@@ -87,6 +87,24 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
     %{handle: handle, agent: agent, model_spec: model_spec, request: request}
   end
 
+  # `turn_started` is emitted *before* the model call, so the request the model was sent
+  # only exists once the loop has got as far as `Model.stream/3` — a gap that grew when
+  # R1's journal writes and inference gate landed in it. Waiting on the terminal event
+  # instead would not do here: a planning turn's terminal event is *held* pending the
+  # plan-exit answer, so it never arrives.
+  defp await_request(agent, attempts \\ 300)
+
+  defp await_request(_agent, 0), do: flunk("the loop never reached the model")
+
+  defp await_request(agent, attempts) do
+    if NativeModelScript.call_count(agent) > 0 do
+      :ok
+    else
+      Process.sleep(10)
+      await_request(agent, attempts - 1)
+    end
+  end
+
   defp await_event(type, timeout \\ 15_000) do
     receive do
       {:session_adapter_event, %{type: ^type} = event} -> event
@@ -226,6 +244,12 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
       started = await_event(:turn_started)
 
       assert "write" in started.payload["tools"]
+
+      # `turn_started` is emitted *before* the model call, so the request only exists once
+      # the turn has finished. Reading it off the agent any earlier is a race with however
+      # much work the loop does between the event and `Model.stream/3` — which grew when
+      # R1's journal and inference gate landed in that gap.
+      await_request(agent)
       assert [%{system: system, tools: tools} | _rest] = NativeModelScript.requests(agent)
 
       # The list the model is shown and the list the prompt describes are the same list.

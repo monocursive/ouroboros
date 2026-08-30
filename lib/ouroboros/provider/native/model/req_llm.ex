@@ -72,6 +72,86 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     error -> {:error, {:model_client_error, Exception.message(error)}}
   end
 
+  # R1. The same two builders `stream/2` runs, rendered as plain data for a digest. It is
+  # the *projected* request rather than the loop's message list because this translation is
+  # lossy on purpose — an assistant message with neither text nor calls never leaves, a
+  # staged image a non-vision model cannot read is dropped, a missing screenshot degrades
+  # to a marker — and a digest that ignored all of that would say two different requests
+  # were the same one.
+  #
+  # Nothing here is meant to be read back. Image bytes become a digest of themselves
+  # rather than base64, so a screenshot changes the request digest without putting a
+  # megabyte in a journal record; the tool callback is omitted because it is a function.
+  @impl true
+  def project(request) do
+    with {:ok, tools} <- build_tools(request.tools, request.model),
+         {:ok, context} <- build_context(request) do
+      {:ok,
+       %{
+         "model" => to_string(request.model),
+         "reasoning_effort" => stringify_option(request[:reasoning_effort]),
+         "max_tokens" => request[:max_tokens],
+         "messages" => Enum.map(context.messages, &project_message/1),
+         "tools" => Enum.map(tools, &project_tool/1)
+       }}
+    end
+  rescue
+    error -> {:error, {:unprojectable_request, Exception.message(error)}}
+  end
+
+  defp project_message(%ReqLLM.Message{} = message) do
+    %{
+      "role" => to_string(message.role),
+      "name" => message.name,
+      "tool_call_id" => message.tool_call_id,
+      "tool_calls" => project_any(message.tool_calls),
+      "reasoning_details" => project_any(message.reasoning_details),
+      "metadata" => project_any(message.metadata),
+      "content" => message.content |> List.wrap() |> Enum.map(&project_part/1)
+    }
+  end
+
+  defp project_message(other), do: project_any(other)
+
+  defp project_part(%ReqLLM.Message.ContentPart{} = part) do
+    %{
+      "type" => to_string(part.type),
+      "text" => part.text,
+      "url" => part.url,
+      "file_id" => part.file_id,
+      "media_type" => part.media_type,
+      "filename" => part.filename,
+      "metadata" => project_any(part.metadata)
+    }
+    |> Map.put("data_sha256", data_digest(part.data))
+  end
+
+  defp project_part(other), do: project_any(other)
+
+  defp data_digest(data) when is_binary(data),
+    do: :sha256 |> :crypto.hash(data) |> Base.encode16(case: :lower)
+
+  defp data_digest(nil), do: nil
+  defp data_digest(other), do: project_any(other)
+
+  # `to_json_schema/1` is the shape the provider is actually sent, which is the shape worth
+  # digesting; the struct also carries a callback function, and a function has no stable
+  # rendering across two builds of the same code.
+  defp project_tool(%ReqLLM.Tool{} = tool) do
+    ReqLLM.Tool.to_json_schema(tool)
+  rescue
+    _error -> %{"name" => tool.name, "description" => tool.description}
+  end
+
+  defp project_tool(other), do: project_any(other)
+
+  defp stringify_option(value) when is_atom(value) and not is_nil(value),
+    do: Atom.to_string(value)
+
+  defp stringify_option(value), do: value
+
+  defp project_any(value), do: Ouroboros.Provider.Native.Journal.jsonable(value)
+
   @impl true
   def available? do
     Code.ensure_loaded?(ReqLLM) and function_exported?(ReqLLM, :stream_text, 3)

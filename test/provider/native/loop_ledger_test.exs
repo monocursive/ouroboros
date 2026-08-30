@@ -1,15 +1,47 @@
 defmodule Ouroboros.Provider.Native.LoopLedgerTest.RefusingStorage do
   @moduledoc """
-  A ledger checkpoint that cannot be written.
+  A ledger checkpoint that stops being writable after a stated number of writes.
 
   This is how "kill the ledger" is expressed in a test: not by killing the process, which
   would take the whole node's audit trail down with it, but by taking away the one thing
-  that makes a write durable. `Ouroboros.Agent.EffectLedger` answers every `record_started`
-  with an error, and the loop's response to that error is the property under test.
+  that makes a write durable. `Ouroboros.Agent.EffectLedger` then answers `record_started`
+  with an error, and the caller's response to that error is the property under test.
+
+  `arm/1`'s allowance exists because R1 put a second hard gate in front of the first. A
+  turn's *first* ledger write is now the `:inference` attempt, so an allowance of zero
+  refuses the model call and the loop never reaches a tool at all; an allowance of one lets
+  that through in order to refuse the `:tool_call` attempt behind it. Both are real
+  refusals worth pinning, and before R1 there was only one write to refuse.
   """
 
+  @allowance {__MODULE__, :allowance}
+
+  @doc "Lets `allowed` writes through, then goes offline. Reset by `disarm/0`."
+  def arm(allowed) when is_integer(allowed) and allowed >= 0 do
+    counter = :atomics.new(1, signed: false)
+    :atomics.put(counter, 1, allowed)
+    :persistent_term.put(@allowance, counter)
+    :ok
+  end
+
+  def disarm, do: :persistent_term.erase(@allowance)
+
   def get_checkpoint(_key, _opts), do: :not_found
-  def put_checkpoint(_key, _checkpoint, _opts), do: {:error, :storage_offline}
+
+  def put_checkpoint(_key, _checkpoint, _opts) do
+    case :persistent_term.get(@allowance, nil) do
+      nil ->
+        {:error, :storage_offline}
+
+      counter ->
+        if :atomics.get(counter, 1) == 0 do
+          {:error, :storage_offline}
+        else
+          :atomics.sub(counter, 1, 1)
+          :ok
+        end
+    end
+  end
 end
 
 defmodule Ouroboros.Provider.Native.LoopLedgerTest do
@@ -110,8 +142,10 @@ defmodule Ouroboros.Provider.Native.LoopLedgerTest do
           [{:text, "gave up"}, {:finish, :stop}]
         ])
 
+      # One write of allowance: enough for R1's `:inference` attempt, so the model call is
+      # admitted and the refusal under test is the tool's own.
       events =
-        with_refusing_ledger(fn ->
+        with_refusing_ledger(1, fn ->
           run(loop)
           collect()
         end)
@@ -123,6 +157,28 @@ defmodule Ouroboros.Provider.Native.LoopLedgerTest do
 
       refute File.exists?(touched),
              "the tool ran although its attempt could not be recorded"
+    end
+
+    test "a ledger that cannot record the model call refuses the turn before it spends",
+         context do
+      # R1 §4.2. Inference is gated exactly like a tool call and it is the *first* gate a
+      # turn reaches, so a dead ledger now costs nothing at all rather than one model call
+      # whose tool nobody could account for.
+      {loop, agent} =
+        start_loop(context, [[{:text, "should never be asked"}, {:finish, :stop}]])
+
+      events =
+        with_refusing_ledger(0, fn ->
+          run(loop)
+          collect()
+        end)
+
+      failed = find(events, :turn_failed)
+      assert failed.payload["reason"] == "inference_unrecordable"
+      assert failed.payload["error"] =~ "could not record this model call before it ran"
+
+      assert NativeModelScript.requests(agent) == [],
+             "the model was called although the call could not be recorded"
     end
   end
 
@@ -354,9 +410,10 @@ defmodule Ouroboros.Provider.Native.LoopLedgerTest do
   # Swaps the node's ledger for one whose storage refuses, under the registered name the
   # loop reaches it by. Safe because this module is `async: false`: ExUnit runs synchronous
   # modules one at a time, after the asynchronous ones have finished.
-  defp with_refusing_ledger(fun) do
+  defp with_refusing_ledger(allowed, fun) do
     original = Process.whereis(EffectLedger)
     Process.unregister(EffectLedger)
+    RefusingStorage.arm(allowed)
 
     {:ok, refusing} =
       EffectLedger.start_link(
@@ -367,6 +424,7 @@ defmodule Ouroboros.Provider.Native.LoopLedgerTest do
     try do
       fun.()
     after
+      RefusingStorage.disarm()
       Process.unregister(EffectLedger)
       GenServer.stop(refusing)
       Process.register(original, EffectLedger)

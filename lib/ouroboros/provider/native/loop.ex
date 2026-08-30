@@ -91,6 +91,43 @@ defmodule Ouroboros.Provider.Native.Loop do
   with a fresh parent request id, and the answer is handed back to the child by the id
   the child minted — two id spaces, one person. See
   `Ouroboros.Provider.Native.Subagent` for the lifecycle and every bound.
+
+  ## The journal, and the inference gate (R1)
+
+  Every turn writes itself down in `Ouroboros.Provider.Native.Journal` — the session's
+  append-only, hash-chained record: what the turn was configured with, the prompt as it
+  entered the conversation, each model call's provenance digests and the chunks that came
+  back, each tool result exactly as it entered `messages`, every message this loop
+  injected, every approval decision, and the settled turn with the digest the conversation
+  checkpoint just computed. A journal write failure **never refuses an effect**: the turn
+  says `journal_degraded` once and carries on, and the record says what it lost.
+
+  The *ledger* is the gate, and inference is gated exactly like a tool call: one
+  `:inference` entry per model round-trip, checkpointed **before** `Model.stream`, settled
+  after. A ledger that cannot record the call refuses it and the turn fails as
+  `inference_unrecordable`, rather than spending money nobody can account for.
+
+  ## The replay seams (R1, for R2)
+
+  Verified replay re-runs *this* code with every nondeterminism source substituted by the
+  record, so the seams live here and default to live behaviour:
+
+    * **`model_module`** — already a seam. `Model.stream/3` is a pure dispatch on a
+      module, so a replay model that streams the recorded chunks needs nothing here.
+    * **`tool_source`** — `:live` dispatches. Anything else means the recorded
+      `tool_result` content is authoritative: admission, hooks, sandbox, LSP and MCP are
+      never invoked, because their outputs are already baked into that content. It also
+      turns off ledger accounting, in both directions — replay executes nothing, so there
+      is no effect to account for, and writing entries would corrupt the record it is
+      verifying.
+    * **`control_feed`** — a 1-arity function replacing the mailbox drain, so steers,
+      interrupts and approval answers arrive at their recorded positions rather than in a
+      race. `nil` drains the mailbox, which is what a live turn does.
+    * **`hooks`** — already a seam. `run_turn/2` reloads from disk only when `hooks` is
+      `nil`, so a caller that presets the empty config defeats the per-turn reload.
+
+  R1 defines them and ships none of the replay side; `Ouroboros.Provider.Native.Replay`
+  (R2) is what consumes them, and it does so without editing this file.
   """
 
   alias Jido.Harness.ApprovalResponse
@@ -103,6 +140,8 @@ defmodule Ouroboros.Provider.Native.Loop do
   alias Ouroboros.Provider.Native.Desktop
 
   alias Ouroboros.Provider.Native.Hooks
+  alias Ouroboros.Provider.Native.Inference
+  alias Ouroboros.Provider.Native.Journal
   alias Ouroboros.Provider.Native.Model
   alias Ouroboros.Provider.Native.Permissions
   alias Ouroboros.Provider.Native.Sandbox
@@ -145,6 +184,20 @@ defmodule Ouroboros.Provider.Native.Loop do
     # means this node could not resolve one, and the meter says so by omitting the key
     # rather than by inventing a denominator.
     :context_window,
+    # R1. The digest `Ouroboros.Provider.Native.Context` took over the system prompt and
+    # the tool definitions — the cached prefix's identity. Recorded on every `turn_started`
+    # journal record, so a reader can see at a glance which turns shared a prefix and where
+    # a `configure` or a compaction rotated it.
+    :prefix_fingerprint,
+    # R1. The session's turn journal, or `nil` for a run that keeps no record — the coding
+    # plane's finite run, and the loop tests that have no session directory. Every write
+    # goes through `journal/3` below, which never fails a turn.
+    journal: nil,
+    # R1's replay seams; see the moduledoc. `:live` dispatches tools and accounts for them;
+    # anything else takes recorded results as authoritative and writes no ledger entries.
+    tool_source: :live,
+    # A 1-arity function replacing `drain_control/1`, or `nil` for the mailbox.
+    control_feed: nil,
     # The `.agents/rules` held back for lazy loading, and the ones already injected. A
     # rule enters the conversation once per session, however many matching files are
     # read after it.
@@ -228,12 +281,32 @@ defmodule Ouroboros.Provider.Native.Loop do
         tool_specs: build_tool_specs(state),
         turn_files: %{},
         turn_paths: [],
-        turn_commands: []
+        turn_commands: [],
+        # The other writer — the session, between turns — may have advanced the file since
+        # this handle was built. One bounded tail read per turn brings it current, and
+        # clears the degraded flag, which is what makes `journal_degraded` once *per turn*
+        # rather than once per handle.
+        journal: Journal.sync(state.journal)
     }
+
+    state =
+      journal(state, "turn_started", %{
+        "model_spec" => state.model_spec,
+        "reasoning_effort" => state.reasoning_effort,
+        "approval_mode" => state.approval_mode,
+        "sandbox_mode" => state.scope.sandbox_mode,
+        "max_iterations" => state.max_iterations,
+        "prefix_fingerprint" => state.prefix_fingerprint,
+        "system_sha256" => text_digest(state.system)
+      })
 
     injected = injected(Hooks.notify(state.hooks, :user_prompt_submit, hook_base(state)))
     user_message = append_user_text(user_message, injected)
     state = %{state | messages: state.messages ++ [user_message]}
+
+    # After the hook fold, deliberately: what belongs in the record is the bytes that
+    # actually entered the conversation, not the ones the operator typed.
+    state = journal(state, "prompt", prompt_record(user_message))
 
     emit(state, :turn_started, %{
       "model" => state.model_spec,
@@ -317,6 +390,19 @@ defmodule Ouroboros.Provider.Native.Loop do
               end
             end
 
+          # Named apart from an ordinary model failure, because it is a different fact: the
+          # model was never called. Same words the tool loop uses when the ledger cannot
+          # record a dispatch, for the same reason — a refusal a reader cannot tell from a
+          # provider outage is one they will go looking for in the wrong place.
+          {:error, state, {:inference_unrecordable, reason}} ->
+            fail(
+              state,
+              "Refused: the effect ledger could not record this model call before it ran, " <>
+                "so it did not run. A model call nobody can account for afterwards is what " <>
+                "that ledger exists to prevent (#{inspect(reason, limit: 6)}).",
+              "inference_unrecordable"
+            )
+
           {:error, state, reason} ->
             fail(state, "model call failed: #{describe(reason)}", "model_error")
         end
@@ -337,9 +423,49 @@ defmodule Ouroboros.Provider.Native.Loop do
       max_tokens: nil
     }
 
-    case Model.stream(state.model_module, request, []) do
-      {:ok, stream} -> consume(state, stream)
-      {:error, reason} -> {:error, state, reason}
+    # Digested over the module's own projection of the wire request, not over
+    # `state.messages`: that is what makes it cover the iteration-mutated system suffix
+    # and the reserved final round's empty tool list, and what makes two conversations
+    # that project to the same request digest to the same value.
+    prompt_sha256 = Journal.digest(Model.project(state.model_module, request))
+    effect_id = inference_effect_id(state, iteration)
+
+    case open_inference_effect(state, iteration, request, prompt_sha256, effect_id) do
+      :ok ->
+        state =
+          journal(state, "model_call", %{
+            "iteration" => iteration,
+            "request_sha256" => prompt_sha256,
+            "system_sha256" => text_digest(request.system),
+            "message_count" => length(request.messages),
+            "tools_sha256" => tools_digest(request.tools),
+            "ledger_effect_id" => effect_id
+          })
+
+        started = System.monotonic_time(:millisecond)
+
+        case Model.stream(state.model_module, request, []) do
+          {:ok, stream} ->
+            consume(state, stream, iteration, effect_id, started)
+
+          {:error, reason} ->
+            settle_inference_effect(
+              state,
+              effect_id,
+              Inference.status_of(reason),
+              started,
+              nil,
+              %{}
+            )
+
+            {:error, state, reason}
+        end
+
+      # The same hard gate the tool loop makes, for the same reason: a model call nobody
+      # can account for afterwards is exactly what the entry exists to prevent, so the turn
+      # fails by name rather than spending the tokens.
+      {:error, reason} ->
+        {:error, state, {:inference_unrecordable, reason}}
     end
   end
 
@@ -378,33 +504,40 @@ defmodule Ouroboros.Provider.Native.Loop do
     if iteration >= state.max_iterations, do: [], else: tool_specs(state)
   end
 
-  defp consume(state, stream) do
-    {text, calls, usages, reasoning_details, provider_metadata} =
-      Enum.reduce(stream, {[], [], [], [], %{}}, fn chunk,
-                                                    {text, calls, usages, details, metadata} ->
+  # `chunks` is the retained stream, in the order it arrived, and it is the reason
+  # `{:thinking, delta}` is no longer discarded: the journal is the first durable home
+  # thinking has ever had here. It is accumulated reversed and flipped once at the end,
+  # because a turn can stream tens of thousands of deltas and `++` per chunk is quadratic.
+  defp consume(state, stream, iteration, effect_id, started) do
+    {text, calls, usages, reasoning_details, provider_metadata, chunks} =
+      Enum.reduce(stream, {[], [], [], [], %{}, []}, fn chunk,
+                                                        {text, calls, usages, details, metadata,
+                                                         chunks} ->
+        chunks = [Journal.jsonable(chunk) | chunks]
+
         case chunk do
           {:text, delta} when is_binary(delta) and delta != "" ->
             emit(state, :output_text_delta, %{"text" => delta})
-            {[text, delta], calls, usages, details, metadata}
+            {[text, delta], calls, usages, details, metadata, chunks}
 
           {:thinking, delta} when is_binary(delta) and delta != "" ->
             emit(state, :thinking_delta, %{"text" => delta})
-            {text, calls, usages, details, metadata}
+            {text, calls, usages, details, metadata, chunks}
 
           {:tool_call, call} ->
-            {text, calls ++ [call], usages, details, metadata}
+            {text, calls ++ [call], usages, details, metadata, chunks}
 
           {:reasoning_details, next} when is_list(next) ->
-            {text, calls, usages, next, metadata}
+            {text, calls, usages, next, metadata, chunks}
 
           {:provider_metadata, next} when is_map(next) ->
-            {text, calls, usages, details, Map.merge(metadata, next)}
+            {text, calls, usages, details, Map.merge(metadata, next), chunks}
 
           {:usage, usage} ->
-            {text, calls, usages ++ [usage], details, metadata}
+            {text, calls, usages ++ [usage], details, metadata, chunks}
 
           _ignored ->
-            {text, calls, usages, details, metadata}
+            {text, calls, usages, details, metadata, chunks}
         end
       end)
 
@@ -412,11 +545,28 @@ defmodule Ouroboros.Provider.Native.Loop do
     if final != "", do: emit(state, :output_text_final, %{"text" => final})
 
     state = Enum.reduce(usages, state, &record_usage(&2, &1))
+    usage = List.last(usages) || %{}
+    elapsed = System.monotonic_time(:millisecond) - started
+    chunks = Enum.reverse(chunks)
+
+    state =
+      journal(state, "model_result", %{
+        "iteration" => iteration,
+        "chunks" => chunks,
+        "duration_ms" => elapsed
+      })
+
+    settle_inference_effect(state, effect_id, :completed, started, journal_seq(state), usage)
+
     {:ok, state, final, calls, reasoning_details, provider_metadata}
   rescue
-    error -> {:error, state, {:stream_failed, Exception.message(error)}}
+    error ->
+      settle_inference_effect(state, effect_id, :stream_failed, started, nil, %{})
+      {:error, state, {:stream_failed, Exception.message(error)}}
   catch
-    :exit, reason -> {:error, state, {:stream_exited, inspect(reason)}}
+    :exit, reason ->
+      settle_inference_effect(state, effect_id, :stream_failed, started, nil, %{})
+      {:error, state, {:stream_exited, inspect(reason)}}
   end
 
   # The meter rides on `usage` because that is the event a client already subscribes to
@@ -582,7 +732,9 @@ defmodule Ouroboros.Provider.Native.Loop do
 
           {:deny, state, message, classified, authority} ->
             refuse_tool_effect(state, call, classified, effect_id, authority)
-            {:continue, tool_result(state, call, %{output: message, is_error: true})}
+
+            {:continue,
+             tool_result(state, call, %{output: message, is_error: true}, ledger_ref: effect_id)}
 
           {:interrupted, state, classified} ->
             refuse_tool_effect(state, call, classified, effect_id, interrupted_authority())
@@ -597,12 +749,15 @@ defmodule Ouroboros.Provider.Native.Loop do
               authority(:deny, "runtime", :once, :runtime, {:desktop, :unresolved}, nil)
             )
 
-            {:continue, tool_result(state, call, %{output: message, is_error: true})}
+            {:continue,
+             tool_result(state, call, %{output: message, is_error: true}, ledger_ref: effect_id)}
         end
 
       {:deny, state, message, classified, authority} ->
         refuse_tool_effect(state, call, classified, effect_id, authority)
-        {:continue, tool_result(state, call, %{output: message, is_error: true})}
+
+        {:continue,
+         tool_result(state, call, %{output: message, is_error: true}, ledger_ref: effect_id)}
 
       {:interrupted, state, classified} ->
         refuse_tool_effect(state, call, classified, effect_id, interrupted_authority())
@@ -783,7 +938,7 @@ defmodule Ouroboros.Provider.Native.Loop do
         ) ++ hook_context
       )
 
-    state = tool_result(state, call, result)
+    state = tool_result(state, call, result, ledger_ref: effect_id, duration_ms: elapsed)
     state = emit_changes(state, changes)
     state = emit_plan(state, Map.get(result, :plan))
     state = inject_rules(state, Map.get(result, :reads, %{}))
@@ -828,11 +983,15 @@ defmodule Ouroboros.Provider.Native.Loop do
             |> Enum.filter(&Instructions.matches?(&1, path, state.scope.root))
             |> Enum.map(& &1.path)
 
-          %{
-            state
-            | messages: state.messages ++ [%{role: :user, content: text}],
-              rules_loaded: state.rules_loaded ++ loaded
-          }
+          state
+          |> journal_injected("rule", text)
+          |> then(
+            &%{
+              &1
+              | messages: &1.messages ++ [%{role: :user, content: text}],
+                rules_loaded: &1.rules_loaded ++ loaded
+            }
+          )
 
         # A rule that would forge a runtime delimiter is dropped rather than injected, and
         # marked loaded so the same file is not retried on every read of every path it
@@ -937,25 +1096,35 @@ defmodule Ouroboros.Provider.Native.Loop do
     state
   end
 
-  defp tool_result(state, call, result) do
+  defp tool_result(state, call, result, opts \\ []) do
     images = Map.get(result, :images, [])
 
     emit(state, :tool_result, tool_result_event(call, result, images))
 
-    %{
-      state
-      | messages:
-          state.messages ++
-            [
-              %{
-                role: :tool,
-                tool_call_id: call.id,
-                name: call.name,
-                content: tool_result_content(result.output, images),
-                is_error: result.is_error
-              }
-            ]
+    message = %{
+      role: :tool,
+      tool_call_id: call.id,
+      name: call.name,
+      content: tool_result_content(result.output, images),
+      is_error: result.is_error
     }
+
+    # Recorded here rather than at the dispatch sites, and after every append the result
+    # picks up on the way — diagnostics, `PostToolUse` context, an LSP report — because
+    # what replay has to reproduce is what entered `messages`, not what the tool returned.
+    # It is also the copy compaction's in-place elision can no longer destroy.
+    state =
+      journal(state, "tool_result", %{
+        "call_id" => call.id,
+        "tool" => call.name,
+        "ledger_ref" => Keyword.get(opts, :ledger_ref),
+        "content" => Journal.jsonable(message.content),
+        "is_error" => result.is_error == true,
+        "duration_ms" => Keyword.get(opts, :duration_ms),
+        "output_bytes" => byte_size(to_string(Map.get(result, :output, ""))) + image_bytes(result)
+      })
+
+    %{state | messages: state.messages ++ [message]}
   end
 
   # A tool result carrying staged images (`desktop_state`, §8.2) becomes a multimodal tool
@@ -1337,67 +1506,113 @@ defmodule Ouroboros.Provider.Native.Loop do
       classified,
       context,
       persist?,
-      deadline(state.approval_timeout_ms)
+      deadline(state.approval_timeout_ms),
+      payload
     )
   end
 
-  defp wait_for_approval(state, call, request_id, classified, context, persist?, deadline) do
+  # The `approval` journal record is written at the *answer*, not at the question: what
+  # replay needs is the decision that was made and the permission entry it produced, and
+  # the resulting tool message is its own `tool_result` record. The question travels as a
+  # digest, because a question is content — it names a command and a path — and the
+  # journal already holds the tool call it was about.
+  defp wait_for_approval(
+         state,
+         call,
+         request_id,
+         classified,
+         context,
+         persist?,
+         deadline,
+         question
+       ) do
     remaining = remaining(deadline)
 
     receive do
       {:native_approval, ^request_id, %ApprovalResponse{decision: :approve} = response} ->
         state = if persist?, do: grant(state, classified, response.scope), else: state
+        entry_id = record(state, :approve, response.scope, :human, nil)
+
+        state =
+          journal_approval(state, request_id, call.id, question, %{
+            "decision" => "approve",
+            "scope" => response.scope,
+            "actor" => "human",
+            "permission_entry_id" => entry_id
+          })
 
         {:allow, state, call, classified, context,
-         authority(
-           :allow,
-           "human",
-           response.scope,
-           :human,
-           nil,
-           record(state, :approve, response.scope, :human, nil),
-           request_id
-         )}
+         authority(:allow, "human", response.scope, :human, nil, entry_id, request_id)}
 
       {:native_approval, ^request_id, %ApprovalResponse{} = response} ->
+        entry_id = record(state, :deny, response.scope, :human, nil)
+
+        state =
+          journal_approval(state, request_id, call.id, question, %{
+            "decision" => "deny",
+            "scope" => response.scope,
+            "actor" => "human",
+            "permission_entry_id" => entry_id
+          })
+
         {:deny, state,
          "Refused: the operator denied this #{classified.tool} call" <>
            reason_suffix(response.reason) <> ".", classified,
-         authority(
-           :deny,
-           "human",
-           response.scope,
-           :human,
-           nil,
-           record(state, :deny, response.scope, :human, nil),
-           request_id
-         )}
+         authority(:deny, "human", response.scope, :human, nil, entry_id, request_id)}
 
       {:native_approval, _other_id, _response} ->
-        wait_for_approval(state, call, request_id, classified, context, persist?, deadline)
+        wait_for_approval(
+          state,
+          call,
+          request_id,
+          classified,
+          context,
+          persist?,
+          deadline,
+          question
+        )
 
       :native_interrupt ->
+        state =
+          journal_approval(state, request_id, call.id, question, %{
+            "decision" => "interrupted",
+            "scope" => "once",
+            "actor" => "runtime"
+          })
+
         {:interrupted, %{state | interrupted?: true}, classified}
 
       {:native_steer, text} ->
         state = %{state | steer: state.steer ++ [text]}
-        wait_for_approval(state, call, request_id, classified, context, persist?, deadline)
+
+        wait_for_approval(
+          state,
+          call,
+          request_id,
+          classified,
+          context,
+          persist?,
+          deadline,
+          question
+        )
     after
       remaining ->
         ref = {:timeout, state.approval_timeout_ms}
+        entry_id = record(state, :deny, :once, :rule, ref)
+
+        state =
+          journal_approval(state, request_id, call.id, question, %{
+            "decision" => "timeout",
+            "scope" => "once",
+            "actor" => "rule",
+            "rule_id" => rule_id(ref),
+            "permission_entry_id" => entry_id
+          })
 
         {:deny, state,
          "Refused: nobody answered the approval request within " <>
            "#{state.approval_timeout_ms} ms, so it was denied.", classified,
-         authority(
-           :deny,
-           "timeout",
-           :once,
-           :rule,
-           ref,
-           record(state, :deny, :once, :rule, ref),
-           request_id
-         )}
+         authority(:deny, "timeout", :once, :rule, ref, entry_id, request_id)}
     end
   end
 
@@ -1413,10 +1628,12 @@ defmodule Ouroboros.Provider.Native.Loop do
         settle_tool_effect(state, effect_id, :failed, 0, 0)
 
         {:continue,
-         tool_result(state, call, %{
-           output: "ask_user needs a `question`. Nothing was asked.",
-           is_error: true
-         })}
+         tool_result(
+           state,
+           call,
+           %{output: "ask_user needs a `question`. Nothing was asked.", is_error: true},
+           ledger_ref: effect_id
+         )}
 
       {:ok, payload} ->
         request_id = new_request_id()
@@ -1448,13 +1665,30 @@ defmodule Ouroboros.Provider.Native.Loop do
       {:native_approval, ^request_id, %ApprovalResponse{} = response} ->
         result = payload |> AskUser.answer(response) |> Tools.normalize_result_of()
         settle_tool_effect(state, effect_id, result, nil)
-        {:continue, tool_result(state, call, append_context(result, hook_context))}
+
+        state =
+          journal_approval(state, request_id, call.id, payload, %{
+            "decision" => response.decision,
+            "scope" => response.scope,
+            "actor" => "human"
+          })
+
+        {:continue,
+         tool_result(state, call, append_context(result, hook_context), ledger_ref: effect_id)}
 
       {:native_approval, _other_id, _response} ->
         wait_for_answer(state, call, request_id, payload, hook_context, effect_id, deadline)
 
       :native_interrupt ->
         settle_tool_effect(state, effect_id, :refused, nil, 0)
+
+        state =
+          journal_approval(state, request_id, call.id, payload, %{
+            "decision" => "interrupted",
+            "scope" => "once",
+            "actor" => "runtime"
+          })
+
         {:interrupted, %{state | interrupted?: true}}
 
       {:native_steer, text} ->
@@ -1468,7 +1702,16 @@ defmodule Ouroboros.Provider.Native.Loop do
           |> Tools.normalize_result_of()
 
         settle_tool_effect(state, effect_id, :timed_out, state.approval_timeout_ms, 0)
-        {:continue, tool_result(state, call, append_context(result, hook_context))}
+
+        state =
+          journal_approval(state, request_id, call.id, payload, %{
+            "decision" => "timeout",
+            "scope" => "once",
+            "actor" => "runtime"
+          })
+
+        {:continue,
+         tool_result(state, call, append_context(result, hook_context), ledger_ref: effect_id)}
     end
   end
 
@@ -2485,7 +2728,170 @@ defmodule Ouroboros.Provider.Native.Loop do
     kind, reason -> {:error, {:effect_ledger_failure, kind, inspect(reason)}}
   end
 
+  # ---------------------------------------------------------------- inference (R1)
+
+  defp inference_effect_id(state, iteration),
+    do:
+      Inference.new_effect_id(
+        {state.session_id, state.provider_session_id, state.turn_id, iteration}
+      )
+
+  # Checkpoint before the request leaves, and a hard gate. Replay is the one caller that
+  # skips it, because replay executes nothing and there is no effect to account for —
+  # writing an entry there would also collide with the original run's, which is a hazard
+  # worth closing at the source rather than in a dedup rule.
+  defp open_inference_effect(%{tool_source: source}, _iteration, _request, _digest, _id)
+       when source != :live,
+       do: :ok
+
+  defp open_inference_effect(state, iteration, request, prompt_sha256, effect_id) do
+    Inference.gate(
+      effect_id,
+      %{
+        session_id: state.session_id,
+        turn_id: state.turn_id,
+        iteration: iteration,
+        model: request.model,
+        prompt_sha256: prompt_sha256
+      },
+      principal: principal(state),
+      cause: inference_cause_type(state),
+      constraints: inference_constraints(state)
+    )
+  end
+
+  defp inference_cause_type(%{subagent_parent: parent}) when is_binary(parent),
+    do: "native.subagent.inference"
+
+  defp inference_cause_type(_state), do: "native.inference"
+
+  # G3's link, same as a subagent's tool calls carry: a child's model calls are the child's
+  # own entries, and this is what says whose authority they ran under.
+  defp inference_constraints(%{subagent_parent: parent} = state) when is_binary(parent),
+    do: %{subagent_parent: parent, subagent_task_id: state.subagent_task_id}
+
+  defp inference_constraints(_state), do: nil
+
+  defp settle_inference_effect(%{tool_source: source}, _id, _status, _started, _seq, _usage)
+       when source != :live,
+       do: :ok
+
+  defp settle_inference_effect(_state, effect_id, status, started, journal_seq, usage) do
+    Inference.settle(
+      effect_id,
+      status,
+      System.monotonic_time(:millisecond) - started,
+      journal_seq,
+      usage
+    )
+  end
+
+  # ---------------------------------------------------------------- journal (R1)
+
+  # Every journal write goes through here, and it can only ever advance the state: the
+  # handle carries its own degradation, `Journal.append/3` never raises, and a turn whose
+  # record could not be written says so once and carries on. Which is the whole contract —
+  # the ledger is the gate, this is the record.
+  defp journal(state, kind, fields) do
+    degraded_before? = state.journal != nil and state.journal.degraded?
+
+    journal =
+      Journal.append(
+        state.journal,
+        kind,
+        Map.put_new(fields, "turn_id", state.turn_id)
+      )
+
+    if journal != nil and journal.degraded? and not degraded_before? do
+      emit(state, :provider_event, %{
+        "kind" => "journal_degraded",
+        "message" =>
+          "this session's turn journal could not be written, so this turn is not fully " <>
+            "replayable. The effects themselves are unaffected and the effect ledger still " <>
+            "accounts for them; the next record the journal does write names what was lost."
+      })
+    end
+
+    %{state | journal: journal}
+  end
+
+  defp journal_seq(%{journal: %Journal{seq: seq}}), do: seq
+  defp journal_seq(_state), do: nil
+
+  defp journal_approval(state, request_id, call_id, question, decision) do
+    journal(
+      state,
+      "approval",
+      Map.merge(
+        %{
+          "request_id" => request_id,
+          "call_id" => call_id,
+          "question_sha256" => Journal.digest(Journal.jsonable(question))
+        },
+        Map.new(decision, fn {key, value} -> {key, Journal.jsonable(value)} end)
+      )
+    )
+  end
+
+  # Every non-prompt user message this loop appends, recorded with the reason it was
+  # appended: a lazily-loaded rule, a steer that landed between two tools, a `Stop` hook's
+  # context, a failing project check. Without the origin they are indistinguishable from
+  # the operator speaking, which is exactly the confusion replay has to avoid.
+  defp journal_injected(state, origin, content, opts \\ []) do
+    journal(state, "injected", %{
+      "origin" => origin,
+      "content" => Journal.jsonable(content),
+      "after_call_id" => Keyword.get(opts, :after_call_id)
+    })
+  end
+
+  defp text_digest(text) when is_binary(text),
+    do: :sha256 |> :crypto.hash(text) |> Base.encode16(case: :lower)
+
+  defp text_digest(_text), do: nil
+
+  # The tool list the model was shown, digested in the order it was shown in. An empty list
+  # is a real state — the reserved final round — and digests to a value of its own rather
+  # than to `nil`, so a reader can tell "no tools were offered" from "nobody recorded it".
+  defp tools_digest(tools) when is_list(tools),
+    do: Journal.digest(Enum.map(tools, &Map.take(&1, [:name, :description, :parameters])))
+
+  defp tools_digest(_tools), do: nil
+
+  # The prompt as it entered the conversation: text, plus a pointer per attachment. A
+  # staged image is named by the digest it is already stored under rather than carried,
+  # which is the same contract the tool result event makes about a screenshot.
+  defp prompt_record(%{content: content}) when is_binary(content),
+    do: %{"content" => content, "attachments" => []}
+
+  defp prompt_record(%{content: parts}) when is_list(parts) do
+    %{
+      "content" =>
+        parts
+        |> Enum.filter(&(Map.get(&1, :type) == :text))
+        |> Enum.map_join("\n", &(Map.get(&1, :text) || "")),
+      "attachments" =>
+        parts
+        |> Enum.reject(&(Map.get(&1, :type) == :text))
+        |> Enum.map(
+          &%{
+            "sha256" => Map.get(&1, :sha256),
+            "media_type" => Map.get(&1, :media_type),
+            "size" => Map.get(&1, :size)
+          }
+        )
+    }
+  end
+
+  defp prompt_record(message), do: %{"content" => Journal.jsonable(message), "attachments" => []}
+
   # ---------------------------------------------------------------- control
+
+  # R1's control seam. A live turn drains its own mailbox, which is a race by nature: a
+  # steer arrives whenever the operator sent it. Replay hands the same messages back in the
+  # order they were recorded at, so the feed replaces the drain rather than wrapping it —
+  # a replay that also read the mailbox would be racing a process nobody is talking to.
+  defp drain_control(%{control_feed: feed} = state) when is_function(feed, 1), do: feed.(state)
 
   defp drain_control(state) do
     receive do
@@ -2501,14 +2907,16 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp apply_steer(%{steer: []} = state), do: state
 
   defp apply_steer(state) do
-    messages =
-      state.messages ++
-        Enum.map(state.steer, fn
-          %{role: :user} = message -> message
-          text when is_binary(text) -> %{role: :user, content: text}
-        end)
+    steered =
+      Enum.map(state.steer, fn
+        %{role: :user} = message -> message
+        text when is_binary(text) -> %{role: :user, content: text}
+      end)
 
-    %{state | messages: messages, steer: []}
+    state =
+      Enum.reduce(steered, state, &journal_injected(&2, "steer", Map.get(&1, :content)))
+
+    %{state | messages: state.messages ++ steered, steer: []}
   end
 
   # ---------------------------------------------------------------- terminals
@@ -2516,7 +2924,7 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp complete(state, iterations) do
     state = run_checks(state)
 
-    case settle(state) do
+    case settle(state, "complete") do
       {:ok, state} ->
         emit(state, :turn_completed, %{
           "status" => "completed",
@@ -2536,7 +2944,7 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp interrupted(state) do
     state = %{state | interrupted?: true}
 
-    case settle(state) do
+    case settle(state, "interrupted") do
       {:ok, state} ->
         emit(state, :turn_interrupted, %{"reason" => "interrupted"})
         {:ok, state}
@@ -2547,7 +2955,7 @@ defmodule Ouroboros.Provider.Native.Loop do
   end
 
   defp fail(state, message, reason) do
-    case settle(state) do
+    case settle(state, "failed:" <> to_string(reason)) do
       {:ok, state} ->
         emit(state, :turn_failed, %{"error" => message, "reason" => reason})
         {:ok, state}
@@ -2578,13 +2986,24 @@ defmodule Ouroboros.Provider.Native.Loop do
   # file manifest written, the `Stop` hooks run, the conversation checkpointed. The
   # conversation goes last, because a `Stop` hook's `additionalContext` becomes part of
   # it and a checkpoint written before that would resume without it.
-  defp settle(state) do
+  defp settle(state, status) do
     state = record_turn_files(state)
-    state = inject(state, Hooks.notify(state.hooks, :stop, hook_base(state)))
+    state = inject(state, Hooks.notify(state.hooks, :stop, hook_base(state)), "stop_hook")
 
     case persist(state) do
-      :ok -> {:ok, state}
-      {:error, reason} -> {:error, state, reason}
+      # The digest the checkpoint just computed, carried into the journal rather than
+      # recomputed: it is the journal↔conversation cross-link, and two digests taken over
+      # the same list by two callers is one more place for them to disagree.
+      {:ok, digest} ->
+        {:ok,
+         journal(state, "turn_settled", %{
+           "status" => status,
+           "message_count" => state.message_offset + length(state.messages),
+           "conversation_digest" => digest
+         })}
+
+      {:error, reason} ->
+        {:error, state, reason}
     end
   end
 
@@ -2601,9 +3020,14 @@ defmodule Ouroboros.Provider.Native.Loop do
         state
 
       failures ->
-        inject(state, [
-          "Project checks failed after this turn's file changes:\n" <> Enum.join(failures, "\n")
-        ])
+        inject(
+          state,
+          [
+            "Project checks failed after this turn's file changes:\n" <>
+              Enum.join(failures, "\n")
+          ],
+          "checks"
+        )
     end
   end
 
@@ -2635,10 +3059,14 @@ defmodule Ouroboros.Provider.Native.Loop do
     state
   end
 
-  defp inject(state, []), do: state
+  defp inject(state, [], _origin), do: state
 
-  defp inject(state, lines) do
-    %{state | messages: state.messages ++ [%{role: :user, content: injected_body(lines)}]}
+  defp inject(state, lines, origin) do
+    content = injected_body(lines)
+
+    state
+    |> journal_injected(origin, content)
+    |> then(&%{&1 | messages: &1.messages ++ [%{role: :user, content: content}]})
   end
 
   defp injected([]), do: ""
@@ -2667,7 +3095,9 @@ defmodule Ouroboros.Provider.Native.Loop do
     }
   end
 
-  defp persist(%{checkpoint: nil}), do: :ok
+  # A run with nowhere to write has nothing to cross-link, and says so with a `nil` digest
+  # rather than with one it computed over a list nobody persisted.
+  defp persist(%{checkpoint: nil}), do: {:ok, nil}
 
   defp persist(state) do
     state.checkpoint.(%{
@@ -2676,6 +3106,14 @@ defmodule Ouroboros.Provider.Native.Loop do
       session_grants: state.session_grants,
       rules_loaded: state.rules_loaded
     })
+    |> case do
+      # The callback now answers with the digest the checkpoint computed. Bare `:ok` is
+      # still accepted, because the coding plane and the loop's own tests supply callbacks
+      # that persist nothing and have no digest to give.
+      {:ok, digest} -> {:ok, digest}
+      :ok -> {:ok, nil}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   # ---------------------------------------------------------------- helpers

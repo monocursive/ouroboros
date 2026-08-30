@@ -22,13 +22,13 @@ defmodule Ouroboros.Provider.Native.CheckpointTest do
   ]
 
   test "round-trips a conversation byte-for-byte in shape", %{path: path} do
-    assert :ok = Checkpoint.write(path, @conversation)
+    assert {:ok, _digest} = Checkpoint.write(path, @conversation)
     assert {:ok, restored} = Checkpoint.read(path)
     assert restored == @conversation
   end
 
   test "is written 0600 and atomically, leaving no temporary behind", %{path: path} do
-    assert :ok = Checkpoint.write(path, @conversation)
+    assert {:ok, _digest} = Checkpoint.write(path, @conversation)
     {:ok, %File.Stat{mode: mode}} = File.stat(path)
     assert Bitwise.band(mode, 0o777) == 0o600
 
@@ -40,7 +40,7 @@ defmodule Ouroboros.Provider.Native.CheckpointTest do
   end
 
   test "a tampered checkpoint is refused rather than partially replayed", %{path: path} do
-    assert :ok = Checkpoint.write(path, @conversation)
+    assert {:ok, _digest} = Checkpoint.write(path, @conversation)
 
     payload = path |> File.read!() |> JSON.decode!()
     tampered = %{payload | "messages" => Enum.take(payload["messages"], 2)}
@@ -62,7 +62,7 @@ defmodule Ouroboros.Provider.Native.CheckpointTest do
   test "trims to the event limit without leaving an orphan tool result", %{path: path} do
     long = List.duplicate(%{role: :user, content: "x"}, 10) ++ @conversation
 
-    assert :ok = Checkpoint.write(path, long, event_limit: 3)
+    assert {:ok, _digest} = Checkpoint.write(path, long, event_limit: 3)
     assert {:ok, restored} = Checkpoint.read(path)
 
     assert length(restored) <= 3
@@ -105,7 +105,7 @@ defmodule Ouroboros.Provider.Native.CheckpointTest do
 
   test "a checkpoint written before the offset existed reads as a whole conversation",
        %{path: path} do
-    assert :ok = Checkpoint.write(path, @conversation)
+    assert {:ok, _digest} = Checkpoint.write(path, @conversation)
 
     payload = path |> File.read!() |> JSON.decode!()
     File.write!(path, JSON.encode!(Map.drop(payload, ["offset", "rewind_floor"])))
@@ -118,7 +118,7 @@ defmodule Ouroboros.Provider.Native.CheckpointTest do
 
   test "a trimmed checkpoint without offset infers it from the sibling manifest", %{path: path} do
     kept = Enum.take(@conversation, -2)
-    assert :ok = Checkpoint.write(path, kept)
+    assert {:ok, _digest} = Checkpoint.write(path, kept)
 
     payload = path |> File.read!() |> JSON.decode!() |> Map.drop(["offset", "rewind_floor"])
     File.write!(path, JSON.encode!(payload))
@@ -149,7 +149,7 @@ defmodule Ouroboros.Provider.Native.CheckpointTest do
   end
 
   defp write_and_load(path, messages, opts) do
-    :ok = Checkpoint.write(path, messages, opts)
+    {:ok, _digest} = Checkpoint.write(path, messages, opts)
     Checkpoint.load(path)
   end
 

@@ -75,13 +75,27 @@ defmodule Ouroboros.Provider.Native.Model do
   """
   @callback stream(request(), keyword()) :: {:ok, Enumerable.t()} | {:error, term()}
 
+  @doc """
+  The wire request this module would send, as plain data, for provenance only.
+
+  R1. The turn journal and the `:inference` ledger entry both digest what the model was
+  actually asked, and `state.messages` is not that: a module's own projection is lossy on
+  purpose (a tool result carrying an evicted screenshot degrades to a marker; an assistant
+  message with no content and no calls is dropped), so a digest over the loop's list would
+  claim two different requests were the same one. This returns the projection instead —
+  never a credential, never a raw image, and never anything the caller is expected to
+  render. `Ouroboros.Provider.Native.Model.project/2` supplies a structural fallback for a
+  module that does not implement it, so a test double stays a test double.
+  """
+  @callback project(request()) :: {:ok, term()} | {:error, term()}
+
   @doc "Whether this node can resolve a model at all. Reported by `status/1`."
   @callback available?() :: boolean()
 
   @doc "One row per known model provider: its env var name and whether it is set."
   @callback credential_report() :: [%{provider: atom(), env: String.t(), present: boolean()}]
 
-  @optional_callbacks available?: 0, credential_report: 0
+  @optional_callbacks available?: 0, credential_report: 0, project: 1
 
   @default_module Ouroboros.Provider.Native.Model.ReqLLM
   @model_env "OUROBOROS_NATIVE_MODEL"
@@ -97,6 +111,45 @@ defmodule Ouroboros.Provider.Native.Model do
   @doc "Streams one model response through the configured module."
   @spec stream(module(), request(), keyword()) :: {:ok, Enumerable.t()} | {:error, term()}
   def stream(module, request, opts \\ []), do: module.stream(request, opts)
+
+  @doc """
+  The projection a digest is taken over, from the module that would send the request.
+
+  A module that declares no `project/1` gets the structural fallback below: the request's
+  own fields, which already carry the two things a digest over `state.messages` would
+  miss — the iteration-mutated system suffix and the final round's empty tool list. It is
+  weaker than a real projection (it cannot see what the module would drop on the way to
+  the wire) and it is stated as such rather than presented as the same thing. A module
+  that raises while projecting yields a named marker, because provenance failing must not
+  fail the turn the provenance is about.
+  """
+  @spec project(module(), request()) :: term()
+  def project(module, request) do
+    if function_exported?(module, :project, 1) do
+      case module.project(request) do
+        {:ok, projection} -> projection
+        {:error, reason} -> %{"unprojectable" => inspect(reason, limit: 6)}
+      end
+    else
+      fallback_projection(module, request)
+    end
+  rescue
+    error -> %{"unprojectable" => Exception.message(error)}
+  end
+
+  defp fallback_projection(module, request) do
+    %{
+      "projection" => "structural",
+      "module" => inspect(module),
+      "model" => request[:model],
+      "system" => request[:system],
+      "messages" => request[:messages] || [],
+      "tools" =>
+        Enum.map(request[:tools] || [], &Map.take(&1, [:name, :description, :parameters])),
+      "reasoning_effort" => request[:reasoning_effort],
+      "max_tokens" => request[:max_tokens]
+    }
+  end
 
   @doc "The model spec a session uses when the caller named none."
   @spec configured_model() :: String.t() | nil

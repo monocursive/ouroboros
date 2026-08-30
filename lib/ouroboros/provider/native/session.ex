@@ -60,6 +60,8 @@ defmodule Ouroboros.Provider.Native.Session do
   alias Ouroboros.Provider.Native.Context.Handoff
   alias Ouroboros.Provider.Native.Context.Window
   alias Ouroboros.Provider.Native.Hooks
+  alias Ouroboros.Provider.Native.Inference
+  alias Ouroboros.Provider.Native.Journal
   alias Ouroboros.Provider.Native.Loop
   alias Ouroboros.Provider.Native.Model
   alias Ouroboros.Provider.Native.Paths
@@ -373,12 +375,26 @@ defmodule Ouroboros.Provider.Native.Session do
         # dropped once it has been sent. It never joins the system prompt: the prefix has
         # a fingerprint and a session-scoped instruction in it would cost the cache.
         start_context: [],
-        resumed?: not fork? and not is_nil(request.provider_session_id)
+        resumed?: not fork? and not is_nil(request.provider_session_id),
+        # R1. The session's own handle on the turn journal. It is opened here and passed
+        # into every `Loop` this session runs; between turns this process is the writer,
+        # and each of its own records syncs the handle first because the loop advanced the
+        # file while it was not looking.
+        journal: Journal.open(session_dir)
       }
 
       case build_context(state) do
         {:ok, state} ->
           register(provider_session_id)
+
+          state =
+            journal(state, "session_opened", %{
+              "provider_session_id" => provider_session_id,
+              "resumed" => state.resumed?,
+              "forked_from_provider_session_id" => if(fork?, do: request.provider_session_id),
+              "journal_version" => Journal.version()
+            })
+
           # Written at open as well as on every change: a session that *started* planning
           # — `provider_options: %{plan: true}` — has a posture worth resuming into, and
           # waiting for a `configure` that may never come would lose it.
@@ -587,7 +603,7 @@ defmodule Ouroboros.Provider.Native.Session do
     state = state |> release_held_terminal() |> stop_loop() |> stop_subagents("session closed")
 
     case checkpoint(state) do
-      :ok ->
+      {:ok, _digest} ->
         _ = session_end(state, "closed")
 
         emit(state, %{
@@ -617,7 +633,7 @@ defmodule Ouroboros.Provider.Native.Session do
     }
 
     case checkpoint(state) do
-      :ok -> {:reply, :ok, state}
+      {:ok, digest} -> {:reply, {:ok, digest}, state}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
@@ -895,6 +911,11 @@ defmodule Ouroboros.Provider.Native.Session do
         system: state.prompt_context.system,
         tool_specs: state.prompt_context.tools,
         context_window: state.prompt_context.context_window,
+        prefix_fingerprint: state.prompt_context.fingerprint,
+        # R1. The loop is the journal's writer for the length of the turn; it syncs the
+        # handle at the top of `run_turn/2` because this process may have advanced the file
+        # since the handle was built.
+        journal: state.journal,
         rules: Context.rules(state.prompt_context),
         rules_loaded: state.rules_loaded,
         scope: state.scope,
@@ -984,11 +1005,20 @@ defmodule Ouroboros.Provider.Native.Session do
       else: state
   end
 
+  # R1's `configure` records are written here rather than inside each `configure_one/3`
+  # clause: this is the one place that knows a change was *applied* rather than refused,
+  # and eight clauses each remembering to journal themselves is eight places for the ninth
+  # to forget. A refused change writes nothing, which is correct — nothing changed.
   defp apply_configuration(state, changes) do
     Enum.reduce_while(changes, {:ok, state}, fn {key, value}, {:ok, state} ->
-      case configure_one(state, normalize_key(key), value) do
-        {:ok, state} -> {:cont, {:ok, state}}
-        {:error, reason} -> {:halt, {:error, reason}}
+      key = normalize_key(key)
+
+      case configure_one(state, key, value) do
+        {:ok, state} ->
+          {:cont, {:ok, journal(state, "configure", %{"key" => key, "value" => value})}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
       end
     end)
   end
@@ -1099,7 +1129,7 @@ defmodule Ouroboros.Provider.Native.Session do
          {:ok, source_path, _durable?} <- Checkpoint.locate(source_id),
          {:ok, messages} <- Checkpoint.read(source_path),
          {:ok, child_path, _durable?} <- Checkpoint.locate(child_id),
-         :ok <- Checkpoint.write(child_path, messages, event_limit: limit) do
+         {:ok, _digest} <- Checkpoint.write(child_path, messages, event_limit: limit) do
       :ok
     else
       {:error, :no_checkpoint} -> {:error, :fork_source_unavailable}
@@ -1142,8 +1172,18 @@ defmodule Ouroboros.Provider.Native.Session do
         state = %{state | messages: Enum.take(state.messages, count)}
 
         case checkpoint(state) do
-          :ok -> {:ok, state, count}
-          {:error, reason} -> {:error, state, reason}
+          {:ok, digest} ->
+            state =
+              journal(state, "rewind", %{
+                "to_turn" => Journal.jsonable(to_turn),
+                "message_count" => count,
+                "conversation_digest" => digest
+              })
+
+            {:ok, state, count}
+
+          {:error, reason} ->
+            {:error, state, reason}
         end
 
       # A boundary this session cannot honour leaves the transcript alone and *says so*.
@@ -1233,20 +1273,73 @@ defmodule Ouroboros.Provider.Native.Session do
   defp describe_unrestorable(%{path: path} = entry),
     do: %{"path" => path, "reason" => Map.get(entry, :reason) || "could not be restored"}
 
+  # Answers with the digest the write computed, because the loop's `turn_settled` journal
+  # record carries it as the journal↔conversation cross-link (R1) and recomputing it here
+  # would be a second digest over the same list.
   defp checkpoint(state) do
     case Checkpoint.write(state.checkpoint_path, state.messages,
            event_limit: state.checkpoint_limit,
            offset: state.message_offset,
            rewind_floor: state.rewind_floor
          ) do
-      :ok ->
-        :ok
+      {:ok, digest} ->
+        {:ok, digest}
 
       {:error, reason} ->
         Logger.warning("native session checkpoint failed: #{inspect(reason)}")
         {:error, reason}
     end
   end
+
+  # ---------------------------------------------------------------- journal (R1)
+
+  # This process is the journal's writer between turns; the loop is its writer during one.
+  # Syncing first is what makes that safe without a lock: the handle picks up whatever the
+  # loop appended while this process was not looking, and a bounded tail read is all it
+  # costs. The degradation is announced here for the same reason the loop announces its
+  # own — a session whose record has holes should say so once, not silently.
+  defp journal(state, kind, fields) do
+    journal = journal_direct(state, kind, fields)
+
+    if journal != nil and journal.degraded? do
+      emit(state, %{
+        type: :provider_event,
+        payload: %{
+          "kind" => "journal_degraded",
+          "message" =>
+            "this session's turn journal could not be written, so it is not fully " <>
+              "replayable. Nothing else about the session is affected; the next record " <>
+              "the journal does write names what was lost."
+        },
+        turn_id: nil,
+        request_id: nil
+      })
+    end
+
+    %{state | journal: journal}
+  end
+
+  # The same append without the announcement or the state update, for the summariser: it
+  # runs inside a closure that has no state to give back, so it writes through the file —
+  # which is the authority anyway — and this process's next `journal/3` syncs onto it.
+  defp journal_direct(state, kind, fields) do
+    state.journal |> Journal.sync() |> Journal.append(kind, fields)
+  end
+
+  defp text_digest(text) when is_binary(text),
+    do: :sha256 |> :crypto.hash(text) |> Base.encode16(case: :lower)
+
+  defp text_digest(_text), do: nil
+
+  # The same principal shape the loop's tool-call entries use, so one reader's filter finds
+  # a session's tool calls and its model calls together.
+  defp principal(%{context: %{session_id: id}}) when is_binary(id) and id != "",
+    do: "session:" <> id
+
+  defp principal(%{provider_session_id: id}) when is_binary(id) and id != "",
+    do: "native:" <> id
+
+  defp principal(_state), do: "native"
 
   # ---------------------------------------------------------------- context (D3/D9)
 
@@ -1553,6 +1646,10 @@ defmodule Ouroboros.Provider.Native.Session do
   end
 
   defp apply_compaction(state, outcome, entry, trigger) do
+    # Taken before anything moves: after `rebase/2` and the message swap there is no way
+    # left to say what the conversation hashed to going in.
+    pre_digest = Checkpoint.digest_of(state.messages, event_limit: state.checkpoint_limit)
+
     report = %{
       trigger: Atom.to_string(trigger),
       turn: state.turns,
@@ -1579,7 +1676,34 @@ defmodule Ouroboros.Provider.Native.Session do
     # Checkpoint before broadcast, the same order every other durable write in this
     # process follows: a client told the conversation was folded must never be able to
     # restart onto a conversation that was not.
-    _ = checkpoint(state)
+    digest =
+      case checkpoint(state) do
+        {:ok, digest} -> digest
+        {:error, _reason} -> nil
+      end
+
+    # R1. `elided` is what compaction's in-place marker rewrite costs the conversation —
+    # and the reason the journal's own `tool_result` records matter: the bytes it replaces
+    # survive in no other durable artifact, so without this the pre-elision content would
+    # be gone from every copy. `post_digest` is the folded conversation; `pre_digest` is
+    # what it was, carried from the last `turn_settled`.
+    state =
+      journal(state, "compaction", %{
+        "turn_id" => "compact_" <> Integer.to_string(state.turns + 1),
+        "trigger" => report.trigger,
+        # The summariser's own `model_call`/`model_result` pair is written at top level
+        # under this turn id rather than inlined here, so a replay engine feeds it back
+        # through the same path as any other model call. An elide-only fold ran no
+        # summariser and says so with `null` rather than a pointer to nothing.
+        "summariser_turn_id" =>
+          if(report.summarised, do: "compact_" <> Integer.to_string(state.turns + 1)),
+        "elided" => Journal.jsonable(outcome.elided),
+        "archived_messages" => report.archived_messages,
+        "archive_id" => report.archive_id,
+        "summarised" => report.summarised,
+        "pre_digest" => pre_digest,
+        "post_digest" => digest
+      })
 
     emit(state, %{
       type: :provider_event,
@@ -1634,7 +1758,15 @@ defmodule Ouroboros.Provider.Native.Session do
   # The summariser is one more call on the same model module the turn uses, with no
   # tools. It is deliberately not the loop: a summary that could call `bash` would be a
   # second agent nobody asked for.
-  defp summariser(state) do
+  #
+  # R1 §4.2 makes it a *gated* model call all the same: it spends tokens on the operator's
+  # key, so it gets an `:inference` entry before the request leaves and a `model_call` /
+  # `model_result` journal pair under its own `compact_N` turn id. Nothing here is
+  # best-effort telemetry — a summariser nobody can account for is the same hole as an
+  # unaccounted turn, and cheaper to close here than to explain later.
+  defp summariser(state), do: summariser(state, "compact_" <> Integer.to_string(state.turns + 1))
+
+  defp summariser(state, turn_id) do
     fn %{messages: messages, instruction: instruction} ->
       request = %{
         model: state.model_spec,
@@ -1642,29 +1774,115 @@ defmodule Ouroboros.Provider.Native.Session do
         messages: messages ++ [%{role: :user, content: instruction}],
         tools: [],
         provider_session_id: state.provider_session_id,
-        turn_id: "compact_" <> Integer.to_string(state.turns + 1),
+        turn_id: turn_id,
         reasoning_effort: nil,
         max_tokens: nil
       }
 
-      case Model.stream(state.model_module, request, []) do
-        {:ok, stream} -> {:ok, collect_text(stream)}
+      case run_summariser(state, request, turn_id) do
+        {:ok, text, _seq} -> {:ok, text}
         {:error, reason} -> {:error, reason}
       end
     end
   end
 
-  defp collect_text(stream) do
-    stream
-    |> Enum.reduce([], fn
-      {:text, delta}, acc when is_binary(delta) -> [acc, delta]
-      _other, acc -> acc
-    end)
-    |> IO.iodata_to_binary()
+  # Returns the `model_result` journal sequence alongside the text, so the `compaction`
+  # record can point at the call that produced its summary. A pointer rather than an
+  # inlined copy of the pair: the chunk list can be large, and a `model_result` record at
+  # top level is one the replay engine feeds back through the same path as any other model
+  # call rather than a special case buried inside a compaction record.
+  defp run_summariser(state, request, turn_id) do
+    prompt_sha256 = Journal.digest(Model.project(state.model_module, request))
+
+    effect_id =
+      Inference.new_effect_id({state.provider_session_id, turn_id, state.turns})
+
+    attempt = %{
+      session_id: state.context.session_id,
+      turn_id: turn_id,
+      iteration: 1,
+      model: request.model,
+      prompt_sha256: prompt_sha256
+    }
+
+    case Inference.gate(effect_id, attempt,
+           principal: principal(state),
+           cause: summariser_cause(turn_id)
+         ) do
+      :ok ->
+        stream_summary(state, request, turn_id, effect_id, prompt_sha256)
+
+      {:error, reason} ->
+        {:error, {:inference_unrecordable, reason}}
+    end
+  end
+
+  defp stream_summary(state, request, turn_id, effect_id, prompt_sha256) do
+    _ =
+      journal_direct(state, "model_call", %{
+        "turn_id" => turn_id,
+        "iteration" => 1,
+        "request_sha256" => prompt_sha256,
+        "system_sha256" => text_digest(request.system),
+        "message_count" => length(request.messages),
+        "tools_sha256" => Journal.digest([]),
+        "ledger_effect_id" => effect_id
+      })
+
+    started = System.monotonic_time(:millisecond)
+
+    case Model.stream(state.model_module, request, []) do
+      {:ok, stream} ->
+        {text, chunks, usage} = collect(stream)
+        elapsed = System.monotonic_time(:millisecond) - started
+
+        journal =
+          journal_direct(state, "model_result", %{
+            "turn_id" => turn_id,
+            "iteration" => 1,
+            "chunks" => chunks,
+            "duration_ms" => elapsed
+          })
+
+        seq = journal && journal.seq
+        Inference.settle(effect_id, :completed, elapsed, seq, usage)
+        {:ok, text, seq}
+
+      {:error, reason} ->
+        Inference.settle(
+          effect_id,
+          Inference.status_of(reason),
+          System.monotonic_time(:millisecond) - started,
+          nil,
+          %{}
+        )
+
+        {:error, reason}
+    end
+  end
+
+  defp summariser_cause(_turn_id), do: "native.compaction.inference"
+
+  # The whole stream, retained: the text the summary is, the chunks the journal records —
+  # thinking included, which nothing durable held before R1 — and the provider's last usage
+  # map for the ledger's token counts.
+  defp collect(stream) do
+    {text, chunks, usage} =
+      Enum.reduce(stream, {[], [], %{}}, fn chunk, {text, chunks, usage} ->
+        chunks = [Journal.jsonable(chunk) | chunks]
+
+        case chunk do
+          {:text, delta} when is_binary(delta) -> {[text, delta], chunks, usage}
+          {:usage, next} when is_map(next) -> {text, chunks, next}
+          _other -> {text, chunks, usage}
+        end
+      end)
+
+    {IO.iodata_to_binary(text), Enum.reverse(chunks), usage}
   rescue
-    _error -> ""
+    _error -> {"", [], %{}}
   catch
-    :exit, _reason -> ""
+    :exit, _reason -> {"", [], %{}}
   end
 
   # ---------------------------------------------------------------- handoff
@@ -1687,7 +1905,8 @@ defmodule Ouroboros.Provider.Native.Session do
     seeded = [%{role: :user, content: packet}]
 
     with {:ok, checkpoint_path, _durable?} <- Checkpoint.locate(child_id),
-         :ok <- Checkpoint.write(checkpoint_path, seeded, event_limit: state.checkpoint_limit),
+         {:ok, _digest} <-
+           Checkpoint.write(checkpoint_path, seeded, event_limit: state.checkpoint_limit),
          {:ok, pid} <- maybe_open_child(state, child_id, open_child?) do
       result = %{
         provider_session_id: child_id,
@@ -1737,7 +1956,13 @@ defmodule Ouroboros.Provider.Native.Session do
   defp handoff_summary(state) do
     instruction = Compaction.summary_instruction(nil)
 
-    case summariser(state).(%{messages: state.messages, focus: nil, instruction: instruction}) do
+    # Gated exactly like the compaction summariser, under its own turn id so the two are
+    # never confused in the record. A handoff that could not be accounted for falls back to
+    # the structural summary below, which spends nothing — the same answer it already gives
+    # when the model call fails.
+    summariser = summariser(state, "handoff_" <> Integer.to_string(state.turns + 1))
+
+    case summariser.(%{messages: state.messages, focus: nil, instruction: instruction}) do
       {:ok, summary} when is_binary(summary) ->
         case String.trim(summary) do
           "" -> Compaction.structural_summary(state.messages, nil)

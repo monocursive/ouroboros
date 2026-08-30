@@ -83,12 +83,17 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
   end
 
   @doc """
-  Writes the conversation, atomically and privately.
+  Writes the conversation, atomically and privately, and answers with its digest.
 
   A temporary file in the same directory is renamed over the target, so a reader never
   sees a partial write and a crashed write leaves the previous checkpoint intact.
+
+  The digest is returned rather than recomputed by whoever wants it: R1's turn journal
+  records it on `turn_settled` as the journal↔conversation cross-link, and two digests
+  taken over the same list by two callers is one more place for them to disagree. It is
+  the same value `load/1` verifies the file against.
   """
-  @spec write(String.t(), [map()], keyword()) :: :ok | {:error, term()}
+  @spec write(String.t(), [map()], keyword()) :: {:ok, String.t()} | {:error, term()}
   def write(path, messages, opts \\ []) do
     limit = Keyword.get(opts, :event_limit, @default_limit)
     trimmed = trim(messages, limit)
@@ -116,10 +121,26 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
          :ok <- File.write(temporary, json, [:binary, :sync]),
          :ok <- File.chmod(temporary, 0o600),
          :ok <- File.rename(temporary, path) do
-      :ok
+      {:ok, digest}
     else
       {:error, reason} -> {:error, {:checkpoint_write_failed, reason}}
     end
+  end
+
+  @doc """
+  The digest `write/3` would compute for a message list, without writing anything.
+
+  The same trim and the same canonical encoding, so a value from here and a value from a
+  write are comparable. R1's `compaction` journal record uses it for `pre_digest`: what the
+  conversation hashed to *before* the fold, which no later write can reconstruct.
+  """
+  @spec digest_of([map()], keyword()) :: String.t()
+  def digest_of(messages, opts \\ []) do
+    messages
+    |> trim(Keyword.get(opts, :event_limit, @default_limit))
+    |> Enum.map(&encode/1)
+    |> canonical()
+    |> digest()
   end
 
   @doc """
