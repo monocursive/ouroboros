@@ -75,8 +75,12 @@ defmodule Ouroboros.Provider.Native.SessionJournalTest do
 
     configures = records_of(handle, "configure")
 
-    assert Enum.map(configures, & &1["key"]) == ["model", "reasoning_effort"]
-    assert Enum.map(configures, & &1["value"]) == ["script:other", "high"]
+    # As a set, not a sequence: `configure` takes a map, and the order two keys in one map
+    # are applied in is the map's, not the caller's. Asserting an order here would be
+    # asserting a property neither this code nor the caller actually has.
+    assert configures |> Enum.map(&{&1["key"], &1["value"]}) |> Enum.sort() ==
+             [{"model", "script:other"}, {"reasoning_effort", "high"}]
+
     refute Enum.any?(configures, &(&1["key"] == "nonsense"))
     assert Enum.all?(configures, &(&1["turn_id"] == nil))
   end
