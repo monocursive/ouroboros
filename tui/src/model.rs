@@ -3135,6 +3135,227 @@ impl McpRefusal {
     }
 }
 
+/// One window of a native session's turn journal — what `interactive.journal` answers.
+///
+/// The journal is the replay substrate (docs/REPLAY.md §3): an append-only, hash-chained
+/// record of everything a turn was derived from. This client reads it for provenance — how
+/// far the chain verifies, what was truncated, which model calls happened — and never
+/// re-derives any of it, because every one of those facts is the runtime's to state.
+///
+/// Decoded tolerantly for the reason [`SessionInfo`] is, and for one more: the record
+/// vocabulary is explicitly open (§3.2 lists fourteen kinds and the engine may add a
+/// fifteenth). A record whose `kind` this build has never heard of is kept whole, with its
+/// raw tree, rather than dropped — a provenance header that silently omitted records would
+/// be the one output in this client that lies by subtraction.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Journal {
+    pub records: Vec<JournalRecord>,
+    /// How many records the window carried, as the runtime counted them. Kept beside
+    /// `records.len()` rather than replacing it: a disagreement between the two is a fact
+    /// about the answer, not something to smooth over.
+    pub count: Option<u64>,
+    /// The chain head — `sha256` of the newest record — and its sequence.
+    pub head: Option<String>,
+    pub head_seq: Option<u64>,
+    /// The sequence the chain verifies through. Below `head_seq` this is a bounded
+    /// verification, and the header says so.
+    pub verified_through: Option<u64>,
+    /// Set where the budget dropped the oldest turns (§3.4). Everything at or below this
+    /// sequence is gone, permanently, and was recorded as gone.
+    pub truncated_through: Option<u64>,
+}
+
+/// One journal record, kind-tagged, with the fields this client actually renders lifted
+/// out and the whole tree kept beside them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JournalRecord {
+    /// Per-session, contiguous from 1.
+    pub seq: u64,
+    /// `model_call`, `turn_started`, `turn_settled`, `gap`, `truncated`, … — verbatim, so
+    /// a kind added after this build renders as itself.
+    pub kind: String,
+    pub at: Option<String>,
+    pub turn_id: Option<String>,
+    /// This record's own hash, and the one it chains onto.
+    pub hash: Option<String>,
+    pub prev: Option<String>,
+    /// `model_call`: which pass through the loop this was.
+    pub iteration: Option<u64>,
+    /// `turn_started`: the model spec the turn was started on. A `model_call` never
+    /// carries one — the turn it belongs to does — which is why the provenance header
+    /// resolves it by `turn_id` rather than reading it off the call.
+    pub model_spec: Option<String>,
+    /// `model_call`: the digest of the request that was actually sent.
+    pub request_sha256: Option<String>,
+    pub system_sha256: Option<String>,
+    pub tools_sha256: Option<String>,
+    /// `turn_settled`: the digest the checkpoint just wrote — the journal↔checkpoint
+    /// cross-link.
+    pub conversation_digest: Option<String>,
+    pub message_count: Option<u64>,
+    /// `turn_settled`: `complete`, `interrupted`, or a failure.
+    pub status: Option<String>,
+    /// `model_call`: the `:inference` ledger entry this call was gated by.
+    pub ledger_effect_id: Option<String>,
+    /// `gap`: why the record after a write failure could not be written.
+    pub reason: Option<String>,
+    /// `truncated`: what the budget dropped, and the chain head it dropped it from.
+    pub dropped_through_seq: Option<u64>,
+    pub prior_head: Option<String>,
+    pub raw: Value,
+}
+
+impl Journal {
+    /// Reads one `interactive.journal` answer. Unknown keys are ignored and a record this
+    /// build cannot read a `seq` for is dropped, because a record with no sequence has no
+    /// place in a chain.
+    pub fn decode(value: &Value) -> Self {
+        let number = |key: &str| value.get(key).and_then(Value::as_u64);
+
+        Self {
+            records: value
+                .get("records")
+                .and_then(Value::as_array)
+                .map(|items| items.iter().filter_map(JournalRecord::decode).collect())
+                .unwrap_or_default(),
+            count: number("count"),
+            head: nonempty(value.get("head")),
+            head_seq: number("head_seq"),
+            verified_through: number("verified_through"),
+            truncated_through: number("truncated_through"),
+        }
+    }
+
+    /// The newest sequence this window carried, for the cursor of the next page.
+    pub fn newest_seq(&self) -> Option<u64> {
+        self.records.iter().map(|record| record.seq).max()
+    }
+
+    /// Whether the chain verifies all the way to the head it named.
+    ///
+    /// `None` where the runtime named neither, which is not the same as "no": an older or
+    /// partial answer that omitted both is silence, and this client does not turn silence
+    /// into a verification verdict.
+    pub fn fully_verified(&self) -> Option<bool> {
+        match (self.verified_through, self.head_seq) {
+            (Some(verified), Some(head)) => Some(verified >= head),
+            _ => None,
+        }
+    }
+}
+
+impl JournalRecord {
+    fn decode(value: &Value) -> Option<Self> {
+        let seq = value.get("seq").and_then(Value::as_u64)?;
+        let text = |key: &str| nonempty(value.get(key));
+        let number = |key: &str| value.get(key).and_then(Value::as_u64);
+
+        Some(Self {
+            seq,
+            // A record with no kind is still a record in the chain; naming it "unknown"
+            // keeps it countable and visibly unread rather than silently typed.
+            kind: text("kind").unwrap_or_else(|| "unknown".to_string()),
+            at: text("at"),
+            turn_id: text("turn_id"),
+            hash: text("hash"),
+            prev: text("prev"),
+            iteration: number("iteration"),
+            model_spec: text("model_spec"),
+            request_sha256: text("request_sha256"),
+            system_sha256: text("system_sha256"),
+            tools_sha256: text("tools_sha256"),
+            conversation_digest: text("conversation_digest"),
+            message_count: number("message_count"),
+            status: text("status"),
+            ledger_effect_id: text("ledger_effect_id"),
+            reason: text("reason"),
+            dropped_through_seq: number("dropped_through_seq"),
+            prior_head: text("prior_head"),
+            raw: value.clone(),
+        })
+    }
+
+    /// Whether this record is one model call — the rows the provenance header lists.
+    pub fn is_model_call(&self) -> bool {
+        self.kind == "model_call"
+    }
+
+    /// The first `len` characters of a digest, which is what a header shows: the whole
+    /// 64 is unreadable at a glance and the prefix is enough to compare two runs by eye.
+    pub fn digest_prefix(digest: Option<&str>, len: usize) -> String {
+        match digest {
+            Some(digest) if !digest.is_empty() => digest.chars().take(len).collect(),
+            _ => "—".to_string(),
+        }
+    }
+}
+
+/// What the verify verb answered — `interactive.replay_verify` (docs/REPLAY.md §7.1).
+///
+/// **Decoded defensively and rendered as what it says.** The verb is built by a different
+/// slice, so this reads the four scalars it promises, keeps the divergence whole, and
+/// ignores everything else rather than refusing an answer that grew a field.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReplayVerdict {
+    /// `None` where the runtime answered without the key — silence, not a failure. A
+    /// client that rendered a missing `verified` as "diverged" would be inventing the
+    /// worst of the three answers.
+    pub verified: Option<bool>,
+    pub turns: Option<u64>,
+    pub records: Option<u64>,
+    pub head: Option<String>,
+    pub divergence: Option<ReplayDivergence>,
+}
+
+/// The named refusal a diverging replay answers with. Every field is optional because the
+/// only thing this client does with them is print them, and printing four of five facts is
+/// better than refusing to print any.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReplayDivergence {
+    pub seq: Option<u64>,
+    pub turn_id: Option<String>,
+    /// Which derived field stopped matching — the whole point of the refusal.
+    pub field: Option<String>,
+    pub expected_sha256: Option<String>,
+    pub got_sha256: Option<String>,
+}
+
+impl ReplayVerdict {
+    pub fn decode(value: &Value) -> Self {
+        Self {
+            verified: value.get("verified").and_then(Value::as_bool),
+            turns: value.get("turns").and_then(Value::as_u64),
+            records: value.get("records").and_then(Value::as_u64),
+            head: nonempty(value.get("head")),
+            divergence: value
+                .get("divergence")
+                .filter(|divergence| !divergence.is_null())
+                .map(ReplayDivergence::decode),
+        }
+    }
+}
+
+impl ReplayDivergence {
+    fn decode(value: &Value) -> Self {
+        Self {
+            seq: value.get("seq").and_then(Value::as_u64),
+            turn_id: nonempty(value.get("turn_id")),
+            field: nonempty(value.get("field")),
+            expected_sha256: nonempty(value.get("expected_sha256")),
+            got_sha256: nonempty(value.get("got_sha256")),
+        }
+    }
+}
+
+/// A trimmed, nonempty string out of an optional JSON value.
+fn nonempty(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|found| !found.is_empty())
+        .map(str::to_string)
+}
+
 /// A bounded list of nonempty strings out of a JSON array, or an empty one.
 fn strings(value: Option<&Value>) -> Vec<String> {
     value
@@ -3422,6 +3643,142 @@ mod tests {
         assert!(!error("error_scope_denied").code.is_handshake_refusal());
     }
 
+    /// R1's `interactive.journal`: the provenance a replay is read against.
+    ///
+    /// The fixture is the as-built shape, and it is the shape this decodes — `head_seq`
+    /// beside `head`, `count` beside the records, `truncated_through` explicitly null.
+    /// The three facts the CLI header states are all read here: how far the chain
+    /// verifies, whether anything was truncated, and what each model call was.
+    #[test]
+    fn the_journal_window_decodes_into_its_provenance() {
+        let journal = Journal::decode(&result("interactive_journal_result"));
+
+        assert_eq!(journal.count, Some(4));
+        assert_eq!(journal.head_seq, Some(4));
+        assert_eq!(journal.verified_through, Some(4));
+        assert_eq!(
+            journal.head.as_deref(),
+            Some("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+        );
+
+        // Verified through the head it named, so the header states a whole chain rather
+        // than a bounded one.
+        assert_eq!(journal.fully_verified(), Some(true));
+
+        // An explicit JSON null is not a truncation. The distinction is the difference
+        // between "nothing was dropped" and "records 1..n are gone".
+        assert_eq!(journal.truncated_through, None);
+
+        // The window is a *window*: four records exist, two were sent.
+        assert_eq!(journal.records.len(), 2);
+        assert_eq!(journal.newest_seq(), Some(4));
+
+        let call = &journal.records[0];
+        assert!(call.is_model_call());
+        assert_eq!(call.seq, 3);
+        assert_eq!(call.iteration, Some(1));
+        assert_eq!(call.turn_id.as_deref(), Some("turn-0000000000000000000001"));
+        assert_eq!(call.message_count, Some(7));
+        assert_eq!(
+            call.ledger_effect_id.as_deref(),
+            Some("inference-00000000000000000000000000000001")
+        );
+        assert_eq!(
+            call.request_sha256.as_deref(),
+            Some("1111111111111111111111111111111111111111111111111111111111111111")
+        );
+        assert_eq!(
+            JournalRecord::digest_prefix(call.request_sha256.as_deref(), 12),
+            "111111111111"
+        );
+        // §3.2: a `model_call` carries no model spec — the `turn_started` above it does —
+        // so the header resolves the name by turn rather than inventing one here.
+        assert_eq!(call.model_spec, None);
+
+        let settled = &journal.records[1];
+        assert!(!settled.is_model_call());
+        assert_eq!(settled.kind, "turn_settled");
+        assert_eq!(settled.seq, 4);
+        assert_eq!(settled.status.as_deref(), Some("complete"));
+        assert_eq!(
+            settled.conversation_digest.as_deref(),
+            Some("4444444444444444444444444444444444444444444444444444444444444444")
+        );
+        // The chain is stored, and both ends of each link survive the decode.
+        assert_eq!(settled.prev.as_deref(), call.hash.as_deref());
+        assert_eq!(settled.hash.as_deref(), journal.head.as_deref());
+
+        // The whole record is kept beside the lifted fields, so `--json` emits what the
+        // runtime sent rather than this build's reading of it.
+        assert_eq!(settled.raw["message_count"], 7);
+    }
+
+    /// A kind this build has never heard of is still a record in the chain.
+    #[test]
+    fn an_unknown_journal_kind_is_kept_rather_than_dropped() {
+        let journal = Journal::decode(&serde_json::json!({
+            "records": [
+                {"seq": 1, "kind": "some_kind_from_2027", "hash": "ab", "prev": "00"},
+                {"kind": "model_call"},
+                {"seq": 2}
+            ]
+        }));
+
+        // Three records in, two out: the one with no sequence has no place in a chain.
+        assert_eq!(journal.records.len(), 2);
+        assert_eq!(journal.records[0].kind, "some_kind_from_2027");
+        assert_eq!(journal.records[1].kind, "unknown");
+
+        // Nothing was claimed that was not said.
+        assert_eq!(journal.head, None);
+        assert_eq!(journal.fully_verified(), None);
+    }
+
+    /// R2's verdict, decoded against the spec shape while the verb is still being built.
+    #[test]
+    fn the_replay_verdict_decodes_both_answers_and_neither() {
+        let verified = ReplayVerdict::decode(&serde_json::json!({
+            "verified": true,
+            "turns": 12,
+            "records": 340,
+            "head": "cc",
+            "divergence": null,
+            "a_key_this_build_has_never_heard_of": {"nested": true}
+        }));
+
+        assert_eq!(verified.verified, Some(true));
+        assert_eq!(verified.turns, Some(12));
+        assert_eq!(verified.records, Some(340));
+        assert_eq!(verified.head.as_deref(), Some("cc"));
+        assert_eq!(verified.divergence, None);
+
+        let diverged = ReplayVerdict::decode(&serde_json::json!({
+            "verified": false,
+            "turns": 3,
+            "records": 40,
+            "head": "dd",
+            "divergence": {
+                "seq": 17,
+                "turn_id": "turn-2",
+                "field": "conversation_digest",
+                "expected_sha256": "aaaa",
+                "got_sha256": "bbbb"
+            }
+        }));
+
+        let divergence = diverged.divergence.expect("a named divergence");
+        assert_eq!(divergence.seq, Some(17));
+        assert_eq!(divergence.field.as_deref(), Some("conversation_digest"));
+        assert_eq!(divergence.expected_sha256.as_deref(), Some("aaaa"));
+        assert_eq!(divergence.got_sha256.as_deref(), Some("bbbb"));
+
+        // An answer that said nothing says nothing here either — `verified: None` is not
+        // `Some(false)`, because a missing verdict is not a divergence.
+        let silent = ReplayVerdict::decode(&serde_json::json!({}));
+        assert_eq!(silent.verified, None);
+        assert_eq!(silent.divergence, None);
+    }
+
     #[test]
     fn every_golden_fixture_is_accounted_for() {
         let dir =
@@ -3505,6 +3862,7 @@ mod tests {
                 "interactive_event_detail_result",
                 "interactive_event_excerpt_notification",
                 "interactive_event_notification",
+                "interactive_journal_result",
                 "ledger_export_result",
                 "ledger_list_result",
                 "mcp_list_result",
