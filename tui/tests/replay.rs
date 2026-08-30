@@ -581,6 +581,17 @@ fn each_flag_becomes_the_param_it_names_and_only_when_given() {
         json!({"id": SESSION, "fork_id": "ouro-cli-deadbeef", "to_turn": "turn-2"})
     );
 
+    // An all-digits `--at` is an ordinal, and the runtime types ordinals as integers —
+    // "1" as a string falls into the turn-id lookup and is refused `unknown_turn`.
+    let at_ordinal = ForkOptions {
+        at: Some("1".into()),
+        ..fork_options()
+    };
+    assert_eq!(
+        at_ordinal.params(),
+        json!({"id": SESSION, "fork_id": "ouro-cli-deadbeef", "to_turn": 1})
+    );
+
     let model_only = ForkOptions {
         model: Some("anthropic:claude-opus-4".into()),
         ..fork_options()

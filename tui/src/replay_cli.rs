@@ -697,7 +697,15 @@ impl ForkOptions {
             .map(str::trim)
             .filter(|at| !at.is_empty())
         {
-            params.insert("to_turn".into(), json!(at));
+            // The runtime types a turn target as a turn id (string) or a non-negative
+            // ordinal (integer). All digits sent as a string falls into the turn-id
+            // lookup and misses — `unknown_turn` on a perfectly good ordinal — so
+            // digits become the integer the server means. Live-found: `--at 1` was
+            // refused while `to_turn: 1` was accepted.
+            match at.parse::<u64>() {
+                Ok(ordinal) => params.insert("to_turn".into(), json!(ordinal)),
+                Err(_) => params.insert("to_turn".into(), json!(at)),
+            };
         }
 
         if let Some(model) = self
