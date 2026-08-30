@@ -56,6 +56,10 @@ defmodule Ouroboros.Provider.Native.LoopTest do
     pid
   end
 
+  # Mid-turn event waits share this module's 15s ceiling. The module is async and a
+  # full-suite run schedules it beside dozens of concurrent cases; a loaded run showed a
+  # first approval ask landing after the old 5s wait had already flunked. Every wait
+  # stays bounded on its explicit event, so a wedged loop still fails inside a test.
   defp collect(acc \\ []) do
     receive do
       {:event, %{type: type} = event}
@@ -419,7 +423,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       {loop, _agent} = start_loop(context, @write_script, approval_mode: :prompt)
       pid = run(loop)
 
-      assert_receive {:event, %{type: :approval_requested} = ask}, 5_000
+      assert_receive {:event, %{type: :approval_requested} = ask}, 15_000
       assert ask.payload["kind"] == "file_change"
       assert ask.payload["tool_call"]["name"] == "write"
       assert ask.payload["tool_call"]["cwd"] == context.workspace
@@ -448,7 +452,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       {loop, _agent} = start_loop(context, @write_script, approval_mode: :prompt)
       pid = run(loop)
 
-      assert_receive {:event, %{type: :approval_requested} = ask}, 5_000
+      assert_receive {:event, %{type: :approval_requested} = ask}, 15_000
 
       send(
         pid,
@@ -470,7 +474,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
 
       run(loop)
 
-      assert_receive {:event, %{type: :approval_requested}}, 5_000
+      assert_receive {:event, %{type: :approval_requested}}, 15_000
 
       events = collect()
       [result] = all(events, :tool_result)
@@ -490,7 +494,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       {loop, _agent} = start_loop(context, script, approval_mode: :prompt)
       pid = run(loop)
 
-      assert_receive {:event, %{type: :approval_requested} = ask}, 5_000
+      assert_receive {:event, %{type: :approval_requested} = ask}, 15_000
 
       send(
         pid,
@@ -533,7 +537,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       {loop, _agent} = start_loop(context, script, approval_mode: :auto_edit)
       pid = run(loop)
 
-      assert_receive {:event, %{type: :approval_requested} = ask}, 5_000
+      assert_receive {:event, %{type: :approval_requested} = ask}, 15_000
       assert ask.payload["kind"] == "command"
       assert ask.payload["tool_call"]["command"] == "rm -rf /"
       assert ask.payload["suggested_rule"] == "Bash(rm *)"
@@ -570,7 +574,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
 
       pid = run(loop)
 
-      assert_receive {:event, %{type: :approval_requested} = ask}, 5_000
+      assert_receive {:event, %{type: :approval_requested} = ask}, 15_000
 
       send(
         pid,
@@ -606,7 +610,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       pid = run(loop)
 
       # Steer while the first tool call is in flight; it must not interrupt it.
-      assert_receive {:event, %{type: :tool_call}}, 5_000
+      assert_receive {:event, %{type: :tool_call}}, 15_000
       send(pid, {:native_steer, "actually, stop after this and explain"})
 
       events = collect()
@@ -633,7 +637,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       {loop, agent} = start_loop(context, script)
       pid = run(loop)
 
-      assert_receive {:event, %{type: :tool_call}}, 5_000
+      assert_receive {:event, %{type: :tool_call}}, 15_000
       send(pid, :native_interrupt)
 
       events = collect()
@@ -677,7 +681,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       {loop, _agent} = start_loop(context, [delayed])
       pid = run(loop)
 
-      assert_receive :model_waiting, 5_000
+      assert_receive :model_waiting, 15_000
       send(pid, :native_interrupt)
       send(pid, :release_model)
 
@@ -691,7 +695,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       {loop, _agent} = start_loop(context, @write_script, approval_mode: :prompt)
       pid = run(loop)
 
-      assert_receive {:event, %{type: :approval_requested}}, 5_000
+      assert_receive {:event, %{type: :approval_requested}}, 15_000
       send(pid, :native_interrupt)
 
       events = collect()
