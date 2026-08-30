@@ -8,6 +8,7 @@ defmodule Ouroboros.Interactive.Task do
   alias Jido.Harness.{Session, SessionInfo, TurnRequest, TurnResult}
   alias Ouroboros.Interactive.{Event, State, Store}
   alias Ouroboros.Interactive.Task.{Approvals, Resume, Shell, Turns}
+  alias Ouroboros.Poll.{Cadence, Timer}
   alias Ouroboros.Provider
   alias Ouroboros.Provider.Native.Paths
   alias Ouroboros.Provider.Native.Session, as: NativeSession
@@ -18,6 +19,13 @@ defmodule Ouroboros.Interactive.Task do
   alias Ouroboros.Workspace.Worktree
 
   @poll_interval 25
+
+  # The ceiling the wakeup interval decays to once a conversation is genuinely between
+  # turns. See `Ouroboros.Poll.Cadence` for why a second is the right bound: everything a
+  # human does resets the cadence on the way in, so this delays only an out-of-band change
+  # — the provider process dying under an idle session — and nothing that is being watched.
+  @idle_poll_interval_max 1_000
+
   @replay_limit 100
   # C4. How long this coordinator waits on a provider-side fold. Under the gateway's own
   # 120s ceiling for `interactive.compact`, so a transport that never answers is this
@@ -143,10 +151,15 @@ defmodule Ouroboros.Interactive.Task do
   def handle_call({:subscribe, subscriber, cursor}, _from, runtime) when is_pid(subscriber) do
     case subscription_events(runtime.session, cursor) do
       {:ok, backlog} ->
+        # Somebody has started watching. Nothing is predicted to arrive — an idle session
+        # is idle whether or not anyone is looking — but a decayed interval is a bet that
+        # lateness is cheap, and that bet is worse once there is a live subscriber to be
+        # late to. Reset the policy without forcing a wakeup: the timer already armed keeps
+        # its due date, and the decay simply starts again from the fast interval.
         runtime =
           if State.terminal?(runtime.session),
             do: runtime,
-            else: put_subscriber(runtime, subscriber)
+            else: runtime |> put_subscriber(subscriber) |> reset_cadence()
 
         {:reply, {:ok, backlog}, runtime}
 
@@ -581,7 +594,8 @@ defmodule Ouroboros.Interactive.Task do
   end
 
   @impl true
-  def handle_info(:poll, runtime), do: {:noreply, poll(runtime)}
+  def handle_info(:poll, runtime),
+    do: {:noreply, runtime |> Timer.clear(:poll_timer) |> poll()}
 
   def handle_info(:ready_deadline, %{ready_waiters: []} = runtime),
     do: {:noreply, %{runtime | ready_timer: nil}}
@@ -606,6 +620,8 @@ defmodule Ouroboros.Interactive.Task do
   # this message used to strand the coordinator: nothing rescheduled retirement
   # once it had been declined.
   def handle_info(:retire, runtime) do
+    runtime = Timer.clear(runtime, :retire_timer)
+
     cond do
       not State.terminal?(runtime.session) -> {:noreply, runtime}
       map_size(runtime.turn_waiters) == 0 -> {:stop, :normal, runtime}
@@ -661,6 +677,9 @@ defmodule Ouroboros.Interactive.Task do
       workspace_lease: lease,
       workspace_capability: capability,
       retry: no_retry(),
+      poll_timer: nil,
+      retire_timer: nil,
+      cadence: Cadence.new(@poll_interval, @idle_poll_interval_max),
       terminal_observed_at: nil,
       pending_steers: [],
       resume_settled: false,
@@ -1101,7 +1120,7 @@ defmodule Ouroboros.Interactive.Task do
           |> reply_all_terminal_turn_waiters()
           |> schedule_retire()
         else
-          schedule_poll(runtime, @poll_interval)
+          schedule_next_poll(runtime)
         end
 
       {:error, runtime} ->
@@ -2560,15 +2579,59 @@ defmodule Ouroboros.Interactive.Task do
     %{runtime | ready_waiters: waiters}
   end
 
-  def schedule_poll(runtime, delay) do
-    Process.send_after(self(), :poll, delay)
+  # A zero delay is this coordinator's existing vocabulary for "something just happened, or
+  # is about to — look now": it is what every verb that reaches a provider already passes.
+  # So it is also exactly the right place to reset the cadence. Nothing had to be taught a
+  # new list of triggers; the call sites that predict events were already marked.
+  def schedule_poll(runtime, 0) do
     runtime
+    |> reset_cadence()
+    |> Timer.schedule(:poll_timer, :poll, 0)
   end
 
-  def schedule_retire(runtime) do
-    Process.send_after(self(), :retire, @terminal_retire_ms)
-    runtime
+  # A non-zero delay is an error path's own backoff (`retry/3`) or a checkpoint that has to
+  # be tried again. Those own their timing; the cadence is left where it was.
+  def schedule_poll(runtime, delay) do
+    Timer.schedule(runtime, :poll_timer, :poll, delay)
   end
+
+  # The steady-state loop, and the only site that decays. Reached once per poll that found
+  # nothing to drain and checkpointed a live session, so the cadence advances exactly once
+  # per wakeup — never twice, and never from two chains at once, which is what
+  # `Ouroboros.Poll.Timer` is there to guarantee.
+  defp schedule_next_poll(runtime) do
+    cadence = Cadence.advance(runtime.cadence, poll_idle?(runtime))
+
+    %{runtime | cadence: cadence}
+    |> Timer.schedule(:poll_timer, :poll, Cadence.interval(cadence))
+  end
+
+  def reset_cadence(runtime), do: %{runtime | cadence: Cadence.busy(runtime.cadence)}
+
+  # Idle is not "quiet for a while" — it is a positive statement the Harness session just
+  # made about itself in the checkpoint that landed a line ago: the session is `:idle`, so
+  # there is no active turn and nothing queued behind it. The rest of the conjunction is
+  # this coordinator's own unfinished business, each item something that will produce an
+  # event without anybody asking: an approval a human still owes an answer to, a dispatch
+  # whose outcome is unknown, a turn that has not reached a terminal status, a retry
+  # counting down. Any of them, and the session is polled at the fast interval.
+  defp poll_idle?(runtime) do
+    session = runtime.session
+
+    session.status == :idle and
+      runtime.retry.count == 0 and
+      map_size(runtime.external_approvals) == 0 and
+      Turns.unresolved_dispatches(session) == [] and
+      Enum.all?(session.turns, fn {_id, turn} -> State.terminal_turn?(turn) end)
+  end
+
+  @doc false
+  # A test seam, and deliberately the whole of one: the interval is a pure function of the
+  # cadence struct, so a test can assert the policy decayed without measuring a clock.
+  def poll_interval_ms(runtime), do: Cadence.interval(runtime.cadence)
+
+  def schedule_retire(runtime),
+    do: Timer.schedule(runtime, :retire_timer, :retire, @terminal_retire_ms)
 
   # D7. A session that asked for a worktree gets one *before* the lease is acquired, and
   # the lease is then taken on the worktree's own path — so every containment check in
