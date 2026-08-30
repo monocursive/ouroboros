@@ -5,7 +5,7 @@ defmodule Ouroboros.Coding.Task do
 
   require Logger
 
-  alias Jido.Harness.{ApprovalResponse, Run, RunResult}
+  alias Jido.Harness.{ApprovalResponse, Run, RunInfo, RunResult}
   alias Ouroboros.Coding.{Store, TaskState}
   alias Ouroboros.Poll.Timer
   alias Ouroboros.Provider.Native.Run, as: NativeRun
@@ -478,13 +478,41 @@ defmodule Ouroboros.Coding.Task do
 
   defp poll(%{task: %TaskState{harness_run_id: nil}} = runtime), do: attach_or_start(runtime)
 
+  # `Run.replay/2` re-reads and re-JSON-decodes the whole run journal even to answer that
+  # nothing is new, so a poll that opened with it paid O(run length) to find an idle run
+  # (docs/proposals/jido-harness-push-subscription.md §2.3). `Run.info/1` is in-memory
+  # struct construction, and its `output_cursor` is the same append counter replay serves
+  # from — the comparison `mirrored_through_result?/1` already stakes finishing on. So
+  # peek first, and replay only past a cursor that has actually advanced. This fronts the
+  # poll with the info call, so an unreachable run now retries as `:harness_info_failed`
+  # rather than `:harness_replay_failed`.
   defp poll(runtime) do
+    task = runtime.task
+
+    case safe_run_call(fn -> Run.info(task.harness_run_id) end) do
+      {:ok, %RunInfo{output_cursor: output_cursor}} ->
+        if output_cursor > task.cursor,
+          do: drain_replay(runtime),
+          else: collect_result(runtime)
+
+      {:error, :not_found} ->
+        lose(runtime, :harness_run_not_found)
+
+      {:error, reason} ->
+        retry_with_error(runtime, :harness_info_failed, reason)
+    end
+  end
+
+  defp drain_replay(runtime) do
     task = runtime.task
 
     case safe_run_call(fn ->
            Run.replay(task.harness_run_id, cursor: task.cursor, limit: @replay_limit)
          end) do
       {:ok, [_ | _] = events} -> runtime |> clear_retry() |> persist_harness_events(events)
+      # The peek said the cursor had advanced and the log answered with nothing — a
+      # journal that failed or rotated between the two calls. The result path re-reads
+      # info itself, so nothing stale is trusted.
       {:ok, []} -> collect_result(runtime)
       {:error, :not_found} -> lose(runtime, :harness_run_not_found)
       {:error, reason} -> retry_with_error(runtime, :harness_replay_failed, reason)

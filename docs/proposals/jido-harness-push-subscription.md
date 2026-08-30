@@ -354,22 +354,21 @@ At the pinned ref, with no upstream change, Ouroboros:
    the Harness session reports itself idle with nothing outstanding, and reset instantly by
    any verb that can make a provider emit. This cuts the idle cost of an open conversation
    by 40x and does not touch active-turn latency.
-Not yet done here, and the largest remaining win available without upstream changes:
+3. **Gates `replay/2` behind the `output_cursor` high-water mark** (§2.4) — every poll
+   calls the cheap `info/1` first and skips the replay entirely unless the cursor has
+   advanced past the coordinator's durable one, so a poll that finds nothing new no
+   longer pays the §2.3 rescan at all, busy or idle. The failure surface moved with it:
+   an unreachable session now reports `:harness_session_info_failed`
+   (`:harness_info_failed` on the coding plane) where it used to report a replay
+   failure, and the test doubles derive `info`'s cursor from their `replay` fixture so
+   the two cannot disagree. The comparison itself was already trusted before the change:
+   `mirrored_through_result?/1` in both coordinators compares the durable cursor against
+   `output_cursor`.
 
-3. **Gate `replay/2` behind `SessionInfo.output_cursor`** (§2.4) — call the cheap `info/1`
-   first and skip the replay entirely unless the cursor has advanced past the coordinator's
-   durable one. This removes the §2.3 rescan from *every* poll, busy or idle, which the
-   cadence work above does not do. It is deliberately not bundled with the cadence change:
-   it alters what a poll does rather than when it happens, it moves which call reports a
-   failure (`:harness_session_replay_failed` becomes `:harness_session_info_failed` for an
-   unreachable session), and the coding plane's `Ouroboros.Test.StubRun` answers `info` and
-   `replay` from independent fixtures, so it needs test doubles updated alongside it.
-   The comparison itself is already trusted elsewhere in this codebase: `mirrored_through_result?/1`
-   in both coordinators compares the durable cursor against `output_cursor` today.
-
-So a *busy* session still pays the §2.3 rescan at 25 ms, and an idle one still pays it once
-a second. Item 3 fixes the first; only a push seam fixes the second properly, and the cost
-of both grows with the length of the conversation.
+So the journal rescan is now paid only when there are events to read. What remains is the
+wakeups themselves — one in-memory `info/1` call per poll, once a second per idle open
+conversation — a floor that no longer grows with conversation length, and that only a
+push seam can remove.
 
 ---
 

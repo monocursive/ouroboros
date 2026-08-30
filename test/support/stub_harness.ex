@@ -62,7 +62,8 @@ defmodule Ouroboros.Test.StubRun do
       run_id: state.run_id,
       provider: state.provider,
       state: state.state,
-      started_at: DateTime.utc_now() |> DateTime.to_iso8601()
+      started_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+      output_cursor: Ouroboros.Test.StubHarness.output_cursor(state.replay)
     )
   end
 
@@ -70,6 +71,23 @@ defmodule Ouroboros.Test.StubRun do
   # what a wedged provider transport looks like from Ouroboros.
   defp delay(%{delay_ms: 0}), do: :ok
   defp delay(%{delay_ms: delay_ms}), do: Process.sleep(delay_ms)
+end
+
+defmodule Ouroboros.Test.StubHarness do
+  @moduledoc """
+  What the stub run and stub session share: an `info` whose `output_cursor` agrees with
+  the `replay` fixture.
+
+  The coordinators peek `info.output_cursor` and call `replay` only once it has advanced
+  past their durable checkpoint, so a stub answering the two from independent fixtures
+  would leave its replay reply unreachable. Deriving the cursor from the replay fixture
+  keeps them in lockstep by construction: events advertise the highest sequence they
+  carry, and an error advertises a cursor no checkpoint reaches — a wedged replay only
+  wedges a poll that attempts it.
+  """
+
+  def output_cursor({:ok, events}), do: Enum.reduce(events, 0, &max(&1.sequence, &2))
+  def output_cursor({:error, _reason}), do: 1_000_000_000
 end
 
 defmodule Ouroboros.Test.StubSession do
@@ -160,7 +178,8 @@ defmodule Ouroboros.Test.StubSession do
       session_id: state.session_id,
       provider: state.provider,
       state: state.state,
-      started_at: DateTime.utc_now() |> DateTime.to_iso8601()
+      started_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+      output_cursor: Ouroboros.Test.StubHarness.output_cursor(state.replay)
     )
   end
 

@@ -733,7 +733,33 @@ defmodule Ouroboros.Interactive.Task do
 
   defp poll(%{session: %State{harness_session_id: nil}} = runtime), do: attach_or_start(runtime)
 
+  # `Session.replay/2` re-reads and re-JSON-decodes the whole session journal even to
+  # answer that nothing is new, so a poll that opened with it paid O(conversation length)
+  # to find an empty conversation (docs/proposals/jido-harness-push-subscription.md §2.3).
+  # `Session.info/1` is in-memory struct construction, and its `output_cursor` is the same
+  # append counter replay serves from — the comparison `mirrored_through_result?/1`
+  # already stakes turn completion on. So peek first, and replay only past a cursor that
+  # has actually advanced. This fronts the poll with the info call, so an unreachable
+  # session now retries as `:harness_session_info_failed` rather than
+  # `:harness_session_replay_failed`.
   defp poll(runtime) do
+    session = runtime.session
+
+    case safe_session_call(fn -> Session.info(session.harness_session_id) end) do
+      {:ok, %SessionInfo{output_cursor: output_cursor} = info} ->
+        if output_cursor > harness_cursor(session),
+          do: drain_replay(runtime),
+          else: refresh_session(runtime, info)
+
+      {:error, :not_found} ->
+        Resume.resume_or_lose(runtime, :harness_session_not_found)
+
+      {:error, reason} ->
+        retry(runtime, :harness_session_info_failed, reason)
+    end
+  end
+
+  defp drain_replay(runtime) do
     session = runtime.session
 
     case safe_session_call(fn ->
@@ -745,6 +771,9 @@ defmodule Ouroboros.Interactive.Task do
       {:ok, [_ | _] = events} ->
         runtime |> clear_retry() |> persist_harness_events(rebase_sequences(session, events))
 
+      # The peek said the cursor had advanced and the log answered with nothing — a
+      # journal that failed or rotated between the two calls. The peeked snapshot
+      # predates the replay attempt, so checkpoint from a fresh one.
       {:ok, []} ->
         refresh_session(runtime)
 
@@ -951,18 +980,22 @@ defmodule Ouroboros.Interactive.Task do
   defp refresh_session(runtime) do
     case safe_session_call(fn -> Session.info(runtime.session.harness_session_id) end) do
       {:ok, %SessionInfo{} = info} ->
-        runtime = runtime |> clear_retry() |> collect_turn_results()
-
-        case recover_checkpointed_dispatch(runtime, info) do
-          {:ok, runtime} -> checkpoint_info(runtime, info)
-          {:retry, runtime, kind, reason} -> retry(runtime, kind, reason)
-        end
+        refresh_session(runtime, info)
 
       {:error, :not_found} ->
         Resume.resume_or_lose(runtime, :harness_session_not_found)
 
       {:error, reason} ->
         retry(runtime, :harness_session_info_failed, reason)
+    end
+  end
+
+  defp refresh_session(runtime, %SessionInfo{} = info) do
+    runtime = runtime |> clear_retry() |> collect_turn_results()
+
+    case recover_checkpointed_dispatch(runtime, info) do
+      {:ok, runtime} -> checkpoint_info(runtime, info)
+      {:retry, runtime, kind, reason} -> retry(runtime, kind, reason)
     end
   end
 
