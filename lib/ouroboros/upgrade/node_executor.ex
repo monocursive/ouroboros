@@ -71,6 +71,10 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
 
   defmodule Receipt do
     @moduledoc "A node-local capability proving which artifact was committed."
+
+    @typedoc "The capability `commit/2` hands back and `rollback/2`/`promote/2` demand."
+    @type t :: %__MODULE__{}
+
     @enforce_keys [:id, :artifact, :migrations, :committed_at, :node]
     defstruct @enforce_keys
   end
@@ -1399,26 +1403,28 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
 
   defp valid_operations?(_operations, _next_sequence), do: false
 
-  defp valid_operation?(operation) when is_map(operation) do
-    allowed =
-      MapSet.new([
-        :sequence,
-        :operation,
-        :outcome,
-        :artifact_id,
-        :epoch,
-        :occurred_at,
-        :token_digest,
-        :receipt_id,
-        :module_count,
-        :migration_count,
-        :modules,
-        :artifact,
-        :migrations,
-        :reason
-      ])
+  # A module attribute, not a `MapSet`: the set is a compile-time constant of fourteen
+  # atoms, so `in` is both clearer and free of the opaque type dialyzer reported the
+  # `MapSet.member?/2` against.
+  @allowed_operation_keys [
+    :sequence,
+    :operation,
+    :outcome,
+    :artifact_id,
+    :epoch,
+    :occurred_at,
+    :token_digest,
+    :receipt_id,
+    :module_count,
+    :migration_count,
+    :modules,
+    :artifact,
+    :migrations,
+    :reason
+  ]
 
-    keys_valid? = operation |> Map.keys() |> Enum.all?(&MapSet.member?(allowed, &1))
+  defp valid_operation?(operation) when is_map(operation) do
+    keys_valid? = operation |> Map.keys() |> Enum.all?(&(&1 in @allowed_operation_keys))
 
     keys_valid? and is_integer(operation[:sequence]) and operation[:sequence] > 0 and
       valid_operation_outcome?(operation[:operation], operation[:outcome]) and

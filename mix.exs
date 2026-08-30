@@ -17,6 +17,14 @@ defmodule Ouroboros.MixProject do
       # `dialyzer.ignore-warnings`; new files and new warning types must still be clean.
       dialyzer: [
         plt_local_path: "_build/plts",
+        # Three apps this code calls that dialyxir does not put in the PLT on its own, so
+        # every call into them read as `Unknown function` and hid whatever was really
+        # there. `:mix` is the Mix tasks under `lib/mix/tasks` and `Mix.env/0`;
+        # `:ex_unit` is the Forge sandbox, which runs a suite in-process
+        # (`ExUnit.start/1`, `ExUnit.run/0`); `:llm_db` is an `included_applications` of
+        # `req_llm`, which is why it is absent by default — `req_llm` adds it to its own
+        # PLT for the same reason.
+        plt_add_apps: [:mix, :ex_unit, :llm_db],
         flags: [:error_handling],
         ignore_warnings: "dialyzer.ignore-warnings"
       ],
