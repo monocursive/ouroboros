@@ -133,7 +133,7 @@ defmodule Ouroboros.AgentEffectsTest do
       denied = unique_id("kernel-agent")
       signal!(pid, EffectStartAgent, %{from: actor, agent_id: denied, module: Kernel})
 
-      failure = await_effect!(pid, :start_agent)
+      failure = await_effect!(pid, :start_agent, 200, [entry])
       assert failure.status == :failed
       assert failure.error == {:effect_failed, :start_agent, {:agent_module_not_allowed, Kernel}}
       assert Mesh.whereis(denied) == nil
@@ -182,7 +182,7 @@ defmodule Ouroboros.AgentEffectsTest do
       assert is_pid(Mesh.whereis(protected))
 
       signal!(pid, EffectStopAgent, %{from: actor, agent_id: allowed})
-      stopped = await_effect!(pid, :stop_agent)
+      stopped = await_effect!(pid, :stop_agent, 200, [denied])
       assert stopped.status == :ok
       assert stopped.result == %{agent_id: allowed}
       assert Mesh.whereis(allowed) == nil
@@ -245,7 +245,7 @@ defmodule Ouroboros.AgentEffectsTest do
       options: [provider: @provider, workspace: File.cwd!()]
     })
 
-    assert await_effect!(pid, :delegate).status == :denied
+    assert await_effect!(pid, :delegate, 200, [entry]).status == :denied
     assert :ok = Team.close(team)
   end
 
@@ -400,9 +400,19 @@ defmodule Ouroboros.AgentEffectsTest do
 
   # Effects settle asynchronously by design: the agent's own process is never the thing
   # waiting on a build peer or a provider run.
-  defp await_effect!(server, effect, attempts \\ 200) do
+  # A signal's `:started` projection lands in `last_effects` asynchronously, so a second
+  # await of the same effect issued right after `signal!` can find the *predecessor's*
+  # settled entry and answer with it — under CPU load, reliably enough to fail the
+  # denied-after-granted assertions. Callers awaiting a successor pass the entries this
+  # await must not answer with in `excluding`.
+  defp await_effect!(server, effect, attempts \\ 200, excluding \\ []) do
+    excluded_ids = Enum.map(excluding, & &1.id)
+
     entry =
-      server |> agent_state() |> Map.fetch!(:last_effects) |> Enum.find(&(&1.effect == effect))
+      server
+      |> agent_state()
+      |> Map.fetch!(:last_effects)
+      |> Enum.find(&(&1.effect == effect and &1.id not in excluded_ids))
 
     cond do
       is_map(entry) and entry.status != :started ->
@@ -410,7 +420,7 @@ defmodule Ouroboros.AgentEffectsTest do
 
       attempts > 0 ->
         Process.sleep(50)
-        await_effect!(server, effect, attempts - 1)
+        await_effect!(server, effect, attempts - 1, excluding)
 
       true ->
         flunk("effect #{effect} never settled: #{inspect(entry)}")
