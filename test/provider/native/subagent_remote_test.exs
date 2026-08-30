@@ -64,10 +64,17 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
     Application.put_env(:ouroboros, :native_data_dir, origin_data)
     Application.put_env(:ouroboros, :native_model_module, NativeModelScript)
 
+    # Both nodes share this host's filesystem, so the peer's root is named here (with the
+    # same run-keyed scheme as `tmp_dir!/1`) and registered for removal before the peer
+    # exists — `on_exit` runs in reverse order, so the directory outlives the peer by
+    # exactly one callback instead of outliving the run.
+    peer_root = Path.join(System.tmp_dir!(), "ouro-peer-#{:os.getpid()}-#{unique()}")
+    File.rm_rf!(peer_root)
+    on_exit(fn -> File.rm_rf(peer_root) end)
+
     peer = start_app_peer!()
 
     # The peer's own directories, created *by the peer*, under app env only the peer has.
-    peer_root = peer_call(peer, Path, :join, [System.tmp_dir!(), "ouro-peer-#{unique()}"])
     peer_data = Path.join(peer_root, "data")
     peer_workspace = Path.join(peer_root, "workspace")
     :ok = peer_call(peer, File, :mkdir_p!, [peer_data])
@@ -85,7 +92,8 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
     on_exit(fn ->
       Enum.each(previous, fn {key, value} -> restore(key, value) end)
       File.rm_rf(origin_root)
-      # The peer is stopped by its own `on_exit`; its directories go with the host's tmp.
+      # The peer is stopped by its own `on_exit`; `peer_root` is removed by the callback
+      # registered before the peer started, which therefore runs after the stop.
     end)
 
     %{
@@ -639,8 +647,14 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
 
   defp unique, do: System.unique_integer([:positive])
 
+  # `System.unique_integer/1` restarts from small values on every VM boot, so a name
+  # keyed by it alone collides with the leavings of any earlier run that died before its
+  # cleanup. For the worktree fixture that leftover is a repository with `base` already
+  # committed — `git add .` then stages nothing and the commit reports a clean tree. The
+  # OS pid keys the name to this run, and the pre-clean makes even a reused name empty.
   defp tmp_dir!(tag) do
-    dir = Path.join(System.tmp_dir!(), "ouro-#{tag}-#{unique()}")
+    dir = Path.join(System.tmp_dir!(), "ouro-#{tag}-#{:os.getpid()}-#{unique()}")
+    File.rm_rf!(dir)
     File.mkdir_p!(dir)
     dir
   end

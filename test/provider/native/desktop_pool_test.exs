@@ -32,7 +32,7 @@ defmodule Ouroboros.Provider.Native.Desktop.PoolTest do
   describe "one helper per node — handshake and requests" do
     test "handshakes to ready and answers doctor, windows, and state" do
       pid = start_pool(responding_helper())
-      assert %{phase: :ready} = wait_status(pid, &(&1.phase == :ready))
+      assert %{phase: :ready} = wait_status(pid, &(&1.phase == :ready), 15_000)
 
       assert {:ok, %{"readiness" => %{"screenshot" => "ok"}}} = Pool.doctor(pid, 2_000)
       assert {:ok, %{"windows" => []}} = Pool.windows(pid, 2_000)
@@ -40,8 +40,8 @@ defmodule Ouroboros.Provider.Native.Desktop.PoolTest do
     end
 
     test "a second in-flight request waits in the queue and both complete" do
-      pid = start_pool(slow_helper(), handshake_timeout_ms: 3_000)
-      wait_status(pid, &(&1.phase == :ready), 3_000)
+      pid = start_pool(slow_helper())
+      wait_status(pid, &(&1.phase == :ready), 15_000)
 
       first = Task.async(fn -> Pool.state(pid, %{}, 3_000) end)
       Process.sleep(80)
@@ -53,8 +53,8 @@ defmodule Ouroboros.Provider.Native.Desktop.PoolTest do
 
     test "a queued request expires on its original deadline and is never sent later" do
       log = request_log()
-      pid = start_pool(recording_slow_helper(), handshake_timeout_ms: 3_000)
-      wait_status(pid, &(&1.phase == :ready), 3_000)
+      pid = start_pool(recording_slow_helper())
+      wait_status(pid, &(&1.phase == :ready), 15_000)
 
       first = Task.async(fn -> Pool.state(pid, %{"tag" => "first"}, 3_000) end)
       wait_internal(pid, &(get_in(&1, [:inflight, :method]) == "state"))
@@ -71,8 +71,8 @@ defmodule Ouroboros.Provider.Native.Desktop.PoolTest do
 
     test "a queued request is removed when its caller dies" do
       log = request_log()
-      pid = start_pool(recording_slow_helper(), handshake_timeout_ms: 3_000)
-      wait_status(pid, &(&1.phase == :ready), 3_000)
+      pid = start_pool(recording_slow_helper())
+      wait_status(pid, &(&1.phase == :ready), 15_000)
 
       first = Task.async(fn -> Pool.state(pid, %{"tag" => "first"}, 3_000) end)
       wait_internal(pid, &(get_in(&1, [:inflight, :method]) == "state"))
@@ -93,8 +93,8 @@ defmodule Ouroboros.Provider.Native.Desktop.PoolTest do
 
     test "cancel of a queued caller does not abort a different caller's inflight act" do
       log = request_log()
-      pid = start_pool(recording_act_helper(), handshake_timeout_ms: 3_000)
-      wait_status(pid, &(&1.phase == :ready), 3_000)
+      pid = start_pool(recording_act_helper())
+      wait_status(pid, &(&1.phase == :ready), 15_000)
 
       first = Task.async(fn -> Pool.request(pid, "act", %{"tag" => "first"}, 3_000) end)
       wait_internal(pid, &(get_in(&1, [:inflight, :method]) == "act"))
@@ -112,8 +112,8 @@ defmodule Ouroboros.Provider.Native.Desktop.PoolTest do
 
     test "an in-flight timeout stays occupied until the helper acknowledges, then drains" do
       _log = request_log()
-      pid = start_pool(recording_slow_helper(), handshake_timeout_ms: 3_000)
-      wait_status(pid, &(&1.phase == :ready), 3_000)
+      pid = start_pool(recording_slow_helper())
+      wait_status(pid, &(&1.phase == :ready), 15_000)
 
       assert {:error, :timeout} = Pool.state(pid, %{"tag" => "timed-out"}, 100)
 
@@ -154,8 +154,8 @@ defmodule Ouroboros.Provider.Native.Desktop.PoolTest do
         System.delete_env("OURO_CU_MARKER")
       end)
 
-      pid = start_pool(env_echo_helper(), handshake_timeout_ms: 3_000)
-      wait_status(pid, &(&1.phase == :ready), 3_000)
+      pid = start_pool(env_echo_helper())
+      wait_status(pid, &(&1.phase == :ready), 15_000)
 
       assert {:ok, %{"token" => token, "marker" => marker}} = Pool.doctor(pid, 2_000)
       assert token == "", "the gateway token must not reach the helper's environment"
@@ -185,9 +185,14 @@ defmodule Ouroboros.Provider.Native.Desktop.PoolTest do
     # Started detached (not `start_link`) so the pool is independent of the test process:
     # its child's exit does not travel through us, and we stop it explicitly at teardown,
     # which reaps the helper via `terminate/2`.
+    #
+    # The default handshake ceiling is sized to a loaded machine: the handshake spawns an
+    # OS child and round-trips a doctor request, and a loaded full-suite run was seen
+    # blowing 3s on that (helper broken: :handshake_timeout). Tests that *assert* the
+    # broken path pass their own deliberately small ceiling.
     {:ok, pid} =
       Pool.start(
-        Keyword.merge([name: name, helper_path: helper_path, handshake_timeout_ms: 2_000], opts)
+        Keyword.merge([name: name, helper_path: helper_path, handshake_timeout_ms: 15_000], opts)
       )
 
     on_exit(fn ->

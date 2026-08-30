@@ -8,6 +8,11 @@ defmodule Ouroboros.Provider.Native.AskUserTest do
 
   use ExUnit.Case, async: true
 
+  # This module is async and a loaded full-suite run schedules it beside dozens of
+  # concurrent cases; event waits are sized to that workload (a 10s ask wait was seen
+  # blown), and the module ceiling to the waits a test can stack.
+  @moduletag timeout: 120_000
+
   alias Jido.Harness.ApprovalResponse
   alias Ouroboros.Provider.Native.Loop
   alias Ouroboros.Provider.Native.Paths
@@ -66,7 +71,7 @@ defmodule Ouroboros.Provider.Native.AskUserTest do
       {:event, event} ->
         collect([event | acc])
     after
-      15_000 -> flunk("no terminal turn event within 15s")
+      30_000 -> flunk("no terminal turn event within 30s")
     end
   end
 
@@ -74,7 +79,7 @@ defmodule Ouroboros.Provider.Native.AskUserTest do
     receive do
       {:event, %{type: ^type} = event} -> event
     after
-      10_000 -> flunk("no #{type} within 10s")
+      30_000 -> flunk("no #{type} within 30s")
     end
   end
 

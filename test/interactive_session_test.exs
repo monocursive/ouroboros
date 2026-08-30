@@ -823,8 +823,13 @@ defmodule Ouroboros.InteractiveSessionTest do
 
     refute_receive {:stub_session_exited_before_dispatch, ^harness_session_id}, 100
 
-    assert {:ok, %State{turns: %{^turn_id => %{status: :ambiguous}}}} =
-             InteractiveSession.info(ref)
+    # Read the claim from the durable record rather than the coordinator's pid. The
+    # coordinator is racing this assertion honestly: the stub's exit sends it through
+    # `resume_or_lose`, and with no provider session id it loses the session and retires
+    # — while `finalize_unresolved_turns` keeps the turn `:ambiguous` in the checkpoint.
+    # Under CPU load the retirement wins the race with a pid-based `info/1`, and what
+    # this test protects is the record a restarted coordinator reconciles from anyway.
+    assert {:ok, %State{turns: %{^turn_id => %{status: :ambiguous}}}} = Store.get(id)
 
     assert :ok = retire_session(id)
   end

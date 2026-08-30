@@ -242,6 +242,12 @@ defmodule Ouroboros.Gateway.SessionDelegationTest do
       if pid = Task.whereis(id) do
         assert :ok =
                  DynamicSupervisor.terminate_child(Ouroboros.Interactive.TaskSupervisor, pid)
+
+        # The registry clears a dead coordinator asynchronously; until it does, a call
+        # is handed the corpse (twice, under load — one immediate retry re-reads the
+        # same stale entry). This test is about the *rebuilt* coordinator reading the
+        # durable record at capacity, so its precondition is the coordinator being gone.
+        wait_until(fn -> Task.whereis(id) == nil end)
       end
 
       assert {:ok, session} = Store.get(id)

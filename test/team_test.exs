@@ -1197,6 +1197,32 @@ defmodule Ouroboros.TeamTest do
     assert :ok = Team.close(team)
     assert_eventually(fn -> Ouroboros.Mesh.whereis(worker_id) == nil end)
 
+    # The `coding.list` above recorded the peer as a durable session owner. In this
+    # test's ephemeral posture there is no fleet profile through which an operator could
+    # tombstone and forget a machine, so once the peer dies that evidence would outlive
+    # it and make every later fleet list in this VM fail closed (`owner_query_incomplete`
+    # naming this peer) — failing whichever unrelated test happens to list next. Retire
+    # the evidence the way the design retires it: delete the terminal tasks, then let one
+    # more successful list observe the still-connected owner empty.
+    assert {:ok, recorded_owners} = Ouroboros.Cluster.session_owners(:coding)
+    assert Atom.to_string(peer_node) in recorded_owners
+
+    assert {:ok, :ok} =
+             Methods.invoke("coding.delete", %{
+               "id" => gateway_task_id,
+               "node" => Atom.to_string(peer_node)
+             })
+
+    assert {:ok, :ok} =
+             Methods.invoke("coding.delete", %{
+               "id" => coding_task_id,
+               "node" => Atom.to_string(peer_node)
+             })
+
+    assert {:ok, _rows} = Methods.invoke("coding.list", %{})
+    assert {:ok, cleared_owners} = Ouroboros.Cluster.session_owners(:coding)
+    refute Atom.to_string(peer_node) in cleared_owners
+
     # A durable ref does not stop being valid merely because its owner is temporarily
     # offline. Resolve the last-known node without minting an atom, then let the session
     # plane return the honest reconnectable error instead of mislabelling it bad input.
