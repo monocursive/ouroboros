@@ -23,6 +23,7 @@ defmodule Ouroboros.Provider.Native.ReplayTest do
 
   @moduletag :capture_log
 
+  alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.Provider.Native.Checkpoint
   alias Ouroboros.Provider.Native.Context
   alias Ouroboros.Provider.Native.Context.Window
@@ -69,10 +70,17 @@ defmodule Ouroboros.Provider.Native.ReplayTest do
       before = File.ls!(context.session_dir) |> Enum.sort()
       journal_before = File.read!(Journal.path(context.session_dir))
 
+      # The live turn accounted for its one model call, and that entry is the record replay
+      # is verifying: a second one written by the replay would corrupt it, and dedup rules
+      # are the wrong place to close that — `tool_source` closes it at the source.
+      assert [_live] = inferences(context)
+
       assert {:ok, %{verified: true}} = verify(context)
 
       assert File.ls!(context.session_dir) |> Enum.sort() == before
       assert File.read!(Journal.path(context.session_dir)) == journal_before
+      assert [_still_one] = inferences(context)
+      assert {:ok, []} = EffectLedger.list(principal: principal(context), effect: :tool_call)
     end
 
     test "the events come back carrying the recorded instants, not this one's", context do
@@ -391,6 +399,13 @@ defmodule Ouroboros.Provider.Native.ReplayTest do
   defp records(context) do
     {:ok, %{records: records}} = Journal.window(Journal.path(context.session_dir), limit: 500)
     records
+  end
+
+  defp principal(context), do: "session:" <> context.session_id
+
+  defp inferences(context) do
+    {:ok, entries} = EffectLedger.list(principal: principal(context), effect: :inference)
+    entries
   end
 
   defp append(context, kind, fields) do
