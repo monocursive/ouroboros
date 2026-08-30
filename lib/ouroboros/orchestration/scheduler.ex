@@ -543,7 +543,7 @@ defmodule Ouroboros.Orchestration.Scheduler do
               id == step.id or current.state in @terminal_states ->
                 {current_plan, cancelled}
 
-              MapSet.member?(descendants, id) ->
+              Map.has_key?(descendants, id) ->
                 blocked = %{
                   current
                   | state: :blocked,
@@ -657,6 +657,10 @@ defmodule Ouroboros.Orchestration.Scheduler do
     plan |> Map.put(:steps, steps) |> derive_status()
   end
 
+  # The descendant set is a plain map used as a set: built here, read once at the
+  # cancellation fold above, never leaving this module. A `MapSet` added an opaque type
+  # dialyzer cannot follow through the recursion and bought nothing for a membership test.
+  @spec descendants(map(), String.t()) :: %{optional(String.t()) => true}
   defp descendants(plan, root_id) do
     dependents =
       Enum.reduce(plan.steps, %{}, fn {id, step}, acc ->
@@ -665,16 +669,22 @@ defmodule Ouroboros.Orchestration.Scheduler do
         end)
       end)
 
-    collect_descendants(Map.get(dependents, root_id, []), dependents, MapSet.new())
+    collect_descendants(Map.get(dependents, root_id, []), dependents, %{})
   end
 
+  @spec collect_descendants([String.t()], map(), %{optional(String.t()) => true}) ::
+          %{optional(String.t()) => true}
   defp collect_descendants([], _dependents, seen), do: seen
 
   defp collect_descendants([id | rest], dependents, seen) do
-    if MapSet.member?(seen, id) do
+    if Map.has_key?(seen, id) do
       collect_descendants(rest, dependents, seen)
     else
-      collect_descendants(rest ++ Map.get(dependents, id, []), dependents, MapSet.put(seen, id))
+      collect_descendants(
+        rest ++ Map.get(dependents, id, []),
+        dependents,
+        Map.put(seen, id, true)
+      )
     end
   end
 

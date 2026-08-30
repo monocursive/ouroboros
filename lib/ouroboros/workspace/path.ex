@@ -6,7 +6,7 @@ defmodule Ouroboros.Workspace.Path do
   @spec canonicalize(String.t()) :: {:ok, String.t()} | {:error, term()}
   def canonicalize(path) when is_binary(path) and byte_size(path) > 0 do
     with {:ok, absolute} <- make_absolute(path),
-         {:ok, canonical} <- resolve("/", split(absolute), MapSet.new(), 0),
+         {:ok, canonical} <- resolve("/", split(absolute), %{}, 0),
          {:ok, %File.Stat{type: :directory}} <- File.stat(canonical) do
       {:ok, canonical}
     else
@@ -21,7 +21,7 @@ defmodule Ouroboros.Workspace.Path do
   @spec canonicalize_file(String.t()) :: {:ok, String.t()} | {:error, term()}
   def canonicalize_file(path) when is_binary(path) and byte_size(path) > 0 do
     with {:ok, absolute} <- make_absolute(path),
-         {:ok, canonical} <- resolve("/", split(absolute), MapSet.new(), 0),
+         {:ok, canonical} <- resolve("/", split(absolute), %{}, 0),
          {:ok, %File.Stat{type: :regular}} <- File.stat(canonical) do
       {:ok, canonical}
     else
@@ -57,6 +57,12 @@ defmodule Ouroboros.Workspace.Path do
   # This resolver intentionally processes `..` only after following each
   # preceding symlink. Lexically expanding the input first would authorize the
   # wrong directory for paths such as `link/../workspace`.
+  #
+  # `seen` is a plain map used as a set. It never leaves this module and only ever
+  # answers "have I followed this link already", so a `MapSet` bought nothing here and
+  # cost an opaque type that dialyzer cannot follow across the recursion.
+  @spec resolve(String.t(), [String.t()], %{optional(String.t()) => true}, non_neg_integer()) ::
+          {:ok, String.t()} | {:error, term()}
   defp resolve(current, [], _seen, _count), do: {:ok, current}
   defp resolve(current, ["." | rest], seen, count), do: resolve(current, rest, seen, count)
 
@@ -88,15 +94,22 @@ defmodule Ouroboros.Workspace.Path do
     end
   end
 
+  @spec follow_symlink(
+          String.t(),
+          String.t(),
+          [String.t()],
+          %{optional(String.t()) => true},
+          non_neg_integer()
+        ) :: {:ok, String.t()} | {:error, term()}
   defp follow_symlink(candidate, current, rest, seen, count) do
-    if MapSet.member?(seen, candidate) do
+    if Map.has_key?(seen, candidate) do
       {:error, {:symbolic_link_cycle, candidate}}
     else
       case File.read_link(candidate) do
         {:ok, target} ->
           next_current = if Elixir.Path.type(target) == :absolute, do: "/", else: current
           next_segments = split(target) ++ rest
-          resolve(next_current, next_segments, MapSet.put(seen, candidate), count + 1)
+          resolve(next_current, next_segments, Map.put(seen, candidate, true), count + 1)
 
         {:error, reason} ->
           {:error, {:symbolic_link_unreadable, candidate, reason}}
