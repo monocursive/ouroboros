@@ -648,6 +648,16 @@ pub struct Capabilities {
     /// so the backtrack menu offers the fork wherever `interactive.fork` is served and the
     /// runtime has not said the transport cannot.
     pub fork: Capability,
+    /// Whether this session keeps a turn journal, and so can be replayed deterministically
+    /// (docs/REPLAY.md §7.3). Three answers rather than two: `true` for a native session
+    /// with a whole chain, `"degraded"` where the journal has gaps and replay is therefore
+    /// bounded, and an explicit `false` for every transport that runs its loop in a vendor
+    /// process and has nothing to record.
+    ///
+    /// The runtime sends that `false` **on purpose**, because [`Capability::offered`] reads
+    /// absence as offered: a vendor session that simply omitted the key would wear a badge
+    /// promising something no client can deliver.
+    pub replay: Capability,
     pub dynamic_model: Capability,
     pub dynamic_configuration: Capability,
     /// C5. Which OS sandbox the runtime actually put this session's process in —
@@ -691,10 +701,42 @@ impl Capabilities {
             steer: at("steer"),
             multimodal: at("multimodal"),
             fork: at("fork"),
+            replay: at("replay"),
             dynamic_model: at("dynamic_model"),
             dynamic_configuration: at("dynamic_configuration"),
             sandbox: at("sandbox"),
             declared: true,
+        }
+    }
+}
+
+/// D10. What a replay badge is allowed to claim about a session.
+///
+/// Two states and a silence, and the silence draws nothing. A badge is a *positive* claim
+/// — "this conversation can be re-run against its record" — so it is raised only where the
+/// runtime declared the capability, never from an absent key. That is the same reading
+/// [`Capabilities::os_sandbox`] takes, and the opposite of [`Capability::offered`], which
+/// governs whether a *control* stays on screen: hiding a working control on silence would
+/// invent a ceiling, and raising a badge on silence would invent a promise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayPosture {
+    /// Declared, with a whole chain behind it.
+    Whole,
+    /// Declared `"degraded"`: the journal has gaps, so replay is bounded and says so.
+    Degraded,
+}
+
+impl Capabilities {
+    /// Whether this session's chrome may say it is replayable, and how confidently.
+    ///
+    /// A mechanism this build has never heard of counts as [`ReplayPosture::Whole`]: it is
+    /// still the runtime positively declaring the capability, and only the one word it
+    /// defined for a bounded journal downgrades the badge.
+    pub fn replay_posture(&self) -> Option<ReplayPosture> {
+        match self.replay.mechanism()?.trim() {
+            "" => None,
+            "degraded" => Some(ReplayPosture::Degraded),
+            _declared => Some(ReplayPosture::Whole),
         }
     }
 }

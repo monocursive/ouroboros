@@ -15,7 +15,7 @@ use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::keymap::Action;
-use crate::model::{AttachmentKind, Plane, SessionInfo, SessionStatus, Triage};
+use crate::model::{AttachmentKind, Plane, ReplayPosture, SessionInfo, SessionStatus, Triage};
 
 use super::access;
 use super::app::{App, ComposerVerb, Connection};
@@ -269,10 +269,9 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
             (false, true) => "└",
             (false, false) => signal,
         };
-        // D7. Dropped whole where the card cannot hold it, the same rule the node label
-        // and the usage cell below follow.
-        let badge = worktree_badge(session)
-            .filter(|badge| badge.width() + label.width() + 4 <= content.width as usize);
+        // D7/D10. Dropped whole where the card cannot hold them, the same rule the node
+        // label and the usage cell below follow.
+        let badges = card_badges(session, label.width() + 3, content.width as usize);
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from({
@@ -281,11 +280,8 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
                         Span::styled(label, title_style),
                     ];
 
-                    if let Some(badge) = badge {
-                        spans.push(Span::styled(
-                            format!(" {badge}"),
-                            Style::default().fg(theme::accent()),
-                        ));
+                    for (badge, style) in badges {
+                        spans.push(Span::styled(format!(" {badge}"), style));
                     }
 
                     spans
@@ -963,6 +959,61 @@ pub fn worktree_badge(session: &SessionInfo) -> Option<String> {
         .map(|worktree| format!("\u{2387} {}", worktree.label()))
 }
 
+/// D10. The `⟲ replay` badge, in the same short form the rail and the header take.
+///
+/// Raised only where the runtime *declared* the capability, because the badge says this
+/// conversation can be re-run against its record and no client can make that true on its
+/// own. A session whose journal has gaps wears `⟲ partial` in muted rather than accent:
+/// bounded replay is a different promise from whole replay, and one badge meaning both
+/// would make it mean the weaker of them everywhere.
+///
+/// Both forms are eight or nine columns, which is the whole budget a rail card has beside
+/// its title. A longer, more explanatory degraded label would simply never be drawn there —
+/// a badge that only fits on the header is a badge the rail does not have.
+pub fn replay_badge(session: &SessionInfo) -> Option<(String, Style)> {
+    match session.capabilities.replay_posture()? {
+        ReplayPosture::Whole => Some((
+            "\u{27f2} replay".to_string(),
+            Style::default().fg(theme::accent()),
+        )),
+        ReplayPosture::Degraded => Some((
+            "\u{27f2} partial".to_string(),
+            Style::default().fg(theme::muted()),
+        )),
+    }
+}
+
+/// Every badge a card or header may prefix a title with, widest-context first, dropped
+/// whole from the right where the room runs out.
+///
+/// D7's rule, applied to a row that now has two of them: a badge is either fully drawn or
+/// not drawn at all, and the one that survives a narrow card is the one that came first.
+/// Truncating a branch name to `⎇ featu…` would produce a label that reads like a
+/// different branch, and a half-drawn capability claim is worse than none.
+fn card_badges(session: &SessionInfo, taken: usize, room: usize) -> Vec<(String, Style)> {
+    let mut spent = taken;
+    let mut badges = Vec::new();
+
+    let candidates = worktree_badge(session)
+        .map(|badge| (badge, Style::default().fg(theme::accent())))
+        .into_iter()
+        .chain(replay_badge(session));
+
+    for (badge, style) in candidates {
+        // The leading space each badge is drawn with is part of what has to fit.
+        let cost = badge.width() + 1;
+
+        if spent + cost > room {
+            continue;
+        }
+
+        spent += cost;
+        badges.push((badge, style));
+    }
+
+    badges
+}
+
 fn plan_panel_height(app: &App, area: Rect) -> u16 {
     if !app.sessions.show_plan || area.height < 16 {
         return 0;
@@ -1188,6 +1239,12 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     // D7/D9. Read here, beside the provider, because the watch below is borrowed mutably
     // for the rest of this function and these two come from the session *row*.
     let conversation_worktree = app.sessions.open_info().and_then(worktree_badge);
+    // D10. The same short badge, on the row that names the session being read.
+    let conversation_replay = app
+        .sessions
+        .open_info()
+        .and_then(replay_badge)
+        .map(|(badge, _style)| badge);
     let conversation_handed_off_from = app
         .sessions
         .open_info()
@@ -1340,6 +1397,7 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
                 show_event_details,
                 verbosity,
                 worktree: conversation_worktree,
+                replay: conversation_replay,
                 handed_off_from: conversation_handed_off_from,
             },
         );
@@ -1434,9 +1492,10 @@ fn details_pane(
                 provider: pane.provider,
                 show_event_details: true,
                 verbosity: pane.verbosity,
-                // The details pane replaces the subtitle with a cursor line, so neither
-                // badge is drawn there and neither is looked up.
+                // The details pane replaces the subtitle with a cursor line, so none of
+                // these badges is drawn there and none is looked up.
                 worktree: None,
+                replay: None,
                 handed_off_from: None,
             },
         );
@@ -1508,6 +1567,8 @@ struct ConversationHeader<'a> {
     verbosity: Verbosity,
     /// D7. `⎇ <branch>` where this session was given its own worktree.
     worktree: Option<String>,
+    /// D10. `⟲ replay` where the runtime declared this session replayable.
+    replay: Option<String>,
     /// D9. The session this one's opening packet was written from, where there was one.
     handed_off_from: Option<String>,
 }
@@ -1594,6 +1655,12 @@ fn render_conversation_header(
         facts.push(compact_session_id(header.id, area.width.saturating_sub(24)));
 
         if let Some(badge) = header.worktree.as_deref() {
+            facts.push(badge.to_string());
+        }
+
+        // D10. Beside the worktree because they answer the same kind of question about
+        // the conversation on screen: what is behind it, and what can be done with it.
+        if let Some(badge) = header.replay.as_deref() {
             facts.push(badge.to_string());
         }
 
