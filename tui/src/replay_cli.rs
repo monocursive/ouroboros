@@ -166,7 +166,7 @@ impl Options {
 /// What the verify verb answered, or why it could not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verify {
-    Verdict(ReplayVerdict),
+    Verdict(Box<ReplayVerdict>),
     /// The runtime refused, in its own words. A refusal is part of the answer — an
     /// operator who asked `--verify` is owed the reason, not a silent omission.
     Refused(String),
@@ -349,7 +349,7 @@ async fn read_events(
 /// that does not serve it produces a sentence rather than a stack of `-32601`.
 async fn read_verdict(client: &Client, options: &Options) -> Verify {
     match client.call(VERIFY_METHOD, options.verify_params()).await {
-        Ok(answer) => Verify::Verdict(ReplayVerdict::decode(&answer)),
+        Ok(answer) => Verify::Verdict(Box::new(ReplayVerdict::decode(&answer))),
         Err(ClientError::Rpc(rpc)) if rpc.code == ErrorCode::MethodNotFound => Verify::Refused(
             format!("this runtime does not serve {VERIFY_METHOD} yet, so nothing was verified"),
         ),
@@ -556,13 +556,21 @@ fn verdict(text: &mut String, verify: &Verify) {
                     let _ = writeln!(text, "  verify            verified{scope}");
                 }
                 // A divergence is a finding about a record or about the code, never a
-                // reason to keep going quietly, so it is spelled out field by field.
+                // reason to keep going quietly, so it is spelled out field by field. A
+                // boundary is neither: the record itself bounds what could be verified,
+                // and calling that DIVERGED would accuse an honest record.
                 Some(false) | None => {
+                    let bounded = verdict
+                        .divergence
+                        .as_ref()
+                        .is_some_and(super::model::ReplayDivergence::boundary);
                     let _ = writeln!(
                         text,
                         "  verify            {}{scope}",
-                        match verdict.verified {
-                            Some(false) => "DIVERGED",
+                        match (verdict.verified, bounded) {
+                            (Some(false), true) =>
+                                "bounded — prefix verified, remainder unverifiable",
+                            (Some(false), false) => "DIVERGED",
                             _ => "the runtime returned no verdict",
                         }
                     );
@@ -578,30 +586,46 @@ fn verdict(text: &mut String, verify: &Verify) {
             }
 
             if let Some(divergence) = verdict.divergence.as_ref() {
-                let _ = writeln!(
-                    text,
-                    "  divergence        {} at seq {}{}",
-                    divergence.field.as_deref().unwrap_or("an unnamed field"),
-                    divergence
-                        .seq
-                        .map(|seq| seq.to_string())
-                        .unwrap_or_else(|| "—".to_string()),
-                    divergence
-                        .turn_id
-                        .as_deref()
-                        .map(|turn| format!(" of turn {turn}"))
-                        .unwrap_or_default()
-                );
-                let _ = writeln!(
-                    text,
-                    "  expected          {}",
-                    JournalRecord::digest_prefix(divergence.expected_sha256.as_deref(), DIGEST)
-                );
-                let _ = writeln!(
-                    text,
-                    "  got               {}",
-                    JournalRecord::digest_prefix(divergence.got_sha256.as_deref(), DIGEST)
-                );
+                let seq = divergence
+                    .seq
+                    .map(|seq| seq.to_string())
+                    .unwrap_or_else(|| "—".to_string());
+                let turn = divergence
+                    .turn_id
+                    .as_deref()
+                    .map(|turn| format!(" of turn {turn}"))
+                    .unwrap_or_default();
+                if divergence.boundary() {
+                    // A boundary names itself and carries no digest pair — printing
+                    // placeholder dashes for digests it never claimed would dress the
+                    // boundary up as a mismatch.
+                    let _ = writeln!(
+                        text,
+                        "  boundary          {} at seq {seq}{turn}{}",
+                        divergence.reason.as_deref().unwrap_or("unnamed"),
+                        divergence
+                            .detail
+                            .as_deref()
+                            .map(|detail| format!(" ({detail})"))
+                            .unwrap_or_default()
+                    );
+                } else {
+                    let _ = writeln!(
+                        text,
+                        "  divergence        {} at seq {seq}{turn}",
+                        divergence.field.as_deref().unwrap_or("an unnamed field"),
+                    );
+                    let _ = writeln!(
+                        text,
+                        "  expected          {}",
+                        JournalRecord::digest_prefix(divergence.expected_sha256.as_deref(), DIGEST)
+                    );
+                    let _ = writeln!(
+                        text,
+                        "  got               {}",
+                        JournalRecord::digest_prefix(divergence.got_sha256.as_deref(), DIGEST)
+                    );
+                }
             }
         }
     }

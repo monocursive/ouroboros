@@ -3380,6 +3380,14 @@ pub struct ReplayVerdict {
 /// better than refusing to print any.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReplayDivergence {
+    /// The engine's discriminator: `"diverged"` is a mismatch finding, `"boundary"` is
+    /// the record bounding verification (a compaction fold, a gap, a truncation). The
+    /// golden fixture pins the boundary shape; an absent kind reads as a divergence,
+    /// which was the only shape before the discriminator existed.
+    pub kind: Option<String>,
+    /// A boundary's name for itself — `"compaction"`, `"gap"`, and their siblings.
+    pub reason: Option<String>,
+    pub detail: Option<String>,
     pub seq: Option<u64>,
     pub turn_id: Option<String>,
     /// Which derived field stopped matching — the whole point of the refusal.
@@ -3406,12 +3414,20 @@ impl ReplayVerdict {
 impl ReplayDivergence {
     fn decode(value: &Value) -> Self {
         Self {
+            kind: nonempty(value.get("kind")),
+            reason: nonempty(value.get("reason")),
+            detail: nonempty(value.get("detail")),
             seq: value.get("seq").and_then(Value::as_u64),
             turn_id: nonempty(value.get("turn_id")),
             field: nonempty(value.get("field")),
             expected_sha256: nonempty(value.get("expected_sha256")),
             got_sha256: nonempty(value.get("got_sha256")),
         }
+    }
+
+    /// A boundary is the record bounding verification, not a finding against it.
+    pub fn boundary(&self) -> bool {
+        self.kind.as_deref() == Some("boundary")
     }
 }
 
@@ -3711,6 +3727,33 @@ mod tests {
         assert!(!error("error_scope_denied").code.is_handshake_refusal());
     }
 
+    /// R2's `interactive.replay_verify`: the as-built verdict, which shapes the
+    /// divergence as one object with a `kind` discriminator — the fixture pins the
+    /// *boundary* arm deliberately, because that is the answer whose shape the spec's
+    /// own sketch (`null | {…}`) did not anticipate.
+    #[test]
+    fn the_replay_verify_fixture_decodes_into_its_verdict() {
+        let verdict = ReplayVerdict::decode(&result("interactive_replay_verify_result"));
+
+        assert_eq!(verdict.verified, Some(false));
+        assert_eq!(verdict.turns, Some(2));
+        assert_eq!(verdict.records, Some(19));
+        assert_eq!(
+            verdict.head.as_deref(),
+            Some("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+        );
+
+        let divergence = verdict.divergence.as_ref().expect("a bounded verdict");
+        assert!(divergence.boundary());
+        assert_eq!(divergence.kind.as_deref(), Some("boundary"));
+        assert_eq!(divergence.reason.as_deref(), Some("compaction"));
+        assert_eq!(divergence.seq, Some(12));
+        // A boundary claims no digest pair; the renderer must not invent one.
+        assert_eq!(divergence.detail, None);
+        assert_eq!(divergence.expected_sha256, None);
+        assert_eq!(divergence.got_sha256, None);
+    }
+
     /// R1's `interactive.journal`: the provenance a replay is read against.
     ///
     /// The fixture is the as-built shape, and it is the shape this decodes — `head_seq`
@@ -3931,6 +3974,7 @@ mod tests {
                 "interactive_event_excerpt_notification",
                 "interactive_event_notification",
                 "interactive_journal_result",
+                "interactive_replay_verify_result",
                 "ledger_export_result",
                 "ledger_list_result",
                 "mcp_list_result",
