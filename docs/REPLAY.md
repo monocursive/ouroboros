@@ -1,8 +1,9 @@
 # REPLAY — deterministic re-execution for the native provider
 
-Status: SPEC (2026-08-30, written against `deploy` @ `5d9bbda`). Nothing below is built
-unless a section says so. Every load-bearing claim was verified against the tree at that
-commit by four explorers and re-checked by hand; file:line references are to that state.
+Status: **BUILT** (2026-08-30; spec written same day against `deploy` @ `5d9bbda`,
+implemented as slices R1–R4 plus the seam-wiring follow-up). The spec body below is kept
+as designed; §11 records every as-built deviation and what the live acceptance walk
+proved. File:line references in the body are to the pre-implementation tree.
 
 ## 0. Vocabulary, and the governing property
 
@@ -456,3 +457,76 @@ Wave 2 (parallel, disjoint):
 Integration (me): merge order R1 → (R2,R3,R4), `mix compile --force` before the first
 post-merge run, full gates both toolchains, then the §9 live walk, then a docs honesty
 pass recording any gap between this spec and what shipped.
+
+## 11. As built (2026-08-30)
+
+All four slices plus a seam-wiring follow-up are on `deploy`. Final gates: 2876 Elixir
+tests / 40 cargo targets, both fully green, golden and PROTOCOL.md regenerated and
+byte-stable, clippy/fmt clean.
+
+### Spec corrections found during implementation (the spec above was wrong)
+
+- **§3.2 `compaction.elided`** is `elided_count` (a count) — the compaction fold returns
+  no per-call identity, and the pre-elision bytes live in the journal's own
+  `tool_result` records anyway, which is the property §3.2 actually wanted.
+- **§3.2 `injected.after_call_id`** does not exist — the journal is a total order and
+  `seq` already fixes position.
+- **§3.2 summariser inlining**: the compaction summariser's `model_call`/`model_result`
+  pair are top-level records under `turn_id "compact_N"`, pointed at by the compaction
+  record's `summariser_turn_id`, so the verify engine feeds every model call uniformly.
+- **§7.1 `divergence: null | {…}`**: the reply is one object with a `kind`
+  discriminator — `"diverged"` (field, expected/got digests) or `"boundary"` (reason,
+  seq) — so a record honestly bounding verification is not dressed up as a mismatch.
+
+### As-built decisions worth knowing
+
+- **Gap intent survives the writer**: a failed append stages a sidecar
+  (`journal.ndjson.gap`) so the `gap` record lands even when the loop process died.
+- **`interactive.journal` routes through the native transport** (the `rewind_points`
+  precedent); the verify engine reads the file directly, so a dead-transport session
+  still verifies. A file-only read path for the *verb* is future work.
+- **The ledger's `:inference` correlation key** is `(session_id, turn_id, iteration)`;
+  `journal_seq` in the settled result points at the `model_result` record.
+- **Verified-replay boundaries, by name**: `unsettled_turn` (crash mid-turn),
+  `unstarted_turn` (a summariser/compaction group), `compaction` (the fold cannot be
+  re-derived — the record carries digests, not the post-fold list), `forked` (a child's
+  seeded prefix derives from the parent's journal, which the child's cannot rebuild;
+  cross-journal verification via the recorded parent linkage is future work),
+  `unreproducible_injection` (rules/hook text the record cannot re-derive), and
+  attachment-bearing prompts. Approvals are inert under replay — recorded tools never
+  ask.
+- **Event-payload equality** is asserted by the parity tests (live stream vs replayed
+  stream through both projections), not recomputed inside the engine; the engine
+  compares prefix digests, request digests, and the per-turn conversation digest.
+- **Timestamp granularity**: events re-emit the `at` of the record they derive from,
+  which for delta events is coarser than the live instants. Closing it needs a per-event
+  `at` in the record — a recording change, deliberately not made in v1.
+- **Capability `replay`** is `true`/`false` only (the three-state `"degraded"` needs a
+  per-session journal scan at list time — deferred); vendors get explicit `false`. The
+  badge draws only on explicit `true`. Multimodal tool results replay with an exact
+  *message* but a diverging `tool_result` *event* (live splits artifacts out) — surfaces
+  as a named divergence, reconstruction deferred.
+
+### What the live acceptance walk proved (§9, real daemon, real ollama models)
+
+1. **Recorded** ✓ — chain 16/16 on a session with a structured tool call, two human
+   approvals, and a mid-turn steer; settled `:inference` entries carrying model, turn,
+   iteration, tokens, and resolving `journal_seq` pointers.
+2. **Rendered** ✓ — `ouro replay` twice, byte-identical, provenance header + transcript.
+3. **Verified** ✓ — the real tool+steer turn verified; one flipped byte →
+   `chain_broken` at seq 8; one removed (re-chained) record → `DIVERGED
+   request_sha256 at seq 9` with the expected/got pair.
+4. **Crash-honest** ✓ — `kill -9` mid-stream: boot reconciled the inference entry to
+   `:ambiguous` (`runtime_restarted_before_settlement`), the journal survived intact
+   (per-record fsync), verify bounded at `unsettled_turn at seq 2`.
+5. **Forked** ✓ — `ouro fork --at 1 --model …`: child seeded with the truncated prefix,
+   `forked_from` set, substituted model named in the child's own `turn_started`; parent
+   untouched. (Found live and fixed: the CLI sent ordinals as strings; the runtime
+   types them as integers.)
+6. **Elision-proof** ◐ — proven at the suite level (journal `tool_result` records carry
+   pre-elision content); the live session was too small to trigger a real fold, and
+   manual compaction was honestly a no-op below thresholds.
+
+Small-model note for future walks: qwen2.5-coder:1.5b emits tool calls as *text JSON*
+even when handed a tools array (confirmed against ollama directly) — use llama3.2:3b or
+larger for a tool-calling live session.
