@@ -846,8 +846,23 @@ defmodule Ouroboros.InteractiveSession do
   @doc false
   def local_call(id, message) do
     with :ok <- validate_id(id),
-         {:ok, pid} <- ensure_coordinator(id),
-         do: safe_call(pid, message, call_timeout())
+         {:ok, pid} <- ensure_coordinator(id) do
+      case safe_call(pid, message, call_timeout()) do
+        # The registry entry `Task.whereis/1` reads outlives its process for a moment
+        # (registry DOWN handling is asynchronous), and a coordinator may retire between
+        # the lookup and the call. `:noproc` proves the coordinator never received this
+        # message, so re-ensuring is safe for every message: the second attempt reaches
+        # a coordinator rebuilt from the durable record, or reports the session's
+        # absence honestly. One retry only — `:timeout` stays an error, because a timed
+        # out call may have been received, and retrying it could apply a change twice.
+        {:error, {:session_call_failed, {:noproc, _call}}} ->
+          with {:ok, pid} <- ensure_coordinator(id),
+               do: safe_call(pid, message, call_timeout())
+
+        reply ->
+          reply
+      end
+    end
   end
 
   defp create_or_match(session) do
