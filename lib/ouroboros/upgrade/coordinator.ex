@@ -47,6 +47,9 @@ defmodule Ouroboros.Upgrade.Coordinator do
   defmodule DeploymentReceipt do
     @moduledoc "Evidence and compensation status for a best-effort deployment."
 
+    @typedoc "One deployment's evidence. Named by `deployment_result/0` and by `Rollout`."
+    @type t :: %__MODULE__{}
+
     @enforce_keys [:id, :artifact_id, :epoch, :nodes, :node_receipts, :started_at]
     defstruct id: nil,
               artifact_id: nil,
