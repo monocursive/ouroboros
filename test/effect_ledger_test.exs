@@ -532,7 +532,297 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
     end
   end
 
+  describe "the :inference effect kind (R1)" do
+    test "it is a ledger-only kind with its own closed status vocabulary" do
+      assert :inference in EffectLedger.effects()
+      refute :inference in Ouroboros.Control.Grants.effects()
+
+      assert EffectLedger.inference_statuses() == [
+               :completed,
+               :failed,
+               :capacity_timeout,
+               :stream_failed
+             ]
+    end
+
+    # The hazard this pins: `sanitize_attempt/2` and `sanitize_result/2` both reach the
+    # field lists with `Map.fetch!`, inside `handle_call`. A kind added to `effects/0`
+    # without both entries is not a validation error, it is a GenServer crash — and this
+    # process leads a rest_for_one tree, so it takes the core down with it. Recording *and*
+    # settling in one test is what makes both lookups run.
+    test "records and settles without reaching for a field list that is not there" do
+      ledger = start_ledger!()
+
+      attrs = %{
+        id: "inference-1",
+        effect: :inference,
+        principal: "session:s1",
+        attempt: %{
+          session_id: "s1",
+          turn_id: "t1",
+          iteration: 2,
+          model: "anthropic:claude-sonnet-4",
+          provider: :native,
+          prompt_sha256: String.duplicate("a", 64),
+          node: node(),
+          # Not in the field list, and carrying the one thing that must never land.
+          prompt: @secret
+        },
+        authority: %{decision: :allow, reason: "session"},
+        cause: %{signal_type: "native.inference", signal_id: "inference-1"}
+      }
+
+      assert {:ok, %Entry{status: :started} = started, :created} =
+               EffectLedger.record_started(attrs, ledger)
+
+      assert started.attempt == %{
+               session_id: "s1",
+               turn_id: "t1",
+               iteration: 2,
+               model: "anthropic:claude-sonnet-4",
+               provider: :native,
+               prompt_sha256: String.duplicate("a", 64),
+               node: node()
+             }
+
+      assert {:ok, %Entry{} = settled, :updated} =
+               EffectLedger.settle(
+                 "inference-1",
+                 %{
+                   status: :ok,
+                   result: %{
+                     status: :completed,
+                     duration_ms: 1_400,
+                     output_bytes: 900,
+                     journal_seq: 12,
+                     input_tokens: 4_000,
+                     output_tokens: 220,
+                     # Not in the field list either.
+                     text: @secret
+                   }
+                 },
+                 ledger
+               )
+
+      assert settled.result == %{
+               status: :completed,
+               duration_ms: 1_400,
+               output_bytes: 900,
+               journal_seq: 12,
+               input_tokens: 4_000,
+               output_tokens: 220
+             }
+
+      refute inspect(settled) =~ @secret
+    end
+
+    test "a status outside the vocabulary is dropped rather than coerced" do
+      ledger = start_ledger!()
+
+      assert {:ok, _entry, :created} =
+               EffectLedger.record_started(
+                 %{
+                   id: "inference-2",
+                   effect: :inference,
+                   principal: "session:s1",
+                   attempt: %{session_id: "s1", turn_id: "t1", iteration: 1},
+                   authority: %{decision: :allow, reason: "session"},
+                   cause: %{signal_id: "inference-2"}
+                 },
+                 ledger
+               )
+
+      assert {:ok, settled, :updated} =
+               EffectLedger.settle(
+                 "inference-2",
+                 %{status: :failed, result: %{status: :exploded, duration_ms: 3}},
+                 ledger
+               )
+
+      refute Map.has_key?(settled.result, :status)
+      assert settled.result.duration_ms == 3
+    end
+
+    test "a crash between the request and its answer reconciles to ambiguous at boot" do
+      path = temporary_path("inference-restart")
+      on_exit(fn -> File.rm_rf(path) end)
+      storage = {Ouroboros.Storage.DurableFile, path: path}
+      ledger = start_ledger!(storage: storage)
+
+      attrs = %{
+        id: "inference-restart",
+        effect: :inference,
+        principal: "session:s1",
+        attempt: %{session_id: "s1", turn_id: "t1", iteration: 1, model: "m"},
+        authority: %{decision: :allow, reason: "session"},
+        cause: %{signal_type: "native.inference", signal_id: "inference-restart"}
+      }
+
+      assert {:ok, %Entry{status: :started}, :created} =
+               EffectLedger.record_started(attrs, ledger)
+
+      stop_supervised!(ledger)
+      replacement = start_ledger!(storage: storage)
+
+      # The hard replay boundary R1 §5.3 names: the runtime acknowledged the request and
+      # never recorded what came back, so the entry says exactly that rather than guessing.
+      assert {:ok, %Entry{} = recovered} = EffectLedger.get("inference-restart", replacement)
+      assert recovered.status == :ambiguous
+      assert recovered.error.classification == :runtime_restarted_before_settlement
+
+      # A late settlement still lands, which is what keeps an isolated restart honest.
+      assert {:ok, %Entry{status: :ok}, :updated} =
+               EffectLedger.settle(
+                 "inference-restart",
+                 %{status: :ok, result: %{status: :completed, journal_seq: 4}},
+                 replacement
+               )
+    end
+
+    test "the cause names which of the three model-call sites this was" do
+      ledger = start_ledger!()
+
+      for {id, cause} <- [
+            {"inf-loop", "native.inference"},
+            {"inf-child", "native.subagent.inference"},
+            {"inf-compact", "native.compaction.inference"}
+          ] do
+        assert {:ok, entry, :created} =
+                 EffectLedger.record_started(
+                   %{
+                     id: id,
+                     effect: :inference,
+                     principal: "session:s1",
+                     attempt: %{session_id: "s1", turn_id: "t1", iteration: 1},
+                     authority: %{decision: :allow, reason: "session"},
+                     cause: %{signal_type: cause, signal_id: id}
+                   },
+                   ledger
+                 )
+
+        assert entry.cause.signal_type == cause
+      end
+    end
+  end
+
+  describe "the version-2 checkpoint (R1)" do
+    test "a version-1 checkpoint is upgraded on read rather than refused" do
+      table = unique_name("v1_storage")
+      storage = {Jido.Storage.ETS, table: table}
+
+      # Written the way a build that predates `:inference` would have written it.
+      entry = %Entry{
+        sequence: 1,
+        started_sequence: 1,
+        id: "tool-legacy",
+        effect: :tool_call,
+        principal: "session:s1",
+        attempt: %{session_id: "s1", turn_id: "t1", call_id: "c1", tool: "read"},
+        authority: %{decision: :allow},
+        cause: %{signal_id: "sig-1"},
+        status: :ok,
+        result: %{status: :completed},
+        error: nil,
+        started_at: "2026-08-22T00:00:00Z",
+        settled_at: "2026-08-22T00:00:01Z",
+        origin_node: node()
+      }
+
+      assert :ok =
+               Jido.Storage.ETS.put_checkpoint(
+                 EffectLedger.checkpoint_key(),
+                 %{version: 1, entries: [entry], next_sequence: 2},
+                 table: table
+               )
+
+      name = unique_name("v1_ledger")
+      start_supervised!({EffectLedger, name: name, storage: storage}, id: name)
+
+      # The whole point of the bump being a widening: the history survives it.
+      assert {:ok, %Entry{id: "tool-legacy", status: :ok}} = EffectLedger.get("tool-legacy", name)
+
+      # And the next write stamps the new version, with the new kind alongside the old.
+      assert {:ok, _entry, :created} =
+               EffectLedger.record_started(
+                 %{
+                   id: "inference-after-upgrade",
+                   effect: :inference,
+                   principal: "session:s1",
+                   attempt: %{session_id: "s1", turn_id: "t1", iteration: 1},
+                   authority: %{decision: :allow, reason: "session"},
+                   cause: %{signal_id: "inference-after-upgrade"}
+                 },
+                 name
+               )
+
+      assert {:ok, %{version: 2}} =
+               Jido.Storage.ETS.get_checkpoint(EffectLedger.checkpoint_key(), table: table)
+    end
+
+    test "a checkpoint from a version this build does not know is still refused" do
+      table = unique_name("v3_storage")
+      storage = {Jido.Storage.ETS, table: table}
+
+      assert :ok =
+               Jido.Storage.ETS.put_checkpoint(
+                 EffectLedger.checkpoint_key(),
+                 %{version: 3, entries: [], next_sequence: 1},
+                 table: table
+               )
+
+      name = unique_name("v3_ledger")
+
+      assert {:error, {{:unsupported_effect_ledger_checkpoint, 3}, _child_spec}} =
+               start_supervised({EffectLedger, name: name, storage: storage}, id: name)
+    end
+  end
+
   describe "retention is fair across effect kinds (I1)" do
+    test "a fifth kind takes its share and no more" do
+      ledger = start_ledger!(retention_limit: 10)
+
+      # One of each of the four rare kinds, then a flood of the fifth.
+      for {id, effect, attempt} <- [
+            {"denied-forge", :forge, %{module: A}},
+            {"denied-permission", :permission, %{tool: "Bash", mode: :prompt}},
+            {"denied-approval", :approval, %{session_id: "s1", request_id: "r1"}},
+            {"denied-shell", :operator_shell, %{session_id: "s1", cwd: "/tmp"}}
+          ] do
+        assert {:ok, _entry, :created} =
+                 EffectLedger.record_denied(attrs(id, effect, attempt), ledger)
+      end
+
+      for number <- 1..100 do
+        assert {:ok, _entry, :created} =
+                 EffectLedger.record_denied(
+                   %{
+                     id: "denied-inference-#{number}",
+                     effect: :inference,
+                     principal: "session:s1",
+                     attempt: %{session_id: "s1", turn_id: "t1", iteration: number},
+                     authority: %{decision: :deny},
+                     cause: %{signal_id: "inference-#{number}"},
+                     result: %{status: :failed}
+                   },
+                   ledger
+                 )
+      end
+
+      assert {:ok, retained} = EffectLedger.list([limit: 100], ledger)
+      assert length(retained) == 10
+
+      # Five kinds present, limit 10, so the quota is 2 and the four rare kinds each keep
+      # their one entry; the six slots nobody claimed go to the newest overall.
+      for id <- ~w(denied-forge denied-permission denied-approval denied-shell) do
+        assert Enum.any?(retained, &(&1.id == id)),
+               "the highest-volume kind evicted #{id}"
+      end
+
+      assert length(Enum.filter(retained, &(&1.effect == :inference))) == 6
+      assert Enum.any?(retained, &(&1.id == "denied-inference-100"))
+      refute Enum.any?(retained, &(&1.id == "denied-inference-1"))
+    end
+
     test "a flood of tool calls cannot evict the only forge this node ever ran" do
       ledger = start_ledger!(retention_limit: 10)
 
