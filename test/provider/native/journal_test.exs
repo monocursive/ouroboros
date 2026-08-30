@@ -129,6 +129,41 @@ defmodule Ouroboros.Provider.Native.JournalTest do
     assert Bitwise.band(mode, 0o777) == 0o600
   end
 
+  test "a handle whose tail cannot be read stages a gap instead of forging a link", %{
+    dir: dir,
+    path: path
+  } do
+    journal = dir |> Journal.open() |> Journal.append("turn_started", %{"turn_id" => "t1"})
+
+    # A directory where the file should be: the tail read fails, so this handle does not
+    # know what it would be chaining onto.
+    File.rm!(path)
+    File.mkdir_p!(path)
+
+    journal = Journal.sync(journal)
+    refute journal.synced?
+
+    journal = Journal.append(journal, "model_call", %{"turn_id" => "t1"})
+    assert journal.degraded?
+    assert File.regular?(path <> ".gap")
+
+    # Nothing was written where a link could not be made — the directory that stood in for
+    # the file is still empty, and removing it leaves no journal behind.
+    assert File.ls!(path) == []
+    File.rm_rf!(path)
+    refute File.exists?(path)
+
+    # And the retry recovers: the next append re-reads the tail, finds an empty file, and
+    # writes the staged gap ahead of the record.
+    journal = Journal.append(journal, "turn_settled", %{"turn_id" => "t1"})
+    assert journal.synced?
+    assert [gap, settled] = records(path)
+    assert gap["kind"] == "gap"
+    assert "model_call" in gap["dropped_kinds"]
+    assert settled["kind"] == "turn_settled"
+    assert {:ok, %{verified_through: 2}} = Journal.verify(path)
+  end
+
   test "journaling is optional: a nil handle is a no-op all the way through" do
     assert Journal.open(nil) == nil
     assert Journal.append(nil, "turn_started", %{"turn_id" => "t1"}) == nil

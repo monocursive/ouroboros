@@ -88,11 +88,6 @@ defmodule Ouroboros.Provider.Native.Journal do
   # caught.
   @tail_window_bytes 256 * 1024
 
-  @kinds ~w(
-    session_opened turn_started prompt model_call model_result tool_result injected
-    approval configure compaction rewind turn_settled gap truncated
-  )
-
   defstruct [
     :path,
     :session_dir,
@@ -100,7 +95,10 @@ defmodule Ouroboros.Provider.Native.Journal do
     prev: @seed,
     bytes: 0,
     budget_bytes: nil,
-    degraded?: false
+    degraded?: false,
+    # Whether `seq`/`prev` are known to describe the file's actual tail. False means the
+    # tail read failed and this handle must not append: see `append/3`.
+    synced?: false
   ]
 
   @type t :: %__MODULE__{}
@@ -112,10 +110,6 @@ defmodule Ouroboros.Provider.Native.Journal do
   @doc "Where one session's journal lives."
   @spec path(String.t()) :: String.t()
   def path(session_dir), do: Path.join(session_dir, @filename)
-
-  @doc "The record kinds this version writes."
-  @spec kinds() :: [String.t()]
-  def kinds, do: @kinds
 
   @doc "The journal format version, carried by every `session_opened` record."
   @spec version() :: pos_integer()
@@ -143,32 +137,37 @@ defmodule Ouroboros.Provider.Native.Journal do
   end
 
   @doc """
-  Brings a handle current with the file another writer may have advanced.
+  Brings a handle current with the file another writer may have advanced, and opens a
+  fresh writing window.
 
   A bounded tail read, not a scan: only the last complete line is parsed, for its `seq`
-  and `hash`. Also clears `degraded?`, which is per writing window — the loop syncs at
-  the top of each turn, so "once per turn" falls out of this rather than out of a counter
-  somebody has to reset.
+  and `hash`. Clearing `degraded?` is what makes it a *window* — the loop syncs at the top
+  of each turn, so "announced once per turn" falls out of this rather than out of a
+  counter somebody has to reset.
   """
   @spec sync(t() | nil) :: t() | nil
   def sync(nil), do: nil
+  def sync(%__MODULE__{} = journal), do: resync(%{journal | degraded?: false})
 
-  def sync(%__MODULE__{} = journal) do
-    journal = %{journal | degraded?: false}
-
+  # The same tail read without touching `degraded?`, so an append that re-syncs mid-window
+  # cannot un-announce a degradation the caller has already reported.
+  defp resync(%__MODULE__{} = journal) do
     case last_record(journal.path) do
       {:ok, nil, bytes} ->
-        %{journal | seq: 0, prev: @seed, bytes: bytes}
+        %{journal | seq: 0, prev: @seed, bytes: bytes, synced?: true}
 
       {:ok, record, bytes} ->
-        %{journal | seq: seq_of(record), prev: Map.get(record, "hash", @seed), bytes: bytes}
+        %{
+          journal
+          | seq: seq_of(record),
+            prev: Map.get(record, "hash", @seed),
+            bytes: bytes,
+            synced?: true
+        }
 
-      # An unreadable or unparseable tail is not a reason to stop recording, and it is
-      # not a reason to guess either: refuse to append onto a file whose head we cannot
-      # name, and let the caller report the degradation.
       {:error, reason} ->
         Logger.warning("native journal tail was unreadable (#{inspect(reason)}): #{journal.path}")
-        %{journal | degraded?: true}
+        %{journal | synced?: false}
     end
   end
 
@@ -179,17 +178,25 @@ defmodule Ouroboros.Provider.Native.Journal do
   and stages a `gap` for the next successful write; the caller's effect proceeds either
   way. `nil` in, `nil` out, which is what makes journaling optional for the coding plane
   and for tests that have no session directory.
+
+  A handle whose tail could not be read does not append at all. Writing onto a file whose
+  head this process cannot name would produce a record that *looks* chained and is not,
+  which is worse than a stated gap — so the gap is staged and the write is skipped. The
+  tail read is retried first, because the failure that produced it may have been transient.
   """
   @spec append(t() | nil, String.t() | atom(), map()) :: t() | nil
   def append(nil, _kind, _fields), do: nil
 
-  def append(%__MODULE__{degraded?: true} = journal, kind, fields) do
-    # Still try: a transient failure should not disable the journal for the rest of the
-    # turn. What `degraded?` buys is that the caller announces it only once.
-    do_append(journal, kind, fields)
-  end
-
+  # Still tried when `degraded?`: a transient write failure must not disable the journal
+  # for the rest of the turn. What `degraded?` buys is that the caller announces it once.
   def append(%__MODULE__{} = journal, kind, fields), do: do_append(journal, kind, fields)
+
+  defp do_append(%{synced?: false} = journal, kind, fields) do
+    case resync(journal) do
+      %{synced?: true} = journal -> do_append(journal, kind, fields)
+      journal -> degrade(journal, to_string(kind), :journal_head_unknown)
+    end
+  end
 
   defp do_append(journal, kind, fields) do
     journal = flush_gap(journal)
