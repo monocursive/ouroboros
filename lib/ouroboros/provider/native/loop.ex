@@ -2837,12 +2837,13 @@ defmodule Ouroboros.Provider.Native.Loop do
   # appended: a lazily-loaded rule, a steer that landed between two tools, a `Stop` hook's
   # context, a failing project check. Without the origin they are indistinguishable from
   # the operator speaking, which is exactly the confusion replay has to avoid.
-  defp journal_injected(state, origin, content, opts \\ []) do
-    journal(state, "injected", %{
-      "origin" => origin,
-      "content" => Journal.jsonable(content),
-      "after_call_id" => Keyword.get(opts, :after_call_id)
-    })
+  #
+  # REPLAY.md §3.2 also names an optional `after_call_id`, and it is deliberately absent
+  # rather than written as a permanent `null`: the journal is a total order, so a steer's
+  # position is already fixed by its `seq` relative to the `tool_result` records around it,
+  # and a key that never carries a value reads as a field somebody implemented.
+  defp journal_injected(state, origin, content) do
+    journal(state, "injected", %{"origin" => origin, "content" => Journal.jsonable(content)})
   end
 
   defp text_digest(text) when is_binary(text),
