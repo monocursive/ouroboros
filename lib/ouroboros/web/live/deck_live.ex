@@ -1781,6 +1781,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
       <.vital label="Machine" value={@row && @row.node} />
       <.vital label="Provider" value={@row && @row.provider} />
+      <.vital label="Replay" value={replay_word(@options)} />
       <.vital label="Workspace" value={@row && @row.workspace} />
     </aside>
     """
@@ -1995,6 +1996,21 @@ defmodule Ouroboros.Web.Live.DeckLive do
     sandbox = Map.get(options, :sandbox_mode) || (row && row.sandbox_mode)
 
     to_string(sandbox || "") == "unrestricted"
+  end
+
+  # R3/D10. Whether this session kept a turn journal, read off the capabilities the
+  # projection already carries rather than asked for separately. `nil` — and so an em dash
+  # — where the provider or transport did not resolve, because "not answered" and "not
+  # replayable" are different facts and a vital that spelled them the same would be the
+  # lie this capability exists to prevent. The rail *row* badge is deliberately not here:
+  # `Rail.Row` carries no capabilities field, and REPLAY.md §7.3 records that divergence.
+  defp replay_word(options) do
+    case options |> Map.get(:capabilities) |> then(&(&1 || %{})) |> Map.get(:replay) do
+      true -> "yes"
+      false -> "no"
+      nil -> nil
+      other -> to_string(other)
+    end
   end
 
   defp sandbox_word(options, row) do
