@@ -21,12 +21,11 @@ defmodule Ouroboros.Provider.Native.ReplayParityTest do
   events that *do* have a record. Closing this properly needs an `at` per emitted event in
   R1's record, and that is a recording change, not an engine change.
 
-  **The turn has no tool call and no steer.** Both are blocked on the same missing wiring:
-  `tool_source` is defined on the `Loop` struct and consulted only by the inference ledger
-  gate, so a replayed tool call would dispatch the tool for real — and a steer cannot be
-  recorded without a tool call, because `apply_steer/1` is only reachable after
-  `run_tools/2`. The engine refuses such a turn by name rather than running it, and the last
-  test here pins that refusal so it converts into coverage the day the seam lands.
+  Tool calls and steers are covered. `tool_source` is wired into `Loop.dispatch/2`, so a
+  replayed tool call answers from the record instead of dispatching, and a steer — only
+  reachable after `run_tools/2`, so it needs a tool call to exist at all — is fed back at
+  its recorded position. This file used to pin the `:tool_source_seam_unwired` refusal
+  here instead; that boundary is no longer the honest answer.
   """
 
   use ExUnit.Case, async: false
@@ -130,26 +129,61 @@ defmodule Ouroboros.Provider.Native.ReplayParityTest do
     end
   end
 
-  describe "the tool seam R1 has not wired yet" do
-    test "a turn that called a tool is refused by name rather than re-run", context do
-      run(context, [
-        [{:tool_call, %{id: "c1", name: "read", input: %{"path" => "lib/a.ex"}}}],
-        [{:text, "read it"}, {:finish, :stop}]
-      ])
+  describe "a turn that called a tool, and was steered mid-flight" do
+    test "the seam is wired, so the engine re-runs the turn instead of bounding it" do
+      # The claim every other test in this block rests on. If this ever goes false the
+      # engine falls back to `:tool_source_seam_unwired` and the parity assertions below
+      # would be asserting nothing, so it is stated on its own.
+      Seam.forget()
+      assert Seam.tool_dispatch_honored?()
+    end
+
+    test "it replays to the same stream, and to the same cells", context do
+      live = run(context, tool_and_steer_script(), steer: "actually, just summarise it")
+
+      # Not a vacuous setup: the record really does hold both a tool result and the steer.
+      kinds = context |> records() |> Enum.map(& &1["kind"])
+      assert "tool_result" in kinds
+      assert "injected" in kinds
+
+      assert {:ok, %{verified: true} = verdict} = verify(context)
+      assert verdict.turns == 1
+
+      assert Enum.map(live, & &1.type) == Enum.map(verdict.events, & &1.type)
+      assert Enum.map(live, & &1.payload) == Enum.map(verdict.events, & &1.payload)
+      assert Enum.map(live, & &1.turn_id) == Enum.map(verdict.events, & &1.turn_id)
+
+      assert project(live) == project(verdict.events)
+      refute project(live) == []
+    end
+
+    test "the replayed tool_call event carries the recorded ledger_ref", context do
+      live = run(context, tool_and_steer_script(), steer: "and stop there")
 
       assert {:ok, verdict} = verify(context)
 
-      if Seam.tool_dispatch_honored?() do
-        # The day `Loop.dispatch/2` answers from `tool_source`, this turn verifies and the
-        # boundary below stops being the honest answer.
-        assert verdict.verified, "the seam is wired but the turn did not verify"
-        assert verdict.turns == 1
-      else
-        refute verdict.verified
-        assert {:replay_boundary, :tool_source_seam_unwired, seq} = verdict.divergence
-        assert seq == Enum.find(records(context), &(&1["kind"] == "tool_result"))["seq"]
-        assert verdict.turns == 0
-      end
+      live_call = Enum.find(live, &(&1.type == :tool_call))
+      replayed = Enum.find(verdict.events, &(&1.type == :tool_call))
+      recorded = Enum.find(records(context), &(&1["kind"] == "tool_result"))
+
+      # Replay opens no entry of its own, so the only honest reference is the live run's —
+      # and it has to be present, not merely equal-if-present: a dropped key is a payload
+      # difference the projection would render as a row without a ledger link.
+      assert is_map(replayed.payload["ledger_ref"])
+      assert replayed.payload["ledger_ref"]["id"] == recorded["ledger_ref"]
+      assert replayed.payload["ledger_ref"] == live_call.payload["ledger_ref"]
+    end
+
+    test "the steer lands after the tool result it followed, as it did live", context do
+      live = run(context, tool_and_steer_script(), steer: "after the read, please")
+
+      assert {:ok, %{verified: true} = verdict} = verify(context)
+
+      # The ordering the control feed exists to reproduce: a steer drained before the turn
+      # even reached the model is still applied *after* the tool results, so both streams
+      # put the tool result ahead of the second model call.
+      assert order(live) == order(verdict.events)
+      assert [:tool_call, :tool_result | _rest] = order(live)
     end
 
     test "the probe never executes anything, whatever it answers", _context do
@@ -163,7 +197,23 @@ defmodule Ouroboros.Provider.Native.ReplayParityTest do
 
   # ------------------------------------------------------------------ helpers
 
-  defp run(context, script) do
+  # A tool call, then a final answer. The steer `run/3` sends is drained at the top of the
+  # first iteration and applied after `run_tools/2` returns, which is the only position a
+  # steer can occupy — and the reason a steer cannot be recorded without a tool call.
+  defp tool_and_steer_script do
+    [
+      [
+        {:text, "reading"},
+        {:tool_call, %{id: "c1", name: "read", input: %{"path" => "lib/a.ex"}}}
+      ],
+      [{:text, "read it"}, {:finish, :stop}]
+    ]
+  end
+
+  defp order(events),
+    do: events |> Enum.map(& &1.type) |> Enum.filter(&(&1 in [:tool_call, :tool_result]))
+
+  defp run(context, script, opts \\ []) do
     {model_spec, _agent} = NativeModelScript.start(script)
     {:ok, prefix} = prefix(context, model_spec)
     test = self()
@@ -187,7 +237,15 @@ defmodule Ouroboros.Provider.Native.ReplayParityTest do
     }
 
     parent = self()
-    spawn_link(fn -> send(parent, {:finished, Loop.run_turn(loop, "do the thing")}) end)
+    pid = spawn_link(fn -> send(parent, {:finished, Loop.run_turn(loop, "do the thing")}) end)
+
+    # Queued before the loop has drained anything, so where it *lands* is decided by the
+    # loop rather than by this scheduler — which is what makes the position reproducible.
+    case Keyword.get(opts, :steer) do
+      nil -> :ok
+      text -> send(pid, {:native_steer, text})
+    end
+
     collect()
   end
 
