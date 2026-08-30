@@ -327,17 +327,15 @@ async fn read_events(
         }
 
         let newest = events.last().map(|event| event.sequence);
-        let count = events.len();
         watch.absorb(events);
 
         match newest {
+            // The one case that continues: the window carried ground this walk had not
+            // already covered.
             Some(newest) if newest > cursor => cursor = newest,
-            // Either the window was empty or it answered nothing new. Both are the end.
+            // Empty, or entirely at or below the cursor it was asked from. Both are the
+            // end of the history the runtime retains, and neither is worth a second round.
             _ => break,
-        }
-
-        if count == 0 {
-            break;
         }
     }
 
