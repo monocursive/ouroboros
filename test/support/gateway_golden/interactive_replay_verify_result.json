@@ -1,0 +1,16 @@
+{
+  "id": 15,
+  "jsonrpc": "2.0",
+  "result": {
+    "divergence": {
+      "detail": null,
+      "kind": "boundary",
+      "reason": "compaction",
+      "seq": 12
+    },
+    "head": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "records": 19,
+    "turns": 2,
+    "verified": false
+  }
+}

@@ -57,6 +57,7 @@
       "interactive.list",
       "interactive.rename",
       "interactive.replay",
+      "interactive.replay_verify",
       "interactive.request_approval",
       "interactive.respond_approval",
       "interactive.rewind",

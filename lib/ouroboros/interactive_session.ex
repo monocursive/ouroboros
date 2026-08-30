@@ -629,6 +629,21 @@ defmodule Ouroboros.InteractiveSession do
   def journal(session, opts \\ []), do: call(session, {:journal, opts})
 
   @doc """
+  R2. Re-runs this session's recorded turns through the real loop and answers the verdict.
+
+  `%{verified:, turns:, records:, head:, divergence:}` — `turns` is how many verified, which
+  is why a bounded record answers with a number rather than with a failure. Divergence is
+  named, never continued past: either the loop re-derives what was recorded or it says at
+  which record and in which field it stopped agreeing.
+
+  Reads the journal file, so it needs no live native transport — a session whose runtime
+  died a week ago replays wherever its session directory is. It does need the session's
+  workspace, because the system prompt and the tool list are re-derived from it rather than
+  read out of a record that holds only their digests.
+  """
+  def replay_verify(session), do: call(session, :replay_verify)
+
+  @doc """
   Hands this session's work to a fresh one seeded with a curated packet.
 
   Amp's answer to compacting a compacted conversation: rather than folding again, the
