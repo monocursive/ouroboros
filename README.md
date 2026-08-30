@@ -3277,6 +3277,17 @@ locally.
 it is what makes boot order irrelevant. A strategy that is named but missing its
 variables refuses the boot; it does not quietly run unformed.
 
+A member that will not answer is not dialed at that interval forever. The first three
+consecutive failures are dialed at full cadence — that is where a peer which is merely
+slow to boot is found, so formation is exactly as fast as it ever was — and after that
+the wait doubles on each further failure, up to a two minute ceiling. The log follows the
+dials: one line each time the wait widens, naming the host and how long it is being left
+alone, instead of one identical `unable to connect` warning per interval. Anything that
+says the host is worth dialing again clears it immediately: it answers, it connects
+inward, or the roster changes under it — so a cancelled member that is re-invited, or a
+fresh invite reusing a name, is dialed on the sweep it reappears and never serves out a
+wait it did not earn.
+
 ### Distribution TLS
 
 Cleartext Erlang distribution puts the shared cookie, and everything after it, on the

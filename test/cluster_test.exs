@@ -672,6 +672,125 @@ defmodule Ouroboros.ClusterTest do
     end
   end
 
+  # The dialer's pacing, observed through the dialer. `Ouroboros.Cluster.DialBackoff` is
+  # unit-tested as pure arithmetic in `test/cluster_dial_backoff_test.exs`; what these
+  # prove is that `RosterEpmd` is actually wired to it — that the sweeps it skips are
+  # sweeps that never reach a socket, and that every reset really does reach the roster.
+  #
+  # No real peer is dialed: the strategy's `connect` and `list_nodes` are the MFAs
+  # libcluster already takes for exactly this, so nothing here opens a port.
+  describe "dial backoff" do
+    test "an unreachable member's dial attempts decay across sweeps" do
+      table = new_backoff_table!()
+      host = backoff_host()
+
+      with_backoff_membership(host, fn ->
+        # A five second cadence, so every sweep below is one this test asked for and the
+        # windows the policy arms outlast the whole test.
+        strategy = start_backoff_strategy!(table, host, 5_000)
+
+        # `handle_continue` dials before anything else can: an offline peer still costs
+        # the boot nothing, and the first attempt is still immediate.
+        assert dials(table) == 1
+
+        # Grace. A peer that is merely slow to boot is found here, at full cadence.
+        for _sweep <- 1..2, do: sweep_now!(strategy)
+        assert dials(table) == 3
+
+        # The fourth failure is the one that arms a window, and says so once.
+        log =
+          ExUnit.CaptureLog.capture_log(fn ->
+            sweep_now!(strategy)
+          end)
+
+        assert dials(table) == 4
+        assert log =~ "backing off #{inspect(host)}"
+        assert log =~ "consecutive failed dials"
+
+        # And then the point of all of it: twenty further sweeps reach no socket at all.
+        # The fixed cadence this replaces made twenty more TLS handshakes and twenty more
+        # byte-identical "unable to connect" warnings.
+        quiet =
+          ExUnit.CaptureLog.capture_log(fn ->
+            for _sweep <- 1..20, do: sweep_now!(strategy)
+          end)
+
+        assert dials(table) == 4
+        refute quiet =~ "unable to connect"
+        refute quiet =~ "backing off"
+
+        GenServer.stop(strategy)
+      end)
+    end
+
+    test "a member that comes up after backing off is connected with no operator" do
+      table = new_backoff_table!()
+      host = backoff_host()
+
+      with_backoff_membership(host, fn ->
+        # The same schedule at a 30ms cadence, so the windows this test waits out are
+        # milliseconds. Only the unit differs: the wait is denominated in sweeps.
+        strategy = start_backoff_strategy!(table, host, 30)
+
+        # Past the grace and demonstrably pacing itself — six dials take three sweeps'
+        # worth of grace plus three widening windows, not six sweeps.
+        assert_eventually(fn -> dials(table) >= 6 end, 300)
+        assert connected(table) == []
+
+        # The peer comes up. Nothing else happens: no restart, no roster edit, nobody
+        # touching the dialer. The window it is inside is bounded by the cap, so the
+        # dialer comes back on its own.
+        :ets.insert(table, {:reachable, true})
+        assert_eventually(fn -> host in connected(table) end, 300)
+
+        # Having answered, it is dialed no more: `connect_nodes/4` skips what is already
+        # connected, and the policy has forgotten it either way.
+        settled = dials(table)
+        for _sweep <- 1..5, do: sweep_now!(strategy)
+        assert dials(table) == settled
+
+        GenServer.stop(strategy)
+      end)
+    end
+
+    test "a membership change dials a backed-off member on the sweep it returns" do
+      table = new_backoff_table!()
+      host = backoff_host()
+
+      with_backoff_membership(host, fn ->
+        strategy = start_backoff_strategy!(table, host, 5_000)
+
+        for _sweep <- 1..3, do: sweep_now!(strategy)
+        assert dials(table) == 4
+
+        sweep_now!(strategy)
+        assert dials(table) == 4
+
+        # `ouro fleet invite cancel` while the runtime is up: only the roster moves.
+        System.put_env("OUROBOROS_CLUSTER_HOSTS", "")
+        sweep_now!(strategy)
+        assert dials(table) == 4
+
+        # And re-invited. This is the wait-forever bug in a new costume — an operator who
+        # re-adds a member must not serve out a window earned by whatever held that name
+        # before — so the returning host is dialed on the very sweep it reappears.
+        System.put_env("OUROBOROS_CLUSTER_HOSTS", Atom.to_string(host))
+        sweep_now!(strategy)
+        assert dials(table) == 5
+
+        # With a full grace ahead of it, not a resumed climb: three more sweeps, three
+        # more dials, and only then another window.
+        for _sweep <- 1..3, do: sweep_now!(strategy)
+        assert dials(table) == 8
+
+        sweep_now!(strategy)
+        assert dials(table) == 8
+
+        GenServer.stop(strategy)
+      end)
+    end
+  end
+
   describe "placement" do
     @tag timeout: 180_000
     test "agents are placed on a :core peer and refused everywhere else" do
@@ -2135,6 +2254,80 @@ defmodule Ouroboros.ClusterTest do
 
   @doc false
   def list_nodes_for_strategy_test, do: []
+
+  # A dialer that never leaves this VM. `Cluster.Strategy.connect_nodes/4` takes `connect`
+  # and `list_nodes` as MFAs precisely so a strategy can be driven without a network, and
+  # the pair below is a whole two-node world: whether the peer answers, who is connected,
+  # and how many handshakes were actually attempted.
+  @doc false
+  def backoff_connect(table, host) do
+    :ets.update_counter(table, :dials, 1)
+
+    if :ets.lookup_element(table, :reachable, 2) do
+      :ets.insert(
+        table,
+        {:connected, MapSet.put(:ets.lookup_element(table, :connected, 2), host)}
+      )
+
+      true
+    else
+      false
+    end
+  end
+
+  @doc false
+  def backoff_connected(table),
+    do: table |> :ets.lookup_element(:connected, 2) |> MapSet.to_list()
+
+  defp new_backoff_table! do
+    table = :"backoff_dialer_#{System.unique_integer([:positive])}"
+    :ets.new(table, [:public, :named_table, :set])
+    :ets.insert(table, [{:dials, 0}, {:reachable, false}, {:connected, MapSet.new()}])
+    table
+  end
+
+  # Never a name any other test could make reachable, and never a port: nothing here binds.
+  defp backoff_host, do: :"ouro-backoff-#{System.unique_integer([:positive])}@127.0.0.1"
+
+  # An unset fleet id makes `fleet_profile_storage/0` ephemeral whatever the data
+  # directory holds, so these tests state their own roster and are indifferent to the
+  # fleet the rest of the suite leaves behind.
+  defp with_backoff_membership(host, fun) do
+    with_env(
+      %{"OUROBOROS_FLEET_ID" => nil, "OUROBOROS_CLUSTER_HOSTS" => Atom.to_string(host)},
+      fun
+    )
+  end
+
+  defp start_backoff_strategy!(table, host, sweep_ms) do
+    state = %Elixir.Cluster.Strategy.State{
+      topology: :backoff_test,
+      connect: {__MODULE__, :backoff_connect, [table]},
+      list_nodes: {__MODULE__, :backoff_connected, [table]},
+      config: [hosts: [host], timeout: sweep_ms],
+      meta: nil
+    }
+
+    {:ok, strategy} = Cluster.RosterEpmd.start_link([state])
+
+    # `start_link/1` returns as soon as `init/1` does, so the boot sweep may still be in
+    # flight. One synchronous call behind it makes "the first sweep already happened" a
+    # fact rather than a race.
+    _synchronized = :sys.get_state(strategy)
+    strategy
+  end
+
+  # The strategy cancels and re-arms its timer on every sweep, so a nudge advances the
+  # schedule rather than forking a second one — which is what lets a test own the clock.
+  defp sweep_now!(strategy) do
+    send(strategy, :connect)
+    _synchronized = :sys.get_state(strategy)
+    :ok
+  end
+
+  defp dials(table), do: :ets.lookup_element(table, :dials, 2)
+
+  defp connected(table), do: backoff_connected(table)
 
   # Change only the name on a profile that is otherwise exactly as it was, so a test of the
   # name cannot pass by having accidentally rewritten the roster underneath it.
