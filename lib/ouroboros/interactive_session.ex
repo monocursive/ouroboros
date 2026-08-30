@@ -620,6 +620,15 @@ defmodule Ouroboros.InteractiveSession do
   def rewind_points(session), do: call(session, :rewind_points)
 
   @doc """
+  R1. A window of a native session's turn journal — the replay substrate.
+
+  `opts` takes `:since_seq` (exclusive) and `:limit`. The answer carries the chain head,
+  how far it verified, and what the budget truncated, because a record a caller cannot
+  bound is a record they cannot rely on.
+  """
+  def journal(session, opts \\ []), do: call(session, {:journal, opts})
+
+  @doc """
   Hands this session's work to a fresh one seeded with a curated packet.
 
   Amp's answer to compacting a compacted conversation: rather than folding again, the

@@ -222,6 +222,11 @@ defmodule Ouroboros.Gateway.Methods do
     # routing, same ceiling — so the only thing that makes it a separate method is the
     # larger per-leaf byte cap it encodes the answer under.
     "interactive.event_detail" => %{scope: :read, timeout: @default_timeout},
+    # R1. The native session's turn journal — the replay substrate, and a different record
+    # from the event stream `replay` above serves: events are what a client renders, this
+    # is what the session *was*. Read scope by the same dividing line as everything else in
+    # this block: it reads one file and starts nothing.
+    "interactive.journal" => %{scope: :read, timeout: @default_timeout},
     # D9. What a session can honestly say about its own context window. Read scope: it
     # asks a live transport a question and starts nothing.
     "interactive.context" => %{scope: :read, timeout: @default_timeout},
@@ -681,6 +686,15 @@ defmodule Ouroboros.Gateway.Methods do
     "interactive.info" => {:closed, [@session_id, @session_node]},
     "interactive.replay" => {:closed, [@session_id, @cursor_param, @limit_param, @session_node]},
     "interactive.event_detail" => {:closed, [@session_id, @sequence_param, @session_node]},
+    "interactive.journal" =>
+      {:closed,
+       [
+         @session_id,
+         {"since_seq", {:optional, 0}, :non_negative_integer,
+          "exclusive — the window starts at the next journal sequence"},
+         @limit_param,
+         @session_node
+       ], "native sessions only; every other transport answers `-32006`"},
     "interactive.context" => {:closed, [@session_id, @session_node]},
     "interactive.delegations" => {:closed, [@session_id, @session_node]},
     "interactive.subscribe" =>
@@ -1249,6 +1263,19 @@ defmodule Ouroboros.Gateway.Methods do
     with_event_detail(params, :interactive, fn session, opts ->
       InteractiveSession.replay(session, opts)
     end)
+  end
+
+  def invoke("interactive.journal", params) do
+    with :ok <- only_keys(params, ["id", "since_seq", "limit", "node"]),
+         {:ok, session} <- session_target(:interactive, params),
+         {:ok, since} <- fetch_since_seq(params),
+         {:ok, limit} <- fetch_limit(params) do
+      safe(fn ->
+        reply(InteractiveSession.journal(session, since_seq: since, limit: limit))
+      end)
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
   end
 
   def invoke("coding.list", _params), do: safe(fn -> Present.fleet_sessions(CodingSession) end)
@@ -2855,6 +2882,15 @@ defmodule Ouroboros.Gateway.Methods do
     case Map.get(params, "cursor", 0) do
       cursor when is_integer(cursor) and cursor >= 0 -> {:ok, cursor}
       _other -> {:invalid, "params.cursor must be a non-negative integer"}
+    end
+  end
+
+  # R1's cursor. Named apart from `cursor` because it counts journal records rather than
+  # events, and the two sequences are different numbers over the same session.
+  defp fetch_since_seq(params) do
+    case Map.get(params, "since_seq", 0) do
+      value when is_integer(value) and value >= 0 -> {:ok, value}
+      _other -> {:invalid, "params.since_seq must be a non-negative integer"}
     end
   end
 

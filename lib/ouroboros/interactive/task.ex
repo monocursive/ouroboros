@@ -275,6 +275,27 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
+  # R1. Reads one file and starts nothing, so it is `:read` scope — but it still goes
+  # through the native transport, because the transport is what knows where this session's
+  # directory is. The refusal vocabulary is `rewind_points`'s, unchanged: a session with no
+  # live native transport says so rather than answering with an empty record.
+  def handle_call({:journal, opts}, _from, runtime) do
+    case native_transport(runtime.session, :journal) do
+      {:ok, pid} ->
+        result =
+          case safe_session_call(fn -> NativeSession.journal(pid, opts) end) do
+            {:ok, window} -> {:ok, durable(window)}
+            {:error, reason} -> {:error, {:journal_unavailable, durable(reason)}}
+            other -> {:error, {:journal_unavailable, durable(other)}}
+          end
+
+        {:reply, result, runtime}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, runtime}
+    end
+  end
+
   def handle_call(:rewind_points, _from, runtime) do
     case native_transport(runtime.session, :rewind_points) do
       {:ok, pid} ->

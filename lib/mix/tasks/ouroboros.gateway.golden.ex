@@ -135,6 +135,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       {"workspace_browse_result", workspace_browse_result()},
       {"ledger_list_result", ledger_list_result()},
       {"ledger_export_result", ledger_export_result()},
+      {"interactive_journal_result", interactive_journal_result()},
       {"stream_lagged_notification", stream_lagged_notification()},
       {"stream_ended_notification", stream_ended_notification()},
       {"error_unauthenticated", error_unauthenticated()},
@@ -1155,6 +1156,56 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       |> Methods.chain()
       |> Map.merge(%{node: :ouroboros@golden, format: "jsonl", limit: 500, since: 0})
     )
+  end
+
+  # R1. A window of the turn journal. The shape a second implementation has to agree
+  # about is the framing every record shares — `seq`, `at`, `turn_id`, `kind`, `prev`,
+  # `hash` — plus the four fields that bound what the window *means*: the chain `head`,
+  # the `head_seq` it belongs to, how far the chain `verified_through`, and what the
+  # budget dropped. `truncated_through` is `null` here because this journal is whole,
+  # which is the ordinary answer; a truncated one carries the sequence it dropped through
+  # and is asserted where it is cheap and real, against a journal the test writes, in
+  # `Ouroboros.Provider.Native.JournalTest`.
+  #
+  # The hashes are literals rather than a chain computed here. `Encode.chain/1` is derived
+  # in `ledger_export_result` because that verb *is* the chain and a fixture that hid a
+  # change to it would defeat the purpose; this verb hands back records a session already
+  # sealed, so the fixture pins the field a client reads and not this build's arithmetic.
+  defp interactive_journal_result do
+    Conn.result_frame(14, %{
+      head: String.duplicate("c", 64),
+      head_seq: 4,
+      verified_through: 4,
+      truncated_through: nil,
+      count: 4,
+      records: [
+        %{
+          "seq" => 3,
+          "at" => @timestamp,
+          "turn_id" => @turn_id,
+          "kind" => "model_call",
+          "prev" => String.duplicate("a", 64),
+          "hash" => String.duplicate("b", 64),
+          "iteration" => 1,
+          "request_sha256" => String.duplicate("1", 64),
+          "system_sha256" => String.duplicate("2", 64),
+          "tools_sha256" => String.duplicate("3", 64),
+          "message_count" => 7,
+          "ledger_effect_id" => "inference-00000000000000000000000000000001"
+        },
+        %{
+          "seq" => 4,
+          "at" => @turn_end_timestamp,
+          "turn_id" => @turn_id,
+          "kind" => "turn_settled",
+          "prev" => String.duplicate("b", 64),
+          "hash" => String.duplicate("c", 64),
+          "status" => "complete",
+          "message_count" => 7,
+          "conversation_digest" => String.duplicate("4", 64)
+        }
+      ]
+    })
   end
 
   defp ledger_entry do

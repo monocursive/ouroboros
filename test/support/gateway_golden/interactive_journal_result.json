@@ -1,0 +1,38 @@
+{
+  "id": 14,
+  "jsonrpc": "2.0",
+  "result": {
+    "count": 4,
+    "head": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "head_seq": 4,
+    "records": [
+      {
+        "at": "2026-01-01T00:00:00.000000Z",
+        "hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "iteration": 1,
+        "kind": "model_call",
+        "ledger_effect_id": "inference-00000000000000000000000000000001",
+        "message_count": 7,
+        "prev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "request_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "seq": 3,
+        "system_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "tools_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "turn_id": "turn-0000000000000000000001"
+      },
+      {
+        "at": "2026-01-01T00:01:30.000000Z",
+        "conversation_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+        "hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "kind": "turn_settled",
+        "message_count": 7,
+        "prev": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "seq": 4,
+        "status": "complete",
+        "turn_id": "turn-0000000000000000000001"
+      }
+    ],
+    "truncated_through": null,
+    "verified_through": 4
+  }
+}

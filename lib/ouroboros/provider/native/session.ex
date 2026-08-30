@@ -213,6 +213,18 @@ defmodule Ouroboros.Provider.Native.Session do
   def rewind_points(handle), do: SessionAdapter.call(handle, :rewind_points)
 
   @doc """
+  R1. A window of this session's turn journal, with the chain state that bounds it.
+
+  `{head, head_seq, verified_through, truncated_through, count, records}`. The chain is
+  verified on the way past rather than reported as a boolean: `verified_through` below
+  `head_seq` is how a reader learns the record is trustworthy only up to a point, and
+  `truncated_through` is what the budget dropped. Neither is an error, because both are
+  states a record honestly reaches.
+  """
+  @spec journal(pid(), keyword()) :: {:ok, map()} | {:error, term()}
+  def journal(handle, opts \\ []), do: SessionAdapter.call(handle, {:journal, opts})
+
+  @doc """
   Puts this session into, or out of, plan mode — B2's runtime half.
 
   Plan mode is a read-only posture with a job attached. While it is on:
@@ -640,6 +652,10 @@ defmodule Ouroboros.Provider.Native.Session do
 
   def handle_call({:checkpoint, _stale_turn_id, _snapshot}, _from, state),
     do: {:reply, :ok, state}
+
+  def handle_call({:journal, opts}, _from, state) do
+    {:reply, Journal.window(Journal.path(state.session_dir), opts), state}
+  end
 
   def handle_call(:rewind_points, _from, state) do
     case Checkpoint.turns(state.session_dir) do

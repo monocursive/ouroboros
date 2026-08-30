@@ -52,6 +52,7 @@
       "interactive.handoff",
       "interactive.info",
       "interactive.interrupt",
+      "interactive.journal",
       "interactive.kill",
       "interactive.list",
       "interactive.rename",
