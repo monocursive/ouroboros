@@ -7,6 +7,7 @@ defmodule Ouroboros.Coding.Task do
 
   alias Jido.Harness.{ApprovalResponse, Run, RunResult}
   alias Ouroboros.Coding.{Store, TaskState}
+  alias Ouroboros.Poll.Timer
   alias Ouroboros.Provider.Native.Run, as: NativeRun
   alias Ouroboros.Workspace
   alias Ouroboros.Workspace.Manager, as: WorkspaceManager
@@ -181,13 +182,14 @@ defmodule Ouroboros.Coding.Task do
   end
 
   @impl true
-  def handle_info(:poll, runtime), do: {:noreply, runtime |> clear_timer(:poll_timer) |> poll()}
+  def handle_info(:poll, runtime),
+    do: {:noreply, runtime |> Timer.clear(:poll_timer) |> poll()}
 
   # A waiter that arrives in the window between the terminal checkpoint and this
   # message used to strand the coordinator: nothing rescheduled retirement once it
   # had been declined.
   def handle_info(:retire, %{task: task} = runtime) do
-    runtime = clear_timer(runtime, :retire_timer)
+    runtime = Timer.clear(runtime, :retire_timer)
 
     cond do
       not TaskState.terminal?(task) -> {:noreply, runtime}
@@ -783,44 +785,19 @@ defmodule Ouroboros.Coding.Task do
     %{runtime | waiters: %{}}
   end
 
-  defp schedule_poll(runtime, delay), do: schedule_timer(runtime, :poll_timer, :poll, delay)
+  # A coding run has no idle state to decay into, so this plane keeps the fixed interval:
+  # the coordinator polls from `adopt/2` — where the run becomes `:running` — until its
+  # terminal checkpoint retires it, and every wakeup in between is one taken while an agent
+  # is actually executing and streaming events to whoever is watching. Slowing that down
+  # would trade the latency of the output for wakeups the run was going to spend anyway.
+  # The interactive plane, which spends most of its life between turns, is the one that
+  # carries an `Ouroboros.Poll.Cadence`.
+  defp schedule_poll(runtime, delay), do: Timer.schedule(runtime, :poll_timer, :poll, delay)
 
   defp schedule_attach(runtime), do: schedule_poll(runtime, @poll_interval)
 
   defp schedule_retire(runtime),
-    do: schedule_timer(runtime, :retire_timer, :retire, @terminal_retire_ms)
-
-  # One pending timer per message, not one per call. Several paths ask for a poll or a
-  # retirement for the same reason at the same time, and every extra timer became another
-  # self-perpetuating chain: each delivery scheduled its own successor.
-  defp schedule_timer(runtime, key, message, delay) do
-    due = System.monotonic_time(:millisecond) + delay
-
-    case Map.fetch!(runtime, key) do
-      %{due: pending_due} when pending_due <= due ->
-        runtime
-
-      pending ->
-        cancel_timer(pending, message)
-        Map.put(runtime, key, %{ref: Process.send_after(self(), message, delay), due: due})
-    end
-  end
-
-  defp cancel_timer(nil, _message), do: :ok
-
-  defp cancel_timer(%{ref: ref}, message) do
-    if Process.cancel_timer(ref) == false do
-      receive do
-        ^message -> :ok
-      after
-        0 -> :ok
-      end
-    end
-
-    :ok
-  end
-
-  defp clear_timer(runtime, key), do: Map.put(runtime, key, nil)
+    do: Timer.schedule(runtime, :retire_timer, :retire, @terminal_retire_ms)
 
   defp touch(task), do: %{task | updated_at: DateTime.utc_now() |> DateTime.to_iso8601()}
 
