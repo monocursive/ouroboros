@@ -107,27 +107,44 @@ defmodule Ouroboros.Provider.Native.Loop do
   after. A ledger that cannot record the call refuses it and the turn fails as
   `inference_unrecordable`, rather than spending money nobody can account for.
 
-  ## The replay seams (R1, for R2)
+  ## The replay seams
 
   Verified replay re-runs *this* code with every nondeterminism source substituted by the
   record, so the seams live here and default to live behaviour:
 
-    * **`model_module`** — already a seam. `Model.stream/3` is a pure dispatch on a
-      module, so a replay model that streams the recorded chunks needs nothing here.
-    * **`tool_source`** — `:live` dispatches. Anything else means the recorded
-      `tool_result` content is authoritative: admission, hooks, sandbox, LSP and MCP are
-      never invoked, because their outputs are already baked into that content. It also
-      turns off ledger accounting, in both directions — replay executes nothing, so there
-      is no effect to account for, and writing entries would corrupt the record it is
-      verifying.
+    * **`model_module`** — `Model.stream/3` is a pure dispatch on a module, so a replay
+      model that streams the recorded chunks needs nothing here.
+    * **`tool_source`** — `:live` dispatches. `{:recorded, %{call_id => %{output:,
+      is_error:, ledger_ref:}}}` makes the recorded `tool_result` content authoritative:
+      `dispatch/2` answers from it *before* the tool lookup, so admission, hooks, sandbox,
+      LSP, MCP and the tool itself are never reached — their outputs are already baked into
+      that content, and re-deriving any of it would be re-running it. A `call_id` the
+      record does not hold comes back as an error result naming `{:not_in_record, id}`
+      rather than as a dispatch. Any other non-`:live` value answers from an empty record:
+      a shape this build does not understand is still not a licence to run a tool.
+
+      It also closes the four ledger doors — `open_tool_effect/5`, `refuse_tool_effect/5`
+      and both `settle_tool_effect` arities — in the same breath, and for the same reason
+      the inference gate is closed: replay executes nothing, so there is no effect to
+      account for, and an entry written for an effect that never happened would corrupt
+      the record a verifier is checking against.
+
+      The `tool_call` event carries the **recorded** `ledger_ref`, because replay opens no
+      entry of its own and the live run's entry is the one a reader following that event
+      wants. Dropping the key would make the replayed event differ from the live one by a
+      key's presence — a divergence about the replay rather than about the session.
     * **`control_feed`** — a 1-arity function replacing the mailbox drain, so steers,
       interrupts and approval answers arrive at their recorded positions rather than in a
       race. `nil` drains the mailbox, which is what a live turn does.
-    * **`hooks`** — already a seam. `run_turn/2` reloads from disk only when `hooks` is
-      `nil`, so a caller that presets the empty config defeats the per-turn reload.
+    * **`hooks`** — `run_turn/2` reloads from disk only when `hooks` is `nil`, so a caller
+      that presets the empty config defeats the per-turn reload.
 
-  R1 defines them and ships none of the replay side; `Ouroboros.Provider.Native.Replay`
-  (R2) is what consumes them, and it does so without editing this file.
+  `Ouroboros.Provider.Native.Replay` is what consumes them, and
+  `Ouroboros.Provider.Native.Replay.Seam` *asks* this loop whether the tool seam is honored
+  rather than assuming it — a probe whose only tool call names a tool that does not exist,
+  so a loop without the seam answers "not a tool in this session" and runs nothing either
+  way. Keep that probe working: it is what stops a regression here from silently becoming a
+  replay that dispatches real tools.
   """
 
   alias Jido.Harness.ApprovalResponse
@@ -667,6 +684,32 @@ defmodule Ouroboros.Provider.Native.Loop do
     end
   end
 
+  # R1's tool seam, and deliberately the *first* thing dispatch asks — ahead of the tool
+  # lookup, the depth cap, argument validation and classification. Everything past this
+  # point can reach a filesystem, a language server, an MCP server or a human, and replay
+  # must reach none of them: the recorded `tool_result` content already has every one of
+  # those effects baked into it, so re-deriving any of it would be re-running it.
+  #
+  # It answers even for a tool this session does not have, which is what makes the seam
+  # observable: `Ouroboros.Provider.Native.Replay.Seam` probes it with a tool name
+  # `Tools.lookup/3` can never resolve, precisely so that a loop *without* the seam
+  # answers "not a tool in this session" and executes nothing either way.
+  #
+  # The `ledger_ref` on the event is the recorded one rather than a fresh id. Replay opens
+  # no effect, so there is no new entry to name — and the entry the live run wrote is the
+  # one a reader following this event wants. A replayed event that dropped the key would
+  # differ from the live event by a key's presence, which is a divergence about the replay
+  # rather than about the session.
+  defp dispatch(%{tool_source: {:recorded, results}} = state, call) when is_map(results),
+    do: recorded_dispatch(state, call, results)
+
+  # `tool_source` is documented as "anything but `:live` means the recorded content is
+  # authoritative". A value in a shape this build does not understand is therefore still
+  # not a licence to dispatch: it answers from an empty record, so every call comes back
+  # named rather than run.
+  defp dispatch(%{tool_source: source} = state, call) when source != :live,
+    do: recorded_dispatch(state, call, %{})
+
   # The lookup is first so a tool this session does not have never claims a ledger
   # reference it will not have an entry for. Everything past it is gated, and everything
   # gated is recorded.
@@ -717,6 +760,33 @@ defmodule Ouroboros.Provider.Native.Loop do
         end
     end
   end
+
+  defp recorded_dispatch(state, call, results) do
+    recorded = Map.get(results, call.id)
+    ledger_ref = recorded && Map.get(recorded, :ledger_ref)
+
+    emit_tool_call(state, call, ledger_ref)
+
+    {:continue,
+     tool_result(state, call, recorded_tool_result(recorded, call), ledger_ref: ledger_ref)}
+  end
+
+  # A call the record has no result for. It is an error result rather than a raise, because
+  # the loop's job here is to keep going and let the comparison downstream name the
+  # divergence: a turn that stopped at the first missing record would report the stop
+  # instead of the gap.
+  defp recorded_tool_result(nil, call) do
+    %{
+      output:
+        "Refused: this turn is being replayed from a record that has no result for " <>
+          "`#{call.name}` call #{inspect(call.id)} (#{inspect({:not_in_record, call.id})}). " <>
+          "Nothing was run.",
+      is_error: true
+    }
+  end
+
+  defp recorded_tool_result(recorded, _call),
+    do: %{output: Map.get(recorded, :output), is_error: Map.get(recorded, :is_error) == true}
 
   defp depth_capped?(state, module) when module in [AgentTool, AgentResult],
     do: is_integer(state.subagent_depth) and state.subagent_depth >= AgentTool.max_depth()
@@ -2555,6 +2625,14 @@ defmodule Ouroboros.Provider.Native.Loop do
   # Checkpoint before run, and a hard gate rather than best effort: the whole claim a
   # `:tool_call` entry makes is that the call is accountable afterwards, and a call whose
   # attempt could not be written down is not.
+  # Replay accounts for nothing because it executes nothing — the same rule the inference
+  # gate follows, and the reason it is a guard on each of the four ledger doors rather than
+  # a check at one of them: a path that reached the ledger under replay would write an entry
+  # for an effect that never happened, into the record a verifier is checking against.
+  defp open_tool_effect(%{tool_source: source}, _call, _classified, _effect_id, _authority)
+       when source != :live,
+       do: :ok
+
   defp open_tool_effect(state, call, classified, effect_id, authority) do
     case safe_ledger(fn ->
            EffectLedger.record_started(
@@ -2569,6 +2647,10 @@ defmodule Ouroboros.Provider.Native.Loop do
   # A refusal is terminal the instant it is decided, so it is written as one entry rather
   # than as a start nothing would ever settle. Best effort, and deliberately: the call is
   # already refused, and failing to record a refusal cannot make it run.
+  defp refuse_tool_effect(%{tool_source: source}, _call, _classified, _effect_id, _authority)
+       when source != :live,
+       do: :ok
+
   defp refuse_tool_effect(state, call, classified, effect_id, authority) do
     attrs =
       state
@@ -2662,6 +2744,10 @@ defmodule Ouroboros.Provider.Native.Loop do
   # rather than from the runner's message: `Tools.execute/4` reports a killed tool as an
   # ordinary error result, so elapsed time is the only structural evidence there is, and
   # the inference is stated here rather than presented as something the runner said.
+  defp settle_tool_effect(%{tool_source: source}, _effect_id, _result, _elapsed)
+       when source != :live,
+       do: :ok
+
   defp settle_tool_effect(state, effect_id, result, elapsed) when is_map(result) do
     bytes = byte_size(to_string(Map.get(result, :output, ""))) + image_bytes(result)
 
@@ -2674,6 +2760,10 @@ defmodule Ouroboros.Provider.Native.Loop do
 
     settle_tool_effect(state, effect_id, status, elapsed, bytes)
   end
+
+  defp settle_tool_effect(%{tool_source: source}, _effect_id, _status, _elapsed, _bytes)
+       when source != :live,
+       do: :ok
 
   defp settle_tool_effect(_state, effect_id, status, elapsed, bytes) do
     outcome = %{
