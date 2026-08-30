@@ -10,7 +10,6 @@ defmodule Ouroboros.Interactive.Task do
   alias Ouroboros.Interactive.Task.{Approvals, Resume, Shell, Turns}
   alias Ouroboros.Provider
   alias Ouroboros.Provider.Native.Paths
-  alias Ouroboros.Provider.Native.Replay
   alias Ouroboros.Provider.Native.Session, as: NativeSession
   alias Ouroboros.Provider.Session, as: ProviderSession
   alias Ouroboros.Team
@@ -298,14 +297,17 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
-  # R2. Verified replay reads the journal *file*, so unlike `:journal` it needs no live
-  # native transport: the session may be long dead and its record is still on disk, which is
-  # most of the point of having a record. What it does need is the start request's shape —
-  # the system prompt and the tool list are *re-derived* from the workspace, because the
-  # journal holds their digests and not their bytes, so the workspace and the tool
-  # allow/deny lists are inputs to the verdict rather than decoration on it.
-  def handle_call(:replay_verify, _from, runtime) do
-    {:reply, replay_verify(runtime.session), runtime}
+  # R2. This coordinator answers *where the record is and what shape the session was*, and
+  # nothing more. Verification itself re-runs a turn loop per recorded turn and is bounded at
+  # two minutes by the gateway, so doing it inside this `handle_call` would freeze the
+  # session — no turn, no approval, no interrupt — for as long as it took. The caller runs
+  # it, on this node, in its own process.
+  #
+  # The plan is what the engine cannot read out of the journal: the workspace above all,
+  # because the system prompt and the tool list are *re-derived* from it rather than read
+  # back — the record holds their digests and not their bytes.
+  def handle_call(:replay_plan, _from, runtime) do
+    {:reply, replay_plan(runtime.session), runtime}
   end
 
   def handle_call(:rewind_points, _from, runtime) do
@@ -1616,16 +1618,11 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
-  defp replay_verify(%State{} = session) do
+  defp replay_plan(%State{} = session) do
     with :ok <- native_record(session),
          {:ok, provider_session_id} <- recorded_session(session),
          {:ok, session_dir, _durable?} <- Paths.session_dir(provider_session_id) do
-      case Replay.verify(session_dir, replay_options(session, provider_session_id)) do
-        # The events are the engine's own working evidence and can run to tens of thousands
-        # of deltas for one turn. The verdict crosses the wire; the stream does not.
-        {:ok, verdict} -> {:ok, verdict |> Map.delete(:events) |> durable()}
-        {:error, reason} -> {:error, {:replay_refused, durable(reason)}}
-      end
+      {:ok, {session_dir, replay_options(session, provider_session_id)}}
     end
   end
 
