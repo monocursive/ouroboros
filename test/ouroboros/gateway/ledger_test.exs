@@ -221,11 +221,12 @@ defmodule Ouroboros.Gateway.LedgerTest do
   end
 
   test "the export chain still verifies with the new kinds in it", context do
-    record!(context.principal, "effect-#{context.principal}-c1", %{
-      effect: :tool_call,
-      attempt: %{tool: "read", subject: %{paths: ["lib/a.ex"]}},
-      result: %{status: :completed, duration_ms: 1, output_bytes: 4}
-    })
+    call =
+      record!(context.principal, "effect-#{context.principal}-c1", %{
+        effect: :tool_call,
+        attempt: %{tool: "read", subject: %{paths: ["lib/a.ex"]}},
+        result: %{status: :completed, duration_ms: 1, output_bytes: 4}
+      })
 
     record!(context.principal, "effect-#{context.principal}-c2", %{
       effect: :approval,
@@ -233,7 +234,14 @@ defmodule Ouroboros.Gateway.LedgerTest do
       result: %{decision: :allow, scope: :session, actor: :headless, origin: "external"}
     })
 
-    assert {:ok, export} = Methods.invoke("ledger.export", %{})
+    # `ledger.export` has no principal filter — it is the whole node's history — and its
+    # window is bounded. Exporting from *before this test's own first entry* is what makes
+    # the assertion about what it wrote rather than about how busy the node's ledger
+    # happened to be; without it the two entries fall outside the window on any seed that
+    # ran enough of the suite first. The chain is computed at answer time over whatever the
+    # result set is, so a narrower window verifies exactly as well.
+    assert {:ok, export} =
+             Methods.invoke("ledger.export", %{"since" => call.sequence - 1})
 
     head =
       Enum.reduce(export.lines, export.seed, fn line, previous ->
