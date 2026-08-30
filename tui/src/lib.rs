@@ -23,6 +23,7 @@ pub mod mcp_cli;
 pub mod mcp_serve;
 pub mod model;
 pub mod proto;
+pub mod replay_cli;
 pub mod run;
 pub mod runtime;
 pub mod status;

@@ -32,8 +32,8 @@ use rand::TryRngCore;
 use serde_json::{json, Value};
 
 use ouro::cli::{
-    AcpArgs, Cli, Command, DesktopCommand, FleetCommand, HookCommand, InviteCommand, LedgerArgs,
-    McpCommand, RunArgs, ServiceCommand, SessionsCommand, SyncCommand,
+    AcpArgs, Cli, Command, DesktopCommand, FleetCommand, ForkArgs, HookCommand, InviteCommand,
+    LedgerArgs, McpCommand, ReplayArgs, RunArgs, ServiceCommand, SessionsCommand, SyncCommand,
 };
 use ouro::config::{self, Loaded, StartFlags};
 use ouro::fleet_add;
@@ -209,6 +209,8 @@ async fn run(cli: Cli) -> Result<()> {
         Some(Command::Web { print }) => web(&paths, cli.dev, print).await,
         Some(Command::Stop) => stop(&paths, cli.dev).await,
         Some(Command::Ledger(args)) => ledger(&paths, args).await,
+        Some(Command::Replay(args)) => replay(&paths, args).await,
+        Some(Command::Fork(args)) => fork(&paths, args).await,
         Some(Command::Desktop { command }) => desktop(&paths, command).await,
         Some(Command::Fleet { command }) => fleet_command(&paths, cli.dev, command).await,
         Some(Command::ServiceRun) => service_run(&paths, cli.dev).await,
@@ -2021,6 +2023,9 @@ fn start_failure(error: &ClientError) -> StartFailure {
     }
 }
 
+/// The sentence an indeterminate durable start earns. Lives in [`ouro::model`] because
+/// `ouro fork` mints an id and creates a session by the same discipline, and two surfaces
+/// that said this differently would be two contracts.
 fn start_outcome_unknown(
     method: &str,
     session_id: &str,
@@ -2028,17 +2033,7 @@ fn start_outcome_unknown(
     retry_error: &str,
     retry_unknown: bool,
 ) -> String {
-    let retry_status = if retry_unknown {
-        "also had an unknown outcome"
-    } else {
-        "returned a definite refusal, but cannot prove the first request did not create the session"
-    };
-
-    format!(
-        "the {method} outcome is unknown for session {session_id}; the exact same-id retry \
-         {retry_status}. Run `ouro` and inspect session {session_id} before starting another \
-         session. first attempt: {first_error}; retry: {retry_error}"
-    )
+    ouro::model::ambiguous_mutation(method, session_id, first_error, retry_error, retry_unknown)
 }
 
 /// Build the mutation that immediately follows `interactive.start`.
@@ -2597,6 +2592,65 @@ async fn ledger(paths: &Paths, args: LedgerArgs) -> Result<()> {
     let mut err = std::io::stderr().lock();
 
     ouro::ledger_cli::run(&connected.client, &options, &mut out, &mut err).await
+}
+
+/// `ouro replay`: one read against a runtime that is already up.
+///
+/// No spawn, for `ouro ledger`'s reason and one more: replay is defined as the thing that
+/// executes nothing, and a command that booted a machine to answer it would have started
+/// the first process of the day in order to prove nothing started.
+async fn replay(paths: &Paths, args: ReplayArgs) -> Result<()> {
+    let (address, token) = remote_endpoint(paths, args.addr, args.token_file).await?;
+    let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
+    let connected = attach_with(address, token, false, None, hook).await?;
+
+    let options = ouro::replay_cli::Options {
+        session: args.session,
+        node: args.node,
+        verify: args.verify,
+        json: args.json,
+        width: args.width,
+    };
+
+    let mut out = std::io::stdout().lock();
+    let mut err = std::io::stderr().lock();
+
+    ouro::replay_cli::run(&connected.client, &options, &mut out, &mut err).await
+}
+
+/// `ouro fork`: branch a recorded session, with the child id minted before the call.
+///
+/// Attaches rather than starting, like every other verb that acts on a session that
+/// already exists — but this one *mutates*, so it needs `operate` and says so when the
+/// listener it reached was opened at `read`.
+async fn fork(paths: &Paths, args: ForkArgs) -> Result<()> {
+    let (address, token) = remote_endpoint(paths, args.addr, args.token_file).await?;
+    let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
+    let connected = attach_with(address, token, false, None, hook).await?;
+
+    if !connected.hello.operates() {
+        bail!(
+            "forking a session mutates the runtime and needs OUROBOROS_GATEWAY_SCOPE=operate; \
+             this listener answered at scope `{}`",
+            connected.hello.scope
+        );
+    }
+
+    // Minted before the mutation, exactly as `ouro new` mints a session id: if the reply
+    // is lost after the gateway accepted the request, replaying these params can only
+    // adopt this same child.
+    let options = ouro::replay_cli::ForkOptions {
+        session: args.session,
+        node: args.node,
+        fork_id: new_client_session_id()?,
+        at: args.at,
+        model: args.model,
+    };
+
+    let mut out = std::io::stdout().lock();
+    let mut err = std::io::stderr().lock();
+
+    ouro::replay_cli::fork(&connected.client, &options, &mut out, &mut err).await
 }
 
 /// `ouro desktop` — the Computer Use operator surface. Reporting only; the model tools and

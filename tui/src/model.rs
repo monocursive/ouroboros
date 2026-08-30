@@ -1813,6 +1813,32 @@ pub fn outcome_unknown(data: Option<&Value>) -> bool {
 /// the side of retaining that id. Only protocol/schema/auth/placement decisions are
 /// provably pre-dispatch. Generic upstream failures and newer error codes are not
 /// permission to mint a second potentially billable session.
+/// What an operator is told when a durable mutation's outcome could not be established.
+///
+/// A start and a fork are the same shape of act — a caller-minted id, a session that may
+/// exist on the other side of a lost reply — so they say the same thing, from here, rather
+/// than from two call sites that could drift apart. The id is named twice on purpose: it is
+/// the only handle the operator has for going and looking.
+pub fn ambiguous_mutation(
+    method: &str,
+    session_id: &str,
+    first_error: &str,
+    retry_error: &str,
+    retry_unknown: bool,
+) -> String {
+    let retry_status = if retry_unknown {
+        "also had an unknown outcome"
+    } else {
+        "returned a definite refusal, but cannot prove the first request did not create the session"
+    };
+
+    format!(
+        "the {method} outcome is unknown for session {session_id}; the exact same-id retry \
+         {retry_status}. Run `ouro` and inspect session {session_id} before starting another \
+         session. first attempt: {first_error}; retry: {retry_error}"
+    )
+}
+
 pub fn start_outcome_unknown(error: &ClientError) -> bool {
     match error {
         ClientError::Rpc(rpc) => {

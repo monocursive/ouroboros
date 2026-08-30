@@ -213,6 +213,33 @@ pub enum Command {
     /// a clean stream for a pipe.
     Ledger(LedgerArgs),
 
+    /// Re-read a recorded session against its journal and print it, deterministically.
+    ///
+    /// Replay executes nothing, spends nothing, and writes no ledger entry: it reads the
+    /// turn journal for provenance — the chain head, how far it verifies, what the budget
+    /// dropped, one row per model call — and then renders the session's own events through
+    /// the same projection the terminal draws. Two runs at the same width are the same
+    /// bytes, which is what makes the output diffable.
+    ///
+    /// Reads a runtime that is already running; it never starts one, because replaying a
+    /// session is a question about history. Native sessions only — every other transport
+    /// has no journal to read, and says so.
+    ///
+    /// Re-calling the model is a *fork*, not a replay. See `ouro fork`.
+    Replay(ReplayArgs),
+
+    /// Branch a recorded session into a new one, optionally at a turn and on another model.
+    ///
+    /// The child id is minted here, before the call, so a reply lost in transit can only
+    /// ever adopt the same child rather than silently create a second one.
+    ///
+    /// `--at` and `--model` are what make a fork an experiment rather than a copy: branch
+    /// at the decision point, substitute the model, and the two journals are directly
+    /// comparable records of the same prefix. A runtime whose fork envelope predates those
+    /// two params refuses them by name, and this says so rather than printing the
+    /// `invalid_params` it was given.
+    Fork(ForkArgs),
+
     /// Computer Use operator surface. `ouro desktop doctor` reports node readiness.
     Desktop {
         #[command(subcommand)]
@@ -357,6 +384,77 @@ pub struct LedgerArgs {
     /// How many entries at most. The runtime bounds this as well, and its bound wins.
     #[arg(long, value_name = "N")]
     pub limit: Option<u64>,
+
+    /// Where the gateway listens. Omitted, the local gateway.json is read instead.
+    #[arg(long, value_name = "HOST:PORT")]
+    pub addr: Option<String>,
+
+    /// A file holding the gateway token. Omitted, the token beside gateway.json is used.
+    #[arg(long, value_name = "PATH")]
+    pub token_file: Option<PathBuf>,
+}
+
+/// `ouro replay`'s flags.
+#[derive(Debug, Args)]
+pub struct ReplayArgs {
+    /// The session to replay.
+    #[arg(value_name = "SESSION")]
+    pub session: String,
+
+    /// The machine that owns the session. Omitted, the one this command reached.
+    #[arg(long, value_name = "NAME")]
+    pub node: Option<String>,
+
+    /// Also ask the runtime to re-derive the session from its record and print the
+    /// verdict, or the divergence it found by name.
+    #[arg(long)]
+    pub verify: bool,
+
+    /// The raw journal records and then the raw events, one JSON object per line, on
+    /// stdout. The provenance header moves to stderr so the stream stays pipeable.
+    #[arg(long)]
+    pub json: bool,
+
+    /// The measure the transcript wraps prose at. Fixed rather than the terminal's, so
+    /// the same session renders the same bytes from any window.
+    #[arg(long, value_name = "N", default_value_t = ouro_replay_default_width())]
+    pub width: usize,
+
+    /// Where the gateway listens. Omitted, the local gateway.json is read instead.
+    #[arg(long, value_name = "HOST:PORT")]
+    pub addr: Option<String>,
+
+    /// A file holding the gateway token. Omitted, the token beside gateway.json is used.
+    #[arg(long, value_name = "PATH")]
+    pub token_file: Option<PathBuf>,
+}
+
+/// Named rather than written twice: the help text and the renderer must agree about the
+/// default, and a literal in both places is how they stop agreeing.
+fn ouro_replay_default_width() -> usize {
+    crate::replay_cli::DEFAULT_WIDTH
+}
+
+/// `ouro fork`'s flags.
+#[derive(Debug, Args)]
+pub struct ForkArgs {
+    /// The session to branch.
+    #[arg(value_name = "SESSION")]
+    pub session: String,
+
+    /// The machine that owns it. Omitted, the one this command reached.
+    #[arg(long, value_name = "NAME")]
+    pub node: Option<String>,
+
+    /// Branch at this turn instead of at the tail. The child is seeded with the parent's
+    /// conversation truncated to that point — the same turn ids `ouro` shows in the
+    /// backtrack menu.
+    #[arg(long, value_name = "TURN")]
+    pub at: Option<String>,
+
+    /// Run the child on this model spec instead of inheriting the parent's.
+    #[arg(long, value_name = "SPEC")]
+    pub model: Option<String>,
 
     /// Where the gateway listens. Omitted, the local gateway.json is read instead.
     #[arg(long, value_name = "HOST:PORT")]
