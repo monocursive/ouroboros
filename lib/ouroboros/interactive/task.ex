@@ -9,6 +9,7 @@ defmodule Ouroboros.Interactive.Task do
   alias Ouroboros.Interactive.{Event, State, Store}
   alias Ouroboros.Interactive.Task.{Approvals, Resume, Shell, Turns}
   alias Ouroboros.Provider
+  alias Ouroboros.Provider.Native.Paths
   alias Ouroboros.Provider.Native.Session, as: NativeSession
   alias Ouroboros.Provider.Session, as: ProviderSession
   alias Ouroboros.Team
@@ -294,6 +295,19 @@ defmodule Ouroboros.Interactive.Task do
       {:error, reason} ->
         {:reply, {:error, reason}, runtime}
     end
+  end
+
+  # R2. This coordinator answers *where the record is and what shape the session was*, and
+  # nothing more. Verification itself re-runs a turn loop per recorded turn and is bounded at
+  # two minutes by the gateway, so doing it inside this `handle_call` would freeze the
+  # session — no turn, no approval, no interrupt — for as long as it took. The caller runs
+  # it, on this node, in its own process.
+  #
+  # The plan is what the engine cannot read out of the journal: the workspace above all,
+  # because the system prompt and the tool list are *re-derived* from it rather than read
+  # back — the record holds their digests and not their bytes.
+  def handle_call(:replay_plan, _from, runtime) do
+    {:reply, replay_plan(runtime.session), runtime}
   end
 
   def handle_call(:rewind_points, _from, runtime) do
@@ -1619,6 +1633,64 @@ defmodule Ouroboros.Interactive.Task do
                 "this runtime. Only a `native` session can #{verb}."
           }}}
     end
+  end
+
+  defp replay_plan(%State{} = session) do
+    with :ok <- native_record(session),
+         {:ok, provider_session_id} <- recorded_session(session),
+         {:ok, session_dir, _durable?} <- Paths.session_dir(provider_session_id) do
+      {:ok, {session_dir, replay_options(session, provider_session_id)}}
+    end
+  end
+
+  # The same capability answer `native_transport/2` gives, minus the liveness half: a vendor
+  # session has no journal to verify and never will, and saying so is a different fact from
+  # "this native session is not running right now".
+  defp native_record(%State{} = session) do
+    case session_transport(session) do
+      :native ->
+        :ok
+
+      transport ->
+        {:error,
+         {:unsupported_on_transport,
+          %{
+            transport: transport,
+            verb: :replay_verify,
+            provider: session.provider,
+            message:
+              "#{inspect(session.provider)} reaches this session over the " <>
+                "#{inspect(transport)} transport, which keeps no turn journal on this " <>
+                "runtime. Only a `native` session can be replay-verified."
+          }}}
+    end
+  end
+
+  defp recorded_session(%State{provider_session_id: id}) when is_binary(id) and id != "",
+    do: {:ok, id}
+
+  defp recorded_session(_session),
+    do:
+      {:error,
+       {:replay_refused,
+        %{
+          reason: :not_started,
+          message:
+            "this session never opened a native transport, so nothing recorded a journal " <>
+              "for it. Send a turn first."
+        }}}
+
+  defp replay_options(%State{} = session, provider_session_id) do
+    [
+      workspace: session.workspace,
+      add_dirs: Map.get(session.options, :add_dirs, []),
+      allowed_tools: Map.get(session.options, :allowed_tools),
+      disallowed_tools: Map.get(session.options, :disallowed_tools),
+      system_prompt: Map.get(session.options, :system_prompt),
+      event_limit: Map.get(session.options, :event_limit),
+      session_id: session.id,
+      provider_session_id: provider_session_id
+    ]
   end
 
   defp compact(%{session: session} = runtime, focus) do

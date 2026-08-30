@@ -9,6 +9,7 @@ defmodule Ouroboros.InteractiveSession do
 
   alias Jido.Harness.ApprovalResponse
   alias Ouroboros.Interactive.{Ref, State, Store, Task}
+  alias Ouroboros.Provider.Native.Replay
   alias Ouroboros.Team
   alias Ouroboros.Workspace.Exec
 
@@ -28,6 +29,13 @@ defmodule Ouroboros.InteractiveSession do
   # ceilings are layered so that the innermost one answers: the coordinator denies at 13
   # minutes, this transport stops waiting at 14, and the gateway kills the task at 15.
   @approval_request_timeout 14 * 60 * 1_000
+
+  # R2. Verified replay re-derives a whole session — one turn loop per recorded turn — and
+  # the gateway stops waiting at two minutes. This sits just below that on purpose, the way
+  # the signing `:erpc` bound does: letting the remote call decide first produces the honest
+  # answer, which is that the owner node did not finish, rather than a bare gateway ceiling
+  # with nothing in it.
+  @replay_verify_timeout 110_000
 
   @doc "Starts or adopts a caller-independent interactive coding session."
   @spec start(keyword()) :: {:ok, Ref.t()} | {:error, term()}
@@ -639,6 +647,43 @@ defmodule Ouroboros.InteractiveSession do
   bound is a record they cannot rely on.
   """
   def journal(session, opts \\ []), do: call(session, {:journal, opts})
+
+  @doc """
+  R2. Re-runs this session's recorded turns through the real loop and answers the verdict.
+
+  `%{verified:, turns:, records:, head:, divergence:}` — `turns` is how many verified, which
+  is why a bounded record answers with a number rather than with a failure. Divergence is
+  named, never continued past: either the loop re-derives what was recorded or it says at
+  which record and in which field it stopped agreeing.
+
+  Reads the journal file, so it needs no live native transport — a session whose runtime
+  died a week ago replays wherever its session directory is. It does need the session's
+  workspace, because the system prompt and the tool list are re-derived from it rather than
+  read out of a record that holds only their digests.
+
+  Two steps, and the split is the point. The coordinator is asked only *where the record is
+  and what shape the session was* — a cheap question — and the verification itself runs in
+  the caller's own process on the owner node, because re-running a turn loop per recorded
+  turn inside the coordinator's `handle_call` would freeze the session for as long as it
+  took. The caller's ceiling, not the session's availability, is what bounds it.
+  """
+  def replay_verify(session) do
+    with {:ok, _id, owner} <- session_identity(session),
+         {:ok, plan} <- call(session, :replay_plan) do
+      route(owner, __MODULE__, :verify_plan, [plan], @replay_verify_timeout)
+    end
+  end
+
+  @doc false
+  @spec verify_plan({String.t(), keyword()}) :: {:ok, map()} | {:error, term()}
+  def verify_plan({session_dir, opts}) do
+    case Replay.verify(session_dir, opts) do
+      # The events are the engine's own working evidence and can run to tens of thousands of
+      # deltas for a single turn. The verdict is what a caller asked for; the stream is not.
+      {:ok, verdict} -> {:ok, Map.delete(verdict, :events)}
+      {:error, reason} -> {:error, {:replay_refused, reason}}
+    end
+  end
 
   @doc """
   Hands this session's work to a fresh one seeded with a curated packet.

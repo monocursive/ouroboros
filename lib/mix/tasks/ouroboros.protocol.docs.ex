@@ -86,6 +86,7 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
     "coding_event_detail_result" => {:method, "coding.event_detail"},
     "code_intel_diagnostics_result" => {:method, "code_intel.diagnostics"},
     "interactive_journal_result" => {:method, "interactive.journal"},
+    "interactive_replay_verify_result" => {:method, "interactive.replay_verify"},
     "ledger_list_result" => {:method, "ledger.list"},
     "ledger_export_result" => {:method, "ledger.export"},
     "mcp_list_result" => {:method, "mcp.list"},

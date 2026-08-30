@@ -136,6 +136,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       {"ledger_list_result", ledger_list_result()},
       {"ledger_export_result", ledger_export_result()},
       {"interactive_journal_result", interactive_journal_result()},
+      {"interactive_replay_verify_result", interactive_replay_verify_result()},
       {"stream_lagged_notification", stream_lagged_notification()},
       {"stream_ended_notification", stream_ended_notification()},
       {"error_unauthenticated", error_unauthenticated()},
@@ -1205,6 +1206,32 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
           "conversation_digest" => String.duplicate("4", 64)
         }
       ]
+    })
+  end
+
+  # R2. A verdict from verified replay, and deliberately the *bounded* one rather than the
+  # happy answer: `verified: false` with `turns: 2` is the shape a client is most likely to
+  # get wrong, because the two fields together say something neither says alone — the record
+  # was verified as far as it went, and it stopped going at a named record. A fixture that
+  # showed only `verified: true, divergence: null` would let a client ship treating the
+  # boolean as the whole answer.
+  #
+  # `divergence` is one object with a `kind` discriminator either way. `boundary` carries
+  # `reason` and an optional `detail`; the other kind is `diverged` and carries `field`,
+  # `expected_sha256` and `got_sha256` instead. Both always carry `seq`, because the one
+  # question a reader always has is *which record*.
+  defp interactive_replay_verify_result do
+    Conn.result_frame(15, %{
+      "verified" => false,
+      "turns" => 2,
+      "records" => 19,
+      "head" => String.duplicate("c", 64),
+      "divergence" => %{
+        "kind" => "boundary",
+        "reason" => "compaction",
+        "detail" => nil,
+        "seq" => 12
+      }
     })
   end
 

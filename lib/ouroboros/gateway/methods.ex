@@ -97,6 +97,7 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Provider.OpenAIAuth
   alias Ouroboros.Provider.Native.Desktop
   alias Ouroboros.Provider.Native.Mcp
+  alias Ouroboros.Provider.Native.Replay
   alias Ouroboros.Runtime.Capabilities
   alias Ouroboros.Team
   alias Ouroboros.Upgrade.NodeExecutor
@@ -171,6 +172,16 @@ defmodule Ouroboros.Gateway.Methods do
   # Preview and admit run the forge build peer (60s default) and, for admit, a rollout.
   # Keep the gateway ceiling above that so a named forge refusal wins over -32005.
   @forge_timeout 120_000
+
+  # R2. Verified replay re-derives a whole session: one `Loop.run_turn/2` per recorded turn,
+  # each rebuilding the cached prefix from the workspace (instruction files, the tool
+  # schemas) and re-digesting the conversation. There is no provider latency in any of it —
+  # the model is a recording — so the cost is local CPU and local reads, and it scales with
+  # how long the session was. Two minutes is chosen the way `@compaction_timeout` is: well
+  # above what any session an operator would ask about takes, and well below a ceiling that
+  # would let one call hold a gateway task for a shift. A session too long to verify inside
+  # it is a real answer — that session needs an offline verifier, not a longer socket.
+  @replay_verify_timeout 120_000
 
   # `Team.add_worker/3` and `delegate/4` bound themselves at 60s; `cancel/2` and `close/1`
   # call at `:infinity`. Both land here as 60s, and for the two `:infinity` verbs the
@@ -340,6 +351,11 @@ defmodule Ouroboros.Gateway.Methods do
     # truncates its conversation; it is the native transport's verb and refused elsewhere.
     "interactive.rewind" => %{scope: :operate, timeout: @compaction_timeout},
     "interactive.rewind_points" => %{scope: :read, timeout: @default_timeout},
+    # R2. Verified replay. `:operate` rather than `:read` by the dividing line this table
+    # already draws at `computer_use.status`/`probe`: it starts a process — a real turn loop
+    # per recorded turn — even though it spends no tokens, executes no tool and writes
+    # nothing. Its own ceiling, because a long session re-derives many turns.
+    "interactive.replay_verify" => %{scope: :operate, timeout: @replay_verify_timeout},
     # B7. The operator's own shell, in the session's admitted workspace, on its owner
     # node. `:operate` and nothing less: it runs a command. The ceiling is the runner's
     # own — ten minutes — because the gateway killing the task would leave a ledger entry
@@ -695,6 +711,13 @@ defmodule Ouroboros.Gateway.Methods do
          @limit_param,
          @session_node
        ], "native sessions only; every other transport answers `-32006`"},
+    "interactive.replay_verify" =>
+      {:closed, [@session_id, @session_node],
+       "native sessions only; every other transport answers `-32006`. Re-runs the recorded " <>
+         "turns through the real turn loop and answers `{verified, turns, records, head, " <>
+         "divergence}`. `divergence` is `null`, a `diverged` object naming the record and " <>
+         "the field that stopped agreeing, or a `boundary` object naming why verification " <>
+         "stops there — `turns` counts what verified either way"},
     "interactive.context" => {:closed, [@session_id, @session_node]},
     "interactive.delegations" => {:closed, [@session_id, @session_node]},
     "interactive.subscribe" =>
@@ -1280,6 +1303,20 @@ defmodule Ouroboros.Gateway.Methods do
     else
       {:invalid, message} -> invalid_params(message)
     end
+  end
+
+  # R2. The verdict is shaped here rather than in the engine, because the engine's own
+  # vocabulary is tuples — `{:replay_diverged, …}` and `{:replay_boundary, reason, seq}` —
+  # and a wire that flattened both into a string would make a client guess which it had.
+  def invoke("interactive.replay_verify", params) do
+    with_session(params, :interactive, ["id", "node"], fn session ->
+      safe(fn ->
+        case InteractiveSession.replay_verify(session) do
+          {:ok, verdict} -> {:ok, replay_verdict(verdict)}
+          other -> reply(other)
+        end
+      end)
+    end)
   end
 
   def invoke("coding.list", _params), do: safe(fn -> Present.fleet_sessions(CodingSession) end)
@@ -2725,6 +2762,19 @@ defmodule Ouroboros.Gateway.Methods do
     else
       {:invalid, message} -> invalid_params(message)
     end
+  end
+
+  # A closed answer, and `verified` is not derivable from `divergence` being absent on the
+  # client side alone — a bounded record is *not* verified and still names no divergence in
+  # the diverged sense, so the boolean is stated rather than implied.
+  defp replay_verdict(verdict) do
+    %{
+      "verified" => verdict.verified == true,
+      "turns" => verdict.turns,
+      "records" => verdict.records,
+      "head" => verdict.head,
+      "divergence" => Replay.describe(verdict.divergence)
+    }
   end
 
   defp session_target(plane, params) do
