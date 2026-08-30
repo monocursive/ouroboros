@@ -875,6 +875,10 @@ defmodule Ouroboros.Gateway.Methods do
        [
          @session_id,
          {"fork_id", :optional, :string, "caller-owned id for the child"},
+         {"to_turn", :optional, :turn_target,
+          "branch at the end of this turn rather than at the tail; native sessions only, and refused rather than silently widened when the parent no longer holds that boundary"},
+         {"model", :optional, :string,
+          "the child's model, replacing the parent's rather than inheriting it"},
          @session_node
        ]},
     "interactive.rewind" =>
@@ -1670,12 +1674,19 @@ defmodule Ouroboros.Gateway.Methods do
   # B6. The child's id is caller-owned for the same reason a start's is: a ceiling can
   # fire after the child exists, and a client that had to mint a second id to find out
   # would create a second session instead.
+  #
+  # R3. `to_turn` and `model` are the two things a fork may change about the child. Both
+  # are validated here and decided deeper: whether this provider can branch anywhere but
+  # its tail is `Ouroboros.Provider.session_fork_options/3`'s answer, and whether the
+  # parent still holds the named boundary is the native session's.
   def invoke("interactive.fork", params) do
     safe(fn ->
-      with :ok <- only_keys(params, ["id", "fork_id", "node"]),
+      with :ok <- only_keys(params, ["id", "fork_id", "to_turn", "model", "node"]),
            {:ok, session} <- session_target(:interactive, params),
-           {:ok, fork_id} <- fetch_optional_string(params, "fork_id") do
-        fork_reply(InteractiveSession.fork(session, fork_id))
+           {:ok, fork_id} <- fetch_optional_string(params, "fork_id"),
+           {:ok, to_turn} <- fetch_optional_rewind_target(params, "to_turn"),
+           {:ok, model} <- fetch_optional_option_string(params, "model") do
+        fork_reply(InteractiveSession.fork(session, fork_id, %{to_turn: to_turn, model: model}))
       else
         {:invalid, message} -> invalid_params(message)
       end
@@ -2823,6 +2834,22 @@ defmodule Ouroboros.Gateway.Methods do
       value when is_integer(value) and value >= 0 -> {:ok, value}
       _other -> {:invalid, "params.#{key} must be a turn id or a non-negative turn number"}
     end
+  end
+
+  # The same target where naming none is a legitimate answer: `interactive.fork` without a
+  # `to_turn` branches at the tail, which is what it has always done.
+  defp fetch_optional_rewind_target(params, key) do
+    if Map.has_key?(params, key), do: fetch_rewind_target(params, key), else: {:ok, nil}
+  end
+
+  # `interactive.start` validates `model` through `option_value/3`'s `:string`, which
+  # refuses a whitespace-only spec rather than passing it to a resolver. A fork's `model`
+  # is the same option reaching the same place, so it is held to the same rule instead of
+  # `fetch_optional_string/2`'s slightly looser one.
+  defp fetch_optional_option_string(params, key) do
+    if Map.has_key?(params, key),
+      do: option_value(key, :string, Map.get(params, key)),
+      else: {:ok, nil}
   end
 
   defp fetch_optional_enum(params, key, allowed) do

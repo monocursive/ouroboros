@@ -64,11 +64,18 @@ defmodule Ouroboros.Provider do
     :dynamic_configuration
   ]
 
-  # Not `InteractionCapabilities` fields: the harness has no notion of forking a session
-  # and none of folding one, so `:fork` and `:compact` are derived beside the declared set
-  # — from the dialect, or from the adapter table below. Listed here so the public shape
-  # stays one map with one docstring.
-  @derived_capability_keys [:fork, :compact]
+  # Not `InteractionCapabilities` fields: the harness has no notion of forking a session,
+  # none of folding one, and none of replaying one, so `:fork`, `:compact` and `:replay`
+  # are derived beside the declared set — from the dialect, or from the adapter table
+  # below. Listed here so the public shape stays one map with one docstring.
+  #
+  # R3/D10. `:replay` is the one key here whose value is a boolean rather than a member of
+  # the `:native | :managed | :process | false` vocabulary above: replay is not a thing a
+  # transport does *some other way*, it is a thing this runtime's own turn journal either
+  # recorded or did not. It is emitted for **every** provider, `false` where it does not
+  # hold, because the Rust client reads an absent capability key as offered and an omitted
+  # `:replay` would therefore claim replayability for every vendor session on the wire.
+  @derived_capability_keys [:fork, :compact, :replay]
 
   # Run adapters whose `provider_options.fork_session` is a **boolean** that branches the
   # session named by `provider_session_id`, rather than something else wearing the same
@@ -255,6 +262,7 @@ defmodule Ouroboros.Provider do
       |> Map.new(&{&1, Map.get(capabilities, &1, false)})
       |> Map.put(:fork, fork_capability(provider, spec, declared))
       |> Map.put(:compact, compact_capability(declared))
+      |> Map.put(:replay, replay_capability(declared))
     else
       _unresolvable -> nil
     end
@@ -287,6 +295,18 @@ defmodule Ouroboros.Provider do
       _unresolvable -> false
     end
   end
+
+  # R3/D10. Only the native transport runs its tool loop in this runtime, so only a native
+  # session has a turn journal to replay from — limit 1 of REPLAY.md §8, said per session
+  # rather than left for a client to infer from `transport`.
+  #
+  # Deliberately two-state. REPLAY.md §7.3 also specifies a `"degraded"` value for a native
+  # session whose journal has gaps, and that is *not* answerable here: this function is
+  # documented and used as a projection-time derivation from the provider spec alone — no
+  # session id reaches it, no live process is consulted, and it is called for every row of
+  # `interactive.list`. Reading each session's journal to answer it would turn a list into
+  # a directory walk per row. Deferred rather than faked; see the report.
+  defp replay_capability(declared), do: Session.capabilities(declared).transport == :native
 
   defp compact_capability(declared) do
     cond do
@@ -326,11 +346,21 @@ defmodule Ouroboros.Provider do
   Everything else answers `{:error, {:unforkable_session, …}}`, including ACP: neither
   bundled ACP agent publishes a branch verb, and `session/load` continues a session rather
   than copying it.
+
+  R3. `to_turn` names a turn to branch *at* rather than at the tail. It is answered here
+  because this is the one place in the fork chain that knows the provider's shape: only
+  the native transport hands its conversation to this runtime, so only a native fork can
+  be cut at a turn boundary. A vendor session branches where the vendor's own flag
+  branches it — the tail — and asking for anything else is
+  `{:error, {:unforkable_at_turn, …}}` rather than a fork that silently ignored the
+  parameter and copied the whole thread.
   """
-  @spec session_fork_options(term(), atom() | nil) :: {:ok, map()} | {:error, term()}
-  def session_fork_options(provider, transport \\ nil) do
+  @spec session_fork_options(term(), atom() | nil, String.t() | non_neg_integer() | nil) ::
+          {:ok, map()} | {:error, term()}
+  def session_fork_options(provider, transport \\ nil, to_turn \\ nil) do
     with {:ok, spec} <- fork_spec(provider),
-         {:ok, declared} <- fork_transport(spec, provider, transport) do
+         {:ok, declared} <- fork_transport(spec, provider, transport),
+         :ok <- forkable_at_turn(spec, declared, to_turn) do
       case fork_option(provider, spec, declared) do
         nil ->
           {:error,
@@ -346,8 +376,35 @@ defmodule Ouroboros.Provider do
             }}}
 
         {key, value} ->
-          {:ok, %{key => value}}
+          {:ok, fork_turn_option(%{key => value}, to_turn)}
       end
+    end
+  end
+
+  # A tail fork carries no turn option at all, so a provider that never learned to read one
+  # sees exactly the request it saw before this parameter existed.
+  defp fork_turn_option(options, nil), do: options
+  defp fork_turn_option(options, to_turn), do: Map.put(options, :fork_to_turn, to_turn)
+
+  defp forkable_at_turn(_spec, _declared, nil), do: :ok
+
+  defp forkable_at_turn(spec, declared, to_turn) do
+    if Session.capabilities(declared).transport == :native do
+      :ok
+    else
+      {:error,
+       {:unforkable_at_turn,
+        %{
+          provider: spec.provider,
+          transport: declared.name,
+          to_turn: to_turn,
+          reason: :vendor_forks_at_tail,
+          message:
+            "#{inspect(spec.provider)} reaches an interactive session over the " <>
+              "#{inspect(declared.name)} transport, which branches a thread where it " <>
+              "currently stands and nowhere else. Fork without `to_turn` to branch at the " <>
+              "tail; only a native session's conversation is this runtime's to cut."
+        }}}
     end
   end
 

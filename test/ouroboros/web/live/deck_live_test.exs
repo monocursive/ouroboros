@@ -593,6 +593,51 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       refute html =~ "ouro-meter-fill"
     end
 
+    # R3/D10. The replay badge on the web's focused pane. Three renders, because the three
+    # states say different things and the one that matters most is the third: a session
+    # whose provider declared nothing is "—", not "no". Deliberately *not* a rail-row
+    # badge — `Rail.Row` carries no capabilities field and REPLAY.md §7.3 records that as
+    # a deferred divergence rather than a gap nobody noticed.
+    test "the Replay vital reports what the session's capabilities say", %{conn: conn} do
+      id = session_id()
+
+      _plane =
+        plane(
+          id: id,
+          backlogs: [{:ok, []}],
+          options: %{capabilities: %{replay: true, fork: :native}}
+        )
+
+      {:ok, _view, html} = live(conn, "/s/interactive/#{id}")
+
+      assert html =~ "Replay"
+      assert html =~ ~r/Replay<\/dt>\s*<dd[^>]*>\s*yes/
+    end
+
+    test "a session on a provider that cannot replay says so rather than staying blank",
+         %{conn: conn} do
+      id = session_id()
+
+      _plane =
+        plane(id: id, backlogs: [{:ok, []}], options: %{capabilities: %{replay: false}})
+
+      {:ok, _view, html} = live(conn, "/s/interactive/#{id}")
+
+      assert html =~ ~r/Replay<\/dt>\s*<dd[^>]*>\s*no/
+    end
+
+    test "a session whose provider declared nothing is unanswered, not unreplayable",
+         %{conn: conn} do
+      id = session_id()
+      _plane = plane(id: id, backlogs: [{:ok, []}], options: %{})
+
+      {:ok, _view, html} = live(conn, "/s/interactive/#{id}")
+
+      # "not answered" and "not replayable" are different facts, and the vital that spelled
+      # them the same would be exactly the lie this capability exists to prevent.
+      assert html =~ ~r/Replay<\/dt>\s*<dd[^>]*>\s*—/
+    end
+
     test "a live event reaches the transcript after the coalescing window", %{conn: conn} do
       id = session_id()
 

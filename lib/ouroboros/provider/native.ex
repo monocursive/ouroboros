@@ -130,6 +130,10 @@ defmodule Ouroboros.Provider.Native do
       # `subagent_deadline_ms` bounds how long one may run. The rest of a child's shape —
       # its depth, its parent, its task id — is set by this runtime when it opens the child
       # and would be a way to forge a lineage if a request could name it.
+      # R3's `fork_to_turn` rides beside `fork_session` for the same reason: a fork's
+      # branch point is start intent that only exists at open, and this is the one channel
+      # a start carries it on. It is meaningless without `fork_session`, and the session
+      # ignores it when that is absent — a resume is not a branch.
       provider_options: [
         :max_iterations,
         :tool_timeout_ms,
@@ -137,6 +141,7 @@ defmodule Ouroboros.Provider.Native do
         :plan,
         :subagent_model,
         :fork_session,
+        :fork_to_turn,
         :subagent_deadline_ms
       ]
     )

@@ -55,6 +55,10 @@ defmodule Ouroboros.Coding.TaskState do
     :fallback_model,
     :fork,
     :fork_session,
+    # R3. A turn id or ordinal naming where a native fork branches. Reproducible execution
+    # policy in exactly the sense this list means: it is the branch point a child was
+    # started at, it is worth nothing without `fork_session`, and it carries no secret.
+    :fork_to_turn,
     :log_file,
     :log_level,
     :max_budget_usd,

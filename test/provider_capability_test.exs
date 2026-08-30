@@ -135,7 +135,7 @@ defmodule Ouroboros.ProviderCapabilityTest do
       end
     end
 
-    test "the twelve declared keys are present for every bundled provider and Wire-safe" do
+    test "the thirteen declared keys are present for every bundled provider and Wire-safe" do
       expected =
         Enum.sort([
           :transport,
@@ -149,11 +149,12 @@ defmodule Ouroboros.ProviderCapabilityTest do
           :dynamic_model,
           :dynamic_configuration,
           # Not `InteractionCapabilities` fields: the harness has no notion of branching a
-          # session and none of folding one, so these two are derived from the dialect or
-          # the adapter's own provider-option list. They still have to be in the map a
-          # client reads.
+          # session, none of folding one, and none of replaying one, so these three are
+          # derived from the dialect or the adapter's own provider-option list. They still
+          # have to be in the map a client reads.
           :fork,
-          :compact
+          :compact,
+          :replay
         ])
 
       assert Enum.sort(Provider.capability_keys()) == expected
@@ -162,10 +163,15 @@ defmodule Ouroboros.ProviderCapabilityTest do
         capabilities = Provider.session_capabilities(provider)
         assert capabilities |> Map.keys() |> Enum.sort() == expected
 
-        for {key, value} <- Map.delete(capabilities, :transport) do
+        # `:replay` is the one boolean here. Replay is not something a transport does some
+        # other way — it is something this runtime's own turn journal either recorded or
+        # did not — so it has no place in the `:native | :managed | :process` vocabulary.
+        for {key, value} <- Map.drop(capabilities, [:transport, :replay]) do
           assert value in [:native, :provider, :managed, :process, :persistent, :per_turn, false],
                  "#{provider} #{key} is #{inspect(value)}"
         end
+
+        assert is_boolean(capabilities.replay), "#{provider} replay is #{inspect(capabilities)}"
 
         # Nothing here needs an encoder that has to be taught a struct.
         assert Wire.to_json(capabilities) |> JSON.encode!() |> is_binary()
@@ -184,7 +190,7 @@ defmodule Ouroboros.ProviderCapabilityTest do
         declared = Map.from_struct(Dialect.ACP.capabilities())
         resolved = Provider.session_capabilities(provider)
 
-        for {key, value} <- Map.drop(resolved, [:fork, :compact]), key != :transport do
+        for {key, value} <- Map.drop(resolved, [:fork, :compact, :replay]), key != :transport do
           assert Map.fetch!(declared, key) == value
         end
       end
@@ -456,6 +462,39 @@ defmodule Ouroboros.ProviderCapabilityTest do
       end
     end
 
+    # R3/D10. `to_turn` is the one fork parameter that is not provider-neutral: only the
+    # native transport hands its conversation to this runtime, so only a native fork has a
+    # conversation this runtime can cut. Every vendor branches its own thread where the
+    # vendor's flag branches it — at the tail — and the refusal says so rather than
+    # accepting the parameter and ignoring it.
+    test "only a native session can be forked at a turn" do
+      assert {:ok, %{fork_session: true, fork_to_turn: "t2"}} =
+               Provider.session_fork_options(:native, nil, "t2")
+
+      # A turn ordinal is the same target `rewind_points` hands back, and travels the same.
+      assert {:ok, %{fork_to_turn: 0}} = Provider.session_fork_options(:native, nil, 0)
+
+      # Naming no turn is the tail fork this function performed before the parameter
+      # existed, and it carries nothing extra.
+      assert {:ok, options} = Provider.session_fork_options(:native)
+      refute Map.has_key?(options, :fork_to_turn)
+
+      # Claude can fork — it has `--fork-session` — and still cannot fork at a turn. The
+      # two refusals are different facts and are named differently.
+      assert Provider.session_capabilities(:claude).fork == :native
+      assert {:ok, _tail} = Provider.session_fork_options(:claude)
+
+      for provider <- [:claude, :zai, :grok] do
+        assert {:error, {:unforkable_at_turn, details}} =
+                 Provider.session_fork_options(provider, nil, "t2")
+
+        assert details.provider == provider
+        assert details.to_turn == "t2"
+        assert details.reason == :vendor_forks_at_tail
+        assert details.message =~ "native"
+      end
+    end
+
     test "every bundled provider's compact answer names who would do the folding" do
       # Native holds and folds its own conversation. Every other remaining transport
       # neither hands its conversation over nor publishes a fold.
@@ -480,6 +519,40 @@ defmodule Ouroboros.ProviderCapabilityTest do
 
       refute function_exported?(Dialect.ACP, :compact_option, 0)
       assert Provider.session_compact(:nothing_by_this_name) == false
+    end
+
+    # R3/D10. The value being *present and false* is the whole point: the Rust client reads
+    # an absent capability key as offered (`Capability::offered()`), so a map that simply
+    # omitted `:replay` for the eight vendors would claim every one of their sessions is
+    # replayable. Only the native transport runs its tool loop in this runtime, and only a
+    # native session therefore has a turn journal to replay from.
+    test "every bundled provider answers replay explicitly, and only native answers true" do
+      expected = %{
+        native: true,
+        claude: false,
+        zai: false,
+        grok: false,
+        gemini: false,
+        amp: false,
+        opencode: false,
+        kimi: false,
+        pi: false
+      }
+
+      for {provider, replay} <- expected do
+        capabilities = Provider.session_capabilities(provider)
+
+        assert Map.has_key?(capabilities, :replay),
+               "#{provider} omits :replay, which a client reads as offered"
+
+        assert capabilities.replay == replay,
+               "#{provider}: expected replay #{inspect(replay)}"
+      end
+
+      # And it crosses the wire as a JSON boolean rather than a stringified atom, which is
+      # what lets a client decode it as the three-state capability it will become.
+      assert Wire.to_json(%{replay: true}) == %{"replay" => true}
+      assert Wire.to_json(%{replay: false}) == %{"replay" => false}
     end
 
     test "Claude's fork is `--fork-session` beside `--resume`, and the argv proves it" do

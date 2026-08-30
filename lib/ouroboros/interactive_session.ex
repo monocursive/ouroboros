@@ -260,15 +260,27 @@ defmodule Ouroboros.InteractiveSession do
   Refused where the transport declares no way to branch, and where the provider has not
   yet named a session to branch from.
 
+  `overrides` is the small closed envelope a caller may change about the child, and it is
+  a map rather than two more positional arguments because both members are optional and a
+  third would read as `fork(session, id, nil, nil, "gpt-5")`:
+
+    * `:to_turn` — a turn id or ordinal to branch *at*, exactly what `rewind_points/1`
+      hands back. The child's conversation is the parent's truncated to the end of that
+      turn. Native sessions only; a vendor thread branches where the vendor branches it.
+    * `:model` — the child's model, replacing the parent's rather than inheriting it.
+
+  Neither touches the parent, and a fork that names neither is the fork this function
+  performed before they existed.
+
   Three steps, in this order for one reason: the parent's coordinator plans the fork and
   counts it, but never starts it. Starting a session waits on provider readiness with no
   bound, and a coordinator held behind that wait would answer nothing — not `info/1`, not
   `interrupt/2`, not its own turns — until a child it does not own had finished starting.
   """
-  @spec fork(session(), String.t() | nil) :: {:ok, map()} | {:error, term()}
-  def fork(session, id \\ nil) do
+  @spec fork(session(), String.t() | nil, map()) :: {:ok, map()} | {:error, term()}
+  def fork(session, id \\ nil, overrides \\ %{}) do
     with {:ok, _parent_id, owner} <- session_identity(session),
-         {:ok, opts} <- call(session, {:fork_plan, id}),
+         {:ok, opts} <- call(session, {:fork_plan, id, overrides}),
          {:ok, child} <- start_child(owner, opts, :fork_start_failed) do
       # The child exists and carries `forked_from`, which is the durable half of the
       # relationship. The parent's count is a hint that follows it, and a parent that

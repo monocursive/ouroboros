@@ -15,6 +15,7 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
 
   alias Jido.Harness.{Session, SessionInfo}
   alias Ouroboros.Gateway.Methods
+  alias Ouroboros.Gateway.Wire
   alias Ouroboros.Interactive.{State, Store, Task}
   alias Ouroboros.InteractiveSession
   alias Ouroboros.Test.HarnessAdapter
@@ -254,6 +255,81 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
                Methods.invoke("interactive.fork", %{"id" => "some-session", "provider" => "codex"})
 
       assert message =~ "provider"
+    end
+
+    # R3. Both new parameters are in the closed envelope, and both are validated at the
+    # gateway rather than deeper: a `to_turn` of `-1` or a `model` of three spaces is a
+    # parameter error, and answering it as one is what keeps a plane refusal meaningful.
+    test "to_turn and model are validated before anything is planned" do
+      %{envelope: :closed, params: descriptors} = Methods.params()["interactive.fork"]
+
+      assert descriptors |> Enum.map(& &1.name) |> Enum.sort() ==
+               ["fork_id", "id", "model", "node", "to_turn"]
+
+      for name <- ["to_turn", "model"] do
+        descriptor = Enum.find(descriptors, &(&1.name == name))
+        assert descriptor.requirement == :optional
+      end
+
+      for bad <- [-1, "", 1.5, %{}, true] do
+        assert {:error, -32_602, message} =
+                 Methods.invoke("interactive.fork", %{"id" => "some-session", "to_turn" => bad})
+
+        assert message =~ "to_turn"
+        assert message =~ "turn id"
+      end
+
+      for bad <- ["", "   ", 7, nil] do
+        assert {:error, -32_602, message} =
+                 Methods.invoke("interactive.fork", %{"id" => "some-session", "model" => bad})
+
+        assert message =~ "model"
+      end
+    end
+
+    # A vendor session refuses the branch point by name at the wire, which is what lets a
+    # client tell "this provider cannot do that" from "that turn is gone".
+    test "a to_turn on a session that branches only at its tail is refused by name",
+         %{id: id} do
+      ref = start_session(id, sandbox_mode: :read_only)
+      adapter = name_provider_session(ref)
+
+      assert {:error, -32_006, message, data} =
+               Methods.invoke("interactive.fork", %{
+                 "id" => id,
+                 "fork_id" => unique_id("gateway-branch"),
+                 "to_turn" => "t2"
+               })
+
+      assert message =~ "refused the call"
+      assert ["unforkable_at_turn", details] = data
+      assert details["reason"] == "vendor_forks_at_tail"
+      assert details["to_turn"] == "t2"
+
+      if Process.alive?(adapter), do: HarnessAdapter.finish(adapter)
+      retire_session(id)
+    end
+
+    # R3/D10. The capability a client greys the replay verb from, on the two surfaces a
+    # client actually reads. Present and `false` rather than absent: the Rust client reads
+    # an absent key as offered.
+    test "interactive.info and interactive.list both carry the replay capability",
+         %{id: id} do
+      start_session(id, sandbox_mode: :read_only)
+
+      assert {:ok, info} = Methods.invoke("interactive.info", %{"id" => id})
+      assert Map.has_key?(info.options.capabilities, :replay)
+      assert info.options.capabilities.replay == false
+
+      assert {:ok, listed} = Methods.invoke("interactive.list", %{})
+      row = Enum.find(listed, &(&1.id == id))
+      assert row
+      assert row.options.capabilities.replay == false
+
+      # And it survives the wire encoder as a JSON boolean, not a stringified atom.
+      assert %{"replay" => false} = Wire.to_json(info.options.capabilities)
+
+      retire_session(id)
     end
   end
 

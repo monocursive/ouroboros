@@ -379,7 +379,15 @@ defmodule Ouroboros.Interactive.Task do
   # this answers with the child's start intent and nothing else, and
   # `Ouroboros.InteractiveSession.fork/2` starts the child outside this process.
   def handle_call({:fork_plan, id}, _from, runtime) do
-    {:reply, fork_plan(runtime.session, id), runtime}
+    {:reply, fork_plan(runtime.session, id, %{}), runtime}
+  end
+
+  # R3. The three-element form carries the branch point and the model substitution. Both
+  # clauses stay: a fork is planned by calling into the *parent's* coordinator, which on a
+  # fleet may be an older build on another node, and a call it cannot match would kill the
+  # parent rather than refuse the child.
+  def handle_call({:fork_plan, id, overrides}, _from, runtime) do
+    {:reply, fork_plan(runtime.session, id, overrides), runtime}
   end
 
   # Counted only once the child exists, so the number never claims a session nobody can
@@ -1543,12 +1551,21 @@ defmodule Ouroboros.Interactive.Task do
   # The workspace is admitted exactly as it is for any other session, which means a fork
   # of a live session holding an exclusive lease is refused by the lease. That is honest
   # and it is a real limit: until worktrees (D7), a branch runs where the parent is not.
-  defp fork_plan(%State{} = session, id) do
+  #
+  # R3. `overrides` is the closed envelope `interactive.fork` accepts beyond the child's
+  # id: `:to_turn` names a branch point other than the tail, `:model` substitutes the
+  # child's model. Everything absent from it is still the parent's own start intent, which
+  # is what keeps a plain fork a plain fork.
+  defp fork_plan(%State{} = session, id, overrides) do
     with {:ok, id} <- validate_fork_id(id),
          {:ok, parent_session_id} <- forkable_provider_session(session),
          {:ok, fork_options} <-
-           Provider.session_fork_options(session.provider, Map.get(session.options, :transport)) do
-      {:ok, fork_start_options(session, id, parent_session_id, fork_options)}
+           Provider.session_fork_options(
+             session.provider,
+             Map.get(session.options, :transport),
+             Map.get(overrides, :to_turn)
+           ) do
+      {:ok, fork_start_options(session, id, parent_session_id, fork_options, overrides)}
     end
   end
 
@@ -2090,7 +2107,13 @@ defmodule Ouroboros.Interactive.Task do
   # identity (its own id, its own place in a fork tree) and plus the two that make it a
   # branch. Options are read from the durable record, so a child of a session whose mode
   # was changed mid-life starts under the mode it is actually running with.
-  defp fork_start_options(%State{} = session, id, parent_session_id, fork_options) do
+  #
+  # R3. Except for `model`, which is the one piece of start intent a fork may *replace*
+  # rather than inherit. It is applied here, after the merge, so the child's start request
+  # carries the substituted spec everywhere the parent's would have carried its own — which
+  # is what puts it in the child's first `turn_started` journal record and makes a
+  # fork-for-eval self-describing rather than something an operator has to remember.
+  defp fork_start_options(%State{} = session, id, parent_session_id, fork_options, overrides) do
     provider_options =
       session.options
       |> Map.get(:provider_options, %{})
@@ -2112,7 +2135,10 @@ defmodule Ouroboros.Interactive.Task do
         forked_from: session.id
       )
 
-    opts
+    case Map.get(overrides, :model) do
+      nil -> opts
+      model -> Keyword.put(opts, :model, model)
+    end
   end
 
   # A wedged provider used to be retried every 25ms, rewriting the whole session
