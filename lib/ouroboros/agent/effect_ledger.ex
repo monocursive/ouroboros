@@ -29,9 +29,10 @@ defmodule Ouroboros.Agent.EffectLedger do
 
   I1 put two high-volume kinds in here — a `:tool_call` for every tool the native agent
   runs, and an `:approval` for every human answer — beside kinds a node produces a handful
-  of times in its life. A single global "keep the newest N" would let one long turn's four
-  hundred tool calls evict the only `:forge` this machine ever ran, which is the opposite
-  of what a durable record is for.
+  of times in its life. R1 added a third, `:inference`, one per model round-trip, which is
+  the highest-volume of the lot. A single global "keep the newest N" would let one long
+  turn's four hundred tool calls evict the only `:forge` this machine ever ran, which is
+  the opposite of what a durable record is for.
 
   So eviction is max-min fair by effect kind: every kind present keeps its newest
   `retention_limit / kinds present` terminal entries before any kind keeps a second batch,
@@ -44,7 +45,10 @@ defmodule Ouroboros.Agent.EffectLedger do
   being raised for the new kinds. A larger number is a larger object to serialize and fsync
   on every single write, and every tool call already costs two of those; an operator who
   wants a longer native history raises the number knowingly rather than paying for it by
-  default.
+  default. A fifth kind present moves the per-kind quota from 1000/4 to 1000/5, which is
+  acceptable because this ledger is the *authority* record and the session's turn journal
+  (`Ouroboros.Provider.Native.Journal`) is the replay substrate: what an evicted
+  `:inference` entry costs is the accountability row, not the recording of the call.
   """
 
   use GenServer
@@ -54,7 +58,15 @@ defmodule Ouroboros.Agent.EffectLedger do
   alias Ouroboros.Control.Grants
 
   @store_key {:ouroboros, :agent_effect_ledger, 1}
-  @checkpoint_version 1
+  @checkpoint_version 2
+  # A version-1 checkpoint is read as-is: the `Entry` struct did not change when
+  # `:inference` was added, so there is nothing to widen. What the bump buys is the other
+  # direction — an *older* build reading a checkpoint that contains `:inference` entries
+  # would fail `valid_entry?/1` on `effect in effects()` and discard the whole file as
+  # `:invalid_effect_ledger_checkpoint`, losing every entry rather than refusing cleanly.
+  # With the version stamped, that build says `:unsupported_effect_ledger_checkpoint` and
+  # stops, which is the difference between "I cannot read this" and "this is garbage".
+  @upgradable_versions [1]
   @default_retention_limit 1_000
   @default_query_limit 100
   @max_query_limit 500
@@ -104,7 +116,17 @@ defmodule Ouroboros.Agent.EffectLedger do
       :subject,
       :node,
       :permission_entry_id
-    ]
+    ],
+    # R1. One model round-trip, checkpointed before the request leaves this node. The
+    # correlation key across runs is `(session_id, turn_id, iteration)`: entry ids embed
+    # nanosecond time by design and must not be expected to reproduce, so a replay that
+    # wanted to line two runs up would have nothing to line them up *by* without these
+    # three. `prompt_sha256` is a digest of the wire request after the model client's own
+    # projection — not of `state.messages` — which is what makes it cover the
+    # iteration-mutated system suffix and the final round's empty tool list. It is an
+    # unvalidated string, the `operator_shell.command_digest` precedent: a digest is an
+    # identity, and the prompt it names is exactly the content this ledger keeps out.
+    inference: [:session_id, :turn_id, :iteration, :model, :provider, :prompt_sha256, :node]
   }
   @result_fields %{
     start_agent: [:agent_id, :module, :node],
@@ -116,12 +138,30 @@ defmodule Ouroboros.Agent.EffectLedger do
     permission: [:decision, :scope, :actor, :rule_id],
     operator_shell: [:exit_status, :duration_ms, :output_bytes, :spilled, :timed_out],
     tool_call: [:status, :duration_ms, :output_bytes],
-    approval: [:decision, :scope, :actor, :rule_id, :origin]
+    approval: [:decision, :scope, :actor, :rule_id, :origin],
+    # R1. `journal_seq` points at the `model_result` record in the session's turn journal
+    # — a pointer, not a copy, which is what keeps this entry content-minimized while the
+    # thing it points at holds the whole streamed response. Token counts are the provider's
+    # own numbers and are identities of the call rather than of its content.
+    inference: [
+      :status,
+      :duration_ms,
+      :output_bytes,
+      :journal_seq,
+      :input_tokens,
+      :output_tokens
+    ]
   }
 
   # The whole vocabulary a `tool_call` outcome may use. `:refused` is a call the runtime
   # never started; `:timed_out` is one the tool runner killed at `tool_timeout_ms`.
   @tool_call_statuses [:completed, :failed, :refused, :timed_out]
+
+  # The whole vocabulary an `inference` outcome may use. `:capacity_timeout` is a request
+  # the model client's admission control never let out; `:stream_failed` is one that
+  # started streaming and died partway, which is a different fact from a model that
+  # answered with an error and is worth being able to count separately.
+  @inference_statuses [:completed, :failed, :capacity_timeout, :stream_failed]
 
   # How much of a subject the ledger will hold. Paths and hostnames are identities, not
   # contents, but an unbounded list of them is still an unbounded write.
@@ -143,7 +183,13 @@ defmodule Ouroboros.Agent.EffectLedger do
   # typed to every tool the native agent runs and every approval a person answered on any
   # provider. Same discipline in both directions: the entry exists before the tool does,
   # and a ledger that cannot record refuses the call.
-  @ledger_only_effects [:permission, :operator_shell, :tool_call, :approval]
+  # `:inference` (R1) extends it once more, to the one effect a native session spends money
+  # on. It is gated exactly like a tool call — `record_started` before `Model.stream`, and
+  # a ledger that cannot record the call refuses it, failing the turn as
+  # `{:inference_unrecordable, reason}` rather than running a model call nobody can account
+  # for. It is the highest-volume kind in here, which the retention arithmetic above
+  # absorbs by construction rather than by raising the limit.
+  @ledger_only_effects [:permission, :operator_shell, :tool_call, :approval, :inference]
 
   defmodule Entry do
     @moduledoc "One durable, content-minimized agent-effect attempt and its outcome."
@@ -304,6 +350,18 @@ defmodule Ouroboros.Agent.EffectLedger do
   """
   @spec tool_call_statuses() :: [atom()]
   def tool_call_statuses, do: @tool_call_statuses
+
+  @doc """
+  The vocabulary an `:inference` result's `status` is recorded with.
+
+  It answered (`:completed`), it answered with an error (`:failed`), the model client's
+  admission control never let the request out (`:capacity_timeout`), or the stream started
+  and died partway (`:stream_failed`). The last two are separated because a request that
+  never left is a capacity problem and a stream that broke is a provider problem, and a
+  reader counting one as the other would tune the wrong thing.
+  """
+  @spec inference_statuses() :: [atom()]
+  def inference_statuses, do: @inference_statuses
 
   @type durability :: :ephemeral_checkpoint | :durable_checkpoint | :synced_checkpoint
 
@@ -704,6 +762,13 @@ defmodule Ouroboros.Agent.EffectLedger do
        when status not in @tool_call_statuses,
        do: Map.delete(summary, :status)
 
+  # Same rule for an inference, and for the same reason: a client branches on this value,
+  # so a status outside the vocabulary is dropped rather than coerced into the nearest
+  # one that happens to fit.
+  defp refine_result(:inference, %{status: status} = summary, _result)
+       when status not in @inference_statuses,
+       do: Map.delete(summary, :status)
+
   defp refine_result(_effect, summary, _result), do: summary
 
   defp sanitize_error(nil), do: nil
@@ -902,13 +967,9 @@ defmodule Ouroboros.Agent.EffectLedger do
       :not_found ->
         {:ok, %{entries: [], next_sequence: 1}}
 
-      {:ok,
-       %{version: @checkpoint_version, entries: entries, next_sequence: next_sequence} =
-           checkpoint}
+      {:ok, %{version: version, entries: entries, next_sequence: next_sequence} = checkpoint}
       when is_list(entries) and is_integer(next_sequence) and next_sequence >= 1 ->
-        if valid_checkpoint?(entries, next_sequence),
-          do: {:ok, Map.take(checkpoint, [:entries, :next_sequence])},
-          else: {:error, :invalid_effect_ledger_checkpoint}
+        upgrade(version, checkpoint)
 
       {:ok, %{version: version}} ->
         {:error, {:unsupported_effect_ledger_checkpoint, version}}
@@ -922,6 +983,38 @@ defmodule Ouroboros.Agent.EffectLedger do
       other ->
         {:error, {:invalid_effect_ledger_storage_response, other}}
     end
+  end
+
+  defp upgrade(@checkpoint_version, checkpoint), do: accept(checkpoint)
+
+  # The `Entry` struct is unchanged between 1 and 2 — what moved is the effect-kind
+  # vocabulary — so this is a widening with nothing to widen, and the entries are accepted
+  # as they stand rather than rebuilt. `struct(Entry, Map.from_struct(entry))` is still run
+  # for the property the rollout registry's migration relies on: an entry serialized before
+  # a field existed comes back with that field's declared default rather than missing,
+  # which is what stops a later `Map.fetch!` from finding a hole. A newer checkpoint is
+  # still refused rather than coerced, because a field this build would silently drop is
+  # not a field it may rewrite.
+  defp upgrade(version, checkpoint) when version in @upgradable_versions do
+    checkpoint
+    |> Map.update!(:entries, fn entries ->
+      Enum.map(entries, fn
+        %Entry{} = entry -> struct(Entry, Map.from_struct(entry))
+        other -> other
+      end)
+    end)
+    |> accept()
+  end
+
+  defp upgrade(version, _checkpoint),
+    do: {:error, {:unsupported_effect_ledger_checkpoint, version}}
+
+  defp accept(checkpoint) do
+    if valid_checkpoint?(checkpoint.entries, checkpoint.next_sequence),
+      do: {:ok, Map.take(checkpoint, [:entries, :next_sequence])},
+      else: {:error, :invalid_effect_ledger_checkpoint}
+  rescue
+    _error -> {:error, :invalid_effect_ledger_checkpoint}
   end
 
   defp valid_checkpoint?(entries, next_sequence) do
