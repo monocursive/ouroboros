@@ -21,6 +21,22 @@
 # Matching is `String.contains?/2` against a warning as `mix dialyzer --format dialyzer`
 # prints it, so an entry pins a line number and will stop matching when code moves. That
 # is deliberate: a stale entry should stop working rather than quietly widen.
+#
+# KNOWN GAP, and it is the one that let the last baseline rot. Nothing detects a dead
+# entry in this file. `Unnecessary Skips: 0` in the dialyzer output is not a check that
+# passed — dialyxir only tracks which filters fired for an `.exs` pattern file, and this
+# is a plain-text one, so `list_unused_filters: true` is inert here. Verified by adding a
+# filter naming a file that does not exist: still `Unnecessary Skips: 0`, still green.
+# So an entry whose line number drifts stops filtering and stops being counted, in
+# silence, and the warning it named starts firing unnoticed. Closing this properly means
+# converting the file to the `.exs` pattern form, where `list_unused_filters: true`
+# actually fails the build on a dead entry. Worth doing once the held section below is
+# empty. Until then: when you touch this file, re-run `mix dialyzer --format dialyzer`
+# with it emptied and diff, rather than trusting the skip count.
+#
+# Also: reproduce failures with the default formatter or `--format dialyzer`.
+# `--format short` throws on this tree — dialyxir 1.4.7 has no case for OTP's
+# `:exact_compare` warning and dies formatting it, before any filtering happens.
 
 # ── deps ──────────────────────────────────────────────────────────────────────────────
 # Not ours to fix. `jido_signal`'s `using.ex` macro expands to per-callsite validators it
