@@ -75,19 +75,33 @@ jobs:
           elixir-version: ${{ env.ELIXIR_VERSION }}
           otp-version: ${{ env.OTP_VERSION }}
 
+      # A cache namespace of its own, and that matters here rather than being tidiness.
+      # The PLTs live in `_build/plts`, so they are only cached if this job's `_build` is
+      # what gets saved — and `actions/cache` writes an entry once. Sharing the `elixir`
+      # job's key meant whichever job finished first saved its `_build`, and a `mix test`
+      # build carries no PLT. The PLT would then be rebuilt from scratch on every run,
+      # which is the several minutes this cache exists to avoid.
+      #
+      # `mix.lock` is in the key because the PLT is built from the dependency tree;
+      # `mix.exs` is not, because `plt_add_apps` changes are reconciled in place by
+      # dialyxir's own "Checking PLT" pass rather than needing a cold build.
       - uses: actions/cache@v4
         with:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('mix.lock') }}
-          restore-keys: ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
+          key: ${{ runner.os }}-mix-dialyzer-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-dialyzer-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
 
       - run: mix deps.get
 
-      # Gradual: `:error_handling` only, PLTs under `_build/plts` (inside the mix cache
-      # above). The first hosted run still builds a PLT; treat that as the debugging
-      # session the honesty note at the top of this file already named.
+      # Gradual: `:error_handling` only, PLTs under `_build/plts`. Deliberately not part
+      # of `make test`, which stays fast; this job is the gate.
+      #
+      # Note for anyone reproducing a failure locally: use the default formatter or
+      # `--format dialyzer`. `--format short` crashes on this tree — dialyxir 1.4.7 has no
+      # case for OTP's `:exact_compare` warning and throws while formatting it, before any
+      # filtering happens.
       - run: mix dialyzer
 
   rust:
