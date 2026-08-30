@@ -89,8 +89,10 @@ defmodule Ouroboros.Mesh.Directory do
                by_ref: Map.put(state.by_ref, ref, id)
            }}
         else
+          # `join_once/2` answers `:ok` or nothing at all — `:pg.join/3` has no failure
+          # return — so `false` from the liveness check is the only way out of the `with`.
+          # An `{:error, _}` clause here matched nothing and only looked like a handled case.
           false -> {:error, :not_alive}
-          {:error, reason} -> {:error, reason}
         end
     end
   end

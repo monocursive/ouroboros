@@ -262,6 +262,7 @@ defmodule Ouroboros.DataDir do
     end
   end
 
+  @spec raise_inspection!(String.t(), term()) :: no_return()
   defp raise_inspection!(path, reason) do
     raise "cannot inspect durable data directory #{path}: #{:file.format_error(reason)}"
   end

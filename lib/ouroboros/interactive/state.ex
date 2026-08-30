@@ -683,7 +683,10 @@ defmodule Ouroboros.Interactive.State do
   row can show. `cursor` is on it, which is the integer that made this necessary. Anything
   a row drops is one `interactive.info` away, addressed by the id the row carries.
   """
-  @spec summary(t()) :: t()
+  # Not `t()`, and the difference is the point: `usage` comes back as the two figures
+  # `usage_summary/1` keeps, not the account `t()` declares, so a row is deliberately no
+  # longer a whole session. Claiming `t()` here was a promise the body does not keep.
+  @spec summary(t()) :: map()
   def summary(%__MODULE__{} = state) do
     state
     |> public()

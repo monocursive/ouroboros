@@ -84,9 +84,10 @@ defmodule Ouroboros.Provider.Native.Tools.Read do
   end
 
   # A file whose bytes are not text is described, not dumped: a binary blob in the
-  # transcript is unreadable for the operator and unusable for the model.
-  defp slice(content, _offset, _limit) when not is_binary(content), do: {[], ""}
-
+  # transcript is unreadable for the operator and unusable for the model. That is the
+  # `String.valid?/1` branch below — `read/1` only ever hands this a binary, so the
+  # `not is_binary/1` clause that used to sit here could not run and was not the check
+  # doing that work.
   defp slice(content, offset, limit) do
     if String.valid?(content) do
       lines = String.split(content, "\n")
