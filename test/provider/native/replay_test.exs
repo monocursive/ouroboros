@@ -237,6 +237,22 @@ defmodule Ouroboros.Provider.Native.ReplayTest do
       assert verdict.divergence == {:replay_boundary, :compaction, compaction["seq"]}
     end
 
+    test "a prompt whose attachments the record only names is bounded, not guessed at",
+         context do
+      live(context, "turn-1", [[{:text, "one"}, {:finish, :stop}]])
+
+      # The record holds `{sha256, media_type, size}` per attachment and never the bytes, so
+      # the message the model was actually sent cannot be reassembled from it.
+      rewrite(context, fn record ->
+        tamper(record, "prompt", "attachments", [
+          %{"sha256" => String.duplicate("f", 64), "media_type" => "image/png", "size" => 9}
+        ])
+      end)
+
+      assert {:ok, %{divergence: {:replay_boundary, {:prompt_attachments, 1}, _seq}}} =
+               verify(context)
+    end
+
     test "an injection this engine cannot reproduce is named rather than dropped", context do
       live(context, "turn-1", [[{:text, "one"}, {:finish, :stop}]],
         after_run: fn journal ->

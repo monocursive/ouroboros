@@ -297,7 +297,7 @@ defmodule Ouroboros.Provider.Native.Replay do
     with {:ok, script} <- script(turn, context),
          {:ok, results} <- tool_results(turn, context),
          :ok <- runnable(script, turn),
-         {:ok, message} <- Record.prompt(turn.prompt, context.session_dir),
+         {:ok, message} <- prompt(turn, context),
          {:ok, scope} <- scope(turn, context),
          {:ok, prefix} <- prefix(turn, context, scope),
          :ok <- prefix_matches(turn, prefix) do
@@ -311,6 +311,17 @@ defmodule Ouroboros.Provider.Native.Replay do
 
       {:error, reason} ->
         {:error, {:replay_boundary, {:unreplayable, reason}, turn.first_seq}, context}
+    end
+  end
+
+  # The record's own refusal becomes the boundary's own name — `prompt_attachments`,
+  # `blob_unavailable` — rather than being wrapped in a second one. A reader who has to
+  # unpeel two layers to learn that the attachment bytes were never in the record is a
+  # reader the vocabulary failed.
+  defp prompt(turn, context) do
+    case Record.prompt(turn.prompt, context.session_dir) do
+      {:ok, message} -> {:ok, message}
+      {:error, reason} -> {:boundary, reason, Map.get(turn.prompt, "seq")}
     end
   end
 
