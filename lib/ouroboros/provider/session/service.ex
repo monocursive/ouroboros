@@ -95,10 +95,15 @@ defmodule Ouroboros.Provider.Session.Service do
   @type state :: map()
 
   @typedoc "What the caller has to tell this module about the session, per call."
+  # `:turn_id` is what `provider_event/2` tags its emission with, and every caller has
+  # always passed it. Leaving it out of a map type that lists every key it admits made
+  # each `serve/4` and `resume/4` call read as a contract break, which cost `Jsonl` the
+  # analysis of `run_service/4` entirely.
   @type context :: %{
           required(:root) => String.t() | nil,
           required(:sandbox_mode) => atom() | nil,
-          optional(:rpc_id) => term()
+          optional(:rpc_id) => term(),
+          optional(:turn_id) => term()
         }
 
   @doc "The empty service state one session starts with."
