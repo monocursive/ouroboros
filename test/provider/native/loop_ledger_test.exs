@@ -331,7 +331,7 @@ defmodule Ouroboros.Provider.Native.LoopLedgerTest do
       assert bash_call.payload["name"] == "bash"
 
       # A string naming the backend, or `none` — never a boolean a client would have to guess at.
-      assert bash_call.payload["sandbox"] in ["sandbox-exec", "bwrap", "none"]
+      assert bash_call.payload["sandbox"] in ["sandbox-exec", "ouro-sandbox", "bwrap", "none"]
       assert read_call.payload["name"] == "read"
       refute Map.has_key?(read_call.payload, "sandbox")
     end

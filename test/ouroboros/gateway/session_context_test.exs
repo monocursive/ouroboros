@@ -650,6 +650,7 @@ defmodule Ouroboros.Gateway.SessionContextTest do
       # C5. The owner node names the OS sandbox its shell runs under, as a string.
       assert State.public(session).options.capabilities.sandbox in [
                "sandbox-exec",
+               "ouro-sandbox",
                "bwrap",
                "none"
              ]

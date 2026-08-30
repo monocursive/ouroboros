@@ -80,26 +80,41 @@ defmodule Ouroboros.Provider.Native.Sandbox do
 
   ## What it does not do
 
-  No seccomp filter on Linux, so a bubblewrap session constrains the filesystem and the
-  network namespace but not the syscall surface. A name-based create filter (`LD_PRELOAD`)
-  denies `.git` / `.ouroboros` path components that appear after the command starts;
-  static binaries that never call libc are outside that net. No domain allowlist and no
-  proxy: external network is on or off, never "these hosts". A network-denied macOS
-  command retains loopback for build-tool IPC; bubblewrap keeps its isolated network
-  namespace. `sandbox-exec` is deprecated by Apple — it still works on macOS 26 and it is
-  what Codex ships, but it carries that warning. Live bubblewrap behaviour is claimed only
-  where the live suite runs: Linux CI on ubuntu-24.04, which installs `bwrap` and
-  exercises the filesystem denials. That suite still has no seccomp, and the original
-  authoring Mac never ran it.
+  Linux has two backends and they are not equally strong. `ouro-sandbox`
+  (`Sandbox.Helper`) is preferred where the kernel supports it: read-only mounts *and* a
+  Landlock domain for the filesystem, an unshared network namespace, and a small seccomp
+  denylist. `bwrap` is the fallback and constrains the filesystem and the network namespace
+  but not the syscall surface.
+
+  **Both** still depend on the `LD_PRELOAD` name filter for one case: denying the creation
+  of a `.git` / `.ouroboros` directory that did not exist when the command started. Landlock
+  attaches rights to inodes, so it cannot write a rule for a path that does not exist, and
+  the only right that would cover it — `MAKE_DIR` on the parent — would deny every
+  legitimate `mkdir` in the workspace. Static binaries that never call libc are outside that
+  net, on either backend. `Sandbox.Helper`'s moduledoc has the layer-by-layer table.
+
+  No domain allowlist and no proxy: external network is on or off, never "these hosts". A
+  network-denied macOS command retains loopback for build-tool IPC; both Linux backends
+  keep an isolated network namespace with loopback up. `sandbox-exec` is deprecated by
+  Apple — it still works on macOS 26 and it is what Codex ships, but it carries that
+  warning.
+
+  Live bubblewrap behaviour is claimed only where the live suite runs: Linux CI on
+  ubuntu-24.04, which installs `bwrap` and exercises the filesystem denials. The
+  `ouro-sandbox` helper's enforcement was observed on Linux 7.0 with Landlock ABI 8 —
+  filesystem denials, the network posture, capability drop, and the seccomp belt — by
+  `tui/sandbox/tests/linux_enforcement.rs`, which is skipped with a printed reason where
+  the kernel or the container cannot enforce. Neither Linux suite runs on a Mac.
   """
 
   require Logger
 
   alias Ouroboros.Provider.Native.Sandbox.Bwrap
+  alias Ouroboros.Provider.Native.Sandbox.Helper
   alias Ouroboros.Provider.Native.Sandbox.SandboxExec
 
   @typedoc "Which OS mechanism this node can actually use."
-  @type backend :: :sandbox_exec | :bwrap | :none
+  @type backend :: :sandbox_exec | :ouro_sandbox | :bwrap | :none
 
   @typedoc "What `detect/0` found, once, for this node."
   @type detection :: %{
@@ -138,7 +153,7 @@ defmodule Ouroboros.Provider.Native.Sandbox do
     backend: :none,
     executable: nil,
     version: nil,
-    notes: "no OS sandbox on this node: neither sandbox-exec nor bwrap is available"
+    notes: "no OS sandbox on this node: none of ouro-sandbox, sandbox-exec, or bwrap is available"
   }
 
   # ------------------------------------------------------------------ detection
@@ -182,6 +197,7 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   @spec label(detection() | backend()) :: String.t()
   def label(%{backend: backend}), do: label(backend)
   def label(:sandbox_exec), do: "sandbox-exec"
+  def label(:ouro_sandbox), do: "ouro-sandbox"
   def label(:bwrap), do: "bwrap"
   def label(:none), do: "none"
 
@@ -382,6 +398,9 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   def wrap(command, scope, policy, %{backend: :sandbox_exec, executable: executable}),
     do: SandboxExec.wrap(command, scope, policy, executable)
 
+  def wrap(command, scope, policy, %{backend: :ouro_sandbox, executable: executable}),
+    do: Helper.wrap(command, scope, policy, executable)
+
   def wrap(command, scope, policy, %{backend: :bwrap, executable: executable}),
     do: Bwrap.wrap(command, scope, policy, executable)
 
@@ -538,9 +557,10 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   def no_backend_refusal(detection) do
     "this session runs with sandbox_mode: read_only and this node has no OS sandbox " <>
       "backend — #{detection.notes}. Without one a shell cannot be made read-only, so " <>
-      "read_only refuses `bash` entirely rather than pretending. Install bubblewrap " <>
-      "(Linux), run on macOS where `sandbox-exec` is present, or ask the human to " <>
-      "reconfigure this session with sandbox_mode: workspace_write."
+      "read_only refuses `bash` entirely rather than pretending. Install the " <>
+      "`ouro-sandbox` helper or bubblewrap (Linux), run on macOS where `sandbox-exec` " <>
+      "is present, or ask the human to reconfigure this session with " <>
+      "sandbox_mode: workspace_write."
   end
 
   # ---------------------------------------------------------------- internals
@@ -571,10 +591,40 @@ defmodule Ouroboros.Provider.Native.Sandbox do
     end
   end
 
+  # `ouro-sandbox` first, bubblewrap second. The helper is preferred where it can actually
+  # enforce — it adds a Landlock domain and a seccomp filter over the same mount semantics
+  # — and `Helper.probe/1` returns `nil` rather than a detection when it cannot, so a node
+  # whose kernel predates Landlock falls through to bubblewrap instead of selecting a
+  # backend that would refuse every command.
   defp probe_linux do
+    case probe_helper() do
+      nil -> probe_bwrap()
+      detection -> detection
+    end
+  end
+
+  defp probe_helper do
+    with path when is_binary(path) <- Helper.executable(),
+         %{version: version, notes: notes} <- Helper.probe(path) do
+      %{
+        backend: :ouro_sandbox,
+        executable: path,
+        version: version,
+        notes:
+          "Linux ouro-sandbox through #{path}. #{notes}. Filesystem via read-only mounts " <>
+            "and a Landlock domain, network via an unshared namespace, and a minimal " <>
+            "seccomp denylist. Creating a `.git` that did not exist when the command " <>
+            "started is still carried by the LD_PRELOAD filter, not by the kernel."
+      }
+    else
+      _absent_or_unusable -> nil
+    end
+  end
+
+  defp probe_bwrap do
     case System.find_executable("bwrap") do
       nil ->
-        %{@none | notes: "Linux without bwrap (bubblewrap) on PATH"}
+        %{@none | notes: "Linux without ouro-sandbox or bwrap (bubblewrap) on PATH"}
 
       path ->
         %{
