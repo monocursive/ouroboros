@@ -1698,11 +1698,12 @@ defmodule Ouroboros.Provider.Native.Session do
         {:error, _reason} -> nil
       end
 
-    # R1. `elided` is what compaction's in-place marker rewrite costs the conversation —
-    # and the reason the journal's own `tool_result` records matter: the bytes it replaces
-    # survive in no other durable artifact, so without this the pre-elision content would
-    # be gone from every copy. `post_digest` is the folded conversation; `pre_digest` is
-    # what it was, carried from the last `turn_settled`.
+    # R1. `elided_count` is how many tool results compaction rewrote in place — a count
+    # rather than the per-call list REPLAY.md §3.2 asks for, because `Compaction.compact/2`
+    # returns a count and nothing else knows which calls they were. It costs nothing that
+    # matters: the elided *bytes* survive in this journal's own `tool_result` records, keyed
+    # by `call_id`, which is the copy the in-place rewrite used to destroy. `post_digest` is
+    # the folded conversation; `pre_digest` is what it hashed to going in.
     state =
       journal(state, "compaction", %{
         "turn_id" => "compact_" <> Integer.to_string(state.turns + 1),
@@ -1713,7 +1714,7 @@ defmodule Ouroboros.Provider.Native.Session do
         # summariser and says so with `null` rather than a pointer to nothing.
         "summariser_turn_id" =>
           if(report.summarised, do: "compact_" <> Integer.to_string(state.turns + 1)),
-        "elided" => Journal.jsonable(outcome.elided),
+        "elided_count" => outcome.elided,
         "archived_messages" => report.archived_messages,
         "archive_id" => report.archive_id,
         "summarised" => report.summarised,
