@@ -372,7 +372,20 @@ defmodule Ouroboros.CodeIntel.DocumentsTest do
                end
              end)
 
-    assert Enum.count(recorded(record), &(&1["method"] == "textDocument/didOpen")) == 2
+    # The record file is written by the replacement's own OS process as frames reach it,
+    # so it lags the pool's status — the status above can flip while the replacement is
+    # still `:starting` with the didOpen queued, and under CPU load an `elixir` script
+    # takes seconds to boot. Await the evidence, then hold the exact count: one re-open,
+    # never a re-opening loop.
+    opens =
+      await(fn ->
+        case Enum.count(recorded(record), &(&1["method"] == "textDocument/didOpen")) do
+          count when count >= 2 -> {:ok, count}
+          count -> {:recorded_opens, count}
+        end
+      end)
+
+    assert opens == 2
   end
 
   defp recorded(record) do

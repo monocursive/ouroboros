@@ -1,6 +1,10 @@
 defmodule Ouroboros.Provider.Native.LoopTest do
   use ExUnit.Case, async: true
 
+  # The ceiling a test can stack out of collect/1 and an event wait, with room to fail
+  # inside the test rather than on the runner's guillotine.
+  @moduletag timeout: 120_000
+
   alias Jido.Harness.ApprovalResponse
   alias Ouroboros.Provider.Native.Loop
   alias Ouroboros.Provider.Native.Paths
@@ -56,10 +60,10 @@ defmodule Ouroboros.Provider.Native.LoopTest do
     pid
   end
 
-  # Mid-turn event waits share this module's 15s ceiling. The module is async and a
-  # full-suite run schedules it beside dozens of concurrent cases; a loaded run showed a
-  # first approval ask landing after the old 5s wait had already flunked. Every wait
-  # stays bounded on its explicit event, so a wedged loop still fails inside a test.
+  # Mid-turn event waits share this module's 30s ceiling. The module is async and a
+  # full-suite run schedules it beside dozens of concurrent cases; loaded runs showed
+  # first events landing after 5s and 10s waits had already flunked. Every wait stays
+  # bounded on its explicit event, so a wedged loop still fails inside a test.
   defp collect(acc \\ []) do
     receive do
       {:event, %{type: type} = event}
@@ -69,8 +73,8 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       {:event, event} ->
         collect([event | acc])
     after
-      15_000 ->
-        flunk("no terminal turn event within 15s; collected: #{inspect(Enum.reverse(acc))}")
+      30_000 ->
+        flunk("no terminal turn event within 30s; collected: #{inspect(Enum.reverse(acc))}")
     end
   end
 
@@ -423,7 +427,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       {loop, _agent} = start_loop(context, @write_script, approval_mode: :prompt)
       pid = run(loop)
 
-      assert_receive {:event, %{type: :approval_requested} = ask}, 15_000
+      assert_receive {:event, %{type: :approval_requested} = ask}, 30_000
       assert ask.payload["kind"] == "file_change"
       assert ask.payload["tool_call"]["name"] == "write"
       assert ask.payload["tool_call"]["cwd"] == context.workspace
@@ -452,7 +456,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       {loop, _agent} = start_loop(context, @write_script, approval_mode: :prompt)
       pid = run(loop)
 
-      assert_receive {:event, %{type: :approval_requested} = ask}, 15_000
+      assert_receive {:event, %{type: :approval_requested} = ask}, 30_000
 
       send(
         pid,
@@ -474,7 +478,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
 
       run(loop)
 
-      assert_receive {:event, %{type: :approval_requested}}, 15_000
+      assert_receive {:event, %{type: :approval_requested}}, 30_000
 
       events = collect()
       [result] = all(events, :tool_result)
@@ -494,7 +498,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       {loop, _agent} = start_loop(context, script, approval_mode: :prompt)
       pid = run(loop)
 
-      assert_receive {:event, %{type: :approval_requested} = ask}, 15_000
+      assert_receive {:event, %{type: :approval_requested} = ask}, 30_000
 
       send(
         pid,
@@ -537,7 +541,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       {loop, _agent} = start_loop(context, script, approval_mode: :auto_edit)
       pid = run(loop)
 
-      assert_receive {:event, %{type: :approval_requested} = ask}, 15_000
+      assert_receive {:event, %{type: :approval_requested} = ask}, 30_000
       assert ask.payload["kind"] == "command"
       assert ask.payload["tool_call"]["command"] == "rm -rf /"
       assert ask.payload["suggested_rule"] == "Bash(rm *)"
@@ -574,7 +578,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
 
       pid = run(loop)
 
-      assert_receive {:event, %{type: :approval_requested} = ask}, 15_000
+      assert_receive {:event, %{type: :approval_requested} = ask}, 30_000
 
       send(
         pid,
@@ -610,7 +614,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       pid = run(loop)
 
       # Steer while the first tool call is in flight; it must not interrupt it.
-      assert_receive {:event, %{type: :tool_call}}, 15_000
+      assert_receive {:event, %{type: :tool_call}}, 30_000
       send(pid, {:native_steer, "actually, stop after this and explain"})
 
       events = collect()
@@ -637,7 +641,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       {loop, agent} = start_loop(context, script)
       pid = run(loop)
 
-      assert_receive {:event, %{type: :tool_call}}, 15_000
+      assert_receive {:event, %{type: :tool_call}}, 30_000
       send(pid, :native_interrupt)
 
       events = collect()
@@ -681,7 +685,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       {loop, _agent} = start_loop(context, [delayed])
       pid = run(loop)
 
-      assert_receive :model_waiting, 15_000
+      assert_receive :model_waiting, 30_000
       send(pid, :native_interrupt)
       send(pid, :release_model)
 
@@ -695,7 +699,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       {loop, _agent} = start_loop(context, @write_script, approval_mode: :prompt)
       pid = run(loop)
 
-      assert_receive {:event, %{type: :approval_requested}}, 15_000
+      assert_receive {:event, %{type: :approval_requested}}, 30_000
       send(pid, :native_interrupt)
 
       events = collect()
