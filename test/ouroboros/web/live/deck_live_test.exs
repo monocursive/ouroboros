@@ -157,6 +157,16 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       answer(state, :configure, {:ok, %{changed: changes}})
     end
 
+    def handle_call(:close, _from, state) do
+      send(state.test, {:closed, state.id})
+
+      with {:ok, session} <- Ouroboros.Interactive.Store.get(state.id) do
+        :ok = Ouroboros.Interactive.Store.put(%{session | status: :closed})
+      end
+
+      {:reply, {:ok, %{id: state.id, status: :closed}}, %{state | status: :closed}}
+    end
+
     defp answer(state, key, default) do
       case Map.get(state.answers, key, []) do
         [scripted | rest] ->
@@ -1028,8 +1038,65 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
       html = submit(view, "   ")
 
-      assert html =~ "write a message before sending"
+      assert html =~ "Write a message before sending."
       refute_receive {:sent, _mode, _turn, _input, _opts}, 100
+    end
+
+    test "a failed turn offers a one-click retry with a fresh turn id", %{conn: conn} do
+      id = session_id()
+      pid = plane(id: id, status: :idle, backlogs: [{:ok, []}])
+
+      {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
+      submit(view, "try the operation")
+      assert_receive {:sent, :message, first, "try the operation", []}
+
+      FakePlane.emit(pid, event(1, :turn_started, %{}))
+      FakePlane.emit(pid, event(2, :turn_failed, %{"error" => "server_is_overloaded"}))
+      html = flush(view)
+
+      assert html =~ "The agent stopped before completing the last message."
+      assert html =~ "Retry last message"
+
+      view |> element(~s(button[phx-click="retry"])) |> render_click()
+      assert_receive {:sent, :message, second, "try the operation", []}
+      assert first != second
+    end
+
+    test "an empty draft disables the visible send control", %{conn: conn} do
+      id = session_id()
+      _plane = plane(id: id, status: :idle, backlogs: [{:ok, []}])
+
+      {:ok, _view, html} = live(conn, "/s/interactive/#{id}")
+
+      assert html =~ ~r/<button[^>]*data-ouro-send[^>]*disabled/
+    end
+
+    test "a running session can be ended through a modal confirmation", %{conn: conn} do
+      id = session_id()
+      listed(id)
+      _plane = plane(id: id, status: :running, backlogs: [{:ok, []}])
+
+      {:ok, view, _html} = live(conn, "/")
+
+      dialog =
+        view
+        |> element(~s(button[phx-value-action="close"][phx-value-id="#{id}"]))
+        |> render_click()
+
+      assert dialog =~ "End session"
+      assert dialog =~ ~s(phx-hook="Modal")
+      assert dialog =~ ~s(aria-modal="true")
+      refute dialog =~ ~r/<dialog[^>]*\sopen(?:\s|>)/
+
+      html = render_submit(view, "session-close", %{})
+      assert_receive {:closed, ^id}
+
+      refute has_element?(
+               view,
+               ~s(button[phx-value-action="close"][phx-value-id="#{id}"])
+             )
+
+      assert html =~ ~s(phx-value-action="delete")
     end
 
     test "a second click of the same words is the same turn", %{conn: conn} do
@@ -1123,10 +1190,10 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
 
       # Absent, not defaulted: a picker showing `workspace_write` because nothing said
       # otherwise would be this page inventing a security posture.
-      refute html =~ "Sandbox ·"
+      refute html =~ "File access ·"
       # The thinking picker is a preference, not a permission, so it is always offered —
       # with the honest label for having been told nothing.
-      assert html =~ "Thinking · Default"
+      assert html =~ "Thinking · Session default"
     end
 
     test "is present, marked and amber where the session reported unrestricted",
@@ -1136,7 +1203,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
 
       {:ok, _view, html} = live(conn, "/s/interactive/#{id}")
 
-      assert html =~ "Sandbox · unrestricted"
+      assert html =~ "File access · Full computer access"
       assert html =~ "ouro-picker-warn"
       assert html =~ "ouro-picker-on"
     end
@@ -1157,8 +1224,8 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
 
       # The session still reports `read_only`, so the label still says `read_only`. The
       # mark follows the re-read, never the click.
-      assert html =~ "Sandbox · read only"
-      refute html =~ "Sandbox · unrestricted"
+      assert html =~ "File access · Read only"
+      refute html =~ "File access · Full computer access"
     end
 
     test "renders a configure refusal verbatim", %{conn: conn} do
@@ -1270,7 +1337,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       {:ok, _view, html} = live(conn, "/s/interactive/#{id}")
 
       assert html =~ "ouro-approval-warn"
-      assert html =~ "sandbox escalation"
+      assert html =~ "File access request"
       assert html =~ "cargo build --release"
     end
 
@@ -1692,7 +1759,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       view |> element(~s(button[phx-click="auto_approve"])) |> render_click()
       html = view |> element(~s(button[phx-click="auto_approve"])) |> render_click()
 
-      refute html =~ "Auto-approve is on"
+      refute html =~ "Routine actions are allowed automatically"
 
       FakePlane.emit(pid, corpus("event_approval_requested_permission", 1, "r1"))
       flush(view)
@@ -1748,7 +1815,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
 
       {:ok, _view, html} = live(conn, "/s/interactive/#{id}")
 
-      assert html =~ "this session names no workspace, so there is no scope to save the rule in"
+      assert html =~ "Choose a project folder before saving an approval rule for this session."
       refute html =~ "Remember for this workspace"
     end
 
@@ -1769,16 +1836,16 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       refute html =~ "Remember for this workspace"
       # No pattern is not a refusal to explain; there is simply nothing to offer, and the
       # gate says so by naming no reason.
-      refute html =~ "there is no scope to save the rule in"
+      refute html =~ "Choose a project folder before saving an approval rule"
     end
 
     # The third refusal is unreachable through the deck by construction — this build's
     # `Methods.names/0` always contains `permissions.add`, and the deck passes that list
     # rather than one a test could shorten. Asserted against the gate directly so the
     # sentence stays covered.
-    test "names a runtime that does not serve permissions.add" do
+    test "explains when this node cannot save an approval rule" do
       assert {nil, reason} = Transcript.suggested_rule("Bash(ls:*)", ["interactive.list"], "/w")
-      assert reason == "this runtime does not serve permissions.add, so the rule cannot be saved"
+      assert reason == "This Ouroboros node cannot save approval rules."
     end
 
     test "a Computer Use pattern is user-scoped and needs no workspace" do

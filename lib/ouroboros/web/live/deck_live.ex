@@ -116,7 +116,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   # A turn state nothing has been read from yet, so the composer has something to draw
   # before a session is open.
-  @quiet_turn %{running?: false, spoke?: false, turn_id: nil, queued: 0}
+  @quiet_turn %{running?: false, spoke?: false, failed?: false, turn_id: nil, queued: 0}
 
   # ------------------------------------------------------------------------------------
   # Lifecycle
@@ -127,6 +127,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
     socket =
       socket
       |> assign(:scope, Config.for_endpoint(socket.endpoint).scope)
+      |> assign(:page_title, "Sessions")
       |> assign(:rows, [])
       |> assign(:list_error, nil)
       |> assign(:status, nil)
@@ -225,6 +226,12 @@ defmodule Ouroboros.Web.Live.DeckLive do
   def handle_event("send", %{"message" => text}, socket) when is_binary(text),
     do: {:noreply, send_turn(socket, String.trim_trailing(text))}
 
+  def handle_event("retry", _params, %{assigns: %{last_send: {text, _turn_id}}} = socket) do
+    {:noreply, socket |> assign(:last_send, nil) |> send_turn(text)}
+  end
+
+  def handle_event("retry", _params, socket), do: {:noreply, socket}
+
   def handle_event("interrupt", _params, %{assigns: %{open: {:interactive, id}}} = socket) do
     params = session_params(socket, :interactive, id)
 
@@ -252,7 +259,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
         %{"action" => action, "plane" => plane, "id" => id},
         socket
       )
-      when action in ["rename", "delete"] do
+      when action in ["rename", "close", "delete"] do
     with {:ok, plane} <- Map.fetch(@planes, plane),
          row when not is_nil(row) <- row(socket.assigns.rows, {plane, id}),
          true <- session_action_allowed?(socket, action, row) do
@@ -302,8 +309,21 @@ defmodule Ouroboros.Web.Live.DeckLive do
     end
   end
 
+  def handle_event(
+        "session-close",
+        _params,
+        %{assigns: %{session_action: %{action: "close", row: row}}} = socket
+      ) do
+    if session_action_allowed?(socket, "close", row) do
+      params = session_params(socket, :interactive, row.id)
+      {:noreply, finish_session_action(socket, "interactive.close", params)}
+    else
+      {:noreply, assign(socket, :session_action_error, "Only running sessions can be ended.")}
+    end
+  end
+
   def handle_event(event, _params, socket)
-      when event in ["session-action", "session-rename", "session-delete"],
+      when event in ["session-action", "session-rename", "session-close", "session-delete"],
       do: {:noreply, socket}
 
   def handle_event("configure", _params, socket), do: {:noreply, socket}
@@ -436,6 +456,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
     |> assign(:list_error, error)
     |> assign(:status, runtime_status(scope, session))
     |> refresh_info()
+    |> assign_page_title()
   end
 
   # Both planes, each refused independently: a coding list that failed must not empty a
@@ -493,6 +514,11 @@ defmodule Ouroboros.Web.Live.DeckLive do
       Call.available?(:operate, "interactive.rename")
   end
 
+  defp session_action_allowed?(socket, "close", row) do
+    row.plane == :interactive and socket.assigns.scope == :operate and
+      not Rail.terminal?(row.status) and Call.available?(:operate, "interactive.close")
+  end
+
   defp session_action_allowed?(socket, "delete", row) do
     socket.assigns.scope == :operate and Rail.terminal?(row.status) and
       Call.available?(:operate, "#{row.plane}.delete")
@@ -537,6 +563,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
     |> assign(:watch, Watch.new())
     |> resubscribe()
     |> refresh_info()
+    |> assign_page_title()
   end
 
   defp close(socket) do
@@ -559,6 +586,19 @@ defmodule Ouroboros.Web.Live.DeckLive do
     |> assign(:truncated, 0)
     |> reset_session_state()
     |> stream(:cells, [], reset: true)
+  end
+
+  defp assign_page_title(%{assigns: %{open: nil}} = socket),
+    do: assign(socket, :page_title, "Sessions")
+
+  defp assign_page_title(%{assigns: %{open: open, rows: rows}} = socket) do
+    title =
+      case row(rows, open) do
+        nil -> "Session"
+        session -> Rail.title(session)
+      end
+
+    assign(socket, :page_title, title)
   end
 
   # The one repair.
@@ -735,7 +775,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # ---------------------------------------------------------------------------- Sending
 
   defp send_turn(%{assigns: %{open: {:interactive, _id}}} = socket, "") do
-    assign(socket, :composer_error, "write a message before sending")
+    assign(socket, :composer_error, "Write a message before sending.")
   end
 
   defp send_turn(%{assigns: %{open: {:interactive, id}}} = socket, text) do
@@ -775,7 +815,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
     assign(
       socket,
       :composer_error,
-      "this plane runs to completion and takes no messages; the terminal client has its controls"
+      "This task runs to completion and does not accept messages. Use the terminal client to control it."
     )
   end
 
@@ -1238,6 +1278,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
             draft={@draft}
             composer_error={@composer_error}
             turn={@turn}
+            last_send={@last_send}
             status={@row_status}
             sandbox={@sandbox}
             effort={@effort}
@@ -1277,6 +1318,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
       <span class="ouro-wordmark">Ouroboros</span>
 
       <a class="ouro-presence" aria-label={@machines_label} href="/machines">
+        <span class="ouro-presence-label">Machines</span>
         <span
           :for={machine <- @machines}
           class={["ouro-dot", machine.connected? && "ouro-dot-on"]}
@@ -1374,6 +1416,11 @@ defmodule Ouroboros.Web.Live.DeckLive do
         row.plane == :interactive and Call.available?(assigns.scope, "interactive.rename")
       )
       |> assign(
+        :can_close,
+        row.plane == :interactive and not Rail.terminal?(row.status) and
+          Call.available?(assigns.scope, "interactive.close")
+      )
+      |> assign(
         :can_delete,
         Rail.terminal?(row.status) and Call.available?(assigns.scope, "#{row.plane}.delete")
       )
@@ -1397,7 +1444,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
         </span>
         <span :if={not @age_in_line?} class="ouro-row-age ouro-mono">{age(@row.updated_at)}</span>
       </.link>
-      <div :if={@can_rename or @can_delete} class="ouro-row-actions">
+      <div :if={@can_rename or @can_close or @can_delete} class="ouro-row-actions">
         <button
           :if={@can_rename}
           type="button"
@@ -1409,6 +1456,18 @@ defmodule Ouroboros.Web.Live.DeckLive do
           aria-label={"Rename #{Rail.title(@row)}"}
         >
           Rename
+        </button>
+        <button
+          :if={@can_close}
+          type="button"
+          class="ouro-row-action ouro-row-action-danger"
+          phx-click="session-action"
+          phx-value-action="close"
+          phx-value-plane={@row.plane}
+          phx-value-id={@row.id}
+          aria-label={"End #{Rail.title(@row)}"}
+        >
+          End
         </button>
         <button
           :if={@can_delete}
@@ -1445,9 +1504,11 @@ defmodule Ouroboros.Web.Live.DeckLive do
     ~H"""
     <dialog
       :if={@action}
-      open
+      id="session-action-dialog"
       class="ouro-session-dialog"
+      aria-modal="true"
       aria-labelledby="session-action-title"
+      phx-hook="Modal"
     >
       <form
         :if={@action.action == "rename"}
@@ -1470,6 +1531,31 @@ defmodule Ouroboros.Web.Live.DeckLive do
             Cancel
           </button>
           <button type="submit" class="ouro-button" phx-disable-with="Renaming…">Rename</button>
+        </div>
+      </form>
+      <form
+        :if={@action.action == "close"}
+        phx-submit="session-close"
+        class="ouro-session-dialog-form"
+      >
+        <h2 id="session-action-title">End session</h2>
+        <p>
+          End <strong>{Rail.title(@action.row)}</strong>? Its transcript remains available,
+          but it cannot receive more messages.
+        </p>
+        <p :if={@error} class="ouro-refusal" role="alert">{@error}</p>
+        <div class="ouro-session-dialog-actions">
+          <button
+            type="button"
+            class="ouro-button-quiet"
+            phx-click="session-action-cancel"
+            autofocus
+          >
+            Keep session
+          </button>
+          <button type="submit" class="ouro-button ouro-button-danger" phx-disable-with="Ending…">
+            End session
+          </button>
         </div>
       </form>
 
@@ -1590,6 +1676,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   attr :draft, :string, required: true
   attr :composer_error, :any, required: true
   attr :turn, :map, required: true
+  attr :last_send, :any, required: true
   attr :status, :any, required: true
   attr :sandbox, :any, required: true
   attr :effort, :any, required: true
@@ -1623,6 +1710,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
         :can_configure,
         plane == :interactive and operate? and Call.available?(:operate, "interactive.configure")
       )
+      |> assign(:can_retry, operate? and assigns.turn.failed? and not is_nil(assigns.last_send))
       |> assign(:node, node_of(assigns.row))
 
     ~H"""
@@ -1687,7 +1775,12 @@ defmodule Ouroboros.Web.Live.DeckLive do
       can_interrupt={@can_interrupt}
       can_configure={@can_configure}
       ended={@ended}
+      can_retry={@can_retry}
     />
+    <details class="ouro-vitals-mobile">
+      <summary>Session details</summary>
+      <.vitals info={@info} row={@row} />
+    </details>
     """
   end
 
@@ -1706,10 +1799,12 @@ defmodule Ouroboros.Web.Live.DeckLive do
         phx-click="auto_approve"
         aria-pressed={to_string(@on)}
       >
-        {if @on, do: "Auto-approve is on", else: "Auto-approve"}
+        {if @on,
+          do: "Routine actions are allowed automatically",
+          else: "Automatically allow routine actions"}
       </button>
       <span class="ouro-quiet">
-        this view only · never a question, a plan exit, or a Computer Use ask
+        Only for this session while it is open. Questions and screen control still ask you.
       </span>
     </div>
     """
@@ -1773,7 +1868,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
       <.vital label="Cost" value={cost(Map.get(@usage, :cost_usd))} />
 
       <div class="ouro-vital">
-        <dt>Sandbox</dt>
+        <dt>File access</dt>
         <dd class={["ouro-mono", @unrestricted? && "ouro-tag-full"]}>
           {sandbox_word(@options, @row)}
         </dd>
@@ -2015,8 +2110,8 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   defp sandbox_word(options, row) do
     case Map.get(options, :sandbox_mode) || (row && row.sandbox_mode) do
-      nil -> "not reported"
-      mode -> mode |> to_string() |> String.replace("_", " ")
+      nil -> "Not reported"
+      mode -> Composer.word(to_string(mode))
     end
   end
 

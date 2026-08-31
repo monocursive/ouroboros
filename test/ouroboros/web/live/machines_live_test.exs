@@ -363,25 +363,23 @@ defmodule Ouroboros.Web.Live.MachinesLiveTest do
   # ------------------------------------------------------------------------------------
 
   describe "the page" do
-    test "mounts and names itself", %{conn: conn} do
+    test "mounts as an advanced page with a contextual title", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/machines")
 
+      assert html =~ "Advanced"
       assert html =~ "Machines"
+      assert html =~ "Advanced · Machines · Ouroboros"
     end
 
-    test "a fleetless runtime gets the empty state naming ouro fleet create" do
-      # Rendered as a component rather than through the page, because whether the machine
-      # running this suite is in a fleet is not a fixed fact: a full run starts dozens of
-      # distributed nodes, and the cluster directory remembers every one of them. The page
-      # then correctly shows a roster, which is the *other* branch. Both must be reachable.
+    test "a fleetless runtime leads with plain guidance and keeps commands advanced" do
       html = render_component(&MachinesLive.no_fleet/1, %{})
 
       assert html =~ MachinesLive.no_fleet_title()
+      assert html =~ "not connected to other Ouroboros machines"
+      assert html =~ "Ask an administrator"
+      assert html =~ "Administrator setup"
       assert html =~ "<code>ouro fleet create</code>"
-      assert html =~ "open Machines in the terminal"
-      # No roster, and above all no member list claiming a fleet exists.
       refute html =~ "ouro-members"
-      # And no Add control, which is the whole point of the state.
       refute html =~ "<form"
       refute html =~ "<input"
     end
@@ -413,11 +411,11 @@ defmodule Ouroboros.Web.Live.MachinesLiveTest do
       refute html =~ "<input"
     end
 
-    test "the terminal-add section names the command and offers no form", %{conn: conn} do
+    test "the terminal setup command is available in advanced disclosure without a form",
+         %{conn: conn} do
       {:ok, _view, html} = live(conn, "/machines")
 
-      assert html =~ "Adding a machine"
-      assert html =~ "Adds run in the terminal, not here"
+      assert html =~ "Administrator setup"
       assert html =~ "<code>ouro fleet add user@host</code>"
       refute html =~ "<form"
     end
@@ -427,15 +425,14 @@ defmodule Ouroboros.Web.Live.MachinesLiveTest do
 
       # Mounted, polled — and no report, because `fleet.doctor` walks the whole directory
       # and this page never puts that on a cadence.
-      assert html =~ "Run doctor"
+      assert html =~ "Check connections"
       refute html =~ "ouro-report"
 
       after_click = render_click(view, "doctor")
 
       assert after_click =~ "ouro-report"
-      # The real report, rendered as the runtime wrote it. Asserted on the headline's own
-      # words and the first check's id rather than on a verdict: whether this machine is
-      # healthy depends on what else the suite started, and the page reports either.
+      assert after_click =~ "Technical report"
+      assert after_click =~ ~r/(Everything is working|items? needs? attention)/
       assert after_click =~ "warnings"
       assert after_click =~ "errors"
       assert after_click =~ "generated"

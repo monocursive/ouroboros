@@ -1019,11 +1019,11 @@ defmodule Ouroboros.Web.TranscriptTest do
 
       # This runtime does not serve the verb that would save it.
       assert {nil, reason} = Transcript.suggested_rule("Bash(ls:*)", ["interactive.start"], "/w")
-      assert reason == "this runtime does not serve permissions.add, so the rule cannot be saved"
+      assert reason == "This Ouroboros node cannot save approval rules."
 
       # The session names no workspace to scope it in.
       assert {nil, reason} = Transcript.suggested_rule("Bash(ls:*)", methods, nil)
-      assert reason == "this session names no workspace, so there is no scope to save the rule in"
+      assert reason == "Choose a project folder before saving an approval rule for this session."
 
       assert {nil, ^reason} = Transcript.suggested_rule("Bash(ls:*)", methods, "   ")
     end

@@ -37,6 +37,7 @@ defmodule Ouroboros.Web.Live.ComposerTest do
 
       refute state.spoke?
       refute state.running?
+      refute state.failed?
       assert state.queued == 0
     end
 
@@ -56,7 +57,22 @@ defmodule Ouroboros.Web.Live.ComposerTest do
         assert state.spoke?
         refute state.running?
         assert is_nil(state.turn_id)
+        assert state.failed? == (unquote(outcome) == :turn_failed)
       end
+    end
+
+    test "an idle status after a failed turn keeps the retry evidence" do
+      state =
+        Composer.turn_state(
+          entries([
+            event(1, :turn_started),
+            event(2, :turn_failed),
+            event(3, :session_idle)
+          ])
+        )
+
+      assert state.failed?
+      refute state.running?
     end
 
     test "the queue depth is the newest one the runtime published" do
@@ -138,9 +154,10 @@ defmodule Ouroboros.Web.Live.ComposerTest do
              ]
     end
 
-    test "an unreported posture reads as Default and never as a mode" do
-      assert Composer.word(nil) == "Default"
-      assert Composer.word(:workspace_write) == "workspace write"
+    test "postures use human-facing file-access language" do
+      assert Composer.word(nil) == "Session default"
+      assert Composer.word("workspace_write") == "Project files"
+      assert Composer.word("unrestricted") == "Full computer access"
     end
   end
 end

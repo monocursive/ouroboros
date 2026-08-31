@@ -37,7 +37,7 @@ defmodule Ouroboros.MixProject do
   # two consumers that must never miss it are `mix compile` in a development loop and
   # `mix release`, which compiles on its way to `:assemble`. One hook covers both, and a
   # release then picks up `priv/static/web/` with the same verbatim `priv/` copy it has
-  # always done — no new packaging mechanism, and still no Node.
+  # always done — no new packaging mechanism or Node requirement.
   defp aliases do
     [
       "web.assets": &copy_web_assets/1,
@@ -46,9 +46,9 @@ defmodule Ouroboros.MixProject do
   end
 
   # The JavaScript `Ouroboros.Web` serves is the prebuilt bundle that already shipped
-  # inside each dependency. It is copied, never built: this repo has no JavaScript
-  # toolchain, and the alternative to a copy is esbuild, a package.json, and a second
-  # toolchain to keep green for two files nobody edits.
+  # inside each dependency. It is copied, never built: the production asset path has no
+  # JavaScript build step. Node and Playwright are development-only browser-test tools,
+  # not release inputs.
   #
   # They are copied rather than committed because a vendored copy of a dependency's asset
   # is a file that silently disagrees with the dependency after the next `mix deps.get`.
@@ -134,12 +134,11 @@ defmodule Ouroboros.MixProject do
       # nodes found each other; this is the discovery half, and it stays off unless
       # `OUROBOROS_CLUSTER_STRATEGY` names a strategy.
       {:libcluster, "~> 3.5"},
-      # `Ouroboros.Web` — the LiveView operator surface (docs/WEB.md). Four packages and
-      # nothing else: there is no Node, no esbuild, no Tailwind, and no asset pipeline in
-      # this repo, and adding one to serve a handful of hand-written files would be a
-      # second toolchain to keep green for zero user-visible gain. The JavaScript these
-      # deps already ship prebuilt is copied into `priv/static/web/` by the `web.assets`
-      # alias below; the CSS is hand-authored.
+      # `Ouroboros.Web` — the LiveView operator surface (docs/WEB.md). Four runtime
+      # packages and no esbuild, Tailwind, or JavaScript asset pipeline. The JavaScript
+      # these dependencies already ship prebuilt is copied into `priv/static/web/` by the
+      # `web.assets` alias below; the CSS is hand-authored. Node is used only by the
+      # Playwright browser acceptance suite.
       #
       # `phoenix_pubsub` arrives transitively and is already optional-compatible with
       # `jido_signal`, so it needs no declaration of its own.

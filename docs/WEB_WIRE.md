@@ -29,10 +29,10 @@ still `pending` (`docs/AGENT_EXPERIENCE.md:162`, `:863`). The option-preserving 
 grow that transport and let the existing LiveView become a client of it, which retires
 `Web.Call` and the pid subscription while keeping Phoenix, `Phoenix.LiveViewTest`, and the
 transcript parity lock — the three things the GPUI deletion was paid for. The alternative
-that deletes Phoenix and puts a JS client in the browser retires more code but re-incurs
-the exact cost the GPUI removal just bought out: a surface with no headless test story, in
-a third toolchain, in a repository that already carries 403 lines of untested JavaScript
-it has flagged as an open risk (`docs/WEB.md:673-690`). The transport itself is worth
+that deletes Phoenix and puts a JS client in the browser retires more code but adds a
+second projection and its own corpus runner. The repository now has Playwright coverage
+for the existing LiveView integration; that gate does not validate a proposed
+client-side transcript projection. The transport itself is worth
 building under every option including doing nothing else, so §3 specs it as a standalone
 slice.
 
@@ -299,24 +299,21 @@ survive in reshaped form.
 moves — Rust keeps `transcript_cells.rs:846` and `model/transcript.rs:361`, and TypeScript
 gains a port of both, so the count of implementations is unchanged at two. The 69-fixture
 corpus does not retire either: it has to be re-pointed at a TypeScript projection, which
-means a JavaScript test runner in CI, which is a **third toolchain** in a repository that
-today builds with `cargo` and `mix` and nothing else. And the resync algorithm's copy count
-goes from four to four — `watch.ex` dies, a TypeScript watch is born.
+means adding a JavaScript projection test runner to CI. The repository now has Playwright
+for browser acceptance, but it does not compile or test a TypeScript projection. And the
+resync algorithm's copy count goes from four to four — `watch.ex` dies, a TypeScript watch
+is born.
 
 **The cost that decides it.** The GPUI desktop was deleted seven days ago, and the first
 reason given was that it had **no headless test story** — "Nothing here has been verified
 by eye" (`WEB.md:26-36`, quoting `docs/DESKTOP.md:189-192`) — while
 "`Phoenix.LiveViewTest` is fully headless, which changes the economics of every future
 surface slice" (`WEB.md:35-36`). Option B's honest answer to "what is the headless test
-story now" would have to be a real one: a Node/Bun test runner for the TS projection
-against the corpus, plus a headless browser (Playwright) in CI for the surface itself,
-plus the CI time and flake budget both carry. That is a defensible answer — it is what
-most teams do — but it is **new** infrastructure, and this repository has already declined
-to add a JavaScript toolchain once, on purpose (`WEB.md:258-260`), and is already paying
-for that: `app.js` is ~380 lines, "the suite executes none of it", and W8 recorded that it
-"did neither" of the two honest options rather than choosing one (`WEB.md:673-690`).
-Option B multiplies that untested surface by roughly an order of magnitude and asks the
-same team to build the harness it declined to build when the file was fifty lines.
+story now" still requires a Node/Bun test runner for the TS projection against the corpus.
+The Playwright gate added for the existing LiveView surface covers browser integration,
+not the proposed client-side projection. Option B therefore multiplies that projection
+surface by roughly an order of magnitude and adds a second implementation and its corpus
+harness.
 (`priv/static/web/app.js` is 403 lines today; `WEB.md:673` rounds it to ~380.)
 
 There is a genuine case for B — a browser client over a documented protocol is what an

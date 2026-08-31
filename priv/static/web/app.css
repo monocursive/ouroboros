@@ -41,9 +41,10 @@
 
   /* Semantic tones. Never the action accent; see rule 1 above. */
   --attention-green: #3db474;
-  --warn-amber: #c29a45;
-  --danger-ink: #ffffff;
-  --danger: #c75f55;
+  --warn-amber: #d3aa56;
+  --danger-ink: #15171a;
+  --danger: #d06d64;
+  --backdrop: rgb(0 0 0 / 65%);
 
   /* The one filled control. */
   --button-bg: var(--ink);
@@ -77,10 +78,11 @@
   --tertiary: #656961;
   --focus: #246b47;
 
-  --attention-green: #2e9e63;
-  --warn-amber: #a8842f;
-  --danger-ink: #f7f7f4;
-  --danger: #b04a43;
+  --attention-green: #176b3e;
+  --warn-amber: #765a13;
+  --danger-ink: #ffffff;
+  --danger: #9f3732;
+  --backdrop: rgb(0 0 0 / 45%);
 
   --button-bg: var(--ink);
   --button-ink: #f4f4f1;
@@ -100,7 +102,7 @@ body {
   background: var(--page);
   color: var(--ink);
   font-family: var(--font-ui);
-  font-size: 15px;
+  font-size: 16px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
@@ -190,6 +192,48 @@ a:where(:hover) {
   padding: 0.1em 0.35em;
   color: var(--ink);
 }
+.ouro-technical {
+  color: var(--secondary);
+  font-size: 0.875rem;
+}
+
+.ouro-technical > summary {
+  color: var(--secondary);
+  cursor: pointer;
+  min-height: 2.75rem;
+  display: flex;
+  align-items: center;
+}
+
+.ouro-technical pre {
+  max-width: 100%;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ouro-gate-form {
+  display: flex;
+  align-items: stretch;
+  gap: 0.6rem;
+  margin: 1.25rem 0;
+}
+
+.ouro-gate-form input {
+  min-width: 0;
+  flex: 1;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--ink);
+  padding: 0.7rem 0.8rem;
+  font: inherit;
+}
+
+.ouro-gate-form button {
+  min-height: 2.75rem;
+}
+
 
 .ouro-page {
   max-width: 52rem;
@@ -252,6 +296,13 @@ a:where(:hover) {
   cursor: pointer;
   text-decoration: none;
 }
+.ouro-button {
+  min-height: 2.75rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 
 .ouro-button:hover {
   background: var(--secondary);
@@ -423,6 +474,11 @@ body.phx-loading {
   gap: 0.35rem;
   text-decoration: none;
 }
+.ouro-presence-label {
+  color: var(--secondary);
+  font-size: 0.85rem;
+}
+
 
 /* Hollow is "not connected", filled is "connected". Never green: presence is a fact
    about a machine, not a request for a person's attention. */
@@ -462,8 +518,8 @@ body.phx-loading {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 44px;
+  height: 44px;
   padding: 0;
   background: transparent;
   color: var(--tertiary);
@@ -592,7 +648,7 @@ body.phx-loading {
 }
 
 .ouro-row-wrap:has(.ouro-row-actions) .ouro-row {
-  padding-right: 6.5rem;
+  padding-right: 9.5rem;
 }
 
 .ouro-row-actions {
@@ -601,12 +657,7 @@ body.phx-loading {
   right: 0.5rem;
   display: flex;
   gap: 0.25rem;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.ouro-row-wrap:hover .ouro-row-actions,
-.ouro-row-wrap:focus-within .ouro-row-actions {
+  z-index: 1;
   opacity: 1;
   pointer-events: auto;
 }
@@ -615,11 +666,14 @@ body.phx-loading {
   border: 0;
   background: var(--panel);
   color: var(--secondary);
-  padding: 0.2rem 0.3rem;
+  padding: 0.45rem 0.55rem;
   font: inherit;
-  font-size: 0.72rem;
+  font-size: 0.8rem;
+  min-height: 2.75rem;
+  min-width: 2.75rem;
   cursor: pointer;
 }
+
 
 .ouro-row-action:hover {
   color: var(--ink);
@@ -795,6 +849,10 @@ body.phx-loading {
   background: var(--workspace);
   min-height: 0;
 }
+.ouro-vitals-mobile {
+  display: none;
+}
+
 
 .ouro-vital {
   display: flex;
@@ -1318,6 +1376,7 @@ body.phx-loading {
 .ouro-composer-input {
   flex: 1;
   min-width: 0;
+  min-height: 2.75rem;
   resize: none;
   overflow-y: auto;
   line-height: 1.45;
@@ -1341,6 +1400,15 @@ body.phx-loading {
 .ouro-composer-refusal {
   margin-bottom: 0.5rem;
 }
+.ouro-composer-retry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.6rem;
+  color: var(--secondary);
+}
+
 
 /* A count the runtime published, not one this page kept. Quiet on purpose: a queue is a
    fact about pacing, not a problem. */
@@ -1357,12 +1425,13 @@ body.phx-loading {
    a quiet one. */
 .ouro-quiet-button {
   font-family: var(--font-ui);
-  font-size: 0.78rem;
+  font-size: 0.85rem;
   color: var(--secondary);
   background: transparent;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 0.25rem 0.6rem;
+  padding: 0.55rem 0.75rem;
+  min-height: 2.75rem;
   cursor: pointer;
 }
 
@@ -1394,12 +1463,13 @@ body.phx-loading {
 
 .ouro-picker-option {
   font-family: var(--font-ui);
-  font-size: 0.72rem;
+  font-size: 0.8rem;
   color: var(--tertiary);
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--radius);
-  padding: 0.1rem 0.4rem;
+  padding: 0.55rem 0.7rem;
+  min-height: 2.75rem;
   cursor: pointer;
 }
 
@@ -1582,25 +1652,57 @@ body.phx-loading {
 /* -------------------------------------------------------------------- Narrow view */
 
 @media (max-width: 1100px) {
+  .ouro-deck {
+    height: 100dvh;
+    min-height: 36rem;
+  }
+
   .ouro-columns,
   .ouro-columns:has(> .ouro-vitals) {
     grid-template-columns: minmax(0, 1fr);
-    grid-auto-rows: min-content;
+    grid-template-rows: minmax(8rem, 28vh) minmax(0, 1fr);
+    overflow: hidden;
   }
 
-  .ouro-rail,
-  .ouro-vitals {
+  .ouro-rail {
     border: 0;
     border-bottom: 1px solid var(--hairline-2);
+    min-height: 0;
   }
 
-  .ouro-deck {
-    height: auto;
-    min-height: 100vh;
+  .ouro-columns > .ouro-vitals {
+    display: none;
   }
 
-  .ouro-transcript {
-    overflow-y: visible;
+  .ouro-vitals-mobile {
+    display: block;
+    flex: 0 0 auto;
+    border-top: 1px solid var(--hairline-1);
+    background: var(--workspace);
+  }
+
+  .ouro-vitals-mobile > summary {
+    min-height: 2.75rem;
+    padding: 0 var(--gutter);
+    display: flex;
+    align-items: center;
+    color: var(--secondary);
+    cursor: pointer;
+  }
+
+  .ouro-vitals-mobile .ouro-vitals {
+    border: 0;
+    max-height: 45vh;
+  }
+
+  .ouro-focus {
+    overflow: hidden;
+  }
+
+  .ouro-composer {
+    position: sticky;
+    bottom: 0;
+    z-index: 5;
   }
 }
 
@@ -1627,7 +1729,49 @@ body.phx-loading {
     margin-left: auto;
     white-space: nowrap;
   }
+  .ouro-row-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .ouro-row-action {
+    min-height: 2.75rem;
+    padding-inline: 0.55rem;
+  }
+
+  .ouro-row-wrap:has(.ouro-row-actions) .ouro-row {
+    padding-right: 10.5rem;
+  }
+
+  .ouro-composer-box {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ouro-composer-actions {
+    justify-content: flex-end;
+  }
+
+  body .ouro-new {
+    padding-inline: 0.75rem;
+  }
+
+  body .ouro-new-advanced > summary,
+  body .ouro-new-label-row,
+  body .ouro-gate-form {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  body .ouro-new-advanced-summary {
+    text-align: left;
+  }
 }
+
+.ouro-session-dialog::backdrop {
+  background: var(--backdrop);
+}
+
 
 .ouro-session-dialog {
   position: fixed;
@@ -1735,6 +1879,34 @@ body.phx-loading {
   display: flex;
   flex-direction: column;
 }
+.ouro-new-advanced {
+  border-bottom: 1px solid var(--hairline-1);
+}
+
+.ouro-new-advanced > summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  color: var(--secondary);
+  cursor: pointer;
+}
+
+.ouro-new-advanced > summary::marker {
+  color: var(--tertiary);
+}
+
+.ouro-new-advanced-summary {
+  color: var(--tertiary);
+  font: 0.75rem/1.4 var(--font-mono);
+  text-align: right;
+}
+
+.ouro-new-advanced > .ouro-new-field:last-child {
+  border-bottom: 0;
+}
+
 
 .ouro-new-field {
   padding: 1.1rem 1.25rem;
@@ -1779,6 +1951,7 @@ body.phx-loading {
   font-family: var(--font-ui);
   font-size: 0.9rem;
   width: 100%;
+  min-height: 2.75rem;
   background: var(--inset);
   color: var(--ink);
   border: 1px solid var(--border);
@@ -1844,6 +2017,7 @@ body.phx-loading {
   border-radius: var(--radius);
   padding: 0.35rem 0.7rem;
   cursor: pointer;
+  min-height: 2.75rem;
 }
 
 .ouro-new-secondary:hover:not([disabled]) {
@@ -1873,6 +2047,7 @@ body.phx-loading {
   border: 1px solid var(--hairline-2);
   border-radius: var(--radius);
   padding: 0.55rem 0.7rem;
+  min-height: 2.75rem;
   cursor: pointer;
   font-family: var(--font-ui);
   color: var(--ink);
@@ -2123,6 +2298,7 @@ body.phx-loading {
   border-radius: var(--radius);
   padding: 0.3rem 0.85rem;
   cursor: pointer;
+  min-height: 2.75rem;
 }
 
 .ouro-button-quiet:hover {

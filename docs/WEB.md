@@ -253,17 +253,18 @@ imprecise or silent:
 
 Added to `mix.exs`: `phoenix`, `phoenix_live_view`, `bandit`, `phoenix_html` (current
 stable lines at implementation time; `phoenix_pubsub` arrives transitively and is already
-optional-compatible via `jido_signal`). Nothing else.
+optional-compatible via `jido_signal`). Nothing else is required at runtime.
 
-**No Node, no esbuild, no Tailwind, no asset pipeline.** The repo has zero JS/CSS today
-and the release copies `priv/` verbatim; that stays true:
+**No esbuild, no Tailwind, no production asset pipeline.** The release copies `priv/`
+verbatim. Node is a development/CI dependency only, used by Playwright to execute browser
+acceptance journeys:
 
 - JS: the prebuilt bundles that ship inside the deps
   (`deps/phoenix/priv/static/phoenix.min.js`,
   `deps/phoenix_live_view/priv/static/phoenix_live_view.min.js`) are copied into
   `priv/static/web/` by a mix alias that runs in `make release-tarball` and in dev
-  compile. A ~50-line hand-written `app.js` wires the LiveSocket and the few hooks
-  (clipboard, notification permission, scroll pinning).
+  compile. The hand-written `app.js` wires the LiveSocket and browser hooks; Playwright
+  loads it exactly as the release serves it.
 - CSS: hand-authored. `tui/src/desktop_design.rs` is already a token system (paired
   dark/light palettes, layer order, semantic tones — `docs/DESKTOP.md:211-227`); it ports
   to CSS custom properties nearly one-to-one, and the design rules it encodes (semantic
@@ -669,25 +670,14 @@ packages and gained nothing; no surviving crate moved versions.
   credential, same postures, but the security-review pass in W0 should walk the Phoenix
   endpoint with the same eyes that reviewed the listener (frame limits → body limits,
   upload handling off by default, no code-reload endpoints in prod).
-- **The browser half of this surface is not tested by anything.** Added by W8, because W8
-  is where it stopped being a rounding error. `app.js` is ~380 lines and there is no
-  JavaScript toolchain here to run them in — deliberately, per §3, and the trade was cheap
-  while the file was fifty lines of LiveSocket wiring. It now also owns Enter-to-send,
-  scroll pinning, `localStorage` round-tripping for two preferences, the Notification
-  permission dance, the Page Visibility gate, and the set of already-rung request ids.
-  Every commit in W0–W8 that touched it says which of its claims are unverified, and the
-  BEAM-side halves are asserted (the layout emits the script, the toggles render, the two
-  files agree on their storage keys, the server pushes the right edge), but **the suite
-  executes none of it**.
-
-  W8's own JavaScript was driven once, by hand, under a throwaway fake DOM in `node` —
-  the pre-paint script against a storage that throws, the theme toggle round-tripping
-  `data-theme` and `localStorage`, and the bell across on/off, hidden/visible,
-  granted/denied/revoked, no-API, and the same key twice. It passed. That is a fact about
-  one afternoon, not a gate: the harness is not in this repository and nothing re-runs it,
-  so the next edit to `app.js` has exactly the coverage it had before. The honest options
-  are a headless-browser gate in CI or a deliberate standing acceptance; W8 did neither and
-  is recording the choice rather than making it.
+- **Browser regression coverage has a CI gate.** `test/browser/operator-flow.spec.js`
+  drives the password recovery form, progressive session setup, desktop and mobile
+  session layouts, empty-send protection, native modal behavior, and contextual document
+  titles in Chromium. `playwright.config.js` starts the real Phoenix endpoint against an
+  isolated data directory; `.github/workflows/ci.yml` installs Chromium and runs the
+  suite. This closes the earlier W8 gap where `app.js` had only been exercised once under
+  a throwaway fake DOM. It does not replace the BEAM-side LiveView tests; the browser gate
+  covers browser-owned behavior while those tests continue to cover server transitions.
 - **Open**: whether `Web.Call` should also write to the effect ledger the way operate
   calls via the gateway are audited today (v1: same log line, no ledger change); whether
   the defaulted posture should eventually serve the web on the tailnet automatically once

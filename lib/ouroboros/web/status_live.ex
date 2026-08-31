@@ -22,7 +22,7 @@ defmodule Ouroboros.Web.StatusLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    {:ok, load(socket)}
+    {:ok, socket |> assign(:page_title, "Advanced · Runtime") |> load()}
   end
 
   @impl true
@@ -33,8 +33,9 @@ defmodule Ouroboros.Web.StatusLive do
     ~H"""
     <main class="ouro-page">
       <header class="ouro-header">
-        <h1>Ouroboros</h1>
-        <p class="ouro-subhead">{@scope} scope</p>
+        <p class="ouro-subhead">Advanced</p>
+        <h1>Runtime status</h1>
+        <p class="ouro-subhead"><a href="/">Sessions</a></p>
       </header>
 
       <section class="ouro-panel">
@@ -68,7 +69,7 @@ defmodule Ouroboros.Web.StatusLive do
         <dd class="ouro-mono">{@status.connected_nodes}</dd>
       </div>
       <div class="ouro-fact">
-        <dt>Interactive sessions</dt>
+        <dt>Agent sessions</dt>
         <dd class="ouro-mono">{@status.interactive_sessions}</dd>
       </div>
       <div class="ouro-fact">

@@ -270,16 +270,17 @@ defmodule Ouroboros.Web.StylesheetTest do
       end
     end
 
-    test "the light theme's semantic tones stay readable on a card" do
-      light = colour_tokens(~s([data-theme="light"]))
+    test "semantic tones meet the body-text contrast floor in both themes" do
+      for selector <- [":root", ~s([data-theme="light"])] do
+        values = colour_tokens(selector)
 
-      # 3:1, the large-text and non-text floor: every one of these is a chip, a label or a
-      # short tag rather than a paragraph.
-      for token <- ["--attention-green", "--warn-amber", "--danger", "--secondary"] do
-        ratio = contrast(light[token], light["--card"])
+        for token <- ["--attention-green", "--warn-amber", "--danger", "--secondary"] do
+          ratio = contrast(values[token], values["--card"])
 
-        assert ratio >= 3.0,
-               "light #{token} on --card is #{Float.round(ratio, 2)}:1, below the 3:1 floor"
+          assert ratio >= 4.5,
+                 "#{selector} #{token} on --card is #{Float.round(ratio, 2)}:1, " <>
+                   "below the 4.5:1 floor"
+        end
       end
     end
 

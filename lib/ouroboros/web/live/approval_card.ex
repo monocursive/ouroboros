@@ -213,6 +213,7 @@ defmodule Ouroboros.Web.Live.ApprovalCard do
       |> assign(:subject, Approval.subject(assigns.request))
       |> assign(:parsed, parsed_diff(detail))
       |> assign(:escalation?, detail.kind == "sandbox escalation")
+      |> assign(:kind, kind(detail.kind))
 
     ~H"""
     <section
@@ -221,7 +222,7 @@ defmodule Ouroboros.Web.Live.ApprovalCard do
       aria-live="polite"
     >
       <header class="ouro-approval-head">
-        <span :if={@detail.kind} class="ouro-approval-kind">{@detail.kind}</span>
+        <span :if={@kind} class="ouro-approval-kind">{@kind}</span>
         <span class="ouro-approval-subject">{@detail.title || @subject}</span>
         <span :if={@also_waiting > 0} class="ouro-quiet">
           {@also_waiting} more waiting
@@ -291,6 +292,9 @@ defmodule Ouroboros.Web.Live.ApprovalCard do
     </section>
     """
   end
+
+  defp kind("sandbox escalation"), do: "File access request"
+  defp kind(value), do: value
 
   attr :plan, :any, required: true
 

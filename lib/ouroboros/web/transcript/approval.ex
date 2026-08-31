@@ -465,7 +465,7 @@ defmodule Ouroboros.Web.Transcript.Approval do
 
     cond do
       "permissions.add" not in methods ->
-        {nil, "this runtime does not serve permissions.add, so the rule cannot be saved"}
+        {nil, "This Ouroboros node cannot save approval rules."}
 
       String.starts_with?(pattern, "ComputerUse(") ->
         {%Rule{pattern: pattern, workspace: workspace || ""}, nil}
@@ -474,7 +474,7 @@ defmodule Ouroboros.Web.Transcript.Approval do
         {%Rule{pattern: pattern, workspace: workspace}, nil}
 
       true ->
-        {nil, "this session names no workspace, so there is no scope to save the rule in"}
+        {nil, "Choose a project folder before saving an approval rule for this session."}
     end
   end
 

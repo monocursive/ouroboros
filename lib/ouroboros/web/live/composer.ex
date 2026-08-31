@@ -77,6 +77,7 @@ defmodule Ouroboros.Web.Live.Composer do
   @type turn :: %{
           running?: boolean(),
           spoke?: boolean(),
+          failed?: boolean(),
           turn_id: String.t() | nil,
           queued: non_neg_integer()
         }
@@ -90,25 +91,40 @@ defmodule Ouroboros.Web.Live.Composer do
   """
   @spec turn_state([Entry.t()]) :: turn()
   def turn_state(entries) when is_list(entries) do
-    Enum.reduce(entries, %{running?: false, spoke?: false, turn_id: nil, queued: 0}, fn
-      %Entry.Event{event: event}, state -> absorb(state, event)
-      _divider, state -> state
-    end)
+    Enum.reduce(
+      entries,
+      %{running?: false, spoke?: false, failed?: false, turn_id: nil, queued: 0},
+      fn
+        %Entry.Event{event: event}, state -> absorb(state, event)
+        _divider, state -> state
+      end
+    )
   end
 
   defp absorb(state, event) do
     case Map.get(event, :type) do
       :turn_started ->
-        %{state | running?: true, spoke?: true, turn_id: Map.get(event, :turn_id)}
+        %{
+          state
+          | running?: true,
+            spoke?: true,
+            failed?: false,
+            turn_id: Map.get(event, :turn_id)
+        }
 
-      type when type in [:turn_completed, :turn_failed, :turn_interrupted] ->
-        %{state | running?: false, spoke?: true, turn_id: nil}
+      :turn_failed ->
+        %{state | running?: false, spoke?: true, failed?: true, turn_id: nil}
+
+      type when type in [:turn_completed, :turn_interrupted] ->
+        %{state | running?: false, spoke?: true, failed?: false, turn_id: nil}
 
       :queue_changed ->
         %{state | queued: queued_of(event)}
 
-      # The session itself went away, whatever the last turn boundary said.
-      type when type in [:session_closed, :session_idle] ->
+      :session_closed ->
+        %{state | running?: false, spoke?: true, failed?: false, turn_id: nil}
+
+      :session_idle ->
         %{state | running?: false, spoke?: true, turn_id: nil}
 
       _other ->
@@ -152,9 +168,13 @@ defmodule Ouroboros.Web.Live.Composer do
   def working?(%{spoke?: true, running?: running}, _status), do: running
   def working?(_silent, status), do: status in [:running, :starting, :awaiting_approval]
 
-  @doc "One sandbox posture or effort as a word, never a raw atom."
+  @doc "One file-access posture or effort as a word, never a raw atom."
   @spec word(term()) :: String.t()
-  def word(nil), do: "Default"
+  def word(nil), do: "Session default"
+  def word("default"), do: "Session default"
+  def word("read_only"), do: "Read only"
+  def word("workspace_write"), do: "Project files"
+  def word("unrestricted"), do: "Full computer access"
   def word(value), do: value |> to_string() |> String.replace("_", " ")
 
   # ------------------------------------------------------------------------------------
@@ -177,6 +197,7 @@ defmodule Ouroboros.Web.Live.Composer do
   attr :can_interrupt, :boolean, required: true
   attr :can_configure, :boolean, required: true
   attr :ended, :boolean, default: false
+  attr :can_retry, :boolean, default: false
 
   def composer(assigns) do
     assigns =
@@ -187,6 +208,17 @@ defmodule Ouroboros.Web.Live.Composer do
     ~H"""
     <div class="ouro-composer">
       <p :if={@error} class="ouro-refusal ouro-composer-refusal" role="alert">{@error}</p>
+      <div :if={@turn.failed?} class="ouro-composer-retry" role="status">
+        <span>The agent stopped before completing the last message.</span>
+        <button
+          :if={@can_retry}
+          type="button"
+          class="ouro-quiet-button"
+          phx-click="retry"
+        >
+          Retry last message
+        </button>
+      </div>
 
       <p :if={@ended} class="ouro-quiet" role="status">
         This session has ended; it takes no further messages.
@@ -203,6 +235,7 @@ defmodule Ouroboros.Web.Live.Composer do
             name="message"
             class="ouro-composer-input"
             phx-hook="Composer"
+            required
             phx-debounce="400"
             rows="1"
             aria-label="message"
@@ -221,7 +254,13 @@ defmodule Ouroboros.Web.Live.Composer do
               Interrupt
             </button>
 
-            <button type="submit" class="ouro-button" phx-disable-with="Sending…">
+            <button
+              type="submit"
+              class="ouro-button"
+              data-ouro-send
+              disabled={String.trim(@draft) == ""}
+              phx-disable-with="Sending…"
+            >
               {if @queues?, do: "Queue", else: "Send"}
             </button>
           </div>
@@ -231,7 +270,7 @@ defmodule Ouroboros.Web.Live.Composer do
       <div :if={@can_configure and not @ended} class="ouro-composer-footer">
         <.picker
           :if={@sandbox}
-          label="Sandbox"
+          label="File access"
           current={@sandbox}
           choices={sandbox_modes()}
           field="sandbox_mode"

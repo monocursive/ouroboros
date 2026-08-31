@@ -4,10 +4,10 @@ defmodule Ouroboros.Web.Layouts do
   in every page's top row.
 
   Three files and a font link, all of them named here rather than assembled by a build
-  step, because this repo has no JavaScript toolchain and adding one to serve four static
-  assets would be a second toolchain to keep green. `phoenix.min.js` and
+  step, because the production asset path has no JavaScript bundler. `phoenix.min.js` and
   `phoenix_live_view.min.js` are copied out of the dependencies verbatim by the
   `web.assets` mix alias; `app.css` and `app.js` are written by hand and read like it.
+  Playwright exercises those files in a browser but does not build or transform them.
 
   ## The one script that is not deferred
 
@@ -84,7 +84,10 @@ defmodule Ouroboros.Web.Layouts do
 
   @doc "The document shell."
   def root(assigns) do
-    assigns = assign(assigns, :theme_script_tag, theme_script_tag())
+    assigns =
+      assigns
+      |> assign_new(:page_title, fn -> nil end)
+      |> assign(:theme_script_tag, theme_script_tag())
 
     ~H"""
     <!DOCTYPE html>
@@ -94,7 +97,7 @@ defmodule Ouroboros.Web.Layouts do
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta name="referrer" content="no-referrer" />
         <meta name="csrf-token" content={get_csrf_token()} />
-        <title>Ouroboros</title>
+        <.live_title default="Ouroboros" suffix=" · Ouroboros">{@page_title}</.live_title>
         {@theme_script_tag}
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />

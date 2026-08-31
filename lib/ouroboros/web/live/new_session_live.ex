@@ -66,6 +66,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     socket =
       socket
       |> assign(:scope, config.scope)
+      |> assign(:page_title, "New session")
       |> assign(:data_dir, config.data_dir)
       # Where the operator's last successful start left this form. `read/1` is total, so a
       # corrupt file is a form with no defaults rather than a page that will not mount.
@@ -98,29 +99,18 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   # ------------------------------------------------------------------------------------
 
   # One `phx-change` for the whole form, so every re-render is drawn from one consistent
-  # reading of it. A control absent from the DOM — the model text input outside its two
-  # modes — is absent from the params too, and keeps whatever it last held rather than
-  # being cleared by a change to some other field.
+  # reading of it. The submit handler reads the browser payload through the same function;
+  # rendered controls and the request can therefore never disagree.
   @impl true
   def handle_event("change", params, socket) do
-    form = socket.assigns.form
-
-    form = %{
-      form
-      | provider: params["provider"] || form.provider,
-        workspace: params["workspace"] || form.workspace,
-        model_text: params["model_text"] || form.model_text,
-        model_search: params["model_search"] || form.model_search,
-        model_choice: model_choice(params, form),
-        effort: blank_to_nil(params["effort"])
-    }
+    form = params |> read_form(socket.assigns.form) |> reconcile(socket)
 
     provider_invalid? =
-      socket.assigns.provider_invalid? and blank?(params["provider"] || form.provider)
+      socket.assigns.provider_invalid? and blank?(form.provider)
 
     {:noreply,
      socket
-     |> assign(:form, reconcile(form, socket))
+     |> assign(:form, form)
      |> assign(:initial_message, params["initial_message"] || socket.assigns.initial_message)
      |> assign(:provider_invalid?, provider_invalid?)
      |> assign(:refusal, nil)}
@@ -203,27 +193,47 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   # Start
   # ------------------------------------------------------------------------------------
 
-  def handle_event("start", _params, socket) do
-    if blank?(socket.assigns.form.provider) do
-      {:noreply,
-       socket
-       |> assign(:provider_invalid?, true)
-       |> assign(:refusal, nil)
-       |> push_event("focus-invalid", %{selector: "#provider"})}
-    else
-      case socket.assigns.started_id do
-        id when is_binary(id) ->
-          {:noreply, send_initial(socket, id)}
+  def handle_event("start", params, socket) do
+    form = params |> read_form(socket.assigns.form) |> reconcile(socket)
 
-        nil ->
-          case NewSession.start_params(socket.assigns.form, field(socket)) do
-            {:error, message} ->
-              {:noreply, assign(socket, :refusal, %{message: message, detail: nil})}
+    socket =
+      socket
+      |> assign(:form, form)
+      |> assign(:initial_message, params["initial_message"] || socket.assigns.initial_message)
 
-            {:ok, params} ->
-              {:noreply, start(socket, params)}
-          end
-      end
+    cond do
+      not socket.assigns.loaded? ->
+        {:noreply,
+         assign(socket, :refusal, %{
+           message: "Settings are still loading.",
+           detail: "Wait a moment, then start the session."
+         })}
+
+      blank?(form.provider) ->
+        {:noreply,
+         socket
+         |> assign(:provider_invalid?, true)
+         |> assign(:refusal, nil)
+         |> push_event("focus-invalid", %{selector: "#provider"})}
+
+      not available_provider?(socket.assigns.providers, form.provider) ->
+        {:noreply,
+         assign(socket, :refusal, %{
+           message: "That AI provider is not available on this computer.",
+           detail: "Choose one marked available under Advanced settings."
+         })}
+
+      is_binary(socket.assigns.started_id) ->
+        {:noreply, send_initial(socket, socket.assigns.started_id)}
+
+      true ->
+        case NewSession.start_params(form, field(socket)) do
+          {:error, message} ->
+            {:noreply, assign(socket, :refusal, %{message: message, detail: nil})}
+
+          {:ok, params} ->
+            {:noreply, start(socket, params)}
+        end
     end
   end
 
@@ -260,7 +270,11 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   defp load_providers(socket) do
     case call(socket, "runtime.providers", %{}) do
       {:ok, entries} when is_list(entries) ->
-        assign(socket, :providers, NewSession.provider_rows(entries))
+        rows = NewSession.provider_rows(entries)
+
+        socket
+        |> assign(:providers, rows)
+        |> assign(:form, choose_provider(socket.assigns.form, rows))
 
       refused ->
         assign(socket, :providers_error, message(refused))
@@ -351,7 +365,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
             socket
             |> assign(:starting?, false)
             |> assign(:refusal, %{
-              message: "interactive.start answered something this build cannot read",
+              message: "The session started, but this build could not open it.",
               detail: nil
             })
         end
@@ -416,6 +430,37 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   # ------------------------------------------------------------------------------------
   # Derived state
   # ------------------------------------------------------------------------------------
+  defp read_form(params, form) do
+    %{
+      form
+      | provider: Map.get(params, "provider", form.provider),
+        workspace: Map.get(params, "workspace", form.workspace),
+        model_text: Map.get(params, "model_text", form.model_text),
+        model_search: Map.get(params, "model_search", form.model_search),
+        model_choice: model_choice(params, form),
+        effort: blank_to_nil(Map.get(params, "effort", form.effort))
+    }
+  end
+
+  defp choose_provider(form, rows) do
+    available = Enum.filter(rows, & &1.detected?)
+
+    provider =
+      cond do
+        Enum.any?(available, &(&1.name == form.provider)) -> form.provider
+        Enum.any?(available, &(&1.name == "native")) -> "native"
+        available != [] -> hd(available).name
+        true -> nil
+      end
+
+    %{form | provider: provider}
+  end
+
+  defp available_provider?(rows, provider) when is_list(rows) do
+    Enum.any?(rows, &(&1.name == provider and &1.detected?))
+  end
+
+  defp available_provider?(_rows, _provider), do: false
 
   # A model chosen under the previous provider is not necessarily a row under the new one,
   # so the choice is re-checked against the field the change produced rather than carried.
@@ -448,6 +493,11 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     account = NewSession.account_card(assigns.account, assigns.login)
     gated? = NewSession.requires_chatgpt?(assigns.form, field)
 
+    can_start? = Call.available?(assigns.scope, "interactive.start")
+
+    provider_ready? =
+      assigns.loaded? and available_provider?(assigns.providers, assigns.form.provider)
+
     assigns =
       assigns
       |> assign(:field, field)
@@ -458,37 +508,23 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       |> assign(:intent, NewSession.model_intent(assigns.form, field))
       |> assign(:account_card, account)
       |> assign(:gated?, gated?)
-      |> assign(:can_start?, Call.available?(assigns.scope, "interactive.start"))
+      |> assign(:can_start?, can_start?)
+      |> assign(:provider_ready?, provider_ready?)
       |> assign(:can_browse?, Call.available?(assigns.scope, "workspace.browse"))
+      |> assign(:provider_label, provider_label(assigns.form.provider))
 
     ~H"""
     <div class="ouro-new">
       <header class="ouro-new-top">
         <div class="ouro-top-row">
-          <a class="ouro-new-back" href="/">← Deck</a>
+          <a class="ouro-new-back" href="/">← Sessions</a>
           <Layouts.theme_toggle />
         </div>
         <h1 class="ouro-new-title">New session</h1>
-        <p class="ouro-new-sub">Choose where and how this agent works</p>
+        <p class="ouro-new-sub">Choose a project and describe what you want done</p>
       </header>
 
       <form id="new-session" class="ouro-new-form" phx-change="change" phx-submit="start">
-        <.provider_field
-          rows={@providers}
-          error={@providers_error}
-          invalid={@provider_invalid?}
-          loaded={@loaded?}
-          chosen={@form.provider}
-        />
-
-        <.model_field
-          field={@field}
-          visible={@visible}
-          form={@form}
-          intent={@intent}
-          error={@catalogue_error}
-        />
-
         <.workspace_field
           workspace={@form.workspace}
           can_browse={@can_browse?}
@@ -497,14 +533,10 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
           refusal={@browse_refusal}
         />
 
-        <.thinking_field effort={@form.effort} />
-
-        <.sandbox_field sandbox={@form.sandbox} />
-
         <section class="ouro-new-field" aria-labelledby="initial-message-label">
           <div class="ouro-new-label-row">
             <label class="ouro-new-label" id="initial-message-label" for="initial-message">
-              First message
+              What should the agent do?
             </label>
             <span class="ouro-new-aside">Optional</span>
           </div>
@@ -512,15 +544,45 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
             id="initial-message"
             class="ouro-new-input ouro-new-message"
             name="initial_message"
-            rows="4"
-            placeholder="What should this agent do?"
+            rows="5"
+            placeholder="Describe the result you want. You can add more instructions later."
           >{@initial_message}</textarea>
-          <p class="ouro-new-hint">Sent immediately after the session starts.</p>
+          <p class="ouro-new-hint">This becomes the first message in the session.</p>
         </section>
 
-        <.account_card :if={@gated?} card={@account_card} scope={@scope} />
+        <details
+          class="ouro-new-advanced"
+          open={@provider_invalid? or (@gated? and not @account_card.usable?)}
+        >
+          <summary>
+            <span>Advanced settings</span>
+            <span class="ouro-new-advanced-summary">
+              {@provider_label} · recommended model · {sandbox_title(@form.sandbox)}
+            </span>
+          </summary>
 
-        <p :if={@refusal} class="ouro-refusal ouro-new-refusal">
+          <.provider_field
+            rows={@providers}
+            error={@providers_error}
+            invalid={@provider_invalid?}
+            loaded={@loaded?}
+            chosen={@form.provider}
+          />
+
+          <.model_field
+            field={@field}
+            visible={@visible}
+            form={@form}
+            intent={@intent}
+            error={@catalogue_error}
+          />
+
+          <.thinking_field effort={@form.effort} />
+          <.sandbox_field sandbox={@form.sandbox} />
+          <.account_card :if={@gated?} card={@account_card} scope={@scope} />
+        </details>
+
+        <p :if={@refusal} class="ouro-refusal ouro-new-refusal" role="alert">
           {@refusal.message}
           <span :if={@refusal.detail} class="ouro-new-refusal-detail">{@refusal.detail}</span>
         </p>
@@ -530,15 +592,24 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
           <button
             type="submit"
             class="ouro-button"
-            disabled={not @can_start? or @starting? or (@gated? and not @account_card.usable?)}
+            disabled={
+              not @can_start? or not @provider_ready? or @starting? or
+                (@gated? and not @account_card.usable?)
+            }
           >
             {start_label(@can_start?, @starting?, @gated?, @account_card)}
           </button>
         </footer>
 
+        <p :if={not @loaded? and is_nil(@providers_error)} class="ouro-new-note" role="status">
+          Finding the available AI provider…
+        </p>
+        <p :if={@loaded? and not @provider_ready?} class="ouro-new-note" role="alert">
+          No supported AI provider is available on this computer.
+        </p>
         <p :if={not @can_start?} class="ouro-new-note">
-          This endpoint was started with <code>OUROBOROS_WEB_SCOPE=read</code>, which does not
-          serve <code>interactive.start</code>.
+          This link is view-only. Ask the person who set up Ouroboros for permission to start
+          sessions.
         </p>
       </form>
     </div>
@@ -550,6 +621,14 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
   defp start_label(_can?, _starting?, true, %{usable?: false}), do: "Connect ChatGPT first"
   defp start_label(_can?, _starting?, _gated?, _card), do: "Start session"
+  defp provider_label(nil), do: "finding provider"
+  defp provider_label("native"), do: "Ouroboros AI"
+  defp provider_label("claude"), do: "Claude"
+  defp provider_label("gemini"), do: "Gemini"
+  defp provider_label("grok"), do: "Grok"
+  defp provider_label("opencode"), do: "OpenCode"
+  defp provider_label("zai"), do: "Z.ai"
+  defp provider_label(provider), do: provider
 
   # ------------------------------------------------------------------------------------
   # Provider
@@ -567,8 +646,8 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     ~H"""
     <section class="ouro-new-field" aria-labelledby="provider-label">
       <div class="ouro-new-label-row">
-        <label class="ouro-new-label" id="provider-label" for="provider">Provider</label>
-        <span class="ouro-new-aside">Required</span>
+        <label class="ouro-new-label" id="provider-label" for="provider">AI provider</label>
+        <span class="ouro-new-aside">Automatically selected</span>
       </div>
 
       <select
@@ -577,25 +656,28 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
         phx-hook="FocusInvalid"
         name="provider"
         required
+        disabled={not @loaded}
         aria-invalid={to_string(@invalid)}
         aria-describedby={if @invalid, do: "provider-error", else: nil}
       >
-        <option value="" selected={is_nil(@chosen) or @chosen == ""}>Choose a provider</option>
+        <option value="" selected={is_nil(@chosen) or @chosen == ""}>No provider available</option>
         <option
           :for={row <- @rows || []}
           value={row.name}
           selected={@chosen == row.name}
+          disabled={not row.detected?}
           class={if not row.detected?, do: "ouro-new-dim"}
         >
-          {row.name}{if row.note, do: " — #{row.note}"}
+          {provider_label(row.name)}{if row.name == "native" and row.detected?,
+            do: " — recommended"}{if row.note, do: " — unavailable: #{row.note}"}
         </option>
       </select>
 
       <p :if={@invalid} id="provider-error" class="ouro-refusal" role="alert">
-        choose a provider before starting a session
+        choose an available AI provider before starting
       </p>
-      <p :if={@error} class="ouro-refusal">the provider list could not be read: {@error}</p>
-      <p :if={not @loaded and is_nil(@error)} class="ouro-new-hint">reading the provider list…</p>
+      <p :if={@error} class="ouro-refusal">The provider list could not be loaded: {@error}</p>
+      <p :if={not @loaded and is_nil(@error)} class="ouro-new-hint">Finding providers…</p>
       <p :if={@footnote} class="ouro-new-hint">{@footnote}</p>
     </section>
     """
@@ -735,18 +817,18 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     ~H"""
     <section class="ouro-new-field" aria-labelledby="workspace-label">
       <div class="ouro-new-label-row">
-        <span class="ouro-new-label" id="workspace-label">Workspace</span>
-        <span class="ouro-new-aside">Absolute path</span>
+        <label class="ouro-new-label" id="workspace-label" for="workspace">Project folder</label>
+        <span class="ouro-new-aside">Optional</span>
       </div>
 
       <div class="ouro-new-row">
         <input
+          id="workspace"
           type="text"
           class="ouro-new-input"
           name="workspace"
           value={@workspace}
-          placeholder="/absolute/path"
-          aria-labelledby="workspace-label"
+          placeholder="Choose a project folder"
           autocomplete="off"
         />
         <button
@@ -754,11 +836,12 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
           class="ouro-new-secondary"
           phx-click="browse-open"
           disabled={not @can_browse}
-          title={not @can_browse && "this endpoint does not serve workspace.browse"}
+          title={not @can_browse && "Folder browsing is unavailable from this link"}
         >
           Browse…
         </button>
       </div>
+      <p class="ouro-new-hint">Leave blank to use the default project folder.</p>
 
       <.browse_panel :if={@open} listing={@listing} refusal={@refusal} />
     </section>
@@ -872,11 +955,11 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     <section class="ouro-new-field" aria-labelledby="effort-label">
       <div class="ouro-new-label-row">
         <span class="ouro-new-label" id="effort-label">Thinking</span>
-        <span class="ouro-new-aside">{if @effort, do: "Your choice", else: "Not stated"}</span>
+        <span class="ouro-new-aside">{if @effort, do: "Selected", else: "Recommended"}</span>
       </div>
 
       <select class="ouro-new-select" name="effort" aria-labelledby="effort-label">
-        <option value="" selected={is_nil(@effort)}>Runtime default</option>
+        <option value="" selected={is_nil(@effort)}>Recommended</option>
         <option :for={level <- NewSession.efforts()} value={level} selected={@effort == level}>
           {String.capitalize(level)}
         </option>
@@ -884,8 +967,8 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
       <p class="ouro-new-intent">
         {if @effort,
-          do: "Sends reasoning_effort #{@effort}",
-          else: "Sends no reasoning_effort — the runtime decides"}
+          do: "Thinking level: #{String.capitalize(@effort)}",
+          else: "Ouroboros will choose the recommended thinking level."}
       </p>
     </section>
     """
@@ -902,7 +985,9 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     <section class="ouro-new-field" aria-labelledby="sandbox-label">
       <div class="ouro-new-label-row">
         <span class="ouro-new-label" id="sandbox-label">File access</span>
-        <span class="ouro-new-aside">{if @sandbox, do: "Your choice", else: "Not stated"}</span>
+        <span class="ouro-new-aside">
+          {if @sandbox == "workspace_write", do: "Recommended", else: "Selected"}
+        </span>
       </div>
 
       <div class="ouro-cards" role="group" aria-labelledby="sandbox-label">
@@ -927,11 +1012,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
         </button>
       </div>
 
-      <p class="ouro-new-intent">
-        {if @sandbox,
-          do: "Sends sandbox_mode #{@sandbox}",
-          else: "Sends no sandbox_mode — the plane decides"}
-      </p>
+      <p class="ouro-new-intent">{sandbox_intent(@sandbox)}</p>
     </section>
     """
   end
@@ -940,12 +1021,24 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   # reads says full access, because "unrestricted" names the parameter rather than what
   # the agent is being allowed to do.
   defp sandbox_title("read_only"), do: "Read only"
-  defp sandbox_title("workspace_write"), do: "Workspace write"
-  defp sandbox_title("unrestricted"), do: "Full access — no sandbox"
+  defp sandbox_title("workspace_write"), do: "Project files"
+  defp sandbox_title("unrestricted"), do: "Full computer access"
 
   defp sandbox_describe("read_only"), do: "cannot create or edit files"
-  defp sandbox_describe("workspace_write"), do: "can edit files in the workspace"
-  defp sandbox_describe("unrestricted"), do: "shell runs with no OS sandbox"
+  defp sandbox_describe("workspace_write"), do: "can edit files in the project folder"
+
+  defp sandbox_describe("unrestricted"),
+    do: "can change files outside the project and run system commands"
+
+  defp sandbox_intent("read_only"),
+    do: "The agent can inspect the project without changing files."
+
+  defp sandbox_intent("workspace_write"), do: "The agent can edit files in the project folder."
+
+  defp sandbox_intent("unrestricted"),
+    do: "The agent can access files outside the project folder."
+
+  defp sandbox_intent(_mode), do: "Ouroboros will use the recommended file access."
 
   defp warns?(mode), do: mode == "unrestricted"
 

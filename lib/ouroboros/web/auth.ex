@@ -3,11 +3,12 @@ defmodule Ouroboros.Web.Auth do
   Token in, cookie out, and one page for everything that is neither.
 
   A browser cannot hold a token the way `ouro` does, and a token in a URL survives in the
-  address bar, in history, and in every `Referer` the page would send. So the token is
-  spent exactly once:
+  address bar, in history, and in every `Referer` the page would send. A fresh launch may
+  still spend the command's one-time URL, while a returning browser can submit the same
+  credential without putting it in a URL:
 
       GET /auth?token=…  →  signed HttpOnly SameSite=Lax session cookie  →  302 to /
-
+      POST /auth         →  the same exchange from a password field      →  302 to /
   Nothing after that carries the credential, and `Referrer-Policy: no-referrer` on every
   response from this endpoint keeps the one URL that did from leaking sideways.
 
@@ -16,12 +17,11 @@ defmodule Ouroboros.Web.Auth do
   Every failure renders the same page with the same status: no token, a wrong token, a
   token of the wrong length, a missing cookie, a cookie signed by a secret this node no
   longer has. A surface that distinguished them would be telling a stranger which half of
-  their guess was right, and there is nothing on the other side of this door worth
-  building a probe against it for.
+  their guess was right.
 
-  The page names `ouro web`, because the operator who lands on it is nearly always the
-  one who bookmarked `/` and does not have a fresh URL. It is deliberately the only thing
-  an unauthenticated request can learn.
+  The page offers one password field so a person can recover without understanding the
+  daemon's publication files. `ouro web` remains the local fallback for somebody who has
+  terminal access, but it is no longer the only action the page offers.
 
   ## The comparison
 
@@ -55,7 +55,8 @@ defmodule Ouroboros.Web.Auth do
     config = opts[:config] || Config.for_endpoint(opts[:endpoint])
 
     case {conn.method, conn.path_info} do
-      {"GET", @auth_path} -> exchange(conn, config)
+      {"GET", @auth_path} -> exchange_query(conn, config)
+      {"POST", @auth_path} -> exchange_form(conn, config)
       _other -> require_session(conn)
     end
   end
@@ -102,10 +103,26 @@ defmodule Ouroboros.Web.Auth do
     end
   end
 
-  defp exchange(conn, config) do
+  defp exchange_query(conn, config) do
     conn = fetch_query_params(conn)
+    exchange(conn, conn.query_params["token"], config)
+  end
 
-    if token_matches?(conn.query_params["token"], config.token) do
+  defp exchange_form(conn, config) do
+    case read_body(conn, length: 8_192, read_length: 8_192, read_timeout: 1_000) do
+      {:ok, body, conn} ->
+        exchange(conn, body |> Plug.Conn.Query.decode() |> Map.get("token"), config)
+
+      {:more, _partial, conn} ->
+        refuse(conn)
+
+      {:error, _reason} ->
+        refuse(conn)
+    end
+  end
+
+  defp exchange(conn, presented, config) do
+    if token_matches?(presented, config.token) do
       conn
       |> fetch_session()
       # A fresh cookie for a fresh exchange: re-presenting the token must never adopt a
@@ -153,15 +170,29 @@ defmodule Ouroboros.Web.Auth do
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta name="referrer" content="no-referrer" />
-        <title>Ouroboros</title>
+        <title>Sign in · Ouroboros</title>
         <link rel="stylesheet" href="/web/app.css" />
       </head>
       <body class="ouro-plain">
         <main class="ouro-gate">
-          <h1>Ouroboros</h1>
-          <p>This surface needs the operator token for its data directory.</p>
-          <p>Run <code>ouro web</code> on the machine running this daemon. It reads the
-          published <code>web.json</code>, builds the one-time link, and opens it.</p>
+          <h1>Open Ouroboros</h1>
+          <p>Enter the access token shared by the person who set up this workspace.</p>
+          <form class="ouro-gate-form" method="post" action="/auth">
+            <label for="ouro-access-token">Access token</label>
+            <input
+              id="ouro-access-token"
+              name="token"
+              type="password"
+              autocomplete="current-password"
+              required
+              autofocus
+            />
+            <button type="submit">Continue</button>
+          </form>
+          <p class="ouro-gate-help">
+            On the computer running Ouroboros, <code>ouro web</code> opens a fresh signed-in
+            browser automatically.
+          </p>
         </main>
       </body>
     </html>

@@ -120,6 +120,7 @@ defmodule Ouroboros.Web.Live.MachinesLive do
     socket =
       socket
       |> assign(:scope, Config.for_endpoint(socket.endpoint).scope)
+      |> assign(:page_title, "Advanced · Machines")
       |> assign(:fleet, nil)
       |> assign(:fleet_error, nil)
       |> assign(:status, nil)
@@ -348,14 +349,24 @@ defmodule Ouroboros.Web.Live.MachinesLive do
   # The doctor report
   # ------------------------------------------------------------------------------------
 
-  # Flattened to text on purpose. `fleet.doctor` answers a list of checks with guidance
-  # attached, and a table would have to decide which columns matter; a report keeps every
-  # word the runtime wrote, in the order it wrote them.
   defp report(doctor) do
     checks = doctor |> Map.get(:checks, []) |> List.wrap()
+    summary = Map.get(doctor, :summary, %{})
+    issues = Map.get(summary, :warnings, 0) + Map.get(summary, :errors, 0)
 
-    [headline(doctor), "" | Enum.flat_map(checks, &check_lines/1)]
-    |> Enum.join("\n")
+    raw =
+      [headline(doctor), "" | Enum.flat_map(checks, &check_lines/1)]
+      |> Enum.join("\n")
+
+    %{
+      healthy?: Map.get(doctor, :healthy?) == true,
+      summary:
+        if(issues == 0,
+          do: "Everything is working.",
+          else: "#{issues} #{if issues == 1, do: "item needs", else: "items need"} attention."
+        ),
+      raw: raw
+    }
   end
 
   defp headline(doctor) do
@@ -408,10 +419,10 @@ defmodule Ouroboros.Web.Live.MachinesLive do
     ~H"""
     <main class="ouro-page ouro-machines">
       <header class="ouro-header">
-        <p :if={@view.name} class="ouro-subhead">Machines</p>
+        <p class="ouro-subhead">Advanced</p>
         <h1>{@view.name || "Machines"}</h1>
         <p class="ouro-subhead ouro-top-row">
-          <a class="ouro-backlink" href="/">the deck</a>
+          <a class="ouro-backlink" href="/">Sessions</a>
           <Layouts.theme_toggle />
         </p>
       </header>
@@ -516,12 +527,16 @@ defmodule Ouroboros.Web.Live.MachinesLive do
         <button type="button" class="ouro-button" phx-click="refresh">Refresh</button>
       </div>
       <p class="ouro-empty-body">
-        The runtime reports no fleet: its directory names only this machine and formation
-        names no strategy, so there is no roster to show and nothing to add a machine to.
-        Create one with <code>ouro fleet create</code>, or open Machines in the terminal
-        client (<code>ouro</code> → Machines) to be walked through it. This page shows the
-        roster once a fleet exists.
+        This computer is not connected to other Ouroboros machines. Ask an administrator to
+        set up shared machines if you need them.
       </p>
+      <details class="ouro-technical">
+        <summary>Administrator setup</summary>
+        <p>
+          Create a fleet with <code>ouro fleet create</code>, then add machines from the
+          terminal client.
+        </p>
+      </details>
     </section>
     """
   end
@@ -533,18 +548,25 @@ defmodule Ouroboros.Web.Live.MachinesLive do
     ~H"""
     <section class="ouro-panel ouro-doctor">
       <div class="ouro-panel-head">
-        <h2>Doctor</h2>
-        <button type="button" class="ouro-button-quiet" phx-click="doctor">Run doctor</button>
+        <h2>Connection check</h2>
+        <button type="button" class="ouro-button-quiet" phx-click="doctor">
+          Check connections
+        </button>
       </div>
 
       <p class="ouro-footnote">
-        <code>fleet.doctor</code>
-        walks the whole directory, so it runs when you ask it to and never on a cadence.
+        Checks this computer and every configured peer. It only runs when requested.
       </p>
 
       <p :if={@error} class="ouro-refusal" role="alert">{@error}</p>
       <div :if={@report} role="status">
-        <pre class="ouro-report ouro-mono">{@report}</pre>
+        <p class={if @report.healthy?, do: "ouro-tone-success", else: "ouro-tone-warning"}>
+          {@report.summary}
+        </p>
+        <details class="ouro-technical">
+          <summary>Technical report</summary>
+          <pre class="ouro-report ouro-mono">{@report.raw}</pre>
+        </details>
       </div>
     </section>
     """
@@ -552,20 +574,13 @@ defmodule Ouroboros.Web.Live.MachinesLive do
 
   defp terminal_add(assigns) do
     ~H"""
-    <section class="ouro-panel">
-      <div class="ouro-panel-head">
-        <h2>Adding a machine</h2>
-      </div>
+    <details class="ouro-panel ouro-technical ouro-machine-admin">
+      <summary>Administrator setup</summary>
       <p class="ouro-empty-body">
-        Adds run in the terminal, not here. <code>ouro fleet add user@host</code>
-        drives the probe, the binary copy, the invitation and enrolment over SSH from the
-        machine you type it on, and the terminal client walks the same pipeline with a
-        stepper under <code>ouro</code>
-        → Machines. This page does not offer a form for it,
-        because a form here would have to hand the daemon that SSH authority — a different
-        design, not a port of this one.
+        Add a machine from a trusted terminal with <code>ouro fleet add user@host</code>.
+        The terminal client guides the SSH probe, copy, invitation, and enrolment.
       </p>
-    </section>
+    </details>
     """
   end
 end

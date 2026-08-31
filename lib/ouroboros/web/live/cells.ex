@@ -398,13 +398,46 @@ defmodule Ouroboros.Web.Live.Cells do
   # ------------------------------------------------------------------------------------
 
   defp status(assigns) do
+    raw = assigns.cell.detail
+    detail = if assigns.cell.tone == :error, do: friendly_error(raw), else: raw
+
+    assigns =
+      assigns
+      |> assign(:raw_detail, raw)
+      |> assign(:detail, detail)
+      |> assign(
+        :technical?,
+        assigns.cell.tone == :error and is_binary(raw) and raw != "" and raw != detail
+      )
+
     ~H"""
     <div class={["ouro-cell", "ouro-status", tone(@cell.tone)]}>
       <span class="ouro-status-label">{@cell.label}</span>
-      <span :if={@cell.detail != ""} class="ouro-status-detail">{@cell.detail}</span>
+      <span :if={@detail != ""} class="ouro-status-detail">{@detail}</span>
+      <details :if={@technical?} class="ouro-technical">
+        <summary>Technical details</summary>
+        <pre>{@raw_detail}</pre>
+      </details>
     </div>
     """
   end
+
+  defp friendly_error(detail) when is_binary(detail) do
+    down = String.downcase(detail)
+
+    cond do
+      String.contains?(down, ["server_is_overloaded", "currently overloaded", "overloaded"]) ->
+        "The AI service is temporarily busy. Try the message again."
+
+      String.contains?(down, ["authentication", "unauthorized", "credential", "api key"]) ->
+        "The AI provider needs to be connected again."
+
+      true ->
+        "The agent stopped unexpectedly."
+    end
+  end
+
+  defp friendly_error(_detail), do: "The agent stopped unexpectedly."
 
   defp chat_note(assigns) do
     ~H"""

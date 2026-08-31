@@ -117,7 +117,7 @@ defmodule Ouroboros.Web.Live.NewSession do
       model_choice: if(Map.has_key?(prefs, "model"), do: :custom, else: :runtime_default),
       model_text: Map.get(prefs, "model", ""),
       workspace: Map.get(prefs, "workspace", ""),
-      sandbox: Map.get(prefs, "sandbox_mode"),
+      sandbox: Map.get(prefs, "sandbox_mode", "workspace_write"),
       effort: Map.get(prefs, "reasoning_effort")
     }
   end
@@ -158,10 +158,9 @@ defmodule Ouroboros.Web.Live.NewSession do
   @doc """
   One row per provider `runtime.providers` reported, in the order it reported them.
 
-  A row whose probe found nothing is `detected?: false` and carries the probe's own reason,
-  and it is **still offered**. The probe knows whether an executable is on this node's
-  PATH; it does not know whether a session can start, and a picker that hid a provider on
-  that evidence would be making a claim the runtime never made.
+  A row whose probe found nothing is retained so the page can explain why it is
+  unavailable, but the browser disables it. Starting a provider that this runtime already
+  proved it cannot drive turns a deterministic setup problem into a late refusal.
   """
   @spec provider_rows(term()) :: [map()]
   def provider_rows(entries) when is_list(entries) do
@@ -206,16 +205,12 @@ defmodule Ouroboros.Web.Live.NewSession do
   defp probe_note(_status, _error), do: nil
 
   @doc """
-  The footnote drawn once under the picker when any row is dimmed, or `nil`.
-
-  Said once rather than beside each row, and said as what it is: a report about a probe,
-  not a verdict on whether a session can start.
+  The footnote drawn once under the picker when any row is unavailable, or `nil`.
   """
   @spec provider_footnote([map()]) :: String.t() | nil
   def provider_footnote(rows) when is_list(rows) do
     if Enum.any?(rows, &(not &1.detected?)) do
-      "Dimmed entries are ones whose probe found no executable. " <>
-        "The runtime decides whether a session starts."
+      "Unavailable providers stay listed so you can see what this computer is missing."
     end
   end
 
@@ -255,13 +250,21 @@ defmodule Ouroboros.Web.Live.NewSession do
   end
 
   defp rows(row) do
+    default = trimmed(row[:default])
+
     catalogue =
       row
       |> Map.get(:models)
       |> List.wrap()
+      |> Enum.filter(&agent_model?(&1, default))
       |> Enum.map(fn model ->
         id = to_string(model[:id])
-        %{choice: {:catalog, id}, label: id, detail: detail(model)}
+
+        %{
+          choice: {:catalog, id},
+          label: trimmed(model[:name]) || short_model_id(id),
+          detail: model_detail(model, id)
+        }
       end)
 
     [default_row(row)] ++ catalogue ++ [custom_row()]
@@ -270,26 +273,57 @@ defmodule Ouroboros.Web.Live.NewSession do
   defp default_row(row) do
     label =
       case trimmed(row[:default]) do
-        nil -> "Runtime default"
-        default -> "Runtime default · #{default}"
+        nil ->
+          "Recommended"
+
+        default ->
+          name =
+            row
+            |> Map.get(:models)
+            |> List.wrap()
+            |> Enum.find(&(to_string(&1[:id]) == default))
+            |> then(fn
+              nil -> short_model_id(default)
+              model -> trimmed(model[:name]) || short_model_id(default)
+            end)
+
+          "Recommended · #{name}"
       end
 
-    %{choice: :runtime_default, label: label, detail: "Send no model and let the runtime choose"}
+    %{choice: :runtime_default, label: label, detail: "Let Ouroboros choose the best model"}
   end
 
   defp custom_row do
-    %{choice: :custom, label: "Custom…", detail: "Type a model id this list does not carry"}
+    %{choice: :custom, label: "Custom model…", detail: "For advanced provider configurations"}
   end
 
-  # The vendor's name and the window, whichever the snapshot actually stated. `nil` when it
-  # stated neither: a row showing only the id is honest, an empty second line is not.
-  defp detail(model) do
-    case {trimmed(model[:name]), window(model[:context_window])} do
-      {nil, nil} -> nil
-      {name, nil} -> name
-      {nil, window} -> window
-      {name, window} -> "#{name} · #{window}"
+  # The readable name is the option label. Detail keeps the exact id available to an
+  # advanced reader without forcing everybody else to parse a provider namespace first.
+  defp model_detail(model, id) do
+    case window(model[:context_window]) do
+      nil -> id
+      window -> "#{id} · #{window}"
     end
+  end
+
+  defp short_model_id(id) do
+    id
+    |> String.split(":", parts: 2)
+    |> List.last()
+    |> String.replace("-", " ")
+  end
+
+  # The shared catalogue also contains embedding, image, audio, moderation and realtime
+  # lanes. They cannot run an interactive coding turn, so offering them here creates a
+  # choice whose only outcome is a provider refusal.
+  defp agent_model?(model, default) do
+    id = model |> Map.get(:id) |> to_string()
+
+    id == default or
+      not Regex.match?(
+        ~r/(?:^|[-_:])(embedding|image|moderation|omni|realtime|transcrib|tts|whisper|audio)(?:$|[-_:])/i,
+        id
+      )
   end
 
   defp window(tokens) when is_integer(tokens) and tokens >= 1_000 and tokens < 1_000_000,
@@ -374,9 +408,9 @@ defmodule Ouroboros.Web.Live.NewSession do
 
     hint =
       case {field, send} do
-        {:unsupported, _send} -> "Sends no model option — this provider does not accept one"
-        {_field, nil} -> "Sends no model option (runtime default)"
-        {_field, model} -> "Sends #{model}"
+        {:unsupported, _send} -> "This provider chooses its own model"
+        {_field, nil} -> "Ouroboros will choose the recommended model"
+        {_field, model} -> "Using #{model}"
       end
 
     %{send: send, hint: hint}

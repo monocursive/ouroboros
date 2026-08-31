@@ -11,7 +11,7 @@ defmodule Ouroboros.Web.AuthTest do
   use ExUnit.Case, async: false
 
   import Phoenix.ConnTest
-  import Plug.Conn, only: [get_resp_header: 2]
+  import Plug.Conn, only: [get_resp_header: 2, put_req_header: 3]
 
   alias Ouroboros.Web.Auth
   alias Ouroboros.Web.Config
@@ -82,10 +82,28 @@ defmodule Ouroboros.Web.AuthTest do
       assert sign_in() != sign_in()
     end
 
-    test "only GET reaches the exchange" do
-      conn = dispatch(build_conn(), @endpoint, :post, "/auth?token=#{@token}")
+    test "a form submission buys the same cookie without putting the token in the URL" do
+      conn =
+        build_conn()
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> dispatch(@endpoint, :post, "/auth", "token=#{@token}")
+
+      assert conn.status == 302
+      assert get_resp_header(conn, "location") == ["/"]
+      assert is_binary(conn.resp_cookies[@cookie].value)
+      assert conn.resp_cookies[@cookie].http_only
+      assert conn.resp_cookies[@cookie].same_site == "Lax"
+      assert get_resp_header(conn, "cache-control") == ["no-store"]
+    end
+
+    test "a form submission with the wrong token gets the same refusal" do
+      conn =
+        build_conn()
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> dispatch(@endpoint, :post, "/auth", "token=#{String.duplicate("x", 40)}")
 
       assert conn.status == 401
+      assert conn.resp_body == get("/auth").resp_body
       assert conn.resp_cookies == %{}
     end
   end
@@ -127,13 +145,17 @@ defmodule Ouroboros.Web.AuthTest do
       assert conn.resp_cookies == %{}
     end
 
-    test "the page names the client that can produce a fresh link" do
+    test "the page offers recovery without requiring a terminal" do
       body = get("/").resp_body
 
+      assert body =~ "Open Ouroboros"
+      assert body =~ ~s|method="post"|
+      assert body =~ ~s|action="/auth"|
+      assert body =~ ~s|type="password"|
+      assert body =~ "Access token"
+      assert body =~ "Continue"
       assert body =~ "ouro web"
-      assert body =~ "Ouroboros"
 
-      # And nothing else. It must not describe the runtime it is guarding.
       refute body =~ @token
       refute body =~ to_string(node())
     end

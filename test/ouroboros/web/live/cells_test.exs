@@ -418,6 +418,23 @@ defmodule Ouroboros.Web.Live.CellsTest do
       refute paint(%Cell.Status{label: "Approved", tone: :success}) =~ "attention-green"
     end
 
+    test "provider failures lead with recovery copy and hide raw diagnostics in disclosure" do
+      raw = "** (ServerError) server_is_overloaded\\n    stack frame"
+      html = paint(%Cell.Status{label: "Turn failed", detail: raw, tone: :error})
+
+      assert html =~ "The AI service is temporarily busy. Try the message again."
+      assert html =~ "Technical details"
+      assert html =~ "server_is_overloaded"
+      assert html =~ "<details"
+    end
+
+    test "unknown failures never lead with a stack trace" do
+      html = paint(%Cell.Status{label: "Turn failed", detail: "opaque crash", tone: :error})
+
+      assert html =~ "The agent stopped unexpectedly."
+      assert html =~ "Technical details"
+    end
+
     test "an approval request from the corpus renders its words" do
       html = draw(["event_approval_requested_permission"])
 

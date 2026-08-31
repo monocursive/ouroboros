@@ -342,17 +342,21 @@
         }
       }.bind(this);
 
-      this.onInput = this.autosize.bind(this);
+      this.onInput = function () {
+        this.autosize();
+        this.syncSend();
+      }.bind(this);
 
       this.el.addEventListener("keydown", this.onKeyDown);
       this.el.addEventListener("input", this.onInput);
       this.autosize();
+      this.syncSend();
     },
-
     // The server owns the draft, so a send that cleared it or a refusal that handed it
     // back both land here and the box has to follow.
     updated: function () {
       this.autosize();
+      this.syncSend();
     },
 
     destroyed: function () {
@@ -364,6 +368,37 @@
       var el = this.el;
       el.style.height = "auto";
       el.style.height = Math.min(el.scrollHeight, this.maxHeight) + "px";
+    },
+
+    syncSend: function () {
+      var form = this.el.form;
+      var button = form && form.querySelector("[data-ouro-send]");
+      if (button) button.disabled = this.el.value.trim() === "";
+    }
+  };
+
+  var Modal = {
+    mounted: function () {
+      this.previouslyFocused = document.activeElement;
+      this.onCancel = function (event) {
+        event.preventDefault();
+        this.pushEvent("session-action-cancel", {});
+      }.bind(this);
+
+      this.el.addEventListener("cancel", this.onCancel);
+      if (!this.el.open) this.el.showModal();
+
+      var target = this.el.querySelector(
+        "[autofocus], button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])"
+      );
+      if (target) target.focus();
+    },
+
+    destroyed: function () {
+      this.el.removeEventListener("cancel", this.onCancel);
+      if (this.previouslyFocused && this.previouslyFocused.isConnected) {
+        this.previouslyFocused.focus();
+      }
     }
   };
 
@@ -383,7 +418,7 @@
 
   var liveSocket = new LiveSocket("/live", Socket, {
     params: { _csrf_token: csrfToken },
-    hooks: { ScrollPin: ScrollPin, Composer: Composer, FocusInvalid: FocusInvalid }
+    hooks: { ScrollPin: ScrollPin, Composer: Composer, FocusInvalid: FocusInvalid, Modal: Modal }
   });
 
   // The socket is the only thing that can tell a viewer the daemon went away, so the
