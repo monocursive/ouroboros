@@ -5,7 +5,7 @@ defmodule Ouroboros.Interactive.Task do
 
   require Logger
 
-  alias Jido.Harness.{Session, SessionInfo, TurnRequest, TurnResult}
+  alias Jido.Harness.{Session, SessionInfo, TurnResult}
   alias Ouroboros.Interactive.{Event, State, Store}
   alias Ouroboros.Interactive.Task.{Approvals, Resume, Shell, Turns}
   alias Ouroboros.Poll.{Cadence, Timer}
@@ -13,6 +13,7 @@ defmodule Ouroboros.Interactive.Task do
   alias Ouroboros.Provider.Native.Paths
   alias Ouroboros.Provider.Native.Session, as: NativeSession
   alias Ouroboros.Provider.Session, as: ProviderSession
+  alias Ouroboros.ReasoningEffort
   alias Ouroboros.Team
   alias Ouroboros.Workspace
   alias Ouroboros.Workspace.Manager, as: WorkspaceManager
@@ -199,15 +200,21 @@ defmodule Ouroboros.Interactive.Task do
   def handle_call({:steer, input, opts}, _from, runtime) do
     case authorize_steer_attachments(input, opts, runtime) do
       {:ok, input, opts} ->
-        case with_harness_session(runtime, &Session.steer(&1, input, opts)) do
-          {:ok, request_id} when is_binary(request_id) ->
-            {:reply, {:ok, request_id},
-             runtime
-             |> remember_steer(request_id, input)
-             |> schedule_poll(0)}
+        case ReasoningEffort.turn_request(input, opts) do
+          {:ok, request} ->
+            case with_harness_session(runtime, &Session.steer(&1, request)) do
+              {:ok, request_id} when is_binary(request_id) ->
+                {:reply, {:ok, request_id},
+                 runtime
+                 |> remember_steer(request_id, request)
+                 |> schedule_poll(0)}
 
-          reply ->
-            {:reply, reply, schedule_poll(runtime, 0)}
+              reply ->
+                {:reply, reply, schedule_poll(runtime, 0)}
+            end
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, runtime}
         end
 
       {:error, reason} ->
@@ -716,7 +723,7 @@ defmodule Ouroboros.Interactive.Task do
     case State.unrequestable_reason(session) do
       nil ->
         case safe_session_call(fn ->
-               Session.start(session.provider, State.request(session))
+               ReasoningEffort.start_session(session.provider, State.request(session))
              end) do
           {:ok, id} -> Resume.adopt(runtime, id)
           {:error, reason} -> fail_start(runtime, reason)
@@ -1170,7 +1177,7 @@ defmodule Ouroboros.Interactive.Task do
       when info.state == :idle and is_nil(info.active_turn_id) and info.queued_turns == 0 ->
         turn = Map.fetch!(runtime.session.turns, turn_id)
 
-        with {:ok, request} <- TurnRequest.new(turn.request),
+        with {:ok, request} <- ReasoningEffort.turn_request(turn.request),
              request =
                Provider.apply_runtime_provider_policy(request, runtime.session.provider),
              {:ok, request} <-

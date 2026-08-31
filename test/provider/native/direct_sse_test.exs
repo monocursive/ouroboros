@@ -1,13 +1,16 @@
 defmodule Ouroboros.Provider.Native.DirectSSETest do
   use ExUnit.Case, async: false
 
+  alias Ouroboros.Provider.AnthropicKey
   alias Ouroboros.Provider.Native.Model.ReqLLM, as: DirectModel
   alias Ouroboros.Provider.Native.Tools
 
   setup do
     previous_options = Application.get_env(:ouroboros, :native_model_options)
     previous_key = System.get_env("OPENAI_API_KEY")
+    previous_anthropic_key = System.get_env("ANTHROPIC_API_KEY")
     System.put_env("OPENAI_API_KEY", "test-openai-key")
+    System.put_env("ANTHROPIC_API_KEY", "test-anthropic-key")
 
     on_exit(fn ->
       if previous_options,
@@ -17,9 +20,110 @@ defmodule Ouroboros.Provider.Native.DirectSSETest do
       if previous_key,
         do: System.put_env("OPENAI_API_KEY", previous_key),
         else: System.delete_env("OPENAI_API_KEY")
+
+      if previous_anthropic_key,
+        do: System.put_env("ANTHROPIC_API_KEY", previous_anthropic_key),
+        else: System.delete_env("ANTHROPIC_API_KEY")
     end)
 
     :ok
+  end
+
+  test "streams Anthropic Messages with API-key auth and no OAuth lane" do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "ouroboros-direct-anthropic-#{System.unique_integer([:positive])}"
+      )
+
+    Ouroboros.DataDir.ensure_private!(root)
+    path = Path.join(root, "anthropic.key")
+    previous_path = Application.get_env(:ouroboros, :anthropic_api_key_file)
+    Application.put_env(:ouroboros, :anthropic_api_key_file, path)
+    System.delete_env("ANTHROPIC_API_KEY")
+    assert {:ok, %{source: :stored}} = AnthropicKey.put("test-anthropic-key", path: path)
+
+    on_exit(fn ->
+      if previous_path,
+        do: Application.put_env(:ouroboros, :anthropic_api_key_file, previous_path),
+        else: Application.delete_env(:ouroboros, :anthropic_api_key_file)
+
+      File.rm_rf(root)
+    end)
+
+    parent = self()
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, packet: :raw, reuseaddr: true])
+    {:ok, {_address, port}} = :inet.sockname(listener)
+
+    {:ok, server} =
+      Task.start(fn ->
+        {:ok, socket} = :gen_tcp.accept(listener, 5_000)
+        {:ok, request} = read_request(socket, "")
+        send(parent, {:anthropic_http_request, request})
+
+        body =
+          [
+            ~s(event: message_start\ndata: {"type":"message_start","message":{"id":"msg-direct-1","type":"message","role":"assistant","model":"claude-sonnet-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":3,"output_tokens":0}}}\n\n),
+            ~s(event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n),
+            ~s(event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello from claude"}}\n\n),
+            ~s(event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n),
+            ~s(event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":3}}\n\n),
+            ~s(event: message_stop\ndata: {"type":"message_stop"}\n\n)
+          ]
+          |> IO.iodata_to_binary()
+
+        response =
+          "HTTP/1.1 200 OK\r\n" <>
+            "content-type: text/event-stream\r\n" <>
+            "content-length: #{byte_size(body)}\r\n" <>
+            "connection: close\r\n\r\n" <> body
+
+        :ok = :gen_tcp.send(socket, response)
+        :gen_tcp.close(socket)
+        :gen_tcp.close(listener)
+      end)
+
+    monitor = Process.monitor(server)
+
+    Application.put_env(:ouroboros, :native_model_options,
+      base_url: "http://127.0.0.1:#{port}",
+      receive_timeout: 5_000,
+      stream_idle_timeout: 5_000,
+      total_timeout: 10_000,
+      max_retries: 0
+    )
+
+    request = %{
+      model: "anthropic:claude-sonnet-5",
+      system: "Be concise",
+      messages: [%{role: :user, content: "say hello"}],
+      tools: [],
+      provider_session_id: "native-anthropic-test",
+      turn_id: "turn-anthropic-test",
+      reasoning_effort: :low,
+      max_tokens: nil
+    }
+
+    assert {:ok, stream} = DirectModel.stream(request, [])
+    chunks = Enum.to_list(stream)
+
+    assert {:text, "hello from claude"} in chunks
+    assert Enum.any?(chunks, &match?({:usage, %{input_tokens: 3}}, &1))
+    assert {:finish, :stop} in chunks
+
+    assert_receive {:anthropic_http_request, raw}, 5_000
+    assert raw =~ "POST /v1/messages HTTP/1.1"
+    assert String.downcase(raw) =~ "x-api-key: test-anthropic-key"
+    refute String.downcase(raw) =~ "authorization: bearer"
+    assert String.downcase(raw) =~ "anthropic-version: 2023-06-01"
+
+    payload = request_payload(raw)
+    assert payload["model"] == "claude-sonnet-5"
+    assert payload["messages"] == [%{"role" => "user", "content" => "say hello"}]
+    assert payload["thinking"] == %{"type" => "adaptive", "display" => "summarized"}
+    assert payload["output_config"] == %{"effort" => "low"}
+
+    assert_receive {:DOWN, ^monitor, :process, ^server, :normal}, 5_000
   end
 
   test "streams an OpenAI Responses call directly over HTTP without a process adapter" do

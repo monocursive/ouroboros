@@ -119,7 +119,6 @@ defmodule Ouroboros.Provider.Native.Subagent do
   use GenServer, restart: :temporary
 
   alias Jido.Harness.ApprovalResponse
-  alias Jido.Harness.SessionRequest
   alias Jido.Harness.TurnRequest
   alias Ouroboros.Provider.Native.Paths
   alias Ouroboros.Provider.Native.Session
@@ -530,7 +529,7 @@ defmodule Ouroboros.Provider.Native.Subagent do
   # rendered to a binary before it travels: an exception struct from the target is a term
   # the parent has no reason to reconstruct.
   defp build_request(state) do
-    case SessionRequest.new(state.request_attrs) do
+    case Ouroboros.ReasoningEffort.session_request(state.request_attrs) do
       {:ok, request} ->
         {:ok, request}
 

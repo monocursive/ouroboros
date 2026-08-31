@@ -7,13 +7,16 @@ defmodule Ouroboros.Models do
   else comes from `llm_db`, a packaged snapshot of provider metadata that loads lazily
   and needs no network (`deps/llm_db`). This module is the seam between the two — it
   answers what `llm_db` knows about the models each *configured* provider draws from,
-  and nothing about models nobody here can reach.
+  and nothing about models nobody here can reach. Native is the deliberate exception to
+  the one-catalogue-per-provider shape: its in-process transport can reach both the
+  ChatGPT-backed OpenAI lane and Anthropic's API-key lane, so its row combines those
+  catalogues and prefixes every id with the transport ReqLLM must use.
 
   ## What this is not
 
-  Not a claim that a listed model will work. Ouroboros drives a vendor CLI; whether that
-  CLI accepts a given model id depends on the account behind it, and only the CLI can
-  answer. A provider whose adapter does not normalize `:model` at all says so
+  Not a claim that a listed model will work. Ouroboros drives a vendor CLI or, for Native,
+  a direct API; whether that account accepts a given model id is known only when it is
+  called. A provider whose adapter does not normalize `:model` at all says so
   (`model_option: false`) rather than offering a list nothing can select from.
 
   Not pricing this runtime charges or verifies. The rates are `llm_db`'s snapshot of the
@@ -43,6 +46,11 @@ defmodule Ouroboros.Models do
     kimi: :moonshotai
   }
 
+  # These are model transports inside `:native`, not Harness providers. The configured
+  # native model is inserted first below and wins when it draws from the same catalogue
+  # (for example an `openai:` API-key default replacing the packaged `openai_codex:` lane).
+  @native_catalogs [openai_codex: :openai, anthropic: :anthropic]
+
   # One provider's list is drawn into a picker, so it is bounded here rather than by the
   # client. Newest first, because that is the order a person scans for the model they
   # meant; the count that did not fit travels beside it so the bound is visible rather
@@ -59,11 +67,9 @@ defmodule Ouroboros.Models do
     "token.cache_write" => :cache_write_per_mtok
   }
 
-  # The gateway and the pinned Harness request schemas currently normalize these three
-  # values. A vendor catalogue may publish a wider vocabulary (for example `none`,
-  # `xhigh`, or `max`); advertising one here would let a client select a value the very
-  # next start/configure call refuses, so model metadata is intersected with this list.
-  @reasoning_efforts ~w(low medium high)
+  # Model metadata is intersected with the selected transport's vocabulary. Native owns
+  # the whole request path and accepts the six OpenAI levels; vendor transports stay on
+  # the three values their pinned Harness request schemas validate.
 
   @doc """
   Returns the catalogue for every provider this node serves.
@@ -83,18 +89,7 @@ defmodule Ouroboros.Models do
 
   @doc "Returns the `llm_db` provider a given Ouroboros provider draws its models from."
   @spec catalog(atom()) :: atom() | nil
-  def catalog(:native) do
-    case native_model_provider() do
-      :openai_codex ->
-        :openai
-
-      provider when is_atom(provider) and not is_nil(provider) ->
-        if known_catalog?(provider), do: provider
-
-      _unknown ->
-        nil
-    end
-  end
+  def catalog(:native), do: native_catalog(native_model_provider())
 
   def catalog(provider) when is_atom(provider) do
     case Map.fetch(configured_catalogs(), provider) do
@@ -120,10 +115,64 @@ defmodule Ouroboros.Models do
     default_from(config, :session_defaults) || default_from(config, :request_defaults)
   end
 
+  @doc "Reasoning levels advertised by one selected model and accepted by its transport."
+  @spec reasoning_efforts(atom() | String.t() | nil, String.t() | nil) :: [String.t()]
+  def reasoning_efforts(provider, model_id) do
+    accepted = Ouroboros.ReasoningEffort.names_for_provider(provider)
+
+    with provider when is_atom(provider) <- provider_atom(provider),
+         model_id when is_binary(model_id) and model_id != "" <- model_id,
+         model when not is_nil(model) <- find_model(provider, model_id) do
+      model_reasoning_efforts(model, provider)
+    else
+      _unknown -> accepted
+    end
+  end
+
+  defp provider_atom(provider) when is_atom(provider), do: provider
+
+  defp provider_atom(provider) when is_binary(provider) do
+    providers()
+    |> Enum.find(&(Atom.to_string(&1) == provider))
+  end
+
   defp providers do
     Enum.map(Ouroboros.providers(), & &1.provider)
   rescue
     _unavailable -> []
+  end
+
+  defp provider_models(:native) do
+    lanes = native_catalogs()
+
+    models =
+      lanes
+      |> Enum.flat_map(fn {prefix, catalog} ->
+        Enum.map(catalog_models(catalog), &{prefix, catalog, &1})
+      end)
+      |> Enum.sort_by(
+        fn {prefix, _catalog, model} ->
+          {Map.get(model, :release_date) || "", model.id, Atom.to_string(prefix)}
+        end,
+        :desc
+      )
+
+    %{
+      provider: :native,
+      # Kept for older clients that know only the singular field. `catalogs` states the
+      # complete truth for clients that understand Native's multi-transport row.
+      catalog: catalog(:native),
+      catalogs: Enum.map(lanes, &elem(&1, 1)),
+      default: default_model(:native),
+      model_option: model_option?(:native),
+      total: length(models),
+      models:
+        models
+        |> Enum.take(@max_models)
+        |> Enum.map(fn {prefix, _catalog, model} ->
+          model(model, Atom.to_string(prefix), :native)
+        end)
+    }
   end
 
   defp provider_models(provider) do
@@ -139,7 +188,7 @@ defmodule Ouroboros.Models do
       # every other capability is. A client that greys the picker reads this.
       model_option: model_option?(provider),
       total: length(models),
-      models: models |> Enum.take(@max_models) |> Enum.map(&model(&1, prefix))
+      models: models |> Enum.take(@max_models) |> Enum.map(&model(&1, prefix, provider))
     }
   end
 
@@ -161,7 +210,7 @@ defmodule Ouroboros.Models do
       Map.get(model, :catalog_only) == true
   end
 
-  defp model(model, prefix) do
+  defp model(model, prefix, provider) do
     limits = Map.get(model, :limits) || %{}
 
     %{
@@ -171,18 +220,20 @@ defmodule Ouroboros.Models do
       context_window: number(Map.get(limits, :context)),
       max_output_tokens: number(Map.get(limits, :output)),
       release_date: Map.get(model, :release_date),
-      reasoning_efforts: reasoning_efforts(model),
+      reasoning_efforts: model_reasoning_efforts(model, provider),
       pricing: pricing(Map.get(model, :pricing))
     }
   end
 
-  defp reasoning_efforts(model) do
+  defp model_reasoning_efforts(model, provider) do
+    accepted = Ouroboros.ReasoningEffort.names_for_provider(provider)
+
     model
     |> declared_reasoning_efforts()
     |> Enum.map(&reasoning_effort_name/1)
-    |> Enum.filter(&(&1 in @reasoning_efforts))
+    |> Enum.filter(&(&1 in accepted))
     |> Enum.uniq()
-    |> Enum.sort_by(&Enum.find_index(@reasoning_efforts, fn known -> known == &1 end))
+    |> Enum.sort_by(&Enum.find_index(accepted, fn known -> known == &1 end))
   end
 
   # Prefer llm_db's canonical capability shape. The packaged snapshot predates that
@@ -258,12 +309,45 @@ defmodule Ouroboros.Models do
     _unavailable -> false
   end
 
-  defp model_prefix(:native) do
-    case native_model_provider() do
-      provider when is_atom(provider) and not is_nil(provider) -> Atom.to_string(provider)
-      _unknown -> nil
+  defp find_model(:native, model_id) do
+    Enum.find_value(native_catalogs(), fn {prefix, catalog} ->
+      prefix = Atom.to_string(prefix)
+      Enum.find(catalog_models(catalog), &(model_id(prefix, &1.id) == model_id))
+    end)
+  end
+
+  defp find_model(provider, model_id) do
+    catalog = catalog(provider)
+    prefix = model_prefix(provider)
+
+    if catalog do
+      Enum.find(catalog_models(catalog), &(model_id(prefix, &1.id) == model_id))
     end
   end
+
+  defp native_catalogs do
+    configured =
+      case native_model_provider() do
+        nil ->
+          []
+
+        provider ->
+          catalog = native_catalog(provider)
+          if is_nil(catalog), do: [], else: [{provider, catalog}]
+      end
+
+    (configured ++ @native_catalogs)
+    |> Enum.filter(fn {_prefix, catalog} -> known_catalog?(catalog) end)
+    |> Enum.uniq_by(&elem(&1, 1))
+  end
+
+  defp native_catalog(:openai_codex), do: :openai
+
+  defp native_catalog(provider) when is_atom(provider) and not is_nil(provider) do
+    if known_catalog?(provider), do: provider
+  end
+
+  defp native_catalog(_unknown), do: nil
 
   defp model_prefix(_provider), do: nil
   defp model_id(nil, id), do: id

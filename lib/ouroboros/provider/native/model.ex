@@ -62,7 +62,7 @@ defmodule Ouroboros.Provider.Native.Model do
           tools: [tool_spec()],
           provider_session_id: String.t(),
           turn_id: String.t(),
-          reasoning_effort: :low | :medium | :high | nil,
+          reasoning_effort: :none | :low | :medium | :high | :xhigh | :max | nil,
           max_tokens: pos_integer() | nil
         }
 
@@ -93,7 +93,14 @@ defmodule Ouroboros.Provider.Native.Model do
   @callback available?() :: boolean()
 
   @doc "One row per known model provider: its env var name and whether it is set."
-  @callback credential_report() :: [%{provider: atom(), env: String.t(), present: boolean()}]
+  @callback credential_report() :: [
+              %{
+                required(:provider) => atom(),
+                required(:env) => String.t(),
+                required(:present) => boolean(),
+                optional(:source) => atom() | nil
+              }
+            ]
 
   @optional_callbacks available?: 0, credential_report: 0, project: 1
 
@@ -174,7 +181,14 @@ defmodule Ouroboros.Provider.Native.Model do
   end
 
   @doc "Credential presence per model provider. Names and booleans only, never values."
-  @spec credential_report() :: [%{provider: atom(), env: String.t(), present: boolean()}]
+  @spec credential_report() :: [
+          %{
+            required(:provider) => atom(),
+            required(:env) => String.t(),
+            required(:present) => boolean(),
+            optional(:source) => atom() | nil
+          }
+        ]
   def credential_report do
     module = module()
 
@@ -210,8 +224,6 @@ defmodule Ouroboros.Provider.Native.Model do
   rescue
     ArgumentError -> nil
   end
-
-  defp existing_provider(_provider), do: nil
 
   defp configured_default, do: Application.get_env(:ouroboros, :native_model)
 end

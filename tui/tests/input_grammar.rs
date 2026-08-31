@@ -610,7 +610,7 @@ fn an_effort_the_gateway_does_not_take_is_refused_by_name() {
     let mut app = opened("idle", steering_capabilities(), Vec::new());
 
     compose(&mut app);
-    type_text(&mut app, "/effort xhigh");
+    type_text(&mut app, "/effort unbounded");
     app.apply(key(KeyCode::Enter));
 
     assert!(app
@@ -620,7 +620,10 @@ fn an_effort_the_gateway_does_not_take_is_refused_by_name() {
         .and_then(|composer| composer.reasoning_effort)
         .is_none());
     let text = screen(&mut app).text();
-    assert!(text.contains("low, medium, and high"), "{text}");
+    assert!(
+        text.contains("none, low, medium, high, xhigh, and max"),
+        "{text}"
+    );
 }
 
 /// Backspace at the chip — on an empty draft the caret sits immediately after it.

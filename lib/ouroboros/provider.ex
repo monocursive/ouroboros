@@ -145,8 +145,8 @@ defmodule Ouroboros.Provider do
   @spec public_execution_policy(atom(), map() | nil, keyword()) :: map()
   def public_execution_policy(provider, options, opts \\ [])
 
-  def public_execution_policy(:native, _options, opts) do
-    model = Ouroboros.Provider.Native.Model.configured_model()
+  def public_execution_policy(:native, options, opts) do
+    model = selected_model(options) || Ouroboros.Provider.Native.Model.configured_model()
 
     %{
       runtime_ready:
@@ -163,6 +163,13 @@ defmodule Ouroboros.Provider do
   end
 
   def public_execution_policy(_provider, _options, _opts), do: %{}
+
+  defp selected_model(options) when is_map(options) do
+    Map.get(options, :model) || Map.get(options, "model")
+  end
+
+  defp selected_model(options) when is_list(options), do: Keyword.get(options, :model)
+  defp selected_model(_options), do: nil
 
   @doc false
   @spec apply_runtime_provider_policy(map(), atom()) :: map()

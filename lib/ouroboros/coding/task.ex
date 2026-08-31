@@ -450,7 +450,9 @@ defmodule Ouroboros.Coding.Task do
 
     case TaskState.unrequestable_reason(task) do
       nil ->
-        case safe_run_call(fn -> Run.start(task.provider, TaskState.request(task)) end) do
+        case safe_run_call(fn ->
+               Ouroboros.ReasoningEffort.start_run(task.provider, TaskState.request(task))
+             end) do
           {:ok, run_id} -> adopt(runtime, run_id)
           {:error, reason} -> fail_start(runtime, reason)
         end

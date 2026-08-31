@@ -54,11 +54,19 @@ defmodule Ouroboros.ModelsTest do
         |> Enum.find(&(&1.id == "openai_codex:gpt-5.6-sol"))
 
       assert model, "the packaged OpenAI catalogue no longer carries gpt-5.6-sol"
-      assert model.reasoning_efforts == ["low", "medium", "high"]
+      assert model.reasoning_efforts == ["none", "low", "medium", "high", "xhigh", "max"]
 
       for row <- Models.list().providers, model <- row.models do
-        assert Enum.all?(model.reasoning_efforts, &(&1 in ~w(low medium high)))
+        assert Enum.all?(model.reasoning_efforts, &(&1 in Ouroboros.ReasoningEffort.names()))
       end
+
+      assert Models.reasoning_efforts(:native, "anthropic:claude-opus-5") == [
+               "low",
+               "medium",
+               "high",
+               "xhigh",
+               "max"
+             ]
     end
 
     test "pricing is normalised to one million tokens, in the currency it was stated in" do
@@ -91,7 +99,11 @@ defmodule Ouroboros.ModelsTest do
       assert Models.catalog(:gemini) == :google
       assert Models.catalog(:grok) == :xai
       assert Models.catalog(:kimi) == :moonshotai
-      assert Enum.all?(provider_row(:native).models, &String.starts_with?(&1.id, "openai_codex:"))
+
+      native = provider_row(:native)
+      assert native.catalogs == [:openai, :anthropic]
+      assert Enum.any?(native.models, &String.starts_with?(&1.id, "openai_codex:"))
+      assert Enum.any?(native.models, &String.starts_with?(&1.id, "anthropic:"))
 
       # A provider whose atom is itself an llm_db provider id needs no entry.
       assert Models.catalog(:zai) == :zai

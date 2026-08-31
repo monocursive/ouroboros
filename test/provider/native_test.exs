@@ -248,6 +248,15 @@ defmodule Ouroboros.Provider.NativeTest do
       assert is_list(credentials)
       assert Enum.all?(credentials, &(is_binary(&1["env"]) and is_boolean(&1["present"])))
 
+      assert %{"env" => "ANTHROPIC_API_KEY", "present" => anthropic_present} =
+               Enum.find(credentials, &(&1["provider"] == :anthropic))
+
+      assert anthropic_present ==
+               match?(
+                 value when is_binary(value) and value != "",
+                 System.get_env("ANTHROPIC_API_KEY")
+               )
+
       serialized = JSON.encode!(status.details)
       refute serialized =~ "sk-must-not-appear"
 

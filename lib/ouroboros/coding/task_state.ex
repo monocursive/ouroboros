@@ -411,7 +411,7 @@ defmodule Ouroboros.Coding.TaskState do
         projected(
           state.options,
           :provider_execution,
-          Provider.public_execution_policy(state.provider, state.options[:provider_options])
+          Provider.public_execution_policy(state.provider, state.options)
         )
       )
       |> Trace.put(prompt_trace)

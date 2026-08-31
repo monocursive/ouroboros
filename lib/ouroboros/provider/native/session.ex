@@ -1054,8 +1054,9 @@ defmodule Ouroboros.Provider.Native.Session do
   defp configure_one(state, :model, value) when is_binary(value) and value != "",
     do: {:ok, %{state | model_spec: value}}
 
-  defp configure_one(state, :reasoning_effort, value) when value in [:low, :medium, :high, nil],
-    do: {:ok, %{state | reasoning_effort: value}}
+  defp configure_one(state, :reasoning_effort, value)
+       when value in [:none, :low, :medium, :high, :xhigh, :max, nil],
+       do: {:ok, %{state | reasoning_effort: value}}
 
   defp configure_one(state, :approval_mode, value)
        when value in [:default, :prompt, :auto_edit, :auto_approve],

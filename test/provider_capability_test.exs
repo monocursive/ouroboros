@@ -120,6 +120,21 @@ defmodule Ouroboros.ProviderCapabilityTest do
       assert public.options.provider_execution.transport == :direct
       assert public.options.provider_execution.model =~ ":"
     end
+
+    test "native public readiness follows the selected Anthropic model, not the OpenAI default" do
+      assert {:ok, session} =
+               State.new("capability-interactive-anthropic",
+                 provider: :native,
+                 model: "anthropic:claude-sonnet-5"
+               )
+
+      policy = State.public(session).options.provider_execution
+      assert policy.model == "anthropic:claude-sonnet-5"
+
+      assert policy.runtime_ready ==
+               (Ouroboros.Provider.Native.Model.available?() and
+                  Ouroboros.Provider.Native.Model.credential_ready?(policy.model))
+    end
   end
 
   describe "declared session capabilities" do

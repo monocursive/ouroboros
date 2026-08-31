@@ -1227,7 +1227,8 @@ impl App {
         true
     }
 
-    /// `/effort low|medium|high`: `reasoning_effort` on the *next* send, and only that one.
+    /// `/effort none|low|medium|high|xhigh|max`: `reasoning_effort` on the *next* send,
+    /// and only that one. `/effort clear` removes the override.
     fn set_reasoning_effort(&mut self, level: &str) {
         if self.sessions.composer.is_none() {
             return;
@@ -1243,11 +1244,11 @@ impl App {
             self.inform(
                 match current {
                     Some(effort) => format!(
-                        "the next turn carries reasoning_effort {}. /effort low|medium|high \
-                         changes it; /effort none clears it",
+                        "the next turn carries reasoning_effort {}. /effort \
+                         none|low|medium|high|xhigh|max changes it; /effort clear removes it",
                         effort.as_str()
                     ),
-                    None => "/effort low|medium|high sets reasoning_effort on the next turn only"
+                    None => "/effort none|low|medium|high|xhigh|max sets reasoning_effort on the next turn only"
                         .to_string(),
                 },
                 NoticeKind::Info,
@@ -1255,7 +1256,7 @@ impl App {
             return;
         }
 
-        if matches!(level, "none" | "clear" | "off") {
+        if matches!(level, "clear" | "off") {
             if let Some(composer) = self.sessions.composer.as_mut() {
                 composer.reasoning_effort = None;
             }
@@ -1267,7 +1268,7 @@ impl App {
         let Some(effort) = Effort::parse(level) else {
             self.inform(
                 format!(
-                    "{level} is not an effort the gateway takes; it accepts low, medium, and high"
+                    "{level} is not an effort the gateway takes; it accepts none, low, medium, high, xhigh, and max"
                 ),
                 NoticeKind::Warn,
             );

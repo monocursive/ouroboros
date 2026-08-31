@@ -12,12 +12,14 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   uses (see `Ouroboros.Provider.Native.Tools`).
 
   Every model provider `ReqLLM` ships is reachable — `anthropic:…`, `openai:…`,
-  `openai_codex:…`, `google:…`, `openrouter:…`, `ollama:…` and the rest. Keys come from
-  each provider's own environment variable; this module never reads or forwards one
-  itself, so a credential cannot reach an event payload through here.
+  `openai_codex:…`, `google:…`, `openrouter:…`, `ollama:…` and the rest. Keys normally
+  come from each provider's own environment variable. Anthropic additionally has one
+  node-owned private file, read only into the transient ReqLLM request options; no
+  credential can reach an event payload through here.
   """
 
   @behaviour Ouroboros.Provider.Native.Model
+  alias Ouroboros.Provider.AnthropicKey
   alias Ouroboros.Provider.Native.Model.{Admission, ToolSchema}
   alias ReqLLM.Provider.ChunkAccumulator
 
@@ -162,18 +164,22 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     if Code.ensure_loaded?(ReqLLM.Providers) do
       rows =
         ReqLLM.Providers.list()
+        |> Enum.reject(&(&1 == :anthropic))
         |> Enum.map(fn provider ->
           env = ReqLLM.Keys.env_var_name(provider)
-          %{provider: provider, env: env, present: present?(env)}
+          %{provider: provider, env: env, present: present?(env), source: source(env)}
         end)
+
+      oauth_present? = Ouroboros.Provider.OpenAIAuth.credential_present?()
 
       oauth = %{
         provider: :openai_codex,
         env: "OUROBOROS_OAUTH_FILE",
-        present: Ouroboros.Provider.OpenAIAuth.credential_present?()
+        present: oauth_present?,
+        source: if(oauth_present?, do: :stored)
       }
 
-      Enum.sort_by([oauth | rows], &{&1.provider, &1.env})
+      Enum.sort_by([oauth, AnthropicKey.status() | rows], &{&1.provider, &1.env})
     else
       []
     end
@@ -189,7 +195,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     end
   end
 
-  defp present?(_env), do: false
+  defp source(env), do: if(present?(env), do: :environment)
 
   defp build_tools([], _model_spec), do: {:ok, []}
 
@@ -451,6 +457,24 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     options
     |> Keyword.put_new(:oauth_file, Ouroboros.Provider.OpenAIAuth.credential_path())
     |> Keyword.put(:provider_options, provider_options)
+  end
+
+  # Ouroboros deliberately exposes no Claude subscription or OAuth lane. ReqLLM supports
+  # those modes for other callers, so state the narrower product contract on every
+  # Anthropic request instead of relying on the dependency's current default. The
+  # environment-first `AnthropicKey` boundary supplies the credential only to this
+  # transient request; the auth mode is likewise forced here.
+  defp put_transport_options(options, %{model: "anthropic:" <> _}) do
+    options =
+      options
+      |> Keyword.delete(:auth_file)
+      |> Keyword.delete(:oauth_file)
+      |> Keyword.put(:provider_options, auth_mode: :api_key)
+
+    case AnthropicKey.fetch() do
+      {:ok, key, _source} -> Keyword.put(options, :api_key, key)
+      {:error, _reason} -> Keyword.delete(options, :api_key)
+    end
   end
 
   defp put_transport_options(options, _request), do: Keyword.delete(options, :provider_options)

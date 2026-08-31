@@ -1371,6 +1371,10 @@ pub struct ProviderModels {
     /// picker says nothing here rather than guessing a vendor.
     #[serde(default)]
     pub catalog: Option<String>,
+    /// Every vendor catalogue this row combines. Usually one; Native lists OpenAI and
+    /// Anthropic because its in-process model option can address both transports.
+    #[serde(default)]
+    pub catalogs: Vec<String>,
     /// The model this node configured for the provider. Not a value to send: it is what
     /// the runtime applies when a start request names no model at all.
     #[serde(default)]
@@ -1392,7 +1396,8 @@ pub struct ProviderModels {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ModelEntry {
     /// Already carries whatever prefix this provider's model option needs
-    /// (`openai_codex:` on `native`), so a start request sends this string verbatim.
+    /// (`openai_codex:` or `anthropic:` on `native`), so a start request sends this
+    /// string verbatim.
     #[serde(default)]
     pub id: String,
     /// The vendor's own name for the model, when the snapshot has one.
@@ -2855,24 +2860,36 @@ impl Attachment {
     }
 }
 
-/// Reasoning effort, exactly the three values `@reasoning_efforts` declares in
-/// `gateway/methods.ex`. It can be a session default or a per-turn override; a fourth
-/// would be a `-32602` naming the parameter.
+/// Reasoning effort, exactly the six values `@reasoning_efforts` declares in
+/// `gateway/methods.ex`. It can be a session default or a per-turn override.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Effort {
+    NoReasoning,
     Low,
     Medium,
     High,
+    XHigh,
+    Max,
 }
 
 impl Effort {
-    pub const ALL: [Effort; 3] = [Self::Low, Self::Medium, Self::High];
+    pub const ALL: [Effort; 6] = [
+        Self::NoReasoning,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::NoReasoning => "none",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
         }
     }
 
@@ -2883,9 +2900,12 @@ impl Effort {
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::NoReasoning => "None",
             Self::Low => "Low",
             Self::Medium => "Medium",
             Self::High => "High",
+            Self::XHigh => "XHigh",
+            Self::Max => "Max",
         }
     }
 }
@@ -4516,6 +4536,7 @@ mod tests {
                 {
                     "provider": "native",
                     "catalog": "openai",
+                    "catalogs": ["openai", "anthropic"],
                     "default": "openai_codex:gpt-5.6-sol",
                     "model_option": true,
                     "total": 57,
@@ -4526,7 +4547,7 @@ mod tests {
                             "context_window": 400000,
                             "max_output_tokens": 128000,
                             "release_date": "2026-05-14",
-                            "reasoning_efforts": ["low", "medium", "high"],
+                            "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
                             "pricing": {
                                 "currency": "USD",
                                 "input_per_mtok": 1.25,
@@ -4568,6 +4589,7 @@ mod tests {
 
         let native = catalogue.provider("native").expect("the native row");
         assert_eq!(native.catalog.as_deref(), Some("openai"));
+        assert_eq!(native.catalogs, vec!["openai", "anthropic"]);
         assert_eq!(native.default.as_deref(), Some("openai_codex:gpt-5.6-sol"));
         assert!(native.model_option);
         assert_eq!(
@@ -4579,7 +4601,14 @@ mod tests {
         assert_eq!(native.models[0].context_window, Some(400_000));
         assert_eq!(
             native.models[0].efforts(),
-            vec![Effort::Low, Effort::Medium, Effort::High]
+            vec![
+                Effort::NoReasoning,
+                Effort::Low,
+                Effort::Medium,
+                Effort::High,
+                Effort::XHigh,
+                Effort::Max,
+            ]
         );
         assert_eq!(
             native.models[0]

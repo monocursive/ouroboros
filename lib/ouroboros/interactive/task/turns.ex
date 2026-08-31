@@ -5,6 +5,7 @@ defmodule Ouroboros.Interactive.Task.Turns do
   alias Ouroboros.Interactive.State
   alias Ouroboros.Interactive.Task
   alias Ouroboros.Provider
+  alias Ouroboros.ReasoningEffort
   alias Ouroboros.Runtime.Exposure
   alias Ouroboros.Workspace.Path, as: WorkspacePath
 
@@ -208,7 +209,7 @@ defmodule Ouroboros.Interactive.Task.Turns do
               other
           end
 
-        with {:ok, request} <- TurnRequest.new(attrs) do
+        with {:ok, request} <- ReasoningEffort.turn_request(attrs) do
           {:ok, Provider.apply_runtime_provider_policy(request, provider)}
         end
 

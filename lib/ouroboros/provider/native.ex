@@ -115,6 +115,7 @@ defmodule Ouroboros.Provider.Native do
       ],
       normalized_values: %{
         approval_mode: [:default, :prompt, :auto_edit, :auto_approve],
+        reasoning_effort: Ouroboros.ReasoningEffort.atoms_or_nil(),
         # `:unrestricted` is the shell's OS sandbox turned off, and nothing else. See the
         # moduledoc for what it does not relax.
         sandbox_mode: [:default, :read_only, :workspace_write, :unrestricted]

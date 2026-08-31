@@ -5,8 +5,6 @@ defmodule Ouroboros.Provider.Native.Run do
 
   alias Jido.Harness.ApprovalResponse
   alias Jido.Harness.Event
-  alias Jido.Harness.SessionRequest
-  alias Jido.Harness.TurnRequest
   alias Ouroboros.Provider.Native.Session
 
   @registry Ouroboros.Provider.Native.Registry
@@ -164,7 +162,7 @@ defmodule Ouroboros.Provider.Native.Run do
       |> Map.put_new("max_iterations", request.max_turns)
       |> Map.reject(fn {_key, value} -> is_nil(value) end)
 
-    SessionRequest.new(%{
+    Ouroboros.ReasoningEffort.session_request(%{
       provider: request.provider,
       cwd: request.cwd,
       model: request.model,
@@ -189,7 +187,7 @@ defmodule Ouroboros.Provider.Native.Run do
   end
 
   defp turn_request(request) do
-    TurnRequest.new!(%{
+    Ouroboros.ReasoningEffort.turn_request!(%{
       prompt: request.prompt,
       attachments: request.attachments,
       reasoning_effort: request.reasoning_effort
