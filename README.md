@@ -93,3 +93,8 @@ reviewed or tested. AI assistance does not lower the quality or verification bar
 I reserve the right to close any pull request, including an AI-generated one, at
 any time and without prior warning or explanation. Submitting a pull request does
 not guarantee review, feedback, acceptance, or continued maintenance.
+
+## License
+
+Ouroboros is available under the [MIT License](LICENSE). Copyright (c) 2026
+Monocursive.
