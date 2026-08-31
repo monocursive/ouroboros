@@ -103,6 +103,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   alias Ouroboros.Web.Live.ApprovalCard
   alias Ouroboros.Web.Live.Cells
   alias Ouroboros.Web.Live.Composer
+  alias Ouroboros.Web.Live.LoadingState
   alias Ouroboros.Web.Live.Rail
   alias Ouroboros.Web.Route
   alias Ouroboros.Web.Transcript
@@ -1765,6 +1766,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   def focused(assigns) do
     {plane, id} = assigns.open
     operate? = assigns.scope == :operate
+    agent_loading? = agent_loading?(assigns)
 
     assigns =
       assigns
@@ -1790,6 +1792,8 @@ defmodule Ouroboros.Web.Live.DeckLive do
         plane == :interactive and operate? and Call.available?(:operate, "interactive.configure")
       )
       |> assign(:can_retry, operate? and assigns.turn.failed? and not is_nil(assigns.last_send))
+      |> assign(:agent_loading?, agent_loading?)
+      |> assign(:loading_id, loading_id(plane, id))
       |> assign(:node, node_of(assigns.row))
 
     ~H"""
@@ -1826,6 +1830,10 @@ defmodule Ouroboros.Web.Live.DeckLive do
           session_id={@session_id}
         />
       </div>
+    </div>
+
+    <div :if={@agent_loading?} class="ouro-agent-loading">
+      <LoadingState.loading id={@loading_id} label="Agent working" variant={:drive} />
     </div>
 
     <ApprovalCard.card
@@ -1892,6 +1900,26 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   defp node_of(%Rail.Row{node: node}) when not is_nil(node), do: to_string(node)
   defp node_of(_absent), do: nil
+
+  # A running turn is work by the agent until it becomes a request for the operator. The
+  # approval list is fresher than the three-second status poll, while the status exclusion
+  # covers an opened session whose request event fell below the retained cursor.
+  defp agent_loading?(assigns) do
+    not assigns.ended and assigns.approvals == [] and
+      assigns.status not in [:awaiting_approval, "awaiting_approval"] and
+      Composer.working?(assigns.turn, assigns.status)
+  end
+
+  # Hooks need stable, valid DOM ids. Session ids are runtime input and may contain bytes
+  # that do not belong in one, so the browser sees only a short URL-safe digest.
+  defp loading_id(plane, id) do
+    digest =
+      :crypto.hash(:sha256, "#{plane}:#{id}")
+      |> Base.url_encode64(padding: false)
+      |> binary_part(0, 12)
+
+    "agent-loading-#{digest}"
+  end
 
   attr :counts, :map, required: true
 

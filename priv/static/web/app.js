@@ -435,9 +435,43 @@
     }
   };
 
+  // A local clock for long-running agent work. Keeping this in the browser avoids ten
+  // LiveView messages per second, and performance.now() keeps system-clock changes from
+  // making the elapsed value jump backwards or forwards. The element is phx-update=ignore,
+  // so ordinary transcript patches do not replace the value or restart the clock.
+  var ElapsedTimer = {
+    mounted: function () {
+      this.startedAt = performance.now();
+      this.paint = function () {
+        var total = Math.max(0, performance.now() - this.startedAt) / 1000;
+
+        if (total < 60) {
+          this.el.textContent = total.toFixed(1) + "s";
+          return;
+        }
+
+        var minutes = Math.floor(total / 60);
+        this.el.textContent = minutes + "m " + (total % 60).toFixed(1) + "s";
+      }.bind(this);
+
+      this.paint();
+      this.timer = window.setInterval(this.paint, 100);
+    },
+
+    destroyed: function () {
+      window.clearInterval(this.timer);
+    }
+  };
+
   var liveSocket = new LiveSocket("/live", Socket, {
     params: { _csrf_token: csrfToken },
-    hooks: { ScrollPin: ScrollPin, Composer: Composer, FocusInvalid: FocusInvalid, Modal: Modal }
+    hooks: {
+      ScrollPin: ScrollPin,
+      Composer: Composer,
+      ElapsedTimer: ElapsedTimer,
+      FocusInvalid: FocusInvalid,
+      Modal: Modal
+    }
   });
 
   // The socket is the only thing that can tell a viewer the daemon went away, so the

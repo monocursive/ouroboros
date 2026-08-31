@@ -970,6 +970,40 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
   # ------------------------------------------------------------------------------------
 
   describe "the composer" do
+    test "shows a timed loader only while the agent owns the next action", %{conn: conn} do
+      id = session_id()
+      pid = plane(id: id, status: :idle, backlogs: [{:ok, []}])
+
+      {:ok, view, html} = live(conn, "/s/interactive/#{id}")
+      refute html =~ "ouro-loading-state"
+
+      FakePlane.emit(pid, event(1, :turn_started, %{}))
+      working = flush(view)
+
+      assert working =~ "ouro-loading-state"
+      assert working =~ "Agent working"
+      assert working =~ ~s(phx-hook="ElapsedTimer")
+
+      FakePlane.emit(pid, event(2, :turn_completed, %{}))
+      refute flush(view) =~ "ouro-loading-state"
+    end
+
+    test "does not call waiting on the operator agent work", %{conn: conn} do
+      id = session_id()
+
+      _plane =
+        plane(
+          id: id,
+          status: :awaiting_approval,
+          backlogs: [{:ok, [corpus("event_approval_requested_permission", 1, "r1")]}]
+        )
+
+      {:ok, _view, html} = live(conn, "/s/interactive/#{id}")
+
+      assert html =~ "ouro-approval"
+      refute html =~ "ouro-loading-state"
+    end
+
     test "sends an idle session's draft as a plain-string input", %{conn: conn} do
       id = session_id()
       _plane = plane(id: id, status: :idle, backlogs: [{:ok, []}])

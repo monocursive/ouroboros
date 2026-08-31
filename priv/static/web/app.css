@@ -987,11 +987,121 @@ body.phx-loading {
   animation: ouro-pulse 1.6s ease-in-out infinite;
 }
 
+/* ------------------------------------------------------- Long-running agent activity */
+
+@keyframes ouro-pixel-on {
+  0%,
+  24%,
+  100% {
+    opacity: 0.15;
+    transform: scale(1);
+  }
+  46%,
+  62% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+}
+
+@keyframes ouro-shimmer-text {
+  from {
+    background-position: 180% 0;
+  }
+  to {
+    background-position: -20% 0;
+  }
+}
+
+.ouro-agent-loading {
+  flex: 0 0 auto;
+  padding: 0.65rem var(--gutter);
+  border-top: 1px solid var(--hairline-1);
+}
+
+.ouro-loading-state {
+  display: flex;
+  width: fit-content;
+  align-items: center;
+  gap: 0.625rem;
+}
+
+.ouro-loader-grid {
+  display: grid;
+  flex: 0 0 auto;
+  grid-template-columns: repeat(3, 4px);
+  gap: 1.5px;
+}
+
+.ouro-loader-cell {
+  width: 4px;
+  height: 4px;
+  border-radius: 1px;
+  background: var(--ink);
+  opacity: 0.07;
+}
+
+.ouro-loader-cell-round {
+  border-radius: 50%;
+}
+
+.ouro-loader-cell-active {
+  opacity: 0.15;
+  animation: ouro-pixel-on var(--ouro-loader-duration) ease-in-out
+    var(--ouro-loader-delay) infinite;
+}
+
+.ouro-loading-label {
+  color: var(--secondary);
+  background-image: linear-gradient(
+    90deg,
+    var(--tertiary) 35%,
+    var(--ink) 50%,
+    var(--tertiary) 65%
+  );
+  background-position: 180% 0;
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: ouro-shimmer-text 1.4s linear infinite;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.ouro-loading-elapsed {
+  color: var(--tertiary);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .ouro-streaming .ouro-prose {
+  .ouro-streaming .ouro-prose,
+  .ouro-loader-cell-active,
+  .ouro-loading-label {
     animation: none;
+  }
+
+  .ouro-loader-cell-active {
+    opacity: 0.15;
+    transform: none;
+  }
+
+  .ouro-loading-label {
+    background: none;
+    -webkit-text-fill-color: currentColor;
+  }
+
+  .ouro-streaming .ouro-prose {
     border-left: 2px solid var(--hairline-2);
     padding-left: 0.6rem;
+  }
+}
+
+@media (forced-colors: active) {
+  .ouro-loading-label {
+    background: none;
+    -webkit-text-fill-color: currentColor;
   }
 }
 
@@ -2834,6 +2944,11 @@ body .ouro-transcript {
 }
 
 body .ouro-transcript > div {
+  width: min(100%, var(--lane-width));
+  margin-inline: auto;
+}
+
+body .ouro-agent-loading > .ouro-loading-state {
   width: min(100%, var(--lane-width));
   margin-inline: auto;
 }
