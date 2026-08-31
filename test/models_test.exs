@@ -101,9 +101,10 @@ defmodule Ouroboros.ModelsTest do
       assert Models.catalog(:kimi) == :moonshotai
 
       native = provider_row(:native)
-      assert native.catalogs == [:openai, :anthropic]
+      assert native.catalogs == [:openai, :anthropic, :xai]
       assert Enum.any?(native.models, &String.starts_with?(&1.id, "openai_codex:"))
       assert Enum.any?(native.models, &String.starts_with?(&1.id, "anthropic:"))
+      assert Enum.any?(native.models, &String.starts_with?(&1.id, "xai:"))
 
       # A provider whose atom is itself an llm_db provider id needs no entry.
       assert Models.catalog(:zai) == :zai

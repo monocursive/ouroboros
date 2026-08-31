@@ -140,8 +140,8 @@ defmodule Ouroboros.Web.LayoutsTest do
                render_component(&Layouts.theme_toggle/1, %{})
     end
 
-    test "is on the deck, the machines page and the new-session form", %{conn: conn} do
-      for path <- ["/", "/machines", "/new"] do
+    test "is on every operator page", %{conn: conn} do
+      for path <- ["/", "/machines", "/new", "/settings"] do
         {:ok, _view, html} = live(conn, path)
         assert html =~ "data-ouro-theme", "#{path} has no theme toggle"
       end
@@ -167,7 +167,7 @@ defmodule Ouroboros.Web.LayoutsTest do
       {:ok, _view, deck} = live(conn, "/")
       assert deck =~ "data-ouro-bell"
 
-      for path <- ["/machines", "/new"] do
+      for path <- ["/machines", "/new", "/settings"] do
         {:ok, _view, html} = live(conn, path)
 
         refute html =~ "data-ouro-bell",

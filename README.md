@@ -271,13 +271,23 @@ The default `native` provider calls models directly through ReqLLM and Finch. No
 binary is resolved or spawned. `openai:<model>` uses the official OpenAI API and
 `OPENAI_API_KEY`; `openai_codex:<model>` uses ChatGPT subscription OAuth and the direct
 Codex Responses endpoint. `anthropic:<model>` uses Anthropic's Messages API and
-`ANTHROPIC_API_KEY`, or the private key saved from the Anthropic card on the web
-`/new` page. The environment wins when both are present; the UI-managed key is a
-mode-`0600` `anthropic.key` in the Ouroboros data directory and becomes available to
-new requests immediately. Ouroboros deliberately supports API-key authentication only
-for Anthropic — no Claude OAuth or subscription credential is accepted or exposed. The
-packaged default is `openai_codex:gpt-5.6-sol` and may be overridden with
-`OUROBOROS_NATIVE_MODEL`.
+`ANTHROPIC_API_KEY`, or the private credential saved from the Anthropic card on the web
+`/new` page. An identity-linked key that can access multiple workspaces also needs its
+`wrkspc_…` id in `ANTHROPIC_WORKSPACE_ID` or in that card; Ouroboros sends it as the
+`anthropic-workspace-id` header. The environment wins when both are present. The
+UI-managed key and optional workspace id live in one mode-`0600` `anthropic.key` document
+in the Ouroboros data directory and become available to new requests immediately.
+Ouroboros deliberately supports API-key authentication only for Anthropic — no Claude
+OAuth or subscription credential is accepted or exposed. `xai:<model>` likewise uses
+xAI's API with `XAI_API_KEY` or the mode-`0600` `xai.key` saved from the web page. That
+direct lane is API-key-only. The managed `grok` provider instead drives the first-party
+Grok Build CLI and accepts either its browser/device-auth subscription session (including
+eligible SuperGrok or X Premium+ access) or `XAI_API_KEY`; when both exist, the CLI's
+active subscription session wins. Ouroboros starts `grok login --device-auth` only after
+the operator clicks **Connect subscription**, shows only the HTTPS verification link and
+short code, and leaves token storage and refresh to the CLI's private `~/.grok/auth.json`.
+API usage and subscriptions are separate billing paths. The packaged Native default is
+`openai_codex:gpt-5.6-sol` and may be overridden with `OUROBOROS_NATIVE_MODEL`.
 
 ChatGPT OAuth credentials live in a private `oauth.json` under the Ouroboros data
 directory (or `OUROBOROS_OAUTH_FILE`). Browser PKCE and device-code login are implemented
@@ -321,12 +331,27 @@ export OPENAI_API_KEY=...
 ```
 
 Or run Claude through the same native loop, using an Anthropic API key from the service
-environment (you can also add one from the Anthropic card on the web `/new` page):
+environment (you can also add one from the Anthropic card on the web `/settings` page):
 
 ```sh
 export OUROBOROS_NATIVE_MODEL=anthropic:claude-sonnet-5
 export ANTHROPIC_API_KEY=...
+# Required only for identity-linked/multi-workspace keys:
+export ANTHROPIC_WORKSPACE_ID=wrkspc_...
 ```
+
+Or call Grok directly through the native loop with an xAI API key (the same key can be
+added from the xAI card on `/settings`):
+
+```sh
+export OUROBOROS_NATIVE_MODEL=xai:grok-4.6
+export XAI_API_KEY=...
+```
+
+To use subscription access instead, connect SpaceXAI on `/settings`, then choose the
+managed `grok` provider on `/new`. Ouroboros delegates that device login and every token
+refresh to the installed first-party Grok Build CLI. An xAI API key remains available as
+a separate fallback on the same form.
 
 ```elixir
 Ouroboros.provider_status(:native)    # which key variables are set — names, never values
@@ -1609,9 +1634,9 @@ they do in a shell, and `ouro` scrolls by keyboard.
   per million — so a client can turn `usage.total_tokens` into a context percentage and a
   cost estimate. It is not a claim that a listed model will work: Ouroboros drives a
   vendor CLI or, for `native`, a direct API, and only that credential's account knows what
-  it may run. Native combines the OpenAI and Anthropic catalogues because its model option
-  can select either transport; each id carries its required `openai_codex:`, `openai:`, or
-  `anthropic:` prefix. It is not verified
+  it may run. Native combines the OpenAI, Anthropic, and xAI catalogues because its model
+  option can select any of those transports; each id carries its required
+  `openai_codex:`, `openai:`, `anthropic:`, or `xai:` prefix. It is not verified
   pricing either, just the vendor's public list price as of the snapshot's epoch. Which
   vendor's catalogue a given CLI draws from is Ouroboros's own reading — no adapter
   declares it — and a node can correct it with `config :ouroboros, model_catalogs:`.

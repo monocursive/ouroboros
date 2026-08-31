@@ -4,6 +4,7 @@ defmodule Ouroboros.Gateway.AccountTest do
   use ExUnit.Case, async: false
 
   alias Ouroboros.Gateway.Methods
+  alias Ouroboros.Test.GrokAccountAdapter
   alias Ouroboros.Test.OpenAIAccountAdapter
 
   test "the account surface is advertised with read and operate scopes" do
@@ -15,6 +16,52 @@ defmodule Ouroboros.Gateway.AccountTest do
     assert table["account.login.cancel"].scope == :operate
     assert table["account.logout"].scope == :operate
     assert table["credentials.anthropic.set"].scope == :operate
+    assert table["grok.account.read"].scope == :read
+    assert table["grok.account.login.start"].scope == :operate
+    assert table["grok.account.login.cancel"].scope == :operate
+    assert table["credentials.xai.set"].scope == :operate
+  end
+
+  test "stores an xAI key through a one-way, closed parameter boundary" do
+    root =
+      Path.join(System.tmp_dir!(), "ouroboros-gateway-xai-#{System.unique_integer([:positive])}")
+
+    Ouroboros.DataDir.ensure_private!(root)
+    path = Path.join(root, "xai.key")
+    previous_path = Application.get_env(:ouroboros, :xai_api_key_file)
+    previous_key = System.get_env("XAI_API_KEY")
+    Application.put_env(:ouroboros, :xai_api_key_file, path)
+    System.delete_env("XAI_API_KEY")
+
+    on_exit(fn ->
+      if previous_path,
+        do: Application.put_env(:ouroboros, :xai_api_key_file, previous_path),
+        else: Application.delete_env(:ouroboros, :xai_api_key_file)
+
+      if previous_key,
+        do: System.put_env("XAI_API_KEY", previous_key),
+        else: System.delete_env("XAI_API_KEY")
+
+      File.rm_rf(root)
+    end)
+
+    secret = "xai-gateway-must-not-return"
+
+    assert {:ok, %{provider: :xai, env: "XAI_API_KEY", present: true, source: :stored} = reply} =
+             Methods.invoke("credentials.xai.set", %{"api_key" => secret})
+
+    refute inspect(reply) =~ secret
+    assert File.read!(path) == secret
+
+    assert {:error, -32602, message} =
+             Methods.invoke("credentials.xai.set", %{"api_key" => "xai bad"})
+
+    assert message =~ "whitespace"
+
+    assert {:error, -32602, message} =
+             Methods.invoke("credentials.xai.set", %{"api_key" => secret, "label" => "mine"})
+
+    assert message =~ "unsupported fields"
   end
 
   test "stores an Anthropic key through a one-way, closed parameter boundary" do
@@ -28,8 +75,10 @@ defmodule Ouroboros.Gateway.AccountTest do
     path = Path.join(root, "anthropic.key")
     previous_path = Application.get_env(:ouroboros, :anthropic_api_key_file)
     previous_key = System.get_env("ANTHROPIC_API_KEY")
+    previous_workspace = System.get_env("ANTHROPIC_WORKSPACE_ID")
     Application.put_env(:ouroboros, :anthropic_api_key_file, path)
     System.delete_env("ANTHROPIC_API_KEY")
+    System.delete_env("ANTHROPIC_WORKSPACE_ID")
 
     on_exit(fn ->
       if previous_path,
@@ -39,6 +88,10 @@ defmodule Ouroboros.Gateway.AccountTest do
       if previous_key,
         do: System.put_env("ANTHROPIC_API_KEY", previous_key),
         else: System.delete_env("ANTHROPIC_API_KEY")
+
+      if previous_workspace,
+        do: System.put_env("ANTHROPIC_WORKSPACE_ID", previous_workspace),
+        else: System.delete_env("ANTHROPIC_WORKSPACE_ID")
 
       File.rm_rf(root)
     end)
@@ -50,11 +103,31 @@ defmodule Ouroboros.Gateway.AccountTest do
               provider: :anthropic,
               env: "ANTHROPIC_API_KEY",
               present: true,
-              source: :stored
-            } = reply} = Methods.invoke("credentials.anthropic.set", %{"api_key" => secret})
+              source: :stored,
+              workspace_configured: true
+            } = reply} =
+             Methods.invoke("credentials.anthropic.set", %{
+               "api_key" => secret,
+               "workspace_id" => "wrkspc_Gateway123"
+             })
 
     refute inspect(reply) =~ secret
-    assert File.read!(path) == secret
+    assert reply.workspace_configured
+
+    assert %{
+             "api_key" => ^secret,
+             "workspace_id" => "wrkspc_Gateway123"
+           } = Jason.decode!(File.read!(path))
+
+    assert {:ok, %{workspace_configured: true}} =
+             Methods.invoke("credentials.anthropic.set", %{
+               "workspace_id" => "wrkspc_Replacement456"
+             })
+
+    assert %{
+             "api_key" => ^secret,
+             "workspace_id" => "wrkspc_Replacement456"
+           } = Jason.decode!(File.read!(path))
 
     assert {:error, -32602, message} =
              Methods.invoke("credentials.anthropic.set", %{
@@ -68,6 +141,13 @@ defmodule Ouroboros.Gateway.AccountTest do
              Methods.invoke("credentials.anthropic.set", %{"api_key" => "sk-ant bad"})
 
     assert message =~ "whitespace"
+
+    assert {:error, -32602, message} =
+             Methods.invoke("credentials.anthropic.set", %{
+               "workspace_id" => "not-a-workspace"
+             })
+
+    assert message =~ "wrkspc_-prefixed"
   end
 
   test "reads account state and starts either supported managed ChatGPT flow" do
@@ -111,9 +191,35 @@ defmodule Ouroboros.Gateway.AccountTest do
     assert message =~ "browser or device_code"
   end
 
+  test "reads and starts the first-party Grok device flow" do
+    on_exit(&GrokAccountAdapter.reset/0)
+    GrokAccountAdapter.disconnected()
+
+    assert {:ok, %{"requiresGrokAuth" => true, "account" => nil}} =
+             Methods.invoke("grok.account.read", %{})
+
+    assert {:ok,
+            %{
+              "loginId" => "grok-device",
+              "verificationUrl" => verification_url,
+              "userCode" => "WXYZ-5678"
+            }} = Methods.invoke("grok.account.login.start", %{})
+
+    assert verification_url =~ "auth.x.ai"
+
+    assert {:ok, %{"cancelled" => "grok-device"}} =
+             Methods.invoke("grok.account.login.cancel", %{"login_id" => "grok-device"})
+
+    assert {:error, -32602, message} =
+             Methods.invoke("grok.account.login.start", %{"flow" => "browser"})
+
+    assert message =~ "unsupported fields"
+  end
+
   describe "a boundary that fails is answered in the terms it failed in" do
     setup do
       on_exit(&OpenAIAccountAdapter.succeed/0)
+      on_exit(&GrokAccountAdapter.reset/0)
       :ok
     end
 
@@ -145,6 +251,20 @@ defmodule Ouroboros.Gateway.AccountTest do
         assert message == "the runtime failed the call"
         assert data == ["openai_auth", "the OAuth server refused the request"]
       end
+    end
+
+    test "Grok account failures keep their provider attribution" do
+      GrokAccountAdapter.fail({:error, {:timeout, "grok/login"}})
+
+      assert {:error, -32005, "Grok authentication timed out during grok/login"} =
+               Methods.invoke("grok.account.login.start", %{})
+
+      GrokAccountAdapter.fail({:error, {:upstream, "the device code was refused"}})
+
+      assert {:error, -32006, "the runtime failed the call", data} =
+               Methods.invoke("grok.account.login.start", %{})
+
+      assert data == ["grok_auth", "the device code was refused"]
     end
   end
 end

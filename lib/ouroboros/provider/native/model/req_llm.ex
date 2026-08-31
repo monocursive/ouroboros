@@ -14,12 +14,13 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   Every model provider `ReqLLM` ships is reachable — `anthropic:…`, `openai:…`,
   `openai_codex:…`, `google:…`, `openrouter:…`, `ollama:…` and the rest. Keys normally
   come from each provider's own environment variable. Anthropic additionally has one
-  node-owned private file, read only into the transient ReqLLM request options; no
-  credential can reach an event payload through here.
+  node-owned private file for its key and optional workspace id, read only into the
+  transient ReqLLM request options; no credential can reach an event payload through
+  here.
   """
 
   @behaviour Ouroboros.Provider.Native.Model
-  alias Ouroboros.Provider.AnthropicKey
+  alias Ouroboros.Provider.{AnthropicKey, XAIKey}
   alias Ouroboros.Provider.Native.Model.{Admission, ToolSchema}
   alias ReqLLM.Provider.ChunkAccumulator
 
@@ -164,7 +165,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     if Code.ensure_loaded?(ReqLLM.Providers) do
       rows =
         ReqLLM.Providers.list()
-        |> Enum.reject(&(&1 == :anthropic))
+        |> Enum.reject(&(&1 in [:anthropic, :xai]))
         |> Enum.map(fn provider ->
           env = ReqLLM.Keys.env_var_name(provider)
           %{provider: provider, env: env, present: present?(env), source: source(env)}
@@ -179,7 +180,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
         source: if(oauth_present?, do: :stored)
       }
 
-      Enum.sort_by([oauth, AnthropicKey.status() | rows], &{&1.provider, &1.env})
+      Enum.sort_by([oauth, AnthropicKey.status(), XAIKey.status() | rows], &{&1.provider, &1.env})
     else
       []
     end
@@ -463,7 +464,8 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   # those modes for other callers, so state the narrower product contract on every
   # Anthropic request instead of relying on the dependency's current default. The
   # environment-first `AnthropicKey` boundary supplies the credential only to this
-  # transient request; the auth mode is likewise forced here.
+  # transient request. Identity-linked keys also contribute their workspace header; the
+  # auth mode is likewise forced here.
   defp put_transport_options(options, %{model: "anthropic:" <> _}) do
     options =
       options
@@ -471,13 +473,82 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
       |> Keyword.delete(:oauth_file)
       |> Keyword.put(:provider_options, auth_mode: :api_key)
 
-    case AnthropicKey.fetch() do
+    case AnthropicKey.fetch_credentials() do
+      {:ok, credentials, _source} ->
+        options
+        |> Keyword.put(:api_key, credentials.api_key)
+        |> put_anthropic_workspace(credentials.workspace_id)
+
+      {:error, _reason} ->
+        Keyword.delete(options, :api_key)
+    end
+  end
+
+  # Native's xAI lane is API-key-only. The environment-first boundary supplies a saved
+  # key only to this transient request; SpaceXAI subscription tokens remain owned by the
+  # first-party Grok CLI and never cross into ReqLLM.
+  defp put_transport_options(options, %{model: "xai:" <> _}) do
+    options =
+      options
+      |> Keyword.delete(:auth_file)
+      |> Keyword.delete(:oauth_file)
+      |> Keyword.delete(:provider_options)
+
+    case XAIKey.fetch() do
       {:ok, key, _source} -> Keyword.put(options, :api_key, key)
       {:error, _reason} -> Keyword.delete(options, :api_key)
     end
   end
 
   defp put_transport_options(options, _request), do: Keyword.delete(options, :provider_options)
+
+  defp put_anthropic_workspace(options, nil), do: options
+
+  defp put_anthropic_workspace(options, workspace_id) when is_binary(workspace_id) do
+    http_options = Keyword.get(options, :req_http_options, [])
+
+    headers =
+      http_options
+      |> request_headers()
+      |> Enum.reject(&workspace_header?/1)
+      |> Kernel.++([{"anthropic-workspace-id", workspace_id}])
+
+    http_options =
+      cond do
+        is_list(http_options) and Keyword.keyword?(http_options) ->
+          Keyword.put(http_options, :headers, headers)
+
+        is_map(http_options) ->
+          Map.put(http_options, :headers, headers)
+
+        true ->
+          [headers: headers]
+      end
+
+    Keyword.put(options, :req_http_options, http_options)
+  end
+
+  defp request_headers(http_options) when is_list(http_options) do
+    if Keyword.keyword?(http_options) do
+      http_options |> Keyword.get(:headers, []) |> normalize_headers()
+    else
+      []
+    end
+  end
+
+  defp request_headers(http_options) when is_map(http_options),
+    do: http_options |> Map.get(:headers, []) |> normalize_headers()
+
+  defp request_headers(_http_options), do: []
+
+  defp normalize_headers(headers) when is_list(headers), do: headers
+  defp normalize_headers(headers) when is_map(headers), do: Map.to_list(headers)
+  defp normalize_headers(_headers), do: []
+
+  defp workspace_header?({name, _value}) when is_binary(name),
+    do: String.downcase(name) == "anthropic-workspace-id"
+
+  defp workspace_header?(_header), do: false
 
   defp reasoning_detail(%ReqLLM.Message.ReasoningDetails{} = detail), do: detail
 

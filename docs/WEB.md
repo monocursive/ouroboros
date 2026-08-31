@@ -309,7 +309,8 @@ Inventory source: `docs/DESKTOP.md` and the verified feature map of `tui/src/des
 | Approval card: kinds, choices, provider options, suggested rule, subagent attribution, diff excerpt | one card, optional sections, rendered from the same payload contract (`ui/transcript.rs:309-482`); respond params keep the closed envelope incl. the vendor-option decision table (`ui/transcript.rs:284`) and the plan-choice fallback mapping (`model.rs:2673`) |
 | Sandbox picker, thinking picker — "absent, not defaulted, when the runtime said nothing" | identical rule; `interactive.configure {sandbox_mode}` / `{reasoning_effort}`; label follows the session row after re-list, exactly as `docs/DESKTOP.md:63-69` states it |
 | New-session form: provider/model pickers with search, workspace + Browse…, sandbox, effort | `runtime.providers` / `runtime.models` (fetched on form open, never on cadence — `mod.rs:107`); a `<select>`/combobox has none of the gpui-component filtered-cache pathology, so the authoritative-choice workaround dies with gpui; **Browse… becomes `workspace.browse`** (§7) — the native picker browsed the *client's* filesystem, which was only ever correct when client and daemon shared a machine |
-| ChatGPT account card | `account.read` / `account.login.*`; the sign-in URL is a plain link; "tokens never cross the gateway" holds — they never leave `OpenAIAuth` |
+| ChatGPT / Grok account and API-key cards | ChatGPT uses `account.read` / `account.login.*`. Managed Grok uses `grok.account.*` and the first-party CLI's device flow; direct xAI calls use `credentials.xai.set`. Authorization URLs are plain HTTPS links, API keys cross one operate-scope write and are never returned, and subscription tokens stay in their owning auth module/CLI. |
+| Settings | `/settings` groups the five editable new-session defaults first, subscription and direct API connections second, the detected provider/model catalogue third, and read-only boot/runtime facts last. Secret values never enter LiveView state; environment-owned configuration is shown as read-only rather than rendered as a control that cannot take effect. |
 | Machines panel: fleet name, member presence chips, add-machine form with two-step Tailscale consent, stepper, AuthUrl card | **read-only in v1**: `fleet.status` + `fleet.doctor` + presence derived from `runtime.status.connected_nodes` under the desktop's exact rules (unknown-not-offline before first status, self-is-connected — `tui/src/desktop/machines.rs:107`); the fleet profile is read server-side from the same `<data_dir>/fleet/profile.json` the daemon already validates (`cluster.ex:716-748`). **Add-machine is deferred** (D10 below) with an honest empty state naming `ouro fleet add` — the desktop's own no-fleet posture |
 | Window title, connection pill, notices | page title, a connection indicator driven by LiveView socket state, one notice slot with the same "Info is deliberately dropped" rule |
 | Keyboard: Enter/Shift-Enter, ⌘., ⌘N | same bindings via LiveView key events (browser-permitting; ⌘N may need to become a different chord — browsers own it) |
@@ -545,7 +546,10 @@ PR-sized, each green before the next; W1–W2 are deliberately before any transc
   plan-exit, auto-approve with the question/computer-use carve-outs, suggested-rule row
   (`permissions.add`).
 - **W6 — new-session form.** ✅ **Landed.** Pickers from providers/models,
-  `workspace.browse` (method first, then the UI), sandbox + effort, ChatGPT account card.
+  `workspace.browse` (method first, then the UI), sandbox + effort, ChatGPT and SpaceXAI
+  subscription cards, and private Anthropic/xAI API-key entry. The same contracts now
+  have a dedicated `/settings` index: everyday defaults first, model connections second,
+  catalogue visibility third, and restart-owned runtime/security facts last.
 - **W7 — machines (read-only)** ✅ **Landed**, + fleet status/doctor rendering +
   deferred-add empty state.
 

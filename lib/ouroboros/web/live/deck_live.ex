@@ -1362,6 +1362,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
         </span>
         <Layouts.bell_toggle />
         <Layouts.theme_toggle />
+        <a class="ouro-topbar-link" href="/settings">Settings</a>
         <a class="ouro-button" href="/new">
           New session
         </a>

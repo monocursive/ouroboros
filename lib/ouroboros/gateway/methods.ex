@@ -95,7 +95,9 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Mesh
   alias Ouroboros.Orchestration.Scheduler
   alias Ouroboros.Provider.AnthropicKey
+  alias Ouroboros.Provider.GrokAuth
   alias Ouroboros.Provider.OpenAIAuth
+  alias Ouroboros.Provider.XAIKey
   alias Ouroboros.Provider.Native.Desktop
   alias Ouroboros.Provider.Native.Mcp
   alias Ouroboros.Provider.Native.Replay
@@ -114,6 +116,7 @@ defmodule Ouroboros.Gateway.Methods do
       unavailable: 1,
       upstream_error: 1,
       account_reply: 1,
+      grok_account_reply: 1,
       forget_session_owner_reply: 1,
       fork_reply: 1,
       exit_result: 1
@@ -225,6 +228,7 @@ defmodule Ouroboros.Gateway.Methods do
     "fleet.status" => %{scope: :read, timeout: @default_timeout},
     "fleet.doctor" => %{scope: :read, timeout: @default_timeout},
     "account.read" => %{scope: :read, timeout: @default_timeout},
+    "grok.account.read" => %{scope: :read, timeout: @default_timeout},
     "agents.list" => %{scope: :read, timeout: @default_timeout},
     "agents.state" => %{scope: :read, timeout: @default_timeout},
     "interactive.list" => %{scope: :read, timeout: @default_timeout},
@@ -318,9 +322,12 @@ defmodule Ouroboros.Gateway.Methods do
     "account.login.complete" => %{scope: :operate, timeout: @default_timeout},
     "account.login.cancel" => %{scope: :operate, timeout: @default_timeout},
     "account.logout" => %{scope: :operate, timeout: @default_timeout},
+    "grok.account.login.start" => %{scope: :operate, timeout: @default_timeout},
+    "grok.account.login.cancel" => %{scope: :operate, timeout: @default_timeout},
     # A credential value crosses this boundary once and is never returned. Operate scope
     # is the same authority that may start paid work; read links cannot re-key the node.
     "credentials.anthropic.set" => %{scope: :operate, timeout: @default_timeout},
+    "credentials.xai.set" => %{scope: :operate, timeout: @default_timeout},
     # Both calls checkpoint intent before dispatch. A gateway ceiling can therefore fire
     # after the provider accepted the turn, so the client must reconcile the session
     # rather than present the timeout as a refusal or blindly mint another turn id.
@@ -706,12 +713,25 @@ defmodule Ouroboros.Gateway.Methods do
       {:closed,
        [{"login_id", :required, :string, "correlates with the `loginId` the start reply carried"}]},
     "account.logout" => {:closed, []},
+    "grok.account.read" => {:closed, []},
+    "grok.account.login.start" =>
+      {:closed, [],
+       "starts `grok login --device-auth`; the first-party CLI owns and refreshes every subscription token"},
+    "grok.account.login.cancel" =>
+      {:closed,
+       [{"login_id", :required, :string, "the loginId returned by grok.account.login.start"}]},
     "credentials.anthropic.set" =>
       {:closed,
        [
-         {"api_key", :required, :string,
-          "stored privately on the runtime host; never returned, logged, or checkpointed"}
-       ], "replaces the node-owned Anthropic key; `ANTHROPIC_API_KEY` still takes precedence"},
+         {"api_key", {:optional, nil}, :string,
+          "replaces the privately stored key; may be omitted when updating an existing stored credential"},
+         {"workspace_id", {:optional, nil}, :string,
+          "`wrkspc_`-prefixed workspace for an identity-linked key; may be omitted for a single-workspace key"}
+       ],
+       "updates the node-owned Anthropic credential without returning it; `ANTHROPIC_API_KEY` and `ANTHROPIC_WORKSPACE_ID` still take precedence"},
+    "credentials.xai.set" =>
+      {:closed, [{"api_key", :required, :string, "replaces the privately stored xAI API key"}],
+       "updates the node-owned xAI API key without returning it; `XAI_API_KEY` still takes precedence"},
     "agents.list" => {:open, []},
     "agents.state" => {:open, [{"id", :required, :string, "the agent id"}]},
     "agents.stop" => {:open, [{"id", :required, :string, "the agent id"}]},
@@ -1282,10 +1302,46 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
+  def invoke("grok.account.read", params) do
+    with :ok <- only_keys(params, []) do
+      safe(fn -> grok_account_reply(grok_account_adapter().read()) end)
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("grok.account.login.start", params) do
+    with :ok <- only_keys(params, []) do
+      safe(fn -> grok_account_reply(grok_account_adapter().login()) end)
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("grok.account.login.cancel", params) do
+    with :ok <- only_keys(params, ["login_id"]),
+         {:ok, login_id} <- fetch_string(params, "login_id") do
+      safe(fn -> grok_account_reply(grok_account_adapter().cancel(login_id)) end)
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
   def invoke("credentials.anthropic.set", params) do
+    with :ok <- only_keys(params, ["api_key", "workspace_id"]),
+         {:ok, api_key} <- fetch_optional_api_key(params, "api_key"),
+         {:ok, workspace_id} <- fetch_optional_workspace_id(params, "workspace_id"),
+         :ok <- require_anthropic_update(api_key, workspace_id) do
+      safe(fn -> reply(anthropic_key_adapter().configure(api_key, workspace_id)) end)
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("credentials.xai.set", params) do
     with :ok <- only_keys(params, ["api_key"]),
          {:ok, api_key} <- fetch_api_key(params, "api_key") do
-      safe(fn -> reply(anthropic_key_adapter().put(api_key)) end)
+      safe(fn -> reply(xai_key_adapter().put(api_key)) end)
     else
       {:invalid, message} -> invalid_params(message)
     end
@@ -2971,8 +3027,16 @@ defmodule Ouroboros.Gateway.Methods do
     Application.get_env(:ouroboros, :account_adapter, OpenAIAuth)
   end
 
+  defp grok_account_adapter do
+    Application.get_env(:ouroboros, :grok_account_adapter, GrokAuth)
+  end
+
   defp anthropic_key_adapter do
     Application.get_env(:ouroboros, :anthropic_key_adapter, AnthropicKey)
+  end
+
+  defp xai_key_adapter do
+    Application.get_env(:ouroboros, :xai_key_adapter, XAIKey)
   end
 
   defp fetch_api_key(params, key) do
@@ -2998,6 +3062,45 @@ defmodule Ouroboros.Gateway.Methods do
         {:invalid, "params.#{key} must be a nonempty string"}
     end
   end
+
+  defp fetch_optional_api_key(params, key) do
+    case Map.fetch(params, key) do
+      :error -> {:ok, nil}
+      {:ok, _value} -> fetch_api_key(params, key)
+    end
+  end
+
+  defp fetch_optional_workspace_id(params, key) do
+    case Map.fetch(params, key) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, value} when is_binary(value) ->
+        workspace_id = String.trim(value)
+
+        cond do
+          workspace_id == "" ->
+            {:invalid, "params.#{key} must be a nonempty string when present"}
+
+          byte_size(workspace_id) > 256 ->
+            {:invalid, "params.#{key} must be at most 256 bytes"}
+
+          not Regex.match?(~r/\Awrkspc_[A-Za-z0-9]+\z/, workspace_id) ->
+            {:invalid, "params.#{key} must be a wrkspc_-prefixed Anthropic workspace id"}
+
+          true ->
+            {:ok, workspace_id}
+        end
+
+      {:ok, _value} ->
+        {:invalid, "params.#{key} must be a nonempty string when present"}
+    end
+  end
+
+  defp require_anthropic_update(nil, nil),
+    do: {:invalid, "params must include api_key or workspace_id"}
+
+  defp require_anthropic_update(_api_key, _workspace_id), do: :ok
 
   # An absent optional string is `nil` rather than an error; a present one is held to the
   # same rule as a required one, so `""` is a mistake and not a silent default.

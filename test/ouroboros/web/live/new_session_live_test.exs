@@ -49,7 +49,7 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   defp missing(name),
     do: probed(name, %{installed: false, compatible: false, version: nil, executable: nil})
 
-  defp native_with_anthropic_key(present, source \\ nil) do
+  defp native_with_anthropic_key(present, source \\ nil, workspace_configured \\ false) do
     probed(:native, %{
       installed: true,
       compatible: true,
@@ -60,6 +60,27 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
           %{
             "provider" => "anthropic",
             "env" => "ANTHROPIC_API_KEY",
+            "present" => present,
+            "source" => source,
+            "workspace_env" => "ANTHROPIC_WORKSPACE_ID",
+            "workspace_configured" => workspace_configured
+          }
+        ]
+      }
+    })
+  end
+
+  defp with_xai_key(provider, present, source \\ nil) do
+    probed(provider, %{
+      installed: true,
+      compatible: true,
+      version: "1.0",
+      executable: "in-process",
+      details: %{
+        "credentials" => [
+          %{
+            "provider" => "xai",
+            "env" => "XAI_API_KEY",
             "present" => present,
             "source" => source
           }
@@ -91,6 +112,12 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       reasoning_efforts: Keyword.get(opts, :reasoning_efforts, ["low", "medium", "high"]),
       pricing: nil
     }
+  end
+
+  defp before?(text, left, right) do
+    {left_at, _length} = :binary.match(text, left)
+    {right_at, _length} = :binary.match(text, right)
+    left_at < right_at
   end
 
   # ------------------------------------------------------------------------------------
@@ -138,7 +165,9 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
                provider: "anthropic",
                env: "ANTHROPIC_API_KEY",
                present: true,
-               source: nil
+               source: nil,
+               workspace_env: "ANTHROPIC_WORKSPACE_ID",
+               workspace_configured?: false
              }
     end
   end
@@ -194,6 +223,115 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       assert bare.label == "bare id"
       assert bare.detail == "bare-id"
       assert last.label == "Custom model…"
+    end
+
+    test "groups model rows by provider while preserving each provider's ranking" do
+      field =
+        NewSession.model_field(
+          catalogue([
+            provider_row(:native,
+              total: 6,
+              models: [
+                model("anthropic:claude-opus-5", name: "Claude Opus 5"),
+                model("openai_codex:gpt-5.6-sol", name: "GPT-5.6 Sol"),
+                model("xai:grok-4.5", name: "Grok 4.5"),
+                model("anthropic:claude-sonnet-5", name: "Claude Sonnet 5"),
+                model("openai:gpt-5.6", name: "GPT-5.6"),
+                model("bare-model", name: "Bare model")
+              ]
+            )
+          ]),
+          "native"
+        )
+
+      assert {:rows, rows, 6} = field
+
+      assert [anthropic, openai, other, xai] = NewSession.model_groups(rows, "native")
+      assert anthropic.label == "Anthropic · direct via Ouroboros (no CLI)"
+      assert Enum.map(anthropic.rows, & &1.label) == ["Claude Opus 5", "Claude Sonnet 5"]
+
+      assert openai.label == "OpenAI · direct via Ouroboros (no CLI)"
+      assert Enum.map(openai.rows, & &1.label) == ["GPT-5.6 Sol", "GPT-5.6"]
+
+      assert other.label == "Other · direct via Ouroboros (no CLI)"
+      assert Enum.map(other.rows, & &1.label) == ["Bare model"]
+
+      assert xai.label == "xAI · direct via Ouroboros (no CLI)"
+      assert Enum.map(xai.rows, & &1.label) == ["Grok 4.5"]
+    end
+
+    test "a CLI provider groups every model under the CLI that will execute it" do
+      assert {:rows, rows, 2} =
+               NewSession.model_field(
+                 catalogue([
+                   provider_row(:claude,
+                     total: 2,
+                     models: [model("claude-opus-5"), model("claude-sonnet-5")]
+                   )
+                 ]),
+                 "claude"
+               )
+
+      assert [%{label: "Claude Code CLI", rows: models}] =
+               NewSession.model_groups(rows, "claude")
+
+      assert Enum.map(models, & &1.model) == ["claude-opus-5", "claude-sonnet-5"]
+    end
+
+    test "provider routes state direct versus CLI execution in human terms" do
+      assert %{
+               name: "Ouroboros AI",
+               badge: "Direct · no CLI",
+               short: "direct model APIs, no CLI"
+             } = NewSession.provider_route("native")
+
+      assert %{
+               name: "Claude",
+               badge: "CLI-backed",
+               short: "Claude Code CLI"
+             } = NewSession.provider_route("claude")
+
+      assert %{short: "Claude CLI configured for Z.ai", group: "Claude CLI for Z.ai"} =
+               NewSession.provider_route("zai")
+    end
+
+    test "renders Recommended and Custom around provider optgroups" do
+      field =
+        NewSession.model_field(
+          catalogue([
+            provider_row(:native,
+              total: 3,
+              models: [
+                model("anthropic:claude-sonnet-5", name: "Claude Sonnet 5"),
+                model("openai_codex:gpt-5.6-sol", name: "GPT-5.6 Sol"),
+                model("xai:grok-4.5", name: "Grok 4.5")
+              ]
+            )
+          ]),
+          "native"
+        )
+
+      form = %NewSession{NewSession.new() | provider: "native"}
+
+      html =
+        render_component(&Ouroboros.Web.Live.NewSessionLive.model_control/1,
+          field: field,
+          visible: field,
+          form: form
+        )
+
+      anthropic_group = ~s|<optgroup label="Anthropic · direct via Ouroboros (no CLI)">|
+      openai_group = ~s|<optgroup label="OpenAI · direct via Ouroboros (no CLI)">|
+      xai_group = ~s|<optgroup label="xAI · direct via Ouroboros (no CLI)">|
+
+      assert html =~ anthropic_group
+      assert html =~ openai_group
+      assert html =~ xai_group
+
+      assert before?(html, "Recommended", anthropic_group)
+      assert before?(html, "Claude Sonnet 5", openai_group)
+      assert before?(html, "GPT-5.6 Sol", xai_group)
+      assert before?(html, "Grok 4.5", "Custom model…")
     end
 
     test "a provider with no configured default says so without inventing one" do
@@ -756,7 +894,11 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
 
       assert card == %{
                provider: "Anthropic",
+               key: "anthropic",
                env: "ANTHROPIC_API_KEY",
+               managed?: false,
+               workspace_env: "ANTHROPIC_WORKSPACE_ID",
+               workspace_configured?: false,
                state: :required,
                source: nil,
                usable?: false
@@ -779,14 +921,23 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
         )
 
       form = %NewSession{NewSession.new() | provider: "native"}
-      rows = NewSession.provider_rows([native_with_anthropic_key(true, "stored")])
+      rows = NewSession.provider_rows([native_with_anthropic_key(true, "stored", true)])
 
-      assert %{state: :available, source: "stored", usable?: true} =
+      assert %{
+               state: :available,
+               source: "stored",
+               workspace_configured?: true,
+               usable?: true
+             } =
                NewSession.api_key_card(form, field, rows)
 
       assert NewSession.api_key_card(form, field, []) == %{
                provider: "Anthropic",
+               key: "anthropic",
                env: "ANTHROPIC_API_KEY",
+               managed?: false,
+               workspace_env: "ANTHROPIC_WORKSPACE_ID",
+               workspace_configured?: false,
                state: :checking,
                source: nil,
                usable?: false
@@ -802,6 +953,94 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       }
 
       assert NewSession.api_key_card(form, {:text, nil}, []) == nil
+    end
+  end
+
+  describe "the xAI API-key and Grok subscription cards" do
+    test "a direct xAI model requires only its API key" do
+      field =
+        NewSession.model_field(
+          catalogue([
+            provider_row(:native, total: 1, models: [model("xai:grok-4.6")])
+          ]),
+          "native"
+        )
+
+      form = %NewSession{
+        NewSession.new()
+        | provider: "native",
+          model_choice: {:catalog, "xai:grok-4.6"}
+      }
+
+      card =
+        NewSession.api_key_card(
+          form,
+          field,
+          NewSession.provider_rows([with_xai_key(:native, false)])
+        )
+
+      assert card == %{
+               provider: "xAI",
+               key: "xai",
+               env: "XAI_API_KEY",
+               managed?: false,
+               workspace_env: nil,
+               workspace_configured?: false,
+               state: :required,
+               source: nil,
+               usable?: false
+             }
+
+      refute NewSession.requires_grok?(form)
+    end
+
+    test "the managed Grok provider accepts either a subscription or an xAI API key" do
+      form = %NewSession{NewSession.new() | provider: "grok"}
+      rows = NewSession.provider_rows([with_xai_key(:grok, true, "stored")])
+
+      assert %{managed?: true, key: "xai", state: :available, usable?: true} =
+               NewSession.api_key_card(form, :unsupported, rows)
+
+      assert NewSession.requires_grok?(form)
+
+      assert %{state: :required, usable?: false} =
+               NewSession.grok_account_card(
+                 %{
+                   "account" => nil,
+                   "requiresGrokAuth" => true,
+                   "login" => idle()
+                 },
+                 nil
+               )
+
+      assert %{state: :connected, usable?: true, identity: "subscriber@example.test"} =
+               NewSession.grok_account_card(
+                 %{
+                   "account" => %{
+                     "type" => "grok_subscription",
+                     "label" => "subscriber@example.test"
+                   },
+                   "requiresGrokAuth" => false,
+                   "login" => idle()
+                 },
+                 nil
+               )
+    end
+
+    test "a pending Grok login exposes only its verification link and code" do
+      login = %{
+        login_id: "grok-device",
+        url: "https://auth.x.ai/device?user_code=WXYZ-5678",
+        code: "WXYZ-5678"
+      }
+
+      assert %{
+               state: :waiting,
+               usable?: false,
+               login_id: "grok-device",
+               code: "WXYZ-5678",
+               url: "https://auth.x.ai/device?user_code=WXYZ-5678"
+             } = NewSession.grok_account_card(nil, login)
     end
   end
 
@@ -860,10 +1099,30 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       assert html =~ "Search models…"
       assert html =~ "Recommended"
       assert html =~ "Custom model…"
+      assert html =~ "Direct · no CLI"
+      assert html =~ "Ouroboros runs this model directly."
+      assert html =~ "no model CLI is launched"
+      assert html =~ "Anthropic · direct via Ouroboros (no CLI)"
       assert html =~ "Ouroboros will choose the recommended model"
 
       # And the sentence is the one the form's own function produces for its own state.
       assert html =~ intent(view).hint
+    end
+
+    test "provider choices and a CLI model field name the executable path", %{conn: conn} do
+      {:ok, view, html} = live(conn, "/new")
+
+      assert html =~ "Ouroboros AI — direct model APIs, no CLI — recommended"
+      assert html =~ "Claude — Claude Code CLI"
+      assert html =~ "Grok — Grok Build CLI"
+      assert html =~ "Z.ai — Claude CLI configured for Z.ai"
+
+      html = change(view, %{"provider" => "claude"})
+
+      assert html =~ "CLI-backed"
+      assert html =~ "Runs through Claude Code CLI."
+      assert html =~ "The CLI owns the model session and tools"
+      assert html =~ ~s(<optgroup label="Claude Code CLI">)
     end
 
     test "a search narrows the list here, and never hides the two rows it must not",
@@ -1158,6 +1417,13 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   describe "Anthropic API-key gating" do
     setup :endpoint
 
+    setup do
+      previous = System.get_env("ANTHROPIC_WORKSPACE_ID")
+      System.delete_env("ANTHROPIC_WORKSPACE_ID")
+      on_exit(fn -> restore_env("ANTHROPIC_WORKSPACE_ID", previous) end)
+      :ok
+    end
+
     test "a Claude model explains the service key and disables Start when it is absent",
          %{conn: conn} do
       previous = System.get_env("ANTHROPIC_API_KEY")
@@ -1189,8 +1455,9 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       assert html =~ "Available"
       assert html =~ "available from the service environment"
       assert html =~ "Its value never reaches this page."
+      assert html =~ "ANTHROPIC_WORKSPACE_ID"
       refute html =~ "test-key-that-must-not-render"
-      refute html =~ "Replace saved key"
+      refute html =~ "Manage Anthropic credentials"
       refute has_element?(view, "button[type=submit][disabled]")
     end
 
@@ -1208,8 +1475,9 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
         |> element(~s(button[phx-click="open-anthropic-key"]))
         |> render_click()
 
-      assert html =~ "Anthropic API key"
+      assert html =~ "Anthropic credentials"
       assert has_element?(view, "#anthropic-key-form input[type=password]")
+      assert has_element?(view, "#anthropic-key-form #anthropic-workspace-id")
 
       secret = "sk-ant-ui-value-must-never-render"
 
@@ -1223,16 +1491,140 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       html = render(view)
       path = Path.join(dir, "anthropic.key")
 
-      assert File.read!(path) == secret
+      assert %{"api_key" => ^secret, "workspace_id" => nil} =
+               Jason.decode!(File.read!(path))
+
       assert {:ok, stat} = File.lstat(path)
       assert stat.type == :regular
       assert Bitwise.band(stat.mode, 0o777) == 0o600
       assert html =~ "A private Anthropic API key is stored by Ouroboros."
-      assert html =~ "Replace saved key"
+      assert html =~ "Identity-linked keys also need"
+      assert html =~ "Manage Anthropic credentials"
       refute html =~ secret
       refute logs =~ secret
       assert logs =~ "[FILTERED]"
       refute has_element?(view, "button[type=submit][disabled]")
+
+      _ =
+        view
+        |> element(~s(button[phx-click="open-anthropic-key"]))
+        |> render_click()
+
+      refute has_element?(view, "#anthropic-api-key[required]")
+
+      html =
+        view
+        |> form("#anthropic-key-form", %{
+          "anthropic_workspace_id" => "wrkspc_Web123"
+        })
+        |> render_submit()
+
+      assert %{
+               "api_key" => ^secret,
+               "workspace_id" => "wrkspc_Web123"
+             } = Jason.decode!(File.read!(path))
+
+      assert html =~ "A workspace ID is configured"
+      refute html =~ secret
+    end
+  end
+
+  describe "xAI API-key gating" do
+    setup :endpoint
+
+    setup do
+      previous = System.get_env("XAI_API_KEY")
+      System.delete_env("XAI_API_KEY")
+      on_exit(fn -> restore_env("XAI_API_KEY", previous) end)
+      :ok
+    end
+
+    test "a direct Grok model explains xAI billing and disables Start without a key",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/new")
+      html = choose_xai(view)
+
+      assert html =~ "xAI API"
+      assert html =~ "XAI_API_KEY"
+      assert html =~ "Direct Grok models use the xAI API."
+      assert html =~ "SpaceXAI subscription"
+      assert html =~ "managed Grok provider"
+      assert html =~ "Add xAI API key first"
+      assert has_element?(view, "button[type=submit][disabled]")
+    end
+
+    test "an operate link stores an xAI key privately and enables the direct model",
+         %{conn: conn, dir: dir} do
+      {:ok, view, _html} = live(conn, "/new")
+      _ = choose_xai(view)
+
+      html = view |> element(~s(button[phx-click="open-xai-key"])) |> render_click()
+      assert html =~ "xAI API key"
+      assert has_element?(view, "#xai-key-form input[type=password]")
+
+      secret = "xai-ui-value-must-never-render"
+
+      logs =
+        capture_log([level: :debug], fn ->
+          view
+          |> form("#xai-key-form", %{"xai_api_key" => secret})
+          |> render_submit()
+        end)
+
+      html = render(view)
+      path = Path.join(dir, "xai.key")
+
+      assert File.read!(path) == secret
+      assert {:ok, stat} = File.lstat(path)
+      assert stat.type == :regular
+      assert Bitwise.band(stat.mode, 0o777) == 0o600
+      assert html =~ "A private xAI API key is stored by Ouroboros."
+      refute html =~ secret
+      refute logs =~ secret
+      assert logs =~ "[FILTERED]"
+      refute has_element?(view, "button[type=submit][disabled]")
+    end
+  end
+
+  describe "Grok subscription gating" do
+    setup :endpoint
+
+    setup do
+      previous = System.get_env("XAI_API_KEY")
+      System.delete_env("XAI_API_KEY")
+      on_exit(fn -> restore_env("XAI_API_KEY", previous) end)
+      :ok
+    end
+
+    test "the managed provider offers subscription login or a separately billed API key",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/new")
+      html = change(view, %{"provider" => "grok"})
+
+      assert html =~ "SpaceXAI subscription"
+      assert html =~ "Connect an eligible SpaceXAI subscription"
+      assert html =~ "API usage is billed separately from a subscription"
+      assert html =~ "Connect Grok or add API key first"
+      assert has_element?(view, ~s(button[phx-click="connect-grok"]))
+      assert has_element?(view, ~s(button[phx-click="open-xai-key"]))
+      assert has_element?(view, "button[type=submit][disabled]")
+    end
+
+    test "Connect and Cancel use the bounded Grok device flow", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/new")
+      _ = change(view, %{"provider" => "grok"})
+
+      html = view |> element(~s(button[phx-click="connect-grok"])) |> render_click()
+
+      assert html =~ "Waiting"
+      assert html =~ "WXYZ-5678"
+      assert html =~ ~s(href="https://auth.x.ai/device?user_code=WXYZ-5678")
+      refute html =~ "cli-secret"
+
+      html = view |> element(~s(button[phx-click="cancel-grok"])) |> render_click()
+
+      refute html =~ "WXYZ-5678"
+      assert html =~ "One option required"
     end
   end
 
@@ -1386,7 +1778,10 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
     dir = Path.join(System.tmp_dir!(), "ouroboros-web-new-#{System.unique_integer([:positive])}")
     Ouroboros.DataDir.ensure_private!(dir)
     previous_anthropic_key_file = Application.get_env(:ouroboros, :anthropic_api_key_file)
+    previous_xai_key_file = Application.get_env(:ouroboros, :xai_api_key_file)
     Application.put_env(:ouroboros, :anthropic_api_key_file, Path.join(dir, "anthropic.key"))
+    Application.put_env(:ouroboros, :xai_api_key_file, Path.join(dir, "xai.key"))
+    Ouroboros.Test.GrokAccountAdapter.reset()
     token_path = Path.join(dir, "gateway.token")
     File.write!(token_path, @token)
     File.chmod!(token_path, 0o600)
@@ -1400,6 +1795,12 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
             previous_anthropic_key_file
           ),
         else: Application.delete_env(:ouroboros, :anthropic_api_key_file)
+
+      if previous_xai_key_file,
+        do: Application.put_env(:ouroboros, :xai_api_key_file, previous_xai_key_file),
+        else: Application.delete_env(:ouroboros, :xai_api_key_file)
+
+      Ouroboros.Test.GrokAccountAdapter.reset()
 
       File.rm_rf(dir)
     end)
@@ -1479,6 +1880,12 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       end)
 
     change(view, %{"model_choice" => NewSession.choice_value(choice.choice)})
+  end
+
+  defp choose_xai(view) do
+    _ = change(view, %{"provider" => "native"})
+    _ = change(view, %{"model_choice" => "custom"})
+    change(view, %{"model_text" => "xai:grok-4.6"})
   end
 
   defp restore_env(name, nil), do: System.delete_env(name)

@@ -9,7 +9,7 @@ defmodule Ouroboros.Models do
   answers what `llm_db` knows about the models each *configured* provider draws from,
   and nothing about models nobody here can reach. Native is the deliberate exception to
   the one-catalogue-per-provider shape: its in-process transport can reach both the
-  ChatGPT-backed OpenAI lane and Anthropic's API-key lane, so its row combines those
+  ChatGPT-backed OpenAI lane plus Anthropic and xAI API-key lanes, so its row combines those
   catalogues and prefixes every id with the transport ReqLLM must use.
 
   ## What this is not
@@ -49,7 +49,7 @@ defmodule Ouroboros.Models do
   # These are model transports inside `:native`, not Harness providers. The configured
   # native model is inserted first below and wins when it draws from the same catalogue
   # (for example an `openai:` API-key default replacing the packaged `openai_codex:` lane).
-  @native_catalogs [openai_codex: :openai, anthropic: :anthropic]
+  @native_catalogs [openai_codex: :openai, anthropic: :anthropic, xai: :xai]
 
   # One provider's list is drawn into a picker, so it is bounded here rather than by the
   # client. Newest first, because that is the order a person scans for the model they

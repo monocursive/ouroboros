@@ -166,8 +166,10 @@ config :ouroboros,
   native_model_queue_timeout_ms: 120_000,
   # The packaged direct default uses ChatGPT subscription OAuth. API-key deployments may
   # set `OUROBOROS_NATIVE_MODEL=openai:<model>` with `OPENAI_API_KEY`, or select
-  # `anthropic:<model>` with `ANTHROPIC_API_KEY` or the private key saved from the web
-  # new-session page. Anthropic is API-key-only in Ouroboros.
+  # `anthropic:<model>` or `xai:<model>` with the vendor API key or the private credential
+  # saved from the web new-session page. Identity-linked Anthropic keys additionally use
+  # `ANTHROPIC_WORKSPACE_ID`. Direct Anthropic and xAI lanes are API-key-only; managed
+  # Grok subscription access stays in the first-party CLI.
   native_model: "openai_codex:gpt-5.6-sol",
   # How long a terminal coding task or interactive session is retained before the
   # recovery sweep deletes it. `nil` disables the sweep and keeps everything.
@@ -179,6 +181,11 @@ config :ouroboros,
     if(config_env() == :test,
       do: Ouroboros.Test.OpenAIAccountAdapter,
       else: Ouroboros.Provider.OpenAIAuth
+    ),
+  grok_account_adapter:
+    if(config_env() == :test,
+      do: Ouroboros.Test.GrokAccountAdapter,
+      else: Ouroboros.Provider.GrokAuth
     ),
   # Language servers, owned by this node rather than by any session. Everything here is a
   # bound; `Ouroboros.CodeIntel.Config` documents each one and refuses a value that would
@@ -279,6 +286,7 @@ config :jido_harness,
   providers: %{
     claude: Ouroboros.Provider.ClaudeAdapter,
     codex: Ouroboros.Provider.RemovedCodex,
+    grok: Ouroboros.Provider.GrokAdapter,
     kimi: Ouroboros.Provider.KimiAdapter,
     opencode: Ouroboros.Provider.OpenCodeAdapter,
     native: Ouroboros.Provider.Native

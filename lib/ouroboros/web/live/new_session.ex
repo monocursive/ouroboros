@@ -211,9 +211,20 @@ defmodule Ouroboros.Web.Live.NewSession do
         env = trimmed(value(row, :env))
         present = value(row, :present)
         source = identifier(value(row, :source))
+        workspace_env = trimmed(value(row, :workspace_env))
+        workspace_configured = value(row, :workspace_configured) == true
 
         if provider && env && is_boolean(present),
-          do: [%{provider: provider, env: env, present: present, source: source}],
+          do: [
+            %{
+              provider: provider,
+              env: env,
+              present: present,
+              source: source,
+              workspace_env: workspace_env,
+              workspace_configured?: workspace_configured
+            }
+          ],
           else: []
 
       _other ->
@@ -369,6 +380,149 @@ defmodule Ouroboros.Web.Live.NewSession do
     }
   end
 
+  @doc """
+  Catalogue rows grouped by the execution path the form actually selected.
+
+  Native rows are grouped by the company that provides the model and explicitly marked as
+  direct, no-CLI calls. A CLI-backed provider gets one group bearing that CLI's name. The
+  runtime's ranking stays authoritative inside every group. The form-owned Recommended
+  and Custom rows are deliberately absent; they frame the groups separately in the
+  control.
+
+  Transport namespaces that reach the same model provider share one heading — notably
+  `openai:` API models and `openai_codex:` ChatGPT-backed models both belong to OpenAI.
+  Their exact transport remains visible in each row's detail.
+  """
+  @spec model_groups([map()], String.t() | nil) :: [%{label: String.t(), rows: [map()]}]
+  def model_groups(rows, provider \\ nil)
+
+  def model_groups(rows, provider) when is_list(rows) do
+    rows
+    |> Enum.filter(&catalogue?/1)
+    |> Enum.reduce(%{}, fn row, groups ->
+      label = model_group_label(row.model, provider)
+      Map.update(groups, label, [row], &[row | &1])
+    end)
+    |> Enum.map(fn {label, rows} -> %{label: label, rows: Enum.reverse(rows)} end)
+    |> Enum.sort_by(&String.downcase(&1.label))
+  end
+
+  def model_groups(_rows, _provider), do: []
+
+  defp model_group_label(model, "native"),
+    do: "#{model_provider_label(model)} · direct via Ouroboros (no CLI)"
+
+  defp model_group_label(_model, provider) when is_binary(provider),
+    do: provider_route(provider).group
+
+  defp model_group_label(model, _provider), do: model_provider_label(model)
+
+  defp model_provider_label(model) when is_binary(model) do
+    model
+    |> String.split(":", parts: 2)
+    |> List.first()
+    |> case do
+      "anthropic" -> "Anthropic"
+      "google" -> "Google"
+      "google_vertex" -> "Google"
+      "ollama" -> "Ollama"
+      "openai" -> "OpenAI"
+      "openai_codex" -> "OpenAI"
+      "openrouter" -> "OpenRouter"
+      "xai" -> "xAI"
+      namespace when namespace == model -> "Other"
+      namespace -> namespace |> String.replace("_", " ") |> String.capitalize()
+    end
+  end
+
+  defp model_provider_label(_model), do: "Other"
+
+  @doc "Human-readable execution path for one provider choice."
+  @spec provider_route(String.t() | nil) :: %{
+          name: String.t(),
+          short: String.t(),
+          badge: String.t(),
+          title: String.t(),
+          detail: String.t(),
+          group: String.t()
+        }
+  def provider_route("native") do
+    %{
+      name: "Ouroboros AI",
+      short: "direct model APIs, no CLI",
+      badge: "Direct · no CLI",
+      title: "Ouroboros runs this model directly.",
+      detail: "Its built-in agent loop calls the model API; no model CLI is launched.",
+      group: "Direct via Ouroboros (no CLI)"
+    }
+  end
+
+  def provider_route("claude"),
+    do: cli_route("Claude", "Claude Code CLI", "Claude Code CLI")
+
+  def provider_route("gemini"), do: cli_route("Gemini", "Gemini CLI", "Gemini CLI")
+
+  def provider_route("grok") do
+    cli_route(
+      "Grok",
+      "Grok Build CLI",
+      "Grok Build CLI",
+      "The CLI owns the model session and can use a SpaceXAI subscription or xAI API key."
+    )
+  end
+
+  def provider_route("kimi"), do: cli_route("Kimi", "Kimi Code CLI", "Kimi Code CLI")
+
+  def provider_route("opencode"),
+    do: cli_route("OpenCode", "OpenCode CLI", "OpenCode CLI")
+
+  def provider_route("pi"), do: cli_route("Pi", "Pi CLI", "Pi CLI")
+  def provider_route("amp"), do: cli_route("Amp", "Amp CLI", "Amp CLI")
+
+  def provider_route("zai") do
+    cli_route(
+      "Z.ai",
+      "Claude CLI configured for Z.ai",
+      "Claude CLI for Z.ai",
+      "Claude CLI owns the model session and is configured to use Z.ai's GLM models."
+    )
+  end
+
+  def provider_route(nil) do
+    %{
+      name: "finding provider",
+      short: "execution path unknown",
+      badge: "Not selected",
+      title: "Choose an AI provider.",
+      detail: "Its execution path will be shown here before you select a model.",
+      group: "Provider not selected"
+    }
+  end
+
+  def provider_route(provider) when is_binary(provider) do
+    %{
+      name: provider,
+      short: "external provider adapter",
+      badge: "Provider adapter",
+      title: "Runs through the #{provider} provider adapter.",
+      detail: "This adapter does not declare a more specific execution path to the form.",
+      group: "#{provider} provider adapter"
+    }
+  end
+
+  defp cli_route(name, short, group, detail \\ nil) do
+    %{
+      name: name,
+      short: short,
+      badge: "CLI-backed",
+      title: "Runs through #{short}.",
+      detail:
+        detail ||
+          "The CLI owns the model session and tools; Ouroboros supervises and normalizes it.",
+      group: group
+    }
+  end
+
   # The readable name is the option label. Detail keeps the exact id available to an
   # advanced reader without forcing everybody else to parse a provider namespace first.
   defp model_detail(model, id) do
@@ -516,19 +670,53 @@ defmodule Ouroboros.Web.Live.NewSession do
     end
   end
 
-  @doc "API-key readiness for a selected direct Anthropic model, or `nil` when unrelated."
+  @doc "Whether the selected managed provider runs through the first-party Grok CLI."
+  @spec requires_grok?(t()) :: boolean()
+  def requires_grok?(%__MODULE__{provider: "grok"}), do: true
+  def requires_grok?(%__MODULE__{}), do: false
+
+  @doc "API-key readiness for a selected direct Anthropic/xAI model or managed Grok."
   @spec api_key_card(t(), model_field(), term()) :: map() | nil
   def api_key_card(%__MODULE__{} = form, field, provider_rows) do
     case effective_model(form, field) do
       "anthropic:" <> _model ->
-        api_key_card(provider_rows, form.provider, "anthropic", "ANTHROPIC_API_KEY")
+        api_key_card(
+          provider_rows,
+          form.provider,
+          "anthropic",
+          "Anthropic",
+          "ANTHROPIC_API_KEY",
+          managed?: false,
+          workspace_env: "ANTHROPIC_WORKSPACE_ID"
+        )
+
+      "xai:" <> _model ->
+        api_key_card(
+          provider_rows,
+          form.provider,
+          "xai",
+          "xAI",
+          "XAI_API_KEY",
+          managed?: false
+        )
+
+      _other when form.provider == "grok" ->
+        api_key_card(
+          provider_rows,
+          form.provider,
+          "xai",
+          "xAI",
+          "XAI_API_KEY",
+          managed?: true
+        )
 
       _other ->
         nil
     end
   end
 
-  defp api_key_card(rows, selected_provider, model_provider, env) when is_list(rows) do
+  defp api_key_card(rows, selected_provider, model_provider, label, env, opts)
+       when is_list(rows) and is_list(opts) do
     credential =
       rows
       |> Enum.find(&(trimmed(&1[:name]) == trimmed(selected_provider)))
@@ -548,16 +736,77 @@ defmodule Ouroboros.Web.Live.NewSession do
       end
 
     %{
-      provider: "Anthropic",
+      provider: label,
+      key: model_provider,
       env: env,
+      managed?: Keyword.get(opts, :managed?, false),
+      workspace_env: (credential && credential[:workspace_env]) || opts[:workspace_env],
+      workspace_configured?: credential != nil and credential[:workspace_configured?] == true,
       state: state,
       source: credential && credential[:source],
       usable?: state == :available
     }
   end
 
-  defp api_key_card(_rows, _selected_provider, _model_provider, env),
-    do: %{provider: "Anthropic", env: env, state: :checking, source: nil, usable?: false}
+  defp api_key_card(_rows, _selected_provider, model_provider, label, env, opts),
+    do: %{
+      provider: label,
+      key: model_provider,
+      env: env,
+      managed?: Keyword.get(opts, :managed?, false),
+      workspace_env: opts[:workspace_env],
+      workspace_configured?: false,
+      state: :checking,
+      source: nil,
+      usable?: false
+    }
+
+  @doc "Non-secret SpaceXAI subscription readiness and pending device login."
+  @spec grok_account_card(term(), term()) :: map()
+  def grok_account_card(read, login) do
+    pending? = grok_pending_login?(read) or is_map(login)
+
+    state =
+      cond do
+        not is_map(read) and not pending? -> :checking
+        grok_usable?(read) -> :connected
+        pending? -> :waiting
+        true -> :required
+      end
+
+    %{
+      state: state,
+      usable?: grok_usable?(read),
+      identity: grok_identity(read),
+      code: login && login[:code],
+      url: login && login[:url],
+      login_id: login && login[:login_id],
+      error: grok_login_error(read)
+    }
+  end
+
+  @doc "Whether the first-party CLI reports a usable subscription credential."
+  @spec grok_usable?(term()) :: boolean()
+  def grok_usable?(%{"account" => %{"type" => "grok_subscription"}}), do: true
+  def grok_usable?(%{"requiresGrokAuth" => false}), do: true
+  def grok_usable?(_read), do: false
+
+  defp grok_pending_login?(%{"login" => %{"status" => status}})
+       when status in ["starting", "pending"],
+       do: true
+
+  defp grok_pending_login?(_read), do: false
+
+  defp grok_login_error(%{"login" => %{"error" => error}})
+       when is_binary(error) and error != "",
+       do: error
+
+  defp grok_login_error(_read), do: nil
+
+  defp grok_identity(%{"account" => account}) when is_map(account),
+    do: trimmed(account["label"]) || "SpaceXAI subscription"
+
+  defp grok_identity(_read), do: nil
 
   defp effective_model(%__MODULE__{} = form, field) do
     model_intent(form, field).send || selected_default_model(field, form.model_choice)

@@ -242,7 +242,7 @@ defmodule Ouroboros.Application do
     # argument. It reaches the runtime only through the gateway's own method table
     # (`Ouroboros.Web.Call`), so two transports serve one authorization decision.
     children ++
-      [Ouroboros.Cluster, Ouroboros.Provider.OpenAIAuth] ++
+      [Ouroboros.Cluster, Ouroboros.Provider.OpenAIAuth, Ouroboros.Provider.GrokAuth] ++
       gateway_children() ++
       [
         Ouroboros.CodeIntel.Supervisor,

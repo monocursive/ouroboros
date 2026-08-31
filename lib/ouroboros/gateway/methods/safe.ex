@@ -210,6 +210,14 @@ defmodule Ouroboros.Gateway.Methods.Safe do
 
   def account_reply(result), do: reply(result)
 
+  def grok_account_reply({:error, {:timeout, operation}}),
+    do: {:error, code(:upstream_timeout), "Grok authentication timed out during #{operation}"}
+
+  def grok_account_reply({:error, {:upstream, message}}) when is_binary(message),
+    do: upstream_error({:grok_auth, message})
+
+  def grok_account_reply(result), do: reply(result)
+
   def forget_session_owner_reply({:ok, result}), do: {:ok, result}
 
   def forget_session_owner_reply({:error, {:invalid_session_owner_machine, machine}}) do

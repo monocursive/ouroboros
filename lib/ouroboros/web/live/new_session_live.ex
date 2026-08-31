@@ -82,6 +82,9 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       |> assign(:account, nil)
       |> assign(:login, nil)
       |> assign(:polling_account?, false)
+      |> assign(:grok_account, nil)
+      |> assign(:grok_login, nil)
+      |> assign(:polling_grok_account?, false)
       |> assign(:api_key_dialog?, false)
       |> assign(:api_key_error, nil)
       |> assign(:starting?, false)
@@ -192,6 +195,46 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   end
 
   # ------------------------------------------------------------------------------------
+  # Grok subscription
+  # ------------------------------------------------------------------------------------
+
+  # The first-party CLI owns this device-code flow and its token file. The page receives
+  # only the verification URL and short code that the CLI prints for a human.
+  def handle_event("connect-grok", _params, socket) do
+    case call(socket, "grok.account.login.start", %{}) do
+      {:ok, reply} when is_map(reply) ->
+        login = %{
+          login_id: reply["loginId"],
+          url: reply["verificationUrl"],
+          code: reply["userCode"]
+        }
+
+        {:noreply,
+         socket
+         |> assign(:grok_login, login)
+         |> assign(:refusal, nil)
+         |> maybe_poll_grok_account()}
+
+      refused ->
+        {:noreply, assign(socket, :refusal, NewSession.refusal(refused))}
+    end
+  end
+
+  def handle_event("cancel-grok", _params, socket) do
+    socket =
+      case socket.assigns.grok_login do
+        %{login_id: id} when is_binary(id) ->
+          _ = call(socket, "grok.account.login.cancel", %{"login_id" => id})
+          socket
+
+        _none ->
+          socket
+      end
+
+    {:noreply, socket |> assign(:grok_login, nil) |> read_grok_account()}
+  end
+
+  # ------------------------------------------------------------------------------------
   # Anthropic API key
   # ------------------------------------------------------------------------------------
 
@@ -215,33 +258,55 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     {:noreply, socket |> assign(:api_key_dialog?, false) |> assign(:api_key_error, nil)}
   end
 
-  # The raw value exists only in this callback's parameters and the gateway task that
+  # The raw key exists only in this callback's parameters and the gateway task that
   # atomically stores it. It is never assigned to the socket, echoed in a refusal, or put
   # into the session form. Phoenix filters the `api_key` parameter name before logging.
-  def handle_event("save-anthropic-key", %{"anthropic_api_key" => api_key}, socket) do
-    case call(socket, "credentials.anthropic.set", %{"api_key" => api_key}) do
-      {:ok, _status} ->
-        {:noreply,
-         socket
-         |> assign(:api_key_dialog?, false)
-         |> assign(:api_key_error, nil)
-         |> assign(:refusal, nil)
-         |> load_providers()}
+  # A blank key is deliberately omitted so an operator can add a workspace id to the
+  # already-stored key that Anthropic will not show them again.
+  def handle_event("save-anthropic-key", params, socket) when is_map(params) do
+    credential_params =
+      %{}
+      |> put_credential_param("api_key", params["anthropic_api_key"])
+      |> put_credential_param("workspace_id", params["anthropic_workspace_id"])
 
-      refused ->
-        words = NewSession.refusal(refused)
-
+    case credential_params do
+      empty when map_size(empty) == 0 ->
         {:noreply,
-         assign(
-           socket,
-           :api_key_error,
-           (words && words.message) || "The Anthropic API key could not be stored."
-         )}
+         assign(socket, :api_key_error, "Enter a new API key or an Anthropic workspace ID.")}
+
+      credential_params ->
+        save_anthropic_credentials(socket, credential_params)
     end
   end
 
-  def handle_event("save-anthropic-key", _params, socket) do
-    {:noreply, assign(socket, :api_key_error, "Enter an Anthropic API key.")}
+  def handle_event("open-xai-key", _params, socket) do
+    if Call.available?(socket.assigns.scope, "credentials.xai.set") do
+      {:noreply,
+       socket
+       |> assign(:api_key_dialog?, true)
+       |> assign(:api_key_error, nil)
+       |> assign(:refusal, nil)}
+    else
+      {:noreply,
+       assign(socket, :refusal, %{
+         message: "This link cannot change provider credentials.",
+         detail: "Open the operate-scope Ouroboros web surface to add an xAI API key."
+       })}
+    end
+  end
+
+  def handle_event("cancel-xai-key", _params, socket) do
+    {:noreply, socket |> assign(:api_key_dialog?, false) |> assign(:api_key_error, nil)}
+  end
+
+  def handle_event("save-xai-key", %{"xai_api_key" => api_key}, socket) do
+    case String.trim(api_key) do
+      "" ->
+        {:noreply, assign(socket, :api_key_error, "Enter an xAI API key.")}
+
+      api_key ->
+        save_xai_key(socket, api_key)
+    end
   end
 
   # ------------------------------------------------------------------------------------
@@ -255,6 +320,13 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       socket
       |> assign(:form, form)
       |> assign(:initial_message, params["initial_message"] || socket.assigns.initial_message)
+
+    api_key = NewSession.api_key_card(form, field(socket), socket.assigns.providers)
+
+    grok_account =
+      NewSession.grok_account_card(socket.assigns.grok_account, socket.assigns.grok_login)
+
+    grok_required? = NewSession.requires_grok?(form)
 
     cond do
       not socket.assigns.loaded? ->
@@ -278,14 +350,19 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
            detail: "Choose one marked available under Advanced settings."
          })}
 
-      match?(
-        %{usable?: false},
-        NewSession.api_key_card(form, field(socket), socket.assigns.providers)
-      ) ->
+      grok_required? and not grok_account.usable? and not (api_key && api_key.usable?) ->
         {:noreply,
          assign(socket, :refusal, %{
-           message: "An Anthropic API key is not available to the Ouroboros service.",
-           detail: "Add it under Anthropic API, or set it in the service environment."
+           message: "Grok needs a SpaceXAI subscription or an xAI API key.",
+           detail: "Connect the first-party Grok CLI, or add an API key under Advanced settings."
+         })}
+
+      match?(%{managed?: false, usable?: false}, api_key) ->
+        {:noreply,
+         assign(socket, :refusal, %{
+           message: "A #{api_key.provider} API key is not available to the Ouroboros service.",
+           detail:
+             "Add it under #{api_key.provider} API, or set #{api_key.env} in the service environment."
          })}
 
       is_binary(socket.assigns.started_id) ->
@@ -314,6 +391,17 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     {:noreply, maybe_poll_account(socket)}
   end
 
+  def handle_info(:poll_grok_account, socket) do
+    socket = socket |> assign(:polling_grok_account?, false) |> read_grok_account()
+
+    socket =
+      if grok_settled?(socket.assigns.grok_account),
+        do: assign(socket, :grok_login, nil),
+        else: socket
+
+    {:noreply, maybe_poll_grok_account(socket)}
+  end
+
   def handle_info(_message, socket), do: {:noreply, socket}
 
   # ------------------------------------------------------------------------------------
@@ -330,6 +418,8 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     # A login this runtime already has in flight — started from the TUI, or from another
     # browser — is one this page should follow rather than ignore.
     |> maybe_poll_account()
+    |> read_grok_account()
+    |> maybe_poll_grok_account()
   end
 
   defp load_providers(socket) do
@@ -372,6 +462,13 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     end
   end
 
+  defp read_grok_account(socket) do
+    case call(socket, "grok.account.read", %{}) do
+      {:ok, read} when is_map(read) -> assign(socket, :grok_account, read)
+      _refused -> socket
+    end
+  end
+
   # Only while a login is actually waiting. Every other state of this card is answered by
   # the read the page already did, and a timer that kept running past it would be a poll
   # nobody asked for.
@@ -387,10 +484,28 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     assign(socket, :polling_account?, true)
   end
 
+  defp maybe_poll_grok_account(socket) do
+    card = NewSession.grok_account_card(socket.assigns.grok_account, socket.assigns.grok_login)
+    if card.state == :waiting, do: poll_grok_account(socket), else: socket
+  end
+
+  defp poll_grok_account(%{assigns: %{polling_grok_account?: true}} = socket), do: socket
+
+  defp poll_grok_account(socket) do
+    Process.send_after(self(), :poll_grok_account, @account_poll)
+    assign(socket, :polling_grok_account?, true)
+  end
+
   defp settled?(read) when is_map(read),
     do: not match?(%{"login" => %{"status" => "pending"}}, read)
 
   defp settled?(_read), do: false
+
+  defp grok_settled?(%{"login" => %{"status" => status}})
+       when status in ["starting", "pending"],
+       do: false
+
+  defp grok_settled?(read), do: is_map(read)
 
   defp browse(socket, path) do
     params = if is_binary(path), do: %{"path" => path}, else: %{}
@@ -481,6 +596,59 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     end
   end
 
+  defp save_anthropic_credentials(socket, credential_params) do
+    case call(socket, "credentials.anthropic.set", credential_params) do
+      {:ok, _status} ->
+        {:noreply,
+         socket
+         |> assign(:api_key_dialog?, false)
+         |> assign(:api_key_error, nil)
+         |> assign(:refusal, nil)
+         |> load_providers()}
+
+      refused ->
+        words = NewSession.refusal(refused)
+
+        {:noreply,
+         assign(
+           socket,
+           :api_key_error,
+           (words && words.message) || "The Anthropic credentials could not be stored."
+         )}
+    end
+  end
+
+  defp save_xai_key(socket, api_key) do
+    case call(socket, "credentials.xai.set", %{"api_key" => api_key}) do
+      {:ok, _status} ->
+        {:noreply,
+         socket
+         |> assign(:api_key_dialog?, false)
+         |> assign(:api_key_error, nil)
+         |> assign(:refusal, nil)
+         |> load_providers()}
+
+      refused ->
+        words = NewSession.refusal(refused)
+
+        {:noreply,
+         assign(
+           socket,
+           :api_key_error,
+           (words && words.message) || "The xAI API key could not be stored."
+         )}
+    end
+  end
+
+  defp put_credential_param(params, _key, value) when not is_binary(value), do: params
+
+  defp put_credential_param(params, key, value) do
+    case String.trim(value) do
+      "" -> params
+      value -> Map.put(params, key, value)
+    end
+  end
+
   defp call(socket, method, params) do
     Call.call(socket.assigns.scope, method, params, session: socket.assigns[:web_session])
   end
@@ -562,7 +730,12 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     field = NewSession.model_field(assigns.catalogue, assigns.form.provider)
     account = NewSession.account_card(assigns.account, assigns.login)
     gated? = NewSession.requires_chatgpt?(assigns.form, field)
+    grok_account = NewSession.grok_account_card(assigns.grok_account, assigns.grok_login)
+    grok_gated? = NewSession.requires_grok?(assigns.form)
     api_key = NewSession.api_key_card(assigns.form, field, assigns.providers)
+    chatgpt_ready? = not gated? or account.usable?
+    grok_ready? = not grok_gated? or grok_account.usable? or (api_key && api_key.usable?)
+    api_key_required? = match?(%{managed?: false, usable?: false}, api_key)
 
     can_start? = Call.available?(assigns.scope, "interactive.start")
 
@@ -580,10 +753,15 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       |> assign(:intent, NewSession.model_intent(assigns.form, field))
       |> assign(:account_card, account)
       |> assign(:gated?, gated?)
+      |> assign(:chatgpt_ready?, chatgpt_ready?)
+      |> assign(:grok_account_card, grok_account)
+      |> assign(:grok_gated?, grok_gated?)
+      |> assign(:grok_ready?, grok_ready?)
       |> assign(:api_key_card, api_key)
+      |> assign(:api_key_required?, api_key_required?)
       |> assign(
         :can_set_api_key?,
-        Call.available?(assigns.scope, "credentials.anthropic.set")
+        Call.available?(assigns.scope, credential_method(api_key))
       )
       |> assign(:can_start?, can_start?)
       |> assign(:provider_ready?, provider_ready?)
@@ -630,8 +808,8 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
         <details
           class="ouro-new-advanced"
           open={
-            @provider_invalid? or (@gated? and not @account_card.usable?) or
-              (is_map(@api_key_card) and not @api_key_card.usable?)
+            @provider_invalid? or not @chatgpt_ready? or not @grok_ready? or
+              @api_key_required?
           }
         >
           <summary>
@@ -660,6 +838,12 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
           <.thinking_field effort={@form.effort} choices={@efforts} />
           <.sandbox_field sandbox={@form.sandbox} />
           <.account_card :if={@gated?} card={@account_card} scope={@scope} />
+          <.grok_account_card
+            :if={@grok_gated?}
+            card={@grok_account_card}
+            scope={@scope}
+            api_key={@api_key_card}
+          />
           <.api_key_card
             :if={is_map(@api_key_card)}
             card={@api_key_card}
@@ -679,11 +863,17 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
             class="ouro-button"
             disabled={
               not @can_start? or not @provider_ready? or @starting? or
-                (@gated? and not @account_card.usable?) or
-                (is_map(@api_key_card) and not @api_key_card.usable?)
+                not @chatgpt_ready? or not @grok_ready? or @api_key_required?
             }
           >
-            {start_label(@can_start?, @starting?, @gated?, @account_card, @api_key_card)}
+            {start_label(
+              @can_start?,
+              @starting?,
+              @chatgpt_ready?,
+              @grok_ready?,
+              @api_key_required?,
+              @api_key_card
+            )}
           </button>
         </footer>
 
@@ -699,29 +889,41 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
         </p>
       </form>
 
-      <.anthropic_key_dialog :if={@api_key_dialog?} error={@api_key_error} />
+      <.anthropic_key_dialog
+        :if={(@api_key_dialog? and @api_key_card) && @api_key_card.key == "anthropic"}
+        error={@api_key_error}
+        card={@api_key_card}
+      />
+      <.xai_key_dialog
+        :if={(@api_key_dialog? and @api_key_card) && @api_key_card.key == "xai"}
+        error={@api_key_error}
+      />
     </div>
     """
   end
 
-  defp start_label(false, _starting?, _gated?, _card, _api_key), do: "Start session"
-  defp start_label(_can?, true, _gated?, _card, _api_key), do: "Starting…"
+  defp start_label(false, _starting?, _chatgpt?, _grok?, _key?, _card), do: "Start session"
+  defp start_label(_can?, true, _chatgpt?, _grok?, _key?, _card), do: "Starting…"
+  defp start_label(_can?, _starting?, false, _grok?, _key?, _card), do: "Connect ChatGPT first"
 
-  defp start_label(_can?, _starting?, true, %{usable?: false}, _api_key),
-    do: "Connect ChatGPT first"
+  defp start_label(_can?, _starting?, _chatgpt?, false, _key?, _card),
+    do: "Connect Grok or add API key first"
 
-  defp start_label(_can?, _starting?, _gated?, _card, %{usable?: false}),
-    do: "Add Anthropic API key first"
+  defp start_label(_can?, _starting?, _chatgpt?, _grok?, true, card),
+    do: "Add #{card.provider} API key first"
 
-  defp start_label(_can?, _starting?, _gated?, _card, _api_key), do: "Start session"
-  defp provider_label(nil), do: "finding provider"
-  defp provider_label("native"), do: "Ouroboros AI"
-  defp provider_label("claude"), do: "Claude"
-  defp provider_label("gemini"), do: "Gemini"
-  defp provider_label("grok"), do: "Grok"
-  defp provider_label("opencode"), do: "OpenCode"
-  defp provider_label("zai"), do: "Z.ai"
-  defp provider_label(provider), do: provider
+  defp start_label(_can?, _starting?, _chatgpt?, _grok?, _key?, _card),
+    do: "Start session"
+
+  defp credential_method(%{key: "anthropic"}), do: "credentials.anthropic.set"
+  defp credential_method(%{key: "xai"}), do: "credentials.xai.set"
+  defp credential_method(_card), do: "credentials.anthropic.set"
+  defp provider_label(provider), do: NewSession.provider_route(provider).name
+
+  defp provider_option_label(provider) do
+    route = NewSession.provider_route(provider)
+    "#{route.name} — #{route.short}"
+  end
 
   # ------------------------------------------------------------------------------------
   # Provider
@@ -761,7 +963,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
           disabled={not row.detected?}
           class={if not row.detected?, do: "ouro-new-dim"}
         >
-          {provider_label(row.name)}{if row.name == "native" and row.detected?,
+          {provider_option_label(row.name)}{if row.name == "native" and row.detected?,
             do: " — recommended"}{if row.note, do: " — unavailable: #{row.note}"}
         </option>
       </select>
@@ -787,11 +989,21 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   attr :error, :any, required: true
 
   def model_field(assigns) do
+    assigns = assign(assigns, :route, NewSession.provider_route(assigns.form.provider))
+
     ~H"""
     <section class="ouro-new-field" aria-labelledby="model-label">
       <div class="ouro-new-label-row">
         <span class="ouro-new-label" id="model-label">Model</span>
         <span class="ouro-new-aside">{model_aside(@field)}</span>
+      </div>
+
+      <div class="ouro-model-route" aria-label="Model execution path">
+        <span class="ouro-model-route-badge">{@route.badge}</span>
+        <span class="ouro-model-route-copy">
+          <strong>{@route.title}</strong>
+          <span>{@route.detail}</span>
+        </span>
       </div>
 
       <.model_control field={@field} visible={@visible} form={@form} />
@@ -840,6 +1052,9 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     assigns =
       assigns
       |> assign(:rows, rows)
+      |> assign(:recommended_rows, Enum.filter(rows, &(&1.choice == :runtime_default)))
+      |> assign(:model_groups, NewSession.model_groups(rows, assigns.form.provider))
+      |> assign(:custom_rows, Enum.filter(rows, &(&1.choice == :custom)))
       |> assign(:matched, NewSession.listed(assigns.visible))
       |> assign(:custom?, assigns.form.model_choice == :custom)
 
@@ -858,16 +1073,13 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
           There is no client-side widget cache to distrust, so the label on screen and the
           value in the request are read from one place. --%>
     <select class="ouro-new-select ouro-new-list" name="model_choice" size="8" aria-label="model">
-      <option
-        :for={row <- @rows}
-        value={NewSession.choice_value(row.choice)}
-        selected={row.choice == @form.model_choice}
-      >
-        <%!-- An em dash, not the middot the detail itself uses to join a name to a
-              context window: one option is one line here, and the two separators keep the
-              row's id readable apart from what the snapshot says about it. --%>
-        {row.label}{if row.detail, do: " — #{row.detail}"}
-      </option>
+      <.model_option :for={row <- @recommended_rows} row={row} chosen={@form.model_choice} />
+
+      <optgroup :for={group <- @model_groups} label={group.label}>
+        <.model_option :for={row <- group.rows} row={row} chosen={@form.model_choice} />
+      </optgroup>
+
+      <.model_option :for={row <- @custom_rows} row={row} chosen={@form.model_choice} />
     </select>
 
     <p :if={@form.model_search != ""} class="ouro-new-hint">
@@ -884,6 +1096,23 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       aria-label="custom model id"
       autocomplete="off"
     />
+    """
+  end
+
+  attr :row, :map, required: true
+  attr :chosen, :any, required: true
+
+  defp model_option(assigns) do
+    ~H"""
+    <option
+      value={NewSession.choice_value(@row.choice)}
+      selected={@row.choice == @chosen}
+    >
+      <%!-- An em dash, not the middot the detail itself uses to join a name to a
+            context window: one option is one line here, and the two separators keep the
+            row's id readable apart from what the snapshot says about it. --%>
+      {@row.label}{if @row.detail, do: " — #{@row.detail}"}
+    </option>
     """
   end
 
@@ -1225,6 +1454,97 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   defp account_aside(:required), do: "Required"
 
   # ------------------------------------------------------------------------------------
+  # Grok subscription
+  # ------------------------------------------------------------------------------------
+
+  attr :card, :map, required: true
+  attr :scope, :atom, required: true
+  attr :api_key, :any, required: true
+
+  def grok_account_card(assigns) do
+    assigns =
+      assign(
+        assigns,
+        :can_login?,
+        Call.available?(assigns.scope, "grok.account.login.start")
+      )
+
+    ~H"""
+    <section class="ouro-new-field ouro-account" aria-labelledby="grok-account-label">
+      <div class="ouro-new-label-row">
+        <span class="ouro-new-label" id="grok-account-label">SpaceXAI subscription</span>
+        <span class="ouro-new-aside">
+          {grok_account_aside(@card.state, @api_key)}
+        </span>
+      </div>
+
+      <p :if={@card.state == :checking} class="ouro-new-hint">
+        Reading Grok CLI account readiness…
+      </p>
+
+      <p :if={@card.state == :connected} class="ouro-new-hint">
+        The first-party Grok Build CLI is connected{if @card.identity,
+          do: " as #{@card.identity}"}. It owns and refreshes the subscription tokens;
+        Ouroboros never reads them.
+      </p>
+
+      <p :if={@card.state == :required} class="ouro-new-hint">
+        Connect an eligible SpaceXAI subscription through the first-party Grok Build CLI.
+        You can use an xAI API key instead; API usage is billed separately from a subscription.
+      </p>
+
+      <div :if={@card.state == :waiting} class="ouro-account-wait">
+        <p class="ouro-new-hint">
+          Open the link, confirm that the code matches, then come back here.
+        </p>
+        <p :if={@card.code} class="ouro-account-code ouro-mono">{@card.code}</p>
+        <p :if={@card.url}>
+          <a
+            :if={NewSession.https?(@card.url)}
+            href={@card.url}
+            rel="noreferrer noopener"
+            target="_blank"
+          >
+            {@card.url}
+          </a>
+          <span :if={not NewSession.https?(@card.url)} class="ouro-mono">
+            {@card.url} — shown but not linked: it is not https.
+          </span>
+        </p>
+      </div>
+
+      <p :if={@card.error} class="ouro-refusal">{@card.error}</p>
+
+      <div class="ouro-new-row">
+        <button
+          :if={@card.state in [:required, :checking]}
+          type="button"
+          class="ouro-new-secondary"
+          phx-click="connect-grok"
+          disabled={not @can_login?}
+        >
+          Connect subscription
+        </button>
+        <button
+          :if={@card.state == :waiting}
+          type="button"
+          class="ouro-new-secondary"
+          phx-click="cancel-grok"
+        >
+          Cancel
+        </button>
+      </div>
+    </section>
+    """
+  end
+
+  defp grok_account_aside(:checking, _api_key), do: "Checking"
+  defp grok_account_aside(:connected, _api_key), do: "Connected"
+  defp grok_account_aside(:waiting, _api_key), do: "Waiting"
+  defp grok_account_aside(:required, %{usable?: true}), do: "Optional"
+  defp grok_account_aside(:required, _api_key), do: "One option required"
+
+  # ------------------------------------------------------------------------------------
   # Direct API key
   # ------------------------------------------------------------------------------------
 
@@ -1244,27 +1564,54 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       </p>
 
       <p :if={@card.state == :available and @card.source == "stored"} class="ouro-new-hint">
-        A private Anthropic API key is stored by Ouroboros. Its value never reaches this page.
+        A private {@card.provider} API key is stored by Ouroboros. Its value never reaches
+        this page.
+        <span :if={@card.key == "anthropic" and @card.workspace_configured?}>
+          A workspace ID is configured for identity-linked requests.
+        </span>
+        <span :if={@card.key == "anthropic" and not @card.workspace_configured?}>
+          Identity-linked keys also need their <code>wrkspc_…</code> workspace ID.
+        </span>
       </p>
 
       <p :if={@card.state == :available and @card.source != "stored"} class="ouro-new-hint">
         {@card.env} is available from the service environment. Its value never reaches this page.
+        <span :if={@card.key == "anthropic"}>
+          Set <code>{@card.workspace_env}</code> too when the key is identity-linked.
+        </span>
       </p>
 
-      <p :if={@card.state == :required} class="ouro-new-hint">
+      <p :if={@card.state == :required and @card.key == "anthropic"} class="ouro-new-hint">
         Claude models use direct Anthropic API calls only. Add a key here, or set
         <code>{@card.env}</code>
         in the Ouroboros service environment. OAuth and Claude
         subscription login are not used.
       </p>
 
+      <p
+        :if={@card.state == :required and @card.key == "xai" and not @card.managed?}
+        class="ouro-new-hint"
+      >
+        Direct Grok models use the xAI API. Add a key here, or set <code>{@card.env}</code>
+        in the Ouroboros service environment. SpaceXAI subscription
+        login is available through the managed Grok provider instead.
+      </p>
+
+      <p
+        :if={@card.state == :required and @card.key == "xai" and @card.managed?}
+        class="ouro-new-hint"
+      >
+        Add an xAI API key as an alternative to subscription login. The first-party CLI uses
+        a connected subscription first and this key as its fallback.
+      </p>
+
       <div :if={@can_set and @card.source != "environment"} class="ouro-new-row">
         <button
           type="button"
           class="ouro-new-secondary"
-          phx-click="open-anthropic-key"
+          phx-click={open_api_key_event(@card.key)}
         >
-          {if @card.state == :available, do: "Replace saved key", else: "Add API key"}
+          {api_key_button_label(@card)}
         </button>
       </div>
 
@@ -1279,7 +1626,19 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   defp api_key_aside(:available), do: "Available"
   defp api_key_aside(:required), do: "Required"
 
+  defp open_api_key_event("anthropic"), do: "open-anthropic-key"
+  defp open_api_key_event("xai"), do: "open-xai-key"
+
+  defp api_key_button_label(%{key: "anthropic", state: :available}),
+    do: "Manage Anthropic credentials"
+
+  defp api_key_button_label(%{state: :available} = card),
+    do: "Replace #{card.provider} API key"
+
+  defp api_key_button_label(_card), do: "Add API key"
+
   attr :error, :any, required: true
+  attr :card, :map, required: true
 
   def anthropic_key_dialog(assigns) do
     ~H"""
@@ -1297,12 +1656,15 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
         class="ouro-session-dialog-form"
         autocomplete="off"
       >
-        <h2 id="anthropic-key-title">Anthropic API key</h2>
+        <h2 id="anthropic-key-title">Anthropic credentials</h2>
         <p>
-          The key is stored as a private mode-0600 file on this runtime host. It is sent only
-          to Anthropic when a Claude model runs and is never shown again.
+          The key and optional workspace ID are stored in one private mode-0600 file on this
+          runtime host. They are sent only to Anthropic when a Claude model runs and are never
+          shown again.
         </p>
-        <label for="anthropic-api-key">API key</label>
+        <label for="anthropic-api-key">
+          API key{if @card.state == :available, do: " (optional)", else: ""}
+        </label>
         <input
           id="anthropic-api-key"
           name="anthropic_api_key"
@@ -1313,12 +1675,90 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
           autocapitalize="none"
           spellcheck="false"
           maxlength="8192"
-          required
+          required={@card.state != :available}
           autofocus
         />
+        <p :if={@card.state == :available} class="ouro-new-hint">
+          Leave this blank to keep the saved key.
+        </p>
+        <label for="anthropic-workspace-id">Workspace ID (identity-linked keys)</label>
+        <input
+          id="anthropic-workspace-id"
+          name="anthropic_workspace_id"
+          type="text"
+          class="ouro-new-input ouro-mono"
+          placeholder="wrkspc_…"
+          autocomplete="off"
+          autocapitalize="none"
+          spellcheck="false"
+          maxlength="256"
+          pattern="wrkspc_[A-Za-z0-9]+"
+        />
+        <p class="ouro-new-hint">
+          Personal or service-account keys that can access multiple workspaces require this
+          value on every request. Find it in Anthropic Console → Settings → Workspaces.
+          <span :if={@card.workspace_configured?}>
+            Leave this blank to keep the saved workspace ID.
+          </span>
+        </p>
         <p :if={@error} class="ouro-refusal" role="alert">{@error}</p>
         <div class="ouro-session-dialog-actions">
           <button type="button" class="ouro-button-quiet" phx-click="cancel-anthropic-key">
+            Cancel
+          </button>
+          <button type="submit" class="ouro-button" phx-disable-with="Saving…">
+            Save credentials
+          </button>
+        </div>
+      </form>
+    </dialog>
+    """
+  end
+
+  attr :error, :any, required: true
+
+  def xai_key_dialog(assigns) do
+    ~H"""
+    <dialog
+      id="xai-key-dialog"
+      class="ouro-session-dialog"
+      aria-modal="true"
+      aria-labelledby="xai-key-title"
+      phx-hook="Modal"
+      data-cancel-event="cancel-xai-key"
+    >
+      <form
+        id="xai-key-form"
+        phx-submit="save-xai-key"
+        class="ouro-session-dialog-form"
+        autocomplete="off"
+      >
+        <h2 id="xai-key-title">xAI API key</h2>
+        <p>
+          The key is stored in a private mode-0600 file on this runtime host. It is passed
+          only to direct xAI requests and the first-party Grok CLI, and is never shown again.
+        </p>
+        <label for="xai-api-key">API key</label>
+        <input
+          id="xai-api-key"
+          name="xai_api_key"
+          type="password"
+          class="ouro-new-input ouro-mono"
+          placeholder="xai-…"
+          autocomplete="new-password"
+          autocapitalize="none"
+          spellcheck="false"
+          maxlength="8192"
+          required
+          autofocus
+        />
+        <p class="ouro-new-hint">
+          Create API keys in the xAI Console. API usage and SpaceXAI subscriptions are
+          separate billing paths.
+        </p>
+        <p :if={@error} class="ouro-refusal" role="alert">{@error}</p>
+        <div class="ouro-session-dialog-actions">
+          <button type="button" class="ouro-button-quiet" phx-click="cancel-xai-key">
             Cancel
           </button>
           <button type="submit" class="ouro-button" phx-disable-with="Saving…">
