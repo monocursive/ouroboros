@@ -141,9 +141,9 @@ defmodule Ouroboros.Web.Live.ComposerTest do
   describe "the sendable values" do
     test "are exactly what interactive.configure accepts, and no more" do
       # `default` is a word for having been told nothing, not a value to send: the
-      # envelope's `reasoning_effort` is `high | low | medium`
+      # envelope's `reasoning_effort` is the canonical six-level vocabulary
       # (`lib/ouroboros/gateway/methods.ex:409`).
-      assert Composer.efforts() == ["low", "medium", "high"]
+      assert Composer.efforts() == ["none", "low", "medium", "high", "xhigh", "max"]
       refute "default" in Composer.efforts()
 
       assert Composer.sandbox_modes() == [

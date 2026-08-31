@@ -129,6 +129,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
       |> assign(:scope, Config.for_endpoint(socket.endpoint).scope)
       |> assign(:page_title, "Sessions")
       |> assign(:rows, [])
+      |> assign(:session_query, "")
       |> assign(:list_error, nil)
       |> assign(:status, nil)
       |> assign(:polling?, false)
@@ -207,6 +208,16 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   def handle_event("collapse", %{"block" => block}, socket),
     do: {:noreply, socket |> update(:expanded, &MapSet.delete(&1, block)) |> redraw(:reset)}
+
+  # The rail is an operator's index, not a second source of truth. Filtering changes only
+  # which already-triaged rows are drawn; it never changes their order, their group, or the
+  # currently open session. The short ceiling keeps a hand-crafted browser event from
+  # turning a quiet search field into unbounded LiveView state.
+  def handle_event("filter-sessions", %{"query" => query}, socket) when is_binary(query) do
+    {:noreply, assign(socket, :session_query, String.slice(query, 0, 120))}
+  end
+
+  def handle_event("filter-sessions", _params, socket), do: {:noreply, socket}
 
   # ------------------------------------------------------------------------------------
   # The composer
@@ -764,11 +775,6 @@ defmodule Ouroboros.Web.Live.DeckLive do
   defp refusal_message({:error, _code, message}) when is_binary(message), do: message
   defp refusal_message({:error, _code, message, _data}) when is_binary(message), do: message
 
-  defp refusal_message(other) do
-    Logger.error("web verb answered #{inspect(other, limit: 5)}")
-    "the runtime answered something this build cannot read"
-  end
-
   defp notice(socket, tone, text),
     do: assign(socket, :approval_notice, %{tone: tone, text: text})
 
@@ -839,7 +845,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # ------------------------------------------------------------------------ Configuring
 
   defp configure(%{assigns: %{open: {:interactive, id}}} = socket, field, choice) do
-    if allowed_choice?(field, choice) do
+    if allowed_choice?(socket.assigns, field, choice) do
       params = socket |> session_params(:interactive, id) |> Map.put(field, choice)
 
       case call(socket, "interactive.configure", params) do
@@ -859,9 +865,12 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   defp configure(socket, _field, _choice), do: socket
 
-  defp allowed_choice?("sandbox_mode", choice), do: choice in Composer.sandbox_modes()
-  defp allowed_choice?("reasoning_effort", choice), do: choice in Composer.efforts()
-  defp allowed_choice?(_field, _choice), do: false
+  defp allowed_choice?(_assigns, "sandbox_mode", choice), do: choice in Composer.sandbox_modes()
+
+  defp allowed_choice?(assigns, "reasoning_effort", choice),
+    do: choice in reasoning_efforts(assigns)
+
+  defp allowed_choice?(_assigns, _field, _choice), do: false
 
   # -------------------------------------------------------------------------- Approving
 
@@ -1132,6 +1141,17 @@ defmodule Ouroboros.Web.Live.DeckLive do
     end
   end
 
+  defp reasoning_efforts(assigns) do
+    open_row = row(assigns.rows, assigns.open)
+
+    provider =
+      (open_row && open_row.provider) || (assigns.info && Map.get(assigns.info, :provider))
+
+    model = reported(assigns, :model) || (open_row && open_row.model)
+
+    Ouroboros.Models.reasoning_efforts(provider, model)
+  end
+
   # ------------------------------------------------------------------------------------
   # Projection into the stream
   # ------------------------------------------------------------------------------------
@@ -1221,10 +1241,11 @@ defmodule Ouroboros.Web.Live.DeckLive do
   def render(assigns) do
     open_row = row(assigns.rows, assigns.open)
     {rule, rule_refusal} = rule_offer(assigns)
+    triaged = Rail.triaged(assigns.rows, pending(assigns))
 
     assigns =
       assigns
-      |> assign(:triaged, Rail.triaged(assigns.rows, pending(assigns)))
+      |> assign(:triaged, filter_sessions(triaged, assigns.session_query))
       |> assign(:machines, machines(assigns.status))
       |> assign(:today, today(assigns.rows))
       |> assign(:activity, activity(assigns))
@@ -1242,6 +1263,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
              to_string(open_row.sandbox_mode))
       )
       |> assign(:effort, reported(assigns, :reasoning_effort))
+      |> assign(:reasoning_efforts, reasoning_efforts(assigns))
       |> assign(:ended?, ended?(assigns, open_row))
 
     ~H"""
@@ -1257,6 +1279,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
           approvals={@approvals}
           answerable={@scope == :operate}
           scope={@scope}
+          query={@session_query}
         />
 
         <main class="ouro-focus">
@@ -1282,6 +1305,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
             status={@row_status}
             sandbox={@sandbox}
             effort={@effort}
+            efforts={@reasoning_efforts}
             scope={@scope}
             ended={@ended?}
           />
@@ -1357,12 +1381,36 @@ defmodule Ouroboros.Web.Live.DeckLive do
   attr :approvals, :list, default: []
   attr :answerable, :boolean, default: false
   attr :scope, :atom, default: :read
+  attr :query, :string, default: ""
 
   def rail(assigns) do
     assigns = assign(assigns, :counts, Rail.counts(assigns.triaged))
 
     ~H"""
     <nav class="ouro-rail" aria-label="sessions">
+      <div class="ouro-rail-head">
+        <div>
+          <span class="ouro-rail-kicker">Workspace</span>
+          <h2>Sessions</h2>
+        </div>
+        <span class="ouro-rail-total ouro-mono">{length(@triaged)}</span>
+      </div>
+
+      <form id="session-search" class="ouro-rail-search-form" phx-change="filter-sessions">
+        <label class="ouro-rail-search">
+          <input
+            type="search"
+            name="query"
+            value={@query}
+            placeholder="Search sessions"
+            aria-label="Search sessions"
+            autocomplete="off"
+            phx-debounce="150"
+          />
+          <kbd>/</kbd>
+        </label>
+      </form>
+
       <p :if={@error} class="ouro-refusal">{@error}</p>
 
       <section :for={group <- Rail.groups()} class={"ouro-group ouro-group-#{group}"}>
@@ -1373,7 +1421,9 @@ defmodule Ouroboros.Web.Live.DeckLive do
           </span>
         </h2>
 
-        <p :if={@counts[group] == 0} class="ouro-group-empty">nothing here</p>
+        <p :if={@counts[group] == 0} class="ouro-group-empty">
+          {if @query == "", do: "nothing here", else: "no matches"}
+        </p>
 
         <.rail_row
           :for={entry <- Enum.filter(@triaged, &(&1.group == group))}
@@ -1387,6 +1437,33 @@ defmodule Ouroboros.Web.Live.DeckLive do
       </section>
     </nav>
     """
+  end
+
+  defp filter_sessions(triaged, query) when query in [nil, ""], do: triaged
+
+  defp filter_sessions(triaged, query) when is_binary(query) do
+    needle = query |> String.trim() |> String.downcase()
+
+    if needle == "" do
+      triaged
+    else
+      Enum.filter(triaged, fn %{row: row} ->
+        [
+          Rail.title(row),
+          row.id,
+          row.workspace,
+          row.provider,
+          row.model,
+          row.status,
+          row.plane,
+          row.node
+        ]
+        |> Enum.reject(&is_nil/1)
+        |> Enum.map_join(" ", &to_string/1)
+        |> String.downcase()
+        |> String.contains?(needle)
+      end)
+    end
   end
 
   attr :entry, :map, required: true
@@ -1680,6 +1757,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   attr :status, :any, required: true
   attr :sandbox, :any, required: true
   attr :effort, :any, required: true
+  attr :efforts, :list, required: true
   attr :scope, :atom, required: true
   attr :ended, :boolean, required: true
 
@@ -1771,6 +1849,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
       status={@status}
       sandbox={@sandbox}
       effort={@effort}
+      efforts={@efforts}
       can_send={@can_send}
       can_interrupt={@can_interrupt}
       can_configure={@can_configure}

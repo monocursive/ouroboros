@@ -230,6 +230,24 @@
     }
   });
 
+  // Command-search convention without taking a printable slash away from a field. The
+  // shortcut is shown on the rail itself, and it applies only while focus is somewhere
+  // that is not already editable. LiveView owns the query and the filtering; this tiny
+  // browser-side half owns only the focus move, which should never require a round trip.
+  document.addEventListener("keydown", function (event) {
+    if (event.key !== "/" || event.altKey || event.ctrlKey || event.metaKey) return;
+
+    var active = document.activeElement;
+    var editable = active && active.matches && active.matches("input, textarea, select, [contenteditable='true']");
+    if (editable) return;
+
+    var search = document.querySelector(".ouro-rail-search input");
+    if (!search) return;
+
+    event.preventDefault();
+    search.focus();
+  });
+
   window.addEventListener("phx:needs-you", function (event) {
     var detail = event.detail || {};
     announce(detail.sessions || []);
@@ -380,9 +398,10 @@
   var Modal = {
     mounted: function () {
       this.previouslyFocused = document.activeElement;
+      this.cancelEvent = this.el.getAttribute("data-cancel-event") || "session-action-cancel";
       this.onCancel = function (event) {
         event.preventDefault();
-        this.pushEvent("session-action-cancel", {});
+        this.pushEvent(this.cancelEvent, {});
       }.bind(this);
 
       this.el.addEventListener("cancel", this.onCancel);

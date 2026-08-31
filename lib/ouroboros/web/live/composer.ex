@@ -36,10 +36,9 @@ defmodule Ouroboros.Web.Live.Composer do
   security control must never do (`docs/DESKTOP.md:63-69`, `docs/WEB.md` §4).
 
   The thinking picker is always offered because effort is a preference, not a permission,
-  and its **label** carries the same honesty: `Default` where nothing reported one. The
-  three sendable values are `low`, `medium`, `high` and nothing else, because those are the
-  three `interactive.configure` accepts (`lib/ouroboros/gateway/methods.ex:409`) — there is
-  no `default` to send, only a word for not having been told.
+  and its **label** carries the same honesty: `Default` where nothing reported one. Its
+  choices are supplied from the selected model's catalogue row and the provider transport
+  vocabulary. There is no `default` to send, only a word for not having been told.
 
   ## Buttons, not a `<select>`
 
@@ -56,8 +55,7 @@ defmodule Ouroboros.Web.Live.Composer do
 
   # The four `interactive.configure` accepts, in the order they escalate.
   @sandbox_modes ~w(default read_only workspace_write unrestricted)
-  # The three `interactive.configure` accepts. There is no fourth: see the moduledoc.
-  @efforts ~w(low medium high)
+  @efforts ~w(none low medium high xhigh max)
 
   @doc "The sandbox postures `interactive.configure` accepts, least authority first."
   @spec sandbox_modes() :: [String.t()]
@@ -193,6 +191,7 @@ defmodule Ouroboros.Web.Live.Composer do
   attr :status, :any, required: true
   attr :sandbox, :any, required: true
   attr :effort, :any, required: true
+  attr :efforts, :list, default: @efforts
   attr :can_send, :boolean, required: true
   attr :can_interrupt, :boolean, required: true
   attr :can_configure, :boolean, required: true
@@ -228,62 +227,64 @@ defmodule Ouroboros.Web.Live.Composer do
         This endpoint was started at read scope, so it can show this session but not speak in it.
       </p>
 
-      <form :if={not @ended and @can_send} id="composer" phx-submit="send" phx-change="draft">
-        <div class="ouro-composer-box">
-          <textarea
-            id="ouro-composer-input"
-            name="message"
-            class="ouro-composer-input"
-            phx-hook="Composer"
-            required
-            phx-debounce="400"
-            rows="1"
-            aria-label="message"
-            placeholder="Say something. Enter sends, Shift-Enter is a new line."
-          >{@draft}</textarea>
+      <div :if={not @ended} class="ouro-composer-surface">
+        <form :if={@can_send} id="composer" phx-submit="send" phx-change="draft">
+          <div class="ouro-composer-box">
+            <textarea
+              id="ouro-composer-input"
+              name="message"
+              class="ouro-composer-input"
+              phx-hook="Composer"
+              required
+              phx-debounce="400"
+              rows="1"
+              aria-label="message"
+              placeholder="Say something. Enter sends, Shift-Enter is a new line."
+            >{@draft}</textarea>
 
-          <div class="ouro-composer-actions">
-            <span :if={@turn.queued > 0} class="ouro-chip ouro-mono">{@turn.queued} queued</span>
+            <div class="ouro-composer-actions">
+              <span :if={@turn.queued > 0} class="ouro-chip ouro-mono">{@turn.queued} queued</span>
 
-            <button
-              :if={@working? and @can_interrupt}
-              type="button"
-              class="ouro-quiet-button"
-              phx-click="interrupt"
-            >
-              Interrupt
-            </button>
+              <button
+                :if={@working? and @can_interrupt}
+                type="button"
+                class="ouro-quiet-button"
+                phx-click="interrupt"
+              >
+                Interrupt
+              </button>
 
-            <button
-              type="submit"
-              class="ouro-button"
-              data-ouro-send
-              disabled={String.trim(@draft) == ""}
-              phx-disable-with="Sending…"
-            >
-              {if @queues?, do: "Queue", else: "Send"}
-            </button>
+              <button
+                type="submit"
+                class="ouro-button"
+                data-ouro-send
+                disabled={String.trim(@draft) == ""}
+                phx-disable-with="Sending…"
+              >
+                {if @queues?, do: "Queue", else: "Send"}
+              </button>
+            </div>
           </div>
+        </form>
+
+        <div :if={@can_configure} class="ouro-composer-footer">
+          <.picker
+            :if={@sandbox}
+            label="File access"
+            current={@sandbox}
+            choices={sandbox_modes()}
+            field="sandbox_mode"
+            warn={to_string(@sandbox) == "unrestricted"}
+          />
+
+          <.picker
+            label="Thinking"
+            current={@effort}
+            choices={@efforts}
+            field="reasoning_effort"
+            warn={false}
+          />
         </div>
-      </form>
-
-      <div :if={@can_configure and not @ended} class="ouro-composer-footer">
-        <.picker
-          :if={@sandbox}
-          label="File access"
-          current={@sandbox}
-          choices={sandbox_modes()}
-          field="sandbox_mode"
-          warn={to_string(@sandbox) == "unrestricted"}
-        />
-
-        <.picker
-          label="Thinking"
-          current={@effort}
-          choices={efforts()}
-          field="reasoning_effort"
-          warn={false}
-        />
       </div>
     </div>
     """

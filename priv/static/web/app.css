@@ -1707,6 +1707,11 @@ body.phx-loading {
 }
 
 @media (max-width: 520px) {
+  body .ouro-columns,
+  body .ouro-columns:has(> .ouro-vitals) {
+    grid-template-rows: minmax(9rem, 26vh) minmax(0, 1fr);
+  }
+
   .ouro-topbar {
     height: auto;
     min-height: var(--topbar-height);
@@ -2417,4 +2422,841 @@ body.phx-loading {
   line-height: 1.45;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* ==========================================================================
+ * Beautiful UI pattern pass: compact AI-native primitives, adapted to Ouroboros.
+ *
+ * This section deliberately keeps the product's three existing laws: the attention
+ * green still means only "a human is needed", layers still separate with hairlines, and
+ * the filled action stays scarce. What changes is the component grammar around those
+ * laws: window radii, inset command controls, centered reading lanes, compact state rows,
+ * and a rail that behaves like an operator's index rather than a file tree.
+ *
+ * These are qualified overrides rather than a second ownership claim on the base
+ * component classes. The earlier sections remain the readable specification of each
+ * component; this pass is the cross-surface visual system laid over all of them.
+ * ========================================================================== */
+
+:root {
+  --radius: 8px;
+  --radius-chip: 999px;
+  --radius-control: 8px;
+  --radius-card: 12px;
+  --radius-window: 16px;
+  --lane-width: 56rem;
+  --rail-width: 316px;
+  --vitals-width: 276px;
+  --topbar-height: 64px;
+  --gutter: 1rem;
+}
+
+body button,
+body input,
+body textarea,
+body select,
+body a {
+  transition:
+    color 140ms ease-out,
+    background-color 140ms ease-out,
+    border-color 140ms ease-out,
+    opacity 140ms ease-out,
+    transform 140ms ease-out;
+}
+
+body button:active,
+body .ouro-button:active,
+body .ouro-row-action:active {
+  transform: scale(0.98);
+}
+
+body .ouro-button,
+body .ouro-button-quiet,
+body .ouro-quiet-button,
+body .ouro-new-secondary {
+  border-radius: var(--radius-control);
+}
+
+body .ouro-button {
+  padding-inline: 1rem;
+}
+
+body .ouro-icon-button {
+  border-radius: var(--radius-control);
+}
+
+body .ouro-icon-button:hover {
+  background: var(--panel);
+  border-color: var(--border);
+}
+
+body .ouro-deck {
+  background: var(--page);
+}
+
+body .ouro-topbar {
+  gap: 0.75rem;
+  padding-inline: 1rem;
+  background: var(--page);
+}
+
+body .ouro-wordmark {
+  font-size: 1rem;
+  letter-spacing: 0.16em;
+}
+
+body .ouro-presence {
+  min-height: 2.25rem;
+  padding: 0 0.65rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+}
+
+body .ouro-presence:hover {
+  background: var(--panel);
+  border-color: var(--hairline-2);
+}
+
+body .ouro-topbar-right {
+  gap: 0.5rem;
+}
+
+body .ouro-pill,
+body .ouro-chip,
+body .ouro-member-chip,
+body .ouro-approval-kind,
+body .ouro-tag-full {
+  border-radius: var(--radius-chip);
+}
+
+body .ouro-pill {
+  min-height: 1.75rem;
+  display: inline-flex;
+  align-items: center;
+  padding-inline: 0.7rem;
+  background: var(--workspace);
+  border-color: var(--border);
+}
+
+body.phx-loading .ouro-pill,
+body .ouro-tool-running .ouro-tool-mark,
+body .ouro-streaming .ouro-prose {
+  animation: ouro-pulse 1.35s ease-in-out infinite;
+}
+
+body .ouro-columns {
+  gap: 0;
+  background: var(--page);
+}
+
+body .ouro-rail,
+body .ouro-focus,
+body .ouro-columns > .ouro-vitals {
+  background: var(--workspace);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-window);
+}
+
+body .ouro-rail,
+body .ouro-transcript,
+body .ouro-composer-footer {
+  scrollbar-color: var(--border-strong) transparent;
+  scrollbar-width: thin;
+}
+
+body .ouro-rail::-webkit-scrollbar,
+body .ouro-transcript::-webkit-scrollbar,
+body .ouro-composer-footer::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+body .ouro-rail::-webkit-scrollbar-track,
+body .ouro-transcript::-webkit-scrollbar-track,
+body .ouro-composer-footer::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+body .ouro-rail::-webkit-scrollbar-thumb,
+body .ouro-transcript::-webkit-scrollbar-thumb,
+body .ouro-composer-footer::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: var(--radius-chip);
+}
+
+body .ouro-rail {
+  margin: 0.75rem 0 0.75rem 0.75rem;
+  padding: 0.75rem 0.65rem 1.25rem;
+}
+
+body .ouro-focus {
+  margin: 0.75rem;
+  overflow: hidden;
+}
+
+body .ouro-columns > .ouro-vitals {
+  margin: 0.75rem 0.75rem 0.75rem 0;
+  padding: 0.55rem 0.85rem;
+}
+
+body .ouro-rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.35rem 0.45rem 0.7rem;
+}
+
+body .ouro-rail-head h2 {
+  margin: 0.05rem 0 0;
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+body .ouro-rail-kicker {
+  color: var(--tertiary);
+  font-size: 0.68rem;
+  font-variant-caps: small-caps;
+  letter-spacing: 0.1em;
+}
+
+body .ouro-rail-total {
+  min-width: 1.75rem;
+  min-height: 1.75rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius-chip);
+  color: var(--tertiary);
+  font-size: 0.72rem;
+}
+
+body .ouro-rail-search-form {
+  margin: 0 0 0.8rem;
+}
+
+body .ouro-rail-search {
+  min-height: 2.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 0.55rem 0 0.7rem;
+  color: var(--tertiary);
+  background: var(--inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+}
+
+body .ouro-rail-search:focus-within {
+  border-color: var(--border-strong);
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+body .ouro-rail-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  color: var(--ink);
+  background: transparent;
+  font: 0.82rem var(--font-ui);
+}
+
+body .ouro-rail-search input:focus-visible {
+  outline: 2px solid transparent;
+  outline-offset: 0;
+}
+
+body .ouro-rail-search input::placeholder {
+  color: var(--tertiary);
+}
+
+body .ouro-rail-search kbd {
+  min-width: 1.4rem;
+  height: 1.4rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--tertiary);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font: 0.7rem var(--font-mono);
+}
+
+body .ouro-group-head {
+  margin: 0.9rem 0.35rem 0.35rem;
+  padding: 0;
+  font-family: var(--font-ui);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+}
+
+body .ouro-count {
+  min-width: 1.25rem;
+  min-height: 1.25rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-chip);
+  font-size: 0.65rem;
+}
+
+body .ouro-group-empty {
+  padding: 0.2rem 0.5rem 0.35rem;
+}
+
+body .ouro-row {
+  min-height: 3.25rem;
+  margin: 0.15rem 0;
+  padding: 0.55rem 0.65rem;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+}
+
+body .ouro-row-wrap:has(.ouro-row-actions) .ouro-row {
+  padding-right: 8.7rem;
+}
+
+body .ouro-row:hover {
+  background: var(--panel);
+  border-color: var(--hairline-2);
+}
+
+body .ouro-row-open {
+  background: var(--card);
+  border-color: var(--border);
+}
+
+body .ouro-row-needs_you {
+  margin: 0.2rem 0;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+}
+
+body .ouro-row-nested {
+  margin-left: 1rem;
+}
+
+body .ouro-row-actions {
+  top: 0.28rem;
+  right: 0.28rem;
+  gap: 0.15rem;
+  opacity: 0;
+  transform: translateX(0.2rem);
+}
+
+body .ouro-row-wrap:hover .ouro-row-actions,
+body .ouro-row-wrap:focus-within .ouro-row-actions {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+body .ouro-row-action {
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+  padding: 0 0.5rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  font-size: 0.72rem;
+}
+
+body .ouro-focus-head {
+  padding: 1rem 1.25rem 0.9rem;
+  background: var(--panel);
+}
+
+body .ouro-focus-title,
+body .ouro-focus-meta {
+  width: min(100%, var(--lane-width));
+  margin-inline: auto;
+}
+
+body .ouro-focus-title {
+  font-family: var(--font-ui);
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+body .ouro-focus-meta {
+  margin-top: 0.25rem;
+}
+
+body .ouro-transcript {
+  padding: 1.5rem 1.25rem 2.25rem;
+  scroll-padding-block: 1.5rem;
+}
+
+body .ouro-transcript > div {
+  width: min(100%, var(--lane-width));
+  margin-inline: auto;
+}
+
+body .ouro-cell {
+  margin-bottom: 0.75rem;
+}
+
+body .ouro-bubble {
+  padding: 0.65rem 0.85rem;
+  border-color: var(--border);
+  border-radius: var(--radius-card);
+}
+
+body .ouro-prose {
+  line-height: 1.7;
+}
+
+body .ouro-prose pre,
+body .ouro-approval-command,
+body .ouro-report {
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius-card);
+}
+
+body .ouro-thinking,
+body .ouro-tool,
+body .ouro-explore,
+body .ouro-subagent,
+body .ouro-plan,
+body .ouro-command,
+body .ouro-runtime {
+  padding: 0.65rem 0.75rem;
+  background: var(--panel);
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius-card);
+}
+
+body .ouro-tool-row,
+body .ouro-explore-row,
+body .ouro-subagent-row {
+  min-height: 1.75rem;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+body .ouro-tool-mark,
+body .ouro-subagent-mark {
+  width: 1.25rem;
+  height: 1.25rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--inset);
+  border-radius: 6px;
+}
+
+body .ouro-body,
+body .ouro-explore-calls,
+body .ouro-subagent-rows {
+  margin-top: 0.55rem;
+  margin-left: 0.6rem;
+  padding-left: 0.9rem;
+}
+
+body .ouro-status,
+body .ouro-chat-note,
+body .ouro-diffstat,
+body .ouro-usage {
+  width: fit-content;
+  max-width: 100%;
+  padding: 0.35rem 0.55rem;
+  background: var(--panel);
+  border: 1px solid var(--hairline-1);
+  border-radius: var(--radius-control);
+}
+
+body .ouro-diff {
+  border-color: var(--border);
+  border-radius: var(--radius-card);
+}
+
+body .ouro-diff-head {
+  padding: 0.55rem 0.7rem;
+}
+
+body .ouro-plan-steps {
+  display: grid;
+  gap: 0.3rem;
+}
+
+body .ouro-plan-steps li {
+  min-height: 2rem;
+  padding: 0.35rem 0.5rem;
+  background: var(--inset);
+  border-radius: var(--radius-control);
+}
+
+body .ouro-approval {
+  width: calc(100% - 2.5rem);
+  max-width: var(--lane-width);
+  margin: 0 auto 0.75rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-window);
+}
+
+body .ouro-approval-warn {
+  border-left: 2px solid var(--warn-amber);
+}
+
+body .ouro-approval-subject {
+  font-family: var(--font-ui);
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+body .ouro-approval-answer {
+  min-height: 2.5rem;
+  border-radius: var(--radius-chip);
+}
+
+body .ouro-auto {
+  width: calc(100% - 2.5rem);
+  max-width: var(--lane-width);
+  margin: 0 auto 0.65rem;
+  padding: 0.5rem 0.65rem;
+  background: var(--panel);
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius-card);
+}
+
+body .ouro-composer {
+  padding: 0 1.25rem 1rem;
+  background: var(--workspace);
+  border-top: 0;
+}
+
+body .ouro-composer > .ouro-refusal,
+body .ouro-composer > .ouro-composer-retry,
+body .ouro-composer > .ouro-quiet,
+body .ouro-composer-surface {
+  width: min(100%, var(--lane-width));
+  margin-inline: auto;
+}
+
+body .ouro-composer-surface {
+  padding: 0.5rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-window);
+}
+
+body .ouro-composer-surface:empty {
+  display: none;
+}
+
+body .ouro-composer-box {
+  gap: 0.45rem;
+  padding: 0.2rem;
+  background: var(--inset);
+  border: 1px solid var(--hairline-2);
+  border-radius: var(--radius-card);
+}
+
+body .ouro-composer-input {
+  min-height: 3rem;
+  padding: 0.75rem;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-control);
+}
+
+body .ouro-composer-input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 0;
+}
+
+body .ouro-composer-actions {
+  padding: 0.2rem;
+}
+
+body .ouro-composer-actions .ouro-button,
+body .ouro-composer-actions .ouro-quiet-button {
+  min-height: 2.75rem;
+}
+
+body .ouro-composer-footer {
+  gap: 0.5rem;
+  margin: 0.5rem -0.1rem -0.1rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--hairline-1);
+}
+
+body .ouro-picker {
+  gap: 0.2rem;
+  padding: 0.2rem;
+  background: var(--workspace);
+  border: 1px solid var(--hairline-1);
+  border-radius: var(--radius-chip);
+}
+
+body .ouro-picker-label {
+  padding-inline: 0.5rem 0.35rem;
+}
+
+body .ouro-picker-option {
+  min-height: 2rem;
+  padding: 0 0.65rem;
+  border-radius: var(--radius-chip);
+}
+
+body .ouro-picker-on {
+  background: var(--card);
+  border-color: var(--border);
+}
+
+body .ouro-columns > .ouro-vitals {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+body .ouro-vital {
+  padding: 0.65rem 0.45rem;
+  border-radius: var(--radius-control);
+}
+
+body .ouro-vital:hover {
+  background: var(--panel);
+}
+
+body .ouro-empty {
+  width: min(calc(100% - 2.5rem), 30rem);
+  margin: auto;
+  padding: 2rem;
+  color: var(--secondary);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-window);
+}
+
+body .ouro-empty-head {
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 1rem;
+  font-variant-caps: normal;
+  letter-spacing: 0;
+}
+
+body .ouro-new {
+  background: var(--page);
+  padding-top: 2rem;
+}
+
+body .ouro-new-top,
+body .ouro-new-form {
+  max-width: 52rem;
+}
+
+body .ouro-new-form {
+  border-color: var(--border);
+  border-radius: var(--radius-window);
+  overflow: hidden;
+}
+
+body .ouro-new-title {
+  font-family: var(--font-ui);
+  font-size: 1.35rem;
+  font-weight: 600;
+}
+
+body .ouro-new-field {
+  padding: 1.25rem 1.4rem;
+}
+
+body .ouro-new-input,
+body .ouro-new-select {
+  border-radius: var(--radius-control);
+}
+
+body .ouro-new-input:hover,
+body .ouro-new-select:hover {
+  border-color: var(--border-strong);
+}
+
+body .ouro-new-advanced > summary {
+  min-height: 3.5rem;
+}
+
+body .ouro-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+body .ouro-card,
+body .ouro-browse {
+  border-radius: var(--radius-card);
+}
+
+body .ouro-card {
+  min-height: 4.25rem;
+  padding: 0.75rem;
+}
+
+body .ouro-card:hover {
+  background: var(--inset);
+  border-color: var(--border-strong);
+}
+
+body .ouro-card-on {
+  background: var(--inset);
+  border-color: var(--ink);
+}
+
+body .ouro-page {
+  max-width: 64rem;
+  background: var(--workspace);
+}
+
+body .ouro-panel,
+body .ouro-facts,
+body .ouro-members {
+  border-radius: var(--radius-window);
+}
+
+body .ouro-member {
+  min-height: 4rem;
+}
+
+body .ouro-session-dialog {
+  border-radius: var(--radius-window);
+  overflow: hidden;
+}
+
+@media (max-width: 1100px) {
+  body .ouro-columns,
+  body .ouro-columns:has(> .ouro-vitals) {
+    grid-template-rows: minmax(9rem, 30vh) minmax(0, 1fr);
+  }
+
+  body .ouro-rail {
+    margin: 0.5rem 0.5rem 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-window);
+  }
+
+  body .ouro-focus {
+    margin: 0.5rem;
+  }
+
+  body .ouro-columns > .ouro-vitals {
+    display: none;
+  }
+
+  body .ouro-vitals-mobile .ouro-vitals {
+    margin: 0;
+    padding: 0.75rem 1rem;
+    border: 0;
+    border-radius: 0;
+  }
+}
+
+@media (max-width: 700px) {
+  body .ouro-cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  body .ouro-approval,
+  body .ouro-auto {
+    width: calc(100% - 1.5rem);
+  }
+}
+
+@media (max-width: 520px) {
+  body .ouro-topbar {
+    padding: 0.5rem 0.75rem;
+  }
+
+  body .ouro-presence-label,
+  body .ouro-pill,
+  body .ouro-today {
+    display: none;
+  }
+
+  body .ouro-topbar-right {
+    width: auto;
+    margin-left: auto;
+  }
+
+  body .ouro-rail-head,
+  body .ouro-rail-search-form {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: var(--workspace);
+  }
+
+  body .ouro-row-wrap:has(.ouro-row-actions) .ouro-row {
+    padding-right: 8.7rem;
+  }
+
+  body .ouro-row-actions {
+    opacity: 1;
+    transform: none;
+  }
+
+  body .ouro-transcript {
+    padding-inline: 0.75rem;
+  }
+
+  body .ouro-composer {
+    padding-inline: 0.75rem;
+  }
+
+  body .ouro-composer-box {
+    flex-direction: row;
+  }
+
+  body .ouro-composer-actions {
+    justify-content: flex-end;
+  }
+
+  body .ouro-auto {
+    align-items: flex-start;
+  }
+
+  body .ouro-auto > span {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+
+  body .ouro-composer-footer {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+
+  body .ouro-picker {
+    flex: 0 0 auto;
+    width: max-content;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body button,
+  body input,
+  body textarea,
+  body select,
+  body a {
+    transition: none;
+  }
+
+  body.phx-loading .ouro-pill,
+  body .ouro-tool-running .ouro-tool-mark,
+  body .ouro-streaming .ouro-prose {
+    animation: none;
+  }
 }

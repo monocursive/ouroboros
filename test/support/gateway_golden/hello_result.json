@@ -34,6 +34,7 @@
       "control.get",
       "control.list",
       "control.submit",
+      "credentials.anthropic.set",
       "fleet.doctor",
       "fleet.forget_session_owner",
       "fleet.status",

@@ -26,6 +26,7 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
 
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
+  import ExUnit.CaptureLog
 
   alias Ouroboros.Gateway.Methods.Browse
   alias Ouroboros.Web.Config
@@ -48,6 +49,25 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   defp missing(name),
     do: probed(name, %{installed: false, compatible: false, version: nil, executable: nil})
 
+  defp native_with_anthropic_key(present, source \\ nil) do
+    probed(:native, %{
+      installed: true,
+      compatible: true,
+      version: "1.0",
+      executable: "in-process",
+      details: %{
+        "credentials" => [
+          %{
+            "provider" => "anthropic",
+            "env" => "ANTHROPIC_API_KEY",
+            "present" => present,
+            "source" => source
+          }
+        ]
+      }
+    })
+  end
+
   defp catalogue(rows), do: %{source: "llm_db", epoch: 1, limit: 50, providers: rows}
 
   defp provider_row(name, opts \\ []) do
@@ -68,7 +88,7 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       context_window: Keyword.get(opts, :context_window),
       max_output_tokens: nil,
       release_date: nil,
-      reasoning_efforts: ["low", "medium", "high"],
+      reasoning_efforts: Keyword.get(opts, :reasoning_efforts, ["low", "medium", "high"]),
       pricing: nil
     }
   end
@@ -108,6 +128,18 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
 
       assert footnote ==
                "Unavailable providers stay listed so you can see what this computer is missing."
+    end
+
+    test "keeps only Anthropic credential presence, never a key value" do
+      assert [%{credentials: [credential]}] =
+               NewSession.provider_rows([native_with_anthropic_key(true)])
+
+      assert credential == %{
+               provider: "anthropic",
+               env: "ANTHROPIC_API_KEY",
+               present: true,
+               source: nil
+             }
     end
   end
 
@@ -169,6 +201,45 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
                NewSession.model_field(catalogue([provider_row(:pi)]), "pi")
 
       assert first.label == "Recommended"
+    end
+
+    test "thinking levels follow the selected model instead of a global three-item list" do
+      field =
+        NewSession.model_field(
+          catalogue([
+            provider_row(:native,
+              default: "openai_codex:gpt-5.6-sol",
+              total: 2,
+              models: [
+                model("openai_codex:gpt-5.6-sol",
+                  reasoning_efforts: ["none", "low", "medium", "high", "xhigh", "max"]
+                ),
+                model("openai_codex:gpt-5.4-nano", reasoning_efforts: ["low", "high"])
+              ]
+            )
+          ]),
+          "native"
+        )
+
+      default = %NewSession{NewSession.new() | provider: "native"}
+
+      assert NewSession.efforts(default, field) == [
+               "none",
+               "low",
+               "medium",
+               "high",
+               "xhigh",
+               "max"
+             ]
+
+      nano = %{default | model_choice: {:catalog, "openai_codex:gpt-5.4-nano"}}
+      assert NewSession.efforts(nano, field) == ["low", "high"]
+
+      assert {:ok, params} = NewSession.start_params(%{default | effort: "max"}, field)
+      assert params["reasoning_effort"] == "max"
+
+      assert {:ok, params} = NewSession.start_params(%{nano | effort: "max"}, field)
+      refute Map.has_key?(params, "reasoning_effort")
     end
   end
 
@@ -661,6 +732,79 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
     end
   end
 
+  describe "the Anthropic API-key card" do
+    test "an Anthropic model is required when the Native runtime reports no key" do
+      field =
+        NewSession.model_field(
+          catalogue([
+            provider_row(:native,
+              total: 1,
+              models: [model("anthropic:claude-sonnet-5")]
+            )
+          ]),
+          "native"
+        )
+
+      form = %NewSession{
+        NewSession.new()
+        | provider: "native",
+          model_choice: {:catalog, "anthropic:claude-sonnet-5"}
+      }
+
+      rows = NewSession.provider_rows([native_with_anthropic_key(false)])
+      card = NewSession.api_key_card(form, field, rows)
+
+      assert card == %{
+               provider: "Anthropic",
+               env: "ANTHROPIC_API_KEY",
+               state: :required,
+               source: nil,
+               usable?: false
+             }
+
+      refute NewSession.requires_chatgpt?(form, field)
+    end
+
+    test "a present key is usable, and the configured Anthropic default is gated too" do
+      field =
+        NewSession.model_field(
+          catalogue([
+            provider_row(:native,
+              default: "anthropic:claude-sonnet-5",
+              total: 1,
+              models: [model("anthropic:claude-sonnet-5")]
+            )
+          ]),
+          "native"
+        )
+
+      form = %NewSession{NewSession.new() | provider: "native"}
+      rows = NewSession.provider_rows([native_with_anthropic_key(true, "stored")])
+
+      assert %{state: :available, source: "stored", usable?: true} =
+               NewSession.api_key_card(form, field, rows)
+
+      assert NewSession.api_key_card(form, field, []) == %{
+               provider: "Anthropic",
+               env: "ANTHROPIC_API_KEY",
+               state: :checking,
+               source: nil,
+               usable?: false
+             }
+    end
+
+    test "other model transports do not raise an Anthropic key requirement" do
+      form = %NewSession{
+        NewSession.new()
+        | provider: "native",
+          model_choice: :custom,
+          model_text: "openai:gpt-5.6"
+      }
+
+      assert NewSession.api_key_card(form, {:text, nil}, []) == nil
+    end
+  end
+
   defp idle, do: %{"status" => "idle", "loginId" => nil, "flow" => nil, "error" => nil}
 
   defp pending,
@@ -1011,6 +1155,87 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
     end
   end
 
+  describe "Anthropic API-key gating" do
+    setup :endpoint
+
+    test "a Claude model explains the service key and disables Start when it is absent",
+         %{conn: conn} do
+      previous = System.get_env("ANTHROPIC_API_KEY")
+      System.delete_env("ANTHROPIC_API_KEY")
+      on_exit(fn -> restore_env("ANTHROPIC_API_KEY", previous) end)
+
+      {:ok, view, _html} = live(conn, "/new")
+      html = choose_anthropic(view)
+
+      assert html =~ "Anthropic API"
+      assert html =~ "ANTHROPIC_API_KEY"
+      assert html =~ "Claude models use direct Anthropic API calls only."
+      assert html =~ "subscription login are not used."
+      assert html =~ "Add API key"
+      assert html =~ "Add Anthropic API key first"
+      refute html =~ "Connect ChatGPT first"
+      assert has_element?(view, "button[type=submit][disabled]")
+    end
+
+    test "a visible service key marks Claude ready without revealing its value", %{conn: conn} do
+      previous = System.get_env("ANTHROPIC_API_KEY")
+      System.put_env("ANTHROPIC_API_KEY", "test-key-that-must-not-render")
+      on_exit(fn -> restore_env("ANTHROPIC_API_KEY", previous) end)
+
+      {:ok, view, _html} = live(conn, "/new")
+      html = choose_anthropic(view)
+
+      assert html =~ "Anthropic API"
+      assert html =~ "Available"
+      assert html =~ "available from the service environment"
+      assert html =~ "Its value never reaches this page."
+      refute html =~ "test-key-that-must-not-render"
+      refute html =~ "Replace saved key"
+      refute has_element?(view, "button[type=submit][disabled]")
+    end
+
+    test "an operate link stores a key privately and enables Claude without echoing it",
+         %{conn: conn, dir: dir} do
+      previous = System.get_env("ANTHROPIC_API_KEY")
+      System.delete_env("ANTHROPIC_API_KEY")
+      on_exit(fn -> restore_env("ANTHROPIC_API_KEY", previous) end)
+
+      {:ok, view, _html} = live(conn, "/new")
+      _ = choose_anthropic(view)
+
+      html =
+        view
+        |> element(~s(button[phx-click="open-anthropic-key"]))
+        |> render_click()
+
+      assert html =~ "Anthropic API key"
+      assert has_element?(view, "#anthropic-key-form input[type=password]")
+
+      secret = "sk-ant-ui-value-must-never-render"
+
+      logs =
+        capture_log([level: :debug], fn ->
+          view
+          |> form("#anthropic-key-form", %{"anthropic_api_key" => secret})
+          |> render_submit()
+        end)
+
+      html = render(view)
+      path = Path.join(dir, "anthropic.key")
+
+      assert File.read!(path) == secret
+      assert {:ok, stat} = File.lstat(path)
+      assert stat.type == :regular
+      assert Bitwise.band(stat.mode, 0o777) == 0o600
+      assert html =~ "A private Anthropic API key is stored by Ouroboros."
+      assert html =~ "Replace saved key"
+      refute html =~ secret
+      refute logs =~ secret
+      assert logs =~ "[FILTERED]"
+      refute has_element?(view, "button[type=submit][disabled]")
+    end
+  end
+
   # ------------------------------------------------------------------------------------
   # The deck's half of `?open`
   # ------------------------------------------------------------------------------------
@@ -1114,6 +1339,19 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       assert html =~ "Browse…"
       assert html =~ "Start session"
     end
+
+    test "shows that a missing Anthropic key needs an operate link without offering a write",
+         %{conn: conn} do
+      previous = System.get_env("ANTHROPIC_API_KEY")
+      System.delete_env("ANTHROPIC_API_KEY")
+      on_exit(fn -> restore_env("ANTHROPIC_API_KEY", previous) end)
+
+      {:ok, view, _html} = live(conn, "/new")
+      html = choose_anthropic(view)
+
+      assert html =~ "This link is view-only, so it cannot store provider credentials."
+      refute has_element?(view, ~s(button[phx-click="open-anthropic-key"]))
+    end
   end
 
   # ------------------------------------------------------------------------------------
@@ -1147,10 +1385,24 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   defp endpoint_with(_context, scope, seed) do
     dir = Path.join(System.tmp_dir!(), "ouroboros-web-new-#{System.unique_integer([:positive])}")
     Ouroboros.DataDir.ensure_private!(dir)
+    previous_anthropic_key_file = Application.get_env(:ouroboros, :anthropic_api_key_file)
+    Application.put_env(:ouroboros, :anthropic_api_key_file, Path.join(dir, "anthropic.key"))
     token_path = Path.join(dir, "gateway.token")
     File.write!(token_path, @token)
     File.chmod!(token_path, 0o600)
-    on_exit(fn -> File.rm_rf(dir) end)
+
+    on_exit(fn ->
+      if previous_anthropic_key_file,
+        do:
+          Application.put_env(
+            :ouroboros,
+            :anthropic_api_key_file,
+            previous_anthropic_key_file
+          ),
+        else: Application.delete_env(:ouroboros, :anthropic_api_key_file)
+
+      File.rm_rf(dir)
+    end)
 
     seed.(dir)
 
@@ -1214,6 +1466,23 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
     _ = change(view, %{"model_choice" => "custom"})
     change(view, %{"model_text" => "openai_codex:gpt-5.6-sol"})
   end
+
+  defp choose_anthropic(view) do
+    _ = change(view, %{"provider" => "native"})
+
+    {:rows, rows, _total} = field(view)
+
+    choice =
+      Enum.find(rows, fn
+        %{choice: {:catalog, "anthropic:" <> _}} -> true
+        _other -> false
+      end)
+
+    change(view, %{"model_choice" => NewSession.choice_value(choice.choice)})
+  end
+
+  defp restore_env(name, nil), do: System.delete_env(name)
+  defp restore_env(name, value), do: System.put_env(name, value)
 
   # The form as the operator's own clicks left it. Reached through the view's process state
   # because that *is* the authority here: the whole design of this page is that the socket

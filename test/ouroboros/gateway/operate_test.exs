@@ -228,7 +228,7 @@ defmodule Ouroboros.Gateway.OperateTest do
         })
 
       assert reasoning["error"]["code"] == -32602
-      assert reasoning["error"]["message"] =~ "high, low, medium"
+      assert reasoning["error"]["message"] =~ "high, low, max, medium, none, xhigh"
 
       attachments =
         call(client, "interactive.send_message", %{
@@ -293,7 +293,7 @@ defmodule Ouroboros.Gateway.OperateTest do
         })
 
       assert structured["error"]["code"] == -32602
-      assert structured["error"]["message"] =~ "high, low, medium"
+      assert structured["error"]["message"] =~ "high, low, max, medium, none, xhigh"
     end
 
     test "an option outside the allowlist is refused rather than dropped", %{client: client} do

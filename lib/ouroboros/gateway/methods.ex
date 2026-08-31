@@ -94,6 +94,7 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.InteractiveSession
   alias Ouroboros.Mesh
   alias Ouroboros.Orchestration.Scheduler
+  alias Ouroboros.Provider.AnthropicKey
   alias Ouroboros.Provider.OpenAIAuth
   alias Ouroboros.Provider.Native.Desktop
   alias Ouroboros.Provider.Native.Mcp
@@ -317,6 +318,9 @@ defmodule Ouroboros.Gateway.Methods do
     "account.login.complete" => %{scope: :operate, timeout: @default_timeout},
     "account.login.cancel" => %{scope: :operate, timeout: @default_timeout},
     "account.logout" => %{scope: :operate, timeout: @default_timeout},
+    # A credential value crosses this boundary once and is never returned. Operate scope
+    # is the same authority that may start paid work; read links cannot re-key the node.
+    "credentials.anthropic.set" => %{scope: :operate, timeout: @default_timeout},
     # Both calls checkpoint intent before dispatch. A gateway ceiling can therefore fire
     # after the provider accepted the turn, so the client must reconcile the session
     # rather than present the timeout as a refusal or blindly mint another turn id.
@@ -427,7 +431,14 @@ defmodule Ouroboros.Gateway.Methods do
     "unrestricted" => :unrestricted
   }
 
-  @reasoning_efforts %{"low" => :low, "medium" => :medium, "high" => :high}
+  @reasoning_efforts %{
+    "none" => :none,
+    "low" => :low,
+    "medium" => :medium,
+    "high" => :high,
+    "xhigh" => :xhigh,
+    "max" => :max
+  }
 
   @approval_decisions %{"approve" => :approve, "deny" => :deny}
   @approval_scopes %{"once" => :once, "session" => :session}
@@ -695,6 +706,12 @@ defmodule Ouroboros.Gateway.Methods do
       {:closed,
        [{"login_id", :required, :string, "correlates with the `loginId` the start reply carried"}]},
     "account.logout" => {:closed, []},
+    "credentials.anthropic.set" =>
+      {:closed,
+       [
+         {"api_key", :required, :string,
+          "stored privately on the runtime host; never returned, logged, or checkpointed"}
+       ], "replaces the node-owned Anthropic key; `ANTHROPIC_API_KEY` still takes precedence"},
     "agents.list" => {:open, []},
     "agents.state" => {:open, [{"id", :required, :string, "the agent id"}]},
     "agents.stop" => {:open, [{"id", :required, :string, "the agent id"}]},
@@ -1260,6 +1277,15 @@ defmodule Ouroboros.Gateway.Methods do
   def invoke("account.logout", params) do
     with :ok <- only_keys(params, []) do
       safe(fn -> account_reply(account_adapter().logout()) end)
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("credentials.anthropic.set", params) do
+    with :ok <- only_keys(params, ["api_key"]),
+         {:ok, api_key} <- fetch_api_key(params, "api_key") do
+      safe(fn -> reply(anthropic_key_adapter().put(api_key)) end)
     else
       {:invalid, message} -> invalid_params(message)
     end
@@ -2943,6 +2969,34 @@ defmodule Ouroboros.Gateway.Methods do
 
   defp account_adapter do
     Application.get_env(:ouroboros, :account_adapter, OpenAIAuth)
+  end
+
+  defp anthropic_key_adapter do
+    Application.get_env(:ouroboros, :anthropic_key_adapter, AnthropicKey)
+  end
+
+  defp fetch_api_key(params, key) do
+    case Map.get(params, key) do
+      value when is_binary(value) ->
+        value = String.trim(value)
+
+        cond do
+          value == "" ->
+            {:invalid, "params.#{key} must be a nonempty string"}
+
+          byte_size(value) > 8 * 1024 ->
+            {:invalid, "params.#{key} must be at most 8192 bytes"}
+
+          String.contains?(value, ["\n", "\r", "\0", "\t", " "]) ->
+            {:invalid, "params.#{key} must not contain whitespace or control characters"}
+
+          true ->
+            {:ok, value}
+        end
+
+      _other ->
+        {:invalid, "params.#{key} must be a nonempty string"}
+    end
   end
 
   # An absent optional string is `nil` rather than an error; a present one is held to the

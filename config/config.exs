@@ -1,5 +1,9 @@
 import Config
 
+# LiveView logs event parameters at debug level. Credential forms therefore use names
+# containing `api_key`, and Phoenix must redact those values before any logger sees them.
+config :phoenix, :filter_parameters, ["password", "token", "secret", "api_key"]
+
 # Native streams are admitted globally by `Provider.Native.Model.Admission`, eight at a
 # time. Keep Finch as one pool with more connections than admitted streams: this removes
 # random one-connection shard collisions and leaves two cleanup/headroom connections for a
@@ -161,7 +165,9 @@ config :ouroboros,
   native_model_queue_limit: 32,
   native_model_queue_timeout_ms: 120_000,
   # The packaged direct default uses ChatGPT subscription OAuth. API-key deployments may
-  # set `OUROBOROS_NATIVE_MODEL=openai:<model>` or override this node setting.
+  # set `OUROBOROS_NATIVE_MODEL=openai:<model>` with `OPENAI_API_KEY`, or select
+  # `anthropic:<model>` with `ANTHROPIC_API_KEY` or the private key saved from the web
+  # new-session page. Anthropic is API-key-only in Ouroboros.
   native_model: "openai_codex:gpt-5.6-sol",
   # How long a terminal coding task or interactive session is retained before the
   # recovery sweep deletes it. `nil` disables the sweep and keeps everything.

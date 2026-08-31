@@ -49,7 +49,7 @@ defmodule Ouroboros.Web.Live.NewSession do
   alias Ouroboros.Gateway.Methods.Browse
 
   @sandbox_modes ["read_only", "workspace_write", "unrestricted"]
-  @efforts ["low", "medium", "high"]
+  @efforts ["none", "low", "medium", "high", "xhigh", "max"]
 
   @typedoc "Which model row a choice stands for. Not the row's label — the label is drawn."
   @type model_choice :: :runtime_default | :custom | {:catalog, String.t()}
@@ -147,9 +147,23 @@ defmodule Ouroboros.Web.Live.NewSession do
   @spec sandbox_modes() :: [String.t()]
   def sandbox_modes, do: @sandbox_modes
 
-  @doc "The three reasoning levels the gateway's vocabulary names."
+  @doc "The reasoning levels the gateway's vocabulary names."
   @spec efforts() :: [String.t()]
   def efforts, do: @efforts
+
+  @doc "The levels offered for the selected model, or the provider vocabulary if unknown."
+  @spec efforts(t(), model_field()) :: [String.t()]
+  def efforts(%__MODULE__{} = form, {:rows, rows, _total}) do
+    case Enum.find(rows, &(&1.choice == form.model_choice)) do
+      %{reasoning_efforts: efforts} when is_list(efforts) -> efforts
+      _unknown -> Ouroboros.ReasoningEffort.names_for_provider(form.provider)
+    end
+  end
+
+  def efforts(%__MODULE__{}, :unsupported), do: []
+
+  def efforts(%__MODULE__{} = form, _field),
+    do: Ouroboros.ReasoningEffort.names_for_provider(form.provider)
 
   # ------------------------------------------------------------------------------------
   # Provider rows
@@ -176,12 +190,38 @@ defmodule Ouroboros.Web.Live.NewSession do
       %{
         name: to_string(provider),
         detected?: detected?(status),
-        note: probe_note(status, Map.get(entry, :error))
+        note: probe_note(status, Map.get(entry, :error)),
+        # Native reports credential names and booleans only. Keeping that non-secret
+        # projection lets the form stop an Anthropic request before it becomes a failed
+        # turn, without ever reading or transporting the key itself.
+        credentials: credential_rows(status)
       }
     ]
   end
 
   defp provider_row(_other), do: []
+
+  defp credential_rows(%{details: details}) when is_map(details) do
+    details
+    |> value(:credentials)
+    |> List.wrap()
+    |> Enum.flat_map(fn
+      row when is_map(row) ->
+        provider = identifier(value(row, :provider))
+        env = trimmed(value(row, :env))
+        present = value(row, :present)
+        source = identifier(value(row, :source))
+
+        if provider && env && is_boolean(present),
+          do: [%{provider: provider, env: env, present: present, source: source}],
+          else: []
+
+      _other ->
+        []
+    end)
+  end
+
+  defp credential_rows(_status), do: []
 
   defp detected?(%{installed: true, compatible: true}), do: true
   defp detected?(_status), do: false
@@ -262,8 +302,10 @@ defmodule Ouroboros.Web.Live.NewSession do
 
         %{
           choice: {:catalog, id},
+          model: id,
           label: trimmed(model[:name]) || short_model_id(id),
-          detail: model_detail(model, id)
+          detail: model_detail(model, id),
+          reasoning_efforts: List.wrap(model[:reasoning_efforts])
         }
       end)
 
@@ -271,8 +313,10 @@ defmodule Ouroboros.Web.Live.NewSession do
   end
 
   defp default_row(row) do
+    default = trimmed(row[:default])
+
     label =
-      case trimmed(row[:default]) do
+      case default do
         nil ->
           "Recommended"
 
@@ -290,11 +334,39 @@ defmodule Ouroboros.Web.Live.NewSession do
           "Recommended · #{name}"
       end
 
-    %{choice: :runtime_default, label: label, detail: "Let Ouroboros choose the best model"}
+    efforts =
+      case default do
+        nil ->
+          nil
+
+        default ->
+          row
+          |> Map.get(:models)
+          |> List.wrap()
+          |> Enum.find(&(to_string(&1[:id]) == default))
+          |> then(fn
+            nil -> nil
+            model -> List.wrap(model[:reasoning_efforts])
+          end)
+      end
+
+    %{
+      choice: :runtime_default,
+      model: default,
+      label: label,
+      detail: "Let Ouroboros choose the best model",
+      reasoning_efforts: efforts
+    }
   end
 
   defp custom_row do
-    %{choice: :custom, label: "Custom model…", detail: "For advanced provider configurations"}
+    %{
+      choice: :custom,
+      model: nil,
+      label: "Custom model…",
+      detail: "For advanced provider configurations",
+      reasoning_efforts: nil
+    }
   end
 
   # The readable name is the option label. Detail keeps the exact id available to an
@@ -430,7 +502,7 @@ defmodule Ouroboros.Web.Live.NewSession do
   defp model_option(_field, _choice, _typed), do: nil
 
   @doc """
-  Whether the model this form would send needs a connected ChatGPT subscription.
+  Whether the effective model needs a connected ChatGPT subscription.
 
   The prefix is the whole test: `runtime.models` already stamps `openai_codex:` onto the
   ids that resolve through subscription OAuth, and an official `openai:` API-key model
@@ -443,6 +515,62 @@ defmodule Ouroboros.Web.Live.NewSession do
       nil -> false
     end
   end
+
+  @doc "API-key readiness for a selected direct Anthropic model, or `nil` when unrelated."
+  @spec api_key_card(t(), model_field(), term()) :: map() | nil
+  def api_key_card(%__MODULE__{} = form, field, provider_rows) do
+    case effective_model(form, field) do
+      "anthropic:" <> _model ->
+        api_key_card(provider_rows, form.provider, "anthropic", "ANTHROPIC_API_KEY")
+
+      _other ->
+        nil
+    end
+  end
+
+  defp api_key_card(rows, selected_provider, model_provider, env) when is_list(rows) do
+    credential =
+      rows
+      |> Enum.find(&(trimmed(&1[:name]) == trimmed(selected_provider)))
+      |> case do
+        %{credentials: credentials} when is_list(credentials) ->
+          Enum.find(credentials, &(trimmed(&1[:provider]) == model_provider and &1[:env] == env))
+
+        _unknown ->
+          nil
+      end
+
+    state =
+      case credential do
+        %{present: true} -> :available
+        %{present: false} -> :required
+        _not_reported -> :checking
+      end
+
+    %{
+      provider: "Anthropic",
+      env: env,
+      state: state,
+      source: credential && credential[:source],
+      usable?: state == :available
+    }
+  end
+
+  defp api_key_card(_rows, _selected_provider, _model_provider, env),
+    do: %{provider: "Anthropic", env: env, state: :checking, source: nil, usable?: false}
+
+  defp effective_model(%__MODULE__{} = form, field) do
+    model_intent(form, field).send || selected_default_model(field, form.model_choice)
+  end
+
+  defp selected_default_model({:rows, rows, _total}, :runtime_default) do
+    case Enum.find(rows, &(&1.choice == :runtime_default)) do
+      %{model: model} -> trimmed(model)
+      _unknown -> nil
+    end
+  end
+
+  defp selected_default_model(_field, _choice), do: nil
 
   @doc "The `<option>` value one choice travels to the browser as."
   @spec choice_value(model_choice()) :: String.t()
@@ -581,7 +709,7 @@ defmodule Ouroboros.Web.Live.NewSession do
          |> put_stated("model", model_intent(form, field).send)
          |> put_stated("workspace", trimmed(form.workspace))
          |> put_stated("sandbox_mode", stated(form.sandbox, @sandbox_modes))
-         |> put_stated("reasoning_effort", stated(form.effort, @efforts))}
+         |> put_stated("reasoning_effort", stated(form.effort, efforts(form, field)))}
     end
   end
 
@@ -669,7 +797,14 @@ defmodule Ouroboros.Web.Live.NewSession do
 
   defp trimmed(_value), do: nil
 
+  defp identifier(nil), do: nil
+  defp identifier(value) when is_atom(value), do: Atom.to_string(value)
+  defp identifier(value), do: trimmed(value)
+
   defp describe(reason) when is_binary(reason), do: reason
   defp describe(reason) when is_atom(reason), do: to_string(reason)
   defp describe(reason), do: inspect(reason, limit: 5)
+
+  defp value(map, key) when is_map(map),
+    do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
 end

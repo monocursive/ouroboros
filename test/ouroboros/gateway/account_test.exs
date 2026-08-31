@@ -14,6 +14,60 @@ defmodule Ouroboros.Gateway.AccountTest do
     assert table["account.login.complete"].scope == :operate
     assert table["account.login.cancel"].scope == :operate
     assert table["account.logout"].scope == :operate
+    assert table["credentials.anthropic.set"].scope == :operate
+  end
+
+  test "stores an Anthropic key through a one-way, closed parameter boundary" do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "ouroboros-gateway-anthropic-#{System.unique_integer([:positive])}"
+      )
+
+    Ouroboros.DataDir.ensure_private!(root)
+    path = Path.join(root, "anthropic.key")
+    previous_path = Application.get_env(:ouroboros, :anthropic_api_key_file)
+    previous_key = System.get_env("ANTHROPIC_API_KEY")
+    Application.put_env(:ouroboros, :anthropic_api_key_file, path)
+    System.delete_env("ANTHROPIC_API_KEY")
+
+    on_exit(fn ->
+      if previous_path,
+        do: Application.put_env(:ouroboros, :anthropic_api_key_file, previous_path),
+        else: Application.delete_env(:ouroboros, :anthropic_api_key_file)
+
+      if previous_key,
+        do: System.put_env("ANTHROPIC_API_KEY", previous_key),
+        else: System.delete_env("ANTHROPIC_API_KEY")
+
+      File.rm_rf(root)
+    end)
+
+    secret = "sk-ant-gateway-must-not-return"
+
+    assert {:ok,
+            %{
+              provider: :anthropic,
+              env: "ANTHROPIC_API_KEY",
+              present: true,
+              source: :stored
+            } = reply} = Methods.invoke("credentials.anthropic.set", %{"api_key" => secret})
+
+    refute inspect(reply) =~ secret
+    assert File.read!(path) == secret
+
+    assert {:error, -32602, message} =
+             Methods.invoke("credentials.anthropic.set", %{
+               "api_key" => secret,
+               "label" => "mine"
+             })
+
+    assert message =~ "unsupported fields"
+
+    assert {:error, -32602, message} =
+             Methods.invoke("credentials.anthropic.set", %{"api_key" => "sk-ant bad"})
+
+    assert message =~ "whitespace"
   end
 
   test "reads account state and starts either supported managed ChatGPT flow" do

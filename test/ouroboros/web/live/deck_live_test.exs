@@ -76,6 +76,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
          # or absent. Empty by default, because the absent case is the one a defaulted
          # fixture would quietly stop testing.
          options: Keyword.get(opts, :options, %{}),
+         provider: Keyword.get(opts, :provider, :claude_code),
          workspace: Keyword.get(opts, :workspace, "/tmp/w"),
          # A scripted answer per verb, popped one at a time: `[{:error, …}, {:ok, …}]` is
          # how a refusal-then-retry is written without a mock framework.
@@ -181,7 +182,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       %State{
         id: state.id,
         node: node(),
-        provider: :claude_code,
+        provider: state.provider,
         workspace: state.workspace,
         workspace_mode: :shared_read,
         status: state.status,
@@ -403,6 +404,28 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       refute html =~ "ouro-transcript"
       # No vitals column either: a panel with nothing in it is worse than no panel.
       refute html =~ "ouro-vitals"
+    end
+
+    test "filters the rail without changing session order or closing the focused pane",
+         %{conn: conn} do
+      first = session_id()
+      second = session_id()
+      _alpha = listed(first, status: :idle, title: "Alpha migration")
+      _beta = listed(second, status: :idle, title: "Beta rollout")
+
+      {:ok, view, html} = live(conn, "/s/interactive/#{first}")
+      assert html =~ "Alpha migration"
+      assert html =~ "Beta rollout"
+
+      filtered = view |> form("#session-search", query: "beta") |> render_change()
+
+      refute has_element?(view, ".ouro-rail", "Alpha migration")
+      assert has_element?(view, ".ouro-rail", "Beta rollout")
+      assert filtered =~ ~s(<h1 class="ouro-focus-title">Alpha migration</h1>)
+
+      restored = view |> form("#session-search", query: "") |> render_change()
+      assert restored =~ "Alpha migration"
+      assert restored =~ "Beta rollout"
     end
   end
 
@@ -1265,6 +1288,31 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       # `default` is a label for having been told nothing, never a value to send: the
       # envelope accepts `low`, `medium` and `high` and nothing else.
       refute html =~ ~s(phx-value-choice="default")
+    end
+
+    test "a native session offers and configures Sol's extended thinking levels", %{conn: conn} do
+      id = session_id()
+
+      _plane =
+        plane(
+          id: id,
+          provider: :native,
+          backlogs: [{:ok, []}],
+          options: %{
+            model: "openai_codex:gpt-5.6-sol",
+            reasoning_effort: :high
+          }
+        )
+
+      {:ok, view, html} = live(conn, "/s/interactive/#{id}")
+      assert html =~ ~s(phx-value-choice="xhigh")
+      assert html =~ ~s(phx-value-choice="max")
+
+      view
+      |> element(~s(button[phx-value-field="reasoning_effort"][phx-value-choice="max"]))
+      |> render_click()
+
+      assert_receive {:configured, %{reasoning_effort: :max}}
     end
   end
 

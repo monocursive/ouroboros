@@ -62,7 +62,7 @@ defmodule Ouroboros.Web.Prefs do
   # Closed vocabularies, restated here rather than reached for through the LiveView layer:
   # this module is read at mount and must not depend on anything that draws.
   @sandbox_modes ["read_only", "workspace_write", "unrestricted"]
-  @efforts ["low", "medium", "high"]
+  @efforts ["none", "low", "medium", "high", "xhigh", "max"]
 
   # A preferences file is five short strings. Anything approaching this is not one, and
   # reading it into memory to find that out is what the bound is for.

@@ -82,6 +82,8 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       |> assign(:account, nil)
       |> assign(:login, nil)
       |> assign(:polling_account?, false)
+      |> assign(:api_key_dialog?, false)
+      |> assign(:api_key_error, nil)
       |> assign(:starting?, false)
       |> assign(:refusal, nil)
       |> assign(:provider_invalid?, false)
@@ -190,6 +192,59 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   end
 
   # ------------------------------------------------------------------------------------
+  # Anthropic API key
+  # ------------------------------------------------------------------------------------
+
+  def handle_event("open-anthropic-key", _params, socket) do
+    if Call.available?(socket.assigns.scope, "credentials.anthropic.set") do
+      {:noreply,
+       socket
+       |> assign(:api_key_dialog?, true)
+       |> assign(:api_key_error, nil)
+       |> assign(:refusal, nil)}
+    else
+      {:noreply,
+       assign(socket, :refusal, %{
+         message: "This link cannot change provider credentials.",
+         detail: "Open the operate-scope Ouroboros web surface to add an Anthropic API key."
+       })}
+    end
+  end
+
+  def handle_event("cancel-anthropic-key", _params, socket) do
+    {:noreply, socket |> assign(:api_key_dialog?, false) |> assign(:api_key_error, nil)}
+  end
+
+  # The raw value exists only in this callback's parameters and the gateway task that
+  # atomically stores it. It is never assigned to the socket, echoed in a refusal, or put
+  # into the session form. Phoenix filters the `api_key` parameter name before logging.
+  def handle_event("save-anthropic-key", %{"anthropic_api_key" => api_key}, socket) do
+    case call(socket, "credentials.anthropic.set", %{"api_key" => api_key}) do
+      {:ok, _status} ->
+        {:noreply,
+         socket
+         |> assign(:api_key_dialog?, false)
+         |> assign(:api_key_error, nil)
+         |> assign(:refusal, nil)
+         |> load_providers()}
+
+      refused ->
+        words = NewSession.refusal(refused)
+
+        {:noreply,
+         assign(
+           socket,
+           :api_key_error,
+           (words && words.message) || "The Anthropic API key could not be stored."
+         )}
+    end
+  end
+
+  def handle_event("save-anthropic-key", _params, socket) do
+    {:noreply, assign(socket, :api_key_error, "Enter an Anthropic API key.")}
+  end
+
+  # ------------------------------------------------------------------------------------
   # Start
   # ------------------------------------------------------------------------------------
 
@@ -221,6 +276,16 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
          assign(socket, :refusal, %{
            message: "That AI provider is not available on this computer.",
            detail: "Choose one marked available under Advanced settings."
+         })}
+
+      match?(
+        %{usable?: false},
+        NewSession.api_key_card(form, field(socket), socket.assigns.providers)
+      ) ->
+        {:noreply,
+         assign(socket, :refusal, %{
+           message: "An Anthropic API key is not available to the Ouroboros service.",
+           detail: "Add it under Anthropic API, or set it in the service environment."
          })}
 
       is_binary(socket.assigns.started_id) ->
@@ -467,9 +532,14 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   defp reconcile(form, socket) do
     field = NewSession.model_field(socket.assigns.catalogue, form.provider)
 
-    if NewSession.offers?(field, form.model_choice),
+    form =
+      if NewSession.offers?(field, form.model_choice),
+        do: form,
+        else: %{form | model_choice: :runtime_default}
+
+    if is_nil(form.effort) or form.effort in NewSession.efforts(form, field),
       do: form,
-      else: %{form | model_choice: :runtime_default}
+      else: %{form | effort: nil}
   end
 
   defp field(socket),
@@ -492,6 +562,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     field = NewSession.model_field(assigns.catalogue, assigns.form.provider)
     account = NewSession.account_card(assigns.account, assigns.login)
     gated? = NewSession.requires_chatgpt?(assigns.form, field)
+    api_key = NewSession.api_key_card(assigns.form, field, assigns.providers)
 
     can_start? = Call.available?(assigns.scope, "interactive.start")
 
@@ -501,6 +572,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     assigns =
       assigns
       |> assign(:field, field)
+      |> assign(:efforts, NewSession.efforts(assigns.form, field))
       |> assign(
         :visible,
         NewSession.search(field, assigns.form.model_search, assigns.form.model_choice)
@@ -508,6 +580,11 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       |> assign(:intent, NewSession.model_intent(assigns.form, field))
       |> assign(:account_card, account)
       |> assign(:gated?, gated?)
+      |> assign(:api_key_card, api_key)
+      |> assign(
+        :can_set_api_key?,
+        Call.available?(assigns.scope, "credentials.anthropic.set")
+      )
       |> assign(:can_start?, can_start?)
       |> assign(:provider_ready?, provider_ready?)
       |> assign(:can_browse?, Call.available?(assigns.scope, "workspace.browse"))
@@ -552,7 +629,10 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
         <details
           class="ouro-new-advanced"
-          open={@provider_invalid? or (@gated? and not @account_card.usable?)}
+          open={
+            @provider_invalid? or (@gated? and not @account_card.usable?) or
+              (is_map(@api_key_card) and not @api_key_card.usable?)
+          }
         >
           <summary>
             <span>Advanced settings</span>
@@ -577,9 +657,14 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
             error={@catalogue_error}
           />
 
-          <.thinking_field effort={@form.effort} />
+          <.thinking_field effort={@form.effort} choices={@efforts} />
           <.sandbox_field sandbox={@form.sandbox} />
           <.account_card :if={@gated?} card={@account_card} scope={@scope} />
+          <.api_key_card
+            :if={is_map(@api_key_card)}
+            card={@api_key_card}
+            can_set={@can_set_api_key?}
+          />
         </details>
 
         <p :if={@refusal} class="ouro-refusal ouro-new-refusal" role="alert">
@@ -594,10 +679,11 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
             class="ouro-button"
             disabled={
               not @can_start? or not @provider_ready? or @starting? or
-                (@gated? and not @account_card.usable?)
+                (@gated? and not @account_card.usable?) or
+                (is_map(@api_key_card) and not @api_key_card.usable?)
             }
           >
-            {start_label(@can_start?, @starting?, @gated?, @account_card)}
+            {start_label(@can_start?, @starting?, @gated?, @account_card, @api_key_card)}
           </button>
         </footer>
 
@@ -612,15 +698,22 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
           sessions.
         </p>
       </form>
+
+      <.anthropic_key_dialog :if={@api_key_dialog?} error={@api_key_error} />
     </div>
     """
   end
 
-  defp start_label(false, _starting?, _gated?, _card), do: "Start session"
-  defp start_label(_can?, true, _gated?, _card), do: "Starting…"
+  defp start_label(false, _starting?, _gated?, _card, _api_key), do: "Start session"
+  defp start_label(_can?, true, _gated?, _card, _api_key), do: "Starting…"
 
-  defp start_label(_can?, _starting?, true, %{usable?: false}), do: "Connect ChatGPT first"
-  defp start_label(_can?, _starting?, _gated?, _card), do: "Start session"
+  defp start_label(_can?, _starting?, true, %{usable?: false}, _api_key),
+    do: "Connect ChatGPT first"
+
+  defp start_label(_can?, _starting?, _gated?, _card, %{usable?: false}),
+    do: "Add Anthropic API key first"
+
+  defp start_label(_can?, _starting?, _gated?, _card, _api_key), do: "Start session"
   defp provider_label(nil), do: "finding provider"
   defp provider_label("native"), do: "Ouroboros AI"
   defp provider_label("claude"), do: "Claude"
@@ -949,6 +1042,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   # ------------------------------------------------------------------------------------
 
   attr :effort, :any, required: true
+  attr :choices, :list, required: true
 
   def thinking_field(assigns) do
     ~H"""
@@ -958,21 +1052,33 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
         <span class="ouro-new-aside">{if @effort, do: "Selected", else: "Recommended"}</span>
       </div>
 
-      <select class="ouro-new-select" name="effort" aria-labelledby="effort-label">
+      <select
+        class="ouro-new-select"
+        name="effort"
+        aria-labelledby="effort-label"
+        disabled={@choices == []}
+      >
         <option value="" selected={is_nil(@effort)}>Recommended</option>
-        <option :for={level <- NewSession.efforts()} value={level} selected={@effort == level}>
+        <option :for={level <- @choices} value={level} selected={@effort == level}>
           {String.capitalize(level)}
         </option>
       </select>
 
       <p class="ouro-new-intent">
-        {if @effort,
-          do: "Thinking level: #{String.capitalize(@effort)}",
-          else: "Ouroboros will choose the recommended thinking level."}
+        {thinking_intent(@effort, @choices)}
       </p>
     </section>
     """
   end
+
+  defp thinking_intent(_effort, []),
+    do: "The selected model does not advertise an adjustable thinking level."
+
+  defp thinking_intent(effort, _choices) when is_binary(effort),
+    do: "Thinking level: #{String.capitalize(effort)}"
+
+  defp thinking_intent(_effort, _choices),
+    do: "Ouroboros will choose the recommended thinking level."
 
   # ------------------------------------------------------------------------------------
   # Sandbox
@@ -1117,4 +1223,110 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   defp account_aside(:connected), do: "Connected"
   defp account_aside(:waiting), do: "Waiting"
   defp account_aside(:required), do: "Required"
+
+  # ------------------------------------------------------------------------------------
+  # Direct API key
+  # ------------------------------------------------------------------------------------
+
+  attr :card, :map, required: true
+  attr :can_set, :boolean, required: true
+
+  def api_key_card(assigns) do
+    ~H"""
+    <section class="ouro-new-field ouro-account" aria-labelledby="api-key-label">
+      <div class="ouro-new-label-row">
+        <span class="ouro-new-label" id="api-key-label">{@card.provider} API</span>
+        <span class="ouro-new-aside">{api_key_aside(@card.state)}</span>
+      </div>
+
+      <p :if={@card.state == :checking} class="ouro-new-hint">
+        Reading API-key readiness…
+      </p>
+
+      <p :if={@card.state == :available and @card.source == "stored"} class="ouro-new-hint">
+        A private Anthropic API key is stored by Ouroboros. Its value never reaches this page.
+      </p>
+
+      <p :if={@card.state == :available and @card.source != "stored"} class="ouro-new-hint">
+        {@card.env} is available from the service environment. Its value never reaches this page.
+      </p>
+
+      <p :if={@card.state == :required} class="ouro-new-hint">
+        Claude models use direct Anthropic API calls only. Add a key here, or set
+        <code>{@card.env}</code>
+        in the Ouroboros service environment. OAuth and Claude
+        subscription login are not used.
+      </p>
+
+      <div :if={@can_set and @card.source != "environment"} class="ouro-new-row">
+        <button
+          type="button"
+          class="ouro-new-secondary"
+          phx-click="open-anthropic-key"
+        >
+          {if @card.state == :available, do: "Replace saved key", else: "Add API key"}
+        </button>
+      </div>
+
+      <p :if={not @can_set and @card.state == :required} class="ouro-new-hint">
+        This link is view-only, so it cannot store provider credentials.
+      </p>
+    </section>
+    """
+  end
+
+  defp api_key_aside(:checking), do: "Checking"
+  defp api_key_aside(:available), do: "Available"
+  defp api_key_aside(:required), do: "Required"
+
+  attr :error, :any, required: true
+
+  def anthropic_key_dialog(assigns) do
+    ~H"""
+    <dialog
+      id="anthropic-key-dialog"
+      class="ouro-session-dialog"
+      aria-modal="true"
+      aria-labelledby="anthropic-key-title"
+      phx-hook="Modal"
+      data-cancel-event="cancel-anthropic-key"
+    >
+      <form
+        id="anthropic-key-form"
+        phx-submit="save-anthropic-key"
+        class="ouro-session-dialog-form"
+        autocomplete="off"
+      >
+        <h2 id="anthropic-key-title">Anthropic API key</h2>
+        <p>
+          The key is stored as a private mode-0600 file on this runtime host. It is sent only
+          to Anthropic when a Claude model runs and is never shown again.
+        </p>
+        <label for="anthropic-api-key">API key</label>
+        <input
+          id="anthropic-api-key"
+          name="anthropic_api_key"
+          type="password"
+          class="ouro-new-input ouro-mono"
+          placeholder="sk-ant-…"
+          autocomplete="new-password"
+          autocapitalize="none"
+          spellcheck="false"
+          maxlength="8192"
+          required
+          autofocus
+        />
+        <p :if={@error} class="ouro-refusal" role="alert">{@error}</p>
+        <div class="ouro-session-dialog-actions">
+          <button type="button" class="ouro-button-quiet" phx-click="cancel-anthropic-key">
+            Cancel
+          </button>
+          <button type="submit" class="ouro-button" phx-disable-with="Saving…">
+            Save API key
+          </button>
+        </div>
+      </form>
+    </dialog>
+    """
+  end
 end

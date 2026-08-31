@@ -62,6 +62,16 @@ defmodule Ouroboros.Web.PrefsTest do
       assert Prefs.read(dir) == %{"provider" => "native"}
     end
 
+    test "retains the extended native reasoning levels", %{dir: dir} do
+      assert :ok =
+               Prefs.write(dir, %{
+                 "provider" => "native",
+                 "reasoning_effort" => "max"
+               })
+
+      assert Prefs.read(dir)["reasoning_effort"] == "max"
+    end
+
     test "drops the session id, and anything else that is not one of the five", %{dir: dir} do
       assert :ok =
                Prefs.write(dir, %{

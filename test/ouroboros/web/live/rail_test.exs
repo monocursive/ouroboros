@@ -304,6 +304,15 @@ defmodule Ouroboros.Web.Live.RailTest do
   # ------------------------------------------------------------------------------------
 
   describe "the rail as drawn" do
+    test "offers command-style session search with a recoverable LiveView form" do
+      html = render_rail([])
+
+      assert html =~ ~s(id="session-search")
+      assert html =~ ~s(aria-label="Search sessions")
+      assert html =~ ~s(phx-change="filter-sessions")
+      assert html =~ "<kbd>/</kbd>"
+    end
+
     test "draws all three headings, always, so an empty group is a fact and not a gap" do
       html = render_rail([])
 
