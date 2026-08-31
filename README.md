@@ -270,8 +270,14 @@ enter the Ouroboros store.
 The default `native` provider calls models directly through ReqLLM and Finch. No Codex
 binary is resolved or spawned. `openai:<model>` uses the official OpenAI API and
 `OPENAI_API_KEY`; `openai_codex:<model>` uses ChatGPT subscription OAuth and the direct
-Codex Responses endpoint. The packaged default is `openai_codex:gpt-5.6-sol` and may be
-overridden with `OUROBOROS_NATIVE_MODEL`.
+Codex Responses endpoint. `anthropic:<model>` uses Anthropic's Messages API and
+`ANTHROPIC_API_KEY`, or the private key saved from the Anthropic card on the web
+`/new` page. The environment wins when both are present; the UI-managed key is a
+mode-`0600` `anthropic.key` in the Ouroboros data directory and becomes available to
+new requests immediately. Ouroboros deliberately supports API-key authentication only
+for Anthropic — no Claude OAuth or subscription credential is accepted or exposed. The
+packaged default is `openai_codex:gpt-5.6-sol` and may be overridden with
+`OUROBOROS_NATIVE_MODEL`.
 
 ChatGPT OAuth credentials live in a private `oauth.json` under the Ouroboros data
 directory (or `OUROBOROS_OAUTH_FILE`). Browser PKCE and device-code login are implemented
@@ -312,6 +318,14 @@ session with `model:`:
 ```sh
 export OUROBOROS_NATIVE_MODEL=openai:gpt-5.6
 export OPENAI_API_KEY=...
+```
+
+Or run Claude through the same native loop, using an Anthropic API key from the service
+environment (you can also add one from the Anthropic card on the web `/new` page):
+
+```sh
+export OUROBOROS_NATIVE_MODEL=anthropic:claude-sonnet-5
+export ANTHROPIC_API_KEY=...
 ```
 
 ```elixir
@@ -1594,7 +1608,10 @@ they do in a shell, and `ouro` scrolls by keyboard.
   configured provider draws from — context window, max output, and the four token rates
   per million — so a client can turn `usage.total_tokens` into a context percentage and a
   cost estimate. It is not a claim that a listed model will work: Ouroboros drives a
-  vendor CLI, and only that CLI's account knows what it may run. It is not verified
+  vendor CLI or, for `native`, a direct API, and only that credential's account knows what
+  it may run. Native combines the OpenAI and Anthropic catalogues because its model option
+  can select either transport; each id carries its required `openai_codex:`, `openai:`, or
+  `anthropic:` prefix. It is not verified
   pricing either, just the vendor's public list price as of the snapshot's epoch. Which
   vendor's catalogue a given CLI draws from is Ouroboros's own reading — no adapter
   declares it — and a node can correct it with `config :ouroboros, model_catalogs:`.

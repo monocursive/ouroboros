@@ -289,7 +289,7 @@ reading.
 |---|---|
 | `runtime.status` | `Ouroboros.status/0` ([ouroboros.ex:13](../lib/ouroboros.ex)) |
 | `runtime.providers` | `Ouroboros.providers/0` + per-provider `provider_status/1`, each probed under its own bounded task. The `native` entry's `details` carries **`sandbox`** (C5) — `"sandbox-exec"`, `"bwrap"`, or `"none"`, the OS sandbox backend the owning node actually detected — plus `sandbox_notes` (why, including Apple's deprecation of `sandbox-exec` and bubblewrap's missing seccomp) and `enforced`, a sentence naming what each mode holds. It is a string and never a boolean: "sandboxed" is not a fact, `"sandbox-exec"` is. **A footer may say "no OS sandbox" for a native session only when this reads `none`** — never inferred from the provider's name, and never from the absence of the key, which means "this runtime did not say" |
-| `runtime.models` | `Ouroboros.Models.list/0` — the packaged `llm_db` catalogue. Native rows carry full ReqLLM specs such as `openai_codex:gpt-5.6-sol`, the configured direct default, context/output limits and public token pricing; availability is reported separately by `runtime.providers`. |
+| `runtime.models` | `Ouroboros.Models.list/0` — the packaged `llm_db` catalogue. Native combines its OpenAI and Anthropic lanes and carries full ReqLLM specs such as `openai_codex:gpt-5.6-sol` and `anthropic:claude-sonnet-5`, the configured direct default, context/output limits and public token pricing; non-secret credential readiness is reported separately by `runtime.providers`. |
 | `account.read` `{}` | `OpenAIAuth.read/1` — non-secret API-key/OAuth readiness, ChatGPT identity claims, and managed-login state. Tokens remain only in the runtime's private OAuth file and never cross the gateway. |
 | `agents.list` | `Mesh.list_agents/0` |
 | `agents.state` `{id}` | `Mesh.state/1` |
@@ -359,6 +359,7 @@ reading.
 | `account.login.complete` `{login_id, code, state}` | `OpenAIAuth.complete/4` — completes browser PKCE captured by a remote client; the verifier never leaves the runtime. |
 | `account.login.cancel` `{login_id}` | `OpenAIAuth.cancel/2` — aborts the matching callback listener or device poll. |
 | `account.logout` `{}` | `OpenAIAuth.logout/1` — atomically removes the local OpenAI-Codex credential. |
+| `credentials.anthropic.set` `{api_key}` | `Provider.AnthropicKey.put/2` — operate-scope one-way credential write used by the web new-session page. Atomically stores a same-user mode-`0600` `anthropic.key` under the private Ouroboros data directory; the reply contains readiness and source only, never the key. `ANTHROPIC_API_KEY` remains the effective source when present. |
 | `computer_use.probe` `{node?}` | `Provider.Native.Desktop.probe/0` — when `enabled?/0` is true, starts the helper if needed and returns handshake `doctor` plus live `phase`/`sessions`. When off it starts nothing and returns the same posture as `computer_use.status`. Node-routed; `ouro desktop doctor` asks `status` (starts nothing); `--probe` is the operator surface that starts the helper |
 
 The three turn-carrying methods (`send_message`, `follow_up`, `steer`) refuse unknown
