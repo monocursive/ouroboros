@@ -226,12 +226,20 @@ defmodule Ouroboros.Application do
     # still carries a generous restart intensity, because language-server failures are
     # states inside the pool, never crashes of it.
     #
-    # D4's MCP subtree and Computer Use's helper pool are last for the same reasons:
-    # somebody else's program, or a host-privileged helper, on the end of a pipe, spawned
-    # lazily, owning nothing any plane rebuilds from. Both run only on `:core`. Computer
-    # Use precedes MCP because its pool holds the live per-session last-state map: an MCP
-    # subtree crash must not restart it and discard those snapshots. A Desktop supervisor
-    # crash may reconnect disposable MCP ports without losing durable session state.
+    # D4's MCP subtree, Computer Use's helper pool, and lane W's wasm pool are last for the
+    # same reasons: somebody else's program, or a host-privileged helper, on the end of a
+    # pipe, spawned lazily, owning nothing any plane rebuilds from. All three run only on
+    # `:core`. Computer Use precedes MCP because its pool holds the live per-session
+    # last-state map: an MCP subtree crash must not restart it and discard those snapshots.
+    # A Desktop supervisor crash may reconnect disposable MCP ports without losing durable
+    # session state.
+    #
+    # The wasm pool leads both of them by the same rule taken one step further. What its
+    # restart discards is live component instances — guest state that only `init` and every
+    # message since could approximate, and that no snapshot anywhere rebuilds. The desktop
+    # pool's map is rebuilt by the next capture and MCP's ports are disposable, so an
+    # improbable wasm crash paying for those two is the cheaper trade than an improbable MCP
+    # crash paying for a running guest.
     #
     # The web surface is last of all, and it is the second child here a stranger can
     # reach. Everything the gateway's paragraph above says applies to it unchanged — it
@@ -246,6 +254,7 @@ defmodule Ouroboros.Application do
       gateway_children() ++
       [
         Ouroboros.CodeIntel.Supervisor,
+        Ouroboros.Wasm.Supervisor,
         Ouroboros.Provider.Native.Desktop.Supervisor,
         Ouroboros.Provider.Native.Mcp.Supervisor
       ] ++ web_children()

@@ -262,6 +262,23 @@ config :ouroboros,
       "com.apple.keychainaccess",
       "com.apple.SecurityAgent"
     ]
+  ],
+  # WebAssembly containment (docs/WASM.md §7). Same posture as `:computer_use`: the helper
+  # on disk is the operator opt-in — `make wasm` builds it, nothing else does — and
+  # everything here is a bound, so a typo falls back to the default rather than widening
+  # one. `OUROBOROS_WASM_HELPER=/path` overrides `:bundled`, which resolves priv/, the
+  # checkout's priv/, a parent walk, or a sibling of `ouro`. The guest's own bounds — fuel,
+  # deadline, memory — are per-request and never defaulted here; `ouro-wasm` refuses a
+  # request that omits one, and inventing a value on this side would be the build deciding
+  # how much of the machine a guest may have.
+  wasm: [
+    helper_path: :bundled,
+    handshake_timeout_ms: 5_000,
+    request_timeout_ms: 30_000,
+    call_margin_ms: 10_000,
+    max_frame_bytes: 8 * 1024 * 1024,
+    broken_ms: 15_000,
+    store_budget_bytes: 512 * 1024 * 1024
   ]
 
 # The two facts about the web endpoint that are genuinely compile-time, and no others.
