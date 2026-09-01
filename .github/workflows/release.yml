@@ -39,7 +39,7 @@ jobs:
             triple: aarch64-unknown-linux-gnu
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: erlef/setup-beam@v1
         with:
@@ -120,7 +120,7 @@ jobs:
       # *not* come from the release, so the key of record is the committed one — the same
       # bytes `ouro update` compiles into itself — and this job verifies its own output
       # against it before publishing anything.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/download-artifact@v4
         with:
