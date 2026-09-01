@@ -29,9 +29,9 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
                        end)
 
   # Same honesty for bubblewrap: installing the binary is not sufficient. Detection runs
-  # a representative namespace probe, so a Linux host whose container policy blocks it
-  # skips these live tests with the detected backend printed instead of failing every
-  # unrelated command before it starts.
+  # a representative filesystem probe (and a separate network-namespace probe), so a Linux
+  # host whose container policy blocks mounts skips these live tests with the detected
+  # backend printed instead of failing every unrelated command before it starts.
   @needs_bwrap (case @backend do
                   :bwrap ->
                     []
@@ -496,7 +496,7 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
   end
 
   describe "detecting bubblewrap" do
-    test "rejects a binary whose version works but whose namespace setup is forbidden", %{
+    test "rejects a binary whose version works but whose filesystem namespace is forbidden", %{
       root: root
     } do
       fake = Path.join(root, "blocked-bwrap")
@@ -509,17 +509,48 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
           echo 'bubblewrap 0.test'
           exit 0
         fi
-        echo 'bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted' >&2
+        echo 'bwrap: Can't mount tmpfs on /newroot: Operation not permitted' >&2
         exit 1
         """
       )
 
       File.chmod!(fake, 0o755)
 
-      assert Bwrap.probe(fake) == nil
+      assert Bwrap.probe(fake) == {:error, :filesystem_namespace_refused}
     end
 
-    test "selects a binary only after the representative namespace command succeeds", %{
+    test "keeps the backend when only the network namespace is forbidden", %{root: root} do
+      fake = Path.join(root, "fs-only-bwrap")
+
+      File.write!(
+        fake,
+        """
+        #!/bin/sh
+        if [ "${1:-}" = "--version" ]; then
+          echo 'bubblewrap 0.test'
+          exit 0
+        fi
+        for arg in "$@"; do
+          if [ "$arg" = "--unshare-net" ]; then
+            echo 'bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted' >&2
+            exit 1
+          fi
+        done
+        exit 0
+        """
+      )
+
+      File.chmod!(fake, 0o755)
+
+      assert {:ok, %{version: "bubblewrap 0.test", unshare_net: false, notes: notes}} =
+               Bwrap.probe(fake)
+
+      assert notes =~ "filesystem capability probe passed"
+      assert notes =~ "network namespace unavailable"
+      refute "--unshare-net" in Bwrap.options(%{root: "/ws"}, fixed_policy(:read_only), false)
+    end
+
+    test "selects a binary only after the representative filesystem command succeeds", %{
       root: root
     } do
       fake = Path.join(root, "working-bwrap")
@@ -537,8 +568,10 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
 
       File.chmod!(fake, 0o755)
 
-      assert %{version: "bubblewrap 0.test", notes: notes} = Bwrap.probe(fake)
-      assert notes =~ "capability probe passed"
+      assert {:ok, %{version: "bubblewrap 0.test", unshare_net: true, notes: notes}} =
+               Bwrap.probe(fake)
+
+      assert notes =~ "capability probes passed"
     end
   end
 

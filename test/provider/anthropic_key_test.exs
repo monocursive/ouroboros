@@ -103,11 +103,67 @@ defmodule Ouroboros.Provider.AnthropicKeyTest do
     assert {:ok, %{api_key: "sk-ant-legacy-key", workspace_id: "wrkspc_Legacy123"}, :stored} =
              AnthropicKey.fetch_credentials(path: path)
 
-    assert %{
-             "version" => 1,
-             "api_key" => "sk-ant-legacy-key",
-             "workspace_id" => "wrkspc_Legacy123"
-           } = Jason.decode!(File.read!(path))
+    assert %{"api_key" => "sk-ant-legacy-key", "workspace_id" => "wrkspc_Legacy123"} =
+             Jason.decode!(File.read!(path))
+  end
+
+  test "replacing the key clears a stored workspace unless a new one is supplied", %{path: path} do
+    assert {:ok, _} =
+             AnthropicKey.put("sk-ant-original", "wrkspc_Original123", path: path)
+
+    assert {:ok, %{workspace_configured: false}} =
+             AnthropicKey.configure("sk-ant-rotated", nil, path: path)
+
+    assert {:ok, %{api_key: "sk-ant-rotated", workspace_id: nil}, :stored} =
+             AnthropicKey.fetch_credentials(path: path)
+
+    assert {:ok, %{workspace_configured: true}} =
+             AnthropicKey.configure("sk-ant-rotated-again", "wrkspc_Fresh456", path: path)
+
+    assert {:ok, %{api_key: "sk-ant-rotated-again", workspace_id: "wrkspc_Fresh456"}, :stored} =
+             AnthropicKey.fetch_credentials(path: path)
+  end
+
+  test "an empty workspace_id clears the stored workspace without requiring the key", %{
+    path: path
+  } do
+    assert {:ok, _} = AnthropicKey.put("sk-ant-keep", "wrkspc_Keep123", path: path)
+    assert {:ok, %{workspace_configured: false}} = AnthropicKey.configure(nil, :clear, path: path)
+
+    assert {:ok, %{api_key: "sk-ant-keep", workspace_id: nil}, :stored} =
+             AnthropicKey.fetch_credentials(path: path)
+  end
+
+  test "an invalid ANTHROPIC_WORKSPACE_ID does not disable a valid environment key", %{
+    path: path
+  } do
+    System.put_env("ANTHROPIC_API_KEY", "sk-ant-environment")
+    System.put_env("ANTHROPIC_WORKSPACE_ID", "not-a-workspace")
+
+    assert {:ok, %{api_key: "sk-ant-environment", workspace_id: nil}, :environment} =
+             AnthropicKey.fetch_credentials(path: path)
+
+    assert %{present: true, source: :environment, workspace_configured: false} =
+             AnthropicKey.status(path: path)
+  end
+
+  test "configure serializes concurrent updates so a key is not dropped", %{path: path} do
+    assert {:ok, _} = AnthropicKey.put("sk-ant-original", path: path)
+
+    tasks =
+      for i <- 1..8 do
+        Task.async(fn ->
+          AnthropicKey.configure(nil, "wrkspc_Parallel#{i}AAA", path: path)
+        end)
+      end
+
+    results = Task.await_many(tasks, 5_000)
+    assert Enum.all?(results, &match?({:ok, %{present: true}}, &1))
+
+    assert {:ok, %{api_key: "sk-ant-original", workspace_id: workspace_id}, :stored} =
+             AnthropicKey.fetch_credentials(path: path)
+
+    assert workspace_id =~ ~r/\Awrkspc_Parallel\d+AAA\z/
   end
 
   test "a stored file with broad permissions is ignored", %{path: path} do

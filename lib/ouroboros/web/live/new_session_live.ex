@@ -239,18 +239,27 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   # ------------------------------------------------------------------------------------
 
   def handle_event("open-anthropic-key", _params, socket) do
-    if Call.available?(socket.assigns.scope, "credentials.anthropic.set") do
-      {:noreply,
-       socket
-       |> assign(:api_key_dialog?, true)
-       |> assign(:api_key_error, nil)
-       |> assign(:refusal, nil)}
-    else
-      {:noreply,
-       assign(socket, :refusal, %{
-         message: "This link cannot change provider credentials.",
-         detail: "Open the operate-scope Ouroboros web surface to add an Anthropic API key."
-       })}
+    cond do
+      not Call.available?(socket.assigns.scope, "credentials.anthropic.set") ->
+        {:noreply,
+         assign(socket, :refusal, %{
+           message: "This link cannot change provider credentials.",
+           detail: "Open the operate-scope Ouroboros web surface to add an Anthropic API key."
+         })}
+
+      env_backed_api_key?(socket) ->
+        {:noreply,
+         assign(socket, :refusal, %{
+           message: "This runtime is using an environment credential.",
+           detail: "Unset the environment variable to store a private key instead."
+         })}
+
+      true ->
+        {:noreply,
+         socket
+         |> assign(:api_key_dialog?, true)
+         |> assign(:api_key_error, nil)
+         |> assign(:refusal, nil)}
     end
   end
 
@@ -267,31 +276,48 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     credential_params =
       %{}
       |> put_credential_param("api_key", params["anthropic_api_key"])
-      |> put_credential_param("workspace_id", params["anthropic_workspace_id"])
+      |> NewSession.put_workspace_param(params)
 
-    case credential_params do
-      empty when map_size(empty) == 0 ->
+    cond do
+      env_backed_api_key?(socket) ->
+        {:noreply,
+         assign(
+           socket,
+           :api_key_error,
+           "This runtime is using an environment credential. Unset the environment variable to store a private key instead."
+         )}
+
+      map_size(credential_params) == 0 ->
         {:noreply,
          assign(socket, :api_key_error, "Enter a new API key or an Anthropic workspace ID.")}
 
-      credential_params ->
+      true ->
         save_anthropic_credentials(socket, credential_params)
     end
   end
 
   def handle_event("open-xai-key", _params, socket) do
-    if Call.available?(socket.assigns.scope, "credentials.xai.set") do
-      {:noreply,
-       socket
-       |> assign(:api_key_dialog?, true)
-       |> assign(:api_key_error, nil)
-       |> assign(:refusal, nil)}
-    else
-      {:noreply,
-       assign(socket, :refusal, %{
-         message: "This link cannot change provider credentials.",
-         detail: "Open the operate-scope Ouroboros web surface to add an xAI API key."
-       })}
+    cond do
+      not Call.available?(socket.assigns.scope, "credentials.xai.set") ->
+        {:noreply,
+         assign(socket, :refusal, %{
+           message: "This link cannot change provider credentials.",
+           detail: "Open the operate-scope Ouroboros web surface to add an xAI API key."
+         })}
+
+      env_backed_api_key?(socket) ->
+        {:noreply,
+         assign(socket, :refusal, %{
+           message: "This runtime is using an environment credential.",
+           detail: "Unset the environment variable to store a private key instead."
+         })}
+
+      true ->
+        {:noreply,
+         socket
+         |> assign(:api_key_dialog?, true)
+         |> assign(:api_key_error, nil)
+         |> assign(:refusal, nil)}
     end
   end
 
@@ -300,12 +326,20 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   end
 
   def handle_event("save-xai-key", %{"xai_api_key" => api_key}, socket) do
-    case String.trim(api_key) do
-      "" ->
+    cond do
+      env_backed_api_key?(socket) ->
+        {:noreply,
+         assign(
+           socket,
+           :api_key_error,
+           "This runtime is using an environment credential. Unset the environment variable to store a private key instead."
+         )}
+
+      String.trim(api_key) == "" ->
         {:noreply, assign(socket, :api_key_error, "Enter an xAI API key.")}
 
-      api_key ->
-        save_xai_key(socket, api_key)
+      true ->
+        save_xai_key(socket, String.trim(api_key))
     end
   end
 
@@ -647,6 +681,11 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       "" -> params
       value -> Map.put(params, key, value)
     end
+  end
+
+  defp env_backed_api_key?(socket) do
+    card = NewSession.api_key_card(socket.assigns.form, field(socket), socket.assigns.providers)
+    is_map(card) and card.source == "environment"
   end
 
   defp call(socket, method, params) do
@@ -1698,9 +1737,14 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
           Personal or service-account keys that can access multiple workspaces require this
           value on every request. Find it in Anthropic Console → Settings → Workspaces.
           <span :if={@card.workspace_configured?}>
-            Leave this blank to keep the saved workspace ID.
+            Replacing the API key clears the stored workspace unless you enter one here.
+            Leave this blank, without a new key, to keep the saved workspace ID.
           </span>
         </p>
+        <label :if={@card.workspace_configured?} class="ouro-new-hint">
+          <input type="checkbox" name="clear_anthropic_workspace" value="true" />
+          Remove the stored workspace ID
+        </label>
         <p :if={@error} class="ouro-refusal" role="alert">{@error}</p>
         <div class="ouro-session-dialog-actions">
           <button type="button" class="ouro-button-quiet" phx-click="cancel-anthropic-key">

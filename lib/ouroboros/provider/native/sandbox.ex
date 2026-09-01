@@ -153,7 +153,9 @@ defmodule Ouroboros.Provider.Native.Sandbox do
     backend: :none,
     executable: nil,
     version: nil,
-    notes: "no OS sandbox on this node: none of ouro-sandbox, sandbox-exec, or bwrap is available"
+    notes:
+      "no OS sandbox on this node: none of ouro-sandbox, sandbox-exec, or bwrap is available",
+    unshare_net: false
   }
 
   # ------------------------------------------------------------------ detection
@@ -401,8 +403,8 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   def wrap(command, scope, policy, %{backend: :ouro_sandbox, executable: executable}),
     do: Helper.wrap(command, scope, policy, executable)
 
-  def wrap(command, scope, policy, %{backend: :bwrap, executable: executable}),
-    do: Bwrap.wrap(command, scope, policy, executable)
+  def wrap(command, scope, policy, %{backend: :bwrap, executable: executable} = detection),
+    do: Bwrap.wrap(command, scope, policy, executable, Map.get(detection, :unshare_net, true))
 
   def wrap(_command, _scope, _policy, %{backend: :none}), do: {:error, :no_backend}
 
@@ -628,22 +630,51 @@ defmodule Ouroboros.Provider.Native.Sandbox do
 
       path ->
         case Bwrap.probe(path) do
-          %{version: version, notes: notes} ->
+          {:ok, %{version: version, notes: notes, unshare_net: true}} ->
             %{
               backend: :bwrap,
               executable: path,
               version: version,
               notes:
                 "Linux bubblewrap through #{path}. #{notes}. Filesystem and network " <>
-                  "namespace only: no seccomp filter, so the syscall surface is not narrowed."
+                  "namespace only: no seccomp filter, so the syscall surface is not narrowed.",
+              unshare_net: true
             }
 
-          nil ->
+          {:ok, %{version: version, notes: notes, unshare_net: false}} ->
+            %{
+              backend: :bwrap,
+              executable: path,
+              version: version,
+              notes:
+                "Linux bubblewrap through #{path}. #{notes}. Filesystem namespace only: " <>
+                  "the host refused an unshared network, so commands keep the host network. " <>
+                  "No seccomp filter.",
+              unshare_net: false
+            }
+
+          {:error, :no_true_executable} ->
+            %{
+              @none
+              | notes:
+                  "Linux bubblewrap at #{path} is installed but `true` is not on PATH, " <>
+                    "so the capability probe cannot run"
+            }
+
+          {:error, :filesystem_namespace_refused} ->
             %{
               @none
               | notes:
                   "Linux bubblewrap at #{path} is installed but cannot apply its read-only " <>
-                    "mount and network namespace on this host"
+                    "mount on this host"
+            }
+
+          {:error, :probe_exception} ->
+            %{
+              @none
+              | notes:
+                  "Linux bubblewrap at #{path} is installed but the capability probe failed " <>
+                    "unexpectedly"
             }
         end
     end

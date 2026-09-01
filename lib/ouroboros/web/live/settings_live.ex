@@ -218,13 +218,22 @@ defmodule Ouroboros.Web.Live.SettingsLive do
     credential_params =
       %{}
       |> put_credential_param("api_key", params["anthropic_api_key"])
-      |> put_credential_param("workspace_id", params["anthropic_workspace_id"])
+      |> NewSession.put_workspace_param(params)
 
-    if map_size(credential_params) == 0 do
+    if env_backed_credential?(socket, :anthropic) do
       {:noreply,
-       assign(socket, :credential_error, "Enter a new API key or an Anthropic workspace ID.")}
+       assign(
+         socket,
+         :credential_error,
+         "This runtime is using ANTHROPIC_API_KEY from the environment. Unset that variable to store a private key instead."
+       )}
     else
-      save_credential(socket, "credentials.anthropic.set", credential_params)
+      if map_size(credential_params) == 0 do
+        {:noreply,
+         assign(socket, :credential_error, "Enter a new API key or an Anthropic workspace ID.")}
+      else
+        save_credential(socket, "credentials.anthropic.set", credential_params)
+      end
     end
   end
 
@@ -235,9 +244,20 @@ defmodule Ouroboros.Web.Live.SettingsLive do
     do: {:noreply, socket |> assign(:credential_dialog, nil) |> assign(:credential_error, nil)}
 
   def handle_event("save-xai-key", %{"xai_api_key" => key}, socket) do
-    case String.trim(key) do
-      "" -> {:noreply, assign(socket, :credential_error, "Enter an xAI API key.")}
-      key -> save_credential(socket, "credentials.xai.set", %{"api_key" => key})
+    cond do
+      env_backed_credential?(socket, :xai) ->
+        {:noreply,
+         assign(
+           socket,
+           :credential_error,
+           "This runtime is using XAI_API_KEY from the environment. Unset that variable to store a private key instead."
+         )}
+
+      String.trim(key) == "" ->
+        {:noreply, assign(socket, :credential_error, "Enter an xAI API key.")}
+
+      true ->
+        save_credential(socket, "credentials.xai.set", %{"api_key" => String.trim(key)})
     end
   end
 
@@ -377,17 +397,25 @@ defmodule Ouroboros.Web.Live.SettingsLive do
   end
 
   defp open_credential(socket, credential, method) do
-    if Call.available?(socket.assigns.scope, method) do
-      {:noreply,
-       socket
-       |> assign(:credential_dialog, credential)
-       |> assign(:credential_error, nil)
-       |> clear_feedback()}
-    else
-      {:noreply,
-       refuse(socket, "This link cannot change provider credentials.",
-         detail: "Open the operate-scope Ouroboros web surface to add an API key."
-       )}
+    cond do
+      not Call.available?(socket.assigns.scope, method) ->
+        {:noreply,
+         refuse(socket, "This link cannot change provider credentials.",
+           detail: "Open the operate-scope Ouroboros web surface to add an API key."
+         )}
+
+      env_backed_credential?(socket, credential) ->
+        {:noreply,
+         refuse(socket, "This runtime is using an environment credential.",
+           detail: "Unset the environment variable to store a private key instead."
+         )}
+
+      true ->
+        {:noreply,
+         socket
+         |> assign(:credential_dialog, credential)
+         |> assign(:credential_error, nil)
+         |> clear_feedback()}
     end
   end
 
@@ -485,6 +513,23 @@ defmodule Ouroboros.Web.Live.SettingsLive do
   end
 
   defp credential(_rows, _provider, _env), do: nil
+
+  defp env_backed_credential?(socket, :anthropic),
+    do:
+      match?(
+        %{source: "environment"},
+        credential(socket.assigns.providers, "anthropic", "ANTHROPIC_API_KEY")
+      )
+
+  defp env_backed_credential?(socket, :xai),
+    do:
+      match?(
+        %{source: "environment"},
+        credential(socket.assigns.providers, "xai", "XAI_API_KEY")
+      )
+
+  defp stored_credential_managed?(_can_set?, %{source: "environment"}), do: false
+  defp stored_credential_managed?(can_set?, _credential), do: can_set?
 
   defp credential_state(%{present: true}), do: :available
   defp credential_state(%{present: false}), do: :missing
@@ -677,7 +722,7 @@ defmodule Ouroboros.Web.Live.SettingsLive do
                   provider="Anthropic"
                   env="ANTHROPIC_API_KEY"
                   credential={@anthropic}
-                  managed={@can_set_anthropic?}
+                  managed={stored_credential_managed?(@can_set_anthropic?, @anthropic)}
                   event="open-anthropic-key"
                   workspace
                 />
@@ -685,7 +730,7 @@ defmodule Ouroboros.Web.Live.SettingsLive do
                   provider="xAI"
                   env="XAI_API_KEY"
                   credential={@xai}
-                  managed={@can_set_xai?}
+                  managed={stored_credential_managed?(@can_set_xai?, @xai)}
                   event="open-xai-key"
                 />
               </div>

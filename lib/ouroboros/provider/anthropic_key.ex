@@ -16,6 +16,8 @@ defmodule Ouroboros.Provider.AnthropicKey do
   readable and is migrated to the versioned document on the next UI update.
   """
 
+  require Logger
+
   alias Ouroboros.DataDir
 
   @env "ANTHROPIC_API_KEY"
@@ -68,9 +70,7 @@ defmodule Ouroboros.Provider.AnthropicKey do
   def fetch_credentials(opts \\ []) when is_list(opts) do
     case normalize(System.get_env(@env)) do
       {:ok, key} ->
-        with {:ok, workspace_id} <- normalize_workspace(System.get_env(@workspace_env)) do
-          {:ok, %{api_key: key, workspace_id: workspace_id}, :environment}
-        end
+        {:ok, %{api_key: key, workspace_id: environment_workspace()}, :environment}
 
       {:error, _reason} ->
         read_stored(path(opts))
@@ -86,27 +86,45 @@ defmodule Ouroboros.Provider.AnthropicKey do
   @doc "Atomically replaces the private key and optional workspace id."
   @spec put(String.t(), String.t() | nil, keyword()) :: {:ok, status()} | {:error, term()}
   def put(key, workspace_id, opts) when is_list(opts) do
-    with {:ok, key} <- normalize(key),
-         {:ok, workspace_id} <- normalize_workspace(workspace_id),
-         path <- path(opts),
-         :ok <- publish(path, %{api_key: key, workspace_id: workspace_id}) do
-      {:ok, status(opts)}
-    end
+    path = path(opts)
+
+    with_lock(path, fn ->
+      with {:ok, key} <- normalize(key),
+           {:ok, workspace_id} <- normalize_workspace(workspace_id),
+           :ok <- publish(path, %{api_key: key, workspace_id: workspace_id}) do
+        {:ok, status(opts)}
+      end
+    end)
   rescue
     error -> {:error, {:credential_write_failed, Exception.message(error)}}
   end
 
-  @doc "Updates either stored field while preserving the other one."
-  @spec configure(String.t() | nil, String.t() | nil, keyword()) ::
+  @doc """
+  Updates either stored field.
+
+  Omitting the workspace (`nil` or `:keep`) keeps the existing one only when the key is
+  also omitted. Replacing the API key clears a stored workspace unless a new one is
+  supplied, so a key for another org cannot keep sending the previous
+  `anthropic-workspace-id`. Pass `""` or `:clear` to drop the workspace without touching
+  the key.
+  """
+  @spec configure(String.t() | nil, String.t() | nil | :keep | :clear, keyword()) ::
           {:ok, status()} | {:error, term()}
   def configure(key, workspace_id, opts \\ []) when is_list(opts) do
-    with :ok <- require_update(key, workspace_id),
-         {:ok, current} <- stored_or_empty(path(opts)),
-         {:ok, key} <- configured_key(key, current.api_key),
-         {:ok, workspace_id} <- configured_workspace(workspace_id, current.workspace_id),
-         :ok <- publish(path(opts), %{api_key: key, workspace_id: workspace_id}) do
-      {:ok, status(opts)}
-    end
+    path = path(opts)
+
+    with_lock(path, fn ->
+      replaced? = key_replaced?(key)
+
+      with :ok <- require_update(key, workspace_id),
+           {:ok, current} <- stored_or_empty(path),
+           {:ok, key} <- configured_key(key, current.api_key),
+           {:ok, workspace_id} <-
+             configured_workspace(workspace_id, current.workspace_id, replaced?),
+           :ok <- publish(path, %{api_key: key, workspace_id: workspace_id}) do
+        {:ok, status(opts)}
+      end
+    end)
   rescue
     error -> {:error, {:credential_write_failed, Exception.message(error)}}
   end
@@ -137,6 +155,17 @@ defmodule Ouroboros.Provider.AnthropicKey do
       source: source,
       workspace_configured: workspace_configured
     }
+  end
+
+  defp environment_workspace do
+    case normalize_workspace(System.get_env(@workspace_env)) do
+      {:ok, workspace_id} ->
+        workspace_id
+
+      {:error, reason} ->
+        Logger.warning("ignoring invalid #{@workspace_env}: #{inspect(reason)}")
+        nil
+    end
   end
 
   defp normalize(value) when is_binary(value) do
@@ -174,18 +203,41 @@ defmodule Ouroboros.Provider.AnthropicKey do
 
   defp normalize_workspace(_value), do: {:error, :invalid_workspace_id}
 
-  defp require_update(key, workspace_id) when key in [nil, ""] and workspace_id in [nil, ""],
-    do: {:error, :credential_update_required}
+  defp require_update(key, workspace_id)
+       when key in [nil, ""] and workspace_id in [nil, :keep],
+       do: {:error, :credential_update_required}
 
   defp require_update(_key, _workspace_id), do: :ok
+
+  defp key_replaced?(key) when key in [nil, ""], do: false
+  defp key_replaced?(_key), do: true
 
   defp configured_key(nil, existing), do: normalize(existing)
   defp configured_key("", existing), do: normalize(existing)
   defp configured_key(key, _existing), do: normalize(key)
 
-  defp configured_workspace(nil, existing), do: normalize_workspace(existing)
-  defp configured_workspace("", existing), do: normalize_workspace(existing)
-  defp configured_workspace(workspace_id, _existing), do: normalize_workspace(workspace_id)
+  defp configured_workspace(:keep, existing, false), do: normalize_workspace(existing)
+  defp configured_workspace(:keep, _existing, true), do: {:ok, nil}
+  defp configured_workspace(nil, existing, false), do: normalize_workspace(existing)
+  defp configured_workspace(nil, _existing, true), do: {:ok, nil}
+  defp configured_workspace(:clear, _existing, _replaced), do: {:ok, nil}
+  defp configured_workspace("", _existing, _replaced), do: {:ok, nil}
+
+  defp configured_workspace(workspace_id, _existing, _replaced),
+    do: normalize_workspace(workspace_id)
+
+  defp with_lock(path, fun) when is_function(fun, 0) do
+    # Concurrent operate callers (two tabs, two gateway clients) must not each read the
+    # stored document, change one field, and rename over the other. `:global.trans`
+    # serializes that read-modify-write on this node the same way worktree markers do.
+    case :global.trans({{__MODULE__, path}, self()}, fun, [node()], 20) do
+      :aborted ->
+        {:error, {:credential_write_failed, "could not lock credential file"}}
+
+      result ->
+        result
+    end
+  end
 
   defp stored_or_empty(path) do
     case read_stored(path) do

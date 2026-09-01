@@ -69,6 +69,11 @@ defmodule Ouroboros.Provider.Native.PromptTest do
     # "do not retry" spends the next call asking for something it is already being given.
     assert prompt =~ "put to the operator for you, once, as an approval"
     assert prompt =~ "do not ask for one with `ask_user`"
+
+    # The prompt must not promise more than the runtime grants: an approved escalation
+    # re-runs under the fenced :workspace_write_escalated profile, never unsandboxed.
+    assert prompt =~ "re-run inside the sandbox with only the `.git` fence"
+    refute prompt =~ "outside the sandbox"
   end
 
   test "the unrestricted posture says what is off and what is still on" do

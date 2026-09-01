@@ -62,7 +62,7 @@ defmodule Ouroboros.Provider.GrokAuth do
 
     cond do
       is_binary(configured) and configured != "" ->
-        Path.expand(configured)
+        if Path.type(configured) == :absolute, do: Path.expand(configured)
 
       grok_home = present(System.get_env("GROK_HOME")) ->
         Path.join(Path.expand(grok_home), "auth.json")
@@ -322,7 +322,7 @@ defmodule Ouroboros.Provider.GrokAuth do
     |> Regex.scan(output)
     |> List.flatten()
     |> Enum.map(&Regex.replace(~r/[.,)\]]+\z/, &1, ""))
-    |> Enum.find(&https?/1)
+    |> Enum.find(&xai_verification_url?/1)
   end
 
   defp user_code(output, url) do
@@ -351,10 +351,13 @@ defmodule Ouroboros.Provider.GrokAuth do
 
   defp code_from_url(_url), do: nil
 
-  defp https?(url) do
+  defp xai_verification_url?(url) do
     case URI.new(url) do
-      {:ok, %URI{scheme: "https", host: host}} when is_binary(host) and host != "" -> true
-      _invalid -> false
+      {:ok, %URI{scheme: "https", host: host}} when is_binary(host) ->
+        host in ["auth.x.ai", "accounts.x.ai"]
+
+      _invalid ->
+        false
     end
   end
 

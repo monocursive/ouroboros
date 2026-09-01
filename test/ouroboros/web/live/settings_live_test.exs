@@ -58,6 +58,26 @@ defmodule Ouroboros.Web.Live.SettingsLiveTest do
     refute html =~ ~r/xai-[A-Za-z0-9_-]{12}/
   end
 
+  test "environment-backed keys are not manageable from settings", %{conn: conn} do
+    previous_anthropic = System.get_env("ANTHROPIC_API_KEY")
+    previous_xai = System.get_env("XAI_API_KEY")
+    System.put_env("ANTHROPIC_API_KEY", "sk-ant-settings-must-not-render")
+    System.put_env("XAI_API_KEY", "xai-settings-must-not-render")
+
+    on_exit(fn ->
+      restore_env("ANTHROPIC_API_KEY", previous_anthropic)
+      restore_env("XAI_API_KEY", previous_xai)
+    end)
+
+    {:ok, view, html} = live(conn, "/settings")
+
+    assert html =~ "Environment only"
+    refute html =~ "sk-ant-settings-must-not-render"
+    refute html =~ "xai-settings-must-not-render"
+    refute has_element?(view, "button[phx-click=open-anthropic-key]")
+    refute has_element?(view, "button[phx-click=open-xai-key]")
+  end
+
   test "saves stated session defaults without starting a session", %{conn: conn, data_dir: dir} do
     {:ok, view, _html} = live(conn, "/settings")
 
@@ -84,6 +104,16 @@ defmodule Ouroboros.Web.Live.SettingsLiveTest do
   end
 
   test "opens managed key forms without putting a credential into the page", %{conn: conn} do
+    previous_anthropic = System.get_env("ANTHROPIC_API_KEY")
+    previous_xai = System.get_env("XAI_API_KEY")
+    System.delete_env("ANTHROPIC_API_KEY")
+    System.delete_env("XAI_API_KEY")
+
+    on_exit(fn ->
+      restore_env("ANTHROPIC_API_KEY", previous_anthropic)
+      restore_env("XAI_API_KEY", previous_xai)
+    end)
+
     {:ok, view, _html} = live(conn, "/settings")
 
     html = render_click(view, "open-anthropic-key", %{})
@@ -98,4 +128,7 @@ defmodule Ouroboros.Web.Live.SettingsLiveTest do
     assert html =~ ~s/id="xai-key-dialog"/
     assert html =~ ~s/type="password"/
   end
+
+  defp restore_env(name, nil), do: System.delete_env(name)
+  defp restore_env(name, value), do: System.put_env(name, value)
 end

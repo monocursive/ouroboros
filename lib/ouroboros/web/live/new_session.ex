@@ -905,6 +905,31 @@ defmodule Ouroboros.Web.Live.NewSession do
 
   def https?(_url), do: false
 
+  @doc """
+  Adds a workspace id to a credential payload, or an empty string that the gateway
+  treats as a clear.
+
+  A typed workspace id wins. The clear checkbox is the only way to send an empty
+  `workspace_id` without a new value, so a blank field still means "keep" when the key
+  is not also being replaced.
+  """
+  @spec put_workspace_param(map(), map()) :: map()
+  def put_workspace_param(params, form) when is_map(params) and is_map(form) do
+    workspace = form["anthropic_workspace_id"]
+    clear? = form["clear_anthropic_workspace"] in ["true", "on"]
+
+    cond do
+      is_binary(workspace) and String.trim(workspace) != "" ->
+        Map.put(params, "workspace_id", String.trim(workspace))
+
+      clear? ->
+        Map.put(params, "workspace_id", "")
+
+      true ->
+        params
+    end
+  end
+
   defp pending_login?(%{"login" => %{"status" => "pending"}}), do: true
   defp pending_login?(_read), do: false
 

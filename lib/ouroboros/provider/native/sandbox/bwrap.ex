@@ -15,12 +15,15 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
   ## Verified where the live suite runs
 
   The argv is still pinned byte for byte in `test/provider/native/sandbox_test.exs`.
-  Before this backend is selected, `probe/1` runs a representative read-only mount and
-  network namespace around the host's `true` executable. Merely finding `bwrap` or reading its version is
-  not enough: some container and hosted-runner policies allow the binary to start but
-  refuse the namespace setup. Live behaviour is claimed only where that probe succeeds;
-  elsewhere detection reports no usable backend and the live suite says why it skipped.
-  There is still no seccomp filter.
+  Before this backend is selected, `probe/1` runs a representative read-only mount around
+  the host's `true` executable, then a second command that also unshares the network
+  namespace. Merely finding `bwrap` or reading its version is not enough: some container
+  and hosted-runner policies allow the binary to start but refuse the namespace setup.
+  Filesystem isolation is enough to select the backend; a host that can mount but cannot
+  unshare the network still wraps commands, omitting `--unshare-net` so they do not fail
+  closed into an unsandboxed shell. Live behaviour is claimed only where the filesystem
+  probe succeeds; elsewhere detection reports no usable backend and the live suite says
+  why it skipped. There is still no seccomp filter.
 
   ## The argv, and why it is in this order
 
@@ -76,37 +79,39 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
   @doc """
   Proves this binary can apply the namespace primitives this backend depends on.
 
-  A version check only proves that bubblewrap is installed. The short-lived command below
-  also exercises the read-only root, `/dev`, `/proc`, and the unshared network namespace;
-  if any of those are forbidden, selecting the backend would make every sandboxed command
-  fail before it started. The probe runs once through `Sandbox.detect/0`'s cache.
+  A version check only proves that bubblewrap is installed. The filesystem probe exercises
+  the read-only root, `/dev`, and `/proc`. A second command also unshares the network
+  namespace. Refusing the network namespace must not discard filesystem isolation: the
+  wrap then omits `--unshare-net` rather than falling through to an unsandboxed shell.
+  The probe runs once through `Sandbox.detect/0`'s cache.
   """
-  @spec probe(String.t()) :: %{version: String.t() | nil, notes: String.t()} | nil
+  @type probe_error :: :no_true_executable | :filesystem_namespace_refused | :probe_exception
+  @type probe :: %{version: String.t() | nil, notes: String.t(), unshare_net: boolean()}
+
+  @spec probe(String.t()) :: {:ok, probe()} | {:error, probe_error()}
   def probe(path) when is_binary(path) do
     with target when is_binary(target) <- System.find_executable("true") do
-      args = [
-        "--die-with-parent",
-        "--ro-bind",
-        "/",
-        "/",
-        "--dev",
-        "/dev",
-        "--proc",
-        "/proc",
-        "--unshare-net",
-        "--",
-        target
-      ]
+      case run_probe(path, filesystem_args(target)) do
+        :ok ->
+          unshare_net = run_probe(path, network_args(target)) == :ok
 
-      case System.cmd(path, args, stderr_to_stdout: true) do
-        {_output, 0} -> %{version: version(path), notes: "namespace capability probe passed"}
-        _refused -> nil
+          notes =
+            if unshare_net do
+              "filesystem and network namespace capability probes passed"
+            else
+              "filesystem capability probe passed; network namespace unavailable on this host"
+            end
+
+          {:ok, %{version: version(path), notes: notes, unshare_net: unshare_net}}
+
+        :refused ->
+          {:error, :filesystem_namespace_refused}
       end
     else
-      _no_true_executable -> nil
+      _no_true_executable -> {:error, :no_true_executable}
     end
   rescue
-    _error -> nil
+    _error -> {:error, :probe_exception}
   end
 
   defp version(path) do
@@ -128,34 +133,41 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
           Ouroboros.Provider.Native.Sandbox.command(),
           map(),
           Ouroboros.Provider.Native.Sandbox.policy(),
-          String.t()
+          String.t(),
+          boolean()
         ) :: {:ok, {String.t(), [String.t()]}} | {:error, term()}
-  def wrap(command, scope, policy, executable) when is_binary(executable) do
+  def wrap(command, scope, policy, executable, unshare_net \\ true)
+
+  def wrap(command, scope, policy, executable, unshare_net)
+      when is_binary(executable) and is_boolean(unshare_net) do
     case argv(command) do
       {:ok, target} ->
-        {:ok, {executable, options(scope, policy) ++ filter_env(policy) ++ ["--"] ++ target}}
+        {:ok,
+         {executable,
+          options(scope, policy, unshare_net) ++ filter_env(policy) ++ ["--"] ++ target}}
 
       {:error, _reason} = error ->
         error
     end
   end
 
-  def wrap(_command, _scope, _policy, _executable), do: {:error, :no_bwrap_executable}
+  def wrap(_command, _scope, _policy, _executable, _unshare_net),
+    do: {:error, :no_bwrap_executable}
 
   @doc "Just the bubblewrap options, without the program — the half a test can pin."
-  @spec options(map(), Ouroboros.Provider.Native.Sandbox.policy()) :: [String.t()]
+  @spec options(map(), Ouroboros.Provider.Native.Sandbox.policy(), boolean()) :: [String.t()]
   # Later binds overlay earlier ones, so the order is the policy: the protected roots go
   # read-only first, the writable roots are bound on top — which is what keeps a worktree
   # under the node's data directory (D7) writable while the rest of that directory stays
   # read-only — and the `.git`/`.ouroboros` directories beneath each writable root are
   # re-bound read-only last.
-  def options(scope, policy) do
+  def options(scope, policy, unshare_net \\ true) when is_boolean(unshare_net) do
     ["--die-with-parent", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"] ++
       Enum.flat_map(on_disk(policy.protected), &["--ro-bind", &1, &1]) ++
       Enum.flat_map(writable(policy), &["--bind", &1, &1]) ++
       protected_segment_binds(policy) ++
       ["--tmpfs", policy.scratch] ++
-      network(policy) ++
+      network(policy, unshare_net) ++
       chdir(scope)
   end
 
@@ -250,8 +262,45 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
   # through the read-only `/` bind and needs no destination placeholder.
   defp on_disk(paths), do: Enum.filter(paths, &File.exists?/1)
 
-  defp network(%{network: true}), do: []
-  defp network(_denied), do: ["--unshare-net"]
+  defp filesystem_args(target),
+    do: [
+      "--die-with-parent",
+      "--ro-bind",
+      "/",
+      "/",
+      "--dev",
+      "/dev",
+      "--proc",
+      "/proc",
+      "--",
+      target
+    ]
+
+  defp network_args(target),
+    do: [
+      "--die-with-parent",
+      "--ro-bind",
+      "/",
+      "/",
+      "--dev",
+      "/dev",
+      "--proc",
+      "/proc",
+      "--unshare-net",
+      "--",
+      target
+    ]
+
+  defp run_probe(path, args) do
+    case System.cmd(path, args, stderr_to_stdout: true) do
+      {_output, 0} -> :ok
+      _refused -> :refused
+    end
+  end
+
+  defp network(%{network: true}, _unshare_net), do: []
+  defp network(_denied, true), do: ["--unshare-net"]
+  defp network(_denied, false), do: []
 
   defp chdir(%{root: root}) when is_binary(root) and root != "", do: ["--chdir", root]
   defp chdir(_absent), do: []

@@ -216,9 +216,11 @@ defmodule Ouroboros.Provider.Native.Prompt do
     configuration stay read-only. #{sentence(network_posture(policy))}
     A sandbox denial names the constraint it hit; do not retry it under a weaker posture.
     A **filesystem** denial is put to the operator for you, once, as an approval: if they
-    grant it the same command is re-run outside the sandbox and that re-run's result is
-    what you get back. So do not ask for one with `ask_user`, and do not repeat a command
-    whose result already tells you the escalation was declined.#{approvals(approval_mode)}
+    grant it the same command is re-run inside the sandbox with only the `.git` fence
+    lifted — `.ouroboros`, the runtime data directory, the user's configuration, and the
+    network policy stay enforced — and that re-run's result is what you get back. So
+    do not ask for one with `ask_user`, and do not repeat a command whose result
+    already tells you the escalation was declined.#{approvals(approval_mode)}
     """
     |> String.trim()
   end

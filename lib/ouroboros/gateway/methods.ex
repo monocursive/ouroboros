@@ -3073,14 +3073,17 @@ defmodule Ouroboros.Gateway.Methods do
   defp fetch_optional_workspace_id(params, key) do
     case Map.fetch(params, key) do
       :error ->
-        {:ok, nil}
+        {:ok, :keep}
+
+      {:ok, value} when value in [nil, ""] ->
+        {:ok, :clear}
 
       {:ok, value} when is_binary(value) ->
         workspace_id = String.trim(value)
 
         cond do
           workspace_id == "" ->
-            {:invalid, "params.#{key} must be a nonempty string when present"}
+            {:ok, :clear}
 
           byte_size(workspace_id) > 256 ->
             {:invalid, "params.#{key} must be at most 256 bytes"}
@@ -3093,11 +3096,11 @@ defmodule Ouroboros.Gateway.Methods do
         end
 
       {:ok, _value} ->
-        {:invalid, "params.#{key} must be a nonempty string when present"}
+        {:invalid, "params.#{key} must be a string, empty to clear, or omitted"}
     end
   end
 
-  defp require_anthropic_update(nil, nil),
+  defp require_anthropic_update(nil, :keep),
     do: {:invalid, "params must include api_key or workspace_id"}
 
   defp require_anthropic_update(_api_key, _workspace_id), do: :ok

@@ -129,6 +129,28 @@ defmodule Ouroboros.Gateway.AccountTest do
              "workspace_id" => "wrkspc_Replacement456"
            } = Jason.decode!(File.read!(path))
 
+    assert {:ok, %{workspace_configured: false}} =
+             Methods.invoke("credentials.anthropic.set", %{"api_key" => "sk-ant-rotated"})
+
+    assert %{
+             "api_key" => "sk-ant-rotated",
+             "workspace_id" => nil
+           } = Jason.decode!(File.read!(path))
+
+    assert {:ok, %{workspace_configured: true}} =
+             Methods.invoke("credentials.anthropic.set", %{
+               "api_key" => "sk-ant-rotated",
+               "workspace_id" => "wrkspc_Kept789"
+             })
+
+    assert {:ok, %{workspace_configured: false}} =
+             Methods.invoke("credentials.anthropic.set", %{"workspace_id" => ""})
+
+    assert %{
+             "api_key" => "sk-ant-rotated",
+             "workspace_id" => nil
+           } = Jason.decode!(File.read!(path))
+
     assert {:error, -32602, message} =
              Methods.invoke("credentials.anthropic.set", %{
                "api_key" => secret,

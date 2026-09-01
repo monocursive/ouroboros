@@ -86,6 +86,46 @@ defmodule Ouroboros.Provider.GrokAuthTest do
     refute inspect(read) =~ "cli-secret"
   end
 
+  test "ignores a non-xAI HTTPS URL printed before the device verification link",
+       %{root: root, executable: executable, auth_path: path} do
+    script = """
+    #!/bin/sh
+    printf 'See https://evil.example/phish for help\\n'
+    printf 'https://auth.x.ai/device?user_code=WXYZ-5678\\nWXYZ-5678\\n'
+    sleep 0.05
+    printf '%s' '{"https://auth.x.ai":{"key":"cli-secret","auth_mode":"oidc","email":"new@example.test"}}' > "$GROK_HOME/auth.json"
+    chmod 600 "$GROK_HOME/auth.json"
+    """
+
+    File.write!(executable, script)
+    File.chmod!(executable, 0o700)
+
+    start_supervised!(
+      {GrokAuth,
+       name: :allowlist_grok_auth,
+       executable: executable,
+       auth_path: path,
+       env: %{"GROK_HOME" => root}}
+    )
+
+    assert {:ok, %{"verificationUrl" => "https://auth.x.ai/device?user_code=WXYZ-5678"}} =
+             GrokAuth.login(:allowlist_grok_auth)
+  end
+
+  test "a relative grok_auth_file is ignored rather than resolved against cwd" do
+    previous = Application.get_env(:ouroboros, :grok_auth_file)
+    Application.put_env(:ouroboros, :grok_auth_file, "relative/auth.json")
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:ouroboros, :grok_auth_file, previous),
+        else: Application.delete_env(:ouroboros, :grok_auth_file)
+    end)
+
+    refute GrokAuth.credential_path() == Path.expand("relative/auth.json")
+    assert GrokAuth.credential_path(path: "relative/auth.json") == nil
+  end
+
   test "a pending login can be cancelled without returning CLI output", %{
     root: root,
     executable: executable,
