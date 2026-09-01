@@ -27,7 +27,17 @@ defmodule Ouroboros.Mesh do
   alias Ouroboros.Signals.{AgentMessage, TaskAssigned, TaskCompleted}
 
   @scope Ouroboros.Mesh.Scope
-  @agent_module_prefixes ["Elixir.Ouroboros.Agent.", "Elixir.Ouroboros.Capability."]
+  # `Ouroboros.Wasm.` is admitted for exactly one module — `Ouroboros.Wasm.Capability`, the
+  # static wrapper every WebAssembly capability runs inside (docs/WASM.md §7.2). Widening a
+  # remote-reachable allow-list is safe here because forged code structurally cannot enter
+  # that namespace: the verifier's introduce-prefix requires `Ouroboros.Capability.*` and the
+  # signer policy refuses anything else, and `Ouroboros.Wasm.` is itself in the verifier's
+  # protected set, so the namespace can be started but never patched (D10).
+  @agent_module_prefixes [
+    "Elixir.Ouroboros.Agent.",
+    "Elixir.Ouroboros.Capability.",
+    "Elixir.Ouroboros.Wasm."
+  ]
 
   @type agent_id :: String.t()
   # A wedged peer must be able to lose a placement or a stop without losing the caller

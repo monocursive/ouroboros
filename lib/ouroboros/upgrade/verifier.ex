@@ -63,7 +63,12 @@ defmodule Ouroboros.Upgrade.Verifier do
     "Elixir.Ouroboros.Orchestration.",
     "Elixir.Ouroboros.Mesh.",
     "Elixir.Ouroboros.Provider.Native.",
-    "Elixir.Ouroboros.Workspace."
+    "Elixir.Ouroboros.Workspace.",
+    # The WebAssembly containment machinery: the helper pool, the component store, and the
+    # wrapper agent forged components run inside. The container must not be hot-patchable by
+    # the thing it contains (docs/WASM.md D10) — the same sentence that puts the permission
+    # engine under `Control.`
+    "Elixir.Ouroboros.Wasm."
   ]
   @introduce_prefix "Elixir.Ouroboros.Capability."
 

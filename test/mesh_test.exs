@@ -103,6 +103,30 @@ defmodule Ouroboros.MeshTest do
       assert {:ok, _pid} = Mesh.start_agent(id, agent: Ouroboros.Agent.Worker)
       on_exit(fn -> Mesh.stop_agent(id) end)
     end
+
+    test "accepts the WebAssembly wrapper agent, and admits its state as a start spec" do
+      # Lane W introduces no module per capability: `Ouroboros.Wasm.Capability` is the one
+      # shipped agent every component runs inside, and *which* component is a fact about the
+      # state it is started with (docs/WASM.md §7.2). Admitting the namespace is safe because
+      # forged code structurally cannot enter it — the verifier's introduce-prefix requires
+      # `Ouroboros.Capability.*` — and `Ouroboros.Wasm.` is itself protected against patching.
+      id = unique_id("wasm")
+
+      assert {:ok, _pid} =
+               Mesh.start_agent(id,
+                 agent: Ouroboros.Wasm.Capability,
+                 initial_state: %{component: String.duplicate("a", 64), name: "greeter"}
+               )
+
+      on_exit(fn -> Mesh.stop_agent(id) end)
+
+      assert {:ok, server_state} = Mesh.state(id)
+      assert server_state.agent.state.component == String.duplicate("a", 64)
+      assert server_state.agent.state.name == "greeter"
+
+      # Nothing is loaded and nothing is instantiated until a message arrives.
+      assert server_state.agent.state.instance == nil
+    end
   end
 
   describe "initial_state seeding" do

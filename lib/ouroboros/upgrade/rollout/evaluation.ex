@@ -101,6 +101,9 @@ defmodule Ouroboros.Upgrade.Rollout.Evaluation do
 
   @type probe :: %{input: term(), expect: expectation()}
 
+  @typedoc "What to start: a module, or a module and the state to seed it with. See `run/3`."
+  @type start_spec :: module() | {module(), map()}
+
   @type spec :: %{
           probes: [probe()],
           budget_ms: pos_integer(),
@@ -162,26 +165,64 @@ defmodule Ouroboros.Upgrade.Rollout.Evaluation do
   def validate(other), do: reject({:not_a_map, describe(other)})
 
   @doc """
-  Runs `spec` against `module` on the node this function is executing on.
+  Runs `spec` against `start` on the node this function is executing on.
+
+  `start` is a module, or `{module, initial_state}` — the same start spec
+  `Ouroboros.Upgrade.Rollout.Probe.ready?/1` takes, and for the same reason: a lane-W
+  capability is one shipped module standing in for every component, so which capability is
+  being evaluated is a fact about its state (docs/WASM.md §7.2, D7). Lane B passes the bare
+  module and nothing about it changes.
 
   Returns `{:ok, report}` whenever the spec was driven to completion, failures included:
   a report is the answer, not the verdict. `{:error, reason}` means the evaluation could
   not be performed at all — an invalid spec, a module that will not load, an agent that
   will not start — which is a definite refusal rather than an ambiguity. Nothing raises.
-  """
-  @spec run(module(), term(), keyword()) :: {:ok, report()} | {:error, term()}
-  def run(module, spec, opts \\ [])
 
-  def run(module, spec, opts) when is_atom(module) and not is_nil(module) and is_list(opts) do
-    with {:ok, valid} <- validate(spec) do
-      execute(module, valid)
+  ## Two sources of seed state, and which one wins
+
+  A spec may carry `:initial_state`, and a start spec may carry state of its own. They are
+  merged, and **the start spec wins on conflict**. The start spec is the deployment's
+  statement of what is being evaluated — which component, under which config, against which
+  helper — while the eval spec is a signed *test* of it. A signed spec that could overwrite
+  `:component` would be a test able to redirect the thing it is testing, which is not a
+  power a test gets to have. Everything the start spec does not name, the spec still seeds.
+
+  That last sentence is a constraint on the *caller*, and it is the whole rule: precedence
+  protects the keys the start spec names, and only those. **A start spec must therefore name
+  every key that decides what is being evaluated**, not merely the ones that identify it —
+  otherwise a signed spec chooses the rest. For `Ouroboros.Wasm.Capability` those keys are
+  `:component`, `:config`, `:name`, `:limits`, `:pool` and `:store_root`: leaving `:limits`
+  out lets a spec pick the bounds it is judged under, and leaving `:pool` or `:store_root`
+  out lets it pick which helper and which bytes. This module deliberately holds no list of
+  them — it must not know any agent's schema — so the obligation lives with whoever builds
+  the start spec, and each such agent states its own keys in its own moduledoc.
+  """
+  @spec run(start_spec(), term(), keyword()) :: {:ok, report()} | {:error, term()}
+  def run(start, spec, opts \\ [])
+
+  def run(start, spec, opts) when is_list(opts) do
+    case normalize_start(start) do
+      {:ok, module, initial_state} ->
+        with {:ok, valid} <- validate(spec) do
+          execute(module, initial_state, valid)
+        end
+
+      :error ->
+        {:error, {:invalid_eval_module, describe(start)}}
     end
   end
 
-  def run(module, _spec, opts) when is_list(opts),
-    do: {:error, {:invalid_eval_module, describe(module)}}
+  def run(_start, _spec, opts), do: {:error, {:invalid_eval_options, describe(opts)}}
 
-  def run(_module, _spec, opts), do: {:error, {:invalid_eval_options, describe(opts)}}
+  defp normalize_start(module) when is_atom(module) and not is_nil(module),
+    do: {:ok, module, %{}}
+
+  defp normalize_start({module, initial_state})
+       when is_atom(module) and not is_nil(module) and is_map(initial_state) and
+              not is_struct(initial_state),
+       do: {:ok, module, initial_state}
+
+  defp normalize_start(_start), do: :error
 
   @doc "Whether a report satisfies the spec that produced it. Anything unrecognized is a no."
   @spec passed?(term()) :: boolean()
@@ -356,12 +397,12 @@ defmodule Ouroboros.Upgrade.Rollout.Evaluation do
 
   # ## Execution
 
-  defp execute(module, spec) do
+  defp execute(module, initial_state, spec) do
     id = evaluation_id(module)
     started = now_ms()
 
     try do
-      case prepare(id, module, spec) do
+      case prepare(id, module, initial_state, spec) do
         :ok -> {:ok, report(module, spec, run_probes(id, spec, started), started)}
         {:error, reason} -> {:error, {:evaluation_unavailable, module, sanitize(reason)}}
       end
@@ -374,9 +415,9 @@ defmodule Ouroboros.Upgrade.Rollout.Evaluation do
     end
   end
 
-  defp prepare(id, module, spec) do
+  defp prepare(id, module, initial_state, spec) do
     with :ok <- ensure_loaded(module),
-         {:ok, _pid} <- start(id, module, spec),
+         {:ok, _pid} <- start(id, module, initial_state, spec),
          :ok <- await_visible(id, @visibility_retries) do
       :ok
     end
@@ -392,8 +433,11 @@ defmodule Ouroboros.Upgrade.Rollout.Evaluation do
     end
   end
 
-  defp start(id, module, spec) do
-    case Mesh.start_agent(id, agent: module, initial_state: spec.initial_state) do
+  # The spec seeds, the start spec decides: see `run/3` on why the merge is in this order.
+  defp start(id, module, initial_state, spec) do
+    seeded = Map.merge(spec.initial_state, initial_state)
+
+    case Mesh.start_agent(id, agent: module, initial_state: seeded) do
       {:ok, pid} -> {:ok, pid}
       {:error, reason} -> {:error, {:evaluation_start_failed, reason}}
       other -> {:error, {:evaluation_start_failed, {:unexpected_result, describe(other)}}}

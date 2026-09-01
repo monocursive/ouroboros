@@ -39,6 +39,13 @@ ouroboros-*.tar
 # The Rust TUI crate's build directory.
 /tui/target/
 
+# The lane-W acceptance guest: its own build directory, and the component `make wasm-guest`
+# copies out of it. Source — Cargo.toml, Cargo.lock, src/lib.rs — is kept; the built
+# component is not, for the same reason `/priv/wasm/` is not. A `.wasm` in a repository is an
+# opaque binary nobody reviews, and this one is reproducible from the world file beside it.
+/test/support/wasm/echo-guest/target/
+/test/support/wasm/echo.wasm
+
 # Where `make dist` names a built client for the platform it can run on. The artifact of
 # record is the one a tagged build uploads, not a copy somebody made locally. The three
 # things under dist/ that are *source* rather than output — the release signing public

@@ -268,9 +268,12 @@ config :ouroboros,
   # everything here is a bound, so a typo falls back to the default rather than widening
   # one. `OUROBOROS_WASM_HELPER=/path` overrides `:bundled`, which resolves priv/, the
   # checkout's priv/, a parent walk, or a sibling of `ouro`. The guest's own bounds — fuel,
-  # deadline, memory — are per-request and never defaulted here; `ouro-wasm` refuses a
-  # request that omits one, and inventing a value on this side would be the build deciding
-  # how much of the machine a guest may have.
+  # deadline, memory — are per-request and never defaulted by the pool; `ouro-wasm` refuses a
+  # request that omits one, and inventing a value there would be the transport deciding how
+  # much of the machine a guest may have. `:capability_limits` is where that decision is made
+  # instead: the bounds `Ouroboros.Wasm.Capability` sends when the state a capability was
+  # deployed with names none of its own. Declared whole — all three keys or none — because a
+  # half-stated bound is not a bound; two of the three keys falls back to all three defaults.
   wasm: [
     helper_path: :bundled,
     handshake_timeout_ms: 5_000,
@@ -278,7 +281,12 @@ config :ouroboros,
     call_margin_ms: 10_000,
     max_frame_bytes: 8 * 1024 * 1024,
     broken_ms: 15_000,
-    store_budget_bytes: 512 * 1024 * 1024
+    store_budget_bytes: 512 * 1024 * 1024,
+    capability_limits: [
+      fuel: 100_000_000,
+      memory_bytes: 64 * 1024 * 1024,
+      deadline_ms: 5_000
+    ]
   ]
 
 # The two facts about the web endpoint that are genuinely compile-time, and no others.

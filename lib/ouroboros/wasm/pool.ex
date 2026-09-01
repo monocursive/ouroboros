@@ -53,6 +53,26 @@ defmodule Ouroboros.Wasm.Pool do
   a soft `max_heap_size` ceiling: a decode blow-up on a hostile frame is logged, not a
   silent balloon and not a crash of a process holding live-instance bookkeeping.
 
+  ## Instances have owners, because nothing else would ever drop them
+
+  The helper holds `MAX_INSTANCES` and evicts none of them: an instance stands until somebody
+  drops it. That is the right policy for a containment helper — forgetting a live guest's
+  state on a timer would be a worse bug than holding it — and it makes the *owner* this
+  side's problem. `instantiate/6` therefore takes `owner: pid`; the pool monitors that
+  process and, when it goes, schedules a `drop` for its instances on this same sequential
+  wire, behind whatever callers are already waiting.
+
+  Without it every throwaway agent leaks: a rollout probe and an evaluation each stand an
+  instance up under an id carrying a unique integer, stop, and never come back for it, so
+  a node walks into `too_many_instances` after a couple of hundred deploys — and a *full*
+  helper is not a *broken* one, so nothing here would ever respawn it.
+
+  The reclaim is best-effort by construction and says so: a broken pool forgets its
+  ownership entirely (the child is killed and its table with it), the scheduled drops are
+  bounded like every other map here, and a drop that cannot be issued is forgotten rather
+  than retried forever. An instance with no owner is still perfectly legitimate — it is one
+  whose lifetime its caller manages.
+
   ## Env is filtered
 
   The helper is spawned with the node's environment minus anything that reads like a secret.
@@ -125,6 +145,8 @@ defmodule Ouroboros.Wasm.Pool do
           os_pid: pos_integer() | nil,
           doctor: map() | nil,
           instances: non_neg_integer(),
+          owned: non_neg_integer(),
+          pending_drops: non_neg_integer(),
           broken_reason: term() | nil
         }
 
@@ -194,22 +216,52 @@ defmodule Ouroboros.Wasm.Pool do
   that omits one — "there is no unlimited default" is its sentence, not this pool's — and
   inventing a value on this side would be this node deciding, silently, how much of the
   machine a guest may have.
+
+  ## `owner:` — who this instance belongs to
+
+  `opts` takes one option, `owner: pid`, and it is the answer to the only unbounded thing
+  this pool otherwise has: an instance nobody drops. The helper holds `MAX_INSTANCES` (256)
+  and evicts none of them, so a caller that stands instances up under fresh names and stops
+  without dropping — every rollout probe and every evaluation does exactly that, under an id
+  carrying a unique integer — walks the helper into `too_many_instances` forever. A full
+  table is not a *broken* helper, so nothing here would ever respawn it.
+
+  An owned instance is monitored, and its owner's `:DOWN` schedules a `drop` on this pool's
+  own wire. That is a reclaim, not a guarantee: a pool that goes broken forgets its
+  ownership (the child is killed and the table with it), and a drop that cannot be issued is
+  forgotten rather than retried forever. `owner:` is optional because an instance whose
+  owner this side cannot name is still a legitimate instance — it is simply one whose
+  lifetime its caller has to manage.
+
+  `opts` follows the server rather than preceding it: the server is the last *required*
+  argument here as it is in every other function, and moving it would silently rebind every
+  existing five-argument call.
   """
-  @spec instantiate(String.t(), String.t(), String.t(), limits(), GenServer.server()) ::
+  @spec instantiate(String.t(), String.t(), String.t(), limits(), GenServer.server(), keyword()) ::
           {:ok, map()} | {:error, failure()}
-  def instantiate(instance, sha256, config, limits, server \\ __MODULE__)
-      when is_binary(instance) and is_binary(sha256) and is_binary(config) do
+  def instantiate(instance, sha256, config, limits, server \\ __MODULE__, opts \\ [])
+      when is_binary(instance) and is_binary(sha256) and is_binary(config) and is_list(opts) do
     with :ok <- valid_instance(instance),
          {:ok, wire} <- wire_limits(limits) do
       request(
         server,
         "instantiate",
         %{"instance" => instance, "sha256" => sha256, "config" => config, "limits" => wire},
-        :derived
+        :derived,
+        owner(opts)
       )
     else
       {:error, _reason} = error -> error
       :error -> {:error, {:invalid_limits, limits}}
+    end
+  end
+
+  # A non-pid `owner:` is no owner. This is a bound on somebody else's bookkeeping, so it
+  # falls back rather than refusing an otherwise valid instantiate.
+  defp owner(opts) do
+    case Keyword.get(opts, :owner) do
+      pid when is_pid(pid) -> pid
+      _absent -> nil
     end
   end
 
@@ -258,6 +310,8 @@ defmodule Ouroboros.Wasm.Pool do
         os_pid: nil,
         doctor: nil,
         instances: 0,
+        owned: 0,
+        pending_drops: 0,
         broken_reason: {:pool_unavailable, reason}
       }
   end
@@ -266,8 +320,9 @@ defmodule Ouroboros.Wasm.Pool do
   # and a helper that does not answer are all error tuples. The deadline is named rather
   # than passed: which one a method gets is the pool's decision, made against the settings
   # that pool was started with and, for `call`, against what it knows of the instance.
-  defp request(server, method, params, deadline) when deadline in [:fixed, :derived] do
-    GenServer.call(server, {:request, method, params, deadline}, @client_ceiling_ms)
+  defp request(server, method, params, deadline, owner \\ nil)
+       when deadline in [:fixed, :derived] do
+    GenServer.call(server, {:request, method, params, deadline, owner}, @client_ceiling_ms)
   catch
     :exit, reason -> {:error, {:pool_unavailable, reason}}
   end
@@ -295,16 +350,29 @@ defmodule Ouroboros.Wasm.Pool do
        broken_reason: nil,
        doctor: nil,
        deadlines: %{},
+       # `instance => {seq, monitor}` for instances an owner claimed, and the names whose
+       # owners have since died and whose `drop` has not gone out yet. Both are bounded by
+       # `max_instances` for the reason `deadlines` is: a peer that never drops must not be
+       # able to grow a map in this process without limit.
+       owners: %{},
+       pending_drops: [],
        instance_seq: 0,
        max_instances: max_instances(opts)
      }}
   end
 
   @impl true
-  def handle_call({:request, method, params, requested}, from, state) do
+  def handle_call({:request, method, params, requested, owner}, from, state) do
     # Mint the deadline at receipt, before reconnect or queue work, so a caller waiting
     # behind another one is not given a fresh window when its turn comes.
-    item = request_item(from, method, params, resolve_timeout(state, method, params, requested))
+    item =
+      request_item(
+        from,
+        method,
+        params,
+        resolve_timeout(state, method, params, requested),
+        owner
+      )
 
     cond do
       state.phase == :ready and state.inflight == nil ->
@@ -357,6 +425,8 @@ defmodule Ouroboros.Wasm.Pool do
        os_pid: state.os_pid,
        doctor: state.doctor,
        instances: map_size(state.deadlines),
+       owned: map_size(state.owners),
+       pending_drops: length(state.pending_drops),
        broken_reason: state.broken_reason
      }, state}
   end
@@ -396,7 +466,11 @@ defmodule Ouroboros.Wasm.Pool do
     {:noreply, go_broken(%{state | inflight: nil}, {:request_timeout, item.method})}
   end
 
-  def handle_info({:deadline, id}, %{inflight: %{id: id, kind: :orphaned}} = state) do
+  # Nobody is owed this answer — an abandoned caller's request, or a reclaim `drop` this
+  # pool issued itself — but a helper that does not answer either one is as wedged as one
+  # that strands a caller, and it is found the same way.
+  def handle_info({:deadline, id}, %{inflight: %{id: id, kind: kind}} = state)
+      when kind in [:orphaned, :internal] do
     {:noreply, go_broken(state, {:request_timeout, state.inflight.method})}
   end
 
@@ -425,10 +499,11 @@ defmodule Ouroboros.Wasm.Pool do
     {:noreply, put_in(state.inflight.kind, :orphaned)}
   end
 
-  def handle_info({:DOWN, monitor, :process, _caller, _reason}, state) do
+  def handle_info({:DOWN, monitor, :process, _pid, _reason}, state) do
     case remove_queued(state.queue, monitor, :monitor) do
+      # Not a caller waiting in the queue, so it may be the owner of a live instance.
       {nil, _queue} ->
-        {:noreply, state}
+        {:noreply, owner_down(state, monitor)}
 
       {item, queue} ->
         drop_timer(item.deadline)
@@ -539,6 +614,11 @@ defmodule Ouroboros.Wasm.Pool do
 
   defp route(:orphaned, _reply, state, _inflight), do: drain(state)
 
+  # A reclaim `drop` this pool issued for a dead owner. Nobody is waiting for the answer;
+  # the bookkeeping it settles is this pool's own.
+  defp route(:internal, reply, state, inflight),
+    do: state |> remember_instance(inflight, reply) |> drain()
+
   # The handshake is where a helper is admitted or not. `usable` is the helper's own probe
   # of whether an engine can be built on this host; `worlds` is what it will link against.
   defp admissible?(%{"usable" => true, "worlds" => worlds}) when is_list(worlds),
@@ -622,7 +702,21 @@ defmodule Ouroboros.Wasm.Pool do
     with :ok <- within_frame_cap(state, frame),
          :ok <- write(state, frame) do
       ref = Process.send_after(self(), {:deadline, id}, timeout_ms)
-      {:ok, %{state | inflight: %{id: id, kind: kind, method: method, deadline: ref}}}
+
+      {:ok,
+       %{
+         state
+         | inflight: %{
+             id: id,
+             kind: kind,
+             method: method,
+             # Carried so `remember_instance/3` can settle the bookkeeping for a request
+             # this pool issued itself, exactly as it does for a caller's.
+             params: params,
+             owner: nil,
+             deadline: ref
+           }
+       }}
     end
   end
 
@@ -664,6 +758,7 @@ defmodule Ouroboros.Wasm.Pool do
                kind: {:caller, item},
                method: item.method,
                params: item.params,
+               owner: item.owner,
                deadline: ref
              }
          }}
@@ -709,6 +804,11 @@ defmodule Ouroboros.Wasm.Pool do
 
     Logger.debug(fn -> "wasm helper broken: #{Kernel.inspect(reason, limit: 10)}" end)
 
+    # The child is killed by `hard_close/1` and its whole instance table goes with it, so
+    # there is nothing left to reclaim: every monitor is released and every scheduled drop
+    # is forgotten rather than issued against a helper that has never heard of the name.
+    forget_owners(state)
+
     %{
       hard_close(state)
       | phase: :broken,
@@ -716,9 +816,17 @@ defmodule Ouroboros.Wasm.Pool do
         queue: :queue.new(),
         buffer: <<>>,
         deadlines: %{},
+        owners: %{},
+        pending_drops: [],
         broken_until: now() + state.settings.broken_ms,
         broken_reason: reason
     }
+  end
+
+  defp forget_owners(state) do
+    Enum.each(state.owners, fn {_instance, {_seq, monitor}} ->
+      Process.demonitor(monitor, [:flush])
+    end)
   end
 
   ## Transport
@@ -852,7 +960,7 @@ defmodule Ouroboros.Wasm.Pool do
   # map is bounded oldest-first (`@max_instances`): a peer that never `drop`s a trapped
   # instance leaves a stale entry, and unbounded stale entries are the only unbounded thing
   # here. Each value carries a sequence so "oldest" is insertion order, not map iteration.
-  defp remember_instance(state, %{method: "instantiate", params: params}, {:ok, _result}) do
+  defp remember_instance(state, %{method: "instantiate", params: params} = inflight, {:ok, _ok}) do
     case {Map.get(params, "instance"), deadline_of(params)} do
       {instance, deadline} when is_binary(instance) and deadline > 0 ->
         seq = state.instance_seq + 1
@@ -863,6 +971,7 @@ defmodule Ouroboros.Wasm.Pool do
           |> bound_instances(state.max_instances)
 
         %{state | deadlines: deadlines, instance_seq: seq}
+        |> remember_owner(instance, Map.get(inflight, :owner), seq)
 
       _incomplete ->
         state
@@ -870,7 +979,10 @@ defmodule Ouroboros.Wasm.Pool do
   end
 
   defp remember_instance(state, %{method: "drop", params: params}, {:ok, _result}) do
-    %{state | deadlines: Map.delete(state.deadlines, Map.get(params, "instance"))}
+    instance = Map.get(params, "instance")
+
+    %{state | deadlines: Map.delete(state.deadlines, instance)}
+    |> forget_owner(instance)
   end
 
   defp remember_instance(state, _inflight, _reply), do: state
@@ -882,6 +994,74 @@ defmodule Ouroboros.Wasm.Pool do
     Map.delete(deadlines, oldest)
   end
 
+  ## Ownership
+
+  # An owner is monitored per *instance*, not per pid: one process may own several, each
+  # goes away on its own, and a per-instance monitor makes each `:DOWN` name exactly one
+  # instance without a reverse index. Re-instantiating a name this pool already tracks
+  # releases the previous monitor first, so a guest that traps on every message cannot leave
+  # a monitor behind per message.
+  defp remember_owner(state, _instance, nil, _seq), do: state
+
+  defp remember_owner(state, instance, owner, seq) when is_pid(owner) do
+    state = forget_owner(state, instance)
+
+    owners =
+      state.owners
+      |> Map.put(instance, {seq, Process.monitor(owner)})
+      |> bound_owners(state.max_instances)
+
+    %{state | owners: owners}
+  end
+
+  defp forget_owner(state, instance) do
+    case Map.pop(state.owners, instance) do
+      {nil, _owners} ->
+        state
+
+      {{_seq, monitor}, owners} ->
+        Process.demonitor(monitor, [:flush])
+        %{state | owners: owners}
+    end
+  end
+
+  # Bounded exactly as `deadlines` is, and for the same reason. Evicting an entry costs the
+  # reclaim for that one instance, never correctness.
+  defp bound_owners(owners, cap) when map_size(owners) <= cap, do: owners
+
+  defp bound_owners(owners, _cap) do
+    {oldest, {_seq, monitor}} = Enum.min_by(owners, fn {_instance, {seq, _ref}} -> seq end)
+    Process.demonitor(monitor, [:flush])
+    Map.delete(owners, oldest)
+  end
+
+  # An owner died. Its instances are still standing in the helper, and nothing else will
+  # ever ask for them, so a `drop` is scheduled on this pool's own wire — behind whatever
+  # callers are already waiting, because a reclaim is never more urgent than work.
+  defp owner_down(state, monitor) do
+    case Enum.find(state.owners, fn {_instance, {_seq, ref}} -> ref == monitor end) do
+      nil ->
+        state
+
+      {instance, _entry} ->
+        %{state | owners: Map.delete(state.owners, instance)}
+        |> schedule_drop(instance)
+        |> drain()
+    end
+  end
+
+  # Bounded, and oldest-first like everything else here: losing the oldest scheduled reclaim
+  # is a leaked instance, while an unbounded list is a leaked node.
+  defp schedule_drop(state, instance) do
+    pending =
+      state.pending_drops
+      |> Enum.reject(&(&1 == instance))
+      |> Kernel.++([instance])
+      |> Enum.take(-state.max_instances)
+
+    %{state | pending_drops: pending}
+  end
+
   ## Queue
 
   defp queueable?(state) do
@@ -890,7 +1070,7 @@ defmodule Ouroboros.Wasm.Pool do
          (state.phase == :broken and now() >= state.broken_until))
   end
 
-  defp request_item(from, method, params, timeout) do
+  defp request_item(from, method, params, timeout, owner) do
     caller = elem(from, 0)
     ref = make_ref()
 
@@ -901,6 +1081,7 @@ defmodule Ouroboros.Wasm.Pool do
       monitor: Process.monitor(caller),
       method: method,
       params: params,
+      owner: owner,
       expires_at: now() + timeout,
       deadline: Process.send_after(self(), {:queued_deadline, ref}, timeout)
     }
@@ -916,8 +1097,10 @@ defmodule Ouroboros.Wasm.Pool do
 
   defp drain(%{phase: :ready, inflight: nil} = state) do
     case :queue.out(state.queue) do
+      # Callers first, always. A reclaim only ever rides an idle wire, so it cannot delay
+      # work and cannot take the one in-flight slot from a request somebody is waiting on.
       {:empty, _queue} ->
-        state
+        drain_pending_drops(state)
 
       {{:value, item}, rest} ->
         state = %{state | queue: rest}
@@ -951,6 +1134,23 @@ defmodule Ouroboros.Wasm.Pool do
   end
 
   defp drain(state), do: state
+
+  defp drain_pending_drops(%{pending_drops: []} = state), do: state
+
+  defp drain_pending_drops(%{pending_drops: [instance | rest]} = state) do
+    state = %{state | pending_drops: rest}
+
+    case issue(
+           state,
+           "drop",
+           %{"instance" => instance},
+           :internal,
+           state.settings.request_timeout_ms
+         ) do
+      {:ok, state} -> state
+      {:error, reason} -> go_broken(state, {:transport_closed, reason})
+    end
+  end
 
   defp remove_queued(queue, value, key) do
     items = :queue.to_list(queue)

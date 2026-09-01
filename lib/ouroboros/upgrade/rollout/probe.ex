@@ -13,10 +13,11 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
   ## The contract this imposes
 
   A capability agent must be startable by `Ouroboros.Mesh.start_agent/2` with no options
-  beyond an id, and must route `ouroboros.agent.message` to something that answers. That
-  is the smallest contract under which a generic probe can say anything at all about code
-  it has never seen. A capability whose real work needs seeded state should still answer
-  a bare message; the probe is a liveness check, not an acceptance test.
+  beyond an id and whatever state the start spec carries, and must route
+  `ouroboros.agent.message` to something that answers. That is the smallest contract under
+  which a generic probe can say anything at all about code it has never seen. A capability
+  whose real work needs seeded state should still answer a bare message; the probe is a
+  liveness check, not an acceptance test.
 
   ## Why every path is defended
 
@@ -54,13 +55,39 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
     (@call_timeout + @visibility_retries * @visibility_delay_ms) * 4
   end
 
-  @doc "Starts, messages, and stops one throwaway instance of `module` on this node."
-  @spec ready?(module()) :: :ok | {:error, term()}
-  def ready?(module) when is_atom(module) and not is_nil(module) do
+  @typedoc """
+  What to start: a module, or a module and the state to seed it with.
+
+  Lane B passes the bare module and always has. A lane-W capability is one shipped module
+  standing in for every component (docs/WASM.md §7.2, D7), so *which* capability is being
+  probed is a fact about its state — `%{component: sha, config: json, …}` — and not about
+  its name. Both forms start the same way; the second one simply has something to seed.
+  """
+  @type start_spec :: module() | {module(), map()}
+
+  @doc "Starts, messages, and stops one throwaway instance of `spec` on this node."
+  @spec ready?(start_spec()) :: :ok | {:error, term()}
+  def ready?(spec) do
+    case normalize(spec) do
+      {:ok, module, initial_state} -> run(module, initial_state)
+      :error -> {:error, {:invalid_probe_module, inspect(spec)}}
+    end
+  end
+
+  defp normalize(module) when is_atom(module) and not is_nil(module), do: {:ok, module, %{}}
+
+  defp normalize({module, initial_state})
+       when is_atom(module) and not is_nil(module) and is_map(initial_state) and
+              not is_struct(initial_state),
+       do: {:ok, module, initial_state}
+
+  defp normalize(_spec), do: :error
+
+  defp run(module, initial_state) do
     id = probe_id(module)
 
     try do
-      probe(id, module)
+      probe(id, module, initial_state)
     rescue
       error -> {:error, {:probe_exception, module, Exception.message(error)}}
     catch
@@ -70,13 +97,11 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
     end
   end
 
-  def ready?(module), do: {:error, {:invalid_probe_module, inspect(module)}}
-
-  defp probe(id, module) do
+  defp probe(id, module, initial_state) do
     body = %{probe: id, node: node()}
 
     with :ok <- ensure_loaded(module),
-         {:ok, _pid} <- start(id, module),
+         {:ok, _pid} <- start(id, module, initial_state),
          :ok <- await_visible(id, @visibility_retries),
          {:ok, agent} <- exchange(id, body),
          :ok <- sane_reply?(agent, body) do
@@ -97,8 +122,8 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
     end
   end
 
-  defp start(id, module) do
-    case Mesh.start_agent(id, agent: module) do
+  defp start(id, module, initial_state) do
+    case Mesh.start_agent(id, agent: module, initial_state: initial_state) do
       {:ok, pid} -> {:ok, pid}
       {:error, reason} -> {:error, {:probe_start_failed, reason}}
       other -> {:error, {:probe_start_failed, {:unexpected_result, inspect(other)}}}

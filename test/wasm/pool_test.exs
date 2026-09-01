@@ -128,7 +128,14 @@ defmodule Ouroboros.Wasm.PoolTest do
       # port cannot reap it, and only kill-by-os-pid can. That is what makes this a real test
       # of the kill (F4) — every `awk` fake exits on EOF, so `close_port` alone would reap it
       # and deleting the kill block would leave the suite green.
-      pool = start_pool(sleeping_helper(), request_timeout_ms: 300)
+      #
+      # `request_timeout_ms` is deliberately 2s and not the 300ms this test used to set. The
+      # setting bounds *every* `:fixed` request, and the first one here is the `doctor` below
+      # — whose deadline is armed on arrival, before a `/bin/sh` and an `awk` have been
+      # spawned. Under a loaded full-suite run that spawn can outlast 300ms, and the test
+      # then failed on its own setup rather than on the kill it exists to prove. Two seconds
+      # is still far below any real wait and gives the spawn most of an order of magnitude.
+      pool = start_pool(sleeping_helper(), request_timeout_ms: 2_000)
       assert {:ok, %{"usable" => true}} = Pool.doctor(pool)
 
       os_pid = Pool.status(pool).os_pid
@@ -346,7 +353,119 @@ defmodule Ouroboros.Wasm.PoolTest do
     end
   end
 
+  describe "instances have owners, because nothing else would ever drop them" do
+    test "an owner's death drops its instance on the pool's own wire" do
+      # Without this, every throwaway agent leaks an instance: a rollout probe and an
+      # evaluation each stand one up under an id carrying a unique integer, stop, and never
+      # come back. The helper evicts nothing, so a node walks into `too_many_instances` —
+      # and a *full* helper is not a *broken* one, so nothing here would ever respawn it.
+      journal = journal_file()
+      pool = start_pool(journaling_helper(journal))
+
+      owner = spawn(fn -> Process.sleep(:infinity) end)
+
+      assert {:ok, _result} = instantiate(pool, "owned", owner: owner)
+      assert %{instances: 1, owned: 1, pending_drops: 0} = Pool.status(pool)
+
+      Process.exit(owner, :kill)
+
+      assert wait_until(fn -> Pool.status(pool).instances == 0 end),
+             "the dead owner's instance was never reclaimed"
+
+      # Not merely forgotten on this side: a `drop` frame for that exact name went out.
+      assert %{"method" => "drop", "params" => %{"instance" => "owned"}} =
+               journal |> requests() |> List.last()
+
+      # And the reclaim settled: no monitor, no scheduled drop, and a pool still answering.
+      assert %{phase: :ready, owned: 0, pending_drops: 0} = Pool.status(pool)
+      assert {:ok, %{"usable" => true}} = Pool.doctor(pool)
+    end
+
+    test "an instance nobody claimed is nobody's to reclaim" do
+      # `owner:` is optional, and an unowned instance is a legitimate one — it is simply one
+      # whose lifetime its caller manages. Nothing here may drop it behind that caller's back.
+      journal = journal_file()
+      pool = start_pool(journaling_helper(journal))
+
+      unrelated = spawn(fn -> Process.sleep(:infinity) end)
+
+      assert {:ok, _result} = instantiate(pool, "unowned")
+      assert %{instances: 1, owned: 0} = Pool.status(pool)
+
+      Process.exit(unrelated, :kill)
+      Process.sleep(100)
+
+      assert %{instances: 1, owned: 0, pending_drops: 0} = Pool.status(pool)
+      refute Enum.any?(requests(journal), &(&1["method"] == "drop"))
+    end
+
+    test "a broken pool forgets its ownership instead of reclaiming a table that is gone" do
+      # Going broken hard-closes and kills the child, and the whole instance table goes with
+      # it. Issuing drops against the next helper would be asking it about names it has never
+      # heard of, so the monitors are released and the schedule is dropped.
+      pool = start_pool(malformed_helper())
+      owner = spawn(fn -> Process.sleep(:infinity) end)
+
+      assert {:ok, %{"usable" => true}} = Pool.doctor(pool)
+      assert {:ok, _result} = instantiate(pool, "doomed", owner: owner)
+      assert %{owned: 1} = Pool.status(pool)
+
+      assert {:error, :broken} = Pool.inspect("/tmp/anything", pool)
+      assert %{phase: :broken, owned: 0, pending_drops: 0, instances: 0} = Pool.status(pool)
+
+      # And the owner dying afterwards is a `:DOWN` for a monitor that no longer exists.
+      Process.exit(owner, :kill)
+      Process.sleep(100)
+
+      assert Process.alive?(pool)
+      assert %{owned: 0, pending_drops: 0} = Pool.status(pool)
+    end
+
+    test "a non-pid owner is no owner, and does not refuse an otherwise valid instantiate" do
+      pool = start_pool(responding_helper())
+
+      assert {:ok, _result} = instantiate(pool, "bad-owner", owner: "not a pid")
+      assert %{instances: 1, owned: 0} = Pool.status(pool)
+    end
+  end
+
   ## Helpers
+
+  defp instantiate(pool, instance, opts \\ []) do
+    Pool.instantiate(
+      instance,
+      String.duplicate("a", 64),
+      "{}",
+      %{fuel: 1_000, memory_bytes: 65_536, deadline_ms: 1_000},
+      pool,
+      opts
+    )
+  end
+
+  defp wait_until(fun, attempts \\ 150)
+  defp wait_until(_fun, 0), do: false
+
+  defp wait_until(fun, attempts) do
+    if fun.() do
+      true
+    else
+      Process.sleep(20)
+      wait_until(fun, attempts - 1)
+    end
+  end
+
+  defp journal_file do
+    path = Path.join(tmp_dir(), "journal")
+    File.write!(path, "")
+    path
+  end
+
+  defp requests(journal) do
+    journal
+    |> File.read!()
+    |> String.split("\n", trim: true)
+    |> Enum.map(&JSON.decode!/1)
+  end
 
   defp start_pool(helper_path, opts \\ []) do
     name = :"wasm_pool_#{System.unique_integer([:positive])}"
@@ -399,6 +518,13 @@ defmodule Ouroboros.Wasm.PoolTest do
                ~S(\"wasmtime\":\"48.0.1\",\"limits\":{\"max_deadline_ms\":60000})
 
   defp responding_helper, do: write_helper(awk_body(@doctor_ok, "", ""))
+
+  # The same, with every request it read appended to `journal` before it is answered. That
+  # is how a test sees a frame the pool issued for itself, which no caller ever receives.
+  defp journaling_helper(journal),
+    do:
+      write_helper(awk_body(@doctor_ok, "", ~s|print $0 >> "#{journal}"; close("#{journal}"); |))
+
   defp slow_helper, do: write_helper(awk_body(@doctor_ok, "", ~s|system("sleep 0.3"); |))
 
   defp doctor_helper(report), do: write_helper(awk_body(report, "", ""))

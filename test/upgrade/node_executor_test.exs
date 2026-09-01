@@ -218,6 +218,48 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
              Verifier.verify(replacement, allow_unsigned: true)
   end
 
+  test "refuses to patch the WebAssembly container, loaded or not" do
+    # `Ouroboros.Wasm.` is the machinery that contains lane-W capabilities: the helper pool
+    # that owns the wasmtime process, the store that decides which bytes a sha names, and the
+    # wrapper agent a component answers messages inside. The container must not be
+    # hot-patchable by the thing it contains (docs/WASM.md D10) — and the namespace is
+    # protected here even though `Ouroboros.Mesh` will now *start* an agent in it, which is
+    # the order those two lines have to land in.
+    module = Ouroboros.Wasm.Sneak
+    binary = compile_capability!(module)
+    on_exit(fn -> unload_capability(module) end)
+
+    assert {:ok, introduction} = introduce_artifact!(module, binary)
+
+    assert {:error, {:immutable_control_module, ^module}} =
+             Verifier.verify(introduction, allow_unsigned: true)
+
+    assert {:module, ^module} = :code.load_binary(module, ~c"wasm_sneak.beam", binary)
+
+    assert {:ok, replacement} =
+             Artifact.build(
+               [{module, binary, old_binary: binary}],
+               epoch: System.unique_integer([:positive, :monotonic])
+             )
+
+    assert {:error, {:immutable_control_module, ^module}} =
+             Verifier.verify(replacement, allow_unsigned: true)
+
+    # And the modules that are actually there, not only a name shaped like one.
+    for shipped <- [Ouroboros.Wasm.Capability, Ouroboros.Wasm.Pool, Ouroboros.Wasm.Store] do
+      shipped_binary = object_code!(shipped)
+
+      assert {:ok, artifact} =
+               Artifact.build(
+                 [{shipped, shipped_binary, old_binary: shipped_binary}],
+                 epoch: System.unique_integer([:positive, :monotonic])
+               )
+
+      assert {:error, {:immutable_control_module, ^shipped}} =
+               Verifier.verify(artifact, allow_unsigned: true)
+    end
+  end
+
   test "rejects on-load code in the new binary and in the rollback preimage" do
     probe = Ouroboros.Test.OnLoadProbe
     plain_binary = compile_probe!(probe, "")

@@ -13,7 +13,7 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test wasm test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
+.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test wasm wasm-guest test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -42,6 +42,7 @@ help:
 	@echo "make sandbox          build ouro-sandbox into priv/sandbox/ (Linux sandbox helper)"
 	@echo "make sandbox-linux-test  prove the sandbox helper enforces, in a Linux container"
 	@echo "make wasm             build ouro-wasm into priv/wasm/ (WebAssembly containment helper)"
+	@echo "make wasm-guest       build the lane-W acceptance guest into test/support/wasm/echo.wasm"
 
 dev:
 	@echo "==> dev: Elixir deps if this checkout has none, then ouro --dev"
@@ -141,6 +142,19 @@ wasm:
 	done
 	@echo "==> wasm: what this build can contain"
 	@priv/wasm/ouro-wasm doctor
+
+# The lane-W acceptance guest: a real component, built by a real toolchain, from the world at
+# tui/wasm/wit/capability.wit. It is a *test fixture* and deliberately not a `release-tarball`
+# prerequisite — nothing a node runs needs it. Its own workspace and its own lockfile, so it
+# can never enter `ouro`'s dependency graph, and its output is gitignored like every other
+# built binary here. Needs one toolchain addition: `rustup target add wasm32-wasip2`.
+wasm-guest:
+	@echo "==> wasm-guest: release component into test/support/wasm/echo.wasm"
+	cd test/support/wasm/echo-guest && $(CARGO) build --release --target wasm32-wasip2
+	cp test/support/wasm/echo-guest/target/wasm32-wasip2/release/ouroboros_echo_guest.wasm \
+	  test/support/wasm/echo.wasm
+	@echo "==> wasm-guest: what it declares"
+	@ls -l test/support/wasm/echo.wasm
 
 computer-use-debug:
 	@echo "==> computer-use-debug: debug helper into priv/computer-use/"

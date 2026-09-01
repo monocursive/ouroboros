@@ -53,11 +53,41 @@ defmodule Ouroboros.Wasm do
     # What `Ouroboros.Wasm.Store` will hold before pruning evicts unreferenced bytes.
     # Eight components at the helper's 64 MiB per-component ceiling: far more than a
     # realistic corpus of capabilities, and still a number an operator would notice.
-    store_budget_bytes: 512 * 1024 * 1024
+    store_budget_bytes: 512 * 1024 * 1024,
+    # The bounds `Ouroboros.Wasm.Capability` stands an instance up under when its own
+    # `initial_state` does not name them. Conservative on purpose: a capability that needs
+    # more says so in the state it is deployed with, where the number is visible to whoever
+    # signs it, rather than inheriting a generous node-wide default it never declared.
+    #
+    # Declared whole, and validated whole (see `valid?/2`): all three or none. A half-stated
+    # bound is not a bound, and the helper refuses a request that omits one for the same
+    # reason — "there is no unlimited default" is its sentence.
+    capability_limits: [
+      # About a tenth of a second of guest computation on this hardware, and three orders of
+      # magnitude above what a JSON step function costs.
+      fuel: 100_000_000,
+      memory_bytes: 64 * 1024 * 1024,
+      deadline_ms: 5_000
+    ]
   ]
 
   @timeout_keys [:handshake_timeout_ms, :request_timeout_ms, :call_margin_ms, :broken_ms]
   @byte_keys [:max_frame_bytes, :store_budget_bytes]
+  @limit_keys [:fuel, :memory_bytes, :deadline_ms]
+
+  @doc """
+  The default instance bounds, as the map `Ouroboros.Wasm.Pool.instantiate/5` takes.
+
+  `Ouroboros.Wasm.Capability` uses these when the state it was deployed with names none of
+  its own. They are a floor an operator may raise, never a ceiling this build invents per
+  request: the three bounds are always sent explicitly.
+  """
+  @spec capability_limits() :: %{
+          fuel: pos_integer(),
+          memory_bytes: pos_integer(),
+          deadline_ms: pos_integer()
+        }
+  def capability_limits, do: Map.new(config(:capability_limits))
 
   @doc "The world id this node admits a component against."
   @spec world() :: String.t()
@@ -112,6 +142,21 @@ defmodule Ouroboros.Wasm do
 
   defp valid?(:helper_path, :bundled), do: true
   defp valid?(:helper_path, value), do: is_binary(value) and value != ""
+
+  # All three bounds or none of them. An operator who writes two of the keys gets the
+  # documented default for all three rather than a silently half-configured instance, which
+  # is the same fallback-on-typo posture as every other setting here — applied to the value
+  # this one actually is.
+  defp valid?(:capability_limits, value) do
+    Keyword.keyword?(value) and Keyword.keys(value) -- @limit_keys == [] and
+      Enum.all?(@limit_keys, fn key ->
+        case Keyword.fetch(value, key) do
+          {:ok, bound} -> is_integer(bound) and bound > 0
+          :error -> false
+        end
+      end)
+  end
+
   defp valid?(key, value) when key in @timeout_keys, do: is_integer(value) and value > 0
   defp valid?(key, value) when key in @byte_keys, do: is_integer(value) and value > 0
 
