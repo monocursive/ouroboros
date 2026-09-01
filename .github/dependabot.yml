@@ -1,0 +1,21 @@
+# One PR per stale dependency, weekly, across all four ecosystems this repository
+# actually builds with. jido_harness is a git dependency pinned by ref in mix.exs, so
+# Dependabot will not touch it — re-pinning that stays a deliberate, hand-made change.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: mix
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: cargo
+    directory: /tui
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly

@@ -4,9 +4,18 @@
 
 name: CI
 
+# Long-lived branches and release tags only. PR branches already run every job through
+# the pull_request event, so an unfiltered `push` ran each PR commit twice. Tags stay
+# because release.yml's publication gate assumes the ordinary CI workflow also sees them.
 on:
   push:
+    branches: [main, dev]
+    tags: ["v*"]
   pull_request:
+
+# Nothing in this workflow writes to the repository; don't hold a token that could.
+permissions:
+  contents: read
 
 # A push that lands while an older run is still going makes that run answer a question
 # nobody is asking any more.
@@ -26,6 +35,7 @@ jobs:
   elixir:
     name: Elixir
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -87,6 +97,8 @@ jobs:
   dialyzer:
     name: Dialyzer
     runs-on: ubuntu-24.04
+    # Generous because a cache miss rebuilds the PLT from scratch, which is most of this.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -127,6 +139,7 @@ jobs:
   rust:
     name: Rust
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: tui
@@ -157,6 +170,7 @@ jobs:
   golden:
     name: Golden fixtures
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
