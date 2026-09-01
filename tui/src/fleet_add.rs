@@ -2566,9 +2566,12 @@ mod tests {
     fn ssh_add_without_a_matching_binary_still_copies_only_the_invite_file() {
         let data = scratch("cross-arch");
         fleet::create(&data, None, "studio", "localhost", fleet::ephemeral_ports()).unwrap();
-        let remote = FakeRemote::linux("/home/op");
-        // Empty roots, not discovered ones: whether this machine happens to have run
-        // `make dist-linux` must not decide what this test asserts.
+        let remote = ScriptedRemote {
+            probes: queue(&[&probe_text(true, false)]),
+            ..ScriptedRemote::default()
+        };
+        // Keep the remote architecture foreign to the test host and the roots empty:
+        // neither the CI platform nor a local `make dist-linux` should decide this result.
         let outcome = add_with_options(
             &data,
             "op@vps",
