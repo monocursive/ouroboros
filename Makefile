@@ -13,7 +13,7 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
+.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test wasm test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -41,6 +41,7 @@ help:
 	@echo "make computer-use     build ouro-computer-use into priv/computer-use/"
 	@echo "make sandbox          build ouro-sandbox into priv/sandbox/ (Linux sandbox helper)"
 	@echo "make sandbox-linux-test  prove the sandbox helper enforces, in a Linux container"
+	@echo "make wasm             build ouro-wasm into priv/wasm/ (WebAssembly containment helper)"
 
 dev:
 	@echo "==> dev: Elixir deps if this checkout has none, then ouro --dev"
@@ -120,6 +121,27 @@ sandbox-linux-test:
 	@echo "==> sandbox-linux-test: enforcement suite in a privileged Linux container"
 	scripts/sandbox-linux-test.sh
 
+# The WebAssembly containment helper. Unlike the sandbox helper this one enforces the same on
+# every platform — the boundary is wasmtime's linker, not a kernel feature — so there is no
+# per-OS caveat here. `ouro-wasm` carries a wasmtime, which needs a newer Rust than the rest of
+# this workspace; see the rust-version note in tui/wasm/Cargo.toml.
+wasm:
+	@echo "==> wasm: release helper into priv/wasm/"
+	cd tui && $(CARGO) build --release -p ouro-wasm
+	mkdir -p priv/wasm
+	cp tui/target/release/ouro-wasm priv/wasm/ouro-wasm
+	chmod 0755 priv/wasm/ouro-wasm
+	@for env in dev test prod; do \
+	  dest="_build/$$env/lib/ouroboros/priv/wasm"; \
+	  if [ -d "_build/$$env/lib/ouroboros/priv" ]; then \
+	    mkdir -p "$$dest"; \
+	    cp priv/wasm/ouro-wasm "$$dest/ouro-wasm"; \
+	    chmod 0755 "$$dest/ouro-wasm"; \
+	  fi; \
+	done
+	@echo "==> wasm: what this build can contain"
+	@priv/wasm/ouro-wasm doctor
+
 computer-use-debug:
 	@echo "==> computer-use-debug: debug helper into priv/computer-use/"
 	cd tui && $(CARGO) build -p ouro-computer-use
@@ -190,7 +212,7 @@ protocol-docs: golden
 	$(MIX) ouroboros.protocol.docs
 	git diff --exit-code docs/PROTOCOL.md
 
-release-tarball: computer-use sandbox
+release-tarball: computer-use sandbox wasm
 	@echo "==> release-tarball: MIX_ENV=prod mix release"
 	MIX_ENV=prod $(MIX) release --overwrite
 	@ls _build/prod/$(RELEASE)-*.tar.gz

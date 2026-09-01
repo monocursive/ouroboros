@@ -36,7 +36,7 @@ Ouroboros for sensitive or unattended work.
 
 ## Quick start
 
-Building from source currently requires Elixir 1.20, Erlang/OTP 29, Rust 1.88,
+Building from source currently requires Elixir 1.20, Erlang/OTP 29, Rust 1.95,
 and `make`.
 
 ```sh

@@ -17,9 +17,11 @@
 # release runner's distribution is the same choice for the same reason.
 FROM hexpm/elixir:1.20.2-erlang-29.0.5-ubuntu-noble-20260730.1
 
-# `.github/workflows/ci.yml` sets RUST_VERSION: "1.88" and release.yml installs 1.88; the
-# crate's own `rust-version` is 1.88. Overridable so a bisect does not need a new file.
-ARG RUST_VERSION=1.88
+# `.github/workflows/ci.yml` sets RUST_VERSION: "1.95" and release.yml installs 1.95. That
+# floor is `ouro-wasm`'s: wasmtime 48 declares `rust-version = "1.95"` and `make dist` builds
+# the helper through `release-tarball`. The client crate itself is still 1.88. Overridable so
+# a bisect does not need a new file.
+ARG RUST_VERSION=1.95
 
 # `mix compile` runs a custom compiler that builds `c_src/fs_filter.c` with whichever of
 # cc/gcc/clang it finds (lib/mix/tasks/compile.ouroboros_fs_filter.ex), `ring` needs a C

@@ -27,9 +27,14 @@ env:
   # The versions this project is developed on. `mix.exs` requires ~> 1.20, and the release
   # bakes whatever ERTS built it, so a runner on a different OTP produces an artifact this
   # project has never run.
+  #
+  # Rust is 1.95 because that is wasmtime 48's own MSRV and `make release-tarball` builds
+  # `ouro-wasm` (tui/wasm). Every other crate here still declares `rust-version = "1.88"` and
+  # still builds on it; this is the floor a *release* needs, kept in one place so the release
+  # workflow's pin and this one cannot drift.
   ELIXIR_VERSION: "1.20"
   OTP_VERSION: "29"
-  RUST_VERSION: "1.88"
+  RUST_VERSION: "1.95"
 
 jobs:
   elixir:
@@ -166,6 +171,12 @@ jobs:
       - run: cargo clippy --all-targets --features embed -- -D warnings
       - run: cargo test
       - run: cargo test --features embed
+
+      # `ouro-wasm` explicitly: this job's cwd selects the root package, so the helper's
+      # containment suite — the tests that prove the linker refuses undeclared imports and
+      # the fuel/deadline/memory bounds hold — would otherwise never run on a PR.
+      - run: cargo clippy -p ouro-wasm --all-targets -- -D warnings
+      - run: cargo test -p ouro-wasm
 
   golden:
     name: Golden fixtures
