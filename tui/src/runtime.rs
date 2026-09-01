@@ -48,7 +48,9 @@
 //! started, which is the case the rendezvous exists to serve.
 
 use std::collections::VecDeque;
-use std::ffi::{CString, OsStr, OsString};
+#[cfg(target_os = "macos")]
+use std::ffi::CString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Read, Seek, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};

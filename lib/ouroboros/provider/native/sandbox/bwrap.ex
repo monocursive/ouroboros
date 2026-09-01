@@ -15,10 +15,12 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
   ## Verified where the live suite runs
 
   The argv is still pinned byte for byte in `test/provider/native/sandbox_test.exs`.
-  Live behaviour — a read-only bind denying writes, a workspace bind allowing them,
-  `$HOME` and `.git` staying read-only — is claimed only on Linux CI with `bwrap`
-  installed (ubuntu-24.04). It is not claimed on the Mac this backend was written on,
-  which still has no `bwrap`, and there is still no seccomp filter.
+  Before this backend is selected, `probe/1` runs a representative read-only mount and
+  network namespace around the host's `true` executable. Merely finding `bwrap` or reading its version is
+  not enough: some container and hosted-runner policies allow the binary to start but
+  refuse the namespace setup. Live behaviour is claimed only where that probe succeeds;
+  elsewhere detection reports no usable backend and the live suite says why it skipped.
+  There is still no seccomp filter.
 
   ## The argv, and why it is in this order
 
@@ -70,6 +72,51 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
   # bind rather than late — which is why this is defence in depth and not the guard.
   @max_segment_depth 6
   @max_segment_visits 2_048
+
+  @doc """
+  Proves this binary can apply the namespace primitives this backend depends on.
+
+  A version check only proves that bubblewrap is installed. The short-lived command below
+  also exercises the read-only root, `/dev`, `/proc`, and the unshared network namespace;
+  if any of those are forbidden, selecting the backend would make every sandboxed command
+  fail before it started. The probe runs once through `Sandbox.detect/0`'s cache.
+  """
+  @spec probe(String.t()) :: %{version: String.t() | nil, notes: String.t()} | nil
+  def probe(path) when is_binary(path) do
+    with target when is_binary(target) <- System.find_executable("true") do
+      args = [
+        "--die-with-parent",
+        "--ro-bind",
+        "/",
+        "/",
+        "--dev",
+        "/dev",
+        "--proc",
+        "/proc",
+        "--unshare-net",
+        "--",
+        target
+      ]
+
+      case System.cmd(path, args, stderr_to_stdout: true) do
+        {_output, 0} -> %{version: version(path), notes: "namespace capability probe passed"}
+        _refused -> nil
+      end
+    else
+      _no_true_executable -> nil
+    end
+  rescue
+    _error -> nil
+  end
+
+  defp version(path) do
+    case System.cmd(path, ["--version"], stderr_to_stdout: true) do
+      {output, 0} -> output |> String.trim() |> String.slice(0, 64)
+      _unavailable -> nil
+    end
+  rescue
+    _error -> nil
+  end
 
   @doc """
   The executable and argv that run `command` under this policy.

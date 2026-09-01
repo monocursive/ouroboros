@@ -20,7 +20,7 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
 
-for dependency in awk cksum dirname find grep mkdir mktemp python3 rm sleep stat tee tr wc; do
+for dependency in awk cksum dirname find grep mkdir mktemp python3 rm sleep tee tr wc; do
   require_command "$dependency"
 done
 
@@ -670,9 +670,13 @@ printf 'lab gateway ports    %s, %s, %s\n' "$CORE_GATEWAY" "$ALPHA_GATEWAY" "$BR
 printf 'lab dist ports       %s, %s, %s\n' "$CORE_DIST" "$ALPHA_DIST" "$BRAVO_DIST"
 
 file_mode() {
-  local mode
-  mode=$(stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1")
-  printf '%s' "$mode"
+  python3 - "$1" <<'PY'
+import pathlib
+import stat
+import sys
+
+print(f"{stat.S_IMODE(pathlib.Path(sys.argv[1]).stat().st_mode):o}")
+PY
 }
 
 assert_private_file() {

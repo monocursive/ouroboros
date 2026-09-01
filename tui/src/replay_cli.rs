@@ -255,9 +255,8 @@ async fn read_journal(
 
         if page + 1 == MAX_PAGES {
             warnings.push(format!(
-                "the journal is longer than {} pages of {PAGE}; the provenance above covers \
-                 records up to sequence {since_seq} and no further",
-                MAX_PAGES
+                "the journal is longer than {MAX_PAGES} pages of {PAGE}; the provenance above \
+                 covers records up to sequence {since_seq} and no further"
             ));
         }
     }

@@ -1,9 +1,6 @@
-# HONESTY NOTE, and it is not a formality: the configured repository remote is not a
-# public GitHub Actions channel, so nothing here has executed on a hosted runner. It is
-# written to be correct — every command in it is one that passes locally on the same
-# toolchain versions — but "passes locally" and "passes on a runner" are different claims
-# and only the first has been made. Treat the first run as a debugging session, not a
-# regression.
+# The first hosted run on 2026-08-31 did exactly what a first run should: it found two
+# Linux portability assumptions that local macOS checks could not. Keep local and hosted
+# evidence distinct when changing this workflow; neither substitutes for the other.
 
 name: CI
 
@@ -56,9 +53,10 @@ jobs:
       # because a cached `_build` would otherwise hide a warning nothing recompiled.
       - run: mix compile --force --warnings-as-errors
 
-      # Linux CI is the node that can actually run bubblewrap. Install it before
-      # `mix test` so the live bwrap suite is not skipped, and print the version so a
-      # green log names the binary it ran under.
+      # Linux CI is the node where bubblewrap may be usable. Install it before `mix test`
+      # and print the version; runtime detection then proves the runner can apply the
+      # required mount and network namespaces before selecting it. A hosted policy may
+      # block those capabilities even when the binary itself starts.
       - run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - run: bwrap --version
 

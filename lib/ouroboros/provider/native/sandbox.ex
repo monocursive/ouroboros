@@ -627,24 +627,26 @@ defmodule Ouroboros.Provider.Native.Sandbox do
         %{@none | notes: "Linux without ouro-sandbox or bwrap (bubblewrap) on PATH"}
 
       path ->
-        %{
-          backend: :bwrap,
-          executable: path,
-          version: bwrap_version(path),
-          notes:
-            "Linux bubblewrap through #{path}. Filesystem and network namespace only: " <>
-              "no seccomp filter, so the syscall surface is not narrowed."
-        }
-    end
-  end
+        case Bwrap.probe(path) do
+          %{version: version, notes: notes} ->
+            %{
+              backend: :bwrap,
+              executable: path,
+              version: version,
+              notes:
+                "Linux bubblewrap through #{path}. #{notes}. Filesystem and network " <>
+                  "namespace only: no seccomp filter, so the syscall surface is not narrowed."
+            }
 
-  defp bwrap_version(path) do
-    case System.cmd(path, ["--version"], stderr_to_stdout: true) do
-      {output, 0} -> output |> String.trim() |> String.slice(0, 64)
-      _unavailable -> nil
+          nil ->
+            %{
+              @none
+              | notes:
+                  "Linux bubblewrap at #{path} is installed but cannot apply its read-only " <>
+                    "mount and network namespace on this host"
+            }
+        end
     end
-  rescue
-    _error -> nil
   end
 
   defp executable(path) do

@@ -28,9 +28,10 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
                            ]
                        end)
 
-  # Same honesty for bubblewrap: a Darwin `mix test` prints why the live suite did not
-  # run. Linux CI installs `bwrap` before `mix test`, so that run is the one that
-  # claims observed behaviour.
+  # Same honesty for bubblewrap: installing the binary is not sufficient. Detection runs
+  # a representative namespace probe, so a Linux host whose container policy blocks it
+  # skips these live tests with the detected backend printed instead of failing every
+  # unrelated command before it starts.
   @needs_bwrap (case @backend do
                   :bwrap ->
                     []
@@ -494,6 +495,53 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
     end
   end
 
+  describe "detecting bubblewrap" do
+    test "rejects a binary whose version works but whose namespace setup is forbidden", %{
+      root: root
+    } do
+      fake = Path.join(root, "blocked-bwrap")
+
+      File.write!(
+        fake,
+        """
+        #!/bin/sh
+        if [ "${1:-}" = "--version" ]; then
+          echo 'bubblewrap 0.test'
+          exit 0
+        fi
+        echo 'bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted' >&2
+        exit 1
+        """
+      )
+
+      File.chmod!(fake, 0o755)
+
+      assert Bwrap.probe(fake) == nil
+    end
+
+    test "selects a binary only after the representative namespace command succeeds", %{
+      root: root
+    } do
+      fake = Path.join(root, "working-bwrap")
+
+      File.write!(
+        fake,
+        """
+        #!/bin/sh
+        if [ "${1:-}" = "--version" ]; then
+          echo 'bubblewrap 0.test'
+        fi
+        exit 0
+        """
+      )
+
+      File.chmod!(fake, 0o755)
+
+      assert %{version: "bubblewrap 0.test", notes: notes} = Bwrap.probe(fake)
+      assert notes =~ "capability probe passed"
+    end
+  end
+
   describe "the decision" do
     test "refuses a read_only shell on a node with no backend, rather than weakening it", %{
       read_only: read_only
@@ -610,7 +658,7 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       first = Sandbox.detect()
       assert :persistent_term.get({Sandbox, :detection}) == first
       assert Sandbox.detect() == first
-      assert first.backend in [:sandbox_exec, :bwrap, :none]
+      assert first.backend in [:sandbox_exec, :ouro_sandbox, :bwrap, :none]
     end
 
     test "lets configuration turn the sandbox off ahead of the cache, without a restart" do
