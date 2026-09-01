@@ -6959,7 +6959,21 @@ mod tests {
         assert!(epmd_lock_held(&lock_path, metadata.dev(), metadata.ino()).unwrap());
         child.kill().unwrap();
         child.wait().unwrap();
-        assert!(!epmd_lock_held(&lock_path, metadata.dev(), metadata.ino()).unwrap());
+
+        // `wait` proves this child was reaped, but another test may have forked while the
+        // parent still held the descriptor and retain the same open-file description
+        // until its exec applies FD_CLOEXEC. Production cleanup already treats that as a
+        // short bounded release window; exercise the same contract under test load.
+        let deadline = Instant::now() + EPMD_STOP_DEADLINE;
+        while epmd_lock_held(&lock_path, metadata.dev(), metadata.ino()).unwrap()
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            !epmd_lock_held(&lock_path, metadata.dev(), metadata.ino()).unwrap(),
+            "the inherited EPMD lock remained held after its bounded release window"
+        );
         remove_epmd_owner_artifacts(&data).unwrap();
         fs::remove_dir_all(data).ok();
     }
