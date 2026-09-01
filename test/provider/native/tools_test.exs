@@ -161,25 +161,6 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
       assert {:error, :unknown_tool} = Tools.lookup("todo", nil, ["todo"])
       assert {:ok, Ouroboros.Provider.Native.Tools.Plan} = Tools.lookup("todo", ["plan"], nil)
     end
-
-    test "the desktop tools are unknown and unlisted while Computer Use is off (D9)" do
-      original = Application.get_env(:ouroboros, :computer_use)
-
-      Application.put_env(:ouroboros, :computer_use, helper_path: "/nope/missing")
-
-      on_exit(fn ->
-        if original == nil,
-          do: Application.delete_env(:ouroboros, :computer_use),
-          else: Application.put_env(:ouroboros, :computer_use, original)
-      end)
-
-      assert {:error, :unknown_tool} = Tools.lookup("desktop_state", nil, nil)
-      assert {:error, :unknown_tool} = Tools.lookup("desktop_act", nil, nil)
-
-      names = Enum.map(Tools.specs(nil, nil, workspace: "/tmp"), & &1.name)
-      refute "desktop_state" in names
-      refute "desktop_act" in names
-    end
   end
 
   describe "classify/3" do
@@ -939,5 +920,35 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
       assert result.output =~ "     1\tx"
       assert_raise ArgumentError, fn -> String.to_existing_atom(invented) end
     end
+  end
+end
+
+defmodule Ouroboros.Provider.Native.ToolsComputerUseOffTest do
+  # Not async: this sets the global `:ouroboros, :computer_use` application key, which
+  # `Native.Desktop.config/1` reads at call time from every tool listing and lookup. An
+  # async writer of that key would poison whichever async reader happened to run
+  # alongside it, so the one test that needs Computer Use off lives here, serial, rather
+  # than making the whole tools file serial (F8).
+  use ExUnit.Case, async: false
+
+  alias Ouroboros.Provider.Native.Tools
+
+  test "the desktop tools are unknown and unlisted while Computer Use is off (D9)" do
+    original = Application.get_env(:ouroboros, :computer_use)
+
+    Application.put_env(:ouroboros, :computer_use, helper_path: "/nope/missing")
+
+    on_exit(fn ->
+      if original == nil,
+        do: Application.delete_env(:ouroboros, :computer_use),
+        else: Application.put_env(:ouroboros, :computer_use, original)
+    end)
+
+    assert {:error, :unknown_tool} = Tools.lookup("desktop_state", nil, nil)
+    assert {:error, :unknown_tool} = Tools.lookup("desktop_act", nil, nil)
+
+    names = Enum.map(Tools.specs(nil, nil, workspace: "/tmp"), & &1.name)
+    refute "desktop_state" in names
+    refute "desktop_act" in names
   end
 end
