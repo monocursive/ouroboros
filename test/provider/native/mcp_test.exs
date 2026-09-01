@@ -1,6 +1,7 @@
 defmodule Ouroboros.Provider.Native.McpTest do
   use ExUnit.Case, async: false
 
+  alias Ouroboros.Provider.Native.Desktop
   alias Ouroboros.Provider.Native.Mcp
   alias Ouroboros.Provider.Native.Mcp.Pool
   alias Ouroboros.Provider.Native.Mcp.Result
@@ -480,17 +481,20 @@ defmodule Ouroboros.Provider.Native.McpTest do
       %{specs: specs}
     end
 
-    test "MCP tools follow the static and node-local desktop tools in the spec list", context do
+    test "MCP tools follow the static and any node-local desktop tools in the spec list",
+         context do
       names = Enum.map(context.specs, & &1.name)
-      static = length(Tools.modules())
 
-      assert Enum.take(names, static) == Enum.map(Tools.modules(), & &1.name())
-      assert Enum.take(names, -2) == ["mcp__fake__echo", "mcp__fake__add"]
+      desktop =
+        if Desktop.enabled?() do
+          ["desktop_state"] ++ if(Desktop.act_enabled?(), do: ["desktop_act"], else: [])
+        else
+          []
+        end
 
-      assert Enum.slice(names, static, length(names) - static - 2) == [
-               "desktop_state",
-               "desktop_act"
-             ]
+      assert names ==
+               Enum.map(Tools.modules(), & &1.name()) ++
+                 desktop ++ ["mcp__fake__echo", "mcp__fake__add"]
     end
 
     test "no MCP tool appears when the caller named no workspace" do

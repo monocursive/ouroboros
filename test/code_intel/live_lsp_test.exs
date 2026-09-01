@@ -5,7 +5,7 @@ defmodule Ouroboros.CodeIntel.LiveLspTest do
   Every other test in this directory talks to a fake server, which proves the pool's own
   behaviour and proves nothing about whether this client is protocol-correct against
   software written by somebody else. This one closes that gap where it can: it looks for
-  clangd, sourcekit-lsp, or rust-analyzer on `PATH`, and if none is there it skips. It
+  a runnable clangd, sourcekit-lsp, or rust-analyzer, and if none is there it skips. It
   never installs anything and it never reaches the network, so it is safe to leave in the
   default run — on a machine with no language servers it is a no-op.
   """
@@ -27,7 +27,7 @@ defmodule Ouroboros.CodeIntel.LiveLspTest do
 
   setup do
     case Enum.find(@candidates, fn {command, _language, _file} ->
-           System.find_executable(command)
+           server_available?(command)
          end) do
       nil ->
         {:ok, server: nil}
@@ -68,6 +68,23 @@ defmodule Ouroboros.CodeIntel.LiveLspTest do
         {:ok, server: command, language: language, root: root, source: source, pool: pool_name}
     end
   end
+
+  # Rustup puts proxy executables on PATH even when their components are not installed.
+  # Treat that proxy's non-zero answer as absent instead of starting it repeatedly until
+  # the live handshake reaches ExUnit's one-minute timeout.
+  defp server_available?("rust-analyzer" = command) do
+    case System.find_executable(command) do
+      nil ->
+        false
+
+      executable ->
+        match?({_output, 0}, System.cmd(executable, ["--version"], stderr_to_stdout: true))
+    end
+  rescue
+    _error -> false
+  end
+
+  defp server_available?(command), do: not is_nil(System.find_executable(command))
 
   defp fixture(:c, root, source) do
     File.write!(source, """
@@ -116,7 +133,7 @@ defmodule Ouroboros.CodeIntel.LiveLspTest do
   test "a real language server completes the handshake and answers a question", context do
     if is_nil(context.server) do
       IO.puts(
-        "\n[live_lsp] skipped: none of #{inspect(Enum.map(@candidates, &elem(&1, 0)))} on PATH"
+        "\n[live_lsp] skipped: none of #{inspect(Enum.map(@candidates, &elem(&1, 0)))} is runnable"
       )
 
       assert true

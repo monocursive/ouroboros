@@ -23,7 +23,7 @@ defmodule Ouroboros.Gateway.ConnTest do
         max_frame: Map.get(context, :max_frame, 1_024)
       )
 
-    {client, conn} = connect(config)
+    {client, conn} = connect(config, method_invoker: method_invoker(context))
 
     on_exit(fn -> :gen_tcp.close(client) end)
 
@@ -32,7 +32,7 @@ defmodule Ouroboros.Gateway.ConnTest do
 
   # A real socket pair, so framing, ownership transfer, and `packet: :line` are exercised
   # rather than mocked. Only the listener's bind is skipped.
-  defp connect(config) do
+  defp connect(config, opts) do
     {:ok, listen} =
       :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
 
@@ -44,7 +44,11 @@ defmodule Ouroboros.Gateway.ConnTest do
     {:ok, conn} =
       DynamicSupervisor.start_child(
         :gateway_conn_test_conns,
-        {Conn, socket: server, config: config, task_supervisor: :gateway_conn_test_tasks}
+        {Conn,
+         socket: server,
+         config: config,
+         task_supervisor: :gateway_conn_test_tasks,
+         method_invoker: Keyword.fetch!(opts, :method_invoker)}
       )
 
     :ok = :gen_tcp.controlling_process(server, conn)
@@ -52,6 +56,30 @@ defmodule Ouroboros.Gateway.ConnTest do
 
     {client, conn}
   end
+
+  defp method_invoker(%{method_invoker: :correlation}) do
+    test = self()
+
+    fn
+      "runtime.providers", _params ->
+        send(test, {:slow_request_started, self()})
+
+        receive do
+          :finish_slow_request -> {:ok, []}
+        after
+          5_000 -> {:ok, []}
+        end
+
+      "agents.list", _params ->
+        send(test, :fast_request_finished)
+        {:ok, []}
+
+      method, params ->
+        Methods.invoke(method, params)
+    end
+  end
+
+  defp method_invoker(_context), do: &Methods.invoke/2
 
   defp send_frame(client, frame) do
     :ok = :gen_tcp.send(client, [JSON.encode_to_iodata!(frame), ?\n])
@@ -254,17 +282,21 @@ defmodule Ouroboros.Gateway.ConnTest do
     assert recv_frame(client) == {:error, :closed}
   end
 
+  @tag method_invoker: :correlation
   test "responses correlate by id, so a slow method never holds a fast one", %{client: client} do
     assert hello(client)["result"]
 
-    # `runtime.providers` shells out to probe every installed provider executable and
-    # takes seconds; `agents.list` reads a process group and takes microseconds. Sent in
-    # that order, the fast one still comes back first — which is the whole point of
-    # dispatching to tasks and correlating by id instead of answering in arrival order.
+    # Hold the first handler at a deterministic seam. Wall-clock differences between two
+    # real methods depend on which provider executables the machine has installed and do
+    # not prove that the connection actually dispatched them concurrently.
     send_frame(client, %{"jsonrpc" => "2.0", "id" => "slow", "method" => "runtime.providers"})
     send_frame(client, %{"jsonrpc" => "2.0", "id" => "fast", "method" => "agents.list"})
 
+    assert_receive {:slow_request_started, slow_request}, 1_000
+    assert_receive :fast_request_finished, 1_000
+
     first = recv_frame(client, 20_000)
+    send(slow_request, :finish_slow_request)
     second = recv_frame(client, 20_000)
 
     assert first["id"] == "fast"

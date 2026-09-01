@@ -232,6 +232,7 @@ defmodule Ouroboros.Gateway.Conn do
       socket: Keyword.fetch!(opts, :socket),
       config: config,
       task_supervisor: Keyword.fetch!(opts, :task_supervisor),
+      method_invoker: Keyword.get(opts, :method_invoker, &Methods.invoke/2),
       peer: nil,
       client: nil,
       authenticated?: false,
@@ -934,9 +935,11 @@ defmodule Ouroboros.Gateway.Conn do
   end
 
   defp start_request(state, {id, method, params, entry}) do
+    method_invoker = state.method_invoker
+
     task =
       Task.Supervisor.async_nolink(state.task_supervisor, fn ->
-        Methods.invoke(method, params)
+        method_invoker.(method, params)
       end)
 
     timer = Process.send_after(self(), {:request_timeout, task.ref}, entry.timeout)
