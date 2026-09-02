@@ -20,7 +20,7 @@
       },
       "os_pid": 4242,
       "owned": 1,
-      "path": "/opt/ouroboros/lib/ouroboros/priv/wasm/ouro-wasm",
+      "path": "ouro-wasm",
       "pending_drops": 0,
       "phase": "ready",
       "present": true,
@@ -47,7 +47,7 @@
       "bytes": 3145728,
       "held": 2,
       "protected": 1,
-      "root": "/var/lib/ouroboros/wasm/components"
+      "root": "components"
     }
   }
 }

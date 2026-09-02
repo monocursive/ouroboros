@@ -1254,12 +1254,18 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
   # A field this node cannot answer is `null`, never a missing key and never `false`: an
   # unreadable store and an empty one are different facts, and `held: null` is how a client
   # tells them apart.
+  #
+  # `helper.path` and `store.root` are **basenames, not paths**, and the fixture pins them
+  # that way because that is what `Ouroboros.Wasm.Surface` answers: both verbs are `:read`,
+  # the lowest scope this gateway has, and an absolute path names an install prefix and
+  # often an account to anyone who may merely look. A client that renders either as a path
+  # is rendering something this protocol does not send.
   defp wasm_status_result do
     Conn.result_frame(16, %{
       node: :ouroboros@golden,
       helper: %{
         present: true,
-        path: "/opt/ouroboros/lib/ouroboros/priv/wasm/ouro-wasm",
+        path: "ouro-wasm",
         world: "ouroboros:capability@0.1.0",
         phase: :ready,
         os_pid: 4242,
@@ -1282,7 +1288,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         broken_reason: nil
       },
       store: %{
-        root: "/var/lib/ouroboros/wasm/components",
+        root: "components",
         budget_bytes: 536_870_912,
         held: 2,
         bytes: 3_145_728,

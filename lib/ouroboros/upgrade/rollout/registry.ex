@@ -76,9 +76,10 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   ## What a checkpoint is re-validated against on read, and what happens to one bad entry
 
   Every entry is held to the validators `deploying/2` applies, again, on load: the id is a
-  binary and matches the entry's own `artifact_id`, the epoch is a positive integer, the
-  sha is 64 lower-case hex or `nil`, the state is one of the five, `nodes` is non-empty,
-  the timestamps are strings. What is *looser* on read than on write is the two names that
+  binary and matches the entry's own `artifact_id`, the epoch is a positive integer *no
+  larger than a number this cluster could have minted*, the sha is 64 lower-case hex or
+  `nil`, the state is one of the five, `nodes` is non-empty, and the timestamps are
+  strings. What is *looser* on read than on write is the two names that
   cross a reboot: a module and a node name this VM never interned come back as binaries,
   and both kinds are accepted, because that is what a rollout of code this node no longer
   holds looks like from here.
@@ -100,6 +101,25 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   went. The mark only rises, the entries are folded in on top of it, and the field is
   additive — a checkpoint that has never held one reads as `0`, and an older build that
   drops it falls back to deriving, which is where the number came from.
+
+  ## What the epoch ceiling holds, and what it does not
+
+  `Ouroboros.Upgrade.Epoch` is a counter: one number per allocation, from zero. A number
+  above 10^14 was therefore not minted by this cluster — reaching it
+  takes a hundred trillion deploys — so an *entry* carrying one is dropped like any other
+  unreadable entry, and a *watermark* carrying one is ignored with a warning and the mark
+  falls back to the entries. The same ceiling applies at `deploying/2`, so a caller cannot
+  write a number this build would refuse to read back.
+
+  Be exact about what that buys, because it is narrower than it looks. It closes the two
+  **unrecoverable** shapes: an epoch so high no future allocation can exceed it, and a
+  watermark with no entry behind it to delete — the one that survived pruning every row and
+  left an operator nothing to remove. It does **not** make a tampered checkpoint safe. A
+  planted entry at a merely large but plausible epoch (10^9, say) still refuses every deploy
+  below it; what recovers from that is deleting the entry, which now works again because
+  the watermark cannot be poisoned above the ceiling in its place. And nothing here defends
+  a node whose checkpoint file an attacker can write at all — that node is already lost.
+  What the ceiling makes true is that the damage stays *recoverable by an operator*.
 
   `component_sha256` is a lower-case 64-hex **string** end to end: in the struct, across
   the checkpoint, and back. Nothing interns it, nothing resolves it, and
@@ -138,6 +158,18 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   @states [:deploying, :live, :superseded, :rolled_back, :quarantined]
   @default_limit 200
   @max_eval_report_bytes 32_768
+
+  # The largest epoch a number this cluster minted could plausibly be. `Ouroboros.Upgrade.Epoch`
+  # is a *counter*: `next/2` allocates `max(what the nodes report, the durable watermark) + 1`,
+  # starting from zero, one number per allocation. Reaching 10^14 therefore takes a hundred
+  # trillion deploys — a thousand a second, without pause, for three thousand years. It is
+  # also comfortably above a hand-minted number taken from a millisecond clock, which is
+  # around 1.8 x 10^12 today and does not reach this until the year 5138.
+  #
+  # So a bigger number was not minted here, and the two places it could arrive from are the
+  # two places it is refused: an entry read back from a checkpoint, and the checkpoint's own
+  # watermark field. See the moduledoc for what this does and does not buy.
+  @max_plausible_epoch 100_000_000_000_000
 
   # The one binary form `module` accepts. See the moduledoc: binary-tolerance is about
   # names crossing a checkpoint, not about admitting arbitrary strings as capabilities.
@@ -573,10 +605,27 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
 
   # A mark this build does not recognize is `0`, which is the honest reading: this
   # checkpoint records no high-water mark, so the entries are all there is to go on.
+  #
+  # That fallback is also the answer to an implausible one, and this field needs an answer
+  # more than an entry does: an entry can be deleted, and the watermark is the one number
+  # with nothing behind it to delete. A checkpoint holding no entries at all and only a
+  # planted mark refused every deploy with nothing an operator could remove. So a number no
+  # allocation could have reached is ignored rather than enforced, loudly.
   defp watermark(held) do
     case Map.get(held, :lane_w_epoch) || Map.get(held, "lane_w_epoch") do
-      value when is_integer(value) and value >= 0 -> value
-      _absent_or_invalid -> 0
+      value when is_integer(value) and value >= 0 and value <= @max_plausible_epoch ->
+        value
+
+      value when is_integer(value) and value > @max_plausible_epoch ->
+        Logger.warning(
+          "rollout registry ignored an implausible lane-W epoch watermark: " <>
+            "#{value} is above #{@max_plausible_epoch}, which no allocation could have reached"
+        )
+
+        0
+
+      _absent_or_invalid ->
+        0
     end
   end
 
@@ -799,11 +848,24 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
     end
   end
 
+  # One rule, both directions: `deploying/2` calls this and so does `loaded_shape/2`, so a
+  # number this build will not read out of a checkpoint is also one it will not write into
+  # one. `Ouroboros.Wasm.Artifact.build/2`'s moduledoc warns that a VM-local counter would
+  # poison this register's watermark past every epoch `Epoch.next/2` mints; the ceiling is
+  # where that warning stops being only a warning.
   defp fetch_epoch(attrs) do
     case Map.fetch(attrs, :epoch) do
-      {:ok, epoch} when is_integer(epoch) and epoch > 0 -> {:ok, epoch}
-      {:ok, other} -> {:error, {:invalid_attribute, :epoch, other}}
-      :error -> {:error, {:missing_attribute, :epoch}}
+      {:ok, epoch} when is_integer(epoch) and epoch > 0 and epoch <= @max_plausible_epoch ->
+        {:ok, epoch}
+
+      {:ok, epoch} when is_integer(epoch) and epoch > @max_plausible_epoch ->
+        {:error, {:implausible_epoch, epoch, @max_plausible_epoch}}
+
+      {:ok, other} ->
+        {:error, {:invalid_attribute, :epoch, other}}
+
+      :error ->
+        {:error, {:missing_attribute, :epoch}}
     end
   end
 

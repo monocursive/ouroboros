@@ -287,6 +287,108 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
                Registry.deploying(wasm_attrs(artifact_id: "legit", epoch: 42), registry)
     end
 
+    test "an entry planted at an epoch nothing could have minted is dropped", context do
+      {adapter, adapter_opts} = context.storage
+
+      # Well-formed in every other way: a real sha, real nodes, a real state, a real pair of
+      # timestamps. Only the number is a lie, and the number is what matters — the lane-W
+      # watermark is global over every lane-W entry, so one planted row at 10^15 answered
+      # `{:stale_epoch, n, 999999999999999}` for every module's every future deploy. Nothing
+      # `Epoch.next/2` can allocate ever exceeds it: the allocator is a counter that adds one.
+      planted = %Registry.Entry{
+        artifact_id: "planted",
+        module: "wasm/greeter",
+        epoch: 999_999_999_999_999,
+        nodes: [node()],
+        state: :rolled_back,
+        component_sha256: String.duplicate("a", 64),
+        created_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+        updated_at: DateTime.utc_now() |> DateTime.to_iso8601()
+      }
+
+      write_checkpoint!(adapter, adapter_opts, %{version: 3, rollouts: %{"planted" => planted}})
+
+      registry = start_registry!(storage: context.storage)
+
+      assert :not_found = Registry.get("planted", registry)
+
+      assert {:ok, %{epoch: 42}} =
+               Registry.deploying(wasm_attrs(artifact_id: "legit", epoch: 42), registry)
+    end
+
+    test "a checkpoint carrying only an implausible watermark still deploys", context do
+      {adapter, adapter_opts} = context.storage
+
+      # The shape the durable watermark introduced, and the reason it is worse than a planted
+      # entry rather than the same: there is no row to delete. An operator who removed every
+      # entry from the file still could not deploy, because the number refusing them was the
+      # file's own field.
+      write_checkpoint!(adapter, adapter_opts, %{
+        version: 3,
+        rollouts: %{},
+        lane_w_epoch: 999_999_999_999_999
+      })
+
+      registry = start_registry!(storage: context.storage)
+
+      assert {:ok, %{epoch: 7}} =
+               Registry.deploying(wasm_attrs(artifact_id: "legit", epoch: 7), registry)
+    end
+
+    test "a legitimately high epoch just under the ceiling is kept and still enforced",
+         context do
+      {adapter, adapter_opts} = context.storage
+
+      # The other half of the rule: the ceiling refuses a number nothing could have minted,
+      # not a number that is merely large. An entry one order below it loads, and it gates.
+      high = 99_999_999_999_999
+
+      entry = %Registry.Entry{
+        artifact_id: "high",
+        module: "wasm/greeter",
+        epoch: high,
+        nodes: [node()],
+        state: :live,
+        component_sha256: String.duplicate("a", 64),
+        created_at: "x",
+        updated_at: "x"
+      }
+
+      write_checkpoint!(adapter, adapter_opts, %{
+        version: 3,
+        rollouts: %{"high" => entry},
+        lane_w_epoch: high
+      })
+
+      registry = start_registry!(storage: context.storage)
+
+      assert {:ok, %{epoch: ^high}} = Registry.get("high", registry)
+
+      assert {:error, {:stale_epoch, 42, ^high}} =
+               Registry.deploying(wasm_attrs(artifact_id: "legit", epoch: 42), registry)
+
+      assert {:ok, _entry} =
+               Registry.deploying(wasm_attrs(artifact_id: "higher", epoch: high + 1), registry)
+    end
+
+    test "and a caller cannot write a number this build would refuse to read back" do
+      # One rule, both directions. `Wasm.Artifact.build/2` has no default epoch precisely
+      # because a VM-local counter would land here; this is where that warning stops being
+      # only a warning.
+      registry = start_registry!()
+
+      assert {:error, {:implausible_epoch, 999_999_999_999_999, ceiling}} =
+               Registry.deploying(wasm_attrs(epoch: 999_999_999_999_999), registry)
+
+      assert ceiling == 100_000_000_000_000
+
+      assert {:error, {:implausible_epoch, _epoch, _ceiling}} =
+               Registry.deploying(attrs(nil, epoch: 999_999_999_999_999), registry)
+
+      assert Registry.list(registry) == []
+      assert {:ok, _entry} = Registry.deploying(wasm_attrs(epoch: ceiling), registry)
+    end
+
     test "every field `deploying/2` refuses is refused again on read", context do
       {adapter, adapter_opts} = context.storage
 
@@ -718,6 +820,15 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
     ids = registry |> Registry.list() |> Enum.map(& &1.artifact_id)
     refute "high" in ids, "the setup did not prune the entry that held the watermark"
     ids
+  end
+
+  defp write_checkpoint!(adapter, adapter_opts, held) do
+    :ok =
+      adapter.put_checkpoint(
+        Registry.checkpoint_key(),
+        Ouroboros.Upgrade.Wire.dump(held),
+        adapter_opts
+      )
   end
 
   # The exact shape the build before tagged map keys wrote: every key bare, atoms tagged.
