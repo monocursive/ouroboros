@@ -2707,7 +2707,7 @@ async fn wasm(paths: &Paths, command: WasmCommand) -> Result<()> {
         }
 
         WasmCommand::Run(args) => {
-            let messages = run_messages(&args)?;
+            let messages = ouro::wasm_cli::read_messages(&args.message, args.messages.as_deref())?;
             let request = ouro::wasm_cli::RunRequest {
                 helper: args.helper.helper.as_deref(),
                 file: &args.file,
@@ -2733,7 +2733,7 @@ async fn wasm(paths: &Paths, command: WasmCommand) -> Result<()> {
         }
 
         WasmCommand::Hook(args) => {
-            let payload = hook_payload(args.payload.as_deref())?;
+            let payload = ouro::wasm_cli::read_payload(args.payload.as_deref())?;
             let request = ouro::wasm_cli::HookRequest {
                 helper: args.helper.helper.as_deref(),
                 file: &args.file,
@@ -2804,53 +2804,6 @@ fn refused_unless(admitted: bool) -> Result<()> {
     } else {
         std::process::exit(1)
     }
-}
-
-/// `--message` first, then `--messages`, in file order. Blank lines are skipped; a line that is
-/// not JSON is *not* — the helper would take it as a body, and a developer who meant a message
-/// should be told they wrote something else.
-fn run_messages(args: &ouro::cli::WasmRunArgs) -> Result<Vec<String>> {
-    let mut messages = args.message.clone();
-
-    if let Some(path) = &args.messages {
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("could not read {}", path.display()))?;
-        for (number, line) in content.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            serde_json::from_str::<serde_json::Value>(line)
-                .with_context(|| format!("{}:{}: not a JSON line", path.display(), number + 1))?;
-            messages.push(line.to_string());
-        }
-    }
-
-    if messages.is_empty() {
-        anyhow::bail!("nothing to send: pass --message '<json>' or --messages <file>");
-    }
-    Ok(messages)
-}
-
-/// The hook payload: a file, `-` for standard input, or an empty object.
-fn hook_payload(source: Option<&str>) -> Result<serde_json::Value> {
-    let text = match source {
-        None => return Ok(serde_json::json!({})),
-        Some("-") => {
-            let mut buffer = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut buffer)
-                .context("could not read the payload from standard input")?;
-            buffer
-        }
-        Some(path) => std::fs::read_to_string(path)
-            .with_context(|| format!("could not read the payload from {path}"))?,
-    };
-
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return Ok(serde_json::json!({}));
-    }
-    serde_json::from_str(trimmed).context("the hook payload is not JSON")
 }
 
 /// The connection every `ouro wasm` verb but `keygen` makes: the same endpoint resolution

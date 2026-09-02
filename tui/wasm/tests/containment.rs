@@ -1424,6 +1424,56 @@ fn reporting_the_shape_did_not_change_what_is_admitted() {
     assert!(reply["result"].is_null());
 }
 
+/// The structural bound runs **in front of** the compiler, proved by the clock (W10 review, M5).
+///
+/// Every other test about `shape::check` asserts on the refusal, and a refusal looks the same
+/// whether it was taken before `Component::new` or after it. The whole point of the bound is
+/// that cranelift never sees the bytes — cranelift cannot be interrupted once it starts, so a
+/// check *after* it would leave the helper burning a CPU for seconds on input it was always
+/// going to refuse, which is exactly the wedge `crate::shape` exists to prevent.
+///
+/// So this measures. The component is one function past `MAX_FUNCTIONS`; compiling it takes
+/// seconds even on the release build and tens of seconds on a debug one. The refusal is asserted
+/// to arrive within a small margin of a `doctor` round trip taken in the same process — a floor
+/// that includes the pipe, the JSON, the file read and the digest, and includes no compilation.
+/// Relative rather than absolute because a loaded runner slows both equally.
+///
+/// Move `shape::check` after `Component::new` in `Host::compile_measured` and this goes red by
+/// three orders of magnitude.
+#[test]
+fn the_structural_bound_is_taken_before_the_compiler_runs() {
+    let mut helper = Helper::spawn(&[]);
+    let over = fixture(
+        "timed-over-functions",
+        &support::dense(MAX_FUNCTIONS - GUEST_FUNCTIONS + 1, 18),
+    );
+
+    // The floor: a round trip that does everything except compile.
+    let started = Instant::now();
+    helper.ok("doctor", Value::Null);
+    let floor = started.elapsed();
+
+    let started = Instant::now();
+    let (refusal, _) = helper.refusal("inspect", json!({ "path": over.path }));
+    let refused_in = started.elapsed();
+    assert_eq!(refusal, "component_too_complex");
+
+    let budget = floor + Duration::from_millis(500);
+    assert!(
+        refused_in < budget,
+        "the refusal took {refused_in:?} against a {budget:?} budget (a `doctor` round trip is \
+         {floor:?}): a structural bound that costs a compile is not a bound in front of the \
+         compiler"
+    );
+
+    // And an absolute ceiling as well, so a pathologically slow `doctor` cannot make the
+    // relative bound vacuous.
+    assert!(
+        refused_in < Duration::from_secs(2),
+        "refused in {refused_in:?}, which is long enough to have compiled something"
+    );
+}
+
 // --------------------------------------------------- the engine's feature set (F2)
 
 /// The engine speaks the smallest dialect the world needs, and the two proposals worth naming

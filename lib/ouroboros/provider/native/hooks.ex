@@ -1807,6 +1807,30 @@ defmodule Ouroboros.Provider.Native.Hooks do
     |> clip(@max_context_bytes)
   end
 
+  # Cut on a **character** boundary, not on a byte.
+  #
+  # `binary_part/3` cuts wherever the number lands, and a repository chooses the text: eight
+  # kilobytes of `additionalContext` ending in an accented letter puts the cut inside a
+  # two-byte codepoint, and the result is a binary that is not valid UTF-8. Everything
+  # downstream then has to survive it — `JSON.encode!` does not, it raises — so a clone could
+  # stop a turn with one long context line. Found by W10's review, which reached it through
+  # `ouro wasm hook` on a component whose reply ended in `é`.
+  #
+  # Walking back is bounded by construction: UTF-8 is at most four bytes, so the loop runs at
+  # most three times before `String.valid?/1` is true. The Rust half of this rule
+  # (`tui/src/wasm_cli.rs`'s `clip`) cuts at the character boundary at or below the same limit,
+  # so the two now agree byte for byte, and `test/support/wasm_golden/hook_narrowing.json` pins
+  # a case that lands mid-codepoint to keep them that way.
   defp clip(text, limit) when byte_size(text) <= limit, do: text
-  defp clip(text, limit), do: binary_part(text, 0, limit) <> "\n… (truncated)"
+
+  defp clip(text, limit),
+    do: binary_part(text, 0, character_boundary(text, limit)) <> "\n… (truncated)"
+
+  defp character_boundary(_text, 0), do: 0
+
+  defp character_boundary(text, at) do
+    if String.valid?(binary_part(text, 0, at)),
+      do: at,
+      else: character_boundary(text, at - 1)
+  end
 end

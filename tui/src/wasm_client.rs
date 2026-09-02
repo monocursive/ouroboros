@@ -11,17 +11,45 @@
 //!
 //!   1. `--helper <path>`, which the developer typed;
 //!   2. `$OUROBOROS_WASM_HELPER`, absolute, which the developer exported;
-//!   3. `ouro`'s own sibling — `<dir of the running binary>/ouro-wasm` — which is as trusted
-//!      as this binary is, because it was installed with it.
+//!   3. `ouro`'s own sibling — `<dir of the *resolved* binary>/ouro-wasm` — the helper
+//!      installed alongside this `ouro`.
 //!
-//! **Never the working directory and never a repository.** `Ouroboros.Wasm.helper_path/0`
+//! **Nothing cwd-derived unless the developer said so.** `Ouroboros.Wasm.helper_path/0`
 //! removed every cwd-derived candidate in W7 for a reason that applies here with more force:
 //! the helper *is* the containment boundary, so a cloned repository that could drop a
 //! `priv/wasm/ouro-wasm` into a directory somebody runs `ouro wasm inspect` in would be
-//! handing this command the binary it spawns to contain untrusted code. `ouro wasm` is run in
-//! exactly the directory a component author is working in, which is the directory the
-//! component came from. So the resolution order is a property of the installation and of what
-//! was typed, and of nothing else.
+//! handing this command the binary it spawns to contain untrusted code. A developer may still
+//! *point at* a helper inside a checkout — `--helper ./priv/wasm/ouro-wasm`, or the absolute
+//! `$OUROBOROS_WASM_HELPER` that CI itself exports — because that is a person choosing, which
+//! is the only thing that may choose. What is forbidden is a path this command derives on its
+//! own from wherever it happens to have been run.
+//!
+//! # Every candidate is canonicalised and vetted before it is spawned ([`vet`])
+//!
+//! Three defects made the rule above a description rather than a mechanism, all three of them
+//! found by review and each with a proof:
+//!
+//!   * **The sibling was the directory `ouro` was *reached through*.** `current_exe` returns
+//!     the path used to start the process, symlinks and all, so a repository shipping
+//!     `./ouro -> /usr/local/bin/ouro` beside its own `./ouro-wasm` had that `ouro-wasm`
+//!     executed. `current_exe` is now canonicalised *first*, so the sibling is the directory
+//!     the real binary lives in.
+//!   * **The file checked and the file executed could differ.** `--helper ouro-wasm` has no
+//!     path separator: `is_file()` resolved it against the working directory, and
+//!     `Command::new` then did a `$PATH` search and ran something else entirely. Every
+//!     accepted path is now canonicalised and it is the *canonical* path that is spawned —
+//!     which is what [`HelperBinary`] exists to make unskippable.
+//!   * **Nothing checked who owned it.** A helper that is writable by anyone but its owner is
+//!     a containment boundary anybody can replace. [`vet`] applies the same shape
+//!     `fleet.rs`'s packaged-EPMD check applies: a regular file, owned, executable, and not
+//!     group- or world-writable.
+//!
+//! Outside the model, stated: a local attacker who can already write into the directory the
+//! real `ouro` lives in, or who can hard-link that binary into a directory they control.
+//! A hard link needs local write access to a directory on the same filesystem, which is
+//! access this rule cannot take away — the link is indistinguishable from the file, because
+//! it *is* the file. What the model does cover is a repository, a clone, an archive, or
+//! anything else that arrives as data.
 //!
 //! # The environment the helper is given
 //!
@@ -42,6 +70,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -121,61 +150,156 @@ impl Limits {
     }
 }
 
+/// A helper path that has been canonicalised and vetted, and the only thing [`Helper::start`]
+/// will spawn.
+///
+/// A newtype rather than a `PathBuf`, and that is the whole point of it: review found a path
+/// that passed `is_file()` and then had `Command::new` run a *different* file, so "the checked
+/// path is the spawned path" cannot be a convention somebody remembers. It is a type nobody can
+/// construct except through [`vet`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HelperBinary(PathBuf);
+
+impl HelperBinary {
+    /// The canonical absolute path, for a message that names which binary was used.
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for HelperBinary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.display())
+    }
+}
+
 /// The helper's path, resolved by the three rules in the module header and no others.
-pub fn resolve(explicit: Option<&Path>) -> Result<PathBuf> {
+pub fn resolve(explicit: Option<&Path>) -> Result<HelperBinary> {
     resolve_from(explicit, std::env::var_os(HELPER_ENV), sibling())
 }
 
 /// The rule itself, as a function of what was typed, what was exported, and where this binary
-/// lives — so a test can state all three instead of mutating a process-wide environment, and
-/// so the list of candidates is one expression a reader can check against D14.
+/// really lives — so a test can state all three instead of mutating a process-wide environment,
+/// and so the list of candidates is one expression a reader can check against D14.
 ///
 /// There is no fourth argument, and that absence is the decision: nothing derived from the
-/// working directory is passed in, so nothing derived from it can be selected.
+/// working directory is passed in, so nothing derived from it can be selected. A developer may
+/// still *name* a path inside a checkout through the first two, which is a person choosing.
 fn resolve_from(
     explicit: Option<&Path>,
     from_env: Option<OsString>,
     sibling: Option<PathBuf>,
-) -> Result<PathBuf> {
+) -> Result<HelperBinary> {
     if let Some(path) = explicit {
-        return if path.is_file() {
-            Ok(path.to_path_buf())
-        } else {
-            Err(anyhow!("--helper {} is not a file", path.display()))
-        };
+        return vet(path, "--helper");
     }
 
     if let Some(from_env) = from_env {
         let path = PathBuf::from(&from_env);
         // Absolute, exactly as `Ouroboros.Wasm.helper_path/0` requires: a relative value in an
-        // environment variable is resolved against the working directory, which is the one
-        // place this must never look.
-        if path.is_absolute() && path.is_file() {
-            return Ok(path);
+        // environment variable is resolved against the working directory, and a helper chosen
+        // by where the command happened to be run is the one thing D14 forbids. Refused before
+        // it is canonicalised, because canonicalising it *is* resolving it against the cwd.
+        if !path.is_absolute() {
+            bail!(
+                "{HELPER_ENV} is {:?}, which is not an absolute path. A relative one would be \
+                 resolved against the working directory, and the helper is the containment \
+                 boundary: where it comes from must not depend on where this command was typed.",
+                from_env
+            );
         }
-        bail!(
-            "{HELPER_ENV} is {:?}, which is not an absolute path to a file",
-            from_env
-        );
+        return vet(&path, HELPER_ENV);
     }
 
+    // `exists()` rather than `is_file()`: something is there and it is not usable, so the
+    // reader is owed the reason rather than "there is no helper".
     if let Some(sibling) = sibling {
-        if sibling.is_file() {
-            return Ok(sibling);
+        if sibling.exists() {
+            return vet(&sibling, "the `ouro-wasm` installed beside `ouro`");
         }
     }
 
     bail!(
         "no `{HELPER}` to run this with. `ouro wasm` looks in exactly three places, in order: \
-         `--helper <path>`, an absolute ${HELPER_ENV}, and beside the running `ouro` binary. \
-         It deliberately does not look in the working directory or in a repository — the \
-         helper is the containment boundary, so a checkout must not be able to supply it. \
-         Build one with `make wasm` and point ${HELPER_ENV} at it."
+         `--helper <path>`, an absolute ${HELPER_ENV}, and beside the installed `ouro` binary. \
+         It deliberately derives nothing from the working directory — the helper is the \
+         containment boundary, so a checkout must not be able to supply one this command went \
+         looking for. Build one with `make wasm` and point ${HELPER_ENV} at it."
     );
 }
 
+/// Canonicalises a candidate and refuses it unless it is a helper this process may trust.
+///
+/// The same shape `fleet.rs`'s packaged-EPMD check applies, for the same reason: a program this
+/// process is about to execute is not somewhere to be relaxed about ownership. Four questions,
+/// in the order that makes each one meaningful:
+///
+///   1. **Canonicalise.** Every symlink resolved and the result absolute, so what is checked
+///      below is the file itself and — because this canonical path is what [`HelperBinary`]
+///      carries to `Command::new` — so that the file checked is the file run. A path that
+///      cannot be canonicalised does not exist, and is refused rather than forwarded to a
+///      `$PATH` search.
+///   2. **A regular file.** A directory, a device, a socket or a FIFO is not a helper.
+///   3. **Owned, and executable.** `uid == geteuid()` is `fleet.rs`'s rule. Root ownership is
+///      accepted too: a helper installed by a package manager into `/usr/local/bin` is owned by
+///      root and is *more* trustworthy than one owned by this account, not less — the attacker
+///      in this model is a repository, and refusing the safest install would push a developer
+///      to `--helper`, which is vetted by this same function anyway.
+///   4. **Not group- or world-writable.** A binary anybody may rewrite is a containment
+///      boundary anybody may replace, whoever nominally owns it.
+///
+/// What this cannot answer is who may write the *directory* it sits in; see the module header
+/// for that residual.
+pub fn vet(path: &Path, source: &str) -> Result<HelperBinary> {
+    let canonical = std::fs::canonicalize(path).with_context(|| {
+        format!(
+            "{source}: {} could not be resolved to a real path",
+            path.display()
+        )
+    })?;
+
+    let metadata = std::fs::symlink_metadata(&canonical)
+        .with_context(|| format!("{source}: could not inspect {}", canonical.display()))?;
+
+    let uid = unsafe { libc::geteuid() };
+    if !metadata.file_type().is_file() {
+        bail!(
+            "{source}: {} is not a regular file, so it is not a helper",
+            canonical.display()
+        );
+    }
+    if metadata.uid() != uid && metadata.uid() != 0 {
+        bail!(
+            "{source}: {} is owned by uid {}, not by this account (uid {uid}) or root. The \
+             helper is the containment boundary: a binary somebody else owns is a binary \
+             somebody else chooses.",
+            canonical.display(),
+            metadata.uid()
+        );
+    }
+    if metadata.mode() & 0o111 == 0 {
+        bail!("{source}: {} is not executable", canonical.display());
+    }
+    if metadata.mode() & 0o022 != 0 {
+        bail!(
+            "{source}: {} is group- or world-writable (mode {:o}); a helper anybody can rewrite \
+             is a containment boundary anybody can replace",
+            canonical.display(),
+            metadata.mode() & 0o7777
+        );
+    }
+
+    Ok(HelperBinary(canonical))
+}
+
+/// The helper installed beside `ouro`, with `current_exe` canonicalised **first**.
+///
+/// Uncanonicalised, this was the directory `ouro` was *reached through*: a repository shipping
+/// `./ouro -> /usr/local/bin/ouro` next to its own `./ouro-wasm` had that `ouro-wasm` spawned,
+/// which is exactly the thing D14 exists to prevent, arriving by the one road nobody was
+/// watching. Canonicalising first makes this the directory the real binary lives in.
 fn sibling() -> Option<PathBuf> {
-    let executable = std::env::current_exe().ok()?;
+    let executable = std::fs::canonicalize(std::env::current_exe().ok()?).ok()?;
     Some(executable.parent()?.join(HELPER))
 }
 
@@ -190,8 +314,14 @@ pub struct Helper {
 }
 
 impl Helper {
-    /// Starts `<path> serve` with the allow-listed environment and nothing else.
-    pub fn start(path: &Path) -> Result<Helper> {
+    /// Starts `<binary> serve` with the allow-listed environment and nothing else.
+    ///
+    /// Takes a [`HelperBinary`] and not a path, so the canonical path [`vet`] approved is the
+    /// path `Command::new` receives. There is no way to reach this function with anything else,
+    /// which is the fix for a `--helper ouro-wasm` that passed `is_file()` against the working
+    /// directory and then had `Command::new` do a `$PATH` search for something different.
+    pub fn start(binary: &HelperBinary) -> Result<Helper> {
+        let path = binary.path();
         let mut command = Command::new(path);
         command.arg("serve");
 
@@ -639,40 +769,157 @@ mod tests {
 
     /// A relative `$OUROBOROS_WASM_HELPER` is refused rather than resolved, because resolving
     /// one is a read of the working directory by another name.
+    ///
+    /// The integration twin plants a *real, working* helper at the relative path, so the
+    /// absolute-path rule is demonstrably what refuses it rather than the file being missing:
+    /// `a_relative_helper_override_is_refused_even_when_it_would_have_worked`.
     #[test]
     fn a_relative_helper_override_is_refused() {
-        let error = resolve_from(None, Some(OsString::from("priv/wasm/ouro-wasm")), None)
+        let planted = plant_a_helper("relative");
+        let relative = OsString::from("priv/wasm/ouro-wasm");
+
+        let error = resolve_from(None, Some(relative), None)
             .expect_err("a relative override must not resolve");
         assert!(
             error.to_string().contains("absolute"),
             "the refusal must name the rule: {error}"
         );
+        // And it is refused for being relative rather than for being absent: the same bytes at
+        // an absolute path resolve.
+        assert!(
+            resolve_from(None, Some(planted.helper.clone().into_os_string()), None).is_ok(),
+            "the same file, named absolutely, is a helper"
+        );
     }
 
     /// The two candidates that *are* honoured, so the test above is a rule and not a refusal
-    /// to work at all.
+    /// to work at all — and what comes back is the **canonical** path, which is what makes the
+    /// checked file and the executed file the same file.
     #[test]
     fn an_absolute_override_and_a_sibling_are_both_honoured() {
         let planted = plant_a_helper("honoured");
+        let canonical = std::fs::canonicalize(&planted.helper).expect("the plant canonicalises");
 
         let from_env = resolve_from(None, Some(planted.helper.clone().into_os_string()), None)
             .expect("an absolute override resolves");
-        assert_eq!(from_env, planted.helper);
+        assert_eq!(from_env.path(), canonical);
 
         let from_sibling =
             resolve_from(None, None, Some(planted.helper.clone())).expect("a sibling resolves");
-        assert_eq!(from_sibling, planted.helper);
+        assert_eq!(from_sibling.path(), canonical);
 
         let typed = resolve_from(Some(&planted.helper), None, None).expect("--helper resolves");
-        assert_eq!(typed, planted.helper);
+        assert_eq!(typed.path(), canonical);
     }
 
-    /// `--helper` is what a developer typed, so it is honoured — and still has to be a file.
+    /// H2. `--helper ouro-wasm` has no path separator, so `is_file()` used to resolve it against
+    /// the working directory while `Command::new` did a `$PATH` search — the checked file and
+    /// the executed file were different files, which review proved by having the `$PATH` one
+    /// write a marker.
+    ///
+    /// Two things stop it now and this test names both: `vet` canonicalises, so a bare name that
+    /// does not exist relative to the cwd is refused outright; and what it returns is a
+    /// [`HelperBinary`], which is the only thing `Helper::start` will spawn — so even a bare
+    /// name that *does* resolve is spawned as its absolute path and never handed to a `$PATH`
+    /// search. Delete the `canonicalize` in `vet` and this goes red.
+    #[test]
+    fn a_bare_helper_name_is_never_left_for_a_path_search() {
+        let error = resolve_from(Some(Path::new("ouro-wasm")), None, None)
+            .expect_err("a bare name that is not a file here must refuse");
+        assert!(
+            error.to_string().contains("could not be resolved"),
+            "the refusal must be about resolving the path: {error}"
+        );
+
+        // And a bare name that *does* resolve comes back absolute, so nothing downstream can
+        // search for it.
+        let planted = plant_a_helper("bare");
+        let restore = std::env::current_dir().ok();
+        let vetted = vet(&planted.helper, "--helper").expect("the plant vets");
+        assert!(
+            vetted.path().is_absolute(),
+            "a vetted helper is absolute: {}",
+            vetted.path().display()
+        );
+        if let Some(restore) = restore {
+            let _ = std::env::set_current_dir(restore);
+        }
+    }
+
+    /// H1. `current_exe` returns the path the process was *reached through*, symlinks and all,
+    /// so a repository shipping `./ouro -> /usr/local/bin/ouro` beside its own `./ouro-wasm`
+    /// had that `ouro-wasm` spawned. `sibling` canonicalises first.
+    ///
+    /// Asserted on the function rather than on a second `ouro`: what the bug was is that the
+    /// *directory* was wrong, and this is the directory. The end-to-end proof — a real symlinked
+    /// `ouro` beside a real planted helper — is
+    /// `a_symlinked_ouro_does_not_adopt_the_helper_beside_the_symlink` in tests/wasm_cli.rs.
+    #[test]
+    fn the_sibling_is_the_directory_the_real_binary_lives_in() {
+        let sibling = sibling().expect("this test binary has a directory");
+        let real = std::fs::canonicalize(std::env::current_exe().expect("a current exe"))
+            .expect("the test binary canonicalises");
+
+        assert_eq!(
+            sibling.parent().expect("the sibling has a directory"),
+            real.parent().expect("the real binary has a directory"),
+            "the sibling must be beside the resolved binary, not beside the path it was reached \
+             through"
+        );
+        assert_eq!(sibling.file_name().expect("a file name"), HELPER);
+    }
+
+    /// `--helper` is what a developer typed, so it is honoured — and still has to exist.
     #[test]
     fn an_explicit_helper_that_is_not_a_file_is_refused() {
         let error = resolve_from(Some(Path::new("/nonexistent/ouro-wasm")), None, None)
             .expect_err("a missing --helper must refuse");
-        assert!(error.to_string().contains("not a file"));
+        assert!(error.to_string().contains("could not be resolved"));
+    }
+
+    /// `vet` refuses what is not a helper, whichever of the three roads it arrived by.
+    ///
+    /// Each clause deleted from `vet` turns one of these red: the file-type check (a directory),
+    /// the executable bit, and the group/world-writable bit. Ownership has no negative case here
+    /// — a test cannot make a file owned by somebody else without privileges it does not have —
+    /// and is stated as a gap rather than asserted falsely.
+    #[test]
+    fn a_helper_must_be_an_executable_file_nobody_else_can_rewrite() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let planted = plant_a_helper("vet");
+
+        // A directory is not a helper.
+        let directory = planted.helper.parent().expect("a parent directory");
+        let error = vet(directory, "--helper").expect_err("a directory is not a helper");
+        assert!(error.to_string().contains("not a regular file"));
+
+        // Neither is a file nobody may execute.
+        let inert = directory.join("not-executable");
+        std::fs::write(&inert, b"#!/bin/sh\nexit 0\n").expect("a file");
+        std::fs::set_permissions(&inert, std::fs::Permissions::from_mode(0o644))
+            .expect("permissions");
+        let error = vet(&inert, "--helper").expect_err("a non-executable is not a helper");
+        assert!(error.to_string().contains("not executable"));
+
+        // Nor one anybody may rewrite — a containment boundary the world can replace is not one.
+        std::fs::set_permissions(&planted.helper, std::fs::Permissions::from_mode(0o777))
+            .expect("permissions");
+        let error = vet(&planted.helper, "--helper").expect_err("world-writable is not a helper");
+        assert!(
+            error.to_string().contains("group- or world-writable"),
+            "the refusal must name the rule: {error}"
+        );
+
+        // Group-writable alone is enough, because a group is other people.
+        std::fs::set_permissions(&planted.helper, std::fs::Permissions::from_mode(0o775))
+            .expect("permissions");
+        assert!(vet(&planted.helper, "--helper").is_err());
+
+        // And the honest case still passes, or the rule would be a refusal to work.
+        std::fs::set_permissions(&planted.helper, std::fs::Permissions::from_mode(0o755))
+            .expect("permissions");
+        assert!(vet(&planted.helper, "--helper").is_ok());
     }
 
     struct Planted {
@@ -688,6 +935,8 @@ mod tests {
 
     /// A `priv/wasm/ouro-wasm` in a directory of its own — the shape a cloned repository has.
     fn plant_a_helper(tag: &str) -> Planted {
+        use std::os::unix::fs::PermissionsExt;
+
         let root = std::env::temp_dir().join(format!(
             "ouro-wasm-{tag}-{}-{}",
             std::process::id(),
@@ -700,6 +949,8 @@ mod tests {
         std::fs::create_dir_all(&directory).expect("a temporary directory");
         let helper = directory.join(HELPER);
         std::fs::write(&helper, b"#!/bin/sh\nexit 0\n").expect("a planted helper");
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
+            .expect("an executable plant");
         Planted { root, helper }
     }
 }

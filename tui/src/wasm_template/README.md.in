@@ -27,8 +27,10 @@ default bounds and sends it messages; every message goes to the same instance, b
 this world is instance-held.
 
 Both need the helper, and find it in exactly three places: `--helper <path>`, an absolute
-`$OUROBOROS_WASM_HELPER`, or beside the `ouro` binary. Never the working directory — the helper
-is the containment boundary, so a checkout must not be able to supply it.
+`$OUROBOROS_WASM_HELPER`, or beside the resolved `ouro` binary. Nothing is derived from the
+working directory — the helper is the containment boundary, so a checkout must not be able to
+*supply* one this command went looking for. Naming a path inside a checkout is fine: a person
+choosing is the only thing that may choose.
 
 ## What this component may do
 

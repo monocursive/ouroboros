@@ -1032,9 +1032,14 @@ ouro wasm check [--workspace DIR] [--json] [--helper PATH]
                       The five commands above start a local ouro-wasm and need no
                       node; `doctor` asks a node and starts nothing. The helper is
                       found in exactly three places — --helper, an absolute
-                      $OUROBOROS_WASM_HELPER, or beside this binary — and never in
-                      the working directory or a repository, because the helper is
-                      the containment boundary (docs/WASM.md D14)
+                      $OUROBOROS_WASM_HELPER, or beside the resolved ouro binary.
+                      Nothing cwd-derived unless you said so: you may point at a
+                      helper inside a checkout, because that is a person choosing;
+                      what this never does is go looking for one where it happens
+                      to have been run. Every candidate is canonicalised and must
+                      be an executable regular file, owned by you or root, that
+                      nobody else can rewrite — and the canonical path is the one
+                      spawned, so the file checked is the file run (docs/WASM.md D14)
 ouro desktop doctor [--probe] [--json] [--addr HOST:PORT] [--token-file PATH]
                       Computer Use readiness on a node. --probe is the operator
                       surface that starts the helper; the default starts nothing

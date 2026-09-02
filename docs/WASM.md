@@ -1015,59 +1015,99 @@ machinery — it is a backend, not a lane (D9).
   component the SDK built, so the SDK cannot quietly grow an import without lane W's own
   acceptance suite going red. `tui/wasm/tests/sdk.rs` holds the four example guests and the
   scaffold template to the same assertion, against the real helper.
-- **D14 — the author's loop runs the helper locally, and the helper comes from three
-  places.** `ouro wasm inspect|run|hook|check|new` need no node: each starts a local
+- **D14 — the author's loop runs the helper locally, and the helper comes from where `ouro`
+  was installed.** `ouro wasm inspect|run|hook|check|new` need no node: each starts a local
   `ouro-wasm` and speaks its line protocol. That they *start* one is the deliberate
   difference from `ouro wasm doctor`, which asks a gateway and starts nothing — a readiness
   surface that spawned to answer whether spawning works would be answering a different
   question, and a development loop that needed a running node would not be a loop.
 
   The helper is found in exactly three places, in order: `--helper <path>`, an **absolute**
-  `$OUROBOROS_WASM_HELPER`, and `ouro`'s own sibling. **Never the working directory and
-  never a repository.** W7 removed every cwd-derived candidate from
+  `$OUROBOROS_WASM_HELPER`, and the `ouro-wasm` beside the **resolved** `ouro` binary. The
+  rule is *nothing cwd-derived unless the developer said so* — not "never a repository",
+  which the first draft said and which was never true: an absolute `$OUROBOROS_WASM_HELPER`
+  pointing into a checkout is honoured, and CI exports exactly that. A person naming a path
+  is the only thing that may choose. What is forbidden is a candidate this command derives on
+  its own from wherever it happened to be run, which is what W7 removed from
   `Ouroboros.Wasm.helper_path/0` for a reason that applies here with more force: `ouro wasm`
   is typed in the directory a component author is working in, which is the directory the
-  component came from, so a clone that could drop a `priv/wasm/ouro-wasm` there would be
-  choosing the binary this command spawns to contain untrusted code. A relative
-  `$OUROBOROS_WASM_HELPER` is refused rather than resolved, because resolving one is a read
-  of the working directory by another name. Proved by
-  `wasm_client::the_working_directory_is_not_a_place_a_helper_may_come_from` — where the
-  absence of a fourth argument to `resolve_from` is the mechanism — and end to end by
-  `wasm_cli::a_helper_planted_in_the_working_directory_is_not_executed`, which plants an
-  executable that would leave a marker file and asserts the marker never appears.
+  component came from.
+
+  Saying that is not enforcing it, and review found three ways the first implementation let
+  something other than a person choose. Each is now a mechanism with a test that was red
+  before it:
+
+    * **The sibling was the directory `ouro` was *reached through*.** `current_exe` returns
+      the path used to start the process, symlinks and all, so a repository shipping
+      `./ouro -> /usr/local/bin/ouro` beside its own `./ouro-wasm` had that `ouro-wasm`
+      executed — proved with a marker file. `current_exe` is canonicalised *first*
+      (`wasm_client::sibling`); pinned by
+      `a_symlinked_ouro_does_not_adopt_the_helper_beside_the_symlink`.
+    * **The file checked and the file executed could differ.** `--helper ouro-wasm` has no
+      path separator, so `is_file()` resolved it against the working directory and
+      `Command::new` then did a `$PATH` search and ran something else — also proved with a
+      marker. Every accepted candidate is canonicalised and it is the canonical path that is
+      spawned, which `HelperBinary` — a newtype only `vet` can construct and the only thing
+      `Helper::start` accepts — makes unskippable rather than remembered. Pinned by
+      `a_bare_helper_name_is_not_resolved_through_the_path`.
+    * **Nothing checked who owned it.** `vet` now applies the shape `fleet.rs`'s
+      packaged-EPMD check applies: a regular file, executable, owned by this account **or by
+      root**, and not group- or world-writable. Root is accepted because a helper installed
+      by a package manager into `/usr/local/bin` is *more* trustworthy than one owned by this
+      account, not less, and refusing the safest install would push a developer to `--helper`,
+      which this same function vets anyway.
+
+  **Outside the model, stated:** a local attacker who can already write into the directory the
+  real `ouro` lives in, or who can hard-link that binary into a directory they control. A hard
+  link needs local write access to a directory on the same filesystem, and the link is
+  indistinguishable from the file because it *is* the file — no rule about paths can defend
+  that, and pretending otherwise would be the kind of claim this spec exists to avoid. What
+  the model does cover is a repository, a clone, an archive: anything that arrives as data.
 
   `run` and `hook` execute attacker-authored components on a developer's machine. That is
   acceptable for one reason and only for it: they run *inside `ouro-wasm`*, under the bounds
   a node uses, with the environment `Ouroboros.Wasm.Pool`'s `@inherited_env` allows and
-  nothing more (`PATH`, `HOME`, `TMPDIR`, each refused when its value carries a
+  nothing more (`PATH`, `HOME`, `TMPDIR`, each dropped when its *value* carries a
   `scheme://user:pass@` or a PEM private-key header). No path reaches wasmtime except through
   the helper; a `--fuel`, `--memory-bytes` or `--deadline-ms` above what `doctor` reports is
   **clamped down** to the helper's own maximum and the clamp is printed. Everything a
   component authors — a reply, a `describe`, a log line — is stripped of control characters
   and ANSI escapes before it reaches a terminal, because a page a component can redraw is a
-  verdict a component can forge.
+  verdict a component can forge. The environment is pinned by a canary helper that dumps what
+  it was given; the stripping by an assertion on the **raw bytes** of stdout, because a string
+  comparison is what would miss a stray `0x1b`.
+
+  Every file these commands read is one a developer *named* and somebody else *wrote*, so
+  each is statted for a regular file and then read through a bounded reader: the
+  `ouroboros.toml` (256 KiB), a `--messages` file (8 MiB), a `--payload` or its standard input
+  (1 MiB), and a component before the helper is told about it (16 MiB). Both halves are
+  necessary and review proved it: a bound taken from `metadata().len()` is zero for a
+  character device, so `ouroboros.toml -> /dev/zero` passed the size check and then read
+  forever — thirteen gigabytes resident after eight seconds. The stat also refuses a FIFO
+  without opening one, because `open` on a FIFO with no writer blocks in the kernel and a path
+  is somebody else's string. This is the shape `hooks.ex`'s `read_bounded/1` and
+  `host.rs`'s `read_component` already had.
 
   `ouro wasm hook` prints the untrusted narrowing, which means implementing D8's rules a
   second time in Rust. Both implementations are pinned to one fixture,
   `test/support/wasm_golden/hook_narrowing.json` (contract C6), read by
   `test/provider/native/hooks_narrowing_golden_test.exs` — which drives every case through
   the real seam rather than a test hook, so no `@doc false` function was added to `hooks.ex`
-  — and by `tui/src/wasm_cli.rs`'s own tests. One thing is deliberately **not** pinned: the
-  context byte clip. Both sides cut at `@max_context_bytes` and append the same marker, but
-  `binary_part/3` cuts on a byte and can split a codepoint where the Rust cuts on the
-  character boundary below it. No fixture case reaches the limit; the Elixir clip is tested
-  on its own in `hooks_component_test.exs`.
+  — and by `tui/src/wasm_cli.rs`'s own tests. The byte clip is pinned too, and fixing it was
+  a repair rather than a test: `clip/2` cut with `binary_part/3`, which cuts wherever the
+  number lands, so eight kilobytes of repository-authored context ending in an accented letter
+  produced a binary that is not valid UTF-8 — and `JSON.encode!` raises on one, so a clone
+  could stop a turn with a long context line. Both sides now walk back to the character
+  boundary at or below the limit and agree byte for byte, and the fixture carries a case whose
+  cut lands mid-codepoint on the **trusted** lane, which is where it is observable: the
+  untrusted lane clips a second time after labelling and throws the broken tail away.
 
   `ouro wasm check` reproduces the workspace admission rules rather than asking a node,
   because the point is to answer before there is a node. It judges every entry as an
   **untrusted** workspace, which is the strict case, and it never instantiates anything —
-  admission is a question about a path, a size, a world and the count of an entry's
-  siblings. One rule it can only half-check: `matcher` is a PCRE, `ouro` carries no regex
-  engine, and adding one to parse a field would be a poor trade. It checks the 200-byte bound
-  exactly and checks that the pattern's groups balance — the property `compile_matcher/1`'s
-  bare compile exists to establish, since `a)|(x` otherwise anchors to an unanchored
-  alternation — and says so rather than claiming to have compiled anything. The node's
-  compile is still the one that decides.
+  admission is a question about a path, a size, a world and the count of an entry's siblings.
+  Two things review had to correct, both of them the same fault in different clothes: a
+  command claiming more than it verified.
 - **D15 — deploying over the socket is sound, and the old comment was wrong.**
   `gateway/methods.ex` used to say there would deliberately never be a `wasm.deploy`,
   because "a component runs on somebody's machine under a signature". The premise was
@@ -1204,6 +1244,23 @@ machinery — it is a backend, not a lane (D9).
   description it could not read), and `test/upgrade/rollout_registry_test.exs` (stored,
   re-validated, refused on read).
 
+    * **The budget is spent the way the node spends it.** `hooks_from/4` runs `build/4` over
+      every entry and puts the failures in `errors`; only what survived reaches
+      `cap_untrusted/2`. So an entry whose path does not resolve costs a repository *nothing*,
+      where the first version charged it a slot — five typos could hide five good components
+      behind a budget that was never really spent.
+    * **`matcher` is reported, not guessed at.** It is a PCRE, `ouro` carries no regex engine,
+      and adding one to decide a single TOML field would put a large dependency in the
+      client's graph to answer a question the node answers anyway. The first version guessed
+      with a parenthesis-balance check that was wrong in *both* directions: it passed
+      `matcher = "*"`, which the node refuses, under a summary line reading "every component
+      entry would be admitted" and an exit code of 0; and it refused `matcher = "\Q(\E"`,
+      which the node compiles happily, because a quoted literal paren opens no group. What is
+      decided here now is the 200-byte bound, exactly; the rest is printed as
+      `matcher: unverified`, the summary reports counts of verified rows and unverified
+      matchers, and the words "would be admitted" do not appear while any row carries one.
+      Unverified is printed, never exited on: the exit code says *refused*, so an author who
+      wired this into a pre-commit hook does not have it break on a pattern the node compiles.
 ## 12. What this does not solve
 
 Stated once, so nobody reads more into the lane than is there:
@@ -1451,109 +1508,6 @@ Each slice is PR-sized, lands green, and is useful alone.
   journal, orders the signer's rate limit first, and keeps probe/eval cleanup in a process
   a deadline kill cannot reach. Every fix landed with a regression test that was red first
   and a mutation that turns it red again.
-- **W10 — the local dev loop.** `ouro wasm` grew five subcommands that need no node:
-  `inspect`, `run`, `hook`, `check` and `new`. Each starts a local `ouro-wasm` and speaks its
-  line protocol through a new `tui/src/wasm_client.rs`; `doctor` still asks a gateway and
-  still starts nothing, and the parsing test that says so now also proves it cannot be handed
-  a `--helper`. The helper is resolved from three places and never the working directory
-  (D14). `inspect` reports the world, the imports, the exports, the sha, the size, and the
-  structural census beside the ceiling each reading was judged against — for which the
-  helper's `inspect` learned to report the `shape::check` census it already took, from the
-  same walk in the same order, so the numbers shown are the numbers the compiler gate used —
-  and one verdict line: admitted as a capability, as a hook component, as both, or as
-  neither with the refusal named. `run` loads, instantiates once, and sends every message to
-  the *same* instance, printing each reply, the fuel it cost, the guest's own log lines and
-  the wall clock; bounds default to `config/config.exs`'s `capability_limits` and are clamped
-  down to the helper's maxima. `hook` builds the payload the seam builds, narrows the
-  `tool_response` on the way in, and prints the raw verdict beside the one the node would act
-  on, naming what was dropped and why. `check` parses an `ouroboros.toml` and judges every
-  `[[hooks]]` and `[checks]` component entry as an untrusted workspace — the exactly-one-of
-  rule, the workspace-relative path, canonical confinement, the 16 MiB ceiling, the world,
-  the shared eight-component budget — and exits non-zero on any refusal without instantiating
-  anything. `new` scaffolds a project from a template embedded in the binary, carrying the
-  world byte for byte (a test compares the two), in a capability and a hook shape.
-
-  Proofs: a Rust integration suite drives the real binary against the real helper and the
-  real acceptance guest — the world and shape report, one instance across two messages
-  (`"n":2` is the evidence), the D8 narrowing on both lanes, the `PostToolUse` output body
-  never reaching the hook, a component that climbs out of the workspace refused with the same
-  sentence a missing one gets, a symlink out of the tree refused after being followed, the
-  ninth component of an untrusted workspace declined, the budget shared across `[[hooks]]`
-  and `[checks]`, a component importing `wasi:cli/environment` refused by name and never run,
-  a component refused before the compiler saw it, and a helper planted in the working
-  directory never executed. The two hand-built components have a test of their own, because
-  every refusal looks alike from outside and a fixture that stopped being a valid component
-  would pass for the wrong reason. The narrowing fixture (C6) is red on both sides for the
-  same mutation. CI's Rust job now builds the helper and the guest and runs under
-  `OUROBOROS_REQUIRE_WASM=1`, so a skip there is a failure exactly as it is on the Elixir
-  side.
-- **W13 — a live capability is a tool, and a description is deployment metadata.** Lane W
-  could deploy a capability and nothing a model or a user touched could reach one. Two
-  things can now, and neither is a mesh client. The native `capability` tool lists the
-  `:live` lane-W rollouts that name this node, with the register's facts beside each
-  component's labelled, bounded claim about itself, and `call`s one under a 64 KiB body
-  bound, a 64 KiB reply bound whose every line is prefixed with the untrusted label, and a
-  timeout of the target's own deadline plus the pool's call margin. One function resolves a
-  name — for the permission engine and for the message alike, on the exact string the model
-  wrote — and a name that is not a rollout name is refused before the register is read. The
-  rule language gains `Capability(<name>)` and `Capability(*)`, matched against a name the
-  node resolved, which is what lets them carry an allow; `Tool(capability)` is deny-and-ask
-  only, because one call reaches one component and an allow on the tool is an allow on every
-  component this node will ever deploy. The tool call's ledger entry carries the capability
-  and the component's sha256. `agents.message` is the operator's half at `:operate`, bounded
-  and labelled the same way, with a marked truncation; `agents.state` labels and bounds the
-  same two fields for a `wasm/` agent, because it is `:read` and returns them too.
-
-  A component's `describe` is read **at deploy**, as a fourth rollout gate, on a throwaway
-  instance under its own bounds, and stored on the registry entry — which is where every
-  reader gets it. It used to be read on the message path, and a component whose `describe`
-  took six seconds while answering messages instantly failed the rollout probe's
-  five-second budget and was rolled back. Contract C1 now also refuses every Unicode
-  control, format and line-separator character in every string of the document, walked
-  whole; the register re-validates on write and on read, and holds a lane-W module name to
-  the artifact charset so a planted `wasm/a/b` is refused. Proved against the scripted
-  helper (including the six-second `describe` that no longer costs a message), the real echo
-  guest, the live rollout, the register's checkpoint, and the native loop.
-
-- **W12 — signing and deploy from the operator's chair.** `Ouroboros.Wasm.Bundle` (the
-  `.ouro-wasm` file: framed header, bounded JSON envelope, raw component, `:safe` term
-  decode, manifest reconstruction held to a fixed point), `Ouroboros.Wasm.Upload` (the
-  chunked, process-free staging area of D16), `Ouroboros.Wasm.Deploy` (the node side of
-  the three verbs), `Wasm.Rollout.rollback/2` reusing the eval-failure branch's own
-  `withdraw/2`, and `Wasm.Surface.deployment/1`/`rollback/1` projecting a rollout outcome
-  onto the wire. Four gateway verbs — `wasm.upload`, `wasm.sign`, `wasm.deploy`,
-  `wasm.rollback`, all `:operate` and node-routed — with protocol docs, golden fixtures
-  and typed Rust decodes for each, and `ouro wasm keygen | sign | deploy | rollback | ls`
-  on top. `keygen` contacts no runtime and writes a seed in exactly the format
-  `Signing.Service` reads, printing the `OUROBOROS_SIGNER_KEY_PATH` and
-  `OUROBOROS_UPGRADE_TRUSTED_SIGNERS` lines; its derived public half is pinned against the
-  RFC 8032 test vector, because a keygen that derived a different public key would print a
-  trust line that verifies nothing and no local round trip would catch it. Proved live on
-  this Mac end to end: `wasm.sign` over `test/support/wasm/echo.wasm` with the imports read
-  off the component, the bundle assembled from the node's prefix and the operator's bytes,
-  `wasm.deploy` reaching `:live` with both eval probes passing, the `wasm/<name>` mesh
-  agent answering a message, and `wasm.rollback` stopping it with the bytes and the
-  manifest still in the store. Refusals proved with the store, the register and the helper
-  pool asserted unchanged. The `methods.ex` comment that promised there would never be a
-  `wasm.deploy` is corrected in place, with D15 for why.
-
-  An adversarial review of the first cut found three ways in and they are all closed here,
-  each with a test that is red without its fix. A **compressed manifest term** made a 42 KiB
-  file allocate 292 MB inside `Bundle.verify/2` at `:operate`, before any trust check — tag
-  80 is refused by inspection now and the decoded term is measured in heap words rather than
-  in the length that was read. A **client-named epoch** at the register's plausibility
-  ceiling wedged lane W on a node permanently from one call — the parameter is gone, the
-  register's boundary is exclusive, and the signing policy refuses an epoch far above
-  anything the node has seen. And **`wasm.sign` handed unsigned bytes to the helper** to
-  read their imports: `imports` is the client's to declare now, computed with the operator's
-  own helper, and the upload is consumed before anything that can refuse. Three more were
-  concurrency: `Upload.take/2` is an atomic rename rather than read-then-remove, the
-  in-flight ceiling is eight `O_CREAT|O_EXCL` slot files rather than a count taken before a
-  create, and an upload has a total lifetime as well as an idle one. Two claims that outran
-  the code were deleted rather than defended: the redundant pre-flight verification in
-  `Wasm.Deploy.deploy/3` (the rollout was already verifying before its checkpoint, and no
-  test could tell the difference), and `:unchanged` counting as proof for an operator's
-  rollback — a capability whose name is still answering is not "rolled back".
 - **W8 — ahead-of-time compilation (proposed, not promised).** `Component::new` on the
   node's hot path is what makes §7.3's bounds necessary in the shape they have.
   `Engine::precompile_component` at sign or deploy time and `Component::deserialize` at
@@ -1608,6 +1562,148 @@ Each slice is PR-sized, lands green, and is useful alone.
 - **Deferred, in rough order:** policy engine (§8.2) → agent-reachable forge/deploy
   effects (§7.7) → tools lane (§9.1) → microVM backend (§10, likely its own spec
   once slice-shaped) → agent world (§9.2).
+
+- **W10 — the local dev loop.** `ouro wasm` grew five subcommands that need no node:
+  `inspect`, `run`, `hook`, `check` and `new`. Each starts a local `ouro-wasm` and speaks its
+  line protocol through a new `tui/src/wasm_client.rs`; `doctor` still asks a gateway and
+  still starts nothing, and the parsing test that says so now also proves it cannot be handed
+  a `--helper`. The helper is resolved from three places and never the working directory
+  (D14). `inspect` reports the world, the imports, the exports, the sha, the size, and the
+  structural census beside the ceiling each reading was judged against — for which the
+  helper's `inspect` learned to report the `shape::check` census it already took, from the
+  same walk in the same order, so the numbers shown are the numbers the compiler gate used —
+  and one verdict line: admitted as a capability, as a hook component, as both, or as
+  neither with the refusal named. `run` loads, instantiates once, and sends every message to
+  the *same* instance, printing each reply, the fuel it cost, the guest's own log lines and
+  the wall clock; bounds default to `config/config.exs`'s `capability_limits` and are clamped
+  down to the helper's maxima. `hook` builds the payload the seam builds, narrows the
+  `tool_response` on the way in, and prints the raw verdict beside the one the node would act
+  on, naming what was dropped and why. `check` parses an `ouroboros.toml` and judges every
+  `[[hooks]]` and `[checks]` component entry as an untrusted workspace — the exactly-one-of
+  rule, the workspace-relative path, canonical confinement, the 16 MiB ceiling, the world,
+  the shared eight-component budget — and exits non-zero on any refusal without instantiating
+  anything. `new` scaffolds a project from a template embedded in the binary, carrying the
+  world byte for byte (a test compares the two), in a capability and a hook shape.
+
+  Proofs: a Rust integration suite drives the real binary against the real helper and the
+  real acceptance guest — the world and shape report, one instance across two messages
+  (`"n":2` is the evidence), the D8 narrowing on both lanes, the `PostToolUse` output body
+  never reaching the hook, a component that climbs out of the workspace refused with the same
+  sentence a missing one gets, a symlink out of the tree refused after being followed, the
+  ninth component of an untrusted workspace declined, the budget shared across `[[hooks]]`
+  and `[checks]`, a component importing `wasi:cli/environment` refused by name and never run,
+  a component refused before the compiler saw it, and a helper planted in the working
+  directory never executed. The two hand-built components have a test of their own, because
+  every refusal looks alike from outside and a fixture that stopped being a valid component
+  would pass for the wrong reason. The narrowing fixture (C6) is red on both sides for the
+  same mutation. CI's Rust job now builds the helper and the guest and runs under
+  `OUROBOROS_REQUIRE_WASM=1`, so a skip there is a failure exactly as it is on the Elixir
+  side.
+
+  **Adversarial review found four ways the slice claimed more than it enforced, and sixteen
+  enforcement points with no test that was red without them.** All were fixed in place; the
+  detail is in D14 and the shape of it is worth stating here, because three of the four were
+  the same mistake — a rule written down in prose and checked by something that did not
+  actually check it.
+
+    * **The helper could be chosen by a repository after all.** `current_exe` was not
+      canonicalised, so `./ouro -> /real/ouro` beside a planted `./ouro-wasm` ran the plant;
+      and `--helper ouro-wasm` passed `is_file()` against the working directory before
+      `Command::new` did a `$PATH` search for a different file. Both proved with marker files.
+      Candidates are now canonicalised and vetted — regular, executable, owned, not
+      group- or world-writable — and the vetted canonical path is carried by a newtype that is
+      the only thing `Helper::start` accepts.
+    * **A bound taken from a stat is not a bound.** `ouroboros.toml -> /dev/zero` reported zero
+      bytes, passed the 256 KiB check, and then read thirteen gigabytes. Every file these
+      commands read is now statted for a regular file and read through `take(limit + 1)`.
+    * **`check` claimed admission it had not verified.** `matcher = "*"` — which the node
+      refuses — passed under "every component entry would be admitted" and exit 0, while the
+      valid `\Q(\E` was refused; and the untrusted component budget was charged to entries
+      whose paths never resolved, so five typos could hide five good components. The matcher
+      heuristic is gone, unverified is printed rather than guessed, and the budget is spent in
+      the node's own order.
+    * **`clip/2` could emit invalid UTF-8.** A byte cut through a codepoint, on
+      repository-authored text, in a string `JSON.encode!` then raises on. Fixed on both sides
+      to cut at a character boundary and pinned by a fixture case whose cut lands mid-codepoint
+      — the one change this slice made to `hooks.ex`, which is otherwise untouched.
+
+  Sixteen enforcement points gained a test that is red without them, re-run against the
+  reviewer's own mutation set: the `||` fallthrough in `parse_output`, a non-object
+  `updatedInput`, a non-map `tool_response`, the context clip, the helper environment
+  allow-list and its credential-value filter (a canary helper that dumps what it was given),
+  the absolute-path rule for `$OUROBOROS_WASM_HELPER` (proved with a *working* relative
+  helper, so the rule is what refuses it), the absolute-component and 16 MiB rules in `check`,
+  the `ouroboros.toml` byte bound, `hook`'s event vocabulary, config bound, component ceiling
+  and deadline ceiling, and the sanitizer — asserted on raw stdout bytes, because a string
+  comparison is what would miss a stray `0x1b`. On the helper side, `shape::check` running
+  *in front of* `Component::new` is now pinned by the clock rather than by a refusal that
+  looks the same either way.
+- **W12 — signing and deploy from the operator's chair.** `Ouroboros.Wasm.Bundle` (the
+  `.ouro-wasm` file: framed header, bounded JSON envelope, raw component, `:safe` term
+  decode, manifest reconstruction held to a fixed point), `Ouroboros.Wasm.Upload` (the
+  chunked, process-free staging area of D16), `Ouroboros.Wasm.Deploy` (the node side of
+  the three verbs), `Wasm.Rollout.rollback/2` reusing the eval-failure branch's own
+  `withdraw/2`, and `Wasm.Surface.deployment/1`/`rollback/1` projecting a rollout outcome
+  onto the wire. Four gateway verbs — `wasm.upload`, `wasm.sign`, `wasm.deploy`,
+  `wasm.rollback`, all `:operate` and node-routed — with protocol docs, golden fixtures
+  and typed Rust decodes for each, and `ouro wasm keygen | sign | deploy | rollback | ls`
+  on top. `keygen` contacts no runtime and writes a seed in exactly the format
+  `Signing.Service` reads, printing the `OUROBOROS_SIGNER_KEY_PATH` and
+  `OUROBOROS_UPGRADE_TRUSTED_SIGNERS` lines; its derived public half is pinned against the
+  RFC 8032 test vector, because a keygen that derived a different public key would print a
+  trust line that verifies nothing and no local round trip would catch it. Proved live on
+  this Mac end to end: `wasm.sign` over `test/support/wasm/echo.wasm` with the imports read
+  off the component, the bundle assembled from the node's prefix and the operator's bytes,
+  `wasm.deploy` reaching `:live` with both eval probes passing, the `wasm/<name>` mesh
+  agent answering a message, and `wasm.rollback` stopping it with the bytes and the
+  manifest still in the store. Refusals proved with the store, the register and the helper
+  pool asserted unchanged. The `methods.ex` comment that promised there would never be a
+  `wasm.deploy` is corrected in place, with D15 for why.
+
+  An adversarial review of the first cut found three ways in and they are all closed here,
+  each with a test that is red without its fix. A **compressed manifest term** made a 42 KiB
+  file allocate 292 MB inside `Bundle.verify/2` at `:operate`, before any trust check — tag
+  80 is refused by inspection now and the decoded term is measured in heap words rather than
+  in the length that was read. A **client-named epoch** at the register's plausibility
+  ceiling wedged lane W on a node permanently from one call — the parameter is gone, the
+  register's boundary is exclusive, and the signing policy refuses an epoch far above
+  anything the node has seen. And **`wasm.sign` handed unsigned bytes to the helper** to
+  read their imports: `imports` is the client's to declare now, computed with the operator's
+  own helper, and the upload is consumed before anything that can refuse. Three more were
+  concurrency: `Upload.take/2` is an atomic rename rather than read-then-remove, the
+  in-flight ceiling is eight `O_CREAT|O_EXCL` slot files rather than a count taken before a
+  create, and an upload has a total lifetime as well as an idle one. Two claims that outran
+  the code were deleted rather than defended: the redundant pre-flight verification in
+  `Wasm.Deploy.deploy/3` (the rollout was already verifying before its checkpoint, and no
+  test could tell the difference), and `:unchanged` counting as proof for an operator's
+  rollback — a capability whose name is still answering is not "rolled back".
+- **W13 — a live capability is a tool, and a description is deployment metadata.** Lane W
+  could deploy a capability and nothing a model or a user touched could reach one. Two
+  things can now, and neither is a mesh client. The native `capability` tool lists the
+  `:live` lane-W rollouts that name this node, with the register's facts beside each
+  component's labelled, bounded claim about itself, and `call`s one under a 64 KiB body
+  bound, a 64 KiB reply bound whose every line is prefixed with the untrusted label, and a
+  timeout of the target's own deadline plus the pool's call margin. One function resolves a
+  name — for the permission engine and for the message alike, on the exact string the model
+  wrote — and a name that is not a rollout name is refused before the register is read. The
+  rule language gains `Capability(<name>)` and `Capability(*)`, matched against a name the
+  node resolved, which is what lets them carry an allow; `Tool(capability)` is deny-and-ask
+  only, because one call reaches one component and an allow on the tool is an allow on every
+  component this node will ever deploy. The tool call's ledger entry carries the capability
+  and the component's sha256. `agents.message` is the operator's half at `:operate`, bounded
+  and labelled the same way, with a marked truncation; `agents.state` labels and bounds the
+  same two fields for a `wasm/` agent, because it is `:read` and returns them too.
+
+  A component's `describe` is read **at deploy**, as a fourth rollout gate, on a throwaway
+  instance under its own bounds, and stored on the registry entry — which is where every
+  reader gets it. It used to be read on the message path, and a component whose `describe`
+  took six seconds while answering messages instantly failed the rollout probe's
+  five-second budget and was rolled back. Contract C1 now also refuses every Unicode
+  control, format and line-separator character in every string of the document, walked
+  whole; the register re-validates on write and on read, and holds a lane-W module name to
+  the artifact charset so a planted `wasm/a/b` is refused. Proved against the scripted
+  helper (including the six-second `describe` that no longer costs a message), the real echo
+  guest, the live rollout, the register's checkpoint, and the native loop.
 
 ## 15. Prior art and references
 

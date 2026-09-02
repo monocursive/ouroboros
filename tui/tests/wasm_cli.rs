@@ -22,7 +22,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -144,6 +144,16 @@ impl Ran {
         self
     }
 
+    fn stderr_says(&self, needle: &str) -> &Ran {
+        let stderr = String::from_utf8_lossy(&self.output.stderr);
+        assert!(
+            stderr.contains(needle),
+            "expected `{needle}` on stderr, got\n--- stderr\n{stderr}\n--- stdout\n{}",
+            self.stdout
+        );
+        self
+    }
+
     fn json(&self) -> Value {
         serde_json::from_str(&self.stdout)
             .unwrap_or_else(|error| panic!("--json did not print JSON ({error}): {}", self.stdout))
@@ -151,20 +161,55 @@ impl Ran {
 }
 
 fn ouro(live: &Live, cwd: &Path, args: &[&str]) -> Ran {
-    let started = Instant::now();
-    let output = Command::new(OURO)
+    ouro_with(live, cwd, args, |command| {
+        command.env(HELPER_ENV, &live.helper);
+    })
+}
+
+/// The same, with the command available for a test that needs to shape the environment.
+///
+/// **Bounded**, and that is not tidiness. Several of these tests exist because a check was
+/// missing that stops `ouro` reading something unbounded — a FIFO with no writer blocks in
+/// `open` forever — so the suite has to be able to *observe* that failure rather than become
+/// it. `output()` would wait for a child that never exits and the assertion after it would
+/// never run, turning a caught regression into a CI job that burns its whole timeout with
+/// nothing to say. So the child is spawned, polled to [`BUDGET`], and killed; a command that
+/// had to be killed is a failing test that names the command.
+fn ouro_with(_live: &Live, cwd: &Path, args: &[&str], shape: impl FnOnce(&mut Command)) -> Ran {
+    let mut command = Command::new(OURO);
+    command
         .args(args)
         .current_dir(cwd)
-        .env(HELPER_ENV, &live.helper)
-        .output()
-        .expect("the ouro binary runs");
-    let took = started.elapsed();
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    shape(&mut command);
 
-    assert!(
-        took < BUDGET,
-        "`ouro {}` took {took:?}, past the {BUDGET:?} budget",
-        args.join(" ")
-    );
+    let started = Instant::now();
+    let mut child = command.spawn().expect("the ouro binary runs");
+
+    loop {
+        match child.try_wait().expect("waiting on the child") {
+            Some(_status) => break,
+            None if started.elapsed() < BUDGET => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "`ouro {}` was still running after {BUDGET:?} and had to be killed — a \
+                     command that cannot finish is a bound that is not being taken",
+                    args.join(" ")
+                );
+            }
+        }
+    }
+
+    let output = child
+        .wait_with_output()
+        .expect("collecting the child's output");
+    let took = started.elapsed();
 
     Ran {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -208,6 +253,29 @@ impl Drop for Scratch {
     fn drop(&mut self) {
         std::fs::remove_dir_all(&self.0).ok();
     }
+}
+
+/// An executable script a test can have `ouro wasm` spawn. Mode 0755 rather than 0777, because
+/// `vet` refuses a group- or world-writable helper — which is the point of `vet`, so a plant
+/// that could not pass it would prove nothing.
+#[cfg(unix)]
+fn plant_executable(path: &Path, script: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("a parent directory");
+    }
+    std::fs::write(path, script).expect("a planted script");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .expect("an executable plant");
+}
+
+/// A file of `len` bytes that costs nothing on disk. The byte bounds under test are read from
+/// the filesystem, so what is *in* an over-cap file never matters — and writing seventeen real
+/// megabytes per test would.
+fn sparse(path: &Path, len: u64) {
+    let file = std::fs::File::create(path).expect("a sparse file");
+    file.set_len(len).expect("a length");
 }
 
 // ----------------------------------------------------------------------- inspect and run
@@ -488,7 +556,11 @@ fn check_admits_a_component_inside_the_workspace_and_shows_a_command_hook_as_dec
     .says("[checks] lint")
     .says("command  ./bin/lint")
     .says("declined untrusted: a command hook is `sh -c` on this machine")
-    .says("every component entry would be admitted");
+    .says("2 component entries verified")
+    // The one hook here declares a matcher, so the summary says what it verified and stops
+    // short of the word "admitted" — see `check_reports_a_matcher_as_unverified_…`.
+    .says("1 matcher NOT verified here")
+    .does_not_say("every component entry would be admitted");
 }
 
 /// A component that resolves outside the workspace is refused, and refused with the *same*
@@ -631,6 +703,716 @@ fn the_component_budget_is_shared_between_hooks_and_checks() {
     // spent first.
     assert_eq!(refused[0]["entry"], "[checks] d");
     assert_eq!(refused[1]["entry"], "[checks] e");
+}
+
+// ======================================================= where the helper may come from (D14)
+//
+// The three findings review proved here were each a way for something other than a person to
+// choose the binary this command executes to contain untrusted code. Each has its reproduction
+// as a test, because a rule whose proof was a one-off script is a rule with nothing holding it.
+
+/// H1. `current_exe` returns the path the process was *reached through*, so a repository
+/// shipping `./ouro -> /real/ouro` beside its own `./ouro-wasm` had that `ouro-wasm` executed.
+/// Proved with a marker file; this is the same attack, committed.
+///
+/// Revert `sibling` to `std::env::current_exe()` without the `canonicalize` and this goes red:
+/// the planted helper runs and leaves its marker.
+#[test]
+#[cfg(unix)]
+fn a_symlinked_ouro_does_not_adopt_the_helper_beside_the_symlink() {
+    let scratch = Scratch::new("symlinked");
+    let marker = scratch.path().join("the-plant-ran");
+
+    // The shape a cloned repository has: a symlink to the real binary, and its own helper.
+    std::os::unix::fs::symlink(OURO, scratch.path().join("ouro")).expect("a symlink to ouro");
+    plant_executable(
+        &scratch.path().join("ouro-wasm"),
+        &format!("#!/bin/sh\ntouch {}\nexit 0\n", marker.display()),
+    );
+    scratch.write("guest.wasm", "\0asm\u{1}\0\0\0");
+
+    let output = Command::new(scratch.path().join("ouro"))
+        .args(["wasm", "inspect", "guest.wasm"])
+        .current_dir(scratch.path())
+        .env_remove(HELPER_ENV)
+        .output()
+        .expect("the symlinked ouro runs");
+
+    assert!(
+        !marker.exists(),
+        "the helper beside the symlink was executed: `sibling` must canonicalise `current_exe` \
+         first, or the containment boundary is whatever a repository ships"
+    );
+
+    // It found the real binary's sibling instead, or none. Either way the plant did not run.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("refused:") || stderr.contains("no `ouro-wasm`"),
+        "expected the real sibling's answer or no helper at all:\n{stdout}\n{stderr}"
+    );
+}
+
+/// H2. `--helper ouro-wasm` has no path separator: `is_file()` resolved it against the working
+/// directory and `Command::new` then did a `$PATH` search, so the file checked and the file
+/// executed were different files. Review proved it by having the `$PATH` one write a marker.
+///
+/// Delete the `canonicalize` in `vet`, or spawn `path` instead of the `HelperBinary`, and the
+/// marker appears.
+#[test]
+#[cfg(unix)]
+fn a_bare_helper_name_is_not_resolved_through_the_path() {
+    let scratch = Scratch::new("pathsearch");
+    let marker = scratch.path().join("the-path-helper-ran");
+
+    let evil = scratch.path().join("evil");
+    std::fs::create_dir_all(&evil).expect("a directory on $PATH");
+    plant_executable(
+        &evil.join("ouro-wasm"),
+        &format!("#!/bin/sh\ntouch {}\nexit 0\n", marker.display()),
+    );
+    scratch.write("guest.wasm", "\0asm\u{1}\0\0\0");
+
+    let path = format!(
+        "{}:{}",
+        evil.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = Command::new(OURO)
+        .args(["wasm", "inspect", "guest.wasm", "--helper", "ouro-wasm"])
+        .current_dir(scratch.path())
+        .env_remove(HELPER_ENV)
+        .env("PATH", path)
+        .output()
+        .expect("the ouro binary runs");
+
+    assert!(
+        !marker.exists(),
+        "a bare `--helper` name reached a $PATH search: the checked file and the executed file \
+         must be the same file"
+    );
+    assert!(
+        !output.status.success(),
+        "a bare name that names nothing here must be refused"
+    );
+}
+
+/// M17. A relative `$OUROBOROS_WASM_HELPER` is refused for *being relative*, not for being
+/// absent — so the plant here is a real, working helper at the relative path. Delete the
+/// `is_absolute` guard in `resolve_from` and the command works, which is the whole finding: a
+/// helper chosen by where the command was typed.
+#[test]
+fn a_relative_helper_override_is_refused_even_when_it_would_have_worked() {
+    let Some(live) = live() else { return };
+    let scratch = Scratch::new("relative");
+
+    // A real helper, copied so it is genuinely usable from here.
+    let planted = scratch.path().join("priv").join("wasm").join("ouro-wasm");
+    std::fs::create_dir_all(planted.parent().expect("a parent")).expect("a directory");
+    std::fs::copy(&live.helper, &planted).expect("a real helper at a relative path");
+    std::fs::copy(&live.guest, scratch.path().join("guest.wasm")).expect("a guest");
+
+    let output = Command::new(OURO)
+        .args(["wasm", "inspect", "guest.wasm"])
+        .current_dir(scratch.path())
+        .env(HELPER_ENV, "priv/wasm/ouro-wasm")
+        .output()
+        .expect("the ouro binary runs");
+
+    assert!(!output.status.success(), "a relative override must refuse");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("absolute"),
+        "the refusal must name the rule rather than the missing file: {stderr}"
+    );
+
+    // And the same helper, named absolutely, works — so the refusal above is the rule and not
+    // a broken plant.
+    let output = Command::new(OURO)
+        .args(["wasm", "inspect", "guest.wasm"])
+        .current_dir(scratch.path())
+        .env(HELPER_ENV, &planted)
+        .output()
+        .expect("the ouro binary runs");
+    assert!(
+        output.status.success(),
+        "the same helper named absolutely must work:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// M14 and M15. The helper is started with the pool's three variables and nothing else, and a
+/// value shaped like a credential is dropped even though its name is on the list.
+///
+/// The canary is a helper that dumps its own environment and exits. `PWD`, `SHLVL` and `_` in
+/// the dump are `/bin/sh`'s own doing, not an inheritance — the assertion is on the names this
+/// process could have passed.
+///
+/// Delete `env_clear()` and the canary shows this test binary's whole environment. Delete the
+/// `looks_like_credential` guard and `HOME` comes through carrying a password.
+#[test]
+#[cfg(unix)]
+fn the_helper_is_started_with_only_the_pools_three_variables() {
+    let scratch = Scratch::new("envcanary");
+    let dump = scratch.path().join("ENVDUMP");
+    let helper = scratch.path().join("ouro-wasm");
+    plant_executable(
+        &helper,
+        &format!("#!/bin/sh\nenv > {}\nexit 0\n", dump.display()),
+    );
+    scratch.write("guest.wasm", "\0asm\u{1}\0\0\0");
+
+    let _ = Command::new(OURO)
+        .args(["wasm", "inspect", "guest.wasm", "--helper"])
+        .arg(&helper)
+        .current_dir(scratch.path())
+        .env_remove(HELPER_ENV)
+        // Three canaries: a name that is not on the list at all, and a `HOME` whose *value* is
+        // shaped like a credential even though its name is.
+        .env("OUROBOROS_CANARY", "must-not-survive")
+        .env("AWS_SECRET_ACCESS_KEY", "must-not-survive")
+        .env("HOME", "https://user:hunter2@example.test/home")
+        .output()
+        .expect("the ouro binary runs");
+
+    let dumped = std::fs::read_to_string(&dump).expect("the canary helper ran and dumped its env");
+    let names: Vec<&str> = dumped
+        .lines()
+        .filter_map(|line| line.split('=').next())
+        .collect();
+
+    assert!(
+        !names.contains(&"OUROBOROS_CANARY"),
+        "a name off the allow-list survived: {dumped}"
+    );
+    assert!(
+        !names.contains(&"AWS_SECRET_ACCESS_KEY"),
+        "a secret survived: {dumped}"
+    );
+    assert!(
+        !dumped.contains("hunter2"),
+        "a credential-shaped HOME was passed anyway: {dumped}"
+    );
+    assert!(
+        !names.contains(&"HOME"),
+        "HOME's value looked like a credential, so its name being allowed is not enough: \
+         {dumped}"
+    );
+
+    // The two that should survive do, or the allow-list would be a refusal to work: `TMPDIR` is
+    // not set on every platform, so only `PATH` is asserted positively.
+    assert!(names.contains(&"PATH"), "PATH must be inherited: {dumped}");
+
+    // And nothing beyond the allow-list plus what `/bin/sh` sets for itself.
+    for name in names {
+        assert!(
+            ["PATH", "HOME", "TMPDIR", "PWD", "SHLVL", "_"].contains(&name),
+            "`{name}` reached the helper and should not have: {dumped}"
+        );
+    }
+}
+
+// ================================================== reading files somebody else wrote (H3, M1)
+
+/// H3. `ouroboros.toml -> /dev/zero` used to read forever: `metadata().len()` is zero for a
+/// character device, so the size bound passed and `read_to_string` never ended. Measured by
+/// review at 13 GB resident after eight seconds.
+///
+/// Delete the `is_file()` check in `read_bounded` and this hangs until the harness budget kills
+/// it, which is the failure it is supposed to be.
+#[test]
+#[cfg(unix)]
+fn check_refuses_a_workspace_toml_that_is_a_device() {
+    let Some(live) = live() else { return };
+    let scratch = Scratch::new("devzero");
+    std::os::unix::fs::symlink("/dev/zero", scratch.path().join("ouroboros.toml"))
+        .expect("a symlink to a device");
+
+    ouro(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "check",
+            "--workspace",
+            &scratch.path().to_string_lossy(),
+        ],
+    )
+    .refused()
+    .stderr_says("is not a regular file");
+}
+
+/// M23. The `ouroboros.toml` byte bound, which `read_config/1` applies before it parses.
+#[test]
+fn check_refuses_an_ouroboros_toml_past_the_config_byte_bound() {
+    let Some(live) = live() else { return };
+    let scratch = Scratch::new("bigtoml");
+    let mut toml = String::with_capacity(300 * 1024);
+    while toml.len() <= 256 * 1024 {
+        toml.push_str("# a repository can write a very long comment\n");
+    }
+    scratch.write("ouroboros.toml", &toml);
+
+    ouro(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "check",
+            "--workspace",
+            &scratch.path().to_string_lossy(),
+        ],
+    )
+    .refused()
+    .stderr_says("larger than the 262144 byte cap");
+}
+
+/// M1. Every other file these commands read: a `--messages` file and a `--payload`, each bounded
+/// and each refused when it is not a regular file. A FIFO is the one that matters most — `open`
+/// on one with no writer blocks in the kernel, so the check has to happen on the stat.
+#[test]
+#[cfg(unix)]
+fn run_and_hook_refuse_a_file_that_is_not_a_regular_file() {
+    let Some(live) = live() else { return };
+    let scratch = Scratch::new("fifo");
+    let fifo = scratch.path().join("messages.jsonl");
+    let made = Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !made {
+        println!("skipped: mkfifo is unavailable on this host");
+        return;
+    }
+    let guest = live.guest.to_string_lossy().into_owned();
+
+    // If the FIFO were opened rather than statted, this would block until the budget killed it.
+    ouro(
+        &live,
+        &repository_root(),
+        &["wasm", "run", &guest, "--messages", &fifo.to_string_lossy()],
+    )
+    .refused()
+    .stderr_says("is not a regular file");
+
+    ouro(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "hook",
+            &guest,
+            "--event",
+            "PreToolUse",
+            "--payload",
+            &fifo.to_string_lossy(),
+        ],
+    )
+    .refused()
+    .stderr_says("is not a regular file");
+}
+
+/// The same two, bounded by size rather than by kind.
+#[test]
+fn run_and_hook_refuse_a_file_past_its_byte_bound() {
+    let Some(live) = live() else { return };
+    let scratch = Scratch::new("bigpayload");
+    let guest = live.guest.to_string_lossy().into_owned();
+
+    // A payload past a mebibyte. Sparse, so this costs nothing on disk.
+    let payload = scratch.path().join("payload.json");
+    sparse(&payload, 1024 * 1024 + 1);
+    ouro(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "hook",
+            &guest,
+            "--event",
+            "PreToolUse",
+            "--payload",
+            &payload.to_string_lossy(),
+        ],
+    )
+    .refused()
+    .stderr_says("larger than the 1048576 byte cap");
+}
+
+// ============================================================== the bounds `check` enforces
+
+/// M21. A workspace `component` is relative to the root; an absolute one is refused rather than
+/// resolved, because resolving it is reading a path the workspace does not own.
+#[test]
+fn check_refuses_an_absolute_component_path() {
+    let Some(live) = live() else { return };
+    let scratch = Scratch::new("absolute");
+    scratch.write(
+        "ouroboros.toml",
+        "[[hooks]]\nevent = \"PreToolUse\"\ncomponent = \"/etc/hosts\"\n",
+    );
+
+    ouro(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "check",
+            "--workspace",
+            &scratch.path().to_string_lossy(),
+        ],
+    )
+    .refused()
+    .says("a workspace `component` must be relative to the workspace root");
+}
+
+/// M22. The hook lane's 16 MiB ceiling, which is tighter than the helper's 64 MiB — and checked
+/// from the filesystem before the helper is asked to compile anything.
+#[test]
+fn check_refuses_a_component_past_the_hook_lanes_byte_ceiling() {
+    let Some(live) = live() else { return };
+    let scratch = Scratch::new("bigcomponent");
+    let component = scratch.path().join("fat.wasm");
+    sparse(&component, 16 * 1024 * 1024 + 1);
+    scratch.write(
+        "ouroboros.toml",
+        "[[hooks]]\nevent = \"PreToolUse\"\ncomponent = \"./fat.wasm\"\n",
+    );
+
+    ouro(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "check",
+            "--workspace",
+            &scratch.path().to_string_lossy(),
+        ],
+    )
+    .refused()
+    .says("the limit is 16777216");
+}
+
+/// M2. The untrusted budget is spent on entries the node would have *built*, and a path that
+/// does not resolve is not one of them — `hooks_from/4` puts those in `errors` and only what
+/// survives reaches `cap_untrusted/2`.
+///
+/// Five broken paths then five good components: all five good ones are admitted. Charge the
+/// broken ones a slot — which is what the first version did — and the fifth good component is
+/// refused as the ninth, which is a repository hiding its own components behind its own typos.
+#[test]
+fn a_component_whose_path_does_not_resolve_costs_no_budget() {
+    let Some(live) = live() else { return };
+    let scratch = Scratch::new("budget-order");
+    std::fs::copy(&live.guest, scratch.write("hooks/vet.wasm", "")).expect("a guest in the tree");
+
+    let mut toml = String::new();
+    for n in 1..=5 {
+        toml.push_str(&format!(
+            "[[hooks]]\nevent = \"PreToolUse\"\ncomponent = \"./missing-{n}.wasm\"\n\n"
+        ));
+    }
+    for _ in 0..5 {
+        toml.push_str("[[hooks]]\nevent = \"PreToolUse\"\ncomponent = \"./hooks/vet.wasm\"\n\n");
+    }
+    scratch.write("ouroboros.toml", &toml);
+
+    let answer = ouro(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "check",
+            "--workspace",
+            &scratch.path().to_string_lossy(),
+            "--json",
+        ],
+    )
+    .refused()
+    .json();
+
+    let entries = answer["entries"].as_array().expect("entries");
+    let admitted = entries
+        .iter()
+        .filter(|entry| entry["verdict"] == "admitted")
+        .count();
+    assert_eq!(
+        admitted, 5,
+        "every good component must be admitted; five broken paths cost no budget: {answer}"
+    );
+    assert_eq!(answer["refused"], 5);
+}
+
+/// H4 and M3. `check` may not claim what it did not verify. `matcher = "*"` is refused by the
+/// node and used to pass here under "every component entry would be admitted"; `\Q(\E` is
+/// compiled by the node and used to be refused here. Both are now reported as unverified, and
+/// neither changes the exit code.
+#[test]
+fn check_reports_a_matcher_as_unverified_and_never_claims_it_was_admitted() {
+    let Some(live) = live() else { return };
+    let scratch = Scratch::new("matcher");
+    std::fs::copy(&live.guest, scratch.write("hooks/vet.wasm", "")).expect("a guest in the tree");
+
+    for pattern in ["*", "\\\\Q(\\\\E"] {
+        scratch.write(
+            "ouroboros.toml",
+            &format!(
+                "[[hooks]]\nevent = \"PreToolUse\"\ncomponent = \"./hooks/vet.wasm\"\n\
+                 matcher = \"{pattern}\"\n"
+            ),
+        );
+
+        let ran = ouro(
+            &live,
+            &repository_root(),
+            &[
+                "wasm",
+                "check",
+                "--workspace",
+                &scratch.path().to_string_lossy(),
+            ],
+        );
+
+        // Nothing is refused — this client cannot decide a PCRE either way …
+        ran.ok().says("matcher: unverified");
+        // … and it does not pretend it did.
+        ran.does_not_say("every component entry would be admitted");
+        ran.says("1 matcher NOT verified here");
+    }
+
+    // With no matcher at all there is nothing undecided, and the strong sentence is allowed.
+    scratch.write(
+        "ouroboros.toml",
+        "[[hooks]]\nevent = \"PreToolUse\"\ncomponent = \"./hooks/vet.wasm\"\n",
+    );
+    ouro(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "check",
+            "--workspace",
+            &scratch.path().to_string_lossy(),
+        ],
+    )
+    .ok()
+    .says("every component entry would be admitted")
+    .does_not_say("unverified");
+}
+
+// ================================================================ the bounds `hook` enforces
+
+/// M24, M25, M26 and L4: the four things `hook` refuses about its own request, and the spelling
+/// it accepts because the node accepts it.
+#[test]
+fn hook_refuses_a_request_the_node_would_refuse() {
+    let Some(live) = live() else { return };
+    let scratch = Scratch::new("hookbounds");
+    let guest = live.guest.to_string_lossy().into_owned();
+
+    // M24: an event this runtime does not dispatch.
+    ouro(
+        &live,
+        &repository_root(),
+        &["wasm", "hook", &guest, "--event", "NotAnEvent"],
+    )
+    .refused()
+    .stderr_says("is not a hook event");
+
+    // L4: but a spelling the node accepts is accepted here, because `event/1` downcases.
+    ouro(
+        &live,
+        &repository_root(),
+        &["wasm", "hook", &guest, "--event", "pretooluse"],
+    )
+    .ok()
+    .says("PreToolUse on the untrusted lane");
+
+    // M25: a `config` past the bound a declared one is held to.
+    let long = "x".repeat(16 * 1024 + 1);
+    ouro(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "hook",
+            &guest,
+            "--event",
+            "PreToolUse",
+            "--config",
+            &long,
+        ],
+    )
+    .refused()
+    .stderr_says("a hook's declared `config` is bounded at 16384");
+
+    // The component itself must be a regular file, statted before the helper is told about it:
+    // `read_component/1` refuses a `not_a_regular_file` on the node for the same reason.
+    ouro(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "hook",
+            &scratch.path().to_string_lossy(),
+            "--event",
+            "PreToolUse",
+        ],
+    )
+    .refused()
+    .stderr_says("not_a_regular_file");
+
+    // M26: the hook lane's byte ceiling, checked from the filesystem before the helper reads it.
+    let fat = scratch.path().join("fat.wasm");
+    sparse(&fat, 16 * 1024 * 1024 + 1);
+    ouro(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "hook",
+            &fat.to_string_lossy(),
+            "--event",
+            "PreToolUse",
+        ],
+    )
+    .refused()
+    .stderr_says("oversize_component");
+}
+
+/// M27. A hook's declared `timeout_ms` becomes its deadline, and never above the component
+/// deadline ceiling — so a `timeout_ms = 600000` that a shell hook may ask for arrives on the
+/// wire as sixty seconds rather than as a refused `instantiate`.
+#[test]
+fn hook_clamps_its_deadline_to_the_component_ceiling() {
+    let Some(live) = live() else { return };
+    let guest = live.guest.to_string_lossy().into_owned();
+
+    let answer = ouro(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "hook",
+            &guest,
+            "--event",
+            "PreToolUse",
+            "--timeout-ms",
+            "600000",
+            "--json",
+        ],
+    )
+    .ok()
+    .json();
+
+    assert_eq!(
+        answer["limits"]["deadline_ms"], 60_000,
+        "ten minutes must arrive as sixty seconds: {answer}"
+    );
+
+    // And it was the *node's* ceiling that did it, not the helper's clamp catching it on the
+    // way out. The two numbers are the same — `@component_deadline_ceiling_ms` is the helper's
+    // `MAX_DEADLINE_MS` — so the deadline alone cannot tell them apart, and without this
+    // assertion dropping the `min` looks identical. What differs is that a request the node
+    // already bounded never needs clamping, and a clamp is reported when it happens.
+    assert_eq!(
+        answer["limits"]["clamped"],
+        json!([]),
+        "the node's own ceiling must apply before the request is sent, so nothing is clamped \
+         on arrival: {answer}"
+    );
+
+    // And a smaller one is honoured, or the clamp would be a fixed number wearing a ceiling's
+    // name.
+    let answer = ouro(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "hook",
+            &guest,
+            "--event",
+            "PreToolUse",
+            "--timeout-ms",
+            "1500",
+            "--json",
+        ],
+    )
+    .ok()
+    .json();
+    assert_eq!(answer["limits"]["deadline_ms"], 1_500);
+}
+
+/// M30. Everything a component authors reaches a terminal through `sanitize`, and a terminal
+/// obeys an escape sequence rather than showing it. Asserted on the **raw bytes** of stdout,
+/// because a `String` comparison is exactly what would miss a stray `0x1b`.
+///
+/// The guest answers with whatever its config's `reply` names, so this is a real component
+/// returning a real escape sequence through the real helper.
+#[test]
+fn a_guest_reply_carrying_an_escape_sequence_reaches_the_terminal_stripped() {
+    let Some(live) = live() else { return };
+    let guest = live.guest.to_string_lossy().into_owned();
+
+    // Clear the screen, home the cursor, and print a line of the component's choosing.
+    let config = json!({ "reply": "ok\u{1b}[2J\u{1b}[HADMITTED BY OPERATOR\u{1b}]0;pwned\u{7}" })
+        .to_string();
+
+    let ran = ouro(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "run",
+            &guest,
+            "--config",
+            &config,
+            "--message",
+            "{}",
+        ],
+    );
+    ran.ok();
+
+    assert!(
+        !ran.output.stdout.contains(&0x1b),
+        "an ESC byte reached the terminal: {:?}",
+        String::from_utf8_lossy(&ran.output.stdout)
+    );
+    assert!(
+        !ran.output.stdout.contains(&0x07),
+        "a BEL byte reached the terminal"
+    );
+    // The text survives; only what a terminal would *obey* is gone.
+    ran.says("ADMITTED BY OPERATOR");
+
+    // The same through `hook`, whose verdict rendering is a different path to the same tty.
+    let ran = ouro(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "hook",
+            &guest,
+            "--event",
+            "PreToolUse",
+            "--config",
+            &json!({
+                "reply": json!({
+                    "hookSpecificOutput": {
+                        "additionalContext": "ok\u{1b}[2Jinjected",
+                    }
+                })
+                .to_string(),
+            })
+            .to_string(),
+        ],
+    );
+    ran.ok();
+    assert!(
+        !ran.output.stdout.contains(&0x1b),
+        "an ESC byte reached the terminal through the hook report"
+    );
 }
 
 // ------------------------------------------------------------------------ the threats

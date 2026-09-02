@@ -30,8 +30,8 @@
 //! itself comes only from the three places D14 names.
 
 use std::collections::BTreeMap;
-use std::io::Write;
-use std::path::Path;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -261,6 +261,19 @@ pub const EVENTS: [&str; 10] = [
     "Notification",
     "FileChanged",
 ];
+
+/// The runtime's own spelling of an event name, matched the way `event/1` matches it: trimmed
+/// and case-insensitive. `None` when this runtime does not dispatch it.
+///
+/// Case-insensitive because the node is: `@events` is keyed by the downcased name, so a hook
+/// declaring `event = "pretooluse"` runs. A `--event` that refused the spelling a workspace may
+/// legitimately use would send an author looking for a bug in their component.
+pub fn canonical_event(name: &str) -> Option<&'static str> {
+    let normalized = name.trim().to_ascii_lowercase();
+    EVENTS
+        .into_iter()
+        .find(|event| event.to_ascii_lowercase() == normalized)
+}
 
 /// The three decisions a hook may state, plus the older `block` spelling that means `deny`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -518,8 +531,8 @@ pub fn inspect<O: Write>(
     json: bool,
     out: &mut O,
 ) -> Result<bool> {
-    let path = wasm_client::resolve(helper_path)?;
-    let mut helper = Helper::start(&path)?;
+    let binary = wasm_client::resolve(helper_path)?;
+    let mut helper = Helper::start(&binary)?;
 
     let report = helper.doctor()?;
     let inspected = match helper.inspect(file) {
@@ -722,8 +735,8 @@ struct Answered {
 /// to the guest that answered the first — and a fresh instance per message would quietly test a
 /// different component from the one that gets deployed.
 pub fn run<O: Write>(request: &RunRequest, out: &mut O) -> Result<bool> {
-    let path = wasm_client::resolve(request.helper)?;
-    let mut helper = Helper::start(&path)?;
+    let binary = wasm_client::resolve(request.helper)?;
+    let mut helper = Helper::start(&binary)?;
 
     let report = helper.doctor()?;
     let (limits, moved) = request.limits.clamped(&report["limits"]);
@@ -943,13 +956,17 @@ pub struct HookRequest<'a> {
 pub fn hook<O: Write>(request: &HookRequest, out: &mut O) -> Result<bool> {
     // Everything a node would refuse this request for, before a helper is started: a helper
     // started to be told the request was malformed is a process spawned for nothing.
-    if !EVENTS.contains(&request.event.as_str()) {
+    //
+    // Case-insensitively, because `event/1` downcases before it looks the name up — a hook
+    // declaring `event = "pretooluse"` runs on the node, so `--event pretooluse` has to print
+    // the narrowing for the hook that runs rather than refuse a spelling the runtime accepts.
+    let Some(event) = canonical_event(&request.event) else {
         bail!(
             "`{}` is not a hook event. This runtime dispatches: {}",
             clean(&request.event),
             EVENTS.join(", ")
         );
-    }
+    };
     if request.config.len() > MAX_HOOK_CONFIG_BYTES {
         bail!(
             "`--config` is {} bytes; a hook's declared `config` is bounded at \
@@ -959,16 +976,18 @@ pub fn hook<O: Write>(request: &HookRequest, out: &mut O) -> Result<bool> {
         );
     }
 
-    let path = wasm_client::resolve(request.helper)?;
-    let mut helper = Helper::start(&path)?;
+    let binary = wasm_client::resolve(request.helper)?;
+    let mut helper = Helper::start(&binary)?;
 
     // The payload the seam builds: whatever the author supplied, with the event name set by
-    // the runtime and — for the two post events — the response narrowed on the way *in*.
+    // the runtime — in the runtime's own spelling, which is what `@event_names` puts on the
+    // wire whatever the author typed — and, for the two post events, the response narrowed on
+    // the way *in*.
     let mut payload = match request.payload.clone() {
         Value::Object(map) => map,
         _not_an_object => Map::new(),
     };
-    payload.insert("hook_event_name".into(), json!(request.event));
+    payload.insert("hook_event_name".into(), json!(event));
 
     let narrowed_response = payload.get("tool_response").map(|response| {
         let kept = tool_response(response, request.trusted);
@@ -978,7 +997,7 @@ pub fn hook<O: Write>(request: &HookRequest, out: &mut O) -> Result<bool> {
         payload.insert("tool_response".into(), kept.clone());
     }
 
-    let dispatched = dispatched(&request.event, request.trusted);
+    let dispatched = dispatched(event, request.trusted);
 
     // The node's own bounds: `Wasm.capability_limits()` with the one bound a hook declares for
     // itself substituted in, and never above the component deadline ceiling. There is no second
@@ -990,14 +1009,26 @@ pub fn hook<O: Write>(request: &HookRequest, out: &mut O) -> Result<bool> {
     }
     .clamped(&report["limits"]);
 
-    let inspected = helper.inspect(request.file)?;
-    let size = inspected["size"].as_u64().unwrap_or(0);
-    if size > HOOK_MAX_COMPONENT_BYTES {
+    // Statted and bounded before the helper is told anything about it, which is the order
+    // `read_component/1` uses: `hooks.ex` stats for a regular file under `@max_component_bytes`
+    // and only then hashes and loads. Doing it after `inspect` would mean a sixty-megabyte file
+    // was read and walked before anybody said it was too big for this lane.
+    let metadata = std::fs::metadata(request.file)
+        .with_context(|| format!("could not read {}", request.file.display()))?;
+    if !metadata.is_file() {
         bail!(
-            "oversize_component: {size} bytes against the hook lane's {HOOK_MAX_COMPONENT_BYTES}"
+            "not_a_regular_file: {} is not a regular file",
+            request.file.display()
+        );
+    }
+    if metadata.len() > HOOK_MAX_COMPONENT_BYTES {
+        bail!(
+            "oversize_component: {} bytes against the hook lane's {HOOK_MAX_COMPONENT_BYTES}",
+            metadata.len()
         );
     }
 
+    let inspected = helper.inspect(request.file)?;
     let sha = inspected["sha256"].as_str().unwrap_or_default().to_string();
     helper.load(&sha, request.file).map_err(name_the_refusal)?;
 
@@ -1040,7 +1071,7 @@ pub fn hook<O: Write>(request: &HookRequest, out: &mut O) -> Result<bool> {
 
     let text = if request.json {
         serde_json::to_string_pretty(&json!({
-            "event": request.event,
+            "event": event,
             "lane": lane(request.trusted),
             "dispatched": dispatched,
             "payload": Value::Object(payload),
@@ -1057,12 +1088,15 @@ pub fn hook<O: Write>(request: &HookRequest, out: &mut O) -> Result<bool> {
     } else {
         render_hook(
             request,
-            dispatched,
-            &narrowed_response,
-            &raw,
-            &kept,
-            &dropped,
-            &logs,
+            &HookReport {
+                event,
+                dispatched,
+                narrowed_response: &narrowed_response,
+                raw: &raw,
+                kept: &kept,
+                dropped: &dropped,
+                logs: &logs,
+            },
         )
     };
 
@@ -1079,26 +1113,37 @@ fn lane(trusted: bool) -> &'static str {
     }
 }
 
-fn render_hook(
-    request: &HookRequest,
+/// One hook run's outcome, gathered so the renderer takes a request and an answer rather than
+/// eight positional arguments nobody can read at the call site.
+struct HookReport<'a> {
+    event: &'a str,
     dispatched: bool,
-    narrowed_response: &Option<(Value, Value)>,
-    raw: &Verdict,
-    kept: &Verdict,
-    dropped: &[&str],
-    logs: &[String],
-) -> String {
-    let mut lines = vec![format!(
-        "{} on the {} lane",
-        clean(&request.event),
-        lane(request.trusted)
-    )];
+    /// The `tool_response` as it arrived and as it was sent, when there was one.
+    narrowed_response: &'a Option<(Value, Value)>,
+    raw: &'a Verdict,
+    kept: &'a Verdict,
+    dropped: &'a [&'a str],
+    logs: &'a [String],
+}
+
+fn render_hook(request: &HookRequest, report: &HookReport) -> String {
+    let HookReport {
+        event,
+        dispatched,
+        narrowed_response,
+        raw,
+        kept,
+        dropped,
+        logs,
+    } = *report;
+
+    let mut lines = vec![format!("{} on the {} lane", event, lane(request.trusted))];
 
     if !dispatched {
         lines.push(format!(
             "  NOT DISPATCHED: the turn loop discards what a {} hook returns, so an untrusted \
              one is not run at all. Everything below is what it *would* have said.",
-            clean(&request.event)
+            event
         ));
     }
 
@@ -1205,6 +1250,122 @@ fn compact(value: &Value) -> String {
     )
 }
 
+// ===================================================== reading files somebody else wrote
+//
+// Every file below is one a *developer* named and somebody *else* wrote: an `ouroboros.toml`
+// out of a clone, a payload, a file of messages. Three properties, and review proved that
+// having two of them is having none.
+//
+//   * **A regular file.** `metadata()` follows symlinks and answers without opening, so a
+//     `ouroboros.toml -> /dev/zero` is refused here rather than discovered by the read. That
+//     matters more than it sounds: `metadata().len()` on a character device is *zero*, so a
+//     size bound taken from it passes, and the `read_to_string` after it never ends. Measured
+//     against the version this replaces: still reading after eight seconds, at 13 GB resident.
+//     The same check refuses a FIFO before anything opens it — `open` on a FIFO with no writer
+//     blocks in the kernel, and a path is somebody else's string.
+//   * **A bound taken from the read, not from the stat.** `take(limit + 1)` and a length
+//     comparison afterwards, so the bound holds whatever the stat said. This is the shape
+//     `host.rs`'s `read_component` already uses, for the same reason.
+//   * **A named refusal.** An author who pointed at the wrong file is owed which rule it broke.
+
+/// The largest hook payload `--payload` will read. A hook payload is a JSON object describing
+/// one tool call; a mebibyte is three orders of magnitude above any real one and still small
+/// enough to be a bound rather than a gesture.
+pub const MAX_PAYLOAD_BYTES: u64 = 1024 * 1024;
+
+/// The largest `--messages` file. The helper's own frame cap, because a file of JSON lines is
+/// at most a sequence of message bodies and a body larger than one frame could never be sent.
+pub const MAX_MESSAGES_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Reads a regular file, bounded, refusing anything that is not one.
+fn read_bounded(path: &Path, limit: u64, what: &str) -> Result<String> {
+    // Before opening it, not after: `metadata` follows symlinks and answers without blocking,
+    // so a link to a device or a FIFO is refused here rather than in the kernel.
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("could not read {what} {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!(
+            "{what} {} is not a regular file; a device, a directory or a FIFO is not a file \
+             this reads",
+            path.display()
+        );
+    }
+
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("could not open {what} {}", path.display()))?;
+
+    // One byte past the cap, so an over-cap file is detected without being read whole.
+    let mut content = String::new();
+    file.take(limit + 1)
+        .read_to_string(&mut content)
+        .with_context(|| format!("could not read {what} {}", path.display()))?;
+
+    if content.len() as u64 > limit {
+        bail!(
+            "{what} {} is larger than the {limit} byte cap",
+            path.display()
+        );
+    }
+    Ok(content)
+}
+
+/// Standard input, under the same bound. `-` is a developer saying "from a pipe", and a pipe is
+/// as unbounded as a file is.
+fn read_bounded_stdin(limit: u64, what: &str) -> Result<String> {
+    let mut content = String::new();
+    std::io::stdin()
+        .lock()
+        .take(limit + 1)
+        .read_to_string(&mut content)
+        .with_context(|| format!("could not read {what} from standard input"))?;
+
+    if content.len() as u64 > limit {
+        bail!("{what} on standard input is larger than the {limit} byte cap");
+    }
+    Ok(content)
+}
+
+/// `--message` first, then `--messages`, in file order.
+///
+/// A line that is not JSON is refused rather than sent: the helper would take it as a body, and
+/// a developer who meant a message should be told they wrote something else.
+pub fn read_messages(inline: &[String], file: Option<&Path>) -> Result<Vec<String>> {
+    let mut messages = inline.to_vec();
+
+    if let Some(path) = file {
+        let content = read_bounded(path, MAX_MESSAGES_BYTES, "the messages file")?;
+        for (number, line) in content.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            serde_json::from_str::<Value>(line)
+                .with_context(|| format!("{}:{}: not a JSON line", path.display(), number + 1))?;
+            messages.push(line.to_string());
+        }
+    }
+
+    if messages.is_empty() {
+        bail!("nothing to send: pass --message '<json>' or --messages <file>");
+    }
+    Ok(messages)
+}
+
+/// The hook payload: a file, `-` for standard input, or an empty object.
+pub fn read_payload(source: Option<&str>) -> Result<Value> {
+    let text = match source {
+        None => return Ok(json!({})),
+        Some("-") => read_bounded_stdin(MAX_PAYLOAD_BYTES, "the hook payload")?,
+        Some(path) => read_bounded(Path::new(path), MAX_PAYLOAD_BYTES, "the hook payload")?,
+    };
+
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(json!({}));
+    }
+    serde_json::from_str(trimmed).context("the hook payload is not JSON")
+}
+
 // ====================================================================== `ouro wasm check`
 
 /// One `[[hooks]]` or `[checks]` entry, as `check` read it and judged it.
@@ -1214,6 +1375,12 @@ pub struct Entry {
     pub label: String,
     pub target: String,
     pub verdict: EntryVerdict,
+    /// Whether this entry declared a `matcher` this command could not decide.
+    ///
+    /// A field rather than a verdict, because it is orthogonal to one: an entry with an
+    /// unverified matcher is otherwise perfectly admissible, and an entry refused for its path
+    /// had a matcher nobody got to. See [`MatcherState`].
+    pub matcher: MatcherState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1234,6 +1401,31 @@ impl EntryVerdict {
     }
 }
 
+/// What this command could say about an entry's `matcher`.
+///
+/// The node compiles it as a PCRE, twice — alone, and then inside `\A(?:…)\z`. `ouro` carries no
+/// regex engine, and adding one to decide a single TOML field would put a large dependency in
+/// the client's graph to answer a question the node answers anyway.
+///
+/// So this command does not answer it, and — this is the half review had to correct — it no
+/// longer *pretends* to. The first version guessed with a parenthesis-balance check, which was
+/// wrong in both directions: it passed `matcher = "*"`, which the node refuses (`quantifier does
+/// not follow a repeatable item`) while `check` printed "every component entry would be
+/// admitted" and exited 0; and it refused `matcher = "\Q(\E"`, which the node compiles happily,
+/// because a quoted literal paren opens no group. A heuristic wrong in both directions is worse
+/// than no answer, because an author reads it as one.
+///
+/// What is left is what can be decided here exactly: the 200-byte bound. The rest is reported as
+/// unverified, and the summary will not use the word "admitted" while any row carries it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatcherState {
+    /// No `matcher` was declared, so nothing is left undecided.
+    Absent,
+    /// A `matcher` was declared and is within its byte bound; whether it *compiles* is the
+    /// node's answer to give.
+    Unverified,
+}
+
 /// `ouro wasm check`: read a workspace's `ouroboros.toml` and say which of its component
 /// entries the node would admit **from a workspace nobody trusts**, which is the strict case.
 ///
@@ -1251,17 +1443,29 @@ pub fn check<O: Write>(
         .with_context(|| format!("no workspace at {}", workspace.display()))?;
     let document = read_workspace_toml(&root)?;
 
-    let path = wasm_client::resolve(helper_path)?;
-    let mut helper = Helper::start(&path)?;
+    let binary = wasm_client::resolve(helper_path)?;
+    let mut helper = Helper::start(&binary)?;
 
     let entries = check_entries(&root, &document, &mut helper)?;
+    // Exit code says *refused*, never *unverified*: an entry this command could not decide is
+    // not an entry it may fail a build over, and an author who wired `ouro wasm check` into a
+    // pre-commit hook should not have it break on a matcher the node compiles fine.
     let ok = !entries.iter().any(|entry| entry.verdict.refused());
+    let unverified = entries
+        .iter()
+        .filter(|entry| entry.matcher == MatcherState::Unverified)
+        .count();
 
     let text = if json {
         serde_json::to_string_pretty(&json!({
             "workspace": root.to_string_lossy(),
             "trust": "untrusted",
-            "admitted": ok,
+            "helper": binary.path().to_string_lossy(),
+            "refused": entries.iter().filter(|entry| entry.verdict.refused()).count(),
+            "unverified_matchers": unverified,
+            // Deliberately not a key called `admitted`: nothing here can say a workspace is
+            // admissible while a matcher it declared is still the node's to compile.
+            "no_refusals": ok,
             "entries": entries.iter().map(|entry| json!({
                 "entry": entry.label,
                 "target": entry.target,
@@ -1270,10 +1474,14 @@ pub fn check<O: Write>(
                     EntryVerdict::Admitted => json!("admitted"),
                     EntryVerdict::Refused(reason) => json!({ "refused": reason }),
                 },
+                "matcher": match entry.matcher {
+                    MatcherState::Absent => json!(null),
+                    MatcherState::Unverified => json!("unverified"),
+                },
             })).collect::<Vec<_>>(),
         }))?
     } else {
-        render_check(&root, &entries)
+        render_check(&root, &binary, &entries)
     };
 
     writeln!(out, "{text}")?;
@@ -1283,51 +1491,97 @@ pub fn check<O: Write>(
 
 fn read_workspace_toml(root: &Path) -> Result<toml::Value> {
     let path = root.join("ouroboros.toml");
-    let size = std::fs::metadata(&path)
-        .with_context(|| format!("no ouroboros.toml in {}", root.display()))?
-        .len();
-
-    // Bounded before it is parsed, exactly as `read_config/1` bounds it.
-    if size > MAX_CONFIG_BYTES {
-        bail!(
-            "{}: is {size} bytes; the limit is {MAX_CONFIG_BYTES}",
-            path.display()
-        );
-    }
-
-    let content = std::fs::read_to_string(&path)
-        .with_context(|| format!("could not read {}", path.display()))?;
+    // Regular-file and bounded, exactly as `read_config/1` is — `hooks.ex` stats for
+    // `type: :regular` before it reads, and so does this. See `read_bounded` for what a
+    // size bound taken from a stat is worth against a device.
+    let content = read_bounded(&path, MAX_CONFIG_BYTES, "ouroboros.toml")?;
     toml::from_str(&content).with_context(|| format!("{}: not valid TOML", path.display()))
+}
+
+/// One entry after parsing, before the untrusted budget is spent on it.
+///
+/// The split into two passes is the node's own and review had to point that out: `hooks_from/4`
+/// runs `build/4` over every entry and puts the failures in `errors`, and only what *survived*
+/// reaches `cap_untrusted/2`. So an entry with a path that does not resolve costs a repository
+/// nothing — where the first version of this command charged it a slot, and five broken paths
+/// could therefore hide five good components behind a budget that was never really spent.
+enum Parsed {
+    /// Refused before the budget: bad grammar, or a path outside the workspace.
+    Refused(Entry),
+    /// A `command =` entry. Declined untrusted, and never a component, so never budgeted.
+    Command(Entry),
+    /// A component the node would have built. `path` is canonical and inside the root.
+    Component {
+        label: String,
+        target: String,
+        matcher: MatcherState,
+        path: PathBuf,
+    },
 }
 
 /// The whole admission pass, as a function of the document so a test can hand it one.
 ///
-/// Order matters and is the node's: `[[hooks]]` in document order, then `[checks]` sorted by
-/// name, with one untrusted-component budget spent across both — a repository cannot double the
-/// budget by moving half its components into `[checks]`.
+/// Order is the node's: `[[hooks]]` in document order, then `[checks]` sorted by name, with one
+/// untrusted-component budget spent across both — a repository cannot double it by moving half
+/// its components into `[checks]` — and spent only on entries that parsed.
 fn check_entries(root: &Path, document: &toml::Value, helper: &mut Helper) -> Result<Vec<Entry>> {
-    let mut entries = Vec::new();
-    let mut spent = 0usize;
-
     // `MAX_HOOKS` is the node's cap across *all three* scopes, and this reads only the
     // workspace's — so applying it here is a superset of what a node would take. It never
     // decides anything in practice: the untrusted component budget is eight and bites first.
     // The two take-caps are reported rather than applied silently, because an entry missing
     // from a table an author is reading is indistinguishable from one that passed.
     let hooks = hook_tables(document);
+    let checks = check_tables(document);
+
+    let mut parsed: Vec<Parsed> = Vec::new();
     for (index, hook) in hooks.iter().take(MAX_HOOKS).enumerate() {
-        entries.push(hook_entry(root, hook, index + 1, helper, &mut spent)?);
+        parsed.push(parse_hook(root, hook, index + 1));
     }
     if hooks.len() > MAX_HOOKS {
-        entries.push(truncated("[[hooks]]", hooks.len(), MAX_HOOKS));
+        parsed.push(Parsed::Refused(truncated(
+            "[[hooks]]",
+            hooks.len(),
+            MAX_HOOKS,
+        )));
     }
-
-    let checks = check_tables(document);
     for (name, check) in checks.iter().take(MAX_CHECKS) {
-        entries.push(check_entry(root, name, check, helper, &mut spent)?);
+        parsed.push(parse_check(root, name, check));
     }
     if checks.len() > MAX_CHECKS {
-        entries.push(truncated("[checks]", checks.len(), MAX_CHECKS));
+        parsed.push(Parsed::Refused(truncated(
+            "[checks]",
+            checks.len(),
+            MAX_CHECKS,
+        )));
+    }
+
+    let mut entries = Vec::new();
+    let mut spent = 0usize;
+    for one in parsed {
+        entries.push(match one {
+            Parsed::Refused(entry) | Parsed::Command(entry) => entry,
+            Parsed::Component {
+                label,
+                target,
+                matcher,
+                path,
+            } => {
+                spent += 1;
+                if spent > MAX_UNTRUSTED_COMPONENTS {
+                    refused(
+                        label,
+                        &target,
+                        &format!(
+                            "an untrusted workspace may run {MAX_UNTRUSTED_COMPONENTS} \
+                             components; this is #{spent} and was declined"
+                        ),
+                    )
+                    .with_matcher(matcher)
+                } else {
+                    admit(label, target, matcher, &path, helper)?
+                }
+            }
+        });
     }
 
     Ok(entries)
@@ -1341,6 +1595,7 @@ fn truncated(table: &str, declared: usize, cap: usize) -> Entry {
             "only the first {cap} are read; {} beyond that are never loaded",
             declared - cap
         )),
+        matcher: MatcherState::Absent,
     }
 }
 
@@ -1366,13 +1621,8 @@ fn check_tables(document: &toml::Value) -> Vec<(String, toml::Value)> {
     sorted.into_iter().collect()
 }
 
-fn hook_entry(
-    root: &Path,
-    hook: &toml::Value,
-    index: usize,
-    helper: &mut Helper,
-    spent: &mut usize,
-) -> Result<Entry> {
+/// Everything `build/4` decides about one `[[hooks]]` entry, and nothing the node decides later.
+fn parse_hook(root: &Path, hook: &toml::Value, index: usize) -> Parsed {
     let label = format!("[[hooks]] #{index}");
     let command = hook.get("command");
     let component = hook.get("component");
@@ -1380,78 +1630,94 @@ fn hook_entry(
     // Exactly one of the two. Both is ambiguous and neither is nothing to run.
     let target = match (command, component) {
         (None, None) => {
-            return Ok(refused(
+            return Parsed::Refused(refused(
                 label,
                 "(none)",
                 "has no `command` and no `component`",
             ))
         }
         (Some(_), Some(_)) => {
-            return Ok(refused(
+            return Parsed::Refused(refused(
                 label,
                 "(both)",
                 "declares both `command` and `component`; a hook is one or the other",
             ))
         }
         (Some(command), None) => {
-            return Ok(Entry {
+            // A `command =` hook takes no `config`: a command hook has no `init`, so `config` on
+            // one is a mistake worth a line rather than a value silently ignored.
+            let shown_command = clean(command.as_str().unwrap_or("(not a string)"));
+            if hook.get("config").is_some() {
+                return Parsed::Refused(refused(
+                    label,
+                    &shown_command,
+                    "`config` is only meaningful for a `component` hook",
+                ));
+            }
+            if let Some(reason) = event_refusal(hook) {
+                return Parsed::Refused(refused(label, &shown_command, &reason));
+            }
+            return Parsed::Command(Entry {
                 label,
-                target: clean(command.as_str().unwrap_or("(not a string)")),
+                target: shown_command,
                 verdict: EntryVerdict::Command,
-            })
+                matcher: MatcherState::Absent,
+            });
         }
         (None, Some(component)) => component,
     };
 
-    if let Some(reason) = hook_grammar(hook) {
-        return Ok(refused(label, &shown(target), &reason));
+    let shown_target = shown(target);
+    if let Some(reason) = event_refusal(hook) {
+        return Parsed::Refused(refused(label, &shown_target, &reason));
+    }
+    let matcher = match matcher_state(hook) {
+        Ok(state) => state,
+        Err(reason) => return Parsed::Refused(refused(label, &shown_target, &reason)),
+    };
+    if let Some(reason) = config_refusal(hook) {
+        return Parsed::Refused(refused(label, &shown_target, &reason).with_matcher(matcher));
     }
 
-    admit(root, label, target, helper, spent)
+    match resolve_component(root, target) {
+        Ok(path) => Parsed::Component {
+            label,
+            target: shown_target,
+            matcher,
+            path,
+        },
+        Err(reason) => {
+            Parsed::Refused(refused(label, &shown_target, &reason).with_matcher(matcher))
+        }
+    }
 }
 
-/// The `[[hooks]]` fields that are not the component itself: the event, the matcher, and the
-/// config string. Each bound exactly where `hooks.ex` bounds it.
-fn hook_grammar(hook: &toml::Value) -> Option<String> {
+fn event_refusal(hook: &toml::Value) -> Option<String> {
     match hook.get("event").and_then(toml::Value::as_str) {
-        None => return Some("has no `event`".into()),
-        Some(name) => {
-            let normalized = name.trim().to_ascii_lowercase();
-            if !EVENTS
-                .iter()
-                .any(|event| event.to_ascii_lowercase() == normalized)
-            {
-                return Some(format!("`{}` is not a hook event", clean(name)));
-            }
+        None => Some("has no `event`".into()),
+        Some(name) if canonical_event(name).is_none() => {
+            Some(format!("`{}` is not a hook event", clean(name)))
         }
+        Some(_known) => None,
     }
+}
 
-    if let Some(matcher) = hook.get("matcher") {
-        match matcher.as_str() {
-            None => return Some("`matcher` must be a string".into()),
-            Some(pattern) if pattern.len() > MAX_MATCHER_BYTES => {
-                return Some(format!(
-                    "`matcher` is {} bytes; the limit is {MAX_MATCHER_BYTES}",
-                    pattern.len()
-                ))
-            }
-            // The node compiles the pattern **alone** before it compiles it inside `\A(?:…)\z`,
-            // because a `)` in the pattern otherwise closes the group the anchoring opened and
-            // `a)|(x` anchors to an unanchored alternation. This client has no regex engine, so
-            // it checks the one structural property that failure needs — balanced groups — and
-            // says so rather than claiming to have compiled anything.
-            Some(pattern) if !balanced_groups(pattern) => {
-                return Some(
-                    "`matcher` has unbalanced parentheses, so the node's anchoring group would \
-                     not be the group it closes"
-                        .into(),
-                )
-            }
-            Some(_bounded) => {}
-        }
+/// The `matcher` field, decided as far as it can be decided here. See [`MatcherState`].
+fn matcher_state(hook: &toml::Value) -> Result<MatcherState, String> {
+    let Some(matcher) = hook.get("matcher") else {
+        return Ok(MatcherState::Absent);
+    };
+    match matcher.as_str() {
+        None => Err("`matcher` must be a string".into()),
+        // An empty or blank matcher is `nil` to the node — `matcher/1` trims and returns
+        // `{:ok, nil}` — so there is nothing left for anybody to compile.
+        Some(pattern) if pattern.trim().is_empty() => Ok(MatcherState::Absent),
+        Some(pattern) if pattern.len() > MAX_MATCHER_BYTES => Err(format!(
+            "`matcher` is {} bytes; the limit is {MAX_MATCHER_BYTES}",
+            pattern.len()
+        )),
+        Some(_bounded) => Ok(MatcherState::Unverified),
     }
-
-    config_refusal(hook)
 }
 
 fn config_refusal(table: &toml::Value) -> Option<String> {
@@ -1468,164 +1734,121 @@ fn config_refusal(table: &toml::Value) -> Option<String> {
     }
 }
 
-/// Whether every `(` has its `)`, ignoring an escaped one and one inside a character class —
-/// the two places a parenthesis is a literal rather than a group.
-fn balanced_groups(pattern: &str) -> bool {
-    let mut depth = 0i32;
-    let mut escaped = false;
-    let mut in_class = false;
-
-    for character in pattern.chars() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match character {
-            '\\' => escaped = true,
-            '[' if !in_class => in_class = true,
-            ']' if in_class => in_class = false,
-            '(' if !in_class => depth += 1,
-            ')' if !in_class => {
-                depth -= 1;
-                if depth < 0 {
-                    return false;
-                }
-            }
-            _other => {}
-        }
-    }
-
-    depth == 0 && !in_class && !escaped
-}
-
-fn check_entry(
-    root: &Path,
-    name: &str,
-    check: &toml::Value,
-    helper: &mut Helper,
-    spent: &mut usize,
-) -> Result<Entry> {
+/// Everything `check/5` decides about one `[checks]` entry.
+fn parse_check(root: &Path, name: &str, check: &toml::Value) -> Parsed {
     let label = format!("[checks] {}", clean(name));
 
     match check {
-        // A bare string is a command check. Same posture as a `command =` hook.
-        toml::Value::String(command) => Ok(Entry {
+        // A bare **non-empty** string is a command check. An empty one matches neither of the
+        // node's two clauses and falls through to its catch-all, so it is refused here too.
+        toml::Value::String(command) if !command.is_empty() => Parsed::Command(Entry {
             label,
             target: clean(command),
             verdict: EntryVerdict::Command,
+            matcher: MatcherState::Absent,
         }),
         toml::Value::Table(_) => {
             let Some(component) = check.get("component") else {
-                return Ok(refused(
+                return Parsed::Refused(refused(
                     label,
                     "(none)",
                     "must be a command string or a `{ component = \"…\" }` table",
                 ));
             };
+            let shown_target = shown(component);
             if let Some(reason) = config_refusal(check) {
-                return Ok(refused(label, &shown(component), &reason));
+                return Parsed::Refused(refused(label, &shown_target, &reason));
             }
-            admit(root, label, component, helper, spent)
+            match resolve_component(root, component) {
+                Ok(path) => Parsed::Component {
+                    label,
+                    target: shown_target,
+                    matcher: MatcherState::Absent,
+                    path,
+                },
+                Err(reason) => Parsed::Refused(refused(label, &shown_target, &reason)),
+            }
         }
-        _other => Ok(refused(
+        _other => Parsed::Refused(refused(
             label,
-            "(not a string or a table)",
+            &shown(check),
             "must be a command string or a `{ component = \"…\" }` table",
         )),
     }
 }
 
-/// The component half: the path rule, the byte ceiling, the world, and the shared budget.
-fn admit(
-    root: &Path,
-    label: String,
-    component: &toml::Value,
-    helper: &mut Helper,
-    spent: &mut usize,
-) -> Result<Entry> {
-    let target = shown(component);
-
+/// The path half of `component_path/3`: a workspace `component` is relative to the root and
+/// canonically inside it. Everything here is decided at *load* time on the node, so a failure
+/// here is a failure that never reaches the untrusted budget.
+fn resolve_component(root: &Path, component: &toml::Value) -> Result<PathBuf, String> {
     let Some(declared) = component.as_str() else {
-        return Ok(refused(label, &target, "`component` must be a string"));
+        return Err("`component` must be a string".into());
     };
     let declared = declared.trim();
     if declared.is_empty() {
-        return Ok(refused(label, &target, "has an empty `component`"));
-    }
-
-    // One budget across both tables, spent in the node's order. Counted before the path is
-    // resolved, because the node counts entries and not files.
-    *spent += 1;
-    if *spent > MAX_UNTRUSTED_COMPONENTS {
-        return Ok(refused(
-            label,
-            &target,
-            &format!(
-                "an untrusted workspace may run {MAX_UNTRUSTED_COMPONENTS} components; this is \
-                 #{spent} and was declined"
-            ),
-        ));
+        return Err("has an empty `component`".into());
     }
 
     // A workspace `component` is relative to the workspace root and refused rather than
     // resolved when it is absolute.
     if Path::new(declared).is_absolute() {
-        return Ok(refused(
-            label,
-            &target,
-            "a workspace `component` must be relative to the workspace root",
-        ));
+        return Err("a workspace `component` must be relative to the workspace root".into());
     }
 
     // Canonical, so a symlink pointing out of the tree is followed and *then* refused: resolving
     // links before processing `..` is what stops a lexical `../..` and a planted link alike.
     // One message for both ways this fails, exactly as the node has one: two messages differing
     // on whether the target exists is an existence oracle for paths this workspace may not read.
+    let outside = "`component` is not a readable regular file inside the workspace";
     let Ok(canonical) = std::fs::canonicalize(root.join(declared)) else {
-        return Ok(refused(
-            label,
-            &target,
-            "`component` is not a readable regular file inside the workspace",
-        ));
+        return Err(outside.into());
     };
     if !canonical.starts_with(root) || !canonical.is_file() {
-        return Ok(refused(
-            label,
-            &target,
-            "`component` is not a readable regular file inside the workspace",
-        ));
+        return Err(outside.into());
     }
+    Ok(canonical)
+}
 
-    let size = std::fs::metadata(&canonical)
-        .map(|meta| meta.len())
-        .unwrap_or(0);
+/// The two questions the node asks when a hook actually *runs*: is it under the hook lane's byte
+/// ceiling, and is it in the world? Both cost a budget slot on the node too, because both happen
+/// after `build/4` — so this runs only for an entry that was budgeted.
+fn admit(
+    label: String,
+    target: String,
+    matcher: MatcherState,
+    path: &Path,
+    helper: &mut Helper,
+) -> Result<Entry> {
+    let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
     if size > HOOK_MAX_COMPONENT_BYTES {
         return Ok(refused(
             label,
             &target,
             &format!("is {size} bytes; the limit is {HOOK_MAX_COMPONENT_BYTES}"),
-        ));
+        )
+        .with_matcher(matcher));
     }
 
     // The world, asked of the helper rather than guessed at. `inspect` reports what the bytes
     // declare and `load` is what runs the admission check and names its refusal; neither
     // instantiates, so nothing in this workspace runs to be checked.
-    match helper.inspect(&canonical) {
+    match helper.inspect(path) {
         Err(error) => {
             let refusal = refusal_or_bail(error)?;
-            Ok(refused(label, &target, &refusal.refusal))
+            Ok(refused(label, &target, &refusal.refusal).with_matcher(matcher))
         }
         Ok(inspected) => {
             let sha = inspected["sha256"].as_str().unwrap_or_default().to_string();
-            match helper.load(&sha, &canonical) {
+            match helper.load(&sha, path) {
                 Ok(_admitted) => Ok(Entry {
                     label,
                     target,
                     verdict: EntryVerdict::Admitted,
+                    matcher,
                 }),
                 Err(error) => {
                     let refusal = refusal_or_bail(error)?;
-                    Ok(refused(label, &target, &refusal.refusal))
+                    Ok(refused(label, &target, &refusal.refusal).with_matcher(matcher))
                 }
             }
         }
@@ -1637,6 +1860,14 @@ fn refused(label: String, target: &str, reason: &str) -> Entry {
         label,
         target: target.to_string(),
         verdict: EntryVerdict::Refused(clean(reason)),
+        matcher: MatcherState::Absent,
+    }
+}
+
+impl Entry {
+    fn with_matcher(mut self, matcher: MatcherState) -> Entry {
+        self.matcher = matcher;
+        self
     }
 }
 
@@ -1648,12 +1879,13 @@ fn shown(value: &toml::Value) -> String {
     }
 }
 
-fn render_check(root: &Path, entries: &[Entry]) -> String {
+fn render_check(root: &Path, binary: &wasm_client::HelperBinary, entries: &[Entry]) -> String {
     let mut lines = vec![
         format!("{}/ouroboros.toml", root.display()),
         "  judged as an UNTRUSTED workspace, which is the strict case: a component hook runs \
          from a clone, a command hook does not"
             .into(),
+        format!("  helper: {binary}"),
     ];
 
     if entries.is_empty() {
@@ -1681,22 +1913,67 @@ fn render_check(root: &Path, entries: &[Entry]) -> String {
                 entry.label, entry.target, ""
             ),
         });
+
+        if entry.matcher == MatcherState::Unverified {
+            lines.push(format!(
+                "  {:<width$}           matcher: unverified (the node compiles it as PCRE; this \
+                 client has no regex engine and checked only its {MAX_MATCHER_BYTES}-byte bound)",
+                ""
+            ));
+        }
     }
 
+    lines.push(summary(entries));
+    lines.join("\n")
+}
+
+/// The last line, which is the one an author reads and the one review caught lying.
+///
+/// It used to say "every component entry would be admitted" whenever nothing was refused —
+/// including for `matcher = "*"`, which the node refuses outright. A summary may only report
+/// what was actually decided: how many rows were verified, and how many carry a matcher that is
+/// still the node's to compile. The word "admitted" does not appear while any of the second kind
+/// exists, because that sentence is the whole of what an author takes away.
+fn summary(entries: &[Entry]) -> String {
     let refused = entries
         .iter()
         .filter(|entry| entry.verdict.refused())
         .count();
-    lines.push(if refused == 0 {
-        "  every component entry would be admitted".into()
-    } else {
-        format!(
-            "  {refused} entr{} refused",
-            if refused == 1 { "y" } else { "ies" }
-        )
-    });
+    let admitted = entries
+        .iter()
+        .filter(|entry| entry.verdict == EntryVerdict::Admitted)
+        .count();
+    let unverified = entries
+        .iter()
+        .filter(|entry| entry.matcher == MatcherState::Unverified)
+        .count();
 
-    lines.join("\n")
+    let mut parts = Vec::new();
+    if refused > 0 {
+        parts.push(format!(
+            "{refused} entr{} refused",
+            if refused == 1 { "y" } else { "ies" }
+        ));
+    }
+    parts.push(format!(
+        "{admitted} component entr{} verified",
+        if admitted == 1 { "y" } else { "ies" }
+    ));
+    if unverified > 0 {
+        parts.push(format!(
+            "{unverified} matcher{} NOT verified here — the node compiles those, and refuses a \
+             pattern that does not",
+            if unverified == 1 { "" } else { "s" }
+        ));
+    }
+
+    let line = parts.join("; ");
+    if refused == 0 && unverified == 0 {
+        // The only case in which the strong sentence is true.
+        format!("  {line}; every component entry would be admitted")
+    } else {
+        format!("  {line}")
+    }
 }
 
 // ======================================================================== `ouro wasm new`
@@ -2031,7 +2308,7 @@ mod tests {
             assert_eq!(dropped, named, "{name}: the wrong keys were dropped");
         }
 
-        assert!(seen >= 10, "the fixture lost its verdict cases: {seen}");
+        assert!(seen >= 18, "the fixture lost its verdict cases: {seen}");
     }
 
     /// Every `dispatch` case: whether the node would run this hook at all.
@@ -2084,7 +2361,7 @@ mod tests {
             );
         }
 
-        assert_eq!(seen, 4, "the fixture lost its payload cases");
+        assert_eq!(seen, 5, "the fixture lost its payload cases");
     }
 
     /// `NODE_DEFAULT_LIMITS` is a copy of `config/config.exs`'s `capability_limits`, because
@@ -2277,7 +2554,18 @@ mod tests {
         );
         let (kept, dropped) = raw.narrow(false);
 
-        let text = render_hook(&request, true, &None, &raw, &kept, &dropped, &[]);
+        let text = render_hook(
+            &request,
+            &HookReport {
+                event: "PreToolUse",
+                dispatched: true,
+                narrowed_response: &None,
+                raw: &raw,
+                kept: &kept,
+                dropped: &dropped,
+                logs: &[],
+            },
+        );
 
         assert!(text.contains("PreToolUse on the untrusted lane"));
         assert!(text.contains("raw verdict (what the component said):"));
@@ -2304,12 +2592,15 @@ mod tests {
 
         let text = render_hook(
             &request,
-            false,
-            &None,
-            &raw,
-            &Verdict::default(),
-            &["dispatch"],
-            &[],
+            &HookReport {
+                event: "Notification",
+                dispatched: false,
+                narrowed_response: &None,
+                raw: &raw,
+                kept: &Verdict::default(),
+                dropped: &["dispatch"],
+                logs: &[],
+            },
         );
 
         assert!(text.contains("NOT DISPATCHED"));
@@ -2334,12 +2625,15 @@ mod tests {
 
         let text = render_hook(
             &request,
-            true,
-            &Some((raw_response, kept_response)),
-            &Verdict::default(),
-            &Verdict::default(),
-            &[],
-            &[],
+            &HookReport {
+                event: "PostToolUse",
+                dispatched: true,
+                narrowed_response: &Some((raw_response, kept_response)),
+                raw: &Verdict::default(),
+                kept: &Verdict::default(),
+                dropped: &[],
+                logs: &[],
+            },
         );
 
         assert!(text.contains("tool_response given:"));
@@ -2357,45 +2651,164 @@ mod tests {
         toml::from_str(toml).expect("the fixture parses")
     }
 
+    fn first_hook(document: &toml::Value) -> Parsed {
+        parse_hook(Path::new("/nowhere"), &hook_tables(document)[0], 1)
+    }
+
+    fn refusal_of_first(document: &toml::Value) -> String {
+        match first_hook(document) {
+            Parsed::Refused(Entry {
+                verdict: EntryVerdict::Refused(reason),
+                ..
+            }) => reason,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    impl std::fmt::Debug for Parsed {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Parsed::Refused(entry) => write!(f, "Refused({entry:?})"),
+                Parsed::Command(entry) => write!(f, "Command({entry:?})"),
+                Parsed::Component { label, .. } => write!(f, "Component({label})"),
+            }
+        }
+    }
+
     /// The grammar half of `check`, which needs no helper: the exactly-one-of rule, the event
-    /// vocabulary, and the two byte bounds.
+    /// vocabulary, and the byte bounds.
     #[test]
     fn the_grammar_refusals_are_the_nodes_own() {
-        let document = check_table(
-            r#"
-            [[hooks]]
-            event = "NotAnEvent"
-            component = "./a.wasm"
-            "#,
-        );
-        let hooks = hook_tables(&document);
+        let document = check_table("[[hooks]]\nevent = \"NotAnEvent\"\ncomponent = \"./a.wasm\"\n");
         assert_eq!(
-            hook_grammar(&hooks[0]).as_deref(),
-            Some("`NotAnEvent` is not a hook event")
+            refusal_of_first(&document),
+            "`NotAnEvent` is not a hook event"
         );
+
+        let document = check_table("[[hooks]]\nevent = \"PreToolUse\"\n");
+        assert_eq!(
+            refusal_of_first(&document),
+            "has no `command` and no `component`"
+        );
+
+        let document = check_table(
+            "[[hooks]]\nevent = \"PreToolUse\"\ncommand = \"x\"\ncomponent = \"./a.wasm\"\n",
+        );
+        assert!(refusal_of_first(&document).contains("one or the other"));
 
         let long = "a".repeat(MAX_MATCHER_BYTES + 1);
         let document = check_table(&format!(
             "[[hooks]]\nevent = \"PreToolUse\"\ncomponent = \"./a.wasm\"\nmatcher = \"{long}\"\n"
         ));
-        assert!(hook_grammar(&hook_tables(&document)[0])
-            .expect("an oversize matcher is refused")
+        assert!(refusal_of_first(&document).contains("201 bytes"));
+    }
+
+    /// L4/M24. The node downcases before it looks an event up, so a hook declaring
+    /// `event = "pretooluse"` runs — and `check` must not refuse a spelling the runtime accepts.
+    /// Delete the `to_ascii_lowercase` in `canonical_event` and the second half goes red.
+    #[test]
+    fn an_event_is_matched_the_way_the_node_matches_it() {
+        assert_eq!(canonical_event("PreToolUse"), Some("PreToolUse"));
+        assert_eq!(canonical_event("pretooluse"), Some("PreToolUse"));
+        assert_eq!(canonical_event("  POSTTOOLUSE  "), Some("PostToolUse"));
+        assert_eq!(canonical_event("NotAnEvent"), None);
+        assert_eq!(canonical_event(""), None);
+
+        // And `check` agrees, because both ask the same function.
+        let document = check_table("[[hooks]]\nevent = \"pretooluse\"\ncomponent = \"./a.wasm\"\n");
+        assert_eq!(
+            event_refusal(&hook_tables(&document)[0]),
+            None,
+            "a lowercase event is a real event on the node"
+        );
+    }
+
+    /// H4 and M3, the two halves of the same lie.
+    ///
+    /// `matcher = "*"` is refused by the node (`quantifier does not follow a repeatable item`)
+    /// and the old parenthesis-balance heuristic passed it, so `check` printed "every component
+    /// entry would be admitted" and exited 0. `matcher = "\Q(\E"` is a quoted literal paren that
+    /// the node compiles happily, and the same heuristic refused it. Neither is decided here any
+    /// more: both are `Unverified`, which the summary refuses to call admitted.
+    ///
+    /// Reintroduce any pattern-shape guess and one of these two goes red.
+    #[test]
+    fn a_matcher_is_reported_as_unverified_rather_than_guessed_at() {
+        // `*` is refused by the node; `\Q(\E` and `a)|(x` are compiled by it; `(a+)+$` is
+        // catastrophic but valid. Not one of them is this client's to judge.
+        for pattern in [
+            "*",
+            "\\\\Q(\\\\E",
+            "a)|(x",
+            "bash|write",
+            "(a+)+$",
+            "[a-",
+            "\\\\",
+        ] {
+            let document = check_table(&format!(
+                "[[hooks]]\nevent = \"PreToolUse\"\ncomponent = \"./a.wasm\"\nmatcher = \"{pattern}\"\n"
+            ));
+            assert_eq!(
+                matcher_state(&hook_tables(&document)[0]),
+                Ok(MatcherState::Unverified),
+                "`{pattern}` must be reported as the node's to compile, not decided here"
+            );
+        }
+
+        // A blank matcher is `nil` to the node, so there is nothing left undecided.
+        for blank in ["", "  "] {
+            let document = check_table(&format!(
+                "[[hooks]]\nevent = \"PreToolUse\"\ncomponent = \"./a.wasm\"\nmatcher = \"{blank}\"\n"
+            ));
+            assert_eq!(
+                matcher_state(&hook_tables(&document)[0]),
+                Ok(MatcherState::Absent)
+            );
+        }
+
+        // The one thing that *is* decided here, exactly: the byte bound.
+        let long = "a".repeat(MAX_MATCHER_BYTES + 1);
+        let document = check_table(&format!(
+            "[[hooks]]\nevent = \"PreToolUse\"\ncomponent = \"./a.wasm\"\nmatcher = \"{long}\"\n"
+        ));
+        assert!(matcher_state(&hook_tables(&document)[0])
+            .expect_err("an oversize matcher is refused")
             .contains("201 bytes"));
+    }
 
-        // The pattern the node compiles alone before it compiles it anchored, because `a)|(x`
-        // would otherwise anchor to an unanchored alternation.
-        let document = check_table(
-            "[[hooks]]\nevent = \"PreToolUse\"\ncomponent = \"./a.wasm\"\nmatcher = \"a)|(x\"\n",
-        );
-        assert!(hook_grammar(&hook_tables(&document)[0])
-            .expect("an unbalanced matcher is refused")
-            .contains("unbalanced parentheses"));
+    /// The summary is the line an author takes away, so it may not say "admitted" while a
+    /// matcher is still the node's to compile. Delete the `unverified == 0` half of `summary`'s
+    /// condition and this goes red.
+    #[test]
+    fn the_summary_never_claims_admission_it_did_not_verify() {
+        let clean_row = Entry {
+            label: "[[hooks]] #1".into(),
+            target: "./a.wasm".into(),
+            verdict: EntryVerdict::Admitted,
+            matcher: MatcherState::Absent,
+        };
+        let with_matcher = Entry {
+            matcher: MatcherState::Unverified,
+            ..clean_row.clone()
+        };
 
-        // And an honest matcher is not refused, or the check would be theatre.
-        let document = check_table(
-            "[[hooks]]\nevent = \"PreToolUse\"\ncomponent = \"./a.wasm\"\nmatcher = \"bash|write\"\n",
+        let verified = summary(std::slice::from_ref(&clean_row));
+        assert!(verified.contains("1 component entry verified"));
+        assert!(verified.contains("every component entry would be admitted"));
+
+        let unverified = summary(std::slice::from_ref(&with_matcher));
+        assert!(
+            !unverified.contains("would be admitted"),
+            "a matcher this client cannot compile is not an admission: {unverified}"
         );
-        assert_eq!(hook_grammar(&hook_tables(&document)[0]), None);
+        assert!(unverified.contains("1 matcher NOT verified here"));
+
+        let refused = summary(&[Entry {
+            verdict: EntryVerdict::Refused("no".into()),
+            ..clean_row.clone()
+        }]);
+        assert!(refused.contains("1 entry refused"));
+        assert!(!refused.contains("would be admitted"));
     }
 
     #[test]
@@ -2404,9 +2817,28 @@ mod tests {
         let document = check_table(&format!(
             "[[hooks]]\nevent = \"PreToolUse\"\ncomponent = \"./a.wasm\"\nconfig = \"{long}\"\n"
         ));
-        assert!(config_refusal(&hook_tables(&document)[0])
-            .expect("an oversize config is refused")
-            .contains("16385 bytes"));
+        assert!(refusal_of_first(&document).contains("16385 bytes"));
+    }
+
+    /// L5. Two rows the node refuses that the first version passed over in silence: a `config`
+    /// on a `command =` hook (a command hook has no `init`), and a `[checks]` entry whose value
+    /// is the empty string (it matches neither of the node's two clauses).
+    #[test]
+    fn a_config_on_a_command_hook_and_an_empty_check_are_both_refused() {
+        let document = check_table(
+            "[[hooks]]\nevent = \"PreToolUse\"\ncommand = \"./lint\"\nconfig = \"{}\"\n",
+        );
+        assert!(refusal_of_first(&document).contains("only meaningful for a `component` hook"));
+
+        let document = check_table("[checks]\nlint = \"\"\n");
+        let (name, value) = check_tables(&document).remove(0);
+        match parse_check(Path::new("/nowhere"), &name, &value) {
+            Parsed::Refused(Entry {
+                verdict: EntryVerdict::Refused(reason),
+                ..
+            }) => assert!(reason.contains("must be a command string")),
+            other => panic!("an empty check must be refused, got {other:?}"),
+        }
     }
 
     /// `[checks]` is a table and has no document order, so the node sorts before it takes the
@@ -2429,11 +2861,13 @@ mod tests {
                 label: "[[hooks]] #1".into(),
                 target: "./hooks/vet.wasm".into(),
                 verdict: EntryVerdict::Admitted,
+                matcher: MatcherState::Absent,
             },
             Entry {
                 label: "[[hooks]] #2".into(),
                 target: "./bin/lint".into(),
                 verdict: EntryVerdict::Command,
+                matcher: MatcherState::Absent,
             },
             Entry {
                 label: "[[hooks]] #3".into(),
@@ -2441,17 +2875,36 @@ mod tests {
                 verdict: EntryVerdict::Refused(
                     "`component` is not a readable regular file inside the workspace".into(),
                 ),
+                matcher: MatcherState::Absent,
+            },
+            Entry {
+                label: "[[hooks]] #4".into(),
+                target: "./hooks/vet.wasm".into(),
+                verdict: EntryVerdict::Admitted,
+                matcher: MatcherState::Unverified,
             },
         ];
 
-        let text = render_check(Path::new("/w"), &entries);
+        let text = render_check(Path::new("/w"), &fake_binary(), &entries);
 
         assert!(text.contains("judged as an UNTRUSTED workspace"));
         assert!(text.contains("[[hooks]] #1  ok"));
         assert!(text.contains("[[hooks]] #2  command"));
         assert!(text.contains("[[hooks]] #3  REFUSED"));
         assert!(text.contains("not a readable regular file inside the workspace"));
+        assert!(text.contains("matcher: unverified (the node compiles it as PCRE"));
         assert!(text.contains("1 entry refused"));
+        assert!(!text.contains("would be admitted"));
+        // Which binary judged this workspace is part of the answer, not decoration: two helpers
+        // of different vintages can disagree about a world.
+        assert!(text.contains("helper: "));
+    }
+
+    /// A `HelperBinary` for a rendering test. `vet` is the only constructor, so this points it
+    /// at a file that certainly exists, is owned by this account or root, and is executable.
+    fn fake_binary() -> wasm_client::HelperBinary {
+        wasm_client::vet(Path::new("/bin/sh"), "a rendering test")
+            .expect("/bin/sh is an executable regular file")
     }
 
     // ================================================================== `new`

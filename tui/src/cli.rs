@@ -740,16 +740,21 @@ pub struct WasmArgs {
 /// The one flag every local `ouro wasm` command takes, and the only way to name a helper
 /// besides the environment.
 ///
-/// There is deliberately nothing here that reads the working directory. `ouro wasm` looks for
-/// the helper in exactly three places — this flag, an absolute `OUROBOROS_WASM_HELPER`, and a
-/// sibling of the running `ouro` — because the helper *is* the containment boundary, and a
-/// cloned repository that could drop a `priv/wasm/ouro-wasm` into the directory an author works
-/// in would be choosing the binary this command spawns to contain untrusted code.
+/// `ouro wasm` derives no candidate from the working directory. It looks in exactly three
+/// places — this flag, an absolute `OUROBOROS_WASM_HELPER`, and the `ouro-wasm` beside the
+/// *resolved* `ouro` — because the helper *is* the containment boundary, and a cloned
+/// repository that could drop a `priv/wasm/ouro-wasm` into the directory an author works in
+/// would be choosing the binary this command spawns to contain untrusted code.
+///
+/// Naming a path inside a checkout is fine, and CI does exactly that: a person choosing is the
+/// only thing that may choose. Every candidate is then canonicalised and must be an executable
+/// regular file, owned by this account or root, that nobody else can rewrite — and the
+/// canonical path is what is spawned, so the file checked is the file run (docs/WASM.md D14).
 #[derive(Debug, Args)]
 pub struct WasmHelperArgs {
     /// The `ouro-wasm` binary to use. Omitted, an absolute `$OUROBOROS_WASM_HELPER` is read,
-    /// and failing that the `ouro-wasm` installed beside this `ouro`. Never the working
-    /// directory and never a repository.
+    /// and failing that the `ouro-wasm` installed beside the resolved `ouro`. Nothing is
+    /// derived from the working directory; a path you name is honoured wherever it points.
     #[arg(long, value_name = "PATH")]
     pub helper: Option<PathBuf>,
 }

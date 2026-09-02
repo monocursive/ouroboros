@@ -77,12 +77,12 @@ defmodule Ouroboros.Provider.Native.HooksNarrowingGoldenTest do
   describe "the fixture is a fixture" do
     test "it is readable, and it has cases of all three kinds", %{fixture: fixture} do
       cases = fixture["cases"]
-      assert is_list(cases) and length(cases) >= 20
+      assert is_list(cases) and length(cases) >= 28
 
       kinds = cases |> Enum.map(& &1["kind"]) |> Enum.frequencies()
-      assert kinds["verdict"] >= 10
+      assert kinds["verdict"] >= 18
       assert kinds["dispatch"] == 5
-      assert Enum.count(cases, &Map.has_key?(&1, "tool_response")) == 4
+      assert Enum.count(cases, &Map.has_key?(&1, "tool_response")) == 5
 
       # Every case names the lane it is about and every lane is one of the two.
       assert Enum.all?(cases, &(&1["lane"] in ["trusted", "untrusted"]))
