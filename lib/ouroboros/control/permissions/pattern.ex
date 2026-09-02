@@ -20,6 +20,8 @@ defmodule Ouroboros.Control.Permissions.Pattern do
       ComputerUse(act)          the desktop_act tool
       ComputerUse(app:<id>)     either desktop tool, when the node resolved that app
       ComputerUse(app:*)        either desktop tool, when the node resolved any app
+      Capability(<name>)        the capability tool, for one live lane-W capability
+      Capability(*)             the capability tool, for any live lane-W capability
 
   ## The two refusals
 
@@ -44,7 +46,18 @@ defmodule Ouroboros.Control.Permissions.Pattern do
   with the flag set so every surface that shows a rule can say what it is.
   """
 
-  @kinds [:bash, :read, :edit, :write, :web_fetch, :mcp, :tool, :tool_param, :computer_use]
+  @kinds [
+    :bash,
+    :read,
+    :edit,
+    :write,
+    :web_fetch,
+    :mcp,
+    :tool,
+    :tool_param,
+    :computer_use,
+    :capability
+  ]
 
   @wrapped %{"Bash" => :bash, "Read" => :read, "Edit" => :edit, "Write" => :write}
 
@@ -54,11 +67,26 @@ defmodule Ouroboros.Control.Permissions.Pattern do
   # cannot smuggle a pattern-length attack past `@max_pattern_bytes` through the app slot.
   @computer_use_app ~r/\A[A-Za-z0-9._-]{1,128}\z/
 
+  # A lane-W capability name, the charset `Ouroboros.Wasm.Artifact.name?/1` holds a rollout
+  # to. Restated rather than imported because this module is pure and depends on nothing —
+  # it is the whole specification of the rule language, and a rule's meaning must not
+  # change because another plane changed its mind.
+  @capability_name ~r/\A[a-z0-9][a-z0-9._-]{0,63}\z/
+
   @enforce_keys [:raw, :kind, :spec, :fragile?]
   defstruct @enforce_keys
 
   @type kind ::
-          :bash | :read | :edit | :write | :web_fetch | :mcp | :tool | :tool_param | :computer_use
+          :bash
+          | :read
+          | :edit
+          | :write
+          | :web_fetch
+          | :mcp
+          | :tool
+          | :tool_param
+          | :computer_use
+          | :capability
   @type t :: %__MODULE__{
           raw: String.t(),
           kind: kind(),
@@ -110,6 +138,9 @@ defmodule Ouroboros.Control.Permissions.Pattern do
   `:deny_or_ask_only`. `ComputerUse(app:…)` is `:any` — an app allow is honest —
   because the app is a fact the node resolved from the live window before `evaluate/1`,
   not a parameter the provider merely reported (the `Tool(…:param=)` distinction).
+  `Capability(…)` is `:any` for exactly that reason too: the name it matches is put in the
+  request context only when it resolves to a `:live` lane-W rollout on this node, so it is
+  a register's answer and not a string the model wrote.
   """
   @spec decisions(t()) :: :any | :deny_or_ask_only
   def decisions(%__MODULE__{kind: :tool_param}), do: :deny_or_ask_only
@@ -213,6 +244,26 @@ defmodule Ouroboros.Control.Permissions.Pattern do
 
       other ->
         {:error, {:invalid_computer_use_pattern, other}}
+    end
+  end
+
+  # W13. `*` is the any-capability form; anything else must be a capability name, checked
+  # against the charset a rollout name is held to rather than accepted as prose. There is no
+  # permissive arm: a name this language cannot represent is a rule an operator would think
+  # they had written.
+  defp parse_named("Capability", inner, raw) do
+    case String.trim(inner) do
+      "" ->
+        {:error, :empty_capability_pattern}
+
+      "*" ->
+        {:ok, %__MODULE__{raw: raw, kind: :capability, spec: %{name: :any}, fragile?: false}}
+
+      name ->
+        if Regex.match?(@capability_name, name),
+          do:
+            {:ok, %__MODULE__{raw: raw, kind: :capability, spec: %{name: name}, fragile?: false}},
+          else: {:error, {:invalid_capability_name, name}}
     end
   end
 

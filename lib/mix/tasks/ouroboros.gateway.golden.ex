@@ -134,6 +134,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       {"mcp_list_result", mcp_list_result()},
       {"wasm_status_result", wasm_status_result()},
       {"wasm_list_result", wasm_list_result()},
+      {"agents_message_result", agents_message_result()},
       {"workspace_browse_result", workspace_browse_result()},
       {"ledger_list_result", ledger_list_result()},
       {"ledger_export_result", ledger_export_result()},
@@ -1356,6 +1357,24 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         %{sha256: String.duplicate("b", 64), size: 1_048_576, mtime: 1_767_225_600}
       ],
       component_count: 2
+    })
+  end
+
+  # W13. One message into a lane-W capability and the reply back out.
+  #
+  # The fixture is a capability on purpose. `agents.message` reaches any mesh agent, but the
+  # capability case is the one where the reply is a *component's* words, and pinning it here
+  # is what pins the two facts a client has to carry with it: `untrusted` beside the reply,
+  # and `truncated` saying whether what it is holding is the reply or a prefix of one. The
+  # reply keeps string keys because that is what the wrapper decodes a guest's JSON into and
+  # nothing on this path ever mints an atom from the wire.
+  defp agents_message_result do
+    Conn.result_frame(18, %{
+      to: "wasm/vet",
+      from: "gateway",
+      untrusted: true,
+      truncated: false,
+      reply: %{"findings" => [], "checked" => 12}
     })
   end
 

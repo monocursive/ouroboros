@@ -9,6 +9,7 @@
       "account.logout",
       "account.read",
       "agents.list",
+      "agents.message",
       "agents.state",
       "agents.stop",
       "capabilities.admit",

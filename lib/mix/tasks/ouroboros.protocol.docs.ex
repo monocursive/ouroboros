@@ -92,6 +92,7 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
     "mcp_list_result" => {:method, "mcp.list"},
     "wasm_status_result" => {:method, "wasm.status"},
     "wasm_list_result" => {:method, "wasm.list"},
+    "agents_message_result" => {:method, "agents.message"},
     "workspace_browse_result" => {:method, "workspace.browse"},
     "interactive_event_notification" => {:notification, "interactive.event"},
     "interactive_event_excerpt_notification" => {:notification, "interactive.event"},
@@ -726,6 +727,7 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
   defp type(:positive_integer), do: "positive integer"
   defp type(:non_negative_integer), do: "non-negative integer"
   defp type(:object), do: "JSON object"
+  defp type(:json), do: "any JSON value"
   defp type(:event_limit), do: "integer, 1..100000"
   defp type(:provider), do: "a provider this node serves (see `runtime.providers`)"
   defp type(:node), do: "a machine name or BEAM node this one is connected to"

@@ -51,6 +51,20 @@ defmodule Ouroboros.Wasm.Capability do
   discovering it. A `guest_error` is the guest *answering*, badly: it is recorded and the
   instance is kept, because nothing about it says the instance is untrustworthy.
 
+  ## What the component says it is, and why that is not the same as what it is
+
+  After the first message is answered, the wrapper asks the instance for its `describe` and
+  keeps the result in `:describe` as `{:untrusted, {:ok, document}}` or
+  `{:untrusted, {:invalid, reason}}` (contract C1; `__MODULE__.Describe` is the whole
+  contract). It is fetched once, because it is a property of `:component` and that does not
+  change; it is fetched *after* the message rather than at instantiate, because it is guest
+  code that may trap and a trap before the message would have made a broken `describe` into
+  a failed rollout probe.
+
+  Nothing in it is an identity and nothing in it is trusted. The registry says what a
+  capability is called and which bytes it is; this is what the bytes claim, bounded at
+  4 KiB, closed to six keys, and tagged untrusted in the shape so no reader can forget.
+
   ## Nothing a guest does takes this agent down
 
   Every refusal — a missing component, a helper that was never built, a broken pipe, a trap,
@@ -137,6 +151,12 @@ defmodule Ouroboros.Wasm.Capability do
       # The two keys the rollout machinery reads. See the moduledoc.
       last_message: [type: :any, default: nil],
       last_answer: [type: :any, default: nil],
+      # What the component says it is, fetched once and kept: `{:untrusted, {:ok, document}}`
+      # or `{:untrusted, {:invalid, reason}}`. The `:untrusted` tag is in the shape rather
+      # than in a comment because every reader of this key is putting the value in front of
+      # a model or an operator, and a value that has to be *remembered* to be untrusted is
+      # one that eventually is not. See `__MODULE__.Describe`.
+      describe: [type: :any, default: nil],
       messages_received: [type: :non_neg_integer, default: 0],
       error: [type: :any, default: nil],
       # Which pool to speak to, and which store to read. Both are the production values by
@@ -210,6 +230,179 @@ defmodule Ouroboros.Wasm.Capability do
     Map.new(limits, fn {key, value} -> {key, min(value, Map.fetch!(ceiling, key))} end)
   end
 
+  defmodule Describe do
+    @moduledoc """
+    The contract a component's `describe` is read under, and the whole of it (contract C1).
+
+    `describe` is the one place a component gets to say what it is in words a model will
+    read. That makes it the lane's prompt-injection surface: the text is authored by the
+    thing lane W exists to contain, it is not signed by anybody, and it reaches a model
+    beside the node's own trusted facts. Two rules answer that, and both are here rather
+    than at each reader so a second reader cannot get either wrong:
+
+      * **Bounded before it is parsed.** The raw string is refused above
+        #{4 * 1024} bytes without being decoded, and `name`, `version` and `summary` carry
+        their own bounds inside it. A 4 KiB ceiling on the whole document is what makes
+        "every capability's describe" a listing a context window can hold.
+      * **Closed.** Six keys are read and every other key is dropped. A component cannot
+        introduce a field into the shape a reader renders, which is the difference between
+        untrusted *content* — which this is — and untrusted *structure*, which it is not.
+
+    `name`, `version` and `world` are required, and `world` must be this node's: a
+    component that runs here was admitted against `Ouroboros.Wasm.world/0` by the linker,
+    so one claiming another world is describing something other than itself. `summary`,
+    `input_schema` and `examples` are optional, and `examples` holds at most four.
+
+    Nothing here is an identity. The registry says what a capability is called and which
+    bytes it is; this says what the bytes claim about themselves, and `parse/1` returning
+    `{:ok, document}` means only that the claim is well formed.
+    """
+
+    alias Ouroboros.Wasm
+    alias Ouroboros.Wasm.Artifact
+
+    @max_document_bytes 4 * 1024
+    @max_summary_chars 200
+    @max_version_bytes 64
+    @max_examples 4
+
+    # Deliberately not `Version.parse/1`: this is a string a component wrote, and the
+    # question is whether it is shaped like a version, not whether this VM can build a
+    # struct out of it. The struct would be one more thing minted from guest data.
+    @semver ~r/\A\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?\z/
+
+    @type document :: %{
+            name: String.t(),
+            version: String.t(),
+            world: String.t(),
+            summary: String.t() | nil,
+            input_schema: map() | nil,
+            examples: [map()]
+          }
+
+    @doc "The largest `describe` this node will read. See the module doc."
+    @spec max_document_bytes() :: pos_integer()
+    def max_document_bytes, do: @max_document_bytes
+
+    @doc """
+    One raw `describe` string, validated against C1.
+
+    Total: every refusal is `{:invalid, reason}` and nothing raises, because the caller is
+    a wrapper whose whole job is to survive a hostile component. The reason names the rule
+    that was broken and never quotes the value that broke it — a refusal that echoes guest
+    prose back into a log is the same injection with a different destination.
+    """
+    @spec parse(term()) :: {:ok, document()} | {:invalid, term()}
+    def parse(raw) when is_binary(raw) do
+      if byte_size(raw) > @max_document_bytes do
+        {:invalid, {:oversize_describe, byte_size(raw), @max_document_bytes}}
+      else
+        decode(raw)
+      end
+    end
+
+    def parse(_raw), do: {:invalid, :describe_not_a_string}
+
+    defp decode(raw) do
+      case JSON.decode(raw) do
+        {:ok, document} when is_map(document) -> validate(document)
+        {:ok, _other} -> {:invalid, :describe_not_an_object}
+        {:error, _reason} -> {:invalid, :describe_not_json}
+      end
+    end
+
+    defp validate(document) do
+      with {:ok, name} <- name(Map.get(document, "name")),
+           {:ok, version} <- version(Map.get(document, "version")),
+           {:ok, world} <- world(Map.get(document, "world")),
+           {:ok, summary} <- summary(Map.get(document, "summary")),
+           {:ok, schema} <- input_schema(Map.get(document, "input_schema")),
+           {:ok, examples} <- examples(Map.get(document, "examples")) do
+        # Built key by key, so every key not named above is dropped rather than carried.
+        {:ok,
+         %{
+           name: name,
+           version: version,
+           world: world,
+           summary: summary,
+           input_schema: schema,
+           examples: examples
+         }}
+      end
+    end
+
+    # The same charset a rollout name is held to. Not because they must be the same name —
+    # this one is the component's claim and that one is the registry's fact — but because a
+    # name a model reads should be a name, and this is the narrowest definition of one this
+    # runtime already has.
+    defp name(value) do
+      if Artifact.name?(value), do: {:ok, value}, else: {:invalid, :invalid_describe_name}
+    end
+
+    defp version(value) when is_binary(value) and byte_size(value) <= @max_version_bytes do
+      if Regex.match?(@semver, value),
+        do: {:ok, value},
+        else: {:invalid, :invalid_describe_version}
+    end
+
+    defp version(_value), do: {:invalid, :invalid_describe_version}
+
+    defp world(value) when is_binary(value) do
+      if value == Wasm.world(),
+        do: {:ok, value},
+        else: {:invalid, :describe_world_mismatch}
+    end
+
+    defp world(_value), do: {:invalid, :describe_world_mismatch}
+
+    defp summary(nil), do: {:ok, nil}
+
+    # Plain text, checked rather than assumed: a control character in a summary is how a
+    # component reaches a terminal renderer, and a lone surrogate is how it reaches an
+    # encoder that will not have it. Both are refusals of the whole document, because a
+    # summary this node would have to repair is one whose author was not writing prose.
+    defp summary(value) when is_binary(value) do
+      cond do
+        not String.valid?(value) ->
+          {:invalid, :invalid_describe_summary}
+
+        String.length(value) > @max_summary_chars ->
+          {:invalid, :oversize_describe_summary}
+
+        String.match?(value, ~r/[\x00-\x08\x0b-\x1f\x7f]/) ->
+          {:invalid, :invalid_describe_summary}
+
+        true ->
+          {:ok, value}
+      end
+    end
+
+    defp summary(_value), do: {:invalid, :invalid_describe_summary}
+
+    # Absent means "any JSON", per C1. Present and not an object is a broken claim, not a
+    # permissive one: this node does not get to guess which the author meant.
+    defp input_schema(nil), do: {:ok, nil}
+    defp input_schema(value) when is_map(value), do: {:ok, value}
+    defp input_schema(_value), do: {:invalid, :invalid_describe_input_schema}
+
+    defp examples(nil), do: {:ok, []}
+
+    defp examples(value) when is_list(value) do
+      cond do
+        length(value) > @max_examples ->
+          {:invalid, {:too_many_describe_examples, length(value), @max_examples}}
+
+        not Enum.all?(value, &(is_map(&1) and not is_struct(&1))) ->
+          {:invalid, :invalid_describe_example}
+
+        true ->
+          {:ok, Enum.map(value, &Map.take(&1, ["message", "reply"]))}
+      end
+    end
+
+    defp examples(_value), do: {:invalid, :invalid_describe_examples}
+  end
+
   defmodule HandleMessage do
     @moduledoc """
     One mesh message into the component, one reply back into agent state.
@@ -243,6 +436,13 @@ defmodule Ouroboros.Wasm.Capability do
     # leaves the name free, so the next message stands a fresh instance up under it rather
     # than having to invent a new one.
     @poisoning ~w(trapped fuel_exhausted deadline_exceeded memory_limit unknown_instance)
+
+    # The refusals a `describe` may earn that are *the component's own doing*, and are
+    # therefore recorded as its description rather than retried. `unknown_instance` is
+    # deliberately absent even though it poisons: it means the helper no longer holds the
+    # instance, which is a fact about the helper's table and not about the bytes.
+    @describe_faults ~w(guest_error trapped fuel_exhausted deadline_exceeded memory_limit
+                        oversize_result unknown_export)
 
     # A pool that is broken has already hard-closed and killed its child, and one that is
     # unavailable never had one: either way the helper's table is gone, which is a fact about
@@ -317,10 +517,60 @@ defmodule Ouroboros.Wasm.Capability do
       with {:ok, pool} <- pool_of(state),
            {:ok, payload} <- encode(body),
            {:ok, instance} <- stand_up(state, pool, name, owner_of(agent)) do
-        deliver(pool, instance, payload, note)
+        pool |> deliver(instance, payload, note) |> describe(state, pool)
       else
         {:refused, stage, reason} ->
           %{instance: nil, last_answer: nil, error: refusal(stage, reason)}
+      end
+    end
+
+    # `describe` is fetched once per agent, on the message path, and **after** the message
+    # has been answered. Both halves of that are decisions (docs/WASM.md D17).
+    #
+    # *After*, because `describe` is the guest's code like any other and may trap. A trap
+    # poisons the instance, and a describe that ran first would have turned a component with
+    # a broken `describe` into a component whose every first message fails — including the
+    # one message `Ouroboros.Upgrade.Rollout.Probe` spends deciding whether a deploy is
+    # healthy. Answering first means a bad `describe` costs the description and nothing else.
+    #
+    # *Once*, because the answer is a property of the component bytes, and `:component` does
+    # not change for the life of an agent. So the second message pays nothing, and a live
+    # capability that has never been messaged is honestly `nil` rather than described by
+    # something this node made up.
+    #
+    # It never touches `:last_answer` or `:error`: those record what the *message* did, and
+    # a failure to fetch metadata is not a failure of the message that happened to trigger it.
+    defp describe(outcome, %{describe: recorded}, _pool) when not is_nil(recorded), do: outcome
+
+    # No live instance to ask — the message poisoned it, or the helper broke. Nothing is
+    # recorded, so the next message asks again: an absent description must not be cached as
+    # a verdict about the component.
+    defp describe(%{instance: nil} = outcome, _state, _pool), do: outcome
+
+    defp describe(%{instance: instance} = outcome, _state, pool) do
+      case Pool.describe(instance, pool) do
+        {:ok, %{"payload" => payload}} when is_binary(payload) ->
+          Map.put(outcome, :describe, {:untrusted, Capability.Describe.parse(payload)})
+
+        {:ok, other} ->
+          Map.put(outcome, :describe, {:untrusted, {:invalid, {:malformed_result, keys(other)}}})
+
+        # The guest answered, badly, or took itself down answering. Both are facts about the
+        # component and are recorded as its description — there is nothing to retry, because
+        # the same bytes will answer the same way. A poisoning refusal additionally frees the
+        # name, exactly as it does on the message path.
+        {:error, %{refusal: named} = reason} when named in @describe_faults ->
+          outcome
+          |> Map.put(:describe, {:untrusted, {:invalid, refusal(:describe, reason)}})
+          |> Map.put(:instance, if(named in @poisoning, do: nil, else: instance))
+
+        # Everything else — a helper that broke, a queue that was full, an instance the
+        # helper no longer holds, a caller past its own deadline — says nothing about the
+        # component. Nothing is recorded and the next message asks again, because caching a
+        # transport fault as "this component cannot describe itself" is a claim about the
+        # wrong party.
+        {:error, _transport} ->
+          outcome
       end
     end
 

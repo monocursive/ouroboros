@@ -425,6 +425,22 @@ defmodule Ouroboros.Wasm.Pool do
     end
   end
 
+  @doc """
+  The instance's own `describe`, under the same bounds its messages run under.
+
+  The world exports exactly two callable functions and `call/4` dispatches both
+  (`tui/wasm/src/world.rs`), so this is `call/4` with the export named and an empty payload
+  — `describe` takes no argument, and sending one would be inventing a parameter the world
+  does not have. It is here rather than at each caller because "which export is metadata"
+  is a fact about the world, not about the caller, and W13 has two readers of it.
+
+  Everything `call/4` says still holds: the answer is the guest's, it is bounded by the
+  helper's result cap, and a trap poisons the instance exactly as it does for a message.
+  """
+  @spec describe(String.t(), GenServer.server()) :: {:ok, map()} | {:error, failure()}
+  def describe(instance, server \\ __MODULE__) when is_binary(instance),
+    do: call(instance, "describe", "", server)
+
   @doc "Drops an instance. Idempotent, because the caller may be recovering from a refusal."
   @spec drop(String.t(), GenServer.server()) :: {:ok, map()} | {:error, failure()}
   def drop(instance, server \\ __MODULE__) when is_binary(instance) do

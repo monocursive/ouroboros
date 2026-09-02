@@ -347,6 +347,13 @@ fence lifted. `web_fetch` reaches the network and is bounded by the permission e
 private, and metadata destinations; it also refuses to follow a redirect off the host
 that was evaluated. The README states the same limits where an operator will read them.
 
+The `capability` tool reaches a deployed WebAssembly capability — the `:live` lane-W
+rollouts on this node, and nothing else on the mesh. It is gated by `Capability(<name>)`
+rules, ledgered with the component's sha256, and everything a component says back to the
+model is bounded and labelled untrusted; `agents.message` is the same reach for a script,
+at gateway `:operate` scope. docs/WASM.md §7.7 and D17 are the whole story, including what
+labelling does and does not buy.
+
 Harness run ownership is node-local. A disconnected remote owner is unavailable; a
 run becomes lost only when its confirmed owner reports `:not_found`.
 

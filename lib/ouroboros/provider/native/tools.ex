@@ -47,6 +47,7 @@ defmodule Ouroboros.Provider.Native.Tools do
   alias Ouroboros.Provider.Native.Tools.ApplyPatch
   alias Ouroboros.Provider.Native.Tools.AskUser
   alias Ouroboros.Provider.Native.Tools.Bash
+  alias Ouroboros.Provider.Native.Tools.Capability
   alias Ouroboros.Provider.Native.Tools.CodeIntel
   alias Ouroboros.Provider.Native.Tools.DesktopAct
   alias Ouroboros.Provider.Native.Tools.DesktopState
@@ -134,7 +135,9 @@ defmodule Ouroboros.Provider.Native.Tools do
       end)
       |> Enum.map(&spec(&1, opts))
 
-    static ++ desktop_specs(allowed, disallowed, opts) ++ mcp_specs(allowed, disallowed, opts)
+    static ++
+      desktop_specs(allowed, disallowed, opts) ++
+      capability_specs(allowed, disallowed, opts) ++ mcp_specs(allowed, disallowed, opts)
   end
 
   @doc """
@@ -176,6 +179,21 @@ defmodule Ouroboros.Provider.Native.Tools do
 
   defp desktop_modules do
     [DesktopState] ++ if(Desktop.act_enabled?(), do: [DesktopAct], else: [])
+  end
+
+  # W13. `capability` appears only on a node that has a live lane-W rollout to reach, the
+  # same posture the desktop tools take (D9): a name the model is taught and cannot use is
+  # a name it spends calls discovering is useless, and on a node with no capabilities the
+  # tool's own answer would be "there are none". It is deliberately not gated on a
+  # workspace the way the desktop tools and MCP are — a capability is deployed to a *node*
+  # by the rollout plane, and a session without a workspace root can still call one.
+  defp capability_specs(allowed, disallowed, opts) do
+    name = Capability.name()
+
+    if name not in disallowed and (allowed == [] or name in allowed) and
+         Capability.live() != [],
+       do: [spec(Capability, opts)],
+       else: []
   end
 
   # The filters apply to an MCP tool exactly as they apply to a static one, on its full
@@ -263,6 +281,7 @@ defmodule Ouroboros.Provider.Native.Tools do
     cond do
       module = Enum.find(modules(), &(&1.name() == name)) -> module
       module = desktop_module(name) -> module
+      module = capability_module(name) -> module
       Mcp.advertised?(name) -> {McpTool, name}
       true -> nil
     end
@@ -275,6 +294,13 @@ defmodule Ouroboros.Provider.Native.Tools do
   # the model from being taught the name, so it is enough that a disabled node refuses here.
   defp desktop_module(name) do
     if Desktop.enabled?(), do: Enum.find(desktop_modules(), &(&1.name() == name))
+  end
+
+  # Resolved on the same condition `specs/3` lists it on: a node with nothing live answers
+  # `:unknown_tool`, which is the truthful answer and the one the model was already given
+  # by omission.
+  defp capability_module(name) do
+    if name == Capability.name() and Capability.live() != [], do: Capability
   end
 
   @doc "The name a tool name resolves to after aliases."
@@ -484,6 +510,13 @@ defmodule Ouroboros.Provider.Native.Tools do
   # classification of "a program whose actions this call authorises but does not name" is
   # the one that asks. `agent_result` is `:read` by the default clause below, deliberately:
   # collecting a summary of work that already happened must never need a second approval.
+  # W13. Listing what a node has deployed is a read; sending a message into a component is
+  # the node running somebody else's program, which is the honest reading of `:execute` —
+  # and it is what makes plan mode refuse a capability call while still allowing the list.
+  defp mode("capability", input) do
+    if operation(input) == "call", do: :execute, else: :read
+  end
+
   defp mode("agent", _input), do: :execute
   defp mode("web_fetch", _input), do: :network
   defp mode(name, _input) when name in ["write", "edit", "apply_patch"], do: :write
@@ -559,7 +592,28 @@ defmodule Ouroboros.Provider.Native.Tools do
       title: claimed_string(input, "title")
     }
 
+  # W13/§7.7. Two facts about a capability call, and both are *this node's* rather than the
+  # model's: `Tools.Capability.resolve/1` answers only for a name that is a `:live` lane-W
+  # entry in the rollout register at classification time, and the sha256 beside it is the
+  # one the register holds for those bytes. That is what makes `Capability(<name>)` an
+  # honest allow rather than a parameter equality test on a string the model wrote — the
+  # same distinction `ComputerUse(app:…)` draws — and it is what puts the component's
+  # identity, not its name alone, into the ledger entry for the call.
+  defp context("capability", input) do
+    case Capability.resolve(claimed_string(input, "name")) do
+      %{name: name, component_sha256: sha} -> %{capability: name, component_sha256: sha}
+      nil -> %{}
+    end
+  end
+
   defp context(_name, _input), do: %{}
+
+  defp operation(input) do
+    case Map.get(input, "operation") || Map.get(input, :operation) do
+      value when is_binary(value) -> String.trim(value)
+      _absent -> nil
+    end
+  end
 
   defp claimed_app(input) do
     case Map.get(input, "app") || Map.get(input, :app) do

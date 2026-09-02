@@ -1,0 +1,14 @@
+{
+  "id": 18,
+  "jsonrpc": "2.0",
+  "result": {
+    "from": "gateway",
+    "reply": {
+      "checked": 12,
+      "findings": []
+    },
+    "to": "wasm/vet",
+    "truncated": false,
+    "untrusted": true
+  }
+}

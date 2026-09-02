@@ -167,6 +167,7 @@ defmodule Ouroboros.Provider.Native.Loop do
   alias Ouroboros.Provider.Native.Tools.Agent, as: AgentTool
   alias Ouroboros.Provider.Native.Tools.AgentResult
   alias Ouroboros.Provider.Native.Tools.AskUser
+  alias Ouroboros.Provider.Native.Tools.Capability, as: CapabilityTool
   alias Ouroboros.Wasm.Pool, as: WasmPool
 
   @default_max_iterations 100
@@ -1049,6 +1050,14 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   defp execute_timeout(state, %{tool: "desktop_act"}),
     do: max(state.tool_timeout_ms, Desktop.config(:act_timeout_ms))
+
+  # W13. A capability's own deadline plus the pool's call margin can exceed the ordinary
+  # tool timeout, and a loop that killed the task first would report a timeout for a
+  # capability that was still inside the bound it was deployed under. The tool derives the
+  # exact deadline from the target; this is the ceiling, so the tool's own error is the one
+  # that fires.
+  defp execute_timeout(state, %{tool: "capability"}),
+    do: max(state.tool_timeout_ms, CapabilityTool.max_timeout_ms())
 
   defp execute_timeout(state, _classified), do: state.tool_timeout_ms
 
@@ -2746,6 +2755,12 @@ defmodule Ouroboros.Provider.Native.Loop do
     |> put_subject(:app, context[:app])
     |> put_subject(:desktop_action, context[:desktop_action])
     |> put_subject(:window_id, context[:window_id])
+    # W13. Which capability, and which bytes. The name is the register's, and the sha256 is
+    # what a signature bound to them: D11 says a mesh message is not itself ledgered, so
+    # this tool entry is the only place the fact that a model reached a component is
+    # written down, and a name without the digest would not say *which* component it was.
+    |> put_subject(:capability, context[:capability])
+    |> put_subject(:component_sha256, context[:component_sha256])
     |> Map.merge(mcp_subject(classified.tool))
   end
 

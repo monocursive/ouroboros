@@ -128,6 +128,26 @@ defmodule Ouroboros.Gateway.Methods do
   # Permissions, MCP, and ledger get share this bound on owner-routed `:erpc`.
   @fleet_query_timeout 5_000
 
+  # W13. `agents.message` waits on an agent, and for a lane-W capability that agent is
+  # waiting on a component under its own deadline. The caller's `timeout_ms` is capped at
+  # `@max_agent_message_timeout_ms` and this ceiling sits above it, so the gateway is never
+  # the thing that gives up first: a client that asked for thirty seconds and got a
+  # gateway timeout at fifteen would have no way to tell a slow capability from a wedged
+  # one.
+  @agent_message_timeout 45_000
+  @default_agent_message_timeout_ms 5_000
+  @max_agent_message_timeout_ms 30_000
+
+  # What may cross into an agent, and what may come back. Both are the same number because
+  # both are a message body — one written by a gateway client, one written by whatever the
+  # agent is. The reply is additionally *marked* when it is cut, because a JSON document
+  # that was silently truncated is a JSON document a client will try to parse.
+  @max_agent_message_bytes 64 * 1024
+
+  # A mesh agent id. Long enough for the `"wasm/" <> name` a rollout mints and for the
+  # opaque ids the forge does, short enough that a refused lookup costs nothing.
+  @max_agent_id_bytes 512
+
   # E2/E3. Code intelligence is the one read whose upstream is a foreign OS process, and
   # its own defaults are generous on purpose: `initialize_timeout_ms` is 45s because
   # ElixirLS and jdtls compile the world on first launch. A gateway method cannot wait
@@ -436,7 +456,24 @@ defmodule Ouroboros.Gateway.Methods do
     # Answered by the connection: it holds the listener configuration this verb needs a
     # second permission from, and it owns the socket the acknowledgement has to reach
     # before the node stops.
-    "runtime.shutdown" => %{scope: :operate, timeout: @default_timeout}
+    "runtime.shutdown" => %{scope: :operate, timeout: @default_timeout},
+    # ---------------------------------------------------------------------------------
+    # W13. One message into one mesh agent.
+    #
+    # `:operate` and not `:read`, twice over: it changes the agent's state by definition,
+    # and for a lane-W capability it *runs a component* — the containment helper starts if
+    # it is not already up, which is the exact thing `wasm.status` and `wasm.list` are
+    # `:read` because they never do.
+    #
+    # Not node-routed. `Ouroboros.Mesh.send_message/4` resolves the agent through the
+    # cluster-wide `:pg` directory and calls it wherever it lives, so this verb already
+    # reaches a peer's agent and a `node` parameter would be a second, weaker answer to a
+    # question the mesh has already answered. What that means for lane W is worth saying
+    # plainly: an `:operate` client on any node in the cluster can message a capability on
+    # any other, and the containment boundary that makes that safe is the helper's linker,
+    # not this table.
+    # ---------------------------------------------------------------------------------
+    "agents.message" => %{scope: :operate, timeout: @agent_message_timeout}
   }
 
   # The exact terms the upstream schemas declare, spelled out here so that a client string
@@ -1074,7 +1111,21 @@ defmodule Ouroboros.Gateway.Methods do
          {"path", :required, :string, nil},
          {"session_id", :optional, :string,
           "recorded as `session:<id>` in the admission's authorship"}
-       ]}
+       ]},
+    # W13
+    "agents.message" =>
+      {:closed,
+       [
+         {"to", :required, :string,
+          "the agent id, at most #{@max_agent_id_bytes} bytes; a lane-W capability is `wasm/<name>`"},
+         {"body", :required, :json,
+          "the message body, any JSON value, at most #{@max_agent_message_bytes} bytes encoded"},
+         {"from", :optional, :string,
+          "who the message is from, at most #{@max_agent_id_bytes} bytes; defaults to `gateway`"},
+         {"timeout_ms", :optional, {:integer, 1, @max_agent_message_timeout_ms},
+          "how long to wait for the agent; defaults to #{@default_agent_message_timeout_ms}"}
+       ],
+       "`reply` is the agent's `last_answer` and is **untrusted**: for a lane-W capability it is prose and JSON the component wrote. It is returned whole when it encodes within #{@max_agent_message_bytes} bytes and as a marked, truncated string otherwise, which is what `truncated` distinguishes. A message an agent refused is still a delivered message: this verb says the agent answered nothing, and `agents.state` says why"}
   }
 
   @type entry :: %{
@@ -2155,6 +2206,36 @@ defmodule Ouroboros.Gateway.Methods do
     with_id(params, fn id -> safe(fn -> reply(Mesh.stop_agent(id)) end) end)
   end
 
+  # ---------------------------------------------------------------------------
+  # W13 — one message into one mesh agent
+  #
+  # The scriptable half of §7.7: `ouro` and anything else holding an `:operate` listener
+  # can now reach a deployed capability the way the native `capability` tool does, without
+  # a model and without an IEx shell. Every bound is settled here, before the mesh is
+  # touched, because the parameters arrive over a socket: an id longer than any this
+  # runtime mints, a body larger than a message, and a timeout past this verb's own
+  # ceiling are all refused rather than clamped — a client that asked for something this
+  # node will not do should be told so, not quietly given something else.
+  #
+  # The reply is the agent's `last_answer` and is untrusted by construction. It is
+  # returned whole when it encodes small and as a marked truncated string when it does
+  # not, and `untrusted: true` rides beside it so a client rendering it has no excuse.
+  # ---------------------------------------------------------------------------
+
+  def invoke("agents.message", params) do
+    safe(fn ->
+      with :ok <- only_keys(params, ["to", "body", "from", "timeout_ms"]),
+           {:ok, to} <- agent_id(params, "to"),
+           {:ok, from} <- agent_from(params),
+           {:ok, body} <- agent_message_body(params),
+           {:ok, timeout} <- agent_message_timeout(params) do
+        reply(send_agent_message(from, to, body, timeout))
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
   def invoke("capabilities.list", params) do
     safe(fn ->
       with :ok <- only_keys(params, ["workspace"]),
@@ -2652,6 +2733,139 @@ defmodule Ouroboros.Gateway.Methods do
       end)
     else
       {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  # W13 ------------------------------------------------------------------------------
+
+  defp agent_id(params, key) do
+    case Map.get(params, key) do
+      value when is_binary(value) and value != "" ->
+        if byte_size(value) <= @max_agent_id_bytes,
+          do: {:ok, value},
+          else: {:invalid, "params.#{key} must be at most #{@max_agent_id_bytes} bytes"}
+
+      _other ->
+        {:invalid, "params.#{key} must be a nonempty string"}
+    end
+  end
+
+  # A `from` is a label on the message, and an absent one is not an error: the caller is a
+  # gateway client, and saying so is more honest than making every script invent an
+  # identity the mesh does not check anyway.
+  defp agent_from(params) do
+    case Map.get(params, "from") do
+      nil -> {:ok, "gateway"}
+      _present -> agent_id(params, "from")
+    end
+  end
+
+  # Bounded by what it costs on the wire into the agent, not by what the decoded term costs
+  # here: the number in the contract is the number a client can measure. Measured by
+  # encoding, and an unencodable body is refused rather than carried to an agent that would
+  # have to refuse it later with less to say about why.
+  defp agent_message_body(params) do
+    case Map.fetch(params, "body") do
+      :error ->
+        {:invalid, "params.body is required and may be any JSON value"}
+
+      {:ok, body} ->
+        case encoded_bytes(body) do
+          {:ok, size} when size <= @max_agent_message_bytes ->
+            {:ok, body}
+
+          {:ok, size} ->
+            {:invalid,
+             "params.body encodes to #{size} bytes; the bound is #{@max_agent_message_bytes}"}
+
+          :error ->
+            {:invalid, "params.body must be a JSON value"}
+        end
+    end
+  end
+
+  defp encoded_bytes(term) do
+    {:ok, byte_size(JSON.encode!(term))}
+  rescue
+    _error -> :error
+  end
+
+  defp agent_message_timeout(params) do
+    case Map.get(params, "timeout_ms") do
+      nil ->
+        {:ok, @default_agent_message_timeout_ms}
+
+      value when is_integer(value) and value >= 1 and value <= @max_agent_message_timeout_ms ->
+        {:ok, value}
+
+      _other ->
+        {:invalid,
+         "params.timeout_ms must be an integer between 1 and #{@max_agent_message_timeout_ms}"}
+    end
+  end
+
+  defp send_agent_message(from, to, body, timeout) do
+    case Mesh.send_message(from, to, body, timeout: timeout) do
+      {:ok, agent} -> {:ok, agent_message_result(from, to, agent)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp agent_message_result(from, to, agent) do
+    {answer, truncated?} = bounded_answer(agent_answer(agent, to))
+
+    %{
+      to: to,
+      from: from,
+      # Stated in the result and not only in the reference. Every path a component's words
+      # take to a reader carries this label (docs/WASM.md D17), and a client that drew this
+      # into a transcript beside the operator's own text without it would be the one place
+      # the rule was not enforced.
+      untrusted: true,
+      truncated: truncated?,
+      reply: answer
+    }
+  end
+
+  # `Jido.AgentServer.call/3` answers with the agent as it stands after the signal, which
+  # is where `Ouroboros.Mesh`'s whole message convention puts a reply. A shape this build
+  # does not recognise falls back to the directory rather than to a guess.
+  defp agent_answer(%{state: %{last_answer: answer}}, _to), do: answer
+
+  defp agent_answer(_agent, to) do
+    case Mesh.state(to) do
+      {:ok, %{agent: %{state: %{last_answer: answer}}}} -> answer
+      _unreadable -> nil
+    end
+  end
+
+  # Whole when it fits, and a marked string when it does not — never a silently cut JSON
+  # document, which is a document a client will try to parse and fail on with no idea why.
+  defp bounded_answer(answer) do
+    case encoded_bytes(answer) do
+      {:ok, size} when size <= @max_agent_message_bytes ->
+        {answer, false}
+
+      {:ok, _size} ->
+        {truncate(JSON.encode!(answer)), true}
+
+      :error ->
+        {truncate(inspect(answer, limit: 200, printable_limit: @max_agent_message_bytes)), true}
+    end
+  end
+
+  defp truncate(text) when byte_size(text) <= @max_agent_message_bytes, do: text
+
+  defp truncate(text),
+    do: text |> binary_part(0, @max_agent_message_bytes) |> valid_prefix()
+
+  # The cut is by bytes and walked back to a whole character: half a codepoint is a string
+  # the JSON encoder on the way out would refuse.
+  defp valid_prefix(binary) do
+    cond do
+      String.valid?(binary) -> binary
+      byte_size(binary) == 0 -> binary
+      true -> binary |> binary_part(0, byte_size(binary) - 1) |> valid_prefix()
     end
   end
 

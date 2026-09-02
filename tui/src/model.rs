@@ -4225,6 +4225,7 @@ mod tests {
         assert_eq!(
             found,
             vec![
+                "agents_message_result",
                 "code_intel_diagnostics_result",
                 "coding_event_detail_result",
                 "coding_event_notification",
@@ -4416,6 +4417,36 @@ mod tests {
         assert_eq!(component.sha256, "a".repeat(64));
         assert_eq!(component.size, 2_097_152);
         assert!(component.mtime.is_some());
+    }
+
+    /// W13's `agents.message`: one message into one mesh agent, and the reply back.
+    ///
+    /// There is no typed model for it here on purpose — a client sends a body and reads a
+    /// reply, and both are whatever the agent's own contract says. What this pins is the
+    /// envelope around them, which is the part a client must not get wrong: `untrusted` is
+    /// always present and always true, because a reply from a lane-W capability is prose a
+    /// component wrote and drawing it beside the operator's own words unlabelled is the
+    /// injection this lane exists to bound. `truncated` is the other half: it says whether
+    /// what arrived is the reply or a prefix of one, which is the difference between JSON a
+    /// client can parse and JSON it cannot.
+    #[test]
+    fn the_agents_message_fixture_labels_the_reply_it_carries() {
+        let result = &fixture("agents_message_result")["result"];
+
+        assert_eq!(result["to"], "wasm/vet");
+        assert_eq!(result["from"], "gateway");
+
+        // Not `is_truthy`, not "present": exactly `true`. A client that read this key as
+        // optional would render an unlabelled component's words the first time a node
+        // omitted it.
+        assert_eq!(result["untrusted"], true);
+        assert_eq!(result["truncated"], false);
+
+        // Untruncated, so the reply is the structure the agent answered with rather than a
+        // string holding an encoding of it.
+        assert!(result["reply"].is_object());
+        assert_eq!(result["reply"]["checked"], 12);
+        assert!(result["reply"]["findings"].as_array().unwrap().is_empty());
     }
 
     #[test]
