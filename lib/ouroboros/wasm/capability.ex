@@ -71,16 +71,34 @@ defmodule Ouroboros.Wasm.Capability do
   (`reason.refusal`) and are otherwise bounded before they are stored: a failure term built
   out of a `GenServer.call/3` argument list carries the whole outbound message inside it.
 
-  ## Every key that decides what runs must be named by the start spec
+  ## Nothing in `initial_state` is trusted, because nothing validates it
 
-  `Ouroboros.Upgrade.Rollout.Evaluation` merges a spec's `initial_state` *under* the start
-  spec's, so the start spec wins the keys it names — and only those. A signed eval spec can
-  therefore seed any key the start spec leaves out. For this agent the keys that decide what
-  is being evaluated are **`:component`, `:config`, `:name`, `:limits`, `:pool` and
-  `:store_root`**, and a caller that stands this agent up for evaluation must name all six.
-  Leaving `:limits` out lets a signed spec choose the bounds it is judged under; leaving
-  `:pool` or `:store_root` out lets it choose which helper and which bytes. (`:instance` is
-  the seventh and is safe unnamed, because a seeded instance is ignored above.)
+  `Ouroboros.Mesh.start_agent/2` is remote-reachable and merges a caller's `initial_state`
+  wholesale; Jido does not check it against the schema above. So every key here that decides
+  *what runs, where, and under what bounds* is validated where it is used, not where it is
+  declared (F3):
+
+    * **`:pool`** must resolve to a live local process that was started as
+      `Ouroboros.Wasm.Pool` (or be the module name itself, this node's own singleton).
+      Anything else is a recorded refusal and no request is sent. Untyped, it aimed this
+      agent's `GenServer.call` at any process a starter could name, and the pool's
+      `{:request, …}` tuple killed the process that received it.
+    * **`:store_root`** is honoured only where `config :ouroboros, :wasm,
+      allow_store_root_override: true` — this repository's test environment. Everywhere else
+      the node's own store root is read, whatever the state says. Untyped, it ran unsigned,
+      unregistered bytes out of any directory the BEAM user could read.
+    * **`:limits`** is clamped element-wise to `Ouroboros.Wasm.capability_limits_max/0` and
+      the clamp is recorded in `:error`. Untyped, a declaration was obeyed, so a starter
+      wrote the helper's own maxima into it and got them.
+
+  A separate hazard with the same shape: `Ouroboros.Upgrade.Rollout.Evaluation` merges a
+  spec's `initial_state` *under* the start spec's, so the start spec wins the keys it names
+  and only those, and a signed eval spec can seed any key it leaves out. The keys that decide
+  what is being evaluated are **`:component`, `:config`, `:name`, `:limits`, `:pool` and
+  `:store_root`**, and a caller that stands this agent up for evaluation should name all six.
+  The validation above bounds what an unnamed one can cost; naming them is what makes the
+  evaluation mean what it says. (`:instance` is the seventh and is safe unnamed, because a
+  seeded instance is ignored above.)
 
   ## What is not here yet
 
@@ -110,7 +128,8 @@ defmodule Ouroboros.Wasm.Capability do
       config: [type: :string, default: "{}"],
       # A label, for a log line. Deliberately not part of any identity — see the moduledoc.
       name: [type: :string, default: "capability"],
-      # `%{fuel, memory_bytes, deadline_ms}`, all three or none. See `limits/1`.
+      # `%{fuel, memory_bytes, deadline_ms}`, all three or none, and each one clamped to this
+      # node's `capability_limits_max` ceiling. See `limits/1`.
       limits: [type: :map, default: %{}],
       # The live instance's name in the helper, or nil when none is standing. Only ever
       # believed when it equals this agent's derived name.
@@ -122,7 +141,11 @@ defmodule Ouroboros.Wasm.Capability do
       error: [type: :any, default: nil],
       # Which pool to speak to, and which store to read. Both are the production values by
       # default and exist so a test can point one agent at its own helper and its own
-      # directory without touching anything global.
+      # directory without touching anything global. Both are **validated before they are
+      # used**, because `Mesh.start_agent/2` is remote-reachable and Jido merges a caller's
+      # `initial_state` without checking it against this schema (F3): `:pool` must name a
+      # live local `Ouroboros.Wasm.Pool` process, and `:store_root` is honoured only on a node
+      # whose config says `allow_store_root_override: true`.
       pool: [type: :any, default: Ouroboros.Wasm.Pool],
       store_root: [type: :any, default: nil]
     ],
@@ -140,19 +163,52 @@ defmodule Ouroboros.Wasm.Capability do
   `Ouroboros.Wasm.capability_limits/0` otherwise. A partial map falls back whole rather than
   being completed from the defaults: a bound nobody stated is not one this node gets to
   invent, and half of one is not a bound.
+
+  Whichever of the two it is, **every value is clamped to this node's
+  `Ouroboros.Wasm.capability_limits_max/0`** (F3). `:limits` arrives inside `initial_state`
+  on the remote-reachable `Ouroboros.Mesh.start_agent/2`, and Jido does not validate
+  `initial_state` against this agent's schema — so a declaration was simply obeyed, and a
+  remote starter helped itself to the helper's own maxima on a node that had agreed to none
+  of them. A clamp rather than a refusal because the node's ceiling is the node's answer to
+  the question "how much may a capability have", and answering it is not the same as
+  refusing to run the capability. What the clamp must never be is silent: `note/1` returns
+  the fact, and `HandleMessage` records it in `:error` on every message.
   """
   @spec limits(map()) :: %{
           fuel: pos_integer(),
           memory_bytes: pos_integer(),
           deadline_ms: pos_integer()
         }
-  def limits(%{limits: %{fuel: fuel, memory_bytes: memory, deadline_ms: deadline}})
-      when is_integer(fuel) and fuel > 0 and is_integer(memory) and memory > 0 and
-             is_integer(deadline) and deadline > 0 do
+  def limits(state), do: clamp(declared(state), Wasm.capability_limits_max())
+
+  @doc """
+  What was clamped out of this capability's declared `:limits`, or `nil` when nothing was.
+
+  Recorded in the agent's `:error` by `HandleMessage` so a declaration this node would not
+  honour is visible where every other refusal is, rather than being obeyed quietly at a
+  number nobody agreed to.
+  """
+  @spec note(map()) :: %{stage: :limits, reason: {:limits_clamped, map(), map()}} | nil
+  def note(state) do
+    declared = declared(state)
+    effective = clamp(declared, Wasm.capability_limits_max())
+
+    if effective == declared,
+      do: nil,
+      else: %{stage: :limits, reason: {:limits_clamped, declared, effective}}
+  end
+
+  defp declared(%{limits: %{fuel: fuel, memory_bytes: memory, deadline_ms: deadline}})
+       when is_integer(fuel) and fuel > 0 and is_integer(memory) and memory > 0 and
+              is_integer(deadline) and deadline > 0 do
     %{fuel: fuel, memory_bytes: memory, deadline_ms: deadline}
   end
 
-  def limits(_state), do: Wasm.capability_limits()
+  defp declared(_state), do: Wasm.capability_limits()
+
+  defp clamp(limits, ceiling) do
+    Map.new(limits, fn {key, value} -> {key, min(value, Map.fetch!(ceiling, key))} end)
+  end
 
   defmodule HandleMessage do
     @moduledoc """
@@ -168,6 +224,7 @@ defmodule Ouroboros.Wasm.Capability do
 
     alias Jido.Agent.StateOp
     alias Ouroboros.Mesh
+    alias Ouroboros.Wasm
     alias Ouroboros.Wasm.Capability
     alias Ouroboros.Wasm.Pool
     alias Ouroboros.Wasm.Store
@@ -241,20 +298,59 @@ defmodule Ouroboros.Wasm.Capability do
     # of the agent holding it.
     defp exchange(state, agent, body) do
       name = instance_name(agent)
+      # A declaration this node clamped is carried through the whole exchange and recorded
+      # even when everything else succeeds, so it is visible on *every* message rather than
+      # only on the one that stood the instance up.
+      note = Capability.note(state)
 
-      with {:ok, payload} <- encode(body),
-           {:ok, instance} <- stand_up(state, name, owner_of(agent)) do
-        deliver(state, instance, payload)
+      with {:ok, pool} <- pool_of(state),
+           {:ok, payload} <- encode(body),
+           {:ok, instance} <- stand_up(state, pool, name, owner_of(agent)) do
+        deliver(pool, instance, payload, note)
       else
         {:refused, stage, reason} ->
           %{instance: nil, last_answer: nil, error: refusal(stage, reason)}
       end
     end
 
-    defp deliver(state, instance, payload) do
-      case Pool.call(instance, "handle-message", payload, state.pool) do
+    # Which process this agent may aim a `GenServer.call` at, and the answer is: one that is
+    # actually a `Ouroboros.Wasm.Pool` on this node (F3).
+    #
+    # `:pool` is `type: :any` in the schema and arrives inside `initial_state` on the
+    # remote-reachable `Mesh.start_agent/2`, which Jido merges without checking it against
+    # that schema. Before this, whatever a starter wrote was handed straight to
+    # `GenServer.call/3`: a registered name, and the pool's own `{:request, …}` tuple was
+    # delivered to somebody else's process — enough to kill an `Agent` on a `function_clause`
+    # — or a pid, with the same effect. So the value is *resolved* and then *identified*:
+    # `:proc_lib.translate_initial_call/1` names the module a live process was started as,
+    # which is the one fact about it a caller cannot forge from the outside.
+    #
+    # `Ouroboros.Wasm.Pool` itself is the exception and is always allowed. It is this node's
+    # own singleton and it is lazy: a node where it is not running answers `:unavailable`
+    # through the ordinary path, and turning that into a start-state refusal would be a
+    # different (and less honest) message about a pool nobody chose.
+    defp pool_of(%{pool: Pool}), do: {:ok, Pool}
+
+    defp pool_of(%{pool: pool}) do
+      case GenServer.whereis(pool) do
+        pid when is_pid(pid) and node(pid) == node() ->
+          if :proc_lib.translate_initial_call(pid) == {Pool, :init, 1},
+            do: {:ok, pid},
+            else: {:refused, :pool, {:pool_not_a_wasm_pool, describe(pool)}}
+
+        _remote_or_absent ->
+          {:refused, :pool, {:pool_not_a_wasm_pool, describe(pool)}}
+      end
+    rescue
+      # `GenServer.whereis/1` raises on a term that is not a server reference at all, which
+      # is exactly what an arbitrary `initial_state` value may be.
+      _error -> {:refused, :pool, {:pool_not_a_wasm_pool, describe(pool)}}
+    end
+
+    defp deliver(pool, instance, payload, note) do
+      case Pool.call(instance, "handle-message", payload, pool) do
         {:ok, %{"payload" => reply}} when is_binary(reply) ->
-          %{instance: instance, last_answer: decode(reply), error: nil}
+          %{instance: instance, last_answer: decode(reply), error: note}
 
         {:ok, other} ->
           # The helper broke its own result contract. The instance is still live as far as it
@@ -286,12 +382,13 @@ defmodule Ouroboros.Wasm.Capability do
     # Idempotent, and only for this agent's own instance. A `:instance` that is anything else
     # is somebody else's name or a stale one, and is stood over rather than adopted — nothing
     # about the seeded value is recorded, because there is nothing about it worth keeping.
-    defp stand_up(%{instance: instance}, name, _owner) when instance == name, do: {:ok, name}
+    defp stand_up(%{instance: instance}, _pool, name, _owner) when instance == name,
+      do: {:ok, name}
 
-    defp stand_up(state, name, owner) do
+    defp stand_up(state, pool, name, owner) do
       with {:ok, path} <- store_path(state),
-           :ok <- load(state, path),
-           :ok <- instantiate(state, name, owner) do
+           :ok <- load(state, pool, path),
+           :ok <- instantiate(state, pool, name, owner) do
         {:ok, name}
       end
     end
@@ -303,20 +400,29 @@ defmodule Ouroboros.Wasm.Capability do
       end
     end
 
-    defp store_opts(%{store_root: root}) when is_binary(root) and root != "", do: [root: root]
+    # A seeded `:store_root` names which bytes this capability runs, and it arrives on a
+    # remote-reachable start surface, so it is honoured only where the node's own config says
+    # so — this repository's test environment, and nowhere else by default (F3). Everywhere
+    # else the node's own store root is used and the seeded value is simply not read: it is
+    # not a refusal, because the agent is perfectly runnable from the store it is supposed to
+    # read from.
+    defp store_opts(%{store_root: root}) when is_binary(root) and root != "" do
+      if Wasm.allow_store_root_override?(), do: [root: root], else: []
+    end
+
     defp store_opts(_state), do: []
 
     # `load` is idempotent helper-side: a component already in its cache is reported as
     # cached rather than compiled again.
-    defp load(state, path) do
-      case Pool.load(state.component, path, state.pool) do
+    defp load(state, pool, path) do
+      case Pool.load(state.component, path, pool) do
         {:ok, _report} -> :ok
         {:error, reason} -> {:refused, :load, reason}
       end
     end
 
-    defp instantiate(state, name, owner) do
-      case stand(state, name, owner) do
+    defp instantiate(state, pool, name, owner) do
+      case stand(state, pool, name, owner) do
         {:ok, _result} ->
           :ok
 
@@ -325,9 +431,9 @@ defmodule Ouroboros.Wasm.Capability do
         # The name is derived from this agent's id and belongs to it; take it back rather
         # than refusing every message forever.
         {:error, %{refusal: "instance_exists"}} ->
-          _ = Pool.drop(name, state.pool)
+          _ = Pool.drop(name, pool)
 
-          case stand(state, name, owner) do
+          case stand(state, pool, name, owner) do
             {:ok, _result} -> :ok
             {:error, reason} -> {:refused, :instantiate, reason}
           end
@@ -337,13 +443,13 @@ defmodule Ouroboros.Wasm.Capability do
       end
     end
 
-    defp stand(state, name, owner) do
+    defp stand(state, pool, name, owner) do
       Pool.instantiate(
         name,
         state.component,
         state.config,
         Capability.limits(state),
-        state.pool,
+        pool,
         owner: owner
       )
     end

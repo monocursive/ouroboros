@@ -15,8 +15,16 @@ defmodule Ouroboros.Wasm do
     1. `OUROBOROS_WASM_HELPER` — an operator pointing at a build of their own;
     2. a configured absolute `helper_path` under `config :ouroboros, :wasm`;
     3. the first existing candidate: the application's `priv/` (which is the `_build`
-       fan-out `make wasm` writes), the checkout's `priv/wasm/`, a parent walk from the
-       working directory, or a sibling of `ouro` itself.
+       fan-out `make wasm` writes), or a sibling of `ouro` itself.
+
+  **Nothing in that order is derived from the working directory** (F1). The helper *is* the
+  containment boundary, so the set of paths that may supply it has to be a property of the
+  installation and never of where the daemon happens to have been started: a walk up the
+  cwd's ancestors for `priv/wasm/ouro-wasm` meant any repository a user cloned and any
+  directory an agent could write could hand this node the binary it spawns to contain
+  untrusted code. A checkout that wants its own build says so with `OUROBOROS_WASM_HELPER`
+  or with the `_build` fan-out `make wasm` already writes; a worktree that wants one says so
+  with the env override or its own `priv/wasm/`.
 
   Settings are bounds on somebody else's program, so a malformed value falls back to the
   default rather than widening anything — the `Ouroboros.Provider.Native.Desktop.config/1`
@@ -68,12 +76,43 @@ defmodule Ouroboros.Wasm do
       fuel: 100_000_000,
       memory_bytes: 64 * 1024 * 1024,
       deadline_ms: 5_000
-    ]
+    ],
+    # The **ceiling** the bounds above may be raised to, per capability, by the state a
+    # capability is deployed with. `capability_limits` is the default; this is the most any
+    # declaration can ask for, and `Ouroboros.Wasm.Capability.limits/1` clamps element-wise
+    # against it (F3).
+    #
+    # It exists because `:limits` arrives in `initial_state`, `Ouroboros.Mesh.start_agent/2`
+    # is remote-reachable, and Jido does not validate `initial_state` against the agent's
+    # schema — so before this, a remote starter simply wrote the helper's own maxima into the
+    # state it started a capability with and got them: a full trillion units of fuel, a
+    # gibibyte, and sixty seconds of wall clock per message, on a node that had never agreed
+    # to any of it. A ceiling is the only place that decision can honestly live, because it
+    # is the node's and not the deployment's.
+    #
+    # Conservative on purpose, and still two orders of magnitude above the default: a
+    # hundredth of the helper's fuel ceiling, a quarter of its memory ceiling, half its
+    # deadline. Declared whole and validated whole, exactly as `capability_limits` is.
+    capability_limits_max: [
+      fuel: 10_000_000_000,
+      memory_bytes: 256 * 1024 * 1024,
+      deadline_ms: 30_000
+    ],
+    # Whether a capability's `initial_state` may name the directory its component bytes are
+    # read from. Default **false**, and true only in this repository's test environment.
+    #
+    # `:store_root` is a test seam — it lets one agent read its own directory without touching
+    # anything global — and on a remote-reachable start surface a test seam is an arbitrary
+    # read: a starter that names a root runs whatever unsigned, unregistered bytes sit at
+    # `<root>/wasm/components/sha256-<hex>.wasm` for any directory the BEAM user can read.
+    # With this false the node's own store root is used whatever the state says (F3).
+    allow_store_root_override: false
   ]
 
   @timeout_keys [:handshake_timeout_ms, :request_timeout_ms, :call_margin_ms, :broken_ms]
   @byte_keys [:max_frame_bytes, :store_budget_bytes]
   @limit_keys [:fuel, :memory_bytes, :deadline_ms]
+  @limits_keys [:capability_limits, :capability_limits_max]
 
   @doc """
   The default instance bounds, as the map `Ouroboros.Wasm.Pool.instantiate/5` takes.
@@ -88,6 +127,29 @@ defmodule Ouroboros.Wasm do
           deadline_ms: pos_integer()
         }
   def capability_limits, do: Map.new(config(:capability_limits))
+
+  @doc """
+  The ceiling a deployed capability's own `:limits` may reach.
+
+  `Ouroboros.Wasm.Capability.limits/1` clamps element-wise against this, so a declaration
+  that asks for more runs under this instead and says so in the agent's `:error`. Read from
+  `config :ouroboros, :wasm, :capability_limits_max`, whole or not at all.
+  """
+  @spec capability_limits_max() :: %{
+          fuel: pos_integer(),
+          memory_bytes: pos_integer(),
+          deadline_ms: pos_integer()
+        }
+  def capability_limits_max, do: Map.new(config(:capability_limits_max))
+
+  @doc """
+  Whether a capability's `initial_state` may name its own component store root.
+
+  False on any node that has not deliberately said otherwise, because the key arrives on a
+  remote-reachable start surface and naming a root is naming which bytes run.
+  """
+  @spec allow_store_root_override?() :: boolean()
+  def allow_store_root_override?, do: config(:allow_store_root_override) == true
 
   @doc "The world id this node admits a component against."
   @spec world() :: String.t()
@@ -113,8 +175,8 @@ defmodule Ouroboros.Wasm do
           _bundled ->
             # The first candidate that exists; failing that, the first candidate as the name
             # a `doctor` would report; failing even that, the bare helper name. Always a
-            # string and never `hd([])` — none of these paths touches the working directory,
-            # so a removed cwd cannot raise here.
+            # string and never `hd([])`, and none of these paths reads the working directory
+            # — so a removed cwd cannot raise here and a planted one cannot be selected.
             Enum.find(candidates(), &File.regular?/1) || List.first(candidates()) || @helper
         end
     end
@@ -147,7 +209,7 @@ defmodule Ouroboros.Wasm do
   # documented default for all three rather than a silently half-configured instance, which
   # is the same fallback-on-typo posture as every other setting here — applied to the value
   # this one actually is.
-  defp valid?(:capability_limits, value) do
+  defp valid?(key, value) when key in @limits_keys do
     Keyword.keyword?(value) and Keyword.keys(value) -- @limit_keys == [] and
       Enum.all?(@limit_keys, fn key ->
         case Keyword.fetch(value, key) do
@@ -157,17 +219,22 @@ defmodule Ouroboros.Wasm do
       end)
   end
 
+  defp valid?(:allow_store_root_override, value), do: is_boolean(value)
+
   defp valid?(key, value) when key in @timeout_keys, do: is_integer(value) and value > 0
   defp valid?(key, value) when key in @byte_keys, do: is_integer(value) and value > 0
 
   defp candidates do
-    # No bare `Path.expand("priv/wasm/…")` candidate: it raises `File.Error` when the working
-    # directory has been removed out from under a running node — turning `Pool.init/1` into a
-    # supervisor restart storm — and it is attacker-influenceable through cwd. `walk_priv_helper/0`
-    # subsumes it (its first iteration is the checkout's own `priv/wasm/`) and guards `File.cwd()`.
+    # Two candidates, and neither is derived from the working directory (F1). A bare
+    # `Path.expand("priv/wasm/…")` and a walk up the cwd's ancestors were both here and both
+    # are gone: they let whatever directory the daemon happened to be started in — a cloned
+    # repository, a worktree an agent wrote — name the binary this node spawns as its
+    # containment boundary, and the bare form additionally raised `File.Error` when the
+    # working directory had been removed out from under a running node. What remains is the
+    # installation's own `priv/` and the binary that ships beside `ouro`, both of which are
+    # as trusted as the release itself.
     [
       priv_helper(),
-      walk_priv_helper(),
       sibling_helper(:os.find_executable(~c"ouro"))
     ]
     |> Enum.reject(&is_nil/1)
@@ -178,22 +245,6 @@ defmodule Ouroboros.Wasm do
     case :code.priv_dir(:ouroboros) do
       priv when is_list(priv) -> Path.join([List.to_string(priv), "wasm", @helper])
       _bad_name -> nil
-    end
-  end
-
-  defp walk_priv_helper do
-    case File.cwd() do
-      {:ok, cwd} ->
-        cwd
-        |> Stream.iterate(&Path.dirname/1)
-        |> Enum.take(6)
-        |> Enum.find_value(fn dir ->
-          path = Path.join([dir, "priv", "wasm", @helper])
-          if File.regular?(path), do: path
-        end)
-
-      {:error, _reason} ->
-        nil
     end
   end
 

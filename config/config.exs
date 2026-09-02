@@ -266,14 +266,19 @@ config :ouroboros,
   # WebAssembly containment (docs/WASM.md §7). Same posture as `:computer_use`: the helper
   # on disk is the operator opt-in — `make wasm` builds it, nothing else does — and
   # everything here is a bound, so a typo falls back to the default rather than widening
-  # one. `OUROBOROS_WASM_HELPER=/path` overrides `:bundled`, which resolves priv/, the
-  # checkout's priv/, a parent walk, or a sibling of `ouro`. The guest's own bounds — fuel,
-  # deadline, memory — are per-request and never defaulted by the pool; `ouro-wasm` refuses a
-  # request that omits one, and inventing a value there would be the transport deciding how
-  # much of the machine a guest may have. `:capability_limits` is where that decision is made
-  # instead: the bounds `Ouroboros.Wasm.Capability` sends when the state a capability was
-  # deployed with names none of its own. Declared whole — all three keys or none — because a
-  # half-stated bound is not a bound; two of the three keys falls back to all three defaults.
+  # one. `OUROBOROS_WASM_HELPER=/path` overrides `:bundled`, which resolves the application's
+  # own priv/ or a sibling of `ouro` — and nothing derived from the working directory, since
+  # the helper is the containment boundary and a cloned repository must not be able to supply
+  # it. The guest's own bounds — fuel, deadline, memory — are per-request and never defaulted
+  # by the pool; `ouro-wasm` refuses a request that omits one, and inventing a value there
+  # would be the transport deciding how much of the machine a guest may have.
+  # `:capability_limits` is where that decision is made instead: the bounds
+  # `Ouroboros.Wasm.Capability` sends when the state a capability was deployed with names
+  # none of its own, and `:capability_limits_max` is the ceiling a deployment's own
+  # declaration is clamped to — `initial_state` reaches this node over a remote-reachable
+  # start surface, so how much a capability may ask for is the node's answer and not the
+  # deployment's. Both are declared whole — all three keys or none — because a half-stated
+  # bound is not a bound; two of the three keys falls back to all three defaults.
   wasm: [
     helper_path: :bundled,
     handshake_timeout_ms: 5_000,
@@ -286,7 +291,17 @@ config :ouroboros,
       fuel: 100_000_000,
       memory_bytes: 64 * 1024 * 1024,
       deadline_ms: 5_000
-    ]
+    ],
+    capability_limits_max: [
+      fuel: 10_000_000_000,
+      memory_bytes: 256 * 1024 * 1024,
+      deadline_ms: 30_000
+    ],
+    # A capability's `initial_state` may name the directory its component bytes are read
+    # from only where this is true — which is this repository's own test environment, and
+    # nowhere else. It is a test seam, and on a remote-reachable start surface a test seam
+    # that names a directory is an arbitrary read of unsigned bytes.
+    allow_store_root_override: config_env() == :test
   ]
 
 # The two facts about the web endpoint that are genuinely compile-time, and no others.

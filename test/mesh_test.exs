@@ -107,9 +107,7 @@ defmodule Ouroboros.MeshTest do
     test "accepts the WebAssembly wrapper agent, and admits its state as a start spec" do
       # Lane W introduces no module per capability: `Ouroboros.Wasm.Capability` is the one
       # shipped agent every component runs inside, and *which* component is a fact about the
-      # state it is started with (docs/WASM.md §7.2). Admitting the namespace is safe because
-      # forged code structurally cannot enter it — the verifier's introduce-prefix requires
-      # `Ouroboros.Capability.*` — and `Ouroboros.Wasm.` is itself protected against patching.
+      # state it is started with (docs/WASM.md §7.2).
       id = unique_id("wasm")
 
       assert {:ok, _pid} =
@@ -126,6 +124,36 @@ defmodule Ouroboros.MeshTest do
 
       # Nothing is loaded and nothing is instantiated until a message arrives.
       assert server_state.agent.state.instance == nil
+    end
+
+    test "lane W admits one named module, not the whole Ouroboros.Wasm namespace (F5)" do
+      # The allow-list used to carry the prefix `"Elixir.Ouroboros.Wasm."`, so this
+      # remote-reachable surface said "start any module under lane W's host machinery" and
+      # was saved only by the accident that none of the others exports `new/0` or `new/1`.
+      # A module added to that namespace tomorrow would have become startable silently.
+      for module <- [Ouroboros.Wasm.Pool, Ouroboros.Wasm.Store, Ouroboros.Wasm.Supervisor] do
+        assert {:error, {:agent_module_not_allowed, ^module}} =
+                 Mesh.start_agent(unique_id("wasm-namespace"), agent: module)
+      end
+    end
+
+    test "no second module under Ouroboros.Wasm. has become startable (F5)" do
+      # The enumeration the prefix used to make necessary and the named entry makes cheap: if
+      # a second agent module ever appears under lane W's namespace, this fails and whoever
+      # added it decides — deliberately — whether `Ouroboros.Mesh`'s allow-list should name
+      # it too. `Jido.Agent` is what makes a module startable here, and it is `new/0` and
+      # `new/1` that `do_start_agent/3` calls.
+      {:ok, modules} = :application.get_key(:ouroboros, :modules)
+
+      startable =
+        modules
+        |> Enum.filter(&String.starts_with?(Atom.to_string(&1), "Elixir.Ouroboros.Wasm."))
+        |> Enum.filter(fn module ->
+          Code.ensure_loaded?(module) and
+            (function_exported?(module, :new, 0) or function_exported?(module, :new, 1))
+        end)
+
+      assert startable == [Ouroboros.Wasm.Capability]
     end
   end
 

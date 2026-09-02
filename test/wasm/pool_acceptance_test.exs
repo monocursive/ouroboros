@@ -73,15 +73,43 @@ defmodule Ouroboros.Wasm.PoolAcceptanceTest do
     end
 
     @tag @needs_helper
-    test "instantiate refuses a limit outside the helper's range" do
+    test "instantiate refuses a limit outside the helper's range before the wire (F2)" do
+      # This used to reach the real helper and come back `limits_out_of_range`. It no longer
+      # travels at all: the pool carries the same bounds `tui/wasm/src/host.rs` enforces and
+      # refuses ahead of the frame, which is what keeps a caller-chosen `deadline_ms` from
+      # ever reaching `Process.send_after/3`. The acceptance value of the test is that the
+      # two agree — a build whose helper had *narrower* bounds than these constants would be
+      # caught by `doctor.limits` below, and one with wider bounds by the `{:ok, _}` here.
       pool = start_pool()
 
-      assert {:error, %{refusal: "limits_out_of_range"}} =
+      assert {:error, {:invalid_limits, {:memory_bytes, 1}}} =
                Pool.instantiate(
                  "acceptance",
                  String.duplicate("a", 64),
                  "{}",
                  %{fuel: 1_000_000, memory_bytes: 1, deadline_ms: 1_000},
+                 pool
+               )
+
+      # The real helper's own report of the same four numbers, so a drift between this
+      # build's constants and the binary on disk is a failing test rather than a surprise.
+      assert {:ok, report} = Pool.doctor(pool)
+
+      assert %{
+               "max_fuel" => 1_000_000_000_000,
+               "min_memory_bytes" => 65_536,
+               "max_memory_bytes" => 1_073_741_824,
+               "max_deadline_ms" => 60_000
+             } = report["limits"]
+
+      # And a request at the very edge of those bounds is one this side still sends: it comes
+      # back `unknown_component`, which is the helper answering rather than the pool refusing.
+      assert {:error, %{refusal: "unknown_component"}} =
+               Pool.instantiate(
+                 "acceptance",
+                 String.duplicate("a", 64),
+                 "{}",
+                 %{fuel: 1_000_000_000_000, memory_bytes: 65_536, deadline_ms: 60_000},
                  pool
                )
     end

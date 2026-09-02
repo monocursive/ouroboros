@@ -30,6 +30,35 @@ defmodule Ouroboros.Wasm.PoolTest do
     test "refuses a frame past max_frame_bytes rather than allocating it" do
       assert {:error, {:frame_too_large, _size, 4}} = Codec.decode("abcdef\n", 4)
     end
+
+    test "an unterminated remainder past the cap is an error, not a growing buffer" do
+      # The other half of the same bound, and the one a complete-line check does not cover: a
+      # helper that writes 8 MiB and no newline would otherwise be buffered forever, one
+      # chunk at a time, by a side that is waiting for a delimiter that never comes.
+      assert {:ok, [], 0, "abcd"} = Codec.decode("abcd", 4)
+      assert {:error, {:frame_too_large, 5, 4}} = Codec.decode("abcde", 4)
+    end
+  end
+
+  describe "a helper that stops speaking the protocol is broken, not read forever" do
+    test "noise past the budget breaks the transport" do
+      # The helper writes its diagnostics to stderr and its answers to stdout. Lines on
+      # stdout that are not JSON objects are counted rather than acted on, and past
+      # `@max_noise` the transport is one that has stopped speaking this protocol.
+      pool = start_pool(noisy_helper(25))
+
+      assert {:error, :broken} = Pool.doctor(pool)
+      assert %{phase: :broken, broken_reason: {:noise_limit, noise}} = Pool.status(pool)
+      assert noise > 20
+      assert Process.alive?(pool)
+    end
+
+    test "noise inside the budget is skipped, and the answer after it is still read" do
+      pool = start_pool(noisy_helper(5))
+
+      assert {:ok, %{"usable" => true}} = Pool.doctor(pool)
+      assert %{phase: :ready} = Pool.status(pool)
+    end
   end
 
   describe "lazy: nothing is spawned until a request needs it" do
@@ -88,7 +117,7 @@ defmodule Ouroboros.Wasm.PoolTest do
   describe "broken is a state with a cooldown" do
     test "the window is honored, and a request after it reconnects" do
       spawns = spawn_log()
-      pool = start_pool(flaky_helper(), broken_ms: 400, handshake_timeout_ms: 2_000)
+      pool = start_pool(flaky_helper(spawns), broken_ms: 400, handshake_timeout_ms: 2_000)
 
       # The first spawn exits before answering: broken.
       assert {:error, :broken} = Pool.doctor(pool)
@@ -240,19 +269,73 @@ defmodule Ouroboros.Wasm.PoolTest do
     end
   end
 
-  describe "env is filtered" do
-    test "the helper is spawned without the gateway token but keeps a benign variable" do
-      System.put_env("OUROBOROS_GATEWAY_TOKEN", "supersecret")
-      System.put_env("OURO_WASM_MARKER", "keepme")
+  describe "env is deny-by-default (F4)" do
+    # The deny-list this replaces was a regex over names, and the names that matter are not
+    # the ones it knew: `rel/env.sh.eex` puts the fleet's real distribution cookie in
+    # `RELEASE_COOKIE`, which `(API_?KEY|_TOKEN|SECRET|OAUTH|PASSWORD|CREDENTIAL|
+    # GATEWAY_TOKEN)` does not match, and neither do any of the rest of these. Every one is a
+    # variable a real node running this daemon plausibly holds.
+    @secret_env %{
+      "RELEASE_COOKIE" => "the-fleet-cookie",
+      "OUROBOROS_COOKIE" => "the-fleet-cookie",
+      "OUROBOROS_COOKIE_FILE" => "/etc/ouroboros/cookie",
+      "AWS_ACCESS_KEY_ID" => "AKIAIOSFODNN7EXAMPLE",
+      "SSH_AUTH_SOCK" => "/private/tmp/ssh-agent.sock",
+      "DATABASE_URL" => "postgres://user:pw@db.internal/ouroboros",
+      "OUROBOROS_SIGNING_PRIVATE_KEY" => "-----BEGIN PRIVATE KEY-----",
+      "AUTHORIZATION" => "Bearer abc123",
+      "SIGNING_KEY" => "deadbeef",
+      "NPM_CONFIG_AUTH" => "hunter2",
+      "OUROBOROS_GATEWAY_TOKEN" => "supersecret",
+      # Not secret-shaped at all, and still not the helper's business: the old posture kept
+      # everything it could not name, which is the half of the failure a longer deny-list
+      # would not have fixed either.
+      "OURO_WASM_MARKER" => "keepme"
+    }
+
+    test "the helper is spawned with PATH, HOME and TMPDIR and nothing else this node holds" do
+      Enum.each(@secret_env, fn {name, value} -> System.put_env(name, value) end)
+      on_exit(fn -> Enum.each(@secret_env, fn {name, _} -> System.delete_env(name) end) end)
+
+      pool = start_pool(env_dump_helper())
+
+      assert {:ok, %{"env" => dumped}} = Pool.inspect("/tmp/one", pool)
+      names = dumped |> String.split(" ", trim: true) |> MapSet.new()
+
+      for {name, _value} <- @secret_env do
+        refute MapSet.member?(names, name), "#{name} reached the helper"
+      end
+
+      # The child still has what it needs to run at all: this fake helper is `/bin/sh`
+      # running `awk`, and it found both through PATH.
+      assert MapSet.member?(names, "PATH")
+
+      # And nothing else at all, which is the half a longer deny-list would never have
+      # reached. `PWD`/`SHLVL` are the wrapper shell's own doing — `/bin/sh` exports them
+      # into every child it runs — and are not inherited from this node.
+      leaked =
+        names
+        |> MapSet.difference(MapSet.new(~w(PATH HOME TMPDIR)))
+        |> MapSet.difference(MapSet.new(~w(PWD SHLVL OLDPWD _)))
+
+      assert MapSet.size(leaked) == 0,
+             "the helper's environment is not an allow-list: #{Enum.join(leaked, ", ")}"
+    end
+
+    test "an allowed name carrying a credential-shaped value is dropped too" do
+      previous = System.get_env("TMPDIR")
+      System.put_env("TMPDIR", "postgres://user:pw@db.internal/scratch")
 
       on_exit(fn ->
-        System.delete_env("OUROBOROS_GATEWAY_TOKEN")
-        System.delete_env("OURO_WASM_MARKER")
+        if previous, do: System.put_env("TMPDIR", previous), else: System.delete_env("TMPDIR")
       end)
 
-      pool = start_pool(env_echo_helper())
+      pool = start_pool(env_dump_helper())
 
-      assert {:ok, %{"token" => "", "marker" => "keepme"}} = Pool.inspect("/tmp/one", pool)
+      assert {:ok, %{"env" => dumped}} = Pool.inspect("/tmp/one", pool)
+      names = dumped |> String.split(" ", trim: true) |> MapSet.new()
+
+      refute MapSet.member?(names, "TMPDIR")
     end
   end
 
@@ -320,6 +403,140 @@ defmodule Ouroboros.Wasm.PoolTest do
       assert %{broken_reason: {:handshake_refused, %{worlds: worlds}}} = Pool.status(pool)
       assert worlds != []
       assert Enum.all?(worlds, &(byte_size(&1) <= 2_048 + 8))
+    end
+  end
+
+  describe "limits are bounded before they reach a timer (F2)" do
+    test "a caller-chosen deadline past what a timer accepts is refused, and the pool lives" do
+      # The finding. `resolve_timeout/4` handed `limits.deadline_ms + call_margin_ms` to
+      # `Process.send_after/3` before anything validated it, so one `instantiate` with a
+      # deadline near the 61-bit maximum raised `badarg` inside `handle_call/3` and killed
+      # this GenServer. Forty-four of them exhausted `Ouroboros.Wasm.Supervisor`'s 10-in-60s
+      # and the `:rest_for_one` parent shut down with it.
+      pool = start_pool(responding_helper())
+      assert {:ok, _report} = Pool.doctor(pool)
+
+      huge = %{fuel: 1_000, memory_bytes: 65_536, deadline_ms: 4_611_686_018_427_387_000}
+
+      for _attempt <- 1..44 do
+        assert {:error, {:invalid_limits, {:deadline_ms, 4_611_686_018_427_387_000}}} =
+                 Pool.instantiate("boom", sha(1), "{}", huge, pool)
+      end
+
+      assert Process.alive?(pool)
+      assert %{phase: :ready} = Pool.status(pool)
+      assert {:ok, %{"usable" => true}} = Pool.doctor(pool)
+    end
+
+    test "each of the three bounds is refused at both ends, before any frame" do
+      journal = journal_file()
+      pool = start_pool(journaling_helper(journal))
+      assert {:ok, _report} = Pool.doctor(pool)
+
+      # The helper's own maxima, mirrored from `tui/wasm/src/host.rs`.
+      ok = %{fuel: 1_000, memory_bytes: 65_536, deadline_ms: 1_000}
+
+      refusals = [
+        {%{ok | fuel: 0}, {:fuel, 0}},
+        {%{ok | fuel: 1_000_000_000_001}, {:fuel, 1_000_000_000_001}},
+        {%{ok | memory_bytes: 65_535}, {:memory_bytes, 65_535}},
+        {%{ok | memory_bytes: 1_073_741_825}, {:memory_bytes, 1_073_741_825}},
+        {%{ok | deadline_ms: 0}, {:deadline_ms, 0}},
+        {%{ok | deadline_ms: 60_001}, {:deadline_ms, 60_001}}
+      ]
+
+      for {limits, expected} <- refusals do
+        assert {:error, {:invalid_limits, ^expected}} =
+                 Pool.instantiate("i", sha(1), "{}", limits, pool)
+      end
+
+      # In range, and it goes out.
+      assert {:ok, _result} = Pool.instantiate("i", sha(1), "{}", ok, pool)
+
+      instantiates =
+        journal |> requests() |> Enum.filter(&(&1["method"] == "instantiate"))
+
+      assert length(instantiates) == 1
+    end
+
+    test "a helper whose own doctor limits are narrower has the last word" do
+      # The constants above are this build's reading of `host.rs`; a binary with tighter
+      # bounds is honoured rather than overridden, and the check is server-side because only
+      # the pool holds the report.
+      pool = start_pool(limited_helper(1_000))
+      assert {:ok, _report} = Pool.doctor(pool)
+
+      within_constants = %{fuel: 1_000, memory_bytes: 65_536, deadline_ms: 5_000}
+
+      assert {:error, {:invalid_limits, {:deadline_ms, 5_000}}} =
+               Pool.instantiate("i", sha(1), "{}", within_constants, pool)
+
+      assert {:ok, _result} =
+               Pool.instantiate("i", sha(1), "{}", %{within_constants | deadline_ms: 100}, pool)
+    end
+
+    test "a call waits the deadline its own instance was created with, plus the margin" do
+      # `resolve_timeout/4`'s `call` branch and the per-instance deadline map, which had no
+      # test of their own. The helper answers `instantiate` and then never answers `call`, so
+      # what the pool waits is exactly what it derived.
+      pool = start_pool(limited_helper(30_000, deaf_call_rules()), call_margin_ms: 50)
+      assert {:ok, _report} = Pool.doctor(pool)
+
+      assert {:ok, _result} =
+               Pool.instantiate(
+                 "known",
+                 sha(1),
+                 "{}",
+                 %{fuel: 1_000, memory_bytes: 65_536, deadline_ms: 150},
+                 pool
+               )
+
+      {elapsed, reply} =
+        :timer.tc(fn -> Pool.call("known", "handle-message", "{}", pool) end, :millisecond)
+
+      assert reply == {:error, :timeout}
+
+      # 150 + 50, not the helper's 30 s ceiling and not `request_timeout_ms`.
+      assert elapsed >= 150 and elapsed < 3_000, "waited #{elapsed} ms, not the instance's own"
+    end
+
+    test "a helper that reports an absurd ceiling cannot make the pool arm an absurd timer" do
+      # The second way a number reaches `Process.send_after/3` here, and the one no
+      # caller-side validation covers: `helper_max_deadline/1` reads `max_deadline_ms` off
+      # the helper's own `doctor`, which is somebody else's JSON. A helper reporting a value
+      # past what a timer accepts would raise `badarg` inside `handle_call/3` and kill this
+      # pool — which is why every derived interval is clamped at the one place it leaves
+      # `resolve_timeout/4`, and not only where a caller's number is checked.
+      pool = start_pool(limited_helper(4_611_686_018_427_387_000, deaf_call_rules()))
+      assert {:ok, report} = Pool.doctor(pool)
+      assert report["limits"]["max_deadline_ms"] == 4_611_686_018_427_387_000
+
+      # The request is armed and then abandoned: what this asserts is that arming it did not
+      # kill the pool. Waiting for it would mean waiting out `@max_timeout_ms`, which is the
+      # point — the clamp is what makes the wait finite at all.
+      waiting = Task.async(fn -> Pool.call("never-created", "handle-message", "{}", pool) end)
+      Process.sleep(200)
+
+      assert Process.alive?(pool)
+      assert %{phase: :ready} = Pool.status(pool)
+      Task.shutdown(waiting, :brutal_kill)
+    end
+
+    test "a call on an instance this pool never created waits the helper's own ceiling" do
+      # The other branch: `helper_max_deadline/1`, read off the accepted doctor report. A
+      # helper reporting a 400 ms ceiling is waited for 400 ms plus the margin, which is how
+      # a leftover instance from before a reconnect is bounded at all.
+      pool = start_pool(limited_helper(400, deaf_call_rules()), call_margin_ms: 50)
+      assert {:ok, _report} = Pool.doctor(pool)
+
+      {elapsed, reply} =
+        :timer.tc(
+          fn -> Pool.call("never-created", "handle-message", "{}", pool) end,
+          :millisecond
+        )
+
+      assert reply == {:error, :timeout}
+      assert elapsed >= 400 and elapsed < 3_000, "waited #{elapsed} ms, not the helper's ceiling"
     end
   end
 
@@ -427,10 +644,101 @@ defmodule Ouroboros.Wasm.PoolTest do
       assert {:ok, _result} = instantiate(pool, "bad-owner", owner: "not a pid")
       assert %{instances: 1, owned: 0} = Pool.status(pool)
     end
+
+    test "the owner map is bounded oldest-first, exactly as the deadline map is" do
+      # `bound_owners/2`. A peer that instantiates under caller-chosen names and never drops
+      # would otherwise grow a map — and a monitor per entry — in this process without limit.
+      pool = start_pool(responding_helper(), max_instances: 4)
+      owner = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(owner, :kill) end)
+
+      before = length(Process.info(pool, :monitors) |> elem(1))
+
+      for n <- 1..10 do
+        assert {:ok, _result} = instantiate(pool, "owned-#{n}", owner: owner)
+      end
+
+      assert %{owned: 4, instances: 4} = Pool.status(pool)
+
+      # Evicting an entry releases its monitor rather than leaking one per instance.
+      assert length(Process.info(pool, :monitors) |> elem(1)) - before == 4
+    end
+
+    test "re-instantiating a name releases the monitor the previous one took" do
+      # `remember_owner/4`'s `forget_owner/2` first step. Without it a guest that traps on
+      # every message — so its wrapper re-instantiates under the same derived name every
+      # time — leaves one monitor behind per message, forever.
+      pool = start_pool(responding_helper())
+      owner = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(owner, :kill) end)
+
+      before = length(Process.info(pool, :monitors) |> elem(1))
+
+      for _again <- 1..20 do
+        assert {:ok, _result} = instantiate(pool, "same-name", owner: owner)
+      end
+
+      assert %{owned: 1, instances: 1} = Pool.status(pool)
+      assert length(Process.info(pool, :monitors) |> elem(1)) - before == 1
+    end
+
+    test "reclaims a helper never answers pile up on a bounded list, not an unbounded one" do
+      # `schedule_drop/2` and the `pending_drops` surface. This helper reads a `drop` and
+      # never answers it, so the first reclaim occupies the wire forever and the rest wait —
+      # which is the only state in which anything can queue here at all. The list is bounded
+      # by the same cap as the maps it reclaims from, so a peer cannot grow it.
+      pool = start_pool(limited_helper(60_000, deaf_drop_rules()), max_instances: 2)
+      assert {:ok, _report} = Pool.doctor(pool)
+
+      owners =
+        for n <- 1..2 do
+          owner = spawn(fn -> Process.sleep(:infinity) end)
+          assert {:ok, _result} = instantiate(pool, "owned-#{n}", owner: owner)
+          owner
+        end
+
+      assert %{owned: 2, pending_drops: 0} = Pool.status(pool)
+
+      Enum.each(owners, &Process.exit(&1, :kill))
+      assert wait_until(fn -> Pool.status(pool).owned == 0 end)
+
+      # One reclaim is in flight and unanswered; whatever is behind it is bounded.
+      status = Pool.status(pool)
+      assert status.pending_drops >= 1
+      assert status.pending_drops <= 2
+      assert Process.alive?(pool)
+    end
   end
 
-  describe "the hook lane is budgeted against the shared component cache" do
-    test "sixteen distinct hook components load and the seventeenth never touches the wire" do
+  describe "the queue is bounded, and a full one is :busy rather than a wait" do
+    test "callers past the queue are refused at once, and the pool keeps working" do
+      # `@max_queue` and `queueable?/1`. One request is in flight and eight may wait; the
+      # tenth is answered `:busy` immediately rather than being buffered behind a helper that
+      # is sequential by design.
+      pool = start_pool(slow_helper())
+      assert {:ok, _report} = Pool.doctor(pool)
+
+      waiting =
+        for n <- 1..9 do
+          Task.async(fn -> Pool.inspect("/tmp/#{n}", pool) end)
+        end
+
+      # Give the nine time to arrive: one takes the in-flight slot, eight fill the queue.
+      Process.sleep(120)
+
+      assert {:error, :busy} = Pool.inspect("/tmp/too-many", pool)
+
+      # Every queued caller is still answered — `:busy` refused the arrival, not the queue.
+      for task <- waiting do
+        assert {:ok, %{"method" => "inspect"}} = Task.await(task, 10_000)
+      end
+
+      assert %{phase: :ready} = Pool.status(pool)
+    end
+  end
+
+  describe "the untrusted hook lane is budgeted against the shared component cache" do
+    test "sixteen distinct untrusted components load and the seventeenth never touches the wire" do
       # The helper's cache is 64 slots shared by every lane. Before it evicted, an untrusted
       # workspace shipping components could fill it in one turn — and from then on every
       # `load` on this node failed `too_many_components`, including the *operator's own*
@@ -441,13 +749,14 @@ defmodule Ouroboros.Wasm.PoolTest do
       pool = start_pool(journaling_helper(journal))
 
       for n <- 1..16 do
-        assert {:ok, _result} = Pool.load(sha(n), "/tmp/hook-#{n}.wasm", pool, lane: :hook)
+        assert {:ok, _result} =
+                 Pool.load(sha(n), "/tmp/hook-#{n}.wasm", pool, lane: :untrusted_hook)
       end
 
       assert Pool.status(pool).hook_components == 16
 
       assert {:error, :hook_component_budget} =
-               Pool.load(sha(17), "/tmp/hook-17.wasm", pool, lane: :hook)
+               Pool.load(sha(17), "/tmp/hook-17.wasm", pool, lane: :untrusted_hook)
 
       # Refused before a frame was built: the helper never heard of the seventeenth.
       loads = journal |> requests() |> Enum.filter(&(&1["method"] == "load"))
@@ -455,8 +764,47 @@ defmodule Ouroboros.Wasm.PoolTest do
       refute Enum.any?(loads, &(&1["params"]["sha256"] == sha(17)))
 
       # A sha already counted is free, so a hook that runs forever costs one slot.
-      assert {:ok, _result} = Pool.load(sha(3), "/tmp/hook-3.wasm", pool, lane: :hook)
+      assert {:ok, _result} =
+               Pool.load(sha(3), "/tmp/hook-3.wasm", pool, lane: :untrusted_hook)
+
       assert Pool.status(pool).hook_components == 16
+    end
+
+    test "the operator's own trusted hook lane is never budgeted (F7)" do
+      # The finding, exactly. One counter for both lanes meant an untrusted clone could spend
+      # the whole budget on shas of its own and the operator's trusted `deny` hook then
+      # failed to load — a bound written to protect the trusted lane disarming it instead.
+      pool = start_pool(responding_helper())
+
+      for n <- 1..16 do
+        assert {:ok, _result} =
+                 Pool.load(sha(n), "/tmp/clone-#{n}.wasm", pool, lane: :untrusted_hook)
+      end
+
+      assert {:error, :hook_component_budget} =
+               Pool.load(sha(99), "/tmp/clone-17.wasm", pool, lane: :untrusted_hook)
+
+      # The operator's own hooks load past the exhausted budget, seventeen distinct shas in,
+      # and spend none of it. Trusted churn is bounded by the helper's own eviction.
+      for n <- 100..116 do
+        assert {:ok, _result} = Pool.load(sha(n), "/tmp/operator-#{n}.wasm", pool, lane: :hook)
+      end
+
+      assert Pool.status(pool).hook_components == 16
+    end
+
+    test "a load the helper refuses spends no budget (F7)" do
+      # The count is taken on the helper's `{:ok, _}` and not at admission. Counting at
+      # admission let sixteen *refused* loads — a sha mismatch, bytes that are not a
+      # component — exhaust a budget on a cache they never touched.
+      pool = start_pool(refusing_helper())
+
+      for n <- 1..16 do
+        assert {:error, %{refusal: "sha_mismatch"}} =
+                 Pool.load(sha(n), "/tmp/clone-#{n}.wasm", pool, lane: :untrusted_hook)
+      end
+
+      assert Pool.status(pool).hook_components == 0
     end
 
     test "the capability lane is untouched by an exhausted hook budget" do
@@ -465,11 +813,12 @@ defmodule Ouroboros.Wasm.PoolTest do
       pool = start_pool(responding_helper())
 
       for n <- 1..16 do
-        assert {:ok, _result} = Pool.load(sha(n), "/tmp/hook-#{n}.wasm", pool, lane: :hook)
+        assert {:ok, _result} =
+                 Pool.load(sha(n), "/tmp/hook-#{n}.wasm", pool, lane: :untrusted_hook)
       end
 
       assert {:error, :hook_component_budget} =
-               Pool.load(sha(99), "/tmp/x.wasm", pool, lane: :hook)
+               Pool.load(sha(99), "/tmp/x.wasm", pool, lane: :untrusted_hook)
 
       # The default lane, and an explicit one, both still load.
       assert {:ok, _result} = Pool.load(sha(99), "/tmp/capability.wasm", pool)
@@ -485,22 +834,68 @@ defmodule Ouroboros.Wasm.PoolTest do
       assert {:ok, %{"usable" => true}} = Pool.doctor(pool)
 
       for n <- 1..16 do
-        assert {:ok, _result} = Pool.load(sha(n), "/tmp/hook-#{n}.wasm", pool, lane: :hook)
+        assert {:ok, _result} =
+                 Pool.load(sha(n), "/tmp/hook-#{n}.wasm", pool, lane: :untrusted_hook)
       end
 
       assert {:error, :hook_component_budget} =
-               Pool.load(sha(17), "/tmp/x.wasm", pool, lane: :hook)
+               Pool.load(sha(17), "/tmp/x.wasm", pool, lane: :untrusted_hook)
 
       # `inspect` is the method this fake answers with a frame the pool refuses.
       assert {:error, :broken} = Pool.inspect("/tmp/anything", pool)
       assert %{phase: :broken, hook_components: 0} = Pool.status(pool)
     end
 
-    test "an unrecognized lane is the budgeted one, so a typo cannot buy an exemption" do
+    test "an unrecognized lane is refused, so a typo cannot buy an exemption" do
       pool = start_pool(responding_helper())
 
-      assert {:ok, _result} = Pool.load(sha(1), "/tmp/one.wasm", pool, lane: :hooks)
-      assert Pool.status(pool).hook_components == 1
+      assert {:error, {:invalid_lane, :hooks}} =
+               Pool.load(sha(1), "/tmp/one.wasm", pool, lane: :hooks)
+
+      assert {:error, {:invalid_lane, "hook"}} =
+               Pool.load(sha(1), "/tmp/one.wasm", pool, lane: "hook")
+
+      # Refused at the API boundary: nothing was spawned and nothing was counted.
+      assert %{phase: :idle, hook_components: 0} = Pool.status(pool)
+    end
+  end
+
+  describe "the lane-W boot task reruns when the chain restarts it (F6)" do
+    test "the supervised child spec is transient, not temporary" do
+      # A supervisor drops every *temporary* child from the list it restarts after a
+      # sibling's crash — `supervisor:terminate_children/2` terminates them and does not
+      # return them — so the boot task was started exactly once per VM and the `rest_for_one`
+      # comment beside it was wrong. Transient is the shape it needs: not restarted on its
+      # own normal exit, restarted when the chain takes it down.
+      previous = Application.get_env(:ouroboros, :data_dir)
+      Application.put_env(:ouroboros, :data_dir, Path.join(tmp_dir(), "data"))
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:ouroboros, :data_dir, previous),
+          else: Application.delete_env(:ouroboros, :data_dir)
+      end)
+
+      assert [%{id: Ouroboros.Wasm.Boot, restart: :transient}] =
+               Ouroboros.Application.wasm_restart_children()
+    end
+
+    test "a transient one-shot task under rest_for_one reruns; a temporary one does not" do
+      # And what that restart type buys, proved against a real supervisor rather than
+      # asserted. The leader is what a pool restart stands in for here.
+      for {restart, expected} <- [{:transient, 2}, {:temporary, 1}] do
+        test_pid = self()
+        {:ok, sup} = start_rest_for_one(restart, test_pid)
+
+        assert_receive {:ran, ^restart}, 2_000
+        Process.exit(Process.whereis(leader_name()), :kill)
+
+        runs = drain_runs(restart, 1)
+        Supervisor.stop(sup)
+
+        assert runs == expected,
+               "a #{restart} one-shot task ran #{runs} time(s) across a sibling restart"
+      end
     end
   end
 
@@ -639,6 +1034,35 @@ defmodule Ouroboros.Wasm.PoolTest do
   defp slow_helper, do: write_helper(awk_body(@doctor_ok, "", ~s|system("sleep 0.3"); |))
 
   defp doctor_helper(report), do: write_helper(awk_body(report, "", ""))
+
+  # A helper whose `doctor` reports a chosen `max_deadline_ms`, so a test can prove both what
+  # the pool derives from a report and what it refuses against one.
+  defp limited_helper(max_deadline_ms, extra_rules \\ "") do
+    report =
+      ~S(\"usable\":true,\"worlds\":[\"ouroboros:capability@0.1.0\"],) <>
+        ~S(\"wasmtime\":\"48.0.1\",\"limits\":{\"max_deadline_ms\":) <>
+        Integer.to_string(max_deadline_ms) <> "}"
+
+    write_helper(awk_body(report, extra_rules, ""))
+  end
+
+  # Reads a `call` and never answers it, so the pool's own derived deadline is the whole of
+  # the wait.
+  defp deaf_call_rules do
+    """
+    } else if ($0 ~ /"method":"call"/) {
+      next
+    """
+  end
+
+  # The same for `drop`, which is how a reclaim can be observed *waiting* rather than
+  # settling on the next idle turn of the wire.
+  defp deaf_drop_rules do
+    """
+    } else if ($0 ~ /"method":"drop"/) {
+      next
+    """
+  end
 
   defp refusing_helper do
     write_helper(
@@ -793,7 +1217,10 @@ defmodule Ouroboros.Wasm.PoolTest do
     )
   end
 
-  defp env_echo_helper do
+  # Answers every non-`doctor` request with the *names* of every variable in its own
+  # environment, space-separated. Names only: the point is which variables crossed the spawn
+  # boundary at all, and a value that did cross has no business in a test log either.
+  defp env_dump_helper do
     write_helper("""
     #!/bin/sh
     exec awk '
@@ -804,7 +1231,9 @@ defmodule Ouroboros.Wasm.PoolTest do
       if ($0 ~ /"method":"doctor"/) {
         printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"result\\":{#{@doctor_ok}}}\\n", id)
       } else {
-        printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"result\\":{\\"token\\":\\"%s\\",\\"marker\\":\\"%s\\"}}\\n", id, ENVIRON["OUROBOROS_GATEWAY_TOKEN"], ENVIRON["OURO_WASM_MARKER"])
+        names = ""
+        for (k in ENVIRON) { names = names k " " }
+        printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"result\\":{\\"env\\":\\"%s\\"}}\\n", id, names)
       }
       fflush()
     }
@@ -814,13 +1243,30 @@ defmodule Ouroboros.Wasm.PoolTest do
 
   defp silent_helper, do: write_helper("#!/bin/sh\nexec cat >/dev/null\n")
 
+  # Writes `lines` complete non-JSON lines to stdout before every answer, which is the shape
+  # of a helper that has started printing to the wrong descriptor.
+  defp noisy_helper(lines) do
+    write_helper(
+      awk_body(
+        @doctor_ok,
+        "",
+        ~s|for (i = 0; i < #{lines}; i++) { print "a banner line" } |
+      )
+    )
+  end
+
   # Exits without answering the first time it is spawned and behaves the second time, so a
   # test can prove the cooldown window is honored and then cleared.
-  defp flaky_helper do
+  #
+  # The spawn log's path is baked into the script rather than passed through the environment:
+  # the pool spawns its child with an allow-list environment (F4), so a variable this test
+  # exported would not reach it — and a fake helper that needs the node's environment to work
+  # is one that stops testing the real spawn.
+  defp flaky_helper(spawns) do
     write_helper("""
     #!/bin/sh
-    echo spawn >> "$OURO_WASM_SPAWNS"
-    if [ "$(wc -l < "$OURO_WASM_SPAWNS")" -le 1 ]; then
+    echo spawn >> "#{spawns}"
+    if [ "$(wc -l < "#{spawns}")" -le 1 ]; then
       exit 3
     fi
     #{awk_program(@doctor_ok, "", "")}
@@ -856,16 +1302,37 @@ defmodule Ouroboros.Wasm.PoolTest do
   defp spawn_log do
     path = Path.join(tmp_dir(), "spawns")
     File.write!(path, "")
-    previous = System.get_env("OURO_WASM_SPAWNS")
-    System.put_env("OURO_WASM_SPAWNS", path)
-
-    on_exit(fn ->
-      if previous,
-        do: System.put_env("OURO_WASM_SPAWNS", previous),
-        else: System.delete_env("OURO_WASM_SPAWNS")
-    end)
-
     path
+  end
+
+  ## The F6 supervision fixture
+  #
+  # A `rest_for_one` tree shaped like the `:core` tail: a restartable leader (the pool's
+  # stand-in) and a one-shot task behind it (the boot task's stand-in) that reports each run.
+
+  defp leader_name, do: :ouro_wasm_boot_leader
+
+  defp start_rest_for_one(restart, test_pid) do
+    leader = %{
+      id: :leader,
+      start: {Agent, :start_link, [fn -> :up end, [name: leader_name()]]}
+    }
+
+    follower = %{
+      id: :follower,
+      start: {Task, :start_link, [fn -> send(test_pid, {:ran, restart}) end]},
+      restart: restart
+    }
+
+    Supervisor.start_link([leader, follower], strategy: :rest_for_one)
+  end
+
+  defp drain_runs(restart, seen) do
+    receive do
+      {:ran, ^restart} -> drain_runs(restart, seen + 1)
+    after
+      500 -> seen
+    end
   end
 
   defp spawn_count(path), do: path |> File.read!() |> String.split("\n", trim: true) |> length()

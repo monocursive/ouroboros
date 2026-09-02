@@ -1006,7 +1006,9 @@ defmodule Ouroboros.Provider.Native.Hooks do
         # This `load` is also how an evicted sha comes back: the helper forgets a component
         # nothing holds, and loading it again — a cache hit whenever it is still held — is
         # what makes the `instantiate` after it safe to issue.
-        case Wasm.Pool.load(sha, path, pool, lane: :hook) do
+        case Wasm.Pool.load(sha, path, pool,
+               lane: if(Map.get(hook, :trusted, false), do: :hook, else: :untrusted_hook)
+             ) do
           {:ok, _report} -> stand_and_call(hook, pool, sha, payload, ceiling)
           {:error, reason} -> {:ignored, note(reason, "load")}
         end

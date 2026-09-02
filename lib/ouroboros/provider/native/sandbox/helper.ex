@@ -78,8 +78,14 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
   The absolute path the helper would be spawned from, or `nil` when nothing is installed.
 
   `OUROBOROS_SANDBOX_HELPER` wins, then a configured absolute path, then the first existing
-  candidate — the same precedence the Computer Use helper uses, for the same reason: an
-  operator testing a build needs a way to point the runtime at it without a release.
+  candidate — the application's own `priv/`, or a sibling of `ouro`. The same precedence the
+  Computer Use helper uses, for the same reason: an operator testing a build needs a way to
+  point the runtime at it without a release.
+
+  No candidate is derived from the working directory (F1). This helper applies namespaces,
+  Landlock and seccomp and then `execve`s the command, so what supplies it decides what
+  contains an untrusted command; a `Path.expand("priv/sandbox/…")` and a walk up the cwd's
+  ancestors were both here, and either let a cloned repository supply that binary.
   """
   @spec executable() :: String.t() | nil
   def executable do
@@ -99,31 +105,22 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
   end
 
   defp candidates do
-    [priv_helper(), Path.expand(Path.join(["priv", "sandbox", @helper_name])), walk_helper()]
+    # No cwd-derived candidate, in either of the two shapes this used to carry (F1): see
+    # `executable/0`.
+    [priv_helper(), sibling_helper(:os.find_executable(~c"ouro"))]
     |> Enum.reject(&is_nil/1)
     |> Enum.uniq()
   end
+
+  defp sibling_helper(false), do: nil
+
+  defp sibling_helper(path) when is_list(path),
+    do: Path.join(Path.dirname(List.to_string(path)), @helper_name)
 
   defp priv_helper do
     case :code.priv_dir(:ouroboros) do
       priv when is_list(priv) -> Path.join([List.to_string(priv), "sandbox", @helper_name])
       _bad_name -> nil
-    end
-  end
-
-  defp walk_helper do
-    case File.cwd() do
-      {:ok, cwd} ->
-        cwd
-        |> Stream.iterate(&Path.dirname/1)
-        |> Enum.take(6)
-        |> Enum.find_value(fn dir ->
-          path = Path.join([dir, "priv", "sandbox", @helper_name])
-          if File.regular?(path), do: path
-        end)
-
-      {:error, _reason} ->
-        nil
     end
   end
 

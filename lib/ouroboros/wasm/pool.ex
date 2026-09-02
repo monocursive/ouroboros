@@ -73,12 +73,21 @@ defmodule Ouroboros.Wasm.Pool do
   than retried forever. An instance with no owner is still perfectly legitimate — it is one
   whose lifetime its caller manages.
 
-  ## Env is filtered
+  ## Env is deny-by-default
 
-  The helper is spawned with the node's environment minus anything that reads like a secret.
-  It runs untrusted guest code behind a linker that imports one host function; it has no
-  business holding this runtime's credentials, and a child that cannot read them cannot leak
-  them to the thing it contains.
+  The helper is spawned with an **allow-list** environment: `PATH`, `HOME`, `TMPDIR`, and
+  nothing else this node happens to be holding. It runs untrusted guest code behind a linker
+  that imports one host function; it has no business holding this runtime's credentials, and
+  a child that cannot read them cannot leak them to the thing it contains.
+
+  A deny-list stood here before and did not hold (F4). It was a regex over names —
+  `API_KEY`, `_TOKEN`, `SECRET`, `OAUTH`, `PASSWORD`, `CREDENTIAL`, `GATEWAY_TOKEN` — and
+  the real distribution cookie is called `RELEASE_COOKIE` (`rel/env.sh.eex` puts the fleet's
+  own cookie there), which that regex does not match; neither do `AWS_ACCESS_KEY_ID`,
+  `SSH_AUTH_SOCK`, `DATABASE_URL`, `AUTHORIZATION`, or a `*_PRIVATE_KEY`. Enumerating what a
+  secret is called is a losing shape for a containment boundary, so this is the posture
+  `Ouroboros.Provider.Native.Exec` already takes: name what the child needs, drop the rest,
+  and check the values that survive as well as the names.
   """
 
   use GenServer
@@ -88,13 +97,22 @@ defmodule Ouroboros.Wasm.Pool do
   alias Ouroboros.Wasm
   alias Ouroboros.Wasm.Codec
 
-  # Names of environment variables the helper is never given. Deliberately the same
-  # expression as `Ouroboros.Provider.Native.Desktop.Pool`'s `@secret_env` and kept in step
-  # with it by hand: a shared module would tie two independent spawn seams to one list, and
-  # this repo already carries a third, differently-shaped copy in
-  # `Ouroboros.Provider.Native.Exec`. Stripping generously is safe because the helper needs
-  # none of these to run.
-  @secret_env ~r/(API_?KEY|_TOKEN|SECRET|OAUTH|PASSWORD|CREDENTIAL|GATEWAY_TOKEN)/i
+  # The only environment variables the helper is given. Deny-by-default, not a deny-list
+  # (F4): see the moduledoc for why the name-shaped deny-list this replaces could not hold.
+  #
+  # The list is short because `ouro-wasm` is a static-ish Rust binary that opens no files it
+  # was not handed a path to and makes no network call. `PATH` and `HOME` are what any child
+  # is entitled to; `TMPDIR` is what the platform expects a process to write scratch under,
+  # and on macOS it is per-user and per-session. `Port.open/2` itself needs nothing here — it
+  # `execve`s an absolute path — so this is the child's environment and not the spawn's.
+  @inherited_env ~w(PATH HOME TMPDIR)
+
+  # An allowed *name* is not yet an allowed *value*. The three variables above are paths, and
+  # a path is not supposed to look like this; a node whose `PATH` somehow carries a
+  # credential URI hands the helper one anyway if only the name is checked. The same shape
+  # `Ouroboros.Provider.Native.Exec.sensitive_environment?/2` applies, narrowed to what a
+  # path can plausibly contain.
+  @credential_value ~r{([a-z][a-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@)|(-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----)}i
 
   # Lines of non-JSON stdout tolerated before the transport is treated as broken. The helper
   # writes its diagnostics to stderr and its answers to stdout; anything else on stdout is a
@@ -117,7 +135,12 @@ defmodule Ouroboros.Wasm.Pool do
   # unbounded growth is what this caps.
   @max_instances 512
 
-  # The most *distinct* hook components one helper's life may admit to its cache.
+  # The most *distinct* untrusted-hook components one helper's life may admit to its cache.
+  # Untrusted only: `lane: :hook`, the operator's own node- and user-scope component hooks,
+  # is not budgeted at all (F7). Sharing one counter between the two made the bound
+  # self-defeating — a cloned repository spent it on sixteen shas of its own and the
+  # operator's trusted `deny` hook then could not load, which is the failure the budget was
+  # written to prevent, arrived at from the other side.
   #
   # The helper holds `MAX_COMPONENTS` (64, `tui/wasm/src/host.rs`) in a cache every lane on
   # this node shares, and since W6 it evicts at that ceiling: the least recently used
@@ -132,9 +155,10 @@ defmodule Ouroboros.Wasm.Pool do
   # again. Sixteen per helper lifetime is far above any honest repository and bounds that
   # churn at a quarter of the table.
   #
-  # It is a budget and not an eviction: an operator who edits their own hook seventeen times
-  # within one helper's life hits it, even though the helper itself now has room. Any
-  # respawn — a restart, a broken transition — clears it.
+  # It is a budget and not an eviction, so a *clone* that ships seventeen distinct components
+  # within one helper's life hits it even though the helper has room. The operator editing
+  # their own hook seventeen times no longer does: that is `lane: :hook`, and nothing counts
+  # it. Any respawn — a restart, a broken transition — clears the set.
   @hook_component_budget 16
 
   # The most evicted shas one debug line names. The helper evicts one component per `load`,
@@ -162,7 +186,38 @@ defmodule Ouroboros.Wasm.Pool do
   # in-contract wait — the helper's own 60 s `max_deadline_ms` plus the transport margin.
   @client_ceiling_ms 180_000
 
-  @typedoc "What `status/1` reports about the helper."
+  # The helper's own bounds on the three per-instance limits, mirrored from
+  # `tui/wasm/src/host.rs` (`MAX_FUEL`, `MIN_MEMORY_BYTES`, `MAX_MEMORY_BYTES`,
+  # `MAX_DEADLINE_MS`). They are duplicated here rather than only asked of the helper because
+  # `instantiate/6` refuses *before* it has a helper: the pool is lazy, the first request is
+  # what spawns one, and a limit this side would never send is not one worth spawning a child
+  # to have refused. A connected helper's own `doctor.limits` is checked too and wins when it
+  # is narrower (`within_helper_limits/2`), so a build with tighter bounds than these is
+  # honoured rather than overridden.
+  @max_fuel 1_000_000_000_000
+  @min_memory_bytes 65_536
+  @max_memory_bytes 1_073_741_824
+  @max_deadline_ms 60_000
+
+  # The hard ceiling on any interval this pool hands `Process.send_after/3`, whatever a
+  # caller's `limits.deadline_ms` and whatever an operator's `call_margin_ms` and
+  # `request_timeout_ms` say (F2). `Process.send_after/3` raises `badarg` above
+  # `4_294_967_295` ms, and a `badarg` raised inside `handle_call/3` kills this GenServer —
+  # so a caller-chosen integer reaching a timer unclamped is a remote crash of the pool, and
+  # forty-odd of them exhaust `Ouroboros.Wasm.Supervisor` and take the `:rest_for_one` parent
+  # with it. `wire_limits/1` already refuses such a value; this is the independent bound that
+  # holds even if some other path ever computes one. Comfortably above the largest legitimate
+  # wait (`@max_deadline_ms` plus a generous margin) and below `@client_ceiling_ms`, so a
+  # request still answers before the caller's own ceiling fires.
+  @max_timeout_ms 120_000
+
+  @typedoc """
+  What `status/1` reports about the helper.
+
+  `hook_components` is the count of **budgeted untrusted** hook shas this helper has
+  accepted, not every hook component it holds: the operator's own `lane: :hook` loads are
+  not budgeted and are not counted (F7).
+  """
   @type status :: %{
           phase: :idle | :handshaking | :ready | :broken,
           helper_path: String.t(),
@@ -175,8 +230,11 @@ defmodule Ouroboros.Wasm.Pool do
           broken_reason: term() | nil
         }
 
-  @typedoc "Which lane a `load` is for. The hook lane is budgeted; the capability lane is not."
-  @type lane :: :capability | :hook
+  @typedoc """
+  Which lane a `load` is for. Only `:untrusted_hook` is budgeted; `:capability` and the
+  operator's own `:hook` are not.
+  """
+  @type lane :: :capability | :hook | :untrusted_hook
 
   @typedoc "A refusal frame from the helper. `refusal` is the name peers match on."
   @type refusal :: %{code: integer(), refusal: String.t(), message: String.t()}
@@ -190,6 +248,7 @@ defmodule Ouroboros.Wasm.Pool do
           | :timeout
           | :hook_component_budget
           | {:frame_too_large, non_neg_integer(), pos_integer()}
+          | {:invalid_lane, term()}
           | {:invalid_limits, term()}
           | {:invalid_instance, term()}
           | {atom(), term()}
@@ -235,20 +294,29 @@ defmodule Ouroboros.Wasm.Pool do
 
   ## `lane:` — whose bytes these are
 
-  `opts` takes one option, `lane: :capability | :hook`, defaulting to `:capability`, and it
-  exists because the helper's component cache is a **shared** resource. `:hook` names the
-  one lane whose bytes come out of a repository rather than out of a signed artifact, and
-  distinct shas loaded under it are counted against `#{@hook_component_budget}` for the
-  life of the current helper: a new one past that is refused `{:error, :hook_component_budget}`
-  here, before a frame is built. The helper evicts at its own ceiling — least recently
-  used, never a component with a live instance — so the lane cannot starve the capability
-  lane with `too_many_components`; what the budget bounds is how many compiles, and how
-  many evictions of somebody else's component, a repository can cause per helper lifetime.
+  `opts` takes one option, `lane: :capability | :hook | :untrusted_hook`, defaulting to
+  `:capability`, and it exists because the helper's component cache is a **shared**
+  resource. An unrecognized lane is `{:error, {:invalid_lane, _}}`.
+
+  Exactly one of the three is budgeted: **`:untrusted_hook`**, the bytes that come out of a
+  repository somebody cloned rather than out of a signed artifact or an operator's own
+  configuration. Distinct shas loaded under it are counted against
+  `#{@hook_component_budget}` for the life of the current helper, and a new one past that is
+  refused `{:error, :hook_component_budget}` here, before a frame is built.
+
+  `:hook` — the operator's own node- and user-scope component hooks — is **not** budgeted,
+  and that separation is the whole point (F7). One counter for both lanes meant an untrusted
+  clone could spend the budget on sixteen shas of its own and the operator's trusted `deny`
+  hook then failed to load: a bound meant to protect the trusted lane instead disarmed it.
+  Trusted churn is bounded by the helper, which evicts least-recently-used at its own
+  ceiling and never a component with a live instance.
 
   A sha already counted is free, so re-running the same hook forever costs one slot. The
-  count is taken at admission rather than on success: a `load` that fails still spent a
-  slot, which is the conservative direction for a bound whose whole job is to leave room
-  for somebody else. `status/1` reports it as `hook_components`.
+  count is taken **when the helper answers `{:ok, _}`**, not when the request is issued: a
+  `load` the helper refused compiled nothing and evicted nothing, so counting it let sixteen
+  refusals — a sha mismatch, bytes that are not a component — spend a budget on a cache they
+  never touched. `status/1` reports the count as `hook_components`, which therefore means
+  *budgeted untrusted shas* and not every hook component this helper holds.
 
   ## `evicted` — what this load cost somebody else
 
@@ -265,15 +333,19 @@ defmodule Ouroboros.Wasm.Pool do
           {:ok, map()} | {:error, failure()}
   def load(sha256, path, server \\ __MODULE__, opts \\ [])
       when is_binary(sha256) and is_binary(path) and is_list(opts) do
-    request(server, "load", %{"sha256" => sha256, "path" => path}, :fixed, nil, lane(opts))
+    with {:ok, lane} <- lane(opts) do
+      request(server, "load", %{"sha256" => sha256, "path" => path}, :fixed, nil, lane)
+    end
   end
 
-  # An unrecognized lane is the unbudgeted one only when nothing was asked for. Anything
-  # else a caller wrote is a typo, and a typo must not silently buy an exemption.
+  # An unrecognized lane is a refusal, not a silent default. It used to fall through to the
+  # budgeted lane, which was safe in the only direction that mattered then; now that one of
+  # the three lanes is *exempt*, guessing at all is the wrong shape — a caller whose `lane:`
+  # this build does not know has said something this build cannot honour either way.
   defp lane(opts) do
     case Keyword.get(opts, :lane, :capability) do
-      :capability -> :capability
-      _hook_or_typo -> :hook
+      lane when lane in [:capability, :hook, :untrusted_hook] -> {:ok, lane}
+      other -> {:error, {:invalid_lane, other}}
     end
   end
 
@@ -367,7 +439,8 @@ defmodule Ouroboros.Wasm.Pool do
   defp valid_instance(instance), do: {:error, {:invalid_instance, byte_size(instance)}}
 
   @doc """
-  The most distinct hook components one helper's life may admit. See `@hook_component_budget`.
+  The most distinct **untrusted** hook components one helper's life may admit. See
+  `@hook_component_budget`.
 
   Public because a spent budget is an operator-visible fact: the turn loop says so once per
   turn (docs/WASM.md W-F3) and `wasm.status` reports it beside `hook_components`. Reading
@@ -436,9 +509,9 @@ defmodule Ouroboros.Wasm.Pool do
        # able to grow a map in this process without limit.
        owners: %{},
        pending_drops: [],
-       # The distinct component digests admitted under `lane: :hook` since this helper was
-       # spawned. Reset with every other per-child fact, because the cache it bounds dies
-       # with the child that held it.
+       # The distinct component digests the helper *accepted* under `lane: :untrusted_hook`
+       # since it was spawned. Reset with every other per-child fact, because the cache it
+       # bounds dies with the child that held it.
        hook_shas: MapSet.new(),
        instance_seq: 0,
        max_instances: max_instances(opts)
@@ -447,9 +520,9 @@ defmodule Ouroboros.Wasm.Pool do
 
   @impl true
   def handle_call({:request, method, params, requested, owner, lane}, from, state) do
-    case check_lane(state, method, params, lane) do
-      {:ok, hook_sha} ->
-        issue_request(state, method, params, requested, owner, from, hook_sha)
+    case admit(state, method, params, lane) do
+      :ok ->
+        issue_request(state, method, params, requested, owner, from, lane)
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -471,38 +544,73 @@ defmodule Ouroboros.Wasm.Pool do
      }, state}
   end
 
-  # The lane budget, checked before anything else a request would spend: no frame is built,
-  # no timer armed, no monitor taken. A refusal that had already touched the wire would be a
-  # smaller version of the exhaustion it exists to prevent.
-  #
-  # Checking and *counting* are separate steps because this pool is lazy: the request that
-  # finds no child spawns one, and `connect/1` empties `hook_shas` because a fresh helper's
-  # cache is empty. Counting here would put the sha in a set the next line throws away — so
-  # the check answers with the sha to count, and `count_hook/2` runs once the request is on
-  # a connected child. A request that never reaches a helper (`:unavailable`, `:broken`,
-  # `:busy`) is not counted at all, which is the honest reading of a budget on a cache.
-  defp check_lane(state, "load", params, :hook) do
-    case Map.get(params, "sha256") do
-      sha when is_binary(sha) ->
-        cond do
-          MapSet.member?(state.hook_shas, sha) -> {:ok, nil}
-          MapSet.size(state.hook_shas) < @hook_component_budget -> {:ok, sha}
-          true -> {:error, :hook_component_budget}
-        end
-
-      _absent ->
-        # Malformed, and the helper's own refusal is the honest answer to it. Not counted: a
-        # request the helper rejects outright never reaches the cache this bounds.
-        {:ok, nil}
+  # Everything a request must satisfy before anything is spent on it: no frame is built, no
+  # timer armed, no monitor taken, and — since this pool is lazy — no child spawned. A
+  # refusal that had already touched the wire would be a smaller version of the exhaustion
+  # these bounds exist to prevent.
+  defp admit(state, method, params, lane) do
+    with :ok <- check_lane(state, method, params, lane) do
+      check_limits(state, method, params)
     end
   end
 
-  defp check_lane(_state, _method, _params, _lane), do: {:ok, nil}
+  # The untrusted-hook budget. Only `lane: :untrusted_hook` is budgeted (F7): a repository's
+  # bytes are the ones nobody signed, and one counter shared with the operator's own trusted
+  # hooks let a clone spend the budget and make a trusted `deny` fail open.
+  #
+  # Checking and *counting* are separate steps, and counting happens on the helper's `{:ok,
+  # _}` (`count_hook/3`) rather than here. Two reasons, and either is sufficient. This pool
+  # is lazy, so the request that finds no child spawns one and `connect/1` empties
+  # `hook_shas`; counting here would put the sha in a set the next line throws away. And a
+  # `load` the helper *refuses* — a sha mismatch, bytes that are not a component, an
+  # undeclared import — admitted nothing to the cache this budget bounds, so counting it let
+  # sixteen refusals spend a budget that had cost the node nothing.
+  defp check_lane(state, "load", params, :untrusted_hook) do
+    case Map.get(params, "sha256") do
+      sha when is_binary(sha) ->
+        if MapSet.member?(state.hook_shas, sha) or
+             MapSet.size(state.hook_shas) < @hook_component_budget,
+           do: :ok,
+           else: {:error, :hook_component_budget}
 
-  defp count_hook(state, nil), do: state
-  defp count_hook(state, sha), do: %{state | hook_shas: MapSet.put(state.hook_shas, sha)}
+      _absent ->
+        # Malformed, and the helper's own refusal is the honest answer to it.
+        :ok
+    end
+  end
 
-  defp issue_request(state, method, params, requested, owner, from, hook_sha) do
+  defp check_lane(_state, _method, _params, lane) when lane in [:capability, :hook], do: :ok
+
+  # A lane this build does not know is a caller's typo, and a typo must never buy an
+  # exemption from a budget. `load/4` refuses one before it ever reaches here; this is the
+  # same answer for anything that arrives another way.
+  defp check_lane(_state, _method, _params, lane), do: {:error, {:invalid_lane, lane}}
+
+  # What the connected helper says it will accept, checked against what this request carries.
+  # `wire_limits/1` has already refused anything outside this build's constants; this is the
+  # narrower check that only a `doctor` report can answer, and it is done here rather than at
+  # the API boundary because only the pool holds the report.
+  defp check_limits(state, "instantiate", params) do
+    case get_in_map(params, ["limits"]) do
+      limits when is_map(limits) -> within_helper_limits(state, limits)
+      _absent -> :ok
+    end
+  end
+
+  defp check_limits(_state, _method, _params), do: :ok
+
+  # Counted when the helper answers `{:ok, _}` and not before: the budget bounds the compiles
+  # and the evictions a repository can cause, and a refused `load` caused neither.
+  defp count_hook(state, %{method: "load", lane: :untrusted_hook, params: params}, {:ok, _result}) do
+    case Map.get(params, "sha256") do
+      sha when is_binary(sha) -> %{state | hook_shas: MapSet.put(state.hook_shas, sha)}
+      _absent -> state
+    end
+  end
+
+  defp count_hook(state, _inflight, _reply), do: state
+
+  defp issue_request(state, method, params, requested, owner, from, lane) do
     # Mint the deadline at receipt, before reconnect or queue work, so a caller waiting
     # behind another one is not given a fresh window when its turn comes.
     item =
@@ -511,12 +619,13 @@ defmodule Ouroboros.Wasm.Pool do
         method,
         params,
         resolve_timeout(state, method, params, requested),
-        owner
+        owner,
+        lane
       )
 
     cond do
       state.phase == :ready and state.inflight == nil ->
-        case issue_item(count_hook(state, hook_sha), item) do
+        case issue_item(state, item) do
           {:ok, state} ->
             {:noreply, state}
 
@@ -536,7 +645,7 @@ defmodule Ouroboros.Wasm.Pool do
       queueable?(state) ->
         case ensure_connected(state) do
           {:ok, state} ->
-            {:noreply, state |> count_hook(hook_sha) |> enqueue(item)}
+            {:noreply, enqueue(state, item)}
 
           {:unavailable, state} ->
             cleanup_item(item)
@@ -748,10 +857,17 @@ defmodule Ouroboros.Wasm.Pool do
     Process.demonitor(item.monitor, [:flush])
     note_evictions(inflight, reply)
     GenServer.reply(item.from, reply)
-    state |> remember_instance(inflight, reply) |> drain()
+
+    state
+    |> count_hook(inflight, reply)
+    |> remember_instance(inflight, reply)
+    |> drain()
   end
 
-  defp route(:orphaned, _reply, state, _inflight), do: drain(state)
+  # The caller went away, but the helper still answered and a successful `load` still
+  # admitted a component to the shared cache — so it is still counted.
+  defp route(:orphaned, reply, state, inflight),
+    do: state |> count_hook(inflight, reply) |> drain()
 
   # A reclaim `drop` this pool issued for a dead owner. Nobody is waiting for the answer;
   # the bookkeeping it settles is this pool's own.
@@ -859,7 +975,10 @@ defmodule Ouroboros.Wasm.Pool do
 
     with :ok <- within_frame_cap(state, frame),
          :ok <- write(state, frame) do
-      ref = Process.send_after(self(), {:deadline, id}, timeout_ms)
+      # Clamped like every other interval that reaches a timer here (F2). This path carries
+      # settings rather than a caller's number, but a settings typo is still an integer
+      # somebody chose, and `Process.send_after/3` raises on a large enough one.
+      ref = Process.send_after(self(), {:deadline, id}, min(max(timeout_ms, 1), @max_timeout_ms))
 
       {:ok,
        %{
@@ -872,6 +991,9 @@ defmodule Ouroboros.Wasm.Pool do
              # this pool issued itself, exactly as it does for a caller's.
              params: params,
              owner: nil,
+             # A request this pool issued for itself — the handshake, a reclaim `drop` — is
+             # never a repository's, so it is never budgeted.
+             lane: :capability,
              deadline: ref
            }
        }}
@@ -917,6 +1039,7 @@ defmodule Ouroboros.Wasm.Pool do
                method: item.method,
                params: item.params,
                owner: item.owner,
+               lane: item.lane,
                deadline: ref
              }
          }}
@@ -1023,14 +1146,19 @@ defmodule Ouroboros.Wasm.Pool do
     error -> {:error, Exception.message(error)}
   end
 
-  # Erlang's `env` option modifies the inherited environment rather than replacing it, so
-  # the helper keeps PATH, HOME, and TMPDIR, and only the secret-shaped variables are unset
-  # (value `false` removes one).
+  # Erlang's `env` option *modifies* the inherited environment rather than replacing it —
+  # there is no `:clear` for `Port.open/2` as there is for erlexec — so deny-by-default is
+  # expressed by naming every variable this node holds that is not on the allow-list and
+  # removing it (value `false` unsets one). The list is built from this node's own
+  # environment at spawn time, so nothing that is not there cannot be removed.
   defp filtered_env do
     System.get_env()
-    |> Enum.filter(fn {name, _value} -> Regex.match?(@secret_env, name) end)
+    |> Enum.reject(fn {name, value} -> inherited?(name, value) end)
     |> Enum.map(fn {name, _value} -> {String.to_charlist(name), false} end)
   end
+
+  defp inherited?(name, value),
+    do: name in @inherited_env and not Regex.match?(@credential_value, value)
 
   defp write(%{port: nil}, _frames), do: {:error, :closed}
 
@@ -1085,11 +1213,19 @@ defmodule Ouroboros.Wasm.Pool do
   # be found on the timescale of the request that wedged it. An instance this pool did not
   # create is either unknown to the helper too (refused at once) or a leftover from before a
   # reconnect, so the helper's own ceiling is the honest bound to wait.
-  defp resolve_timeout(state, "instantiate", params, :derived) do
+  defp resolve_timeout(state, method, params, requested) do
+    # Clamped at the one place every timeout leaves this function, so no derivation below —
+    # nor any added later — can hand `Process.send_after/3` an interval it will raise on.
+    # `max/2` as well as `min/2`: a non-positive interval is a timer that fires immediately
+    # and answers a caller `:timeout` before the helper has read the request.
+    state |> derive_timeout(method, params, requested) |> max(1) |> min(@max_timeout_ms)
+  end
+
+  defp derive_timeout(state, "instantiate", params, :derived) do
     deadline_of(params) + state.settings.call_margin_ms
   end
 
-  defp resolve_timeout(state, "call", params, :derived) do
+  defp derive_timeout(state, "call", params, :derived) do
     instance = Map.get(params, "instance")
 
     case Map.get(state.deadlines, instance) do
@@ -1098,7 +1234,7 @@ defmodule Ouroboros.Wasm.Pool do
     end
   end
 
-  defp resolve_timeout(state, _method, _params, _fixed), do: state.settings.request_timeout_ms
+  defp derive_timeout(state, _method, _params, _fixed), do: state.settings.request_timeout_ms
 
   defp deadline_of(params) do
     case get_in_map(params, ["limits", "deadline_ms"]) do
@@ -1229,7 +1365,7 @@ defmodule Ouroboros.Wasm.Pool do
          (state.phase == :broken and now() >= state.broken_until))
   end
 
-  defp request_item(from, method, params, timeout, owner) do
+  defp request_item(from, method, params, timeout, owner, lane) do
     caller = elem(from, 0)
     ref = make_ref()
 
@@ -1241,6 +1377,7 @@ defmodule Ouroboros.Wasm.Pool do
       method: method,
       params: params,
       owner: owner,
+      lane: lane,
       expires_at: now() + timeout,
       deadline: Process.send_after(self(), {:queued_deadline, ref}, timeout)
     }
@@ -1353,13 +1490,72 @@ defmodule Ouroboros.Wasm.Pool do
     end
   end
 
-  defp wire_limits(%{fuel: fuel, memory_bytes: memory, deadline_ms: deadline})
-       when is_integer(fuel) and fuel > 0 and is_integer(memory) and memory > 0 and
-              is_integer(deadline) and deadline > 0 do
-    {:ok, %{"fuel" => fuel, "memory_bytes" => memory, "deadline_ms" => deadline}}
+  # Every one of the three bounds is range-checked here, against the helper's own maxima, and
+  # a value outside them is `{:error, {:invalid_limits, {key, value}}}` before a frame is
+  # built or a timer armed (F2). Two separate things needed this. `deadline_ms` is the one
+  # limit that also becomes a *transport* deadline — `resolve_timeout/4` derives one from it
+  # and hands it to `Process.send_after/3` — so a caller-chosen `deadline_ms` past what a
+  # timer accepts used to raise `badarg` inside `handle_call/3` and kill the pool, which is
+  # remotely reachable through `Mesh.start_agent/2`'s `initial_state`. And all three are
+  # bounds the helper would refuse anyway (`limits_out_of_range`), so refusing here spends no
+  # frame, no compile, and — since the pool is lazy — no spawn.
+  #
+  # This is a refusal and not a clamp: a bound nobody stated is not one this node invents,
+  # and silently running a guest under a *different* bound than the one it was deployed with
+  # would be exactly that. The clamping belongs one layer up, where the declaration is
+  # visible (`Ouroboros.Wasm.Capability.limits/1`).
+  defp wire_limits(%{fuel: fuel, memory_bytes: memory, deadline_ms: deadline}) do
+    with :ok <- in_range(:fuel, fuel, 1, @max_fuel),
+         :ok <- in_range(:memory_bytes, memory, @min_memory_bytes, @max_memory_bytes),
+         :ok <- in_range(:deadline_ms, deadline, 1, @max_deadline_ms) do
+      {:ok, %{"fuel" => fuel, "memory_bytes" => memory, "deadline_ms" => deadline}}
+    end
   end
 
   defp wire_limits(_other), do: :error
+
+  defp in_range(_key, value, low, high)
+       when is_integer(value) and value >= low and value <= high,
+       do: :ok
+
+  defp in_range(key, value, _low, _high), do: {:error, {:invalid_limits, {key, value}}}
+
+  # The second, narrower check: what the *connected* helper says it accepts. The constants
+  # above are this build's reading of `host.rs` and cannot be newer than the binary on disk,
+  # so a helper whose `doctor.limits` are tighter has the last word. An absent or malformed
+  # report leaves the constants standing rather than widening anything.
+  defp within_helper_limits(state, %{"fuel" => fuel} = wire) do
+    limits = get_in_map(state.doctor, ["limits"])
+
+    with :ok <- under(:fuel, fuel, limits, "max_fuel"),
+         :ok <- over(:memory_bytes, wire["memory_bytes"], limits, "min_memory_bytes"),
+         :ok <- under(:memory_bytes, wire["memory_bytes"], limits, "max_memory_bytes"),
+         :ok <- under(:deadline_ms, wire["deadline_ms"], limits, "max_deadline_ms") do
+      :ok
+    end
+  end
+
+  defp within_helper_limits(_state, _params), do: :ok
+
+  defp under(key, value, limits, name) do
+    case get_in_map(limits, [name]) do
+      bound when is_integer(bound) and bound > 0 and value > bound ->
+        {:error, {:invalid_limits, {key, value}}}
+
+      _within_or_unknown ->
+        :ok
+    end
+  end
+
+  defp over(key, value, limits, name) do
+    case get_in_map(limits, [name]) do
+      bound when is_integer(bound) and bound > 0 and value < bound ->
+        {:error, {:invalid_limits, {key, value}}}
+
+      _within_or_unknown ->
+        :ok
+    end
+  end
 
   defp drop_timer(ref) when is_reference(ref), do: Process.cancel_timer(ref)
   defp drop_timer(_ref), do: :ok

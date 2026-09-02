@@ -82,8 +82,15 @@ defmodule Ouroboros.Application do
   end
 
   # D7's recoverable half runs as a supervised one-shot task after the workspace manager
-  # starts. Boot never waits on Git or on a slow filesystem; a manager restart reruns the
-  # task through the `rest_for_one` chain.
+  # starts, so boot never waits on Git or on a slow filesystem.
+  #
+  # It runs **once per VM**, not once per manager restart: the child spec below is
+  # `restart: :temporary`, and a supervisor drops temporary children from the list it
+  # restarts after a sibling's crash rather than starting them again. Reconciliation is a
+  # boot-time sweep of worktrees that outlived a previous run, and a manager restart does not
+  # create more of those, so once is the right number — but the `rest_for_one` chain is not
+  # what makes it happen, and this comment used to claim it was (F6). The lane-W boot task
+  # beside it needs the opposite and is `:transient` for that reason.
   defp reconcile_worktrees do
     if Application.get_env(:ouroboros, :workspace_allowed_roots, []) != [] do
       report = Ouroboros.Workspace.Worktree.reconcile()
@@ -262,20 +269,36 @@ defmodule Ouroboros.Application do
 
   # The lane-W half of the same idea as `reconcile_worktrees`: a supervised one-shot task,
   # started after the thing it needs — here the helper pool and, far upstream, the rollout
-  # registry — so boot never waits on it and a pool restart reruns it through the
-  # `rest_for_one` chain. It is idempotent by construction (a mesh id already claimed is a
-  # success), so rerunning it is free.
+  # registry — so boot never waits on it.
+  #
+  # `restart: :transient` and not `:temporary`, which is what makes the sentence above about
+  # the `rest_for_one` chain true (F6). A supervisor drops every *temporary* child from the
+  # list it restarts after a sibling's crash — `supervisor:terminate_children/2` terminates
+  # them and does not return them — so a temporary task here was started exactly once per VM
+  # and a pool restart reran nothing, however the comment read. Transient is the shape this
+  # needs: not restarted on its own normal exit (`Wasm.Boot.run/0` returns `:ok` and never
+  # raises, so that is every ordinary run), and restarted when the chain takes it down.
+  #
+  # It is safe to rerun because it is idempotent by construction: a mesh id already claimed
+  # by this component counts as started (`Ouroboros.Wasm.Boot`'s "Idempotent, by
+  # construction"), and an id held by a *different* component is reported as failed rather
+  # than fought over.
   #
   # Skipped entirely on a node with no durable data directory: no store means no manifests
   # and nothing that could have survived a reboot, which is every library start and every
   # test run.
-  defp wasm_restart_children do
+  #
+  # Public (undocumented) so `test/wasm/pool_test.exs` can read the restart type off the spec
+  # this tree actually starts, rather than restating it.
+  @doc false
+  @spec wasm_restart_children() :: [Supervisor.child_spec()]
+  def wasm_restart_children do
     if Ouroboros.Wasm.Boot.enabled?() do
       [
         %{
           id: Ouroboros.Wasm.Boot,
           start: {Task, :start_link, [&Ouroboros.Wasm.Boot.run/0]},
-          restart: :temporary
+          restart: :transient
         }
       ]
     else

@@ -19,25 +19,30 @@ defmodule Ouroboros.Mesh do
   `start_agent/2` is a remote-reachable start surface: `:erpc` from any connected node
   can invoke it and choose the `:agent` module. Startable modules are therefore limited
   to the `Ouroboros.Agent.` and `Ouroboros.Capability.` namespaces — the latter reserved
-  for agents forged at runtime — plus whatever `:mesh_allowed_agent_modules` names in
-  application config.
+  for agents forged at runtime — plus the single named module `Ouroboros.Wasm.Capability`,
+  plus whatever `:mesh_allowed_agent_modules` names in application config.
   """
 
   alias Ouroboros.Mesh.Directory
   alias Ouroboros.Signals.{AgentMessage, TaskAssigned, TaskCompleted}
 
   @scope Ouroboros.Mesh.Scope
-  # `Ouroboros.Wasm.` is admitted for exactly one module — `Ouroboros.Wasm.Capability`, the
-  # static wrapper every WebAssembly capability runs inside (docs/WASM.md §7.2). Widening a
-  # remote-reachable allow-list is safe here because forged code structurally cannot enter
-  # that namespace: the verifier's introduce-prefix requires `Ouroboros.Capability.*` and the
-  # signer policy refuses anything else, and `Ouroboros.Wasm.` is itself in the verifier's
-  # protected set, so the namespace can be started but never patched (D10).
   @agent_module_prefixes [
     "Elixir.Ouroboros.Agent.",
-    "Elixir.Ouroboros.Capability.",
-    "Elixir.Ouroboros.Wasm."
+    "Elixir.Ouroboros.Capability."
   ]
+
+  # Lane W adds exactly one startable module, not a namespace (F5).
+  # `Ouroboros.Wasm.Capability` is the static wrapper every WebAssembly capability runs
+  # inside (docs/WASM.md §7.2); everything else under `Ouroboros.Wasm.` is host machinery —
+  # the pool, the store, the verifier, the rollout — and admitting the prefix meant this
+  # remote-reachable surface said "start any of them" and was saved only by the accident that
+  # none of the others exports `new/0` or `new/1` today. A module added to that namespace
+  # tomorrow would silently become startable from any connected node; naming the one module
+  # is the same protection that does not depend on what the namespace happens to contain.
+  # `test/mesh_test.exs` enumerates the namespace and fails if a second module becomes
+  # startable.
+  @agent_modules ["Elixir.Ouroboros.Wasm.Capability"]
 
   @type agent_id :: String.t()
   # A wedged peer must be able to lose a placement or a stop without losing the caller
@@ -263,7 +268,9 @@ defmodule Ouroboros.Mesh do
   end
 
   defp agent_module_allowed?(module) when is_atom(module) do
-    String.starts_with?(Atom.to_string(module), @agent_module_prefixes) or
+    name = Atom.to_string(module)
+
+    String.starts_with?(name, @agent_module_prefixes) or name in @agent_modules or
       module in Application.get_env(:ouroboros, :mesh_allowed_agent_modules, [])
   end
 

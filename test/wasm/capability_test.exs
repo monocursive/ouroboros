@@ -409,8 +409,7 @@ defmodule Ouroboros.Wasm.CapabilityTest do
       # `catch :exit` does not catch. Both used to lose the entire state write while
       # `Mesh.send_message/4` still answered `{:ok, agent}`.
       for {label, opts} <- [
-            {"a component that is not a sha", [component: 123]},
-            {"a pool that is not a server", [pool: "not-a-server"]}
+            {"a component that is not a sha", [component: 123]}
           ] do
         %{id: id} = capability([], opts)
 
@@ -428,25 +427,30 @@ defmodule Ouroboros.Wasm.CapabilityTest do
       end
     end
 
-    test "a recorded refusal never carries the message that produced it (F6)" do
-      # `GenServer.call/3` puts its whole request in the exit reason, so a `call` against a
-      # dead pool used to store the entire outbound payload inside `:error`.
-      id = "wasm-unbounded-#{System.unique_integer([:positive])}"
+    test "a recorded refusal is bounded however large the term that produced it is (F6)" do
+      # The original shape of this — a `call` against a pool that is not running, whose exit
+      # reason carries the whole outbound payload — is no longer reachable: a `:pool` that
+      # does not resolve to a live local `Ouroboros.Wasm.Pool` is refused before a request is
+      # built (F3), and the test below proves that. What is still reachable, and is the same
+      # bound, is a refusal built out of a caller-supplied *term*: `Store.path/2` answers
+      # `{:invalid_sha256, sha}` with the whole of what it was handed.
+      huge = String.duplicate("component-", 20_000)
       secret = String.duplicate("payload-", 20_000)
-
-      %{id: ^id} =
-        capability([],
-          id: id,
-          instance: derived_name(id),
-          pool: :"wasm_pool_that_is_not_running_#{System.unique_integer([:positive])}"
-        )
+      %{id: id} = capability([], component: huge)
 
       assert {:ok, _agent} = Mesh.send_message("tester", id, %{"body" => secret})
 
-      assert %{stage: :call, reason: reason} = state(id).error
+      assert %{stage: :store, reason: reason} = state(id).error
       assert is_binary(reason)
-      refute reason =~ "payload-payload-"
-      assert byte_size(reason) <= 2_048
+
+      # Cut, rather than the 200 KB term the store handed back.
+      assert byte_size(reason) <= 2_048 + 8
+      assert byte_size(huge) > 100_000
+      refute reason =~ String.duplicate("component-", 100)
+
+      # And never the message that produced it, which is what a `GenServer.call/3` exit
+      # reason carries whole.
+      refute reason =~ "payload-"
     end
 
     test "a malformed frame's keys are bounded by bytes, not only counted (F6)" do
@@ -612,6 +616,157 @@ defmodule Ouroboros.Wasm.CapabilityTest do
     end
   end
 
+  describe "nothing in initial_state is trusted, because nothing validates it (F3)" do
+    test "a pool that is not this node's wasm pool is refused, and no request is sent" do
+      # The proof the review ran: `pool: [type: :any]` let a remote starter aim this agent's
+      # `GenServer.call` at any registered process, and the pool's `{:request, …}` tuple then
+      # killed the process that received it on a `function_clause`. Here the victim is a
+      # plain `Agent` under a name the starter chose, and it has to survive the message.
+      victim_name = :"wasm_capability_victim_#{unique()}"
+      {:ok, victim} = Agent.start(fn -> :untouched end, name: victim_name)
+      on_exit(fn -> if Process.alive?(victim), do: Agent.stop(victim) end)
+
+      for {label, aimed} <- [
+            {"a registered name", victim_name},
+            {"a bare pid", victim},
+            {"a string", "not-a-server"},
+            {"a module that is not the pool", Ouroboros.Wasm.Store}
+          ] do
+        %{id: id} = capability([], pool: aimed)
+
+        assert {:ok, _agent} = Mesh.send_message("tester", id, %{seq: 1})
+        state = state(id)
+
+        assert %{stage: :pool, reason: {:pool_not_a_wasm_pool, described}} = state.error, label
+        assert is_binary(described), label
+
+        # Recorded, answered, and the agent is still an agent that received a message.
+        assert state.messages_received == 1, label
+        assert state.instance == nil, label
+        assert is_pid(Mesh.whereis(id)), label
+      end
+
+      # The whole point: nothing was ever sent, so the process somebody aimed at is alive
+      # and holds exactly what it held.
+      assert Process.alive?(victim)
+      assert Agent.get(victim, & &1) == :untouched
+    end
+
+    test "the node's own pool is always allowed, running or not" do
+      # `Ouroboros.Wasm.Pool` is this node's lazy singleton and is not refused as a start
+      # state: a node where it is not running answers `:unavailable` through the ordinary
+      # path, which is a more honest sentence than "you may not name your own pool".
+      %{id: id} = capability([], pool: Ouroboros.Wasm.Pool, component: "not-a-sha")
+
+      assert {:ok, _agent} = Mesh.send_message("tester", id, %{seq: 1})
+
+      # It got past the pool check and refused on the component instead.
+      assert %{stage: :store} = state(id).error
+    end
+
+    test "a seeded store_root is ignored where config does not allow the override" do
+      # `:store_root` names which bytes run. On a remote-reachable start surface that is an
+      # arbitrary read of unsigned, unregistered bytes out of any directory this user can
+      # read, so it is honoured only where the node's own config says so.
+      env = capability(load: [result(%{"cached" => false, "evicted" => []})])
+
+      put_wasm_config(allow_store_root_override: false)
+
+      %{id: id} = capability([], env: env, id: "wasm-root-#{unique()}")
+
+      assert {:ok, _agent} = Mesh.send_message("tester", id, %{seq: 1})
+
+      # The seeded root held the only copy of these bytes, and the node's own store is not
+      # the seeded directory — so the component was never found, never loaded, and never
+      # instantiated. (This node configures no `:data_dir`, so its own store root is
+      # `:no_data_dir`; a node that has one answers `{:unknown_component, sha}`. Either way
+      # the seeded directory was not read.)
+      assert %{stage: :store, reason: reason} = state(id).error
+      assert reason in [:no_data_dir] or match?({:unknown_component, _sha}, reason)
+      refute Enum.any?(requests(env.journal), &(&1["method"] == "load"))
+    end
+
+    test "declared limits are clamped to the node's ceiling, and the clamp is recorded" do
+      # Proved on the wire before this: a remote starter wrote the helper's own maxima into
+      # `initial_state` and got them — a trillion units of fuel, a gibibyte, sixty seconds
+      # per message — on a node that had agreed to none of it.
+      ceiling = Wasm.capability_limits_max()
+      greedy = %{fuel: 1_000_000_000_000, memory_bytes: 1_073_741_824, deadline_ms: 60_000}
+
+      %{id: id, journal: journal} =
+        capability([call: [result(%{"payload" => ~s({"n":1}), "fuel_used" => 1})]],
+          limits: greedy
+        )
+
+      assert {:ok, _agent} = Mesh.send_message("tester", id, %{seq: 1})
+
+      # What went out is the ceiling, element-wise, not what was declared.
+      assert %{"params" => %{"limits" => sent}} = request(journal, "instantiate")
+
+      assert sent == %{
+               "fuel" => ceiling.fuel,
+               "memory_bytes" => ceiling.memory_bytes,
+               "deadline_ms" => ceiling.deadline_ms
+             }
+
+      # And the declaration this node would not honour is visible rather than silently
+      # obeyed — on a message that otherwise succeeded.
+      state = state(id)
+      assert state.last_answer == %{"n" => 1}
+      assert %{stage: :limits, reason: {:limits_clamped, ^greedy, clamped}} = state.error
+      assert clamped == ceiling
+    end
+
+    test "a declaration inside the ceiling is honoured whole, and records nothing" do
+      modest = %{fuel: 1_000_000, memory_bytes: 1_048_576, deadline_ms: 500}
+
+      %{id: id, journal: journal} =
+        capability([call: [result(%{"payload" => ~s({"n":1}), "fuel_used" => 1})]],
+          limits: modest
+        )
+
+      assert {:ok, _agent} = Mesh.send_message("tester", id, %{seq: 1})
+
+      assert %{"params" => %{"limits" => sent}} = request(journal, "instantiate")
+
+      assert sent == %{
+               "fuel" => 1_000_000,
+               "memory_bytes" => 1_048_576,
+               "deadline_ms" => 500
+             }
+
+      assert state(id).error == nil
+      assert Capability.note(%{limits: modest}) == nil
+    end
+
+    test "limits/1 clamps whatever it is handed, defaults included" do
+      ceiling = Wasm.capability_limits_max()
+
+      assert Capability.limits(%{limits: %{fuel: 1, memory_bytes: 2, deadline_ms: 3}}) ==
+               %{fuel: 1, memory_bytes: 2, deadline_ms: 3}
+
+      assert Capability.limits(%{
+               limits: %{
+                 fuel: ceiling.fuel * 2,
+                 memory_bytes: ceiling.memory_bytes * 2,
+                 deadline_ms: ceiling.deadline_ms * 2
+               }
+             }) == ceiling
+
+      # An operator who raised `capability_limits` past the ceiling raised nothing: the
+      # default is clamped by the same rule as a declaration.
+      put_wasm_config(
+        capability_limits: [
+          fuel: ceiling.fuel * 2,
+          memory_bytes: ceiling.memory_bytes * 2,
+          deadline_ms: ceiling.deadline_ms * 2
+        ]
+      )
+
+      assert Capability.limits(%{limits: %{}}) == ceiling
+    end
+  end
+
   ## Fixtures
 
   # One capability agent, its own pool, its own helper, its own store. `plans` scripts the
@@ -668,6 +823,16 @@ defmodule Ouroboros.Wasm.CapabilityTest do
     on_exit(fn -> Mesh.stop_agent(id) end)
 
     Map.put(env, :id, id)
+  end
+
+  # Replaces a few keys of the node's shipped `:wasm` config for one test and restores the
+  # whole keyword at teardown. Built from the running config rather than from a literal, so
+  # a test that moves one bound does not silently rewrite the other eight. This module is
+  # `async: false` precisely because this is global.
+  defp put_wasm_config(overrides) do
+    previous = Application.get_env(:ouroboros, :wasm, [])
+    on_exit(fn -> Application.put_env(:ouroboros, :wasm, previous) end)
+    Application.put_env(:ouroboros, :wasm, Keyword.merge(previous, overrides))
   end
 
   defp seed(state, opts, key) do
