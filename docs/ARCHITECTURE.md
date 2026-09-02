@@ -348,7 +348,7 @@ private, and metadata destinations; it also refuses to follow a redirect off the
 that was evaluated. The README states the same limits where an operator will read them.
 
 The `capability` tool reaches a deployed WebAssembly capability — the `:live` lane-W
-rollouts on this node, and nothing else on the mesh. It is gated by `Capability(<name>)`
+rollouts that name this node, and nothing else on the mesh. It is gated by `Capability(<name>)`
 rules, ledgered with the component's sha256, and everything a component says back to the
 model is bounded and labelled untrusted; `agents.message` is the same reach for a script,
 at gateway `:operate` scope. docs/WASM.md §7.7 and D17 are the whole story, including what

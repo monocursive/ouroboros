@@ -15,6 +15,7 @@ defmodule Ouroboros.Control.Permissions.Pattern do
       mcp__<server>__<tool>     one MCP tool
       mcp__<server>__*          every tool on one MCP server
       Tool(<name>)              one tool by the name the provider calls it
+                                (`Tool(capability)`: deny and ask only — see `decisions/1`)
       Tool(<name>:<param>=<v>)  that tool with that parameter — deny and ask only
       ComputerUse(observe)      the desktop_state tool
       ComputerUse(act)          the desktop_act tool
@@ -72,6 +73,9 @@ defmodule Ouroboros.Control.Permissions.Pattern do
   # it is the whole specification of the rule language, and a rule's meaning must not
   # change because another plane changed its mind.
   @capability_name ~r/\A[a-z0-9][a-z0-9._-]{0,63}\z/
+
+  # The one tool whose `Tool(<name>)` form may not carry an allow. See `decisions/1`.
+  @per_target_tool "capability"
 
   @enforce_keys [:raw, :kind, :spec, :fragile?]
   defstruct @enforce_keys
@@ -141,9 +145,23 @@ defmodule Ouroboros.Control.Permissions.Pattern do
   `Capability(…)` is `:any` for exactly that reason too: the name it matches is put in the
   request context only when it resolves to a `:live` lane-W rollout on this node, so it is
   a register's answer and not a string the model wrote.
+
+  `Tool(capability)` is the second `:deny_or_ask_only`, and it is a different argument.
+  The pattern is perfectly precise — it names one tool — but that tool's authority is not
+  the tool: one call reaches one deployed component, and every component is somebody else's
+  program. An allow on the tool is therefore an allow on every capability this node has
+  deployed *and every one it will deploy later*, which is not a sentence anybody answering
+  a prompt about `vet` meant to say (docs/WASM.md §7.7). Denying and asking on the tool
+  stay available, because both are narrowing. `Capability(<name>)` and `Capability(*)` are
+  how an allow is written, and the second one says the broad thing out loud.
   """
   @spec decisions(t()) :: :any | :deny_or_ask_only
   def decisions(%__MODULE__{kind: :tool_param}), do: :deny_or_ask_only
+
+  def decisions(%__MODULE__{kind: :tool, spec: %{name: name}}) do
+    if String.downcase(name) == @per_target_tool, do: :deny_or_ask_only, else: :any
+  end
+
   def decisions(%__MODULE__{}), do: :any
 
   @doc "Whether this pattern constrains arguments, and is therefore routed around easily."

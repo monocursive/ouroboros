@@ -118,43 +118,58 @@ defmodule Ouroboros.Wasm.CapabilityAcceptanceTest do
       assert state.last_message.body == %{"hello" => "world"}
     end
 
-    # W13. The wrapper reads the guest's own `describe` export through the real helper and
-    # holds it to contract C1. The guest's document is the smallest legal one — name,
-    # version, world and nothing else — which is exactly the case a validator written
-    # against the optional keys would get wrong.
+    # W13/D17. The description is read at deploy time, on its own instance, and never on the
+    # message path. This is the real helper and a real component: what it proves is that the
+    # export the world declares, the toolchain built, and contract C1 all agree.
     @tag @needs_live
-    test "the guest's own describe is read, validated, and kept tagged untrusted" do
-      %{id: id} = capability()
+    test "the guest's own describe is captured at deploy time and satisfies contract C1" do
+      %{pool: pool, root: root, sha: sha} = staged()
 
-      assert state(id).describe == nil, "nothing is described before a message"
+      state = %{
+        component: sha,
+        config: ~s({"greeting":"hello"}),
+        name: "echo",
+        limits: Wasm.capability_limits(),
+        pool: pool,
+        store_root: root
+      }
 
-      assert {:ok, _agent} = Mesh.send_message("acceptance", id, %{"hello" => "world"})
-      state = state(id)
+      assert {:ok, document} = Capability.capture_describe(state)
 
-      assert {:untrusted, {:ok, document}} = state.describe
       assert document.name == "ouroboros-echo-guest"
       assert document.world == Wasm.world()
       assert document.version =~ ~r/\A\d+\.\d+\.\d+/
 
-      # The optional half is absent in this guest and is `nil`/`[]` rather than missing:
-      # the shape a reader renders is the same whichever keys a component wrote.
+      # The guest writes the smallest legal document — name, version, world and nothing
+      # else — which is exactly the case a validator written against the optional keys gets
+      # wrong. The absent half is `nil`/`[]` rather than missing, so a reader renders one
+      # shape whichever keys a component chose to write.
       assert document.summary == nil
       assert document.input_schema == nil
       assert document.examples == []
 
-      # Fetching it did not disturb the message that triggered it, and did not disturb the
-      # instance either: the guest's own counter proves the same instance answers next.
-      assert state.error == nil
-      assert state.last_answer["n"] == 1
+      # Nothing a component wrote carries a character that could make it stop looking like
+      # a component's words.
+      assert Capability.Describe.clean_text?(document)
+    end
+
+    @tag @needs_live
+    test "a message to the real guest asks the helper for no metadata at all" do
+      %{id: id} = capability()
+
+      assert {:ok, _agent} = Mesh.send_message("acceptance", id, %{"hello" => "world"})
+      first = state(id)
+
+      # F2, against the real wire: the wrapper holds no description and asked for none, so
+      # nothing a component does to its own `describe` can spend a caller's budget.
+      refute Map.has_key?(first, :describe)
+      assert first.last_answer["n"] == 1
 
       assert {:ok, _agent} = Mesh.send_message("acceptance", id, %{"hello" => "again"})
       second = state(id)
 
       assert second.last_answer["n"] == 2
-      assert second.instance == state.instance
-      # Once per agent: the description is a property of the bytes, and the bytes did not
-      # change between the two messages.
-      assert second.describe == state.describe
+      assert second.instance == first.instance
     end
   end
 

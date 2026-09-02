@@ -149,10 +149,149 @@ defmodule Ouroboros.Gateway.AgentsMessageTest do
     end
   end
 
-  defp start_worker do
+  describe "the reply, bounded and marked (F12)" do
+    test "a reply past the bound comes back as a marked string, not a cut document" do
+      # M29/M37/G3. Three bytes per character, so a cut at a byte boundary lands inside one
+      # unless it is walked back; and the marker is what tells a client that the JSON it is
+      # holding is a prefix rather than a document.
+      id = worker(%{last_answer: String.duplicate("€", 40 * 1024)})
+
+      assert {:ok, %{truncated: true, reply: reply}} =
+               Methods.invoke("agents.message", %{"to" => id, "body" => %{}})
+
+      assert is_binary(reply)
+      assert String.valid?(reply), "the cut landed inside a character"
+      assert byte_size(reply) <= 64 * 1024
+      assert reply =~ "truncated at 65536 bytes"
+    end
+
+    test "a reply inside the bound comes back whole, and says it was not cut" do
+      id = worker(%{last_answer: %{"findings" => [], "checked" => 12}})
+
+      assert {:ok, %{truncated: false, reply: reply}} =
+               Methods.invoke("agents.message", %{"to" => id, "body" => %{}})
+
+      assert reply == %{"findings" => [], "checked" => 12}
+    end
+  end
+
+  describe "agents.state is a read of somebody else's words (F4)" do
+    test "a lane-W agent's state is labelled untrusted and bounded" do
+      id = "wasm/gw-#{System.unique_integer([:positive])}"
+      big = String.duplicate("€", 40 * 1024)
+
+      {:ok, _pid} =
+        Mesh.start_agent(id,
+          agent: Ouroboros.Agent.Worker,
+          initial_state: %{last_answer: big}
+        )
+
+      on_exit(fn -> Mesh.stop_agent(id) end)
+
+      assert {:ok, result} = Methods.invoke("agents.state", %{"id" => id})
+
+      # `agents.state` is `:read` and it hands back the same two fields `agents.message`
+      # labels. It carries the same label now, and the same bound.
+      assert result.untrusted == true
+      assert result.truncated == true
+
+      answer = result.agent.state.last_answer
+      assert is_binary(answer)
+      assert byte_size(answer) <= 64 * 1024
+      assert String.valid?(answer)
+      assert answer =~ "truncated at 65536 bytes"
+    end
+
+    test "the message a capability was sent is bounded on the same rule" do
+      id = "wasm/gw-#{System.unique_integer([:positive])}"
+
+      # Seeded rather than sent, because `agents.message` caps a body at the same 64 KiB and
+      # the claim here is about what `agents.state` does with a field it finds — a capability
+      # is also messaged by probes, evaluations and other agents, none of which pass through
+      # that cap.
+      {:ok, _pid} =
+        Mesh.start_agent(id,
+          agent: Ouroboros.Agent.Worker,
+          initial_state: %{last_message: %{body: String.duplicate("€", 40 * 1024)}}
+        )
+
+      on_exit(fn -> Mesh.stop_agent(id) end)
+
+      assert {:ok, result} = Methods.invoke("agents.state", %{"id" => id})
+      assert result.truncated == true
+
+      message = result.agent.state.last_message
+      assert is_binary(message)
+      assert byte_size(message) <= 64 * 1024
+      assert message =~ "truncated at 65536 bytes"
+    end
+
+    test "an agent that is not a capability is answered exactly as before" do
+      id = start_worker()
+
+      assert {:ok, result} = Methods.invoke("agents.state", %{"id" => id})
+
+      # This is a statement about who wrote the content, not a cap on introspection.
+      refute Map.has_key?(result, :untrusted)
+      refute Map.has_key?(result, :truncated)
+      assert is_map(result.agent.state)
+    end
+  end
+
+  describe "what a message may leave behind (F9)" do
+    test "an agent's inbox keeps the newest messages and drops the rest" do
+      id = start_worker()
+      blob = String.duplicate("x", 60 * 1024)
+
+      # G2. `agents.message` makes an unbounded list reachable from any `:operate` client on
+      # any node in the cluster: twelve of these retained three quarters of a megabyte, and
+      # nothing pruned it ever. Twenty is past the byte bound, which is the one that fires
+      # first for bodies this size.
+      for n <- 1..20 do
+        assert {:ok, %{to: ^id}} =
+                 Methods.invoke("agents.message", %{
+                   "to" => id,
+                   "body" => %{"n" => n, "blob" => blob},
+                   "timeout_ms" => 5_000
+                 })
+      end
+
+      assert {:ok, %{agent: %{state: state}}} = Mesh.state(id)
+
+      # The count is still true — a bounded mailbox is not a bounded history.
+      assert state.messages_received == 20
+
+      assert :erlang.external_size(state.inbox) <= 1024 * 1024,
+             "the inbox retained #{:erlang.external_size(state.inbox)} bytes"
+
+      # Newest kept, oldest dropped: what a mailbox is for.
+      assert List.last(state.inbox).body["n"] == 20
+      assert length(state.inbox) < 20
+    end
+
+    test "small messages are kept up to the count bound, and the newest survive" do
+      id = start_worker()
+
+      for n <- 1..70 do
+        assert {:ok, _sent} =
+                 Methods.invoke("agents.message", %{"to" => id, "body" => %{"n" => n}})
+      end
+
+      assert {:ok, %{agent: %{state: state}}} = Mesh.state(id)
+
+      assert length(state.inbox) == 64
+      assert List.last(state.inbox).body["n"] == 70
+      assert List.first(state.inbox).body["n"] == 7
+      assert state.messages_received == 70
+    end
+  end
+
+  defp start_worker, do: worker(%{})
+
+  defp worker(state) do
     id = "gateway-agents-message-#{System.unique_integer([:positive])}"
 
-    {:ok, _pid} = Mesh.start_agent(id, agent: Ouroboros.Agent.Worker)
+    {:ok, _pid} = Mesh.start_agent(id, agent: Ouroboros.Agent.Worker, initial_state: state)
     on_exit(fn -> Mesh.stop_agent(id) end)
 
     id

@@ -600,7 +600,10 @@ defmodule Ouroboros.Provider.Native.Tools do
   # same distinction `ComputerUse(app:…)` draws — and it is what puts the component's
   # identity, not its name alone, into the ledger entry for the call.
   defp context("capability", input) do
-    case Capability.resolve(claimed_string(input, "name")) do
+    # `Map.get/2` and not `claimed_string/2`: the engine must be asked about the *exact*
+    # string the model wrote, and `Tools.Capability.resolve/1` is the one function that
+    # judges it — the same one the tool calls a moment later with the same value (F1).
+    case Capability.resolve(Map.get(input, "name") || Map.get(input, :name)) do
       %{name: name, component_sha256: sha} -> %{capability: name, component_sha256: sha}
       nil -> %{}
     end
@@ -608,12 +611,9 @@ defmodule Ouroboros.Provider.Native.Tools do
 
   defp context(_name, _input), do: %{}
 
-  defp operation(input) do
-    case Map.get(input, "operation") || Map.get(input, :operation) do
-      value when is_binary(value) -> String.trim(value)
-      _absent -> nil
-    end
-  end
+  # Untrimmed, because `Tools.Capability` is untrimmed: a value the classifier repaired and
+  # the tool did not is a value the permission engine judged and the tool never ran (F1).
+  defp operation(input), do: Map.get(input, "operation") || Map.get(input, :operation)
 
   defp claimed_app(input) do
     case Map.get(input, "app") || Map.get(input, :app) do

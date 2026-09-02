@@ -152,6 +152,11 @@ defmodule Ouroboros.Gateway.Methods do
   # opaque ids the forge does, short enough that a refused lookup costs nothing.
   @max_agent_id_bytes 512
 
+  # The id prefix a lane-W capability runs under. `Ouroboros.Wasm.Rollout` mints it; it is
+  # restated here rather than imported because this module must not depend on the wasm plane
+  # to answer a verb about the mesh, and it is one short literal.
+  @wasm_agent_prefix "wasm/"
+
   # E2/E3. Code intelligence is the one read whose upstream is a foreign OS process, and
   # its own defaults are generous on purpose: `initialize_timeout_ms` is 45s because
   # ElixirLS and jdtls compile the world on first launch. A gateway method cannot wait
@@ -840,7 +845,9 @@ defmodule Ouroboros.Gateway.Methods do
       {:closed, [{"api_key", :required, :string, "replaces the privately stored xAI API key"}],
        "updates the node-owned xAI API key without returning it; `XAI_API_KEY` still takes precedence"},
     "agents.list" => {:open, []},
-    "agents.state" => {:open, [{"id", :required, :string, "the agent id"}]},
+    "agents.state" =>
+      {:open, [{"id", :required, :string, "the agent id"}],
+       "for a lane-W capability (`wasm/<name>`) the answer additionally carries `untrusted: true` and `truncated`, and `agent.state.last_answer`/`last_message` are bounded at 64 KiB with an in-band marker: both are written by a component, and this verb is `read`"},
     "agents.stop" => {:open, [{"id", :required, :string, "the agent id"}]},
     "interactive.list" => {:open, []},
     "interactive.info" => {:closed, [@session_id, @session_node]},
@@ -1542,8 +1549,15 @@ defmodule Ouroboros.Gateway.Methods do
 
   def invoke("agents.list", _params), do: safe(fn -> reply(Mesh.list_agents()) end)
 
+  # W13/F4. `agents.state` is `:read` and hands back an agent's whole state. For a lane-W
+  # capability that state holds `last_answer` and `last_message` — a component's own prose,
+  # unbounded, through the one verb a read-only listener may call. So for a `wasm/` agent
+  # the two fields are bounded exactly as `agents.message`'s reply is and the answer carries
+  # `untrusted: true` beside them, which is the same label its sibling verb carries and for
+  # the same reason. Every other agent is answered unchanged: this is a statement about who
+  # wrote the content, not a general cap on introspection.
   def invoke("agents.state", params) do
-    with_id(params, fn id -> safe(fn -> reply(Mesh.state(id)) end) end)
+    with_id(params, fn id -> safe(fn -> reply(bounded_agent_state(id, Mesh.state(id))) end) end)
   end
 
   def invoke("interactive.list", _params),
@@ -2962,6 +2976,24 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   # W13 ------------------------------------------------------------------------------
+  defp bounded_agent_state(@wasm_agent_prefix <> _name, {:ok, %{agent: %{state: state}} = server})
+       when is_map(state) do
+    {answer, answer_truncated?} = bounded_answer(Map.get(state, :last_answer))
+    {message, message_truncated?} = bounded_answer(Map.get(state, :last_message))
+
+    bounded =
+      state
+      |> Map.replace(:last_answer, answer)
+      |> Map.replace(:last_message, message)
+
+    {:ok,
+     server
+     |> Map.put(:agent, Map.put(server.agent, :state, bounded))
+     |> Map.put(:untrusted, true)
+     |> Map.put(:truncated, answer_truncated? or message_truncated?)}
+  end
+
+  defp bounded_agent_state(_id, result), do: result
 
   defp agent_id(params, key) do
     case Map.get(params, key) do
@@ -3081,8 +3113,17 @@ defmodule Ouroboros.Gateway.Methods do
 
   defp truncate(text) when byte_size(text) <= @max_agent_message_bytes, do: text
 
-  defp truncate(text),
-    do: text |> binary_part(0, @max_agent_message_bytes) |> valid_prefix()
+  # In band, and by design. A client holding a JSON document that was silently cut has a
+  # document it will try to parse and fail on with no idea why; the marker is the only thing
+  # in the value itself that says what happened, and it is the same sentence the native
+  # `capability` tool appends for the same reason. Room is made for it *inside* the bound,
+  # so a truncated reply is never larger than an untruncated one may be.
+  defp truncate(text) do
+    marker = "… truncated at #{@max_agent_message_bytes} bytes."
+    keep = @max_agent_message_bytes - byte_size(marker)
+
+    text |> binary_part(0, max(keep, 0)) |> valid_prefix() |> Kernel.<>(marker)
+  end
 
   # The cut is by bytes and walked back to a whole character: half a codepoint is a string
   # the JSON encoder on the way out would refuse.

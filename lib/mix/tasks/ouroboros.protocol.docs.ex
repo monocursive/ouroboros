@@ -97,6 +97,7 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
     "wasm_sign_result" => {:method, "wasm.sign"},
     "wasm_deploy_result" => {:method, "wasm.deploy"},
     "wasm_rollback_result" => {:method, "wasm.rollback"},
+    "agents_message_truncated_result" => {:method, "agents.message"},
     "workspace_browse_result" => {:method, "workspace.browse"},
     "interactive_event_notification" => {:notification, "interactive.event"},
     "interactive_event_excerpt_notification" => {:notification, "interactive.event"},

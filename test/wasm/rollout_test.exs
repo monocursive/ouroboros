@@ -491,6 +491,17 @@ defmodule Ouroboros.Wasm.RolloutTest do
       assert entry.component_sha256 == artifact.component_sha256
       assert entry.epoch == artifact.epoch
 
+      # W13/D17. The description is captured at deploy time, on a throwaway instance, and
+      # stored on the entry. This is where it is read from afterwards — never from the
+      # message path, where a slow `describe` used to cost a healthy component its probe.
+      assert {:ok, document} = entry.describe
+      assert document.name == "ouroboros-echo-guest"
+      assert document.world == Ouroboros.Wasm.world()
+      assert document.summary == nil
+      assert document.examples == []
+
+      assert outcome.deployment[node()].describe == :described
+
       # And the sha is now protected from pruning, which is what W1 left ready.
       assert {:ok, protected} = Store.protected_shas(registry: context.registry)
       assert MapSet.member?(protected, artifact.component_sha256)
@@ -722,6 +733,40 @@ defmodule Ouroboros.Wasm.RolloutTest do
       # "checkpoint before effect" buys: a crash mid-rollout leaves evidence there was one.
       assert {:ok, entry} = Registry.get(artifact.id, context.registry)
       assert entry.component_sha256 == artifact.component_sha256
+    end
+  end
+
+  describe "the description gate (W13)" do
+    @tag @needs_live
+    test "a describe that cannot finish in its budget stops the deploy", context do
+      env = live_env(context)
+      name = unique_name()
+      id = start_id(name)
+      artifact = guest!(context, name: name, start: %{id: id, config: ~s({"greeting":"hello"})})
+      on_exit(fn -> Mesh.stop_agent(id) end)
+
+      # The same component that deploys cleanly above, given a metadata budget it cannot
+      # answer inside: one unit of fuel, so the guest traps describing itself. F2's whole
+      # point is that this cost lands here, at deploy, with the deploy's own evidence — and
+      # not on the first message a rollout probe sends, where a component that merely took
+      # time to describe itself failed a health check it had nothing to do with.
+      assert {:error, {state, outcome}} =
+               deploy(
+                 artifact,
+                 [node()],
+                 context,
+                 env ++ [describe_limits: %{fuel: 1, memory_bytes: 1024 * 1024, deadline_ms: 100}]
+               )
+
+      assert state in [:quarantined, :rolled_back]
+      assert outcome.stage == :describe
+      refute match?({:ok, _document}, outcome.deployment[node()].describe)
+
+      # Nothing went live, and nothing was recorded as a description.
+      assert {:ok, entry} = Registry.get(artifact.id, context.registry)
+      assert entry.state == state
+      assert entry.describe == nil
+      refute entry.state == :live
     end
   end
 

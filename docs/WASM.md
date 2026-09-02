@@ -696,12 +696,13 @@ and there are exactly two ways to reach one. Neither is `Mesh.send_message/4` fr
 shell, which remains what it always was: an operator with an IEx prompt has the node.
 
 * **The model** calls the native `capability` tool. `list` answers with the register's own
-  facts about every `:live` lane-W rollout on this node — name, epoch, component sha256,
-  and whether an agent is running — beside each component's own `describe`, labelled
-  `[untrusted, authored by the component]` and bounded. `call` takes `{name, message}` and
-  answers with the reply, bounded at 64 KiB with a truncation marker and labelled the same
-  way. Only a name the register calls live is reachable: this is not a mesh client, and a
-  model naming any other agent id is refused before anything is sent.
+  facts about every `:live` lane-W rollout **that names this node a target** — name, epoch,
+  component sha256, and whether an agent is running — beside each component's own
+  `describe`, read from the register entry, labelled `[untrusted, authored by the
+  component]` and bounded. `call` takes `{name, message}` and answers with the reply, whose
+  **every line** carries that same label, bounded at 64 KiB with a truncation marker. Only a
+  name the register calls live is reachable: this is not a mesh client, and a model naming
+  any other agent id is refused before anything is sent.
 * **A script or the TUI** calls the gateway verb `agents.message` `{to, body, from?,
   timeout_ms?}`, scope `:operate`. That one reaches *any* mesh agent, because the mesh
   already resolves an agent anywhere in the cluster and a second, weaker answer in the
@@ -709,19 +710,43 @@ shell, which remains what it always was: an operator with an IEx prompt has the 
   `wasm.status` is `:read`: sending a message to a capability starts the containment
   helper and runs a component.
 
+**One name, and it is the one the model wrote.** `Tools.Capability.resolve/1` is the single
+function that turns a string into a capability, and both the permission engine's question
+and the tool's message are asked with the *exact* bytes the model sent. Nothing anywhere
+trims. That identity is load-bearing rather than tidy: while classification and execution
+normalised differently, a name padded with a non-breaking space resolved to nothing for the
+engine — so a `Capability(*)` deny did not match — and to a live capability for the tool, so
+the message went anyway and the ledger entry named neither the capability nor its bytes. A
+name that is not `Wasm.Artifact.name?/1` is refused before the register is read at all.
+
 **The permission rule keys on the capability, never on the tool.** `Capability(<name>)`
 matches a call to that capability, `Capability(*)` matches a call to any, and with no rule
 written the engine's own posture applies: ask, once per capability, and the operator's
-answer is what persists. An *allow* on the pattern is honest because the name it matches
+answer is what persists. An *allow* on those patterns is honest because the name they match
 is one this node resolved against its live rollouts before the engine was asked — the same
 distinction `ComputerUse(app:…)` draws against `Tool(<name>:<param>=…)`, whose parameter is
 whatever the provider reported. A name that does not resolve carries no `capability` in the
 request context at all, so `Capability(*)` cannot cover "we could not tell which one".
 
+`Tool(capability)` is **deny-and-ask only**, enforced by `Pattern.decisions/1` and therefore
+by every path that creates a rule — node configuration, `permissions.add`, and the
+remember-this-answer flow alike. The pattern is perfectly precise about the tool; the
+problem is that the tool is not the authority. One call reaches one deployed component, so
+an allow on the name is an allow on every capability this node has deployed *and every one
+it will deploy later*. Narrowing on the tool stays available, because narrowing is always
+honest. `Capability(*)` is how the broad thing is said out loud.
+
 The tool call is ledgered like every other tool call, and its subject carries both the
 capability's name and the sha256 of its component bytes. D11 says a mesh message is not
 individually ledgered; this entry is therefore the only written record that a model reached
 a component, which is why a name without the digest would not have been enough.
+
+**Where a description comes from.** Not from the component, at read time — from the
+registry entry, where the deploy that admitted the component put it (D17). `agents.state`
+is `:read` and returns a capability's whole state, so for a `wasm/` agent it carries
+`untrusted: true` and bounds `last_answer` and `last_message` to the same 64 KiB with the
+same in-band marker: the sibling verb labels those two fields, and a read-only listener
+must not be the way around the label.
 
 ## 8. Lane H: hooks and policy as components
 
@@ -1027,35 +1052,6 @@ machinery — it is a backend, not a lane (D9).
   bare compile exists to establish, since `a)|(x` otherwise anchors to an unanchored
   alternation — and says so rather than claiming to have compiled anything. The node's
   compile is still the one that decides.
-- **D17 — a capability is reachable as a tool, and `describe` is read after the message,
-  once.** Two decisions, and both are about ordering.
-
-  *Reachability.* The `capability` tool is a seam between two untrusted parties — the model
-  and the component — so it is not a mesh client: only a `:live` lane-W entry in this node's
-  register is reachable, and the register is consulted again inside the tool rather than
-  trusted from classification. The permission rule is `Capability(<name>)` and the name it
-  matches is one the node resolved, which is what makes an *allow* on it honest rather than
-  a parameter equality test on a string the model wrote (`Tool(…:param=)`, refused for
-  allows, exists precisely to mark that difference). The mesh message itself stays
-  unledgered per D11; the **tool call** is ledgered like every other, carrying the
-  capability's name and the component's sha256, and that entry is therefore the whole
-  written record that a model reached a component. `agents.message` is the operator's half
-  of the same reach, at `:operate`, and it is deliberately not node-routed: the mesh already
-  resolves an agent anywhere in the cluster, so a capability on a peer is reachable today
-  and the boundary that makes that safe is the helper's linker.
-
-  *Ordering.* `Ouroboros.Wasm.Capability` reads a component's `describe` on the message
-  path, **after** `handle-message` has been answered, and only when it has none. After,
-  because `describe` is guest code that can trap, and a trap poisons the instance — reading
-  it first would have turned a component with a broken `describe` into a component whose
-  every first message fails, including the one message a rollout probe spends deciding
-  whether a deploy is healthy. Once, because the answer is a property of `:component`, which
-  does not change for the life of an agent. The cost is that a live capability nobody has
-  messaged has no description, and `list` says exactly that rather than inventing one. A
-  refusal that is the component's own — a guest error, a trap, an oversize result — is
-  recorded as its description and never retried; a transport refusal records nothing, so the
-  next message asks again. Proved in `test/wasm/capability_test.exs` (the scripted helper,
-  per rule) and `test/wasm/capability_acceptance_test.exs` (the real guest).
 - **D15 — deploying over the socket is sound, and the old comment was wrong.**
   `gateway/methods.ex` used to say there would deliberately never be a `wasm.deploy`,
   because "a component runs on somebody's machine under a signature". The premise was
@@ -1100,6 +1096,60 @@ machinery — it is a backend, not a lane (D9).
   components through that module and asserts the decision it reaches — including the difference
   between the trusted and the untrusted lane, which is the shape a deleted narrowing would show
   up as.
+- **D17 — a capability is reachable as a tool, and a description is deployment metadata.**
+  Two decisions. The first is about *which* names; the second is about *when*.
+
+  *Reachability.* The `capability` tool is a seam between two untrusted parties — the model
+  and the component — so it is not a mesh client: only a `:live` lane-W entry that names
+  this node is reachable, and the register is consulted again inside the tool. One function
+  resolves a name, for classification and for execution, on the exact string the model
+  wrote; nothing trims, because two normalisations are two names and the gap between them
+  is a bypass. The permission rule is `Capability(<name>)` or `Capability(*)`, matched
+  against a name the node resolved, which is what makes an *allow* on it honest;
+  `Tool(capability)` is deny-and-ask only, because the tool is not the authority — one call
+  reaches one component, and an allow on the tool name is an allow on every component this
+  node will ever deploy. The mesh message itself stays unledgered per D11; the **tool call**
+  is ledgered like every other, carrying the capability's name and the component's sha256,
+  and that entry is therefore the whole written record that a model reached a component.
+  `agents.message` is the operator's half of the same reach, at `:operate`, and it is
+  deliberately not node-routed: the mesh already resolves an agent anywhere in the cluster,
+  so a capability on a peer is reachable today and the boundary that makes that safe is the
+  helper's linker.
+
+  *When a description is read.* **At deploy, as a gate, and never on the message path.**
+  `Ouroboros.Wasm.Rollout` runs one more gate after stage, probe and eval:
+  `Wasm.Capability.capture_describe/2` on every target, on a throwaway instance under its
+  own bounds, and the validated document is stored on the registry entry. A component that
+  cannot describe itself inside the budget its own deploy gave it does not go live — the
+  gate fails like any other, and the deploy is rolled back or quarantined.
+
+  It was on the message path, fetched after the first message, and that was wrong in a way
+  only a clock reveals. The fetch is a synchronous pool round trip inside the caller's
+  `Jido.AgentServer.call`, and `Rollout.Probe` gives its one message five seconds — so a
+  component whose `describe` merely took six, while answering messages instantly and staying
+  inside every bound it was deployed under, failed its own health check and was rolled back.
+  A capability's liveness must not depend on how fast it can describe itself. Moving the
+  read to the deploy puts the cost where taking time is already accounted for, gives every
+  reader one source instead of a per-agent cache that only warms after somebody messages it,
+  and makes a listing incapable of starting a component. The wrapper no longer calls
+  `describe` at all.
+
+  *What a description may contain.* Contract C1, plus a rule the first cut did not have:
+  no character in Unicode category **Cc** (every C0 control, tab and newline included, DEL,
+  and the C1 block), **Cf** (the zero-width set, the bidirectional overrides and isolates,
+  the BOM) or **Zl/Zp**, in any string reached by walking the whole document — `name`,
+  `summary`, and every string inside `examples` and `input_schema`. Those are the characters
+  that let a component's prose stop looking like a component's prose: a newline puts its next
+  sentence on a line of its own, and U+202E reverses what a human reviews relative to what a
+  model reads. Refusing them is why the renderers only prefix a label and never have to
+  escape anything. The register re-validates on write *and* on read, because a checkpoint is
+  a file on disk and a planted summary's next stop is a model's context.
+
+  Proved in `test/wasm/capability_test.exs` (the scripted helper, including a six-second
+  `describe` that does not cost a five-second message), `test/wasm/capability_acceptance_test.exs`
+  (the real guest), `test/wasm/rollout_test.exs` (the gate, and a deploy stopped by a
+  description it could not read), and `test/upgrade/rollout_registry_test.exs` (stored,
+  re-validated, refused on read).
 
 ## 12. What this does not solve
 
@@ -1146,14 +1196,27 @@ Stated once, so nobody reads more into the lane than is there:
   is a later decision and not this one.
 - **`describe` is prompt-injection surface, and labelling is the whole defence.** A
   component's `describe` is untrusted text authored by the thing this lane exists to
-  contain, and it reaches a model beside the node's own trusted facts. Three things bound
-  it and none of them makes it safe: it is refused above 4 KiB *before* it is decoded, it
-  is closed to the six keys contract C1 names (so a component can supply content but never
-  structure), and every line of it that reaches a reader carries
+  contain, and it reaches a model beside the node's own trusted facts. Four things bound it
+  and none of them makes it safe: it is refused above 4 KiB *before* it is decoded; it is
+  closed to the six keys contract C1 names and its `examples` to two, so a component can
+  supply content but never structure; every string in it is refused if it carries a
+  character in Unicode category Cc, Cf, Zl or Zp, so it cannot stop looking like one
+  component's prose; and every line of it that reaches a reader is prefixed
   `[untrusted, authored by the component]`. What remains is that a model may still be
   persuaded by 200 characters of a component's prose — labelling tells it who is speaking,
   it does not decide for it. The registry's own facts — name, epoch, sha256 — are rendered
   separately and are never mixed into the labelled half.
+- **A listing is bounded and says so; the register is not.** `capability list` renders at
+  most 50 capabilities, so a large fleet cannot spend a context window on a directory, and
+  the heading says when it cut. The cap is on the *listing* only: `resolve/1` reads the
+  whole register, so a capability past the cut is still callable by name. There is no cap on
+  how many a node may hold.
+- **A worker's mailbox is bounded, which means a mailbox is not a history.**
+  `agents.message` lets any `:operate` client on any node in the cluster put a 64 KiB body
+  into an agent, so `Ouroboros.Agent.Worker` keeps the newest 64 messages and at most 1 MiB
+  of them. `messages_received` still counts every one; the bodies of the old ones are gone.
+  Nothing in this runtime reads the inbox as an audit trail — the effect ledger is that —
+  but a caller that assumed otherwise would now be wrong.
 - **The workspace.** §10 is the axis for `bash`/git/LSP; nothing in lanes W/H/T
   touches it.
 - **Signer custody and node-local authority.** A signer is still a cluster member
@@ -1371,26 +1434,34 @@ Each slice is PR-sized, lands green, and is useful alone.
   same mutation. CI's Rust job now builds the helper and the guest and runs under
   `OUROBOROS_REQUIRE_WASM=1`, so a skip there is a failure exactly as it is on the Elixir
   side.
-- **W13 — a live capability is a tool.** Lane W could deploy a capability and nothing a
-  model or a user touched could reach one. Now two things can, and neither is a mesh client.
-  `Ouroboros.Wasm.Capability` reads a component's own `describe` through the pool once per
-  agent, after the first message is answered rather than at instantiate, and holds it to
-  contract C1 — 4 KiB before decoding, six keys, `examples` at four — keeping it as
-  `{:untrusted, {:ok, document}}` or `{:untrusted, {:invalid, reason}}`; a component's own
-  refusal is recorded as its description, a transport refusal is not, and neither disturbs
-  the message that triggered the fetch. The native `capability` tool lists the `:live`
-  lane-W entries with the register's facts beside each component's labelled, bounded claim
-  about itself, and `call`s one under a 64 KiB body bound, a 64 KiB marked reply bound, and
-  a timeout of the target's own deadline plus the pool's call margin; the name is looked up
-  in the register again inside the tool, so nothing else is reachable. The permission rule
-  is a new pattern kind, `Capability(<name>)` / `Capability(*)`, matched against a name the
-  node resolved — which is what lets it carry an *allow* — and the tool call's ledger entry
-  carries that name and the component's sha256. `agents.message` is the operator's half, at
-  `:operate`, bounded and labelled the same way. Proved against the scripted helper for the
-  wrapper's decisions, against the real echo guest for the describe contract, and through
-  the native loop for the deny-before-delivery and the ledger's subject; the two remaining
-  gaps are named in §12 (the sequential helper's cost, and what labelling does and does not
-  buy).
+- **W13 — a live capability is a tool, and a description is deployment metadata.** Lane W
+  could deploy a capability and nothing a model or a user touched could reach one. Two
+  things can now, and neither is a mesh client. The native `capability` tool lists the
+  `:live` lane-W rollouts that name this node, with the register's facts beside each
+  component's labelled, bounded claim about itself, and `call`s one under a 64 KiB body
+  bound, a 64 KiB reply bound whose every line is prefixed with the untrusted label, and a
+  timeout of the target's own deadline plus the pool's call margin. One function resolves a
+  name — for the permission engine and for the message alike, on the exact string the model
+  wrote — and a name that is not a rollout name is refused before the register is read. The
+  rule language gains `Capability(<name>)` and `Capability(*)`, matched against a name the
+  node resolved, which is what lets them carry an allow; `Tool(capability)` is deny-and-ask
+  only, because one call reaches one component and an allow on the tool is an allow on every
+  component this node will ever deploy. The tool call's ledger entry carries the capability
+  and the component's sha256. `agents.message` is the operator's half at `:operate`, bounded
+  and labelled the same way, with a marked truncation; `agents.state` labels and bounds the
+  same two fields for a `wasm/` agent, because it is `:read` and returns them too.
+
+  A component's `describe` is read **at deploy**, as a fourth rollout gate, on a throwaway
+  instance under its own bounds, and stored on the registry entry — which is where every
+  reader gets it. It used to be read on the message path, and a component whose `describe`
+  took six seconds while answering messages instantly failed the rollout probe's
+  five-second budget and was rolled back. Contract C1 now also refuses every Unicode
+  control, format and line-separator character in every string of the document, walked
+  whole; the register re-validates on write and on read, and holds a lane-W module name to
+  the artifact charset so a planted `wasm/a/b` is refused. Proved against the scripted
+  helper (including the six-second `describe` that no longer costs a message), the real echo
+  guest, the live rollout, the register's checkpoint, and the native loop.
+
 - **W12 — signing and deploy from the operator's chair.** `Ouroboros.Wasm.Bundle` (the
   `.ouro-wasm` file: framed header, bounded JSON envelope, raw component, `:safe` term
   decode, manifest reconstruction held to a fixed point), `Ouroboros.Wasm.Upload` (the

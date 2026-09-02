@@ -139,6 +139,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       {"wasm_sign_result", wasm_sign_result()},
       {"wasm_deploy_result", wasm_deploy_result()},
       {"wasm_rollback_result", wasm_rollback_result()},
+      {"agents_message_truncated_result", agents_message_truncated_result()},
       {"workspace_browse_result", workspace_browse_result()},
       {"ledger_list_result", ledger_list_result()},
       {"ledger_export_result", ledger_export_result()},
@@ -1532,6 +1533,22 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         "ouroboros@golden" => :rolled_back,
         "ouroboros@peer" => :not_needed
       }
+    })
+  end
+
+  # W13. The same verb when the reply did not fit, which is a different shape and not a
+  # smaller one: `reply` is a **string** rather than the structure the agent answered with,
+  # and the marker inside it is the only thing that says so. A client that read `reply` as
+  # JSON whenever it was a string, or that trusted `truncated` without looking at the value,
+  # would parse a prefix and report a syntax error the user cannot act on. The fixture keeps
+  # a short body because what is pinned is the envelope, not the ceiling.
+  defp agents_message_truncated_result do
+    Conn.result_frame(19, %{
+      to: "wasm/vet",
+      from: "gateway",
+      untrusted: true,
+      truncated: true,
+      reply: "{\"findings\":[{\"file\":\"lib/a.ex\"… truncated at 65536 bytes."
     })
   end
 

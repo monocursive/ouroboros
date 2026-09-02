@@ -3009,7 +3009,11 @@ pub fn attachment_refusal(diagnostic: &str) -> bool {
 /// `Control.Permissions.Pattern` validates it, and an unvalidatable pattern comes back as
 /// `-32602` naming itself rather than as a rule that matches nothing.
 pub fn permission_add_params(pattern: &str, workspace: &str) -> Value {
-    if pattern.starts_with("ComputerUse(") {
+    // Node facts, not directory facts: a Computer Use grant names an app and this operator,
+    // and a `Capability(…)` grant names a component the rollout plane deployed to this
+    // machine (docs/WASM.md §7.7). Either one scoped to a workspace would be unrememberable
+    // from a session that never chose one.
+    if pattern.starts_with("ComputerUse(") || pattern.starts_with("Capability(") {
         return serde_json::json!({
             "scope": "user",
             "pattern": pattern,
@@ -4552,6 +4556,7 @@ mod tests {
             found,
             vec![
                 "agents_message_result",
+                "agents_message_truncated_result",
                 "code_intel_diagnostics_result",
                 "coding_event_detail_result",
                 "coding_event_notification",
@@ -4951,6 +4956,31 @@ mod tests {
         assert!(result["reply"].is_object());
         assert_eq!(result["reply"]["checked"], 12);
         assert!(result["reply"]["findings"].as_array().unwrap().is_empty());
+    }
+
+    /// The same verb when the reply did not fit. This is the case a client gets wrong by
+    /// treating `truncated` as decoration: `reply` stops being the structure the agent
+    /// answered with and becomes a **string** holding a prefix of its encoding, and the
+    /// marker inside that string is the only thing in the value itself that says so. A
+    /// client that parsed it as JSON would report a syntax error the user cannot act on.
+    #[test]
+    fn a_truncated_agents_message_reply_is_a_marked_string_not_a_document() {
+        let result = &fixture("agents_message_truncated_result")["result"];
+
+        assert_eq!(result["untrusted"], true);
+        assert_eq!(result["truncated"], true);
+
+        let reply = result["reply"]
+            .as_str()
+            .expect("a truncated reply is a string");
+        assert!(
+            !result["reply"].is_object(),
+            "a cut document is not a document"
+        );
+        assert!(
+            reply.ends_with("truncated at 65536 bytes."),
+            "nothing in the value said it was cut: {reply}"
+        );
     }
 
     #[test]

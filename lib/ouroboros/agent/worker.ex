@@ -72,6 +72,20 @@ defmodule Ouroboros.Agent.Worker do
         causation_id: [type: :any, default: nil]
       ]
 
+    @max_inbox 64
+    @max_inbox_bytes 1024 * 1024
+
+    # W13/F9. The inbox keeps the newest #{@max_inbox} messages and at most
+    # #{div(@max_inbox_bytes, 1024)} KiB of them, oldest dropped first.
+    #
+    # It was unbounded, and `agents.message` is what made that reachable: any `:operate`
+    # gateway client, from any node in the cluster, can now send this agent a 64 KiB body as
+    # often as it likes, and every one of them was retained forever in a list nothing
+    # pruned. A mailbox is a *recent* record — that is what makes it useful to a reader and
+    # what makes `last_message` the field the rest of this runtime actually reads — so the
+    # bound is on both counts, because either one alone is a way past the other: sixty-four
+    # 64 KiB bodies is four megabytes, and four million one-byte bodies is the same problem
+    # spelled differently.
     @impl true
     def run(params, %{agent: agent}) do
       message = %{
@@ -83,11 +97,27 @@ defmodule Ouroboros.Agent.Worker do
 
       {:ok,
        %{
-         inbox: agent.state.inbox ++ [message],
+         inbox: bound_inbox(agent.state.inbox ++ [message]),
          last_message: message,
          messages_received: agent.state.messages_received + 1
        }}
     end
+
+    # Newest kept, oldest dropped, count first and then bytes. `external_size/1` measures a
+    # term without building the binary, so measuring a megabyte costs nothing.
+    defp bound_inbox(inbox) do
+      inbox
+      |> Enum.take(-@max_inbox)
+      |> trim_bytes()
+    end
+
+    defp trim_bytes([_only] = inbox), do: inbox
+
+    defp trim_bytes([_ | rest] = inbox) do
+      if :erlang.external_size(inbox) > @max_inbox_bytes, do: trim_bytes(rest), else: inbox
+    end
+
+    defp trim_bytes([]), do: []
   end
 
   defmodule AssignTask do

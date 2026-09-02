@@ -152,6 +152,7 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   require Logger
 
   alias Ouroboros.Upgrade.{Beam, ModuleName, Wire}
+  alias Ouroboros.Wasm.Artifact
 
   @store_key {:ouroboros, :capability_rollouts, 1}
   @checkpoint_version 3
@@ -196,7 +197,8 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
                   component_sha256: nil,
                   test_report: %{},
                   detail: nil,
-                  eval_report: nil
+                  eval_report: nil,
+                  describe: nil
                 ]
 
     @type state :: :deploying | :live | :superseded | :rolled_back | :quarantined
@@ -217,6 +219,13 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
             test_report: map(),
             detail: term(),
             eval_report: map() | nil,
+            # W13. What a lane-W component said it was, captured once at deploy time by
+            # `Ouroboros.Wasm.Capability.capture_describe/2` and held to contract C1 there:
+            # `{:ok, document}` when it satisfied the contract, `{:invalid, reason}` when it
+            # answered and did not. `nil` for lane B and for a rollout that predates W13.
+            # Untrusted text with a trusted *shape*: this register is the only place a
+            # description is read from, so every surface that shows one shows the same one.
+            describe: {:ok, map()} | {:invalid, term()} | nil,
             created_at: String.t(),
             updated_at: String.t()
           }
@@ -261,6 +270,8 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   `:detail` records the evidence for the transition. `:eval_report` records what an
   evaluation gate proved on the way to it; omitting it keeps whatever the entry already
   held, so marking an entry twice cannot erase the report that justified the first mark.
+  `:describe` (W13) records what a lane-W component said it was, and follows the same
+  keep-on-omission rule for the same reason.
   """
   @spec mark(String.t(), Entry.state(), keyword(), GenServer.server()) ::
           {:ok, Entry.t()} | {:error, term()}
@@ -268,7 +279,8 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
       when is_binary(artifact_id) and is_atom(state) and is_list(opts) do
     GenServer.call(
       server,
-      {:mark, artifact_id, state, Keyword.get(opts, :detail), Keyword.get(opts, :eval_report)}
+      {:mark, artifact_id, state, Keyword.get(opts, :detail), Keyword.get(opts, :eval_report),
+       Keyword.get(opts, :describe)}
     )
   end
 
@@ -348,7 +360,7 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
     end
   end
 
-  def handle_call({:mark, artifact_id, next, detail, eval_report}, _from, state) do
+  def handle_call({:mark, artifact_id, next, detail, eval_report, describe}, _from, state) do
     with {:ok, entry} <- fetch(state, artifact_id),
          :ok <- ensure_transition(entry.state, next) do
       persist(
@@ -357,6 +369,7 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
           | state: next,
             detail: bound_report(detail, :detail),
             eval_report: bound_report(eval_report) || entry.eval_report,
+            describe: bound_describe(describe) || entry.describe,
             updated_at: now()
         },
         state
@@ -446,6 +459,50 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
       true ->
         report
     end
+  end
+
+  # W13. A description is untrusted text with a trusted shape, and both halves are checked
+  # here as well as at capture. `{:ok, document}` is re-validated against contract C1 —
+  # `Ouroboros.Wasm.Capability.Describe` owns the rules and this calls it rather than
+  # restating them — so a document that reached this register by any route other than
+  # `capture_describe/2` is held to the same class of characters and the same six keys. An
+  # `{:invalid, reason}` keeps only a bounded reason, because the reason came from a
+  # component's failure and is not itself evidence of anything but the failure.
+  defp bound_describe(nil), do: nil
+
+  defp bound_describe({:ok, document}) when is_map(document) do
+    case revalidate_describe(document) do
+      {:ok, clean} -> {:ok, clean}
+      :error -> {:invalid, :describe_refused_on_write}
+    end
+  end
+
+  defp bound_describe({:invalid, reason}), do: {:invalid, bound_report(reason, :describe)}
+  defp bound_describe(other), do: {:invalid, {:not_a_describe, describe(other)}}
+
+  # Re-encoding and re-parsing is deliberate: it is the one check that cannot drift from
+  # what `capture_describe/2` accepted, because it *is* that check. A document this cannot
+  # round-trip through JSON is one no reader downstream could render anyway.
+  defp revalidate_describe(document) do
+    raw =
+      %{
+        "name" => Map.get(document, :name),
+        "version" => Map.get(document, :version),
+        "world" => Map.get(document, :world),
+        "summary" => Map.get(document, :summary),
+        "input_schema" => Map.get(document, :input_schema),
+        "examples" => Map.get(document, :examples)
+      }
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+      |> Map.new()
+      |> JSON.encode!()
+
+    case Ouroboros.Wasm.Capability.Describe.parse(raw) do
+      {:ok, clean} -> {:ok, clean}
+      {:invalid, _reason} -> :error
+    end
+  rescue
+    _error -> :error
   end
 
   defp ensure_absent(state, artifact_id) do
@@ -875,10 +932,23 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   # record about a rollout that happened before the reboot. What `deploying/2` refuses is a
   # caller *presenting* such a name; what this refuses is an entry with no name at all.
   defp loaded_module(%{module: module}) when is_atom(module) and not is_nil(module), do: :ok
+
+  # W13/F14. The lane-W form is the exception to the looseness above, because it is not a
+  # *name this VM has not interned* — it is an identity this build mints itself, and it is
+  # the string every lane-W surface reads a capability's name back out of. A planted
+  # `wasm/a/b` would have become a capability called `a/b`.
+  defp loaded_module(%{module: @wasm_prefix <> name}), do: name_or_refusal(name)
+
   defp loaded_module(%{module: module}) when is_binary(module) and module != "", do: :ok
 
   defp loaded_module(%{module: other}),
     do: {:error, {:invalid_attribute, :module, describe(other)}}
+
+  defp name_or_refusal(name) do
+    if Artifact.name?(name),
+      do: :ok,
+      else: {:error, {:invalid_attribute, :module, @wasm_prefix <> describe(name)}}
+  end
 
   # Node names cross the checkpoint the way module names do: `[:safe]` cannot intern one a
   # rebooted VM has never connected to, so `Ouroboros.Upgrade.Wire` hands it back as the
@@ -907,10 +977,26 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
       not is_map(Map.get(entry, :test_report)) ->
         {:error, {:invalid_attribute, :test_report, describe(Map.get(entry, :test_report))}}
 
+      # W13. A stored description is read back through the same contract that admitted it.
+      # A checkpoint is a file on disk; anything that can write it can plant a document
+      # whose summary carries a bidirectional override or thirty kilobytes of prose, and
+      # that document's next stop is a model's context. Re-validated here, exactly as an
+      # epoch and a sha are.
+      not loaded_describe?(Map.get(entry, :describe)) ->
+        {:error, {:invalid_attribute, :describe, describe(Map.get(entry, :describe))}}
+
       true ->
         :ok
     end
   end
+
+  defp loaded_describe?(nil), do: true
+  defp loaded_describe?({:invalid, _reason}), do: true
+
+  defp loaded_describe?({:ok, document}) when is_map(document),
+    do: match?({:ok, _clean}, revalidate_describe(document))
+
+  defp loaded_describe?(_other), do: false
 
   defp key_label(id) when is_binary(id) or is_atom(id), do: id
   defp key_label(id), do: describe(id)
@@ -974,8 +1060,16 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
       {:ok, module} when is_atom(module) and not is_nil(module) ->
         {:ok, module}
 
-      {:ok, @wasm_prefix <> name = module} when name != "" ->
-        {:ok, module}
+      # W13/F14. `"wasm/" <> name` is an *identity*: it is the mesh id a capability runs
+      # under and the string this register hands back as a rollout's name. A binary that
+      # merely starts with the prefix is not one — `wasm/a/b` names two path segments and
+      # `wasm/../x` names an escape — so the name is held to the same charset
+      # `Ouroboros.Wasm.Artifact.name?/1` holds a signed artifact's to, on the way in and,
+      # through `loaded_shape/2`, on the way back off disk.
+      {:ok, @wasm_prefix <> name = module} ->
+        if Artifact.name?(name),
+          do: {:ok, module},
+          else: {:error, {:invalid_attribute, :module, module}}
 
       {:ok, other} ->
         {:error, {:invalid_attribute, :module, other}}

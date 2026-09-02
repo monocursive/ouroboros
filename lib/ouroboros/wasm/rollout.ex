@@ -496,7 +496,10 @@ defmodule Ouroboros.Wasm.Rollout do
 
   defp run(artifact, bytes, nodes, opts, registry, spec, warnings) do
     evidence =
-      Map.new(nodes, &{&1, %{stage: nil, probe: :skipped, eval: :skipped, recovery: nil}})
+      Map.new(
+        nodes,
+        &{&1, %{stage: nil, probe: :skipped, eval: :skipped, describe: :skipped, recovery: nil}}
+      )
 
     evidence = gate(evidence, nodes, :stage, &stage_node(&1, artifact, bytes, opts, registry))
 
@@ -510,7 +513,27 @@ defmodule Ouroboros.Wasm.Rollout do
         do: gate(evidence, nodes, :eval, &eval_node(&1, artifact, spec, opts)),
         else: eval_absent(evidence, spec)
 
+    # W13. The last gate, and the only one that keeps something: every target reads the
+    # component's own `describe` on a throwaway instance and the driver stores the answer
+    # on the registry entry. It is a *gate* and not a courtesy — a component that cannot
+    # describe itself inside the budget its own deploy gave it does not go live — because
+    # the alternative was reading it on the message path, where it cost a healthy component
+    # its rollout probe (docs/WASM.md D17).
+    evidence =
+      if passed_through_eval?(evidence, spec),
+        do: gate(evidence, nodes, :describe, &describe_node(&1, artifact, opts)),
+        else: evidence
+
     settle(evidence, artifact, nodes, opts, registry, spec, warnings)
+  end
+
+  # The description gate runs only when everything that decides whether this component runs
+  # at all has already passed, so a failing deploy is never delayed by metadata.
+  defp passed_through_eval?(evidence, nil), do: all_passed?(evidence, :probe)
+
+  defp passed_through_eval?(evidence, _spec) do
+    all_passed?(evidence, :probe) and
+      Enum.all?(evidence, fn {_target, e} -> not failed?(e.eval) and not ambiguous?(e.eval) end)
   end
 
   # Reported, not refused. Deploying to nodes you do not drive from is a legitimate thing
@@ -591,6 +614,35 @@ defmodule Ouroboros.Wasm.Rollout do
       {:returned, other} -> {:ambiguous, {:unexpected_result, inspect(other, limit: 10)}}
       {:ambiguous, reason} -> {:ambiguous, reason}
     end
+  end
+
+  # Every target is asked, because a description is a property of the bytes and a fleet
+  # where two nodes answer differently is a fleet holding two different components under
+  # one sha — which is worth failing the deploy over rather than papering over by asking
+  # one machine. `capture_describe/2` never raises and never returns anything but these
+  # three shapes.
+  defp describe_node(target, artifact, opts) do
+    state = %{start_state(artifact, opts) | limits: describe_limits(opts)}
+
+    case remote(target, Capability, :capture_describe, [state, []], describe_timeout(opts)) do
+      {:returned, {:ok, document}} -> {:ok, document}
+      {:returned, {:invalid, reason}} -> {:error, {:describe_invalid, reason}}
+      {:returned, {:error, reason}} -> {:error, {:describe_failed, reason}}
+      {:returned, other} -> {:ambiguous, {:unexpected_result, inspect(other, limit: 10)}}
+      {:ambiguous, reason} -> {:ambiguous, reason}
+    end
+  end
+
+  # The one description this rollout recorded, or `nil`. Every target answered the same
+  # question about the same bytes; disagreement is a failed gate above, so by the time this
+  # runs the answers are equal and the first is the answer.
+  defp captured_describe(evidence) do
+    Enum.find_value(evidence, fn {_target, e} ->
+      case Map.get(e, :describe) do
+        {:ok, document} -> {:ok, document}
+        _absent_or_failed -> nil
+      end
+    end)
   end
 
   defp eval_absent(evidence, nil),
@@ -691,7 +743,10 @@ defmodule Ouroboros.Wasm.Rollout do
   # Exactly the order `Ouroboros.Upgrade.Rollout` settles in: ambiguity outranks failure,
   # failure outranks success, and "nobody answered" is never success.
   defp verdict(evidence) do
-    outcomes = Enum.flat_map(evidence, fn {_target, e} -> [e.stage, e.probe, e.eval] end)
+    outcomes =
+      Enum.flat_map(evidence, fn {_target, e} ->
+        [e.stage, e.probe, e.eval, describe_outcome(e)]
+      end)
 
     cond do
       Enum.any?(outcomes, &ambiguous?/1) -> :ambiguous
@@ -699,6 +754,11 @@ defmodule Ouroboros.Wasm.Rollout do
       true -> :pass
     end
   end
+
+  # A captured description is a pass; `:skipped` is what an earlier gate's failure leaves
+  # behind and says nothing on its own.
+  defp describe_outcome(%{describe: {:ok, _document}}), do: :ok
+  defp describe_outcome(%{describe: outcome}), do: outcome
 
   defp ambiguous?({:ambiguous, _reason}), do: true
   # A helper reading something other than the signed manifest is a node holding what
@@ -713,6 +773,18 @@ defmodule Ouroboros.Wasm.Rollout do
   defp all_passed?(evidence, key) do
     Enum.all?(evidence, fn {_target, e} -> Map.get(e, key) == :ok end)
   end
+
+  # W13's gate answers `{:ok, document}` rather than `:ok`, because it is the one gate that
+  # brings something back. Once the document has been taken for the register, every node's
+  # evidence keeps only the fact that there was one: a description belongs in exactly one
+  # place, and repeating it per node in the returned outcome and in the durable detail is
+  # three copies of untrusted text where one will do.
+  defp bound_describe({:ok, _document} = _outcome), do: :described
+
+  defp bound_describe(node_evidence) when is_map(node_evidence),
+    do: %{node_evidence | describe: bound_describe(node_evidence.describe)}
+
+  defp bound_describe(outcome), do: outcome
 
   # Nothing durable was started before the verdict, so withdrawing is proving absence: on
   # every target, either no wrapper holds this start id, or the one that does is this
@@ -867,6 +939,9 @@ defmodule Ouroboros.Wasm.Rollout do
   defp record(state, evidence, artifact, nodes, registry, spec, warnings) do
     report = eval_report(evidence, spec)
 
+    captured = captured_describe(evidence)
+    evidence = Map.new(evidence, fn {target, e} -> {target, bound_describe(e)} end)
+
     outcome = %{
       artifact_id: artifact.id,
       module: @module_prefix <> artifact.name,
@@ -887,7 +962,9 @@ defmodule Ouroboros.Wasm.Rollout do
       nodes: Map.new(evidence, fn {target, e} -> {target, bound(e)} end)
     }
 
-    case Registry.mark(artifact.id, state, [detail: detail, eval_report: report], registry) do
+    mark_opts = [detail: detail, eval_report: report, describe: captured]
+
+    case Registry.mark(artifact.id, state, mark_opts, registry) do
       {:ok, _entry} -> reply(state, outcome)
       {:error, reason} -> {:error, {:rollout_record_failed, state, reason, outcome}}
     end
@@ -896,13 +973,27 @@ defmodule Ouroboros.Wasm.Rollout do
   defp reply(:live, outcome), do: {:ok, outcome}
   defp reply(state, outcome), do: {:error, {state, outcome}}
 
+  # The gate this rollout got as far as, in the order they run: stage, probe, eval, describe.
+  # W13's gate is last, so an evaluation that failed still reports `:evaluate` — the deploy
+  # never reached the description, and naming a gate it never ran would be a lie about why
+  # it stopped.
   defp stage_reached(evidence, spec) do
     cond do
       not all_passed?(evidence, :stage) -> :stage
       not all_passed?(evidence, :probe) -> :probe
+      not is_nil(spec) and not passed_through_eval?(evidence, spec) -> :evaluate
+      not described?(evidence) -> :describe
       is_nil(spec) -> :settle
       true -> :evaluate
     end
+  end
+
+  # Both spellings, because `record/7` reduces the document to `:described` before it asks:
+  # the register holds the document, and the evidence holds only that there was one.
+  defp described?(evidence) do
+    Enum.all?(evidence, fn {_target, e} ->
+      match?({:ok, _document}, Map.get(e, :describe)) or Map.get(e, :describe) == :described
+    end)
   end
 
   defp eval_report(_evidence, nil), do: nil
@@ -1078,6 +1169,30 @@ defmodule Ouroboros.Wasm.Rollout do
       Application.get_env(:ouroboros, :capability_eval_timeout, @default_eval_timeout_ms)
     end)
   end
+
+  # W13. The bounds the description read runs under, which are the capability's own by
+  # default and are separately nameable because the two are different work: a message runs
+  # whatever the component decided to do with a caller's body, while `describe` is declared
+  # pure and reads nothing. An operator (or a test) that wants a metadata read held to a
+  # tighter bound than the capability's runtime can say so without changing what the
+  # capability runs under afterwards.
+  defp describe_limits(opts) do
+    case Keyword.get(opts, :describe_limits) do
+      %{fuel: fuel, memory_bytes: memory, deadline_ms: deadline} = limits
+      when is_integer(fuel) and is_integer(memory) and is_integer(deadline) ->
+        limits
+
+      _absent_or_partial ->
+        Keyword.get_lazy(opts, :limits, &Wasm.capability_limits/0)
+    end
+  end
+
+  # W13. One `describe` on one throwaway instance: a load (already cached by `stage`), an
+  # instantiate, one guest call and a drop. Sized like the probe's budget rather than the
+  # evaluation's, because it is one call and not a spec's worth of them — and deliberately
+  # generous relative to what a `describe` should cost, so that what fails here is a
+  # component that genuinely cannot answer rather than one on a busy machine.
+  defp describe_timeout(opts), do: positive(opts, :describe_timeout, &Probe.budget_ms/0)
 
   defp positive(opts, key, default) do
     case Keyword.get(opts, key) do

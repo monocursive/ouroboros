@@ -1071,11 +1071,15 @@ defmodule Ouroboros.Web.Live.DeckLive do
   end
 
   # Computer Use remember is user-scoped by design (D4): the grant is "this app, from this
-  # operator", which is not a fact about a directory. Every other pattern is scoped to the
-  # workspace the gate already proved this session names.
+  # operator", which is not a fact about a directory. `Capability(…)` joins it for the same
+  # reason (W13): a capability is deployed to a node by the rollout plane, and a session
+  # that has not chosen a project folder could otherwise never remember an answer about one.
+  # Every other pattern is scoped to the workspace the gate already proved this session
+  # names.
   defp add_rule(%{assigns: %{open: {plane, id}}} = socket, %Approval.Rule{} = rule) do
     params =
-      if String.starts_with?(rule.pattern, "ComputerUse(") do
+      if String.starts_with?(rule.pattern, "ComputerUse(") or
+           String.starts_with?(rule.pattern, "Capability(") do
         %{"scope" => "user", "pattern" => rule.pattern, "decision" => "allow"}
       else
         %{
