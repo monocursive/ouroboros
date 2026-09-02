@@ -30,7 +30,7 @@ defmodule Ouroboros.Wasm.Bundle do
   A fixed 17-byte header, a bounded JSON envelope, and then the component bytes raw:
 
       offset  0   "OUROWASM"                  magic
-      offset  8   0x01                        format version
+      offset  8   0x01                        format version, exactly
       offset  9   envelope length             uint32, big-endian, <= #{64 * 1024}
       offset 13   component length            uint32, big-endian, <= the component cap
       offset 17   envelope                    JSON, UTF-8
@@ -89,6 +89,16 @@ defmodule Ouroboros.Wasm.Bundle do
   # thing being bounded is what a term decoder is handed, and that deserves its own number
   # rather than an inherited one.
   @max_manifest_bytes 32 * 1024
+
+  # And what the decoded term may cost this process. The largest manifest this build can
+  # legitimately produce — a full twenty-probe eval spec and a 16 KiB start config — is
+  # about eight kibibytes of heap, because its bulk is binaries and binaries are cheap on a
+  # heap. Sixteen times that is generous for everything real and refuses the shapes that
+  # are only large after decoding: a byte list encodes at one byte an element and decodes at
+  # sixteen.
+  @max_manifest_heap_bytes 128 * 1024
+
+  @word_bytes 8
 
   # Not a new number. It is the ceiling the signer already holds a lane-W submission to
   # (`:signing_max_artifact_bytes`, `Ouroboros.Upgrade.Signing.Service`), so a bundle can
@@ -373,10 +383,8 @@ defmodule Ouroboros.Wasm.Bundle do
     end
   end
 
-  # `:safe` is the whole of the answer to "this term came from a file somebody else
-  # wrote". It refuses to create atoms, refuses funs, and raises on anything it will not
-  # build — which is caught here and reported as a refusal, because a malformed bundle is
-  # an answer and never an exception in a gateway task.
+  # `:safe` refuses to create atoms and refuses funs, and it is *not* the whole of the
+  # answer to "this term came from a file somebody else wrote" — see `manifest_term/1`.
   defp artifact(%{manifest: term, signer: signer, signature: signature}) do
     with {:ok, manifest} <- manifest_term(term),
          {:ok, artifact} <- rebuild(manifest) do
@@ -384,7 +392,36 @@ defmodule Ouroboros.Wasm.Bundle do
     end
   end
 
+  # Three checks, and the order is the whole of it.
+  #
+  # 1. **Not compressed.** `term_to_binary/2` can deflate its output, and
+  #    `binary_to_term/2` inflates it transparently — `:safe` included. So the ceiling
+  #    `decode64/3` held the *encoded* length to says nothing about what a decode
+  #    allocates: forty-two kibibytes of zlib is a sixteen-million-element list, built
+  #    inside `verify/2` — the entry point `wasm.deploy` reaches at `:operate` — before a
+  #    single trust check has run. This build's encoder passes `[:deterministic]` and
+  #    nothing else, so it never emits tag 80 and refusing it costs nothing that could
+  #    legitimately arrive.
+  # 2. **Then decode**, under `:safe`, so no atom and no fun is created by a file.
+  # 3. **Then bound what was allocated**, not what was read. Uncompressed external terms
+  #    are not size-preserving either: thirty kibibytes of `STRING_EXT` is thirty thousand
+  #    cons cells, which is half a mebibyte of heap — sixteen times what the field's own
+  #    ceiling admitted. `:erts_debug.flat_size/1` measures the decoded term in words and
+  #    allocates nothing to do it, so the ceiling below is a statement about this process's
+  #    heap rather than about a length somebody else chose.
   defp manifest_term(term) do
+    with :ok <- uncompressed(term),
+         {:ok, manifest} <- decoded(term) do
+      bounded_term(manifest)
+    end
+  end
+
+  # The external term format is a `131` version byte and then a tag. `80` is `COMPRESSED`.
+  defp uncompressed(<<131, 80, _rest::binary>>), do: {:error, :compressed_manifest}
+  defp uncompressed(<<131, _tag, _rest::binary>>), do: :ok
+  defp uncompressed(_other), do: {:error, :unreadable_manifest}
+
+  defp decoded(term) do
     case :erlang.binary_to_term(term, [:safe]) do
       manifest when is_map(manifest) and not is_struct(manifest) -> {:ok, manifest}
       other -> {:error, {:invalid_manifest, describe(other)}}
@@ -393,6 +430,14 @@ defmodule Ouroboros.Wasm.Bundle do
     _error -> {:error, :unreadable_manifest}
   catch
     _kind, _reason -> {:error, :unreadable_manifest}
+  end
+
+  defp bounded_term(manifest) do
+    heap = :erts_debug.flat_size(manifest) * @word_bytes
+
+    if heap > @max_manifest_heap_bytes,
+      do: {:error, {:manifest_too_large, heap, @max_manifest_heap_bytes}},
+      else: {:ok, manifest}
   end
 
   # Named fields, then one fixed point. The struct is built out of the keys this module

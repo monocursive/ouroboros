@@ -9,15 +9,23 @@ defmodule Ouroboros.Wasm.Upload do
   choice is between shrinking what an operator may deploy to whatever fits one frame and
   cutting the bytes into frames that do. This is the second one.
 
-  ## What it is, and what it deliberately is not
+  ## Files, and one file that is a lock
 
-  Files in `<data_dir>/wasm/uploads`, and no process. An upload is `<id>.part` while it is
-  being written and `<id>.done` once its author has said it is finished; `take/2` reads a
-  `.done` and removes it. There is no supervisor entry, no ETS table and no GenServer,
-  because there is no state here that outlives a file: the offset is the file's size, the
-  membership test is `File.exists?/1`, and the expiry is the file's mtime. A registry of
-  in-flight uploads would be a second answer to every one of those questions, and the two
-  would disagree the first time a node restarted mid-upload.
+  There is still no process. What there is, and what the first version of this module got
+  wrong, is that **counting is not claiming**: `File.ls/1` and then `File.write/3` is a
+  read-then-write across two syscalls, and thirty-two concurrent openers all counted seven
+  and all created a file. The ceiling was a number in a comment.
+
+  So a slot is claimed the only way a filesystem makes atomic: `slot-<n>` is created with
+  `[:exclusive]`, which is `O_CREAT|O_EXCL`, and exactly one caller can win each of the
+  eight. The slot file *is* the claim, and it carries the two facts an upload's lifetime
+  needs — which id holds it, and when it was opened. An upload with no slot is litter and
+  the next sweep removes it.
+
+  `take/2` is a `File.rename/2` before it is a read, for the same reason: read-then-remove
+  let two `wasm.deploy` frames naming the same upload both receive the bytes, which is
+  exactly the replay this module says cannot happen. A rename to a private name either
+  wins or fails with `:enoent`; the winner reads what it moved.
 
   ## Every bound, and why each one is where it is
 
@@ -26,21 +34,29 @@ defmodule Ouroboros.Wasm.Upload do
       having taken one. It is still validated on the way back in — `[0-9a-f]{32}` and
       nothing else reaches `Path.join/2` — because a value that made a round trip through
       a client is a value that arrived from a client.
-    * **One chunk is #{div(512 * 1024, 1024)} KiB** of decoded bytes. Base64 makes that
-      about 683 KiB on the wire, which clears the default frame with a third to spare, and
-      a node whose operator lowered `OUROBOROS_GATEWAY_MAX_FRAME` refuses the frame before
-      this module ever sees it. The reply states the number so a client sizes its chunks
-      from the node's answer rather than from a constant compiled into it.
+    * **One chunk is 512 KiB** of decoded bytes. Base64 makes that about 683 KiB on the
+      wire, which clears the default frame with a third to spare, and a node whose operator
+      lowered `OUROBOROS_GATEWAY_MAX_FRAME` refuses the frame before this module ever sees
+      it. The reply states the number so a client sizes its chunks from the node's answer
+      rather than from a constant compiled into it.
     * **The total is `Ouroboros.Wasm.Bundle.max_bytes/0`** — the largest thing that could
       legitimately be uploaded, which is a bundle at the component ceiling. Checked before
       each append against the size the file already has, so the ceiling cannot be reached
       and then exceeded.
-    * **#{8} uploads may be in flight per node.** An `:operate` client is an operator, but
-      a client that has stopped talking still owns disk until something reclaims it, and
-      "the disk filled up" is not an outcome a socket gets to cause.
-    * **Ten minutes.** Every call sweeps the directory first and removes what is older,
-      which is why no timer exists: the thing that would fire one is the thing that would
-      notice, and it is already here.
+    * **Eight uploads may be in flight per node**, and that is now a fact about eight slot
+      files rather than about a count somebody took.
+    * **Two clocks, and neither is `File.touch/1`.** Ten minutes idle — the mtime, which a
+      write moves on its own and nothing here moves artificially — and **thirty minutes
+      total from the moment the slot was claimed**, whatever the client does in between.
+      Without the second one, a client that sends one byte every nine minutes holds a slot
+      for as long as it likes, and eight such clients hold the node. Every entry point
+      sweeps, including the two that only read: an upload past either clock must not be
+      consumable, and a sweep that only ran on the write path left `take/2` reading files
+      the module had already promised were gone.
+    * **Nothing here follows a symlink.** The staging root must be a real directory and a
+      staged file must be a regular file, both checked with `File.lstat/1` — otherwise
+      `chmod` and `write` are operations on somebody else's target, chosen by whoever could
+      create a name in that directory.
 
   ## An upload carries no authority
 
@@ -63,10 +79,18 @@ defmodule Ouroboros.Wasm.Upload do
 
   @part ".part"
   @done ".done"
+  @taken ".taken-"
+  @slot "slot-"
 
   @max_chunk_bytes 512 * 1024
   @max_in_flight 8
+
+  # Idle: how long a transfer may go untouched before the node reclaims it.
   @ttl_ms 10 * 60 * 1_000
+
+  # Total: how long one transfer may exist at all, however busy it looks. A client that
+  # writes one byte a minute is not making progress worth a slot.
+  @max_lifetime_ms 30 * 60 * 1_000
 
   @type receipt :: %{
           upload: String.t(),
@@ -87,6 +111,14 @@ defmodule Ouroboros.Wasm.Upload do
   @doc "The most uploads one node holds at once before a new one is refused."
   @spec max_in_flight() :: pos_integer()
   def max_in_flight, do: @max_in_flight
+
+  @doc "How long one upload may exist, from the moment its slot was claimed."
+  @spec max_lifetime_ms() :: pos_integer()
+  def max_lifetime_ms, do: @max_lifetime_ms
+
+  @doc "How long an upload may go unwritten before the node reclaims it."
+  @spec idle_ms() :: pos_integer()
+  def idle_ms, do: @ttl_ms
 
   @doc """
   Where this node stages uploads, or `{:error, :no_data_dir}` on a node with none.
@@ -142,25 +174,27 @@ defmodule Ouroboros.Wasm.Upload do
   @doc """
   Reads a finished upload and removes it, or refuses one that is not finished.
 
-  Consume-once on purpose: an upload is a transfer, and a transfer that could be replayed
-  into two deployments is a name two callers can disagree about. A caller that needs the
-  bytes twice uploads them twice.
+  Consume-once, and it is the `File.rename/2` that makes it so rather than the sentence:
+  two callers naming the same upload both rename it to private names of their own, one
+  gets `:enoent`, and only the winner reads anything. A caller that needs the bytes twice
+  uploads them twice.
   """
   @spec take(String.t(), keyword()) :: {:ok, binary()} | {:error, term()}
   def take(id, opts \\ []) when is_binary(id) do
-    with {:ok, dir} <- root(opts),
-         {:ok, id} <- valid_id(id) do
-      path = Path.join(dir, id <> @done)
+    with {:ok, dir} <- swept(opts),
+         {:ok, id} <- valid_id(id),
+         {:ok, done} <- committed(dir, id) do
+      claim = Path.join(dir, id <> @taken <> unique())
 
-      case File.read(path) do
-        {:ok, bytes} ->
-          _ignored = File.rm(path)
-          {:ok, bytes}
+      case File.rename(done, claim) do
+        :ok ->
+          result = File.read(claim)
+          _ignored = File.rm(claim)
+          release(dir, id)
+          bytes(result)
 
         {:error, :enoent} ->
-          if File.exists?(Path.join(dir, id <> @part)),
-            do: {:error, {:upload_incomplete, id}},
-            else: {:error, {:unknown_upload, id}}
+          {:error, {:unknown_upload, id}}
 
         {:error, reason} ->
           {:error, {:upload_unreadable, reason}}
@@ -171,54 +205,72 @@ defmodule Ouroboros.Wasm.Upload do
   @doc """
   Where a finished upload's bytes are, without reading or removing them.
 
-  For the one caller that has a use for the file rather than its contents:
-  `Ouroboros.Wasm.Pool.inspect/2` reads a component off disk, and handing it this path
-  saves writing sixteen mebibytes to a second one. It is still `take/2` that consumes the
-  upload, so nothing here changes what a caller ends up holding.
+  Kept for a caller that has a use for the file rather than its contents. Nothing in this
+  build parses a staged file — `wasm.sign` never hands unsigned bytes to the helper
+  (docs/WASM.md D15) — so this exists for the same reason `sweep/1` is public: a seam
+  worth being able to ask about directly.
   """
   @spec path(String.t(), keyword()) :: {:ok, Path.t()} | {:error, term()}
   def path(id, opts \\ []) when is_binary(id) do
-    with {:ok, dir} <- root(opts),
+    with {:ok, dir} <- swept(opts),
          {:ok, id} <- valid_id(id) do
-      done = Path.join(dir, id <> @done)
-
-      cond do
-        File.regular?(done) -> {:ok, done}
-        File.exists?(Path.join(dir, id <> @part)) -> {:error, {:upload_incomplete, id}}
-        true -> {:error, {:unknown_upload, id}}
-      end
+      committed(dir, id)
     end
   end
 
   @doc """
-  Removes every upload older than the retention window, returning how many went.
+  Removes every upload past either clock, returning how many went.
 
-  Called at the head of every append, which is the only reason this module needs no timer.
+  Called at the head of every entry point — including the two that only read — which is
+  the only reason this module needs no timer.
   """
   @spec sweep(keyword()) :: non_neg_integer()
   def sweep(opts \\ []) do
     case root(opts) do
-      {:ok, dir} -> expire(dir, now_ms() - @ttl_ms)
+      {:ok, dir} -> expire(dir)
       {:error, _no_data_dir} -> 0
     end
   end
 
   ## Plumbing
 
-  defp prepared(opts) do
-    with {:ok, dir} <- root(opts),
-         :ok <- ensure_directory(dir) do
-      _swept = expire(dir, now_ms() - @ttl_ms)
+  defp swept(opts) do
+    with {:ok, dir} <- root(opts) do
+      _swept = expire(dir)
       {:ok, dir}
     end
   end
 
+  defp prepared(opts) do
+    with {:ok, dir} <- root(opts),
+         :ok <- ensure_directory(dir) do
+      _swept = expire(dir)
+      {:ok, dir}
+    end
+  end
+
+  # `File.lstat/1`, never `File.stat/1`: a root that is a symlink is a root whose owner is
+  # whoever created the link, and `chmod` through it is a mode set on their target.
   defp ensure_directory(dir) do
+    case File.lstat(dir) do
+      {:ok, %File.Stat{type: :directory}} ->
+        _ignored = File.chmod(dir, 0o700)
+        :ok
+
+      {:ok, %File.Stat{type: type}} ->
+        {:error, {:upload_directory_not_a_directory, type}}
+
+      {:error, :enoent} ->
+        create_directory(dir)
+
+      {:error, reason} ->
+        {:error, {:upload_directory_unwritable, reason}}
+    end
+  end
+
+  defp create_directory(dir) do
     case File.mkdir_p(dir) do
       :ok ->
-        # 0700 for the same reason the data directory is: these bytes are somebody's
-        # unreleased capability, and the directory they land in should not be a place
-        # every account on the host can read from.
         _ignored = File.chmod(dir, 0o700)
         :ok
 
@@ -227,42 +279,89 @@ defmodule Ouroboros.Wasm.Upload do
     end
   end
 
-  # A new upload is admitted only if the node is under its in-flight ceiling *after* the
-  # sweep, so a client whose previous attempts timed out is not permanently locked out by
-  # its own litter.
+  # A slot is claimed before a byte is written, and it is claimed with `O_CREAT|O_EXCL`,
+  # so the ceiling is enforced by the filesystem rather than by a count somebody took.
   defp opened(nil, dir) do
-    case in_flight(dir) do
-      count when count >= @max_in_flight ->
-        {:error, {:too_many_uploads, count, @max_in_flight}}
+    id = @id_bytes |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
 
-      _room ->
-        id = @id_bytes |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
+    case claim_slot(dir, id, 0) do
+      :ok ->
         path = Path.join(dir, id <> @part)
 
+        # `[:exclusive]` here is a belt and is honestly labelled as one: `id` is sixteen
+        # bytes of `:crypto.strong_rand_bytes/1`, so there is no reachable input that makes
+        # this file already exist, and no test in this suite can tell it from `[:write]`.
+        # The exclusivity that actually bounds this node is the slot claim above, which is
+        # reachable, contended, and proved by the concurrent-opener test. What keeps an
+        # *existing* upload from being clobbered is `written/2`'s `[:append]` and the offset
+        # check, both of which are reachable and both of which are proved.
         case File.write(path, "", [:exclusive]) do
           :ok ->
             _ignored = File.chmod(path, 0o600)
             {:ok, id, path}
 
           {:error, reason} ->
+            release(dir, id)
             {:error, {:upload_not_created, reason}}
         end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
   defp opened(id, dir) when is_binary(id) do
     with {:ok, id} <- valid_id(id) do
-      path = Path.join(dir, id <> @part)
+      case staged(dir, id, @part) do
+        {:ok, path} ->
+          {:ok, id, path}
 
-      cond do
-        File.exists?(path) -> {:ok, id, path}
-        File.exists?(Path.join(dir, id <> @done)) -> {:error, {:upload_closed, id}}
-        true -> {:error, {:unknown_upload, id}}
+        {:error, {:unknown_upload, _id}} = absent ->
+          if File.exists?(Path.join(dir, id <> @done)),
+            do: {:error, {:upload_closed, id}},
+            else: absent
+
+        error ->
+          error
       end
     end
   end
 
   defp opened(id, _dir), do: {:error, {:invalid_upload_id, describe(id)}}
+
+  defp claim_slot(_dir, _id, n) when n >= @max_in_flight,
+    do: {:error, {:too_many_uploads, @max_in_flight, @max_in_flight}}
+
+  defp claim_slot(dir, id, n) do
+    contents = "#{id} #{now_ms()}\n"
+
+    case File.write(Path.join(dir, @slot <> Integer.to_string(n)), contents, [:exclusive]) do
+      :ok -> :ok
+      {:error, :eexist} -> claim_slot(dir, id, n + 1)
+      {:error, reason} -> {:error, {:upload_not_created, reason}}
+    end
+  end
+
+  defp release(dir, id) do
+    Enum.each(0..(@max_in_flight - 1), fn n ->
+      path = Path.join(dir, @slot <> Integer.to_string(n))
+
+      case slot_holder(path) do
+        {^id, _opened_ms} -> File.rm(path)
+        _other -> :ok
+      end
+    end)
+  end
+
+  defp slot_holder(path) do
+    with {:ok, contents} <- File.read(path),
+         [id, opened] <- contents |> String.trim() |> String.split(" ", parts: 2),
+         {opened_ms, ""} <- Integer.parse(opened) do
+      {id, opened_ms}
+    else
+      _unreadable -> nil
+    end
+  end
 
   # Hex and exactly the minted length. Nothing else reaches `Path.join/2`, so no id — however
   # it was spelled — can name a file outside this directory or a file that is not an upload.
@@ -270,6 +369,34 @@ defmodule Ouroboros.Wasm.Upload do
     if Regex.match?(@id_pattern, id),
       do: {:ok, id},
       else: {:error, {:invalid_upload_id, describe(id)}}
+  end
+
+  # A committed upload, or the reason it is not one. "You have not finished sending this"
+  # and "there is nothing here" are different mistakes and a client fixes them differently.
+  defp committed(dir, id) do
+    case staged(dir, id, @done) do
+      {:error, {:unknown_upload, _id}} = absent ->
+        case staged(dir, id, @part) do
+          {:ok, _part} -> {:error, {:upload_incomplete, id}}
+          _no_part -> absent
+        end
+
+      other ->
+        other
+    end
+  end
+
+  # A staged file must be a regular file. A symlink under this name was put there by
+  # whoever could write in this directory, and appending to it appends to their target.
+  defp staged(dir, id, suffix) do
+    path = Path.join(dir, id <> suffix)
+
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :regular}} -> {:ok, path}
+      {:ok, %File.Stat{type: type}} -> {:error, {:upload_not_a_file, type}}
+      {:error, :enoent} -> {:error, {:unknown_upload, id}}
+      {:error, reason} -> {:error, {:upload_unreadable, reason}}
+    end
   end
 
   defp bound_chunk(chunk) do
@@ -281,9 +408,9 @@ defmodule Ouroboros.Wasm.Upload do
   end
 
   defp held(path) do
-    case File.stat(path) do
+    case File.lstat(path) do
       {:ok, %File.Stat{type: :regular, size: size}} -> {:ok, size}
-      {:ok, _other} -> {:error, :upload_not_a_file}
+      {:ok, %File.Stat{type: type}} -> {:error, {:upload_not_a_file, type}}
       {:error, reason} -> {:error, {:upload_unreadable, reason}}
     end
   end
@@ -303,11 +430,7 @@ defmodule Ouroboros.Wasm.Upload do
     end
   end
 
-  defp settle(id, _dir, path, received, false) do
-    # The mtime is the expiry clock, so an upload still being written must not age out from
-    # under its author between chunks.
-    _touched = File.touch(path)
-
+  defp settle(id, _dir, _path, received, false) do
     {:ok,
      %{
        upload: id,
@@ -336,43 +459,82 @@ defmodule Ouroboros.Wasm.Upload do
     end
   end
 
-  defp in_flight(dir) do
-    case File.ls(dir) do
-      {:ok, names} -> Enum.count(names, &upload?/1)
-      {:error, _unreadable} -> @max_in_flight
-    end
-  end
+  defp bytes({:ok, bytes}), do: {:ok, bytes}
+  defp bytes({:error, reason}), do: {:error, {:upload_unreadable, reason}}
 
-  defp upload?(name), do: String.ends_with?(name, @part) or String.ends_with?(name, @done)
+  # One pass over the eight slots, then one over the directory. A slot past either clock
+  # takes its files with it; a file with no slot is litter from a crash between the two
+  # writes and goes on its own.
+  defp expire(dir) do
+    held =
+      Enum.reduce(0..(@max_in_flight - 1), MapSet.new(), fn n, acc ->
+        path = Path.join(dir, @slot <> Integer.to_string(n))
 
-  defp expire(dir, floor_ms) do
-    case File.ls(dir) do
-      {:ok, names} ->
-        names
-        |> Enum.filter(&upload?/1)
-        |> Enum.count(&expired?(Path.join(dir, &1), floor_ms))
+        case slot_holder(path) do
+          nil ->
+            _ignored = File.rm(path)
+            acc
 
-      {:error, _unreadable} ->
-        0
-    end
-  end
-
-  defp expired?(path, floor_ms) do
-    case File.stat(path, time: :posix) do
-      {:ok, %File.Stat{mtime: mtime}} when is_integer(mtime) ->
-        if mtime * 1_000 < floor_ms do
-          # Never the bytes, never the sha: what an operator needs from this line is that
-          # a transfer was abandoned, and the id is the whole of that.
-          Logger.debug("wasm upload #{Path.basename(path)} expired unread")
-          File.rm(path) == :ok
-        else
-          false
+          {id, opened_ms} ->
+            if expired?(dir, id, opened_ms) do
+              _ignored = File.rm(path)
+              acc
+            else
+              MapSet.put(acc, id)
+            end
         end
+      end)
 
-      _unreadable ->
-        false
+    case File.ls(dir) do
+      {:ok, names} -> names |> Enum.filter(&upload?/1) |> Enum.count(&orphaned(dir, &1, held))
+      {:error, _unreadable} -> 0
     end
   end
+
+  defp upload?(name) do
+    String.ends_with?(name, @part) or String.ends_with?(name, @done) or
+      String.contains?(name, @taken)
+  end
+
+  defp orphaned(dir, name, held) do
+    id = name |> String.split(".") |> List.first()
+
+    if MapSet.member?(held, id) do
+      false
+    else
+      # Never the bytes, never the sha: what an operator needs from this line is that a
+      # transfer was reclaimed, and the id is the whole of that.
+      Logger.debug("wasm upload #{name} reclaimed")
+      File.rm(Path.join(dir, name)) == :ok
+    end
+  end
+
+  # Two clocks, checked together. The idle one is the file's own mtime, which a write moves
+  # and nothing here moves artificially; the total one is the slot's claim time, which
+  # nothing moves at all.
+  defp expired?(dir, id, opened_ms) do
+    now = now_ms()
+
+    cond do
+      now - opened_ms > @max_lifetime_ms -> true
+      true -> idle?(dir, id, now)
+    end
+  end
+
+  defp idle?(dir, id, now) do
+    [Path.join(dir, id <> @part), Path.join(dir, id <> @done)]
+    |> Enum.map(&File.lstat(&1, time: :posix))
+    |> Enum.find_value(:absent, fn
+      {:ok, %File.Stat{type: :regular, mtime: mtime}} when is_integer(mtime) -> mtime
+      _other -> nil
+    end)
+    |> case do
+      :absent -> true
+      mtime -> now - mtime * 1_000 > @ttl_ms
+    end
+  end
+
+  defp unique, do: Integer.to_string(System.unique_integer([:positive, :monotonic]))
 
   defp now_ms, do: System.system_time(:millisecond)
 

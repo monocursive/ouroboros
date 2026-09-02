@@ -188,6 +188,21 @@ defmodule Ouroboros.Wasm.BundleTest do
       assert {:error, :empty_component} = Bundle.decode(<<"OUROWASM", 1::8, 1::32, 0::32>>)
     end
 
+    # M32. The version byte is matched as a literal in the clause that reads the two
+    # lengths, and the earlier test only reached the *fallback* clause because its input was
+    # too short. This one is a whole, well-formed file whose only difference is the version.
+    test "a fully framed file from a future version is refused, not read", context do
+      {:ok, bundle} = Bundle.encode(signed!(context), @bytes)
+
+      <<"OUROWASM", 1::8, rest::binary>> = bundle
+      future = "OUROWASM" <> <<2::8>> <> rest
+
+      assert byte_size(future) == byte_size(bundle)
+
+      assert {:error, {:unsupported_bundle_version, 2}} = Bundle.decode(future)
+      assert {:error, {:unsupported_bundle_version, 2}} = Bundle.verify(future, [])
+    end
+
     test "something that is not one of these files is refused by its first eight bytes" do
       assert {:error, :not_a_bundle} = Bundle.decode(<<"NOTAWASM", 1::8, 1::32, 1::32>>)
 
@@ -217,12 +232,83 @@ defmodule Ouroboros.Wasm.BundleTest do
 
       assert {:error, {:invalid_signer, 0}} = rebuild(bundle, &Map.put(&1, "signer", ""))
 
-      assert {:error, {:field_too_large, :manifest, _}} =
-               rebuild(bundle, &Map.put(&1, "manifest", Base.encode64(:binary.copy("m", 40_000))))
+      # M8. The number in the refusal is the **encoded** length, which is the whole point of
+      # the check: it is made from the length of the string in hand, before a decode of it
+      # allocates anything. Delete the pre-decode bound and this still refuses — the decoded
+      # ceiling catches it — but it refuses at 40 000 having first built 40 000 bytes from a
+      # value somebody else chose the size of.
+      oversize = Base.encode64(:binary.copy("m", 40_000))
+
+      assert {:error, {:field_too_large, :manifest, encoded}} =
+               rebuild(bundle, &Map.put(&1, "manifest", oversize))
+
+      assert encoded == byte_size(oversize)
+      assert encoded > 40_000
     end
   end
 
   describe "the manifest term, which arrives from a file" do
+    # H1. `term_to_binary/2` can deflate its output and `binary_to_term/2` inflates it
+    # transparently — `:safe` included — so the ceiling on the *encoded* field said nothing
+    # about what a decode allocates. Forty-two kibibytes of zlib was a sixteen-million
+    # element list built inside `verify/2`, which is what `wasm.deploy` reaches at
+    # `:operate`, before a single trust check had run.
+    test "a compressed manifest is refused without being inflated", context do
+      {:ok, bundle} = Bundle.encode(signed!(context), @bytes)
+
+      bomb = :erlang.term_to_binary(%{id: List.duplicate(0, 16_000_000)}, compressed: 9)
+      assert byte_size(bomb) < 64 * 1024
+
+      hostile = reframe(bundle, &Map.put(&1, "manifest", Base.encode64(bomb)))
+      assert byte_size(hostile) < 64 * 1024
+
+      assert {:error, :compressed_manifest} = Bundle.decode(hostile)
+
+      # And the same, through the entry point a socket actually reaches.
+      assert {:error, :compressed_manifest} = Bundle.verify(hostile, context.trust_policy)
+
+      # Measured rather than asserted about: delete the tag-80 clause from `uncompressed/1`
+      # and this process grows to hundreds of megabytes decoding a file smaller than a
+      # screenshot.
+      assert grew_by(fn -> Bundle.verify(hostile, context.trust_policy) end) < 4 * 1024 * 1024
+    end
+
+    test "the encoder never writes a compressed term, so refusing one costs nothing",
+         context do
+      {:ok, bundle} = Bundle.encode(signed!(context), @bytes)
+
+      <<"OUROWASM", 1::8, len::32, _::32, rest::binary>> = bundle
+      {:ok, %{"manifest" => manifest}} = JSON.decode(binary_part(rest, 0, len))
+
+      assert <<131, tag, _::binary>> = Base.decode64!(manifest)
+      refute tag == 80
+    end
+
+    # The second bound, on what the decode *allocated*. Uncompressed terms are not
+    # size-preserving either: a byte list is one byte an element on the wire and a cons cell
+    # — sixteen bytes — in the heap, so a field comfortably under the encoded ceiling still
+    # costs sixteen times it. Delete `bounded_term/1` and this decodes happily.
+    test "a manifest that is small encoded and large decoded is refused", context do
+      {:ok, bundle} = Bundle.encode(signed!(context), @bytes)
+
+      # `STRING_EXT`: thirty thousand elements, thirty thousand bytes, and half a mebibyte
+      # of heap on the other side.
+      fat = :erlang.term_to_binary(%{id: :binary.bin_to_list(:binary.copy(<<1>>, 30_000))})
+
+      assert byte_size(fat) < 32 * 1024
+      assert :erts_debug.flat_size(:erlang.binary_to_term(fat)) * 8 > 128 * 1024
+
+      assert {:error, {:manifest_too_large, heap, ceiling}} =
+               reframe(bundle, &Map.put(&1, "manifest", Base.encode64(fat))) |> Bundle.decode()
+
+      assert heap > ceiling
+      assert ceiling == 128 * 1024
+
+      # A real manifest — the largest this build can produce, with a full eval spec and a
+      # 16 KiB start config — is nowhere near it, because its bulk is binaries.
+      assert :erts_debug.flat_size(Artifact.manifest(signed!(context))) * 8 < 128 * 1024
+    end
+
     test "an atom this node has never interned is refused rather than created", context do
       {:ok, bundle} = Bundle.encode(signed!(context), @bytes)
 
@@ -375,6 +461,48 @@ defmodule Ouroboros.Wasm.BundleTest do
     envelope = binary_part(rest, 0, envelope_len)
 
     "OUROWASM" <> <<1::8, envelope_len::32, component_len::32>> <> envelope <> replacement
+  end
+
+  # Re-frames a bundle with a mutated envelope and hands back the *file*, where `rebuild/2`
+  # hands back the decode. Same arithmetic, different question.
+  defp reframe(bundle, mutate) do
+    <<"OUROWASM", 1::8, envelope_len::32, component_len::32, rest::binary>> = bundle
+    envelope = binary_part(rest, 0, envelope_len)
+    component = binary_part(rest, envelope_len, component_len)
+
+    {:ok, fields} = JSON.decode(envelope)
+    replaced = fields |> mutate.() |> JSON.encode!()
+
+    "OUROWASM" <>
+      <<1::8, byte_size(replaced)::32, component_len::32>> <> replaced <> component
+  end
+
+  # How much heap one call grew, measured in a process of its own so nothing this test
+  # already holds is counted.
+  defp grew_by(fun) do
+    parent = self()
+
+    {pid, ref} =
+      spawn_monitor(fn ->
+        _result = fun.()
+        {:memory, memory} = Process.info(self(), :memory)
+        send(parent, {:grew, memory})
+      end)
+
+    receive do
+      {:grew, memory} ->
+        receive do
+          {:DOWN, ^ref, _, _, _} -> :ok
+        after
+          1_000 -> :ok
+        end
+
+        memory
+    after
+      120_000 ->
+        Process.exit(pid, :kill)
+        flunk("the decode did not finish in 120s")
+    end
   end
 
   defp interned?(name) do

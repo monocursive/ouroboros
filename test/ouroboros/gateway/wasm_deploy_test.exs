@@ -165,7 +165,7 @@ defmodule Ouroboros.Gateway.WasmDeployTest do
     test "an offset that is not where the node is answers where it is" do
       {:ok, %{upload: id}} = invoke("wasm.upload", %{"offset" => 0, "data" => b64("abcdef")})
 
-      assert {:error, code, message} =
+      assert {:error, code, message, _data} =
                Methods.invoke("wasm.upload", %{
                  "upload" => id,
                  "offset" => 0,
@@ -203,6 +203,17 @@ defmodule Ouroboros.Gateway.WasmDeployTest do
       assert {:error, _code, message} = sign(%{"start" => %{"id" => "wasm/anything"}})
       assert message =~ "start"
 
+      # M24. Every key not in the list is refused by name, and `initial_state` is worth one
+      # assertion of its own: `Ouroboros.Wasm.Rollout.start_state/2` names the six keys that
+      # decide what is being evaluated, and a signed spec merges *under* them, so a key here
+      # that looked like it seeded an evaluation would be a parameter promising something
+      # the deployment already decided.
+      for smuggled <- ["initial_state", "start_id", "signer", "trust_policy", "nodes"] do
+        assert {:error, code, message} = sign(%{smuggled => %{}})
+        assert code == Methods.code(:invalid_params)
+        assert message =~ smuggled
+      end
+
       # `start_config` is accepted; the id is derived from the name. There is no spelling
       # of the id a request could get wrong because there is no spelling of it at all.
       assert {:ok, %{params: params}} = Methods.params("wasm.sign")
@@ -217,14 +228,30 @@ defmodule Ouroboros.Gateway.WasmDeployTest do
       assert {:error, _code, message} = sign(%{"author" => nil})
       assert message =~ "author"
 
-      assert {:error, _code, message} = sign(%{"epoch" => 0})
-      assert message =~ "epoch"
-
       assert {:error, _code, message} = sign(%{"source_sha256" => "nope"})
       assert message =~ "source_sha256"
 
       assert {:error, _code, message} = sign(%{"imports" => ["log", 7]})
       assert message =~ "imports"
+
+      # H3. `imports` is required, and `[]` is a real answer. The node used to resolve an
+      # absent list by handing the staged, unsigned bytes to its own helper — at `:operate`,
+      # before a signature existed and upstream of the signing service's rate limit.
+      assert {:error, code, message} =
+               Methods.invoke("wasm.sign", %{
+                 "upload" => upload_id(),
+                 "name" => "greeter",
+                 "author" => "a"
+               })
+
+      assert code == Methods.code(:invalid_params)
+      assert message =~ "params.imports is required"
+      assert message =~ "does not parse unsigned bytes"
+
+      # And the empty list is accepted as the statement it is, reaching the plane rather
+      # than the validator.
+      assert {:error, code, _message} = sign(%{"imports" => []})
+      assert code == Methods.code(:not_found)
 
       assert {:error, _code, message} =
                sign(%{"start_config" => String.duplicate("x", 16_385)})
@@ -273,27 +300,61 @@ defmodule Ouroboros.Gateway.WasmDeployTest do
       assert {:ok, _valid} = Ouroboros.Upgrade.Rollout.Evaluation.validate(spec)
     end
 
-    test "a state key this node has never interned is a parameter error, not a new atom" do
+    # L6. `String.to_existing_atom/1` was the first answer and it is the wrong bound: every
+    # atom the VM happens to hold — thousands of module names, every option key of every
+    # dependency — was a legal state field to match on. The closed set is what
+    # `Ouroboros.Wasm.Capability` declares, read from the agent rather than restated.
+    test "only the wrapper agent's own state fields may be matched on" do
+      fields = Methods.wasm_state_fields()
+
+      assert :messages_received in fields
+      assert :last_answer in fields
+
+      for field <- fields do
+        assert {:error, code, _message} =
+                 sign(%{
+                   "eval" => %{
+                     "probes" => [
+                       %{
+                         "input" => 1,
+                         "expect" => %{
+                           "kind" => "state_matches",
+                           "key" => Atom.to_string(field),
+                           "value" => 1
+                         }
+                       }
+                     ]
+                   }
+                 })
+
+        # Past the validator and refused by the plane on the upload, which is how a valid
+        # field is distinguished from a rejected one here.
+        assert code == Methods.code(:not_found), "#{field} is a field of the agent's state"
+      end
+    end
+
+    test "an atom this VM holds but the agent does not declare is still refused" do
+      # `:gen_server` is interned in every running VM, so `String.to_existing_atom/1` would
+      # have accepted it as a state field to match on. It is not one.
+      assert interned?("gen_server")
+
+      assert {:error, code, message} = state_matches_on("gen_server")
+      assert code == Methods.code(:invalid_params)
+      assert message =~ "field of the wasm capability's state"
+      assert message =~ "messages_received"
+    end
+
+    test "a name this node has never interned is a parameter error, not a new atom" do
       key = "a_state_field_no_ouroboros_agent_declares_anywhere"
       refute interned?(key)
 
-      assert {:error, code, message} =
-               sign(%{
-                 "eval" => %{
-                   "probes" => [
-                     %{
-                       "input" => 1,
-                       "expect" => %{"kind" => "state_matches", "key" => key, "value" => 1}
-                     }
-                   ]
-                 }
-               })
+      assert {:error, code, message} = state_matches_on(key)
 
       assert code == Methods.code(:invalid_params)
-      assert message =~ "state field this node knows"
+      assert message =~ "field of the wasm capability's state"
 
-      # Delete the rescue around `String.to_existing_atom/1` and this is what changes: the
-      # atom table grows by one entry per hostile frame, in a table nothing collects.
+      # Nothing here converts a client's bytes at all: the comparison is a string against
+      # `Atom.to_string/1`, so an unknown name never becomes an atom, existing or otherwise.
       refute interned?(key)
     end
 
@@ -330,6 +391,26 @@ defmodule Ouroboros.Gateway.WasmDeployTest do
                sign(%{"eval" => %{"probes" => [%{"input" => 1}], "required" => "most"}})
 
       assert message =~ "at_least"
+    end
+  end
+
+  describe "the epoch, which is not a parameter" do
+    # H2. `epoch` was an optional client parameter with no ceiling. The rollout register
+    # admits an epoch only *above* its watermark and refuses one at its plausibility
+    # ceiling, so one deploy at the ceiling left no number that was both — on every lane-W
+    # capability on that node, durably, from one `:operate` call.
+    test "the envelope refuses `epoch` by name" do
+      assert {:error, code, message} =
+               sign(%{"epoch" => 100_000_000_000_000})
+
+      assert code == Methods.code(:invalid_params)
+      assert message =~ "epoch"
+
+      # Any epoch, not merely a large one: there is no parameter at all.
+      assert {:error, _code, message} = sign(%{"epoch" => 7})
+      assert message =~ "epoch"
+
+      refute Enum.any?(elem(Methods.params("wasm.sign"), 1).params, &(&1.name == "epoch"))
     end
   end
 
@@ -379,6 +460,70 @@ defmodule Ouroboros.Gateway.WasmDeployTest do
     end
   end
 
+  describe "the bounds a mutation would otherwise walk straight past" do
+    # M25. The chunk is bounded from the *encoded* length, before a decode of it allocates
+    # anything — four characters to three bytes, so the string in hand already states what a
+    # decode would cost. Delete the pre-decode branch and the refusal still happens, but
+    # only after building the bytes; the two are told apart by which length is reported.
+    test "an oversized chunk is refused from its encoded length, not its decoded one" do
+      max = Upload.max_chunk_bytes()
+      over = b64(:binary.copy("x", max + 1))
+
+      assert {:error, code, message} =
+               Methods.invoke("wasm.upload", %{"offset" => 0, "data" => over})
+
+      assert code == Methods.code(:invalid_params)
+      assert message =~ "at most #{max} bytes"
+
+      # A string that is far too long *and* not base64 at all: with the pre-decode bound it
+      # never reaches `Base.decode64/1`, so the answer is about size and not about encoding.
+      hostile = String.duplicate("!", max * 2)
+
+      assert {:error, _code, message} =
+               Methods.invoke("wasm.upload", %{"offset" => 0, "data" => hostile})
+
+      assert message =~ "at most #{max} bytes",
+             "an oversized frame was decoded before it was measured"
+    end
+
+    # M37. The target list is bounded before any of it is resolved.
+    test "a deploy naming more machines than the bound is refused" do
+      many = for n <- 1..33, do: "machine-#{n}"
+
+      assert {:error, code, message} =
+               Methods.invoke("wasm.deploy", %{"upload" => upload_id(), "nodes" => many})
+
+      assert code == Methods.code(:invalid_params)
+      assert message =~ "1 to 32"
+
+      # Thirty-two is the bound, so thirty-two is resolved rather than refused for length —
+      # and then refused for naming machines this node is not connected to.
+      assert {:error, _code, message} =
+               Methods.invoke("wasm.deploy", %{
+                 "upload" => upload_id(),
+                 "nodes" => Enum.take(many, 32)
+               })
+
+      assert message =~ "connected machine"
+    end
+
+    # L5's other half: the offset a client resumes from arrives as data, not as prose.
+    test "an offset mismatch carries the held offset a client resumes from" do
+      {:ok, %{upload: id}} = invoke("wasm.upload", %{"offset" => 0, "data" => b64("abcdef")})
+
+      assert {:error, code, message, data} =
+               Methods.invoke("wasm.upload", %{
+                 "upload" => id,
+                 "offset" => 0,
+                 "data" => b64("abcdef")
+               })
+
+      assert code == Methods.code(:invalid_params)
+      assert message =~ "must be 6"
+      assert data == %{"reason" => "offset_mismatch", "offset" => 6}
+    end
+  end
+
   describe "the result shapes the goldens pin" do
     test "a projected deployment has exactly the fixture's shape" do
       projected = Surface.deployment(outcome()) |> Wire.to_json()
@@ -423,7 +568,12 @@ defmodule Ouroboros.Gateway.WasmDeployTest do
     Methods.invoke(
       "wasm.sign",
       Map.merge(
-        %{"upload" => upload_id(), "name" => "greeter", "author" => "test-agent"},
+        %{
+          "upload" => upload_id(),
+          "name" => "greeter",
+          "author" => "test-agent",
+          "imports" => ["log"]
+        },
         overrides
       )
     )
@@ -462,7 +612,7 @@ defmodule Ouroboros.Gateway.WasmDeployTest do
   defp minimal_params("wasm.upload"), do: %{"offset" => 0, "data" => b64("x")}
 
   defp minimal_params("wasm.sign"),
-    do: %{"upload" => upload_id(), "name" => "greeter", "author" => "a"}
+    do: %{"upload" => upload_id(), "name" => "greeter", "author" => "a", "imports" => []}
 
   defp minimal_params("wasm.deploy"), do: %{"upload" => upload_id()}
   defp minimal_params("wasm.rollback"), do: %{"name" => "greeter"}
@@ -506,10 +656,20 @@ defmodule Ouroboros.Gateway.WasmDeployTest do
   defp shape(value) when is_binary(value), do: :string
   defp shape(value) when is_integer(value), do: :integer
   defp shape(value) when is_boolean(value), do: :boolean
-  defp shape(value), do: :other
+  defp shape(_other), do: :other
 
   defp fixture(name) do
     @golden |> Path.join(name <> ".json") |> File.read!() |> JSON.decode!()
+  end
+
+  defp state_matches_on(key) do
+    sign(%{
+      "eval" => %{
+        "probes" => [
+          %{"input" => 1, "expect" => %{"kind" => "state_matches", "key" => key, "value" => 1}}
+        ]
+      }
+    })
   end
 
   defp b64(bytes), do: Base.encode64(bytes)

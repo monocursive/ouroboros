@@ -84,6 +84,8 @@ pub fn keygen<O: Write>(args: &WasmKeygenArgs, out: &mut O) -> Result<()> {
         );
     }
 
+    signer_id(&args.id)?;
+
     let seed = random_seed()?;
     let public = public_key(&seed)?;
 
@@ -129,6 +131,13 @@ pub async fn sign<O: Write>(client: &Client, args: &WasmSignArgs, out: &mut O) -
     let prefix = base64::engine::general_purpose::STANDARD
         .decode(prefix)
         .context("the runtime's bundle prefix is not base64")?;
+
+    // The manifest that came back must describe the file that went up. This client cannot
+    // verify a signature — it holds no trusted key, and the node it is talking to is the
+    // one that would have to be lying — but it can refuse to write a bundle whose two
+    // halves disagree, which is the failure a truncated upload or a confused node produces
+    // and which would otherwise surface as a quarantine on some other machine later.
+    describes(&signed, &bytes, prefix.len())?;
 
     // The whole of this client's knowledge of the format: the node's prefix, then the
     // bytes it just uploaded.
@@ -275,6 +284,10 @@ async fn upload(client: &Client, bytes: &[u8], node: Option<&str>) -> Result<Str
     let mut offset: usize = 0;
     let mut chunk = CHUNK_BYTES;
 
+    // Bounded, because a node that answered a different offset every time would otherwise
+    // be a loop. Two resumes is one more than a retried frame needs.
+    let mut resumes: u8 = 2;
+
     while offset < bytes.len() {
         let end = (offset + chunk).min(bytes.len());
         let last = end == bytes.len();
@@ -299,10 +312,24 @@ async fn upload(client: &Client, bytes: &[u8], node: Option<&str>) -> Result<Str
             params.insert("node".into(), Value::String(node.to_string()));
         }
 
-        let answer = client
-            .call(UPLOAD_METHOD, Value::Object(params))
-            .await
-            .map_err(|error| anyhow!("the runtime refused {UPLOAD_METHOD}: {error}"))?;
+        let answer = match client.call(UPLOAD_METHOD, Value::Object(params)).await {
+            Ok(answer) => answer,
+
+            // The node refuses a frame whose offset is not where it is, and says where it
+            // is in the error's `data`. That is the one refusal a client can act on rather
+            // than report: a retried or reordered frame resumes from the node's own number
+            // instead of ending the transfer.
+            Err(error) => match held_offset(&error) {
+                Some(held) if held <= bytes.len() && held != offset && resumes > 0 => {
+                    resumes -= 1;
+                    offset = held;
+                    continue;
+                }
+                _other => {
+                    return Err(anyhow!("the runtime refused {UPLOAD_METHOD}: {error}"));
+                }
+            },
+        };
 
         let receipt = WasmUploadReceipt::decode(&answer);
 
@@ -324,6 +351,70 @@ async fn upload(client: &Client, bytes: &[u8], node: Option<&str>) -> Result<Str
     }
 
     id.ok_or_else(|| anyhow!("the upload produced no id"))
+}
+
+/// Refuses a signature whose manifest is not about the bytes this client uploaded.
+pub fn describes(signed: &WasmSignature, bytes: &[u8], prefix_len: usize) -> Result<()> {
+    let digest = sha256_hex(bytes);
+
+    match signed.component_sha256.as_deref() {
+        Some(sha) if sha == digest => {}
+        Some(sha) => bail!(
+            "the runtime signed a manifest for component {sha}, but the file uploaded hashes \
+             to {digest}"
+        ),
+        None => bail!("the runtime answered {SIGN_METHOD} without a component digest"),
+    }
+
+    match signed.size {
+        Some(size) if size == bytes.len() as u64 => {}
+        Some(size) => bail!(
+            "the runtime signed a manifest for {size} bytes, but the file uploaded is {} bytes",
+            bytes.len()
+        ),
+        None => bail!("the runtime answered {SIGN_METHOD} without a component size"),
+    }
+
+    let expected = prefix_len as u64 + bytes.len() as u64;
+
+    match signed.bundle_bytes {
+        Some(total) if total == expected => Ok(()),
+        Some(total) => bail!(
+            "the runtime says the bundle is {total} bytes; the prefix and the component are \
+             {expected}"
+        ),
+        None => Ok(()),
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
+
+    digest
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The offset a node says it holds, out of an `offset_mismatch` refusal's `data`.
+///
+/// `None` for every other error: a client resumes only where the node named a place to
+/// resume from, never by guessing from a message.
+pub fn held_offset(error: &crate::transport::ClientError) -> Option<usize> {
+    let crate::transport::ClientError::Rpc(error) = error else {
+        return None;
+    };
+
+    let data = error.data.as_ref()?;
+
+    if data.get("reason").and_then(Value::as_str) != Some("offset_mismatch") {
+        return None;
+    }
+
+    data.get("offset")
+        .and_then(Value::as_u64)
+        .map(|offset| offset as usize)
 }
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>> {
@@ -357,21 +448,7 @@ pub fn sign_params(args: &WasmSignArgs, upload: &str) -> Result<Map<String, Valu
     params.insert("upload".into(), Value::String(upload.to_string()));
     params.insert("name".into(), Value::String(args.name.clone()));
     params.insert("author".into(), Value::String(args.author.clone()));
-
-    if let Some(epoch) = args.epoch {
-        params.insert("epoch".into(), Value::from(epoch));
-    }
-
-    if let Some(imports) = &args.imports {
-        let declared: Vec<Value> = imports
-            .split(',')
-            .map(str::trim)
-            .filter(|import| !import.is_empty())
-            .map(|import| Value::String(import.to_string()))
-            .collect();
-
-        params.insert("imports".into(), Value::Array(declared));
-    }
+    params.insert("imports".into(), Value::Array(imports(args)?));
 
     if let Some(language) = &args.language {
         params.insert("language".into(), Value::String(language.clone()));
@@ -401,6 +478,60 @@ pub fn sign_params(args: &WasmSignArgs, upload: &str) -> Result<Map<String, Valu
     Ok(params)
 }
 
+/// The import list this client declares on the operator's behalf.
+///
+/// Either repeated `--import` flags or the `imports` array of an `ouro wasm inspect --json`
+/// document, which the *operator's* helper produced. Neither is optional: the node refuses a
+/// `wasm.sign` with no `imports` at all, because the alternative was the node parsing
+/// unsigned bytes to find out. An empty list is a real answer and is sent as one.
+fn imports(args: &WasmSignArgs) -> Result<Vec<Value>> {
+    let Some(path) = &args.imports_from else {
+        return Ok(args
+            .import
+            .iter()
+            .map(|import| Value::String(import.trim().to_string()))
+            .collect());
+    };
+
+    let text = if path.as_os_str() == "-" {
+        let mut buffer = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut buffer)
+            .context("reading the inspect report from stdin")?;
+        buffer
+    } else {
+        std::fs::read_to_string(path)
+            .with_context(|| format!("reading the inspect report at {}", path.display()))?
+    };
+
+    let report: Value = serde_json::from_str(&text)
+        .context("--imports-from expects `ouro wasm inspect --json` output")?;
+
+    // Two shapes, because the report may be the whole document or the component object
+    // inside it, and an operator piping one should not have to know which.
+    let imports = report
+        .pointer("/imports")
+        .or_else(|| report.pointer("/component/imports"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("--imports-from found no `imports` array in that inspect report"))?;
+
+    if imports.len() > 8 {
+        bail!(
+            "that report declares {} imports; the node accepts at most 8",
+            imports.len()
+        );
+    }
+
+    imports
+        .iter()
+        .map(|import| {
+            import
+                .as_str()
+                .map(|name| Value::String(name.trim().to_string()))
+                .ok_or_else(|| anyhow!("an import in that report is not a string"))
+        })
+        .collect()
+}
+
 fn node_list(nodes: &str) -> Result<Vec<Value>> {
     let named: Vec<Value> = nodes
         .split(',')
@@ -426,6 +557,31 @@ fn default_bundle_path(signed: &WasmSignature, fallback: &str) -> PathBuf {
 // ---------------------------------------------------------------------------
 // The key
 // ---------------------------------------------------------------------------
+
+/// The charset a signer id may use.
+///
+/// `OUROBOROS_UPGRADE_TRUSTED_SIGNERS` is a comma-separated list of `id:base64` pairs, so
+/// an id holding a comma or a colon produces a line that parses into a different signer —
+/// or into none — and the failure surfaces on a core node as an artifact nobody trusts,
+/// far from the command that caused it. Whitespace is worse: it survives a round trip
+/// through a shell and compares unequal to the id the service signs as.
+pub fn signer_id(id: &str) -> Result<()> {
+    let usable = !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+
+    if usable {
+        Ok(())
+    } else {
+        bail!(
+            "--id must be 1 to 64 characters of letters, digits, `-`, `_` or `.`: it is one \
+             half of an OUROBOROS_UPGRADE_TRUSTED_SIGNERS entry, which is `id:base64` pairs \
+             separated by commas"
+        )
+    }
+}
 
 fn random_seed() -> Result<[u8; SEED_BYTES]> {
     use rand::TryRngCore;
@@ -810,6 +966,39 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn scratch(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ouro-w12-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
+    }
+
+    fn signing_args(import: Vec<String>, imports_from: Option<PathBuf>) -> WasmSignArgs {
+        WasmSignArgs {
+            component: PathBuf::from("greeter.wasm"),
+            name: "greeter".into(),
+            author: "ops".into(),
+            import,
+            imports_from,
+            language: None,
+            source_sha256: None,
+            start_config: None,
+            eval: None,
+            out: None,
+            json: false,
+            node: None,
+            addr: None,
+            token_file: None,
+        }
+    }
+
     fn fixture(name: &str) -> Value {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../test/support/gateway_golden")
@@ -1060,8 +1249,8 @@ mod tests {
             component: PathBuf::from("greeter.wasm"),
             name: "greeter".into(),
             author: "ops".into(),
-            epoch: Some(12),
-            imports: Some("log, ".into()),
+            import: vec!["log".into()],
+            imports_from: None,
             language: Some("rust".into()),
             source_sha256: None,
             start_config: Some(r#"{"greeting":"hi"}"#.into()),
@@ -1078,8 +1267,12 @@ mod tests {
         assert_eq!(params["upload"], "9f2c1d4e8a7b6053f1e2d3c4b5a69780");
         assert_eq!(params["name"], "greeter");
         assert_eq!(params["author"], "ops");
-        assert_eq!(params["epoch"], 12);
         assert_eq!(params["imports"], json!(["log"]));
+
+        // There is no `epoch` parameter at all any more. A number a client chose could be
+        // placed at the register's plausibility ceiling, which leaves no epoch that is both
+        // fresh and plausible and wedges lane W on that node durably; the node allocates it.
+        assert!(!params.contains_key("epoch"));
         assert_eq!(params["language"], "rust");
         // The text, not a re-encoding of it: what the signer covers is what the operator
         // wrote, byte for byte.
@@ -1098,8 +1291,8 @@ mod tests {
             component: PathBuf::from("greeter.wasm"),
             name: "greeter".into(),
             author: "ops".into(),
-            epoch: None,
-            imports: None,
+            import: vec![],
+            imports_from: None,
             language: None,
             source_sha256: None,
             start_config: Some("greeting = hi".into()),
@@ -1113,6 +1306,147 @@ mod tests {
 
         let error = sign_params(&args, "abc").expect_err("must refuse");
         assert!(error.to_string().contains("--start-config must be JSON"));
+    }
+
+    /// A component that imports nothing says so. The node refuses a `wasm.sign` with no
+    /// `imports` key at all, because the alternative — it reading the bytes to find out —
+    /// is the one thing this lane must not do.
+    #[test]
+    fn an_empty_import_list_is_sent_as_one_rather_than_omitted() {
+        let params = sign_params(&signing_args(vec![], None), "abc").expect("params");
+
+        assert_eq!(params["imports"], json!([]));
+        assert!(params.contains_key("imports"));
+    }
+
+    /// `ouro wasm inspect --json | ouro wasm sign --imports-from -`, without the pipe.
+    #[test]
+    fn imports_from_reads_an_inspect_report_in_either_shape() {
+        let dir = scratch("imports-from");
+        let flat = dir.join("flat.json");
+        let nested = dir.join("nested.json");
+
+        std::fs::write(&flat, r#"{"imports": ["log"], "world": "x"}"#).unwrap();
+        std::fs::write(&nested, r#"{"component": {"imports": ["log", "clock"]}}"#).unwrap();
+
+        let params = sign_params(&signing_args(vec![], Some(flat)), "abc").expect("flat");
+        assert_eq!(params["imports"], json!(["log"]));
+
+        let params = sign_params(&signing_args(vec![], Some(nested)), "abc").expect("nested");
+        assert_eq!(params["imports"], json!(["log", "clock"]));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_report_with_no_imports_array_is_refused_rather_than_read_as_none() {
+        let dir = scratch("imports-bad");
+        let path = dir.join("report.json");
+        std::fs::write(&path, r#"{"world": "x"}"#).unwrap();
+
+        let error = sign_params(&signing_args(vec![], Some(path)), "abc").expect_err("refuse");
+        assert!(error.to_string().contains("no `imports` array"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// L4. The manifest that comes back must describe the file that went up. This client
+    /// cannot verify a signature — it holds no trusted key — but it can refuse to write a
+    /// bundle whose two halves disagree, which is what a truncated upload produces.
+    #[test]
+    fn a_signature_that_does_not_describe_the_uploaded_bytes_is_not_written() {
+        let bytes = b"\0asm\x0d\x00\x01\x00 a component".to_vec();
+        let digest = sha256_hex(&bytes);
+
+        let good = WasmSignature::decode(&json!({
+            "component_sha256": digest,
+            "size": bytes.len(),
+            "bundle_bytes": bytes.len() + 300
+        }));
+
+        assert!(describes(&good, &bytes, 300).is_ok());
+
+        let wrong_sha = WasmSignature::decode(&json!({
+            "component_sha256": "a".repeat(64),
+            "size": bytes.len(),
+        }));
+
+        let error = describes(&wrong_sha, &bytes, 300).expect_err("a different component");
+        assert!(error.to_string().contains("hashes to"));
+
+        let wrong_size = WasmSignature::decode(&json!({
+            "component_sha256": digest,
+            "size": bytes.len() + 1,
+        }));
+
+        assert!(describes(&wrong_size, &bytes, 300)
+            .expect_err("a different size")
+            .to_string()
+            .contains("bytes, but the file uploaded"));
+
+        let wrong_total = WasmSignature::decode(&json!({
+            "component_sha256": digest,
+            "size": bytes.len(),
+            "bundle_bytes": 7
+        }));
+
+        assert!(describes(&wrong_total, &bytes, 300)
+            .expect_err("a bundle that does not add up")
+            .to_string()
+            .contains("the prefix and the component are"));
+
+        // A runtime that named no digest at all is not a runtime to write a file from.
+        let silent = WasmSignature::decode(&json!({}));
+        assert!(describes(&silent, &bytes, 300).is_err());
+    }
+
+    /// L5. A node that answers "you are not where you think you are" says where it is, in
+    /// the error's data. That number is the one thing a client acts on rather than reports.
+    #[test]
+    fn the_held_offset_is_read_from_the_refusal_and_from_nothing_else() {
+        use crate::proto::{ErrorCode, RpcError};
+        use crate::transport::ClientError;
+
+        let mismatch = ClientError::Rpc(RpcError {
+            code: ErrorCode::InvalidParams,
+            message: "params.offset must be 6, which is what this upload holds".into(),
+            data: Some(json!({"reason": "offset_mismatch", "offset": 6})),
+        });
+
+        assert_eq!(held_offset(&mismatch), Some(6));
+
+        // The sentence alone is not a protocol: without the machine-readable reason there
+        // is nothing to resume from.
+        let sentence_only = ClientError::Rpc(RpcError {
+            code: ErrorCode::InvalidParams,
+            message: "params.offset must be 6, which is what this upload holds".into(),
+            data: None,
+        });
+
+        assert_eq!(held_offset(&sentence_only), None);
+
+        let other_reason = ClientError::Rpc(RpcError {
+            code: ErrorCode::InvalidParams,
+            message: "nope".into(),
+            data: Some(json!({"reason": "outside_roots", "offset": 6})),
+        });
+
+        assert_eq!(held_offset(&other_reason), None);
+        assert_eq!(held_offset(&ClientError::Timeout), None);
+    }
+
+    /// L8. A signer id is one half of an `id:base64` pair in a comma-separated list.
+    #[test]
+    fn a_signer_id_that_would_break_the_trusted_signers_line_is_refused() {
+        assert!(signer_id("release-key").is_ok());
+        assert!(signer_id("release_key.2026").is_ok());
+
+        for hostile in ["", "a:b", "a,b", "with space", "tab\there", &"x".repeat(65)] {
+            assert!(
+                signer_id(hostile).is_err(),
+                "{hostile:?} would produce a trusted-signers line that names a different signer"
+            );
+        }
     }
 
     #[test]

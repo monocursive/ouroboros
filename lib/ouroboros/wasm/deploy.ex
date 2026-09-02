@@ -14,38 +14,51 @@ defmodule Ouroboros.Wasm.Deploy do
   by `Ouroboros.Wasm.Rollout.deploy/4`; `rollback/2` is `Ouroboros.Wasm.Rollout.rollback/2`.
   Every refusal any of those three make is still made, in the same place, by the same code.
 
-  ## The order in `deploy/3`, which is the whole of its safety
+  ## Where verification happens, said once and accurately
 
-  Verify, **then** anything else. The bundle is read, parsed under its bounds, and put
-  through this node's own trust policy before a byte of it reaches
-  `Ouroboros.Wasm.Store`, the helper, or the rollout register. An unsigned bundle, a
-  tampered manifest, a signer nobody trusts: each is a refusal with nothing written and
-  nothing started. `Rollout.deploy/4` verifies again — against its own reading of the
-  policy, and again on every target — and that redundancy is deliberate: the pre-flight
-  here is what keeps the *checkpoint* from being written for something that was never
-  going to be admitted.
+  In `Ouroboros.Wasm.Rollout.deploy/4`, before its `:deploying` checkpoint, and again on
+  every target before it stages a byte. This module decodes the bundle — which is where
+  its *bounds* are enforced, and the reason `Bundle.decode/1` is a separate function from
+  `Bundle.verify/2` — and hands the manifest and the bytes to the rollout. An earlier
+  draft also verified here, and called that "the whole of its safety"; it was not, because
+  the rollout was already verifying before it wrote anything, and a mutation that deleted
+  the pre-flight left every test green. A second check that no test can distinguish is not
+  defence in depth, it is a sentence claiming more than the code does, so it is gone. What
+  is proved instead is the invariant that was always the real one: a bundle this node
+  refuses consumes no epoch and leaves the rollout register byte-identical.
 
-  ## What `sign/2` does not take the caller's word for
+  ## What `sign/2` never does
 
-  The digest, the size, and the import list.
+  **Parse the bytes.** They are unsigned, they came from a socket, and the helper is the
+  one component of this system whose job is to run other people's code — feeding it
+  attacker-supplied input *before* a signature exists, upstream of the signing service's
+  own rate limit, is the shape of the problem lane W exists to avoid (D15). An earlier
+  draft read the import list off the component with this node's helper whenever a caller
+  did not declare one. That is gone: **`imports` is required**, the *client* computes it
+  with the operator's own helper (`ouro wasm inspect --json`), and a declared list that
+  does not match what the component actually imports is refused at stage by
+  `Ouroboros.Wasm.Verifier.cross_check/2` — which is D5's posture exactly, and the same
+  answer lane W has always given for a manifest that describes something else.
 
-    * the sha256 and the size are computed from the uploaded bytes by
-      `Ouroboros.Wasm.Artifact.build/2` and recomputed again by the signing policy, which
-      is handed the same bytes;
-    * the **imports are read off the component** by this node's helper when the caller did
-      not declare them, because a manifest's import list is compared against the helper's
-      own reading at stage time (`Ouroboros.Wasm.Verifier.cross_check/2`) and a wrong list
-      is a quarantine that costs an epoch and a signature to recover from. Declaring them
-      is still allowed — the list is provenance, and an operator who knows what they built
-      may say so — but guessing on their behalf is not, so a node with no helper and a
-      caller with no declaration is a refusal naming `imports` rather than an empty list
-      nobody meant.
+  What it does not take the caller's word for is the digest and the size: both are computed
+  from the uploaded bytes by `Ouroboros.Wasm.Artifact.build/2` and recomputed again by the
+  signing policy, which is handed the same bytes.
 
-  The epoch is allocated with `Ouroboros.Upgrade.Epoch.next/2` over **this node**, exactly
-  as `Ouroboros.Upgrade.Forge` allocates before building a manifest. That bounds it above
-  everything this node has seen and not above a peer that has seen more, so a bundle signed
-  here and deployed to a busier machine can still be refused `{:stale_epoch, _, _}` — which
-  is the register doing its job, and is why the epoch may also be named explicitly.
+  **The upload is consumed first**, before anything that can fail. A refused sign costs the
+  client its transfer, which is the point: an upload that survived its own refusal was a
+  blob a client could re-present without limit.
+
+  ## The epoch is not a parameter
+
+  It is allocated with `Ouroboros.Upgrade.Epoch.next/2` over the **connected cluster**,
+  exactly as `Ouroboros.Upgrade.Forge` allocates before building a manifest. It used to be
+  an optional client parameter with no ceiling, and that was a one-call, unrecoverable
+  wedge: `Ouroboros.Upgrade.Rollout.Registry` admits an epoch only above its watermark and
+  refuses one at its plausibility ceiling, so a single deploy *at* the ceiling left no
+  number that was both, on every lane-W capability on that node, durably. Allocating over
+  every connected node rather than over this one also closes the other end of it — a
+  bundle signed here and deployed to a busier peer is no longer refused for a number this
+  node could not see.
 
   ## The signature comes back; the bytes do not go out again
 
@@ -60,7 +73,7 @@ defmodule Ouroboros.Wasm.Deploy do
   alias Ouroboros.Upgrade.Epoch
   alias Ouroboros.Upgrade.Signing.Service, as: SigningService
   alias Ouroboros.Wasm
-  alias Ouroboros.Wasm.{Artifact, Bundle, Pool, Rollout, Surface, Upload}
+  alias Ouroboros.Wasm.{Artifact, Bundle, Rollout, Surface, Upload}
 
   @default_signing_timeout 15_000
   @signing_slack 5_000
@@ -69,8 +82,7 @@ defmodule Ouroboros.Wasm.Deploy do
           required(:upload) => String.t(),
           required(:name) => String.t(),
           required(:author) => String.t(),
-          optional(:epoch) => pos_integer() | nil,
-          optional(:imports) => [String.t()] | nil,
+          required(:imports) => [String.t()],
           optional(:language) => String.t() | nil,
           optional(:source_sha256) => String.t() | nil,
           optional(:start_config) => String.t() | nil,
@@ -80,18 +92,22 @@ defmodule Ouroboros.Wasm.Deploy do
   @doc """
   Signs the component staged under `attrs.upload` and answers the bundle's prefix.
 
-  Options are test seams and nothing else: `:upload_root`, `:signing_service`,
-  `:signing_node`, `:pool`, `:epoch_opts`.
+  `attrs.imports` is required: this node does not read a component to find out (see the
+  moduledoc). Options are test seams and nothing else: `:upload_root`, `:signing_service`,
+  `:signing_node`, `:epoch_nodes`, `:epoch_opts`.
   """
   @spec sign(sign_attrs(), keyword()) :: {:ok, map()} | {:error, term()}
   def sign(attrs, opts \\ [])
 
-  def sign(%{upload: upload} = attrs, opts) when is_binary(upload) and is_list(opts) do
-    with {:ok, server} <- signer(opts),
+  def sign(%{upload: upload, imports: imports} = attrs, opts)
+      when is_binary(upload) and is_list(imports) and is_list(opts) do
+    # The upload is consumed first, before anything that can refuse. A staged blob that
+    # outlived its own refusal is a blob a client can re-present without limit, and every
+    # bound below it — the policy, its rate limit, the journal — is downstream of that.
+    with {:ok, bytes} <- Upload.take(upload, upload_opts(opts)),
+         {:ok, server} <- signer(opts),
          {:ok, signer_id} <- signer_id(server),
-         {:ok, imports} <- imports(attrs, upload, opts),
-         {:ok, bytes} <- Upload.take(upload, upload_opts(opts)),
-         {:ok, epoch} <- epoch(attrs, opts),
+         {:ok, epoch} <- epoch(opts),
          {:ok, artifact} <- build(bytes, attrs, imports, epoch),
          {:ok, signature} <- issue(server, artifact, signer_id, bytes),
          {:ok, signed} <- Artifact.with_signature(artifact, signature),
@@ -100,10 +116,13 @@ defmodule Ouroboros.Wasm.Deploy do
     end
   end
 
+  def sign(%{upload: upload} = attrs, opts) when is_binary(upload) and is_list(opts),
+    do: {:error, {:invalid_sign_request, {:imports, describe(Map.get(attrs, :imports))}}}
+
   def sign(attrs, _opts), do: {:error, {:invalid_sign_request, describe(attrs)}}
 
   @doc """
-  Verifies the bundle staged under `upload` against this node's trust policy, then deploys.
+  Deploys the bundle staged under `upload`, which the rollout verifies before it records.
 
   Answers `{:ok, projection}` for every rollout that *ran* — `:live`, `:rolled_back` and
   `:quarantined` alike, because all three are outcomes a client renders rather than
@@ -113,11 +132,11 @@ defmodule Ouroboros.Wasm.Deploy do
   def deploy(upload, nodes, opts \\ [])
 
   def deploy(upload, nodes, opts) when is_binary(upload) and is_list(nodes) and is_list(opts) do
-    # Verified before anything else touches it: the bytes are not handed to the store, the
-    # helper or the register until this node's own policy has admitted the manifest that
-    # describes them.
+    # Decoded under the bundle's own bounds, then handed to the rollout, which verifies it
+    # against this node's trust policy *before* its checkpoint and again on every target.
+    # See the moduledoc for why there is no second verification here.
     with {:ok, bundle} <- Upload.take(upload, upload_opts(opts)),
-         {:ok, %{artifact: artifact, bytes: bytes}} <- Bundle.verify(bundle, trust_policy(opts)) do
+         {:ok, %{artifact: artifact, bytes: bytes}} <- Bundle.decode(bundle) do
       artifact
       |> Rollout.deploy(bytes, nodes, rollout_opts(opts))
       |> settled()
@@ -214,49 +233,18 @@ defmodule Ouroboros.Wasm.Deploy do
 
   ## The manifest
 
-  defp epoch(attrs, opts) do
-    case Map.get(attrs, :epoch) do
-      given when is_integer(given) and given > 0 ->
-        {:ok, given}
+  # Over every connected node, not over this one. `Ouroboros.Upgrade.Epoch.next/2` reads
+  # each target's executor and lane-W register and allocates above the highest, so a bundle
+  # signed here is above what the busiest machine in the cluster has admitted — which is the
+  # difference between a signature that deploys and one refused `{:stale_epoch, _, _}` by a
+  # peer this node never asked.
+  defp epoch(opts) do
+    nodes = Keyword.get_lazy(opts, :epoch_nodes, fn -> [node() | Node.list()] end)
 
-      _absent ->
-        case Epoch.next([node()], Keyword.get(opts, :epoch_opts, [])) do
-          {:ok, epoch} -> {:ok, epoch}
-          {:error, reason} -> {:error, {:epoch_not_allocated, reason}}
-        end
+    case Epoch.next(nodes, Keyword.get(opts, :epoch_opts, [])) do
+      {:ok, epoch} -> {:ok, epoch}
+      {:error, reason} -> {:error, {:epoch_not_allocated, reason}}
     end
-  end
-
-  # Declared, or read off the component by this node's helper. Never guessed: see the
-  # moduledoc. The staged file is inspected in place, so a sixteen-mebibyte component is
-  # not written to a second path to be looked at.
-  defp imports(attrs, upload, opts) do
-    case Map.get(attrs, :imports) do
-      declared when is_list(declared) ->
-        {:ok, declared}
-
-      _absent ->
-        with {:ok, path} <- Upload.path(upload, upload_opts(opts)) do
-          derive_imports(path, Keyword.get(opts, :pool, Pool))
-        end
-    end
-  end
-
-  defp derive_imports(path, pool) do
-    case Pool.inspect(path, pool) do
-      {:ok, %{"imports" => imports}} when is_list(imports) ->
-        if Enum.all?(imports, &is_binary/1),
-          do: {:ok, Enum.sort(imports)},
-          else: {:error, {:imports_not_derivable, :unreadable_report}}
-
-      {:ok, _report} ->
-        {:error, {:imports_not_derivable, :unreadable_report}}
-
-      {:error, reason} ->
-        {:error, {:imports_not_derivable, describe(reason)}}
-    end
-  catch
-    kind, reason -> {:error, {:imports_not_derivable, {kind, describe(reason)}}}
   end
 
   defp build(bytes, attrs, imports, epoch) do
@@ -334,12 +322,6 @@ defmodule Ouroboros.Wasm.Deploy do
        do: {:ok, Surface.deployment(outcome)}
 
   defp settled({:error, reason}), do: {:error, reason}
-
-  defp trust_policy(opts) do
-    Keyword.get_lazy(opts, :trust_policy, fn ->
-      Application.get_env(:ouroboros, :upgrade_trust_policy, [])
-    end)
-  end
 
   # Only the keys `Ouroboros.Wasm.Rollout` reads, so a caller cannot pass this module's
   # own test seams through to it.

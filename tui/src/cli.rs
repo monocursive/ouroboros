@@ -610,17 +610,23 @@ pub struct WasmSignArgs {
     #[arg(long, value_name = "AUTHOR")]
     pub author: String,
 
-    /// The epoch this manifest carries. Omitted, the node allocates one above everything it
-    /// has seen. Lane W has no `version` field: identity is the digest and ordering is the
-    /// epoch (docs/WASM.md §7.2, D2).
-    #[arg(long, value_name = "N")]
-    pub epoch: Option<u64>,
+    /// An import the component declares. Repeat it once per import, or pass none at all for
+    /// a component that imports nothing.
+    ///
+    /// The node does not read the component to find out: those are unsigned bytes from a
+    /// socket, and handing them to a helper to be parsed is what the containment lane
+    /// exists to avoid (docs/WASM.md D15). Compute the list with the *operator's* own
+    /// helper — `ouro wasm inspect --json` — and pass it here, or pipe it in with
+    /// `--imports-from`. A list that does not match what the component actually imports is
+    /// refused at stage by the cross-check.
+    #[arg(long = "import", value_name = "NAME")]
+    pub import: Vec<String>,
 
-    /// The imports to declare, comma separated. Omitted, the node reads them off the
-    /// component with its own helper — which is the better answer, because a declared list
-    /// that does not match what the component actually imports is a quarantine.
-    #[arg(long, value_name = "LIST")]
-    pub imports: Option<String>,
+    /// Read the imports from `ouro wasm inspect --json` output — a file, or `-` for stdin.
+    /// The convenient form of `--import`: `ouro wasm inspect g.wasm --json | ouro wasm sign
+    /// g.wasm --name g --author me --imports-from -`.
+    #[arg(long, value_name = "PATH", conflicts_with = "import")]
+    pub imports_from: Option<PathBuf>,
 
     /// The guest toolchain, recorded as provenance.
     #[arg(long, value_name = "LANGUAGE")]
@@ -1767,6 +1773,8 @@ mod tests {
             "greeter",
             "--author",
             "ops",
+            "--import",
+            "log",
             "--start-config",
             r#"{"greeting":"hi"}"#,
             "--eval",
@@ -1785,10 +1793,10 @@ mod tests {
         assert_eq!(args.start_config.as_deref(), Some(r#"{"greeting":"hi"}"#));
         assert_eq!(args.eval, Some(PathBuf::from("spec.json")));
         assert_eq!(args.out, Some(PathBuf::from("greeter.ouro-wasm")));
-        // Omitted means "read them off the component", which is a different instruction
-        // from an empty list.
-        assert_eq!(args.imports, None);
-        assert_eq!(args.epoch, None);
+        // Imports are declared by the operator, one flag per import, and never inferred by
+        // the node from bytes nobody signed.
+        assert_eq!(args.import, vec!["log".to_string()]);
+        assert_eq!(args.imports_from, None);
 
         // The durable wrapper's id is derived from the name by the runtime and by the
         // signing policy alike. A flag for it would be a way to sign a manifest claiming a
@@ -1804,6 +1812,50 @@ mod tests {
         assert!(
             Cli::try_parse_from(["ouro", "wasm", "sign", "g.wasm", "--name", "greeter"]).is_err()
         );
+
+        // There is no `--epoch`. A number a client chose could be placed at the rollout
+        // register's plausibility ceiling, which leaves no epoch that is both fresh and
+        // plausible: one call, and lane W on that node is wedged durably. The node
+        // allocates it over the connected cluster instead.
+        assert!(
+            Cli::try_parse_from(["ouro", "wasm", "sign", "g.wasm", "--epoch", "7"]).is_err(),
+            "an epoch a client may name is an epoch a client may wedge a register with"
+        );
+
+        // `--import` repeats, and `--imports-from` is the piped form of the same thing.
+        // They are mutually exclusive, because two sources for one signed field is two
+        // answers to what was signed.
+        let Some(Command::Wasm {
+            command: WasmCommand::Sign(repeated),
+        }) = parse(&[
+            "wasm", "sign", "g.wasm", "--name", "g", "--author", "o", "--import", "log",
+            "--import", "clock",
+        ])
+        .command
+        else {
+            panic!("repeated --import must parse");
+        };
+
+        assert_eq!(
+            repeated.import,
+            vec!["log".to_string(), "clock".to_string()]
+        );
+
+        assert!(Cli::try_parse_from([
+            "ouro",
+            "wasm",
+            "sign",
+            "g.wasm",
+            "--name",
+            "g",
+            "--author",
+            "o",
+            "--import",
+            "log",
+            "--imports-from",
+            "-",
+        ])
+        .is_err());
     }
 
     /// W12. Deploy takes a file and the machines to put it on, and nothing that would let a

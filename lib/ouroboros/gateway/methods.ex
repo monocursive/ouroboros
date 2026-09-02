@@ -109,6 +109,7 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Upgrade.Signing.Service, as: SigningService
   alias Ouroboros.Wasm.Surface, as: WasmSurface
   alias Ouroboros.Wasm.Artifact, as: WasmArtifact
+  alias Ouroboros.Wasm.Capability, as: WasmCapability
   alias Ouroboros.Wasm.Deploy, as: WasmDeploy
   alias Ouroboros.Wasm.Upload, as: WasmUpload
 
@@ -371,10 +372,18 @@ defmodule Ouroboros.Gateway.Methods do
     # why: the authority in a deployment is the **signature**, which the target verifies
     # against its own trust policy, so a socket that carries a signed bundle adds nothing
     # a client did not already have — while a `:operate` client could always start any BEAM
-    # capability through the mesh. What is still true is the sentence underneath it: no
-    # unsigned bytes reach the helper through any path, and there is still no `wasm.drop`,
+    # capability through the mesh. What is still true is the sentence underneath it: **no
+    # unsigned bytes reach the helper through any path**, and there is still no `wasm.drop`,
     # `wasm.load`, `wasm.instantiate` or `wasm.call`, because those would be a socket
     # deciding what this node runs rather than a signer deciding what may exist.
+    #
+    # That first claim was briefly false and is worth saying twice. `wasm.sign` once read a
+    # component's import list off the staged file with this node's own helper, which handed
+    # attacker-supplied bytes to the one process whose job is running other people's code,
+    # at `:operate`, before a signature existed and upstream of the signing service's rate
+    # limit. `imports` is required now, the client computes it with the *operator's* helper
+    # (`ouro wasm inspect`), and a wrong list is refused at stage by
+    # `Ouroboros.Wasm.Verifier.cross_check/2` — which is D5's posture and always was.
     #
     # Node-routed like `computer_use.status`, because a helper, a store and a register are
     # node-local authorities: a fleet answer is one call per machine, not a merged view
@@ -1207,10 +1216,8 @@ defmodule Ouroboros.Gateway.Methods do
          {"name", :required, :string,
           "lower case, starting with a letter or digit, then letters, digits, `.`, `_`, `-`, at most 64 bytes; it is the register's module and the durable wrapper's id"},
          {"author", :required, :string, "provenance the signing policy requires"},
-         {"epoch", :optional, :positive_integer,
-          "allocated over this node with `Ouroboros.Upgrade.Epoch.next/2` when omitted"},
-         {"imports", :optional, {:list, :string, 8},
-          "read off the component by this node's helper when omitted, because a wrong list is a quarantine rather than a warning"},
+         {"imports", :required, {:list, :string, 8},
+          "the imports the component declares, computed by the client with the operator's own helper (`ouro wasm inspect`). This node never parses unsigned bytes to find out; a list that does not match what the component imports is refused at stage by the cross-check, which is where a manifest that describes something else has always been caught"},
          {"language", :optional, :string, nil},
          {"source_sha256", :optional, :string, "64 lower-case hex"},
          {"start_config", :optional, :string,
@@ -1229,7 +1236,7 @@ defmodule Ouroboros.Gateway.Methods do
           "the signed evaluation spec; required by default for lane W (D12) and refused by the signer when absent. There is no `initial_state`: what a capability is evaluated as is the deployment's statement, not the test's"},
          @authority_node
        ],
-       "answers the bundle's **prefix** rather than the bundle: the client already holds the bytes it uploaded, and a sixteen-mebibyte result would need a chunked download to hand somebody their own file back"},
+       "answers the bundle's **prefix** rather than the bundle: the client already holds the bytes it uploaded, and a sixteen-mebibyte result would need a chunked download to hand somebody their own file back. There is no `epoch` parameter: it is allocated over the connected cluster with `Ouroboros.Upgrade.Epoch.next/2`, because an epoch a client chose could be placed at the rollout register's plausibility ceiling, which leaves no number that is both fresh and plausible and wedges lane W on that node durably"},
     "wasm.deploy" =>
       {:closed,
        [
@@ -1269,6 +1276,16 @@ defmodule Ouroboros.Gateway.Methods do
   @doc "The method table: name to the scope it requires and the ceiling it runs under."
   @spec table() :: %{String.t() => entry()}
   def table, do: @table
+
+  @doc """
+  The state fields a signed eval spec's `state_matches` check may name.
+
+  Read from `Ouroboros.Wasm.Capability`'s own schema rather than restated, so the closed
+  set cannot drift from the agent it describes. Public because the test that pins the set
+  must assert against the agent and not against a copy in this module.
+  """
+  @spec wasm_state_fields() :: [atom()]
+  def wasm_state_fields, do: WasmCapability.new().state |> Map.keys()
 
   @doc "Every method name this build serves, as reported in the `hello` result."
   @spec names() :: [String.t()]
@@ -1848,7 +1865,6 @@ defmodule Ouroboros.Gateway.Methods do
              "upload",
              "name",
              "author",
-             "epoch",
              "imports",
              "language",
              "source_sha256",
@@ -1859,7 +1875,6 @@ defmodule Ouroboros.Gateway.Methods do
          {:ok, upload} <- wasm_upload(params),
          {:ok, name} <- wasm_name(params),
          {:ok, author} <- fetch_string(params, "author"),
-         {:ok, epoch} <- wasm_optional_positive(params, "epoch"),
          {:ok, imports} <- wasm_imports(params),
          {:ok, language} <- fetch_optional_string(params, "language"),
          {:ok, source_sha256} <- wasm_optional_sha256(params),
@@ -1867,9 +1882,7 @@ defmodule Ouroboros.Gateway.Methods do
          {:ok, eval} <- wasm_eval(params),
          {:ok, target} <- permissions_node(params) do
       attrs =
-        %{upload: upload, name: name, author: author}
-        |> wasm_put(:epoch, epoch)
-        |> wasm_put(:imports, imports)
+        %{upload: upload, name: name, author: author, imports: imports}
         |> wasm_put(:language, language)
         |> wasm_put(:source_sha256, source_sha256)
         |> wasm_put(:start_config, start_config)
@@ -3184,8 +3197,13 @@ defmodule Ouroboros.Gateway.Methods do
     )
   end
 
-  defp wasm_reply({:error, {:offset_mismatch, held, _sent}}),
-    do: invalid_params("params.offset must be #{held}, which is what this upload holds")
+  # The held offset travels in `data` as well as in the sentence, because resuming is what a
+  # client does with it and parsing a number out of an error message is not a protocol.
+  defp wasm_reply({:error, {:offset_mismatch, held, _sent}}) do
+    {:error, code(:invalid_params),
+     "params.offset must be #{held}, which is what this upload holds",
+     %{"reason" => "offset_mismatch", "offset" => held}}
+  end
 
   defp wasm_reply({:error, {:unknown_upload, id}}),
     do: not_found("no upload #{id} on this node; it may have expired or been consumed")
@@ -3305,12 +3323,17 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  # Absent means "read them off the component", which is a different instruction from an
-  # empty list, so `nil` and `[]` are not folded together here.
+  # Required, and `[]` is a legitimate answer meaning "this component imports nothing" —
+  # which is why it must be *said* rather than inferred from an absent key. The node does
+  # not read the component to find out (D15): it is unsigned input from a socket, and the
+  # helper is not a parser this end gets to point at it.
   defp wasm_imports(params) do
     case Map.get(params, "imports") do
       nil ->
-        {:ok, nil}
+        {:invalid,
+         "params.imports is required: this node does not parse unsigned bytes to find out " <>
+           "what a component imports. Compute it with `ouro wasm inspect`, or send [] for a " <>
+           "component that imports nothing"}
 
       values when is_list(values) and length(values) <= 8 ->
         if Enum.all?(values, &(is_binary(&1) and &1 != "" and byte_size(&1) <= 64)),
@@ -3439,21 +3462,31 @@ defmodule Ouroboros.Gateway.Methods do
      "params.eval.probes[].expect must name a kind: any_reply, contains, equals or state_matches"}
   end
 
-  # A capability's state field, resolved against the atoms this node already holds. An
-  # unknown one is a parameter error rather than a new entry in a table nothing collects —
-  # and a signed manifest whose eval spec names an atom no loading node has is a manifest
-  # `Ouroboros.Wasm.Bundle` would refuse to decode anyway.
+  # A field of the wrapper agent's own state, and nothing else.
+  #
+  # `String.to_existing_atom/1` was the first answer and it is the wrong bound: it admits
+  # every atom the VM happens to hold — thousands of module names, every option key of
+  # every dependency — as a state field to match on. What an eval spec may name is what
+  # `Ouroboros.Wasm.Capability` declares, so the list is read from the agent itself rather
+  # than restated here, and the comparison is a string against `Atom.to_string/1` so no
+  # conversion happens at all: a name outside the list never becomes an atom, existing or
+  # otherwise.
   defp wasm_state_key(key) when byte_size(key) <= 128 do
-    {:ok, String.to_existing_atom(key)}
-  rescue
-    ArgumentError ->
-      {:invalid,
-       "params.eval.probes[].expect.key must name a state field this node knows, got: " <>
-         inspect(key)}
+    case Enum.find(wasm_state_fields(), &(Atom.to_string(&1) == key)) do
+      nil ->
+        {:invalid,
+         "params.eval.probes[].expect.key must name a field of the wasm capability's state (" <>
+           Enum.join(wasm_state_names(), ", ") <> "), got: " <> inspect(key)}
+
+      field ->
+        {:ok, field}
+    end
   end
 
   defp wasm_state_key(_key),
     do: {:invalid, "params.eval.probes[].expect.key must be at most 128 bytes"}
+
+  defp wasm_state_names, do: wasm_state_fields() |> Enum.map(&Atom.to_string/1) |> Enum.sort()
 
   defp wasm_required(nil), do: {:ok, nil}
   defp wasm_required("all"), do: {:ok, :all}

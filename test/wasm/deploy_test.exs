@@ -79,6 +79,9 @@ defmodule Ouroboros.Wasm.DeployTest do
     Application.put_env(:ouroboros, :upgrade_trust_policy, trust_policy)
     on_exit(fn -> restore(:upgrade_trust_policy, previous) end)
 
+    table = String.to_atom("wasm_deploy_rollouts_#{System.unique_integer([:positive])}")
+    registry = start_registry!(table)
+
     %{
       service: service,
       trust_policy: trust_policy,
@@ -86,7 +89,8 @@ defmodule Ouroboros.Wasm.DeployTest do
       tmp: tmp,
       uploads: Path.join(tmp, "uploads"),
       store_root: Path.join(tmp, "store"),
-      registry: start_registry!()
+      registry: registry,
+      registry_table: table
     }
   end
 
@@ -109,15 +113,16 @@ defmodule Ouroboros.Wasm.DeployTest do
                    name: "greeter",
                    author: "test-agent",
                    imports: [],
-                   epoch: 4_000,
                    eval: @eval
                  },
                  upload_root: context.uploads
                )
 
-      # And the bytes are still staged: a refusal that consumed the upload would make the
-      # operator re-transfer sixteen mebibytes to learn the same thing twice.
-      assert {:ok, _bytes} = Upload.take(upload, root: context.uploads)
+      # The upload is consumed first, before anything that can refuse. A staged blob that
+      # outlived its own refusal is one a client could re-present without limit — and every
+      # bound below the signer (its policy, its rate limit, its journal) sits downstream of
+      # that. Re-transferring is the cost, and it is the client's.
+      assert {:error, {:unknown_upload, ^upload}} = Upload.take(upload, root: context.uploads)
     end
 
     test "a signed manifest comes back as a bundle prefix, and the journal says so",
@@ -125,10 +130,10 @@ defmodule Ouroboros.Wasm.DeployTest do
       bytes = "\0asm\x01\x00\x00\x00 a component this test never runs"
       upload = upload!(context, bytes)
 
-      assert {:ok, receipt} = sign(context, upload, epoch: 4_100)
+      assert {:ok, receipt} = sign(context, upload)
 
       assert receipt.name == "greeter"
-      assert receipt.epoch == 4_100
+      assert is_integer(receipt.epoch) and receipt.epoch > 0
       assert receipt.component_sha256 == Artifact.digest(bytes)
       assert receipt.size == byte_size(bytes)
       assert receipt.world == Wasm.world()
@@ -163,7 +168,7 @@ defmodule Ouroboros.Wasm.DeployTest do
       # D12: lane W's signer requires an eval spec by default, because there is no
       # BuildPeer behind a component and the signed spec is the test story.
       assert {:error, {:signing_refused, :eval_spec_required}} =
-               sign(context, upload, epoch: 4_200, eval: nil)
+               sign(context, upload, eval: nil)
 
       assert {:ok, decisions} = Service.decisions(context.service)
       assert List.last(decisions).decision == :refused
@@ -173,14 +178,14 @@ defmodule Ouroboros.Wasm.DeployTest do
       upload = upload!(context, "\0asm\x01\x00\x00\x00 component")
 
       assert {:error, {:signing_refused, {:import_not_in_world, "socket"}}} =
-               sign(context, upload, epoch: 4_201, imports: ["socket"])
+               sign(context, upload, imports: ["socket"])
     end
 
     test "the start id is derived from the name and is not a field a caller may name",
          context do
       upload = upload!(context, "\0asm\x01\x00\x00\x00 component")
 
-      assert {:ok, receipt} = sign(context, upload, epoch: 4_300, name: "vet")
+      assert {:ok, receipt} = sign(context, upload, name: "vet")
       assert receipt.start_id == "wasm/vet"
 
       prefix = Base.decode64!(receipt.bundle_prefix)
@@ -188,20 +193,134 @@ defmodule Ouroboros.Wasm.DeployTest do
       assert artifact.metadata.start == %{id: "wasm/vet", config: "{}"}
     end
 
-    test "an epoch nobody named is allocated rather than guessed", context do
+    # H2. The epoch was an optional client parameter with no ceiling, and the register
+    # admits an epoch only *above* its watermark while refusing one at its plausibility
+    # ceiling — so one deploy at the ceiling left no number that was both, on every lane-W
+    # capability on that node, durably. There is no parameter now: it is allocated.
+    test "the epoch is allocated, not named, and rises with each manifest", context do
+      first = upload!(context, "\0asm\x01\x00\x00\x00 component one")
+      second = upload!(context, "\0asm\x01\x00\x00\x00 component two")
+
+      assert {:ok, one} = sign(context, first)
+      assert {:ok, two} = sign(context, second)
+
+      assert is_integer(one.epoch) and one.epoch > 0
+      assert two.epoch > one.epoch
+
+      # And no spelling of it reaches the manifest from the caller.
+      assert {:error, {:invalid_sign_request, {:imports, "nil"}}} =
+               Deploy.sign(%{upload: first, name: "g", author: "a", epoch: 9}, [])
+    end
+
+    # M4. Every other check the signer makes is about numbers computed *from* the bytes, so
+    # without this one a signature over a text file is perfectly well formed.
+    test "bytes that are not a WebAssembly binary at all are refused before signing",
+         context do
+      # No magic at all.
+      for not_wasm <- ["just some text", "{\"json\": true}", "\x7fELF\x02\x01\x01\x00"] do
+        assert {:error, {:not_a_wasm_binary, :magic}} = sign(context, upload!(context, not_wasm))
+      end
+
+      # The magic, and then a version word no WebAssembly binary carries. This is the other
+      # half of the check and the half a mutation of the preamble list reaches.
+      for wrong <- ["\0asmZZZZ rest", "\0asm\x02\x00\x00\x00 rest", "\0asm\x0d\x00\x02\x00 x"] do
+        assert {:error, {:not_a_wasm_binary, :preamble, _hex}} =
+                 sign(context, upload!(context, wrong))
+      end
+
+      # And a file that is only the magic is not one either.
+      assert {:error, {:not_a_wasm_binary, :magic}} = sign(context, upload!(context, "\0asm"))
+
+      # A core module's preamble is accepted here and refused by the helper against the
+      # world, which is where a linker contract belongs (D5).
+      assert {:ok, _receipt} =
+               sign(context, upload!(context, "\0asm\x01\x00\x00\x00 core module"))
+
+      assert {:ok, _receipt} =
+               sign(context, upload!(context, "\0asm\x0d\x00\x01\x00 component"))
+    end
+
+    # H3. The node never parses unsigned bytes. `imports` is the client's to compute, with
+    # the *operator's* helper, and a wrong list is refused at stage by the cross-check.
+    test "a sign request with no import list is refused rather than resolved", context do
       upload = upload!(context, "\0asm\x01\x00\x00\x00 component")
 
-      assert {:ok, receipt} = sign(context, upload, epoch: nil)
-      assert is_integer(receipt.epoch) and receipt.epoch > 0
+      assert {:error, {:invalid_sign_request, {:imports, "nil"}}} =
+               Deploy.sign(
+                 %{upload: upload, name: "greeter", author: "a", eval: @eval},
+                 signing_service: context.service,
+                 upload_root: context.uploads
+               )
+    end
+
+    # The reviewer's F5, kept: `Ouroboros.Wasm.Pool` is not on this path at all any more, so
+    # a pool handed to `sign/2` is never spoken to. Delete the `imports` requirement and
+    # restore a derivation and this goes red on the first inspect.
+    test "unsigned uploaded bytes never reach the helper", context do
+      parent = self()
+
+      pool =
+        spawn(fn ->
+          receive do
+            {:"$gen_call", from, {:request, "inspect", %{"path" => path}, _d, _o, _l}} ->
+              send(parent, {:helper_saw, path})
+              GenServer.reply(from, {:error, :not_a_component})
+              Process.sleep(:infinity)
+          end
+        end)
+
+      on_exit(fn -> if Process.alive?(pool), do: Process.exit(pool, :kill) end)
+
+      upload = upload!(context, "\0asm\x01\x00\x00\x00 " <> :crypto.strong_rand_bytes(4096))
+
+      _result = sign(context, upload, pool: pool)
+
+      refute_receive {:helper_saw, _path},
+                     1_000,
+                     "the helper was handed a path to bytes nobody has signed, at " <>
+                       ":operate scope, before the signing policy ran"
+    end
+
+    # M20. The id is derived from the name inside this module, so a caller that reaches
+    # `Deploy.sign/2` directly — which the gateway does not let anybody do, but a future
+    # in-VM caller would — still cannot name a durable id for a component it does not
+    # describe. Read the id out of `attrs` instead of deriving it and this goes red.
+    test "a caller cannot smuggle a durable id past the name it derives from", context do
+      upload = upload!(context, "\0asm\x01\x00\x00\x00 component")
+
+      assert {:ok, receipt} =
+               Deploy.sign(
+                 %{
+                   upload: upload,
+                   name: "vet",
+                   author: "test-agent",
+                   imports: [],
+                   start_config: "{}",
+                   start_id: "wasm/greeter",
+                   start: %{id: "wasm/greeter", config: "{}"},
+                   eval: @eval
+                 },
+                 signing_service: context.service,
+                 upload_root: context.uploads
+               )
+
+      assert receipt.start_id == "wasm/vet"
+
+      prefix = Base.decode64!(receipt.bundle_prefix)
+
+      {:ok, %{artifact: artifact}} =
+        Bundle.decode(prefix <> "\0asm\x01\x00\x00\x00 component")
+
+      assert artifact.metadata.start == %{id: "wasm/vet", config: "{}"}
+      refute Map.has_key?(artifact.metadata, :start_id)
     end
 
     test "an unknown or unfinished upload is refused before anything is built", context do
       {:ok, %{upload: half}} = Upload.append(nil, 0, "half", false, root: context.uploads)
 
-      assert {:error, {:unknown_upload, _}} =
-               sign(context, String.duplicate("0", 32), epoch: 4_400)
+      assert {:error, {:unknown_upload, _}} = sign(context, String.duplicate("0", 32))
 
-      assert {:error, {:upload_incomplete, ^half}} = sign(context, half, epoch: 4_401)
+      assert {:error, {:upload_incomplete, ^half}} = sign(context, half)
     end
   end
 
@@ -230,7 +349,7 @@ defmodule Ouroboros.Wasm.DeployTest do
     test "a bundle whose bytes were swapped for others of the same length is refused",
          context do
       bytes = "\0asm\x01\x00\x00\x00 a component this test never runs"
-      {:ok, receipt} = sign(context, upload!(context, bytes), epoch: 4_500)
+      {:ok, receipt} = sign(context, upload!(context, bytes))
       prefix = Base.decode64!(receipt.bundle_prefix)
 
       swapped = String.duplicate("z", byte_size(bytes))
@@ -250,7 +369,7 @@ defmodule Ouroboros.Wasm.DeployTest do
     test "a signer this node does not trust is refused, and the file is otherwise perfect",
          context do
       bytes = "\0asm\x01\x00\x00\x00 a component this test never runs"
-      {:ok, receipt} = sign(context, upload!(context, bytes), epoch: 4_600)
+      {:ok, receipt} = sign(context, upload!(context, bytes))
       bundle = Base.decode64!(receipt.bundle_prefix) <> bytes
 
       # The same bundle, read by a node whose policy names no signers at all. The policy is
@@ -262,6 +381,66 @@ defmodule Ouroboros.Wasm.DeployTest do
 
       assert store_snapshot(context) == before
       assert Registry.list(context.registry) == []
+    end
+
+    # M3. The claim that used to sit on this module — "verify, then anything else, and that
+    # is the whole of its safety" — was not what made it safe: `Rollout.deploy/4` verifies
+    # before its own `:deploying` checkpoint, so deleting the redundant pre-flight left
+    # every test green. The pre-flight is gone; this pins the invariant that was always the
+    # real one, and it is stated in the terms an operator cares about — a bundle this node
+    # refuses spends no epoch and leaves the durable record byte-identical.
+    test "a bundle nobody trusts spends no epoch and leaves the register byte-identical",
+         context do
+      bytes = "\0asm\x01\x00\x00\x00 a component this test never runs"
+      {:ok, receipt} = sign(context, upload!(context, bytes))
+      bundle = Base.decode64!(receipt.bundle_prefix) <> bytes
+
+      before_checkpoint = checkpoint(context)
+      before_watermark = Registry.wasm_epoch(context.registry)
+
+      assert {:error, {:untrusted_signer, @signer}} =
+               deploy(context, upload!(context, bundle), trust_policy: [allow_unsigned: false])
+
+      assert Registry.list(context.registry) == []
+      assert Registry.wasm_epoch(context.registry) == before_watermark
+      assert checkpoint(context) == before_checkpoint
+    end
+
+    # M34. `rollout_opts/1` is an allow-list, and this is what it is for: `:epoch_registry`
+    # is a seam `Ouroboros.Wasm.Rollout` reads to point a *target's* epoch admission at a
+    # different register, and a caller of this module must not be able to reach it. Replace
+    # the `Keyword.take/2` with `opts` and the stage below fails on a watermark this
+    # deployment never had anything to do with.
+    test "a caller's own options do not reach the rollout", context do
+      other = start_registry!()
+
+      :ok =
+        Registry.admit_wasm_epoch(
+          %{
+            artifact_id: "someone-else",
+            epoch: 90_000_000,
+            component_sha256: String.duplicate("f", 64)
+          },
+          other
+        )
+
+      bytes = "\0asm\x01\x00\x00\x00 a component this test never runs"
+      {:ok, receipt} = sign(context, upload!(context, bytes))
+      bundle = Base.decode64!(receipt.bundle_prefix) <> bytes
+
+      assert {:ok, outcome} =
+               deploy(context, upload!(context, bundle), epoch_registry: other)
+
+      # It did not settle live — there is no helper here — but it failed on staging the
+      # component, never on an epoch belonging to a register nobody named.
+      stage = outcome.deployment[Atom.to_string(node())].stage
+      assert stage.outcome == :error
+
+      refute stage.detail =~ "stale_epoch",
+             "an option this module holds for its own use was forwarded to the rollout"
+
+      assert {:ok, entry} = Registry.get(receipt.artifact_id, context.registry)
+      assert entry.state in [:rolled_back, :quarantined]
     end
 
     test "a file that is not one of these is refused by its framing", context do
@@ -285,14 +464,12 @@ defmodule Ouroboros.Wasm.DeployTest do
 
       bytes = File.read!(@guest)
 
-      # 1. Sign. The imports are read off the component by the helper rather than declared,
-      #    because a wrong list is a quarantine and not a warning.
+      # 1. Sign. The imports are the *client's* to declare — this node does not parse
+      #    unsigned bytes (D15) — and a wrong list is refused at stage by the cross-check.
       assert {:ok, receipt} =
                sign(context, upload!(context, bytes),
                  name: name,
-                 epoch: nil,
-                 imports: nil,
-                 pool: pool,
+                 imports: ["log"],
                  start_config: ~s({"greeting":"hello"})
                )
 
@@ -379,37 +556,67 @@ defmodule Ouroboros.Wasm.DeployTest do
       assert {:ok, outcome} = Deploy.rollback(name, registry: context.registry)
 
       assert outcome.recovery == %{Atom.to_string(node()) => :unchanged}
-      assert outcome.state == :rolled_back
       assert Process.alive?(pid)
+
+      # M5. `:unchanged` is proof on the *compensation* path — this rollout started nothing
+      # and the process is somebody else's — and it is proof of nothing here. An operator
+      # told `rolled_back` while a process still answers under `wasm/<name>` has been told
+      # the capability is gone when its name is not. Change `@withdrawn` back to include
+      # `:unchanged` and this goes red.
+      assert outcome.state == :quarantined
+      assert {:ok, entry} = Registry.get(outcome.artifact_id, context.registry)
+      assert entry.state == :quarantined
     end
 
-    test "a lane-B rollout is not a lane-W rollout and is never found here", context do
-      {:ok, entry} =
+    # M6/M29. The old version of this seeded a lane-B entry whose *module* was an atom, so
+    # `Registry.history/2`'s name match already excluded it and `lane_w?/1` was never
+    # reached — deleting the filter left the test green. This one seeds an entry the module
+    # match *does* find: the module is literally `"wasm/<name>"`, and the only thing that
+    # makes it lane B is the absence of a component sha, which is exactly what `lane_w?/1`
+    # reads. Delete `lane_w?(&1)` from `live_entry/2` and this goes red.
+    test "an entry under a lane-W name with no component is still not a lane-W rollout",
+         context do
+      name = "impostor-#{System.unique_integer([:positive])}"
+      id = "beam-#{System.unique_integer([:positive])}"
+
+      {:ok, _entry} =
         Registry.deploying(
           %{
-            artifact_id: "beam-#{System.unique_integer([:positive])}",
-            module: Ouroboros.Capability.Nothing,
-            epoch: 9_100,
+            artifact_id: id,
+            module: "wasm/" <> name,
+            epoch: 9_100 + System.unique_integer([:positive]),
             nodes: [node()]
           },
           context.registry
         )
 
-      {:ok, _live} = Registry.mark(entry.artifact_id, :live, [], context.registry)
+      {:ok, entry} = Registry.mark(id, :live, [], context.registry)
 
-      assert {:error, {:no_live_rollout, "nothing"}} =
-               Deploy.rollback("nothing", registry: context.registry)
+      # The register found it by name, and it is live.
+      assert entry.state == :live
+      assert entry.component_sha256 == nil
+
+      assert Enum.any?(
+               Registry.history("wasm/" <> name, context.registry),
+               &(&1.artifact_id == id)
+             )
+
+      # And rollback still will not touch it, because a rollout with no component bytes is
+      # not a rollout this lane deployed.
+      assert {:error, {:no_live_rollout, ^name}} =
+               Deploy.rollback(name, registry: context.registry)
     end
   end
 
   ## Helpers
 
-  defp sign(context, upload, attrs) do
+  defp sign(context, upload, attrs \\ []) do
     attrs = Map.new(attrs)
+    {opts, attrs} = Map.split(attrs, [:pool, :epoch_nodes])
 
     base = %{
       upload: upload,
-      name: Map.get(attrs, :name, "greeter"),
+      name: "greeter",
       author: "test-agent",
       imports: [],
       start_config: "{}",
@@ -422,10 +629,9 @@ defmodule Ouroboros.Wasm.DeployTest do
       |> Enum.reject(fn {_key, value} -> is_nil(value) end)
       |> Map.new()
 
-    Deploy.sign(attrs,
-      signing_service: context.service,
-      upload_root: context.uploads,
-      pool: Map.get(attrs, :pool, Pool)
+    Deploy.sign(
+      attrs,
+      [signing_service: context.service, upload_root: context.uploads] ++ Map.to_list(opts)
     )
   end
 
@@ -469,6 +675,16 @@ defmodule Ouroboros.Wasm.DeployTest do
 
     "OUROWASM" <>
       <<1::8, byte_size(envelope)::32, byte_size(bytes)::32>> <> envelope <> bytes
+  end
+
+  # The rollout register's durable record, exactly as it sits in storage. Compared before
+  # and after a refusal, because "spent no epoch and wrote nothing" is a claim about the
+  # bytes on the other side of the checkpoint rather than about what a listing renders.
+  defp checkpoint(context) do
+    Jido.Storage.ETS.get_checkpoint(
+      Ouroboros.Upgrade.Rollout.Registry.checkpoint_key(),
+      table: context.registry_table
+    )
   end
 
   # What the store holds, as a set. Compared before and after a refusal, because "nothing
@@ -552,16 +768,12 @@ defmodule Ouroboros.Wasm.DeployTest do
     server_state.agent.state
   end
 
-  defp start_registry! do
+  defp start_registry!(
+         table \\ String.to_atom("wasm_deploy_rollouts_#{System.unique_integer([:positive])}")
+       ) do
     name = String.to_atom("wasm_deploy_registry_#{System.unique_integer([:positive])}")
 
-    {:ok, pid} =
-      Registry.start_link(
-        name: name,
-        storage:
-          {Jido.Storage.ETS,
-           table: String.to_atom("wasm_deploy_rollouts_#{System.unique_integer([:positive])}")}
-      )
+    {:ok, pid} = Registry.start_link(name: name, storage: {Jido.Storage.ETS, table: table})
 
     on_exit(fn ->
       try do

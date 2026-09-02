@@ -251,7 +251,9 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
   @behaviour Ouroboros.Upgrade.Signing.Policy
 
   alias Ouroboros.Upgrade.{Artifact, Beam}
+  alias Ouroboros.Upgrade.Epoch
   alias Ouroboros.Upgrade.Rollout.Evaluation
+  alias Ouroboros.Upgrade.Rollout.Registry
   alias Ouroboros.Wasm
 
   @capability_prefix "Elixir.Ouroboros.Capability."
@@ -268,6 +270,26 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
   # prefix and that name.
   @start_prefix "wasm/"
   @max_start_config_bytes 16_384
+
+  # How far above what this node has actually seen a lane-W epoch may be.
+  #
+  # `Ouroboros.Upgrade.Rollout.Registry` refuses an epoch at or above its plausibility
+  # ceiling, and admits one only when it is strictly greater than its watermark. Between
+  # those two rules, a single entry recorded near the ceiling leaves almost no room: every
+  # later epoch is stale or implausible, and the watermark is durable, so the wedge does
+  # not clear. The register's own ceiling is the last line; this is the one in front of it,
+  # and it is here rather than there because a *signature* is what makes a huge epoch
+  # deployable at all — a manifest nobody signed never reaches a register.
+  #
+  # A million above the highest number this node knows about is generous by six orders of
+  # magnitude for a counter that adds one per allocation, and it is not a bound on how many
+  # deployments a cluster may do: the floor rises with them.
+  #
+  # Honest limit: the floor is what *this* node can see. On a dedicated `:signer` host that
+  # runs no rollout register and allocates no epochs, it is zero, so the effective bound is
+  # a flat million — which is still a bound, and still refuses the shapes that wedge a
+  # register, but it is not a statement about the cluster's real watermark.
+  @max_epoch_distance 1_000_000
 
   # The same default the service applies, so a policy invoked directly — by a test, or by
   # an operator rehearsing a decision — is held to the bound a service would have applied.
@@ -304,6 +326,7 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
   # component bytes submitted beside the manifest, and the hard rule is the world.
   def evaluate(%Wasm.Artifact{} = artifact, context) when is_map(context) do
     with :ok <- check_wasm_shape(artifact, context),
+         :ok <- check_epoch_distance(artifact),
          :ok <- check_world(artifact),
          {:ok, recomputed} <- check_component_bytes(artifact, context),
          :ok <- check_imports(artifact),
@@ -658,6 +681,43 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
       true ->
         :ok
     end
+  end
+
+  # Positivity is not a bound. See `@max_epoch_distance`.
+  defp check_epoch_distance(%Wasm.Artifact{epoch: epoch}) do
+    floor = epoch_floor()
+
+    if epoch - floor > @max_epoch_distance,
+      do: {:refused, {:epoch_too_far_ahead, epoch, floor + @max_epoch_distance}},
+      else: :ok
+  end
+
+  # The highest number this node knows about, from the two places one can come from: what
+  # its register has admitted, and what its own allocator has handed out. Either may be
+  # unavailable — a signer node runs neither — and an unavailable one contributes zero
+  # rather than an opinion.
+  defp epoch_floor, do: max(registry_watermark(), allocation_watermark())
+
+  defp registry_watermark do
+    case Registry.wasm_epoch() do
+      epoch when is_integer(epoch) and epoch >= 0 -> epoch
+      _other -> 0
+    end
+  rescue
+    _unavailable -> 0
+  catch
+    _kind, _reason -> 0
+  end
+
+  defp allocation_watermark do
+    case Epoch.watermark() do
+      {:ok, epoch} when is_integer(epoch) and epoch >= 0 -> epoch
+      _other -> 0
+    end
+  rescue
+    _unavailable -> 0
+  catch
+    _kind, _reason -> 0
   end
 
   # The lane-W analogue of the capability namespace, and hard for the same reason. A world

@@ -647,8 +647,17 @@ the signer id and the 64-byte signature, and then the component bytes **raw**. T
 half is not base64 — that would be twenty-one mebibytes of decoding handed to a parser by
 whoever wrote the file, to save nobody anything — and only the KiB-scale envelope is.
 Every field is bounded before it is parsed, the total size must equal the header plus the
-two declared lengths exactly (so trailing data is a refusal), and the manifest term is
-read with `binary_to_term/2`'s `:safe`, so a bundle cannot grow this node's atom table.
+two declared lengths exactly (so trailing data is a refusal), and the manifest term is read
+with `binary_to_term/2`'s `:safe`, so a bundle cannot grow this node's atom table. `:safe`
+is not the whole of it: the external term format's tag 80 is `COMPRESSED`, which
+`binary_to_term/2` inflates transparently, so a ceiling on the *encoded* field said nothing
+about what a decode allocated — forty-two kibibytes of zlib was a sixteen-million-element
+list built inside `Bundle.verify/2`, which is what `wasm.deploy` reaches at `:operate`,
+before a single trust check had run. A compressed manifest is refused by its tag (this
+build's encoder passes `[:deterministic]` and nothing else, so it never writes one), and
+what the decode *did* allocate is then measured with `:erts_debug.flat_size/1` against a
+heap ceiling — because uncompressed terms are not size-preserving either: a byte list is
+one byte an element on the wire and a cons cell in the heap.
 Reconstruction is then held to a fixed point: the struct built out of the decoded map must
 project back through `Wasm.Artifact.manifest/1` to exactly the map that was decoded, which
 is one comparison instead of nine and cannot be satisfied by a manifest carrying a key
@@ -658,10 +667,13 @@ signer.
 
 The verbs are `wasm.sign`, `wasm.deploy` and `wasm.rollback`, all `:operate` and
 node-routed like `wasm.status`, plus `wasm.upload` underneath them (D16). `wasm.sign`
-builds a manifest over uploaded bytes — recomputing the digest and the size, and reading
-the *imports off the component* with this node's helper rather than believing a caller,
-because a wrong import list is a quarantine and not a warning — and hands it to
-`Upgrade.Signing.Service`, which applies the whole policy above and journals the decision.
+builds a manifest over uploaded bytes — recomputing the digest and the size, taking the
+**declared** import list from the client, and refusing bytes that do not begin like a
+WebAssembly binary at all — and hands it to `Upgrade.Signing.Service`, which applies the
+whole policy above and journals the decision. It **never parses the component**: those are
+unsigned bytes from a socket, and pointing the helper at them is what this lane exists to
+avoid (D15). The epoch is not a parameter either; it is allocated over the connected
+cluster.
 It answers with the bundle's **prefix** rather than the bundle: the operator already holds
 the bytes they uploaded, so returning them would mean building a chunked download to hand
 somebody their own file back. `wasm.deploy` verifies the bundle against the node's own
@@ -670,7 +682,11 @@ trust policy **before** the store, the helper or the register hears about it, th
 with an error, because `:rolled_back` and `:quarantined` are outcomes a client renders.
 `wasm.rollback` reaches the same `withdraw/2` the eval-failure branch uses — a wrapper
 running some other component's sha is left alone and reported `:unchanged` — and marks the
-entry `:rolled_back` only where every node proved absence. Bytes stay in the store (D6).
+entry `:rolled_back` only where every node proved **absence**. `:unchanged` is not absence:
+something is still answering under the id the operator asked to retire, so the entry is
+`:quarantined` and the per-node evidence says which node and why. (On the *compensation*
+path `:unchanged` remains proof, because there the claim is only that this rollout started
+nothing.) Bytes stay in the store (D6).
 
 Champion/challenger (`compare: true`) is **deferred**, not inherited: `Wasm.Rollout`'s
 `eval_report` hardcodes `compare: false`. `Upgrade.Rollout` accepts a `:replace`
@@ -1067,7 +1083,37 @@ machinery — it is a backend, not a lane (D9).
   *would* be a socket deciding what this node runs rather than a signer deciding what may
   exist. Proved in `test/ouroboros/gateway/wasm_deploy_test.exs` (an unsigned, a tampered
   and an untrusted bundle each refused with the store, the register and the helper pool
-  unchanged) and in `test/wasm/deploy_test.exs`.
+  unchanged) and in `test/wasm/deploy_test.exs`, which also asserts the register's durable
+  checkpoint is byte-identical after a refusal.
+
+  **The node does not parse what it has not verified.** The first cut of `wasm.sign` read a
+  component's import list off the staged file with the node's own helper whenever a caller
+  did not declare one. That handed attacker-supplied bytes to the one process whose job is
+  running other people's code, at `:operate`, before a signature existed and *upstream* of
+  the signing service's rate limit — one staged blob could be fed to it without bound,
+  because a failed read did not consume the upload either. So `imports` is required, the
+  client computes it with the **operator's** own helper (`ouro wasm inspect --json`), and a
+  declared list that does not match what the component actually imports is refused at stage
+  by `Wasm.Verifier.cross_check/2`, which is D5's posture and always was: the manifest's
+  import list is provenance, and the linker is the boundary. `Wasm.Artifact.build/2` does
+  check eight bytes of preamble, because every other check a signer makes is about numbers
+  computed *from* the bytes and would sign a text file just as happily; whether those bytes
+  are a *component* remains the helper's answer, under §7.3's bounds, on the node that will
+  run them. The upload is consumed before anything that can refuse.
+
+  **And the epoch is not a client's to name.** `Rollout.Registry` admits a lane-W epoch only
+  strictly above its watermark and refuses one at its plausibility ceiling, so a single
+  deploy *at* the ceiling left no number that was both — on every lane-W capability on that
+  node, durably, since the watermark is carried in the checkpoint and pruning cannot lower
+  it. One `:operate` call, unrecoverable. There is no `epoch` parameter now: it is allocated
+  with `Upgrade.Epoch.next/2` over `[node() | Node.list()]`, which also closes the other end
+  of it — a bundle signed on a quiet node is no longer refused by a busier peer for a number
+  the signer could not see. The register's own boundary became exclusive (`>=`, not `>`), and
+  the signing policy gained a second guard in front of it: an epoch more than a million above
+  anything this node has seen is refused at signing time, because a signature is what makes a
+  large epoch deployable at all. Its honest limit is that a dedicated signer sees no register
+  and no allocator, so its floor there is zero and the bound is a flat million. Proved in
+  `test/wasm/epoch_test.exs`.
 - **D16 — bytes cross the socket in frames, because one frame will not hold them.**
   `Gateway.Config` bounds an inbound frame at `OUROBOROS_GATEWAY_MAX_FRAME`, a mebibyte
   by default, and the Rust client refuses to send more than the same number. A component
@@ -1078,10 +1124,17 @@ machinery — it is a backend, not a lane (D9).
   (about 683 KiB on the wire, a third under the default ceiling), a total bounded by
   `Bundle.max_bytes/0` — the signer's own `:signing_max_artifact_bytes` plus the envelope,
   so a bundle can never carry more than a signer would have looked at — **eight uploads in
-  flight per node**, and **ten minutes** before an abandoned one is swept. It is files in
-  `<data_dir>/wasm/uploads` and no process: the offset is the file's size, membership is
-  `File.exists?/1`, expiry is the mtime, and every call sweeps before it writes, so the
-  thing that would fire a timer is the thing that would notice. The id is minted by the
+  flight per node**, **ten minutes idle** and **thirty minutes total** before one is
+  reclaimed. It is files in `<data_dir>/wasm/uploads` and no process, and the two operations
+  that have to be atomic are the two a filesystem will do for you. A slot is a file created
+  `O_CREAT|O_EXCL`, because counting and then creating is two syscalls and thirty-two
+  concurrent openers all counted seven; the slot carries the id and the claim time, so the
+  total clock is a fact nothing can touch. `take/2` is a `File.rename/2` before it is a
+  read, because read-then-remove let two `wasm.deploy` frames naming one upload both
+  receive the bytes. Every entry point sweeps, including the two that only read — a sweep on
+  the write path alone left `take/2` handing back files the module had already promised were
+  gone — and nothing follows a symlink: the root must be a real directory and a staged file
+  a regular file, both by `File.lstat/1`. The id is minted by the
   node — a client-chosen id is a client-chosen filename — and is still validated as 32 hex
   characters on the way back in. An upload carries no authority whatsoever: the sha it
   reports at commit is a receipt for the transfer, and what comes out of it is verified by
@@ -1483,6 +1536,24 @@ Each slice is PR-sized, lands green, and is useful alone.
   manifest still in the store. Refusals proved with the store, the register and the helper
   pool asserted unchanged. The `methods.ex` comment that promised there would never be a
   `wasm.deploy` is corrected in place, with D15 for why.
+
+  An adversarial review of the first cut found three ways in and they are all closed here,
+  each with a test that is red without its fix. A **compressed manifest term** made a 42 KiB
+  file allocate 292 MB inside `Bundle.verify/2` at `:operate`, before any trust check — tag
+  80 is refused by inspection now and the decoded term is measured in heap words rather than
+  in the length that was read. A **client-named epoch** at the register's plausibility
+  ceiling wedged lane W on a node permanently from one call — the parameter is gone, the
+  register's boundary is exclusive, and the signing policy refuses an epoch far above
+  anything the node has seen. And **`wasm.sign` handed unsigned bytes to the helper** to
+  read their imports: `imports` is the client's to declare now, computed with the operator's
+  own helper, and the upload is consumed before anything that can refuse. Three more were
+  concurrency: `Upload.take/2` is an atomic rename rather than read-then-remove, the
+  in-flight ceiling is eight `O_CREAT|O_EXCL` slot files rather than a count taken before a
+  create, and an upload has a total lifetime as well as an idle one. Two claims that outran
+  the code were deleted rather than defended: the redundant pre-flight verification in
+  `Wasm.Deploy.deploy/3` (the rollout was already verifying before its checkpoint, and no
+  test could tell the difference), and `:unchanged` counting as proof for an operator's
+  rollback — a capability whose name is still answering is not "rolled back".
 - **W8 — ahead-of-time compilation (proposed, not promised).** `Component::new` on the
   node's hot path is what makes §7.3's bounds necessary in the shape they have.
   `Engine::precompile_component` at sign or deploy time and `Component::deserialize` at

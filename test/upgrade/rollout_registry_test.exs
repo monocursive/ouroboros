@@ -361,8 +361,10 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
       {adapter, adapter_opts} = context.storage
 
       # The other half of the rule: the ceiling refuses a number nothing could have minted,
-      # not a number that is merely large. An entry one order below it loads, and it gates.
-      high = 99_999_999_999_999
+      # not a number that is merely large. An entry one order below it loads, and it gates —
+      # and `high + 1` below is still strictly under the ceiling, which is what makes this a
+      # test about largeness rather than about the boundary.
+      high = 99_999_999_999_998
 
       entry = %Registry.Entry{
         artifact_id: "high",
@@ -442,7 +444,22 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
                Registry.deploying(attrs(nil, epoch: 999_999_999_999_999), registry)
 
       assert Registry.list(registry) == []
-      assert {:ok, _entry} = Registry.deploying(wasm_attrs(epoch: ceiling), registry)
+
+      # The ceiling itself is refused, and that one character of comparison is the
+      # difference between a bound and a trap. `ensure_fresh_epoch/2` admits an epoch only
+      # when it is strictly *greater* than the watermark, so an entry recorded at this
+      # number leaves nothing that is both fresh and plausible: every later deploy of every
+      # lane-W capability on the node is one refusal or the other, permanently, because the
+      # watermark is carried in the checkpoint and pruning cannot lower it back. Admitting
+      # it was a one-call wedge with no way out (W12 review, H2).
+      assert {:error, {:implausible_epoch, ^ceiling, ^ceiling}} =
+               Registry.deploying(wasm_attrs(epoch: ceiling), registry)
+
+      assert Registry.list(registry) == []
+
+      # And one below it is admitted, so the range is not shortened by more than the number
+      # nobody could have minted anyway.
+      assert {:ok, _entry} = Registry.deploying(wasm_attrs(epoch: ceiling - 1), registry)
     end
 
     test "every field `deploying/2` refuses is refused again on read", context do

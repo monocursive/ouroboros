@@ -131,6 +131,19 @@ defmodule Ouroboros.Wasm.Rollout do
   @module_prefix "wasm/"
   @proven_recoveries [:rolled_back, :not_needed, :unchanged]
 
+  # What an **operator's** rollback accepts as proof, and it is a strictly shorter list.
+  #
+  # `:unchanged` means a wrapper is alive under this capability's durable id running some
+  # other component's sha. On the *compensation* path that is proof enough of what matters
+  # there — this rollout started nothing and the process belongs to somebody else — so
+  # `@proven_recoveries` keeps it. On the rollback path it is not proof of anything the
+  # verb claims: an operator asking to retire `greeter` and being told `rolled_back` while
+  # a process still holds `wasm/greeter` has been told the capability is gone when its name
+  # is still answering. Whose component that is, this node cannot say; that it is not this
+  # entry's is exactly why nothing here may stop it. So the honest state is `:quarantined`,
+  # and the per-node evidence says which node and why.
+  @withdrawn [:rolled_back, :not_needed]
+
   # Staging publishes bytes and compiles a component. The helper's own `load` bound is
   # `Ouroboros.Wasm.config(:request_timeout_ms)`; this is the transport around it, plus
   # room for the file write.
@@ -242,7 +255,10 @@ defmodule Ouroboros.Wasm.Rollout do
     * **Stop anything that is not this capability's wrapper.** The id is derived
       (`"wasm/" <> name`), never read from anywhere, and `withdraw/2` stops the process
       holding it only when that process is running the sha the registry entry records. A
-      wrapper holding the name for some other component is `:unchanged` and is left alone.
+      wrapper holding the name for some other component is `:unchanged` and is left alone —
+      and because something is still alive under the id this verb was asked to retire, the
+      rollout is marked `:quarantined` rather than `:rolled_back`. "Rolled back" must never
+      be the word for a capability whose name is still answering.
     * **Touch a rollout the register does not hold as live lane-W.** A name with no live
       entry is `{:no_live_rollout, name}`; a lane-B entry is not a lane-W entry and is
       never found here.
@@ -859,7 +875,7 @@ defmodule Ouroboros.Wasm.Rollout do
       end)
 
     state =
-      if Enum.all?(recovery, fn {_t, r} -> r in @proven_recoveries end),
+      if Enum.all?(recovery, fn {_t, r} -> r in @withdrawn end),
         do: :rolled_back,
         else: :quarantined
 

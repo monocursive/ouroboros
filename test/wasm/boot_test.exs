@@ -173,7 +173,7 @@ defmodule Ouroboros.Wasm.BootTest do
       seed!(context,
         name: name,
         nodes: [:"boot-test-elsewhere@nowhere"],
-        bytes: "\0asm\x01 a different component",
+        bytes: "\0asm\x01\x00\x00\x00 a different component",
         start: %{id: id, config: ~s({"who":"loser"})}
       )
 

@@ -362,7 +362,7 @@ defmodule Ouroboros.Wasm.SigningTest do
     test "component bytes are bounded before anything looks at them" do
       # Big enough that the bound is about the component and not about the manifest beside
       # it, which is a few hundred bytes serialized.
-      big = String.duplicate("\0asm", 1_000)
+      big = "\0asm\x01\x00\x00\x00" <> String.duplicate("x", 3_992)
       service = start_service!(max_artifact_bytes: 2_000)
 
       assert {:refused, {:component_too_large, 4_000, 2_000}} =

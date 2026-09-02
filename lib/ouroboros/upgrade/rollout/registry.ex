@@ -171,6 +171,15 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   # So a bigger number was not minted here, and the two places it could arrive from are the
   # two places it is refused: an entry read back from a checkpoint, and the checkpoint's own
   # watermark field. See the moduledoc for what this does and does not buy.
+  # The comparison is `>=`, and that one character is the difference between a bound and a
+  # trap. `ensure_fresh_epoch/2` admits an epoch only when it is **strictly greater** than
+  # the watermark, so an entry recorded *at* this number leaves no number that is both
+  # plausible and fresh: every later deploy is either `{:stale_epoch, _, _}` or
+  # `{:implausible_epoch, _, _}`, on every lane-W capability on the node, permanently — and
+  # the watermark is carried in the checkpoint, so pruning cannot lower it back. Admitting
+  # the ceiling was therefore a one-call, unrecoverable wedge of lane W. Nothing legitimate
+  # is lost: `Ouroboros.Upgrade.Epoch` adds one per allocation, and a cluster that reached
+  # ninety-nine trillion deployments has other problems.
   @max_plausible_epoch 100_000_000_000_000
 
   # The one binary form `module` accepts. See the moduledoc: binary-tolerance is about
@@ -822,10 +831,10 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   # allocation could have reached is ignored rather than enforced, loudly.
   defp watermark(held) do
     case Map.get(held, :lane_w_epoch) || Map.get(held, "lane_w_epoch") do
-      value when is_integer(value) and value >= 0 and value <= @max_plausible_epoch ->
+      value when is_integer(value) and value >= 0 and value < @max_plausible_epoch ->
         value
 
-      value when is_integer(value) and value > @max_plausible_epoch ->
+      value when is_integer(value) and value >= @max_plausible_epoch ->
         Logger.warning(
           "rollout registry ignored an implausible lane-W epoch watermark: " <>
             "#{value} is above #{@max_plausible_epoch}, which no allocation could have reached"
@@ -1101,10 +1110,10 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   # where that warning stops being only a warning.
   defp fetch_epoch(attrs) do
     case Map.fetch(attrs, :epoch) do
-      {:ok, epoch} when is_integer(epoch) and epoch > 0 and epoch <= @max_plausible_epoch ->
+      {:ok, epoch} when is_integer(epoch) and epoch > 0 and epoch < @max_plausible_epoch ->
         {:ok, epoch}
 
-      {:ok, epoch} when is_integer(epoch) and epoch > @max_plausible_epoch ->
+      {:ok, epoch} when is_integer(epoch) and epoch >= @max_plausible_epoch ->
         {:error, {:implausible_epoch, epoch, @max_plausible_epoch}}
 
       {:ok, other} ->

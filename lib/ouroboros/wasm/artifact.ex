@@ -77,6 +77,27 @@ defmodule Ouroboros.Wasm.Artifact do
   @sha256_hex 64
   @signature_bytes 64
 
+  # What a WebAssembly binary starts with, and the only thing about the bytes this struct
+  # reads besides their digest and their length.
+  #
+  # It is not a parser and must not become one: §7.3's structural pass and wasmtime's own
+  # validator live in the helper, behind W7's bounds, on the node that is about to *run*
+  # the component — and `Ouroboros.Upgrade.Signing.Policy.Default` deliberately does not
+  # need a helper to decide (D5). What this catches is the case that made a signature
+  # meaningless rather than merely wrong: a signer will otherwise happily sign a manifest
+  # over a text file, a tarball, or an ELF binary, because every check it makes is about
+  # numbers computed *from* those bytes rather than about the bytes being a component at
+  # all. Eight bytes of preamble is the cheapest possible "this is at least the right kind
+  # of file", and it costs no parse.
+  #
+  # Both known preambles are accepted: `01 00 00 00` is a core module and `0d 00 01 00` is
+  # a component (version 13, layer 1). A core module is not something this lane can run —
+  # the helper refuses it against the world — but that refusal belongs where the linker is,
+  # and narrowing it here would mean this module claiming to know a binary format it
+  # deliberately does not read.
+  @wasm_magic "\0asm"
+  @wasm_preambles [<<0x01, 0x00, 0x00, 0x00>>, <<0x0D, 0x00, 0x01, 0x00>>]
+
   # A component's name is not decoration: it is the register's `module` field
   # (`"wasm/" <> name`) and the durable mesh id a `start` block may claim, and both of those
   # are compared as strings by things that trust them. So the charset is the one a name can
@@ -140,6 +161,7 @@ defmodule Ouroboros.Wasm.Artifact do
     name = Map.get(attrs, :name)
 
     with :ok <- validate_bytes(bytes),
+         :ok <- validate_preamble(bytes),
          :ok <- validate_id(id),
          :ok <- validate_epoch(epoch),
          :ok <- validate_name(name),
@@ -277,6 +299,15 @@ defmodule Ouroboros.Wasm.Artifact do
 
   defp validate_bytes(""), do: {:error, :empty_component}
   defp validate_bytes(_bytes), do: :ok
+
+  # Eight bytes, no parse. See the attribute above for what this does and does not claim.
+  defp validate_preamble(<<@wasm_magic, preamble::binary-size(4), _rest::binary>>) do
+    if preamble in @wasm_preambles,
+      do: :ok,
+      else: {:error, {:not_a_wasm_binary, :preamble, Base.encode16(preamble, case: :lower)}}
+  end
+
+  defp validate_preamble(_bytes), do: {:error, {:not_a_wasm_binary, :magic}}
 
   defp validate_id(id) when is_binary(id) and id != "", do: :ok
   defp validate_id(id), do: {:error, {:invalid_artifact_id, describe(id)}}
