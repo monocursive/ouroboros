@@ -722,6 +722,18 @@ Two repairs ride along: hooks gain a node-config scope (W-F3 — an operator mus
 able to install a node-wide hook; today only user and workspace scopes exist), and
 `[checks]` may name components under the same rule.
 
+**The narrowing is visible before it is provoked.** `ouro wasm hook <file> --event <Event>
+[--trusted]` runs a component exactly the way `invoke/3` does — the same payload shape, the
+same `tool_response` narrowing on the way in, the same one-instance-one-message-always-dropped
+lifecycle, the same deadline ceiling — and prints *both* verdicts: what the component said,
+and what this node would act on. An author who tests a hook by reading its own output is
+testing a verdict the runtime may already have dropped, and a dropped `allow` that nobody sees
+dropped is a rule that gets rediscovered as a bug report. The rules are implemented once more
+in Rust for that display and both implementations are pinned to
+`test/support/wasm_golden/hook_narrowing.json` (D14, contract C6), read by a test on each side;
+`ouro wasm check` answers the other half of the same question — which of a repository's
+`component =` entries this node would admit at all — without instantiating any of them.
+
 ### 8.2 Wasm policy (the C6 slot)
 
 `Ouroboros.Wasm.PolicyEngine`: an engine for `config :ouroboros,
@@ -892,6 +904,59 @@ machinery — it is a backend, not a lane (D9).
   component the SDK built, so the SDK cannot quietly grow an import without lane W's own
   acceptance suite going red. `tui/wasm/tests/sdk.rs` holds the two example guests and the
   scaffold template to the same assertion, against the real helper.
+- **D14 — the author's loop runs the helper locally, and the helper comes from three
+  places.** `ouro wasm inspect|run|hook|check|new` need no node: each starts a local
+  `ouro-wasm` and speaks its line protocol. That they *start* one is the deliberate
+  difference from `ouro wasm doctor`, which asks a gateway and starts nothing — a readiness
+  surface that spawned to answer whether spawning works would be answering a different
+  question, and a development loop that needed a running node would not be a loop.
+
+  The helper is found in exactly three places, in order: `--helper <path>`, an **absolute**
+  `$OUROBOROS_WASM_HELPER`, and `ouro`'s own sibling. **Never the working directory and
+  never a repository.** W7 removed every cwd-derived candidate from
+  `Ouroboros.Wasm.helper_path/0` for a reason that applies here with more force: `ouro wasm`
+  is typed in the directory a component author is working in, which is the directory the
+  component came from, so a clone that could drop a `priv/wasm/ouro-wasm` there would be
+  choosing the binary this command spawns to contain untrusted code. A relative
+  `$OUROBOROS_WASM_HELPER` is refused rather than resolved, because resolving one is a read
+  of the working directory by another name. Proved by
+  `wasm_client::the_working_directory_is_not_a_place_a_helper_may_come_from` — where the
+  absence of a fourth argument to `resolve_from` is the mechanism — and end to end by
+  `wasm_cli::a_helper_planted_in_the_working_directory_is_not_executed`, which plants an
+  executable that would leave a marker file and asserts the marker never appears.
+
+  `run` and `hook` execute attacker-authored components on a developer's machine. That is
+  acceptable for one reason and only for it: they run *inside `ouro-wasm`*, under the bounds
+  a node uses, with the environment `Ouroboros.Wasm.Pool`'s `@inherited_env` allows and
+  nothing more (`PATH`, `HOME`, `TMPDIR`, each refused when its value carries a
+  `scheme://user:pass@` or a PEM private-key header). No path reaches wasmtime except through
+  the helper; a `--fuel`, `--memory-bytes` or `--deadline-ms` above what `doctor` reports is
+  **clamped down** to the helper's own maximum and the clamp is printed. Everything a
+  component authors — a reply, a `describe`, a log line — is stripped of control characters
+  and ANSI escapes before it reaches a terminal, because a page a component can redraw is a
+  verdict a component can forge.
+
+  `ouro wasm hook` prints the untrusted narrowing, which means implementing D8's rules a
+  second time in Rust. Both implementations are pinned to one fixture,
+  `test/support/wasm_golden/hook_narrowing.json` (contract C6), read by
+  `test/provider/native/hooks_narrowing_golden_test.exs` — which drives every case through
+  the real seam rather than a test hook, so no `@doc false` function was added to `hooks.ex`
+  — and by `tui/src/wasm_cli.rs`'s own tests. One thing is deliberately **not** pinned: the
+  context byte clip. Both sides cut at `@max_context_bytes` and append the same marker, but
+  `binary_part/3` cuts on a byte and can split a codepoint where the Rust cuts on the
+  character boundary below it. No fixture case reaches the limit; the Elixir clip is tested
+  on its own in `hooks_component_test.exs`.
+
+  `ouro wasm check` reproduces the workspace admission rules rather than asking a node,
+  because the point is to answer before there is a node. It judges every entry as an
+  **untrusted** workspace, which is the strict case, and it never instantiates anything —
+  admission is a question about a path, a size, a world and the count of an entry's
+  siblings. One rule it can only half-check: `matcher` is a PCRE, `ouro` carries no regex
+  engine, and adding one to parse a field would be a poor trade. It checks the 200-byte bound
+  exactly and checks that the pattern's groups balance — the property `compile_matcher/1`'s
+  bare compile exists to establish, since `a)|(x` otherwise anchors to an unanchored
+  alternation — and says so rather than claiming to have compiled anything. The node's
+  compile is still the one that decides.
 
 ## 12. What this does not solve
 
@@ -1109,6 +1174,42 @@ Each slice is PR-sized, lands green, and is useful alone.
   journal, orders the signer's rate limit first, and keeps probe/eval cleanup in a process
   a deadline kill cannot reach. Every fix landed with a regression test that was red first
   and a mutation that turns it red again.
+- **W10 — the local dev loop.** `ouro wasm` grew five subcommands that need no node:
+  `inspect`, `run`, `hook`, `check` and `new`. Each starts a local `ouro-wasm` and speaks its
+  line protocol through a new `tui/src/wasm_client.rs`; `doctor` still asks a gateway and
+  still starts nothing, and the parsing test that says so now also proves it cannot be handed
+  a `--helper`. The helper is resolved from three places and never the working directory
+  (D14). `inspect` reports the world, the imports, the exports, the sha, the size, and the
+  structural census beside the ceiling each reading was judged against — for which the
+  helper's `inspect` learned to report the `shape::check` census it already took, from the
+  same walk in the same order, so the numbers shown are the numbers the compiler gate used —
+  and one verdict line: admitted as a capability, as a hook component, as both, or as
+  neither with the refusal named. `run` loads, instantiates once, and sends every message to
+  the *same* instance, printing each reply, the fuel it cost, the guest's own log lines and
+  the wall clock; bounds default to `config/config.exs`'s `capability_limits` and are clamped
+  down to the helper's maxima. `hook` builds the payload the seam builds, narrows the
+  `tool_response` on the way in, and prints the raw verdict beside the one the node would act
+  on, naming what was dropped and why. `check` parses an `ouroboros.toml` and judges every
+  `[[hooks]]` and `[checks]` component entry as an untrusted workspace — the exactly-one-of
+  rule, the workspace-relative path, canonical confinement, the 16 MiB ceiling, the world,
+  the shared eight-component budget — and exits non-zero on any refusal without instantiating
+  anything. `new` scaffolds a project from a template embedded in the binary, carrying the
+  world byte for byte (a test compares the two), in a capability and a hook shape.
+
+  Proofs: a Rust integration suite drives the real binary against the real helper and the
+  real acceptance guest — the world and shape report, one instance across two messages
+  (`"n":2` is the evidence), the D8 narrowing on both lanes, the `PostToolUse` output body
+  never reaching the hook, a component that climbs out of the workspace refused with the same
+  sentence a missing one gets, a symlink out of the tree refused after being followed, the
+  ninth component of an untrusted workspace declined, the budget shared across `[[hooks]]`
+  and `[checks]`, a component importing `wasi:cli/environment` refused by name and never run,
+  a component refused before the compiler saw it, and a helper planted in the working
+  directory never executed. The two hand-built components have a test of their own, because
+  every refusal looks alike from outside and a fixture that stopped being a valid component
+  would pass for the wrong reason. The narrowing fixture (C6) is red on both sides for the
+  same mutation. CI's Rust job now builds the helper and the guest and runs under
+  `OUROBOROS_REQUIRE_WASM=1`, so a skip there is a failure exactly as it is on the Elixir
+  side.
 - **W8 — ahead-of-time compilation (proposed, not promised).** `Component::new` on the
   node's hot path is what makes §7.3's bounds necessary in the shape they have.
   `Engine::precompile_component` at sign or deploy time and `Component::deserialize` at

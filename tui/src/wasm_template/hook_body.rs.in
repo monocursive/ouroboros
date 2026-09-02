@@ -1,0 +1,66 @@
+    /// One hook event in, one verdict out.
+    ///
+    /// The body is the hook payload the runtime sends — `hook_event_name`, `session_id`, `cwd`,
+    /// and for a tool event `tool_name` and `tool_input`. The reply is the stdout contract every
+    /// compatible implementation reads:
+    ///
+    /// ```json
+    /// {"hookSpecificOutput": {
+    ///    "permissionDecision": "deny" | "ask" | "allow",
+    ///    "permissionDecisionReason": "why",
+    ///    "additionalContext": "text appended to the turn",
+    ///    "updatedInput": {"…": "a rewritten tool_input"}
+    /// }}
+    /// ```
+    ///
+    /// An empty reply is silence, and silence is not consent.
+    ///
+    /// # What survives from an untrusted workspace
+    ///
+    /// A component hook is admitted from a workspace nobody trusts, which is the whole point of
+    /// the lane — and the price is that it may make a decision **stricter and never looser**.
+    /// `deny` and `ask` stand; `additionalContext` is kept and labelled on every line; `allow`
+    /// is read as silence and `updatedInput` is dropped. Run `ouro wasm hook` against this
+    /// component to see both verdicts — what it said, and what the node would act on.
+    fn handle_message(body: String) -> Result<String, String> {
+        let Some(session) = SESSION.get().as_mut() else {
+            return Err("init has not run on this instance".to_string());
+        };
+
+        let payload: Value = serde_json::from_str(&body)
+            .map_err(|error| format!("hook payload is not JSON: {error}"))?;
+
+        session.messages += 1;
+
+        let event = payload["hook_event_name"].as_str().unwrap_or("");
+        let tool = payload["tool_name"].as_str().unwrap_or("");
+        log("info", event);
+
+        // Replace this with the rule this hook exists to state. As written it denies nothing
+        // and asks about one tool, which is the safe shape to start from: a hook that denies by
+        // accident is a repository that cannot run its own tools.
+        //
+        // Which tool comes from the `config` this hook was declared with — the `config = "…"`
+        // string beside `component =` in `ouroboros.toml`, handed to `init` verbatim. It is
+        // repository text like any other, so it is read defensively and never trusted to be
+        // there.
+        let ask_about = session.config["ask_about"].as_str().unwrap_or("bash");
+
+        if event == "PreToolUse" && tool == ask_about {
+            return Ok(json!({
+                "hookSpecificOutput": {
+                    "permissionDecision": "ask",
+                    "permissionDecisionReason":
+                        format!("{{name}} asks about `{ask_about}`"),
+                }
+            })
+            .to_string());
+        }
+
+        Ok(json!({
+            "hookSpecificOutput": {
+                "additionalContext": format!("{{name}} saw {event}"),
+            }
+        })
+        .to_string())
+    }

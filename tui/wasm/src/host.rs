@@ -632,11 +632,18 @@ impl Host {
     }
 
     /// `inspect`: what these bytes are, without admitting them to anything.
+    ///
+    /// `shape` is the census [`shape::check`] already took on the way to the compiler, reported
+    /// rather than discarded. It is the one part of admission an author cannot otherwise see:
+    /// `doctor` names the ceilings and this names the readings, so `ouro wasm inspect` can put
+    /// the two beside each other instead of leaving a refusal to be discovered. Reporting a
+    /// measurement decides nothing — the same `check` in the same place still refuses the same
+    /// components, and `inspect` still admits nothing to either table.
     pub fn inspect(&self, params: &Value) -> Result<Value, Refusal> {
         let path = required_str(params, "path")?;
         let bytes = read_component(path)?;
         let sha256 = sha256_hex(&bytes);
-        let component = self.compile(&bytes)?;
+        let (component, census) = self.compile_measured(&bytes)?;
         let (imports, exports) = self.declared_names(&component);
 
         Ok(json!({
@@ -645,6 +652,7 @@ impl Host {
             "imports": imports,
             "exports": exports,
             "size": bytes.len(),
+            "shape": shape_report(&census),
         }))
     }
 
@@ -990,13 +998,22 @@ impl Host {
     /// without the compiler ever seeing the bytes; see [`crate::shape`] for why a bound after
     /// the fact — a watchdog thread, a deadline — could not have done this.
     fn compile(&self, bytes: &[u8]) -> Result<Component, Refusal> {
-        shape::check(bytes)?;
-        Component::new(&self.engine, bytes).map_err(|error| {
+        self.compile_measured(bytes)
+            .map(|(component, _census)| component)
+    }
+
+    /// The same compile, keeping the census instead of dropping it. `inspect` is the only
+    /// caller that wants it: this exists so the reading and the refusal come from one walk in
+    /// one order, rather than from a second walk `inspect` could get out of step with.
+    fn compile_measured(&self, bytes: &[u8]) -> Result<(Component, shape::Census), Refusal> {
+        let census = shape::check(bytes)?;
+        let component = Component::new(&self.engine, bytes).map_err(|error| {
             refusal::refuse(
                 refusal::COMPILE_FAILED,
                 bounded(&format!("{error:#}"), MAX_ERROR_BYTES),
             )
-        })
+        })?;
+        Ok((component, census))
     }
 
     fn restore(&self, name: String, live: Live) {
@@ -1110,6 +1127,26 @@ fn read_component(path: &str) -> Result<Vec<u8>, Refusal> {
         )));
     }
     Ok(bytes)
+}
+
+/// The census as `inspect` reports it. Every key here is the `doctor` limit key of the same
+/// name without its `max_` prefix — `functions` against `max_functions`, `nesting_depth`
+/// against `max_nesting_depth` — so a reading and its ceiling can be paired by name rather
+/// than by a table somebody has to keep in step.
+fn shape_report(census: &shape::Census) -> Value {
+    json!({
+        "functions": census.functions,
+        "code_bytes": census.code_bytes,
+        "types": census.types,
+        "component_imports": census.imports,
+        "component_exports": census.exports,
+        "definitions": census.definitions,
+        "segment_bytes": census.segment_bytes,
+        "nesting_depth": census.depth,
+        "core_modules": census.core_modules,
+        "nested_components": census.nested_components,
+        "sections": census.sections,
+    })
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

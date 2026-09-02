@@ -501,7 +501,13 @@ pub struct DesktopArgs {
     pub probe: bool,
 }
 
-/// `ouro wasm`'s subcommands. One so far.
+/// `ouro wasm`'s subcommands: one that asks a node, and five that ask a local helper.
+///
+/// `doctor` is the operator's readiness surface and starts nothing at all. The other five are
+/// the component author's loop (W10): each starts a local `ouro-wasm` and speaks its protocol,
+/// which is the deliberate difference — a readiness surface that spawned to answer whether
+/// spawning works would be answering a different question, and a development loop that needed
+/// a running node would not be a loop.
 #[derive(Debug, Subcommand)]
 pub enum WasmCommand {
     /// Report WebAssembly containment readiness on the node — helper presence and phase,
@@ -511,6 +517,42 @@ pub enum WasmCommand {
     /// There is deliberately no `--probe`: starting the helper to see whether it starts is
     /// the one thing a read-scope readiness surface must not do.
     Doctor(WasmArgs),
+
+    /// Scaffold a component project that builds, in the world this runtime speaks.
+    ///
+    /// Written from a template embedded in this binary, never fetched: a scaffold a command
+    /// downloads is a command that runs somebody else's code the first time it is used.
+    New(WasmNewArgs),
+
+    /// What a component declares, how its shape sits against the bounds that decide whether
+    /// it compiles at all, and whether the node would admit it — as a capability, as a hook
+    /// component, or as neither, naming the refusal.
+    ///
+    /// It loads the component into a local helper, which compiles it under the same
+    /// structural bound the node uses. It never instantiates it, so nothing runs.
+    Inspect(WasmInspectArgs),
+
+    /// Stand one instance up and send it messages, under the node's own default bounds.
+    ///
+    /// Every message goes to the *same* instance, because state in this world is
+    /// instance-held: a fresh instance per message would quietly exercise a different
+    /// component from the one that gets deployed.
+    Run(WasmRunArgs),
+
+    /// Run a component the way the node's hook seam would, and print both verdicts — what the
+    /// component said, and what the node would keep of it after the untrusted narrowing.
+    ///
+    /// The second is the only one that ever reaches a turn, so an author who tests a hook by
+    /// reading its own output is testing a verdict the runtime may already have dropped.
+    Hook(WasmHookArgs),
+
+    /// Validate a workspace's `ouroboros.toml` component entries the way the node would judge
+    /// them for a workspace nobody trusts, and exit non-zero on any refusal.
+    ///
+    /// It never instantiates anything: admission is a question about a path, a size, a world
+    /// and the count of an entry's siblings, and running a component answers none of it.
+    Check(WasmCheckArgs),
+    // W12 adds its variants below
 }
 
 /// `ouro wasm doctor`'s flags.
@@ -527,6 +569,154 @@ pub struct WasmArgs {
     /// A file holding the gateway token. Omitted, the token beside gateway.json is used.
     #[arg(long, value_name = "PATH")]
     pub token_file: Option<PathBuf>,
+}
+
+/// The one flag every local `ouro wasm` command takes, and the only way to name a helper
+/// besides the environment.
+///
+/// There is deliberately nothing here that reads the working directory. `ouro wasm` looks for
+/// the helper in exactly three places — this flag, an absolute `OUROBOROS_WASM_HELPER`, and a
+/// sibling of the running `ouro` — because the helper *is* the containment boundary, and a
+/// cloned repository that could drop a `priv/wasm/ouro-wasm` into the directory an author works
+/// in would be choosing the binary this command spawns to contain untrusted code.
+#[derive(Debug, Args)]
+pub struct WasmHelperArgs {
+    /// The `ouro-wasm` binary to use. Omitted, an absolute `$OUROBOROS_WASM_HELPER` is read,
+    /// and failing that the `ouro-wasm` installed beside this `ouro`. Never the working
+    /// directory and never a repository.
+    #[arg(long, value_name = "PATH")]
+    pub helper: Option<PathBuf>,
+}
+
+/// `ouro wasm new`'s flags.
+#[derive(Debug, Args)]
+pub struct WasmNewArgs {
+    /// The project's name, which is also its crate name. Letters, digits, `-` and `_`.
+    pub name: String,
+
+    /// Scaffold a hook component — one that reads a hook payload and answers the verdict
+    /// contract — instead of a plain capability.
+    #[arg(long)]
+    pub hook: bool,
+
+    /// The directory to create the project in. Omitted, the current one.
+    #[arg(long, value_name = "DIR")]
+    pub into: Option<PathBuf>,
+}
+
+/// `ouro wasm inspect`'s flags.
+#[derive(Debug, Args)]
+pub struct WasmInspectArgs {
+    /// The component to look at.
+    pub file: PathBuf,
+
+    /// Emit the helper's own report as JSON instead of a readable summary.
+    #[arg(long)]
+    pub json: bool,
+
+    #[command(flatten)]
+    pub helper: WasmHelperArgs,
+}
+
+/// `ouro wasm run`'s flags.
+#[derive(Debug, Args)]
+pub struct WasmRunArgs {
+    /// The component to run.
+    pub file: PathBuf,
+
+    /// The JSON string handed to `init`, verbatim.
+    #[arg(long, value_name = "JSON", default_value = "{}")]
+    pub config: String,
+
+    /// One message, as JSON. Repeatable; every message goes to the same instance.
+    #[arg(long, value_name = "JSON")]
+    pub message: Vec<String>,
+
+    /// A file of JSON lines, one message per line. Read in order, after any `--message`.
+    #[arg(long, value_name = "PATH")]
+    pub messages: Option<PathBuf>,
+
+    /// Also call `describe`, which is metadata and reads nothing.
+    #[arg(long)]
+    pub describe: bool,
+
+    /// Instruction budget for one message. Defaults to the node's `capability_limits`; a
+    /// value above what the helper accepts is clamped down to it and said out loud.
+    #[arg(long, value_name = "N")]
+    pub fuel: Option<u64>,
+
+    /// Memory ceiling, summed across every memory the instance holds.
+    #[arg(long, value_name = "N")]
+    pub memory_bytes: Option<u64>,
+
+    /// Wall-clock deadline for one message.
+    #[arg(long, value_name = "MS")]
+    pub deadline_ms: Option<u64>,
+
+    /// Emit the whole run as JSON.
+    #[arg(long)]
+    pub json: bool,
+
+    #[command(flatten)]
+    pub helper: WasmHelperArgs,
+}
+
+/// `ouro wasm hook`'s flags.
+///
+/// There is no `--fuel` and no `--memory-bytes`, and that is the node's shape rather than an
+/// omission: a hook declares one bound for itself, `timeout_ms`, and fuel and memory are
+/// `config :ouroboros, :wasm`'s, where an operator can already see and move them.
+#[derive(Debug, Args)]
+pub struct WasmHookArgs {
+    /// The component to run.
+    pub file: PathBuf,
+
+    /// The hook event, spelled as a hook declares it: `PreToolUse`, `PostToolUse`,
+    /// `SessionStart`, and the rest.
+    #[arg(long, value_name = "EVENT")]
+    pub event: String,
+
+    /// A file holding the hook payload as JSON, or `-` for standard input. Omitted, an empty
+    /// object. The runtime's own `hook_event_name` is set over whatever this carries.
+    #[arg(long, value_name = "PATH")]
+    pub payload: Option<String>,
+
+    /// The JSON string handed to `init`, verbatim — a hook's declared `config`.
+    #[arg(long, value_name = "JSON", default_value = "{}")]
+    pub config: String,
+
+    /// Show the trusted lane: an operator's own hook, or a workspace they named. The default
+    /// is the untrusted lane, because that is the one a cloned repository gets and the one
+    /// whose narrowing an author needs to see.
+    #[arg(long)]
+    pub trusted: bool,
+
+    /// The hook's declared `timeout_ms`, which becomes its deadline. Clamped to the component
+    /// deadline ceiling exactly as the node clamps it.
+    #[arg(long, value_name = "MS")]
+    pub timeout_ms: Option<u64>,
+
+    /// Emit both verdicts and what was dropped as JSON.
+    #[arg(long)]
+    pub json: bool,
+
+    #[command(flatten)]
+    pub helper: WasmHelperArgs,
+}
+
+/// `ouro wasm check`'s flags.
+#[derive(Debug, Args)]
+pub struct WasmCheckArgs {
+    /// The workspace holding the `ouroboros.toml`. Omitted, the current directory.
+    #[arg(long, value_name = "DIR")]
+    pub workspace: Option<PathBuf>,
+
+    /// Emit the table as JSON.
+    #[arg(long)]
+    pub json: bool,
+
+    #[command(flatten)]
+    pub helper: WasmHelperArgs,
 }
 
 /// `ouro update`'s flags.
@@ -1257,6 +1447,151 @@ mod tests {
             Cli::try_parse_from(["ouro", "wasm", "doctor", "--probe"]).is_err(),
             "a readiness surface with a --probe is a readiness surface that spawns"
         );
+
+        // W10 gave `ouro wasm` five subcommands that *do* start a helper, locally and by
+        // design. `doctor` did not inherit a way to: it still takes the three remote flags and
+        // takes neither `--helper` nor anything else that names a binary to run.
+        assert!(
+            Cli::try_parse_from(["ouro", "wasm", "doctor", "--helper", "/bin/true"]).is_err(),
+            "the readiness surface must not be able to name a helper, let alone start one"
+        );
+    }
+
+    /// W10. The five local subcommands take `--helper` and nothing that reads the working
+    /// directory: the helper is the containment boundary, so the set of paths that may supply
+    /// it is what was typed, an absolute environment override, and this binary's own sibling.
+    #[test]
+    fn the_local_wasm_commands_name_a_helper_and_never_a_directory_to_search() {
+        let Some(Command::Wasm {
+            command: WasmCommand::Inspect(args),
+        }) = parse(&[
+            "wasm",
+            "inspect",
+            "guest.wasm",
+            "--helper",
+            "/opt/ouro-wasm",
+        ])
+        .command
+        else {
+            panic!("`ouro wasm inspect` must parse");
+        };
+        assert_eq!(args.file, PathBuf::from("guest.wasm"));
+        assert_eq!(args.helper.helper, Some(PathBuf::from("/opt/ouro-wasm")));
+        assert!(!args.json);
+
+        // There is no flag that says "look for a helper under here": the only way to widen the
+        // candidate set is to type a path, and that is one path rather than a directory to walk.
+        for rejected in [
+            vec!["wasm", "inspect", "g.wasm", "--helper-dir", "/tmp"],
+            vec!["wasm", "inspect", "g.wasm", "--search-cwd"],
+            vec!["wasm", "run", "g.wasm", "--helper-dir", "/tmp"],
+        ] {
+            assert!(
+                Cli::try_parse_from(std::iter::once("ouro").chain(rejected.iter().copied()))
+                    .is_err(),
+                "a way to search for a helper is a way for a clone to supply one: {rejected:?}"
+            );
+        }
+    }
+
+    /// `run` sends every message to one instance, so the messages are a list and there is no
+    /// flag that would make them each their own instance.
+    #[test]
+    fn ouro_wasm_run_takes_repeatable_messages_and_optional_bounds() {
+        let Some(Command::Wasm {
+            command: WasmCommand::Run(args),
+        }) = parse(&[
+            "wasm",
+            "run",
+            "guest.wasm",
+            "--config",
+            r#"{"a":1}"#,
+            "--message",
+            r#"{"one":1}"#,
+            "--message",
+            r#"{"two":2}"#,
+            "--deadline-ms",
+            "250",
+            "--describe",
+        ])
+        .command
+        else {
+            panic!("`ouro wasm run` must parse");
+        };
+
+        assert_eq!(args.config, r#"{"a":1}"#);
+        assert_eq!(args.message, vec![r#"{"one":1}"#, r#"{"two":2}"#]);
+        assert_eq!(args.deadline_ms, Some(250));
+        assert!(args.describe);
+        // Absent bounds are the node's defaults, resolved at dispatch rather than defaulted to
+        // a number this file invents.
+        assert_eq!(args.fuel, None);
+        assert_eq!(args.memory_bytes, None);
+    }
+
+    /// `hook` defaults to the **untrusted** lane, because that is the lane a cloned repository
+    /// gets and the one whose narrowing an author needs to see. `--trusted` is the opt-in, and
+    /// there is deliberately no `--untrusted` to be the default nobody typed.
+    #[test]
+    fn ouro_wasm_hook_shows_the_untrusted_lane_unless_told_otherwise() {
+        let Some(Command::Wasm {
+            command: WasmCommand::Hook(args),
+        }) = parse(&["wasm", "hook", "vet.wasm", "--event", "PreToolUse"]).command
+        else {
+            panic!("`ouro wasm hook` must parse");
+        };
+
+        assert!(!args.trusted, "the default lane is the strict one");
+        assert_eq!(args.event, "PreToolUse");
+        assert_eq!(args.payload, None);
+        assert_eq!(args.config, "{}");
+        assert_eq!(args.timeout_ms, None);
+
+        // A hook declares one bound for itself and fuel and memory are the operator's, so there
+        // is no flag here that would let a hook ask for either.
+        for rejected in [
+            vec!["wasm", "hook", "v.wasm", "--event", "Stop", "--fuel", "1"],
+            vec![
+                "wasm",
+                "hook",
+                "v.wasm",
+                "--event",
+                "Stop",
+                "--memory-bytes",
+                "1",
+            ],
+        ] {
+            assert!(
+                Cli::try_parse_from(std::iter::once("ouro").chain(rejected.iter().copied()))
+                    .is_err(),
+                "a hook does not choose fuel or memory on a node either: {rejected:?}"
+            );
+        }
+
+        // The event is not optional: there is no default event, because every event narrows
+        // differently and guessing one would print the wrong narrowing convincingly.
+        assert!(Cli::try_parse_from(["ouro", "wasm", "hook", "v.wasm"]).is_err());
+    }
+
+    #[test]
+    fn ouro_wasm_check_and_new_take_their_one_argument_each() {
+        let Some(Command::Wasm {
+            command: WasmCommand::Check(args),
+        }) = parse(&["wasm", "check", "--workspace", "/repo"]).command
+        else {
+            panic!("`ouro wasm check` must parse");
+        };
+        assert_eq!(args.workspace, Some(PathBuf::from("/repo")));
+
+        let Some(Command::Wasm {
+            command: WasmCommand::New(args),
+        }) = parse(&["wasm", "new", "my-guard", "--hook"]).command
+        else {
+            panic!("`ouro wasm new` must parse");
+        };
+        assert_eq!(args.name, "my-guard");
+        assert!(args.hook);
+        assert_eq!(args.into, None);
     }
 
     #[test]

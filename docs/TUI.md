@@ -982,6 +982,57 @@ ouro fleet doctor     actionable profile/network/runtime/service checks
 ouro fleet service install|status|remove
                       generate and inspect launchd/systemd user recovery
 ouro fleet leave      remove a stopped non-owner/empty-fleet profile safely
+ouro wasm doctor [--json] [--addr HOST:PORT] [--token-file PATH]
+                      WebAssembly containment readiness on a node: helper presence
+                      and phase, the world and bounds, the hook-component budget,
+                      the component store, lane-W rollouts. Asks wasm.status,
+                      which starts nothing — and there is no --probe and no
+                      --helper, because a readiness surface must not spawn the
+                      thing it is reporting on
+ouro wasm new NAME [--hook] [--into DIR]
+                      scaffold a component project that builds, from a template
+                      embedded in this binary. --hook writes one that reads a hook
+                      payload and answers the verdict contract
+ouro wasm inspect FILE [--json] [--helper PATH]
+                      what a component declares, how its shape sits against the
+                      bounds that decide whether it compiles at all, and one
+                      verdict: admitted as a capability, as a hook component, as
+                      both, or as neither with the refusal named. Compiles it
+                      inside the helper; never instantiates it. Exits non-zero on
+                      a refusal
+ouro wasm run FILE [--config JSON] [--message JSON]... [--messages PATH]
+         [--describe] [--fuel N] [--memory-bytes N] [--deadline-ms MS]
+         [--json] [--helper PATH]
+                      stand one instance up and send it messages. Every message
+                      goes to the SAME instance, because state in this world is
+                      instance-held. Prints each reply, the fuel it cost, the
+                      guest's own log lines and the wall clock. Bounds default to
+                      the node's capability_limits and are clamped DOWN to the
+                      helper's maxima, never up
+ouro wasm hook FILE --event EVENT [--payload PATH|-] [--config JSON]
+         [--trusted] [--timeout-ms MS] [--json] [--helper PATH]
+                      run a component the way the node's hook seam would and print
+                      BOTH verdicts: what it said, and what the node would act on
+                      after the untrusted narrowing (D8), naming what was dropped
+                      and why. Defaults to the untrusted lane, which is the one a
+                      cloned repository gets. No --fuel and no --memory-bytes: a
+                      hook declares one bound for itself and the other two are the
+                      operator's
+ouro wasm check [--workspace DIR] [--json] [--helper PATH]
+                      validate an ouroboros.toml's [[hooks]] and [checks]
+                      component entries the way this runtime judges an UNTRUSTED
+                      workspace — path confinement, byte ceiling, world, the
+                      eight-component budget shared across both tables — and exit
+                      non-zero on any refusal. Instantiates nothing
+                      The five commands above start a local ouro-wasm and need no
+                      node; `doctor` asks a node and starts nothing. The helper is
+                      found in exactly three places — --helper, an absolute
+                      $OUROBOROS_WASM_HELPER, or beside this binary — and never in
+                      the working directory or a repository, because the helper is
+                      the containment boundary (docs/WASM.md D14)
+ouro desktop doctor [--probe] [--json] [--addr HOST:PORT] [--token-file PATH]
+                      Computer Use readiness on a node. --probe is the operator
+                      surface that starts the helper; the default starts nothing
 ouro acp [--provider NAME] [--workspace PATH] [--approval-mode MODE]
          [--sandbox-mode MODE] [--addr HOST:PORT] [--token-file PATH]
                       an Agent Client Protocol agent on stdio, spawned by an

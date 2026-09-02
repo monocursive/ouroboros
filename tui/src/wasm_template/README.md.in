@@ -1,0 +1,57 @@
+# {{name}}
+
+A WebAssembly component for Ouroboros lane W, in world `ouroboros:capability@0.1.0`.
+
+## Build
+
+```
+rustup target add wasm32-wasip2
+cargo build --release --target wasm32-wasip2
+```
+
+The artifact is `target/wasm32-wasip2/release/{{crate_name}}.wasm`. It is a **component**, not
+a core module: `wasm32-wasip2` emits one directly.
+
+## The loop
+
+```
+ouro wasm inspect target/wasm32-wasip2/release/{{crate_name}}.wasm
+ouro wasm run     target/wasm32-wasip2/release/{{crate_name}}.wasm \
+    --config '{}' --message '{"hello":"world"}'
+```
+
+`inspect` says what the component declares, how its shape sits against the bounds that decide
+whether it compiles at all, and whether the node would admit it — as a capability, as a hook
+component, or as neither, naming the refusal. `run` stands one instance up under the node's own
+default bounds and sends it messages; every message goes to the same instance, because state in
+this world is instance-held.
+
+Both need the helper, and find it in exactly three places: `--helper <path>`, an absolute
+`$OUROBOROS_WASM_HELPER`, or beside the `ouro` binary. Never the working directory — the helper
+is the containment boundary, so a checkout must not be able to supply it.
+
+## What this component may do
+
+One import: `log`. No clock, no randomness, no filesystem, no socket. An import the host's
+linker does not define fails to instantiate, which is the whole containment claim — so adding a
+dependency that reaches for `std`'s stdio or environment does not produce a component with more
+authority, it produces a component that will not run.
+
+Three bounds, none of them optional and all of them per message: fuel, a wall-clock deadline,
+and a memory ceiling summed across every memory the instance holds. A guest that exceeds one is
+stopped and the host says which.
+
+## Deploying it
+
+Signing and rollout are the node's: see `docs/WASM.md` §7.5 and §7.6. A workspace hook needs no
+signature — declare it in `ouroboros.toml`:
+
+```toml
+[[hooks]]
+event = "PreToolUse"
+component = "./hooks/{{crate_name}}.wasm"
+matcher = "bash|write"
+```
+
+and check it with `ouro wasm check`, which judges the file the way a workspace nobody trusts
+would be judged.

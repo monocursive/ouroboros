@@ -1345,6 +1345,85 @@ fn each_structural_bound_refuses_before_the_compiler_runs() {
     assert!(report["limits"]["max_functions"].as_u64().expect("a bound") > 0);
 }
 
+/// `inspect` reports the census it was measured against, every reading pairing with a `doctor`
+/// ceiling by name — and reporting it admits nothing (W10).
+///
+/// The reading is the one part of admission an author could not otherwise see: `doctor` names
+/// the ceilings and a refusal names the one that fired, so without this a component under every
+/// bound and a component one function short of a refusal look identical. `ouro wasm inspect`
+/// puts the two columns beside each other, which is only honest if they are the *same* numbers
+/// the compiler gate used — hence one walk, in `compile_measured`, feeding both.
+///
+/// Delete the `shape` key from `Host::inspect` and this is red at the first assertion; make the
+/// report a second, independent walk and the pairing below is what notices when it drifts.
+#[test]
+fn inspect_reports_the_shape_it_was_measured_against_and_admits_nothing() {
+    let mut helper = Helper::spawn(&[]);
+    let fixture = fixture("shape", &support::echo());
+
+    let inspected = helper.ok("inspect", json!({ "path": fixture.path }));
+    let shape = &inspected["shape"];
+    let report = helper.ok("doctor", Value::Null);
+
+    // Every reading has a ceiling of the same name, and every reading is under it. A key
+    // without its `max_` twin is a report an operator cannot read against anything.
+    let readings = shape.as_object().expect("inspect reports a shape object");
+    assert!(!readings.is_empty());
+    for (key, value) in readings {
+        let bound = report["limits"][format!("max_{key}")]
+            .as_u64()
+            .unwrap_or_else(|| panic!("`{key}` has no `max_{key}` in doctor's limits: {report}"));
+        let reading = value
+            .as_u64()
+            .unwrap_or_else(|| panic!("`{key}` is a number"));
+        assert!(
+            reading <= bound,
+            "the acceptance guest is over its own ceiling: {key} {reading} > {bound}"
+        );
+    }
+
+    // The readings are of *this* component, not zeros: a guest declares functions and code.
+    assert!(shape["functions"].as_u64().expect("functions") > 0);
+    assert!(shape["code_bytes"].as_u64().expect("code bytes") > 0);
+    // Summed across the tree, core imports included — the echo guest's core module imports its
+    // memory, its allocator and `log` — so this is a count of declarations and not the world's
+    // one import. `inspect`'s own `imports` list is where that is read.
+    assert!(shape["component_imports"].as_u64().expect("imports") > 0);
+    assert_eq!(inspected["imports"], json!(["log"]));
+
+    // And `inspect` is still the method that decides nothing: nothing was admitted to either
+    // table by measuring it.
+    assert_eq!(report["held"]["components"], 0);
+    assert_eq!(report["held"]["instances"], 0);
+}
+
+/// The measurement changed no refusal: a component past a bound is refused by `inspect` exactly
+/// as it is by `load`, and with the same name, after `inspect` learned to report the census.
+///
+/// This is the "no effect on admission" half. `shape::check` runs in the same place, in the same
+/// order, in front of the same `Component::new`; what moved is that its answer is kept.
+#[test]
+fn reporting_the_shape_did_not_change_what_is_admitted() {
+    let mut helper = Helper::spawn(&[]);
+    let over = fixture(
+        "over-after-shape",
+        &support::dense(MAX_FUNCTIONS - GUEST_FUNCTIONS + 1, 18),
+    );
+
+    let (inspected, _) = helper.refusal("inspect", json!({ "path": over.path }));
+    let (loaded, _) = helper.refusal("load", json!({ "sha256": over.sha256, "path": over.path }));
+    assert_eq!(inspected, "component_too_complex");
+    assert_eq!(
+        loaded, inspected,
+        "both paths refuse the same bytes by name"
+    );
+
+    // A refusal carries no shape: there is nothing to report about bytes that were never
+    // measured to the end.
+    let reply = helper.request("inspect", json!({ "path": over.path }));
+    assert!(reply["result"].is_null());
+}
+
 // --------------------------------------------------- the engine's feature set (F2)
 
 /// The engine speaks the smallest dialect the world needs, and the two proposals worth naming

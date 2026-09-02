@@ -184,17 +184,22 @@ jobs:
   rust:
     name: Rust
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # 40, not 30: W10 added a `tui/tests/wasm_cli.rs` that drives the real helper, so this job
+    # now builds `ouro-wasm` in release and the acceptance guest before `cargo test`. Both are
+    # cached; the ceiling is for the run that misses.
+    timeout-minutes: 40
     defaults:
       run:
         working-directory: tui
     steps:
       - uses: actions/checkout@v7
 
-      # `wasm32-wasip2` because `tests/sdk.rs` builds three guest projects with it — the SDK's
-      # two examples and the scaffold template — and asserts against the real helper that each
-      # is in this world and imports exactly `log`. Without the target those tests skip, and a
-      # skip here is what `OUROBOROS_REQUIRE_WASM` below turns back into a failure.
+      # `wasm32-wasip2` because this job now builds guests with it: the acceptance guest
+      # (`make wasm-guest`), `ouro wasm new`'s scaffold, and the three projects `tests/sdk.rs`
+      # builds — the SDK's two examples and the scaffold template — each put to the real
+      # helper to prove it is in this world and imports exactly `log`. Without the target
+      # those tests skip, and a skip here is what `OUROBOROS_REQUIRE_WASM` below turns back
+      # into a failure.
       - run: rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal --component rustfmt,clippy && rustup default ${{ env.RUST_VERSION }} && rustup target add wasm32-wasip2
 
       # The guest projects are separate cargo workspaces with build directories of their own,
@@ -208,7 +213,8 @@ jobs:
             tui/target
             tui/wasm/guest/examples/counter/target
             tui/wasm/guest/examples/deny-writes/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('tui/Cargo.lock', 'tui/wasm/guest/Cargo.lock') }}
+            test/support/wasm/echo-guest/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('tui/Cargo.lock', 'tui/wasm/guest/Cargo.lock', 'test/support/wasm/echo-guest/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
       - run: cargo fmt --check
@@ -218,8 +224,30 @@ jobs:
       # extractor — only to bake bytes into it — so this stays independent of `mix`.
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo clippy --all-targets --features embed -- -D warnings
+
+      # Both halves of the wasm lane, exactly as the Elixir job builds them — and for the same
+      # reason. `tui/tests/wasm_cli.rs` drives `ouro wasm inspect|run|hook|check` against the
+      # real helper and the real guest; without these two steps it would skip green on every
+      # run, which is the silence W7 already had to fix once on the Elixir side. `make` from the
+      # repository root, since this job's default working directory is `tui`.
+      - run: make wasm
+        working-directory: .
+      - run: make wasm-guest
+        working-directory: .
+
+      # `OUROBOROS_REQUIRE_WASM` is what makes the two steps above load-bearing: with it a
+      # missing helper or guest fails the suite that needed it and names the `make` target,
+      # instead of printing a skip nobody reads. `OUROBOROS_WASM_HELPER` is absolute because
+      # `ouro wasm` refuses a relative one — resolving one is a read of the working directory,
+      # which is the one place the containment boundary may not come from (D14).
       - run: cargo test
+        env:
+          OUROBOROS_REQUIRE_WASM: "1"
+          OUROBOROS_WASM_HELPER: ${{ github.workspace }}/priv/wasm/ouro-wasm
       - run: cargo test --features embed
+        env:
+          OUROBOROS_REQUIRE_WASM: "1"
+          OUROBOROS_WASM_HELPER: ${{ github.workspace }}/priv/wasm/ouro-wasm
 
       # `ouro-wasm` explicitly: this job's cwd selects the root package, so the helper's
       # containment suite — the tests that prove the linker refuses undeclared imports and

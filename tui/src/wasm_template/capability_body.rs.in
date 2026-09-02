@@ -1,0 +1,23 @@
+    /// One message in, one JSON reply out.
+    fn handle_message(body: String) -> Result<String, String> {
+        log("info", "handle-message");
+
+        let Some(session) = SESSION.get().as_mut() else {
+            return Err("init has not run on this instance".to_string());
+        };
+
+        let body: Value =
+            serde_json::from_str(&body).map_err(|error| format!("body is not JSON: {error}"))?;
+
+        session.messages += 1;
+
+        // Replace this with whatever this capability is for. The count is here because it is
+        // the evidence that state is instance-held: a second message answers `"n": 2`, and it
+        // can only do that if the same instance answered both.
+        Ok(json!({
+            "echo": body,
+            "config": session.config,
+            "n": session.messages,
+        })
+        .to_string())
+    }

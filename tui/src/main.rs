@@ -2670,8 +2670,12 @@ async fn desktop(paths: &Paths, command: DesktopCommand) -> Result<()> {
     }
 }
 
-/// `ouro wasm` — the WebAssembly containment operator surface. Reporting only: signing a
-/// component and rolling one out live elsewhere, and nothing here starts the helper.
+/// `ouro wasm` — the WebAssembly containment operator surface and the component author's local
+/// loop (docs/WASM.md W5, W10).
+///
+/// `doctor` asks a node and starts nothing. The other five ask a local `ouro-wasm` and no node
+/// at all: that is what makes them a loop, and it is why `doctor` keeps its own property rather
+/// than inheriting theirs.
 async fn wasm(paths: &Paths, command: WasmCommand) -> Result<()> {
     match command {
         WasmCommand::Doctor(args) => {
@@ -2682,7 +2686,139 @@ async fn wasm(paths: &Paths, command: WasmCommand) -> Result<()> {
             let mut out = std::io::stdout().lock();
             ouro::wasm_cli::doctor(&connected.client, args.json, &mut out).await
         }
+
+        WasmCommand::New(args) => {
+            let into = args.into.unwrap_or_else(|| PathBuf::from("."));
+            let mut out = std::io::stdout().lock();
+            ouro::wasm_cli::new(&into, &args.name, args.hook, &mut out)
+        }
+
+        WasmCommand::Inspect(args) => {
+            let mut out = std::io::stdout().lock();
+            let admitted = ouro::wasm_cli::inspect(
+                args.helper.helper.as_deref(),
+                &args.file,
+                args.json,
+                &mut out,
+            )?;
+            // A refused component is an answer, not a crash — and an answer a script should be
+            // able to read out of an exit code rather than out of prose.
+            refused_unless(admitted)
+        }
+
+        WasmCommand::Run(args) => {
+            let messages = run_messages(&args)?;
+            let request = ouro::wasm_cli::RunRequest {
+                helper: args.helper.helper.as_deref(),
+                file: &args.file,
+                config: args.config.clone(),
+                messages,
+                limits: ouro::wasm_client::Limits {
+                    fuel: args
+                        .fuel
+                        .unwrap_or(ouro::wasm_client::NODE_DEFAULT_LIMITS.fuel),
+                    memory_bytes: args
+                        .memory_bytes
+                        .unwrap_or(ouro::wasm_client::NODE_DEFAULT_LIMITS.memory_bytes),
+                    deadline_ms: args
+                        .deadline_ms
+                        .unwrap_or(ouro::wasm_client::NODE_DEFAULT_LIMITS.deadline_ms),
+                },
+                describe: args.describe,
+                json: args.json,
+            };
+
+            let mut out = std::io::stdout().lock();
+            refused_unless(ouro::wasm_cli::run(&request, &mut out)?)
+        }
+
+        WasmCommand::Hook(args) => {
+            let payload = hook_payload(args.payload.as_deref())?;
+            let request = ouro::wasm_cli::HookRequest {
+                helper: args.helper.helper.as_deref(),
+                file: &args.file,
+                event: args.event.clone(),
+                payload,
+                config: args.config.clone(),
+                trusted: args.trusted,
+                timeout_ms: args
+                    .timeout_ms
+                    .unwrap_or(ouro::wasm_cli::DEFAULT_HOOK_TIMEOUT_MS),
+                json: args.json,
+            };
+
+            let mut out = std::io::stdout().lock();
+            refused_unless(ouro::wasm_cli::hook(&request, &mut out)?)
+        }
+
+        WasmCommand::Check(args) => {
+            let workspace = args.workspace.unwrap_or_else(|| PathBuf::from("."));
+            let mut out = std::io::stdout().lock();
+            refused_unless(ouro::wasm_cli::check(
+                args.helper.helper.as_deref(),
+                &workspace,
+                args.json,
+                &mut out,
+            )?)
+        }
     }
+}
+
+/// A refusal the command already printed, turned into a non-zero exit without a second copy of
+/// the reason on stderr.
+fn refused_unless(admitted: bool) -> Result<()> {
+    if admitted {
+        Ok(())
+    } else {
+        std::process::exit(1)
+    }
+}
+
+/// `--message` first, then `--messages`, in file order. Blank lines are skipped; a line that is
+/// not JSON is *not* — the helper would take it as a body, and a developer who meant a message
+/// should be told they wrote something else.
+fn run_messages(args: &ouro::cli::WasmRunArgs) -> Result<Vec<String>> {
+    let mut messages = args.message.clone();
+
+    if let Some(path) = &args.messages {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("could not read {}", path.display()))?;
+        for (number, line) in content.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            serde_json::from_str::<serde_json::Value>(line)
+                .with_context(|| format!("{}:{}: not a JSON line", path.display(), number + 1))?;
+            messages.push(line.to_string());
+        }
+    }
+
+    if messages.is_empty() {
+        anyhow::bail!("nothing to send: pass --message '<json>' or --messages <file>");
+    }
+    Ok(messages)
+}
+
+/// The hook payload: a file, `-` for standard input, or an empty object.
+fn hook_payload(source: Option<&str>) -> Result<serde_json::Value> {
+    let text = match source {
+        None => return Ok(serde_json::json!({})),
+        Some("-") => {
+            let mut buffer = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut buffer)
+                .context("could not read the payload from standard input")?;
+            buffer
+        }
+        Some(path) => std::fs::read_to_string(path)
+            .with_context(|| format!("could not read the payload from {path}"))?,
+    };
+
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    serde_json::from_str(trimmed).context("the hook payload is not JSON")
 }
 
 /// Where a runtime this client did not start listens, and the token to present to it.
