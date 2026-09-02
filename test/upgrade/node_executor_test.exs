@@ -1492,6 +1492,99 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
     stop_isolated_executor(executor)
   end
 
+  test "a signed eval spec with string keys survives the journal, signature intact" do
+    # The eval spec is signed inside the manifest, and a probe's input is a JSON-shaped
+    # map with string keys. Every receipt keeps the whole artifact, so the checkpoint
+    # boundary has to hand back the exact term the signer saw: a key that came back as
+    # the atom it spells would change the bytes under the signature, and a reader that
+    # re-verified a journaled artifact would refuse a signature that was never wrong.
+    module = Ouroboros.Capability.JournaledEvalSpec
+    binary = compile_capability!(module)
+
+    on_exit(fn ->
+      :code.delete(module)
+      :code.soft_purge(module)
+      :ok
+    end)
+
+    assert {:ok, spec} =
+             Ouroboros.Upgrade.Rollout.Evaluation.validate(%{
+               probes: [
+                 %{
+                   input: %{"greet" => "hello", "nil" => nil, "error" => "none"},
+                   expect: {:equals, %{"reply" => "hello"}}
+                 },
+                 %{input: "plain", expect: {:state_matches, :last_message, %{"ok" => true}}}
+               ],
+               initial_state: %{"count" => 0}
+             })
+
+    assert {:ok, artifact} =
+             Artifact.build([{module, binary, disposition: :introduce}],
+               epoch: System.unique_integer([:positive, :monotonic]),
+               metadata: %{forge: %{eval: spec}}
+             )
+
+    {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
+    signed = Artifact.sign(artifact, "journal-signer", private_key)
+    trust_policy = [trusted_signers: %{"journal-signer" => public_key}]
+
+    directory =
+      Path.join(
+        System.tmp_dir!(),
+        "ouroboros-journaled-eval-spec-#{:os.getpid()}-#{System.unique_integer([:positive])}"
+      )
+
+    File.rm_rf!(directory)
+    File.mkdir_p!(directory)
+    on_exit(fn -> File.rm_rf(directory) end)
+    storage = {Ouroboros.Storage.DurableFile, path: directory}
+    server = String.to_atom("journaled_eval_spec_#{System.unique_integer([:positive])}")
+
+    {:ok, executor} =
+      NodeExecutor.start_link(name: server, storage: storage, trust_policy: trust_policy)
+
+    Process.unlink(executor)
+    assert {:ok, token} = NodeExecutor.prepare(signed, server: server)
+    assert {:ok, receipt} = NodeExecutor.commit(token, server: server)
+    assert receipt.artifact == signed
+    GenServer.stop(executor)
+
+    # The file itself carries the probe input with its string keys, not as bare names
+    # that read back as whatever atoms this VM happens to hold.
+    assert {:ok, wire} =
+             Ouroboros.Storage.DurableFile.get_checkpoint(
+               {:ouroboros, :upgrade_node_executor, node()},
+               path: directory
+             )
+
+    assert [stored] = wire |> Wire.load() |> Map.fetch!(:receipts) |> Map.values()
+
+    assert %{forge: %{eval: %{probes: [%{input: %{"greet" => "hello", "nil" => nil}} | _]}}} =
+             stored.artifact.metadata
+
+    {:ok, executor} =
+      NodeExecutor.start_link(name: server, storage: storage, trust_policy: trust_policy)
+
+    Process.unlink(executor)
+    assert %{mode: :ready} = NodeExecutor.status(server: server)
+    assert {:ok, restored} = NodeExecutor.receipt(receipt.id, server: server)
+    assert restored.artifact == signed
+
+    assert Artifact.signing_payload(restored.artifact, "journal-signer") ==
+             Artifact.signing_payload(signed, "journal-signer")
+
+    assert :crypto.verify(
+             :eddsa,
+             :none,
+             Artifact.signing_payload(restored.artifact, "journal-signer"),
+             restored.artifact.signature.value,
+             [public_key, :ed25519]
+           )
+
+    GenServer.stop(executor)
+  end
+
   defp object_code!(module) do
     {^module, binary, _filename} = :code.get_object_code(module)
     binary

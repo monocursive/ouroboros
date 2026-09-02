@@ -352,6 +352,30 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
     assert {:quarantined, _detail} = Rollout.settled_state(unknown)
   end
 
+  test "a rollout whose id spells a word is still that rollout after a restart" do
+    directory = temporary_directory!()
+    storage = {Ouroboros.Storage.DurableFile, path: directory}
+
+    # `"error"` and `"nil"` are atoms in every VM. A checkpoint boundary that read a bare
+    # key back as the atom it names turned these ids into `:error` and `nil`, and the
+    # restarted registry refused its whole checkpoint as invalid — one rollout named
+    # like a word took every other rollout's record down with it.
+    first = start_registry!(storage: storage)
+    assert {:ok, entry} = Registry.deploying(attrs("error"), first)
+    assert {:ok, _other} = Registry.deploying(attrs("nil"), first)
+    GenServer.stop(first)
+
+    second = start_registry!(storage: storage)
+    assert {:ok, restored} = Registry.get("error", second)
+    assert restored == entry
+    assert {:ok, %{artifact_id: "nil"}} = Registry.get("nil", second)
+
+    assert second |> Registry.list() |> Enum.map(& &1.artifact_id) |> Enum.sort() == [
+             "error",
+             "nil"
+           ]
+  end
+
   defp deployment(node_receipts) do
     %DeploymentReceipt{
       id: "deployment-#{System.unique_integer([:positive])}",
