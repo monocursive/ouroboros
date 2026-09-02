@@ -429,7 +429,83 @@ defmodule Ouroboros.Wasm.PoolTest do
     end
   end
 
+  describe "the hook lane is budgeted against the shared component cache" do
+    test "sixteen distinct hook components load and the seventeenth never touches the wire" do
+      # The helper's cache is 64 slots with no eviction and it is shared by every lane, so
+      # an untrusted workspace shipping components could fill it in one turn — and from then
+      # on every `load` on this node fails `too_many_components`, including the *operator's
+      # own* component hook's. That is an untrusted workspace deleting somebody else's deny.
+      journal = journal_file()
+      pool = start_pool(journaling_helper(journal))
+
+      for n <- 1..16 do
+        assert {:ok, _result} = Pool.load(sha(n), "/tmp/hook-#{n}.wasm", pool, lane: :hook)
+      end
+
+      assert Pool.status(pool).hook_components == 16
+
+      assert {:error, :hook_component_budget} =
+               Pool.load(sha(17), "/tmp/hook-17.wasm", pool, lane: :hook)
+
+      # Refused before a frame was built: the helper never heard of the seventeenth.
+      loads = journal |> requests() |> Enum.filter(&(&1["method"] == "load"))
+      assert length(loads) == 16
+      refute Enum.any?(loads, &(&1["params"]["sha256"] == sha(17)))
+
+      # A sha already counted is free, so a hook that runs forever costs one slot.
+      assert {:ok, _result} = Pool.load(sha(3), "/tmp/hook-3.wasm", pool, lane: :hook)
+      assert Pool.status(pool).hook_components == 16
+    end
+
+    test "the capability lane is untouched by an exhausted hook budget" do
+      # The whole point of the bound: what a repository spends is its own, and the lane that
+      # carries signed artifacts keeps the other 48 slots.
+      pool = start_pool(responding_helper())
+
+      for n <- 1..16 do
+        assert {:ok, _result} = Pool.load(sha(n), "/tmp/hook-#{n}.wasm", pool, lane: :hook)
+      end
+
+      assert {:error, :hook_component_budget} =
+               Pool.load(sha(99), "/tmp/x.wasm", pool, lane: :hook)
+
+      # The default lane, and an explicit one, both still load.
+      assert {:ok, _result} = Pool.load(sha(99), "/tmp/capability.wasm", pool)
+
+      assert {:ok, _result} =
+               Pool.load(sha(98), "/tmp/capability.wasm", pool, lane: :capability)
+
+      assert Pool.status(pool).hook_components == 16
+    end
+
+    test "a broken transition forgets the budget, because the cache it bounded is gone" do
+      pool = start_pool(malformed_helper())
+      assert {:ok, %{"usable" => true}} = Pool.doctor(pool)
+
+      for n <- 1..16 do
+        assert {:ok, _result} = Pool.load(sha(n), "/tmp/hook-#{n}.wasm", pool, lane: :hook)
+      end
+
+      assert {:error, :hook_component_budget} =
+               Pool.load(sha(17), "/tmp/x.wasm", pool, lane: :hook)
+
+      # `inspect` is the method this fake answers with a frame the pool refuses.
+      assert {:error, :broken} = Pool.inspect("/tmp/anything", pool)
+      assert %{phase: :broken, hook_components: 0} = Pool.status(pool)
+    end
+
+    test "an unrecognized lane is the budgeted one, so a typo cannot buy an exemption" do
+      pool = start_pool(responding_helper())
+
+      assert {:ok, _result} = Pool.load(sha(1), "/tmp/one.wasm", pool, lane: :hooks)
+      assert Pool.status(pool).hook_components == 1
+    end
+  end
+
   ## Helpers
+
+  # Sixty-four hex characters, distinct per `n`, in the shape the helper's `sha256` is.
+  defp sha(n), do: String.pad_leading(Integer.to_string(n), 64, "0")
 
   defp instantiate(pool, instance, opts \\ []) do
     Pool.instantiate(

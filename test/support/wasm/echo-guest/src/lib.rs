@@ -208,6 +208,18 @@ impl Guest for Component {
             return Err("init has not run on this instance".to_string());
         };
 
+        // The hook lane (docs/WASM.md §8.1) drives this same world: a hook component's reply
+        // *is* the stdout contract `Hooks.parse_output/1` reads, so a test hook has to be able
+        // to state one verbatim rather than have it wrapped in an echo envelope. A config
+        // carrying a string `reply` is that: the answer, exactly, for every message. No
+        // capability test sets it, so every other test on this guest is unaffected — and the
+        // authority is unchanged, because a string in the config was already the host's to
+        // choose.
+        if let Some(Value::String(reply)) = session.config.get("reply") {
+            session.messages += 1;
+            return Ok(reply.clone());
+        }
+
         let body: Value =
             serde_json::from_str(&body).map_err(|error| format!("body is not JSON: {error}"))?;
 
