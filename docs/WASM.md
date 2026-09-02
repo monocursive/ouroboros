@@ -567,7 +567,12 @@ discipline of `Rollout` (§4.1) with the code-loading machinery deleted:
    watermark it checks against is a **durable high-water mark** (`lane_w_epoch`, additive,
    no version move) rather than the highest surviving entry: derived from the entries
    alone, `prune/2` could discard the settled rollout that held the highest number and
-   free it for replay. `test_report` and `detail` are bounded and portability-checked on
+   free it for replay. Both the entry's epoch and the watermark are held to a plausibility
+   ceiling on read, and `deploying/2` shares it: `Epoch` is a counter that adds one per
+   allocation, so a number above 10^14 was not minted by this cluster; an entry carrying
+   one is dropped like any other unreadable entry and a watermark carrying one is ignored.
+   That closes the two unrecoverable shapes (W-F26); it does not make a tampered checkpoint
+   safe. `test_report` and `detail` are bounded and portability-checked on
    the way in, the same as `eval_report` — both arrive from a requester, and a durable
    store an attacker sizes is not one;
 3. per node: `Wasm.Store.stage` over `:erpc` (content-addressed, idempotent — a node
@@ -923,8 +928,8 @@ Stated once, so nobody reads more into the lane than is there:
   rather than at admission. `wasm.status`'s `hook_components` therefore counts budgeted
   untrusted shas, not every hook component the helper holds.
 
-The W7 review wave (2026-09-02) found the rest. All fixed in W7 except W-F26, which the
-re-verification pass found last and which is open.
+The W7 review wave (2026-09-02) found the rest. All fixed in W7, W-F26 included — the
+re-verification pass found it last, and it closed in the same wave.
 
 - **W-F5 (HIGH):** `Wire.dump/1`'s struct clause matched every map carrying an atom
   `:__struct__`; `%{1 => 2, __struct__: :ok}` raised and `%{__struct__: :ok}` lost its key
@@ -936,8 +941,14 @@ re-verification pass found last and which is open.
   could claim a durable id it does not describe (§7.5 check 6).
 - **W-F7 (MED):** the register never re-validated loaded entries; a planted epoch refused
   every future deploy and a legacy id spelling a word took the whole register down (§7.6).
+  The first fix re-ran `deploying/2`'s validators on read, which dropped a *malformed*
+  plant and not a well-formed one — `fetch_epoch/1` took any positive integer, so an entry
+  at 10^15 still refused every deploy (W-F26). Closed by a ceiling derived from the
+  allocator: `Epoch.next/2` is a counter, so a number above 10^14 was not minted here.
 - **W-F8 (MED):** the lane-W epoch watermark was derived from surviving entries, so prune
-  could lower it (§7.6 step 2).
+  could lower it (§7.6 step 2). Making it durable introduced the mirror failure — a
+  checkpoint with no entries and only a planted watermark refused everything with nothing
+  to delete — which the same ceiling closes on read, with a warning.
 - **W-F9 (MED):** a local gate deadline skipped probe/eval cleanup, leaking the throwaway
   agent and its helper instance (§7.6).
 - **W-F10 (doc lie):** `wasm/rollout.ex` claimed `:erpc.call/5` kills the peer process; it
@@ -975,17 +986,19 @@ re-verification pass found last and which is open.
   in-world component, a node-wide stall (§7.3). **W-F25 (MED, helper):** engine proposals were not
   minimized (relaxed SIMD, tail calls and the rest were accepted) (§7.3).
 
-- **W-F26 (real, MED; open, fix in flight):** the register's re-validation on read
-  (W-F7's fix) rejects *malformed* entries only. A well-formed entry carrying an
-  implausible epoch — `999_999_999_999_999`, which no `Upgrade.Epoch.next/2` could ever
-  mint, since it allocates one above a durable watermark — passes `fetch_epoch/1`'s
-  "positive integer" check, is folded into `lane_w_epoch`, and refuses every subsequent
-  lane-W deploy on that node for **every** module, because the gate is register-wide and
-  not per-component. W-F8 made the watermark durable, which is right for replay defence
-  and means this now survives deleting the entry that planted it. The fix in flight is an
-  epoch ceiling derived from what `Upgrade.Epoch` can actually mint, applied both to
-  entries on read and to the watermark. Until it lands, the recovery is operator-side:
-  remove the checkpoint.
+- **W-F26 (real, MED; fixed):** the register's re-validation on read (W-F7's first fix)
+  rejected *malformed* entries only. A well-formed entry carrying an implausible epoch —
+  `999_999_999_999_999`, which no `Upgrade.Epoch.next/2` could ever mint, since it
+  allocates one above a durable watermark — passed `fetch_epoch/1`'s "positive integer"
+  check, was folded into `lane_w_epoch`, and refused every subsequent lane-W deploy on that
+  node for **every** module, because the gate is register-wide and not per-component. W-F8
+  made the watermark durable, which is right for replay defence and meant this survived
+  deleting the entry that planted it. Closed by `@max_plausible_epoch` (10^14) in the
+  register: `fetch_epoch/1` refuses above it on both the write and the read path, and
+  `watermark/1` ignores an implausible mark with a warning. That closes the two
+  *unrecoverable* shapes; it does not make a tampered checkpoint safe — a plant at a merely
+  large epoch still gates until the operator deletes the entry, which works again precisely
+  because the watermark can no longer be poisoned above the ceiling in its place.
 
 ## 14. Slices
 
