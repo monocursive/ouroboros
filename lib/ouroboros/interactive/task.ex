@@ -1006,6 +1006,13 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
+  # An exit from a `GenServer.call` that says the callee is no longer there, as opposed
+  # to one that says something went wrong while it was.
+  defp callee_gone?({reason, {GenServer, :call, _args}}), do: callee_gone?(reason)
+  defp callee_gone?(reason) when reason in [:noproc, :killed, :normal, :shutdown], do: true
+  defp callee_gone?({:shutdown, _reason}), do: true
+  defp callee_gone?(_reason), do: false
+
   defp harness_session_present?(runtime) do
     match?(
       {:ok, %SessionInfo{}},
@@ -1050,6 +1057,24 @@ defmodule Ouroboros.Interactive.Task do
               if harness_session_present?(runtime),
                 do: Turns.mark_turn_ambiguous(runtime, turn.id, :harness_turn_not_found),
                 else: runtime
+
+            # The same fact as `:not_found`, arriving one message earlier. The session
+            # answered this poll's `info` and died before the `await` reached it, so the
+            # call exits with the reason the session died with rather than answering.
+            # (`SessionManager.call/2` reads only `:noproc` as `:not_found`; a session
+            # killed *during* the call is not `:noproc`.) Marking the turn from that exit
+            # would give it a sentence about a killed call that the loss diagnosed a poll
+            # later could no longer replace — `:ambiguous` is terminal — so the diagnosis
+            # is left to `refresh_session` exactly as it is for `:not_found`.
+            {:error, {:harness_call_exit, exit_reason} = reason} ->
+              if callee_gone?(exit_reason) and not harness_session_present?(runtime),
+                do: runtime,
+                else:
+                  Turns.mark_turn_ambiguous(
+                    runtime,
+                    turn.id,
+                    {:harness_turn_await_failed, reason}
+                  )
 
             {:error, reason} ->
               Turns.mark_turn_ambiguous(runtime, turn.id, {:harness_turn_await_failed, reason})
