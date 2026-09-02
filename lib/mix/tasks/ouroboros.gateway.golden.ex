@@ -132,6 +132,8 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       {"coding_event_detail_result", coding_event_detail_result()},
       {"code_intel_diagnostics_result", code_intel_diagnostics_result()},
       {"mcp_list_result", mcp_list_result()},
+      {"wasm_status_result", wasm_status_result()},
+      {"wasm_list_result", wasm_list_result()},
       {"workspace_browse_result", workspace_browse_result()},
       {"ledger_list_result", ledger_list_result()},
       {"ledger_export_result", ledger_export_result()},
@@ -1232,6 +1234,122 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         "detail" => nil,
         "seq" => 12
       }
+    })
+  end
+
+  # W5. A hand-written term in the shape `Ouroboros.Wasm.Surface.status/1` returns, not a
+  # capture of a live pool: a fixture that started a helper would need one on the machine
+  # regenerating it, and what a second implementation has to agree about is the shape.
+  #
+  # Fully populated on purpose — a ready helper with an accepted `doctor` report, two of
+  # sixteen hook-component slots spent, a store holding bytes a rollout protects, rollouts
+  # in three of the five states, boot on — so a client's decode is exercised on every field
+  # rather than on the two a quiet node happens to fill.
+  #
+  # **Every nested map here is an open projection.** `helper`, `store`, `rollouts` and
+  # `boot` gain keys as the lane grows, and `helper.limits` is the *helper's own* bounds
+  # table, forwarded under the names it reported with no list of them restated on this
+  # side. A client keys on what it knows and ignores the rest.
+  #
+  # A field this node cannot answer is `null`, never a missing key and never `false`: an
+  # unreadable store and an empty one are different facts, and `held: null` is how a client
+  # tells them apart.
+  defp wasm_status_result do
+    Conn.result_frame(16, %{
+      node: :ouroboros@golden,
+      helper: %{
+        present: true,
+        path: "/opt/ouroboros/lib/ouroboros/priv/wasm/ouro-wasm",
+        world: "ouroboros:capability@0.1.0",
+        phase: :ready,
+        os_pid: 4242,
+        instances: 2,
+        owned: 1,
+        pending_drops: 0,
+        hook_components: 2,
+        hook_component_budget: 16,
+        usable: true,
+        worlds: ["ouroboros:capability@0.1.0"],
+        wasmtime: "43.0.1",
+        limits: %{
+          "max_component_bytes" => 67_108_864,
+          "max_components" => 64,
+          "max_deadline_ms" => 60_000,
+          "max_instances" => 256,
+          "max_memory_bytes" => 268_435_456,
+          "max_result_bytes" => 1_048_576
+        },
+        broken_reason: nil
+      },
+      store: %{
+        root: "/var/lib/ouroboros/wasm/components",
+        budget_bytes: 536_870_912,
+        held: 2,
+        bytes: 3_145_728,
+        protected: 1
+      },
+      rollouts: %{
+        total: 3,
+        by_state: %{deploying: 0, live: 1, quarantined: 1, rolled_back: 0, superseded: 1}
+      },
+      boot: %{enabled: true}
+    })
+  end
+
+  # W5. The listing half, in the shape `Ouroboros.Wasm.Surface.list/1` returns.
+  #
+  # Both lists are sorted by their own identity — `artifact_id` and `sha256` — because two
+  # reads of an unchanged node must produce the same bytes, and neither a directory listing
+  # nor a map traversal promises that. The count beside each list is the total the node
+  # holds, which is how a client sees a list that was cut at the ceiling.
+  #
+  # A rollout row carries no `detail` and no `eval_report`: those are arbitrary terms a
+  # deployment put there, and this is a listing. `name` is the lane-W module's `"wasm/"`
+  # prefix removed, because that prefix is how the register keeps a component out of the
+  # atom table and is not part of what anybody deployed. `nodes` are strings for the same
+  # reason: a node name a client turned back into an atom is an atom this build minted from
+  # the wire.
+  defp wasm_list_result do
+    Conn.result_frame(17, %{
+      node: :ouroboros@golden,
+      rollouts: [
+        %{
+          artifact_id: "wasm-0000000000000000000001",
+          name: "vet",
+          component_sha256: String.duplicate("a", 64),
+          epoch: 7,
+          state: :live,
+          nodes: ["ouroboros@golden", "ouroboros@peer"],
+          created_at: @timestamp,
+          updated_at: @timestamp
+        },
+        %{
+          artifact_id: "wasm-0000000000000000000002",
+          name: "vet",
+          component_sha256: String.duplicate("b", 64),
+          epoch: 6,
+          state: :superseded,
+          nodes: ["ouroboros@golden"],
+          created_at: @timestamp,
+          updated_at: @turn_end_timestamp
+        },
+        %{
+          artifact_id: "wasm-0000000000000000000003",
+          name: "lint",
+          component_sha256: String.duplicate("c", 64),
+          epoch: 5,
+          state: :quarantined,
+          nodes: ["ouroboros@peer"],
+          created_at: @timestamp,
+          updated_at: @turn_end_timestamp
+        }
+      ],
+      rollout_count: 3,
+      components: [
+        %{sha256: String.duplicate("a", 64), size: 2_097_152, mtime: 1_767_225_600},
+        %{sha256: String.duplicate("b", 64), size: 1_048_576, mtime: 1_767_225_600}
+      ],
+      component_count: 2
     })
   end
 

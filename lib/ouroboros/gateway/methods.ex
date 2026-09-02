@@ -106,6 +106,7 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Upgrade.NodeExecutor
   alias Ouroboros.Upgrade.Rollout.Registry, as: Rollouts
   alias Ouroboros.Upgrade.Signing.Service, as: SigningService
+  alias Ouroboros.Wasm.Surface, as: WasmSurface
 
   import Ouroboros.Gateway.Methods.Safe,
     only: [
@@ -303,6 +304,23 @@ defmodule Ouroboros.Gateway.Methods do
     "mcp.list" => %{scope: :read, timeout: @default_timeout},
     "computer_use.status" => %{scope: :read, timeout: @default_timeout},
     "computer_use.artifact" => %{scope: :read, timeout: @default_timeout},
+    # ---------------------------------------------------------------------------------
+    # W5. Lane W on the wire.
+    #
+    # `:read` on the same dividing line the rest of this table draws, and a stricter one
+    # than usual: these two do not merely avoid changing state, they avoid *starting* the
+    # containment helper. `Ouroboros.Wasm.Surface` reads a pool process that already
+    # exists, a directory, and a register. A node that has never built `ouro-wasm` answers
+    # both as readily as one that runs it hourly. There is deliberately no `wasm.deploy`
+    # and no `wasm.drop`: a component runs on somebody's machine under a signature, and it
+    # is deployed by the forge and the rollout plane, never authored over a socket.
+    #
+    # Node-routed like `computer_use.status`, because a helper, a store and a register are
+    # node-local authorities: a fleet answer is one call per machine, not a merged view
+    # this node could invent.
+    # ---------------------------------------------------------------------------------
+    "wasm.status" => %{scope: :read, timeout: @default_timeout},
+    "wasm.list" => %{scope: :read, timeout: @default_timeout},
     # Starts the helper so `ouro desktop doctor` can report TCC. Status stays start-nothing.
     "computer_use.probe" => %{scope: :operate, timeout: @default_timeout},
     "code_intel.touch" => %{scope: :operate, timeout: @default_timeout},
@@ -837,6 +855,16 @@ defmodule Ouroboros.Gateway.Methods do
          @authority_node
        ]},
     "computer_use.probe" =>
+      {:closed,
+       [
+         @authority_node
+       ]},
+    "wasm.status" =>
+      {:closed,
+       [
+         @authority_node
+       ]},
+    "wasm.list" =>
       {:closed,
        [
          @authority_node
@@ -1587,6 +1615,19 @@ defmodule Ouroboros.Gateway.Methods do
       {:invalid, message} -> invalid_params(message)
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # W5 — lane W on the wire
+  #
+  # Both start nothing: `Surface` reads a pool process that already exists rather than
+  # asking for one, so `ouro wasm doctor` against a node that has never built the helper is
+  # a report and not a spawn. The remote branch is the `computer_use.status` one — a
+  # bounded `:erpc` to the machine whose helper is being described, so an unreachable node
+  # reads as unreachable instead of as a gateway ceiling with no detail.
+  # ---------------------------------------------------------------------------
+
+  def invoke("wasm.status", params), do: wasm_call(params, :status)
+  def invoke("wasm.list", params), do: wasm_call(params, :list)
 
   # ---------------------------------------------------------------------------
   # E2/E3 — code intelligence on the wire
@@ -2589,6 +2630,28 @@ defmodule Ouroboros.Gateway.Methods do
         reply(:erpc.call(target, Permissions, function, arguments, @fleet_query_timeout))
       end
     end)
+  end
+
+  # W5. Same posture as `permissions_call/3` and `mcp_call/2`: a helper, a component store
+  # and a rollout register are node-local, so the machine that owns them is the machine
+  # that describes them. `Ouroboros.Wasm.Surface` raises nothing and blocks on nothing
+  # without a deadline — a pool it does not find is `:absent`, a store it cannot read is
+  # `nil` — so what crosses `:erpc` is always an ordinary map. A peer too old to hold the
+  # module answers `-32006` naming it, which is the honest reading of "that node cannot
+  # describe a lane it does not have".
+  defp wasm_call(params, function) do
+    with :ok <- only_keys(params, ["node"]),
+         {:ok, target} <- permissions_node(params) do
+      safe(fn ->
+        if target == node() do
+          {:ok, apply(WasmSurface, function, [[]])}
+        else
+          {:ok, :erpc.call(target, WasmSurface, function, [[]], @fleet_query_timeout)}
+        end
+      end)
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
   end
 
   # Same posture as `permissions_call/3` and `code_intel_call/3`, and for the same

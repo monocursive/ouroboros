@@ -90,6 +90,8 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
     "ledger_list_result" => {:method, "ledger.list"},
     "ledger_export_result" => {:method, "ledger.export"},
     "mcp_list_result" => {:method, "mcp.list"},
+    "wasm_status_result" => {:method, "wasm.status"},
+    "wasm_list_result" => {:method, "wasm.list"},
     "workspace_browse_result" => {:method, "workspace.browse"},
     "interactive_event_notification" => {:notification, "interactive.event"},
     "interactive_event_excerpt_notification" => {:notification, "interactive.event"},
@@ -127,7 +129,7 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
   @band_order ~w(
     handshake runtime fleet account agents interactive coding teams
     plans control permissions grants code_intel ledger workspace capabilities
-    upgrade signing
+    upgrade signing wasm
   )
 
   @impl Mix.Task

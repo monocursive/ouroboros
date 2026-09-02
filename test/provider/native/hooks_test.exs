@@ -124,6 +124,84 @@ defmodule Ouroboros.Provider.Native.HooksTest do
   defp tool_results(events),
     do: events |> Enum.filter(&(&1.type == :tool_result)) |> Enum.map(& &1.payload)
 
+  # The `status` kind only. A turn emits other provider events — a checkpoint, for one —
+  # and counting those as hook reports would make "said once" untestable.
+  defp status_events(events),
+    do:
+      Enum.filter(
+        events,
+        &(&1.type == :provider_event and &1.payload["kind"] == "status")
+      )
+
+  # ------------------------------------------------- the hook-component budget (W5/W-F3)
+
+  # A pool that reports a fixed `hook_components` and counts how many times it was asked.
+  # A real one would need a helper on disk and a component to spend the budget on, and what
+  # is under test here is the sentence and when it is said — not the pool's bookkeeping,
+  # which `Ouroboros.Provider.Native.HooksComponentTest` holds against the real thing.
+  defmodule BudgetPool do
+    @moduledoc false
+    use GenServer
+
+    def start_link(used), do: GenServer.start_link(__MODULE__, used)
+
+    @impl true
+    def init(used), do: {:ok, %{used: used, calls: 0}}
+
+    @impl true
+    def handle_call(:status, _from, state) do
+      status = %{
+        phase: :ready,
+        helper_path: "/fake/ouro-wasm",
+        os_pid: 1,
+        doctor: nil,
+        instances: 0,
+        owned: 0,
+        pending_drops: 0,
+        hook_components: state.used,
+        broken_reason: nil
+      }
+
+      {:reply, status, %{state | calls: state.calls + 1}}
+    end
+
+    def handle_call(:calls, _from, state), do: {:reply, state.calls, state}
+  end
+
+  defp fake_pool(used) do
+    {:ok, pid} = BudgetPool.start_link(used)
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+    pid
+  end
+
+  # One component hook, declared far enough from this turn's events that nothing tries to
+  # run it: what is being tested is the once-per-turn report, not an invocation.
+  defp component_hooks(pool) do
+    %Hooks{
+      hooks: [
+        %{
+          event: :pre_compact,
+          matcher: nil,
+          kind: :component,
+          command: nil,
+          component: "./hooks/vet.wasm",
+          confine_to: nil,
+          config: "",
+          timeout_ms: 5_000,
+          scope: :workspace,
+          trusted: true,
+          cwd: nil,
+          pool: pool
+        }
+      ],
+      checks: [],
+      trusted?: true,
+      declined: 0,
+      errors: [],
+      pool: pool
+    }
+  end
+
   @bash_script [
     [{:tool_call, %{id: "c1", name: "bash", input: %{"command" => "echo ran"}}}],
     [{:text, "done"}, {:finish, :stop}]
@@ -582,6 +660,61 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       # And it says so, once, rather than leaving the operator to believe they ran.
       status = Enum.find(events, &(&1.type == :provider_event))
       assert status.payload["message"] =~ "this workspace is not trusted"
+    end
+  end
+
+  # ================================================== the hook-component budget (W5/W-F3)
+
+  describe "a spent hook-component budget is said once per turn" do
+    test "a session with a component hook on a node whose budget is spent is told", context do
+      budget = Ouroboros.Wasm.Pool.hook_component_budget()
+      pool = fake_pool(budget)
+
+      {loop, _agent} = start_loop(context, @bash_script, hooks: component_hooks(pool))
+
+      run(loop)
+      [status] = status_events(collect())
+
+      assert status.payload["message"] =~
+               "component hooks can no longer load on this node"
+
+      assert status.payload["message"] =~ "budget (#{budget}) is spent"
+      assert status.payload["message"] =~ "restart the wasm pool"
+    end
+
+    test "room left in the budget says nothing at all", context do
+      pool = fake_pool(Ouroboros.Wasm.Pool.hook_component_budget() - 1)
+
+      {loop, _agent} = start_loop(context, @bash_script, hooks: component_hooks(pool))
+
+      run(loop)
+
+      assert status_events(collect()) == []
+    end
+
+    test "a session with no component hook never asks the pool anything", context do
+      pool = fake_pool(Ouroboros.Wasm.Pool.hook_component_budget())
+
+      {loop, _agent} =
+        start_loop(context, @bash_script,
+          hooks: %Hooks{
+            hooks: [],
+            checks: [],
+            trusted?: true,
+            declined: 0,
+            errors: [],
+            pool: pool
+          }
+        )
+
+      run(loop)
+
+      assert status_events(collect()) == []
+
+      # The fast path is the claim, so it is the assertion: the pool was never asked. A
+      # workspace with no component hook is the overwhelming majority, and a status line
+      # that cost every one of them a `GenServer.call` would be the wrong trade.
+      assert GenServer.call(pool, :calls) == 0
     end
   end
 

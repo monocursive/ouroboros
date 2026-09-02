@@ -349,6 +349,17 @@ defmodule Ouroboros.Wasm.Pool do
   defp valid_instance(instance) when byte_size(instance) <= @max_instance_bytes, do: :ok
   defp valid_instance(instance), do: {:error, {:invalid_instance, byte_size(instance)}}
 
+  @doc """
+  The most distinct hook components one helper's life may admit. See `@hook_component_budget`.
+
+  Public because a spent budget is an operator-visible fact: the turn loop says so once per
+  turn (docs/WASM.md W-F3) and `wasm.status` reports it beside `hook_components`. Reading
+  the number off the module rather than restating it in two other files is how those three
+  cannot disagree.
+  """
+  @spec hook_component_budget() :: pos_integer()
+  def hook_component_budget, do: @hook_component_budget
+
   @doc "Describes the helper this node owns: phase, os pid, the accepted doctor report."
   @spec status(GenServer.server()) :: status()
   def status(server \\ __MODULE__) do

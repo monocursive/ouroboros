@@ -1,0 +1,53 @@
+{
+  "id": 16,
+  "jsonrpc": "2.0",
+  "result": {
+    "boot": {
+      "enabled": true
+    },
+    "helper": {
+      "broken_reason": null,
+      "hook_component_budget": 16,
+      "hook_components": 2,
+      "instances": 2,
+      "limits": {
+        "max_component_bytes": 67108864,
+        "max_components": 64,
+        "max_deadline_ms": 60000,
+        "max_instances": 256,
+        "max_memory_bytes": 268435456,
+        "max_result_bytes": 1048576
+      },
+      "os_pid": 4242,
+      "owned": 1,
+      "path": "/opt/ouroboros/lib/ouroboros/priv/wasm/ouro-wasm",
+      "pending_drops": 0,
+      "phase": "ready",
+      "present": true,
+      "usable": true,
+      "wasmtime": "43.0.1",
+      "world": "ouroboros:capability@0.1.0",
+      "worlds": [
+        "ouroboros:capability@0.1.0"
+      ]
+    },
+    "node": "ouroboros@golden",
+    "rollouts": {
+      "by_state": {
+        "deploying": 0,
+        "live": 1,
+        "quarantined": 1,
+        "rolled_back": 0,
+        "superseded": 1
+      },
+      "total": 3
+    },
+    "store": {
+      "budget_bytes": 536870912,
+      "bytes": 3145728,
+      "held": 2,
+      "protected": 1,
+      "root": "/var/lib/ouroboros/wasm/components"
+    }
+  }
+}

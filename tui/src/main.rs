@@ -34,6 +34,7 @@ use serde_json::{json, Value};
 use ouro::cli::{
     AcpArgs, Cli, Command, DesktopCommand, FleetCommand, ForkArgs, HookCommand, InviteCommand,
     LedgerArgs, McpCommand, ReplayArgs, RunArgs, ServiceCommand, SessionsCommand, SyncCommand,
+    WasmCommand,
 };
 use ouro::config::{self, Loaded, StartFlags};
 use ouro::fleet_add;
@@ -212,6 +213,7 @@ async fn run(cli: Cli) -> Result<()> {
         Some(Command::Replay(args)) => replay(&paths, args).await,
         Some(Command::Fork(args)) => fork(&paths, args).await,
         Some(Command::Desktop { command }) => desktop(&paths, command).await,
+        Some(Command::Wasm { command }) => wasm(&paths, command).await,
         Some(Command::Fleet { command }) => fleet_command(&paths, cli.dev, command).await,
         Some(Command::ServiceRun) => service_run(&paths, cli.dev).await,
         // Answered at the top of this function, before the terminal existed as far as
@@ -2664,6 +2666,21 @@ async fn desktop(paths: &Paths, command: DesktopCommand) -> Result<()> {
 
             let mut out = std::io::stdout().lock();
             ouro::desktop_cli::doctor(&connected.client, args.json, args.probe, &mut out).await
+        }
+    }
+}
+
+/// `ouro wasm` — the WebAssembly containment operator surface. Reporting only: signing a
+/// component and rolling one out live elsewhere, and nothing here starts the helper.
+async fn wasm(paths: &Paths, command: WasmCommand) -> Result<()> {
+    match command {
+        WasmCommand::Doctor(args) => {
+            let (address, token) = remote_endpoint(paths, args.addr, args.token_file).await?;
+            let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
+            let connected = attach_with(address, token, false, None, hook).await?;
+
+            let mut out = std::io::stdout().lock();
+            ouro::wasm_cli::doctor(&connected.client, args.json, &mut out).await
         }
     }
 }

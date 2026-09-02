@@ -246,6 +246,12 @@ pub enum Command {
         command: DesktopCommand,
     },
 
+    /// WebAssembly containment operator surface. `ouro wasm doctor` reports node readiness.
+    Wasm {
+        #[command(subcommand)]
+        command: WasmCommand,
+    },
+
     /// Create, join, and diagnose a secure group of Ouroboros machines.
     Fleet {
         #[command(subcommand)]
@@ -493,6 +499,34 @@ pub struct DesktopArgs {
     /// start-nothing `computer_use.status`.
     #[arg(long)]
     pub probe: bool,
+}
+
+/// `ouro wasm`'s subcommands. One so far.
+#[derive(Debug, Subcommand)]
+pub enum WasmCommand {
+    /// Report WebAssembly containment readiness on the node — helper presence and phase,
+    /// the world and bounds it runs under, the hook-component budget, the component store,
+    /// and lane-W rollouts. Asks `wasm.status`, which starts nothing.
+    ///
+    /// There is deliberately no `--probe`: starting the helper to see whether it starts is
+    /// the one thing a read-scope readiness surface must not do.
+    Doctor(WasmArgs),
+}
+
+/// `ouro wasm doctor`'s flags.
+#[derive(Debug, Args)]
+pub struct WasmArgs {
+    /// Emit the raw status JSON instead of a readable summary.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Where the gateway listens. Omitted, the local gateway.json is read instead.
+    #[arg(long, value_name = "HOST:PORT")]
+    pub addr: Option<String>,
+
+    /// A file holding the gateway token. Omitted, the token beside gateway.json is used.
+    #[arg(long, value_name = "PATH")]
+    pub token_file: Option<PathBuf>,
 }
 
 /// `ouro update`'s flags.
@@ -1200,6 +1234,29 @@ mod tests {
                 "a secret on a command line is readable by every process on the host: {args:?}"
             );
         }
+    }
+
+    /// W5. `ouro wasm doctor` reports and never starts, so it takes the three flags every
+    /// remote operator surface takes and deliberately not a fourth.
+    #[test]
+    fn ouro_wasm_doctor_reports_and_offers_no_way_to_start_the_helper() {
+        let Some(Command::Wasm {
+            command: WasmCommand::Doctor(args),
+        }) = parse(&["wasm", "doctor", "--json"]).command
+        else {
+            panic!("`ouro wasm doctor --json` must parse");
+        };
+
+        assert!(args.json);
+        assert_eq!(args.addr, None);
+        assert_eq!(args.token_file, None);
+
+        // Starting the helper to see whether it starts is the one thing this must not do,
+        // so there is no flag that would.
+        assert!(
+            Cli::try_parse_from(["ouro", "wasm", "doctor", "--probe"]).is_err(),
+            "a readiness surface with a --probe is a readiness surface that spawns"
+        );
     }
 
     #[test]

@@ -3451,6 +3451,298 @@ impl ReplayDivergence {
     }
 }
 
+/// W5. What `wasm.status` answers for one node — the containment lane's posture.
+///
+/// Decoded tolerantly for the reason [`McpList`] is: this is a status projection whose
+/// keys the runtime extends, and a strict struct would be the one place this client
+/// refuses to show an operator their helper because the runtime described it more fully
+/// than it used to.
+///
+/// **`None` is not `false` here.** The runtime answers `null` for a fact it does not know
+/// — an unreadable store, a rollout register that is not running — and `0` for a fact it
+/// does. Folding the two together would report an unreadable store as an empty one, which
+/// is the one reading an operator must never be given.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmStatus {
+    pub node: Option<String>,
+    pub helper: WasmHelper,
+    pub store: WasmStore,
+    pub rollouts: WasmRollouts,
+    /// Whether this node has the durable state a boot-time restart of live components
+    /// reads. `false` is a posture — no data directory — and not a failure.
+    pub boot_enabled: bool,
+}
+
+/// The `ouro-wasm` helper this node owns, as the pool holds it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmHelper {
+    /// The bytes are on disk. This is the whole opt-in: a node that never built the helper
+    /// reports `false` and is not broken.
+    pub present: bool,
+    pub path: Option<String>,
+    /// The world this build links against, whatever the helper says it offers.
+    pub world: Option<String>,
+    /// `absent` (no pool process on that node), `idle` (no helper spawned yet),
+    /// `handshaking`, `ready`, or `broken`. Kept as the runtime's own string: an unknown
+    /// sixth phase renders as itself rather than being folded into one of the five.
+    pub phase: Option<String>,
+    pub os_pid: Option<u64>,
+    pub instances: u64,
+    pub owned: u64,
+    pub pending_drops: u64,
+    /// Distinct hook components admitted since this helper spawned, and the ceiling. At the
+    /// ceiling no further component hook loads on that node until the pool restarts.
+    pub hook_components: u64,
+    pub hook_component_budget: u64,
+    /// The helper's own probe of whether an engine can be built on that host. `None` where
+    /// no report has been accepted — which is not the same as "it cannot".
+    pub usable: Option<bool>,
+    pub worlds: Vec<String>,
+    pub wasmtime: Option<String>,
+    /// The helper's bounds table, under the names it reported them with. Kept as a map
+    /// rather than named fields because it is the helper's contract and it grows.
+    pub limits: BTreeMap<String, i64>,
+    /// Why the pool is broken, in the runtime's words. Present only in the `broken` phase.
+    pub broken_reason: Option<String>,
+}
+
+impl WasmHelper {
+    /// The helper has handshaked and will answer.
+    pub fn ready(&self) -> bool {
+        self.phase.as_deref() == Some("ready")
+    }
+
+    /// No pool process on that node at all — nobody has asked for a helper there.
+    pub fn absent(&self) -> bool {
+        self.phase.as_deref() == Some("absent")
+    }
+
+    /// Whether a further hook component would now be refused on that node.
+    pub fn hook_budget_spent(&self) -> bool {
+        self.hook_component_budget > 0 && self.hook_components >= self.hook_component_budget
+    }
+}
+
+/// The content-addressed component store, and what it is allowed to hold.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmStore {
+    /// `None` on a node with no data directory: there is no store, rather than an empty one.
+    pub root: Option<String>,
+    pub budget_bytes: Option<u64>,
+    /// How many components are held and how many bytes they occupy. `None` means the
+    /// directory could not be read — never "none held".
+    pub held: Option<u64>,
+    pub bytes: Option<u64>,
+    /// How many of them a rollout is keeping alive, which a prune may not evict. `None`
+    /// when the register did not answer, so nothing is known to be referenced.
+    pub protected: Option<u64>,
+}
+
+/// Lane-W rollouts, counted by the state the register holds them in.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmRollouts {
+    /// `None` when the register did not answer.
+    pub total: Option<u64>,
+    pub by_state: BTreeMap<String, u64>,
+}
+
+impl WasmRollouts {
+    pub fn state(&self, name: &str) -> u64 {
+        self.by_state.get(name).copied().unwrap_or(0)
+    }
+}
+
+/// W5. What `wasm.list` answers: every lane-W rollout and every component held.
+///
+/// Both lists arrive sorted by their own identity and bounded by the runtime. The count
+/// beside each is the total that node holds, which is how a client sees a list that was
+/// cut rather than a node that holds less than it does.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmList {
+    pub node: Option<String>,
+    pub rollouts: Vec<WasmRollout>,
+    pub rollout_count: Option<u64>,
+    pub components: Vec<WasmComponent>,
+    pub component_count: Option<u64>,
+}
+
+/// One lane-W rollout, as the register holds it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmRollout {
+    pub artifact_id: String,
+    /// The capability's name. The register's `"wasm/"` prefix is the runtime's way of
+    /// keeping a component out of the atom table and is already removed here.
+    pub name: Option<String>,
+    pub component_sha256: Option<String>,
+    pub epoch: Option<u64>,
+    /// `deploying`, `live`, `superseded`, `rolled_back`, or `quarantined` — the runtime's
+    /// own string, because an unknown sixth state is still worth showing.
+    pub state: Option<String>,
+    /// Node names as strings. They stay strings: a node name this client turned back into
+    /// anything else would be a value minted from the wire.
+    pub nodes: Vec<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// One component the store holds.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmComponent {
+    pub sha256: String,
+    pub size: u64,
+    pub mtime: Option<i64>,
+}
+
+impl WasmStatus {
+    pub fn decode(value: &Value) -> Self {
+        Self {
+            node: nonempty(value.get("node")),
+            helper: WasmHelper::decode(value.get("helper").unwrap_or(&Value::Null)),
+            store: WasmStore::decode(value.get("store").unwrap_or(&Value::Null)),
+            rollouts: WasmRollouts::decode(value.get("rollouts").unwrap_or(&Value::Null)),
+            boot_enabled: value
+                .pointer("/boot/enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        }
+    }
+}
+
+impl WasmHelper {
+    fn decode(value: &Value) -> Self {
+        let number = |key: &str| value.get(key).and_then(Value::as_u64);
+
+        Self {
+            present: value
+                .get("present")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            path: nonempty(value.get("path")),
+            world: nonempty(value.get("world")),
+            phase: nonempty(value.get("phase")),
+            os_pid: number("os_pid"),
+            instances: number("instances").unwrap_or(0),
+            owned: number("owned").unwrap_or(0),
+            pending_drops: number("pending_drops").unwrap_or(0),
+            hook_components: number("hook_components").unwrap_or(0),
+            hook_component_budget: number("hook_component_budget").unwrap_or(0),
+            usable: value.get("usable").and_then(Value::as_bool),
+            worlds: strings(value.get("worlds")),
+            wasmtime: nonempty(value.get("wasmtime")),
+            limits: value
+                .get("limits")
+                .and_then(Value::as_object)
+                .map(|table| {
+                    table
+                        .iter()
+                        .take(MAX_WASM_ROWS)
+                        .filter_map(|(key, bound)| Some((key.clone(), bound.as_i64()?)))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            broken_reason: nonempty(value.get("broken_reason")),
+        }
+    }
+}
+
+impl WasmStore {
+    fn decode(value: &Value) -> Self {
+        let number = |key: &str| value.get(key).and_then(Value::as_u64);
+
+        Self {
+            root: nonempty(value.get("root")),
+            budget_bytes: number("budget_bytes"),
+            held: number("held"),
+            bytes: number("bytes"),
+            protected: number("protected"),
+        }
+    }
+}
+
+impl WasmRollouts {
+    fn decode(value: &Value) -> Self {
+        Self {
+            total: value.get("total").and_then(Value::as_u64),
+            by_state: value
+                .pointer("/by_state")
+                .and_then(Value::as_object)
+                .map(|states| {
+                    states
+                        .iter()
+                        .take(MAX_WASM_ROWS)
+                        .filter_map(|(state, count)| Some((state.clone(), count.as_u64()?)))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+}
+
+impl WasmList {
+    pub fn decode(value: &Value) -> Self {
+        Self {
+            node: nonempty(value.get("node")),
+            rollouts: value
+                .get("rollouts")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .take(MAX_WASM_ROWS)
+                        .filter_map(WasmRollout::decode)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            rollout_count: value.get("rollout_count").and_then(Value::as_u64),
+            components: value
+                .get("components")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .take(MAX_WASM_ROWS)
+                        .filter_map(WasmComponent::decode)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            component_count: value.get("component_count").and_then(Value::as_u64),
+        }
+    }
+}
+
+impl WasmRollout {
+    /// `None` for a row with no artifact id: a rollout this client cannot address is a row
+    /// it cannot honestly draw.
+    fn decode(value: &Value) -> Option<Self> {
+        Some(Self {
+            artifact_id: nonempty(value.get("artifact_id"))?,
+            name: nonempty(value.get("name")),
+            component_sha256: nonempty(value.get("component_sha256")),
+            epoch: value.get("epoch").and_then(Value::as_u64),
+            state: nonempty(value.get("state")),
+            nodes: strings(value.get("nodes")),
+            created_at: nonempty(value.get("created_at")),
+            updated_at: nonempty(value.get("updated_at")),
+        })
+    }
+}
+
+impl WasmComponent {
+    /// `None` for a row with no digest: the digest *is* the component's identity here.
+    fn decode(value: &Value) -> Option<Self> {
+        Some(Self {
+            sha256: nonempty(value.get("sha256"))?,
+            size: value.get("size").and_then(Value::as_u64).unwrap_or(0),
+            mtime: value.get("mtime").and_then(Value::as_i64),
+        })
+    }
+}
+
+/// At most this many rows, limit entries, or state counts out of one lane-W answer. The
+/// runtime bounds all four itself; this is the client refusing to be the place a bound is
+/// only claimed.
+const MAX_WASM_ROWS: usize = native::MAX_ROWS;
+
 /// A trimmed, nonempty string out of an optional JSON value.
 fn nonempty(value: Option<&Value>) -> Option<String> {
     value
@@ -4001,9 +4293,142 @@ mod tests {
                 "runtime_status_result",
                 "stream_ended_notification",
                 "stream_lagged_notification",
+                "wasm_list_result",
+                "wasm_status_result",
                 "workspace_browse_result",
             ]
         );
+    }
+
+    /// W5's `wasm.status`: what an operator reads to know whether this node could contain a
+    /// component, and under what bounds.
+    ///
+    /// The fixture is a ready helper on purpose, because a quiet node fills two of these
+    /// fields and a decode proved against one would ship blind to the rest.
+    #[test]
+    fn the_wasm_status_fixture_decodes_into_the_typed_model() {
+        let status = WasmStatus::decode(&fixture("wasm_status_result")["result"]);
+
+        assert_eq!(status.node.as_deref(), Some("ouroboros@golden"));
+        assert!(status.boot_enabled);
+
+        let helper = &status.helper;
+        assert!(helper.present, "the bytes are on disk, which is the opt-in");
+        assert!(helper.ready());
+        assert!(!helper.absent());
+        assert_eq!(helper.os_pid, Some(4242));
+        assert_eq!(helper.world.as_deref(), Some("ouroboros:capability@0.1.0"));
+        assert_eq!(helper.usable, Some(true));
+        assert_eq!(
+            helper.worlds,
+            vec!["ouroboros:capability@0.1.0".to_string()]
+        );
+        assert_eq!(helper.wasmtime.as_deref(), Some("43.0.1"));
+        assert_eq!(helper.instances, 2);
+        assert_eq!(helper.owned, 1);
+        assert_eq!(helper.pending_drops, 0);
+        assert_eq!(helper.broken_reason, None);
+
+        // The bounds table arrives under the helper's own names, which is what lets it
+        // grow one without this client being edited.
+        assert_eq!(helper.limits.get("max_deadline_ms"), Some(&60_000));
+        assert_eq!(helper.limits.get("max_components"), Some(&64));
+
+        // Two of sixteen: room left, so nothing here warns.
+        assert_eq!(helper.hook_components, 2);
+        assert_eq!(helper.hook_component_budget, 16);
+        assert!(!helper.hook_budget_spent());
+
+        assert_eq!(
+            status.store.root.as_deref(),
+            Some("/var/lib/ouroboros/wasm/components")
+        );
+        assert_eq!(status.store.held, Some(2));
+        assert_eq!(status.store.bytes, Some(3_145_728));
+        assert_eq!(status.store.protected, Some(1));
+        assert_eq!(status.store.budget_bytes, Some(536_870_912));
+
+        assert_eq!(status.rollouts.total, Some(3));
+        assert_eq!(status.rollouts.state("live"), 1);
+        assert_eq!(status.rollouts.state("quarantined"), 1);
+        assert_eq!(status.rollouts.state("superseded"), 1);
+        assert_eq!(status.rollouts.state("deploying"), 0);
+        // A state the answer never mentioned reads as zero, not as a panic.
+        assert_eq!(status.rollouts.state("a_sixth_state_from_2027"), 0);
+    }
+
+    /// A node that never built the helper, and a runtime too old to have heard of lane W,
+    /// decode to the same thing: "nothing here", never a panic and never a fabricated
+    /// helper. `absent` is the phase, and `false` is not what an unknown fact decodes to.
+    #[test]
+    fn an_empty_wasm_status_decodes_to_a_node_with_no_helper() {
+        let empty = WasmStatus::decode(&serde_json::json!({}));
+
+        assert!(!empty.helper.present);
+        assert!(!empty.helper.ready());
+        assert_eq!(empty.helper.phase, None);
+        assert_eq!(empty.helper.usable, None, "unknown is not `false`");
+        assert!(empty.helper.limits.is_empty());
+        assert!(!empty.helper.hook_budget_spent(), "0 of 0 is not spent");
+        assert_eq!(empty.store.held, None, "unreadable is not empty");
+        assert_eq!(empty.rollouts.total, None);
+        assert!(!empty.boot_enabled);
+    }
+
+    /// W5's `wasm.list`: the two registers an operator reconciles — what the rollout plane
+    /// believes is deployed, and what bytes this node actually holds.
+    #[test]
+    fn the_wasm_list_fixture_decodes_into_the_typed_model() {
+        let list = WasmList::decode(&fixture("wasm_list_result")["result"]);
+
+        assert_eq!(list.node.as_deref(), Some("ouroboros@golden"));
+        assert_eq!(list.rollout_count, Some(3));
+        assert_eq!(list.rollouts.len(), 3);
+        assert_eq!(list.component_count, Some(2));
+        assert_eq!(list.components.len(), 2);
+
+        // Sorted by artifact id, so two reads of an unchanged node agree.
+        let live = &list.rollouts[0];
+        assert_eq!(live.artifact_id, "wasm-0000000000000000000001");
+        assert_eq!(live.state.as_deref(), Some("live"));
+        // The `wasm/` prefix keeps a component out of the runtime's atom table and is not
+        // part of what anybody deployed, so what arrives here is the name.
+        assert_eq!(live.name.as_deref(), Some("vet"));
+        assert_eq!(live.epoch, Some(7));
+        assert_eq!(live.component_sha256.as_deref(), Some(&"a".repeat(64)[..]));
+        assert_eq!(
+            live.nodes,
+            vec!["ouroboros@golden".to_string(), "ouroboros@peer".to_string()]
+        );
+        assert!(live.created_at.is_some());
+
+        // The three states in the fixture are three an operator has to tell apart: what is
+        // running, what it replaced, and what was held back as evidence.
+        assert_eq!(list.rollouts[1].state.as_deref(), Some("superseded"));
+        assert_eq!(list.rollouts[2].state.as_deref(), Some("quarantined"));
+        assert_eq!(list.rollouts[2].name.as_deref(), Some("lint"));
+
+        // A listing, not a record: no arbitrary deployment term rides along.
+        let raw = &fixture("wasm_list_result")["result"]["rollouts"][0];
+        assert!(raw.get("detail").is_none());
+        assert!(raw.get("eval_report").is_none());
+
+        let component = &list.components[0];
+        assert_eq!(component.sha256, "a".repeat(64));
+        assert_eq!(component.size, 2_097_152);
+        assert!(component.mtime.is_some());
+    }
+
+    #[test]
+    fn an_empty_wasm_list_decodes_to_an_empty_listing() {
+        let empty = WasmList::decode(&serde_json::json!({}));
+
+        assert!(empty.rollouts.is_empty());
+        assert!(empty.components.is_empty());
+        // Nothing listed and nothing known are different, and only one is safe to draw as
+        // "this node holds no components".
+        assert_eq!(empty.rollout_count, None);
+        assert_eq!(empty.component_count, None);
     }
 
     /// D4's `mcp.list`: what a client reads to draw a node's MCP servers — the state

@@ -96,6 +96,8 @@
       "upgrade.history",
       "upgrade.rollouts",
       "upgrade.status",
+      "wasm.list",
+      "wasm.status",
       "workspace.browse",
       "workspace.exec"
     ],
