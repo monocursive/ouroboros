@@ -168,14 +168,25 @@ defmodule Ouroboros.Provider.Native.Hooks do
   Containment bounds what one component may do and says nothing about how many a clone may
   ship, so an untrusted workspace is admitted at most eight components across `[[hooks]]`
   and `[checks]` together; the rest are declined and counted like shell hooks. Separately,
-  `Ouroboros.Wasm.Pool` budgets the *shared* helper cache: at most sixteen distinct hook
-  components per helper lifetime, in any scope. The helper's 64-slot table evicts at its
+  `Ouroboros.Wasm.Pool` budgets the *shared* helper cache: at most sixteen distinct
+  **untrusted** hook shas per helper lifetime. The helper's 64-slot table evicts at its
   ceiling — least recently used, never a component with a live instance — so a clone can no
   longer fill it and leave every later `load` on the node (the capability lane's rollouts,
   the operator's own earlier-loaded hooks) failing `too_many_components`, which was an
   untrusted workspace making an outcome *looser* by deleting somebody else's `deny`. What
-  the budget bounds now is churn: every distinct sha a repository ships is a compile nothing
-  time-bounds, and past the ceiling an eviction somebody else pays to compile again.
+  the budget bounds now is churn: every distinct sha a repository ships is a compile, and
+  past the ceiling an eviction somebody else pays to compile again.
+
+  Untrusted only, and that is the repair of a bound that used to be its own bypass: one
+  counter shared by both scopes meant a clone could spend it and leave the *operator's own*
+  component hook unable to load — a `deny` disarmed by an untrusted workspace, through the
+  mechanism meant to stop exactly that. So each entry, hook and check alike, carries the
+  `trusted` its scope decided, and that field chooses the lane: `:hook` for an operator's,
+  `:untrusted_hook` for a repository's, and only the second is counted. A count is taken when
+  the helper answers `{:ok, _}`, so a refused `load` — a sha mismatch, bytes that are not a
+  component, a shape the helper will not compile — spends nothing, having cost the node
+  nothing. `Pool.status/1`'s `hook_components` is that count, and therefore means budgeted
+  untrusted shas rather than every hook component the helper holds.
 
   ### Accepted residuals
 
@@ -184,14 +195,11 @@ defmodule Ouroboros.Provider.Native.Hooks do
     * An untrusted clone's `PreCompact` component hook can deny every compaction. That is
       strictly stricter and therefore inside D8, but it is a new availability lever: a
       session in such a repository keeps its whole conversation and says why, forever.
-    * Compilation is not time-bounded. `load` is bounded only by the pool's transport
-      deadline, and a component that outlasts it breaks the pool — the helper is killed and
-      every live instance with it. Nothing in this slice bounds cranelift; the admission
-      cap and the lane budget bound the *count* of components, not the cost of one.
-    * The lane budget is a budget and not an eviction. An operator who edits their own
-      component seventeen times within one helper's life will find the seventeenth refused
-      until the helper is respawned, even though the helper — which evicts — would have
-      room for it.
+    * Compilation is bounded by *shape* and not by time. The helper refuses
+      `component_too_complex` on a structural walk before `Component::new` runs, which is
+      what makes a compile bomb cheap to reject; cranelift itself is still not interruptible,
+      so the bound is "no admissible component compiles slowly" rather than "no compile
+      outlasts a deadline".
     * A `matcher` that exhausts its backtracking budget reads as **no match**, silently. That
       is the only safe direction — a hook that did not run cannot loosen anything, since
       `deny` needs a hook to have run — but it means a pathological pattern stops matching
@@ -411,7 +419,13 @@ defmodule Ouroboros.Provider.Native.Hooks do
           pool: GenServer.server()
         }
 
-  @typedoc "One `[checks]` entry. Same command/component split as a hook, without a verdict."
+  @typedoc """
+  One `[checks]` entry. Same command/component split as a hook, without a verdict.
+
+  `trusted` is the same field a hook carries and decides the same two things: whether the
+  failure text is labelled before it is injected, and which of the pool's two hook lanes the
+  component loads under — only the untrusted one is budgeted.
+  """
   @type check :: %{
           name: String.t(),
           kind: :command | :component,
@@ -419,7 +433,8 @@ defmodule Ouroboros.Provider.Native.Hooks do
           component: String.t() | nil,
           confine_to: String.t() | nil,
           config: String.t(),
-          timeout_ms: pos_integer()
+          timeout_ms: pos_integer(),
+          trusted: boolean()
         }
 
   @type t :: %__MODULE__{
@@ -753,11 +768,43 @@ defmodule Ouroboros.Provider.Native.Hooks do
     Enum.flat_map(config.checks, &run_check(&1, config, tail_lines))
   end
 
-  # Belt and braces: `load_project/2` already declines an untrusted workspace's command
-  # checks, and this refuses to run one that reached the struct any other way.
-  defp run_check(%{kind: :command}, %__MODULE__{trusted?: false}, _tail_lines), do: []
+  # Belt and braces, and both braces are asked. `load_project/2` already declines an
+  # untrusted workspace's command checks; this refuses one that reached the struct any other
+  # way, and it asks the **entry** as well as the configuration it arrived in. The entry
+  # carries its own `trusted` for the same reason a hook does — it is what chooses the pool
+  # lane and the label — so a check whose own answer is "repository-authored" must not run
+  # `sh -c` on this machine because the struct around it happened to say otherwise. An entry
+  # with no `trusted` key at all is read as untrusted, the conservative default every reader
+  # of this field takes.
+  defp run_check(%{kind: :command} = check, %__MODULE__{} = config, tail_lines) do
+    if config.trusted? and Map.get(check, :trusted, false),
+      do: run_command_check(check, config, tail_lines),
+      else: []
+  end
 
-  defp run_check(%{kind: :command} = check, %__MODULE__{workspace: workspace}, tail_lines) do
+  defp run_check(%{kind: :component} = check, %__MODULE__{pool: pool}, tail_lines) do
+    payload = encode(%{"event" => "check", "name" => check.name})
+
+    case run_component(check, pool, payload, nil) do
+      {:ok, reply} ->
+        case String.trim(reply) do
+          "" ->
+            []
+
+          failure ->
+            [check_text(check, "#{subject(check)} failed:\n" <> tail(failure, tail_lines))]
+        end
+
+      # The refusal *name*, and never the helper's prose: this line is injected into a turn,
+      # and the prose can carry a digest of whatever was at the path. `report/2` puts the
+      # whole sentence in this node's log, where no model reads it.
+      {:ignored, note} ->
+        report(check.component, note)
+        [check_text(check, "#{subject(check)} could not run: #{note.name}")]
+    end
+  end
+
+  defp run_command_check(check, %__MODULE__{workspace: workspace}, tail_lines) do
     case Exec.run_shell(check.command,
            cd: workspace,
            timeout_ms: check.timeout_ms,
@@ -780,28 +827,6 @@ defmodule Ouroboros.Provider.Native.Hooks do
     end
   end
 
-  defp run_check(%{kind: :component} = check, %__MODULE__{} = config, tail_lines) do
-    payload = encode(%{"event" => "check", "name" => check.name})
-
-    case run_component(check, config.pool, payload, nil) do
-      {:ok, reply} ->
-        case String.trim(reply) do
-          "" ->
-            []
-
-          failure ->
-            [check_text(config, "#{subject(check)} failed:\n" <> tail(failure, tail_lines))]
-        end
-
-      # The refusal *name*, and never the helper's prose: this line is injected into a turn,
-      # and the prose can carry a digest of whatever was at the path. `report/2` puts the
-      # whole sentence in this node's log, where no model reads it.
-      {:ignored, note} ->
-        report(check.component, note)
-        [check_text(config, "#{subject(check)} could not run: #{note.name}")]
-    end
-  end
-
   # What a `[checks]` failure calls itself, clipped on both halves. Name and target alike
   # come from `ouroboros.toml`, and this sentence becomes a user message in the next model
   # step — a 4000-byte key was a repository writing that message rather than naming a check.
@@ -815,7 +840,12 @@ defmodule Ouroboros.Provider.Native.Hooks do
   # message* rather than appended to a tool result, so unlabelled it is indistinguishable
   # from something the operator said. Every line, header included — the check's own name and
   # path are as repository-authored as the guest's reply is.
-  defp check_text(%__MODULE__{trusted?: true}, text), do: text
+  #
+  # Read off the **check**, which is also what chooses the pool lane, so one entry has one
+  # answer to "is this repository-authored" rather than two that can drift. An entry with no
+  # `trusted` key at all — a caller assembling its own configuration — is read as untrusted,
+  # the same conservative default `run_component/4` gives the lane.
+  defp check_text(%{trusted: true}, text), do: text
   defp check_text(_untrusted, text), do: labelled(text)
 
   @doc "Whether operator configuration trusts a workspace for repository commands."
@@ -1342,7 +1372,7 @@ defmodule Ouroboros.Provider.Native.Hooks do
     case read_config(path) do
       {:ok, %{} = document} ->
         {hooks, hook_errors} = hooks_from(document, :workspace, root, trusted?)
-        {checks, check_errors} = checks_from(document, :workspace, root)
+        {checks, check_errors} = checks_from(document, :workspace, root, trusted?)
         errors = hook_errors ++ check_errors
 
         if trusted? do
@@ -1525,9 +1555,7 @@ defmodule Ouroboros.Provider.Native.Hooks do
          config: config,
          timeout_ms: timeout(Map.get(entry, "timeout_ms")),
          scope: scope,
-         # Only a workspace can be untrusted. A node or user hook is the operator's own,
-         # which is the authority a rule answers to.
-         trusted: scope != :workspace or trusted?,
+         trusted: entry_trusted?(scope, trusted?),
          cwd: cwd,
          pool: Wasm.Pool
        })}
@@ -1713,7 +1741,7 @@ defmodule Ouroboros.Provider.Native.Hooks do
   defp timeout(value) when is_integer(value) and value > 0, do: min(value, @max_timeout_ms)
   defp timeout(_value), do: @default_timeout_ms
 
-  defp checks_from(document, scope, cwd) do
+  defp checks_from(document, scope, cwd, trusted?) do
     document
     |> Map.get("checks", %{})
     |> case do
@@ -1724,7 +1752,7 @@ defmodule Ouroboros.Provider.Native.Hooks do
         |> Enum.sort()
         |> Enum.take(@max_checks)
         |> Enum.reduce({[], []}, fn {name, value}, {checks, errors} ->
-          case check(name, value, scope, cwd) do
+          case check(name, value, scope, cwd, trusted?) do
             {:ok, check} -> {checks ++ [check], errors}
             {:error, message} -> {checks, errors ++ ["[checks] #{name}: #{message}"]}
           end
@@ -1735,7 +1763,7 @@ defmodule Ouroboros.Provider.Native.Hooks do
     end
   end
 
-  defp check(name, command, _scope, _cwd) when is_binary(command) and command != "" do
+  defp check(name, command, scope, _cwd, trusted?) when is_binary(command) and command != "" do
     {:ok,
      %{
        name: name,
@@ -1744,11 +1772,12 @@ defmodule Ouroboros.Provider.Native.Hooks do
        component: nil,
        confine_to: nil,
        config: "{}",
-       timeout_ms: @default_timeout_ms
+       timeout_ms: @default_timeout_ms,
+       trusted: entry_trusted?(scope, trusted?)
      }}
   end
 
-  defp check(name, table, scope, cwd) when is_map(table) do
+  defp check(name, table, scope, cwd, trusted?) when is_map(table) do
     with {:ok, path, confine_to} <- component_path(Map.get(table, "component"), scope, cwd),
          {:ok, config} <- hook_config(table, :component) do
       {:ok,
@@ -1759,13 +1788,18 @@ defmodule Ouroboros.Provider.Native.Hooks do
          component: path,
          confine_to: confine_to,
          config: config,
-         timeout_ms: @default_timeout_ms
+         timeout_ms: @default_timeout_ms,
+         trusted: entry_trusted?(scope, trusted?)
        }}
     end
   end
 
-  defp check(_name, _other, _scope, _cwd),
+  defp check(_name, _other, _scope, _cwd, _trusted?),
     do: {:error, "must be a command string or a `{ component = \"…\" }` table"}
+
+  # The one rule, shared by `[[hooks]]` and `[checks]`: only a workspace can be untrusted. A
+  # node or user entry is the operator's own, which is the authority a rule answers to.
+  defp entry_trusted?(scope, trusted?), do: scope != :workspace or trusted?
 
   # ---------------------------------------------------------------- text
 

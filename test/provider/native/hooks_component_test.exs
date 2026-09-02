@@ -531,8 +531,8 @@ defmodule Ouroboros.Provider.Native.HooksComponentTest do
 
   # ================================================================ shared-resource bounds
 
-  describe "the hook lane is budgeted against the node's shared component cache" do
-    test "a hook whose component would be the seventeenth is ignored, loudly and at error",
+  describe "the untrusted hook lane is budgeted against the node's shared component cache" do
+    test "an untrusted hook whose component would be the seventeenth is ignored, at error",
          context do
       # The proved attack this bounded: the helper's component cache is 64 slots shared by
       # every lane, and before it evicted a clone shipping enough components filled it, so
@@ -540,15 +540,12 @@ defmodule Ouroboros.Provider.Native.HooksComponentTest do
       # hook's — failed `too_many_components`: an untrusted workspace deleting somebody
       # else's deny. The helper now evicts at its ceiling; the budget stays as the bound on
       # how much compile and eviction churn a repository can cause per helper lifetime.
-      %{config: config, pool: pool} = loaded(context, reply: @deny, full: true)
+      %{config: config, pool: pool} = untrusted(context, reply: @deny, full: true)
 
-      # Spend the whole budget on this pool under the same lane the hook uses. If hooks.ex
-      # stopped passing `lane: :hook`, this hook's own load would sail past the budget and
-      # the deny below would stand.
-      for n <- 1..16 do
-        assert {:ok, _result} =
-                 Pool.load(String.pad_leading("#{n}", 64, "0"), "/tmp/x.wasm", pool, lane: :hook)
-      end
+      # Spend the whole budget under the lane an untrusted hook uses. If this seam stopped
+      # deriving the lane from the hook's own trust, this hook's load would sail past the
+      # budget and the deny below would stand.
+      spend_budget(pool)
 
       log =
         capture_log(fn ->
@@ -563,9 +560,25 @@ defmodule Ouroboros.Provider.Native.HooksComponentTest do
       assert log =~ "until it is respawned"
     end
 
-    test "a component already counted is free, so a hook that runs forever costs one slot",
-         context do
+    test "the same budget, spent by a clone, does not touch a trusted hook", context do
+      # The whole point of scoping the budget, held at this seam rather than at the pool's:
+      # a bound meant to stop an untrusted workspace disarming somebody else's `deny` was
+      # itself the way to do it. Sixteen untrusted shas is a spent budget; the operator's
+      # own hook loads anyway, and its `deny` stands.
       %{config: config, pool: pool} = loaded(context, reply: @deny, full: true)
+
+      spend_budget(pool)
+
+      assert {:deny, "no"} = Hooks.pre_tool_use(config, "bash", %{"command" => "ls"}, base())
+
+      # And it did not join the count on its way through: a trusted load is unbudgeted, not
+      # budgeted-and-forgiven.
+      assert Pool.status(pool).hook_components == 16
+    end
+
+    test "an untrusted component already counted is free, however often the hook runs",
+         context do
+      %{config: config, pool: pool} = untrusted(context, reply: @deny, full: true)
 
       for _run <- 1..5 do
         assert {:deny, _reason} =
@@ -573,6 +586,70 @@ defmodule Ouroboros.Provider.Native.HooksComponentTest do
       end
 
       assert Pool.status(pool).hook_components == 1
+    end
+
+    test "a trusted hook is never counted at all, however often it runs", context do
+      %{config: config, pool: pool} = loaded(context, reply: @deny, full: true)
+
+      for _run <- 1..5 do
+        assert {:deny, "no"} = Hooks.pre_tool_use(config, "bash", %{"command" => "ls"}, base())
+      end
+
+      assert Pool.status(pool).hook_components == 0
+    end
+
+    test "a load the helper refused spends nothing", context do
+      # Counting at the request would have let sixteen refusals — a sha mismatch, bytes that
+      # are not a component, a shape the helper will not compile — spend a budget that bounds
+      # compiles and evictions the node never paid for. This helper refuses every `load`, so
+      # five runs of this hook cost the node nothing and must therefore cost the clone
+      # nothing.
+      %{config: config, pool: pool} =
+        untrusted(context,
+          reply: @deny,
+          load_error: load_refusal("sha_mismatch", "the bytes hash to something else"),
+          full: true
+        )
+
+      log =
+        capture_log(fn ->
+          for _run <- 1..5 do
+            assert {:none, _input, [], false} =
+                     Hooks.pre_tool_use(config, "bash", %{"command" => "ls"}, base())
+          end
+        end)
+
+      assert log =~ "sha_mismatch"
+      assert Pool.status(pool).hook_components == 0
+    end
+
+    test "an untrusted [checks] component is budgeted; a trusted one is not", context do
+      # `[checks]` entries carry the same `trusted` a hook does, and it chooses the same
+      # lane. Without the field they took the conservative default whatever the workspace
+      # was, which put an operator's own checks in the budget a clone can spend.
+      trusted = checks_config(context, trusted?: true)
+      assert [%{kind: :component, trusted: true}] = trusted.checks
+      assert Hooks.run_checks(trusted) == []
+      assert Pool.status(trusted.pool).hook_components == 0
+
+      untrusted = checks_config(context, trusted?: false)
+      assert [%{kind: :component, trusted: false}] = untrusted.checks
+      assert Hooks.run_checks(untrusted) == []
+      assert Pool.status(untrusted.pool).hook_components == 1
+    end
+
+    test "an entry carrying no trust at all is read as untrusted, in both places",
+         context do
+      # `load/2` always sets the field; a caller assembling its own configuration may not,
+      # and the conservative reading is the one that has to survive that. Both readers take
+      # the same default: the budgeted lane, and a labelled failure.
+      trusted = checks_config(context, trusted?: true, reply: "lint failed")
+      [check] = trusted.checks
+      config = %{trusted | checks: [Map.delete(check, :trusted)]}
+
+      assert [failure] = Hooks.run_checks(config)
+      assert String.starts_with?(failure, "[untrusted workspace hook] ")
+      assert Pool.status(config.pool).hook_components == 1
     end
   end
 
@@ -1202,6 +1279,34 @@ defmodule Ouroboros.Provider.Native.HooksComponentTest do
   end
 
   defp untrusted(context, opts), do: loaded(context, Keyword.put(opts, :trusted?, false))
+
+  # A loaded configuration whose one `[checks]` entry is a component answered by a scripted
+  # helper, on a pool of its own. `[[hooks]]` and `[checks]` take the same `trusted` from the
+  # same workspace decision, and this is the half that reads it off a check.
+  defp checks_config(context, opts) do
+    fake = helper(context, Keyword.put_new(opts, :reply, ""))
+    pool = pool(context, fake, nil)
+
+    project(context, ~s([checks]\nlint = { component = "./hooks/vet.wasm" }\n))
+
+    context.workspace
+    |> Hooks.load(load_opts(context, fake, Keyword.put(opts, :pool, pool)))
+    |> Map.put(:pool, pool)
+  end
+
+  # The whole untrusted-hook budget, spent on this pool by somebody else. Sixteen distinct
+  # shas under `lane: :untrusted_hook` — the lane a repository's component hook uses — so
+  # what the tests below vary is only whose bytes come next.
+  defp spend_budget(pool) do
+    for n <- 1..Pool.hook_component_budget() do
+      assert {:ok, _result} =
+               Pool.load(String.pad_leading("#{n}", 64, "0"), "/tmp/x.wasm", pool,
+                 lane: :untrusted_hook
+               )
+    end
+
+    assert Pool.status(pool).hook_components == Pool.hook_component_budget()
+  end
 
   # The same hook, declared in the user file instead. Always trusted: it is the operator's.
   defp user_scope(context, opts) do

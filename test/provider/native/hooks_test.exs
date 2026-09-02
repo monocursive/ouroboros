@@ -1193,6 +1193,11 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       # the guard changed nothing any test could see. This constructs the struct directly —
       # the shape a future loader bug, or a caller assembling its own configuration, would
       # produce — and the guard is the only thing between it and `sh -c` on this machine.
+      #
+      # Both readers, because the guard asks both: the configuration's trust and the entry's
+      # own `trusted`, the field that also chooses the pool lane and the label. Either one
+      # saying "repository-authored" is enough to refuse, and an entry that carries no answer
+      # at all is read as untrusted.
       marker = Path.join(context.root, "belt-and-braces-check-ran")
 
       check = %{
@@ -1202,7 +1207,8 @@ defmodule Ouroboros.Provider.Native.HooksTest do
         component: nil,
         confine_to: nil,
         config: "{}",
-        timeout_ms: 5_000
+        timeout_ms: 5_000,
+        trusted: false
       }
 
       untrusted = %Hooks{
@@ -1214,9 +1220,20 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       assert Hooks.run_checks(untrusted) == []
       refute File.exists?(marker)
 
-      # The same struct, trusted, runs it — so what the assertion above proves is the guard
-      # and not a check that could never have run at all.
-      assert [failure] = Hooks.run_checks(%{untrusted | trusted?: true})
+      # A trusted configuration is not enough on its own: the entry still says it came from a
+      # repository, and that is the answer that wins.
+      assert Hooks.run_checks(%{untrusted | trusted?: true}) == []
+      refute File.exists?(marker)
+
+      # Nor is an entry with no answer at all, which is read as untrusted.
+      silent = %{untrusted | trusted?: true, checks: [Map.delete(check, :trusted)]}
+      assert Hooks.run_checks(silent) == []
+      refute File.exists?(marker)
+
+      # Both agreeing runs it — so what the assertions above prove is the guard and not a
+      # check that could never have run at all.
+      both = %{untrusted | trusted?: true, checks: [%{check | trusted: true}]}
+      assert [failure] = Hooks.run_checks(both)
       assert failure =~ "typecheck"
       assert File.exists?(marker)
     end

@@ -40,7 +40,10 @@ jobs:
   elixir:
     name: Elixir
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # 45, not 20: this job now builds `ouro-wasm` before `mix test`, and a cold cargo build
+    # of wasmtime is 10+ minutes on a hosted runner (361 s for build plus suite locally). A
+    # run that hits the cargo cache is far shorter; the ceiling is for the run that does not.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
