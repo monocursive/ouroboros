@@ -77,7 +77,7 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
   @doc """
   The absolute path the helper would be spawned from, or `nil` when nothing is installed.
 
-  `OUROBOROS_SANDBOX_HELPER` wins, then a configured absolute path, then the first existing
+  An absolute `OUROBOROS_SANDBOX_HELPER` wins, then a configured absolute path, then the first existing
   candidate — the application's own `priv/`, or a sibling of `ouro`. The same precedence the
   Computer Use helper uses, for the same reason: an operator testing a build needs a way to
   point the runtime at it without a release.
@@ -91,18 +91,27 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
   def executable do
     case System.get_env("OUROBOROS_SANDBOX_HELPER") do
       path when is_binary(path) and path != "" ->
-        if File.regular?(path), do: path, else: nil
+        if absolute_path?(path), do: regular(path), else: configured_executable()
 
       _unset ->
-        case Application.get_env(:ouroboros, :native_sandbox_helper) do
-          path when is_binary(path) and path != "" ->
-            if File.regular?(path), do: path, else: nil
-
-          _bundled ->
-            Enum.find(candidates(), &File.regular?/1)
-        end
+        configured_executable()
     end
   end
+
+  defp configured_executable do
+    case Application.get_env(:ouroboros, :native_sandbox_helper) do
+      path when is_binary(path) and path != "" ->
+        if absolute_path?(path),
+          do: regular(path),
+          else: Enum.find(candidates(), &File.regular?/1)
+
+      _bundled ->
+        Enum.find(candidates(), &File.regular?/1)
+    end
+  end
+
+  defp regular(path), do: if(File.regular?(path), do: path, else: nil)
+  defp absolute_path?(path), do: Path.type(path) == :absolute
 
   defp candidates do
     # No cwd-derived candidate, in either of the two shapes this used to carry (F1): see

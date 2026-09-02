@@ -438,6 +438,30 @@ defmodule Ouroboros.Wasm.RolloutTest do
 
   describe "against the real helper, on one node" do
     @tag @needs_live
+    test "a target refuses an epoch spent by a different driver", context do
+      env = live_env(context)
+      target_registry = start_registry!()
+
+      assert :ok =
+               Registry.admit_wasm_epoch(
+                 %{
+                   artifact_id: "other-driver",
+                   epoch: 70_000,
+                   component_sha256: String.duplicate("a", 64)
+                 },
+                 target_registry
+               )
+
+      artifact = guest!(context, epoch: 60_000)
+
+      assert {:error, {:rolled_back, outcome}} =
+               deploy(artifact, [node()], context, env ++ [epoch_registry: target_registry])
+
+      assert {:error, {:stale_epoch, 60_000, 70_000}} = outcome.deployment[node()].stage
+      assert {:ok, []} = Store.list(root: context.root)
+    end
+
+    @tag @needs_live
     test "a signed component deploys, is registered at v3, and starts its wrapper", context do
       env = live_env(context)
       name = unique_name()
@@ -484,6 +508,63 @@ defmodule Ouroboros.Wasm.RolloutTest do
 
       assert %{"echo" => %{"greet" => "world"}, "config" => %{"greeting" => "hello"}} =
                state(id).last_answer
+    end
+
+    @tag @needs_live
+    test "a new live version replaces the wrapper from its superseded predecessor", context do
+      env = live_env(context)
+      name = unique_name()
+      id = start_id(name)
+      old_sha = String.duplicate("b", 64)
+      old_epoch = next_epoch()
+
+      {:ok, old_entry} =
+        Registry.deploying(
+          %{
+            artifact_id: "old-#{name}",
+            module: "wasm/" <> name,
+            epoch: old_epoch,
+            nodes: [node()],
+            component_sha256: old_sha
+          },
+          context.registry
+        )
+
+      {:ok, _live} = Registry.mark(old_entry.artifact_id, :live, [], context.registry)
+
+      {:ok, old_pid} =
+        Mesh.start_agent(id,
+          agent: Capability,
+          initial_state: %{
+            component: old_sha,
+            config: "{}",
+            name: name,
+            limits: %{},
+            pool: env[:pool],
+            store_root: context.root
+          }
+        )
+
+      on_exit(fn -> Mesh.stop_agent(id) end)
+
+      artifact =
+        guest!(context,
+          name: name,
+          epoch: old_epoch + 1,
+          start: %{id: id, config: ~s({"version":"new"})}
+        )
+
+      assert {:ok, outcome} = deploy(artifact, [node()], context, env)
+      assert outcome.state == :live
+      assert outcome.started.id == id
+      refute Mesh.whereis(id) == old_pid
+      assert state(id).component == artifact.component_sha256
+
+      assert {:ok, %{state: :superseded, detail: %{replaced_by: replacement}}} =
+               Registry.get(old_entry.artifact_id, context.registry)
+
+      assert replacement == artifact.id
+      assert {:ok, %{state: :live}} = Registry.get(artifact.id, context.registry)
     end
 
     @tag @needs_live

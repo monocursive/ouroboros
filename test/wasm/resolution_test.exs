@@ -232,6 +232,39 @@ defmodule Ouroboros.Wasm.ResolutionTest do
     end
   end
 
+  @tag :subprocess
+  test "relative helper overrides are rejected by all three containment resolvers" do
+    root =
+      Path.join(System.tmp_dir!(), "ouro-relative-helper-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(Path.join(root, "priv/sandbox"))
+    File.write!(Path.join(root, "priv/sandbox/ouro-sandbox"), "#!/bin/sh\nexit 0\n")
+    on_exit(fn -> File.rm_rf(root) end)
+
+    code = """
+    File.cd!(#{inspect(root)})
+    System.put_env("OUROBOROS_WASM_HELPER", "priv/wasm/ouro-wasm")
+    System.put_env("OUROBOROS_COMPUTER_USE_HELPER", "priv/computer-use/ouro-computer-use")
+    System.put_env("OUROBOROS_SANDBOX_HELPER", "priv/sandbox/ouro-sandbox")
+    Application.put_env(:ouroboros, :wasm, helper_path: "configured/ouro-wasm")
+    Application.put_env(:ouroboros, :computer_use, helper_path: "configured/ouro-computer-use")
+    Application.put_env(:ouroboros, :native_sandbox_helper, "configured/ouro-sandbox")
+
+    IO.puts("WASM:" <> Ouroboros.Wasm.helper_path())
+    IO.puts("DESKTOP:" <> Ouroboros.Provider.Native.Desktop.helper_path())
+    IO.puts("SANDBOX:" <> inspect(Ouroboros.Provider.Native.Sandbox.Helper.executable()))
+    """
+
+    {output, status} = run_elixir(code)
+    assert status == 0, output
+    refute output =~ "WASM:priv/", output
+    refute output =~ "WASM:configured/", output
+    refute output =~ "DESKTOP:priv/", output
+    refute output =~ "DESKTOP:configured/", output
+    refute output =~ "SANDBOX:\"priv/", output
+    refute output =~ "SANDBOX:\"configured/", output
+  end
+
   # Replaces a few keys of the node's `:wasm` config for one test and restores the whole
   # keyword at teardown. This module is `async: false` precisely because this is global, and
   # the restores are LIFO, so the first snapshot taken is the last one put back.

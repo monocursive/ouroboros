@@ -91,6 +91,27 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
   end
 
   describe "lane W's epoch watermark" do
+    test "a target claim is durable, atomic, and idempotent only for the same artifact" do
+      directory = temporary_directory!()
+      storage = {Ouroboros.Storage.DurableFile, path: directory}
+      claim = %{artifact_id: "target-a", epoch: 70, component_sha256: String.duplicate("a", 64)}
+
+      first = start_registry!(storage: storage)
+      assert :ok = Registry.admit_wasm_epoch(claim, first)
+      assert :ok = Registry.admit_wasm_epoch(claim, first)
+
+      assert {:error, {:stale_epoch, 70, 70}} =
+               Registry.admit_wasm_epoch(%{claim | artifact_id: "target-b"}, first)
+
+      GenServer.stop(first)
+
+      second = start_registry!(storage: storage)
+      assert :ok = Registry.admit_wasm_epoch(claim, second)
+
+      assert {:error, {:stale_epoch, 69, 70}} =
+               Registry.admit_wasm_epoch(%{claim | artifact_id: "older", epoch: 69}, second)
+    end
+
     test "refuses an epoch this register has already seen, in any state" do
       registry = start_registry!()
 
@@ -369,6 +390,41 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
 
       assert {:ok, _entry} =
                Registry.deploying(wasm_attrs(artifact_id: "higher", epoch: high + 1), registry)
+    end
+
+    test "a lower surviving entry cannot become an idempotent claim above a legacy watermark",
+         context do
+      {adapter, adapter_opts} = context.storage
+      sha = String.duplicate("a", 64)
+
+      entry = %Registry.Entry{
+        artifact_id: "lower",
+        module: "wasm/greeter",
+        epoch: 70,
+        nodes: [node()],
+        state: :deploying,
+        component_sha256: sha,
+        created_at: "x",
+        updated_at: "x"
+      }
+
+      # Older checkpoints have a durable watermark but no artifact claim. Persisting an
+      # update to a surviving lower entry must not turn that entry into an exact retry that
+      # bypasses the higher mark.
+      write_checkpoint!(adapter, adapter_opts, %{
+        version: 3,
+        rollouts: %{"lower" => entry},
+        lane_w_epoch: 100
+      })
+
+      registry = start_registry!(storage: context.storage)
+      assert {:ok, _entry} = Registry.mark("lower", :rolled_back, [], registry)
+
+      assert {:error, {:stale_epoch, 70, 100}} =
+               Registry.admit_wasm_epoch(
+                 %{artifact_id: "lower", epoch: 70, component_sha256: sha},
+                 registry
+               )
     end
 
     test "and a caller cannot write a number this build would refuse to read back" do

@@ -59,11 +59,11 @@ defmodule Ouroboros.Wasm.Rollout do
   far above anything `Epoch.next/2` allocates, and one such entry in the register would
   refuse every properly minted epoch after it, forever.
 
-  The other half is enforced by `Ouroboros.Upgrade.Rollout.Registry` itself, atomically,
-  inside the same call that writes the `:deploying` entry — see its moduledoc. Lane B's
-  monotonicity is enforced per node by `Ouroboros.Upgrade.NodeExecutor.prepare/2`; lane W
-  has no node executor, so this register is the only durable record of what this plane has
-  already deployed.
+  The other half is enforced by `Ouroboros.Upgrade.Rollout.Registry` itself, atomically:
+  the driver spends the epoch in the call that writes `:deploying`, and every target spends
+  it again before staging bytes. Lane B's monotonicity is enforced per node by
+  `Ouroboros.Upgrade.NodeExecutor.prepare/2`; lane W has no node executor, so its node-local
+  register is the durable target-side replay boundary.
 
   **A retry is always a new manifest.** The register refuses a duplicate artifact id
   (`{:already_recorded, _}`) and refuses an epoch it has already seen in any state
@@ -103,9 +103,11 @@ defmodule Ouroboros.Wasm.Rollout do
   `warnings: [{:driver_not_a_target, node()}]` and one `Logger.warning` says the same.
 
   A start id is claimed once cluster-wide, so a rollout can find its `start.id` already
-  held by a wrapper running a **different** component. That is not a start, and reporting
-  it as one would put a component nobody described behind an id somebody trusts, so it is
-  `{:start_id_claimed_by, other_sha}` and the entry is marked `:quarantined`.
+  held by a wrapper running a **different** component. When the registry proves that holder
+  is the overlapping live entry this rollout just superseded, it is stopped and replaced.
+  Any other holder is not a start, and reporting it as one would put a component nobody
+  described behind an id somebody trusts, so it is `{:start_id_claimed_by, other_sha}` and
+  the entry is marked `:quarantined`.
 
   ## Not here
 
@@ -272,10 +274,12 @@ defmodule Ouroboros.Wasm.Rollout do
   def stage(%Artifact{} = artifact, bytes, opts) when is_binary(bytes) and is_list(opts) do
     store_opts = store_opts(opts)
     pool = Keyword.get(opts, :pool, Pool)
+    epoch_registry = Keyword.get(opts, :epoch_registry, Registry)
 
     # This node's own trust policy, never the caller's. A loading node that was told which
     # signers to trust would be verifying the sender rather than the artifact.
     with :ok <- verified(artifact, bytes),
+         :ok <- admitted_epoch(artifact, epoch_registry),
          {:ok, put} <- published(artifact, bytes, store_opts),
          {:ok, manifest} <- published_manifest(artifact, store_opts),
          {:ok, report} <- loaded(artifact, put.path, pool),
@@ -444,7 +448,7 @@ defmodule Ouroboros.Wasm.Rollout do
     evidence =
       Map.new(nodes, &{&1, %{stage: nil, probe: :skipped, eval: :skipped, recovery: nil}})
 
-    evidence = gate(evidence, nodes, :stage, &stage_node(&1, artifact, bytes, opts))
+    evidence = gate(evidence, nodes, :stage, &stage_node(&1, artifact, bytes, opts, registry))
 
     evidence =
       if all_passed?(evidence, :stage),
@@ -498,10 +502,14 @@ defmodule Ouroboros.Wasm.Rollout do
     end)
   end
 
-  defp stage_node(target, artifact, bytes, opts) do
+  defp stage_node(target, artifact, bytes, opts, registry) do
+    epoch_registry =
+      if target == node(), do: Keyword.get(opts, :epoch_registry, registry), else: Registry
+
     remote_opts = [
       pool: Keyword.get(opts, :pool, Pool),
-      store_root: Keyword.get(opts, :store_root)
+      store_root: Keyword.get(opts, :store_root),
+      epoch_registry: epoch_registry
     ]
 
     case remote(target, __MODULE__, :stage, [artifact, bytes, remote_opts], stage_timeout(opts)) do
@@ -571,10 +579,46 @@ defmodule Ouroboros.Wasm.Rollout do
   defp started(outcome, artifact, nodes, opts, registry) do
     case start_capability(artifact, nodes, opts) do
       {:claimed, id, other_sha} ->
-        quarantine_claim(outcome, artifact, registry, id, other_sha)
+        if replaceable_predecessor?(artifact, registry, other_sha) do
+          replace_predecessor(outcome, artifact, nodes, opts, registry, id, other_sha)
+        else
+          quarantine_claim(outcome, artifact, registry, id, other_sha)
+        end
 
       started ->
         {:ok, %{outcome | started: started}}
+    end
+  end
+
+  # Marking the challenger live atomically supersedes an overlapping live entry of the same
+  # capability. Its still-running wrapper is therefore not a squatter: it is the predecessor
+  # this rollout just displaced. Only that exact recorded relationship authorizes stopping
+  # it; a process whose sha is not in the superseded entry remains somebody else's claim.
+  defp replaceable_predecessor?(artifact, registry, component_sha256) do
+    Registry.history(@module_prefix <> artifact.name, registry)
+    |> Enum.any?(fn entry ->
+      entry.state == :superseded and entry.component_sha256 == component_sha256 and
+        get_in(entry.detail, [:replaced_by]) == artifact.id
+    end)
+  rescue
+    _error -> false
+  catch
+    _kind, _reason -> false
+  end
+
+  defp replace_predecessor(outcome, artifact, nodes, opts, registry, id, component_sha256) do
+    case withdraw(id, component_sha256) do
+      stopped when stopped in [:rolled_back, :not_needed] ->
+        case start_capability(artifact, nodes, opts) do
+          {:claimed, ^id, other_sha} ->
+            quarantine_claim(outcome, artifact, registry, id, other_sha)
+
+          started ->
+            {:ok, %{outcome | started: started}}
+        end
+
+      _unproven_stop ->
+        quarantine_claim(outcome, artifact, registry, id, component_sha256)
     end
   end
 
@@ -766,6 +810,19 @@ defmodule Ouroboros.Wasm.Rollout do
       :ok -> :ok
       {:error, reason} -> {:error, {:component_rejected, reason}}
     end
+  end
+
+  defp admitted_epoch(artifact, registry) do
+    Registry.admit_wasm_epoch(
+      %{
+        artifact_id: artifact.id,
+        epoch: artifact.epoch,
+        component_sha256: artifact.component_sha256
+      },
+      registry
+    )
+  catch
+    :exit, reason -> {:error, {:epoch_registry_unavailable, bound(reason)}}
   end
 
   # Content-addressed and idempotent: a node already holding this sha writes nothing and

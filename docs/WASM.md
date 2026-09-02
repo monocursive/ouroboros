@@ -560,7 +560,7 @@ collapse the whole findings map to a rendered string, taking `component_sha256`,
 discipline of `Rollout` (§4.1) with the code-loading machinery deleted:
 
 1. validate nodes (connected, `:core`) and verify signature + sha;
-2. **checkpoint `:deploying` before any effect** into the existing `Rollout.Registry` —
+2. **checkpoint `:deploying` before any effect** into the driver's existing `Rollout.Registry` —
    `entry.module` is already `module() | String.t()`; lane W writes `"wasm/" <> name`,
    and checkpoint v3 widens the entry with `component_sha256` (same struct-widening idiom
    as v1→v2's `eval_report`). The epoch gate is inside that same serialized call, and the
@@ -575,15 +575,18 @@ discipline of `Rollout` (§4.1) with the code-loading machinery deleted:
    safe. `test_report` and `detail` are bounded and portability-checked on
    the way in, the same as `eval_report` — both arrive from a requester, and a durable
    store an attacker sizes is not one;
-3. per node: `Wasm.Store.stage` over `:erpc` (content-addressed, idempotent — a node
-   that already holds the sha does nothing);
+3. per node: atomically admit the epoch in that target's own `Rollout.Registry`, then
+   `Wasm.Store.stage` over `:erpc` (content-addressed, idempotent — a node that already
+   holds the sha does nothing). The claim stored beside the target's high-water mark makes
+   a retry of the same artifact idempotent, while a different driver cannot replay an older
+   signed manifest to nodes whose local executor never sees lane W;
 4. probe: the generalized `Rollout.Probe` starts
    `{Ouroboros.Wasm.Capability, %{component: sha, config: cfg}}` on each target,
    same signal, same echo check, same budget;
 5. eval: `Rollout.Evaluation` runs the signed spec unchanged;
 6. settle exactly as lane B does: pass → `:live`; fail → stop instances +
    `:rolled_back`; any ambiguity → `:quarantined`. `Upgrade.Epoch` is reused for
-   ordering, and a stale-epoch deploy is refused at step 2.
+   ordering, and a stale-epoch deploy is refused at step 2 or step 3.
 
 Rollback is honest and total: no code was loaded, so "rollback to absence" is *stop
 the wrapper agents and mark the entry* — no purge, no old-code residency, nothing that
@@ -593,14 +596,15 @@ supervised one-shot task (the `Worktree` reconcile pattern,
 manifest declares a `start` block — the `Runtime.Capabilities.maybe_start/2` rule
 applied to a lane that can actually honor it across reboots.
 
+A later live rollout of the same named capability replaces the wrapper held by the entry it
+just superseded. The registry relationship is the authority to stop it: an unrelated holder
+of the same mesh id remains a conflict and quarantines the challenger.
+
 Every entry is re-validated when the checkpoint is read, against the same validators
-`deploying/2` applies, which closes the *malformed* half of what a planted checkpoint
-could do. It does not close the well-formed half: `fetch_epoch/1` asks only for a
-positive integer, so `epoch: 999_999_999_999_999` in an otherwise valid entry is still
-admitted and still refuses every lane-W deploy on the node — and since W-F8 made the
-watermark durable, it now survives deletion of the entry that carried it. That is W-F26,
-open, fix in flight. One bad entry is **dropped with a logged reason and the rest of the
-register loads**, because refusing the whole checkpoint for
+`deploying/2` applies. `fetch_epoch/1` also applies the 10^14 plausibility ceiling described
+above, so the malformed and unrecoverably high cases are both refused. One bad entry is
+**dropped with a logged reason and the rest of the register loads**, because refusing the
+whole checkpoint for
 one row is how a single unreadable entry stopped a node deploying anything at all; an id
 that a pre-tagging checkpoint wrote bare and that spells an atom (`"nil"`, `"error"`) is
 migrated to its string rather than dropped. Read is looser than write in exactly two
@@ -962,7 +966,8 @@ re-verification pass found it last, and it closed in the same wave.
   `wasm.status`/`wasm.list` exposed absolute paths under `:read` (now basenames).
 - **W-F17 (CRITICAL class, pool):** `Wasm.helper_path/0` — and the desktop and sandbox
   resolvers — walked six ancestors of the daemon's cwd for the helper binary, so a cloned
-  repository could supply the containment boundary itself. Removed.
+  repository could supply the containment boundary itself. Removed; explicit environment
+  and configuration overrides must also be absolute.
 - **W-F18 (CRITICAL, pool):** a caller-chosen `limits.deadline_ms` reached
   `Process.send_after` unvalidated and crashed the pool, escalating through
   `Wasm.Supervisor`; reachable via a remote `Mesh.start_agent` of the wrapper. Limits are
@@ -999,6 +1004,19 @@ re-verification pass found it last, and it closed in the same wave.
   *unrecoverable* shapes; it does not make a tampered checkpoint safe — a plant at a merely
   large epoch still gates until the operator deletes the entry, which works again precisely
   because the watermark can no longer be poisoned above the ceiling in its place.
+
+- **W-F27 (HIGH; fixed):** marking a replacement live superseded the old entry before the
+  fixed start id was reclaimed, so every started same-name upgrade quarantined itself. A
+  holder is replaced only when the registry proves it is that superseded predecessor.
+- **W-F28 (HIGH; fixed):** the replay watermark lived only on the driver; a different core
+  could replay an older signed component to the same targets. Every target now durably and
+  atomically admits the epoch before staging bytes.
+- **W-F29 (MED; fixed):** a remotely seeded non-integer `messages_received` raised outside
+  the wrapper's rescue, making every message look successful while recording nothing. The
+  counter is normalized at use.
+- **W-F30 (MED; fixed):** relative helper overrides still resolved from cwd after the
+  candidate walk was removed. Wasm, Computer Use and sandbox overrides now require absolute
+  paths.
 
 ## 14. Slices
 

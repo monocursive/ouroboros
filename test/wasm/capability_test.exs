@@ -617,6 +617,20 @@ defmodule Ouroboros.Wasm.CapabilityTest do
   end
 
   describe "nothing in initial_state is trusted, because nothing validates it (F3)" do
+    test "a malformed seeded message counter cannot bypass bookkeeping" do
+      %{id: id} =
+        capability([call: [result(%{"payload" => ~s({"n":1}), "fuel_used" => 1})]],
+          messages_received: "not-a-counter"
+        )
+
+      assert {:ok, _agent} = Mesh.send_message("tester", id, %{seq: 1})
+
+      state = state(id)
+      assert state.messages_received == 1
+      assert state.last_message.body == %{seq: 1}
+      assert state.last_answer == %{"n" => 1}
+    end
+
     test "a pool that is not this node's wasm pool is refused, and no request is sent" do
       # The proof the review ran: `pool: [type: :any]` let a remote starter aim this agent's
       # `GenServer.call` at any registered process, and the pool's `{:request, …}` tuple then
@@ -818,6 +832,7 @@ defmodule Ouroboros.Wasm.CapabilityTest do
       }
       |> seed(opts, :limits)
       |> seed(opts, :instance)
+      |> seed(opts, :messages_received)
 
     {:ok, _pid} = Mesh.start_agent(id, agent: Capability, initial_state: initial_state)
     on_exit(fn -> Mesh.stop_agent(id) end)

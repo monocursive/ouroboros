@@ -12,7 +12,7 @@ defmodule Ouroboros.Wasm do
 
   Resolution order, same shape as the desktop helper's:
 
-    1. `OUROBOROS_WASM_HELPER` — an operator pointing at a build of their own;
+    1. `OUROBOROS_WASM_HELPER` — an absolute path to an operator build;
     2. a configured absolute `helper_path` under `config :ouroboros, :wasm`;
     3. the first existing candidate: the application's `priv/` (which is the `_build`
        fan-out `make wasm` writes), or a sibling of `ouro` itself.
@@ -165,20 +165,24 @@ defmodule Ouroboros.Wasm do
   def helper_path do
     case System.get_env("OUROBOROS_WASM_HELPER") do
       path when is_binary(path) and path != "" ->
-        path
+        if absolute_path?(path), do: path, else: configured_helper_path()
 
       _unset ->
-        case config(:helper_path) do
-          path when is_binary(path) and path != "" ->
-            path
+        configured_helper_path()
+    end
+  end
 
-          _bundled ->
-            # The first candidate that exists; failing that, the first candidate as the name
-            # a `doctor` would report; failing even that, the bare helper name. Always a
-            # string and never `hd([])`, and none of these paths reads the working directory
-            # — so a removed cwd cannot raise here and a planted one cannot be selected.
-            Enum.find(candidates(), &File.regular?/1) || List.first(candidates()) || @helper
-        end
+  defp configured_helper_path do
+    case config(:helper_path) do
+      path when is_binary(path) and path != "" ->
+        path
+
+      _bundled ->
+        # The first candidate that exists; failing that, the first candidate as the name
+        # a `doctor` would report; failing even that, the bare helper name. Always a
+        # string and never `hd([])`, and none of these paths reads the working directory
+        # — so a removed cwd cannot raise here and a planted one cannot be selected.
+        Enum.find(candidates(), &File.regular?/1) || List.first(candidates()) || @helper
     end
   end
 
@@ -203,7 +207,9 @@ defmodule Ouroboros.Wasm do
   def all, do: Enum.map(@defaults, fn {key, _default} -> {key, config(key)} end)
 
   defp valid?(:helper_path, :bundled), do: true
-  defp valid?(:helper_path, value), do: is_binary(value) and value != ""
+
+  defp valid?(:helper_path, value),
+    do: is_binary(value) and value != "" and absolute_path?(value)
 
   # All three bounds or none of them. An operator who writes two of the keys gets the
   # documented default for all three rather than a silently half-configured instance, which
@@ -223,6 +229,8 @@ defmodule Ouroboros.Wasm do
 
   defp valid?(key, value) when key in @timeout_keys, do: is_integer(value) and value > 0
   defp valid?(key, value) when key in @byte_keys, do: is_integer(value) and value > 0
+
+  defp absolute_path?(path), do: Path.type(path) == :absolute
 
   defp candidates do
     # Two candidates, and neither is derived from the working directory (F1). A bare

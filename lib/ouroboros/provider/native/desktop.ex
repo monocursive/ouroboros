@@ -178,7 +178,7 @@ defmodule Ouroboros.Provider.Native.Desktop do
   @doc """
   The absolute path the helper would be spawned from.
 
-  `OUROBOROS_COMPUTER_USE_HELPER` wins, then a configured absolute `:helper_path`, then
+  An absolute `OUROBOROS_COMPUTER_USE_HELPER` wins, then a configured absolute `:helper_path`, then
   the first existing candidate: app priv, or a sibling of `ouro` / `ouro-desktop` (the
   macOS app bundle).
 
@@ -193,13 +193,17 @@ defmodule Ouroboros.Provider.Native.Desktop do
   def helper_path do
     case System.get_env("OUROBOROS_COMPUTER_USE_HELPER") do
       path when is_binary(path) and path != "" ->
-        path
+        if absolute_path?(path), do: path, else: configured_helper_path()
 
       _unset ->
-        case config(:helper_path) do
-          path when is_binary(path) and path != "" -> path
-          _bundled -> resolve_bundled_helper()
-        end
+        configured_helper_path()
+    end
+  end
+
+  defp configured_helper_path do
+    case config(:helper_path) do
+      path when is_binary(path) and path != "" -> path
+      _bundled -> resolve_bundled_helper()
     end
   end
 
@@ -1492,7 +1496,10 @@ defmodule Ouroboros.Provider.Native.Desktop do
   defp valid?(:enabled, _default, value), do: is_boolean(value)
   defp valid?(:act_enabled, _default, value), do: is_boolean(value)
   defp valid?(:helper_path, _default, :bundled), do: true
-  defp valid?(:helper_path, _default, value), do: is_binary(value) and value != ""
+
+  defp valid?(:helper_path, _default, value),
+    do: is_binary(value) and value != "" and absolute_path?(value)
+
   defp valid?(:denied_app_ids, _default, value), do: is_list(value)
 
   defp valid?(:jpeg_quality, _default, value),
@@ -1504,4 +1511,6 @@ defmodule Ouroboros.Provider.Native.Desktop do
     do: is_integer(value) and value > 0 and value <= default
 
   defp valid?(_key, _default, _value), do: true
+
+  defp absolute_path?(path), do: Path.type(path) == :absolute
 end

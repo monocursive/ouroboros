@@ -287,10 +287,21 @@ defmodule Ouroboros.Wasm.Capability do
       changes =
         Map.merge(outcome, %{
           last_message: message,
-          messages_received: state.messages_received + 1
+          messages_received: next_message_count(state)
         })
 
       {:ok, %{}, [%StateOp.ReplaceState{state: Map.merge(state, changes)}]}
+    end
+
+    # `initial_state` crosses a remote-reachable boundary and Jido deliberately merges it
+    # without applying this agent's schema. Bookkeeping must therefore tolerate the same
+    # hostile seed as every authority-bearing field below: an invalid counter means no
+    # messages have been counted, not an arithmetic exception outside `run/2`'s rescue.
+    defp next_message_count(state) do
+      case Map.get(state, :messages_received) do
+        count when is_integer(count) and count >= 0 -> count + 1
+        _invalid_or_absent -> 1
+      end
     end
 
     # Everything below answers with the three keys the exchange decides — `:instance`,

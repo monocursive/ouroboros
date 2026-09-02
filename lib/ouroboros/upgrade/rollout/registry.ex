@@ -126,19 +126,20 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   `Ouroboros.Wasm.Store.protected_shas/1` reads it to decide which component bytes a prune
   may never evict (§7.4).
 
-  ## Lane W's epoch gate lives here, and it is atomic
+  ## Lane W's epoch gates live here, and they are atomic
 
   An epoch is the replay defence: an old artifact re-presented later is refused for its
   number, whatever its bytes say. Lane B enforces that per node, inside
   `Ouroboros.Upgrade.NodeExecutor.handle_call({:prepare, ...})`, where the check and the
   record it is checked against are the same serialized message. Lane W has no node
-  executor, so this register is where its monotonicity lives — and it lives *inside*
-  `deploying/2`'s `handle_call`, beside `ensure_absent/2`, for exactly the reason the node
+  executor, so every node's register is where its monotonicity lives. The driver spends the
+  epoch inside `deploying/2`; each target spends it inside `admit_wasm_epoch/2` before staging
+  bytes. Both decisions live in a serialized `handle_call`, for exactly the reason the node
   executor's does. A caller reading the highest epoch and then checkpointing would be a
   read-then-write across two messages, and two concurrent deploys at epochs 70 and 60
   would both pass their reads and both checkpoint.
 
-  So: a `:deploying` request that carries a `component_sha256` is refused
+  So: a `:deploying` request that carries a `component_sha256`, or a target admission, is refused
   `{:stale_epoch, epoch, highest}` unless its epoch is strictly greater than every lane-W
   entry this register holds, **in any state**. Any state, because a `:deploying` entry may
   yet become live, a `:quarantined` one may be running right now, and a `:rolled_back` one
@@ -242,6 +243,19 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   end
 
   @doc """
+  Atomically spends a lane-W epoch on the node that is about to stage the component.
+
+  The same artifact may repeat the claim, which makes a retry after an ambiguous transport
+  result safe. Any different artifact at that epoch, or any lower epoch, is stale. This is
+  the target-local half of `deploying/2`'s driver-side checkpoint: without it, moving the
+  driver to another core also moved the only replay defence.
+  """
+  @spec admit_wasm_epoch(keyword() | map(), GenServer.server()) :: :ok | {:error, term()}
+  def admit_wasm_epoch(attrs, server \\ __MODULE__) do
+    GenServer.call(server, {:admit_wasm_epoch, Map.new(attrs)})
+  end
+
+  @doc """
   Moves a rollout to a new state, refusing transitions that would lose information.
 
   `:detail` records the evidence for the transition. `:eval_report` records what an
@@ -287,6 +301,10 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   @spec durability(GenServer.server()) :: durability()
   def durability(server \\ __MODULE__), do: GenServer.call(server, :durability)
 
+  @doc "The highest lane-W epoch this node has admitted, including target-only claims."
+  @spec wasm_epoch(GenServer.server()) :: non_neg_integer()
+  def wasm_epoch(server \\ __MODULE__), do: GenServer.call(server, :wasm_epoch)
+
   @doc false
   def checkpoint_key, do: @store_key
 
@@ -294,13 +312,14 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   def init(opts) do
     with {:ok, storage} <- storage_config(opts),
          {:ok, adapter, adapter_opts} <- normalize_storage(storage),
-         {:ok, rollouts, watermark} <- load(adapter, adapter_opts) do
+         {:ok, rollouts, watermark, claim} <- load(adapter, adapter_opts) do
       {:ok,
        %{
          adapter: adapter,
          opts: adapter_opts,
          rollouts: rollouts,
          lane_w_epoch: watermark,
+         lane_w_claim: claim,
          limit: limit(opts),
          durability: durability_level(adapter)
        }}
@@ -315,6 +334,15 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
          :ok <- ensure_absent(state, entry.artifact_id),
          :ok <- ensure_fresh_epoch(state, entry) do
       persist(entry, state)
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:admit_wasm_epoch, attrs}, _from, state) do
+    with {:ok, claim} <- build_epoch_claim(attrs),
+         :ok <- ensure_claimable(state, claim) do
+      persist_epoch_claim(claim, state)
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
@@ -350,6 +378,7 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   end
 
   def handle_call(:durability, _from, state), do: {:reply, state.durability, state}
+  def handle_call(:wasm_epoch, _from, state), do: {:reply, highest_lane_w_epoch(state), state}
 
   defp build_entry(attrs) do
     with {:ok, artifact_id} <- fetch_binary(attrs, :artifact_id),
@@ -372,6 +401,23 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
          created_at: timestamp,
          updated_at: timestamp
        }}
+    end
+  end
+
+  defp build_epoch_claim(attrs) do
+    with {:ok, artifact_id} <- fetch_binary(attrs, :artifact_id),
+         {:ok, epoch} <- fetch_epoch(attrs),
+         {:ok, component_sha256} <- fetch_component_sha256(attrs),
+         true <- is_binary(component_sha256) do
+      {:ok,
+       %{
+         artifact_id: artifact_id,
+         epoch: epoch,
+         component_sha256: component_sha256
+       }}
+    else
+      false -> {:error, {:missing_attribute, :component_sha256}}
+      {:error, _reason} = error -> error
     end
   end
 
@@ -418,6 +464,16 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
     if epoch > highest, do: :ok, else: {:error, {:stale_epoch, epoch, highest}}
   end
 
+  defp ensure_claimable(state, %{epoch: epoch} = claim) do
+    highest = highest_lane_w_epoch(state)
+
+    cond do
+      state.lane_w_claim == claim and epoch == highest -> :ok
+      epoch > highest -> :ok
+      true -> {:error, {:stale_epoch, epoch, highest}}
+    end
+  end
+
   # The watermark is the *high-water mark*, not the highest surviving entry. Deriving it
   # from the entries alone made `prune/2` able to lower it: a settled rollout at the
   # highest epoch is exactly the kind of history pruning discards first, and once it was
@@ -460,10 +516,31 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   defp persist(entry, state) do
     rollouts = state.rollouts |> put_entry(entry) |> prune(state.limit)
     watermark = max(state.lane_w_epoch, derived_lane_w_epoch(rollouts))
+    claim = advance_claim(state.lane_w_claim, rollouts)
 
-    case write_checkpoint(state, rollouts, watermark) do
+    case write_checkpoint(state, rollouts, watermark, claim) do
       :ok ->
-        {:reply, {:ok, entry}, %{state | rollouts: rollouts, lane_w_epoch: watermark}}
+        {:reply, {:ok, entry},
+         %{state | rollouts: rollouts, lane_w_epoch: watermark, lane_w_claim: claim}}
+
+      {:error, {:commit_outcome_unknown, _reason} = ambiguity} ->
+        {:stop, ambiguity, {:error, {:rollout_commit_outcome_unknown, ambiguity}}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, {:rollout_checkpoint_failed, reason}}, state}
+
+      other ->
+        {:reply, {:error, {:invalid_rollout_storage_response, other}}, state}
+    end
+  end
+
+  defp persist_epoch_claim(claim, %{lane_w_claim: claim} = state),
+    do: {:reply, :ok, state}
+
+  defp persist_epoch_claim(claim, state) do
+    case write_checkpoint(state, state.rollouts, claim.epoch, claim) do
+      :ok ->
+        {:reply, :ok, %{state | lane_w_epoch: claim.epoch, lane_w_claim: claim}}
 
       {:error, {:commit_outcome_unknown, _reason} = ambiguity} ->
         {:stop, ambiguity, {:error, {:rollout_commit_outcome_unknown, ambiguity}}, state}
@@ -488,10 +565,10 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   # It stays because the argument-position bug is structural — any future encoder that can
   # raise would kill this GenServer again — and a refusal here costs one rollout while a
   # raise costs the whole register.
-  defp write_checkpoint(state, rollouts, watermark) do
+  defp write_checkpoint(state, rollouts, watermark, claim) do
     adapter_call(state.adapter, :put_checkpoint, [
       @store_key,
-      checkpoint(rollouts, watermark),
+      checkpoint(rollouts, watermark, claim),
       state.opts
     ])
   rescue
@@ -552,16 +629,51 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
     end)
   end
 
-  # `:lane_w_epoch` is additive and needs no new checkpoint version, the way the signing
-  # journal's `:lane` is: an older build reads the map, ignores the key, and writes back a
-  # checkpoint without it — at which point the mark is derived from the entries again,
-  # which is where it came from. A checkpoint that has never held one loads as `0`.
-  defp checkpoint(rollouts, watermark) do
+  # These fields are additive and need no new checkpoint version. The claim makes the
+  # highest epoch idempotent for the one artifact that spent it on this target; an older
+  # build ignores both fields and falls back to deriving the mark from rollout entries.
+  defp checkpoint(rollouts, watermark, claim) do
     Wire.dump(%{
       version: @checkpoint_version,
       rollouts: to_wire(rollouts),
-      lane_w_epoch: watermark
+      lane_w_epoch: watermark,
+      lane_w_claim: claim
     })
+  end
+
+  defp advance_claim(current, rollouts) do
+    case derived_claim(rollouts) do
+      nil ->
+        current
+
+      candidate when is_nil(current) ->
+        candidate
+
+      %{epoch: epoch} = candidate when epoch > current.epoch ->
+        candidate
+
+      _older_or_equal ->
+        current
+    end
+  end
+
+  defp derived_claim(rollouts) do
+    rollouts
+    |> Map.values()
+    |> Enum.filter(&is_binary(Map.get(&1, :component_sha256)))
+    |> Enum.max_by(&Map.get(&1, :epoch, 0), fn -> nil end)
+    |> case do
+      nil -> nil
+      entry -> epoch_claim(entry)
+    end
+  end
+
+  defp epoch_claim(entry) do
+    %{
+      artifact_id: Map.get(entry, :artifact_id),
+      epoch: Map.get(entry, :epoch),
+      component_sha256: Map.get(entry, :component_sha256)
+    }
   end
 
   # Two names for one module compare equal whichever side of the checkpoint boundary
@@ -581,15 +693,15 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   defp load(adapter, adapter_opts) do
     case adapter_call(adapter, :get_checkpoint, [@store_key, adapter_opts]) do
       :not_found ->
-        {:ok, %{}, 0}
+        {:ok, %{}, 0, nil}
 
       {:ok, wire} ->
         case Wire.load(wire) do
           %{version: version, rollouts: rollouts} = held when is_map(rollouts) ->
-            upgrade(version, from_wire(rollouts), watermark(held))
+            load_held(version, rollouts, held)
 
           %{"version" => version, "rollouts" => rollouts} = held when is_map(rollouts) ->
-            upgrade(version, from_wire(rollouts), watermark(held))
+            load_held(version, rollouts, held)
 
           _invalid ->
             {:error, :invalid_rollout_checkpoint}
@@ -600,6 +712,46 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
 
       other ->
         {:error, {:invalid_rollout_storage_response, other}}
+    end
+  end
+
+  defp load_held(version, rollouts, held) do
+    with {:ok, kept, watermark} <- upgrade(version, from_wire(rollouts), watermark(held)) do
+      {:ok, kept, watermark, checkpoint_claim(held, kept, watermark)}
+    end
+  end
+
+  defp checkpoint_claim(held, rollouts, watermark) do
+    case normalize_claim(Map.get(held, :lane_w_claim) || Map.get(held, "lane_w_claim")) do
+      %{epoch: ^watermark} = claim -> claim
+      _absent_or_invalid -> claim_at(rollouts, watermark)
+    end
+  end
+
+  defp normalize_claim(claim) when is_map(claim) do
+    attrs = %{
+      artifact_id: Map.get(claim, :artifact_id) || Map.get(claim, "artifact_id"),
+      epoch: Map.get(claim, :epoch) || Map.get(claim, "epoch"),
+      component_sha256: Map.get(claim, :component_sha256) || Map.get(claim, "component_sha256")
+    }
+
+    case build_epoch_claim(attrs) do
+      {:ok, normalized} -> normalized
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp normalize_claim(_absent_or_invalid), do: nil
+
+  defp claim_at(rollouts, watermark) do
+    rollouts
+    |> Map.values()
+    |> Enum.find(
+      &(Map.get(&1, :epoch) == watermark and is_binary(Map.get(&1, :component_sha256)))
+    )
+    |> case do
+      nil -> nil
+      entry -> epoch_claim(entry)
     end
   end
 
