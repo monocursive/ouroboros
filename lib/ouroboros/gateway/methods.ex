@@ -88,6 +88,7 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Gateway.Methods.Placement
   alias Ouroboros.Gateway.Methods.Present
   alias Ouroboros.Gateway.Methods.Safe
+  alias Ouroboros.Gateway.Wire
   alias Ouroboros.Interactive.State, as: InteractiveState
   alias Ouroboros.Interactive.Ref, as: InteractiveRef
   alias Ouroboros.Interactive.Task, as: InteractiveTask
@@ -107,6 +108,9 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Upgrade.Rollout.Registry, as: Rollouts
   alias Ouroboros.Upgrade.Signing.Service, as: SigningService
   alias Ouroboros.Wasm.Surface, as: WasmSurface
+  alias Ouroboros.Wasm.Artifact, as: WasmArtifact
+  alias Ouroboros.Wasm.Deploy, as: WasmDeploy
+  alias Ouroboros.Wasm.Upload, as: WasmUpload
 
   import Ouroboros.Gateway.Methods.Safe,
     only: [
@@ -163,6 +167,30 @@ defmodule Ouroboros.Gateway.Methods do
   # would be reported as `-32005 upstream_timeout` with no detail; letting `:erpc` decide
   # first produces the honest answer, which is that the signing node did not respond.
   @signing_erpc_timeout 10_000
+
+  # W12. Lane W's four operator verbs, each bounded by the work it actually does rather
+  # than by one number covering all of them.
+  #
+  # `wasm.upload` writes at most half a mebibyte to a local file: it is a `@default_timeout`
+  # verb wearing its own name so the number is not silently inherited.
+  #
+  # `wasm.sign` may inspect the component with this node's helper (a compile-free read, but
+  # a helper that has to be spawned first) and then wait on a signing service that bounds
+  # itself at `:signing_call_timeout` — fifteen seconds by default — on another host.
+  #
+  # `wasm.deploy` runs a whole rollout: stage (60s per node), probe, evaluate (30s), and a
+  # durable start (15s), gate after gate. Its ceiling is above the sum on purpose, the way
+  # `@forge_timeout` is: a rollout that settles `:quarantined` is a named answer an operator
+  # can act on, and a gateway ceiling firing first would replace it with `-32005` and no
+  # detail about which node did not report.
+  @wasm_upload_timeout 15_000
+  @wasm_sign_timeout 60_000
+  @wasm_deploy_timeout 180_000
+  @wasm_rollback_timeout 30_000
+
+  # Below each ceiling above, so the plane's own typed refusal wins the race against a
+  # transport deadline that says nothing about why.
+  @wasm_erpc_slack 5_000
 
   @replay_limit 500
   @default_replay_limit 100
@@ -331,9 +359,17 @@ defmodule Ouroboros.Gateway.Methods do
     # than usual: these two do not merely avoid changing state, they avoid *starting* the
     # containment helper. `Ouroboros.Wasm.Surface` reads a pool process that already
     # exists, a directory, and a register. A node that has never built `ouro-wasm` answers
-    # both as readily as one that runs it hourly. There is deliberately no `wasm.deploy`
-    # and no `wasm.drop`: a component runs on somebody's machine under a signature, and it
-    # is deployed by the forge and the rollout plane, never authored over a socket.
+    # both as readily as one that runs it hourly.
+    #
+    # These two were once the whole of lane W on the wire, and this comment used to say
+    # there would deliberately never be a `wasm.deploy`. W12 reversed that, and D15 says
+    # why: the authority in a deployment is the **signature**, which the target verifies
+    # against its own trust policy, so a socket that carries a signed bundle adds nothing
+    # a client did not already have — while a `:operate` client could always start any BEAM
+    # capability through the mesh. What is still true is the sentence underneath it: no
+    # unsigned bytes reach the helper through any path, and there is still no `wasm.drop`,
+    # `wasm.load`, `wasm.instantiate` or `wasm.call`, because those would be a socket
+    # deciding what this node runs rather than a signer deciding what may exist.
     #
     # Node-routed like `computer_use.status`, because a helper, a store and a register are
     # node-local authorities: a fleet answer is one call per machine, not a merged view
@@ -473,7 +509,23 @@ defmodule Ouroboros.Gateway.Methods do
     # any other, and the containment boundary that makes that safe is the helper's linker,
     # not this table.
     # ---------------------------------------------------------------------------------
-    "agents.message" => %{scope: :operate, timeout: @agent_message_timeout}
+    "agents.message" => %{scope: :operate, timeout: @agent_message_timeout},
+    # W12. Lane W from the operator's chair, and why these are `:operate` and not more.
+    #
+    # A deployment's authority is the signature on it. Every one of these verbs hands the
+    # target node bytes that the target then verifies against its **own**
+    # `upgrade_trust_policy` before anything is written, so the socket is a courier and
+    # never a signer — which is the whole of D15. `:operate` is the same scope that already
+    # starts a BEAM capability through `capabilities.admit` and a session through
+    # `interactive.start`; a listener held at `:read` reaches none of them.
+    #
+    # Node-routed like `wasm.status`, because everything they touch — the upload directory,
+    # the component store, the helper, the rollout register — is node-local.
+    # ---------------------------------------------------------------------------------
+    "wasm.upload" => %{scope: :operate, timeout: @wasm_upload_timeout},
+    "wasm.sign" => %{scope: :operate, timeout: @wasm_sign_timeout},
+    "wasm.deploy" => %{scope: :operate, timeout: @wasm_deploy_timeout, outcome: :unknown},
+    "wasm.rollback" => %{scope: :operate, timeout: @wasm_rollback_timeout}
   }
 
   # The exact terms the upstream schemas declare, spelled out here so that a client string
@@ -1125,7 +1177,68 @@ defmodule Ouroboros.Gateway.Methods do
          {"timeout_ms", :optional, {:integer, 1, @max_agent_message_timeout_ms},
           "how long to wait for the agent; defaults to #{@default_agent_message_timeout_ms}"}
        ],
-       "`reply` is the agent's `last_answer` and is **untrusted**: for a lane-W capability it is prose and JSON the component wrote. It is returned whole when it encodes within #{@max_agent_message_bytes} bytes and as a marked, truncated string otherwise, which is what `truncated` distinguishes. A message an agent refused is still a delivered message: this verb says the agent answered nothing, and `agents.state` says why"}
+       "`reply` is the agent's `last_answer` and is **untrusted**: for a lane-W capability it is prose and JSON the component wrote. It is returned whole when it encodes within #{@max_agent_message_bytes} bytes and as a marked, truncated string otherwise, which is what `truncated` distinguishes. A message an agent refused is still a delivered message: this verb says the agent answered nothing, and `agents.state` says why"},
+    # W12
+    "wasm.upload" =>
+      {:closed,
+       [
+         {"upload", :optional, :string,
+          "the id a previous frame returned; omitted, this frame opens a new upload and the reply names it"},
+         {"offset", :required, :non_negative_integer,
+          "must equal what the node already holds; a mismatch answers `-32602` naming the offset it has, which is where to resume"},
+         {"data", :required, :string,
+          "base64 of at most 512 KiB of the file, bounded before it is decoded"},
+         {"final", {:optional, false}, :boolean,
+          "closes the upload: the bytes become readable by `wasm.sign` and `wasm.deploy`, and the reply carries their sha256"},
+         @authority_node
+       ],
+       "the transport for bytes a JSON frame cannot carry (docs/WASM.md D16). An upload carries no authority: what comes out of it is verified by whichever verb consumes it, it is consumed once, and it is swept ten minutes after the last frame that touched it"},
+    "wasm.sign" =>
+      {:closed,
+       [
+         {"upload", :required, :string, "a committed `wasm.upload` holding the component bytes"},
+         {"name", :required, :string,
+          "lower case, starting with a letter or digit, then letters, digits, `.`, `_`, `-`, at most 64 bytes; it is the register's module and the durable wrapper's id"},
+         {"author", :required, :string, "provenance the signing policy requires"},
+         {"epoch", :optional, :positive_integer,
+          "allocated over this node with `Ouroboros.Upgrade.Epoch.next/2` when omitted"},
+         {"imports", :optional, {:list, :string, 8},
+          "read off the component by this node's helper when omitted, because a wrong list is a quarantine rather than a warning"},
+         {"language", :optional, :string, nil},
+         {"source_sha256", :optional, :string, "64 lower-case hex"},
+         {"start_config", :optional, :string,
+          "the config the durable wrapper is started with; the id is derived from `name` and is never a parameter"},
+         {"eval", :optional,
+          {:object,
+           [
+             {"probes", :required, {:list, :object, 20},
+              "each `{\"input\": <json>, \"expect\": {\"kind\": ..., ...}}`. The kinds are `any_reply`, `contains` (takes `substring`), `equals` (takes `value`) and `state_matches` (takes `key`, a state field this build already knows, and `value`)"},
+             {"budget_ms", :optional, :positive_integer, "the deadline every probe runs under"},
+             {"max_latency_ms", :optional, :positive_integer,
+              "a gate on the latency observed, checked after the answer arrives"},
+             {"required", :optional, {:either, [{:const, "all"}, :object]},
+              "`\"all\"`, or `{\"at_least\": n}`"}
+           ]},
+          "the signed evaluation spec; required by default for lane W (D12) and refused by the signer when absent. There is no `initial_state`: what a capability is evaluated as is the deployment's statement, not the test's"},
+         @authority_node
+       ],
+       "answers the bundle's **prefix** rather than the bundle: the client already holds the bytes it uploaded, and a sixteen-mebibyte result would need a chunked download to hand somebody their own file back"},
+    "wasm.deploy" =>
+      {:closed,
+       [
+         {"upload", :required, :string,
+          "a committed `wasm.upload` holding one `.ouro-wasm` bundle"},
+         {"nodes", :optional, {:list, :node, 32}, "the targets; this node alone by default"},
+         @authority_node
+       ],
+       "the bundle is parsed under its bounds and verified against the driving node's own trust policy before the store, the helper or the rollout register hears about it. A rollout that ran answers with its state — `live`, `rolled_back` or `quarantined` — rather than with an error"},
+    "wasm.rollback" =>
+      {:closed,
+       [
+         {"name", :required, :string, "the live lane-W capability to retire"},
+         @authority_node
+       ],
+       "stops the wrapper agent on every node the entry names and marks the entry; the component bytes stay in the store (D6), so redeploying needs a new epoch and a new signature but no new build"}
   }
 
   @type entry :: %{
@@ -1680,6 +1793,118 @@ defmodule Ouroboros.Gateway.Methods do
 
   def invoke("wasm.status", params), do: wasm_call(params, :status)
   def invoke("wasm.list", params), do: wasm_call(params, :list)
+
+  # ---------------------------------------------------------------------------
+  # W12 — signing and deploy on the wire
+  #
+  # Three verbs and the transport underneath them. What makes them safe is not this
+  # module: it is that the bytes carry a signature the **target** checks against its own
+  # `upgrade_trust_policy` before the store, the helper or the rollout register sees them
+  # (docs/WASM.md D15). This end validates shapes, bounds what it decodes, converts no
+  # client byte into an atom it did not already hold, and routes.
+  #
+  # `wasm.upload` is the only one that takes bytes, because a component is bounded at
+  # sixteen mebibytes and a frame at one (D16). It writes to a node-local file under the
+  # data directory, and every bound on it — the chunk, the total, how many may be in
+  # flight, how long an abandoned one lives — is in `Ouroboros.Wasm.Upload`.
+  # ---------------------------------------------------------------------------
+
+  def invoke("wasm.upload", params) do
+    with :ok <- only_keys(params, ["upload", "offset", "data", "final", "node"]),
+         {:ok, upload} <- wasm_optional_upload(params),
+         {:ok, offset} <- option_value("offset", :non_negative_integer, Map.get(params, "offset")),
+         {:ok, chunk} <- wasm_chunk(params),
+         {:ok, final?} <- wasm_flag(params, "final"),
+         {:ok, target} <- permissions_node(params) do
+      wasm_node_call(
+        target,
+        WasmUpload,
+        :append,
+        [upload, offset, chunk, final?, []],
+        @wasm_upload_timeout - @wasm_erpc_slack
+      )
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("wasm.sign", params) do
+    with :ok <-
+           only_keys(params, [
+             "upload",
+             "name",
+             "author",
+             "epoch",
+             "imports",
+             "language",
+             "source_sha256",
+             "start_config",
+             "eval",
+             "node"
+           ]),
+         {:ok, upload} <- wasm_upload(params),
+         {:ok, name} <- wasm_name(params),
+         {:ok, author} <- fetch_string(params, "author"),
+         {:ok, epoch} <- wasm_optional_positive(params, "epoch"),
+         {:ok, imports} <- wasm_imports(params),
+         {:ok, language} <- fetch_optional_string(params, "language"),
+         {:ok, source_sha256} <- wasm_optional_sha256(params),
+         {:ok, start_config} <- wasm_start_config(params),
+         {:ok, eval} <- wasm_eval(params),
+         {:ok, target} <- permissions_node(params) do
+      attrs =
+        %{upload: upload, name: name, author: author}
+        |> wasm_put(:epoch, epoch)
+        |> wasm_put(:imports, imports)
+        |> wasm_put(:language, language)
+        |> wasm_put(:source_sha256, source_sha256)
+        |> wasm_put(:start_config, start_config)
+        |> wasm_put(:eval, eval)
+
+      wasm_node_call(
+        target,
+        WasmDeploy,
+        :sign,
+        [attrs, []],
+        @wasm_sign_timeout - @wasm_erpc_slack
+      )
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("wasm.deploy", params) do
+    with :ok <- only_keys(params, ["upload", "nodes", "node"]),
+         {:ok, upload} <- wasm_upload(params),
+         {:ok, target} <- permissions_node(params),
+         {:ok, nodes} <- wasm_targets(params, target) do
+      wasm_node_call(
+        target,
+        WasmDeploy,
+        :deploy,
+        [upload, nodes, []],
+        @wasm_deploy_timeout - @wasm_erpc_slack
+      )
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("wasm.rollback", params) do
+    with :ok <- only_keys(params, ["name", "node"]),
+         {:ok, name} <- wasm_name(params),
+         {:ok, target} <- permissions_node(params) do
+      wasm_node_call(
+        target,
+        WasmDeploy,
+        :rollback,
+        [name, []],
+        @wasm_rollback_timeout - @wasm_erpc_slack
+      )
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
 
   # ---------------------------------------------------------------------------
   # E2/E3 — code intelligence on the wire
@@ -2868,6 +3093,364 @@ defmodule Ouroboros.Gateway.Methods do
       true -> binary |> binary_part(0, byte_size(binary) - 1) |> valid_prefix()
     end
   end
+
+  # W12. The same routing as `wasm_call/2`, with a per-verb deadline: these do real work
+  # on the machine they name — a file write, a signing round trip, a whole rollout — so one
+  # `@fleet_query_timeout` covering all of them would kill the longest of them at five
+  # seconds. The `:erpc` deadline sits below the method's ceiling so the plane's own typed
+  # refusal wins the race against a transport timeout with nothing in it.
+  defp wasm_node_call(target, module, function, args, timeout) do
+    safe(fn ->
+      if target == node() do
+        wasm_reply(apply(module, function, args))
+      else
+        wasm_reply(:erpc.call(target, module, function, args, timeout))
+      end
+    end)
+  end
+
+  # The refusals worth naming. Everything below them is a client's own mistake about a
+  # transfer or a file it supplied, so it is `-32602` rather than an upstream failure; a
+  # node that cannot sign at all is `-32004`, because "this node has no signer" and "this
+  # signer said no" need different operator responses.
+  defp wasm_reply({:ok, value}), do: {:ok, value}
+
+  defp wasm_reply({:error, :no_signing_service}) do
+    unavailable(
+      "this node has no signing service: OUROBOROS_SIGNING_NODE must name the :signer " <>
+        "node that holds the key, or this node must run one itself. A component is signed " <>
+        "where the key is, never here"
+    )
+  end
+
+  defp wasm_reply({:error, {:signing_service_unavailable, _detail} = reason}),
+    do: {:error, code(:unavailable), "the signing service did not answer", Wire.to_json(reason)}
+
+  defp wasm_reply({:error, {:signer_unreachable, target, _detail} = reason}) do
+    {:error, code(:unavailable), "signing node #{target} did not answer", Wire.to_json(reason)}
+  end
+
+  defp wasm_reply({:error, {:signing_refused, _reason} = reason}) do
+    {:error, code(:upstream_error), "the signing policy refused this manifest",
+     Wire.to_json(reason)}
+  end
+
+  defp wasm_reply({:error, {:imports_not_derivable, _detail} = reason}) do
+    invalid_params(
+      "params.imports must be given: this node could not read the component's own import " <>
+        "list (#{inspect(reason, limit: 5, printable_limit: 120)}), and a manifest that " <>
+        "declares the wrong imports is quarantined at stage time rather than warned about"
+    )
+  end
+
+  defp wasm_reply({:error, {:offset_mismatch, held, _sent}}),
+    do: invalid_params("params.offset must be #{held}, which is what this upload holds")
+
+  defp wasm_reply({:error, {:unknown_upload, id}}),
+    do: not_found("no upload #{id} on this node; it may have expired or been consumed")
+
+  defp wasm_reply({:error, {:upload_incomplete, id}}),
+    do: invalid_params("upload #{id} has not been committed; send its last frame with final")
+
+  defp wasm_reply({:error, {:upload_closed, id}}),
+    do: invalid_params("upload #{id} is already committed and takes no further frames")
+
+  defp wasm_reply({:error, {:too_many_uploads, _held, max}}) do
+    unavailable(
+      "this node already holds #{max} uploads; they expire ten minutes after their last frame"
+    )
+  end
+
+  defp wasm_reply({:error, :no_data_dir}) do
+    unavailable("this node has no data directory, so it can stage nothing and store nothing")
+  end
+
+  defp wasm_reply({:error, {:no_live_rollout, name}}),
+    do: not_found("no live lane-W rollout named #{inspect(name)} on this node")
+
+  defp wasm_reply(other), do: reply(other)
+
+  ## W12 parameters
+
+  defp wasm_upload(params) do
+    with {:ok, value} <- fetch_string(params, "upload"), do: wasm_upload_id(value)
+  end
+
+  defp wasm_optional_upload(params) do
+    case Map.get(params, "upload") do
+      nil -> {:ok, nil}
+      value when is_binary(value) -> wasm_upload_id(value)
+      _other -> {:invalid, "params.upload must be the id a previous frame returned"}
+    end
+  end
+
+  # Bounded and validated here as well as on the node that minted it: an id that made a
+  # round trip through a client is a value that arrived from a client, and it becomes a
+  # filename there.
+  defp wasm_upload_id(value) do
+    if Regex.match?(~r/\A[0-9a-f]{32}\z/, value),
+      do: {:ok, value},
+      else: {:invalid, "params.upload must be an upload id this node minted"}
+  end
+
+  # The manifest's own charset, checked at the edge so a name that could hold a path
+  # separator or a bidirectional control never reaches the register's module field.
+  defp wasm_name(params) do
+    with {:ok, value} <- fetch_string(params, "name") do
+      if WasmArtifact.name?(value) do
+        {:ok, value}
+      else
+        {:invalid,
+         "params.name must be lower case, start with a letter or digit, then letters, " <>
+           "digits, `.`, `_` or `-`, and be at most 64 bytes: it is the rollout register's " <>
+           "module and the durable id a start block claims cluster-wide"}
+      end
+    end
+  end
+
+  # Bounded before it is decoded, not after: base64 is four characters to three bytes, so
+  # the encoded length already states what a decode would allocate.
+  defp wasm_chunk(params) do
+    max = WasmUpload.max_chunk_bytes()
+
+    case Map.get(params, "data") do
+      value when is_binary(value) and value != "" ->
+        if byte_size(value) > div(max + 2, 3) * 4 + 4 do
+          {:invalid, "params.data must be base64 of at most #{max} bytes"}
+        else
+          wasm_decode64(value, max)
+        end
+
+      _other ->
+        {:invalid, "params.data must be a nonempty base64 string"}
+    end
+  end
+
+  defp wasm_decode64(value, max) do
+    case Base.decode64(value) do
+      {:ok, ""} -> {:invalid, "params.data must decode to at least one byte"}
+      {:ok, chunk} when byte_size(chunk) <= max -> {:ok, chunk}
+      {:ok, _oversize} -> {:invalid, "params.data must be base64 of at most #{max} bytes"}
+      :error -> {:invalid, "params.data must be base64"}
+    end
+  end
+
+  defp wasm_flag(params, key) do
+    case Map.get(params, key, false) do
+      value when is_boolean(value) -> {:ok, value}
+      _other -> {:invalid, "params.#{key} must be a boolean"}
+    end
+  end
+
+  defp wasm_optional_positive(params, key) do
+    case Map.get(params, key) do
+      nil -> {:ok, nil}
+      value -> option_value(key, :positive_integer, value)
+    end
+  end
+
+  defp wasm_optional_sha256(params) do
+    case Map.get(params, "source_sha256") do
+      nil ->
+        {:ok, nil}
+
+      value when is_binary(value) ->
+        if WasmArtifact.sha256?(value),
+          do: {:ok, value},
+          else: {:invalid, "params.source_sha256 must be 64 lower-case hex characters"}
+
+      _other ->
+        {:invalid, "params.source_sha256 must be 64 lower-case hex characters"}
+    end
+  end
+
+  # Absent means "read them off the component", which is a different instruction from an
+  # empty list, so `nil` and `[]` are not folded together here.
+  defp wasm_imports(params) do
+    case Map.get(params, "imports") do
+      nil ->
+        {:ok, nil}
+
+      values when is_list(values) and length(values) <= 8 ->
+        if Enum.all?(values, &(is_binary(&1) and &1 != "" and byte_size(&1) <= 64)),
+          do: {:ok, values},
+          else:
+            {:invalid, "params.imports must contain only nonempty strings of at most 64 bytes"}
+
+      _other ->
+        {:invalid, "params.imports must be a list of at most 8 nonempty strings"}
+    end
+  end
+
+  # The signer bounds this at 16 KiB and refuses anything larger; refusing it here too
+  # means a config nobody could sign is not first uploaded, hashed, and journalled.
+  defp wasm_start_config(params) do
+    case Map.get(params, "start_config") do
+      nil ->
+        {:ok, nil}
+
+      value when is_binary(value) and byte_size(value) <= 16_384 ->
+        {:ok, value}
+
+      _other ->
+        {:invalid, "params.start_config must be a string of at most 16384 bytes"}
+    end
+  end
+
+  # A signed eval spec is the only place in this table where a client's bytes decide an
+  # atom, and they do not: every atom below is a literal in this module, and the one field
+  # that names something outside it — a capability's own state key — goes through
+  # `String.to_existing_atom/1` in a rescue, exactly as `upgrade.history`'s module does.
+  #
+  # `initial_state` is deliberately not accepted. `Ouroboros.Wasm.Rollout.start_state/2`
+  # names the six keys that decide what is being evaluated and a signed spec merges *under*
+  # them, so the only keys an `initial_state` here could still choose are ones no lane-W
+  # capability reads. A parameter that can only do nothing is a parameter that will one day
+  # do something.
+  defp wasm_eval(params) do
+    case Map.get(params, "eval") do
+      nil -> {:ok, nil}
+      spec when is_map(spec) -> wasm_eval_spec(spec)
+      _other -> {:invalid, "params.eval must be an object"}
+    end
+  end
+
+  defp wasm_eval_spec(spec) do
+    with :ok <- only_keys(spec, ["probes", "budget_ms", "max_latency_ms", "required"]),
+         {:ok, probes} <- wasm_probes(Map.get(spec, "probes")),
+         {:ok, budget} <- wasm_optional_positive(spec, "budget_ms"),
+         {:ok, latency} <- wasm_optional_positive(spec, "max_latency_ms"),
+         {:ok, required} <- wasm_required(Map.get(spec, "required")) do
+      {:ok,
+       %{probes: probes}
+       |> wasm_put(:budget_ms, budget)
+       |> wasm_put(:max_latency_ms, latency)
+       |> wasm_put(:required, required)}
+    end
+  end
+
+  defp wasm_probes(probes) when is_list(probes) and probes != [] and length(probes) <= 20 do
+    probes
+    |> Enum.reduce_while({:ok, []}, fn probe, {:ok, acc} ->
+      case wasm_probe(probe) do
+        {:ok, valid} -> {:cont, {:ok, [valid | acc]}}
+        {:invalid, message} -> {:halt, {:invalid, message}}
+      end
+    end)
+    |> case do
+      {:ok, valid} -> {:ok, Enum.reverse(valid)}
+      invalid -> invalid
+    end
+  end
+
+  defp wasm_probes(_other),
+    do: {:invalid, "params.eval.probes must be a list of 1 to 20 objects"}
+
+  defp wasm_probe(probe) when is_map(probe) do
+    with :ok <- only_keys(probe, ["input", "expect"]),
+         true <-
+           Map.has_key?(probe, "input") or {:invalid, "params.eval.probes[].input is required"},
+         {:ok, expect} <- wasm_expect(Map.get(probe, "expect")) do
+      {:ok, %{input: Map.get(probe, "input"), expect: expect}}
+    else
+      {:invalid, message} -> {:invalid, message}
+    end
+  end
+
+  defp wasm_probe(_other), do: {:invalid, "params.eval.probes[] must be an object"}
+
+  defp wasm_expect(nil), do: {:ok, :any_reply}
+
+  defp wasm_expect(%{"kind" => "any_reply"} = expect) do
+    with :ok <- only_keys(expect, ["kind"]), do: {:ok, :any_reply}
+  end
+
+  defp wasm_expect(%{"kind" => "contains", "substring" => substring} = expect)
+       when is_binary(substring) and substring != "" do
+    with :ok <- only_keys(expect, ["kind", "substring"]) do
+      if String.valid?(substring) and byte_size(substring) <= 1_024,
+        do: {:ok, {:contains, substring}},
+        else:
+          {:invalid, "params.eval.probes[].expect.substring must be text of at most 1024 bytes"}
+    end
+  end
+
+  defp wasm_expect(%{"kind" => "equals"} = expect) do
+    with :ok <- only_keys(expect, ["kind", "value"]) do
+      if Map.has_key?(expect, "value"),
+        do: {:ok, {:equals, Map.get(expect, "value")}},
+        else: {:invalid, "params.eval.probes[].expect.value is required for an equals check"}
+    end
+  end
+
+  defp wasm_expect(%{"kind" => "state_matches", "key" => key} = expect) when is_binary(key) do
+    with :ok <- only_keys(expect, ["kind", "key", "value"]),
+         {:ok, field} <- wasm_state_key(key) do
+      if Map.has_key?(expect, "value"),
+        do: {:ok, {:state_matches, field, Map.get(expect, "value")}},
+        else:
+          {:invalid, "params.eval.probes[].expect.value is required for a state_matches check"}
+    end
+  end
+
+  defp wasm_expect(_other) do
+    {:invalid,
+     "params.eval.probes[].expect must name a kind: any_reply, contains, equals or state_matches"}
+  end
+
+  # A capability's state field, resolved against the atoms this node already holds. An
+  # unknown one is a parameter error rather than a new entry in a table nothing collects —
+  # and a signed manifest whose eval spec names an atom no loading node has is a manifest
+  # `Ouroboros.Wasm.Bundle` would refuse to decode anyway.
+  defp wasm_state_key(key) when byte_size(key) <= 128 do
+    {:ok, String.to_existing_atom(key)}
+  rescue
+    ArgumentError ->
+      {:invalid,
+       "params.eval.probes[].expect.key must name a state field this node knows, got: " <>
+         inspect(key)}
+  end
+
+  defp wasm_state_key(_key),
+    do: {:invalid, "params.eval.probes[].expect.key must be at most 128 bytes"}
+
+  defp wasm_required(nil), do: {:ok, nil}
+  defp wasm_required("all"), do: {:ok, :all}
+
+  defp wasm_required(%{"at_least" => n}) when is_integer(n) and n >= 1,
+    do: {:ok, {:at_least, n}}
+
+  defp wasm_required(_other),
+    do: {:invalid, ~s(params.eval.required must be "all" or {"at_least": n})}
+
+  # The targets a rollout drives. Defaulted to the driving node, because a deployment to
+  # nowhere is not a shorter deployment, and bounded and deduplicated here so the rollout's
+  # own `{:duplicate_nodes, _}` is a refusal a client cannot reach by accident.
+  defp wasm_targets(params, driver) do
+    case Map.get(params, "nodes") do
+      nil ->
+        {:ok, [driver]}
+
+      values when is_list(values) and values != [] and length(values) <= 32 ->
+        values
+        |> Enum.reduce_while({:ok, []}, fn value, {:ok, acc} ->
+          case option_value("nodes", :node, value) do
+            {:ok, target} -> {:cont, {:ok, [target | acc]}}
+            {:invalid, message} -> {:halt, {:invalid, message}}
+          end
+        end)
+        |> case do
+          {:ok, targets} -> {:ok, targets |> Enum.reverse() |> Enum.uniq()}
+          invalid -> invalid
+        end
+
+      _other ->
+        {:invalid, "params.nodes must be a list of 1 to 32 connected machines"}
+    end
+  end
+
+  defp wasm_put(map, _key, nil), do: map
+  defp wasm_put(map, key, value), do: Map.put(map, key, value)
 
   # Same posture as `permissions_call/3` and `code_intel_call/3`, and for the same
   # reason: an MCP server runs on the machine whose session asked for it, so a session

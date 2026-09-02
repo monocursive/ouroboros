@@ -3738,6 +3738,332 @@ impl WasmComponent {
     }
 }
 
+/// W12. What one `wasm.upload` frame is answered with.
+///
+/// `sha256` is `None` until the frame that closes the upload — a digest over part of a
+/// file is a number that means nothing, and offering one would invite a client to check
+/// it. `chunk_bytes` is the node's own ceiling, so a client sizes its next frame from the
+/// answer rather than from a constant compiled into it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmUploadReceipt {
+    pub upload: String,
+    pub received: u64,
+    pub complete: bool,
+    pub sha256: Option<String>,
+    pub chunk_bytes: u64,
+}
+
+/// W12. What `wasm.sign` answers with: the bundle's prefix, and what it describes.
+///
+/// Not the bundle. The operator already holds the component they uploaded, so the node
+/// returns the header and the envelope and the client writes those followed by its own
+/// file. `bundle_bytes` is what that file will weigh, which is the only arithmetic the
+/// client does about a format it does not otherwise implement.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmSignature {
+    pub artifact_id: Option<String>,
+    pub name: Option<String>,
+    pub epoch: Option<u64>,
+    pub component_sha256: Option<String>,
+    pub size: Option<u64>,
+    pub world: Option<String>,
+    pub imports: Vec<String>,
+    pub created_at: Option<String>,
+    pub signer: Option<String>,
+    /// The durable id a `start` block claims, derived from the name by the runtime.
+    /// `None` when the manifest declares no start block.
+    pub start_id: Option<String>,
+    pub extension: Option<String>,
+    /// Base64 of the bytes to write before the component. Kept encoded: this client
+    /// decodes it once, at the moment it writes the file, and never inspects it.
+    pub bundle_prefix: Option<String>,
+    pub bundle_bytes: Option<u64>,
+}
+
+/// W12. What `wasm.deploy` answers with: a rollout that ran, and what each node did.
+///
+/// `state` is the answer — `live`, `rolled_back` or `quarantined` — and it arrives as the
+/// runtime's own string, because a sixth state is still worth showing. Only a rollout that
+/// never started is an error rather than one of these.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmDeployment {
+    pub artifact_id: Option<String>,
+    pub name: Option<String>,
+    pub module: Option<String>,
+    pub component_sha256: Option<String>,
+    pub epoch: Option<u64>,
+    pub state: Option<String>,
+    /// How far it got: `stage`, `probe`, `evaluate`, `settle` or `start`.
+    pub stage: Option<String>,
+    pub nodes: Vec<String>,
+    pub started: Option<WasmStarted>,
+    /// Rendered sentences, not terms. The one that exists today says the driver was not
+    /// one of the targets, which costs reboot survival and is reported rather than refused.
+    pub warnings: Vec<String>,
+    pub eval: Option<WasmEvalReport>,
+    /// Per node, the three gates and what compensation proved. Keyed by node name.
+    pub nodes_evidence: BTreeMap<String, WasmNodeEvidence>,
+}
+
+impl WasmDeployment {
+    /// Whether the rollout is running everywhere it was sent.
+    pub fn live(&self) -> bool {
+        self.state.as_deref() == Some("live")
+    }
+
+    /// Whether anybody may still be running something nobody accounted for. This is the
+    /// state that needs a person, and it is never reachable by retrying.
+    pub fn quarantined(&self) -> bool {
+        self.state.as_deref() == Some("quarantined")
+    }
+}
+
+/// Where the durable wrapper landed, if the manifest declared one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmStarted {
+    pub id: Option<String>,
+    /// The node hosting it. `None` when no target accepted, or when the id was claimed.
+    pub node: Option<String>,
+    pub already_started: bool,
+    /// The component sha of whatever holds the id instead. Present only when a start was
+    /// refused because somebody else's capability owns the name.
+    pub claimed_by: Option<String>,
+    pub errors: BTreeMap<String, String>,
+}
+
+/// The signed evaluation spec, and what it proved per node.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmEvalReport {
+    pub probes: Option<u64>,
+    /// `all`, or `at_least <n>`. Words rather than an Elixir term's spelling.
+    pub required: Option<String>,
+    pub budget_ms: Option<u64>,
+    pub nodes: BTreeMap<String, WasmGate>,
+}
+
+/// One node's three gates, plus what a compensation proved about it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmNodeEvidence {
+    pub stage: WasmGate,
+    pub probe: WasmGate,
+    pub eval: WasmGate,
+    /// `not_needed`, `rolled_back`, `unchanged`, or `quarantined`. `None` where the rollout
+    /// passed and nothing was withdrawn.
+    pub recovery: Option<String>,
+}
+
+/// One gate: what happened, and the reason where something did not.
+///
+/// The outcome is the runtime's own word — `ok`, `skipped`, `absent`, `mismatch`, `error`,
+/// `ambiguous`, `passed`, `failed`, `unknown` — kept as a string so a word this build has
+/// not heard of still renders as itself. The four counts are present only for an
+/// evaluation gate.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmGate {
+    pub outcome: Option<String>,
+    pub detail: Option<String>,
+    pub probes: Option<u64>,
+    pub passed: Option<u64>,
+    pub failed: Option<u64>,
+    pub total_ms: Option<u64>,
+}
+
+impl WasmGate {
+    pub fn ok(&self) -> bool {
+        matches!(self.outcome.as_deref(), Some("ok") | Some("passed"))
+    }
+
+    /// What to draw: the outcome, and the reason after it where there is one.
+    pub fn describe(&self) -> String {
+        match (self.outcome.as_deref(), self.detail.as_deref()) {
+            (Some(outcome), Some(detail)) => format!("{outcome} — {detail}"),
+            (Some(outcome), None) => outcome.to_string(),
+            (None, _) => "unknown".into(),
+        }
+    }
+}
+
+/// W12. What `wasm.rollback` answers with.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmRollback {
+    pub artifact_id: Option<String>,
+    pub name: Option<String>,
+    pub module: Option<String>,
+    pub component_sha256: Option<String>,
+    pub epoch: Option<u64>,
+    pub start_id: Option<String>,
+    pub state: Option<String>,
+    pub nodes: Vec<String>,
+    /// Per node, what absence was proved by: `rolled_back`, `not_needed`, `unchanged`, or
+    /// `quarantined` where it could not be shown either way.
+    pub recovery: BTreeMap<String, String>,
+}
+
+impl WasmRollback {
+    pub fn rolled_back(&self) -> bool {
+        self.state.as_deref() == Some("rolled_back")
+    }
+}
+
+impl WasmUploadReceipt {
+    pub fn decode(value: &Value) -> Self {
+        Self {
+            upload: nonempty(value.get("upload")).unwrap_or_default(),
+            received: value.get("received").and_then(Value::as_u64).unwrap_or(0),
+            complete: value
+                .get("complete")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            sha256: nonempty(value.get("sha256")),
+            chunk_bytes: value
+                .get("chunk_bytes")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        }
+    }
+}
+
+impl WasmSignature {
+    pub fn decode(value: &Value) -> Self {
+        Self {
+            artifact_id: nonempty(value.get("artifact_id")),
+            name: nonempty(value.get("name")),
+            epoch: value.get("epoch").and_then(Value::as_u64),
+            component_sha256: nonempty(value.get("component_sha256")),
+            size: value.get("size").and_then(Value::as_u64),
+            world: nonempty(value.get("world")),
+            imports: strings(value.get("imports")),
+            created_at: nonempty(value.get("created_at")),
+            signer: nonempty(value.get("signer")),
+            start_id: nonempty(value.get("start_id")),
+            extension: nonempty(value.get("extension")),
+            bundle_prefix: nonempty(value.get("bundle_prefix")),
+            bundle_bytes: value.get("bundle_bytes").and_then(Value::as_u64),
+        }
+    }
+}
+
+impl WasmDeployment {
+    pub fn decode(value: &Value) -> Self {
+        Self {
+            artifact_id: nonempty(value.get("artifact_id")),
+            name: nonempty(value.get("name")),
+            module: nonempty(value.get("module")),
+            component_sha256: nonempty(value.get("component_sha256")),
+            epoch: value.get("epoch").and_then(Value::as_u64),
+            state: nonempty(value.get("state")),
+            stage: nonempty(value.get("stage")),
+            nodes: strings(value.get("nodes")),
+            started: value
+                .get("started")
+                .filter(|v| v.is_object())
+                .map(WasmStarted::decode),
+            warnings: strings(value.get("warnings")),
+            eval: value
+                .get("eval")
+                .filter(|v| v.is_object())
+                .map(WasmEvalReport::decode),
+            nodes_evidence: keyed(value.get("deployment"), WasmNodeEvidence::decode),
+        }
+    }
+}
+
+impl WasmStarted {
+    fn decode(value: &Value) -> Self {
+        Self {
+            id: nonempty(value.get("id")),
+            node: nonempty(value.get("node")),
+            already_started: value
+                .get("already_started")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            claimed_by: nonempty(value.get("claimed_by")),
+            errors: keyed(value.get("errors"), |reason| {
+                nonempty(Some(reason)).unwrap_or_else(|| reason.to_string())
+            }),
+        }
+    }
+}
+
+impl WasmEvalReport {
+    fn decode(value: &Value) -> Self {
+        Self {
+            probes: value.get("probes").and_then(Value::as_u64),
+            required: nonempty(value.get("required")),
+            budget_ms: value.get("budget_ms").and_then(Value::as_u64),
+            nodes: keyed(value.get("nodes"), WasmGate::decode),
+        }
+    }
+}
+
+impl WasmNodeEvidence {
+    fn decode(value: &Value) -> Self {
+        let gate = |key: &str| {
+            value
+                .get(key)
+                .filter(|inner| inner.is_object())
+                .map(WasmGate::decode)
+                .unwrap_or_default()
+        };
+
+        Self {
+            stage: gate("stage"),
+            probe: gate("probe"),
+            eval: gate("eval"),
+            recovery: nonempty(value.get("recovery")),
+        }
+    }
+}
+
+impl WasmGate {
+    fn decode(value: &Value) -> Self {
+        let number = |key: &str| value.get(key).and_then(Value::as_u64);
+
+        Self {
+            outcome: nonempty(value.get("outcome")),
+            detail: nonempty(value.get("detail")),
+            probes: number("probes"),
+            passed: number("passed"),
+            failed: number("failed"),
+            total_ms: number("total_ms"),
+        }
+    }
+}
+
+impl WasmRollback {
+    pub fn decode(value: &Value) -> Self {
+        Self {
+            artifact_id: nonempty(value.get("artifact_id")),
+            name: nonempty(value.get("name")),
+            module: nonempty(value.get("module")),
+            component_sha256: nonempty(value.get("component_sha256")),
+            epoch: value.get("epoch").and_then(Value::as_u64),
+            start_id: nonempty(value.get("start_id")),
+            state: nonempty(value.get("state")),
+            nodes: strings(value.get("nodes")),
+            recovery: keyed(value.get("recovery"), |value| {
+                nonempty(Some(value)).unwrap_or_else(|| value.to_string())
+            }),
+        }
+    }
+}
+
+/// A bounded map keyed by node name. The runtime writes node names as strings for exactly
+/// this reason: a key a client turned into anything else would be a value minted from the
+/// wire.
+fn keyed<T>(value: Option<&Value>, decode: impl Fn(&Value) -> T) -> BTreeMap<String, T> {
+    value
+        .and_then(Value::as_object)
+        .map(|table| {
+            table
+                .iter()
+                .take(MAX_WASM_ROWS)
+                .map(|(node, inner)| (node.clone(), decode(inner)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// At most this many rows, limit entries, or state counts out of one lane-W answer. The
 /// runtime bounds all four itself; this is the client refusing to be the place a bound is
 /// only claimed.
@@ -4294,11 +4620,189 @@ mod tests {
                 "runtime_status_result",
                 "stream_ended_notification",
                 "stream_lagged_notification",
+                "wasm_deploy_result",
                 "wasm_list_result",
+                "wasm_rollback_result",
+                "wasm_sign_result",
                 "wasm_status_result",
+                "wasm_upload_result",
                 "workspace_browse_result",
             ]
         );
+    }
+
+    /// W12's `wasm.upload`: one frame's receipt, mid-transfer.
+    #[test]
+    fn the_wasm_upload_fixture_decodes_into_the_typed_model() {
+        let receipt = WasmUploadReceipt::decode(&fixture("wasm_upload_result")["result"]);
+
+        assert_eq!(receipt.upload, "9f2c1d4e8a7b6053f1e2d3c4b5a69780");
+        assert_eq!(receipt.received, 524_288);
+        assert!(!receipt.complete);
+        // A digest over part of a file is not offered, so there is nothing to check yet.
+        assert_eq!(receipt.sha256, None);
+        // The node states its own ceiling; the client sizes the next frame from it.
+        assert_eq!(receipt.chunk_bytes, 524_288);
+    }
+
+    /// W12's `wasm.sign`: the bundle's prefix and what it describes.
+    #[test]
+    fn the_wasm_sign_fixture_decodes_into_the_typed_model() {
+        let signed = WasmSignature::decode(&fixture("wasm_sign_result")["result"]);
+
+        assert_eq!(signed.name.as_deref(), Some("vet"));
+        assert_eq!(signed.epoch, Some(7));
+        assert_eq!(signed.signer.as_deref(), Some("release-key"));
+        assert_eq!(signed.world.as_deref(), Some("ouroboros:capability@0.1.0"));
+        assert_eq!(signed.imports, vec!["log".to_string()]);
+        assert_eq!(signed.start_id.as_deref(), Some("wasm/vet"));
+        assert_eq!(signed.extension.as_deref(), Some(".ouro-wasm"));
+        assert_eq!(signed.size, Some(2_097_152));
+
+        // The prefix stays base64 until the moment the file is written. Its length plus the
+        // component's is what the bundle weighs, which is the whole of this client's
+        // knowledge of the format.
+        let prefix = signed.bundle_prefix.as_deref().expect("a bundle prefix");
+        let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, prefix)
+            .expect("the prefix is base64");
+        assert_eq!(&decoded[..8], b"OUROWASM");
+        assert_eq!(
+            signed.bundle_bytes,
+            Some(decoded.len() as u64 + signed.size.unwrap_or(0))
+        );
+    }
+
+    /// W12's `wasm.deploy`: a rollout that ran, and the evidence each node gave.
+    #[test]
+    fn the_wasm_deploy_fixture_decodes_into_the_typed_model() {
+        let deployment = WasmDeployment::decode(&fixture("wasm_deploy_result")["result"]);
+
+        assert!(deployment.live());
+        assert!(!deployment.quarantined());
+        assert_eq!(deployment.stage.as_deref(), Some("evaluate"));
+        assert_eq!(deployment.name.as_deref(), Some("vet"));
+        assert_eq!(deployment.module.as_deref(), Some("wasm/vet"));
+        assert_eq!(deployment.nodes.len(), 2);
+        assert!(deployment.warnings.is_empty());
+
+        let started = deployment.started.as_ref().expect("a durable wrapper");
+        assert_eq!(started.id.as_deref(), Some("wasm/vet"));
+        assert_eq!(started.node.as_deref(), Some("ouroboros@golden"));
+        assert!(!started.already_started);
+        assert_eq!(started.claimed_by, None);
+
+        let eval = deployment.eval.as_ref().expect("a signed eval spec ran");
+        assert_eq!(eval.probes, Some(2));
+        // Words, not an Elixir term's spelling.
+        assert_eq!(eval.required.as_deref(), Some("all"));
+        assert_eq!(eval.budget_ms, Some(10_000));
+        assert_eq!(eval.nodes.len(), 2);
+
+        let evidence = deployment
+            .nodes_evidence
+            .get("ouroboros@golden")
+            .expect("evidence for the node that hosted it");
+
+        assert!(evidence.stage.ok());
+        assert!(evidence.probe.ok());
+        assert!(evidence.eval.ok());
+        assert_eq!(evidence.eval.passed, Some(2));
+        assert_eq!(evidence.eval.failed, Some(0));
+        // Nothing was withdrawn, because nothing failed.
+        assert_eq!(evidence.recovery, None);
+        assert_eq!(evidence.stage.describe(), "ok");
+    }
+
+    /// A failed rollout is still an answer, and the reason arrives beside the outcome.
+    #[test]
+    fn a_deployment_that_did_not_settle_live_still_decodes_whole() {
+        let deployment = WasmDeployment::decode(&serde_json::json!({
+            "state": "quarantined",
+            "stage": "stage",
+            "nodes": ["a@h", "b@h"],
+            "started": null,
+            "warnings": ["{:driver_not_a_target, :c@h}"],
+            "eval": null,
+            "deployment": {
+                "a@h": {
+                    "stage": {"outcome": "mismatch", "detail": "{:component_mismatch, :imports}"},
+                    "probe": {"outcome": "skipped", "detail": null},
+                    "eval": {"outcome": "skipped", "detail": null},
+                    "recovery": "quarantined"
+                },
+                "b@h": {
+                    "stage": {"outcome": "ambiguous", "detail": ":timeout"},
+                    "probe": {"outcome": "skipped", "detail": null},
+                    "eval": {"outcome": "skipped", "detail": null},
+                    "recovery": "not_needed"
+                }
+            }
+        }));
+
+        assert!(deployment.quarantined());
+        assert!(!deployment.live());
+        assert_eq!(deployment.warnings.len(), 1);
+        assert!(deployment.eval.is_none());
+        assert!(deployment.started.is_none());
+
+        let a = &deployment.nodes_evidence["a@h"];
+        assert!(!a.stage.ok());
+        assert_eq!(
+            a.stage.describe(),
+            "mismatch — {:component_mismatch, :imports}"
+        );
+        assert_eq!(a.recovery.as_deref(), Some("quarantined"));
+
+        let b = &deployment.nodes_evidence["b@h"];
+        assert_eq!(b.stage.describe(), "ambiguous — :timeout");
+    }
+
+    /// W12's `wasm.rollback`: what absence was proved by, per node.
+    #[test]
+    fn the_wasm_rollback_fixture_decodes_into_the_typed_model() {
+        let rollback = WasmRollback::decode(&fixture("wasm_rollback_result")["result"]);
+
+        assert!(rollback.rolled_back());
+        assert_eq!(rollback.name.as_deref(), Some("vet"));
+        assert_eq!(rollback.start_id.as_deref(), Some("wasm/vet"));
+        assert_eq!(rollback.nodes.len(), 2);
+        assert_eq!(
+            rollback
+                .recovery
+                .get("ouroboros@golden")
+                .map(String::as_str),
+            Some("rolled_back")
+        );
+        // A node that had nothing to stop proved absence just as well as one that stopped
+        // something, which is why both are `rolled_back` overall.
+        assert_eq!(
+            rollback.recovery.get("ouroboros@peer").map(String::as_str),
+            Some("not_needed")
+        );
+    }
+
+    /// An empty answer is a shape, not a panic — the same rule the other lane-W models keep.
+    #[test]
+    fn the_w12_answers_all_decode_from_nothing() {
+        let empty = serde_json::json!({});
+
+        assert_eq!(WasmUploadReceipt::decode(&empty).received, 0);
+        assert_eq!(WasmSignature::decode(&empty).bundle_prefix, None);
+
+        let deployment = WasmDeployment::decode(&empty);
+        assert!(!deployment.live());
+        assert!(!deployment.quarantined());
+        assert!(deployment.nodes_evidence.is_empty());
+
+        let rollback = WasmRollback::decode(&empty);
+        assert!(!rollback.rolled_back());
+        assert!(rollback.recovery.is_empty());
+
+        // An unknown gate word renders as itself rather than being folded into a known one.
+        let gate = WasmGate::decode(&serde_json::json!({"outcome": "a_word_from_2027"}));
+        assert!(!gate.ok());
+        assert_eq!(gate.describe(), "a_word_from_2027");
+        assert_eq!(WasmGate::default().describe(), "unknown");
     }
 
     /// W5's `wasm.status`: what an operator reads to know whether this node could contain a

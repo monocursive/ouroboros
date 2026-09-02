@@ -97,8 +97,12 @@
       "upgrade.history",
       "upgrade.rollouts",
       "upgrade.status",
+      "wasm.deploy",
       "wasm.list",
+      "wasm.rollback",
+      "wasm.sign",
       "wasm.status",
+      "wasm.upload",
       "workspace.browse",
       "workspace.exec"
     ],

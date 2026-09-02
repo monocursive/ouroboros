@@ -634,6 +634,44 @@ outside, so `Rollout.Probe` and `Rollout.Evaluation` each keep their throwaway a
 cleanup in a process the kill does not reach; without it the agent kept a cluster-wide
 mesh id and a helper instance with nothing linked to it that would ever notice.
 
+#### The bundle, and the three verbs an operator uses (W12)
+
+Deploying used to be console-only: mint a key by hand, build a manifest in IEx, sign it
+through the service, call `Wasm.Rollout.deploy/4`. W12 puts that on the wire without
+moving any of the authority.
+
+`Ouroboros.Wasm.Bundle` is the one file an operator moves around, extension
+`.ouro-wasm`: a 17-byte header (magic, format version, and the envelope and component
+lengths), a bounded JSON envelope carrying the manifest as its own `term_to_binary` plus
+the signer id and the 64-byte signature, and then the component bytes **raw**. The big
+half is not base64 — that would be twenty-one mebibytes of decoding handed to a parser by
+whoever wrote the file, to save nobody anything — and only the KiB-scale envelope is.
+Every field is bounded before it is parsed, the total size must equal the header plus the
+two declared lengths exactly (so trailing data is a refusal), and the manifest term is
+read with `binary_to_term/2`'s `:safe`, so a bundle cannot grow this node's atom table.
+Reconstruction is then held to a fixed point: the struct built out of the decoded map must
+project back through `Wasm.Artifact.manifest/1` to exactly the map that was decoded, which
+is one comparison instead of nine and cannot be satisfied by a manifest carrying a key
+this build has no home for. `Bundle.verify/2` adds nothing of its own: the sha binds the
+bytes, the signature binds the manifest, and the **reading node's** trust policy binds the
+signer.
+
+The verbs are `wasm.sign`, `wasm.deploy` and `wasm.rollback`, all `:operate` and
+node-routed like `wasm.status`, plus `wasm.upload` underneath them (D16). `wasm.sign`
+builds a manifest over uploaded bytes — recomputing the digest and the size, and reading
+the *imports off the component* with this node's helper rather than believing a caller,
+because a wrong import list is a quarantine and not a warning — and hands it to
+`Upgrade.Signing.Service`, which applies the whole policy above and journals the decision.
+It answers with the bundle's **prefix** rather than the bundle: the operator already holds
+the bytes they uploaded, so returning them would mean building a chunked download to hand
+somebody their own file back. `wasm.deploy` verifies the bundle against the node's own
+trust policy **before** the store, the helper or the register hears about it, then runs
+`Wasm.Rollout.deploy/4` unchanged; a rollout that ran answers with its state rather than
+with an error, because `:rolled_back` and `:quarantined` are outcomes a client renders.
+`wasm.rollback` reaches the same `withdraw/2` the eval-failure branch uses — a wrapper
+running some other component's sha is left alone and reported `:unchanged` — and marks the
+entry `:rolled_back` only where every node proved absence. Bytes stay in the store (D6).
+
 Champion/challenger (`compare: true`) is **deferred**, not inherited: `Wasm.Rollout`'s
 `eval_report` hardcodes `compare: false`. `Upgrade.Rollout` accepts a `:replace`
 artifact only against a measured baseline, and what "the version this displaces" means
@@ -1018,6 +1056,42 @@ machinery — it is a backend, not a lane (D9).
   recorded as its description and never retried; a transport refusal records nothing, so the
   next message asks again. Proved in `test/wasm/capability_test.exs` (the scripted helper,
   per rule) and `test/wasm/capability_acceptance_test.exs` (the real guest).
+- **D15 — deploying over the socket is sound, and the old comment was wrong.**
+  `gateway/methods.ex` used to say there would deliberately never be a `wasm.deploy`,
+  because "a component runs on somebody's machine under a signature". The premise was
+  right and the conclusion did not follow. What decides whether a component runs is the
+  signature, verified by the **target** against the target's own
+  `upgrade_trust_policy` — twice on the way in, once in the driver's pre-flight and again
+  on every node before it stages a byte. A socket that carries a signed bundle therefore
+  adds no authority: an `:operate` client that could reach `wasm.deploy` could already
+  start any BEAM capability through `capabilities.admit` and any agent through the mesh,
+  and none of those check a signature at all. What the reversal does not touch is the
+  other half of the old sentence, and it is the half that mattered: there is still no
+  `wasm.load`, `wasm.drop`, `wasm.instantiate` or `wasm.call`, because each of those
+  *would* be a socket deciding what this node runs rather than a signer deciding what may
+  exist. Proved in `test/ouroboros/gateway/wasm_deploy_test.exs` (an unsigned, a tampered
+  and an untrusted bundle each refused with the store, the register and the helper pool
+  unchanged) and in `test/wasm/deploy_test.exs`.
+- **D16 — bytes cross the socket in frames, because one frame will not hold them.**
+  `Gateway.Config` bounds an inbound frame at `OUROBOROS_GATEWAY_MAX_FRAME`, a mebibyte
+  by default, and the Rust client refuses to send more than the same number. A component
+  is bounded at sixteen mebibytes, which is twenty-one after base64. So the choice was
+  between shrinking what an operator may deploy to roughly 700 KiB — which excludes most
+  real components; StarlingMonkey is nine mebibytes (§12) — and cutting the bytes into
+  frames that fit. `wasm.upload` is the second: **512 KiB of decoded bytes per frame**
+  (about 683 KiB on the wire, a third under the default ceiling), a total bounded by
+  `Bundle.max_bytes/0` — the signer's own `:signing_max_artifact_bytes` plus the envelope,
+  so a bundle can never carry more than a signer would have looked at — **eight uploads in
+  flight per node**, and **ten minutes** before an abandoned one is swept. It is files in
+  `<data_dir>/wasm/uploads` and no process: the offset is the file's size, membership is
+  `File.exists?/1`, expiry is the mtime, and every call sweeps before it writes, so the
+  thing that would fire a timer is the thing that would notice. The id is minted by the
+  node — a client-chosen id is a client-chosen filename — and is still validated as 32 hex
+  characters on the way back in. An upload carries no authority whatsoever: the sha it
+  reports at commit is a receipt for the transfer, and what comes out of it is verified by
+  whichever verb consumes it. The **result** direction needs no chunking, because
+  `wasm.sign` answers with the bundle's prefix and the client appends the bytes it already
+  holds.
 
 ## 12. What this does not solve
 
@@ -1309,6 +1383,27 @@ Each slice is PR-sized, lands green, and is useful alone.
   the native loop for the deny-before-delivery and the ledger's subject; the two remaining
   gaps are named in §12 (the sequential helper's cost, and what labelling does and does not
   buy).
+- **W12 — signing and deploy from the operator's chair.** `Ouroboros.Wasm.Bundle` (the
+  `.ouro-wasm` file: framed header, bounded JSON envelope, raw component, `:safe` term
+  decode, manifest reconstruction held to a fixed point), `Ouroboros.Wasm.Upload` (the
+  chunked, process-free staging area of D16), `Ouroboros.Wasm.Deploy` (the node side of
+  the three verbs), `Wasm.Rollout.rollback/2` reusing the eval-failure branch's own
+  `withdraw/2`, and `Wasm.Surface.deployment/1`/`rollback/1` projecting a rollout outcome
+  onto the wire. Four gateway verbs — `wasm.upload`, `wasm.sign`, `wasm.deploy`,
+  `wasm.rollback`, all `:operate` and node-routed — with protocol docs, golden fixtures
+  and typed Rust decodes for each, and `ouro wasm keygen | sign | deploy | rollback | ls`
+  on top. `keygen` contacts no runtime and writes a seed in exactly the format
+  `Signing.Service` reads, printing the `OUROBOROS_SIGNER_KEY_PATH` and
+  `OUROBOROS_UPGRADE_TRUSTED_SIGNERS` lines; its derived public half is pinned against the
+  RFC 8032 test vector, because a keygen that derived a different public key would print a
+  trust line that verifies nothing and no local round trip would catch it. Proved live on
+  this Mac end to end: `wasm.sign` over `test/support/wasm/echo.wasm` with the imports read
+  off the component, the bundle assembled from the node's prefix and the operator's bytes,
+  `wasm.deploy` reaching `:live` with both eval probes passing, the `wasm/<name>` mesh
+  agent answering a message, and `wasm.rollback` stopping it with the bytes and the
+  manifest still in the store. Refusals proved with the store, the register and the helper
+  pool asserted unchanged. The `methods.ex` comment that promised there would never be a
+  `wasm.deploy` is corrected in place, with D15 for why.
 - **W8 — ahead-of-time compilation (proposed, not promised).** `Component::new` on the
   node's hot path is what makes §7.3's bounds necessary in the shape they have.
   `Engine::precompile_component` at sign or deploy time and `Component::deserialize` at

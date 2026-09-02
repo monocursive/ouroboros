@@ -2761,6 +2761,38 @@ async fn wasm(paths: &Paths, command: WasmCommand) -> Result<()> {
                 &mut out,
             )?)
         }
+
+        // W12. `keygen` is the one arm that never opens a socket: custody is set up on the
+        // operator's own machine and the key must not travel. The other four connect the
+        // way `doctor` does, and every decision they depend on is made on the far side.
+        WasmCommand::Keygen(args) => {
+            let mut out = std::io::stdout().lock();
+            ouro::wasm_deploy_cli::keygen(&args, &mut out)
+        }
+        WasmCommand::Sign(args) => {
+            let connected = wasm_connect(paths, args.addr.clone(), args.token_file.clone()).await?;
+
+            let mut out = std::io::stdout().lock();
+            ouro::wasm_deploy_cli::sign(&connected.client, &args, &mut out).await
+        }
+        WasmCommand::Deploy(args) => {
+            let connected = wasm_connect(paths, args.addr.clone(), args.token_file.clone()).await?;
+
+            let mut out = std::io::stdout().lock();
+            ouro::wasm_deploy_cli::deploy(&connected.client, &args, &mut out).await
+        }
+        WasmCommand::Rollback(args) => {
+            let connected = wasm_connect(paths, args.addr.clone(), args.token_file.clone()).await?;
+
+            let mut out = std::io::stdout().lock();
+            ouro::wasm_deploy_cli::rollback(&connected.client, &args, &mut out).await
+        }
+        WasmCommand::Ls(args) => {
+            let connected = wasm_connect(paths, args.addr, args.token_file).await?;
+
+            let mut out = std::io::stdout().lock();
+            ouro::wasm_deploy_cli::ls(&connected.client, args.json, &mut out).await
+        }
     }
 }
 
@@ -2819,6 +2851,19 @@ fn hook_payload(source: Option<&str>) -> Result<serde_json::Value> {
         return Ok(serde_json::json!({}));
     }
     serde_json::from_str(trimmed).context("the hook payload is not JSON")
+}
+
+/// The connection every `ouro wasm` verb but `keygen` makes: the same endpoint resolution
+/// `doctor` uses, with no reconnect, because these are one-shot operator commands and a
+/// silently re-established socket would hide a runtime that went away mid-deploy.
+async fn wasm_connect(
+    paths: &Paths,
+    addr: Option<String>,
+    token_file: Option<PathBuf>,
+) -> Result<Connected> {
+    let (address, token) = remote_endpoint(paths, addr, token_file).await?;
+    let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
+    attach_with(address, token, false, None, hook).await
 }
 
 /// Where a runtime this client did not start listens, and the token to present to it.

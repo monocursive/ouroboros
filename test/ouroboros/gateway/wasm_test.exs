@@ -17,11 +17,27 @@ defmodule Ouroboros.Gateway.WasmTest do
       assert {:ok, %{scope: :read}} = Methods.fetch("wasm.list")
     end
 
-    test "there is no verb for deploying, loading or dropping a component over the wire" do
-      for forbidden <- ~w(wasm.deploy wasm.load wasm.drop wasm.instantiate wasm.call wasm.probe) do
+    # W12 reversed the "there will never be a wasm.deploy" decision, and D15 says why: a
+    # deployment's authority is the signature the target verifies against its own trust
+    # policy, so the socket is a courier. The four verbs that would make it an authority
+    # are still absent, and that is what this test now pins.
+    test "there is still no verb that makes a socket decide what this node runs" do
+      for forbidden <- ~w(wasm.load wasm.drop wasm.instantiate wasm.call wasm.probe) do
         refute forbidden in Methods.names(),
                "#{forbidden} would make a socket an authority over what this node runs"
       end
+    end
+
+    test "the four operator verbs are `:operate`, which is the scope that already starts work" do
+      for verb <- ~w(wasm.upload wasm.sign wasm.deploy wasm.rollback) do
+        assert verb in Methods.names()
+        assert {:ok, %{scope: :operate}} = Methods.fetch(verb)
+      end
+
+      # A deploy's ceiling can fire while the rollout is still running on a peer, and
+      # `:erpc` does not stop a peer. The table says so rather than letting a client read
+      # `-32005` as "it did not happen".
+      assert {:ok, %{outcome: :unknown}} = Methods.fetch("wasm.deploy")
     end
   end
 

@@ -1,0 +1,11 @@
+{
+  "id": 18,
+  "jsonrpc": "2.0",
+  "result": {
+    "chunk_bytes": 524288,
+    "complete": false,
+    "received": 524288,
+    "sha256": null,
+    "upload": "9f2c1d4e8a7b6053f1e2d3c4b5a69780"
+  }
+}

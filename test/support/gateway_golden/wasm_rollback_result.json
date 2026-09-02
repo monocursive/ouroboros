@@ -1,0 +1,21 @@
+{
+  "id": 21,
+  "jsonrpc": "2.0",
+  "result": {
+    "artifact_id": "wasm-0000000000000000000001",
+    "component_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "epoch": 7,
+    "module": "wasm/vet",
+    "name": "vet",
+    "nodes": [
+      "ouroboros@golden",
+      "ouroboros@peer"
+    ],
+    "recovery": {
+      "ouroboros@golden": "rolled_back",
+      "ouroboros@peer": "not_needed"
+    },
+    "start_id": "wasm/vet",
+    "state": "rolled_back"
+  }
+}

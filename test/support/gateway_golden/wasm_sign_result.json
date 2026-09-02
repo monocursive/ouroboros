@@ -1,0 +1,21 @@
+{
+  "id": 19,
+  "jsonrpc": "2.0",
+  "result": {
+    "artifact_id": "wasm-0000000000000000000001",
+    "bundle_bytes": 2097561,
+    "bundle_prefix": "T1VST1dBU00BAAABiAAgAAB7ImJ1bmRsZSI6MSwibWFuaWZlc3QiOiJRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkFRVUpEUkEiLCJzaWduYXR1cmUiOiJBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQT09Iiwic2lnbmVyIjoicmVsZWFzZS1rZXkifQ==",
+    "component_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": "2026-01-01T00:00:00.000000Z",
+    "epoch": 7,
+    "extension": ".ouro-wasm",
+    "imports": [
+      "log"
+    ],
+    "name": "vet",
+    "signer": "release-key",
+    "size": 2097152,
+    "start_id": "wasm/vet",
+    "world": "ouroboros:capability@0.1.0"
+  }
+}

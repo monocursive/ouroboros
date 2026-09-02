@@ -113,6 +113,182 @@ defmodule Ouroboros.Wasm.Surface do
     }
   end
 
+  @doc """
+  Projects a `Ouroboros.Wasm.Rollout` outcome onto the shape `wasm.deploy` answers with.
+
+  The outcome a rollout produces is a working term: node atoms as map keys, per-gate
+  evidence carrying whatever a failure happened to be, an evaluation summary holding a
+  signed spec's own reasons. None of that is wire shape. What a client needs from a deploy
+  is which state it settled in, how far it got, and — per node — whether each of the three
+  gates passed, with the reason where one did not.
+
+  So every gate becomes `%{outcome: <atom>, detail: <text or nil>}` and every reason is
+  rendered and cut here, exactly as `broken_reason` is: a stage failure can carry a
+  `File.Error`, an ambiguity carries an exit reason, and neither is a term a client should
+  be handed. Node names are strings for the reason `wasm.list`'s are — a node name a
+  client turned back into an atom is an atom minted from the wire.
+  """
+  @spec deployment(map()) :: map()
+  def deployment(outcome) when is_map(outcome) do
+    %{
+      artifact_id: identifier(Map.get(outcome, :artifact_id)),
+      name: identifier(Map.get(outcome, :name)),
+      module: identifier(Map.get(outcome, :module)),
+      component_sha256: identifier(Map.get(outcome, :component_sha256)),
+      epoch: integer(Map.get(outcome, :epoch)),
+      state: Map.get(outcome, :state),
+      stage: Map.get(outcome, :stage),
+      nodes: node_list(Map.get(outcome, :nodes)),
+      started: started(Map.get(outcome, :started)),
+      warnings: warnings(Map.get(outcome, :warnings)),
+      eval: eval(Map.get(outcome, :eval_report)),
+      deployment: gates(Map.get(outcome, :deployment))
+    }
+  end
+
+  def deployment(other), do: %{state: :unknown, detail: reason(other)}
+
+  @doc """
+  Projects a `Ouroboros.Wasm.Rollout.rollback/2` outcome onto `wasm.rollback`'s answer.
+
+  Smaller than a deployment's, because a rollback proves one thing per node — that this
+  capability's wrapper is gone from it, or that something there could not be shown to be —
+  and the state is that proof folded together.
+  """
+  @spec rollback(map()) :: map()
+  def rollback(outcome) when is_map(outcome) do
+    %{
+      artifact_id: identifier(Map.get(outcome, :artifact_id)),
+      name: identifier(Map.get(outcome, :name)),
+      module: identifier(Map.get(outcome, :module)),
+      component_sha256: identifier(Map.get(outcome, :component_sha256)),
+      epoch: integer(Map.get(outcome, :epoch)),
+      start_id: identifier(Map.get(outcome, :start_id)),
+      state: Map.get(outcome, :state),
+      nodes: node_list(Map.get(outcome, :nodes)),
+      recovery: recovery(Map.get(outcome, :recovery))
+    }
+  end
+
+  def rollback(other), do: %{state: :unknown, detail: reason(other)}
+
+  # ---------------------------------------------------------------------------
+  # Rollout outcomes
+  # ---------------------------------------------------------------------------
+
+  defp identifier(value) when is_binary(value), do: cut(value)
+  defp identifier(value) when is_atom(value) and not is_nil(value), do: Atom.to_string(value)
+  defp identifier(_other), do: nil
+
+  defp integer(value) when is_integer(value), do: value
+  defp integer(_other), do: nil
+
+  defp node_list(nodes) when is_list(nodes),
+    do: nodes |> Enum.take(@max_rows) |> Enum.map(&node_name/1)
+
+  defp node_list(_other), do: []
+
+  defp started(%{id: id} = started) do
+    %{
+      id: identifier(id),
+      node: started |> Map.get(:node) |> node_or_nil(),
+      already_started: Map.get(started, :already_started, false) == true,
+      claimed_by: started |> Map.get(:claimed_by) |> identifier(),
+      errors: started |> Map.get(:errors, %{}) |> node_keyed(&reason/1)
+    }
+  end
+
+  defp started(_absent), do: nil
+
+  defp node_or_nil(node) when is_nil(node), do: nil
+  defp node_or_nil(node), do: node_name(node)
+
+  # `{:driver_not_a_target, node}` is the only warning this lane has, and a client draws it
+  # as a sentence rather than matching on it, so it arrives rendered.
+  defp warnings(warnings) when is_list(warnings),
+    do: warnings |> Enum.take(@max_rows) |> Enum.map(&reason/1)
+
+  defp warnings(_other), do: []
+
+  defp eval(%{spec: spec, nodes: nodes}) when is_map(spec) do
+    %{
+      probes: integer(Map.get(spec, :probes)),
+      required: required_text(Map.get(spec, :required)),
+      budget_ms: integer(Map.get(spec, :budget_ms)),
+      nodes: node_keyed(nodes, &evidence/1)
+    }
+  end
+
+  defp eval(_absent), do: nil
+
+  # `:all` and `{:at_least, n}` are the register's own vocabulary and a client draws them.
+  # Rendered as words rather than as `inspect/1`'s spelling of an Elixir term, because
+  # `":all"` on a wire is this runtime's syntax leaking into somebody else's client.
+  defp required_text(:all), do: "all"
+  defp required_text({:at_least, n}) when is_integer(n), do: "at_least #{n}"
+  defp required_text(other), do: reason(other)
+
+  defp gates(evidence) when is_map(evidence) do
+    node_keyed(evidence, fn node_evidence ->
+      %{
+        stage: evidence(Map.get(node_evidence, :stage)),
+        probe: evidence(Map.get(node_evidence, :probe)),
+        eval: evidence(Map.get(node_evidence, :eval)),
+        recovery: Map.get(node_evidence, :recovery)
+      }
+    end)
+  end
+
+  defp gates(_other), do: %{}
+
+  defp recovery(recovery) when is_map(recovery),
+    do: node_keyed(recovery, fn value -> if is_atom(value), do: value, else: :unknown end)
+
+  defp recovery(_other), do: %{}
+
+  # Map keys become strings before they reach the wire, so a node name never crosses as a
+  # term a client could turn back into an atom. Bounded by the same row ceiling as
+  # everything else here: a deployment names its own targets, but the map is read out of a
+  # registry entry this build may not have written.
+  defp node_keyed(map, project) when is_map(map) do
+    map
+    |> Enum.take(@max_rows)
+    |> Map.new(fn {target, value} -> {node_name(target), project.(value)} end)
+  end
+
+  defp node_keyed(_other, _project), do: %{}
+
+  # One gate, as an outcome a client branches on and a reason a person reads. The reason is
+  # rendered before it is cut, because a stage failure can carry an exception, an exit
+  # reason, or a port — and none of those are terms a socket hands out.
+  defp evidence(:ok), do: %{outcome: :ok, detail: nil}
+  defp evidence(:skipped), do: %{outcome: :skipped, detail: nil}
+  defp evidence(:absent), do: %{outcome: :absent, detail: nil}
+  defp evidence(nil), do: %{outcome: :unknown, detail: nil}
+  defp evidence({:mismatch, detail}), do: %{outcome: :mismatch, detail: reason(detail)}
+  defp evidence({:error, detail}), do: %{outcome: :error, detail: reason(detail)}
+  defp evidence({:ambiguous, detail}), do: %{outcome: :ambiguous, detail: reason(detail)}
+
+  # An evaluation summary. `satisfied?` is the verdict and the failures are why; both are
+  # `Ouroboros.Upgrade.Rollout.Evaluation.summarize/1`'s own bounded shape, rendered here
+  # because a failure's reason is a signed spec's word for what went wrong.
+  defp evidence(%{satisfied?: satisfied?} = summary) do
+    %{
+      outcome: if(satisfied? == true, do: :passed, else: :failed),
+      detail: summary |> Map.get(:failures, []) |> failures(),
+      probes: integer(Map.get(summary, :probes)),
+      passed: integer(Map.get(summary, :passed)),
+      failed: integer(Map.get(summary, :failed)),
+      total_ms: integer(Map.get(summary, :total_ms))
+    }
+  end
+
+  defp evidence(other), do: %{outcome: :unknown, detail: reason(other)}
+
+  defp failures([]), do: nil
+  defp failures(failures) when is_list(failures), do: reason(failures)
+  defp failures(_other), do: nil
+
   # ---------------------------------------------------------------------------
   # The helper
   # ---------------------------------------------------------------------------

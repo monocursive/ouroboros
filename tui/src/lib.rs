@@ -32,4 +32,5 @@ pub mod ui;
 pub mod update;
 pub mod wasm_cli;
 pub mod wasm_client;
+pub mod wasm_deploy_cli;
 pub mod web_cli;

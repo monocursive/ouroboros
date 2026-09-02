@@ -147,6 +147,18 @@ defmodule Ouroboros.Wasm.Rollout do
 
   @type warning :: {:driver_not_a_target, node()}
 
+  @type rollback_outcome :: %{
+          artifact_id: String.t(),
+          module: String.t(),
+          name: String.t(),
+          component_sha256: String.t(),
+          epoch: pos_integer(),
+          start_id: String.t(),
+          state: Registry.Entry.state(),
+          nodes: [node() | String.t()],
+          recovery: %{optional(node() | String.t()) => atom()}
+        }
+
   @type outcome :: %{
           artifact_id: String.t(),
           module: String.t(),
@@ -214,6 +226,44 @@ defmodule Ouroboros.Wasm.Rollout do
     |> Registry.live()
     |> Enum.filter(&lane_w?/1)
   end
+
+  @doc """
+  Retires the live rollout of `name`: stop the wrapper, mark the entry, keep the bytes.
+
+  This is not a second rollback path. It is the *same* one the eval-failure branch takes —
+  `withdraw/2` on every node the entry names, and `:rolled_back` only where every one of
+  them proved absence — reached by an operator instead of by a failed gate. Writing a
+  second one would mean two answers to "what does rollback prove", and the whole reason
+  `withdraw/2` asks `holder_component/1` before it stops anything is that there is exactly
+  one.
+
+  Three things it will not do:
+
+    * **Stop anything that is not this capability's wrapper.** The id is derived
+      (`"wasm/" <> name`), never read from anywhere, and `withdraw/2` stops the process
+      holding it only when that process is running the sha the registry entry records. A
+      wrapper holding the name for some other component is `:unchanged` and is left alone.
+    * **Touch a rollout the register does not hold as live lane-W.** A name with no live
+      entry is `{:no_live_rollout, name}`; a lane-B entry is not a lane-W entry and is
+      never found here.
+    * **Remove bytes.** D6: the store is content-addressed and durable, rollback is stop
+      and mark, and the material to redeploy from stays exactly where it was.
+
+  Options are `Rollout.deploy/4`'s: `:registry` and `:start_timeout`.
+  """
+  @spec rollback(String.t(), keyword()) :: {:ok, rollback_outcome()} | {:error, term()}
+  def rollback(name, opts \\ [])
+
+  def rollback(name, opts) when is_binary(name) and is_list(opts) do
+    registry = Keyword.get(opts, :registry, Registry)
+
+    with :ok <- validate_name(name),
+         {:ok, entry} <- live_entry(name, registry) do
+      retire(entry, name, registry, opts)
+    end
+  end
+
+  def rollback(name, _opts), do: {:error, {:invalid_component_name, bound(name)}}
 
   @doc """
   The `initial_state` a lane-W capability is stood up with, naming all six deciding keys.
@@ -676,17 +726,88 @@ defmodule Ouroboros.Wasm.Rollout do
       start ->
         nodes
         |> Enum.reduce(evidence, fn target, acc ->
-          put_in(acc[target][:recovery], withdraw_node(target, start.id, artifact, opts))
+          put_in(
+            acc[target][:recovery],
+            withdraw_node(target, start.id, artifact.component_sha256, opts)
+          )
         end)
     end
   end
 
-  defp withdraw_node(target, id, artifact, opts) do
-    args = [id, artifact.component_sha256]
+  # A node name a checkpoint carried as a binary is a rollout of something this VM never
+  # interned (the register's read is looser than its write, deliberately). It is not a
+  # target `:erpc` can reach and it is not a node this module gets to invent an atom for,
+  # so it is unproven — which is the same answer a peer that never replied gives.
+  defp withdraw_node(target, _id, _sha, _opts) when not is_atom(target), do: :quarantined
+
+  defp withdraw_node(target, id, component_sha256, opts) do
+    args = [id, component_sha256]
 
     case remote(target, __MODULE__, :withdraw, args, start_timeout(opts)) do
       {:returned, recovery} when recovery in [:not_needed, :rolled_back, :unchanged] -> recovery
       _unproven -> :quarantined
+    end
+  end
+
+  ## Operator rollback
+
+  defp validate_name(name) do
+    if Artifact.name?(name), do: :ok, else: {:error, {:invalid_component_name, bound(name)}}
+  end
+
+  # One live entry per capability is the register's own rule — marking a challenger live
+  # supersedes the entry it displaces in the same call — so more than one is a register
+  # this build did not write and a set of wrappers nobody can name. Refusing is the honest
+  # answer; picking one would be guessing which of two components an operator meant.
+  defp live_entry(name, registry) do
+    entries =
+      @module_prefix
+      |> Kernel.<>(name)
+      |> Registry.history(registry)
+      |> Enum.filter(&(&1.state == :live and lane_w?(&1)))
+
+    case entries do
+      [entry] -> {:ok, entry}
+      [] -> {:error, {:no_live_rollout, name}}
+      many -> {:error, {:ambiguous_live_rollouts, Enum.map(many, & &1.artifact_id)}}
+    end
+  rescue
+    _unreadable -> {:error, :rollout_registry_unavailable}
+  catch
+    :exit, reason -> {:error, {:rollout_registry_unavailable, bound(reason)}}
+  end
+
+  defp retire(entry, name, registry, opts) do
+    id = @module_prefix <> name
+    nodes = if is_list(entry.nodes), do: entry.nodes, else: []
+
+    recovery =
+      Map.new(nodes, fn target ->
+        {target, withdraw_node(target, id, entry.component_sha256, opts)}
+      end)
+
+    state =
+      if Enum.all?(recovery, fn {_t, r} -> r in @proven_recoveries end),
+        do: :rolled_back,
+        else: :quarantined
+
+    outcome = %{
+      artifact_id: entry.artifact_id,
+      module: entry.module,
+      name: name,
+      component_sha256: entry.component_sha256,
+      epoch: entry.epoch,
+      start_id: id,
+      state: state,
+      nodes: nodes,
+      recovery: recovery
+    }
+
+    detail = %{stage: :rollback, requested: :operator, nodes: bound(recovery)}
+
+    case Registry.mark(entry.artifact_id, state, [detail: detail], registry) do
+      {:ok, _entry} -> {:ok, outcome}
+      {:error, reason} -> {:error, {:rollout_record_failed, state, reason, outcome}}
     end
   end
 

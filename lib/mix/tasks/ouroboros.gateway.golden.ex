@@ -135,6 +135,10 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       {"wasm_status_result", wasm_status_result()},
       {"wasm_list_result", wasm_list_result()},
       {"agents_message_result", agents_message_result()},
+      {"wasm_upload_result", wasm_upload_result()},
+      {"wasm_sign_result", wasm_sign_result()},
+      {"wasm_deploy_result", wasm_deploy_result()},
+      {"wasm_rollback_result", wasm_rollback_result()},
       {"workspace_browse_result", workspace_browse_result()},
       {"ledger_list_result", ledger_list_result()},
       {"ledger_export_result", ledger_export_result()},
@@ -1375,6 +1379,159 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       untrusted: true,
       truncated: false,
       reply: %{"findings" => [], "checked" => 12}
+    })
+  end
+
+  # W12. The four operator verbs, in the shapes `Ouroboros.Wasm.Upload`,
+  # `Ouroboros.Wasm.Deploy` and `Ouroboros.Wasm.Surface` produce.
+  #
+  # A chunk's receipt, mid-transfer. `sha256` is `null` until the frame that closes the
+  # upload, because a digest over half a file is a number that means nothing and would
+  # invite a client to check it. `chunk_bytes` is the node's own ceiling, stated so a
+  # client sizes its next frame from the answer rather than from a constant of its own.
+  defp wasm_upload_result do
+    Conn.result_frame(18, %{
+      upload: "9f2c1d4e8a7b6053f1e2d3c4b5a69780",
+      received: 524_288,
+      complete: false,
+      sha256: nil,
+      chunk_bytes: 524_288
+    })
+  end
+
+  # What a signature buys, and what comes back for it. Not the bundle: the **prefix** —
+  # the header and the envelope — which the client writes followed by the component it
+  # already holds. `bundle_bytes` is what that file will weigh, so a client can say so
+  # before it writes one.
+  defp wasm_sign_result do
+    Conn.result_frame(19, %{
+      artifact_id: "wasm-0000000000000000000001",
+      name: "vet",
+      epoch: 7,
+      component_sha256: String.duplicate("a", 64),
+      size: 2_097_152,
+      world: "ouroboros:capability@0.1.0",
+      imports: ["log"],
+      created_at: @timestamp,
+      signer: "release-key",
+      start_id: "wasm/vet",
+      extension: ".ouro-wasm",
+      bundle_prefix: Base.encode64(wasm_bundle_prefix()),
+      bundle_bytes: byte_size(wasm_bundle_prefix()) + 2_097_152
+    })
+  end
+
+  # A real bundle prefix, of a realistic length, built from a literal envelope rather than
+  # from `Ouroboros.Wasm.Bundle.prefix/1`: a manifest's `term_to_binary` is a fact about
+  # this OTP and a fixture must be the same bytes on every machine. The framing is exact —
+  # magic, version, the two lengths — so the Rust client's decode is held to the real
+  # header rather than to a plausible-looking blob.
+  defp wasm_bundle_prefix do
+    envelope =
+      ~s({"bundle":1,) <>
+        ~s("manifest":"#{String.duplicate("QUJDRA", 40)}",) <>
+        ~s("signature":"#{String.duplicate("A", 86)}==",) <>
+        ~s("signer":"release-key"})
+
+    "OUROWASM" <> <<1::8, byte_size(envelope)::32, 2_097_152::32>> <> envelope
+  end
+
+  # A rollout that reached `:live`, with every gate's evidence per node. Each gate is
+  # `%{outcome:, detail:}` rather than the term the rollout actually held, because a stage
+  # failure can carry an exception and an ambiguity an exit reason, and neither is a term a
+  # socket hands out. Node names are map *keys* here and they are strings, for the reason
+  # `wasm.list`'s `nodes` are: an atom a client minted from the wire is an atom nothing
+  # collects.
+  defp wasm_deploy_result do
+    Conn.result_frame(20, %{
+      artifact_id: "wasm-0000000000000000000001",
+      name: "vet",
+      module: "wasm/vet",
+      component_sha256: String.duplicate("a", 64),
+      epoch: 7,
+      state: :live,
+      stage: :evaluate,
+      nodes: ["ouroboros@golden", "ouroboros@peer"],
+      started: %{
+        id: "wasm/vet",
+        node: "ouroboros@golden",
+        already_started: false,
+        claimed_by: nil,
+        errors: %{}
+      },
+      warnings: [],
+      eval: %{
+        probes: 2,
+        required: "all",
+        budget_ms: 10_000,
+        nodes: %{
+          "ouroboros@golden" => %{
+            outcome: :passed,
+            detail: nil,
+            probes: 2,
+            passed: 2,
+            failed: 0,
+            total_ms: 41
+          },
+          "ouroboros@peer" => %{
+            outcome: :passed,
+            detail: nil,
+            probes: 2,
+            passed: 2,
+            failed: 0,
+            total_ms: 63
+          }
+        }
+      },
+      deployment: %{
+        "ouroboros@golden" => %{
+          stage: %{outcome: :ok, detail: nil},
+          probe: %{outcome: :ok, detail: nil},
+          eval: %{
+            outcome: :passed,
+            detail: nil,
+            probes: 2,
+            passed: 2,
+            failed: 0,
+            total_ms: 41
+          },
+          recovery: nil
+        },
+        "ouroboros@peer" => %{
+          stage: %{outcome: :ok, detail: nil},
+          probe: %{outcome: :ok, detail: nil},
+          eval: %{
+            outcome: :passed,
+            detail: nil,
+            probes: 2,
+            passed: 2,
+            failed: 0,
+            total_ms: 63
+          },
+          recovery: nil
+        }
+      }
+    })
+  end
+
+  # Rollback to absence. `:rolled_back` is earned only where every node proved it, and the
+  # per-node recovery says which proof each one gave: `:rolled_back` stopped a wrapper,
+  # `:not_needed` found none, `:unchanged` found somebody else's, and `:quarantined` is a
+  # node that could not be shown either way.
+  defp wasm_rollback_result do
+    Conn.result_frame(21, %{
+      artifact_id: "wasm-0000000000000000000001",
+      name: "vet",
+      module: "wasm/vet",
+      component_sha256: String.duplicate("a", 64),
+      epoch: 7,
+      start_id: "wasm/vet",
+      state: :rolled_back,
+      nodes: ["ouroboros@golden", "ouroboros@peer"],
+      recovery: %{
+        "ouroboros@golden" => :rolled_back,
+        "ouroboros@peer" => :not_needed
+      }
     })
   end
 

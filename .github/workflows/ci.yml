@@ -187,7 +187,7 @@ jobs:
     # 40, not 30: W10 added a `tui/tests/wasm_cli.rs` that drives the real helper, so this job
     # now builds `ouro-wasm` in release and the acceptance guest before `cargo test`. Both are
     # cached; the ceiling is for the run that misses.
-    timeout-minutes: 40
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: tui
