@@ -4339,10 +4339,9 @@ mod tests {
         assert_eq!(helper.hook_component_budget, 16);
         assert!(!helper.hook_budget_spent());
 
-        assert_eq!(
-            status.store.root.as_deref(),
-            Some("/var/lib/ouroboros/wasm/components")
-        );
+        // A basename, not a path: both wasm verbs are `read`, and the fixture is what the
+        // daemon answers (W7, `Ouroboros.Wasm.Surface`).
+        assert_eq!(status.store.root.as_deref(), Some("components"));
         assert_eq!(status.store.held, Some(2));
         assert_eq!(status.store.bytes, Some(3_145_728));
         assert_eq!(status.store.protected, Some(1));

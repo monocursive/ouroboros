@@ -863,12 +863,13 @@ defmodule Ouroboros.Gateway.Methods do
       {:closed,
        [
          @authority_node
-       ]},
+       ],
+       "`helper.path` and `store.root` are basenames, not paths: both verbs are `read`, and an absolute path names an install prefix rather than anything about lane W"},
     "wasm.list" =>
       {:closed,
        [
          @authority_node
-       ]},
+       ], "`components[].sha256` names a component; nothing here is a filesystem path"},
     "computer_use.artifact" =>
       {:closed,
        [
