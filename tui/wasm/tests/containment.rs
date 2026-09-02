@@ -201,6 +201,37 @@ fn limits(fuel: u64, memory_bytes: u64, deadline_ms: u64) -> Value {
     json!({ "fuel": fuel, "memory_bytes": memory_bytes, "deadline_ms": deadline_ms })
 }
 
+/// `load` a fixture and hand back the helper's answer.
+fn load(helper: &mut Helper, fixture: &Fixture) -> Value {
+    helper.ok(
+        "load",
+        json!({ "sha256": fixture.sha256, "path": fixture.path }),
+    )
+}
+
+/// `instantiate` a loaded fixture as `name`, under the smallest grant the helper accepts.
+fn instantiate(helper: &mut Helper, name: &str, fixture: &Fixture) -> Value {
+    helper.ok(
+        "instantiate",
+        json!({
+            "instance": name,
+            "sha256": fixture.sha256,
+            "config": "",
+            "limits": limits(FUEL, MIN_MEMORY_BYTES, DEADLINE_MS),
+        }),
+    )
+}
+
+/// The shas a `load` answer or a `doctor` census says were evicted.
+fn evicted(answer: &Value) -> Vec<String> {
+    answer["evicted"]
+        .as_array()
+        .expect("evicted is always a list")
+        .iter()
+        .map(|sha| sha.as_str().expect("a sha").to_string())
+        .collect()
+}
+
 /// Load a guest and stand one instance of it up, under the given bounds.
 fn stand_up(helper: &mut Helper, tag: &str, bytes: &[u8], limits: Value) -> Fixture {
     let fixture = fixture(tag, bytes);
@@ -825,47 +856,70 @@ fn a_huge_peer_string_comes_back_small() {
     );
 }
 
-/// Neither map evicts anything, so both need a ceiling, and hitting it is a typed refusal
-/// rather than a helper that grows until the node notices.
+/// Both tables have a ceiling, and both are reached as a typed answer rather than as a helper
+/// that grows until the node notices. They differ in what the ceiling *does*. The component
+/// table is a cache and evicts at it — the least recently used sha no live instance holds — so
+/// the 65th load succeeds and names what it let go, and `doctor` keeps a bounded log of the
+/// same. The instance table is not a cache, and the 257th instance is refused.
 #[test]
 fn the_component_and_instance_tables_are_bounded() {
     let mut helper = Helper::spawn(&[]);
 
-    // 64 components fit; the 65th does not. Each is a distinct guest, so each is a distinct sha.
-    let mut last = None;
+    // 64 components fit without evicting anything. Each is a distinct guest, so each is a
+    // distinct sha.
+    let mut fixtures = Vec::new();
     for n in 0..64 {
         let fixture = fixture("many", &support::oversize(n + 1));
-        helper.ok(
-            "load",
-            json!({ "sha256": fixture.sha256, "path": fixture.path }),
+        let loaded = load(&mut helper, &fixture);
+        assert_eq!(loaded["cached"], false);
+        assert!(
+            evicted(&loaded).is_empty(),
+            "load {n} evicted from a cache that was not full: {loaded}"
         );
-        last = Some(fixture);
+        fixtures.push(fixture);
     }
-    let overflow = fixture("many", &support::oversize(65));
-    let (refusal, _) = helper.refusal(
-        "load",
-        json!({ "sha256": overflow.sha256, "path": overflow.path }),
-    );
-    assert_eq!(refusal, "too_many_components");
 
-    // 256 instances of the last one fit; the 257th does not.
-    let held = last.expect("a component was loaded");
+    // The 65th evicts the first — the least recently used — and says so.
+    let mut last = fixture("many", &support::oversize(65));
+    let loaded = load(&mut helper, &last);
+    assert_eq!(loaded["cached"], false);
+    assert_eq!(evicted(&loaded), vec![fixtures[0].sha256.clone()]);
+
+    let report = helper.ok("doctor", Value::Null);
+    assert_eq!(report["held"]["components"], 64);
+    assert_eq!(report["held"]["evictions"], 1);
+    assert_eq!(evicted(&report["held"]), vec![fixtures[0].sha256.clone()]);
+
+    // Nineteen more: each takes the next-oldest, in the order they were loaded. The log is
+    // itself bounded — after twenty evictions it holds the last sixteen, oldest first — while
+    // the count keeps counting.
+    let mut victims = evicted(&loaded);
+    for n in 66..85 {
+        last = fixture("many", &support::oversize(n));
+        victims.extend(evicted(&load(&mut helper, &last)));
+    }
+    let expected: Vec<String> = fixtures[..20].iter().map(|f| f.sha256.clone()).collect();
+    assert_eq!(
+        victims, expected,
+        "eviction is least recently used, in load order"
+    );
+
+    let report = helper.ok("doctor", Value::Null);
+    assert_eq!(report["held"]["components"], 64);
+    assert_eq!(report["held"]["evictions"], 20);
+    assert_eq!(report["limits"]["max_eviction_log"], 16);
+    assert_eq!(evicted(&report["held"]), victims[4..].to_vec());
+
+    // 256 instances of the newest one fit; the 257th does not, and nothing is evicted to make
+    // room for it.
     for n in 0..256 {
-        helper.ok(
-            "instantiate",
-            json!({
-                "instance": format!("i{n}"),
-                "sha256": held.sha256,
-                "config": "",
-                "limits": limits(FUEL, MIN_MEMORY_BYTES, DEADLINE_MS),
-            }),
-        );
+        instantiate(&mut helper, &format!("i{n}"), &last);
     }
     let (refusal, _) = helper.refusal(
         "instantiate",
         json!({
             "instance": "one-too-many",
-            "sha256": held.sha256,
+            "sha256": last.sha256,
             "config": "",
             "limits": limits(FUEL, MIN_MEMORY_BYTES, DEADLINE_MS),
         }),
@@ -875,6 +929,223 @@ fn the_component_and_instance_tables_are_bounded() {
     let report = helper.ok("doctor", Value::Null);
     assert_eq!(report["held"]["components"], 64);
     assert_eq!(report["held"]["instances"], 256);
+    assert_eq!(
+        report["held"]["evictions"], 20,
+        "a refused instantiate evicts nothing"
+    );
+}
+
+/// A component with a live instance is never evicted, however old it is. The instance would
+/// keep working either way — it holds its own handle on the compiled code — but its owner is
+/// plainly still using that component, and a cache that forgot what its callers hold would be
+/// lying to `doctor`. When every held component is pinned the cache refuses rather than
+/// evicts, and dropping one instance is exactly what makes room again.
+#[test]
+fn eviction_never_touches_a_component_with_live_instances() {
+    let mut helper = Helper::spawn(&[]);
+
+    // The oldest thing in the table, and the one thing with a live instance.
+    let pinned = stand_up(
+        &mut helper,
+        "pinned",
+        &support::echo(),
+        limits(FUEL, MEMORY_BYTES, DEADLINE_MS),
+    );
+
+    // Fill the rest of the table behind it.
+    let mut fillers = Vec::new();
+    for n in 0..63 {
+        let filler = fixture("filler", &support::oversize(n + 1));
+        assert!(evicted(&load(&mut helper, &filler)).is_empty());
+        fillers.push(filler);
+    }
+    let report = helper.ok("doctor", Value::Null);
+    assert_eq!(report["held"]["components"], 64);
+
+    // Full. The least recently used sha is `pinned`'s, and it is passed over for the oldest
+    // sha nothing holds.
+    let newcomer = fixture("newcomer", &support::oversize(100));
+    assert_eq!(
+        evicted(&load(&mut helper, &newcomer)),
+        vec![fillers[0].sha256.clone()]
+    );
+
+    // The live instance is untouched, and its component is still instantiable without a
+    // reload — it was never let go.
+    let answer = helper.ok(
+        "call",
+        json!({ "instance": "pinned", "export": "handle-message", "payload": "still here" }),
+    );
+    assert_eq!(answer["payload"], "CFG|still here");
+    helper.ok(
+        "instantiate",
+        json!({
+            "instance": "pinned-2",
+            "sha256": pinned.sha256,
+            "config": "CFG",
+            "limits": limits(FUEL, MEMORY_BYTES, DEADLINE_MS),
+        }),
+    );
+
+    // Pin everything else: one instance of each of the 63 other components now held.
+    for (n, filler) in fillers.iter().enumerate().skip(1) {
+        instantiate(&mut helper, &format!("f{n}"), filler);
+    }
+    instantiate(&mut helper, "newcomer", &newcomer);
+
+    // Every held component has a live instance, so the cache refuses rather than evicts, and
+    // the refusal says what would make room.
+    let refused = fixture("refused", &support::oversize(101));
+    let (refusal, message) = helper.refusal(
+        "load",
+        json!({ "sha256": refused.sha256, "path": refused.path }),
+    );
+    assert_eq!(refusal, "too_many_components");
+    assert!(
+        message.contains("live instance"),
+        "the refusal should name the reason nothing can go: {message}"
+    );
+
+    let report = helper.ok("doctor", Value::Null);
+    assert_eq!(report["held"]["components"], 64);
+    assert_eq!(report["held"]["instances"], 65);
+    assert_eq!(
+        report["held"]["evictions"], 1,
+        "a refused load evicts nothing"
+    );
+
+    // Drop exactly one instance and the next load evicts exactly that component — not the far
+    // older `pinned`, which is still held.
+    helper.ok("drop", json!({ "instance": "f7" }));
+    assert_eq!(
+        evicted(&load(&mut helper, &refused)),
+        vec![fillers[7].sha256.clone()]
+    );
+
+    // Through all of it `pinned` was never let go, and its instances still answer.
+    let report = helper.ok("doctor", Value::Null);
+    assert!(
+        !evicted(&report["held"]).contains(&pinned.sha256),
+        "a component with live instances was evicted: {}",
+        report["held"]
+    );
+    let answer = helper.ok(
+        "call",
+        json!({ "instance": "pinned-2", "export": "handle-message", "payload": "and here" }),
+    );
+    assert_eq!(answer["payload"], "CFG|and here");
+}
+
+/// The cross-lane defect eviction exists for. A hook is loaded on every invocation and every
+/// edit of it is a new sha, so a long-lived helper sees an unbounded procession of hook
+/// components that are each used once and dropped. With no eviction, the 64th of them made
+/// every later load on the node — the next hook, and the capability lane's next rollout — fail
+/// `too_many_components` until the helper was respawned. Now the 65th load evicts the oldest
+/// hook nobody holds, and the capability loads, instantiates and answers.
+#[test]
+fn a_capability_load_succeeds_after_64_hook_loads() {
+    let mut helper = Helper::spawn(&[]);
+
+    // Sixty-four distinct hooks, each used the way `Hooks.run_component/4` uses one: load,
+    // instantiate, drop. A dropped instance holds nothing, so none of these stays pinned.
+    let mut hooks = Vec::new();
+    for n in 0..64 {
+        let hook = fixture("hook", &support::oversize(n + 1));
+        assert!(evicted(&load(&mut helper, &hook)).is_empty());
+        instantiate(&mut helper, "hook", &hook);
+        let dropped = helper.ok("drop", json!({ "instance": "hook" }));
+        assert_eq!(dropped["dropped"], true);
+        hooks.push(hook);
+    }
+    let report = helper.ok("doctor", Value::Null);
+    assert_eq!(report["held"]["components"], 64);
+    assert_eq!(report["held"]["instances"], 0);
+    assert_eq!(report["held"]["evictions"], 0);
+
+    // The capability lane's load: admitted, at the cost of the oldest hook.
+    let capability = fixture("capability", &support::echo());
+    let loaded = load(&mut helper, &capability);
+    assert_eq!(loaded["cached"], false);
+    assert_eq!(evicted(&loaded), vec![hooks[0].sha256.clone()]);
+
+    helper.ok(
+        "instantiate",
+        json!({
+            "instance": "capability",
+            "sha256": capability.sha256,
+            "config": "CFG",
+            "limits": limits(FUEL, MEMORY_BYTES, DEADLINE_MS),
+        }),
+    );
+    let answer = helper.ok(
+        "call",
+        json!({ "instance": "capability", "export": "handle-message", "payload": "hello" }),
+    );
+    assert_eq!(answer["payload"], "CFG|hello");
+
+    // The evicted hook is simply unknown again: instantiating it is refused by name, and
+    // loading it again compiles it again — at the cost of the next-oldest hook, never of the
+    // capability, which is both newer and held.
+    let (refusal, _) = helper.refusal(
+        "instantiate",
+        json!({
+            "instance": "stale",
+            "sha256": hooks[0].sha256,
+            "config": "",
+            "limits": limits(FUEL, MIN_MEMORY_BYTES, DEADLINE_MS),
+        }),
+    );
+    assert_eq!(refusal, "unknown_component");
+
+    let reloaded = load(&mut helper, &hooks[0]);
+    assert_eq!(
+        reloaded["cached"], false,
+        "an evicted sha is compiled again"
+    );
+    assert_eq!(evicted(&reloaded), vec![hooks[1].sha256.clone()]);
+
+    let report = helper.ok("doctor", Value::Null);
+    assert_eq!(report["held"]["components"], 64);
+    assert_eq!(report["held"]["evictions"], 2);
+    assert_eq!(
+        evicted(&report["held"]),
+        vec![hooks[0].sha256.clone(), hooks[1].sha256.clone()]
+    );
+}
+
+/// Recency is the last time a sha was *wanted*, not the time it was compiled: a repeat `load`
+/// of a held sha — which is what every hook invocation is — is a cache hit that moves it to
+/// the back of the queue, so what a full cache lets go is the component nobody has asked for
+/// longest.
+#[test]
+fn a_cache_hit_counts_as_recent_use() {
+    let mut helper = Helper::spawn(&[]);
+
+    let first = fixture("first", &support::oversize(1));
+    let second = fixture("second", &support::oversize(2));
+    let third = fixture("third", &support::oversize(3));
+    load(&mut helper, &first);
+    load(&mut helper, &second);
+    load(&mut helper, &third);
+    for n in 4..=64 {
+        load(&mut helper, &fixture("rest", &support::oversize(n)));
+    }
+
+    // Ask for `first` again: a hit, which evicts nothing and makes it the most recently
+    // wanted sha in the table.
+    let hit = load(&mut helper, &first);
+    assert_eq!(hit["cached"], true);
+    assert!(evicted(&hit).is_empty());
+
+    // The next admission takes `second` — the oldest sha nobody has wanted since — and the
+    // one after that takes `third`. `first` is at the back of the queue.
+    let loaded = load(&mut helper, &fixture("next", &support::oversize(65)));
+    assert_eq!(evicted(&loaded), vec![second.sha256.clone()]);
+    let loaded = load(&mut helper, &fixture("next", &support::oversize(66)));
+    assert_eq!(evicted(&loaded), vec![third.sha256.clone()]);
+
+    let again = load(&mut helper, &first);
+    assert_eq!(again["cached"], true, "`first` was never let go");
 }
 
 /// The reply cap has to be a bound on what the *host* allocates, not just on what it sends, and

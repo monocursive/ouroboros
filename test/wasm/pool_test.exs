@@ -431,10 +431,12 @@ defmodule Ouroboros.Wasm.PoolTest do
 
   describe "the hook lane is budgeted against the shared component cache" do
     test "sixteen distinct hook components load and the seventeenth never touches the wire" do
-      # The helper's cache is 64 slots with no eviction and it is shared by every lane, so
-      # an untrusted workspace shipping components could fill it in one turn — and from then
-      # on every `load` on this node fails `too_many_components`, including the *operator's
-      # own* component hook's. That is an untrusted workspace deleting somebody else's deny.
+      # The helper's cache is 64 slots shared by every lane. Before it evicted, an untrusted
+      # workspace shipping components could fill it in one turn — and from then on every
+      # `load` on this node failed `too_many_components`, including the *operator's own*
+      # component hook's: an untrusted workspace deleting somebody else's deny. The helper
+      # now evicts (never a component with a live instance), and this budget bounds the
+      # churn a repository can cause instead: compiles, and evictions somebody else repays.
       journal = journal_file()
       pool = start_pool(journaling_helper(journal))
 
@@ -499,6 +501,39 @@ defmodule Ouroboros.Wasm.PoolTest do
 
       assert {:ok, _result} = Pool.load(sha(1), "/tmp/one.wasm", pool, lane: :hooks)
       assert Pool.status(pool).hook_components == 1
+    end
+  end
+
+  describe "an eviction the helper reports is legible on this side" do
+    test "a load answer naming what was evicted is handed back whole and logged, bounded" do
+      # The helper evicts at its ceiling and names the sha it let go in the `load` that took
+      # it. That answer reaches the caller untouched — the caller may want to know — and the
+      # node's log once, at debug, cut to the pool's own bound on helper prose.
+      pool = start_pool(evicting_helper([sha(7), String.duplicate("x", 5_000)]))
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :debug], fn ->
+          assert {:ok, %{"cached" => false, "evicted" => [evicted, long]}} =
+                   Pool.load(sha(1), "/tmp/one.wasm", pool)
+
+          assert evicted == sha(7)
+          assert byte_size(long) == 5_000
+        end)
+
+      assert log =~ "wasm helper evicted 2 component(s)"
+      assert log =~ sha(7)
+      refute log =~ String.duplicate("x", 3_000), "helper prose reached the log unbounded"
+    end
+
+    test "a load that evicted nothing is not an event" do
+      pool = start_pool(evicting_helper([]))
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :debug], fn ->
+          assert {:ok, %{"evicted" => []}} = Pool.load(sha(1), "/tmp/one.wasm", pool)
+        end)
+
+      refute log =~ "evicted"
     end
   end
 
@@ -612,6 +647,22 @@ defmodule Ouroboros.Wasm.PoolTest do
         """
         } else if ($0 ~ /"method":"load"/) {
           printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"error\\":{\\"code\\":-32001,\\"message\\":\\"/tmp/whatever.wasm hashes to abc, not the requested 000\\",\\"data\\":{\\"refusal\\":\\"sha_mismatch\\"}}}\\n", id)
+        """,
+        ""
+      )
+    )
+  end
+
+  # Answers every `load` as a fresh compile that evicted `shas` to make room.
+  defp evicting_helper(shas) do
+    evicted = Enum.map_join(shas, ",", &~s(\\"#{&1}\\"))
+
+    write_helper(
+      awk_body(
+        @doctor_ok,
+        """
+        } else if ($0 ~ /"method":"load"/) {
+          printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"result\\":{\\"cached\\":false,\\"evicted\\":[#{evicted}]}}\\n", id)
         """,
         ""
       )

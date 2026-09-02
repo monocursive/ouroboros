@@ -56,7 +56,7 @@ defmodule Ouroboros.Wasm.Surface do
   # status map.
   @max_worlds 8
 
-  # The most entries the projected `limits` table holds. The helper reports fifteen.
+  # The most entries the projected `limits` table holds. The helper reports sixteen.
   @max_limit_keys 32
 
   # The register's own states, restated so a state with no rollouts in it is still reported

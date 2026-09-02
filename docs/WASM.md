@@ -332,9 +332,9 @@ Methods:
 
 | method | params | returns |
 |---|---|---|
-| `doctor` | — | `{usable, wasmtime, worlds: [supported world ids], notes}` |
+| `doctor` | — | `{usable, wasmtime, worlds: [supported world ids], imports, limits, held: {components, instances, evictions, evicted}, notes}` |
 | `inspect` | `{path}` | `{sha256, world, imports, exports, size}` — parsed from bytes |
-| `load` | `{sha256, path}` | ok / refusal (`sha_mismatch`, `unsupported_world`, `undefined_import`) |
+| `load` | `{sha256, path}` | `{…as inspect, cached, evicted: [sha]}` / refusal (`sha_mismatch`, `unsupported_world`, `undefined_import`, `too_many_components`) |
 | `instantiate` | `{instance, sha256, config, limits: {fuel, memory_bytes, deadline_ms}}` | ok / init error |
 | `call` | `{instance, export, payload}` | `{payload, fuel_used}` / trap / deadline |
 | `drop` | `{instance}` | ok (idempotent) |
@@ -345,6 +345,19 @@ instantiation — authority cannot be smuggled past a lying manifest** (D5). Eve
 runs under a fuel budget, an epoch deadline, and a store memory cap; exhaustion is a
 typed refusal, not a hang. A wasmtime panic or segfault kills a Port, not the node —
 which is the point of the helper (D3).
+
+The component cache is bounded and evicts (`MAX_COMPONENTS` = 64; W6). A `load` past the
+ceiling evicts the **least recently used** component that no live instance holds — an
+instance keeps its own handle on the compiled code, and an owner with an instance up is
+still using that component — and names what it let go in its result (`evicted`); `doctor`
+reports the count and the last `MAX_EVICTION_LOG` = 16 of them under `held`. The refusal
+`too_many_components` is reached only when every held component has a live instance.
+Eviction is a reclaim, not a revocation: the sha is simply unknown again, `instantiate`
+refuses it `unknown_component`, and the peer re-`load`s — recomputing the digest and the
+world check exactly as the first load did. Every peer in this repository loads before it
+instantiates. Instances are never evicted: `MAX_INSTANCES` = 256 is a hard ceiling and
+`too_many_instances` means "drop one". The pool's per-lifetime hook budget (W4, 16 shas)
+stays, as a bound on the churn a repository can cause rather than on the table filling.
 
 Elixir side, copied from the `Desktop.Pool` half: `Ouroboros.Wasm.Pool` (one helper
 per node, lazy, `Port.open` spawn with the same `@secret_env` stripping, doctor
@@ -657,6 +670,14 @@ Stated once, so nobody reads more into the lane than is there:
   both do (`hooks.ex:104-105` vs `mcp/servers.ex:214-220`,
   `permissions.ex:328-333`). An operator cannot install a hook a workspace cannot
   also install. Repaired in slice 4.
+- **W-F4 (cross-lane, operational; fixed in W6):** the helper's component cache had a
+  ceiling and no eviction, while W4's hook lane loads a repository-shipped component on
+  every invocation and every edit of one is a new sha — so a long-lived helper filled with
+  stale hook components and, once full, every later `load` on that node (the next hook,
+  the capability lane's next rollout stage) failed `too_many_components` until a respawn,
+  which only a broken transition causes. W4's interim answer was the pool's per-lifetime
+  budget of 16 hook shas; W6 makes the helper evict (§7.3) and keeps the budget as a
+  bound on churn.
 
 ## 14. Slices
 
@@ -688,6 +709,15 @@ Each slice is PR-sized, lands green, and is useful alone.
 - **W5 — surface.** Gateway verbs (`wasm.list`/`wasm.status`, `:read`;
   protocol-docs + golden fixtures + Rust decode tests per the integrator rule),
   `ouro wasm doctor`, fleet posture fact.
+- **W6 — cache eviction (W-F4).** The helper's component table evicts at its ceiling:
+  least recently used, never a component with a live instance, named in the `load`
+  result and counted (with the last sixteen) by `doctor`; `too_many_components` only when
+  every held component is pinned. No seventh method — reclaim is the helper's decision,
+  made with the two facts only it has (recency, and which shas have instances), and every
+  peer already loads before it instantiates, so an evicted sha heals itself on next use.
+  Rust proofs: a pinned component survives a full table; a capability loads after 64 hook
+  loads; a cache hit is recent use; the eviction log is bounded. The pool logs evictions
+  at debug; W4's hook budget stays as a churn bound.
 - **Deferred, in rough order:** policy engine (§8.2) → agent-reachable forge/deploy
   effects (§7.7) → tools lane (§9.1) → microVM backend (§10, likely its own spec
   once slice-shaped) → agent world (§9.2).

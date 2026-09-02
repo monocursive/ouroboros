@@ -27,7 +27,7 @@
 //! | -32015 | `unknown_export` | `call` named something outside the world's exports |
 //! | -32016 | `oversize_result` | the guest's reply is larger than a reply may be |
 //! | -32017 | `guest_error` | the guest returned its own `err(string)` — its answer, not ours |
-//! | -32018 | `too_many_components` | the component cache is full; nothing here is evicted |
+//! | -32018 | `too_many_components` | the component cache is full and every entry has a live instance, so nothing can be evicted |
 //! | -32019 | `too_many_instances` | the instance table is full; drop one first |
 //!
 //! One standard code travels in the same shape, because it is raised in the same places: a

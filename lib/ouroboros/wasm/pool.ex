@@ -119,20 +119,27 @@ defmodule Ouroboros.Wasm.Pool do
 
   # The most *distinct* hook components one helper's life may admit to its cache.
   #
-  # The helper holds `MAX_COMPONENTS` (64, `tui/wasm/src/host.rs`) and evicts none of them,
-  # and that cache is shared by every lane on this node. Without a bound on the one lane
-  # whose bytes come out of a repository, a single untrusted clone shipping 64 components
-  # under `[checks]` fills the table in one turn — and from then on every `load` on this
-  # node answers `too_many_components`: the capability lane's rollouts quarantine, and the
-  # *operator's own* component hook stops answering, which is an untrusted workspace making
-  # an outcome looser by deleting somebody else's `deny`. A full helper is not a broken one,
-  # so `doctor` still reports usable and nothing here ever respawns it.
+  # The helper holds `MAX_COMPONENTS` (64, `tui/wasm/src/host.rs`) in a cache every lane on
+  # this node shares, and since W6 it evicts at that ceiling: the least recently used
+  # component no live instance holds, named in the `load` that took it. So the hook lane can
+  # no longer *fill* the table — the attack W4 found, where one untrusted clone shipping 64
+  # components left every later `load` on the node answering `too_many_components`, the
+  # capability lane's rollouts quarantined and the operator's own component hook silent, is
+  # answered structurally by the helper. What a repository can still do is *churn* the
+  # table: its bytes are the one kind nobody signed, every distinct sha it ships is a compile
+  # that nothing time-bounds (cranelift runs under the pool's transport deadline and nothing
+  # finer), and past the ceiling each one evicts a component somebody else then compiles
+  # again. Sixteen per helper lifetime is far above any honest repository and bounds that
+  # churn at a quarter of the table.
   #
-  # A quarter of the helper's table, leaving 48 slots the hook lane can never touch. It is a
-  # budget and not an eviction: an operator who edits their own hook seventeen times within
-  # one helper's life hits it, which is the honest residual until the helper can evict.
-  # Any respawn — a restart, a broken transition — clears it.
+  # It is a budget and not an eviction: an operator who edits their own hook seventeen times
+  # within one helper's life hits it, even though the helper itself now has room. Any
+  # respawn — a restart, a broken transition — clears it.
   @hook_component_budget 16
+
+  # The most evicted shas one debug line names. The helper evicts one component per `load`,
+  # so a longer list is a helper misbehaving, and a log line is no place to repeat it.
+  @max_evicted_logged 8
 
   # The longest instance name this side will send. The helper only ever echoes back
   # `MAX_ECHO_BYTES` (256) of a name, so a longer one is both pointless on the wire and a
@@ -229,18 +236,28 @@ defmodule Ouroboros.Wasm.Pool do
   ## `lane:` — whose bytes these are
 
   `opts` takes one option, `lane: :capability | :hook`, defaulting to `:capability`, and it
-  exists because the helper's component cache is a **shared** resource with no eviction.
-  `:hook` names the one lane whose bytes come out of a repository rather than out of a
-  signed artifact, and distinct shas loaded under it are counted against
-  `#{@hook_component_budget}` for the life of the current helper: a new one past that is
-  refused `{:error, :hook_component_budget}` here, before a frame is built, so the lane can
-  never fill the table and starve the capability lane — or the operator's own hooks, loaded
-  earlier and still cached — with `too_many_components`.
+  exists because the helper's component cache is a **shared** resource. `:hook` names the
+  one lane whose bytes come out of a repository rather than out of a signed artifact, and
+  distinct shas loaded under it are counted against `#{@hook_component_budget}` for the
+  life of the current helper: a new one past that is refused `{:error, :hook_component_budget}`
+  here, before a frame is built. The helper evicts at its own ceiling — least recently
+  used, never a component with a live instance — so the lane cannot starve the capability
+  lane with `too_many_components`; what the budget bounds is how many compiles, and how
+  many evictions of somebody else's component, a repository can cause per helper lifetime.
 
   A sha already counted is free, so re-running the same hook forever costs one slot. The
   count is taken at admission rather than on success: a `load` that fails still spent a
   slot, which is the conservative direction for a bound whose whole job is to leave room
   for somebody else. `status/1` reports it as `hook_components`.
+
+  ## `evicted` — what this load cost somebody else
+
+  A successful answer carries `"evicted"`: the shas the helper let go to admit this one,
+  empty for a cache hit and for a cache with room. An evicted component is simply unknown
+  again — `instantiate/6` naming it is refused `unknown_component`, and the caller loads it
+  again, which is why every caller in this repository loads before it instantiates. Each
+  eviction is logged here at debug level, and `doctor/1` reports the count and the most
+  recent of them under `held`.
 
   `opts` follows the server, as `instantiate/6`'s does and for the same reason.
   """
@@ -724,8 +741,12 @@ defmodule Ouroboros.Wasm.Pool do
   defp route(:handshake, {:error, reason}, state, _inflight),
     do: go_broken(state, {:handshake_failed, reason})
 
+  # The eviction note goes out before the reply does: a caller that returns from `load/4`
+  # and reads the log expects the line to be there, and a line written after the reply
+  # would race it.
   defp route({:caller, item}, reply, state, inflight) do
     Process.demonitor(item.monitor, [:flush])
+    note_evictions(inflight, reply)
     GenServer.reply(item.from, reply)
     state |> remember_instance(inflight, reply) |> drain()
   end
@@ -736,6 +757,25 @@ defmodule Ouroboros.Wasm.Pool do
   # the bookkeeping it settles is this pool's own.
   defp route(:internal, reply, state, inflight),
     do: state |> remember_instance(inflight, reply) |> drain()
+
+  # An eviction is the helper's decision, and a legible one: the `load` that caused it names
+  # what was let go. This is the one place on this side that sees every `load` answer, so it
+  # is where that fact reaches the node's log — at debug, because on a busy node evictions
+  # are routine, and the helper's own `doctor` census holds the count and the recent ones for
+  # anyone asking after the fact. Helper strings, so bounded and never atoms.
+  defp note_evictions(%{method: "load"}, {:ok, %{"evicted" => [_ | _] = evicted}}) do
+    Logger.debug(fn ->
+      shas =
+        evicted
+        |> Enum.take(@max_evicted_logged)
+        |> Enum.filter(&is_binary/1)
+        |> Enum.map_join(", ", &bounded/1)
+
+      "wasm helper evicted #{length(evicted)} component(s) to admit a load: #{shas}"
+    end)
+  end
+
+  defp note_evictions(_inflight, _reply), do: :ok
 
   # The handshake is where a helper is admitted or not. `usable` is the helper's own probe
   # of whether an engine can be built on this host; `worlds` is what it will link against.

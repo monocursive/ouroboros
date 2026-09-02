@@ -338,10 +338,12 @@ defmodule Ouroboros.Provider.Native.HooksComponentTest do
   describe "the hook lane is budgeted against the node's shared component cache" do
     test "a hook whose component would be the seventeenth is ignored, loudly and at error",
          context do
-      # The proved attack this bounds: the helper's component cache is 64 slots with no
-      # eviction, shared by every lane. A clone shipping enough components fills it, and from
-      # then on every `load` on the node — including the *operator's own* component hook's —
-      # fails `too_many_components`, so an untrusted workspace deletes somebody else's deny.
+      # The proved attack this bounded: the helper's component cache is 64 slots shared by
+      # every lane, and before it evicted a clone shipping enough components filled it, so
+      # that every later `load` on the node — including the *operator's own* component
+      # hook's — failed `too_many_components`: an untrusted workspace deleting somebody
+      # else's deny. The helper now evicts at its ceiling; the budget stays as the bound on
+      # how much compile and eviction churn a repository can cause per helper lifetime.
       %{config: config, pool: pool} = loaded(context, reply: @deny, full: true)
 
       # Spend the whole budget on this pool under the same lane the hook uses. If hooks.ex

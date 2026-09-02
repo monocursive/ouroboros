@@ -69,8 +69,33 @@
 //! The peer re-instantiates, which costs one `instantiate` and buys a guest whose state is
 //! whatever `init` says it is. A guest returning its own `err(string)` is *not* a trap and does
 //! not poison anything — that is the guest answering, in a way the world provides for.
+//!
+//! # The component cache evicts, and only what nothing holds
+//!
+//! A compiled component stays in the cache until the cache is full and something newer wants
+//! the slot. The table holds [`MAX_COMPONENTS`]; a `load` that would exceed it evicts the
+//! **least recently used** component — recency being the last `load` or `instantiate` that
+//! named the sha — and never one with a live instance. An instance holds its own handle on the
+//! compiled code, so evicting the cache entry could not break it; but an owner that stood an
+//! instance up is plainly still using that component, and a cache that forgot what its callers
+//! hold would be lying to `doctor`. If every held component has a live instance the load is
+//! refused `too_many_components`, which is now the only way that refusal is reached.
+//!
+//! Eviction is a reclaim, not a revocation. Nothing about admission changes: the evicted sha
+//! is simply unknown again, the next `instantiate` naming it is refused `unknown_component`,
+//! and the peer re-`load`s — which recomputes the digest from the bytes on disk and runs the
+//! world check again, exactly as the first load did. Every peer in this repository loads
+//! before it instantiates, so an eviction costs a recompile and nothing else.
+//!
+//! It is also legible, because a reclaim the owner cannot see is a fault it cannot explain: the
+//! `load` that evicted names the shas it let go in its result, and `doctor` reports how many
+//! evictions this process has made and the last [`MAX_EVICTION_LOG`] of them.
+//!
+//! Instances are never evicted. A live guest's state is its owner's, and forgetting it on a
+//! timer would be a worse bug than refusing a new one; the instance table is a hard ceiling,
+//! and `too_many_instances` means "drop one".
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -139,11 +164,22 @@ pub const MAX_TABLES: usize = 4;
 /// element and [`MAX_TABLES`] tables, this is a few megabytes at worst.
 pub const MAX_TABLE_ELEMENTS: usize = 100_000;
 
-/// How much this helper will hold at once. Neither map has any eviction — a component stays
-/// compiled until the process ends, an instance until it is dropped or poisoned — so both need
-/// a ceiling, and a ceiling the owner can read out of `doctor` is better than one it discovers.
+/// How much this helper will hold at once — ceilings the owner can read out of `doctor` rather
+/// than discover.
+///
+/// The two tables are bounded differently on purpose. Components are a *cache*: past
+/// [`MAX_COMPONENTS`], `load` evicts the least recently used component no live instance holds
+/// (see the module header), so the cap bounds memory rather than the number of distinct
+/// components a helper may ever see. Instances are not a cache — each is a guest's live state,
+/// which is its owner's to drop — so [`MAX_INSTANCES`] is a hard ceiling and reaching it is a
+/// refusal.
 pub const MAX_COMPONENTS: usize = 64;
 pub const MAX_INSTANCES: usize = 256;
+
+/// How many evicted shas `doctor` keeps, newest last. Enough to explain the recent past to an
+/// operator asking why a component they expected to be cached was compiled again, and a bound
+/// on what would otherwise be the one unbounded log in a process whose every table is bounded.
+pub const MAX_EVICTION_LOG: usize = 16;
 
 /// The per-call log budget, and the bounds on one line. See the module header: sixteen lines of
 /// at most `256 + 16 + 512` bytes of content plus a short prefix is about 13 KiB, which fits a
@@ -298,6 +334,84 @@ struct Loaded {
     size: usize,
     imports: Vec<String>,
     exports: Vec<String>,
+    /// The cache clock's reading the last time a `load` or `instantiate` named this sha. The
+    /// smallest reading among the components no instance holds is the one eviction takes.
+    last_used: u64,
+}
+
+/// The component cache: what is held, when each entry was last wanted, and what has been let
+/// go. See the module header for the policy; this is the bookkeeping that carries it out.
+struct Components {
+    held: HashMap<String, Loaded>,
+    /// Advanced every time a sha is named by `load` or `instantiate`, so "least recently used"
+    /// is a total order on the table rather than a wall-clock reading that could tie.
+    clock: u64,
+    /// Every eviction this process has made, for `doctor`.
+    evictions: u64,
+    /// The last [`MAX_EVICTION_LOG`] evicted shas, oldest first.
+    recent: VecDeque<String>,
+}
+
+impl Components {
+    fn new() -> Components {
+        Components {
+            held: HashMap::new(),
+            clock: 0,
+            evictions: 0,
+            recent: VecDeque::with_capacity(MAX_EVICTION_LOG),
+        }
+    }
+
+    /// The entry for `sha`, if held, marked as wanted now.
+    fn touch(&mut self, sha: &str) -> Option<&Loaded> {
+        self.clock += 1;
+        let clock = self.clock;
+        let loaded = self.held.get_mut(sha)?;
+        loaded.last_used = clock;
+        Some(&*loaded)
+    }
+
+    /// Admits `loaded` under `sha`, as wanted now.
+    fn insert(&mut self, sha: String, mut loaded: Loaded) {
+        self.clock += 1;
+        loaded.last_used = self.clock;
+        self.held.insert(sha, loaded);
+    }
+
+    /// Whether admitting one more component means letting one go first.
+    fn full(&self) -> bool {
+        self.held.len() >= MAX_COMPONENTS
+    }
+
+    /// The sha eviction would take: the least recently used of those not in `pinned`. `None`
+    /// when every held component is pinned, which is the one case a full cache refuses.
+    fn victim(&self, pinned: &HashSet<String>) -> Option<String> {
+        self.held
+            .iter()
+            .filter(|(sha, _)| !pinned.contains(*sha))
+            .min_by_key(|(_, loaded)| loaded.last_used)
+            .map(|(sha, _)| sha.clone())
+    }
+
+    /// Lets `sha` go and records that it did. A sha not held is not an eviction.
+    fn evict(&mut self, sha: &str) {
+        if self.held.remove(sha).is_some() {
+            self.evictions += 1;
+            if self.recent.len() >= MAX_EVICTION_LOG {
+                self.recent.pop_front();
+            }
+            self.recent.push_back(sha.to_string());
+        }
+    }
+}
+
+/// What `doctor` reports about the tables: how full each is, and what the cache has let go.
+pub struct Census {
+    pub components: usize,
+    pub instances: usize,
+    pub evictions: u64,
+    /// The most recent evictions, oldest first — at most [`MAX_EVICTION_LOG`] of them.
+    pub evicted: Vec<String>,
 }
 
 /// One live instance: its store, and the two exports `call` can reach.
@@ -306,6 +420,8 @@ struct Live {
     describe: TypedFunc<(), (String,)>,
     handle: TypedFunc<(String,), (Result<String, String>,)>,
     limits: Limits,
+    /// The component this instance was stood up from, so eviction can see that it is held.
+    sha256: String,
 }
 
 /// The helper's whole mutable world. One per process; the serve loop hands it to a blocking
@@ -313,7 +429,7 @@ struct Live {
 pub struct Host {
     engine: Engine,
     linker: Linker<State>,
-    components: Mutex<HashMap<String, Loaded>>,
+    components: Mutex<Components>,
     instances: Mutex<HashMap<String, Live>>,
 }
 
@@ -384,7 +500,7 @@ impl Host {
         Ok(Host {
             engine,
             linker,
-            components: Mutex::new(HashMap::new()),
+            components: Mutex::new(Components::new()),
             instances: Mutex::new(HashMap::new()),
         })
     }
@@ -411,13 +527,18 @@ impl Host {
     /// The sha is recomputed from what was read and compared *before* anything is compiled: a
     /// mismatch means the file on disk is not the file that was signed, and the cheapest
     /// correct response to that is to do no work at all.
+    ///
+    /// A full cache is looked at twice. Once here, before the file is read, so a cache with
+    /// nothing evictable refuses without spending a compile; and again at the insert, where the
+    /// eviction actually happens, so the bound is enforced where it matters rather than trusted
+    /// from a check a few hundred milliseconds earlier.
     pub fn load(&self, params: &Value) -> Result<Value, Refusal> {
         let expected = required_str(params, "sha256")?.to_ascii_lowercase();
         let path = required_str(params, "path")?;
 
         {
-            let components = self.components.lock().expect("components lock");
-            if let Some(loaded) = components.get(&expected) {
+            let mut components = self.components.lock().expect("components lock");
+            if let Some(loaded) = components.touch(&expected) {
                 return Ok(json!({
                     "sha256": echo(&expected),
                     "world": loaded.world,
@@ -425,16 +546,11 @@ impl Host {
                     "exports": loaded.exports,
                     "size": loaded.size,
                     "cached": true,
+                    "evicted": [],
                 }));
             }
-            if components.len() >= MAX_COMPONENTS {
-                return Err(refusal::refuse(
-                    refusal::TOO_MANY_COMPONENTS,
-                    format!(
-                        "this helper holds {MAX_COMPONENTS} components, which is all it will \
-                         hold; nothing here is evicted, so the owner decides what to forget"
-                    ),
-                ));
+            if components.full() && components.victim(&self.pinned()).is_none() {
+                return Err(nothing_evictable());
             }
         }
 
@@ -461,10 +577,12 @@ impl Host {
             size: bytes.len(),
             imports,
             exports,
+            last_used: 0,
         };
         // The same shape `inspect` reports, so the owner can cross-check a load against the
-        // signed manifest without a second round trip (docs/WASM.md §7.5).
-        let answer = json!({
+        // signed manifest without a second round trip (docs/WASM.md §7.5) — plus what this
+        // load cost somebody else, so a reclaim is never a fault the owner cannot explain.
+        let mut answer = json!({
             "sha256": actual,
             "world": loaded.world,
             "imports": loaded.imports,
@@ -472,10 +590,20 @@ impl Host {
             "size": loaded.size,
             "cached": false,
         });
-        self.components
-            .lock()
-            .expect("components lock")
-            .insert(actual, loaded);
+
+        let mut components = self.components.lock().expect("components lock");
+        let mut evicted = Vec::new();
+        while components.full() {
+            match components.victim(&self.pinned()) {
+                Some(sha) => {
+                    components.evict(&sha);
+                    evicted.push(echo(&sha));
+                }
+                None => return Err(nothing_evictable()),
+            }
+        }
+        components.insert(actual, loaded);
+        answer["evicted"] = json!(evicted);
         Ok(answer)
     }
 
@@ -510,8 +638,8 @@ impl Host {
         }
 
         let component = {
-            let components = self.components.lock().expect("components lock");
-            let loaded = components.get(&sha256).ok_or_else(|| {
+            let mut components = self.components.lock().expect("components lock");
+            let loaded = components.touch(&sha256).ok_or_else(|| {
                 refusal::refuse(
                     refusal::UNKNOWN_COMPONENT,
                     format!("no component {} has been loaded", echo(&sha256)),
@@ -581,6 +709,7 @@ impl Host {
                 describe,
                 handle,
                 limits,
+                sha256,
             },
         );
 
@@ -682,12 +811,37 @@ impl Host {
         Ok(json!({ "instance": echo(name), "dropped": dropped }))
     }
 
-    /// How many components and instances are held, for `doctor`.
-    pub fn census(&self) -> (usize, usize) {
-        (
-            self.components.lock().expect("components lock").len(),
-            self.instances.lock().expect("instances lock").len(),
-        )
+    /// How full each table is and what the cache has let go, for `doctor`.
+    pub fn census(&self) -> Census {
+        let (components, evictions, evicted) = {
+            let components = self.components.lock().expect("components lock");
+            (
+                components.held.len(),
+                components.evictions,
+                components.recent.iter().cloned().collect(),
+            )
+        };
+        let instances = self.instances.lock().expect("instances lock").len();
+        Census {
+            components,
+            instances,
+            evictions,
+            evicted,
+        }
+    }
+
+    /// The shas with a live instance, which eviction may not take. Read off the instance table
+    /// each time rather than kept as a count beside each component: the table is small, and a
+    /// count that every drop and every poisoning had to remember to decrement is exactly the
+    /// bookkeeping that drifts. Taken with the components lock held, and only ever in that
+    /// order; nothing else holds both.
+    fn pinned(&self) -> HashSet<String> {
+        self.instances
+            .lock()
+            .expect("instances lock")
+            .values()
+            .map(|live| live.sha256.clone())
+            .collect()
     }
 
     /// The names a component declares, cut to what a result may carry back: at most
@@ -767,6 +921,18 @@ fn classify(
     };
 
     refusal::refuse(kind, format!("{what}: {detail}"))
+}
+
+/// The one way a full cache is refused: every held component has a live instance, so there is
+/// nothing eviction may take. The owner drops an instance, or waits for one to be dropped.
+fn nothing_evictable() -> Refusal {
+    refusal::refuse(
+        refusal::TOO_MANY_COMPONENTS,
+        format!(
+            "this helper holds {MAX_COMPONENTS} components and every one of them has a live \
+             instance; nothing can be evicted until an instance is dropped"
+        ),
+    )
 }
 
 /// A component that passed [`world::check`] at load but whose export cannot be typed here. This
@@ -989,6 +1155,7 @@ mod tests {
                 size: bytes.len(),
                 imports: vec!["now".to_string()],
                 exports: Vec::new(),
+                last_used: 0,
             },
         );
 
@@ -1015,5 +1182,74 @@ mod tests {
             host.instances.lock().expect("instances lock").is_empty(),
             "a failed instantiation must retain nothing"
         );
+    }
+
+    /// A cache holding `shas`, inserted in that order, each entry a compiled empty component.
+    fn cache_with(shas: &[&str]) -> Components {
+        let engine = Engine::new(&config()).expect("an engine on this host");
+        let bytes = wat::parse_str("(component)").expect("the empty component assembles");
+        let component = Component::new(&engine, &bytes).expect("it is a valid component");
+        let mut cache = Components::new();
+        for sha in shas {
+            cache.insert(
+                sha.to_string(),
+                Loaded {
+                    component: component.clone(),
+                    world: world::UNKNOWN,
+                    size: bytes.len(),
+                    imports: Vec::new(),
+                    exports: Vec::new(),
+                    last_used: 0,
+                },
+            );
+        }
+        cache
+    }
+
+    fn pinned(shas: &[&str]) -> HashSet<String> {
+        shas.iter().map(|sha| sha.to_string()).collect()
+    }
+
+    #[test]
+    fn eviction_takes_the_least_recently_wanted_and_never_a_pinned_one() {
+        let mut cache = cache_with(&["a", "b", "c"]);
+        assert_eq!(cache.victim(&pinned(&[])).as_deref(), Some("a"));
+
+        // Wanting `a` again makes `b` the one nobody has asked for longest.
+        assert!(cache.touch("a").is_some());
+        assert_eq!(cache.victim(&pinned(&[])).as_deref(), Some("b"));
+
+        // A pinned `b` is passed over, however old.
+        assert_eq!(cache.victim(&pinned(&["b"])).as_deref(), Some("c"));
+
+        // With everything pinned there is no victim at all.
+        assert_eq!(cache.victim(&pinned(&["a", "b", "c"])), None);
+
+        // A miss is not a want.
+        assert!(cache.touch("never-held").is_none());
+        assert_eq!(cache.held.len(), 3);
+    }
+
+    #[test]
+    fn the_eviction_log_is_bounded_and_the_count_is_not() {
+        let shas: Vec<String> = (0..MAX_EVICTION_LOG + 4)
+            .map(|n| format!("{n:064}"))
+            .collect();
+        let refs: Vec<&str> = shas.iter().map(String::as_str).collect();
+        let mut cache = cache_with(&refs);
+
+        for sha in &shas {
+            cache.evict(sha);
+        }
+        assert!(cache.held.is_empty());
+        assert_eq!(cache.evictions as usize, shas.len());
+        assert_eq!(cache.recent.len(), MAX_EVICTION_LOG);
+        assert_eq!(cache.recent.front(), Some(&shas[4]));
+        assert_eq!(cache.recent.back(), shas.last());
+
+        // Evicting a sha that is not held is not an eviction, and is not logged as one.
+        cache.evict("never-held");
+        assert_eq!(cache.evictions as usize, shas.len());
+        assert_eq!(cache.recent.len(), MAX_EVICTION_LOG);
     }
 }

@@ -20,9 +20,10 @@ use crate::world;
 /// read when it was built.
 pub const WASMTIME_VERSION: &str = env!("OURO_WASMTIME_VERSION");
 
-/// The `doctor` response object. `census` is the live component and instance counts when a
-/// serve loop is answering, and `None` for the one-shot subcommand.
-pub fn report(census: Option<(usize, usize)>) -> Value {
+/// The `doctor` response object. `census` is the live state of the two tables — how full each
+/// is, and what the component cache has let go — when a serve loop is answering, and `None`
+/// for the one-shot subcommand.
+pub fn report(census: Option<host::Census>) -> Value {
     let engine = wasmtime::Engine::new(&host::config());
     let mut notes = vec![
         format!(
@@ -35,6 +36,13 @@ pub fn report(census: Option<(usize, usize)>) -> Value {
             .to_string(),
         "a trap drops its instance server-side; the next call on that name is unknown_instance"
             .to_string(),
+        format!(
+            "the component cache holds {}; a load past that evicts the least recently used \
+             component no live instance holds and names it in its result, and is refused \
+             too_many_components only when every held component has a live instance. Instances \
+             are never evicted",
+            host::MAX_COMPONENTS
+        ),
         format!(
             "a call may write {} lines to this helper's stderr; past that one marker line is \
              emitted and the rest are dropped. Draining that pipe is the owner's job",
@@ -65,13 +73,19 @@ pub fn report(census: Option<(usize, usize)>) -> Value {
             "max_table_elements": host::MAX_TABLE_ELEMENTS,
             "max_components": host::MAX_COMPONENTS,
             "max_instances": host::MAX_INSTANCES,
+            "max_eviction_log": host::MAX_EVICTION_LOG,
             "max_log_lines_per_call": host::MAX_LOG_LINES_PER_CALL,
         },
         "notes": notes,
     });
 
-    if let Some((components, instances)) = census {
-        report["held"] = json!({ "components": components, "instances": instances });
+    if let Some(census) = census {
+        report["held"] = json!({
+            "components": census.components,
+            "instances": census.instances,
+            "evictions": census.evictions,
+            "evicted": census.evicted,
+        });
     }
     report
 }
@@ -91,14 +105,33 @@ mod tests {
 
     #[test]
     fn the_report_is_honest_about_this_host() {
-        let report = report(Some((2, 1)));
+        let report = report(Some(host::Census {
+            components: 2,
+            instances: 1,
+            evictions: 3,
+            evicted: vec!["a".repeat(64)],
+        }));
         // Every machine this suite runs on can build an engine; if one cannot, the assertion
         // below is the right place to find that out.
         assert_eq!(report["usable"], true);
         assert_eq!(report["worlds"][0], world::ID);
         assert_eq!(report["imports"][0], world::LOG);
         assert_eq!(report["held"]["components"], 2);
+        assert_eq!(report["held"]["instances"], 1);
+        assert_eq!(report["held"]["evictions"], 3);
+        assert_eq!(report["held"]["evicted"][0], "a".repeat(64));
         assert_eq!(report["limits"]["max_deadline_ms"], host::MAX_DEADLINE_MS);
+        assert_eq!(report["limits"]["max_eviction_log"], host::MAX_EVICTION_LOG);
+    }
+
+    #[test]
+    fn the_subcommand_holds_nothing_and_says_nothing_about_it() {
+        let report = report(None);
+        assert!(
+            report.get("held").is_none(),
+            "a one-shot report has no tables to count"
+        );
+        assert_eq!(report["limits"]["max_components"], host::MAX_COMPONENTS);
     }
 
     #[test]

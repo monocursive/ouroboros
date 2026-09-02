@@ -127,12 +127,14 @@ defmodule Ouroboros.Provider.Native.Hooks do
   Containment bounds what one component may do and says nothing about how many a clone may
   ship, so an untrusted workspace is admitted at most eight components across `[[hooks]]`
   and `[checks]` together; the rest are declined and counted like shell hooks. Separately,
-  `Ouroboros.Wasm.Pool` budgets the *shared* helper cache: at
-  most sixteen distinct hook components per helper lifetime, in any scope. Without that
-  second bound a clone could fill the helper's 64-slot, eviction-free component table and
-  every later `load` on the node — the capability lane's rollouts, and the operator's own
-  earlier-loaded hooks — would fail `too_many_components`, which is an untrusted workspace
-  making an outcome *looser* by deleting somebody else's `deny`.
+  `Ouroboros.Wasm.Pool` budgets the *shared* helper cache: at most sixteen distinct hook
+  components per helper lifetime, in any scope. The helper's 64-slot table evicts at its
+  ceiling — least recently used, never a component with a live instance — so a clone can no
+  longer fill it and leave every later `load` on the node (the capability lane's rollouts,
+  the operator's own earlier-loaded hooks) failing `too_many_components`, which was an
+  untrusted workspace making an outcome *looser* by deleting somebody else's `deny`. What
+  the budget bounds now is churn: every distinct sha a repository ships is a compile nothing
+  time-bounds, and past the ceiling an eviction somebody else pays to compile again.
 
   ### Accepted residuals
 
@@ -147,7 +149,8 @@ defmodule Ouroboros.Provider.Native.Hooks do
       cap and the lane budget bound the *count* of components, not the cost of one.
     * The lane budget is a budget and not an eviction. An operator who edits their own
       component seventeen times within one helper's life will find the seventeenth refused
-      until the helper is respawned.
+      until the helper is respawned, even though the helper — which evicts — would have
+      room for it.
 
   ## The contract, exactly
 
@@ -846,8 +849,9 @@ defmodule Ouroboros.Provider.Native.Hooks do
   # A fresh instance per invocation is the whole state story: no guest memory carries from
   # one hook run to the next, so no earlier payload can influence a later verdict and a
   # guest that trapped cannot poison the call after it. The `after` is unconditional
-  # because the helper evicts nothing on its own — an instance stands until somebody drops
-  # it — and the pool's owner monitor is the backstop, not the plan.
+  # because the helper never evicts an *instance* — one stands until somebody drops it —
+  # and the pool's owner monitor is the backstop, not the plan. Dropping it is also what
+  # lets the helper evict the *component* once nothing holds it.
   @spec run_component(map(), GenServer.server(), String.t(), pos_integer() | nil) ::
           {:ok, String.t()} | {:ignored, note()}
   defp run_component(hook, pool, payload, ceiling) do
@@ -859,10 +863,12 @@ defmodule Ouroboros.Provider.Native.Hooks do
         sha = :sha256 |> :crypto.hash(bytes) |> Base.encode16(case: :lower)
 
         # `lane: :hook` is what subjects a repository's components to the pool's shared-cache
-        # budget. Without it a clone shipping many components fills the helper's table and
-        # every later `load` on this node — the capability lane's, and the operator's own
-        # hooks' — answers `too_many_components`, which would let an untrusted workspace
-        # delete somebody else's `deny`.
+        # budget. The helper evicts at its ceiling, so a clone can no longer fill its table
+        # and silence the operator's own `deny`; what the budget bounds is how many compiles,
+        # and how many of somebody else's evictions, a repository can cause per helper life.
+        # This `load` is also how an evicted sha comes back: the helper forgets a component
+        # nothing holds, and loading it again — a cache hit whenever it is still held — is
+        # what makes the `instantiate` after it safe to issue.
         case Wasm.Pool.load(sha, path, pool, lane: :hook) do
           {:ok, _report} -> stand_and_call(hook, pool, sha, payload, ceiling)
           {:error, reason} -> {:ignored, note(reason, "load")}
@@ -1027,17 +1033,19 @@ defmodule Ouroboros.Provider.Native.Hooks do
   defp refusal_name(_reason), do: "helper_error"
 
   # How loud a failure is. Everything a hook itself can cause is a warning about that hook;
-  # the lane budget is the one refusal that is not about this hook at all — it says the
-  # node's shared component cache is full of somebody else's bytes, and every later
-  # component on this node will fail the same way until the helper is respawned. That is
-  # operator-actionable, so it is an error with the action in it.
+  # the lane budget is the one refusal that is not about this hook at all — it says this
+  # node's hook-lane budget for the shared component cache is spent on somebody else's
+  # bytes, and every later *new* hook component on this node will fail the same way until
+  # the helper is respawned (the helper itself evicts and has room; the pool's per-lifetime
+  # count is what refused). That is operator-actionable, so it is an error with the action
+  # in it.
   #
   # A session-visible status event for the same fact belongs to W5, the surface slice; there
   # is no event vocabulary for it here yet.
   defp report(subject, %{name: "hook_component_budget", detail: detail}) do
     Logger.error(
       "native component hook could not be loaded: #{clip(subject, 500)}: #{clip(detail, 500)}. " <>
-        "This node's wasm helper will admit no further hook components until it is respawned " <>
+        "This node's wasm helper will admit no new hook components until it is respawned " <>
         "(restart the ouro-wasm helper, or the node); a workspace shipping many components " <>
         "is the usual cause."
     )
