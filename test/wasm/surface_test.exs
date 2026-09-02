@@ -259,7 +259,20 @@ defmodule Ouroboros.Wasm.SurfaceTest do
     end
 
     test "an unreadable store and an unavailable register are empty lists with nil counts" do
-      list = Surface.list(root: nil, registry: :a_register_that_is_not_running)
+      # A directory this process may not read, rather than `root: nil`: `nil` falls through
+      # to the global `:data_dir`, which other test files set, and an `async: true` module
+      # that asserts on global application environment is a flake waiting for a neighbour.
+      unreadable =
+        Path.join(
+          System.tmp_dir!(),
+          "ouroboros-surface-unreadable-#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(unreadable)
+      File.chmod!(unreadable, 0o000)
+      on_exit(fn -> File.chmod(unreadable, 0o700) && File.rm_rf(unreadable) end)
+
+      list = Surface.list(root: unreadable, registry: :a_register_that_is_not_running)
 
       assert list.rollouts == []
       assert list.components == []
