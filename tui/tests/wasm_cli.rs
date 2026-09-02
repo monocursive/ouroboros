@@ -1576,8 +1576,12 @@ fn new_scaffolds_a_project_that_builds() {
         return;
     }
 
+    // The artifact is looked for under the project's own `target/`; a `CARGO_TARGET_DIR` in
+    // the developer's (or a harness's) environment would send it elsewhere and fail the test
+    // for a reason that has nothing to do with the scaffold.
     let built = Command::new(cargo())
         .args(["build", "--release", "--target", "wasm32-wasip2"])
+        .env_remove("CARGO_TARGET_DIR")
         .current_dir(&root)
         .output()
         .expect("cargo runs");

@@ -146,8 +146,11 @@ fn root() -> PathBuf {
 fn build(project: &Path, artifact: &str) -> PathBuf {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_unset| "cargo".to_string());
 
+    // The component is looked for under the project's own `target/`, which is also what CI
+    // caches; a `CARGO_TARGET_DIR` inherited from the environment would put it elsewhere.
     let output = Command::new(cargo)
         .args(["build", "--release", "--target", TARGET])
+        .env_remove("CARGO_TARGET_DIR")
         .current_dir(project)
         .output()
         .unwrap_or_else(|error| panic!("cargo does not start: {error}"));
