@@ -26,8 +26,31 @@ native loop is not ported to wasm (see §9.2 for why). The workspace — `bash`,
 
 Goals, in the user's words: agents that are **secure** (containment, not name policy),
 **auditable** (an artifact whose maximum authority is statically legible, signed and
-content-addressed), and **extensible** (third-party capabilities, hooks, and policy in
-any language, safe to install by construction).
+content-addressed), and **extensible** (third-party capabilities, hooks, and policy,
+safe to install by construction).
+
+"Extensible" has a measured boundary, and it is narrower than "any language". What lane W
+admits today is **any language whose toolchain emits a `wasm32-wasip2` component without
+an embedded language runtime** — Rust, C/C++, TinyGo and Zig are the known-good set, and
+the reference guest is Rust. A JavaScript or Python guest ships its own engine inside the
+component, and each of the two that were actually built was refused by a different wall
+(§7.3):
+
+- `componentize-js` (StarlingMonkey, three trivial exports, http/random/clocks/stdio
+  disabled) produced a 12.5 MB component — 9 224 567 code bytes, 2.2× `MAX_CODE_BYTES`,
+  12 660 functions. With every shape bound lifted it compiled in 8.61 s and *still* failed
+  `load`: beside `log` it imports `wasi:io/poll@0.2.10`, `wasi:io/streams@0.2.10` and
+  `wasi:http/types@0.2.10`, so the world refuses it `undefined_import`. That is the linker
+  wall, and it is the one D5 says must hold.
+- `componentize-py` (CPython) produced an 18.4 MB component — 11 150 155 segment bytes,
+  2.66× `MAX_SEGMENT_BYTES`, 6 569 337 code bytes, 2 088 exports, 2 248 imports. With
+  every count bound lifted it failed `compile_failed`: it needs the **extended-const**
+  proposal, which §7.3 disables on purpose.
+
+Four independent walls, then — the shape bounds, the single-`log` world, the disabled
+proposal set, and compile time on a sequential helper — and no two of them are the same
+lever. **Engine-embedding guests are a deferred slice, not a configuration change**
+(§14, W8): raising the numbers alone would admit neither of the two above.
 
 ## 2. Method
 
@@ -365,24 +388,34 @@ which is the point of the helper (D3).
 Compilation is bounded *before* it starts, and it has to be: `Component::new` runs under
 no fuel, no deadline and no memory cap, because there is no store yet, and cranelift
 cannot be interrupted once it has begun. A valid in-world component of 145 000 small
-functions compiled in 28.9 s on this Mac — and the helper is sequential, so that is
-28.9 s in which every hook and every capability on the node waits, long enough for the
-pool's 30 s `load` deadline to break it and drop every live instance. So
-`tui/wasm/src/shape.rs` walks the component and everything nested in it with
+functions — 61 MiB, exporting exactly what this world asks for — took **tens of seconds**
+on this Mac, and the helper is sequential, so that is tens of seconds in which every hook
+and every capability on the node waits: long enough for the pool's 30 s `load` deadline
+to break it and drop every live instance.
+
+So `tui/wasm/src/shape.rs` walks the component and everything nested in it with
 `wasmparser` (the same parser wasmtime itself uses, already in this binary's graph),
 reading section headers without decoding an instruction, and refuses
 `component_too_complex` on any of: code bytes (4 MiB), functions (20 000), types
 (8 192), imports and exports (1 024 each), other index-space definitions (16 384), data
 and element segment bytes (4 MiB), nesting depth (8), core modules (64), nested
-components (64), and sections (8 192) — every one a total over the whole tree. The
-numbers are measured, not felt: at the worst admissible shape the release helper
-compiles in 1.19 s, one function past the bound is refused in 0.14 s without anything
-being compiled, and the acceptance guest declares 101 functions against 20 000 and
-40 721 code bytes against 4 MiB — two orders of magnitude under the two dimensions that
-measure compile cost. `doctor` reports all eleven under `limits`, and the source pins
-them by value so moving one is a deliberate act with a fresh measurement behind it.
+components (64), and sections (8 192) — every one a total over the whole tree. At the
+worst admissible shape the release helper compiles in 1.19 s as `shape.rs` records it and
+1.16 s on re-measurement; one function past the bound is refused in 0.14 s without
+anything being compiled; and the acceptance guest declares 101 functions against 20 000
+and 40 721 code bytes against 4 MiB, two orders of magnitude under the two dimensions
+that measure compile cost. `doctor` reports all eleven under `limits`, and the source
+pins them by value so moving one is a deliberate act with a fresh measurement behind it.
 Custom-section *bytes* are not weighed, only counted — wasmtime skips them, so sixty
 mebibytes of custom section costs the read and the digest, not the compile.
+
+Two honesties about those figures, both from re-measurement. The largest rows of
+`shape.rs`'s table do not reproduce — 4.36 s and 28.9 s came back as 2.73 s and 16.29 s —
+so read them as the order of magnitude they establish rather than as figures; the
+at-bound row does reproduce. And the at-bound figure is measured on **synthetic
+straight-line code**, the cheapest thing per byte a component can hold. Real compiler
+output is about three times denser in compile cost, so a real guest sitting exactly at
+the 4 MiB bound would cost nearer four seconds than one (§12).
 
 The engine speaks the smallest dialect the world needs. wasmtime 48 enables every
 proposal it considers stable, which is right for a host running its own code and wrong
@@ -556,9 +589,13 @@ manifest declares a `start` block — the `Runtime.Capabilities.maybe_start/2` r
 applied to a lane that can actually honor it across reboots.
 
 Every entry is re-validated when the checkpoint is read, against the same validators
-`deploying/2` applies: a planted `epoch: 999_999_999_999_999` used to refuse every future
-lane-W deploy for as long as the file existed. One bad entry is **dropped with a logged
-reason and the rest of the register loads**, because refusing the whole checkpoint for
+`deploying/2` applies, which closes the *malformed* half of what a planted checkpoint
+could do. It does not close the well-formed half: `fetch_epoch/1` asks only for a
+positive integer, so `epoch: 999_999_999_999_999` in an otherwise valid entry is still
+admitted and still refuses every lane-W deploy on the node — and since W-F8 made the
+watermark durable, it now survives deletion of the entry that carried it. That is W-F26,
+open, fix in flight. One bad entry is **dropped with a logged reason and the rest of the
+register loads**, because refusing the whole checkpoint for
 one row is how a single unreadable entry stopped a node deploying anything at all; an id
 that a pre-tagging checkpoint wrote bare and that spells an atom (`"nil"`, `"error"`) is
 migrated to its string rather than dropped. Read is looser than write in exactly two
@@ -697,9 +734,9 @@ without ambient authority") deserves its own slice after lane W's host exists.
 
 A `world ouroboros:agent` (`step(state, event) -> effects` with host-bound
 `model.complete`/`tool.invoke` imports) is an extensibility feature: third-party agent
-brains in any language, structurally contained, signed and placed with machinery that
-exists. It is **not** a migration target for the native loop. The 2026-08-30 rewrite
-assessment applies with equal force here: the loop's value is its integration surface
+brains in any language §1's boundary admits, structurally contained, signed and placed
+with machinery that exists. It is **not** a migration target for the native loop. The
+2026-08-30 rewrite assessment applies with equal force here: the loop's value is its integration surface
 (permissions, hooks, checkpoints, subagents, compaction, computer use), all of which
 are host-side services either way; and record/replay at the effect seams — shipped in
 REPLAY.md — already delivers replay, divergence detection, and forking without giving
@@ -840,6 +877,15 @@ Stated once, so nobody reads more into the lane than is there:
   its bytes suggest, and a future wasmtime may cost differently — so the honest claim is
   that the worst admissible input is bounded and measured, and that the measurement is due
   for a re-run whenever the pin moves.
+- **And the bound is calibrated on the cheapest bytes there are.** The at-bound figure
+  comes from a synthetic component of 20 000 straight-line arithmetic functions: 4.0 MiB
+  in 1.16 s, about 0.29 s per mebibyte. Real compiler output is denser per byte —
+  StarlingMonkey's 9 224 567 code bytes compiled in 8.61 s, roughly a second per
+  mebibyte, some 3.3× the synthetic rate. So a real engine-dense guest sitting exactly at
+  the 4 MiB bound would cost **≈4 s, not ≈1 s**, and the sequential helper would be gone
+  for all of it. The bound still holds — nothing is admitted past 4 MiB — but the sentence
+  "the worst case is about a second" is true only of the shape it was measured on. Due for
+  re-calibration against a real engine-dense guest whenever the numbers move.
 - **Refusing a disabled proposal can still cost a compile.** A component using, say,
   `return_call` is refused by the engine, but the refusal arrives from cranelift's
   translator rather than from a pre-pass, so a large module can be compiled up to the
@@ -877,7 +923,8 @@ Stated once, so nobody reads more into the lane than is there:
   rather than at admission. `wasm.status`'s `hook_components` therefore counts budgeted
   untrusted shas, not every hook component the helper holds.
 
-The W7 review wave (2026-09-02) found the rest. All fixed in W7.
+The W7 review wave (2026-09-02) found the rest. All fixed in W7 except W-F26, which the
+re-verification pass found last and which is open.
 
 - **W-F5 (HIGH):** `Wire.dump/1`'s struct clause matched every map carrying an atom
   `:__struct__`; `%{1 => 2, __struct__: :ok}` raised and `%{__struct__: :ok}` lost its key
@@ -924,9 +971,21 @@ The W7 review wave (2026-09-02) found the rest. All fixed in W7.
 - **W-F23 (HIGH, CI):** CI never built the helper, so 25 acceptance tests skipped green on
   every PR; the Elixir job now builds helper and guest and runs under
   `OUROBOROS_REQUIRE_WASM=1`.
-- **W-F24 (HIGH, helper):** compilation was unbounded — 28.9 s for a 61 MiB in-world
-  component, a node-wide stall (§7.3). **W-F25 (MED, helper):** engine proposals were not
+- **W-F24 (HIGH, helper):** compilation was unbounded — tens of seconds for a 61 MiB
+  in-world component, a node-wide stall (§7.3). **W-F25 (MED, helper):** engine proposals were not
   minimized (relaxed SIMD, tail calls and the rest were accepted) (§7.3).
+
+- **W-F26 (real, MED; open, fix in flight):** the register's re-validation on read
+  (W-F7's fix) rejects *malformed* entries only. A well-formed entry carrying an
+  implausible epoch — `999_999_999_999_999`, which no `Upgrade.Epoch.next/2` could ever
+  mint, since it allocates one above a durable watermark — passes `fetch_epoch/1`'s
+  "positive integer" check, is folded into `lane_w_epoch`, and refuses every subsequent
+  lane-W deploy on that node for **every** module, because the gate is register-wide and
+  not per-component. W-F8 made the watermark durable, which is right for replay defence
+  and means this now survives deleting the entry that planted it. The fix in flight is an
+  epoch ceiling derived from what `Upgrade.Epoch` can actually mint, applied both to
+  entries on read and to the watermark. Until it lands, the recovery is operator-side:
+  remove the checkpoint.
 
 ## 14. Slices
 
@@ -991,6 +1050,21 @@ Each slice is PR-sized, lands green, and is useful alone.
   journal, orders the signer's rate limit first, and keeps probe/eval cleanup in a process
   a deadline kill cannot reach. Every fix landed with a regression test that was red first
   and a mutation that turns it red again.
+- **W8 — ahead-of-time compilation (proposed, not promised).** `Component::new` on the
+  node's hot path is what makes §7.3's bounds necessary in the shape they have.
+  `Engine::precompile_component` at sign or deploy time and `Component::deserialize` at
+  `load` would move cranelift off the node entirely: a `load` becomes an mmap of an
+  artifact somebody else already compiled, and the admission question stops being "how
+  expensive is this to compile" and becomes "how large is this artifact" — a question a
+  byte cap answers exactly. It is also the first of two preconditions for admitting
+  engine-embedding guests (§1); the second is a world broad enough for `wasi:io`, or a
+  runtime build that does not want it, and that one is a signing-policy decision rather
+  than an engineering one (§12). Unbuilt, and carrying its own questions — a precompiled
+  artifact is bound to a wasmtime version *and* a target triple, which is the lane-B
+  triple problem arriving by another road, and deserializing bytes is trusting a compiler
+  output the node did not produce, so what gets signed would have to be the precompiled
+  form. Written down because the bounds above are the shape of a host that compiles, and
+  a reader should know which constraint is essential and which is a consequence.
 - **Deferred, in rough order:** policy engine (§8.2) → agent-reachable forge/deploy
   effects (§7.7) → tools lane (§9.1) → microVM backend (§10, likely its own spec
   once slice-shaped) → agent world (§9.2).
