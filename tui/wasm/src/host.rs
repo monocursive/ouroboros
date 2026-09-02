@@ -11,6 +11,22 @@
 //! authority past it, and neither can a bug in [`crate::world`], whose import check is the
 //! early, legible refusal in front of the same wall.
 //!
+//! # The engine speaks the smallest dialect the world needs
+//!
+//! [`config`] turns off every WebAssembly proposal the v1 capability world does not use — relaxed
+//! SIMD first among them, because it is nondeterministic by design and D4 is not negotiable —
+//! and names the four bounds wasmtime would otherwise default: the wasm stack, the optimisation
+//! level, and the per-memory address-space reservation and guard. Read [`config`] for the list
+//! and for what is deliberately left on.
+//!
+//! # Compilation is bounded before it starts
+//!
+//! [`Host::compile`] is the one place `Component::new` is called, and [`crate::shape::check`]
+//! runs in front of it. Nothing below this line — not fuel, not the epoch deadline, not the
+//! memory ceiling — is armed while a component is being compiled, because there is no store yet;
+//! and cranelift cannot be interrupted once it starts, so the only bound that works is one on
+//! the input. See [`crate::shape`] for the measurements the numbers come from.
+//!
 //! # The bounds, all mandatory, re-armed per call
 //!
 //! Every store is created with fuel set, an epoch deadline armed, and a [`ResourceLimiter`]
@@ -103,9 +119,12 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use wasmtime::component::{Component, Linker, TypedFunc};
-use wasmtime::{Config, Engine, ResourceLimiter, Store, StoreContextMut, Trap};
+use wasmtime::{
+    Config, Engine, OptLevel, ResourceLimiter, Store, StoreContextMut, Trap, WasmFeatures,
+};
 
 use crate::refusal::{self, Refusal};
+use crate::shape;
 use crate::world;
 
 /// The period of the epoch ticker, and therefore the granularity of every deadline. Ten
@@ -433,13 +452,120 @@ pub struct Host {
     instances: Mutex<HashMap<String, Live>>,
 }
 
+/// The native stack one guest call may use, set explicitly rather than inherited.
+///
+/// wasmtime's own default is this same 512 KiB; naming it here is the point. Every guest call
+/// runs on a `spawn_blocking` thread, whose stack tokio gives 2 MiB, so a wasm stack a quarter
+/// of that leaves the host frames underneath it room and turns a runaway recursion into a
+/// `stack overflow` trap — a refusal — rather than into this process dying on a real one.
+pub const MAX_WASM_STACK_BYTES: usize = 512 * 1024;
+
+/// The virtual address space reserved per linear memory, and the unmapped guard after it.
+///
+/// wasmtime's defaults are 4 GiB + 32 MiB per memory, which is right for a host that runs one
+/// large module and wrong for this one: [`MAX_MEMORIES`] memories per store and
+/// [`MAX_INSTANCES`] stores is up to a thousand memories, and a thousand four-gigabyte
+/// reservations is four terabytes of address space asked of the kernel to run guests whose whole
+/// ceiling is [`MAX_MEMORY_BYTES`]. Sixty-four mebibytes is proportionate to what a capability
+/// actually gets granted; a guest whose grant exceeds it still grows past it, because
+/// `memory_may_move` is left at its default and wasmtime re-maps and copies. The guard stays at
+/// wasmtime's 32 MiB because that is what lets cranelift elide the bounds check on every offset
+/// smaller than it — shrinking it would buy address space back at the cost of a check on every
+/// load and store.
+pub const MEMORY_RESERVATION_BYTES: u64 = 64 * 1024 * 1024;
+pub const MEMORY_GUARD_BYTES: u64 = 32 * 1024 * 1024;
+
 /// The engine configuration, in one place so `doctor` can prove an engine is constructible
 /// without building the rest of the host.
+///
+/// # Every proposal this world does not need is off
+///
+/// wasmtime 48 enables, by default, every proposal it considers stable — which in 48 means the
+/// whole of "WASM 3" plus the component model: relaxed SIMD, tail calls, typed function
+/// references, extended const, multi-memory, memory64 and more. The v1 capability world is three
+/// functions over strings. None of that is needed, all of it is compiler surface a component
+/// nobody trusts can reach, and one of them — **relaxed SIMD** — is nondeterministic by design:
+/// `f32x4.relaxed_madd` may or may not fuse the multiply and add depending on the host CPU, so
+/// the same capability on two nodes can disagree. That contradicts D4, which is the reason this
+/// list is enforced rather than assumed.
+///
+/// Disabled here, each by name:
+/// relaxed SIMD, tail calls, typed function references, extended const, multi-memory, memory64,
+/// GC, threads and shared-everything threads, exceptions (both the current and the legacy
+/// proposal), stack switching, wide arithmetic, custom page sizes, memory control, and every
+/// optional component-model extension — async (with its stackful and more-builtins variants),
+/// threading, error contexts, GC, `map`, memory64, fixed-length lists, `implements`, values, and
+/// nested names.
+///
+/// Four of those — threads, exceptions, GC types and component-model async — are *also* off
+/// because the cargo features that would implement them are absent from `Cargo.toml`, which is
+/// why wasmtime does not even expose a setter for them in this build. They are disabled here
+/// through the low-level [`Config::wasm_features`] anyway: a feature that is off because
+/// somebody did not enable a cargo feature is off by omission, and this file should say no on
+/// purpose.
+///
+/// Left **on**, deliberately: the component model itself; SIMD, multi-value, bulk memory,
+/// reference types, sign extension, saturating float conversion and mutable globals — the
+/// deterministic core a real toolchain emits, and what `wasm32-wasip2` produces for the
+/// reference guest. Turning those off would refuse guests this helper exists to run.
 pub fn config() -> Config {
     let mut config = Config::new();
     config.wasm_component_model(true);
     config.consume_fuel(true);
     config.epoch_interruption(true);
+
+    // Cranelift's optimisation level, set explicitly and left where wasmtime puts it.
+    // Measured on the worst component this helper will admit (20 000 functions, just under
+    // 4 MiB of code) on the release build: `None` 1.00 s, `Speed` 1.19 s, `SpeedAndSize`
+    // 1.22 s. Sixteen per cent off a compile that happens once per component, in exchange for
+    // unoptimised code in every call that component ever answers, is not a trade this world —
+    // JSON in, JSON out, per message — should take.
+    config.cranelift_opt_level(OptLevel::Speed);
+
+    // Bounds that have defaults, named rather than inherited.
+    config.max_wasm_stack(MAX_WASM_STACK_BYTES);
+    config.memory_reservation(MEMORY_RESERVATION_BYTES);
+    config.memory_reservation_for_growth(MEMORY_RESERVATION_BYTES);
+    config.memory_guard_size(MEMORY_GUARD_BYTES);
+
+    // Proposals with a setter in this build.
+    config.wasm_relaxed_simd(false);
+    config.wasm_tail_call(false);
+    config.wasm_extended_const(false);
+    config.wasm_multi_memory(false);
+    config.wasm_memory64(false);
+    config.wasm_gc(false);
+    config.wasm_shared_everything_threads(false);
+    config.wasm_stack_switching(false);
+    config.wasm_wide_arithmetic(false);
+    config.wasm_custom_page_sizes(false);
+    config.wasm_component_model_error_context(false);
+    config.wasm_component_model_gc(false);
+    config.wasm_component_model_map(false);
+    config.wasm_component_model_memory64(false);
+    config.wasm_component_model_fixed_length_lists(false);
+    config.wasm_component_model_implements(false);
+
+    // Proposals with no usable named setter in this build: either the cargo feature behind it is
+    // absent (so wasmtime compiles the setter out) or the setter is deprecated. Off already, in
+    // most cases; said out loud, in all of them.
+    for feature in [
+        WasmFeatures::FUNCTION_REFERENCES,
+        WasmFeatures::THREADS,
+        WasmFeatures::EXCEPTIONS,
+        WasmFeatures::LEGACY_EXCEPTIONS,
+        WasmFeatures::GC_TYPES,
+        WasmFeatures::MEMORY_CONTROL,
+        WasmFeatures::CM_ASYNC,
+        WasmFeatures::CM_ASYNC_STACKFUL,
+        WasmFeatures::CM_MORE_ASYNC_BUILTINS,
+        WasmFeatures::CM_THREADING,
+        WasmFeatures::CM_VALUES,
+        WasmFeatures::CM_NESTED_NAMES,
+    ] {
+        config.wasm_features(feature, false);
+    }
+
     config
 }
 
@@ -859,7 +985,12 @@ impl Host {
         (cut(imports), cut(exports))
     }
 
+    /// The one place `Component::new` is called, and therefore the one place the structural
+    /// bound has to hold. [`shape::check`] runs first and refuses `component_too_complex`
+    /// without the compiler ever seeing the bytes; see [`crate::shape`] for why a bound after
+    /// the fact — a watchdog thread, a deadline — could not have done this.
     fn compile(&self, bytes: &[u8]) -> Result<Component, Refusal> {
+        shape::check(bytes)?;
         Component::new(&self.engine, bytes).map_err(|error| {
             refusal::refuse(
                 refusal::COMPILE_FAILED,

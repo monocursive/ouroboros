@@ -34,6 +34,19 @@ tokio = { version = "1", features = ["rt", "macros", "io-util", "io-std"] }
 # rather than trusted from the request (§7.5). Pure Rust, already in this workspace's lock
 # behind `ouro` and `computer-use`; no C, no OpenSSL.
 sha2 = "0.10"
+# The structural pre-compile pass (`src/shape.rs`). This is not a new crate in the graph:
+# wasmtime 48.0.1 already resolves exactly this version behind `wasmtime-environ`, so naming it
+# here adds a direct edge and nothing else — and naming it is the point, because the bound in
+# front of the compiler is load-bearing containment, not an implementation detail of wasmtime's.
+# `default-features = false` drops `validate` (wasmtime validates; this pass only walks section
+# headers), `serde`, `simd` and the hash collections. Pinned to the same minor wasmtime uses:
+# a wasmparser that disagreed with the one inside the engine would be a checker that walks
+# different bytes from the compiler it protects.
+wasmparser = { version = "=0.254.0", default-features = false, features = [
+  "std",
+  "features",
+  "component-model",
+] }
 # The one heavy dependency, and the reason this member exists. `default-features = false`
 # drops most of what the default set pulls in; what is left is what the helper's six methods
 # need and nothing more:
@@ -50,6 +63,14 @@ sha2 = "0.10"
 # the production path), `pooling-allocator`, `profiling`, `coredump`, `debug*`, `threads`,
 # `stack-switching`, `parallel-compilation`. There is no `wasmtime-wasi` at any version: the
 # linker defines exactly one function and WASI is not it (D5).
+#
+# An absent cargo feature is only half of it, because wasmtime 48 enables every *proposal* it
+# considers stable regardless — relaxed SIMD, tail calls, function references, extended const,
+# multi-memory, memory64 and the rest of "WASM 3". Those are turned off by name in
+# `host::config`, which is where the enumeration and the reasons live; four of them (threads,
+# exceptions, GC types, component-model async) are off both ways. Turning a proposal off in a
+# `Config` is the enforcement; leaving its cargo feature out is what keeps the code that
+# implements it out of the binary at all.
 wasmtime = { version = "48", default-features = false, features = [
   "runtime",
   "cranelift",

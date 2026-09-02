@@ -17,6 +17,9 @@
 //!
 //! * [`world`] is the one world this helper speaks, and the early check that some bytes are in
 //!   it. Policy: it refuses a component that could never link, with a refusal that says why.
+//! * [`shape`] is the bound in front of the compiler: a structural walk that refuses a component
+//!   shaped to be expensive to compile *before* `Component::new` runs, because cranelift cannot
+//!   be interrupted once it has started and this helper answers one request at a time.
 //! * [`host`] is the boundary itself — a linker that defines `log` and nothing else, and three
 //!   mandatory bounds (fuel, an epoch deadline, a memory ceiling) that no request can opt out
 //!   of. Enforcement: an import this helper does not define has nothing to bind to.
@@ -33,6 +36,7 @@ mod doctor;
 mod host;
 mod refusal;
 mod server;
+mod shape;
 mod world;
 
 use std::process::ExitCode;

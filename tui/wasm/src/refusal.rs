@@ -29,6 +29,7 @@
 //! | -32017 | `guest_error` | the guest returned its own `err(string)` — its answer, not ours |
 //! | -32018 | `too_many_components` | the component cache is full and every entry has a live instance, so nothing can be evicted |
 //! | -32019 | `too_many_instances` | the instance table is full; drop one first |
+//! | -32020 | `component_too_complex` | the bytes are shaped to be expensive to compile, and were refused before the compiler saw them |
 //!
 //! One standard code travels in the same shape, because it is raised in the same places: a
 //! request whose parameters are missing or mistyped is `-32602` / `invalid_params`, and it is a
@@ -65,6 +66,11 @@ pub const OVERSIZE_RESULT: Kind = (-32016, "oversize_result");
 pub const GUEST_ERROR: Kind = (-32017, "guest_error");
 pub const TOO_MANY_COMPONENTS: Kind = (-32018, "too_many_components");
 pub const TOO_MANY_INSTANCES: Kind = (-32019, "too_many_instances");
+/// The bytes are a component, and a component this helper will not compile: too many functions,
+/// too many bytes of code, too much of some other index space, or nested too deeply. Raised by
+/// [`crate::shape::check`] *before* `Component::new` runs, because cranelift cannot be
+/// interrupted once it starts and the helper is sequential behind it.
+pub const COMPONENT_TOO_COMPLEX: Kind = (-32020, "component_too_complex");
 
 /// One refusal, ready to become a JSON-RPC error object.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,6 +115,7 @@ mod tests {
         GUEST_ERROR,
         TOO_MANY_COMPONENTS,
         TOO_MANY_INSTANCES,
+        COMPONENT_TOO_COMPLEX,
     ];
 
     #[test]

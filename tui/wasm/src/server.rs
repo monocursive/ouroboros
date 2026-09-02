@@ -3,7 +3,9 @@
 //! `serve` reads one request per line from stdin and writes one response per line to stdout —
 //! the mode `Ouroboros.Wasm.Pool` spawns and speaks to. The method table is closed and has six
 //! entries: `doctor`, `inspect`, `load`, `instantiate`, `call`, `drop`. There is no way to ask
-//! this helper to do anything else, which is most of what makes it reviewable.
+//! this helper to do anything else, which is most of what makes it reviewable — and no way to
+//! ask for any of it *unobserved*: a JSON-RPC notification, which by definition gets no reply,
+//! is refused for every method that has an effect. See [`handle_message`].
 //!
 //! Every method runs in `spawn_blocking`. Compiling a component and running a guest are
 //! blocking work — hundreds of milliseconds for the first, up to a whole deadline for the
@@ -13,6 +15,7 @@
 //! The transport's own three codes live here, beside the dispatch that raises them; everything
 //! the *host* refuses is in [`crate::refusal`], which is the table worth reading.
 
+use std::io::Write;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -33,6 +36,19 @@ const MAX_NOISE_LINES: usize = 32;
 
 /// Answers one inbound JSON object. `None` where nothing is owed: a notification (no id), or an
 /// object that is not a request at all.
+///
+/// # A notification is not a way to have work done unobserved
+///
+/// JSON-RPC says an object with no `id` is a notification and gets no reply. Five of this
+/// helper's six methods have effects — `load` admits a component, `instantiate` stands a guest
+/// up, `call` runs one, `drop` takes one down — and running any of those with nobody owed an
+/// answer is a request whose refusals go nowhere, whose fuel accounting goes nowhere, and whose
+/// failure the peer cannot see. So they are not run: a notification naming a side-effectful
+/// method is refused, the refusal goes to stderr where the pool's log is, and nothing happens.
+///
+/// `doctor` is the exception, and only because it is the one method that does nothing: it reads
+/// two table lengths. Running it for a peer that will not hear the answer is a no-op, and
+/// refusing it would make the handshake's shape depend on whether an `id` was included.
 pub fn handle_message(host: &Host, message: Value) -> Option<String> {
     let id = message.get("id").cloned();
 
@@ -45,6 +61,20 @@ pub fn handle_message(host: &Host, message: Value) -> Option<String> {
         });
     };
 
+    if id.is_none() && method != "doctor" {
+        // Deliberately not `eprintln!`, which panics when the write fails; an owner that closed
+        // this pipe is not a reason to unwind.
+        let _ = writeln!(
+            std::io::stderr(),
+            "ouro-wasm: refused notification `{}`: {} ({}); \
+             a method with effects needs an id, so its answer has somewhere to go",
+            bounded(method),
+            INVALID_REQUEST.1,
+            INVALID_REQUEST.0,
+        );
+        return None;
+    }
+
     let params = message.get("params").cloned().unwrap_or(Value::Null);
     let outcome = dispatch(host, method, &params);
 
@@ -53,6 +83,26 @@ pub fn handle_message(host: &Host, message: Value) -> Option<String> {
         Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
         Err(refusal) => error_frame(id, &refusal),
     }))
+}
+
+/// How much of a peer-chosen method name goes into that stderr line. A method name is a string
+/// the peer picked, and it must not be able to forge a log line or a long one.
+const MAX_METHOD_ECHO: usize = 64;
+
+fn bounded(method: &str) -> String {
+    let mut out = String::with_capacity(method.len().min(MAX_METHOD_ECHO));
+    for character in method.chars() {
+        if out.len() + character.len_utf8() > MAX_METHOD_ECHO {
+            out.push('…');
+            break;
+        }
+        out.push(if character.is_control() {
+            ' '
+        } else {
+            character
+        });
+    }
+    out
 }
 
 fn dispatch(host: &Host, method: &str, params: &Value) -> Result<Value, Refusal> {
@@ -212,6 +262,28 @@ mod tests {
         assert!(handle_message(&host(), json!({ "jsonrpc": "2.0", "method": "doctor" })).is_none());
     }
 
+    /// A notification naming a method with effects is refused rather than run. Unobservable
+    /// here — the proof that it did not *happen* is
+    /// `containment::a_notification_is_refused_rather_than_run`, which asks `doctor` afterwards —
+    /// but the shape is checked: still no answer, and `doctor` is still the one carve-out.
+    #[test]
+    fn a_notification_naming_a_method_with_effects_is_not_answered_either() {
+        for method in ["inspect", "load", "instantiate", "call", "drop"] {
+            assert!(
+                handle_message(&host(), json!({ "jsonrpc": "2.0", "method": method })).is_none(),
+                "{method} as a notification must not be answered"
+            );
+        }
+    }
+
+    #[test]
+    fn a_peer_chosen_method_name_cannot_forge_the_refusal_line() {
+        let forged = bounded("load\nouro-wasm: second");
+        assert!(!forged.contains('\n'));
+        assert_eq!(forged, "load ouro-wasm: second");
+        assert!(bounded(&"m".repeat(4096)).len() <= MAX_METHOD_ECHO + 3);
+    }
+
     #[test]
     fn an_object_without_a_method_but_with_an_id_is_invalid() {
         let value = answer(&host(), json!({ "jsonrpc": "2.0", "id": 3 }));
@@ -268,6 +340,54 @@ mod tests {
             .await
             .unwrap();
         assert!(output.is_empty());
+    }
+
+    /// The give-up is a *decision*, not the end of the stream.
+    ///
+    /// [`serve_gives_up_on_a_pipe_that_is_only_noise`] cannot tell the two apart: its input ends,
+    /// so the loop returns and writes nothing whether the budget exists or not. Delete the budget
+    /// check and that test stays green. This one puts a perfectly good request *after* the noise:
+    /// if the loop is still reading, it answers it, and the assertion below fails.
+    const DOCTOR: &[u8] = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"doctor\"}\n";
+
+    #[tokio::test]
+    async fn serve_stops_reading_past_the_noise_budget() {
+        let mut input = "garbage\n".repeat(MAX_NOISE_LINES + 1).into_bytes();
+        input.extend_from_slice(DOCTOR);
+        let mut output: Vec<u8> = Vec::new();
+
+        run(host(), BufReader::new(&input[..]), &mut output, 1024)
+            .await
+            .unwrap();
+        assert!(
+            output.is_empty(),
+            "the loop answered a request after {} noise lines, so it never gave up: {}",
+            MAX_NOISE_LINES + 1,
+            String::from_utf8_lossy(&output)
+        );
+    }
+
+    /// And the budget is a budget rather than a hair trigger: exactly [`MAX_NOISE_LINES`] of
+    /// noise costs the peer nothing, and a message resets the count, so a long-lived pipe that
+    /// hiccups now and then is never given up on.
+    #[tokio::test]
+    async fn noise_under_the_budget_is_survivable_and_a_message_resets_it() {
+        let mut input = "garbage\n".repeat(MAX_NOISE_LINES).into_bytes();
+        input.extend_from_slice(DOCTOR);
+        input.extend_from_slice(&"garbage\n".repeat(MAX_NOISE_LINES).into_bytes());
+        input.extend_from_slice(DOCTOR);
+        let mut output: Vec<u8> = Vec::new();
+
+        run(host(), BufReader::new(&input[..]), &mut output, 1024)
+            .await
+            .unwrap();
+
+        let text = String::from_utf8(output).unwrap();
+        assert_eq!(
+            text.lines().count(),
+            2,
+            "both requests must be answered: {text}"
+        );
     }
 
     #[tokio::test]

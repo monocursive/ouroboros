@@ -149,10 +149,21 @@ impl Helper {
     /// Waits up to two seconds for `needle` to appear on the helper's stderr. Buffering means
     /// the line the guest wrote during a call may land just after the answer to it.
     fn wait_for_stderr(&self, needle: &str) -> String {
+        self.wait_for_stderr_lines(needle, 1)
+    }
+
+    /// The same, for a needle that is expected more than once: waiting for the first occurrence
+    /// would race the second one onto the pipe.
+    fn wait_for_two_markers(&self, needle: &str) -> String {
+        self.wait_for_stderr_lines(needle, 2)
+    }
+
+    fn wait_for_stderr_lines(&self, needle: &str, times: usize) -> String {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let seen = self.stderr.lock().expect("stderr lock").clone();
-            if seen.contains(needle) || Instant::now() > deadline {
+            let count = seen.lines().filter(|line| line.contains(needle)).count();
+            if count >= times || Instant::now() > deadline {
                 return seen;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -1222,6 +1233,432 @@ fn a_reply_far_past_the_cap_is_stopped_before_it_is_allocated() {
         json!({ "instance": "far-over", "export": "describe", "payload": "" }),
     );
     assert_eq!(refusal, "unknown_instance");
+}
+
+// ------------------------------------------------- the bound in front of the compiler (F1)
+
+/// The structural bound, exactly as the helper reports it. Kept here rather than read from the
+/// crate because these tests drive the *binary*: a bound the test and the helper disagreed about
+/// would be a bound nobody was checking.
+const MAX_FUNCTIONS: usize = 20_000;
+const MAX_NESTING_DEPTH: usize = 8;
+
+/// The functions the reference guests' own core module declares — `realloc`, `describe`, `init`
+/// and `handle_message` — which [`support::dense`] adds to.
+const GUEST_FUNCTIONS: usize = 4;
+
+/// Compilation is bounded, and the bound is reachable.
+///
+/// This is the finding this whole file was reopened for. `Component::new` was called under no
+/// fuel, no deadline and no structural bound: a *valid, in-world* component of 145 000 trivial
+/// functions took 28.9 seconds to compile on the release build, and this helper answers one
+/// request at a time, so that is 28.9 seconds in which every hook and every capability on the
+/// node waits — long enough for the daemon's 30-second `load` deadline to break the pool and
+/// drop every live instance with it. A watchdog could not have fixed it: cranelift cannot be
+/// interrupted, so the thread burns to the end whatever the timer says. The only bound that
+/// costs nothing is one taken before the compiler starts.
+///
+/// So: a component at both bounds at once — 20 000 functions *and* just under 4 MiB of code — is
+/// admitted, compiles, instantiates and answers. That is the worst case this helper will hand to
+/// cranelift, and on the release build it takes **1.19 s**. One function past the bound is
+/// refused `component_too_complex` in **0.14 s**, which is the time to read 4 MiB off disk and
+/// walk its section headers; nothing is compiled.
+///
+/// The assertion below is on the refusal and the admission, not on the clock: this suite is
+/// built with `cargo test`, and a debug wasmtime compiles the same bytes in 27 s. `REPLY_TIMEOUT`
+/// is the only wall-clock claim that survives both profiles.
+#[test]
+fn the_worst_component_this_helper_will_compile_is_bounded_and_reachable() {
+    let mut helper = Helper::spawn(&[]);
+
+    // Just past the function bound: refused without being compiled.
+    let over = fixture(
+        "over-functions",
+        &support::dense(MAX_FUNCTIONS - GUEST_FUNCTIONS + 1, 18),
+    );
+    let (refusal, message) = helper.refusal("inspect", json!({ "path": over.path }));
+    assert_eq!(refusal, "component_too_complex");
+    assert!(
+        message.contains("20001") && message.contains("functions"),
+        "the refusal must say which bound and by how much: {message}"
+    );
+
+    // A `load` of the same bytes is refused the same way, and admits nothing.
+    let (refusal, _) = helper.refusal("load", json!({ "sha256": over.sha256, "path": over.path }));
+    assert_eq!(refusal, "component_too_complex");
+    let report = helper.ok("doctor", Value::Null);
+    assert_eq!(report["held"]["components"], 0);
+
+    // Exactly at the bound: admitted, compiled, and it works. A bound that refused this would
+    // be a bound no real guest could reach either.
+    let at = fixture(
+        "at-the-bound",
+        &support::dense(MAX_FUNCTIONS - GUEST_FUNCTIONS, 18),
+    );
+    let loaded = load(&mut helper, &at);
+    assert_eq!(loaded["world"], "ouroboros:capability@0.1.0");
+    instantiate(&mut helper, "at-the-bound", &at);
+    let answered = helper.ok(
+        "call",
+        json!({ "instance": "at-the-bound", "export": "handle-message", "payload": "{}" }),
+    );
+    assert_eq!(answered["payload"], "ok");
+}
+
+/// The other dimensions of the same bound, each refused by name so an owner reading a refusal
+/// learns which ceiling they hit rather than only that they hit one.
+#[test]
+fn each_structural_bound_refuses_before_the_compiler_runs() {
+    let mut helper = Helper::spawn(&[]);
+
+    // Bytes of code, with few enough functions that the function bound is not what fires:
+    // 400 functions of 1 200 instructions is roughly 5 MiB against a 4 MiB ceiling.
+    let fat = fixture("fat", &support::dense(400, 1_200));
+    let (refusal, message) = helper.refusal("inspect", json!({ "path": fat.path }));
+    assert_eq!(refusal, "component_too_complex");
+    assert!(
+        message.contains("bytes of code"),
+        "a component over the code ceiling must be told which ceiling: {message}"
+    );
+
+    // Nesting, which is a handful of bytes to write and a recursion for anything that walks it.
+    let deep = fixture("deep", &support::deeply_nested(MAX_NESTING_DEPTH + 2));
+    let (refusal, message) = helper.refusal("inspect", json!({ "path": deep.path }));
+    assert_eq!(refusal, "component_too_complex");
+    assert!(
+        message.contains("nesting"),
+        "a component nested too deeply must be told so: {message}"
+    );
+
+    // And the helper is unharmed by all of it, still holding nothing.
+    let report = helper.ok("doctor", Value::Null);
+    assert_eq!(report["usable"], true);
+    assert_eq!(report["held"]["components"], 0);
+    assert!(report["limits"]["max_functions"].as_u64().expect("a bound") > 0);
+}
+
+// --------------------------------------------------- the engine's feature set (F2)
+
+/// The engine speaks the smallest dialect the world needs, and the two proposals worth naming
+/// are refused at compile.
+///
+/// wasmtime 48 turns on every proposal it considers stable, which is a reasonable default for a
+/// host running code it wrote and the wrong one for a host running code nobody trusts. Two of
+/// them are worth a test of their own. **Relaxed SIMD** is nondeterministic *by design* —
+/// `f32x4.relaxed_madd` may fuse the multiply and add or not, depending on the host CPU — so a
+/// capability that used it could answer differently on two nodes of one fleet, which is exactly
+/// what D4 forbids. **Tail calls** are deterministic but are a whole extra lowering path in
+/// cranelift for a world whose guests are three functions over strings.
+#[test]
+fn the_engine_refuses_proposals_this_world_does_not_need() {
+    let mut helper = Helper::spawn(&[]);
+
+    for (tag, bytes) in [
+        ("relaxed-simd", support::relaxed_simd()),
+        ("tail-call", support::tail_call()),
+    ] {
+        let fixture = fixture(tag, &bytes);
+        let (refusal, _) = helper.refusal("inspect", json!({ "path": fixture.path }));
+        assert_eq!(
+            refusal, "compile_failed",
+            "a component using {tag} must not compile on this engine"
+        );
+
+        let (refusal, _) = helper.refusal(
+            "load",
+            json!({ "sha256": fixture.sha256, "path": fixture.path }),
+        );
+        assert_eq!(refusal, "compile_failed");
+    }
+
+    // And the dialect that is left is still enough to run the world: a guest that uses plain
+    // SIMD and bulk memory — what a real toolchain emits — loads and answers.
+    let echo = stand_up(
+        &mut helper,
+        "still-works",
+        &support::echo(),
+        limits(FUEL, MEMORY_BYTES, DEADLINE_MS),
+    );
+    let answered = helper.ok(
+        "call",
+        json!({ "instance": "still-works", "export": "handle-message", "payload": "x" }),
+    );
+    assert_eq!(answered["payload"], "CFG|x");
+    assert!(!echo.sha256.is_empty());
+}
+
+// ------------------------------------------------- enforcement nobody was holding (F3/F4)
+
+/// A component that is not read is not compiled. The byte cap is checked against what was
+/// actually read, one byte past the cap, so an over-cap file is refused without being held.
+#[test]
+fn the_component_byte_cap_is_enforced_on_what_is_read() {
+    const CAP: u64 = 64 * 1024 * 1024;
+    let mut helper = Helper::spawn(&[]);
+
+    // Sparse, so this costs an inode rather than 64 MiB of disk.
+    let over = std::env::temp_dir().join(format!("ouro-wasm-it-overcap-{}", std::process::id()));
+    let file = std::fs::File::create(&over).expect("the over-cap fixture is created");
+    file.set_len(CAP + 1).expect("a sparse file of cap + 1");
+    drop(file);
+
+    let (refusal, message) = helper.refusal("inspect", json!({ "path": over.to_string_lossy() }));
+    let _ = std::fs::remove_file(&over);
+    assert_eq!(refusal, "unreadable_component");
+    assert!(
+        message.contains("cap"),
+        "the refusal must say the file was over the cap: {message}"
+    );
+
+    // A file of exactly the cap is read, and then refused for what it *is* rather than for its
+    // size — which is what says the boundary sits where it claims to.
+    let at = std::env::temp_dir().join(format!("ouro-wasm-it-atcap-{}", std::process::id()));
+    let file = std::fs::File::create(&at).expect("the at-cap fixture is created");
+    file.set_len(CAP).expect("a sparse file of exactly the cap");
+    drop(file);
+
+    let (refusal, _) = helper.refusal("inspect", json!({ "path": at.to_string_lossy() }));
+    let _ = std::fs::remove_file(&at);
+    assert_eq!(
+        refusal, "compile_failed",
+        "a file at the cap must be read and judged as bytes, not refused for its size"
+    );
+}
+
+/// Tables are bounded the way memories are. A guest that asks to grow one past the ceiling is
+/// refused the growth — and, having no plan for that, traps. A guest that asks for less than the
+/// ceiling gets it and answers, so the test cannot pass by the growth failing for some other
+/// reason.
+#[test]
+fn table_growth_past_the_ceiling_is_refused() {
+    let mut helper = Helper::spawn(&[]);
+
+    stand_up(
+        &mut helper,
+        "table-ok",
+        &support::table_grower(50_000),
+        limits(FUEL, MEMORY_BYTES, DEADLINE_MS),
+    );
+    let answered = helper.ok(
+        "call",
+        json!({ "instance": "table-ok", "export": "handle-message", "payload": "{}" }),
+    );
+    assert_eq!(
+        answered["payload"], "ok",
+        "growth under the ceiling must be allowed, or this test proves nothing"
+    );
+
+    stand_up(
+        &mut helper,
+        "table-over",
+        &support::table_grower(200_000),
+        limits(FUEL, MEMORY_BYTES, DEADLINE_MS),
+    );
+    let (refusal, _) = helper.refusal(
+        "call",
+        json!({ "instance": "table-over", "export": "handle-message", "payload": "{}" }),
+    );
+    assert_eq!(
+        refusal, "trapped",
+        "a table grown past the ceiling must be refused the growth"
+    );
+}
+
+/// The *count* of memories is capped, separately from their bytes. Five memories under a four
+/// mebibyte grant is 320 KiB of guest memory — far under the ceiling — so the only thing that
+/// can refuse it is the count.
+#[test]
+fn the_memory_count_cap_is_enforced_on_its_own() {
+    let mut helper = Helper::spawn(&[]);
+
+    // Four memories: the guest's own plus three. Exactly at the cap, and admitted.
+    let at = fixture("memories-at", &support::bulk(3, 1, 0));
+    load(&mut helper, &at);
+    helper.ok(
+        "instantiate",
+        json!({
+            "instance": "memories-at",
+            "sha256": at.sha256,
+            "config": "",
+            "limits": limits(FUEL, 4 * 1024 * 1024, DEADLINE_MS),
+        }),
+    );
+
+    // Five. Their bytes together are 320 KiB against a 4 MiB grant, so nothing but the count
+    // can be what refuses this.
+    let over = fixture("memories-over", &support::bulk(4, 1, 0));
+    load(&mut helper, &over);
+    let (refusal, _) = helper.refusal(
+        "instantiate",
+        json!({
+            "instance": "memories-over",
+            "sha256": over.sha256,
+            "config": "",
+            "limits": limits(FUEL, 4 * 1024 * 1024, DEADLINE_MS),
+        }),
+    );
+    assert_eq!(refusal, "instantiate_failed");
+}
+
+/// The world's import check has two halves, and one artifact cannot test both.
+///
+/// A component wanting a clock fails the name check *and* the signature check, so
+/// `an_undeclared_import_never_reaches_an_instance` stays green with either one deleted. These
+/// two fail exactly one each: `notify` has `log`'s signature and the wrong name, and `log` has
+/// the right name and the wrong signature.
+#[test]
+fn the_import_check_holds_by_name_and_by_signature() {
+    let mut helper = Helper::spawn(&[]);
+
+    let misnamed = fixture("misnamed", &support::misnamed_import());
+    let (refusal, message) = helper.refusal(
+        "load",
+        json!({ "sha256": misnamed.sha256, "path": misnamed.path }),
+    );
+    assert_eq!(refusal, "undefined_import");
+    assert!(
+        message.contains("notify"),
+        "the refusal must name the import the world does not declare: {message}"
+    );
+
+    let mistyped = fixture("mistyped", &support::mistyped_log());
+    let (refusal, message) = helper.refusal(
+        "load",
+        json!({ "sha256": mistyped.sha256, "path": mistyped.path }),
+    );
+    assert_eq!(refusal, "undefined_import");
+    assert!(
+        message.contains("signature"),
+        "an import with the right name and the wrong shape must be refused as such: {message}"
+    );
+
+    // Neither was admitted.
+    let report = helper.ok("doctor", Value::Null);
+    assert_eq!(report["held"]["components"], 0);
+}
+
+/// A sha is a hex digest, and hex has two spellings. Both name the same component: the helper
+/// case-folds before it compares, so a peer that upper-cased its digest gets a cache hit rather
+/// than a `sha_mismatch` for bytes that are exactly right.
+#[test]
+fn a_sha_is_matched_without_regard_to_hex_case() {
+    let mut helper = Helper::spawn(&[]);
+    let fixture = fixture("echo", &support::echo());
+    let shouted = fixture.sha256.to_ascii_uppercase();
+    assert_ne!(
+        shouted, fixture.sha256,
+        "the digest must contain hex letters"
+    );
+
+    let loaded = helper.ok("load", json!({ "sha256": shouted, "path": fixture.path }));
+    assert_eq!(loaded["cached"], false);
+    assert_eq!(
+        loaded["sha256"], fixture.sha256,
+        "the answer names the digest in the one spelling this helper uses"
+    );
+
+    // And the cache, and `instantiate`, agree with it.
+    let again = helper.ok("load", json!({ "sha256": shouted, "path": fixture.path }));
+    assert_eq!(again["cached"], true);
+    helper.ok(
+        "instantiate",
+        json!({
+            "instance": "shouted",
+            "sha256": shouted,
+            "config": "CFG",
+            "limits": limits(FUEL, MEMORY_BYTES, DEADLINE_MS),
+        }),
+    );
+    let answered = helper.ok(
+        "call",
+        json!({ "instance": "shouted", "export": "handle-message", "payload": "x" }),
+    );
+    assert_eq!(answered["payload"], "CFG|x");
+}
+
+/// The log budget is per *call*, and the proof is the second call.
+///
+/// `the_log_budget_bounds_one_call` cannot see the refill: a guest past its budget still returns,
+/// so the second call answers whether or not `arm` reset anything. This counts the lines. A
+/// guest asking for a thousand a message gets sixteen and one marker each time, twice — delete
+/// either reset in `arm` and the second call is silent.
+#[test]
+fn the_log_budget_is_refilled_for_each_call() {
+    let mut helper = Helper::spawn(&[]);
+    stand_up(
+        &mut helper,
+        "refill",
+        &support::chatty(),
+        limits(FUEL, MEMORY_BYTES, DEADLINE_MS),
+    );
+
+    for _ in 0..2 {
+        helper.ok(
+            "call",
+            json!({ "instance": "refill", "export": "handle-message", "payload": "x" }),
+        );
+    }
+
+    // Two markers means the budget was spent twice, which means it was refilled once.
+    let logged = helper.wait_for_two_markers("log budget");
+    let markers = logged
+        .lines()
+        .filter(|line| line.contains("log budget"))
+        .count();
+    assert_eq!(
+        markers, 2,
+        "each call gets its own budget and its own one marker line:\n{logged}"
+    );
+
+    let content = logged
+        .lines()
+        .filter(|line| line.contains("guest refill") && !line.contains("log budget"))
+        .count();
+    assert_eq!(
+        content, 32,
+        "sixteen lines a call, twice — got {content}:\n{logged}"
+    );
+}
+
+/// A method with effects cannot be asked for unobserved.
+///
+/// JSON-RPC says an object with no `id` gets no reply. Running `load`, `instantiate`, `call` or
+/// `drop` under that rule means doing work whose refusals go nowhere and whose failures the peer
+/// cannot see. So they are refused: the refusal goes to stderr, and nothing happens.
+#[test]
+fn a_notification_is_refused_rather_than_run() {
+    let mut helper = Helper::spawn(&[]);
+    let fixture = fixture("echo", &support::echo());
+
+    helper.send_raw(
+        &serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "method": "load",
+            "params": { "sha256": fixture.sha256, "path": fixture.path },
+        }))
+        .expect("the notification encodes"),
+    );
+
+    // Nothing was loaded, and the next answer on the wire is the answer to *this* request —
+    // which is also how we know the notification produced no frame of its own.
+    let report = helper.ok("doctor", Value::Null);
+    assert_eq!(
+        report["held"]["components"], 0,
+        "a notification must not admit a component"
+    );
+
+    let logged = helper.wait_for_stderr("refused notification");
+    assert!(
+        logged.contains("refused notification `load`"),
+        "the refusal belongs in the owner's log: {logged}"
+    );
+
+    // `doctor` is the carve-out, because it does nothing: still unanswered, still harmless.
+    helper.send_raw(
+        &serde_json::to_string(&json!({ "jsonrpc": "2.0", "method": "doctor" })).expect("encodes"),
+    );
+    let report = helper.ok("doctor", Value::Null);
+    assert_eq!(report["usable"], true);
 }
 
 /// The hostcall budget meters the guest-to-host direction only. A payload of several megabytes

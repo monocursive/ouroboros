@@ -14,11 +14,23 @@
 use serde_json::{json, Value};
 
 use crate::host;
+use crate::shape;
 use crate::world;
 
 /// The version of wasmtime resolved into this binary, or `"unknown"` if the lock could not be
 /// read when it was built.
 pub const WASMTIME_VERSION: &str = env!("OURO_WASMTIME_VERSION");
+
+/// The proposals [`host::config`] turns off, named for an operator reading this report. Prose,
+/// not a contract: the enforcement is the `Config` in [`crate::host`], and the tests that put a
+/// component using each of these in front of the helper and watch it be refused.
+const DISABLED_PROPOSALS: &str = "relaxed-simd (nondeterministic, and D4 says no), tail-call, \
+     function-references, extended-const, multi-memory, memory64, gc, threads and \
+     shared-everything-threads, exceptions (current and legacy), stack-switching, \
+     wide-arithmetic, custom-page-sizes, memory-control, and every optional component-model \
+     extension (async, threading, error-context, gc, map, memory64, fixed-length-lists, \
+     implements, values, nested-names). Left on: the component model, simd, multi-value, \
+     bulk-memory, reference-types, sign-extension, saturating-float-to-int, mutable-global";
 
 /// The `doctor` response object. `census` is the live state of the two tables — how full each
 /// is, and what the component cache has let go — when a serve loop is answering, and `None`
@@ -48,6 +60,21 @@ pub fn report(census: Option<host::Census>) -> Value {
              emitted and the rest are dropped. Draining that pipe is the owner's job",
             host::MAX_LOG_LINES_PER_CALL
         ),
+        format!(
+            "a component is walked before it is compiled and refused component_too_complex if it \
+             declares more than {} functions, {} bytes of code, {} types, {} levels of nesting or \
+             {} core modules; cranelift cannot be interrupted once it starts, so the bound has to \
+             be taken in front of it",
+            shape::MAX_FUNCTIONS,
+            shape::MAX_CODE_BYTES,
+            shape::MAX_TYPES,
+            shape::MAX_DEPTH,
+            shape::MAX_CORE_MODULES
+        ),
+        format!("the engine has these proposals disabled: {DISABLED_PROPOSALS}"),
+        "a JSON-RPC notification — an object with no id — is refused for every method but \
+         doctor: a method with effects must have somewhere to send its answer"
+            .to_string(),
     ];
     if let Err(error) = &engine {
         notes.push(format!("wasmtime engine unavailable: {error}"));
@@ -66,6 +93,23 @@ pub fn report(census: Option<host::Census>) -> Value {
             "max_result_bytes": host::MAX_RESULT_BYTES,
             "max_hostcall_bytes": host::MAX_HOSTCALL_BYTES,
             "max_component_bytes": host::MAX_COMPONENT_BYTES,
+            "max_wasm_stack_bytes": host::MAX_WASM_STACK_BYTES,
+            "memory_reservation_bytes": host::MEMORY_RESERVATION_BYTES,
+            "memory_guard_bytes": host::MEMORY_GUARD_BYTES,
+            // The structural bound in front of the compiler (`crate::shape`). These are the
+            // numbers that decide whether a component is compiled at all, so they are the ones
+            // an owner most needs to be able to read rather than discover.
+            "max_code_bytes": shape::MAX_CODE_BYTES,
+            "max_functions": shape::MAX_FUNCTIONS,
+            "max_types": shape::MAX_TYPES,
+            "max_component_imports": shape::MAX_IMPORTS,
+            "max_component_exports": shape::MAX_EXPORTS,
+            "max_definitions": shape::MAX_DEFINITIONS,
+            "max_segment_bytes": shape::MAX_SEGMENT_BYTES,
+            "max_nesting_depth": shape::MAX_DEPTH,
+            "max_core_modules": shape::MAX_CORE_MODULES,
+            "max_nested_components": shape::MAX_NESTED_COMPONENTS,
+            "max_sections": shape::MAX_SECTIONS,
             "epoch_tick_ms": host::EPOCH_TICK_MS,
             "max_core_instances": host::MAX_CORE_INSTANCES,
             "max_memories": host::MAX_MEMORIES,
@@ -122,6 +166,39 @@ mod tests {
         assert_eq!(report["held"]["evicted"][0], "a".repeat(64));
         assert_eq!(report["limits"]["max_deadline_ms"], host::MAX_DEADLINE_MS);
         assert_eq!(report["limits"]["max_eviction_log"], host::MAX_EVICTION_LOG);
+    }
+
+    /// The bound in front of the compiler is a number an owner has to be able to read out of
+    /// `doctor`, not one they discover from a refusal.
+    #[test]
+    fn the_structural_bound_is_reported() {
+        let report = report(None);
+        assert_eq!(report["limits"]["max_functions"], shape::MAX_FUNCTIONS);
+        assert_eq!(report["limits"]["max_code_bytes"], shape::MAX_CODE_BYTES);
+        assert_eq!(report["limits"]["max_nesting_depth"], shape::MAX_DEPTH);
+        assert_eq!(
+            report["limits"]["max_wasm_stack_bytes"],
+            host::MAX_WASM_STACK_BYTES
+        );
+
+        let notes = report["notes"].as_array().expect("notes").clone();
+        let joined: String = notes
+            .iter()
+            .filter_map(|note| note.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            joined.contains("component_too_complex"),
+            "doctor must say the compiler is bounded: {joined}"
+        );
+        assert!(
+            joined.contains("relaxed-simd"),
+            "doctor must list what the engine refuses: {joined}"
+        );
+        assert!(
+            joined.contains("notification"),
+            "doctor must say notifications are refused: {joined}"
+        );
     }
 
     #[test]

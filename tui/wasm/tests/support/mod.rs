@@ -106,22 +106,28 @@ fn lift(memory_instance: &str, func_instance: &str) -> String {
     )
 }
 
-/// A guest that imports nothing: one core module holding the allocator and all three exports,
-/// plus whatever `extra` adds to the component (unreferenced core instances, for the guests
-/// that exist to be expensive rather than to work).
-fn solo_parts(name: &str, init: &str, handle_message: &str, extra: &str) -> Vec<u8> {
+/// A guest that imports nothing: one core module holding the allocator, all three exports and
+/// whatever `inner` adds to that module, plus whatever `extra` adds to the component
+/// (unreferenced core instances, for the guests that exist to be expensive rather than to work).
+fn solo_parts(name: &str, init: &str, handle_message: &str, inner: &str, extra: &str) -> Vec<u8> {
     let prelude = trivial_prelude(name, init);
     let lift = lift("$i", "$i");
     assemble(&format!(
         r#"(component
-  (core module $m{ALLOC}{prelude}{handle_message}
+  (core module $m{ALLOC}{prelude}{handle_message}{inner}
   )
   (core instance $i (instantiate $m)){extra}{lift})"#
     ))
 }
 
 fn solo(name: &str, handle_message: &str) -> Vec<u8> {
-    solo_parts(name, TRIVIAL_INIT, handle_message, "")
+    solo_parts(name, TRIVIAL_INIT, handle_message, "", "")
+}
+
+/// A guest in this world with `inner` spliced into its core module: an extra function, an extra
+/// table, an opcode from a proposal the engine is supposed to have turned off.
+fn solo_with(name: &str, inner: &str) -> Vec<u8> {
+    solo_parts(name, TRIVIAL_INIT, SINK_HANDLE, inner, "")
 }
 
 /// A `handle-message` that answers `ok` with a fixed two-byte string whatever it is given. The
@@ -320,6 +326,7 @@ pub fn spin_init() -> Vec<u8> {
 "#,
         SINK_HANDLE,
         "",
+        "",
     )
 }
 
@@ -356,8 +363,125 @@ pub fn bulk(extra: usize, pages: u32, table_elements: u32) -> Vec<u8> {
         "bulk",
         TRIVIAL_INIT,
         SINK_HANDLE,
+        "",
         &format!("\n  (core module $bulk {memory} {table}){instances}"),
     )
+}
+
+/// A guest in this world with `functions` extra core functions of `ops` arithmetic instructions
+/// each, spliced into its core module. Unreferenced, and compiled anyway — which is the whole
+/// point: cranelift's cost is set by what a component *declares*, not by what it runs.
+///
+/// This is the shape the structural bound was measured against; see `crate::shape`.
+pub fn dense(functions: usize, ops: usize) -> Vec<u8> {
+    // Built by hand rather than with `format!` per function: at the bound this is twenty
+    // thousand functions and several megabytes of text, and a `Vec<String>` of it all is a
+    // needless second copy.
+    let mut body = String::with_capacity(functions * (ops * 70 + 64));
+    for index in 0..functions {
+        body.push_str("(func $d");
+        body.push_str(&index.to_string());
+        body.push_str(" (param $x i32) (result i32)");
+        for op in 0..ops {
+            body.push_str("(local.set $x (i32.mul (i32.add (local.get $x) (i32.const ");
+            body.push_str(&op.to_string());
+            body.push_str(")) (i32.const 3)))");
+        }
+        body.push_str("(local.get $x))\n");
+    }
+    solo_with("dense", &body)
+}
+
+/// `depth` components nested inside each other and nothing else. Not in this world and not meant
+/// to be: nesting is the one dimension that is a handful of bytes to write and a recursion for
+/// whatever walks it, so what has to refuse this is the structural pass, before the world check
+/// and before the compiler.
+pub fn deeply_nested(depth: usize) -> Vec<u8> {
+    assemble(&format!(
+        "{}{}",
+        "(component ".repeat(depth),
+        ")".repeat(depth)
+    ))
+}
+
+/// A guest using `f32x4.relaxed_madd`, from the relaxed-SIMD proposal. Relaxed SIMD is
+/// *nondeterministic by design* — whether the multiply and add fuse is the host CPU's business —
+/// so a capability using it can answer differently on two nodes of the same fleet. The engine
+/// has the proposal off; this is what proves it.
+pub fn relaxed_simd() -> Vec<u8> {
+    solo_with(
+        "relaxed-simd",
+        r#"
+    (func $relaxed (param $a v128) (result v128)
+      (f32x4.relaxed_madd (local.get $a) (local.get $a) (local.get $a)))
+"#,
+    )
+}
+
+/// A guest using `return_call`, from the tail-call proposal.
+pub fn tail_call() -> Vec<u8> {
+    solo_with(
+        "tail-call",
+        r#"
+    (func $tail (result i32) (return_call $tail))
+"#,
+    )
+}
+
+/// A guest whose `handle-message` grows a table by `by` elements and traps if it is refused.
+/// The mirror of [`grow`], for the other resource a store bounds by count and by size.
+pub fn table_grower(by: u32) -> Vec<u8> {
+    solo(
+        "table-grower",
+        &format!(
+            r#"
+    (table $t 1 funcref)
+    (func (export "handle_message") (param i32 i32) (result i32)
+      (local $ret i32)
+      (if (i32.eq (table.grow $t (ref.null func) (i32.const {by})) (i32.const -1))
+        (then (unreachable)))
+      (local.set $ret (call $realloc (i32.const 0) (i32.const 0) (i32.const 4) (i32.const 12)))
+      (i32.store (local.get $ret) (i32.const 0))
+      (i32.store offset=4 (local.get $ret) (i32.const 64))
+      (i32.store offset=8 (local.get $ret) (i32.const 2))
+      (local.get $ret))
+    (data (i32.const 64) "ok")
+"#
+        ),
+    )
+}
+
+/// A guest in this world that also declares one component-level import, never lowered and never
+/// called. The two probes built on it are the ones the world check's import half is *only*
+/// checked by: `undeclared_import` below cannot tell the name check from the signature check,
+/// because a clock fails both.
+fn declaring_import(name: &str, params: &str) -> Vec<u8> {
+    let prelude = trivial_prelude(name, TRIVIAL_INIT);
+    let lift = lift("$i", "$i");
+    assemble(&format!(
+        r#"(component
+  (import "{name}" (func $imported {params}))
+  (core module $m{ALLOC}{prelude}{SINK_HANDLE}
+  )
+  (core instance $i (instantiate $m)){lift})"#
+    ))
+}
+
+/// A guest importing `notify` — a name the world does not declare — *with `log`'s exact
+/// signature*. Delete the name check in `world::check` and this component loads, because the
+/// signature check has nothing to object to.
+pub fn misnamed_import() -> Vec<u8> {
+    declaring_import(
+        "notify",
+        r#"(param "level" string) (param "message" string)"#,
+    )
+}
+
+/// A guest importing `log` by its right name and with the wrong signature: one string, not two.
+/// Delete the signature check in `world::check` and this component loads, because the name check
+/// has nothing to object to — and it then fails obscurely at every instantiation instead.
+pub fn mistyped_log() -> Vec<u8> {
+    declaring_import("log", r#"(param "level" string)"#)
 }
 
 /// A guest that declares an import the world does not: `now`, a clock. Nothing in the helper's
