@@ -159,18 +159,24 @@ wasm-guest:
 	@echo "==> wasm-guest: what it declares"
 	@ls -l test/support/wasm/echo.wasm
 
-# The SDK's worked components. Each is a standalone workspace built with a plain `cargo build`,
-# because that is the claim: an author writes their own logic and one macro call, and what comes
-# out is a component in this world whose whole authority is `log`. `tui/wasm/tests/sdk.rs`
-# builds these same two and puts the claim to the real helper; this target is for looking at
-# them by hand.
+# The SDK's worked components, one per seam plus the verdict fixture. Each is a standalone
+# workspace built with a plain `cargo build`, because that is the claim: an author writes their
+# own logic and one macro call, and what comes out is a component in this world whose whole
+# authority is `log`. `tui/wasm/tests/sdk.rs` builds these same four and puts that claim to the
+# real helper; `test/wasm/sdk_acceptance_test.exs` runs the built artifacts through
+# `provider/native/hooks.ex` and asserts the decision the node reaches — which is why this
+# target is a prerequisite of that suite rather than a convenience.
 wasm-examples:
 	@echo "==> wasm-examples: the guest SDK's worked components"
 	cd tui/wasm/guest/examples/counter && $(CARGO) build --release --target wasm32-wasip2
 	cd tui/wasm/guest/examples/deny-writes && $(CARGO) build --release --target wasm32-wasip2
+	cd tui/wasm/guest/examples/lintcheck && $(CARGO) build --release --target wasm32-wasip2
+	cd tui/wasm/guest/examples/verdicts && $(CARGO) build --release --target wasm32-wasip2
 	@echo "==> wasm-examples: what they declare"
 	@ls -l tui/wasm/guest/examples/counter/target/wasm32-wasip2/release/counter.wasm \
-	  tui/wasm/guest/examples/deny-writes/target/wasm32-wasip2/release/deny_writes.wasm
+	  tui/wasm/guest/examples/deny-writes/target/wasm32-wasip2/release/deny_writes.wasm \
+	  tui/wasm/guest/examples/lintcheck/target/wasm32-wasip2/release/lintcheck.wasm \
+	  tui/wasm/guest/examples/verdicts/target/wasm32-wasip2/release/verdicts.wasm
 
 # The SDK's own gates. Its own workspace means `make test`'s `cd tui && cargo …` never reaches
 # it, so it gets a verb rather than being checked by nobody.

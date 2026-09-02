@@ -12,6 +12,18 @@ cargo build --release --target wasm32-wasip2
 
 The component is `target/wasm32-wasip2/release/{{name_snake}}.wasm`.
 
+`ouroboros-guest` is not published to crates.io yet, so `Cargo.toml` reaches it by **path**:
+
+```toml
+ouroboros-guest = { path = "{{sdk_path}}" }
+```
+
+That path has to point at an ouroboros checkout on this machine, and this project stops
+building the moment the checkout moves or goes away. Move the project, and the path moves with
+it; hand the project to somebody else, and they need a checkout of their own and have to edit
+that line. When the crate is published this becomes a version, and the dependency stops being
+a fact about your filesystem.
+
 ## What it is allowed to do
 
 One import: `log`. No clock, no randomness, no filesystem, no socket, and nothing about the

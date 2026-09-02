@@ -325,10 +325,10 @@ four seams over the one world: `Capability` (a JSON body in, a JSON reply out) f
 underneath them for a reply that must be stated verbatim. `#![no_std]` stays the author's own
 line, because it is the claim and not the ceremony: `std` on `wasm32-wasip2` imports thirteen
 `wasi:io`/`wasi:cli` interfaces the helper's linker refuses, and such a build does not
-instantiate at all. Two worked components live in `tui/wasm/guest/examples/`, a scaffold in
-`tui/wasm/guest/template/`, and the acceptance guest is built on the same crate — which is
-what keeps the SDK honest (D13). None of it changes what the helper enforces; containment is
-the linker (D5).
+instantiate at all. Four worked components live in `tui/wasm/guest/examples/` — one per seam,
+plus a fixture that says every verdict there is — a scaffold in `tui/wasm/guest/template/`, and
+the acceptance guest is built on the same crate, which is what keeps the SDK honest (D13). None
+of it changes what the helper enforces; containment is the linker (D5).
 
 ### 7.2 Identity: no BEAM module at all
 
@@ -972,7 +972,7 @@ machinery — it is a backend, not a lane (D9).
   acceptance guest was rewritten onto it rather than left beside it: the assertion
   `imports == ["log"]` in `test/wasm/capability_acceptance_test.exs` now runs against a
   component the SDK built, so the SDK cannot quietly grow an import without lane W's own
-  acceptance suite going red. `tui/wasm/tests/sdk.rs` holds the two example guests and the
+  acceptance suite going red. `tui/wasm/tests/sdk.rs` holds the four example guests and the
   scaffold template to the same assertion, against the real helper.
 - **D14 — the author's loop runs the helper locally, and the helper comes from three
   places.** `ouro wasm inspect|run|hook|check|new` need no node: each starts a local
@@ -1092,6 +1092,14 @@ machinery — it is a backend, not a lane (D9).
   whichever verb consumes it. The **result** direction needs no chunking, because
   `wasm.sign` answers with the bundle's prefix and the client appends the bytes it already
   holds.
+
+  The same reasoning applies to everything else the SDK *says* about the node. A `Verdict`'s
+  documentation of the untrusted narrowing and a `Check`'s "an empty reply is a pass" are
+  claims about `provider/native/hooks.ex`, and a test that read them back out of the SDK's own
+  reply would prove nothing about either. So `test/wasm/sdk_acceptance_test.exs` runs the built
+  components through that module and asserts the decision it reaches — including the difference
+  between the trusted and the untrusted lane, which is the shape a deleted narrowing would show
+  up as.
 
 ## 12. What this does not solve
 
@@ -1428,17 +1436,31 @@ Each slice is PR-sized, lands green, and is useful alone.
   on the enum that produces it — `allow` read as silence, `updatedInput` dropped, `deny`,
   `ask` and context kept and labelled per line — plus a `Silent` variant, because an SDK whose
   only way to say nothing was `allow` would have taught every author to resolve an engine
-  `ask` by accident. The acceptance guest was rewritten onto the SDK with its observable
-  behaviour unchanged: 48,333 bytes became 49,138 (+1.7%), and `test/wasm/` stays at 271
-  passing. Proofs: fourteen host unit tests pinning both wire contracts key by key (rename
-  `permissionDecisionReason` and the node stops reading verdicts, silently — that is the one
-  they catch), and six in `tui/wasm/tests/sdk.rs` that build the two example guests and the
-  substituted scaffold template with a real toolchain and put them to the real helper — each
-  is `ouroboros:capability@0.1.0` importing exactly `log`, a hook's deny, context and silence
-  come back on the keys `parse_output/1` parses, a body a guest cannot use is a `guest_error`
-  that leaves the instance live rather than a trap, and every placeholder a template file uses
-  is one the table W10 will read documents. `make wasm-examples` and
-  `make wasm-sdk-check`; the Rust CI job gains the `wasm32-wasip2` target and
+  `ask` by accident. The acceptance guest was rewritten onto the SDK: 48,335 bytes became
+  49,140 (+805, +1.7%, on the pinned 1.95 toolchain) and `test/wasm/` stays green. One
+  behaviour did change and is written down rather than glossed — it used to log
+  `handle-message` *before* checking whether `init` had run, and the SDK refuses first, so
+  that line is now only emitted for a message it answers. Nothing observes the difference: the
+  pre-`init` path is unreachable through the protocol, because `call` on an instance that was
+  never stood up is `unknown_instance`.
+
+  Proved in two places, because neither is sufficient. `tui/wasm/tests/sdk.rs` (eight tests)
+  builds the four example guests and the substituted scaffold template with a real toolchain
+  and puts them to the real helper: each is `ouroboros:capability@0.1.0` importing exactly
+  `log`, every `Verdict` variant survives the round trip, a `[checks]` pass is the empty reply
+  and a failure is its text, a body a guest cannot use is a `guest_error` that leaves the
+  instance live rather than a trap, and every placeholder a template file uses is one the table
+  W10 will read documents. But every assertion there compares this repository's Rust against
+  its own, so all of it stays green through a rename in `hooks.ex` — the SDK's claims are about
+  the *node*, not about itself. `test/wasm/sdk_acceptance_test.exs` (sixteen tests) is where
+  they are settled: the built components run through `Hooks.pre_tool_use/4` and
+  `Hooks.run_checks/2` in a clone nobody trusts, and what is asserted is the decision and the
+  difference between the two lanes — an untrusted `allow` arriving as silence while the trusted
+  one resolves the call, an untrusted `updatedInput` dropped while the trusted one replaces the
+  arguments, `deny` and `ask` standing in both, every line of context labelled, and a failing
+  check that is a failure rather than the pass an emptied reply would have been. Fourteen host
+  unit tests pin the two documents key by key underneath. `make wasm-examples` and
+  `make wasm-sdk-check`; both CI jobs gain what they need to run all of it, under
   `OUROBOROS_REQUIRE_WASM`, so a machine that cannot build a guest fails rather than skipping
   green. The scaffold is the placeholder W10's `ouro wasm new` embeds.
 - **Deferred, in rough order:** policy engine (§8.2) → agent-reachable forge/deploy

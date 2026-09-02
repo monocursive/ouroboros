@@ -10,8 +10,14 @@ use crate::raw::Raw;
 
 pub use dlmalloc::GlobalDlmalloc;
 
-/// What a guest answers a message it was handed before `init` ran. Word for word what the
-/// acceptance guest has always answered, because `test/wasm/` reads it.
+/// What a guest answers a message it was handed before `init` ran.
+///
+/// Word for word what the acceptance guest answered before W9, and kept for that reason and no
+/// stronger one: **nothing reads this text**, and no caller can reach it through the helper's
+/// protocol — `call` on an instance that was never stood up is `unknown_instance`, and an
+/// `instantiate` whose `init` refused leaves no instance behind. It is the answer for a host
+/// that grows a way to call an export before `init`, written down now so that host is told
+/// rather than handed a `None`.
 const NO_INIT: &str = "init has not run on this instance";
 
 /// What a guest answers a call that arrived while it was already inside one. See [`State`]:
@@ -40,7 +46,7 @@ pub fn trap() -> ! {
 /// Called only by the canonical ABI, which owns the pointer/length/alignment triple it passes
 /// and guarantees it describes a block this allocator handed out.
 pub unsafe fn realloc(old_ptr: *mut u8, old_len: usize, align: usize, new_len: usize) -> *mut u8 {
-    use alloc::alloc::{alloc, realloc, Layout};
+    use alloc::alloc::{alloc, dealloc, realloc, Layout};
 
     let pointer = unsafe {
         if old_len == 0 {
@@ -48,6 +54,17 @@ pub unsafe fn realloc(old_ptr: *mut u8, old_len: usize, align: usize, new_len: u
                 return align as *mut u8;
             }
             alloc(Layout::from_size_align_unchecked(new_len, align))
+        } else if new_len == 0 {
+            // Shrinking a live block to nothing. The canonical ABI does not ask for this and
+            // wit-bindgen's own implementation only `debug_assert`s that it cannot happen —
+            // which in a release build with `panic = "abort"` is no check at all, and
+            // `alloc::realloc` with a zero size is undefined behaviour by contract. So the
+            // branch exists rather than the assertion: free the block and answer with the
+            // dangling-but-aligned pointer, which is the same answer the zero-size case above
+            // gives and is what the ABI's zero-length convention means. No leak, no UB, and no
+            // trap for something that is not the guest's fault.
+            dealloc(old_ptr, Layout::from_size_align_unchecked(old_len, align));
+            return align as *mut u8;
         } else {
             realloc(
                 old_ptr,

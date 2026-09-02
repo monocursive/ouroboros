@@ -6,16 +6,27 @@
 //! author who writes nothing but their own logic and calls one macro — do they get a component
 //! in this world, and is its whole authority still one import?
 //!
-//! Three artifacts, each built from source that ships in this repository:
+//! Five artifacts, each built from source that ships in this repository:
 //!
-//!   * `guest/examples/counter` — a [`Capability`], with a `describe` carrying every optional
+//!   * `guest/examples/counter` — a `Capability`, with a `describe` carrying every optional
 //!     field of contract C1.
 //!   * `guest/examples/deny-writes` — a `Hook`, whose verdict is the stdout contract
 //!     `provider/native/hooks.ex` reads back.
+//!   * `guest/examples/lintcheck` — a `Check`, whose contract runs the other way: an empty
+//!     reply is the **pass**.
+//!   * `guest/examples/verdicts` — every `Verdict` variant, selected by config.
 //!   * `guest/template` — the scaffold `ouro wasm new` will write (W10), with its placeholders
 //!     substituted here exactly as that command will substitute them. A template that does not
 //!     compile is a `new` command that hands somebody a broken project, and nothing else in
 //!     this repository would have noticed.
+//!
+//! # What this file cannot prove
+//!
+//! That the node *reads* any of it. Everything here asserts on the reply text against keys this
+//! repository also wrote, so a rename on the `hooks.ex` side leaves all of it green.
+//! `test/wasm/sdk_acceptance_test.exs` is the other half: it runs these same built components
+//! through `Hooks.pre_tool_use/4` and `Hooks.run_checks/2` and asserts the decision, the
+//! labelling and the untrusted narrowing. Neither file is sufficient alone.
 //!
 //! # When this file does not run
 //!
@@ -188,14 +199,16 @@ fn scaffold(name: &str, type_name: &str) -> PathBuf {
         ("{{sdk_path}}", sdk.to_string_lossy().into_owned()),
     ];
 
-    let target = std::env::temp_dir().join(format!(
-        "ouro-wasm-scaffold-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("a clock after 1970")
-            .as_nanos()
-    ));
+    // A fixed path under the SDK's own (gitignored, CI-cached) build directory rather than a
+    // fresh temp directory per run. Scaffolding into `temp_dir()` meant this test compiled
+    // serde_json, dlmalloc and wit-bindgen from scratch on every single run and on every CI
+    // job, because nothing could cache a directory whose name carried a nanosecond. The three
+    // files are rewritten each time, so a change to the template is still picked up; only
+    // `target/` survives.
+    let target = root()
+        .join("guest")
+        .join("target")
+        .join("template-scaffold");
 
     std::fs::create_dir_all(target.join("src")).expect("the scaffold directory is created");
 
@@ -598,6 +611,152 @@ fn a_hook_written_on_the_sdk_denies_asks_and_stays_silent() {
     );
 }
 
+/// The `Check` seam, whose contract is the one that is easiest to get backwards: **an empty
+/// reply is a pass**, and the failure is the text itself.
+///
+/// Both directions are asserted here, and both matter in the same way: a `Fail` arm that
+/// returned the empty string turns a failing check into a silent pass, and a `Pass` arm that
+/// returned anything at all turns a passing check into a permanent failure injected into every
+/// turn. Neither shows up in a reply this file did not look at.
+///
+/// The reply is also *not JSON* — a `[checks]` failure is plain text — which is the other half
+/// of why `Check` is its own seam and not `Capability` with a convention.
+#[test]
+fn a_check_written_on_the_sdk_is_silent_on_a_pass_and_text_on_a_failure() {
+    if !toolchain_ready("the lintcheck example") {
+        return;
+    }
+
+    let component = build(&root().join("guest/examples/lintcheck"), "lintcheck");
+    let mut helper = Helper::spawn();
+
+    let inspected = helper.admit("failing", &component, r#"{"fail": true}"#);
+    in_this_world_with_only_log(&inspected, "the lintcheck example");
+
+    // The payload `hooks.ex` sends a check: an event and the key it was declared under, and
+    // nothing about the session at all.
+    let check = |name: &str| json!({ "event": "check", "name": name }).to_string();
+
+    let failure = helper.send("failing", &check("lint"));
+    assert!(
+        !failure.is_empty(),
+        "a failing check's reply is its failure text, and an empty reply is a PASS"
+    );
+    assert!(
+        failure.contains("check `lint` says no"),
+        "the check is told the key it was declared under: {failure}"
+    );
+    assert!(
+        failure.lines().count() > 1,
+        "the failure is multi-line, which is what the node's per-line labelling is for: {failure}"
+    );
+
+    // A second instance of the same component, configured the other way. One artifact, both
+    // directions, so nothing here can pass because two different builds disagreed.
+    let sha256 = hex(&Sha256::digest(
+        std::fs::read(&component).expect("the component is readable"),
+    ));
+    helper.ok(
+        "instantiate",
+        json!({
+            "instance": "passing",
+            "sha256": sha256,
+            "config": r#"{"fail": false}"#,
+            "limits": { "fuel": FUEL, "memory_bytes": MEMORY_BYTES, "deadline_ms": DEADLINE_MS },
+        }),
+    );
+
+    assert_eq!(
+        helper.send("passing", &check("typecheck")),
+        "",
+        "a passing check is the empty reply, and nothing else is"
+    );
+}
+
+/// Every [`Verdict`] variant, as the reply text the node parses.
+///
+/// The narrowing itself — `allow` read as silence, `updatedInput` dropped — is enforced in
+/// `hooks.ex` and is proved in `test/wasm/sdk_acceptance_test.exs`, which runs this same
+/// component through it. What is proved *here* is the other half: that the reply carries the
+/// key at all, so that when the Elixir test sees `allow` disappear it is seeing the narrowing
+/// and not a fixture that never said `allow`.
+#[test]
+fn the_whole_verdict_vocabulary_survives_the_round_trip() {
+    if !toolchain_ready("the verdicts example") {
+        return;
+    }
+
+    let component = build(&root().join("guest/examples/verdicts"), "verdicts");
+    let sha256 = hex(&Sha256::digest(
+        std::fs::read(&component).expect("the component is readable"),
+    ));
+
+    let mut helper = Helper::spawn();
+    let inspected = helper.admit("silent", &component, r#"{"say": "silent"}"#);
+    in_this_world_with_only_log(&inspected, "the verdicts example");
+
+    let mut say = |name: &str, verdict: &str| {
+        helper.ok(
+            "instantiate",
+            json!({
+                "instance": name,
+                "sha256": sha256,
+                "config": format!(r#"{{"say": "{verdict}"}}"#),
+                "limits": {
+                    "fuel": FUEL, "memory_bytes": MEMORY_BYTES, "deadline_ms": DEADLINE_MS,
+                },
+            }),
+        );
+        helper.send(
+            name,
+            &json!({ "hook_event_name": "PreToolUse" }).to_string(),
+        )
+    };
+
+    assert_eq!(say("s", "silent"), "", "silence is the empty reply");
+
+    let allow: Value = serde_json::from_str(&say("a", "allow")).expect("JSON");
+    assert_eq!(allow["hookSpecificOutput"]["permissionDecision"], "allow");
+
+    let deny: Value = serde_json::from_str(&say("d", "deny")).expect("JSON");
+    assert_eq!(deny["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert!(deny["hookSpecificOutput"]["permissionDecisionReason"].is_string());
+
+    let ask: Value = serde_json::from_str(&say("k", "ask")).expect("JSON");
+    assert_eq!(ask["hookSpecificOutput"]["permissionDecision"], "ask");
+
+    let context: Value = serde_json::from_str(&say("c", "context")).expect("JSON");
+    let lines = context["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("a context string");
+    assert_eq!(
+        lines.lines().count(),
+        3,
+        "three lines in one string: {lines}"
+    );
+
+    let rewrite: Value = serde_json::from_str(&say("u", "updated_input")).expect("JSON");
+    assert_eq!(
+        rewrite["hookSpecificOutput"]["updatedInput"]["path"],
+        "somewhere/else.txt"
+    );
+
+    // A `say` this fixture does not know is refused at `instantiate`, so a typo in a test's
+    // config can never quietly become silence — which would make every assertion above it
+    // vacuous.
+    let (refusal, message) = helper.refusal(
+        "instantiate",
+        json!({
+            "instance": "nonsense",
+            "sha256": sha256,
+            "config": r#"{"say": "maybe"}"#,
+            "limits": { "fuel": FUEL, "memory_bytes": MEMORY_BYTES, "deadline_ms": DEADLINE_MS },
+        }),
+    );
+    assert_eq!(refusal, "guest_error");
+    assert!(message.contains("maybe"), "the refusal names it: {message}");
+}
+
 /// A hook whose config it cannot use refuses at `instantiate`, which is where the node can still
 /// do something about it — and it refuses rather than trapping.
 #[test]
@@ -653,10 +812,6 @@ fn the_scaffold_template_builds_into_a_component_in_this_world() {
     let reply = helper.send_json("scaffolded", json!({ "hello": "world" }));
     assert_eq!(reply["echo"], json!({ "hello": "world" }));
     assert_eq!(reply["messages"], 1);
-
-    // The build directory is the largest thing this suite creates; a temp directory that
-    // survives every run of it is a disk somebody else pays for.
-    let _ = std::fs::remove_dir_all(&project);
 }
 
 /// Every placeholder the template actually uses is one `PLACEHOLDERS.md` documents.

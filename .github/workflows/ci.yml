@@ -94,8 +94,8 @@ jobs:
       # has one: `actions/cache` writes an entry once, so a shared key means whichever job
       # finished first saved its `tui/target` and the other restored that. This job builds
       # one package; that one builds all of them with two feature sets, and neither is a
-      # useful starting point for the other. The guest's target directory is in the paths
-      # because it is a separate cargo workspace with a lockfile of its own.
+      # useful starting point for the other. The guest and example target directories are in
+      # the paths because each is a separate cargo workspace with a lockfile of its own.
       - uses: actions/cache@v6
         with:
           path: |
@@ -103,16 +103,27 @@ jobs:
             ~/.cargo/git
             tui/target
             test/support/wasm/echo-guest/target
-          key: ${{ runner.os }}-cargo-wasm-${{ env.RUST_VERSION }}-${{ hashFiles('tui/Cargo.lock', 'test/support/wasm/echo-guest/Cargo.lock') }}
+            tui/wasm/guest/examples/counter/target
+            tui/wasm/guest/examples/deny-writes/target
+            tui/wasm/guest/examples/lintcheck/target
+            tui/wasm/guest/examples/verdicts/target
+          key: ${{ runner.os }}-cargo-wasm-${{ env.RUST_VERSION }}-${{ hashFiles('tui/Cargo.lock', 'test/support/wasm/echo-guest/Cargo.lock', 'tui/wasm/guest/examples/*/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-wasm-${{ env.RUST_VERSION }}-
 
       - run: make wasm
       - run: make wasm-guest
 
-      # `OUROBOROS_REQUIRE_WASM` is the switch that makes the two steps above load-bearing.
-      # Without it a runner that failed to build either half would skip the acceptance suites
+      # `test/wasm/sdk_acceptance_test.exs` runs the SDK's built components through
+      # `provider/native/hooks.ex` — it is where `Verdict`'s claims about the untrusted
+      # narrowing and `Check`'s claim about the empty reply are actually observed. Without
+      # this step it would skip, and the SDK's docstrings would be back to asserting
+      # themselves.
+      - run: make wasm-examples
+
+      # `OUROBOROS_REQUIRE_WASM` is the switch that makes the three steps above load-bearing.
+      # Without it a runner that failed to build any of them would skip the acceptance suites
       # and pass, which is exactly the silence this job is being fixed for; with it, a missing
-      # helper or guest fails the suites that needed it and names the `make` target.
+      # helper, guest or example fails the suites that needed it and names the `make` target.
       - run: mix test
         env:
           OUROBOROS_REQUIRE_WASM: "1"
@@ -184,8 +195,9 @@ jobs:
   rust:
     name: Rust
     runs-on: ubuntu-24.04
-    # 40, not 30: W10 added a `tui/tests/wasm_cli.rs` that drives the real helper, so this job
-    # now builds `ouro-wasm` in release and the acceptance guest before `cargo test`. Both are
+    # 45, not 30: W10 added `tui/tests/wasm_cli.rs`, which drives the real helper, so this job
+    # builds `ouro-wasm` in release and the acceptance guest before `cargo test`; W9 added four
+    # guest projects and the scaffold for `tests/sdk.rs`, and the SDK's own gates. All of it is
     # cached; the ceiling is for the run that misses.
     timeout-minutes: 45
     defaults:
@@ -202,19 +214,26 @@ jobs:
       # into a failure.
       - run: rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal --component rustfmt,clippy && rustup default ${{ env.RUST_VERSION }} && rustup target add wasm32-wasip2
 
-      # The guest projects are separate cargo workspaces with build directories of their own,
-      # so `tui/target` alone would leave every run of `tests/sdk.rs` compiling serde_json and
-      # wit-bindgen from scratch three times.
+      # The guest projects are separate cargo workspaces with build directories of their own, so
+      # `tui/target` alone would leave every run compiling serde_json, dlmalloc and wit-bindgen
+      # from scratch — once per example, once more for the scaffold, and four times over for
+      # `make wasm-sdk-check`, which builds the SDK for two targets in two profiles (measured
+      # at 104 s of CPU and 684 MB cold). All six directories are listed, including the SDK's
+      # own, and `tests/sdk.rs` scaffolds the template *into* `tui/wasm/guest/target` for the
+      # same reason: a temp directory named after a nanosecond cannot be cached.
       - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             tui/target
+            tui/wasm/guest/target
             tui/wasm/guest/examples/counter/target
             tui/wasm/guest/examples/deny-writes/target
+            tui/wasm/guest/examples/lintcheck/target
+            tui/wasm/guest/examples/verdicts/target
             test/support/wasm/echo-guest/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('tui/Cargo.lock', 'tui/wasm/guest/Cargo.lock', 'test/support/wasm/echo-guest/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('tui/Cargo.lock', 'tui/wasm/guest/Cargo.lock', 'tui/wasm/guest/examples/*/Cargo.lock', 'test/support/wasm/echo-guest/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
       - run: cargo fmt --check

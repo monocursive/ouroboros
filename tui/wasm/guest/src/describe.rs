@@ -38,8 +38,14 @@ pub struct Example {
 /// Everything in here is text a component authored about itself. Nothing above verifies a word
 /// of it: the `world` field is filled in by this crate and the *component's own type* is what
 /// `inspect` reports and what the signer records, so a `describe` claiming a world it is not in
-/// changes nothing except what a reader is told. Where any of this reaches a model it is
-/// labelled as component-authored and the whole document is bounded at 4 KiB. Write it for a
+/// changes nothing except what a reader is told.
+///
+/// The bounds this crate applies — [`MAX_SUMMARY_CHARS`], [`MAX_EXAMPLES`] — are a courtesy to
+/// an author, not a defence: they hold only for a document this builder produced, and a guest
+/// may return anything at all from `describe`. **Nothing truncates it here and nothing
+/// truncates it in the helper** — a 21 KB document passes both. Contract C1's 4 KiB whole-document
+/// bound and the "component-authored" label belong to whatever puts this in front of a model
+/// (W13), and that consumer must apply them to a string it did not build. Write this for a
 /// reader; do not write it as if it were a permission.
 #[derive(Clone, Debug)]
 pub struct Describe {

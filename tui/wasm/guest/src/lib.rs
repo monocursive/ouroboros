@@ -54,7 +54,7 @@
 //! `wasm32-wasip2` is not silent about being there: the same source built against it — even
 //! with `panic = "abort"`, LTO and `opt-level = "s"` — imports thirteen interfaces beside
 //! `log`, `wasi:io/{poll,error,streams}` and `wasi:cli/{environment,exit,stdin,stdout,stderr}`
-//! plus the four `terminal-*` handles. They arrive with `std`'s stdio, environment and
+//! plus the five `terminal-*` handles. They arrive with `std`'s stdio, environment and
 //! process-exit machinery, they survive `--gc-sections` because the default panic path reaches
 //! them, and the helper's linker defines none of them — so such a build refuses to instantiate
 //! and `inspect` reports `world: "unknown"`. Dropping `std` drops all thirteen. What replaces

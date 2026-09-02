@@ -46,6 +46,16 @@
 //! `guest_error` and which leaves the instance live. A trap is a different fact about a
 //! component, and this one must not manufacture it.
 //!
+//! # The one behaviour W9 changed
+//!
+//! Before the SDK, this file logged `handle-message` and *then* checked whether `init` had
+//! run, so a message that arrived before `init` still produced a log line. The SDK refuses
+//! first: `handle` below is not called at all until there is an instance, so that line is now
+//! only emitted for a message this guest actually answers. Nothing observes the difference —
+//! the pre-`init` path is unreachable through the helper's protocol, since `call` on an
+//! instance that was never stood up is `unknown_instance` — but it is a difference, and this
+//! guest's whole job is to be the thing nobody has to guess about.
+//!
 //! # Authority
 //!
 //! One import: `log`. The world declares no clock, no randomness, no filesystem and no
