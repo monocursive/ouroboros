@@ -32,6 +32,27 @@ defmodule Ouroboros.Wasm.Store do
   security story downstream — the signed manifest, the helper's own `sha_mismatch` refusal —
   rests on the name of a component meaning its content.
 
+  ## Manifests live here too, and that is what makes reboot survival real
+
+  Bytes alone do not restart a capability. `put_manifest/2` writes the signed
+  `Ouroboros.Wasm.Artifact` beside them as `manifest-<hex>.manifest`, where the hex is the
+  sha256 of the **artifact id** — a name that is path-safe by construction, injective, and
+  resolvable from the one field a rollout registry entry already carries. The registry
+  keeps the component sha and nothing else (docs/WASM.md D6, §3.4): bytes and manifest
+  survive in the store, and the register stays a register.
+
+  The manifest is written with the same publish-once discipline as the bytes, and two
+  different manifests under one artifact id is `{:manifest_conflict, id}` rather than a
+  silent overwrite. It is read back with `[:safe]`, so a manifest file cannot intern an
+  atom into a rebooting VM; an atom this VM has never heard of makes the read a named
+  refusal instead. See `decode_manifest/2` for why this boundary is *not*
+  `Ouroboros.Upgrade.Wire`, which the registry and the signing journal both use.
+
+  Manifests are **not** pruned. They are on the order of a kilobyte, one per rollout that
+  ever reached a checkpoint, and they are evidence for exactly the reason §7.4 keeps
+  quarantined bytes: the record of what a node was told to run outlives the decision to
+  stop running it.
+
   ## Pruning fails closed
 
   The store is bounded by a byte budget (`:store_budget_bytes`, see `Ouroboros.Wasm`) and
@@ -50,10 +71,18 @@ defmodule Ouroboros.Wasm.Store do
 
   alias Ouroboros.Upgrade.Rollout
   alias Ouroboros.Wasm
+  alias Ouroboros.Wasm.Artifact
 
   @prefix "sha256-"
   @suffix ".wasm"
+  @manifest_prefix "manifest-"
+  @manifest_suffix ".manifest"
   @temp_infix ".tmp-"
+
+  # A manifest is roughly a kilobyte: an id, an epoch, a digest, and a bounded eval spec
+  # (`Rollout.Evaluation` caps a spec at 16 KiB). This ceiling is generous by three orders
+  # of magnitude and exists so a file in this directory cannot be read into memory unbounded.
+  @max_manifest_bytes 1024 * 1024
 
   # How old a `.tmp-*` file must be before `prune/1` sweeps it. Comfortably longer than any
   # single `put` takes, so a concurrent writer's own in-flight temp — created moments ago —
@@ -110,8 +139,54 @@ defmodule Ouroboros.Wasm.Store do
          {:ok, dir} <- root(opts),
          :ok <- ensure_directory(dir),
          path = component_path(dir, actual),
-         {:ok, published} <- publish_once(path, bytes, actual) do
+         {:ok, published} <- publish_once(path, bytes, actual, :component, actual) do
       {:ok, %{sha256: actual, path: path, size: byte_size(bytes), published: published}}
+    end
+  end
+
+  @doc """
+  Publishes the signed manifest for a rollout, beside the bytes it describes.
+
+  Keyed by the artifact id, so one rollout has one manifest and a redeploy of the same
+  component under a new manifest does not have to displace an older one. Publishing is
+  once: an identical manifest already on disk is `published: false`, and a *different*
+  manifest under the same artifact id is `{:manifest_conflict, id}` — the register refuses
+  a duplicate artifact id for the same reason, and the store does not get to disagree.
+  """
+  @spec put_manifest(Artifact.t(), keyword()) ::
+          {:ok, %{artifact_id: String.t(), path: String.t(), published: boolean()}}
+          | {:error, term()}
+  def put_manifest(artifact, opts \\ [])
+
+  def put_manifest(%Artifact{id: id} = artifact, opts) when is_binary(id) and id != "" do
+    with {:ok, payload} <- encode_manifest(artifact),
+         {:ok, dir} <- root(opts),
+         :ok <- ensure_directory(dir),
+         path = manifest_path(dir, id),
+         {:ok, published} <- publish_once(path, payload, digest(payload), :manifest, id) do
+      {:ok, %{artifact_id: id, path: path, published: published}}
+    end
+  end
+
+  def put_manifest(artifact, _opts), do: {:error, {:invalid_manifest, describe(artifact)}}
+
+  @doc """
+  The signed manifest recorded under `artifact_id`, or a named reason it is unusable.
+
+  Decoding is `[:safe]`, so a manifest naming an atom this VM has never interned comes
+  back as a manifest whose signature no longer verifies rather than as an atom this VM
+  now holds. Both outcomes are refusals downstream; only one of them writes to the atom
+  table.
+  """
+  @spec fetch_manifest(String.t(), keyword()) :: {:ok, Artifact.t()} | {:error, term()}
+  def fetch_manifest(artifact_id, opts \\ []) when is_binary(artifact_id) do
+    with {:ok, dir} <- root(opts) do
+      path = manifest_path(dir, artifact_id)
+
+      with :ok <- ensure_manifest_size(path, artifact_id),
+           {:ok, payload} <- read_manifest(path, artifact_id) do
+        decode_manifest(payload, artifact_id)
+      end
     end
   end
 
@@ -217,13 +292,12 @@ defmodule Ouroboros.Wasm.Store do
   end
 
   @doc """
-  The shas no prune may evict, read from whatever the rollout registry records today.
+  The shas no prune may evict, read from what the rollout registry records.
 
-  Today that is nothing: `Ouroboros.Upgrade.Rollout.Registry.Entry` has no component sha,
-  because checkpoint v3 is what widens it with `component_sha256` (docs/WASM.md §7.6, slice
-  W3). So this reads the field tolerantly — an entry that does not name a component protects
-  nothing — and W3 has only to widen the extraction below, not to change how pruning reads
-  the registry.
+  Checkpoint v3 carries `component_sha256` on every entry (docs/WASM.md §7.6), so a
+  `:live`, `:deploying`, or `:quarantined` lane-W rollout protects the bytes it names. The
+  field is still read tolerantly: a lane-B entry carries `nil` and protects nothing, which
+  is correct — it deployed modules, not components.
   """
   @spec protected_shas(keyword()) :: {:ok, MapSet.t(String.t())} | {:error, :registry_unavailable}
   def protected_shas(opts \\ []) do
@@ -277,10 +351,14 @@ defmodule Ouroboros.Wasm.Store do
     end
   end
 
-  # The shape `publish_once/3`'s temporary carries: the component basename, then `.tmp-`,
-  # then random bytes. Real components end in `.wasm`, so they never match.
+  # The shape a temporary carries: the published basename, then `.tmp-`, then random bytes.
+  # Real components end in `.wasm` and real manifests in `.manifest`, so neither matches.
+  # Manifest temps are swept for the same reason component temps are: a crash mid-publish
+  # leaves one, `list/1` does not see it, and nothing else would ever remove it.
   defp temp_name?(name) do
-    String.starts_with?(name, @prefix) and String.contains?(name, @suffix <> @temp_infix)
+    (String.starts_with?(name, @prefix) and String.contains?(name, @suffix <> @temp_infix)) or
+      (String.starts_with?(name, @manifest_prefix) and
+         String.contains?(name, @manifest_suffix <> @temp_infix))
   end
 
   defp sweep_one(path, name, cutoff) do
@@ -320,6 +398,74 @@ defmodule Ouroboros.Wasm.Store do
   defp normalize(other), do: {:error, {:invalid_sha256, other}}
 
   defp component_path(dir, sha), do: Path.join(dir, @prefix <> sha <> @suffix)
+
+  # Derived, never interpolated: an artifact id is a caller-supplied string, and the one
+  # safe thing to build a filename out of is its digest. It is injective, it is 64 hex
+  # characters whatever the id was, and it cannot walk out of this directory.
+  defp manifest_path(dir, artifact_id),
+    do: Path.join(dir, @manifest_prefix <> digest(artifact_id) <> @manifest_suffix)
+
+  # The rest of this store validates a digest before it reads bytes; a manifest has no name
+  # to check itself against, so what bounds it is its size. A real one is on the order of a
+  # kilobyte, and nothing that reaches a megabyte is a manifest this build wrote.
+  defp ensure_manifest_size(path, artifact_id) do
+    case File.stat(path) do
+      {:ok, %{type: :regular, size: size}} when size <= @max_manifest_bytes ->
+        :ok
+
+      {:ok, %{type: :regular, size: size}} ->
+        {:error, {:manifest_too_large, artifact_id, size}}
+
+      {:ok, %{type: type}} ->
+        {:error, {:invalid_manifest_file, artifact_id, type}}
+
+      {:error, :enoent} ->
+        {:error, {:unknown_manifest, artifact_id}}
+
+      {:error, reason} ->
+        {:error, {:manifest_unreadable, artifact_id, reason}}
+    end
+  end
+
+  defp read_manifest(path, artifact_id) do
+    case File.read(path) do
+      {:ok, payload} -> {:ok, payload}
+      {:error, :enoent} -> {:error, {:unknown_manifest, artifact_id}}
+      {:error, reason} -> {:error, {:manifest_unreadable, artifact_id, reason}}
+    end
+  end
+
+  defp encode_manifest(%Artifact{} = artifact) do
+    {:ok, :erlang.term_to_binary(artifact, [:deterministic])}
+  rescue
+    error -> {:error, {:invalid_manifest, Exception.message(error)}}
+  end
+
+  # `[:safe]`, like every other file boundary in this codebase: a manifest must not be able
+  # to intern an atom into the VM that reads it.
+  #
+  # Deliberately *not* through `Ouroboros.Upgrade.Wire`, which the rollout registry and the
+  # signing journal both use. Wire encodes an atom map key as a string and resolves any
+  # string key back to an existing atom, which is exact for a checkpoint whose keys are all
+  # atoms and lossy for a manifest whose keys are not: a signed eval spec's `input` is a
+  # JSON body with **string** keys, and turning `%{"n" => 1}` into `%{n: 1}` would silently
+  # change the thing the signature covers. Wire exists because a lane-B checkpoint names
+  # forged module atoms a rebooted VM has never interned; a lane-W manifest names no
+  # forged atom at all (docs/WASM.md D2), so the plain round-trip is both exact and safe.
+  #
+  # An atom this VM has genuinely never interned makes `[:safe]` raise, and that is a
+  # refusal here rather than a repair: the caller gets `{:unreadable_manifest, id}`.
+  defp decode_manifest(payload, artifact_id) do
+    case :erlang.binary_to_term(payload, [:safe]) do
+      %Artifact{id: ^artifact_id} = artifact -> {:ok, artifact}
+      %Artifact{id: other} -> {:error, {:manifest_identity_mismatch, artifact_id, other}}
+      _other -> {:error, {:invalid_manifest, artifact_id}}
+    end
+  rescue
+    _error -> {:error, {:unreadable_manifest, artifact_id}}
+  catch
+    _kind, _reason -> {:error, {:unreadable_manifest, artifact_id}}
+  end
 
   defp entry(dir, name) do
     with @prefix <> rest <- name,
@@ -361,18 +507,25 @@ defmodule Ouroboros.Wasm.Store do
     end
   end
 
-  defp publish_once(path, bytes, sha) do
+  # `digest` is what the published file must hash to; `kind` selects the vocabulary the
+  # refusals are named in, and `label` is what those refusals name — the sha for a
+  # component, the artifact id for a manifest. The discipline is one and the same, which is
+  # the point of writing it once.
+  defp publish_once(path, bytes, expected, kind, label) do
     temporary = temporary_path(path)
 
     with {:ok, device} <- open_exclusive(temporary),
          :ok <- write_sync_close(device, bytes) do
-      publish_link(temporary, path, sha)
+      publish_link(temporary, path, expected, kind, label)
     else
       {:error, reason} ->
         _ = File.rm(temporary)
-        {:error, {:component_write_failed, sha, reason}}
+        {:error, {write_failed(kind), label, reason}}
     end
   end
+
+  defp write_failed(:component), do: :component_write_failed
+  defp write_failed(:manifest), do: :manifest_write_failed
 
   defp open_exclusive(path) do
     :file.open(String.to_charlist(path), [:write, :binary, :raw, :exclusive])
@@ -396,31 +549,51 @@ defmodule Ouroboros.Wasm.Store do
   # A link, not a rename: rename overwrites, and publish-once means the first writer of a
   # sha is the only one. `:eexist` is the expected outcome of a second put, so the existing
   # file is verified rather than replaced.
-  defp publish_link(temporary, path, sha) do
+  defp publish_link(temporary, path, expected, kind, label) do
     result =
       case File.ln(temporary, path) do
-        :ok -> with :ok <- sync_directory(Path.dirname(path)), do: {:ok, true}
-        {:error, :eexist} -> with :ok <- verify_existing(path, sha), do: {:ok, false}
-        {:error, reason} -> {:error, {:component_publish_failed, sha, reason}}
+        :ok ->
+          with :ok <- sync_directory(Path.dirname(path)), do: {:ok, true}
+
+        {:error, :eexist} ->
+          with :ok <- verify_existing(path, expected, kind, label), do: {:ok, false}
+
+        {:error, reason} ->
+          {:error, {publish_failed(kind), label, reason}}
       end
 
     _ = File.rm(temporary)
     result
   end
 
-  defp verify_existing(path, sha) do
+  defp publish_failed(:component), do: :component_publish_failed
+  defp publish_failed(:manifest), do: :manifest_publish_failed
+
+  defp verify_existing(path, expected, kind, label) do
     # `lstat` first, so a symlink at the published name is rejected rather than followed and
     # read (F10); `PackageStager.verify_existing` takes the same posture.
     with {:ok, %{type: :regular}} <- File.lstat(path),
          {:ok, bytes} <- File.read(path),
-         true <- digest(bytes) == sha do
+         true <- digest(bytes) == expected do
       :ok
     else
-      {:ok, %{type: type}} -> {:error, {:invalid_component_file, sha, type}}
-      false -> {:error, {:corrupt_component, sha}}
-      {:error, reason} -> {:error, {:component_unreadable, sha, reason}}
+      {:ok, %{type: type}} -> {:error, {invalid_file(kind), label, type}}
+      false -> {:error, {mismatch(kind), label}}
+      {:error, reason} -> {:error, {unreadable(kind), label, reason}}
     end
   end
+
+  defp invalid_file(:component), do: :invalid_component_file
+  defp invalid_file(:manifest), do: :invalid_manifest_file
+
+  # A component whose published bytes do not hash to its own name is corrupt; a manifest
+  # under an id that already names a *different* manifest is a conflict, not corruption —
+  # publish-once refuses to choose between two honest records of two different rollouts.
+  defp mismatch(:component), do: :corrupt_component
+  defp mismatch(:manifest), do: :manifest_conflict
+
+  defp unreadable(:component), do: :component_unreadable
+  defp unreadable(:manifest), do: :manifest_unreadable
 
   defp sync_directory(directory) do
     case :file.open(String.to_charlist(directory), [:read, :raw, :directory]) do
@@ -444,4 +617,6 @@ defmodule Ouroboros.Wasm.Store do
   end
 
   defp digest(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
+
+  defp describe(term), do: inspect(term, limit: 10, printable_limit: 200)
 end

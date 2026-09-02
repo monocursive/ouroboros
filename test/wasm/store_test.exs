@@ -3,6 +3,8 @@ defmodule Ouroboros.Wasm.StoreTest do
   # its own. Nothing here touches application environment or a globally named process.
   use ExUnit.Case, async: true
 
+  alias Ouroboros.Upgrade.Rollout.Registry
+  alias Ouroboros.Wasm.Artifact
   alias Ouroboros.Wasm.Store
 
   # `Store.protected_shas/1` reads whatever `Ouroboros.Upgrade.Rollout.Registry` exposes,
@@ -175,8 +177,8 @@ defmodule Ouroboros.Wasm.StoreTest do
     } do
       {old, _middle, _new} = three_components(opts)
 
-      # The shape `Rollout.Registry.Entry` actually has today: a module name and a *source*
-      # sha, neither of which is a component sha.
+      # A lane-B rollout: a module name and a *source* sha, neither of which is a component
+      # sha. It deployed modules, so it protects no component bytes — which is correct.
       registry =
         start_supervised!(
           {FakeRegistry, [%{state: :live, module: "wasm/echo", source_sha256: old}]}
@@ -206,6 +208,142 @@ defmodule Ouroboros.Wasm.StoreTest do
                Store.prune([budget_bytes: 0, registry: absent] ++ opts)
 
       assert Enum.map(elem(Store.list(opts), 1), & &1.sha256) == [old, middle, new]
+    end
+  end
+
+  # Everything above hands `protected_shas/1` a stand-in. This hands it the real thing:
+  # `Ouroboros.Upgrade.Rollout.Registry` at checkpoint v3, whose entries carry
+  # `component_sha256` (docs/WASM.md §7.6). W1 wrote the extraction against a field that
+  # did not exist yet; this is it switched on.
+  describe "the real rollout registry at checkpoint v3" do
+    test "a live, deploying, or quarantined entry protects its component bytes", %{opts: opts} do
+      {live, deploying, quarantined} = three_components(opts)
+      retired = publish(opts, "retired component bytes")
+      registry = start_registry!()
+
+      record!(registry, "wasm/live", live, :live, registry)
+      record!(registry, "wasm/deploying", deploying, :deploying, registry)
+      record!(registry, "wasm/quarantined", quarantined, :quarantined, registry)
+      record!(registry, "wasm/retired", retired, :rolled_back, registry)
+
+      assert {:ok, protected} = Store.protected_shas(registry: registry)
+
+      assert MapSet.member?(protected, live)
+      assert MapSet.member?(protected, deploying)
+      assert MapSet.member?(protected, quarantined)
+      refute MapSet.member?(protected, retired)
+
+      # And a prune with no budget at all evicts only the one nothing references.
+      assert {:ok, report} = Store.prune([budget_bytes: 0, registry: registry] ++ opts)
+      assert report.evicted == [retired]
+
+      assert Enum.sort(Enum.map(elem(Store.list(opts), 1), & &1.sha256)) ==
+               Enum.sort([live, deploying, quarantined])
+    end
+
+    test "a lane-B entry names no component and protects nothing", %{opts: opts} do
+      sha = publish(opts, "lane B deployed modules, not this")
+      registry = start_registry!()
+
+      {:ok, entry} =
+        Registry.deploying(
+          %{
+            artifact_id: "beam-#{System.unique_integer([:positive])}",
+            module: Ouroboros.Capability.NotAComponent,
+            epoch: System.unique_integer([:positive, :monotonic]),
+            nodes: [node()],
+            source_sha256: sha
+          },
+          registry
+        )
+
+      {:ok, _live} = Registry.mark(entry.artifact_id, :live, [], registry)
+
+      assert {:ok, protected} = Store.protected_shas(registry: registry)
+      assert MapSet.size(protected) == 0
+
+      assert {:ok, %{evicted: [^sha]}} =
+               Store.prune([budget_bytes: 0, registry: registry] ++ opts)
+    end
+  end
+
+  describe "manifests beside the bytes" do
+    test "publishes a manifest and reads it back as the artifact that was signed", %{opts: opts} do
+      artifact = manifest_artifact!()
+
+      assert {:ok, %{artifact_id: id, path: path, published: true}} =
+               Store.put_manifest(artifact, opts)
+
+      assert id == artifact.id
+      assert Path.basename(path) =~ ~r/\Amanifest-[0-9a-f]{64}\.manifest\z/
+      assert {:ok, read} = Store.fetch_manifest(artifact.id, opts)
+      assert read == artifact
+
+      # Exactly, down to the key types. A signed eval spec's `input` is a JSON body with
+      # **string** keys, and a boundary that resolved `"n"` to `:n` would change the thing
+      # the signature covers — which is why this is not written through
+      # `Ouroboros.Upgrade.Wire`.
+      assert [%{input: %{"n" => 1}}] = read.metadata.eval.probes
+
+      assert Artifact.signing_payload(read, "store-test-key") ==
+               Artifact.signing_payload(artifact, "store-test-key")
+
+      # Publishing is once, and an identical manifest is not a conflict.
+      assert {:ok, %{published: false}} = Store.put_manifest(artifact, opts)
+    end
+
+    test "a different manifest under one artifact id is a conflict, never an overwrite", %{
+      opts: opts
+    } do
+      artifact = manifest_artifact!()
+      moved = %{artifact | epoch: artifact.epoch + 1}
+
+      assert {:ok, %{published: true}} = Store.put_manifest(artifact, opts)
+      assert {:error, {:manifest_conflict, id}} = Store.put_manifest(moved, opts)
+      assert id == artifact.id
+
+      # The record on disk is still the first one.
+      assert {:ok, ^artifact} = Store.fetch_manifest(artifact.id, opts)
+    end
+
+    test "an absent or unreadable manifest is named rather than guessed at", %{
+      root: root,
+      opts: opts
+    } do
+      assert {:error, {:unknown_manifest, "nobody"}} = Store.fetch_manifest("nobody", opts)
+
+      artifact = manifest_artifact!()
+      {:ok, %{path: path}} = Store.put_manifest(artifact, opts)
+      File.write!(path, "not a term at all")
+
+      assert {:error, {:unreadable_manifest, id}} = Store.fetch_manifest(artifact.id, opts)
+      assert id == artifact.id
+
+      # A manifest is about a kilobyte. Anything this large is not one, and is refused on
+      # its size rather than read into memory to find out.
+      File.write!(path, :binary.copy("x", 2 * 1024 * 1024))
+
+      assert {:error, {:manifest_too_large, ^id, size}} = Store.fetch_manifest(artifact.id, opts)
+      assert size == 2 * 1024 * 1024
+
+      # And a manifest is not a component: it is never listed and never counted.
+      assert {:ok, entries} = Store.list(opts)
+      assert entries == []
+      assert File.exists?(Path.join(root, Path.basename(path)))
+    end
+
+    test "a stale manifest temporary is swept like any other", %{root: root, opts: opts} do
+      File.mkdir_p!(root)
+      leftover = Path.join(root, "manifest-#{String.duplicate("a", 64)}.manifest.tmp-xyz")
+      File.write!(leftover, "half a manifest")
+
+      registry = start_registry!()
+
+      assert {:ok, report} =
+               Store.prune([temp_grace_seconds: 0, registry: registry] ++ opts)
+
+      assert Path.basename(leftover) in report.swept
+      refute File.exists?(leftover)
     end
   end
 
@@ -316,6 +454,78 @@ defmodule Ouroboros.Wasm.StoreTest do
       end)
 
     {old, middle, new}
+  end
+
+  defp publish(opts, bytes) do
+    {:ok, %{sha256: sha}} = Store.put(bytes, nil, opts)
+    sha
+  end
+
+  # One lane-W rollout in the register, at `state`, naming `component_sha256`.
+  defp record!(_registry, module, component_sha256, state, server) do
+    artifact_id = "rollout-#{System.unique_integer([:positive])}"
+
+    {:ok, entry} =
+      Registry.deploying(
+        %{
+          artifact_id: artifact_id,
+          module: module,
+          epoch: System.unique_integer([:positive, :monotonic]),
+          nodes: [node()],
+          component_sha256: component_sha256
+        },
+        server
+      )
+
+    if state == :deploying do
+      entry
+    else
+      {:ok, marked} = Registry.mark(artifact_id, state, [], server)
+      marked
+    end
+  end
+
+  defp start_registry! do
+    name = String.to_atom("wasm_store_registry_#{System.unique_integer([:positive])}")
+
+    {:ok, pid} =
+      Registry.start_link(
+        name: name,
+        storage:
+          {Jido.Storage.ETS,
+           table: String.to_atom("wasm_store_rollouts_#{System.unique_integer([:positive])}")}
+      )
+
+    on_exit(fn ->
+      try do
+        GenServer.stop(pid)
+      catch
+        :exit, _reason -> :ok
+      end
+    end)
+
+    name
+  end
+
+  defp manifest_artifact! do
+    {:ok, artifact} =
+      Artifact.build(
+        "\0asm\x01\x00\x00\x00 manifest fixture #{System.unique_integer([:positive])}",
+        name: "greeter",
+        author: "test-agent",
+        imports: ["log"],
+        epoch: System.unique_integer([:positive, :monotonic]),
+        eval: %{probes: [%{input: %{"n" => 1}, expect: :any_reply}], budget_ms: 1_000},
+        start: %{id: "wasm/greeter", config: "{}"}
+      )
+
+    {:ok, signed} =
+      Artifact.with_signature(artifact, %{
+        signer: "store-test-key",
+        value: :binary.copy(<<9>>, 64)
+      })
+
+    signed
   end
 
   defp sha256(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)

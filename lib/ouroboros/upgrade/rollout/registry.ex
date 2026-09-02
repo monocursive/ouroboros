@@ -37,7 +37,21 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   "this node has not loaded that module" is a true thing to record about a rollout that
   happened before the reboot.
 
-  ## `eval_report`, and the checkpoint version that carries it
+  ## Two lanes in one register
+
+  A lane-W rollout deploys a WebAssembly component and introduces no module and no atom
+  at all (docs/WASM.md D2), so its `module` is the binary `"wasm/" <> name` and its
+  `component_sha256` is the identity that actually decides what runs. That is the only
+  binary form this register accepts: a name that is neither a module atom nor a lane-W
+  component is still `{:invalid_attribute, :module, _}`, because "binary-tolerant" was
+  always about names crossing a checkpoint, never about admitting anything at all.
+
+  Keeping both lanes here rather than forking a second register is D7. The states, the
+  transition table, the supersede rule, the pruning rule and the ambiguity discipline are
+  identical for both — only the thing being deployed differs — and a second copy of them
+  would be a second place for the rule "ambiguity is never a rollback" to drift.
+
+  ## `eval_report`, `component_sha256`, and the checkpoint versions that carry them
 
   An entry also holds whatever `Ouroboros.Upgrade.Rollout.Evaluation` proved on the way
   to this state: counts, timings, and the first few failures per node, never full probe
@@ -45,10 +59,37 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   durable store nobody can bound, so an oversized or unportable report is replaced by a
   marker saying so rather than truncated into something that reads like evidence.
 
-  That field is why the checkpoint is version 2. A version-1 checkpoint is *upgraded* on
-  read — every entry keeps what it recorded and gains `eval_report: nil`, which is the
-  truth: those rollouts were never evaluated. Anything else is still refused rather than
-  coerced, the way the node executor's journal refuses a shape it cannot interpret.
+  Those two fields are why the checkpoint is version 3. Version 1 knew neither; version 2
+  knew `eval_report`. Both are *upgraded* on read by the same widening: every entry keeps
+  every field it recorded and gains the ones it never had as `nil`, which is the truth
+  about them — those rollouts were never evaluated, and those rollouts named no component.
+  A newer checkpoint is still refused rather than coerced, the way the node executor's
+  journal refuses a shape it cannot interpret, because a field this build would silently
+  drop is not a field it may rewrite.
+
+  `component_sha256` is a lower-case 64-hex **string** end to end: in the struct, across
+  the checkpoint, and back. Nothing interns it, nothing resolves it, and
+  `Ouroboros.Wasm.Store.protected_shas/1` reads it to decide which component bytes a prune
+  may never evict (§7.4).
+
+  ## Lane W's epoch gate lives here, and it is atomic
+
+  An epoch is the replay defence: an old artifact re-presented later is refused for its
+  number, whatever its bytes say. Lane B enforces that per node, inside
+  `Ouroboros.Upgrade.NodeExecutor.handle_call({:prepare, ...})`, where the check and the
+  record it is checked against are the same serialized message. Lane W has no node
+  executor, so this register is where its monotonicity lives — and it lives *inside*
+  `deploying/2`'s `handle_call`, beside `ensure_absent/2`, for exactly the reason the node
+  executor's does. A caller reading the highest epoch and then checkpointing would be a
+  read-then-write across two messages, and two concurrent deploys at epochs 70 and 60
+  would both pass their reads and both checkpoint.
+
+  So: a `:deploying` request that carries a `component_sha256` is refused
+  `{:stale_epoch, epoch, highest}` unless its epoch is strictly greater than every lane-W
+  entry this register holds, **in any state**. Any state, because a `:deploying` entry may
+  yet become live, a `:quarantined` one may be running right now, and a `:rolled_back` one
+  is a number that was already spent. Lane B entries are not looked at and lane B requests
+  are not checked: nothing about this rule changes what a BEAM rollout may record.
   """
 
   use GenServer
@@ -56,11 +97,16 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   alias Ouroboros.Upgrade.{Beam, ModuleName, Wire}
 
   @store_key {:ouroboros, :capability_rollouts, 1}
-  @checkpoint_version 2
-  @upgradable_versions [1]
+  @checkpoint_version 3
+  @upgradable_versions [1, 2]
   @states [:deploying, :live, :superseded, :rolled_back, :quarantined]
   @default_limit 200
   @max_eval_report_bytes 32_768
+
+  # The one binary form `module` accepts. See the moduledoc: binary-tolerance is about
+  # names crossing a checkpoint, not about admitting arbitrary strings as capabilities.
+  @wasm_prefix "wasm/"
+  @sha256_hex 64
 
   @transitions %{
     deploying: [:live, :rolled_back, :quarantined],
@@ -76,19 +122,29 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
     @enforce_keys [:artifact_id, :module, :epoch, :nodes, :state, :created_at, :updated_at]
 
     defstruct @enforce_keys ++
-                [source_sha256: nil, test_report: %{}, detail: nil, eval_report: nil]
+                [
+                  source_sha256: nil,
+                  component_sha256: nil,
+                  test_report: %{},
+                  detail: nil,
+                  eval_report: nil
+                ]
 
     @type state :: :deploying | :live | :superseded | :rolled_back | :quarantined
     @type t :: %__MODULE__{
             artifact_id: String.t(),
             # A name read back from a checkpoint stays a binary when this VM has never
             # interned it, which is what a rollout of code this node no longer holds
-            # looks like from here.
+            # looks like from here. A lane-W rollout's name is a binary from the start:
+            # `"wasm/" <> name`, for a deployment that introduces no atom at all.
             module: module() | String.t(),
             epoch: pos_integer(),
             nodes: [node()],
             state: state(),
             source_sha256: String.t() | nil,
+            # Lane W's real identity: the sha256 of the component bytes, lower-case hex.
+            # `nil` for lane B, which deploys modules and not components.
+            component_sha256: String.t() | nil,
             test_report: map(),
             detail: term(),
             eval_report: map() | nil,
@@ -105,8 +161,12 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   @doc """
   Checkpoints the intent to deploy a capability, before anything is mutated.
 
-  Requires `:artifact_id`, `:module`, `:epoch`, and `:nodes`; accepts `:source_sha256`
-  and `:test_report`.
+  Requires `:artifact_id`, `:module`, `:epoch`, and `:nodes`; accepts `:source_sha256`,
+  `:component_sha256`, and `:test_report`.
+
+  A request carrying `:component_sha256` is a lane-W rollout and is also held to this
+  register's epoch watermark — `{:stale_epoch, epoch, highest}` — in the same serialized
+  call that records it. See the moduledoc for why the check is here and not at the caller.
   """
   @spec deploying(keyword() | map(), GenServer.server()) :: {:ok, Entry.t()} | {:error, term()}
   def deploying(attrs, server \\ __MODULE__) do
@@ -138,9 +198,15 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   @spec list(GenServer.server()) :: [Entry.t()]
   def list(server \\ __MODULE__), do: GenServer.call(server, :list)
 
-  @doc "Returns every rollout for one capability module, oldest first."
-  @spec history(module(), GenServer.server()) :: [Entry.t()]
-  def history(module, server \\ __MODULE__) when is_atom(module) do
+  @doc """
+  Returns every rollout for one capability, oldest first.
+
+  Takes either form of a name: a module atom, or the `"wasm/" <> name` a lane-W rollout
+  records. `same_module?/2` compares them across the checkpoint boundary, so a caller does
+  not have to know which side of a reboot it is on.
+  """
+  @spec history(module() | String.t(), GenServer.server()) :: [Entry.t()]
+  def history(module, server \\ __MODULE__) when is_atom(module) or is_binary(module) do
     server |> list() |> Enum.filter(&same_module?(&1.module, module))
   end
 
@@ -177,7 +243,8 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   @impl true
   def handle_call({:deploying, attrs}, _from, state) do
     with {:ok, entry} <- build_entry(attrs),
-         :ok <- ensure_absent(state, entry.artifact_id) do
+         :ok <- ensure_absent(state, entry.artifact_id),
+         :ok <- ensure_fresh_epoch(state, entry) do
       persist(entry, state)
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
@@ -219,7 +286,8 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
     with {:ok, artifact_id} <- fetch_binary(attrs, :artifact_id),
          {:ok, module} <- fetch_module(attrs),
          {:ok, epoch} <- fetch_epoch(attrs),
-         {:ok, nodes} <- fetch_nodes(attrs) do
+         {:ok, nodes} <- fetch_nodes(attrs),
+         {:ok, component_sha256} <- fetch_component_sha256(attrs) do
       timestamp = now()
 
       {:ok,
@@ -230,6 +298,7 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
          nodes: nodes,
          state: :deploying,
          source_sha256: Map.get(attrs, :source_sha256),
+         component_sha256: component_sha256,
          test_report: Map.get(attrs, :test_report, %{}),
          created_at: timestamp,
          updated_at: timestamp
@@ -260,6 +329,28 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
     if Map.has_key?(state.rollouts, artifact_id),
       do: {:error, {:already_recorded, artifact_id}},
       else: :ok
+  end
+
+  # Lane B is untouched: it has a node executor enforcing this per node, and a BEAM rollout
+  # carries no component sha to recognize it by.
+  defp ensure_fresh_epoch(_state, %Entry{component_sha256: nil}), do: :ok
+
+  defp ensure_fresh_epoch(state, %Entry{epoch: epoch}) do
+    highest = highest_lane_w_epoch(state)
+
+    if epoch > highest, do: :ok, else: {:error, {:stale_epoch, epoch, highest}}
+  end
+
+  # Every state counts. A `:deploying` entry may yet become live, a `:quarantined` one may
+  # be running right now, and a `:rolled_back` one is a number that was already spent — so
+  # none of them is a number a later manifest may reuse.
+  defp highest_lane_w_epoch(state) do
+    state.rollouts
+    |> Map.values()
+    |> Enum.filter(&is_binary(Map.get(&1, :component_sha256)))
+    |> Enum.map(&Map.get(&1, :epoch))
+    |> Enum.filter(&is_integer/1)
+    |> Enum.max(fn -> 0 end)
   end
 
   defp fetch(state, artifact_id) do
@@ -397,10 +488,13 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
 
   defp upgrade(@checkpoint_version, rollouts), do: accept(rollouts)
 
-  # Widening an entry is the one migration that loses nothing: every field a version-1
-  # rollout recorded is kept, and the field it never had becomes `nil`, which is exactly
-  # what "this rollout was never evaluated" means. A newer checkpoint is still refused,
-  # because a field this build would silently drop is not a field it may rewrite.
+  # Widening an entry is the one migration that loses nothing, and one widening covers
+  # every older version: every field an old rollout recorded is kept, and the fields it
+  # never had become `nil`. For a version-1 entry that is `eval_report` and
+  # `component_sha256`; for a version-2 entry it is `component_sha256` alone. Both `nil`s
+  # are the truth — those rollouts were never evaluated, and those rollouts named no
+  # component. A newer checkpoint is still refused, because a field this build would
+  # silently drop is not a field it may rewrite.
   defp upgrade(version, rollouts) when version in @upgradable_versions do
     rollouts
     |> Map.new(fn
@@ -424,7 +518,7 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
     Enum.all?(rollouts, fn
       {id, %Entry{} = entry} when is_binary(id) ->
         Map.get(entry, :artifact_id) == id and Map.get(entry, :state) in @states and
-          Map.has_key?(entry, :eval_report)
+          Map.has_key?(entry, :eval_report) and Map.has_key?(entry, :component_sha256)
 
       _other ->
         false
@@ -480,11 +574,37 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
     end
   end
 
+  # An atom names a module this VM compiled or loaded; `"wasm/<name>"` names a component,
+  # which has no module and no atom by design. Every other binary is still refused — the
+  # register is binary-*tolerant*, not binary-accepting.
   defp fetch_module(attrs) do
     case Map.fetch(attrs, :module) do
-      {:ok, module} when is_atom(module) and not is_nil(module) -> {:ok, module}
-      {:ok, other} -> {:error, {:invalid_attribute, :module, other}}
-      :error -> {:error, {:missing_attribute, :module}}
+      {:ok, module} when is_atom(module) and not is_nil(module) ->
+        {:ok, module}
+
+      {:ok, @wasm_prefix <> name = module} when name != "" ->
+        {:ok, module}
+
+      {:ok, other} ->
+        {:error, {:invalid_attribute, :module, other}}
+
+      :error ->
+        {:error, {:missing_attribute, :module}}
+    end
+  end
+
+  defp fetch_component_sha256(attrs) do
+    case Map.get(attrs, :component_sha256) do
+      nil ->
+        {:ok, nil}
+
+      sha when is_binary(sha) ->
+        if sha =~ ~r/\A[0-9a-f]{#{@sha256_hex}}\z/,
+          do: {:ok, sha},
+          else: {:error, {:invalid_attribute, :component_sha256, sha}}
+
+      other ->
+        {:error, {:invalid_attribute, :component_sha256, other}}
     end
   end
 

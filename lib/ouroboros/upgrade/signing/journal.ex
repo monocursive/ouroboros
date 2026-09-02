@@ -33,6 +33,7 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
 
   @version 1
   @decisions [:issued, :refused]
+  @lanes [:beam, :wasm]
   @default_limit 500
   @max_detail_bytes 4_096
   @max_journaled_modules 25
@@ -42,17 +43,29 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
 
   @type decision :: :issued | :refused
 
+  @typedoc """
+  Which signing lane a decision was about.
+
+  `:beam` is `Ouroboros.Upgrade.Artifact`, `:wasm` is `Ouroboros.Wasm.Artifact`, and
+  `:unknown` is anything this build did not recognize as either — which is a decision
+  worth recording rather than one worth dropping.
+  """
+  @type lane :: :beam | :wasm | :unknown
+
+  # `:lane` is optional because entries written before lanes existed do not carry it, and
+  # `valid?/1` still accepts them — see `record/3`. Everything else has always been there.
   @type entry :: %{
-          sequence: pos_integer(),
-          artifact_id: String.t(),
-          epoch: term(),
-          modules: [map()],
-          requester: node(),
-          signer_id: String.t(),
-          decision: decision(),
-          reason: term(),
-          findings: map(),
-          at: String.t()
+          required(:sequence) => pos_integer(),
+          required(:artifact_id) => String.t(),
+          required(:epoch) => term(),
+          required(:modules) => [map()],
+          required(:requester) => node(),
+          required(:signer_id) => String.t(),
+          required(:decision) => decision(),
+          required(:reason) => term(),
+          required(:findings) => map(),
+          required(:at) => String.t(),
+          optional(:lane) => lane()
         }
 
   @type t :: %__MODULE__{
@@ -76,6 +89,10 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
   a term the checkpoint could not hold: module lists are capped, reasons and findings
   that are unportable or oversized are replaced by a marker naming why, and anything
   unrecognized becomes a rendered string.
+
+  `:lane` is additive and needs no checkpoint version: `valid?/1` never required a fixed
+  key set, so a journal written before lanes existed still loads, and its entries are
+  simply entries with no lane recorded — which is the truth about them.
   """
   @spec record(t(), map(), pos_integer()) :: t()
   def record(%__MODULE__{} = journal, attrs, limit \\ @default_limit)
@@ -84,6 +101,7 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
       sequence: journal.next_sequence,
       artifact_id: text(Map.get(attrs, :artifact_id)),
       epoch: scalar(Map.get(attrs, :epoch)),
+      lane: lane(Map.get(attrs, :lane)),
       modules: modules(Map.get(attrs, :modules, [])),
       requester: requester(Map.get(attrs, :requester)),
       signer_id: text(Map.get(attrs, :signer_id)),
@@ -216,6 +234,9 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
 
   defp decision(decision) when decision in @decisions, do: decision
   defp decision(_other), do: :refused
+
+  defp lane(lane) when lane in @lanes, do: lane
+  defp lane(_other), do: :unknown
 
   defp requester(node) when is_atom(node) and not is_nil(node), do: node
   defp requester(_other), do: :unknown

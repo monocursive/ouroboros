@@ -90,6 +90,78 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
     assert Registry.list(registry) == []
   end
 
+  describe "lane W's epoch watermark" do
+    test "refuses an epoch this register has already seen, in any state" do
+      registry = start_registry!()
+
+      {:ok, first} = Registry.deploying(wasm_attrs(epoch: 70), registry)
+
+      # Equal is stale: the number was spent by the entry that has it.
+      assert {:error, {:stale_epoch, 70, 70}} =
+               Registry.deploying(wasm_attrs(epoch: 70), registry)
+
+      assert {:error, {:stale_epoch, 60, 70}} =
+               Registry.deploying(wasm_attrs(epoch: 60), registry)
+
+      assert {:ok, _second} = Registry.deploying(wasm_attrs(epoch: 71), registry)
+
+      # Every state counts, including the ones that are finished history: a `:rolled_back`
+      # entry's number was still spent, so a later manifest may not reuse it.
+      {:ok, _rolled_back} = Registry.mark(first.artifact_id, :rolled_back, [], registry)
+
+      assert {:error, {:stale_epoch, 71, 71}} =
+               Registry.deploying(wasm_attrs(epoch: 71), registry)
+    end
+
+    test "the check is inside the checkpoint, so concurrent callers cannot both record" do
+      # The read-then-write this replaced: every caller read an empty register, every one
+      # saw its epoch as fresh against `highest = 0`, and every one checkpointed. Here the
+      # check and the write are the same serialized message.
+      #
+      # The epochs are *identical* on purpose, which is what makes the assertion
+      # order-independent: whichever message the register handles first, every later one's
+      # epoch is no longer greater than what it now holds. With descending epochs the
+      # outcome would legitimately depend on arrival order and the test would prove nothing.
+      registry = start_registry!()
+
+      results =
+        1..8
+        |> Enum.map(fn _attempt ->
+          Task.async(fn -> Registry.deploying(wasm_attrs(epoch: 70), registry) end)
+        end)
+        |> Task.await_many(5_000)
+
+      assert Enum.count(results, &match?({:ok, _entry}, &1)) == 1
+      assert Enum.count(results, &match?({:error, {:stale_epoch, 70, 70}}, &1)) == 7
+      assert [%Registry.Entry{epoch: 70}] = Registry.list(registry)
+    end
+
+    test "lane B is not held to it and does not raise it" do
+      registry = start_registry!()
+
+      # A BEAM rollout carries no component sha. Its epochs are the node executor's
+      # business, and they neither refuse each other here nor move lane W's watermark.
+      {:ok, _a} = Registry.deploying(attrs(nil, epoch: 900), registry)
+      {:ok, _b} = Registry.deploying(attrs(nil, epoch: 100), registry)
+      {:ok, _c} = Registry.deploying(attrs(nil, epoch: 100), registry)
+
+      assert {:ok, entry} = Registry.deploying(wasm_attrs(epoch: 1), registry)
+      assert entry.epoch == 1
+    end
+
+    test "a malformed component sha is refused before anything is recorded" do
+      registry = start_registry!()
+
+      assert {:error, {:invalid_attribute, :component_sha256, "nope"}} =
+               Registry.deploying(wasm_attrs(component_sha256: "nope"), registry)
+
+      assert {:error, {:invalid_attribute, :component_sha256, :sha}} =
+               Registry.deploying(wasm_attrs(component_sha256: :sha), registry)
+
+      assert Registry.list(registry) == []
+    end
+  end
+
   test "a failed checkpoint is a failed rollout, not an in-memory one" do
     directory = temporary_directory!()
 
@@ -301,7 +373,7 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
     entry
   end
 
-  defp attrs(artifact_id \\ nil) do
+  defp attrs(artifact_id \\ nil, overrides \\ []) do
     %{
       artifact_id: artifact_id || "artifact-#{System.unique_integer([:positive])}",
       module: @module,
@@ -310,6 +382,20 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
       source_sha256: String.duplicate("a", 64),
       test_report: %{total: 1, failures: 0}
     }
+    |> Map.merge(Map.new(overrides))
+  end
+
+  # A lane-W rollout: a binary module name under the one accepted prefix, and a component
+  # sha, which is what makes this register apply its epoch watermark to it at all.
+  defp wasm_attrs(overrides) do
+    %{
+      artifact_id: "wasm-artifact-#{System.unique_integer([:positive])}",
+      module: "wasm/greeter",
+      epoch: 1,
+      nodes: [node()],
+      component_sha256: String.duplicate("c", 64)
+    }
+    |> Map.merge(Map.new(overrides))
   end
 
   defp start_registry!(opts \\ []) do

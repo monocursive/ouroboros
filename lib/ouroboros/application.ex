@@ -252,12 +252,35 @@ defmodule Ouroboros.Application do
     children ++
       [Ouroboros.Cluster, Ouroboros.Provider.OpenAIAuth, Ouroboros.Provider.GrokAuth] ++
       gateway_children() ++
+      [Ouroboros.CodeIntel.Supervisor, Ouroboros.Wasm.Supervisor] ++
+      wasm_restart_children() ++
       [
-        Ouroboros.CodeIntel.Supervisor,
-        Ouroboros.Wasm.Supervisor,
         Ouroboros.Provider.Native.Desktop.Supervisor,
         Ouroboros.Provider.Native.Mcp.Supervisor
       ] ++ web_children()
+  end
+
+  # The lane-W half of the same idea as `reconcile_worktrees`: a supervised one-shot task,
+  # started after the thing it needs — here the helper pool and, far upstream, the rollout
+  # registry — so boot never waits on it and a pool restart reruns it through the
+  # `rest_for_one` chain. It is idempotent by construction (a mesh id already claimed is a
+  # success), so rerunning it is free.
+  #
+  # Skipped entirely on a node with no durable data directory: no store means no manifests
+  # and nothing that could have survived a reboot, which is every library start and every
+  # test run.
+  defp wasm_restart_children do
+    if Ouroboros.Wasm.Boot.enabled?() do
+      [
+        %{
+          id: Ouroboros.Wasm.Boot,
+          start: {Task, :start_link, [&Ouroboros.Wasm.Boot.run/0]},
+          restart: :temporary
+        }
+      ]
+    else
+      []
+    end
   end
 
   # A discovery publication is not runtime ownership. When this node has a durable data

@@ -358,16 +358,39 @@ defmodule Ouroboros.Upgrade.Verifier do
   defp verify_signature(_artifact, _policy), do: {:error, :invalid_signature_envelope}
 
   defp verify_trusted_signature(artifact, signer, signature, trusted_signers) do
+    artifact
+    |> Artifact.signing_payload(signer)
+    |> verify_payload_signature(signer, signature, trusted_signers)
+  rescue
+    # The payload derivation is inside this rescue for the same reason the crypto call is:
+    # a term this build cannot serialize is a signature it cannot verify, not an exception
+    # to raise at a loading node.
+    _error -> {:error, {:invalid_signature, signer}}
+  catch
+    _kind, _reason -> {:error, {:invalid_signature, signer}}
+  end
+
+  @doc """
+  Checks a detached Ed25519 signature over `payload` against a trusted-signer map.
+
+  Public because a second artifact shape needs exactly this and nothing else. Lane W
+  (`Ouroboros.Wasm.Verifier`) derives its own payload with its own tag and then asks this
+  function, so the two lanes share one key format, one trusted-signer map, and one set of
+  refusal names — and do not share a copy of the crypto.
+
+  `trusted_signers` is the `:trusted_signers` map from the trust policy: signer id to raw
+  32-byte public key, as `OUROBOROS_UPGRADE_TRUSTED_SIGNERS` parses into at boot. An
+  unknown signer, a key of the wrong size, and a signature that does not verify are three
+  different, named refusals.
+  """
+  @spec verify_payload_signature(binary(), String.t(), binary(), map()) :: :ok | {:error, term()}
+  def verify_payload_signature(payload, signer, signature, trusted_signers)
+      when is_binary(payload) and is_binary(signer) and is_binary(signature) and
+             is_map(trusted_signers) do
     case Map.fetch(trusted_signers, signer) do
       {:ok, public_key} when is_binary(public_key) and byte_size(public_key) == 32 ->
         try do
-          if :crypto.verify(
-               :eddsa,
-               :none,
-               Artifact.signing_payload(artifact, signer),
-               signature,
-               [public_key, :ed25519]
-             ) do
+          if :crypto.verify(:eddsa, :none, payload, signature, [public_key, :ed25519]) do
             :ok
           else
             {:error, {:invalid_signature, signer}}
@@ -385,4 +408,11 @@ defmodule Ouroboros.Upgrade.Verifier do
         {:error, {:untrusted_signer, signer}}
     end
   end
+
+  def verify_payload_signature(_payload, signer, _signature, _trusted_signers)
+      when is_binary(signer),
+      do: {:error, {:invalid_signature, signer}}
+
+  def verify_payload_signature(_payload, _signer, _signature, _trusted_signers),
+    do: {:error, :invalid_signature_envelope}
 end

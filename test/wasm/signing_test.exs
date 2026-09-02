@@ -1,0 +1,489 @@
+defmodule Ouroboros.Wasm.SigningTest do
+  # Not async: the service reads application environment for its defaults, and two tests
+  # move `:signing_require_wasm_eval` and `:signing_max_artifact_bytes` to prove they are
+  # read at all.
+  use ExUnit.Case, async: false
+
+  alias Ouroboros.Upgrade.Forge.Signer
+  alias Ouroboros.Upgrade.Signing.Policy
+  alias Ouroboros.Upgrade.Signing.Service
+  alias Ouroboros.Wasm
+  alias Ouroboros.Wasm.Artifact
+  alias Ouroboros.Wasm.Verifier
+
+  @bytes "\0asm\x01\x00\x00\x00 pretend this is a component"
+  @signer_id "wasm-release-key"
+
+  # The order §7.5 states, and the order the arm checks in. Each case below moves exactly
+  # one thing and names the refusal it earns, so a reordering of the checks shows up as a
+  # different reason rather than as a still-passing test.
+  describe "the policy arm, check by check" do
+    test "admits a well-formed manifest and reports what it recomputed" do
+      assert {:ok, findings} = evaluate(artifact!(), context())
+
+      assert findings.lane == :wasm
+      assert findings.world == Wasm.world()
+      assert findings.component_sha256 == sha256(@bytes)
+      assert findings.size == byte_size(@bytes)
+      assert findings.imports == ["log"]
+
+      assert findings.recomputed == %{
+               sha256: :recomputed,
+               size: :recomputed,
+               bytes: byte_size(@bytes)
+             }
+
+      assert findings.provenance.author == "test-agent"
+      assert findings.eval == :required_and_valid
+      assert findings.start == %{id: "wasm/greeter", config_bytes: 2}
+    end
+
+    test "1. shape and size come first" do
+      assert {:refused, :invalid_artifact_id} = evaluate(%{artifact!() | id: ""}, context())
+      assert {:refused, {:invalid_epoch, _}} = evaluate(%{artifact!() | epoch: 0}, context())
+
+      assert {:refused, {:invalid_component_name, _}} =
+               evaluate(%{artifact!() | name: ""}, context())
+
+      assert {:refused, {:invalid_component_sha256, _}} =
+               evaluate(%{artifact!() | component_sha256: "nope"}, context())
+
+      assert {:refused, {:invalid_component_size, _}} =
+               evaluate(%{artifact!() | size: 0}, context())
+
+      assert {:refused, {:invalid_component_imports, _}} =
+               evaluate(%{artifact!() | imports: [:log]}, context())
+
+      assert {:refused, :invalid_artifact_metadata} =
+               evaluate(%{artifact!() | metadata: []}, context())
+
+      # The same bound the BEAM lane's submissions are held to, read from the context the
+      # service supplies.
+      assert {:refused, {:component_too_large, size, 16}} =
+               evaluate(artifact!(), context(max_artifact_bytes: 16))
+
+      assert size == byte_size(@bytes)
+
+      # Shape outranks the world: a manifest this malformed is not a policy question.
+      assert {:refused, :invalid_artifact_id} =
+               evaluate(%{artifact!() | id: "", world: "other:world@1.0.0"}, context())
+    end
+
+    test "2. the world is hard, and no context widens it" do
+      artifact = %{artifact!() | world: "other:world@1.0.0"}
+
+      assert {:refused, {:world_not_supported, "other:world@1.0.0"}} =
+               evaluate(artifact, context())
+
+      # There is no flag for this, on purpose. Even a context that turns off everything
+      # that *is* configurable still refuses.
+      assert {:refused, {:world_not_supported, _}} =
+               evaluate(artifact, context(require_wasm_eval: false))
+
+      # And it outranks the recomputation, which would also have refused.
+      assert {:refused, {:world_not_supported, _}} =
+               evaluate(artifact, context(component_bytes: nil))
+    end
+
+    test "3. absent bytes are a refusal, never a pass" do
+      assert {:refused, :missing_component_bytes} =
+               evaluate(artifact!(), context(component_bytes: nil))
+
+      assert {:refused, :missing_component_bytes} =
+               evaluate(artifact!(), Map.delete(context(), :component_bytes))
+
+      assert {:refused, :missing_component_bytes} =
+               evaluate(artifact!(), context(component_bytes: ""))
+    end
+
+    test "3. the digest and the size are recomputed from the bytes in hand" do
+      artifact = artifact!()
+
+      assert {:refused, {:component_manifest_mismatch, :size, 4, size}} =
+               evaluate(artifact, context(component_bytes: "\0asm"))
+
+      assert size == byte_size(@bytes)
+
+      # Same length, different bytes: only the digest catches this one.
+      swapped = String.replace_prefix(@bytes, "\0asm", "\0ASM")
+
+      assert {:refused, {:component_manifest_mismatch, :sha256}} =
+               evaluate(artifact, context(component_bytes: swapped))
+
+      # And a manifest that claims a sha the bytes do not have is refused for the same
+      # reason, which is the point: nothing here believes the manifest.
+      lying = %{artifact | component_sha256: String.duplicate("b", 64)}
+      assert {:refused, {:component_manifest_mismatch, :sha256}} = evaluate(lying, context())
+    end
+
+    test "4. an import outside the world is refused, without parsing anything" do
+      assert {:refused, {:import_not_in_world, "clock"}} =
+               evaluate(%{artifact!() | imports: ["log", "clock"]}, context())
+
+      # Declaring fewer than the world offers is fine here: the linker is the boundary,
+      # and this list is provenance. `Ouroboros.Wasm.Verifier.cross_check/2` is where the
+      # declared list has to equal what the helper actually found.
+      assert {:ok, findings} = evaluate(%{artifact!() | imports: []}, context())
+      assert findings.imports == []
+    end
+
+    test "5. provenance: the author is required, everything else is checked when present" do
+      assert {:refused, {:provenance_missing, :author}} =
+               evaluate(with_metadata(&Map.delete(&1, :author)), context())
+
+      assert {:refused, {:invalid_provenance, :author, _}} =
+               evaluate(with_metadata(&Map.put(&1, :author, 42)), context())
+
+      assert {:refused, {:invalid_provenance, :source_sha256, _}} =
+               evaluate(with_metadata(&Map.put(&1, :source_sha256, "nope")), context())
+
+      assert {:refused, {:invalid_provenance, :language, _}} =
+               evaluate(with_metadata(&Map.put(&1, :language, :rust)), context())
+
+      assert {:refused, {:tests_failed, 2, 5}} =
+               evaluate(
+                 with_metadata(&Map.put(&1, :test_report, %{total: 5, failures: 2})),
+                 context()
+               )
+
+      assert {:refused, {:invalid_provenance, :test_report, _}} =
+               evaluate(with_metadata(&Map.put(&1, :test_report, %{total: 5})), context())
+
+      # A guest toolchain that produces a report is welcome to say so, and a lane with no
+      # analogue of one is not asked to invent it.
+      assert {:ok, findings} =
+               evaluate(
+                 with_metadata(&Map.put(&1, :test_report, %{total: 5, failures: 0})),
+                 context()
+               )
+
+      assert findings.provenance.test_report == %{total: 5, failures: 0}
+      assert {:ok, findings} = evaluate(artifact!(), context())
+      assert findings.provenance.test_report == nil
+    end
+
+    test "5. an eval spec is required by default and validated whenever it is there" do
+      absent = with_metadata(&Map.delete(&1, :eval))
+
+      assert {:refused, :eval_spec_required} = evaluate(absent, context())
+
+      # The flag extends the BEAM lane's semantics rather than forking them: same
+      # validator, same refusal, only the default differs.
+      assert {:ok, %{eval: :absent}} = evaluate(absent, context(require_wasm_eval: false))
+
+      invalid = with_metadata(&Map.put(&1, :eval, %{probes: []}))
+
+      assert {:refused, {:invalid_eval_spec, :probes_required}} = evaluate(invalid, context())
+
+      assert {:refused, {:invalid_eval_spec, :probes_required}} =
+               evaluate(invalid, context(require_wasm_eval: false))
+
+      assert {:ok, %{eval: :present}} = evaluate(artifact!(), context(require_wasm_eval: false))
+    end
+
+    test "6. a start block is optional, and bounded when present" do
+      assert {:ok, %{start: :absent}} =
+               evaluate(with_metadata(&Map.delete(&1, :start)), context())
+
+      for start <- [
+            %{id: "greeter", config: "{}"},
+            %{id: "wasm/", config: "{}"},
+            %{id: "Elixir.Ouroboros.Capability.Sneaky", config: "{}"},
+            %{id: 42, config: "{}"}
+          ] do
+        assert {:refused, {:invalid_start_id, _}} =
+                 evaluate(with_metadata(&Map.put(&1, :start, start)), context())
+      end
+
+      assert {:refused, {:invalid_start_id, :bounds}} =
+               evaluate(
+                 with_metadata(
+                   &Map.put(&1, :start, %{id: "wasm/" <> String.duplicate("x", 300), config: "{}"})
+                 ),
+                 context()
+               )
+
+      assert {:refused, {:invalid_start, :config}} =
+               evaluate(
+                 with_metadata(&Map.put(&1, :start, %{id: "wasm/greeter", config: %{}})),
+                 context()
+               )
+
+      assert {:refused, {:invalid_start, :config_too_large}} =
+               evaluate(
+                 with_metadata(
+                   &Map.put(&1, :start, %{
+                     id: "wasm/greeter",
+                     config: String.duplicate("x", 20_000)
+                   })
+                 ),
+                 context()
+               )
+
+      assert {:refused, {:invalid_start, :unknown_keys}} =
+               evaluate(
+                 with_metadata(
+                   &Map.put(&1, :start, %{id: "wasm/greeter", config: "{}", role: "worker"})
+                 ),
+                 context()
+               )
+
+      assert {:refused, {:invalid_start, _}} =
+               evaluate(with_metadata(&Map.put(&1, :start, "wasm/greeter")), context())
+    end
+
+    test "the arm's own defaults hold when a context omits the keys" do
+      # Every case above passes a fully-populated context, which means the policy's own
+      # defaults — the ones a caller that is not the shipped service would land on — are
+      # never exercised. These are those defaults.
+      bare = %{signer_id: @signer_id, requester: node(), require_eval: false}
+
+      # `require_wasm_eval` defaults to **true** inside the policy, not only inside the
+      # service. A context that says nothing still requires a signed eval spec (D12).
+      refute Map.has_key?(bare, :require_wasm_eval)
+
+      assert {:refused, :eval_spec_required} =
+               evaluate(
+                 with_metadata(&Map.delete(&1, :eval)),
+                 Map.put(bare, :component_bytes, @bytes)
+               )
+
+      # And the size bound falls back to `:signing_max_artifact_bytes` read here rather
+      # than to no bound at all.
+      previous = Application.get_env(:ouroboros, :signing_max_artifact_bytes)
+      on_exit(fn -> restore(:signing_max_artifact_bytes, previous) end)
+      Application.put_env(:ouroboros, :signing_max_artifact_bytes, 8)
+
+      refute Map.has_key?(bare, :max_artifact_bytes)
+
+      assert {:refused, {:component_too_large, size, 8}} =
+               evaluate(artifact!(), Map.put(bare, :component_bytes, @bytes))
+
+      assert size == byte_size(@bytes)
+
+      # A configured value this build cannot use is not a licence to drop the bound.
+      Application.put_env(:ouroboros, :signing_max_artifact_bytes, :unlimited)
+      assert {:ok, _findings} = evaluate(artifact!(), Map.put(bare, :component_bytes, @bytes))
+    end
+
+    test "the BEAM arm is untouched by any of it" do
+      # A context shaped for lane W does not change what the other arm does with a term it
+      # does not recognize, and the wasm keys are simply not read.
+      assert {:refused, {:invalid_artifact, _}} = evaluate(%{not: "an artifact"}, context())
+      assert {:refused, {:invalid_policy_context, _}} = evaluate(artifact!(), :not_a_context)
+    end
+  end
+
+  describe "the signing service" do
+    test "signs a component manifest, and the loading node's verifier accepts it" do
+      service = start_service!()
+      artifact = artifact!()
+
+      assert {:ok, signature} = sign(service, artifact)
+      assert byte_size(signature) == 64
+
+      assert {:ok, %{public_key: public_key}} = Service.public_info(service)
+      {:ok, signed} = Artifact.with_signature(artifact, %{signer: @signer_id, value: signature})
+
+      assert :ok = Verifier.verify(signed, @bytes, trusted_signers: %{@signer_id => public_key})
+
+      # The signature is over the service's own derivation. Nothing about the manifest may
+      # move afterwards.
+      assert {:error, {:invalid_signature, @signer_id}} =
+               Verifier.verify(%{signed | epoch: signed.epoch + 1}, @bytes,
+                 trusted_signers: %{@signer_id => public_key}
+               )
+    end
+
+    test "the advisory payload is cross-checked against this lane's own derivation" do
+      service = start_service!()
+      artifact = artifact!()
+
+      assert {:ok, _signature} =
+               sign(service, artifact,
+                 request: %{
+                   requester: node(),
+                   component_bytes: @bytes,
+                   payload: Artifact.signing_payload(artifact, @signer_id)
+                 }
+               )
+
+      assert {:refused, {:payload_mismatch, _mine, _theirs}} =
+               sign(service, artifact,
+                 request: %{
+                   requester: node(),
+                   component_bytes: @bytes,
+                   payload: "not the payload"
+                 }
+               )
+    end
+
+    test "a request with no component bytes is refused rather than signed" do
+      service = start_service!()
+
+      assert {:refused, :missing_component_bytes} =
+               sign(service, artifact!(), request: %{requester: node()})
+    end
+
+    test "component bytes are bounded before anything looks at them" do
+      # Big enough that the bound is about the component and not about the manifest beside
+      # it, which is a few hundred bytes serialized.
+      big = String.duplicate("\0asm", 1_000)
+      service = start_service!(max_artifact_bytes: 2_000)
+
+      assert {:refused, {:component_too_large, 4_000, 2_000}} =
+               sign(service, artifact!(bytes: big),
+                 request: %{requester: node(), component_bytes: big}
+               )
+
+      # And a component this build cannot even read is a malformed request, not a policy
+      # question about its digest.
+      assert {:refused, {:invalid_signing_request, {:component_bytes, _}}} =
+               sign(service, artifact!(), request: %{requester: node(), component_bytes: :nope})
+    end
+
+    test "a lane-W request is journaled as one, with the component it would have loaded" do
+      service = start_service!()
+      artifact = artifact!()
+
+      assert {:ok, _signature} = sign(service, artifact)
+      assert {:refused, _reason} = sign(service, %{artifact | world: "other:world@1.0.0"})
+
+      assert {:ok, [issued, refused]} = Service.decisions(service)
+
+      assert issued.lane == :wasm
+      assert issued.decision == :issued
+      assert issued.artifact_id == artifact.id
+
+      assert issued.modules == [
+               %{module: "wasm/greeter", disposition: :component, sha256: sha256(@bytes)}
+             ]
+
+      assert refused.lane == :wasm
+      assert refused.decision == :refused
+      assert refused.reason == {:world_not_supported, "other:world@1.0.0"}
+    end
+
+    test "the require_wasm_eval switch is read from configuration and defaults to true" do
+      previous = Application.get_env(:ouroboros, :signing_require_wasm_eval)
+      on_exit(fn -> restore(:signing_require_wasm_eval, previous) end)
+
+      assert {:ok, %{require_wasm_eval: true}} = Service.status(start_service!())
+
+      Application.put_env(:ouroboros, :signing_require_wasm_eval, false)
+      service = start_service!()
+      assert {:ok, %{require_wasm_eval: false}} = Service.status(service)
+
+      assert {:ok, _signature} = sign(service, with_metadata(&Map.delete(&1, :eval)))
+    end
+
+    test "the deny signer still refuses, and a Local dev signer signs through sign/2" do
+      assert {:error, :signing_denied} =
+               Signer.Deny.sign(Artifact.signing_payload(artifact!(), @signer_id), @signer_id)
+
+      # `Signer.Local` implements only `sign/2` — the generic payload path. Lane W needs no
+      # new callback: the payload it hands over is bytes like any other.
+      {public, secret} = :crypto.generate_key(:eddsa, :ed25519)
+      artifact = artifact!()
+
+      assert {:ok, signature} =
+               Signer.Local.sign(
+                 Artifact.signing_payload(artifact, @signer_id),
+                 @signer_id,
+                 private_key: secret
+               )
+
+      {:ok, signed} = Artifact.with_signature(artifact, %{signer: @signer_id, value: signature})
+      assert :ok = Verifier.verify(signed, @bytes, trusted_signers: %{@signer_id => public})
+    end
+  end
+
+  ## Helpers
+
+  defp evaluate(artifact, context), do: Policy.Default.evaluate(artifact, context)
+
+  defp context(overrides \\ []) do
+    %{
+      signer_id: @signer_id,
+      requester: node(),
+      require_eval: false,
+      require_wasm_eval: true,
+      component_bytes: @bytes,
+      max_artifact_bytes: 16 * 1024 * 1024,
+      node: node()
+    }
+    |> Map.merge(Map.new(overrides))
+  end
+
+  defp artifact!(attrs \\ []) do
+    {bytes, attrs} = Keyword.pop(attrs, :bytes, @bytes)
+
+    {:ok, artifact} =
+      Artifact.build(
+        bytes,
+        Keyword.merge(
+          [
+            name: "greeter",
+            imports: ["log"],
+            author: "test-agent",
+            epoch: System.unique_integer([:positive, :monotonic]),
+            eval: %{probes: [%{input: %{"n" => 1}, expect: :any_reply}], budget_ms: 1_000},
+            start: %{id: "wasm/greeter", config: "{}"}
+          ],
+          attrs
+        )
+      )
+
+    artifact
+  end
+
+  defp with_metadata(fun) do
+    artifact = artifact!()
+    %{artifact | metadata: fun.(artifact.metadata)}
+  end
+
+  defp sign(service, artifact, opts \\ []) do
+    Service.sign_artifact(
+      artifact,
+      Keyword.get(opts, :signer_id, @signer_id),
+      Keyword.get(opts, :request, %{requester: node(), component_bytes: @bytes}),
+      service
+    )
+  end
+
+  defp start_service!(opts \\ []) do
+    opts =
+      opts
+      |> Keyword.put_new_lazy(:key_path, fn -> write_key!(:crypto.strong_rand_bytes(32)) end)
+      |> Keyword.put_new(:signer_id, @signer_id)
+      |> Keyword.put_new(
+        :storage,
+        {Jido.Storage.ETS,
+         table: String.to_atom("wasm_signing_journal_#{System.unique_integer([:positive])}")}
+      )
+      |> Keyword.put(:name, nil)
+
+    start_supervised!({Service, opts}, id: {Service, System.unique_integer([:positive])})
+  end
+
+  defp write_key!(contents) do
+    path = Path.join(tmp_dir!(), "signer-#{System.unique_integer([:positive])}.key")
+    File.write!(path, contents)
+    File.chmod!(path, 0o600)
+    path
+  end
+
+  defp tmp_dir! do
+    directory =
+      Path.join(System.tmp_dir!(), "ouroboros-wasm-signing-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(directory)
+    on_exit(fn -> File.rm_rf(directory) end)
+    directory
+  end
+
+  defp restore(key, nil), do: Application.delete_env(:ouroboros, key)
+  defp restore(key, value), do: Application.put_env(:ouroboros, key, value)
+
+  defp sha256(bytes), do: :sha256 |> :crypto.hash(bytes) |> Base.encode16(case: :lower)
+end

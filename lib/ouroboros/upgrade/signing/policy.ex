@@ -52,16 +52,32 @@ defmodule Ouroboros.Upgrade.Signing.Policy do
   ambiguity, and a signing service must never let "I refuse" and "I do not know what
   happened" look alike.
 
+  ## Two lanes, one gate
+
+  `evaluate/2` is also the gate for lane W (docs/WASM.md §7.5): an
+  `Ouroboros.Wasm.Artifact` is a manifest describing WebAssembly component bytes that
+  travel *beside* it, so the shipped policy dispatches on the struct. Nothing about the
+  BEAM arm changes. What the two arms share is the posture — recompute every claim that
+  can be recomputed, refuse outside a namespace no configuration widens — and what they
+  do not share is the payload space: the two `signing_payload/2` functions carry
+  different tags, so a signature over one can never be replayed as a signature over the
+  other.
+
   ## Configuration
 
     * `config :ouroboros, :signing_policy` — the module implementing this behaviour,
       defaulting to `Ouroboros.Upgrade.Signing.Policy.Default`.
-    * `config :ouroboros, :signing_require_eval` — when true, an artifact must carry a
-      valid `Ouroboros.Upgrade.Rollout.Evaluation` spec in `metadata.forge.eval`.
+    * `config :ouroboros, :signing_require_eval` — when true, a BEAM artifact must carry
+      a valid `Ouroboros.Upgrade.Rollout.Evaluation` spec in `metadata.forge.eval`.
       Defaults to false so the shipped behaviour is the behaviour that existed before
       this module; production deployments should set it to true, because it is the one
       switch that makes "this capability declared how it would be judged" a precondition
       of a signature rather than a hope.
+    * `config :ouroboros, :signing_require_wasm_eval` — the same switch for lane W, and
+      it defaults to **true**. That asymmetry is deliberate and is D12: the BEAM lane has
+      a build peer that ran ExUnit and a `test_report` to show for it, and lane W has no
+      analogue, so the signed eval spec *is* the test story there. The semantics extend
+      rather than fork — same validator, same refusal — and only the default differs.
   """
 
   alias Ouroboros.Upgrade.Artifact
@@ -74,6 +90,9 @@ defmodule Ouroboros.Upgrade.Signing.Policy do
           required(:signer_id) => String.t(),
           required(:requester) => node(),
           required(:require_eval) => boolean(),
+          optional(:require_wasm_eval) => boolean(),
+          optional(:component_bytes) => binary() | nil,
+          optional(:max_artifact_bytes) => pos_integer(),
           optional(atom()) => term()
         }
 
@@ -83,7 +102,7 @@ defmodule Ouroboros.Upgrade.Signing.Policy do
   `{:ok, findings}` admits it, and the findings are journaled next to the decision as the
   evidence behind it. `{:refused, reason}` is final and typed.
   """
-  @callback evaluate(artifact :: Artifact.t(), context :: context()) ::
+  @callback evaluate(artifact :: Artifact.t() | struct(), context :: context()) ::
               {:ok, findings :: map()} | {:refused, reason :: term()}
 
   @doc "Returns the configured policy module, defaulting to the shipped one."
@@ -186,16 +205,68 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
   arrived with a build report claiming green tests. It does not prove the code is good,
   that the test report describes those bytes (the forge asserts that link; the signer
   cannot re-run a build it did not perform), or that the requester is who it says it is.
+
+  ## The lane-W arm
+
+  An `Ouroboros.Wasm.Artifact` is checked by six families, in the order docs/WASM.md §7.5
+  states them:
+
+  1. **Shape and size.** Non-empty id and name, positive epoch, 64-hex lower-case
+     `component_sha256`, positive `size` within `:signing_max_artifact_bytes` — the same
+     bound the BEAM lane's submissions are held to — a string world, a list of string
+     imports, a plain map for metadata.
+  2. **World.** `world == Ouroboros.Wasm.world()`. This is the namespace rule's analogue
+     and it is just as hard: there is no configuration that widens it. A signer that can
+     be argued into signing a component for a world this build does not implement is a
+     signer that has certified a linker contract nobody here can honour.
+  3. **Recomputation.** The submitted component bytes arrive in `context.component_bytes`
+     — the same posture as the advisory payload, supplied per request — and the sha256
+     and the size are recomputed from them. Absent bytes are a refusal
+     (`:missing_component_bytes`), never a pass: a manifest nobody checked against bytes
+     is a set of claims, and this is the one process whose whole job is not to believe
+     them.
+  4. **Imports.** The declared list must be a subset of the world's, which in v1 is
+     `["log"]`. This is a *policy* check and is documented as one (D5): the security
+     boundary is the helper's linker, which defines exactly the world's imports and fails
+     instantiation on anything undeclared. Nothing here parses the component binary, and
+     nothing here needs the `ouro-wasm` helper to be present on the signer node — a
+     signer that cannot parse components is still not a hole, because the list it is
+     reading is provenance and review surface rather than the enforcement mechanism.
+  5. **Provenance.** `metadata.author` must be present. `metadata.eval` is validated by
+     `Ouroboros.Upgrade.Rollout.Evaluation.validate/1` whenever it is there, and is
+     **required by default** (D12, `:signing_require_wasm_eval`). `source_sha256`,
+     `language`, and `test_report` are optional and are checked for shape when present:
+     a guest toolchain that produces a test report is welcome to say so, and lane W does
+     not pretend one exists when it does not.
+  6. **Start block.** `metadata.start`, when present, must be exactly
+     `%{id: binary, config: binary}` with the id under the `wasm/` prefix. It is the
+     claim "this capability runs continuously under this id", which a signature should
+     cover and which a manifest must not be able to point at another lane's namespace.
   """
 
   @behaviour Ouroboros.Upgrade.Signing.Policy
 
   alias Ouroboros.Upgrade.{Artifact, Beam}
   alias Ouroboros.Upgrade.Rollout.Evaluation
+  alias Ouroboros.Wasm
 
   @capability_prefix "Elixir.Ouroboros.Capability."
   @sha256_hex 64
   @max_reported_modules 25
+
+  # v1's world imports exactly one function (docs/WASM.md §7.1). Growth of this set is a
+  # signing-policy event, which is why the list is here and not in configuration.
+  @world_imports ["log"]
+
+  # The namespace a lane-W durable agent id lives in. `Ouroboros.Wasm.Rollout` writes the
+  # registry entry's module as `"wasm/" <> name` for the same reason.
+  @start_prefix "wasm/"
+  @max_start_id_bytes 256
+  @max_start_config_bytes 16_384
+
+  # The same default the service applies, so a policy invoked directly — by a test, or by
+  # an operator rehearsing a decision — is held to the bound a service would have applied.
+  @default_max_artifact_bytes 16 * 1024 * 1024
 
   @impl true
   def evaluate(%Artifact{} = artifact, context) when is_map(context) do
@@ -218,6 +289,40 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
     # A malformed binary can make `:beam_lib` unhappy in ways its own error tuples do not
     # cover. That is a refusal; it must never leave this process as an exception, because
     # the requester reaches it through `:erpc` and would read a raise as ambiguity.
+    error -> {:refused, {:policy_exception, Exception.message(error)}}
+  catch
+    kind, reason -> {:refused, {:policy_failure, kind, inspect(reason)}}
+  end
+
+  # Lane W. Same posture, different arithmetic: there are no BEAM binaries to inspect and
+  # no module names to namespace, so what is recomputed is the digest and the size of the
+  # component bytes submitted beside the manifest, and the hard rule is the world.
+  def evaluate(%Wasm.Artifact{} = artifact, context) when is_map(context) do
+    with :ok <- check_wasm_shape(artifact, context),
+         :ok <- check_world(artifact),
+         {:ok, recomputed} <- check_component_bytes(artifact, context),
+         :ok <- check_imports(artifact),
+         {:ok, provenance} <- check_wasm_provenance(artifact.metadata),
+         {:ok, eval} <- check_wasm_eval(artifact.metadata, context),
+         {:ok, start} <- check_start(artifact.metadata) do
+      {:ok,
+       %{
+         lane: :wasm,
+         epoch: artifact.epoch,
+         name: artifact.name,
+         world: artifact.world,
+         component_sha256: artifact.component_sha256,
+         size: artifact.size,
+         imports: artifact.imports,
+         recomputed: recomputed,
+         provenance: provenance,
+         eval: eval,
+         start: start
+       }}
+    end
+  rescue
+    # Same reason as the BEAM arm: the requester reaches this through `:erpc`, and a raise
+    # there is indistinguishable from transport ambiguity.
     error -> {:refused, {:policy_exception, Exception.message(error)}}
   catch
     kind, reason -> {:refused, {:policy_failure, kind, inspect(reason)}}
@@ -511,6 +616,206 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
   end
 
   defp eval_spec(_forge), do: :absent
+
+  ## Lane W
+
+  defp check_wasm_shape(%Wasm.Artifact{} = artifact, context) do
+    max = max_artifact_bytes(context)
+
+    cond do
+      not is_binary(artifact.id) or artifact.id == "" ->
+        {:refused, :invalid_artifact_id}
+
+      not is_integer(artifact.epoch) or artifact.epoch <= 0 ->
+        {:refused, {:invalid_epoch, describe(artifact.epoch)}}
+
+      not is_binary(artifact.name) or artifact.name == "" ->
+        {:refused, {:invalid_component_name, describe(artifact.name)}}
+
+      not Wasm.Artifact.sha256?(artifact.component_sha256) ->
+        {:refused, {:invalid_component_sha256, describe(artifact.component_sha256)}}
+
+      not is_integer(artifact.size) or artifact.size <= 0 ->
+        {:refused, {:invalid_component_size, describe(artifact.size)}}
+
+      artifact.size > max ->
+        {:refused, {:component_too_large, artifact.size, max}}
+
+      not is_binary(artifact.world) or artifact.world == "" ->
+        {:refused, {:invalid_world, describe(artifact.world)}}
+
+      not is_list(artifact.imports) or not Enum.all?(artifact.imports, &is_binary/1) ->
+        {:refused, {:invalid_component_imports, describe(artifact.imports)}}
+
+      not is_map(artifact.metadata) or is_struct(artifact.metadata) ->
+        {:refused, :invalid_artifact_metadata}
+
+      true ->
+        :ok
+    end
+  end
+
+  # The lane-W analogue of the capability namespace, and hard for the same reason. A world
+  # is a linker contract; certifying one this build does not implement would be certifying
+  # a contract nobody on any loading node can honour.
+  defp check_world(%Wasm.Artifact{world: world}) do
+    if world == Wasm.world(), do: :ok, else: {:refused, {:world_not_supported, world}}
+  end
+
+  # The bytes are the request's, not the manifest's. Absent bytes are a refusal rather
+  # than a pass, which is the whole difference between a signer and a rubber stamp.
+  defp check_component_bytes(%Wasm.Artifact{} = artifact, context) do
+    case Map.get(context, :component_bytes) do
+      bytes when is_binary(bytes) and bytes != "" ->
+        cond do
+          byte_size(bytes) != artifact.size ->
+            {:refused, {:component_manifest_mismatch, :size, byte_size(bytes), artifact.size}}
+
+          Wasm.Artifact.digest(bytes) != artifact.component_sha256 ->
+            {:refused, {:component_manifest_mismatch, :sha256}}
+
+          true ->
+            {:ok, %{sha256: :recomputed, size: :recomputed, bytes: byte_size(bytes)}}
+        end
+
+      _absent ->
+        {:refused, :missing_component_bytes}
+    end
+  end
+
+  # Policy, not enforcement — see the moduledoc and D5. Nothing here parses a component,
+  # so a signer node with no `ouro-wasm` on it decides exactly as well as one with it.
+  defp check_imports(%Wasm.Artifact{imports: imports}) do
+    case Enum.reject(imports, &(&1 in @world_imports)) do
+      [] -> :ok
+      [undeclared | _rest] -> {:refused, {:import_not_in_world, undeclared}}
+    end
+  end
+
+  defp check_wasm_provenance(metadata) do
+    with {:ok, author} <- fetch_author(metadata),
+         {:ok, source_sha256} <- fetch_optional_sha256(metadata),
+         {:ok, language} <- fetch_optional_language(metadata),
+         {:ok, tests} <- fetch_optional_tests(metadata) do
+      {:ok,
+       %{author: author, source_sha256: source_sha256, language: language, test_report: tests}}
+    end
+  end
+
+  defp fetch_author(metadata) do
+    case Map.get(metadata, :author) do
+      author when is_binary(author) and author != "" -> {:ok, author}
+      nil -> {:refused, {:provenance_missing, :author}}
+      other -> {:refused, {:invalid_provenance, :author, describe(other)}}
+    end
+  end
+
+  defp fetch_optional_sha256(metadata) do
+    case Map.get(metadata, :source_sha256) do
+      nil ->
+        {:ok, nil}
+
+      sha ->
+        if is_binary(sha) and sha =~ ~r/\A[0-9a-f]{#{@sha256_hex}}\z/,
+          do: {:ok, sha},
+          else: {:refused, {:invalid_provenance, :source_sha256, describe(sha)}}
+    end
+  end
+
+  defp fetch_optional_language(metadata) do
+    case Map.get(metadata, :language) do
+      nil -> {:ok, nil}
+      language when is_binary(language) and language != "" -> {:ok, language}
+      other -> {:refused, {:invalid_provenance, :language, describe(other)}}
+    end
+  end
+
+  # Optional on purpose (D12): there is no BuildPeer here, so a guest toolchain's report is
+  # provenance when it exists and never a precondition. What is checked is that a report
+  # which *does* exist is not a report of failures.
+  defp fetch_optional_tests(metadata) do
+    case Map.get(metadata, :test_report) do
+      nil ->
+        {:ok, nil}
+
+      report when is_map(report) and not is_struct(report) ->
+        case counter(report, :failures) do
+          nil -> {:refused, {:invalid_provenance, :test_report, describe(report)}}
+          0 -> {:ok, report}
+          failures -> {:refused, {:tests_failed, failures, counter(report, :total)}}
+        end
+
+      other ->
+        {:refused, {:invalid_provenance, :test_report, describe(other)}}
+    end
+  end
+
+  # Same validator and same refusal as the BEAM arm; only the default of the switch
+  # differs, and the moduledoc says why.
+  defp check_wasm_eval(metadata, context) do
+    required? = Map.get(context, :require_wasm_eval, true) == true
+
+    case {required?, Map.get(metadata, :eval)} do
+      {false, nil} -> {:ok, :absent}
+      {true, nil} -> {:refused, :eval_spec_required}
+      {required?, spec} -> validated_eval(spec, required?)
+    end
+  end
+
+  defp validated_eval(spec, required?) do
+    case Evaluation.validate(spec) do
+      {:ok, _valid} -> {:ok, if(required?, do: :required_and_valid, else: :present)}
+      # `Evaluation.validate/1` already names its failures `{:invalid_eval_spec, _}`.
+      {:error, reason} -> {:refused, reason}
+    end
+  end
+
+  defp check_start(metadata) do
+    case Map.get(metadata, :start) do
+      nil -> {:ok, :absent}
+      start when is_map(start) and not is_struct(start) -> validate_start(start)
+      other -> {:refused, {:invalid_start, describe(other)}}
+    end
+  end
+
+  defp validate_start(start) do
+    id = Map.get(start, :id)
+    config = Map.get(start, :config)
+
+    cond do
+      Map.keys(start) -- [:id, :config] != [] ->
+        {:refused, {:invalid_start, :unknown_keys}}
+
+      not is_binary(id) or not String.starts_with?(id, @start_prefix) or
+          byte_size(id) <= byte_size(@start_prefix) ->
+        {:refused, {:invalid_start_id, describe(id)}}
+
+      byte_size(id) > @max_start_id_bytes or not String.valid?(id) ->
+        {:refused, {:invalid_start_id, :bounds}}
+
+      not is_binary(config) ->
+        {:refused, {:invalid_start, :config}}
+
+      byte_size(config) > @max_start_config_bytes ->
+        {:refused, {:invalid_start, :config_too_large}}
+
+      true ->
+        {:ok, %{id: id, config_bytes: byte_size(config)}}
+    end
+  end
+
+  defp max_artifact_bytes(context) do
+    case Map.get(context, :max_artifact_bytes) do
+      value when is_integer(value) and value > 0 ->
+        value
+
+      _absent ->
+        case Application.get_env(:ouroboros, :signing_max_artifact_bytes) do
+          value when is_integer(value) and value > 0 -> value
+          _unset_or_invalid -> @default_max_artifact_bytes
+        end
+    end
+  end
 
   defp describe(term), do: inspect(term, limit: 10, printable_limit: 200)
 end

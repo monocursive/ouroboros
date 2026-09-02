@@ -120,9 +120,24 @@ defmodule Ouroboros.Upgrade.Signing.Service do
       `Ouroboros.Storage.DurableFile` in production.
     * `config :ouroboros, :signing_policy` — the policy module.
     * `config :ouroboros, :signing_require_eval` — require a signed evaluation spec.
+    * `config :ouroboros, :signing_require_wasm_eval` — the same for lane W, defaulting to
+      **true**. See `Ouroboros.Upgrade.Signing.Policy` for why the two defaults differ.
     * `config :ouroboros, :signing_rate_limit_per_minute` — admissions per requester.
     * `config :ouroboros, :signing_journal_limit` — decisions retained.
     * `config :ouroboros, :signing_max_artifact_bytes` — the largest submission accepted.
+      It bounds the serialized artifact and, for lane W, the component bytes submitted
+      beside it.
+
+  ## Two lanes, one key
+
+  `sign_artifact/4` also accepts an `Ouroboros.Wasm.Artifact` (docs/WASM.md §7.5). The
+  seam that had to learn a second struct is exactly one function — the payload derivation
+  — because everything else here is about custody, admission, and recording, none of
+  which cares what a manifest describes. A lane-W request carries the component bytes in
+  `:component_bytes`, which are bounded before anything looks at them and then handed to
+  the policy so it can recompute the digest and the size rather than believe them. The
+  two lanes' payloads carry different tags, so one key signing both cannot produce a
+  signature that verifies across them.
   """
 
   use GenServer
@@ -131,6 +146,7 @@ defmodule Ouroboros.Upgrade.Signing.Service do
 
   alias Ouroboros.Upgrade.Artifact
   alias Ouroboros.Upgrade.Signing.{Journal, Key, Policy}
+  alias Ouroboros.Wasm
 
   @store_key {:ouroboros, :signing_journal, 1}
   @key_path_env "OUROBOROS_SIGNER_KEY_PATH"
@@ -140,7 +156,12 @@ defmodule Ouroboros.Upgrade.Signing.Service do
   @default_max_artifact_bytes 16 * 1024 * 1024
   @call_timeout 15_000
 
-  @type request :: %{optional(:requester) => node(), optional(:payload) => binary()}
+  @type request :: %{
+          optional(:requester) => node(),
+          optional(:payload) => binary(),
+          optional(:component_bytes) => binary()
+        }
+  @type artifact :: Artifact.t() | Wasm.Artifact.t()
   @type decision :: {:ok, binary()} | {:refused, term()}
 
   @doc """
@@ -148,8 +169,9 @@ defmodule Ouroboros.Upgrade.Signing.Service do
 
   Options are for tests and for operators who supply configuration another way:
   `:name`, `:key_path`, `:signer_id`, `:storage`, `:policy`, `:require_eval`,
-  `:rate_limit_per_minute`, `:journal_limit`, and `:max_artifact_bytes`. Everything
-  omitted comes from the environment and application configuration.
+  `:require_wasm_eval`, `:rate_limit_per_minute`, `:journal_limit`, and
+  `:max_artifact_bytes`. Everything omitted comes from the environment and application
+  configuration.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -162,20 +184,26 @@ defmodule Ouroboros.Upgrade.Signing.Service do
 
   This is the remote entry point: `Ouroboros.Upgrade.Forge.Signer.Remote` reaches it by
   `:erpc`. `request` is a plain map carrying `:requester` (the calling node, journaled as
-  a claim) and optionally `:payload`.
+  a claim) and optionally `:payload` and `:component_bytes`.
 
   The `:payload` is **advisory**. The signature is always over bytes this service derives
-  itself with `Ouroboros.Upgrade.Artifact.signing_payload/2` from the artifact in front
-  of it; a caller's payload is never signed and never trusted. It is cross-checked, and a
+  itself — with `Ouroboros.Upgrade.Artifact.signing_payload/2` or, for a lane-W manifest,
+  `Ouroboros.Wasm.Artifact.signing_payload/2` — from the artifact in front of it; a
+  caller's payload is never signed and never trusted. It is cross-checked, and a
   disagreement is refused — not because the signature would have been unsafe, but because
   the requester and the signer disagreeing about what is being signed is a version skew
   worth stopping at.
+
+  `:component_bytes` is the lane-W component the manifest describes. It is bounded by
+  `:signing_max_artifact_bytes` before anything reads it, and is handed to the policy so
+  the digest and the size in the manifest are recomputed rather than believed. A lane-W
+  request without it is refused by the policy, never signed.
 
   Never raises: a service that is down, wedged, or missing is `{:refused, reason}` like
   any other outcome, because the caller reaches this through `:erpc` and an escaping
   exception there is indistinguishable from transport ambiguity.
   """
-  @spec sign_artifact(Artifact.t(), String.t(), request(), GenServer.server()) :: decision()
+  @spec sign_artifact(artifact(), String.t(), request(), GenServer.server()) :: decision()
   def sign_artifact(artifact, signer_id, request \\ %{}, server \\ __MODULE__) do
     if is_binary(signer_id) and signer_id != "" and is_map(request) do
       call(
@@ -259,6 +287,7 @@ defmodule Ouroboros.Upgrade.Signing.Service do
          journal_limit: journal_limit(opts),
          policy: policy(opts),
          require_eval: require_eval(opts),
+         require_wasm_eval: require_wasm_eval(opts),
          rate_limit: rate_limit(opts),
          max_artifact_bytes: max_artifact_bytes(opts),
          window: %{},
@@ -300,6 +329,7 @@ defmodule Ouroboros.Upgrade.Signing.Service do
         decisions: Journal.tally(state.journal),
         tracked_requesters: map_size(state.window),
         require_eval: state.require_eval,
+        require_wasm_eval: state.require_wasm_eval,
         rate_limit_per_minute: state.rate_limit,
         policy: state.policy
       })}, state}
@@ -320,6 +350,7 @@ defmodule Ouroboros.Upgrade.Signing.Service do
     with :ok <- validate_request(request, requester),
          :ok <- ensure_signer_id(signer_id, state),
          :ok <- ensure_size(artifact, state),
+         :ok <- ensure_component_bytes(request, state),
          {:ok, admitted} <- admit_rate(requester, state) do
       decide(artifact, signer_id, request, requester, admitted)
     else
@@ -329,7 +360,7 @@ defmodule Ouroboros.Upgrade.Signing.Service do
   end
 
   defp decide(artifact, signer_id, request, requester, state) do
-    with {:ok, findings} <- evaluate(artifact, signer_id, requester, state),
+    with {:ok, findings} <- evaluate(artifact, signer_id, request, requester, state),
          {:ok, payload} <- derive_payload(artifact, signer_id, request) do
       {:ok, payload, findings, state}
     else
@@ -350,6 +381,24 @@ defmodule Ouroboros.Upgrade.Signing.Service do
 
   defp validate_advisory_payload(payload),
     do: {:refused, {:invalid_signing_request, {:payload, describe(payload)}}}
+
+  # Bounded before anything looks at it, including the policy that would recompute a
+  # digest over it: the component is the one part of a lane-W request whose size the
+  # requester chooses freely, so it is held to the same ceiling as the artifact itself.
+  defp ensure_component_bytes(request, state) do
+    case Map.get(request, :component_bytes) do
+      nil ->
+        :ok
+
+      bytes when is_binary(bytes) ->
+        if byte_size(bytes) > state.max_artifact_bytes,
+          do: {:refused, {:component_too_large, byte_size(bytes), state.max_artifact_bytes}},
+          else: :ok
+
+      other ->
+        {:refused, {:invalid_signing_request, {:component_bytes, describe(other)}}}
+    end
+  end
 
   # The id in the envelope is the id an operator trusted a public key under. Signing a
   # request that names some other identity would produce a signature nobody can verify,
@@ -378,11 +427,17 @@ defmodule Ouroboros.Upgrade.Signing.Service do
     end
   end
 
-  defp evaluate(artifact, signer_id, requester, state) do
+  defp evaluate(artifact, signer_id, request, requester, state) do
     context = %{
       signer_id: signer_id,
       requester: requester,
       require_eval: state.require_eval,
+      require_wasm_eval: state.require_wasm_eval,
+      # Supplied per request, exactly like the advisory payload, and already bounded. A
+      # policy that has them recomputes the manifest's digest and size; one that does not
+      # need them ignores the key.
+      component_bytes: Map.get(request, :component_bytes),
+      max_artifact_bytes: state.max_artifact_bytes,
       node: node()
     }
 
@@ -400,9 +455,27 @@ defmodule Ouroboros.Upgrade.Signing.Service do
 
   # The bytes that get signed are derived here, from the artifact, every time. A caller's
   # payload is compared by digest and then discarded; it is never the thing signed.
+  #
+  # This is the one seam that had to learn a second struct: which manifest shape and which
+  # payload tag. Everything else in this module is about custody, admission, and recording,
+  # and none of that depends on what a manifest describes.
   defp derive_payload(artifact, signer_id, request) do
-    payload = Artifact.signing_payload(artifact, signer_id)
+    with {:ok, payload} <- signing_payload(artifact, signer_id) do
+      compare_payload(payload, request)
+    end
+  rescue
+    error -> {:refused, {:invalid_artifact, Exception.message(error)}}
+  end
 
+  defp signing_payload(%Artifact{} = artifact, signer_id),
+    do: {:ok, Artifact.signing_payload(artifact, signer_id)}
+
+  defp signing_payload(%Wasm.Artifact{} = artifact, signer_id),
+    do: {:ok, Wasm.Artifact.signing_payload(artifact, signer_id)}
+
+  defp signing_payload(other, _signer_id), do: {:refused, {:invalid_artifact, describe(other)}}
+
+  defp compare_payload(payload, request) do
     case Map.get(request, :payload) do
       nil ->
         {:ok, payload}
@@ -413,8 +486,6 @@ defmodule Ouroboros.Upgrade.Signing.Service do
       other ->
         {:refused, {:payload_mismatch, digest(payload), digest(other)}}
     end
-  rescue
-    error -> {:refused, {:invalid_artifact, Exception.message(error)}}
   end
 
   # ## Settlement
@@ -446,6 +517,7 @@ defmodule Ouroboros.Upgrade.Signing.Service do
         %{
           artifact_id: artifact_field(artifact, :id),
           epoch: artifact_field(artifact, :epoch),
+          lane: lane(artifact),
           modules: artifact_modules(artifact),
           requester: requester,
           signer_id: signer_id,
@@ -684,6 +756,16 @@ defmodule Ouroboros.Upgrade.Signing.Service do
     end) == true
   end
 
+  # Defaults to true, unlike its BEAM sibling: lane W has no build peer and no ExUnit run
+  # behind it, so the signed eval spec is the test story (docs/WASM.md D12). The comparison
+  # is against `false` rather than `true` so an unusable configured value keeps the strict
+  # default instead of relaxing it.
+  defp require_wasm_eval(opts) do
+    Keyword.get_lazy(opts, :require_wasm_eval, fn ->
+      Application.get_env(:ouroboros, :signing_require_wasm_eval, true)
+    end) != false
+  end
+
   defp rate_limit(opts) do
     positive(
       Keyword.get_lazy(opts, :rate_limit_per_minute, fn ->
@@ -739,8 +821,17 @@ defmodule Ouroboros.Upgrade.Signing.Service do
   defp requester(_request), do: :unknown
 
   defp artifact_field(%Artifact{} = artifact, key), do: Map.get(artifact, key)
+  defp artifact_field(%Wasm.Artifact{} = artifact, key), do: Map.get(artifact, key)
   defp artifact_field(_artifact, :id), do: ""
   defp artifact_field(_artifact, _key), do: nil
+
+  # Which lane this decision was about, recorded so an operator reading the journal can
+  # tell a signed BEAM patch from a signed component without re-deriving it from the
+  # module list. Anything this build does not recognize is journaled as `:unknown` rather
+  # than as either lane.
+  defp lane(%Artifact{}), do: :beam
+  defp lane(%Wasm.Artifact{}), do: :wasm
+  defp lane(_artifact), do: :unknown
 
   defp artifact_modules(%Artifact{modules: modules}) when is_list(modules) do
     Enum.map(modules, fn
@@ -750,6 +841,20 @@ defmodule Ouroboros.Upgrade.Signing.Service do
       other ->
         other
     end)
+  end
+
+  # A lane-W manifest names one component and no modules. It is journaled in the same
+  # three columns an operator already reads — what would this have loaded, under what
+  # disposition, at what digest — because "wasm/<name>, :component, <sha>" answers exactly
+  # that question and an empty list answers nothing.
+  defp artifact_modules(%Wasm.Artifact{} = artifact) do
+    [
+      %{
+        module: "wasm/" <> to_string(artifact.name),
+        disposition: :component,
+        sha256: artifact.component_sha256
+      }
+    ]
   end
 
   defp artifact_modules(_artifact), do: []
