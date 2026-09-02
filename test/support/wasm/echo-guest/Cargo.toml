@@ -1,5 +1,6 @@
 # The test fixture lane W is proved against: a real component, built by a real toolchain,
-# from the checked-in world at `tui/wasm/wit/capability.wit`.
+# from the checked-in world at `tui/wasm/wit/capability.wit` — and, since W9, built the way
+# every other author builds one, on `ouroboros-guest`.
 #
 # Its own workspace, deliberately. An empty `[workspace]` table stops cargo walking up the
 # tree, so this package can never be pulled into `tui/Cargo.toml`'s graph — `ouro` must not
@@ -24,37 +25,23 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-# The bindings generator for the world. It is the only thing that knows the canonical ABI,
-# which is the point: `tui/wasm/tests/support/mod.rs` spells that ABI out by hand for the
-# helper's own containment proofs, and this guest exists to prove a *toolchain* build of the
-# same world links against the same linker.
+# One dependency, which is the point of W9: the bindings, the allocator, the panic handler,
+# the canonical ABI's `cabi_realloc` and the state cell all live in the SDK now, and this
+# fixture is the standing proof that a build on the SDK keeps the import list at exactly
+# `log`. A path dependency because the SDK is not published; it carries its own `[workspace]`
+# table, so depending on it does not drag `tui/`'s graph in behind it.
 #
-# `default-features = false` plus exactly what the world needs: the `generate!`/`export!`
-# macros and the canonical ABI's `realloc` export. What that drops is `std` — see the
-# `no_std` note in src/lib.rs; a `std` build of this same source imports thirteen
-# `wasi:cli`/`wasi:io` interfaces and the helper's linker refuses every one of them — plus
-# `async` (the world is synchronous by decision, docs/WASM.md D4) and `bitflags` (no flags
-# type in this world).
-wit-bindgen = { version = "0.57", default-features = false, features = [
-  "macros",
-  "realloc",
-] }
-# JSON in and JSON out is the world's contract, so the guest parses rather than splices: a
-# body it cannot read is an `err(string)` the host records, never a trap and never a reply
-# that is not JSON. Already in this repository's Rust graph, and `alloc` without `std` is a
-# supported configuration of it rather than a workaround.
-serde_json = { version = "1", default-features = false, features = ["alloc"] }
-# The allocator a `no_std` build has to bring itself. This is the same implementation Rust's
-# standard library uses on wasm targets, so choosing it is choosing what the `std` build
-# would have linked anyway — without the WASI imports that came with it. `global` installs it
-# as the `#[global_allocator]`; `core`, `debug` and `rustc-dep-of-std` stay off.
-dlmalloc = { version = "0.2", features = ["global"] }
+# `serde_json` arrives re-exported through it rather than declared again here, so there is
+# exactly one place that decides which JSON implementation a guest links and on what
+# features.
+ouroboros-guest = { path = "../../../../tui/wasm/guest" }
 
 [profile.release]
 # `panic = "abort"` keeps the unwinder — and everything it drags in — out of the component.
 # A panic in a guest is a trap the helper already classifies; there is nothing here to unwind
 # to. LTO and a size-shaped opt level then let the linker drop what is unreachable, which is
-# what keeps the import list at exactly `log`.
+# what keeps the import list at exactly `log`. The same stanza the SDK's examples and
+# template carry: cargo reads a profile only from a workspace root, and this is one.
 panic = "abort"
 lto = true
 opt-level = "s"

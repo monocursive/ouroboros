@@ -191,15 +191,24 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - run: rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal --component rustfmt,clippy && rustup default ${{ env.RUST_VERSION }}
+      # `wasm32-wasip2` because `tests/sdk.rs` builds three guest projects with it — the SDK's
+      # two examples and the scaffold template — and asserts against the real helper that each
+      # is in this world and imports exactly `log`. Without the target those tests skip, and a
+      # skip here is what `OUROBOROS_REQUIRE_WASM` below turns back into a failure.
+      - run: rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal --component rustfmt,clippy && rustup default ${{ env.RUST_VERSION }} && rustup target add wasm32-wasip2
 
+      # The guest projects are separate cargo workspaces with build directories of their own,
+      # so `tui/target` alone would leave every run of `tests/sdk.rs` compiling serde_json and
+      # wit-bindgen from scratch three times.
       - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             tui/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('tui/Cargo.lock') }}
+            tui/wasm/guest/examples/counter/target
+            tui/wasm/guest/examples/deny-writes/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('tui/Cargo.lock', 'tui/wasm/guest/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
       - run: cargo fmt --check
@@ -215,8 +224,20 @@ jobs:
       # `ouro-wasm` explicitly: this job's cwd selects the root package, so the helper's
       # containment suite — the tests that prove the linker refuses undeclared imports and
       # the fuel/deadline/memory bounds hold — would otherwise never run on a PR.
+      #
+      # `OUROBOROS_REQUIRE_WASM` is what makes `tests/sdk.rs` load-bearing: without it a runner
+      # missing the wasm32 target would print its skip and pass, which is the same silence the
+      # Elixir job was fixed for. With it, a guest the SDK cannot build fails the job.
       - run: cargo clippy -p ouro-wasm --all-targets -- -D warnings
       - run: cargo test -p ouro-wasm
+        env:
+          OUROBOROS_REQUIRE_WASM: "1"
+
+      # The guest SDK is its own workspace, so nothing above reaches it: `cargo` in `tui`
+      # selects `tui/Cargo.toml`'s members and the SDK is deliberately not one. `wasm-sdk-check`
+      # is its fmt, its unit tests, both clippy passes and the wasm32 build.
+      - run: make wasm-sdk-check
+        working-directory: ${{ github.workspace }}
 
   golden:
     name: Golden fixtures

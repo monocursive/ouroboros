@@ -316,6 +316,20 @@ no random, no state imports, no I/O. `handle-message` is a step function over
 instance-held state; determinism is a property, not a promise. `state-dump`/`state-load`
 exports for migration are v2 (`@since` on the world), not v1.
 
+**Authoring a component.** The world above is what a guest binds against, and `tui/wasm/guest`
+(`ouroboros-guest`) is the crate that binds it so an author does not. It owns the `no_std`
+ceremony — the allocator, the panic handler, the canonical ABI's `cabi_realloc`, the
+`wit_bindgen::generate!` and the instance's state cell — behind one macro call, and offers
+four seams over the one world: `Capability` (a JSON body in, a JSON reply out) for the mesh,
+`Hook` (a typed payload, a `Verdict`) and `Check` for §8.1's two contracts, and `Raw`
+underneath them for a reply that must be stated verbatim. `#![no_std]` stays the author's own
+line, because it is the claim and not the ceremony: `std` on `wasm32-wasip2` imports thirteen
+`wasi:io`/`wasi:cli` interfaces the helper's linker refuses, and such a build does not
+instantiate at all. Two worked components live in `tui/wasm/guest/examples/`, a scaffold in
+`tui/wasm/guest/template/`, and the acceptance guest is built on the same crate — which is
+what keeps the SDK honest (D13). None of it changes what the helper enforces; containment is
+the linker (D5).
+
 ### 7.2 Identity: no BEAM module at all
 
 A lane-W capability introduces **no module and no atom**. Its identity is the
@@ -864,6 +878,20 @@ machinery — it is a backend, not a lane (D9).
 - **D12 — eval is the test story for lane W.** The signer requires a validated eval
   spec for wasm artifacts by default (there is no BuildPeer/ExUnit analogue);
   `test_report` is optional provenance when a guest toolchain produces one.
+- **D13 — the SDK owns the ceremony; the import list is still the claim.**
+  `tui/wasm/guest` exists because the only worked component in this repository was the
+  acceptance guest, and writing a second one meant copying two hundred lines of `no_std`
+  before the first line of logic — with one wrong feature flag enough to make `inspect`
+  report `world: "unknown"`. It is a **trust-free** crate: nothing it generates changes what
+  the linker defines or what the helper refuses, and a `describe` it produced is exactly as
+  untrusted as one written by hand. What it does own is the defaults every author copies —
+  `panic = "abort"`, LTO, `opt-level = "s"`, no `std`, no dependency that pulls WASI — so its
+  defaults are the ecosystem's posture whether or not anyone says so. That is why the
+  acceptance guest was rewritten onto it rather than left beside it: the assertion
+  `imports == ["log"]` in `test/wasm/capability_acceptance_test.exs` now runs against a
+  component the SDK built, so the SDK cannot quietly grow an import without lane W's own
+  acceptance suite going red. `tui/wasm/tests/sdk.rs` holds the two example guests and the
+  scaffold template to the same assertion, against the real helper.
 
 ## 12. What this does not solve
 
@@ -1096,6 +1124,28 @@ Each slice is PR-sized, lands green, and is useful alone.
   output the node did not produce, so what gets signed would have to be the precompiled
   form. Written down because the bounds above are the shape of a host that compiles, and
   a reader should know which constraint is essential and which is a consequence.
+- **W9 — the guest SDK.** `tui/wasm/guest` (`ouroboros-guest`): its own cargo workspace, the
+  `no_std` ceremony behind one macro call, and four seams over the one world — `Capability`
+  for a mesh capability, `Hook` and `Check` for lane H's two contracts, `Raw` underneath them
+  for a reply that must be stated verbatim. `Describe` serialises contract C1 and fills
+  `world` in itself, bounding the summary and the example list where C1 bounds them.
+  `Verdict` is the stdout contract `hooks.ex` reads, with the untrusted narrowing documented
+  on the enum that produces it — `allow` read as silence, `updatedInput` dropped, `deny`,
+  `ask` and context kept and labelled per line — plus a `Silent` variant, because an SDK whose
+  only way to say nothing was `allow` would have taught every author to resolve an engine
+  `ask` by accident. The acceptance guest was rewritten onto the SDK with its observable
+  behaviour unchanged: 48,333 bytes became 49,138 (+1.7%), and `test/wasm/` stays at 271
+  passing. Proofs: fourteen host unit tests pinning both wire contracts key by key (rename
+  `permissionDecisionReason` and the node stops reading verdicts, silently — that is the one
+  they catch), and six in `tui/wasm/tests/sdk.rs` that build the two example guests and the
+  substituted scaffold template with a real toolchain and put them to the real helper — each
+  is `ouroboros:capability@0.1.0` importing exactly `log`, a hook's deny, context and silence
+  come back on the keys `parse_output/1` parses, a body a guest cannot use is a `guest_error`
+  that leaves the instance live rather than a trap, and every placeholder a template file uses
+  is one the table W10 will read documents. `make wasm-examples` and
+  `make wasm-sdk-check`; the Rust CI job gains the `wasm32-wasip2` target and
+  `OUROBOROS_REQUIRE_WASM`, so a machine that cannot build a guest fails rather than skipping
+  green. The scaffold is the placeholder W10's `ouro wasm new` embeds.
 - **Deferred, in rough order:** policy engine (§8.2) → agent-reachable forge/deploy
   effects (§7.7) → tools lane (§9.1) → microVM backend (§10, likely its own spec
   once slice-shaped) → agent world (§9.2).

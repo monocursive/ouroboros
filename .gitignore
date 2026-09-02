@@ -46,6 +46,14 @@ ouroboros-*.tar
 /test/support/wasm/echo-guest/target/
 /test/support/wasm/echo.wasm
 
+# The guest SDK and its worked components, each a workspace of its own and therefore each with
+# a build directory of its own. Source is kept, including every lockfile — a guest an author
+# copies should resolve the same crates tomorrow — and the built `.wasm` is not, for the same
+# reason the acceptance guest's is not. `make wasm-examples` rebuilds them; `ouro wasm inspect`
+# is how you check one.
+/tui/wasm/guest/target/
+/tui/wasm/guest/examples/*/target/
+
 # Where `make dist` names a built client for the platform it can run on. The artifact of
 # record is the one a tagged build uploads, not a copy somebody made locally. The three
 # things under dist/ that are *source* rather than output — the release signing public

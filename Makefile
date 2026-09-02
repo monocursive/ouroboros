@@ -13,7 +13,7 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test wasm wasm-guest test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
+.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test wasm wasm-guest wasm-examples wasm-sdk-check test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -43,6 +43,8 @@ help:
 	@echo "make sandbox-linux-test  prove the sandbox helper enforces, in a Linux container"
 	@echo "make wasm             build ouro-wasm into priv/wasm/ (WebAssembly containment helper)"
 	@echo "make wasm-guest       build the lane-W acceptance guest into test/support/wasm/echo.wasm"
+	@echo "make wasm-examples    build the guest SDK's worked components (counter, deny-writes)"
+	@echo "make wasm-sdk-check   the guest SDK's own gates: fmt, tests, clippy, wasm32 build"
 
 dev:
 	@echo "==> dev: Elixir deps if this checkout has none, then ouro --dev"
@@ -144,7 +146,8 @@ wasm:
 	@priv/wasm/ouro-wasm doctor
 
 # The lane-W acceptance guest: a real component, built by a real toolchain, from the world at
-# tui/wasm/wit/capability.wit. It is a *test fixture* and deliberately not a `release-tarball`
+# tui/wasm/wit/capability.wit — and, since W9, on the guest SDK at tui/wasm/guest, which it
+# reaches by path dependency. It is a *test fixture* and deliberately not a `release-tarball`
 # prerequisite — nothing a node runs needs it. Its own workspace and its own lockfile, so it
 # can never enter `ouro`'s dependency graph, and its output is gitignored like every other
 # built binary here. Needs one toolchain addition: `rustup target add wasm32-wasip2`.
@@ -155,6 +158,34 @@ wasm-guest:
 	  test/support/wasm/echo.wasm
 	@echo "==> wasm-guest: what it declares"
 	@ls -l test/support/wasm/echo.wasm
+
+# The SDK's worked components. Each is a standalone workspace built with a plain `cargo build`,
+# because that is the claim: an author writes their own logic and one macro call, and what comes
+# out is a component in this world whose whole authority is `log`. `tui/wasm/tests/sdk.rs`
+# builds these same two and puts the claim to the real helper; this target is for looking at
+# them by hand.
+wasm-examples:
+	@echo "==> wasm-examples: the guest SDK's worked components"
+	cd tui/wasm/guest/examples/counter && $(CARGO) build --release --target wasm32-wasip2
+	cd tui/wasm/guest/examples/deny-writes && $(CARGO) build --release --target wasm32-wasip2
+	@echo "==> wasm-examples: what they declare"
+	@ls -l tui/wasm/guest/examples/counter/target/wasm32-wasip2/release/counter.wasm \
+	  tui/wasm/guest/examples/deny-writes/target/wasm32-wasip2/release/deny_writes.wasm
+
+# The SDK's own gates. Its own workspace means `make test`'s `cd tui && cargo …` never reaches
+# it, so it gets a verb rather than being checked by nobody.
+#
+# Twice through clippy on purpose. The host pass is the only one that can lint the unit tests —
+# `Describe`'s document and `Verdict`'s reply are checked there, on a target with a test
+# harness — and the `wasm32-wasip2` pass is the build that actually ships. A lint that fires on
+# one and not the other is exactly the kind of thing a single pass would miss.
+wasm-sdk-check:
+	@echo "==> wasm-sdk-check: the guest SDK's own gates"
+	cd tui/wasm/guest && $(CARGO) fmt --check
+	cd tui/wasm/guest && $(CARGO) test
+	cd tui/wasm/guest && $(CARGO) clippy --all-targets -- -D warnings
+	cd tui/wasm/guest && $(CARGO) clippy --target wasm32-wasip2 -- -D warnings
+	cd tui/wasm/guest && $(CARGO) build --release --target wasm32-wasip2
 
 computer-use-debug:
 	@echo "==> computer-use-debug: debug helper into priv/computer-use/"

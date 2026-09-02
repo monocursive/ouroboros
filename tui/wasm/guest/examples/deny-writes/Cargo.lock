@@ -21,6 +21,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "deny-writes"
+version = "0.1.0"
+dependencies = [
+ "ouroboros-guest",
+]
+
+[[package]]
 name = "dlmalloc"
 version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -105,13 +112,6 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
-
-[[package]]
-name = "ouroboros-echo-guest"
-version = "0.1.0"
-dependencies = [
- "ouroboros-guest",
-]
 
 [[package]]
 name = "ouroboros-guest"
