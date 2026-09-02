@@ -92,6 +92,14 @@ defmodule Ouroboros.Wasm.Upload do
   # writes one byte a minute is not making progress worth a slot.
   @max_lifetime_ms 30 * 60 * 1_000
 
+  # How young a slot or a staged file may be and still be nobody's business but its opener's.
+  # A claim is two writes (`slot-<n>`, then `<id>.part`) and a slot's contents land a moment
+  # after the file exists; a sweep running in a concurrent call can read the slot empty, or
+  # see the part before its slot, and would take either for litter. Nothing regular and
+  # younger than this is reclaimed on the strength of what it looks like — an opener that has
+  # stalled that long between two syscalls is a machine with bigger problems than one slot.
+  @claim_grace_ms 30_000
+
   @type receipt :: %{
           upload: String.t(),
           received: non_neg_integer(),
@@ -466,28 +474,54 @@ defmodule Ouroboros.Wasm.Upload do
   # takes its files with it; a file with no slot is litter from a crash between the two
   # writes and goes on its own.
   defp expire(dir) do
-    held =
-      Enum.reduce(0..(@max_in_flight - 1), MapSet.new(), fn n, acc ->
-        path = Path.join(dir, @slot <> Integer.to_string(n))
+    now = now_ms()
+    slots = Enum.map(0..(@max_in_flight - 1), &Path.join(dir, @slot <> Integer.to_string(&1)))
 
-        case slot_holder(path) do
-          nil ->
-            _ignored = File.rm(path)
-            acc
-
-          {id, opened_ms} ->
-            if expired?(dir, id, opened_ms) do
-              _ignored = File.rm(path)
-              acc
-            else
-              MapSet.put(acc, id)
-            end
-        end
-      end)
+    {held, expired, unattributed?} =
+      Enum.reduce(slots, {MapSet.new(), MapSet.new(), false}, &sweep_slot(&1, &2, dir, now))
 
     case File.ls(dir) do
-      {:ok, names} -> names |> Enum.filter(&upload?/1) |> Enum.count(&orphaned(dir, &1, held))
-      {:error, _unreadable} -> 0
+      {:ok, names} ->
+        names
+        |> Enum.filter(&upload?/1)
+        |> Enum.count(&orphaned(dir, &1, held, expired, unattributed?, now))
+
+      {:error, _unreadable} ->
+        0
+    end
+  end
+
+  defp sweep_slot(path, {held, expired, unattributed?}, dir, now) do
+    case slot_holder(path) do
+      nil ->
+        # Unreadable and young is a claim in progress whose id this pass cannot learn;
+        # unreadable and old is litter.
+        if young?(path, now) do
+          {held, expired, true}
+        else
+          _ignored = File.rm(path)
+          {held, expired, unattributed?}
+        end
+
+      {id, opened_ms} ->
+        if expired?(dir, id, opened_ms, now) do
+          _ignored = File.rm(path)
+          {held, MapSet.put(expired, id), unattributed?}
+        else
+          {MapSet.put(held, id), expired, unattributed?}
+        end
+    end
+  end
+
+  # A regular file written inside the grace window. A symlink or anything else is never
+  # young: no opener creates one, so there is no claim in progress it could belong to.
+  defp young?(path, now) do
+    case File.lstat(path, time: :posix) do
+      {:ok, %File.Stat{type: :regular, mtime: mtime}} when is_integer(mtime) ->
+        now - mtime * 1_000 < @claim_grace_ms
+
+      _other ->
+        false
     end
   end
 
@@ -496,32 +530,43 @@ defmodule Ouroboros.Wasm.Upload do
       String.contains?(name, @taken)
   end
 
-  defp orphaned(dir, name, held) do
+  # Held is kept. The files of a slot this pass expired are reclaimed whatever their age,
+  # because their id is known. A slotless file is reclaimed only when this pass read every
+  # slot — a slot it could not read holds an id it does not know — and the file is not a
+  # claim's second write still in flight.
+  defp orphaned(dir, name, held, expired, unattributed?, now) do
     id = name |> String.split(".") |> List.first()
+    path = Path.join(dir, name)
 
-    if MapSet.member?(held, id) do
-      false
-    else
-      # Never the bytes, never the sha: what an operator needs from this line is that a
-      # transfer was reclaimed, and the id is the whole of that.
-      Logger.debug("wasm upload #{name} reclaimed")
-      File.rm(Path.join(dir, name)) == :ok
+    cond do
+      MapSet.member?(held, id) -> false
+      MapSet.member?(expired, id) -> reclaim(path, name)
+      unattributed? -> false
+      young?(path, now) -> false
+      true -> reclaim(path, name)
     end
+  end
+
+  defp reclaim(path, name) do
+    # Never the bytes, never the sha: what an operator needs from this line is that a
+    # transfer was reclaimed, and the id is the whole of that.
+    Logger.debug("wasm upload #{name} reclaimed")
+    File.rm(path) == :ok
   end
 
   # Two clocks, checked together. The idle one is the file's own mtime, which a write moves
   # and nothing here moves artificially; the total one is the slot's claim time, which
   # nothing moves at all.
-  defp expired?(dir, id, opened_ms) do
-    now = now_ms()
-
+  defp expired?(dir, id, opened_ms, now) do
     cond do
       now - opened_ms > @max_lifetime_ms -> true
-      true -> idle?(dir, id, now)
+      true -> idle?(dir, id, opened_ms, now)
     end
   end
 
-  defp idle?(dir, id, now) do
+  # No staged file at all is a claim's second write still in flight while the claim is
+  # young, and an upload whose file went missing once it is not.
+  defp idle?(dir, id, opened_ms, now) do
     [Path.join(dir, id <> @part), Path.join(dir, id <> @done)]
     |> Enum.map(&File.lstat(&1, time: :posix))
     |> Enum.find_value(:absent, fn
@@ -529,7 +574,7 @@ defmodule Ouroboros.Wasm.Upload do
       _other -> nil
     end)
     |> case do
-      :absent -> true
+      :absent -> now - opened_ms > @claim_grace_ms
       mtime -> now - mtime * 1_000 > @ttl_ms
     end
   end

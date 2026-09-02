@@ -1174,7 +1174,13 @@ machinery — it is a backend, not a lane (D9).
   receive the bytes. Every entry point sweeps, including the two that only read — a sweep on
   the write path alone left `take/2` handing back files the module had already promised were
   gone — and nothing follows a symlink: the root must be a real directory and a staged file
-  a regular file, both by `File.lstat/1`. The id is minted by the
+  a regular file, both by `File.lstat/1`. A sweep also keeps its hands off a claim in
+  progress: a claim is two writes with a moment between them, and a sweep in a concurrent
+  call once read a slot empty, took it for litter, and reclaimed the part that slot was about
+  to name (seven winners of thirty-two on the hosted runner), so nothing regular and younger
+  than thirty seconds is reclaimed on the strength of how it looks — an unreadable young
+  slot, a young slot with no part yet, a young slotless part — while the files of a slot the
+  clocks expired go regardless of age. The id is minted by the
   node — a client-chosen id is a client-chosen filename — and is still validated as 32 hex
   characters on the way back in. An upload carries no authority whatsoever: the sha it
   reports at commit is a receipt for the transfer, and what comes out of it is verified by

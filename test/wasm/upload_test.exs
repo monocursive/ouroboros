@@ -238,6 +238,76 @@ defmodule Ouroboros.Wasm.UploadTest do
     end
   end
 
+  # A claim is two writes with a moment between them, and a sweep in a concurrent call can
+  # land in that moment: it read a slot empty, took it for litter, and then reclaimed the
+  # part that slot was about to name (hosted run 33692982947: thirty-two openers, seven
+  # winners). Nothing regular and young is reclaimed on the strength of how it looks.
+  describe "a claim in progress is not litter" do
+    test "an empty slot that is young is a claim, and nothing slotless is reclaimed beside it",
+         %{opts: opts, root: root} do
+      File.mkdir_p!(root)
+      id = String.duplicate("a", 32)
+      File.write!(Path.join(root, "slot-0"), "")
+      File.write!(Path.join(root, id <> ".part"), "x")
+
+      assert Upload.sweep(opts) == 0
+      assert File.exists?(Path.join(root, "slot-0"))
+      assert File.exists?(Path.join(root, id <> ".part"))
+    end
+
+    test "an empty slot past the grace is litter, and so is the slotless file beside it",
+         %{opts: opts, root: root} do
+      File.mkdir_p!(root)
+      id = String.duplicate("b", 32)
+      File.write!(Path.join(root, "slot-0"), "")
+      File.write!(Path.join(root, id <> ".part"), "x")
+      age(Path.join(root, "slot-0"), 60)
+      age(Path.join(root, id <> ".part"), 60)
+
+      assert Upload.sweep(opts) == 1
+      refute File.exists?(Path.join(root, "slot-0"))
+      refute File.exists?(Path.join(root, id <> ".part"))
+    end
+
+    test "a young slot whose part is not written yet is kept, and an old one is not",
+         %{opts: opts, root: root} do
+      File.mkdir_p!(root)
+      young = String.duplicate("c", 32)
+      old = String.duplicate("d", 32)
+      now = System.system_time(:millisecond)
+      File.write!(Path.join(root, "slot-0"), "#{young} #{now}\n")
+      File.write!(Path.join(root, "slot-1"), "#{old} #{now - 60_000}\n")
+
+      assert Upload.sweep(opts) == 0
+      assert File.exists?(Path.join(root, "slot-0"))
+      refute File.exists?(Path.join(root, "slot-1"))
+    end
+
+    test "a slotless part is reclaimed only once it is past the grace",
+         %{opts: opts, root: root} do
+      File.mkdir_p!(root)
+      id = String.duplicate("e", 32)
+      path = Path.join(root, id <> ".part")
+      File.write!(path, "x")
+
+      assert Upload.sweep(opts) == 0
+      assert File.exists?(path)
+
+      age(path, 60)
+      assert Upload.sweep(opts) == 1
+      refute File.exists?(path)
+    end
+
+    test "the files of a slot expired by its clocks are reclaimed whatever their age",
+         %{opts: opts, root: root} do
+      {:ok, %{upload: id}} = Upload.append(nil, 0, "payload", true, opts)
+      rewrite_slot!(root, id, System.system_time(:millisecond) - Upload.max_lifetime_ms() - 1)
+
+      assert Upload.sweep(opts) >= 1
+      refute File.exists?(Path.join(root, id <> ".done"))
+    end
+  end
+
   describe "the two clocks, and the sweep that reads them" do
     # L1. Only `append/5` swept, so `take/2` and `path/2` handed back files the module had
     # already promised were gone. Delete the `expire/1` call from `swept/1` and this is red.
