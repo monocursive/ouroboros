@@ -176,7 +176,11 @@ defmodule Ouroboros.Provider.Native.HooksTest do
 
   # One component hook, declared far enough from this turn's events that nothing tries to
   # run it: what is being tested is the once-per-turn report, not an invocation.
-  defp component_hooks(pool) do
+  #
+  # Untrusted by default, because that is what the budget counts. A trusted component hook —
+  # the operator's own, or a workspace they named — is never budgeted, so a session holding
+  # only those has nothing to be told about and never asks the pool.
+  defp component_hooks(pool, trusted? \\ false) do
     %Hooks{
       hooks: [
         %{
@@ -189,13 +193,13 @@ defmodule Ouroboros.Provider.Native.HooksTest do
           config: "",
           timeout_ms: 5_000,
           scope: :workspace,
-          trusted: true,
+          trusted: trusted?,
           cwd: nil,
           pool: pool
         }
       ],
       checks: [],
-      trusted?: true,
+      trusted?: trusted?,
       declined: 0,
       errors: [],
       pool: pool
@@ -332,6 +336,153 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       refute Hooks.any?(config, :pre_tool_use, "read")
       # Anchored: `bash` must not match `rebash`.
       refute Hooks.any?(config, :pre_tool_use, "rebash")
+    end
+  end
+
+  # ================================================================ the matcher's bounds
+
+  describe "the matcher is a repository-authored regular expression, and bounded like one" do
+    test "a pattern carrying its own parenthesis cannot break out of the anchoring",
+         %{root: root, workspace: workspace} do
+      # The proved escape. `\A(?:` … `)\z` is string concatenation, so `a)|(x` anchored is
+      # `\A(?:a)|(x)\z` — "starts with a" OR "ends with x" — which compiles, is not anchored,
+      # and matches a tool name it was never meant to. The bare compile refuses it first:
+      # unbalanced parentheses are not a regular expression on their own.
+      user_toml(root, """
+      [[hooks]]
+      event = "PreToolUse"
+      matcher = "a)|(x"
+      command = "x"
+      """)
+
+      config = Hooks.load(workspace)
+
+      assert config.hooks == []
+      assert [error] = config.errors
+      assert error =~ "not a regular expression"
+
+      # The line that proves it is the *anchoring* being defended and not just a parse: this
+      # is the tool name the escaped pattern matched.
+      refute Hooks.any?(config, :pre_tool_use, "anything x")
+    end
+
+    test "a pattern past the length bound is refused", %{root: root, workspace: workspace} do
+      pattern = String.duplicate("a", 201)
+
+      user_toml(root, """
+      [[hooks]]
+      event = "PreToolUse"
+      matcher = "#{pattern}"
+      command = "x"
+      """)
+
+      config = Hooks.load(workspace)
+
+      assert config.hooks == []
+      assert [error] = config.errors
+      assert error =~ "201 bytes; the limit is 200"
+    end
+
+    test "a catastrophically backtracking pattern is bounded, not waited on",
+         %{root: root, workspace: workspace} do
+      # `(a+)+$` against 41 characters that cannot match took 90 ms of this node — per tool
+      # call, per hook that declared it, with the *model* choosing the subject. Under the
+      # backtracking budget the same question is answered in under a millisecond, and the
+      # answer is "no match", which is the direction that cannot loosen anything: a hook that
+      # does not run cannot deny, and only a hook that ran can.
+      user_toml(root, """
+      [[hooks]]
+      event = "PreToolUse"
+      matcher = "(a+)+$"
+      command = "x"
+      """)
+
+      config = Hooks.load(workspace)
+      assert [%{matcher: %Regex{}}] = config.hooks
+
+      subject = String.duplicate("a", 41) <> "!"
+
+      {elapsed_us, matched?} =
+        :timer.tc(fn -> Hooks.any?(config, :pre_tool_use, subject) end)
+
+      refute matched?
+      assert elapsed_us < 10_000, "the matcher took #{elapsed_us} us; the budget should bound it"
+
+      # And an honest matcher still matches: the budget is three orders of magnitude above
+      # what a tool name costs.
+      assert Hooks.any?(config, :pre_tool_use, String.duplicate("a", 8))
+    end
+  end
+
+  # ================================================================ the loader's own bounds
+
+  describe "what a repository can grow, the loader takes and drops" do
+    test "at most fifty hooks are taken", %{workspace: workspace} do
+      # A cap the mutation matrix found unproved: deleting the take left sixty hooks loaded
+      # and every test still green.
+      trust(workspace)
+
+      project_toml(
+        workspace,
+        Enum.map_join(1..60, "\n", fn n ->
+          "[[hooks]]\nevent = \"PreToolUse\"\ncommand = \"echo #{n}\"\n"
+        end)
+      )
+
+      config = Hooks.load(workspace)
+
+      assert length(config.hooks) == 50
+      # The first fifty in file order, so what is dropped is the tail and not a sample.
+      assert List.first(config.hooks).command == "echo 1"
+      assert List.last(config.hooks).command == "echo 50"
+    end
+
+    test "a declared timeout is clamped to the ceiling", %{workspace: workspace} do
+      trust(workspace)
+
+      project_toml(workspace, """
+      [[hooks]]
+      event = "PreToolUse"
+      command = "true"
+      timeout_ms = 999999999
+
+      [[hooks]]
+      event = "PreToolUse"
+      command = "true"
+      timeout_ms = 1500
+
+      [[hooks]]
+      event = "PreToolUse"
+      command = "true"
+      timeout_ms = -5
+      """)
+
+      config = Hooks.load(workspace)
+
+      # Clamped, honoured, and defaulted: the three answers `timeout/1` has, so a mutation
+      # that drops the `min` is caught by the first and one that drops the guard by the third.
+      assert Enum.map(config.hooks, & &1.timeout_ms) == [600_000, 1_500, 60_000]
+    end
+
+    test "a config file past the byte cap is an error line and no hooks", %{
+      workspace: workspace
+    } do
+      trust(workspace)
+
+      # 256 KiB is the cap; a file one byte over it is read no further than its stat. Padded
+      # with a comment so the bytes are TOML that *would* have parsed — what refuses this is
+      # the size and nothing else.
+      body =
+        ~s([[hooks]]\nevent = "PreToolUse"\ncommand = "true"\n# ) <>
+          String.duplicate("x", 256 * 1024)
+
+      project_toml(workspace, body)
+
+      config = Hooks.load(workspace)
+
+      assert config.hooks == []
+      assert [error] = config.errors
+      assert error =~ "the limit is #{256 * 1024}"
     end
   end
 
@@ -676,10 +827,27 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       [status] = status_events(collect())
 
       assert status.payload["message"] =~
-               "component hooks can no longer load on this node"
+               "this workspace's component hooks can no longer load on this node"
 
-      assert status.payload["message"] =~ "budget (#{budget}) is spent"
+      # The budget counts untrusted hook components, and the sentence an operator reads says
+      # so — a line that named "hook components" would point at their own, which are never
+      # budgeted and were never at risk.
+      assert status.payload["message"] =~ "untrusted hook components (#{budget}) is spent"
       assert status.payload["message"] =~ "restart the wasm pool"
+    end
+
+    test "a session whose only component hook is trusted never asks the pool", context do
+      # The budget is the untrusted lane's. An operator's own component hook — or one from a
+      # workspace they trusted — is never counted against it, so there is nothing here to
+      # warn about and no reason to read the pool's status at all.
+      pool = fake_pool(Ouroboros.Wasm.Pool.hook_component_budget())
+
+      {loop, _agent} = start_loop(context, @bash_script, hooks: component_hooks(pool, true))
+
+      run(loop)
+
+      assert status_events(collect()) == []
+      assert GenServer.call(pool, :calls) == 0
     end
 
     test "room left in the budget says nothing at all", context do
@@ -1017,6 +1185,40 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       assert config.checks == []
       assert Hooks.run_checks(config) == []
       refute File.exists?(marker)
+    end
+
+    test "a command check that reached the struct untrusted is still not run", context do
+      # The belt-and-braces guard at `run_check/3`, which the mutation matrix found unproved:
+      # the test above proves `load/2` never *builds* an untrusted command check, so deleting
+      # the guard changed nothing any test could see. This constructs the struct directly —
+      # the shape a future loader bug, or a caller assembling its own configuration, would
+      # produce — and the guard is the only thing between it and `sh -c` on this machine.
+      marker = Path.join(context.root, "belt-and-braces-check-ran")
+
+      check = %{
+        name: "typecheck",
+        kind: :command,
+        command: "touch #{marker}; exit 1",
+        component: nil,
+        confine_to: nil,
+        config: "{}",
+        timeout_ms: 5_000
+      }
+
+      untrusted = %Hooks{
+        checks: [check],
+        trusted?: false,
+        workspace: context.workspace
+      }
+
+      assert Hooks.run_checks(untrusted) == []
+      refute File.exists?(marker)
+
+      # The same struct, trusted, runs it — so what the assertion above proves is the guard
+      # and not a check that could never have run at all.
+      assert [failure] = Hooks.run_checks(%{untrusted | trusted?: true})
+      assert failure =~ "typecheck"
+      assert File.exists?(marker)
     end
 
     test "a check that hangs is a failure that says so, not a turn that never ends",

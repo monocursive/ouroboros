@@ -17,25 +17,13 @@ defmodule Ouroboros.Wasm.CapabilityAcceptanceTest do
   # on a machine that never built them should say what it did not check.
   @guest Path.expand("../support/wasm/echo.wasm", __DIR__)
 
-  @needs_live (cond do
-                 not Wasm.available?() ->
-                   [
-                     skip:
-                       "no ouro-wasm at #{Wasm.helper_path()}; run `make wasm` to check the " <>
-                         "real wire rather than a fake helper"
-                   ]
+  # `Ouroboros.Wasm.LiveFixture` decides, so that CI — which builds both halves and sets
+  # `OUROBOROS_REQUIRE_WASM=1` — fails on a missing build instead of skipping green.
+  @needs_live Ouroboros.Wasm.LiveFixture.tag(@guest)
 
-                 not File.regular?(@guest) ->
-                   [
-                     skip:
-                       "no acceptance guest at #{@guest}; run `make wasm-guest` (it needs " <>
-                         "`rustup target add wasm32-wasip2`) to check a real component rather " <>
-                         "than a scripted reply"
-                   ]
-
-                 true ->
-                   []
-               end)
+  setup_all do
+    Ouroboros.Wasm.LiveFixture.ensure!(@guest)
+  end
 
   describe "the world file, world.rs, and a toolchain build agree" do
     @tag @needs_live

@@ -364,23 +364,27 @@ defmodule Ouroboros.Provider.Native.Loop do
     ]
   end
 
-  # W-F3. The helper's hook-component budget is a fact about the *node*, not about this
+  # W-F3. The helper's untrusted-hook budget is a fact about the *node*, not about this
   # session, and a spent one is silent everywhere else: `load` refuses, the seam ignores the
   # refusal loudly in a log nobody is reading, and the operator sees a hook that simply
   # stopped having an opinion. Once per turn is where that gets said.
   #
-  # Read only when this session has a component hook to lose, so a workspace with none — the
-  # overwhelming majority — never touches the pool at all. `Pool.status/1` is a read of state
-  # a running pool already holds: it spawns no helper, and a node with no pool answers
-  # `hook_components: 0`, which is not a spent budget and says nothing here.
+  # What the budget counts is the untrusted lane: an operator's own component hook, and a
+  # workspace they trusted, are never budgeted — they can already run shell, so a count limit
+  # on them would be theatre that eventually silences the operator's own `deny`. So this is
+  # read only when this session has an *untrusted* component hook to lose, which keeps a
+  # workspace with none — the overwhelming majority — off the pool entirely. `Pool.status/1`
+  # is a read of state a running pool already holds: it spawns no helper, and a node with no
+  # pool answers `hook_components: 0`, which is not a spent budget and says nothing here.
   defp spent_hook_budget(%{hooks: %{hooks: hooks, pool: pool}}) do
     budget = WasmPool.hook_component_budget()
 
-    if Enum.any?(hooks, &(&1.kind == :component)) and
+    if Enum.any?(hooks, &(&1.kind == :component and not &1.trusted)) and
          WasmPool.status(pool).hook_components >= budget do
       [
-        "component hooks can no longer load on this node: the helper's hook-component " <>
-          "budget (#{budget}) is spent; restart the wasm pool to clear it"
+        "this workspace's component hooks can no longer load on this node: the helper's " <>
+          "budget for untrusted hook components (#{budget}) is spent; restart the wasm pool " <>
+          "to clear it"
       ]
     else
       []

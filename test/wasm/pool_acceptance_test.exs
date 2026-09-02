@@ -10,15 +10,14 @@ defmodule Ouroboros.Wasm.PoolAcceptanceTest do
   # with the reason printed rather than silently passing, the same honesty
   # `Ouroboros.Provider.Native.SandboxTest` applies to a missing sandbox binary: a green run
   # on a machine that never ran `make wasm` should say what it did not check.
-  @needs_helper (if Wasm.available?() do
-                   []
-                 else
-                   [
-                     skip:
-                       "no ouro-wasm at #{Wasm.helper_path()}; run `make wasm` to check the " <>
-                         "real wire rather than a fake helper"
-                   ]
-                 end)
+  # `Ouroboros.Wasm.LiveFixture` decides, so that CI — which builds the helper and sets
+  # `OUROBOROS_REQUIRE_WASM=1` — fails on a missing build instead of skipping green. No guest
+  # here: everything in this file is reachable without one.
+  @needs_helper Ouroboros.Wasm.LiveFixture.tag()
+
+  setup_all do
+    Ouroboros.Wasm.LiveFixture.ensure!()
+  end
 
   # W2 owns the first real guest. Everything here is reachable without one: the handshake,
   # the refusals that fire before a component is ever compiled, and the ones that fire when

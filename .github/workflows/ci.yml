@@ -75,7 +75,44 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - run: bwrap --version
 
+      # The wasm half of the Elixir suite is opt-in on a developer's machine and was
+      # therefore never opted in *here*: with no `ouro-wasm` and no guest on the runner, the
+      # twenty-five lane-W acceptance tests skipped on every hosted run and the job stayed
+      # green. A containment boundary that CI has never once exercised is a claim, not a
+      # test. So both halves are built before `mix test`, and `OUROBOROS_REQUIRE_WASM` below
+      # turns a missing one back into a failure.
+      #
+      # 1.95 is the same floor `env.RUST_VERSION` pins for the release, because `ouro-wasm`
+      # carries a wasmtime. `wasm32-wasip2` is the guest's target and emits a component
+      # straight from `cargo build` on 1.82 and later.
+      - run: rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal && rustup default ${{ env.RUST_VERSION }} && rustup target add wasm32-wasip2
+
+      # A cache namespace of its own, not the `rust` job's, for the reason the dialyzer job
+      # has one: `actions/cache` writes an entry once, so a shared key means whichever job
+      # finished first saved its `tui/target` and the other restored that. This job builds
+      # one package; that one builds all of them with two feature sets, and neither is a
+      # useful starting point for the other. The guest's target directory is in the paths
+      # because it is a separate cargo workspace with a lockfile of its own.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tui/target
+            test/support/wasm/echo-guest/target
+          key: ${{ runner.os }}-cargo-wasm-${{ env.RUST_VERSION }}-${{ hashFiles('tui/Cargo.lock', 'test/support/wasm/echo-guest/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-wasm-${{ env.RUST_VERSION }}-
+
+      - run: make wasm
+      - run: make wasm-guest
+
+      # `OUROBOROS_REQUIRE_WASM` is the switch that makes the two steps above load-bearing.
+      # Without it a runner that failed to build either half would skip the acceptance suites
+      # and pass, which is exactly the silence this job is being fixed for; with it, a missing
+      # helper or guest fails the suites that needed it and names the `make` target.
       - run: mix test
+        env:
+          OUROBOROS_REQUIRE_WASM: "1"
 
   browser:
     name: Browser journeys
