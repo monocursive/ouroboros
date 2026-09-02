@@ -623,10 +623,27 @@ pub struct WasmSignArgs {
     pub import: Vec<String>,
 
     /// Read the imports from `ouro wasm inspect --json` output — a file, or `-` for stdin.
-    /// The convenient form of `--import`: `ouro wasm inspect g.wasm --json | ouro wasm sign
-    /// g.wasm --name g --author me --imports-from -`.
+    /// The explicit form of what this command otherwise does for itself: `ouro wasm inspect
+    /// g.wasm --json | ouro wasm sign g.wasm --name g --author me --imports-from -`.
     #[arg(long, value_name = "PATH", conflicts_with = "import")]
     pub imports_from: Option<PathBuf>,
+
+    /// Do not start a local `ouro-wasm` to read the component's imports; require `--import`
+    /// or `--imports-from` instead.
+    ///
+    /// For a machine that has no helper. The node will not read the component either — it
+    /// never parses bytes it has not verified (docs/WASM.md D15) — so on such a machine the
+    /// import list has to arrive from somewhere a person named.
+    #[arg(long)]
+    pub no_local_helper: bool,
+
+    /// Print the `wasm.sign` parameters this command would send and stop. Opens no socket
+    /// and uploads nothing; `upload` is null because nothing was uploaded.
+    ///
+    /// It still reads the imports the way the real run would, so it is the way to see what
+    /// your helper says about a component before a node is asked to sign it.
+    #[arg(long)]
+    pub dry_run: bool,
 
     /// The guest toolchain, recorded as provenance.
     #[arg(long, value_name = "LANGUAGE")]
@@ -658,6 +675,12 @@ pub struct WasmSignArgs {
     /// The machine that signs and stages. This one by default.
     #[arg(long, value_name = "MACHINE")]
     pub node: Option<String>,
+
+    /// The helper that reads this component's imports, when neither `--import` nor
+    /// `--imports-from` declared them. Resolved by the same three-place rule as
+    /// `ouro wasm inspect`, and it never reaches the node.
+    #[command(flatten)]
+    pub helper: WasmHelperArgs,
 
     /// Where the gateway listens. Omitted, the local gateway.json is read instead.
     #[arg(long, value_name = "HOST:PORT")]
@@ -773,6 +796,19 @@ pub struct WasmNewArgs {
     /// The directory to create the project in. Omitted, the current one.
     #[arg(long, value_name = "DIR")]
     pub into: Option<PathBuf>,
+
+    /// The one line `describe` reports about this component. At most 200 characters, and
+    /// untrusted wherever it is read. Omitted, a placeholder saying which shape this is.
+    #[arg(long, value_name = "TEXT")]
+    pub summary: Option<String>,
+
+    /// Where `ouroboros-guest` lives, as the `path =` the generated `Cargo.toml` carries.
+    ///
+    /// The crate is not published yet, so a scaffolded project reaches the SDK by path.
+    /// Omitted, this command walks up from `--into` looking for a checkout's
+    /// `tui/wasm/guest`, and refuses rather than guessing when there is none above it.
+    #[arg(long, value_name = "PATH")]
+    pub sdk_path: Option<PathBuf>,
 }
 
 /// `ouro wasm inspect`'s flags.

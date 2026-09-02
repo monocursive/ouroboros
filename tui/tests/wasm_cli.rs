@@ -1536,82 +1536,6 @@ fn inspect_reports_a_component_refused_before_it_was_compiled() {
 
 // ----------------------------------------------------------------------------- the new
 
-/// The scaffold is a project that builds, not a project that looks like one — but only where a
-/// wasm toolchain is installed. Where it is not, this says so loudly rather than passing quietly.
-#[test]
-fn new_scaffolds_a_project_that_builds() {
-    let scratch = Scratch::new("new");
-
-    let output = Command::new(OURO)
-        .args(["wasm", "new", "my-guard", "--hook", "--into"])
-        .arg(scratch.path())
-        .output()
-        .expect("the ouro binary runs");
-    assert!(output.status.success(), "`ouro wasm new` must succeed");
-
-    let root = scratch.path().join("my-guard");
-    for expected in [
-        "Cargo.toml",
-        "src/lib.rs",
-        "wit/capability.wit",
-        "README.md",
-        ".gitignore",
-    ] {
-        assert!(root.join(expected).is_file(), "missing {expected}");
-    }
-
-    // The world in the project is the world the helper enforces, byte for byte: a scaffold
-    // binding against a different one would produce components the runtime refuses.
-    assert_eq!(
-        std::fs::read_to_string(root.join("wit/capability.wit")).expect("the world"),
-        std::fs::read_to_string(repository_root().join("tui/wasm/wit/capability.wit"))
-            .expect("the helper's world")
-    );
-
-    if !target_installed() {
-        let reason = "the wasm32-wasip2 target is not installed; \
-                      `rustup target add wasm32-wasip2` to build the scaffold in this test";
-        assert!(!required(), "{REQUIRE} is set and {reason}");
-        println!("skipped the build half: {reason}");
-        return;
-    }
-
-    // The artifact is looked for under the project's own `target/`; a `CARGO_TARGET_DIR` in
-    // the developer's (or a harness's) environment would send it elsewhere and fail the test
-    // for a reason that has nothing to do with the scaffold.
-    let built = Command::new(cargo())
-        .args(["build", "--release", "--target", "wasm32-wasip2"])
-        .env_remove("CARGO_TARGET_DIR")
-        .current_dir(&root)
-        .output()
-        .expect("cargo runs");
-    assert!(
-        built.status.success(),
-        "the scaffolded project must build:\n{}",
-        String::from_utf8_lossy(&built.stderr)
-    );
-
-    let artifact = root.join("target/wasm32-wasip2/release/my_guard.wasm");
-    assert!(
-        artifact.is_file(),
-        "the component is at {}",
-        artifact.display()
-    );
-
-    // And what it built is admissible, which is the claim a scaffold makes by existing.
-    if let Some(live) = live() {
-        ouro(
-            &live,
-            &repository_root(),
-            &["wasm", "inspect", &artifact.to_string_lossy()],
-        )
-        .ok()
-        .says("world:   ouroboros:capability@0.1.0")
-        .says("imports: log")
-        .says("verdict: admitted");
-    }
-}
-
 fn cargo() -> String {
     std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
 }
@@ -1625,6 +1549,389 @@ fn target_installed() -> bool {
                 && Path::new(String::from_utf8_lossy(&output.stdout).trim()).is_dir()
         })
         .unwrap_or(false)
+}
+
+/// The SDK, as `--sdk-path` names it: `tui/wasm/guest` in this checkout.
+fn sdk_path() -> PathBuf {
+    repository_root().join("tui/wasm/guest")
+}
+
+/// The scaffold is a project that builds, not a project that looks like one — in **both**
+/// shapes, because `--hook` writes a different crate root and a hook scaffold that did not
+/// compile would be the half nobody built.
+///
+/// Only where a wasm toolchain is installed. Where it is not, this says so loudly rather than
+/// passing quietly.
+#[test]
+fn new_scaffolds_a_project_that_builds() {
+    let scratch = Scratch::new("new");
+
+    for (shape, flags, artifact, wants) in [
+        ("capability", vec![], "my_cap", "export_capability!"),
+        ("hook", vec!["--hook"], "my_guard", "export_hook!"),
+    ] {
+        let name = artifact.replace('_', "-");
+        let mut args = vec!["wasm", "new", &name];
+        args.extend(flags);
+        args.push("--sdk-path");
+
+        let output = Command::new(OURO)
+            .args(&args)
+            .arg(sdk_path())
+            .args(["--into"])
+            .arg(scratch.path())
+            .output()
+            .expect("the ouro binary runs");
+        assert!(
+            output.status.success(),
+            "`ouro wasm new` must succeed for the {shape} shape:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let root = scratch.path().join(&name);
+        for expected in ["Cargo.toml", "src/lib.rs", "README.md", ".gitignore"] {
+            assert!(root.join(expected).is_file(), "missing {expected}");
+        }
+        // No `wit/` of its own: the SDK carries the bindings, and a second copy of the world
+        // in every scaffolded project is a copy that drifts.
+        assert!(
+            !root.join("wit").exists(),
+            "a scaffold has no wit/ of its own"
+        );
+
+        // The files are the SDK's template with the table substituted, and nothing survived.
+        for relative in ["Cargo.toml", "src/lib.rs", "README.md"] {
+            let written = std::fs::read_to_string(root.join(relative)).expect("a scaffold file");
+            assert!(
+                !written.contains("{{"),
+                "{relative} carries an unsubstituted placeholder:\n{written}"
+            );
+        }
+
+        let source = std::fs::read_to_string(root.join("src/lib.rs")).expect("the crate root");
+        assert!(
+            source.contains(wants),
+            "the {shape} scaffold must be the {shape} shape:\n{source}"
+        );
+
+        if !target_installed() {
+            let reason = "the wasm32-wasip2 target is not installed; \
+                          `rustup target add wasm32-wasip2` to build the scaffold in this test";
+            assert!(!required(), "{REQUIRE} is set and {reason}");
+            println!("skipped the build half: {reason}");
+            continue;
+        }
+
+        // The artifact is looked for under the project's own `target/`; a `CARGO_TARGET_DIR` in
+        // the developer's (or a harness's) environment would send it elsewhere and fail the test
+        // for a reason that has nothing to do with the scaffold.
+        let built = Command::new(cargo())
+            .args(["build", "--release", "--target", "wasm32-wasip2"])
+            .env_remove("CARGO_TARGET_DIR")
+            .current_dir(&root)
+            .output()
+            .expect("cargo runs");
+        assert!(
+            built.status.success(),
+            "the scaffolded {shape} project must build:\n{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+
+        let component = root.join(format!("target/wasm32-wasip2/release/{artifact}.wasm"));
+        assert!(
+            component.is_file(),
+            "the component is at {}",
+            component.display()
+        );
+
+        // And what it built is admissible with exactly one import, which is the claim a
+        // scaffold makes by existing.
+        if let Some(live) = live() {
+            ouro(
+                &live,
+                &repository_root(),
+                &["wasm", "inspect", &component.to_string_lossy()],
+            )
+            .ok()
+            .says("world:   ouroboros:capability@0.1.0")
+            .says("imports: log")
+            .says("verdict: admitted");
+        }
+    }
+}
+
+/// The SDK path is found by walking up from the **output directory**, and is written relative
+/// to the project so the project moves with the checkout it was scaffolded inside.
+///
+/// The checkout here is a fake one — a `tui/wasm/guest/Cargo.toml` and nothing else — because
+/// the claim under test is the walk, and scaffolding into the real checkout would leave a
+/// project in it.
+#[test]
+fn new_finds_the_sdk_by_walking_up_from_the_output_directory() {
+    let scratch = Scratch::new("sdk-walk");
+    scratch.write("checkout/tui/wasm/guest/Cargo.toml", "[package]\n");
+    let into = scratch.path().join("checkout/a/b");
+    std::fs::create_dir_all(&into).expect("a nested output directory");
+
+    let output = Command::new(OURO)
+        .args(["wasm", "new", "walked", "--into"])
+        .arg(&into)
+        .output()
+        .expect("the ouro binary runs");
+    assert!(
+        output.status.success(),
+        "`ouro wasm new` must find the checkout above its output directory:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cargo = std::fs::read_to_string(into.join("walked/Cargo.toml")).expect("the manifest");
+    assert!(
+        cargo.contains(r#"path = "../../../tui/wasm/guest""#),
+        "the SDK path must be relative to the project it was written into:\n{cargo}"
+    );
+}
+
+/// With no checkout above the output directory there is nothing to guess: `ouroboros-guest` is
+/// unpublished, so a `path =` that is not true is a project that does not build. This refuses
+/// and names the flag that answers it.
+///
+/// Delete the `bail!` at the end of `sdk_path_for` and this goes red — with a scaffolded
+/// project whose `Cargo.toml` points at nothing.
+#[test]
+fn new_refuses_when_no_checkout_is_above_it_and_names_the_flag() {
+    let scratch = Scratch::new("no-sdk");
+
+    let output = Command::new(OURO)
+        .args(["wasm", "new", "orphan", "--into"])
+        .arg(scratch.path())
+        .output()
+        .expect("the ouro binary runs");
+
+    assert!(
+        !output.status.success(),
+        "a scaffold with nowhere to reach the SDK must refuse"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--sdk-path"), "{stderr}");
+    assert!(
+        !scratch.path().join("orphan").exists(),
+        "a refused scaffold leaves nothing behind"
+    );
+}
+
+// ------------------------------------------------------------------------------- the sign
+
+/// `ouro wasm sign` reads the component's import list with the operator's own helper, and the
+/// parameters it would send carry the helper's answer.
+///
+/// `--dry-run` is what makes this a test rather than a deploy: no socket is opened, so the
+/// assertion is on the parameter object itself. The node still never reads the bytes (D15) —
+/// what changed in W10b is which side of the wire types the list, not which side parses.
+///
+/// Delete the `imports_of(args)` call in `imports` and this goes red: `imports` would be the
+/// empty list, which is a manifest that does not describe the component and a `wasm.sign` the
+/// cross-check refuses at stage.
+#[test]
+fn sign_reads_the_imports_from_the_component_itself() {
+    let Some(live) = live() else { return };
+    let guest = live.guest.to_string_lossy().into_owned();
+
+    let params = ouro(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "sign",
+            &guest,
+            "--name",
+            "echo",
+            "--author",
+            "ops",
+            "--dry-run",
+        ],
+    )
+    .ok()
+    .json();
+
+    assert_eq!(params["imports"], json!(["log"]));
+    assert_eq!(params["name"], "echo");
+    assert_eq!(params["author"], "ops");
+    // Nothing was uploaded, and the parameter says so rather than carrying a plausible id.
+    assert_eq!(params["upload"], Value::Null);
+}
+
+/// `--import` still overrides the helper, and `--no-local-helper` refuses instead of
+/// resolving one — which is the pair a machine with no helper needs.
+///
+/// Both run with `$OUROBOROS_WASM_HELPER` removed, so a command that tried to resolve one
+/// would have to find the sibling or fail. The refusal's text is the assertion either way:
+/// it must be about the flags, not about a missing binary.
+#[test]
+fn sign_can_be_told_the_imports_and_told_not_to_look() {
+    let Some(live) = live() else { return };
+    let guest = live.guest.to_string_lossy().into_owned();
+
+    let declared = ouro_with(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "sign",
+            &guest,
+            "--name",
+            "echo",
+            "--author",
+            "ops",
+            "--no-local-helper",
+            "--import",
+            "log",
+            "--dry-run",
+        ],
+        |command| {
+            command.env_remove(HELPER_ENV);
+        },
+    );
+    assert_eq!(declared.ok().json()["imports"], json!(["log"]));
+
+    let refused = ouro_with(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "sign",
+            &guest,
+            "--name",
+            "echo",
+            "--author",
+            "ops",
+            "--no-local-helper",
+            "--dry-run",
+        ],
+        |command| {
+            command.env_remove(HELPER_ENV);
+        },
+    );
+    refused
+        .refused()
+        .stderr_says("--import")
+        .stderr_says("--imports-from");
+}
+
+/// A component this runtime would not admit is not signed, and the refusal is the helper's own
+/// — named, not paraphrased. A signature over a component no node will admit is a signature
+/// nobody can use, and producing one costs a signing service a policy decision it journals.
+///
+/// The component is built here rather than checked in, for the reason the other hand-built
+/// ones are: an opaque `.wasm` in the repository is a blob nobody reviews.
+///
+/// Delete the `helper.load(...)` call in `imports_of` and this goes red: `inspect` alone
+/// succeeds on these bytes and would hand `["wasi:cli/environment", …]` to `wasm.sign`.
+#[test]
+fn sign_refuses_a_component_the_helper_will_not_admit() {
+    let Some(live) = live() else { return };
+    let scratch = Scratch::new("sign-world");
+    let path = scratch.path().join("environment.wasm");
+    std::fs::write(&path, importing_the_environment()).expect("a component on disk");
+
+    ouro(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "sign",
+            &path.to_string_lossy(),
+            "--name",
+            "envy",
+            "--author",
+            "ops",
+            "--dry-run",
+        ],
+    )
+    .refused()
+    .stderr_says("refused by your own helper")
+    .stderr_says("undefined_import");
+}
+
+/// The request `sign` makes of the helper, recorded by a helper that is a shell script.
+///
+/// Two things the assertions above cannot see: that the method is `inspect` (and not, say, an
+/// `instantiate` that would *run* the component an operator has not signed yet), and that the
+/// path it names is the component's. The script answers a world and one import, so the
+/// parameters come back from a helper that is entirely this test's.
+#[cfg(unix)]
+#[test]
+fn sign_asks_its_helper_to_inspect_the_file_and_nothing_more() {
+    let Some(live) = live() else { return };
+    let scratch = Scratch::new("sign-script");
+    let component = scratch.write("thing.wasm", "\0asm\u{d}\0\u{1}\0");
+    let log = scratch.path().join("requests.jsonl");
+    let helper = scratch.path().join("ouro-wasm");
+
+    plant_executable(
+        &helper,
+        &format!(
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> {log}
+  case "$line" in
+    *'"method":"inspect"'*)
+      printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"sha256":"ab","world":"ouroboros:capability@0.1.0","imports":["log"],"exports":["describe"],"size":8,"shape":{{}}}}}}' ;;
+    *'"method":"load"'*)
+      printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"world":"ouroboros:capability@0.1.0"}}}}' ;;
+    *)
+      printf '%s\n' '{{"jsonrpc":"2.0","id":3,"error":{{"code":-32601,"message":"this helper answers inspect and load","data":{{"refusal":"unexpected_method"}}}}}}' ;;
+  esac
+done
+"#,
+            log = log.display()
+        ),
+    );
+
+    let params = ouro_with(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "sign",
+            &component.to_string_lossy(),
+            "--name",
+            "thing",
+            "--author",
+            "ops",
+            "--helper",
+            &helper.to_string_lossy(),
+            "--dry-run",
+        ],
+        |command| {
+            command.env_remove(HELPER_ENV);
+        },
+    )
+    .ok()
+    .json();
+
+    assert_eq!(params["imports"], json!(["log"]));
+
+    let recorded = std::fs::read_to_string(&log).expect("the helper recorded what it was asked");
+    let asked: Vec<Value> = recorded
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("each request is one JSON line"))
+        .collect();
+
+    let methods: Vec<&str> = asked
+        .iter()
+        .map(|request| request["method"].as_str().unwrap_or("?"))
+        .collect();
+    assert_eq!(
+        methods,
+        vec!["inspect", "load"],
+        "sign asks a helper two questions about a file and never runs it: {methods:?}"
+    );
+    assert_eq!(
+        asked[0]["params"]["path"].as_str(),
+        Some(component.to_string_lossy().as_ref()),
+        "the path asked about is the component named on the command line"
+    );
 }
 
 // ------------------------------------------------------------------- hand-built components

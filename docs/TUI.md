@@ -328,7 +328,7 @@ reading.
 | `wasm.status` `{node?}` | `Wasm.Surface.status/1` — WebAssembly containment readiness on the node, starting nothing: `helper` (disk `present`, `path`, `world`, `phase` of `absent`/`idle`/`handshaking`/`ready`/`broken`, live instance counts, `hook_components` against `hook_component_budget`, and the accepted `doctor` report's `usable`/`worlds`/`wasmtime`/`limits`), `store` (root, held count and bytes, budget, how many a rollout protects), `rollouts` (lane-W counts by state) and `boot`. Reads a pool process that already exists and never asks for one, so a node that never built the helper answers as readily as one running it — absence is the operator's opt-in, not a fault. A fact this node cannot answer is `null` rather than a missing key or `false`: an unreadable store and an empty one are different. Node-routed over a bounded `:erpc` like `computer_use.status`. `ouro wasm doctor` is the surface, and it has no `--probe` — starting the helper to see whether it starts is what a read-scope readiness verb must not do |
 | `wasm.list` `{node?}` | `Wasm.Surface.list/1` — every lane-W rollout the register holds (`artifact_id`, `name` with the register's `wasm/` prefix removed, `component_sha256`, `epoch`, `state`, `nodes` as strings, timestamps) and every component the store holds (`sha256`, `size`, `mtime`). Both bounded and sorted by their own identity, with `rollout_count`/`component_count` beside them so a cut list is visible as one. Carries no `detail` and no `eval_report`: those are arbitrary deployment terms and this is a listing. There is still no `wasm.drop`, `wasm.load`, `wasm.instantiate` or `wasm.call` — those would be a socket deciding what this node runs |
 | `wasm.upload` `{upload?, offset, data, final?, node?}` | `Wasm.Upload.append/5` (operate) — the transport for bytes a JSON frame cannot carry (W12, D16): a component is bounded at 16 MiB and a frame at `OUROBOROS_GATEWAY_MAX_FRAME`, a mebibyte by default. `data` is base64 of at most 512 KiB, bounded before it is decoded; `offset` must equal what the node already holds and a mismatch answers `-32602` naming the offset it has. Omitting `upload` opens one and the reply names it; `final` closes it and the reply carries the sha256 of everything received. Files under `<data_dir>/wasm/uploads`; at most eight in flight per node, enforced by `O_CREAT|O_EXCL` slot files rather than by a count; reclaimed ten minutes after the last frame or thirty minutes after the slot was claimed, whichever comes first; taken by an atomic rename so two frames naming one upload cannot both receive the bytes; and no symlink is followed on the way in or out. An `offset` refusal carries the held offset in `data` so a client resumes rather than restarts. An upload carries no authority: it is verified by whichever verb consumes it, and consumed once |
-| `wasm.sign` `{upload, name, author, imports, language?, source_sha256?, start_config?, eval?, node?}` | `Wasm.Deploy.sign/2` (operate) — builds a manifest over the uploaded bytes and hands it to `Upgrade.Signing.Service` on the `:signer` node, which applies the whole lane-W policy (world, recomputed digest and size, imports ⊆ the world's, provenance, a validated eval spec by default, a `start.id` bound to the name) and journals the decision. The epoch is allocated with `Upgrade.Epoch.next/2` over the connected cluster and is **not** a parameter: a client-chosen number at the register's plausibility ceiling wedged lane W on that node durably (D15). `imports` is **required** and the client computes it with the operator's own helper (`ouro wasm inspect --json`) — this node never parses unsigned bytes — and a list that does not match what the component imports is refused at stage by the cross-check. Answers the `.ouro-wasm` bundle's **prefix** — header and envelope — not the bundle: the client already holds the bytes it uploaded. A node with no signing service answers `-32004` naming `OUROBOROS_SIGNING_NODE` |
+| `wasm.sign` `{upload, name, author, imports, language?, source_sha256?, start_config?, eval?, node?}` | `Wasm.Deploy.sign/2` (operate) — builds a manifest over the uploaded bytes and hands it to `Upgrade.Signing.Service` on the `:signer` node, which applies the whole lane-W policy (world, recomputed digest and size, imports ⊆ the world's, provenance, a validated eval spec by default, a `start.id` bound to the name) and journals the decision. The epoch is allocated with `Upgrade.Epoch.next/2` over the connected cluster and is **not** a parameter: a client-chosen number at the register's plausibility ceiling wedged lane W on that node durably (D15). `imports` is **required** and the client computes it with the operator's own helper — `ouro wasm sign` starts one itself, and `ouro wasm inspect --json` piped into `--imports-from` is the explicit form — because this node never parses unsigned bytes; and a list that does not match what the component imports is refused at stage by the cross-check. Answers the `.ouro-wasm` bundle's **prefix** — header and envelope — not the bundle: the client already holds the bytes it uploaded. A node with no signing service answers `-32004` naming `OUROBOROS_SIGNING_NODE` |
 | `wasm.deploy` `{upload, nodes?, node?}` | `Wasm.Deploy.deploy/3` (operate) — parses the uploaded bundle under its bounds and verifies it against the **driving node's own** `upgrade_trust_policy` before the store, the helper or the rollout register hears about it, then `Wasm.Rollout.deploy/4` with every gate unchanged. A rollout that ran answers with its state — `live`, `rolled_back` or `quarantined` — plus per-node evidence for stage, probe and eval; only a rollout that never started is an error. `outcome: unknown` on a gateway ceiling: the rollout does not stop because this socket did |
 | `wasm.rollback` `{name, node?}` | `Wasm.Deploy.rollback/2` (operate) — stops the `wasm/<name>` wrapper on every node the live entry names and marks the entry, by the same `withdraw/2` the eval-failure branch uses: a wrapper running some other component's sha is left alone and reported `unchanged`. `rolled_back` only where every node proved **absence**, else `quarantined` — and `unchanged` is not absence, so a capability whose durable id is still answering is `quarantined` rather than reported as rolled back. Component bytes stay in the store (D6) |
 | `ledger.export` `{since?, node?}` | The same query in JSONL, bounded to the ledger's own maximum (500), ordered ascending, with a SHA-256 chain: `hash(n) = sha256(hash(n-1) ‖ line(n))` where `hash(-1)` is `seed` (64 zeros) and `line` is the exact text its hash covers. A client verifies by hashing the strings it was handed, in order — nothing about how this runtime encodes an entry has to be reimplemented. **The chain is computed for the answer and stored nowhere.** It makes an export self-verifying; it is not tamper-evident storage, and a node that rewrote its own checkpoint would produce a perfectly consistent chain over the rewritten history |
@@ -994,10 +994,17 @@ ouro wasm doctor [--json] [--addr HOST:PORT] [--token-file PATH]
                       which starts nothing — and there is no --probe and no
                       --helper, because a readiness surface must not spawn the
                       thing it is reporting on
-ouro wasm new NAME [--hook] [--into DIR]
-                      scaffold a component project that builds, from a template
-                      embedded in this binary. --hook writes one that reads a hook
-                      payload and answers the verdict contract
+ouro wasm new NAME [--hook] [--into DIR] [--summary TEXT] [--sdk-path PATH]
+                      scaffold a component project that builds, from the guest
+                      SDK's own template (tui/wasm/guest/template) embedded in
+                      this binary — one source of truth, and a test compares the
+                      embedded bytes with the files on disk. --hook writes the
+                      Hook shape, which reads a hook payload and answers the
+                      verdict contract; without it, the Capability shape.
+                      ouroboros-guest is unpublished, so the generated Cargo.toml
+                      reaches it by path: --sdk-path names it, and omitted, this
+                      walks up from --into looking for a checkout's
+                      tui/wasm/guest and refuses rather than guessing
 ouro wasm inspect FILE [--json] [--helper PATH]
                       what a component declares, how its shape sits against the
                       bounds that decide whether it compiles at all, and one
@@ -1029,8 +1036,24 @@ ouro wasm check [--workspace DIR] [--json] [--helper PATH]
                       workspace — path confinement, byte ceiling, world, the
                       eight-component budget shared across both tables — and exit
                       non-zero on any refusal. Instantiates nothing
-                      The five commands above start a local ouro-wasm and need no
-                      node; `doctor` asks a node and starts nothing. The helper is
+ouro wasm sign FILE --name NAME --author WHO [--import NAME]...
+         [--imports-from PATH|-] [--no-local-helper] [--dry-run]
+         [--eval PATH] [--start-config JSON] [--out PATH] [--json]
+         [--helper PATH] [--node MACHINE]
+                      sign a component into a .ouro-wasm bundle. The node never
+                      parses the bytes to find out what they import (docs/WASM.md
+                      D15), so this end declares the import list — and reads it
+                      for itself with a local ouro-wasm, resolved by the same
+                      three-place rule below. A component that helper will not
+                      admit is refused here, naming the helper's own refusal,
+                      rather than at stage. --import and --imports-from override
+                      it; --no-local-helper starts no helper and requires one of
+                      them; --dry-run prints the wasm.sign parameters and opens
+                      no socket
+                      new, inspect, run, hook and check need no node at all;
+                      `doctor` asks a node and starts nothing; `sign` does both,
+                      because the import list is this side's to declare and the
+                      signature is the node's to make. The helper is
                       found in exactly three places — --helper, an absolute
                       $OUROBOROS_WASM_HELPER, or beside the resolved ouro binary.
                       Nothing cwd-derived unless you said so: you may point at a

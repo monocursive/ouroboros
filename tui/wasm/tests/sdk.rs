@@ -6,7 +6,7 @@
 //! author who writes nothing but their own logic and calls one macro — do they get a component
 //! in this world, and is its whole authority still one import?
 //!
-//! Five artifacts, each built from source that ships in this repository:
+//! Six artifacts, each built from source that ships in this repository:
 //!
 //!   * `guest/examples/counter` — a `Capability`, with a `describe` carrying every optional
 //!     field of contract C1.
@@ -15,8 +15,9 @@
 //!   * `guest/examples/lintcheck` — a `Check`, whose contract runs the other way: an empty
 //!     reply is the **pass**.
 //!   * `guest/examples/verdicts` — every `Verdict` variant, selected by config.
-//!   * `guest/template` — the scaffold `ouro wasm new` will write (W10), with its placeholders
-//!     substituted here exactly as that command will substitute them. A template that does not
+//!   * `guest/template` — the scaffold `ouro wasm new` writes, in **both** shapes (a
+//!     `Capability` from `src/lib.rs`, a `Hook` from `src/lib.hook.rs`), with its placeholders
+//!     substituted here exactly as that command substitutes them. A template that does not
 //!     compile is a `new` command that hands somebody a broken project, and nothing else in
 //!     this repository would have noticed.
 //!
@@ -177,45 +178,64 @@ fn build(project: &Path, artifact: &str) -> PathBuf {
     component
 }
 
-/// The three files a scaffolded project is made of. `PLACEHOLDERS.md` beside them documents the
-/// template for whoever substitutes it and is deliberately not one of them.
-const SCAFFOLD_FILES: [&str; 3] = ["Cargo.toml", "README.md", "src/lib.rs"];
+/// Every template file that carries placeholders, which is every one `PLACEHOLDERS.md`
+/// documents a substitution for. `PLACEHOLDERS.md` itself documents the template for whoever
+/// substitutes it and is deliberately not one of them; `gitignore` carries no placeholder and
+/// is copied byte for byte, so it is not one either.
+const SCAFFOLD_FILES: [&str; 4] = ["Cargo.toml", "README.md", "src/lib.rs", "src/lib.hook.rs"];
+
+/// The two shapes `ouro wasm new` writes, and the template file each takes its `src/lib.rs`
+/// from. Exactly one is written into a project: a scaffold has one crate root.
+const SHAPES: [(&str, &str); 2] = [("capability", "src/lib.rs"), ("hook", "src/lib.hook.rs")];
 
 /// `tui/wasm/guest/template`.
 fn template() -> PathBuf {
     root().join("guest").join("template")
 }
 
-/// The scaffold template, substituted into a temporary directory exactly as `ouro wasm new`
-/// will substitute it, and the directory it landed in.
+/// The scaffold template in one shape, substituted into a directory as `ouro wasm new`
+/// substitutes it, and the directory it landed in.
 ///
-/// `{{name_snake}}` is replaced before `{{name}}`, because a plain textual pass in the other
-/// order turns the first into `<name>_snake`. That ordering is the template's contract and
-/// `PLACEHOLDERS.md` says so.
-fn scaffold(name: &str, type_name: &str) -> PathBuf {
+/// A chain of `replace` calls here where the command itself does one pass over the template.
+/// The two agree on every substitution this table can produce — no placeholder is a substring
+/// of another and no value below holds a `{{` — and this file's claim is about what the
+/// template *compiles into*, which is the same text either way. `wasm_cli.rs`'s
+/// `an_unknown_placeholder_is_refused_and_a_value_is_never_re_substituted` is where the
+/// command's own pass is pinned.
+fn scaffold(name: &str, type_name: &str, shape: &str) -> PathBuf {
     let sdk = root().join("guest");
     let substitutions = [
         ("{{name_snake}}", name.replace('-', "_")),
         ("{{name}}", name.to_string()),
         ("{{Name}}", type_name.to_string()),
-        ("{{summary}}", "A scaffolded capability.".to_string()),
+        ("{{summary}}", "A scaffolded component.".to_string()),
         ("{{sdk_path}}", sdk.to_string_lossy().into_owned()),
     ];
 
-    // A fixed path under the SDK's own (gitignored, CI-cached) build directory rather than a
-    // fresh temp directory per run. Scaffolding into `temp_dir()` meant this test compiled
-    // serde_json, dlmalloc and wit-bindgen from scratch on every single run and on every CI
-    // job, because nothing could cache a directory whose name carried a nanosecond. The three
-    // files are rewritten each time, so a change to the template is still picked up; only
-    // `target/` survives.
+    let source = SHAPES
+        .iter()
+        .find(|(named, _)| *named == shape)
+        .map(|(_, file)| *file)
+        .unwrap_or_else(|| panic!("{shape} is not a scaffold shape"));
+
+    // A fixed path per shape under the SDK's own (gitignored, CI-cached) build directory rather
+    // than a fresh temp directory per run. Scaffolding into `temp_dir()` meant this test
+    // compiled serde_json and the SDK from scratch on every single run and on every CI job,
+    // because nothing could cache a directory whose name carried a nanosecond. The files are
+    // rewritten each time, so a change to the template is still picked up; only `target/`
+    // survives.
     let target = root()
         .join("guest")
         .join("target")
-        .join("template-scaffold");
+        .join(format!("template-scaffold-{shape}"));
 
     std::fs::create_dir_all(target.join("src")).expect("the scaffold directory is created");
 
-    for relative in SCAFFOLD_FILES {
+    for (relative, into) in [
+        ("Cargo.toml", "Cargo.toml"),
+        ("README.md", "README.md"),
+        (source, "src/lib.rs"),
+    ] {
         let mut written = std::fs::read_to_string(template().join(relative))
             .unwrap_or_else(|error| panic!("the template is missing {relative}: {error}"));
 
@@ -228,7 +248,7 @@ fn scaffold(name: &str, type_name: &str) -> PathBuf {
             "{relative} still holds an unsubstituted placeholder after scaffolding:\n{written}"
         );
 
-        std::fs::write(target.join(relative), written).expect("the scaffold file is written");
+        std::fs::write(target.join(into), written).expect("the scaffold file is written");
     }
 
     target
@@ -794,7 +814,7 @@ fn a_hook_that_cannot_use_its_config_says_so_at_instantiate() {
     );
 }
 
-/// The scaffold `ouro wasm new` will write (W10), substituted and built here so that command
+/// The scaffold `ouro wasm new` writes (W10b), substituted and built here so that command
 /// cannot ship a template that does not compile.
 ///
 /// It also answers, because a template that compiles and cannot hold a message would be a
@@ -805,7 +825,7 @@ fn the_scaffold_template_builds_into_a_component_in_this_world() {
         return;
     }
 
-    let project = scaffold("my-capability", "MyCapability");
+    let project = scaffold("my-capability", "MyCapability", "capability");
     let component = build(&project, "my_capability");
 
     let mut helper = Helper::spawn();
@@ -817,12 +837,52 @@ fn the_scaffold_template_builds_into_a_component_in_this_world() {
     assert_eq!(reply["messages"], 1);
 }
 
+/// The other shape `ouro wasm new --hook` writes, held to the same two claims and to the one
+/// that is only a hook's: the reply is the verdict contract `hooks.ex` reads back.
+///
+/// A hook scaffold that compiled and answered something `parse_output/1` ignores would be a
+/// `--hook` flag that hands an author a component the seam silently discards, and the shape of
+/// that failure is a hook nobody notices is not running.
+#[test]
+fn the_hook_scaffold_builds_and_answers_the_verdict_contract() {
+    if !toolchain_ready("the hook scaffold template") {
+        return;
+    }
+
+    let project = scaffold("my-guard", "MyGuard", "hook");
+    let component = build(&project, "my_guard");
+
+    let mut helper = Helper::spawn();
+    let inspected = helper.admit("scaffolded-hook", &component, "{}");
+    in_this_world_with_only_log(&inspected, "the hook scaffold template");
+
+    // The tool the scaffold asks about by default, on the event it is written for.
+    let reply = helper.send_json(
+        "scaffolded-hook",
+        json!({ "hook_event_name": "PreToolUse", "tool_name": "bash" }),
+    );
+    assert_eq!(
+        reply["hookSpecificOutput"]["permissionDecision"], "ask",
+        "the hook scaffold asks about its configured tool: {reply}"
+    );
+
+    // Every other tool is silence, which is the empty reply and not an `allow`.
+    let quiet = helper.send(
+        "scaffolded-hook",
+        r#"{"hook_event_name":"PreToolUse","tool_name":"read"}"#,
+    );
+    assert_eq!(
+        quiet, "",
+        "a hook with no opinion answers nothing at all, not an allow"
+    );
+}
+
 /// Every placeholder the template actually uses is one `PLACEHOLDERS.md` documents.
 ///
-/// W10 reads that table to write `ouro wasm new`, so a placeholder added to a template file and
-/// not to the table is a substitution that command will not make — and the scaffolded project
-/// would carry a literal `{{…}}` into somebody's `Cargo.toml`. This test needs no toolchain: it
-/// is the one thing here a machine without `wasm32-wasip2` still checks.
+/// `ouro wasm new` reads that table, so a placeholder added to a template file and not to the
+/// table is a substitution that command will not make — and the scaffolded project would carry
+/// a literal `{{…}}` into somebody's `Cargo.toml`. This test needs no toolchain: it is the one
+/// thing here a machine without `wasm32-wasip2` still checks.
 #[test]
 fn every_placeholder_the_template_uses_is_documented() {
     let table = std::fs::read_to_string(template().join("PLACEHOLDERS.md"))

@@ -1992,35 +1992,46 @@ fn summary(entries: &[Entry]) -> String {
 
 // ======================================================================== `ouro wasm new`
 
-/// The scaffold, embedded rather than fetched: a template a command downloads is a command
-/// that runs somebody else's code the first time it is used.
+/// The scaffold, embedded rather than fetched: a command that downloads its template is a
+/// command that runs somebody else's code the first time it is used.
 ///
-// TODO(W9): replace with the SDK template at `tui/wasm/guest/template/`. W9 is building the
-// guest SDK and its template in parallel with this slice, so this is generated from today's
-// `test/support/wasm/echo-guest/` shape — no_std, raw wit-bindgen, one allocator, one panic
-// handler — and is deliberately the same thing an author would otherwise copy out of the
-// acceptance guest by hand.
-const TEMPLATE_CARGO: &str = include_str!("wasm_template/Cargo.toml.in");
-const TEMPLATE_LIB: &str = include_str!("wasm_template/lib.rs.in");
-const TEMPLATE_CAPABILITY_BODY: &str = include_str!("wasm_template/capability_body.rs.in");
-const TEMPLATE_HOOK_BODY: &str = include_str!("wasm_template/hook_body.rs.in");
-const TEMPLATE_README: &str = include_str!("wasm_template/README.md.in");
-const TEMPLATE_GITIGNORE: &str = include_str!("wasm_template/gitignore.in");
+/// These are the SDK's own template files at `tui/wasm/guest/template/`, which is the one
+/// place a scaffold is written and reviewed (W10b). `include_str!` makes them part of this
+/// binary at compile time; `the_embedded_template_is_the_template_on_disk` reads the same
+/// paths at run time and compares, so this cannot quietly become a copy that drifted — which
+/// is what the raw-`wit-bindgen` template under `src/wasm_template/` had become.
+const TEMPLATE_CARGO: &str = include_str!("../wasm/guest/template/Cargo.toml");
+const TEMPLATE_README: &str = include_str!("../wasm/guest/template/README.md");
+const TEMPLATE_CAPABILITY: &str = include_str!("../wasm/guest/template/src/lib.rs");
+const TEMPLATE_HOOK: &str = include_str!("../wasm/guest/template/src/lib.hook.rs");
 
-/// The world, byte for byte the file the helper enforces (`tui/wasm/wit/capability.wit`).
-///
-/// A copy, because a generated project has to build on a machine that has never seen this
-/// repository and a relative path up into somebody else's tree is not a dependency an author
-/// can honour. A copy is a drift risk, so `the_scaffolded_world_is_the_world_the_helper_speaks`
-/// compares the two and fails when they part.
-const TEMPLATE_WIT: &str = include_str!("wasm_template/capability.wit.in");
+/// Written as `.gitignore`. Dotless in the template directory so it does not become an ignore
+/// rule for the template itself.
+const TEMPLATE_GITIGNORE: &str = include_str!("../wasm/guest/template/gitignore");
+
+/// The template's own path inside a checkout, which is also what the SDK walk below looks for.
+const SDK_RELATIVE: [&str; 3] = ["tui", "wasm", "guest"];
 
 /// `ouro wasm new <name>`: a component project that builds, in the shape this world wants.
 ///
-/// The world file is written into the project rather than referenced out of a checkout: a
-/// generated project must build on a machine that has never seen this repository, and a
-/// relative path up into somebody else's tree is not a dependency an author can honour.
-pub fn new<O: Write>(into: &Path, name: &str, hook: bool, out: &mut O) -> Result<()> {
+/// Two shapes over one world: a `Capability` by default, a `Hook` under `--hook`. Both are the
+/// SDK's template with the table in `tui/wasm/guest/template/PLACEHOLDERS.md` substituted, and
+/// the substitution order is that table's contract — `{{name_snake}}` before `{{name}}`,
+/// because a plain textual pass in the other order turns the first into `<name>_snake`.
+///
+/// `sdk_path` is where the generated `Cargo.toml` reaches `ouroboros-guest`. It is not a
+/// dependency an author can honour by magic — the crate is unpublished, so it is a path on
+/// this filesystem — and when the caller names none it is computed by walking up from the
+/// **output directory** to a checkout. See [`sdk_path_for`] for why that walk is allowed to be
+/// cwd-relative when nothing else here is.
+pub fn new<O: Write>(
+    into: &Path,
+    name: &str,
+    hook: bool,
+    summary: Option<&str>,
+    sdk_path: Option<&Path>,
+    out: &mut O,
+) -> Result<()> {
     let name = name.trim();
     if name.is_empty() || !name.chars().all(is_name_character) {
         bail!(
@@ -2034,13 +2045,34 @@ pub fn new<O: Write>(into: &Path, name: &str, hook: bool, out: &mut O) -> Result
         bail!("{} already exists", root.display());
     }
 
+    let sdk = match sdk_path {
+        // A path the developer named is honoured wherever it points, verbatim: `--sdk-path`
+        // is a person choosing, which is the only thing that may choose.
+        Some(named) => named.to_string_lossy().into_owned(),
+        None => sdk_path_for(&root)?,
+    };
+
+    let summary = summary
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+        .unwrap_or(if hook {
+            "A hook component."
+        } else {
+            "A capability component."
+        });
+
     let files = [
-        ("Cargo.toml", TEMPLATE_CARGO.to_string()),
-        ("src/lib.rs", scaffold_source(hook)),
-        // Verbatim: the world is the artifact of record and is not this command's to reword.
-        ("wit/capability.wit", TEMPLATE_WIT.to_string()),
-        ("README.md", TEMPLATE_README.to_string()),
-        (".gitignore", TEMPLATE_GITIGNORE.to_string()),
+        ("Cargo.toml", TEMPLATE_CARGO),
+        (
+            "src/lib.rs",
+            if hook {
+                TEMPLATE_HOOK
+            } else {
+                TEMPLATE_CAPABILITY
+            },
+        ),
+        ("README.md", TEMPLATE_README),
+        (".gitignore", TEMPLATE_GITIGNORE),
     ];
 
     for (relative, template) in files {
@@ -2049,17 +2081,18 @@ pub fn new<O: Write>(into: &Path, name: &str, hook: bool, out: &mut O) -> Result
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("could not create {}", parent.display()))?;
         }
-        std::fs::write(&path, substitute(&template, name))
+        std::fs::write(&path, substitute(template, name, summary, &sdk)?)
             .with_context(|| format!("could not write {}", path.display()))?;
     }
 
     writeln!(
         out,
-        "{}\n  a {} component in {}\n\n  cargo build --release --target wasm32-wasip2\n  ouro \
-         wasm inspect target/wasm32-wasip2/release/{}.wasm",
+        "{}\n  a {} component in {}, on ouroboros-guest at {}\n\n  cargo build --release \
+         --target wasm32-wasip2\n  ouro wasm inspect target/wasm32-wasip2/release/{}.wasm",
         root.display(),
         if hook { "hook" } else { "capability" },
         crate_world(),
+        clean(&sdk),
         crate_name(name),
     )?;
     out.flush()?;
@@ -2079,43 +2112,138 @@ fn crate_name(name: &str) -> String {
     name.replace('-', "_")
 }
 
-/// The one source file, with the half that differs between a capability and a hook spliced in.
-/// One boilerplate rather than two: the allocator, the panic handler, `cabi_realloc` and the
-/// instance state are identical for both, and two copies of them is two copies to keep right.
-fn scaffold_source(hook: bool) -> String {
-    let (body, summary, intro, loop_line) = if hook {
-        (
-            TEMPLATE_HOOK_BODY,
-            "a hook component",
-            "Declared in a workspace's `ouroboros.toml` as `[[hooks]] component = \"…\"`. It is \
-             admitted from a workspace nobody trusts, because its whole authority is a log line \
-             and a verdict the runtime then narrows (docs/WASM.md D8).",
-            "`ouro wasm hook target/wasm32-wasip2/release/{{crate_name}}.wasm --event PreToolUse \
-             --payload payload.json` prints what this component said and what the node would \
-             keep of it.",
-        )
-    } else {
-        (
-            TEMPLATE_CAPABILITY_BODY,
-            "a capability component",
-            "One string in, one string out, per message, with state held by the instance. The \
-             host stands one up with `init` and then sends it messages.",
-            "`ouro wasm run target/wasm32-wasip2/release/{{crate_name}}.wasm --config '{}' \
-             --message '{\"hello\":\"world\"}'` sends it a message.",
-        )
-    };
+/// `{{Name}}`: the project name as a Rust type, UpperCamelCase.
+///
+/// A name may begin with a digit — `Wasm.Artifact.name?/1` allows it and so does this command
+/// — and `9Lives` is not an identifier, so a leading non-letter gets a `Component` in front of
+/// it rather than a project that does not parse.
+fn type_name(name: &str) -> String {
+    let mut camel = String::with_capacity(name.len());
+    let mut capitalise = true;
 
-    TEMPLATE_LIB
-        .replace("{{handle_message}}", body)
-        .replace("{{summary}}", summary)
-        .replace("{{intro}}", intro)
-        .replace("{{loop}}", loop_line)
+    for character in name.chars() {
+        if character == '-' || character == '_' {
+            capitalise = true;
+            continue;
+        }
+        if capitalise {
+            camel.extend(character.to_uppercase());
+            // A digit has no upper case, so it does not consume the pending capital: `9lives`
+            // is `9Lives` and not `9lives`.
+            capitalise = !character.is_alphabetic();
+        } else {
+            camel.push(character);
+        }
+    }
+
+    match camel.chars().next() {
+        Some(first) if first.is_ascii_alphabetic() => camel,
+        _ => format!("Component{camel}"),
+    }
 }
 
-fn substitute(template: &str, name: &str) -> String {
-    template
-        .replace("{{name}}", name)
-        .replace("{{crate_name}}", &crate_name(name))
+/// Where the generated `Cargo.toml` should reach `ouroboros-guest`, as a path relative to the
+/// project being created.
+///
+/// The walk starts at the project's **parent** — the directory the developer asked for — and
+/// climbs looking for `tui/wasm/guest/Cargo.toml`. Nothing about the `ouro` binary's location
+/// or the helper's is consulted, and that asymmetry is deliberate rather than an oversight:
+/// D14 forbids deriving a *helper* from the working directory because the helper is the
+/// containment boundary and gets executed. This is a `path =` line in a `Cargo.toml` that a
+/// person then reads and builds themselves, in a project this command just created for them,
+/// with the SDK's own source on the other end. A cwd-relative search is the right answer for
+/// it, and the wrong answer for the other thing.
+///
+/// Where the walk finds nothing there is no guess to make: the crate is unpublished, so a
+/// `Cargo.toml` without a true path is a project that does not build, and refusing with the
+/// flag named is more use than a scaffold that fails later with a message about a missing
+/// manifest.
+fn sdk_path_for(root: &Path) -> Result<String> {
+    let parent = root.parent().unwrap_or(Path::new("."));
+    // Canonicalised so the walk is over real directories: `.` and `a/../b` have ancestors that
+    // are not the ancestors they look like.
+    let from = std::fs::canonicalize(parent)
+        .with_context(|| format!("could not resolve {}", parent.display()))?;
+
+    for (climbed, ancestor) in from.ancestors().enumerate() {
+        let candidate = SDK_RELATIVE
+            .iter()
+            .fold(ancestor.to_path_buf(), |path, part| path.join(part));
+
+        if candidate.join("Cargo.toml").is_file() {
+            // Relative to the project directory, which is one below `from`: so one `..` for
+            // the project itself plus one per ancestor climbed.
+            let mut relative = PathBuf::new();
+            for _ in 0..=climbed {
+                relative.push("..");
+            }
+            for part in SDK_RELATIVE {
+                relative.push(part);
+            }
+            return Ok(relative.to_string_lossy().into_owned());
+        }
+    }
+
+    bail!(
+        "no ouroboros checkout above {}, so there is nowhere for `ouroboros-guest` to come \
+         from. It is not published to crates.io yet, so a scaffolded project reaches it by \
+         path: pass `--sdk-path <PATH>` naming a checkout's `tui/wasm/guest`.",
+        from.display()
+    )
+}
+
+/// The template's substitution table (`tui/wasm/guest/template/PLACEHOLDERS.md`), applied in
+/// **one pass** over the template rather than as a sequence of `replace` calls.
+///
+/// Two things follow from the single pass, and both of them matter:
+///
+///   * A substituted value is never itself substituted. `--sdk-path` is arbitrary operator
+///     text that lands in a `Cargo.toml`, and a path holding `{{name}}` has to arrive as those
+///     characters; a chain of `replace` calls would rewrite it depending on which call ran
+///     first, which is a rule about ordering that nobody would remember.
+///   * A placeholder this command does not know is an **error**, not a literal `{{…}}` carried
+///     into somebody's project. Add one to a template file and forget the table here and
+///     `ouro wasm new` refuses loudly instead of writing a manifest cargo cannot parse.
+fn substitute(template: &str, name: &str, summary: &str, sdk_path: &str) -> Result<String> {
+    let snake = crate_name(name);
+    let camel = type_name(name);
+    let table: [(&str, &str); 5] = [
+        ("name_snake", &snake),
+        ("name", name),
+        ("Name", &camel),
+        ("summary", summary),
+        ("sdk_path", sdk_path),
+    ];
+
+    let mut written = String::with_capacity(template.len());
+    let mut rest = template;
+
+    while let Some(open) = rest.find("{{") {
+        written.push_str(&rest[..open]);
+
+        let after = &rest[open + 2..];
+        let close = after
+            .find("}}")
+            .ok_or_else(|| anyhow!("a template file opens a placeholder it never closes"))?;
+        let key = &after[..close];
+
+        let value = table
+            .iter()
+            .find(|(named, _)| *named == key)
+            .map(|(_, value)| *value)
+            .ok_or_else(|| {
+                anyhow!(
+                    "a template file uses {{{{{key}}}}}, which this command does not substitute \
+                     — see tui/wasm/guest/template/PLACEHOLDERS.md"
+                )
+            })?;
+
+        written.push_str(value);
+        rest = &after[close + 2..];
+    }
+
+    written.push_str(rest);
+    Ok(written)
 }
 
 #[cfg(test)]
@@ -2923,32 +3051,220 @@ mod tests {
 
     // ================================================================== `new`
 
-    /// The scaffolded world is a copy of the file the helper enforces, and a copy that drifted
-    /// would be a template producing components the runtime refuses. Byte for byte.
+    /// The template `ouro wasm new` writes is the SDK's template on disk, not a copy of it.
+    ///
+    /// `include_str!` reads at compile time; this reads the same paths at run time and
+    /// compares. Editing a template file cannot make it red — cargo tracks an `include_str!`
+    /// and rebuilds — and that is the point: what it catches is a constant that stopped
+    /// pointing at the SDK's template. Point one of them at a copy and it goes red naming the
+    /// file, which is the drift that actually happened before W10b, when `src/wasm_template/`
+    /// was a second scaffold nothing held to the SDK's.
     #[test]
-    fn the_scaffolded_world_is_the_world_the_helper_speaks() {
-        assert_eq!(TEMPLATE_WIT, include_str!("../wasm/wit/capability.wit"));
+    fn the_embedded_template_is_the_template_on_disk() {
+        let template = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("wasm")
+            .join("guest")
+            .join("template");
+
+        for (relative, embedded) in [
+            ("Cargo.toml", TEMPLATE_CARGO),
+            ("README.md", TEMPLATE_README),
+            ("src/lib.rs", TEMPLATE_CAPABILITY),
+            ("src/lib.hook.rs", TEMPLATE_HOOK),
+            ("gitignore", TEMPLATE_GITIGNORE),
+        ] {
+            let on_disk = std::fs::read_to_string(template.join(relative))
+                .unwrap_or_else(|error| panic!("the SDK template is missing {relative}: {error}"));
+
+            assert_eq!(
+                embedded, on_disk,
+                "the {relative} `ouro` embeds is not the one at tui/wasm/guest/template/"
+            );
+        }
     }
 
+    /// Every placeholder the embedded templates use is one this command substitutes.
+    ///
+    /// `tui/wasm/tests/sdk.rs` holds the template to `PLACEHOLDERS.md`; this holds *this
+    /// binary* to the same table. Add a `{{…}}` to a template file and forget the table in
+    /// `substitute` and `ouro wasm new` now refuses — where before it would have carried the
+    /// literal into somebody's `Cargo.toml`, which is a broken project handed over silently.
     #[test]
-    fn both_scaffolds_substitute_the_name_and_leave_no_placeholder() {
-        for hook in [false, true] {
-            let source = substitute(&scaffold_source(hook), "my-guard");
+    fn both_scaffolds_substitute_everything_and_leave_no_placeholder() {
+        for template in [
+            TEMPLATE_CARGO,
+            TEMPLATE_README,
+            TEMPLATE_CAPABILITY,
+            TEMPLATE_HOOK,
+            TEMPLATE_GITIGNORE,
+        ] {
+            let written = substitute(template, "my-guard", "Guards.", "../../tui/wasm/guest")
+                .expect("every placeholder a template file uses is in the table");
             assert!(
-                !source.contains("{{"),
-                "a placeholder survived into the {} scaffold",
-                if hook { "hook" } else { "capability" }
+                !written.contains("{{"),
+                "a placeholder survived substitution:\n{written}"
             );
-            assert!(source.contains("\"name\": \"my-guard\""));
-            assert!(source.contains("#![no_std]"));
-            assert!(source.contains("wit_bindgen::generate!"));
         }
 
-        // The two differ where they should: only the hook scaffold speaks the verdict contract.
-        assert!(scaffold_source(true).contains("permissionDecision"));
-        assert!(!scaffold_source(false).contains("permissionDecision"));
+        // The two shapes differ where they must: only the hook one speaks the verdict contract.
+        let hook = substitute(TEMPLATE_HOOK, "my-guard", "Guards.", "/sdk").expect("the hook");
+        let capability =
+            substitute(TEMPLATE_CAPABILITY, "my-guard", "Guards.", "/sdk").expect("the capability");
+        assert!(hook.contains("export_hook!(MyGuard)"));
+        assert!(hook.contains("Verdict"));
+        assert!(capability.contains("export_capability!(MyGuard)"));
+        assert!(!capability.contains("Verdict"));
 
-        // And `-` becomes `_` for the artifact name, which is cargo's own rule.
-        assert!(substitute(TEMPLATE_README, "my-guard").contains("my_guard.wasm"));
+        // Both are `no_std`, which is the import list and therefore the security claim.
+        assert!(hook.contains("#![no_std]"));
+        assert!(capability.contains("#![no_std]"));
+
+        // Both name forms come out of the same pass, each as itself.
+        assert!(hook.contains("my_guard.wasm") && hook.contains("my-guard asks about"));
+    }
+
+    /// A placeholder this command does not know is refused, and a substituted value is never
+    /// substituted again.
+    ///
+    /// The second half is not hypothetical: `--sdk-path` is arbitrary operator text that lands
+    /// in a `Cargo.toml`. Replace `substitute`'s single pass with a chain of `.replace()` calls
+    /// and this goes red — the path would be rewritten by whichever call ran after it, which is
+    /// a `path =` line that silently stopped being the one the operator typed.
+    #[test]
+    fn an_unknown_placeholder_is_refused_and_a_value_is_never_re_substituted() {
+        let refusal = substitute("{{whatever}}", "my-guard", "s", "/sdk")
+            .expect_err("a placeholder outside the table is an error")
+            .to_string();
+        assert!(refusal.contains("{{whatever}}"), "{refusal}");
+        assert!(refusal.contains("PLACEHOLDERS.md"), "{refusal}");
+
+        assert!(substitute("{{name", "my-guard", "s", "/sdk")
+            .expect_err("an unclosed placeholder is an error")
+            .to_string()
+            .contains("never closes"));
+
+        let written = substitute(
+            "{{sdk_path}} :: {{name}} :: {{name_snake}}",
+            "my-guard",
+            "s",
+            "/x/{{name}}/guest",
+        )
+        .expect("a path is text, not a template");
+        assert_eq!(written, "/x/{{name}}/guest :: my-guard :: my_guard");
+    }
+
+    /// The Rust type name, including the case a name starting with a digit produces: `9Lives`
+    /// is not an identifier and a scaffold that emitted it would not compile.
+    #[test]
+    fn the_type_name_is_always_an_identifier() {
+        assert_eq!(type_name("my-guard"), "MyGuard");
+        assert_eq!(type_name("my_guard"), "MyGuard");
+        assert_eq!(type_name("guard"), "Guard");
+        assert_eq!(type_name("9lives"), "Component9Lives");
+    }
+
+    /// The SDK path is found by walking up from the **output** directory, and is written
+    /// relative to the project so the project moves with the checkout.
+    ///
+    /// Delete the `for _ in 0..=climbed` loop's `=` and this goes red: the path would be one
+    /// `..` short, which is a `Cargo.toml` that does not resolve.
+    #[test]
+    fn the_sdk_path_is_relative_to_the_project_and_found_by_climbing() {
+        let scratch = scratch_dir("sdk-walk");
+        let guest = scratch.join("checkout/tui/wasm/guest");
+        std::fs::create_dir_all(&guest).expect("a fake checkout");
+        std::fs::write(guest.join("Cargo.toml"), "[package]\n").expect("a fake SDK manifest");
+
+        // Scaffolding straight into the checkout root: `<checkout>/thing` reaches the SDK by
+        // one `..`.
+        std::fs::create_dir_all(scratch.join("checkout/work/deep")).expect("a nested directory");
+        assert_eq!(
+            sdk_path_for(&scratch.join("checkout/thing")).expect("the checkout is above it"),
+            "../tui/wasm/guest"
+        );
+
+        // Two directories down, two `..` plus the project's own.
+        assert_eq!(
+            sdk_path_for(&scratch.join("checkout/work/deep/thing")).expect("still above it"),
+            "../../../tui/wasm/guest"
+        );
+
+        // And nothing above: refused, naming the flag that answers it.
+        let elsewhere = scratch.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("a directory with no checkout above it");
+        let refusal = sdk_path_for(&elsewhere.join("thing"))
+            .expect_err("there is no ouroboros checkout above a scratch directory")
+            .to_string();
+        assert!(
+            refusal.contains("--sdk-path"),
+            "the refusal must name the flag that answers it: {refusal}"
+        );
+
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// `new` writes four files and no fifth, in the shape asked for, with the SDK path the
+    /// caller named.
+    #[test]
+    fn new_writes_the_four_files_of_the_shape_it_was_asked_for() {
+        let scratch = scratch_dir("new-files");
+        std::fs::create_dir_all(&scratch).expect("a scratch directory");
+
+        let mut out = Vec::new();
+        new(
+            &scratch,
+            "my-guard",
+            true,
+            Some("Guards the writes."),
+            Some(Path::new("/somewhere/tui/wasm/guest")),
+            &mut out,
+        )
+        .expect("the scaffold is written");
+
+        let root = scratch.join("my-guard");
+        for expected in ["Cargo.toml", "src/lib.rs", "README.md", ".gitignore"] {
+            assert!(root.join(expected).is_file(), "missing {expected}");
+        }
+        // The world file the old template copied is gone: the SDK carries the bindings now, so
+        // a `wit/` directory in a scaffolded project would be a second copy of the world that
+        // nothing compiles.
+        assert!(
+            !root.join("wit").exists(),
+            "a scaffold has no wit/ of its own"
+        );
+
+        let cargo = std::fs::read_to_string(root.join("Cargo.toml")).expect("the manifest");
+        assert!(cargo.contains(r#"path = "/somewhere/tui/wasm/guest""#));
+        assert!(cargo.contains(r#"name = "my-guard""#));
+
+        let source = std::fs::read_to_string(root.join("src/lib.rs")).expect("the crate root");
+        assert!(source.contains("export_hook!(MyGuard)"));
+        assert!(source.contains("Guards the writes."));
+
+        // A second `new` into the same place refuses rather than overwriting somebody's work.
+        let mut again = Vec::new();
+        assert!(new(
+            &scratch,
+            "my-guard",
+            true,
+            None,
+            Some(Path::new("/somewhere")),
+            &mut again
+        )
+        .is_err());
+
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// A scratch directory under the system temp, named for this process and this moment.
+    fn scratch_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "ouro-wasm-cli-unit-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("a clock after 1970")
+                .as_nanos()
+        ))
     }
 }

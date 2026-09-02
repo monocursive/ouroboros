@@ -13,6 +13,10 @@
 //! * **`sign`** uploads the component and asks the node to sign it. The signature is
 //!   produced on a `:signer`-role host by a service that applies the whole policy and
 //!   journals its decision (C4); this end sends bytes and writes the answer to a file.
+//!   It also reads the component's **import list** first, with a local `ouro-wasm` resolved
+//!   by D14's three-place rule — because the node will not read it (D15) and somebody on
+//!   this side has to. `--import` and `--imports-from` still override; `--no-local-helper`
+//!   requires one of them; `--dry-run` prints what would be sent and opens no socket.
 //! * **`deploy`** uploads a `.ouro-wasm` bundle and asks the node to deploy it. The node
 //!   verifies it against **its own** trust policy before the store, the helper, or the
 //!   rollout register hears about it — so a bundle read off this disk is attacker-
@@ -46,6 +50,7 @@ use serde_json::{json, Map, Value};
 use crate::cli::{WasmDeployArgs, WasmKeygenArgs, WasmRollbackArgs, WasmSignArgs};
 use crate::model::{WasmDeployment, WasmList, WasmRollback, WasmSignature, WasmUploadReceipt};
 use crate::transport::Client;
+use crate::wasm_client::{self, Helper};
 
 const UPLOAD_METHOD: &str = "wasm.upload";
 const SIGN_METHOD: &str = "wasm.sign";
@@ -58,6 +63,10 @@ const LIST_METHOD: &str = "wasm.list";
 /// outbound ceiling with two thirds to spare — and the node's reply narrows it further
 /// whenever the node's own bound is smaller.
 const CHUNK_BYTES: usize = 256 * 1024;
+
+/// What the node's manifest accepts, so a list it would refuse is refused on this side with a
+/// sentence about the list rather than on the far side with one about a manifest.
+const MAX_IMPORTS: usize = 8;
 
 /// The largest file this client will try to upload at all. The runtime bounds it too, and
 /// says so, but a sixteen-mebibyte refusal is cheaper to make before the first frame.
@@ -155,6 +164,33 @@ pub async fn sign<O: Write>(client: &Client, args: &WasmSignArgs, out: &mut O) -
 
     out.write_all(text.as_bytes())?;
     out.write_all(b"\n")?;
+    out.flush()?;
+    Ok(())
+}
+
+/// `ouro wasm sign --dry-run` — the parameters this command would send, and no socket.
+///
+/// It resolves the imports exactly as the real run does, which is the whole point: the answer
+/// it prints is the one your helper gave about these bytes, so a component the helper refuses
+/// is refused here too, before a node is asked for anything. `upload` is `null` because
+/// nothing was uploaded.
+pub fn sign_dry_run<O: Write>(args: &WasmSignArgs, out: &mut O) -> Result<()> {
+    // The same bounded read the real path takes, so a file past the ceiling is refused by the
+    // dry run as well and an operator does not learn about it only from the node.
+    read_bounded(&args.component)?;
+
+    let mut params = sign_params(args, "")?;
+    params.insert("upload".into(), Value::Null);
+
+    if let Some(node) = &args.node {
+        params.insert("node".into(), Value::String(node.clone()));
+    }
+
+    writeln!(
+        out,
+        "{}",
+        serde_json::to_string_pretty(&Value::Object(params))?
+    )?;
     out.flush()?;
     Ok(())
 }
@@ -480,17 +516,43 @@ pub fn sign_params(args: &WasmSignArgs, upload: &str) -> Result<Map<String, Valu
 
 /// The import list this client declares on the operator's behalf.
 ///
-/// Either repeated `--import` flags or the `imports` array of an `ouro wasm inspect --json`
-/// document, which the *operator's* helper produced. Neither is optional: the node refuses a
-/// `wasm.sign` with no `imports` at all, because the alternative was the node parsing
-/// unsigned bytes to find out. An empty list is a real answer and is sent as one.
+/// The node refuses a `wasm.sign` with no `imports` at all, because the alternative was the
+/// node handing unsigned bytes to the one process whose job is running other people's code
+/// (docs/WASM.md D15). That has not changed and is not this function's to change. What
+/// changed in W10b is *who does the typing*: the list is still computed by a helper on this
+/// side of the wire, and this command now starts that helper itself rather than making an
+/// operator run `ouro wasm inspect --json` and paste the answer back.
+///
+/// Three sources, in order, and the first one that applies wins:
+///
+///   1. `--imports-from <report>` — an `ouro wasm inspect --json` document, file or stdin.
+///   2. `--import <name>`, repeated.
+///   3. This command's own local helper, resolved by D14's three-place rule and vetted the
+///      same way [`crate::wasm_cli::inspect`] resolves one.
+///
+/// `--no-local-helper` removes the third, for a machine that has no helper: then one of the
+/// first two is required rather than silently becoming an empty list. An empty list is still
+/// a real answer — a component that imports nothing is in this world — and reaches the node
+/// through a report whose `imports` array is empty.
 fn imports(args: &WasmSignArgs) -> Result<Vec<Value>> {
     let Some(path) = &args.imports_from else {
-        return Ok(args
-            .import
-            .iter()
-            .map(|import| Value::String(import.trim().to_string()))
-            .collect());
+        if !args.import.is_empty() {
+            return Ok(args
+                .import
+                .iter()
+                .map(|import| Value::String(import.trim().to_string()))
+                .collect());
+        }
+
+        if args.no_local_helper {
+            bail!(
+                "--no-local-helper was given and no imports were declared. The node will not \
+                 read the component to find out — it never parses bytes it has not verified — \
+                 so name them with `--import <name>` (repeated) or `--imports-from <report>`."
+            );
+        }
+
+        return imports_of(args);
     };
 
     let text = if path.as_os_str() == "-" {
@@ -514,9 +576,9 @@ fn imports(args: &WasmSignArgs) -> Result<Vec<Value>> {
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("--imports-from found no `imports` array in that inspect report"))?;
 
-    if imports.len() > 8 {
+    if imports.len() > MAX_IMPORTS {
         bail!(
-            "that report declares {} imports; the node accepts at most 8",
+            "that report declares {} imports; the node accepts at most {MAX_IMPORTS}",
             imports.len()
         );
     }
@@ -530,6 +592,73 @@ fn imports(args: &WasmSignArgs) -> Result<Vec<Value>> {
                 .ok_or_else(|| anyhow!("an import in that report is not a string"))
         })
         .collect()
+}
+
+/// The component's imports, read by this command's own helper.
+///
+/// This is the one thing `ouro wasm sign` does that touches wasmtime, and it is deliberately
+/// the same thing `ouro wasm inspect` does: resolve a helper by D14's three-place rule
+/// (`--helper`, an absolute `$OUROBOROS_WASM_HELPER`, the `ouro-wasm` beside the resolved
+/// `ouro`), vet it, start it, ask it. Nothing is derived from the working directory, because
+/// the helper is the containment boundary and the directory a component author signs from is
+/// the directory the component came from.
+///
+/// Two questions, both the helper's:
+///
+///   * `inspect` says what the bytes declare. A refusal here — unreadable, oversize, too
+///     complex to compile — is the answer and is named as the helper named it.
+///   * `load` says whether this runtime would admit them, which is where the world is
+///     actually checked (`world::check`). A component that is not in
+///     `ouroboros:capability@0.1.0` is refused *here*, before a byte is uploaded and long
+///     before a signing service applies a policy to it — because a signature over a component
+///     no node will admit is a signature nobody can use.
+fn imports_of(args: &WasmSignArgs) -> Result<Vec<Value>> {
+    let binary = wasm_client::resolve(args.helper.helper.as_deref())?;
+    let mut helper = Helper::start(&binary)?;
+
+    let inspected = helper
+        .inspect(&args.component)
+        .map_err(|error| refused_by_helper(&args.component, error))?;
+
+    let sha = inspected["sha256"].as_str().unwrap_or_default();
+    helper
+        .load(sha, &args.component)
+        .map_err(|error| refused_by_helper(&args.component, error))?;
+
+    let declared = inspected["imports"]
+        .as_array()
+        .ok_or_else(|| anyhow!("{binary} answered `inspect` without an `imports` array"))?;
+
+    if declared.len() > MAX_IMPORTS {
+        bail!(
+            "that component declares {} imports; the node accepts at most {MAX_IMPORTS}",
+            declared.len()
+        );
+    }
+
+    declared
+        .iter()
+        .map(|import| {
+            import
+                .as_str()
+                .map(|name| Value::String(name.trim().to_string()))
+                .ok_or_else(|| anyhow!("an import in the helper's report is not a string"))
+        })
+        .collect()
+}
+
+/// A helper refusal, said as a reason not to sign. Anything that is not a refusal — a helper
+/// that died, a broken pipe — is this command failing and keeps its own error.
+fn refused_by_helper(component: &Path, error: anyhow::Error) -> anyhow::Error {
+    match wasm_client::refusal_of(&error) {
+        Some(refusal) => anyhow!(
+            "{} was refused by your own helper and is not signed: {refusal}. A signature over \
+             a component no node would admit is a signature nobody can use, so this is refused \
+             here rather than at stage.",
+            component.display()
+        ),
+        None => error,
+    }
 }
 
 fn node_list(nodes: &str) -> Result<Vec<Value>> {
@@ -980,6 +1109,12 @@ mod tests {
         dir
     }
 
+    /// Signing arguments for a unit test.
+    ///
+    /// `no_local_helper` is on, and that is not incidental: since W10b a `sign` with no
+    /// declared imports resolves and starts a real `ouro-wasm`, and a unit test that did so
+    /// would be an integration test that passes or fails by what is installed on the machine.
+    /// The helper path has its own tests in `tui/tests/wasm_cli.rs`, against a real helper.
     fn signing_args(import: Vec<String>, imports_from: Option<PathBuf>) -> WasmSignArgs {
         WasmSignArgs {
             component: PathBuf::from("greeter.wasm"),
@@ -987,6 +1122,8 @@ mod tests {
             author: "ops".into(),
             import,
             imports_from,
+            no_local_helper: true,
+            dry_run: false,
             language: None,
             source_sha256: None,
             start_config: None,
@@ -994,6 +1131,7 @@ mod tests {
             out: None,
             json: false,
             node: None,
+            helper: crate::cli::WasmHelperArgs { helper: None },
             addr: None,
             token_file: None,
         }
@@ -1246,20 +1384,9 @@ mod tests {
     #[test]
     fn sign_params_send_the_operator_s_own_config_text_and_never_a_start_id() {
         let args = WasmSignArgs {
-            component: PathBuf::from("greeter.wasm"),
-            name: "greeter".into(),
-            author: "ops".into(),
-            import: vec!["log".into()],
-            imports_from: None,
             language: Some("rust".into()),
-            source_sha256: None,
             start_config: Some(r#"{"greeting":"hi"}"#.into()),
-            eval: None,
-            out: None,
-            json: false,
-            node: None,
-            addr: None,
-            token_file: None,
+            ..signing_args(vec!["log".into()], None)
         };
 
         let params = sign_params(&args, "9f2c1d4e8a7b6053f1e2d3c4b5a69780").expect("params");
@@ -1288,20 +1415,8 @@ mod tests {
     #[test]
     fn a_start_config_that_is_not_json_is_refused_before_anything_is_uploaded() {
         let args = WasmSignArgs {
-            component: PathBuf::from("greeter.wasm"),
-            name: "greeter".into(),
-            author: "ops".into(),
-            import: vec![],
-            imports_from: None,
-            language: None,
-            source_sha256: None,
             start_config: Some("greeting = hi".into()),
-            eval: None,
-            out: None,
-            json: false,
-            node: None,
-            addr: None,
-            token_file: None,
+            ..signing_args(vec!["log".into()], None)
         };
 
         let error = sign_params(&args, "abc").expect_err("must refuse");
@@ -1311,12 +1426,48 @@ mod tests {
     /// A component that imports nothing says so. The node refuses a `wasm.sign` with no
     /// `imports` key at all, because the alternative — it reading the bytes to find out —
     /// is the one thing this lane must not do.
+    ///
+    /// Since W10b an empty `--import` list is no longer how you say that: no declaration at
+    /// all means "read it with my helper". The empty list arrives through a report, which is
+    /// still a helper's answer and not a client's guess.
     #[test]
     fn an_empty_import_list_is_sent_as_one_rather_than_omitted() {
-        let params = sign_params(&signing_args(vec![], None), "abc").expect("params");
+        let dir = scratch("imports-empty");
+        let path = dir.join("report.json");
+        std::fs::write(&path, r#"{"imports": []}"#).unwrap();
+
+        let params = sign_params(&signing_args(vec![], Some(path)), "abc").expect("params");
 
         assert_eq!(params["imports"], json!([]));
         assert!(params.contains_key("imports"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// With no helper to ask and nothing declared, this refuses rather than sending a list it
+    /// made up. Delete the `no_local_helper` arm in `imports` and it starts a helper instead —
+    /// on a machine that by assumption has none, so the refusal an operator gets is about a
+    /// missing binary rather than about the thing they forgot to type.
+    #[test]
+    fn no_local_helper_with_nothing_declared_is_refused_and_names_both_flags() {
+        let error = sign_params(&signing_args(vec![], None), "abc")
+            .expect_err("nothing to declare and nothing to ask");
+        let text = error.to_string();
+
+        assert!(text.contains("--import"), "{text}");
+        assert!(text.contains("--imports-from"), "{text}");
+        // And it never claims the node will work it out, because it will not.
+        assert!(
+            text.contains("never parses bytes it has not verified"),
+            "{text}"
+        );
+    }
+
+    /// `--import` still overrides, and is not second-guessed against a helper.
+    #[test]
+    fn a_declared_import_list_is_sent_verbatim() {
+        let params = sign_params(&signing_args(vec!["log".into()], None), "abc").expect("params");
+        assert_eq!(params["imports"], json!(["log"]));
     }
 
     /// `ouro wasm inspect --json | ouro wasm sign --imports-from -`, without the pipe.

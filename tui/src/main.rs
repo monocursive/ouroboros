@@ -2690,7 +2690,14 @@ async fn wasm(paths: &Paths, command: WasmCommand) -> Result<()> {
         WasmCommand::New(args) => {
             let into = args.into.unwrap_or_else(|| PathBuf::from("."));
             let mut out = std::io::stdout().lock();
-            ouro::wasm_cli::new(&into, &args.name, args.hook, &mut out)
+            ouro::wasm_cli::new(
+                &into,
+                &args.name,
+                args.hook,
+                args.summary.as_deref(),
+                args.sdk_path.as_deref(),
+                &mut out,
+            )
         }
 
         WasmCommand::Inspect(args) => {
@@ -2770,6 +2777,13 @@ async fn wasm(paths: &Paths, command: WasmCommand) -> Result<()> {
             ouro::wasm_deploy_cli::keygen(&args, &mut out)
         }
         WasmCommand::Sign(args) => {
+            // W10b. `--dry-run` prints the parameters this command would send and opens no
+            // socket, so it is answered before the connection rather than inside `sign`.
+            if args.dry_run {
+                let mut out = std::io::stdout().lock();
+                return ouro::wasm_deploy_cli::sign_dry_run(&args, &mut out);
+            }
+
             let connected = wasm_connect(paths, args.addr.clone(), args.token_file.clone()).await?;
 
             let mut out = std::io::stdout().lock();

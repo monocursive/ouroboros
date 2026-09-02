@@ -1016,11 +1016,14 @@ machinery — it is a backend, not a lane (D9).
   acceptance suite going red. `tui/wasm/tests/sdk.rs` holds the four example guests and the
   scaffold template to the same assertion, against the real helper.
 - **D14 — the author's loop runs the helper locally, and the helper comes from where `ouro`
-  was installed.** `ouro wasm inspect|run|hook|check|new` need no node: each starts a local
-  `ouro-wasm` and speaks its line protocol. That they *start* one is the deliberate
-  difference from `ouro wasm doctor`, which asks a gateway and starts nothing — a readiness
-  surface that spawned to answer whether spawning works would be answering a different
-  question, and a development loop that needed a running node would not be a loop.
+  was installed.** `ouro wasm inspect|run|hook|check` need no node: each starts a local
+  `ouro-wasm` and speaks its line protocol, and `ouro wasm sign` starts one too — for the
+  import list D15 makes the client's to declare, before it opens a socket at all (W10b). That
+  they *start* one is the deliberate difference from `ouro wasm doctor`, which asks a gateway
+  and starts nothing — a readiness surface that spawned to answer whether spawning works would
+  be answering a different question, and a development loop that needed a running node would
+  not be a loop. `new` is the fifth local command and the one exception in the other
+  direction: it writes files and asks nobody anything.
 
   The helper is found in exactly three places, in order: `--helper <path>`, an **absolute**
   `$OUROBOROS_WASM_HELPER`, and the `ouro-wasm` beside the **resolved** `ouro` binary. The
@@ -1132,10 +1135,13 @@ machinery — it is a backend, not a lane (D9).
   running other people's code, at `:operate`, before a signature existed and *upstream* of
   the signing service's rate limit — one staged blob could be fed to it without bound,
   because a failed read did not consume the upload either. So `imports` is required, the
-  client computes it with the **operator's** own helper (`ouro wasm inspect --json`), and a
-  declared list that does not match what the component actually imports is refused at stage
-  by `Wasm.Verifier.cross_check/2`, which is D5's posture and always was: the manifest's
-  import list is provenance, and the linker is the boundary. `Wasm.Artifact.build/2` does
+  client computes it with the **operator's** own helper — `ouro wasm sign` resolves and starts
+  one itself under this same decision's three-place rule, and `--import` / `--imports-from`
+  remain the ways to say it by hand on a machine with no helper (W10b) — and a declared list
+  that does not match what the component actually imports is refused at stage by
+  `Wasm.Verifier.cross_check/2`, which is D5's posture and always was: the manifest's import
+  list is provenance, and the linker is the boundary. Which side of the wire *types* the list
+  was never the point; which side *parses the bytes* is, and it is still not the node. `Wasm.Artifact.build/2` does
   check eight bytes of preamble, because every other check a signer makes is about numbers
   computed *from* the bytes and would sign a text file just as happily; whether those bytes
   are a *component* remains the helper's answer, under §7.3's bounds, on the node that will
@@ -1588,8 +1594,9 @@ Each slice is PR-sized, lands green, and is useful alone.
   `[[hooks]]` and `[checks]` component entry as an untrusted workspace — the exactly-one-of
   rule, the workspace-relative path, canonical confinement, the 16 MiB ceiling, the world,
   the shared eight-component budget — and exits non-zero on any refusal without instantiating
-  anything. `new` scaffolds a project from a template embedded in the binary, carrying the
-  world byte for byte (a test compares the two), in a capability and a hook shape.
+  anything. `new` scaffolds a project from a template embedded in the binary, in a capability
+  and a hook shape — its own raw-`wit-bindgen` template at the time, carrying the world file
+  byte for byte, which W10b replaced with the SDK's.
 
   Proofs: a Rust integration suite drives the real binary against the real helper and the
   real acceptance guest — the world and shape report, one instance across two messages
@@ -1710,6 +1717,61 @@ Each slice is PR-sized, lands green, and is useful alone.
   the artifact charset so a planted `wasm/a/b` is refused. Proved against the scripted
   helper (including the six-second `describe` that no longer costs a message), the real echo
   guest, the live rollout, the register's checkpoint, and the native loop.
+
+- **W10b — `new` scaffolds on the SDK, and `sign` reads the imports itself.** The two seams
+  wave 1 left open, each of them a place where a document said one thing and the code did
+  another.
+
+  `ouro wasm new` wrote its own raw-`wit-bindgen` template — two hundred lines of `no_std`,
+  a `wit/capability.wit` copied byte for byte out of the helper's, and a `TODO(W9)` saying
+  what it was standing in for. W9 shipped the SDK and the scaffold template beside it, and
+  for one slice this repository had two scaffolds: the one an author was told to read and
+  the one the binary actually wrote. `src/wasm_template/` is gone. `new` now embeds
+  `tui/wasm/guest/template/**` with `include_str!` and substitutes the table in that
+  directory's `PLACEHOLDERS.md` in one pass — a placeholder that table does not name is a
+  refusal rather than a literal `{{…}}` carried into somebody's `Cargo.toml`, and a substituted
+  value is never itself substituted, which is what keeps an operator's `--sdk-path` the text
+  they typed. (W9's table gave an *ordering* rule instead, `{{name_snake}}` before `{{name}}`,
+  and the reason it gave was wrong: `{{name}}` is not a substring of `{{name_snake}}`. The
+  single pass needs no ordering, and the sentence is corrected in place.) A scaffolded project
+  depends on
+  `ouroboros-guest` and carries no world file at all, because the SDK carries the bindings
+  and a second copy in every project is a copy that drifts. `--hook` selects
+  `src/lib.hook.rs`, a `Hook` on the verdict contract, written as `src/lib.rs`; without it,
+  the `Capability`. Three tests hold it: `the_embedded_template_is_the_template_on_disk`
+  reads the same paths at run time and compares with what was embedded, `sdk.rs` builds
+  **both** shapes with a real toolchain and puts each to the real helper, and the CLI's
+  integration suite scaffolds both, builds them with a plain `cargo build --release --target
+  wasm32-wasip2`, and asserts `imports: log` and `verdict: admitted` on what came out.
+
+  `ouroboros-guest` is unpublished, so the generated `Cargo.toml` reaches it by **path**, and
+  a path that is not true on this filesystem is a project that does not build. `ouro wasm
+  new` fills it in by walking up from the **output directory** to a checkout's
+  `tui/wasm/guest` and writing the result relative to the project, so a project scaffolded
+  inside a checkout moves with it; with nothing above, it refuses and names `--sdk-path`
+  rather than guessing. The walk is cwd-relative and D14's rule is not violated by that: D14
+  is about where an executable may come from, because the helper is the containment boundary
+  and gets *run*. This is a `path =` line in a manifest a person then builds themselves. The
+  asymmetry is stated in the code, in `PLACEHOLDERS.md` and in the README the scaffold writes.
+
+  `ouro wasm sign` required an operator to run `ouro wasm inspect --json` and pipe the answer
+  back into `--imports-from`, because D15 makes the import list the client's to declare — the
+  node must not hand unsigned bytes to the one process whose job is running other people's
+  code. That reasoning is untouched and the verb is unchanged. What was missing was the other
+  half of the sentence: if the client declares the list, the client should read it. `sign`
+  now resolves a helper by D14's three-place rule, canonicalised and vetted exactly as
+  `inspect` resolves one, asks it `inspect` for the imports and `load` for the world, and
+  **refuses to sign a component its own helper would not admit** — naming the helper's own
+  refusal, before a byte is uploaded and before a signing service spends a policy decision on
+  a signature nobody could use. `--import` and `--imports-from` still override it and are
+  never second-guessed. `--no-local-helper` starts nothing and requires one of them, which is
+  the machine that has no helper; an empty import list is still a real answer and arrives
+  through a report. `--dry-run` prints the `wasm.sign` parameters and opens no socket, which
+  is how the integration suite asserts on them: the real echo guest gives `["log"]`, a
+  hand-built component importing `wasi:cli/environment` is refused by name, and a scripted
+  `ouro-wasm` records that the only two requests `sign` makes of a helper are `inspect` and
+  `load` on the path named on the command line — never an `instantiate` that would *run* a
+  component nobody has signed yet.
 
 - **W11 — the author guide, with its contracts pinned.** Every author-facing fact in this lane
   lived in module docs, this spec and a test file, which is three places a developer does not
