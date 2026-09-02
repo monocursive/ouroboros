@@ -295,6 +295,11 @@ struct State {
     memory_denied: bool,
     logs_remaining: u32,
     log_budget_reported: bool,
+    /// Lines actually written to stderr during the current call, budget notice included. The
+    /// owner reads that pipe on a thread of its own, so a reply can overtake the last line
+    /// the guest wrote; reporting the count in the reply is what lets an owner wait for
+    /// exactly the lines that exist rather than guess with a sleep.
+    log_lines_written: u32,
 }
 
 impl ResourceLimiter for State {
@@ -619,6 +624,7 @@ impl Host {
                 // Deliberately not `eprintln!`, which panics when the write fails. An owner
                 // that closed this pipe is not a reason to unwind through a wasm frame.
                 let _ = writeln!(std::io::stderr(), "{line}");
+                state.log_lines_written = state.log_lines_written.saturating_add(1);
                 Ok(())
             },
         )?;
@@ -790,6 +796,7 @@ impl Host {
                 memory_total: 0,
                 memory_denied: false,
                 logs_remaining: MAX_LOG_LINES_PER_CALL,
+                log_lines_written: 0,
                 log_budget_reported: false,
             },
         );
@@ -836,6 +843,7 @@ impl Host {
             }
         }
 
+        let log_lines = store.data().log_lines_written;
         self.instances.lock().expect("instances lock").insert(
             name.clone(),
             Live {
@@ -847,7 +855,7 @@ impl Host {
             },
         );
 
-        Ok(json!({ "instance": echo(&name), "fuel_used": fuel_used }))
+        Ok(json!({ "instance": echo(&name), "fuel_used": fuel_used, "log_lines": log_lines }))
     }
 
     /// `call`: one message into a live instance, under freshly armed bounds.
@@ -910,6 +918,7 @@ impl Host {
             }
         };
         let fuel_used = fuel_used(&live.store, limits);
+        let log_lines = live.store.data().log_lines_written;
 
         let answer = match result {
             Ok(payload) if payload.len() > MAX_RESULT_BYTES => Err(refusal::refuse(
@@ -919,7 +928,11 @@ impl Host {
                     payload.len()
                 ),
             )),
-            Ok(payload) => Ok(json!({ "payload": payload, "fuel_used": fuel_used })),
+            Ok(payload) => Ok(json!({
+                "payload": payload,
+                "fuel_used": fuel_used,
+                "log_lines": log_lines
+            })),
             Err(message) => Err(refusal::refuse(
                 refusal::GUEST_ERROR,
                 bounded(&message, MAX_ERROR_BYTES),
@@ -1037,6 +1050,7 @@ fn arm(store: &mut Store<State>, limits: Limits) {
     state.memory_denied = false;
     state.logs_remaining = MAX_LOG_LINES_PER_CALL;
     state.log_budget_reported = false;
+    state.log_lines_written = 0;
 
     store
         .set_fuel(limits.fuel)

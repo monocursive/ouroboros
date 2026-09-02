@@ -75,7 +75,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
@@ -477,6 +477,20 @@ impl Helper {
             .filter(|line| line.contains("guest "))
             .map(|line| sanitize(line))
             .collect()
+    }
+
+    /// The guest log lines written since `mark` by a call whose reply said it wrote
+    /// `expected` of them. stderr is a different pipe from stdout, read on a thread of its
+    /// own, so the reply can arrive before the last line the guest wrote has been read; this
+    /// waits for the count the helper reported, bounded so a reader thread that has died
+    /// cannot hang the command, and then reads. `expected` is 0 for a refused call, whose
+    /// count the helper does not know: that read is immediate.
+    pub fn guest_log_counted(&self, mark: usize, expected: u64) -> Vec<String> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while (self.log_mark() as u64) < mark as u64 + expected && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        self.guest_log(mark)
     }
 
     /// How many stderr lines have arrived, so a caller can mark a point and read past it.

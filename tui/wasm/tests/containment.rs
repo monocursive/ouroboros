@@ -555,6 +555,13 @@ fn the_log_budget_bounds_one_call() {
         logged.contains("log budget"),
         "the guest must be told once that the rest were dropped: {logged}"
     );
+    // The reply says how many lines were written — the budget's worth plus the notice —
+    // which is what an owner reading stderr on another thread waits for.
+    assert_eq!(
+        answered["log_lines"].as_u64().expect("log_lines"),
+        lines as u64,
+        "the reply must count exactly the lines that reached stderr:\n{logged}"
+    );
 
     // A fresh call gets a fresh budget, and the helper is still answering.
     let again = helper.ok(

@@ -388,8 +388,8 @@ Methods:
 | `doctor` | — | `{usable, wasmtime, worlds: [supported world ids], imports, limits, held: {components, instances, evictions, evicted}, notes}` |
 | `inspect` | `{path}` | `{sha256, world, imports, exports, size}` — parsed from bytes / refusal (`unreadable_component`, `component_too_complex`, `compile_failed`) |
 | `load` | `{sha256, path}` | `{…as inspect, cached, evicted: [sha]}` / refusal (`sha_mismatch`, `unsupported_world`, `undefined_import`, `component_too_complex`, `too_many_components`) |
-| `instantiate` | `{instance, sha256, config, limits: {fuel, memory_bytes, deadline_ms}}` | ok / init error |
-| `call` | `{instance, export, payload}` | `{payload, fuel_used}` / trap / deadline |
+| `instantiate` | `{instance, sha256, config, limits: {fuel, memory_bytes, deadline_ms}}` | `{instance, fuel_used, log_lines}` / init error |
+| `call` | `{instance, export, payload}` | `{payload, fuel_used, log_lines}` / trap / deadline |
 | `drop` | `{instance}` | ok (idempotent) |
 
 Enforcement lives here and is structural: the linker defines exactly the functions the

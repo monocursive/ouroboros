@@ -757,13 +757,16 @@ pub fn run<O: Write>(request: &RunRequest, out: &mut O) -> Result<bool> {
 
     let described = if request.describe {
         let mark = helper.log_mark();
-        match helper.call(instance, "describe", "") {
-            Ok(result) => Some(Ok(wasm_client::sanitize(
-                result["payload"].as_str().unwrap_or_default(),
-            ))),
-            Err(error) => Some(Err(refusal_or_bail(error)?)),
-        }
-        .map(|described| (described, helper.guest_log(mark)))
+        let (described, expected) = match helper.call(instance, "describe", "") {
+            Ok(result) => (
+                Ok(wasm_client::sanitize(
+                    result["payload"].as_str().unwrap_or_default(),
+                )),
+                result["log_lines"].as_u64().unwrap_or(0),
+            ),
+            Err(error) => (Err(refusal_or_bail(error)?), 0),
+        };
+        Some((described, helper.guest_log_counted(mark, expected)))
     } else {
         None
     };
@@ -774,6 +777,11 @@ pub fn run<O: Write>(request: &RunRequest, out: &mut O) -> Result<bool> {
         let started = Instant::now();
         let reply = helper.call(instance, "handle-message", message);
         let wall_ms = started.elapsed().as_millis();
+        let expected_logs = reply
+            .as_ref()
+            .ok()
+            .and_then(|result| result["log_lines"].as_u64())
+            .unwrap_or(0);
 
         let (outcome, fuel_used) = match reply {
             Ok(result) => (
@@ -789,9 +797,10 @@ pub fn run<O: Write>(request: &RunRequest, out: &mut O) -> Result<bool> {
             message: message.clone(),
             outcome,
             fuel_used,
-            // Read after the answer: the helper's stderr is a different pipe from its stdout,
-            // so a line the guest wrote during the call can land just after the reply to it.
-            logs: helper.guest_log(mark),
+            // Read after the answer, and only once the lines the reply counted have arrived:
+            // the helper's stderr is a different pipe from its stdout, so a line the guest
+            // wrote during the call can land just after the reply to it.
+            logs: helper.guest_log_counted(mark, expected_logs),
             wall_ms,
         });
     }
@@ -1041,7 +1050,12 @@ pub fn hook<O: Write>(request: &HookRequest, out: &mut O) -> Result<bool> {
     let mark = helper.log_mark();
     let body = serde_json::to_string(&Value::Object(payload.clone()))?;
     let replied = helper.call(instance, "handle-message", &body);
-    let logs = helper.guest_log(mark);
+    let expected_logs = replied
+        .as_ref()
+        .ok()
+        .and_then(|result| result["log_lines"].as_u64())
+        .unwrap_or(0);
+    let logs = helper.guest_log_counted(mark, expected_logs);
     let _ = helper.drop_instance(instance);
 
     let reply = match replied {
