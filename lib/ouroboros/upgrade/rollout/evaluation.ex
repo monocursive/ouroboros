@@ -399,6 +399,7 @@ defmodule Ouroboros.Upgrade.Rollout.Evaluation do
 
   defp execute(module, initial_state, spec) do
     id = evaluation_id(module)
+    janitor = janitor(id)
     started = now_ms()
 
     try do
@@ -412,8 +413,30 @@ defmodule Ouroboros.Upgrade.Rollout.Evaluation do
       kind, reason -> {:error, {:evaluation_failure, module, kind, describe(reason)}}
     after
       stop(id)
+      dismiss(janitor)
     end
   end
+
+  # The same guarantee `Ouroboros.Upgrade.Rollout.Probe.janitor/1` makes, for the same
+  # reason: an evaluation runs under a caller's deadline, `after` does not run when a
+  # deadline kills this process, and the agent started here is supervised rather than
+  # linked to the evaluator — so it would keep its cluster-wide id and its helper instance
+  # with nothing left to stop it. A separate process monitors this one and does.
+  defp janitor(id) do
+    owner = self()
+
+    spawn(fn ->
+      ref = Process.monitor(owner)
+
+      receive do
+        {:dismiss, ^owner} -> :ok
+        {:DOWN, ^ref, :process, ^owner, :normal} -> :ok
+        {:DOWN, ^ref, :process, ^owner, _killed} -> stop(id)
+      end
+    end)
+  end
+
+  defp dismiss(janitor), do: send(janitor, {:dismiss, self()})
 
   defp prepare(id, module, initial_state, spec) do
     with :ok <- ensure_loaded(module),

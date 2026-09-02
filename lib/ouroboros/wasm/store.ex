@@ -53,6 +53,15 @@ defmodule Ouroboros.Wasm.Store do
   quarantined bytes: the record of what a node was told to run outlives the decision to
   stop running it.
 
+  Not pruned is not the same as not counted. `list/1` reports them beside the components,
+  tagged `kind: :manifest`, and their bytes count against the prune budget — a budget that
+  ignored a whole class of files in the directory it governs was a budget the store
+  exceeded quietly. What a prune *evicts* is still components only.
+
+  A manifest is also bounded on the way in, at the same ceiling `fetch_manifest/2` reads
+  under: publishing one this store would later refuse to read is publishing a durable,
+  unprunable file that no reboot can use.
+
   ## Pruning fails closed
 
   The store is bounded by a byte budget (`:store_budget_bytes`, see `Ouroboros.Wasm`) and
@@ -93,8 +102,16 @@ defmodule Ouroboros.Wasm.Store do
   # referenced now; `:quarantined` is the evidence for a deploy nobody has resolved.
   @protected_states [:live, :deploying, :quarantined]
 
-  @typedoc "One component the store holds."
+  @typedoc """
+  One file the store holds.
+
+  `kind` says which: `:component` for bytes, whose `sha256` is the digest of the content;
+  `:manifest` for a signed manifest, whose `sha256` is the digest of the artifact id the
+  file is named for. Both are "the name this file is published under", which is what a
+  listing is about; only a component is ever a prune candidate.
+  """
   @type entry :: %{
+          kind: :component | :manifest,
           sha256: String.t(),
           path: String.t(),
           size: non_neg_integer(),
@@ -160,6 +177,7 @@ defmodule Ouroboros.Wasm.Store do
 
   def put_manifest(%Artifact{id: id} = artifact, opts) when is_binary(id) and id != "" do
     with {:ok, payload} <- encode_manifest(artifact),
+         :ok <- ensure_writable_size(payload, id),
          {:ok, dir} <- root(opts),
          :ok <- ensure_directory(dir),
          path = manifest_path(dir, id),
@@ -213,7 +231,14 @@ defmodule Ouroboros.Wasm.Store do
     end
   end
 
-  @doc "Every component held, oldest first, with sizes."
+  @doc """
+  Every file held, oldest first, with sizes and a `:kind`.
+
+  Manifests are listed beside components. They are never evicted, but they are bytes on
+  the disk this store's budget is about, and a listing that did not show them was a
+  listing an operator could not reconcile against `du`. Filter on `:kind` for one or the
+  other; `components/1` is the shorthand.
+  """
   @spec list(keyword()) :: {:ok, [entry()]} | {:error, term()}
   def list(opts \\ []) do
     with {:ok, dir} <- root(opts) do
@@ -222,6 +247,14 @@ defmodule Ouroboros.Wasm.Store do
         {:error, :enoent} -> {:ok, []}
         {:error, reason} -> {:error, {:store_unreadable, dir, reason}}
       end
+    end
+  end
+
+  @doc "The component half of `list/1`: the files a prune may consider."
+  @spec components(keyword()) :: {:ok, [entry()]} | {:error, term()}
+  def components(opts \\ []) do
+    with {:ok, entries} <- list(opts) do
+      {:ok, Enum.filter(entries, &(&1.kind == :component))}
     end
   end
 
@@ -265,10 +298,15 @@ defmodule Ouroboros.Wasm.Store do
          {:ok, entries} <- list(opts),
          {:ok, protected} <- protected_shas(opts) do
       budget = budget(opts)
+
+      # Every file counts against the budget, manifests included: they are not evictable,
+      # but they are on the disk, and a budget that ignored them was a budget the store
+      # exceeded quietly. What is *evictable* is still components only.
       held = Enum.reduce(entries, 0, &(&1.size + &2))
 
       {evicted, reclaimed} =
         entries
+        |> Enum.filter(&(&1.kind == :component))
         |> Enum.reject(&MapSet.member?(protected, &1.sha256))
         |> Enum.reduce_while({[], 0}, fn entry, {shas, freed} ->
           if held - freed <= budget do
@@ -405,6 +443,17 @@ defmodule Ouroboros.Wasm.Store do
   defp manifest_path(dir, artifact_id),
     do: Path.join(dir, @manifest_prefix <> digest(artifact_id) <> @manifest_suffix)
 
+  # The same ceiling `fetch_manifest/2` reads under, applied on the way in. A store that
+  # accepted a manifest it would later refuse to read published a file that is durable,
+  # protected from pruning, and useless: the reboot restart that needs it reports
+  # `{:manifest_unusable, {:manifest_too_large, _, _}}` forever, and nothing rewrites it.
+  # One bound, both directions.
+  defp ensure_writable_size(payload, artifact_id) do
+    if byte_size(payload) <= @max_manifest_bytes,
+      do: :ok,
+      else: {:error, {:manifest_too_large, artifact_id, byte_size(payload)}}
+  end
+
   # The rest of this store validates a digest before it reads bytes; a manifest has no name
   # to check itself against, so what bounds it is its size. A real one is on the order of a
   # kilobyte, and nothing that reaches a megabyte is a manifest this build wrote.
@@ -468,19 +517,47 @@ defmodule Ouroboros.Wasm.Store do
   end
 
   defp entry(dir, name) do
-    with @prefix <> rest <- name,
-         true <- String.ends_with?(rest, @suffix),
-         sha = binary_part(rest, 0, byte_size(rest) - byte_size(@suffix)),
-         {:ok, sha} <- normalize(sha),
-         path = Path.join(dir, name),
-         # `lstat`, not `stat`: a symlink planted at a component name is not a component. It
-         # is rejected here so `list`/`prune` never report its target's size as a component's
-         # (F10). Digest verification on `fetch` is the guarantee against wrong bytes; this is
-         # the guarantee the store's byte accounting is about files it actually holds.
-         {:ok, %{type: :regular, size: size, mtime: mtime}} <- File.lstat(path, time: :posix) do
-      [%{sha256: sha, path: path, size: size, mtime: mtime}]
+    case published_name(name) do
+      {:ok, kind, sha} -> stat_entry(dir, name, kind, sha)
+      :error -> []
+    end
+  end
+
+  defp published_name(@prefix <> rest = _component) do
+    with true <- String.ends_with?(rest, @suffix),
+         hex = binary_part(rest, 0, byte_size(rest) - byte_size(@suffix)),
+         {:ok, sha} <- normalize(hex) do
+      {:ok, :component, sha}
     else
-      _not_a_component -> []
+      _not_a_component -> :error
+    end
+  end
+
+  defp published_name(@manifest_prefix <> rest = _manifest) do
+    with true <- String.ends_with?(rest, @manifest_suffix),
+         hex = binary_part(rest, 0, byte_size(rest) - byte_size(@manifest_suffix)),
+         {:ok, sha} <- normalize(hex) do
+      {:ok, :manifest, sha}
+    else
+      _not_a_manifest -> :error
+    end
+  end
+
+  defp published_name(_other), do: :error
+
+  # `lstat`, not `stat`: a symlink planted at a published name is not a published file. It
+  # is rejected here so `list`/`prune` never report its target's size as a component's
+  # (F10). Digest verification on `fetch` is the guarantee against wrong bytes; this is
+  # the guarantee the store's byte accounting is about files it actually holds.
+  defp stat_entry(dir, name, kind, sha) do
+    path = Path.join(dir, name)
+
+    case File.lstat(path, time: :posix) do
+      {:ok, %{type: :regular, size: size, mtime: mtime}} ->
+        [%{kind: kind, sha256: sha, path: path, size: size, mtime: mtime}]
+
+      _not_a_regular_file ->
+        []
     end
   end
 

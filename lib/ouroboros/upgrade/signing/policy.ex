@@ -239,9 +239,13 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
      a guest toolchain that produces a test report is welcome to say so, and lane W does
      not pretend one exists when it does not.
   6. **Start block.** `metadata.start`, when present, must be exactly
-     `%{id: binary, config: binary}` with the id under the `wasm/` prefix. It is the
-     claim "this capability runs continuously under this id", which a signature should
-     cover and which a manifest must not be able to point at another lane's namespace.
+     `%{id: binary, config: binary}` and the id must be exactly `"wasm/" <> name` for the
+     name in *this* manifest. It is the claim "this capability runs continuously under this
+     id", which a signature should cover — and binding it to the prefix alone was not
+     binding it at all: a component named `evil` could declare `wasm/greeter` and be signed,
+     recorded in the register as `wasm/evil`, and then claim the cluster-wide id everybody
+     trusts as `greeter`. The name's own charset (`Ouroboros.Wasm.Artifact.name?/1`) is what
+     keeps that id from being a path or a bidirectional-override string.
   """
 
   @behaviour Ouroboros.Upgrade.Signing.Policy
@@ -259,9 +263,10 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
   @world_imports ["log"]
 
   # The namespace a lane-W durable agent id lives in. `Ouroboros.Wasm.Rollout` writes the
-  # registry entry's module as `"wasm/" <> name` for the same reason.
+  # registry entry's module as `"wasm/" <> name` for the same reason. The id's own bound is
+  # the *name's* bound (`Ouroboros.Wasm.Artifact.name?/1`), because the id is exactly this
+  # prefix and that name.
   @start_prefix "wasm/"
-  @max_start_id_bytes 256
   @max_start_config_bytes 16_384
 
   # The same default the service applies, so a policy invoked directly — by a test, or by
@@ -304,7 +309,7 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
          :ok <- check_imports(artifact),
          {:ok, provenance} <- check_wasm_provenance(artifact.metadata),
          {:ok, eval} <- check_wasm_eval(artifact.metadata, context),
-         {:ok, start} <- check_start(artifact.metadata) do
+         {:ok, start} <- check_start(artifact) do
       {:ok,
        %{
          lane: :wasm,
@@ -629,7 +634,7 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
       not is_integer(artifact.epoch) or artifact.epoch <= 0 ->
         {:refused, {:invalid_epoch, describe(artifact.epoch)}}
 
-      not is_binary(artifact.name) or artifact.name == "" ->
+      not Wasm.Artifact.name?(artifact.name) ->
         {:refused, {:invalid_component_name, describe(artifact.name)}}
 
       not Wasm.Artifact.sha256?(artifact.component_sha256) ->
@@ -685,11 +690,32 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
 
   # Policy, not enforcement — see the moduledoc and D5. Nothing here parses a component,
   # so a signer node with no `ouro-wasm` on it decides exactly as well as one with it.
+  #
+  # A duplicate is refused rather than deduplicated, because the manifest is what gets
+  # signed: a list the signer silently rewrote is not the list the signature covers, and
+  # `Ouroboros.Wasm.Verifier.cross_check/2` compares the *sorted list* the helper reports
+  # against the *sorted list* the manifest declares. `["log", "log"]` therefore could never
+  # cross-check against any helper on any node — it was a manifest signed into a permanent
+  # quarantine, which is a refusal worth making at the signer instead.
   defp check_imports(%Wasm.Artifact{imports: imports}) do
-    case Enum.reject(imports, &(&1 in @world_imports)) do
-      [] -> :ok
-      [undeclared | _rest] -> {:refused, {:import_not_in_world, undeclared}}
+    cond do
+      Enum.uniq(imports) != imports ->
+        {:refused, {:duplicate_component_imports, describe(duplicates(imports))}}
+
+      true ->
+        case Enum.reject(imports, &(&1 in @world_imports)) do
+          [] -> :ok
+          [undeclared | _rest] -> {:refused, {:import_not_in_world, undeclared}}
+        end
     end
+  end
+
+  defp duplicates(imports) do
+    imports
+    |> Enum.frequencies()
+    |> Enum.filter(fn {_import, count} -> count > 1 end)
+    |> Enum.map(&elem(&1, 0))
+    |> Enum.sort()
   end
 
   defp check_wasm_provenance(metadata) do
@@ -770,28 +796,41 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
     end
   end
 
-  defp check_start(metadata) do
-    case Map.get(metadata, :start) do
+  defp check_start(%Wasm.Artifact{} = artifact) do
+    case Map.get(artifact.metadata, :start) do
       nil -> {:ok, :absent}
-      start when is_map(start) and not is_struct(start) -> validate_start(start)
+      start when is_map(start) and not is_struct(start) -> validate_start(start, artifact.name)
       other -> {:refused, {:invalid_start, describe(other)}}
     end
   end
 
-  defp validate_start(start) do
+  # The id is bound to **this component's name**, not merely to the lane's prefix. A prefix
+  # is a namespace, and a namespace with nothing inside it binding an id to the manifest it
+  # travels in is a namespace any signed component can point anywhere in: a component named
+  # `evil` declaring `start.id: "wasm/greeter"` was, before this, a perfectly signable
+  # manifest whose registry entry said `wasm/evil` while the process it claimed cluster-wide
+  # was the one everybody trusts as `greeter`. It also made `wasm/../../etc/passwd` and a
+  # right-to-left-override id signable, neither of which is a name anybody meant.
+  #
+  # One name, one durable id, and the id is the register's `module` field spelled the same
+  # way. `Ouroboros.Wasm.Rollout.start_block/1` and `Ouroboros.Wasm.Boot` re-derive it from
+  # the manifest rather than reading it, so a reader is never the one deciding.
+  #
+  # There is no separate bound on the id's length any more, and there is no separate
+  # `String.valid?/1` on it: both are now facts about the name, which `check_wasm_shape/2`
+  # has already held to `Ouroboros.Wasm.Artifact.name?/1` — at most 64 bytes of lower-case
+  # ASCII. A second bound that can never fire is a rule nobody is enforcing.
+  defp validate_start(start, name) when is_binary(name) do
     id = Map.get(start, :id)
     config = Map.get(start, :config)
+    expected = @start_prefix <> name
 
     cond do
       Map.keys(start) -- [:id, :config] != [] ->
         {:refused, {:invalid_start, :unknown_keys}}
 
-      not is_binary(id) or not String.starts_with?(id, @start_prefix) or
-          byte_size(id) <= byte_size(@start_prefix) ->
+      not is_binary(id) or id != expected ->
         {:refused, {:invalid_start_id, describe(id)}}
-
-      byte_size(id) > @max_start_id_bytes or not String.valid?(id) ->
-        {:refused, {:invalid_start_id, :bounds}}
 
       not is_binary(config) ->
         {:refused, {:invalid_start, :config}}

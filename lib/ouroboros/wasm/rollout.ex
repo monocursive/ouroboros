@@ -44,6 +44,11 @@ defmodule Ouroboros.Wasm.Rollout do
   never "just links less": that is `Ouroboros.Wasm.Verifier`'s sentence, and here it is
   quarantine.
 
+  A deadline is ambiguity in the strong sense on a peer: `:erpc.call/5` stops waiting, it
+  does not stop the peer, so a stage or an evaluation that missed its deadline may still be
+  running there and may finish after this module has already settled the rollout. That is
+  the honest reading of `:quarantined` — "somebody may be running this and nobody said so".
+
   ## The epoch, where it is minted, and what a retry means
 
   An epoch is inside the signed manifest, so this module cannot mint one — allocating a
@@ -240,16 +245,22 @@ defmodule Ouroboros.Wasm.Rollout do
   binary, is `nil` here — the signer refuses both, and a reader that would rather trust
   the signer than check is a reader one bad manifest away from `Mesh.start_agent/2` with
   whatever the manifest said.
+
+  The id is **derived, not read**: it is `"wasm/" <> artifact.name` or it is nothing. A
+  manifest naming any other id is a manifest claiming a durable id for a component it does
+  not describe, which is what a signature must not be able to authorize (docs/WASM.md
+  §7.5). `Ouroboros.Wasm.Boot` reaches the same rule through this function, so the deploy
+  path and the reboot path cannot disagree about which process a component owns.
   """
   @spec start_block(Artifact.t()) :: %{id: String.t(), config: String.t()} | nil
-  def start_block(%Artifact{metadata: metadata}) when is_map(metadata) do
-    case Map.get(metadata, :start) do
-      %{id: @module_prefix <> rest = id, config: config}
-      when rest != "" and is_binary(config) ->
-        %{id: id, config: config}
+  def start_block(%Artifact{metadata: metadata, name: name}) when is_map(metadata) do
+    if Artifact.name?(name) do
+      expected = @module_prefix <> name
 
-      _absent_or_invalid ->
-        nil
+      case Map.get(metadata, :start) do
+        %{id: ^expected, config: config} when is_binary(config) -> %{id: expected, config: config}
+        _absent_or_invalid -> nil
+      end
     end
   end
 
@@ -809,9 +820,20 @@ defmodule Ouroboros.Wasm.Rollout do
   # filesystem writes in `stage/3`, `:global.trans/2` inside `Mesh.start_agent/2` — and an
   # unbounded local call would mean a rollout that hangs forever on the one node whose
   # deadline nobody set, while every peer's is enforced. So it runs in a task and is killed
-  # at the deadline, exactly as `:erpc.call/5` kills the process it spawned on a peer. A
-  # killed gate leaves whatever it had already started, on either side of that branch, which
-  # is precisely why the outcome is ambiguity and ambiguity quarantines.
+  # at the deadline.
+  #
+  # The two branches are *not* symmetric, and saying otherwise was wrong. `:erpc.call/5`
+  # with a timeout does not kill the process it spawned on the peer: it stops waiting and
+  # demonitors, and the peer's process runs to completion. So a timed-out **local** gate is
+  # killed mid-flight, while a timed-out **peer** gate keeps going and may publish bytes,
+  # start a wrapper, or finish an evaluation after this coordinator has already settled the
+  # rollout. Both outcomes are `{:ambiguous, _}` here and ambiguity quarantines, which is
+  # exactly the state that says "a node may be running something nobody has accounted for".
+  #
+  # What each branch leaves behind is bounded rather than hoped for. The peer's own `after`
+  # blocks run, because it was never killed; the local branch's do not, so
+  # `Ouroboros.Upgrade.Rollout.Probe` and `Ouroboros.Upgrade.Rollout.Evaluation` each keep
+  # their throwaway agent's cleanup in a process the kill does not reach.
   #
   # Public because it is this module's transport primitive: it carries no authority of its
   # own, and it is the unit whose contract is worth testing directly.

@@ -30,6 +30,15 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
   into `{:error, reason}`, including the ones in the cleanup path, and the return value
   is always a plain serializable term: `:ok` or `{:error, term}`, never a pid, struct, or
   reference crossing back over the wire.
+
+  ## The throwaway agent outlives a killed probe unless something else stops it
+
+  A probe runs under a caller's deadline, and a deadline that fires kills this process.
+  `after` does not run for an exit signal from outside, so the agent started here would be
+  left holding a cluster-wide mesh id — and, for a lane-W capability, a helper instance —
+  with nothing linked to it that would ever notice. The cleanup is therefore also held by a
+  separate process that monitors this one and stops the id if this one dies. See
+  `janitor/1`.
   """
 
   alias Ouroboros.Mesh
@@ -85,6 +94,7 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
 
   defp run(module, initial_state) do
     id = probe_id(module)
+    janitor = janitor(id)
 
     try do
       probe(id, module, initial_state)
@@ -94,8 +104,36 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
       kind, reason -> {:error, {:probe_failure, module, kind, inspect(reason)}}
     after
       stop(id)
+      dismiss(janitor)
     end
   end
+
+  # `after` is not cleanup that survives being killed. A probe runs under somebody else's
+  # deadline — `Ouroboros.Wasm.Rollout.bounded_call/5` on this node, `:erpc.call/5` from a
+  # peer — and a deadline that fires kills this process outright, at which point the block
+  # above never runs and the throwaway agent this function started is still holding an id, a
+  # mesh registration, and (for a lane-W capability) a helper instance. Nothing else would
+  # ever remove it: the agent is supervised, not linked to the prober.
+  #
+  # So the id's cleanup is also held by a process that is not the one being killed. It
+  # monitors this one and stops whatever still answers to `id` if this process goes down
+  # any way other than normally. On the ordinary path it is dismissed, and the `after`
+  # block above does the stopping, so nothing is stopped twice.
+  defp janitor(id) do
+    owner = self()
+
+    spawn(fn ->
+      ref = Process.monitor(owner)
+
+      receive do
+        {:dismiss, ^owner} -> :ok
+        {:DOWN, ^ref, :process, ^owner, :normal} -> :ok
+        {:DOWN, ^ref, :process, ^owner, _killed} -> stop(id)
+      end
+    end)
+  end
+
+  defp dismiss(janitor), do: send(janitor, {:dismiss, self()})
 
   defp probe(id, module, initial_state) do
     body = %{probe: id, node: node()}

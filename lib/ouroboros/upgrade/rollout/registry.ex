@@ -42,9 +42,11 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   A lane-W rollout deploys a WebAssembly component and introduces no module and no atom
   at all (docs/WASM.md D2), so its `module` is the binary `"wasm/" <> name` and its
   `component_sha256` is the identity that actually decides what runs. That is the only
-  binary form this register accepts: a name that is neither a module atom nor a lane-W
-  component is still `{:invalid_attribute, :module, _}`, because "binary-tolerant" was
-  always about names crossing a checkpoint, never about admitting anything at all.
+  binary form this register accepts **from a caller**: a name that is neither a module atom
+  nor a lane-W component is still `{:invalid_attribute, :module, _}` at `deploying/2`,
+  because "binary-tolerant" was always about names crossing a checkpoint, never about
+  admitting anything at all. Reading a checkpoint is the other side of exactly that
+  sentence and is looser by exactly that much — see below.
 
   Keeping both lanes here rather than forking a second register is D7. The states, the
   transition table, the supersede rule, the pruning rule and the ambiguity discipline are
@@ -66,6 +68,38 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   A newer checkpoint is still refused rather than coerced, the way the node executor's
   journal refuses a shape it cannot interpret, because a field this build would silently
   drop is not a field it may rewrite.
+
+  `test_report`, `detail` and `eval_report` are all held to the same bound on the way in.
+  The first two arrive from a signed manifest and from a settling rollout, which means a
+  requester chooses them, and an unbounded durable store is not one — see `bound_report/2`.
+
+  ## What a checkpoint is re-validated against on read, and what happens to one bad entry
+
+  Every entry is held to the validators `deploying/2` applies, again, on load: the id is a
+  binary and matches the entry's own `artifact_id`, the epoch is a positive integer, the
+  sha is 64 lower-case hex or `nil`, the state is one of the five, `nodes` is non-empty,
+  the timestamps are strings. What is *looser* on read than on write is the two names that
+  cross a reboot: a module and a node name this VM never interned come back as binaries,
+  and both kinds are accepted, because that is what a rollout of code this node no longer
+  holds looks like from here.
+
+  An entry that fails is **dropped with a logged reason and the rest of the register
+  loads**. Refusing the whole checkpoint for one row meant a single planted or unreadable
+  entry made the node unable to deploy anything, forever — the failure mode the epoch
+  watermark had, below. Two shapes are worth naming: a rollout id that spelled an atom
+  (`"nil"`, `"error"`) in a checkpoint written before map keys were tagged came back as
+  that atom and is **migrated** to its string rather than dropped, because the entry beside
+  it still records the id and the two agree; anything else that is not a usable key is
+  dropped.
+
+  ## The epoch watermark is a high-water mark, and it is durable
+
+  `lane_w_epoch` is carried in the checkpoint. Deriving the watermark from the surviving
+  entries alone let `prune/2` lower it: the entry at the highest epoch is settled history,
+  which is the first thing pruning discards, and its number was free again the moment it
+  went. The mark only rises, the entries are folded in on top of it, and the field is
+  additive — a checkpoint that has never held one reads as `0`, and an older build that
+  drops it falls back to deriving, which is where the number came from.
 
   `component_sha256` is a lower-case 64-hex **string** end to end: in the struct, across
   the checkpoint, and back. Nothing interns it, nothing resolves it, and
@@ -93,6 +127,8 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   """
 
   use GenServer
+
+  require Logger
 
   alias Ouroboros.Upgrade.{Beam, ModuleName, Wire}
 
@@ -226,12 +262,13 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   def init(opts) do
     with {:ok, storage} <- storage_config(opts),
          {:ok, adapter, adapter_opts} <- normalize_storage(storage),
-         {:ok, rollouts} <- load(adapter, adapter_opts) do
+         {:ok, rollouts, watermark} <- load(adapter, adapter_opts) do
       {:ok,
        %{
          adapter: adapter,
          opts: adapter_opts,
          rollouts: rollouts,
+         lane_w_epoch: watermark,
          limit: limit(opts),
          durability: durability_level(adapter)
        }}
@@ -258,7 +295,7 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
         %{
           entry
           | state: next,
-            detail: detail,
+            detail: bound_report(detail, :detail),
             eval_report: bound_report(eval_report) || entry.eval_report,
             updated_at: now()
         },
@@ -299,7 +336,7 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
          state: :deploying,
          source_sha256: Map.get(attrs, :source_sha256),
          component_sha256: component_sha256,
-         test_report: Map.get(attrs, :test_report, %{}),
+         test_report: bound_report(Map.get(attrs, :test_report, %{}), :test_report) || %{},
          created_at: timestamp,
          updated_at: timestamp
        }}
@@ -310,15 +347,23 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   # this store's terms or not at all: portable, and small enough that a bounded registry
   # stays bounded. A rejected report leaves a marker rather than a half-report, because a
   # truncated map still reads like evidence.
-  defp bound_report(nil), do: nil
+  #
+  # All three fields a caller can fill go through here, and that is the point. `eval_report`
+  # is a gate's summary, `test_report` is a *signed manifest's* provenance, and `detail` is
+  # whatever a settling rollout wrote — the last two are chosen by whoever built the
+  # manifest, so a 2 MB report or a pid in one of them would be a 2 MB checkpoint file, or a
+  # term the next boot's `[:safe]` read cannot make sense of, on somebody else's say-so.
+  defp bound_report(report, field \\ :eval_report)
 
-  defp bound_report(report) do
+  defp bound_report(nil, _field), do: nil
+
+  defp bound_report(report, field) do
     cond do
       not Beam.portable_term?(report) ->
-        %{eval_report: :unportable, rendered: inspect(report, limit: 5, printable_limit: 200)}
+        %{field => :unportable, rendered: inspect(report, limit: 5, printable_limit: 200)}
 
       byte_size(:erlang.term_to_binary(report)) > @max_eval_report_bytes ->
-        %{eval_report: :too_large, bytes: byte_size(:erlang.term_to_binary(report))}
+        %{field => :too_large, bytes: byte_size(:erlang.term_to_binary(report))}
 
       true ->
         report
@@ -341,11 +386,21 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
     if epoch > highest, do: :ok, else: {:error, {:stale_epoch, epoch, highest}}
   end
 
+  # The watermark is the *high-water mark*, not the highest surviving entry. Deriving it
+  # from the entries alone made `prune/2` able to lower it: a settled rollout at the
+  # highest epoch is exactly the kind of history pruning discards first, and once it was
+  # gone its number was free again. So the mark is carried in the checkpoint beside the
+  # entries and only ever rises, and what is derived from the entries is folded in on top
+  # of it — a planted entry above the mark still counts, and a pruned one no longer has to.
+  defp highest_lane_w_epoch(state) do
+    max(state.lane_w_epoch, derived_lane_w_epoch(state.rollouts))
+  end
+
   # Every state counts. A `:deploying` entry may yet become live, a `:quarantined` one may
   # be running right now, and a `:rolled_back` one is a number that was already spent — so
   # none of them is a number a later manifest may reuse.
-  defp highest_lane_w_epoch(state) do
-    state.rollouts
+  defp derived_lane_w_epoch(rollouts) do
+    rollouts
     |> Map.values()
     |> Enum.filter(&is_binary(Map.get(&1, :component_sha256)))
     |> Enum.map(&Map.get(&1, :epoch))
@@ -372,14 +427,11 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   # reported without touching in-memory state: the caller must not proceed.
   defp persist(entry, state) do
     rollouts = state.rollouts |> put_entry(entry) |> prune(state.limit)
+    watermark = max(state.lane_w_epoch, derived_lane_w_epoch(rollouts))
 
-    case adapter_call(state.adapter, :put_checkpoint, [
-           @store_key,
-           checkpoint(rollouts),
-           state.opts
-         ]) do
+    case write_checkpoint(state, rollouts, watermark) do
       :ok ->
-        {:reply, {:ok, entry}, %{state | rollouts: rollouts}}
+        {:reply, {:ok, entry}, %{state | rollouts: rollouts, lane_w_epoch: watermark}}
 
       {:error, {:commit_outcome_unknown, _reason} = ambiguity} ->
         {:stop, ambiguity, {:error, {:rollout_commit_outcome_unknown, ambiguity}}, state}
@@ -390,6 +442,30 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
       other ->
         {:reply, {:error, {:invalid_rollout_storage_response, other}}, state}
     end
+  end
+
+  # Encoding is inside the rescue, not in the argument list of a call that has one. The
+  # checkpoint is built from an entry whose `test_report` and `detail` came from somebody
+  # else's manifest, and a `Wire.dump/1` that raised over there raised *here* — outside
+  # `adapter_call/3`'s rescue, out of `handle_call/3`, killing the register and every
+  # rollout record it was holding. A write this process cannot encode is a refused write,
+  # the same as a write the adapter would not take.
+  #
+  # `Ouroboros.Upgrade.Wire.dump/1` is total now, so nothing reaches this clause: it is the
+  # belt, and the brace is that boundary's own promise, swept in `Ouroboros.Upgrade.WireTest`.
+  # It stays because the argument-position bug is structural — any future encoder that can
+  # raise would kill this GenServer again — and a refusal here costs one rollout while a
+  # raise costs the whole register.
+  defp write_checkpoint(state, rollouts, watermark) do
+    adapter_call(state.adapter, :put_checkpoint, [
+      @store_key,
+      checkpoint(rollouts, watermark),
+      state.opts
+    ])
+  rescue
+    error -> {:error, {:rollout_checkpoint_unencodable, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {:rollout_checkpoint_unencodable, {kind, inspect(reason, limit: 5)}}}
   end
 
   # Marking a module live displaces any overlapping live record of the same module in
@@ -444,8 +520,17 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
     end)
   end
 
-  defp checkpoint(rollouts),
-    do: Wire.dump(%{version: @checkpoint_version, rollouts: to_wire(rollouts)})
+  # `:lane_w_epoch` is additive and needs no new checkpoint version, the way the signing
+  # journal's `:lane` is: an older build reads the map, ignores the key, and writes back a
+  # checkpoint without it — at which point the mark is derived from the entries again,
+  # which is where it came from. A checkpoint that has never held one loads as `0`.
+  defp checkpoint(rollouts, watermark) do
+    Wire.dump(%{
+      version: @checkpoint_version,
+      rollouts: to_wire(rollouts),
+      lane_w_epoch: watermark
+    })
+  end
 
   # Two names for one module compare equal whichever side of the checkpoint boundary
   # each of them came from.
@@ -464,15 +549,15 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   defp load(adapter, adapter_opts) do
     case adapter_call(adapter, :get_checkpoint, [@store_key, adapter_opts]) do
       :not_found ->
-        {:ok, %{}}
+        {:ok, %{}, 0}
 
       {:ok, wire} ->
         case Wire.load(wire) do
-          %{version: version, rollouts: rollouts} when is_map(rollouts) ->
-            upgrade(version, from_wire(rollouts))
+          %{version: version, rollouts: rollouts} = held when is_map(rollouts) ->
+            upgrade(version, from_wire(rollouts), watermark(held))
 
-          %{"version" => version, "rollouts" => rollouts} when is_map(rollouts) ->
-            upgrade(version, from_wire(rollouts))
+          %{"version" => version, "rollouts" => rollouts} = held when is_map(rollouts) ->
+            upgrade(version, from_wire(rollouts), watermark(held))
 
           _invalid ->
             {:error, :invalid_rollout_checkpoint}
@@ -486,7 +571,16 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
     end
   end
 
-  defp upgrade(@checkpoint_version, rollouts), do: accept(rollouts)
+  # A mark this build does not recognize is `0`, which is the honest reading: this
+  # checkpoint records no high-water mark, so the entries are all there is to go on.
+  defp watermark(held) do
+    case Map.get(held, :lane_w_epoch) || Map.get(held, "lane_w_epoch") do
+      value when is_integer(value) and value >= 0 -> value
+      _absent_or_invalid -> 0
+    end
+  end
+
+  defp upgrade(@checkpoint_version, rollouts, watermark), do: accept(rollouts, watermark)
 
   # Widening an entry is the one migration that loses nothing, and one widening covers
   # every older version: every field an old rollout recorded is kept, and the fields it
@@ -495,35 +589,132 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   # are the truth — those rollouts were never evaluated, and those rollouts named no
   # component. A newer checkpoint is still refused, because a field this build would
   # silently drop is not a field it may rewrite.
-  defp upgrade(version, rollouts) when version in @upgradable_versions do
+  defp upgrade(version, rollouts, watermark) when version in @upgradable_versions do
     rollouts
     |> Map.new(fn
       {id, %Entry{} = entry} -> {id, struct(Entry, Map.from_struct(entry))}
       {id, other} -> {id, other}
     end)
-    |> accept()
+    |> accept(watermark)
   end
 
-  defp upgrade(version, _rollouts), do: {:error, {:unsupported_rollout_checkpoint, version}}
+  defp upgrade(version, _rollouts, _watermark),
+    do: {:error, {:unsupported_rollout_checkpoint, version}}
 
-  defp accept(rollouts) do
-    if valid_rollouts?(rollouts),
-      do: {:ok, rollouts},
-      else: {:error, :invalid_rollout_checkpoint}
-  end
+  # One bad entry is one bad entry. Refusing the whole register for it means a single
+  # unreadable row — a checkpoint written before ids were keys this build can read, a
+  # planted epoch, a sha that is not one — takes every honest rollout record down with it
+  # and leaves the node unable to deploy at all. So each entry is held to exactly the
+  # validators `build_entry/1` applies on the way in, and the ones that fail are dropped
+  # with a logged reason while the rest load.
+  defp accept(rollouts, watermark) do
+    {kept, refused} =
+      Enum.reduce(Map.to_list(rollouts), {%{}, []}, fn pair, {kept, refused} ->
+        case validate_loaded(pair) do
+          {:ok, id, entry} -> {Map.put(kept, id, entry), refused}
+          {:error, reason} -> {kept, [reason | refused]}
+        end
+      end)
 
-  # Field access is deliberately by `Map.get/2`: a struct-shaped term missing a key is a
-  # checkpoint to refuse, not an exception to raise out of `init/1`.
-  defp valid_rollouts?(rollouts) do
-    Enum.all?(rollouts, fn
-      {id, %Entry{} = entry} when is_binary(id) ->
-        Map.get(entry, :artifact_id) == id and Map.get(entry, :state) in @states and
-          Map.has_key?(entry, :eval_report) and Map.has_key?(entry, :component_sha256)
-
-      _other ->
-        false
+    Enum.each(Enum.reverse(refused), fn reason ->
+      Logger.warning(
+        "rollout registry dropped an unreadable checkpoint entry: #{inspect(reason)}"
+      )
     end)
+
+    {:ok, kept, max(watermark, derived_lane_w_epoch(kept))}
   end
+
+  # Field access is deliberately by `Map.get/2`: a struct-shaped term missing a key is an
+  # entry to refuse, not an exception to raise out of `init/1`.
+  defp validate_loaded({id, %Entry{} = entry}) do
+    with {:ok, id} <- loaded_id(id),
+         :ok <- loaded_shape(id, entry) do
+      {:ok, id, entry}
+    end
+  end
+
+  defp validate_loaded({id, other}), do: {:error, {:not_an_entry, key_label(id), describe(other)}}
+
+  # An id that is an atom is a checkpoint written before map keys were tagged: every key
+  # went to disk bare, and `Wire.load/1` resolves a bare key that names an existing atom
+  # back into that atom. A rollout id spelling a word (`"nil"`, `"error"`) came back as
+  # `nil` or `:error` and matched nothing here. It is migrated on read rather than refused,
+  # because the entry beside it still says what its id was and the two agree.
+  defp loaded_id(id) when is_binary(id) and id != "", do: {:ok, id}
+  defp loaded_id(id) when is_atom(id) and not is_nil(id), do: {:ok, Atom.to_string(id)}
+  defp loaded_id(nil), do: {:ok, "nil"}
+  defp loaded_id(id), do: {:error, {:invalid_rollout_key, describe(id)}}
+
+  defp loaded_shape(id, entry) do
+    attrs = %{
+      artifact_id: Map.get(entry, :artifact_id),
+      module: Map.get(entry, :module),
+      epoch: Map.get(entry, :epoch),
+      nodes: Map.get(entry, :nodes),
+      component_sha256: Map.get(entry, :component_sha256)
+    }
+
+    with {:ok, ^id} <- fetch_binary(attrs, :artifact_id),
+         :ok <- loaded_module(attrs),
+         {:ok, _epoch} <- fetch_epoch(attrs),
+         :ok <- loaded_nodes(attrs),
+         {:ok, _sha} <- fetch_component_sha256(attrs),
+         :ok <- loaded_fields(entry) do
+      :ok
+    else
+      {:ok, other} -> {:error, {:id_mismatch, id, other}}
+      {:error, reason} -> {:error, {id, reason}}
+    end
+  end
+
+  # Looser than `fetch_module/1` on purpose, and for the reason the moduledoc gives: a
+  # forged module name this VM has not interned comes back from the checkpoint as the
+  # binary it was written as, and "this node has not loaded that module" is a true thing to
+  # record about a rollout that happened before the reboot. What `deploying/2` refuses is a
+  # caller *presenting* such a name; what this refuses is an entry with no name at all.
+  defp loaded_module(%{module: module}) when is_atom(module) and not is_nil(module), do: :ok
+  defp loaded_module(%{module: module}) when is_binary(module) and module != "", do: :ok
+
+  defp loaded_module(%{module: other}),
+    do: {:error, {:invalid_attribute, :module, describe(other)}}
+
+  # Node names cross the checkpoint the way module names do: `[:safe]` cannot intern one a
+  # rebooted VM has never connected to, so `Ouroboros.Upgrade.Wire` hands it back as the
+  # binary it was written as. That is a true record of a rollout to a node this VM does not
+  # know, not a corrupt one — so both kinds are accepted here, where `deploying/2` takes
+  # only the atoms a live caller can have.
+  defp loaded_nodes(%{nodes: [_ | _] = nodes}) do
+    if Enum.all?(nodes, &(is_atom(&1) or is_binary(&1))),
+      do: :ok,
+      else: {:error, {:invalid_attribute, :nodes, nodes}}
+  end
+
+  defp loaded_nodes(%{nodes: other}), do: {:error, {:invalid_attribute, :nodes, other}}
+
+  defp loaded_fields(entry) do
+    cond do
+      Map.get(entry, :state) not in @states ->
+        {:error, {:invalid_attribute, :state, Map.get(entry, :state)}}
+
+      not Map.has_key?(entry, :eval_report) or not Map.has_key?(entry, :component_sha256) ->
+        {:error, {:missing_attribute, :eval_report}}
+
+      not is_binary(Map.get(entry, :created_at)) or not is_binary(Map.get(entry, :updated_at)) ->
+        {:error, {:invalid_attribute, :timestamps, nil}}
+
+      not is_map(Map.get(entry, :test_report)) ->
+        {:error, {:invalid_attribute, :test_report, describe(Map.get(entry, :test_report))}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp key_label(id) when is_binary(id) or is_atom(id), do: id
+  defp key_label(id), do: describe(id)
+
+  defp describe(term), do: inspect(term, limit: 5, printable_limit: 200)
 
   defp adapter_call(adapter, function, arguments) do
     apply(adapter, function, arguments)

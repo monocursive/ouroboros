@@ -1,8 +1,47 @@
+# Hoisted to the top level on purpose: the mesh admits `Ouroboros.Capability.*` and one named
+# wrapper, and a `defmodule` nested in the test module would land under
+# `Ouroboros.Wasm.RolloutTest.` and be refused as `agent_module_not_allowed`.
+# A capability that starts instantly and then takes far longer than any deadline in this
+# file to answer one message. That is what makes "the deadline fired while the throwaway
+# agent was alive" a fact rather than a race.
+defmodule Ouroboros.Capability.RolloutTestSlowProbe do
+  @moduledoc false
+
+  use Jido.Agent,
+    name: "ouroboros_capability_rollout_slow_probe",
+    description: "A capability that is slow to answer, so a probe deadline always fires",
+    schema: [last_message: [type: :any, default: nil]],
+    signal_routes: [{"ouroboros.agent.message", __MODULE__.Wait}]
+
+  def actions, do: super() ++ [__MODULE__.Wait]
+
+  defmodule Wait do
+    @moduledoc false
+
+    use Jido.Action,
+      name: "rollout_slow_probe_wait",
+      description: "Sleeps past any deadline this file sets, then echoes",
+      schema: [
+        from: [type: :string, required: true],
+        body: [type: :any, required: true],
+        correlation_id: [type: :string, required: true],
+        causation_id: [type: :any, default: nil]
+      ]
+
+    @impl true
+    def run(params, _context) do
+      Process.sleep(3_000)
+      {:ok, %{last_message: %{body: params.body}}}
+    end
+  end
+end
+
 defmodule Ouroboros.Wasm.RolloutTest do
   # Not async: the live half spawns the real helper as an OS child and starts mesh agents.
   use ExUnit.Case, async: false
 
   alias Ouroboros.Mesh
+  alias Ouroboros.Upgrade.Rollout.Probe
   alias Ouroboros.Upgrade.Rollout.Registry
   alias Ouroboros.Wasm
   alias Ouroboros.Wasm.Artifact
@@ -94,24 +133,37 @@ defmodule Ouroboros.Wasm.RolloutTest do
       assert state.config == "{}"
     end
 
-    test "a start block is read through a validator, not trusted", context do
+    test "a start block is derived from the manifest's own name, never read from it",
+         context do
       assert Rollout.start_block(artifact!(context)) == nil
 
-      assert Rollout.start_block(artifact!(context, start: %{id: "wasm/g", config: "{}"})) ==
-               %{id: "wasm/g", config: "{}"}
+      assert Rollout.start_block(
+               artifact!(context, name: "greeter", start: %{id: "wasm/greeter", config: "{}"})
+             ) == %{id: "wasm/greeter", config: "{}"}
 
       # Everything the signer refuses, this refuses again: a reader that would rather trust
-      # the signer than check is one bad manifest away from starting whatever it said.
+      # the signer than check is one bad manifest away from starting whatever it said. And
+      # the id is *derived* here rather than read, so a manifest that was somehow signed
+      # naming another capability's durable id still starts nothing.
       for start <- [
             %{id: "greeter", config: "{}"},
             %{id: "wasm/", config: "{}"},
-            %{id: "wasm/g", config: %{}},
+            %{id: "wasm/greeter", config: %{}},
             %{id: 42, config: "{}"},
-            "wasm/g",
+            %{id: "wasm/victim", config: "{}"},
+            %{id: "wasm/greeter/../../etc/passwd", config: "{}"},
+            "wasm/greeter",
             nil
           ] do
-        assert Rollout.start_block(artifact!(context, start: start)) == nil
+        assert Rollout.start_block(artifact!(context, name: "greeter", start: start)) == nil,
+               "start_block read #{inspect(start)} for a component named greeter"
       end
+
+      # The squat, from the other side: a *signed* manifest whose name is `evil` and whose
+      # start block names `greeter`'s id. The signature is real; the id is still not this
+      # component's, so nothing is started under it.
+      squat = %{artifact!(context) | name: "evil"}
+      assert Rollout.start_block(squat) == nil
     end
   end
 
@@ -290,12 +342,107 @@ defmodule Ouroboros.Wasm.RolloutTest do
     def boom, do: raise("a gate that raises")
   end
 
+  describe "a target verifies for itself" do
+    test "an unsigned artifact its driver was told to accept is still refused here", context do
+      # `deploy/4`'s `:trust_policy` is the *caller's* and is used once, for the pre-flight.
+      # `stage/3`'s is this node's own, read from application environment on the node that
+      # would load the component. That difference is the whole of a target's independence
+      # from the node deploying to it, and nothing exercised it: every shipped case signs
+      # its artifacts, so deleting `verified(artifact, bytes)` from `stage/3` changed no
+      # outcome anywhere.
+      unsigned = unsigned!()
+      assert unsigned.signature == nil
+
+      assert {:error, {state, outcome}} =
+               deploy(unsigned, [node()], context,
+                 trust_policy: [allow_unsigned: true],
+                 start?: false
+               )
+
+      assert state == :rolled_back
+
+      assert {:error, {:component_rejected, :signature_required}} =
+               outcome.deployment[node()].stage
+
+      # And nothing was published on the way to that refusal: the target refuses before it
+      # writes, not after.
+      assert {:ok, []} = Store.list(root: context.root)
+      assert {:ok, %{state: :rolled_back}} = Registry.get(unsigned.id, context.registry)
+    end
+  end
+
+  describe "compensation is proof, or it is quarantine" do
+    test "a withdrawal no node proved is quarantine, never a rollback", context do
+      # `proven_state/1` is the rule this module's own comment calls "the invariant the
+      # whole module exists to preserve", and nothing built the shape that distinguishes
+      # it: every shipped case withdrew from a node with nothing to withdraw, so forcing
+      # the answer to `:rolled_back` changed no outcome.
+      #
+      # The shape that does distinguish it: a process holds the start id, reports this
+      # component's sha when asked — so `withdraw/2` is obliged to stop it — and cannot be
+      # stopped, because it is not one of the agent supervisor's children. That is what a
+      # peer whose stop nobody could confirm looks like from here.
+      name = unique_name()
+      id = start_id(name)
+      artifact = unsigned!(name: name, start: %{id: id, config: "{}"})
+
+      holder = start_unstoppable_holder!(id, artifact.component_sha256)
+      assert Rollout.holder_component(id) == artifact.component_sha256
+
+      assert {:error, {:quarantined, outcome}} =
+               deploy(artifact, [node()], context, trust_policy: [allow_unsigned: true])
+
+      assert outcome.state == :quarantined
+      assert outcome.deployment[node()].recovery == :quarantined
+      assert {:ok, %{state: :quarantined}} = Registry.get(artifact.id, context.registry)
+
+      # The control: the same clean failure, with nothing holding the id. Now every node
+      # proves it has nothing to withdraw, and only that earns `:rolled_back`.
+      Process.exit(holder, :kill)
+      assert Mesh.whereis(id) == nil
+
+      proved = unsigned!(name: name, start: %{id: id, config: "{}"})
+
+      assert {:error, {:rolled_back, clean}} =
+               deploy(proved, [node()], context, trust_policy: [allow_unsigned: true])
+
+      assert clean.state == :rolled_back
+      assert clean.deployment[node()].recovery == :not_needed
+    end
+  end
+
+  describe "a gate killed at its deadline" do
+    test "leaves no throwaway probe agent behind", context do
+      _ = context
+
+      # `bounded_call/5`'s local branch kills the task at the deadline, and `after` does
+      # not run for an exit signal from outside — so `Probe.run/2`'s cleanup never ran and
+      # its throwaway agent kept a cluster-wide mesh id (and, for a lane-W capability, a
+      # helper instance) with nothing left that would ever stop it.
+      before = probe_agent_ids()
+
+      assert {:ambiguous, :timeout} =
+               Rollout.bounded_call(
+                 node(),
+                 Probe,
+                 :ready?,
+                 [{Ouroboros.Capability.RolloutTestSlowProbe, %{}}],
+                 250
+               )
+
+      assert await_probe_agents(before, 200) == before,
+             "a killed probe left a throwaway agent behind: " <>
+               inspect(probe_agent_ids() -- before)
+    end
+  end
+
   describe "against the real helper, on one node" do
     @tag @needs_live
     test "a signed component deploys, is registered at v3, and starts its wrapper", context do
       env = live_env(context)
-      id = start_id()
-      artifact = guest!(context, start: %{id: id, config: ~s({"greeting":"hello"})})
+      name = unique_name()
+      id = start_id(name)
+      artifact = guest!(context, name: name, start: %{id: id, config: ~s({"greeting":"hello"})})
       on_exit(fn -> Mesh.stop_agent(id) end)
 
       assert {:ok, outcome} = deploy(artifact, [node()], context, env)
@@ -342,11 +489,13 @@ defmodule Ouroboros.Wasm.RolloutTest do
     @tag @needs_live
     test "an eval spec the guest cannot satisfy rolls back, with per-node proof", context do
       env = live_env(context)
-      id = start_id()
+      name = unique_name()
+      id = start_id(name)
       on_exit(fn -> Mesh.stop_agent(id) end)
 
       artifact =
         guest!(context,
+          name: name,
           start: %{id: id, config: "{}"},
           eval: %{
             probes: [%{input: %{"greet" => "x"}, expect: {:equals, "something else entirely"}}],
@@ -415,7 +564,8 @@ defmodule Ouroboros.Wasm.RolloutTest do
     @tag @needs_live
     test "a start id held by another component is not a start", context do
       env = live_env(context)
-      id = start_id()
+      name = unique_name()
+      id = start_id(name)
       on_exit(fn -> Mesh.stop_agent(id) end)
 
       # The squatter: a live wrapper for a *different* component, holding the id first. A
@@ -438,7 +588,7 @@ defmodule Ouroboros.Wasm.RolloutTest do
         )
 
       # A component that passes every gate, whose manifest wants that same durable id.
-      artifact = guest!(context, start: %{id: id, config: "{}"})
+      artifact = guest!(context, name: name, start: %{id: id, config: "{}"})
       refute artifact.component_sha256 == other_sha
 
       assert {:error, {:quarantined, outcome}} = deploy(artifact, [node()], context, env)
@@ -465,11 +615,12 @@ defmodule Ouroboros.Wasm.RolloutTest do
     @tag @needs_live
     test "a driver that is not a target is warned about, not refused", context do
       env = live_env(context)
-      id = start_id()
+      name = unique_name()
+      id = start_id(name)
       on_exit(fn -> Mesh.stop_agent(id) end)
 
       # This node *is* the only target here, so there is nothing to warn about.
-      artifact = guest!(context, start: %{id: id, config: ~s({"greeting":"hello"})})
+      artifact = guest!(context, name: name, start: %{id: id, config: ~s({"greeting":"hello"})})
       assert {:ok, outcome} = deploy(artifact, [node()], context, env)
       assert outcome.warnings == []
 
@@ -562,16 +713,63 @@ defmodule Ouroboros.Wasm.RolloutTest do
     sign(artifact, context.secret)
   end
 
-  defp unsigned! do
+  defp unsigned!(attrs \\ []) do
     {:ok, artifact} =
-      Artifact.build(placeholder_bytes(),
-        name: "greeter",
-        author: "test-agent",
-        epoch: next_epoch()
+      Artifact.build(
+        placeholder_bytes(),
+        Keyword.merge(
+          [name: "greeter", author: "test-agent", epoch: next_epoch()],
+          attrs
+        )
       )
 
     Process.put({__MODULE__, :bytes, artifact.id}, placeholder_bytes())
     artifact
+  end
+
+  # A process that holds a start id, answers `Mesh.state/1` with this component's sha — so
+  # `Rollout.withdraw/2` is obliged to stop it rather than leave it alone — and is not one
+  # of the agent supervisor's children, so stopping it answers `{:error, :not_found}`.
+  # "A wrapper this node could not confirm it stopped" is exactly the evidence a peer
+  # timeout produces, and it is the only thing that earns `:quarantined` over
+  # `:rolled_back` on the compensation path.
+  defp start_unstoppable_holder!(id, component_sha256) do
+    {:ok, pid} = GenServer.start(__MODULE__.UnstoppableHolder, component_sha256)
+    :ok = Ouroboros.Mesh.Directory.register(id, pid)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+    pid
+  end
+
+  defp probe_agent_ids do
+    Mesh.list_agents()
+    |> Enum.map(fn agent -> if is_map(agent), do: Map.get(agent, :id), else: agent end)
+    |> Enum.filter(&(is_binary(&1) and String.starts_with?(&1, "ouroboros-probe-")))
+    |> Enum.sort()
+  end
+
+  # The janitor stops the id after the killed process goes down, which is asynchronous.
+  defp await_probe_agents(expected, 0),
+    do: (probe_agent_ids() == expected && expected) || probe_agent_ids()
+
+  defp await_probe_agents(expected, attempts) do
+    if probe_agent_ids() == expected do
+      expected
+    else
+      Process.sleep(20)
+      await_probe_agents(expected, attempts - 1)
+    end
+  end
+
+  defmodule UnstoppableHolder do
+    @moduledoc false
+    use GenServer
+
+    @impl true
+    def init(component_sha256), do: {:ok, component_sha256}
+
+    @impl true
+    def handle_call(:get_state, _from, sha),
+      do: {:reply, {:ok, %{agent: %{state: %{component: sha}}}}, sha}
   end
 
   # The bytes travel beside the manifest, never inside it, so a test carries them the way
@@ -616,7 +814,11 @@ defmodule Ouroboros.Wasm.RolloutTest do
     server_state.agent.state
   end
 
-  defp start_id, do: "wasm/rollout-test-#{System.unique_integer([:positive])}"
+  # A start id is `"wasm/" <> name` or it is nothing (docs/WASM.md §7.5): the signer
+  # refuses any other, and `Rollout.start_block/1` re-derives it rather than reading it.
+  # So a test that wants a durable id of its own asks for a component name of its own.
+  defp unique_name, do: "rollout-test-#{System.unique_integer([:positive])}"
+  defp start_id(name), do: "wasm/" <> name
 
   defp restore(key, nil), do: Application.delete_env(:ouroboros, key)
   defp restore(key, value), do: Application.put_env(:ouroboros, key, value)

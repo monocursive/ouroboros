@@ -100,7 +100,12 @@ defmodule Ouroboros.Wasm.SurfaceTest do
       status = Surface.status([pool: :a_pool_this_node_never_started] ++ opts(context))
 
       assert status.helper.present == Wasm.available?()
-      assert status.helper.path == Wasm.helper_path()
+
+      # A basename, never the absolute path: both verbs are `:read`, the lowest scope the
+      # gateway has, and an install prefix (often with an account name in it) is a fact
+      # about this operator's disk rather than about lane W.
+      assert status.helper.path == Path.basename(Wasm.helper_path())
+      refute String.contains?(status.helper.path, "/")
       assert status.helper.world == Wasm.world()
       assert status.helper.hook_component_budget == Pool.hook_component_budget()
     end
@@ -113,7 +118,7 @@ defmodule Ouroboros.Wasm.SurfaceTest do
 
       # The pool in this test was started against a path that names nothing, which is what
       # `present: false` has to mean here — not the module's answer for this checkout.
-      assert status.helper.path == Pool.status(pool).helper_path
+      assert status.helper.path == Path.basename(Pool.status(pool).helper_path)
       assert status.helper.present == false
     end
   end
@@ -127,7 +132,8 @@ defmodule Ouroboros.Wasm.SurfaceTest do
 
       status = Surface.status(opts(context))
 
-      assert status.store.root == context.root
+      assert status.store.root == Path.basename(context.root)
+      refute String.contains?(status.store.root, "/")
       assert status.store.held == 2
       assert status.store.bytes == byte_size("\0asm keeper") + byte_size("\0asm loose bytes here")
       assert status.store.budget_bytes == Wasm.config(:store_budget_bytes)
@@ -366,7 +372,7 @@ defmodule Ouroboros.Wasm.SurfaceTest do
       status = Surface.status([pool: {:no_such_pool, node()}] ++ opts(context))
 
       assert status.helper.phase == :absent
-      assert status.helper.path == Wasm.helper_path()
+      assert status.helper.path == Path.basename(Wasm.helper_path())
       assert status.helper.broken_reason == nil
       refute status.helper.path == ""
     end
@@ -397,6 +403,33 @@ defmodule Ouroboros.Wasm.SurfaceTest do
       assert [rendered, "ouroboros@real"] = row.nodes
       assert is_binary(rendered)
       assert byte_size(rendered) <= 512
+    end
+
+    test "a module a checkpoint should never have held is drawn, not raised on", context do
+      # `name_of/1` ended in `to_string/1`, which raises on a map, a tuple, or a pid — and
+      # inside the gateway's `safe/1` that turned one malformed row from a checkpoint this
+      # build did not write into `-32006` for the whole listing. The same guard
+      # `node_name/1` already had, for the same reason.
+      registry =
+        fake_registry([
+          %{entry("wasm-map") | module: %{not: "a module"}},
+          %{entry("wasm-atom") | module: Ouroboros.Capability.NotWasm},
+          %{entry("wasm-long") | module: "wasm/" <> String.duplicate("n", 5_000)}
+        ])
+
+      list = Surface.list(root: context.root, registry: registry)
+
+      assert [atom_named, long, rendered] = Enum.sort_by(list.rollouts, & &1.artifact_id)
+
+      assert atom_named.artifact_id == "wasm-atom"
+      assert atom_named.name == "Elixir.Ouroboros.Capability.NotWasm"
+
+      assert long.artifact_id == "wasm-long"
+      assert byte_size(long.name) <= 512
+
+      assert rendered.artifact_id == "wasm-map"
+      assert is_binary(rendered.name)
+      assert byte_size(rendered.name) <= 512
     end
   end
 

@@ -116,6 +116,55 @@ defmodule Ouroboros.Wasm.ArtifactTest do
       assert {:error, {:invalid_metadata, :author}} =
                Artifact.build(@bytes, name: "greeter", epoch: 7, author: "")
     end
+
+    test "the name is narrow, because it is a durable id and a register key" do
+      valid = [author: "test-agent", epoch: 7]
+
+      # `"wasm/" <> name` is the rollout register's `module` field and the cluster-wide
+      # mesh id a signed `start` block claims. Both are compared as strings by things that
+      # trust them, so a name that can hold a path separator, whitespace, or a
+      # bidirectional control is a name two readers can disagree about.
+      for name <- [
+            "greeter/../../etc/passwd",
+            "greeter/v2",
+            "greeter ",
+            " greeter",
+            "Greeter",
+            "gre\u{202E}eter",
+            "-greeter",
+            ".greeter",
+            String.duplicate("g", 65),
+            "gréeter",
+            "greeter\n"
+          ] do
+        assert {:error, {:invalid_component_name, _rendered}} =
+                 Artifact.build(@bytes, valid ++ [name: name]),
+               "build accepted the name #{inspect(name)}"
+
+        refute Artifact.name?(name)
+      end
+
+      for name <- ["greeter", "g", "greeter-v2", "greeter_v2", "greeter.v2", "g0"] do
+        assert {:ok, _artifact} = Artifact.build(@bytes, valid ++ [name: name])
+        assert Artifact.name?(name)
+      end
+
+      refute Artifact.name?(:greeter)
+      refute Artifact.name?(nil)
+    end
+
+    test "a repeated import can never cross-check, so it is refused where it is written" do
+      # `Ouroboros.Wasm.Verifier.cross_check/2` compares the sorted list a helper reports
+      # against the sorted list the manifest declares. `["log", "log"]` cannot equal any
+      # helper's reading of any component, so a manifest carrying one was a manifest signed
+      # into a permanent quarantine.
+      valid = [name: "greeter", author: "test-agent", epoch: 7]
+
+      assert {:error, {:duplicate_imports, _rendered}} =
+               Artifact.build(@bytes, valid ++ [imports: ["log", "log"]])
+
+      assert {:ok, _artifact} = Artifact.build(@bytes, valid ++ [imports: ["log"]])
+    end
   end
 
   describe "the signing payload" do

@@ -160,6 +160,326 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
 
       assert Registry.list(registry) == []
     end
+
+    test "pruning the entry that held the highest epoch does not free that number" do
+      # The watermark used to be derived from the surviving entries alone. A settled entry
+      # is the first thing `prune/2` discards, so the register could be made to forget the
+      # highest number it had ever admitted — and then admit it, or anything below it,
+      # again. That is a replay of a spent epoch, which is the one thing the gate exists
+      # to prevent.
+      registry = start_registry!(limit: 2)
+
+      for {id, epoch} <- [{"low", 10}, {"mid", 20}, {"high", 30}] do
+        assert {:ok, _entry} =
+                 Registry.deploying(wasm_attrs(artifact_id: id, epoch: epoch), registry)
+      end
+
+      # They settle in reverse, so the highest epoch carries the oldest `updated_at` and
+      # is the first candidate a prune takes.
+      for id <- ["high", "mid", "low"] do
+        assert {:ok, _marked} = Registry.mark(id, :rolled_back, [], registry)
+        Process.sleep(5)
+      end
+
+      ids = registry |> Registry.list() |> Enum.map(& &1.artifact_id)
+      refute "high" in ids, "the setup did not prune the entry that held the watermark"
+
+      assert {:error, {:stale_epoch, 21, 30}} =
+               Registry.deploying(wasm_attrs(artifact_id: "replay", epoch: 21), registry)
+
+      assert {:error, {:stale_epoch, 30, 30}} =
+               Registry.deploying(wasm_attrs(artifact_id: "replay", epoch: 30), registry)
+
+      assert {:ok, _fresh} =
+               Registry.deploying(wasm_attrs(artifact_id: "fresh", epoch: 31), registry)
+    end
+
+    test "the mark is durable, and a checkpoint that never carried one derives it" do
+      directory = temporary_directory!()
+      storage = {Ouroboros.Storage.DurableFile, path: directory}
+      {adapter, adapter_opts} = storage
+
+      first = start_registry!(storage: storage, limit: 2)
+      spend_and_prune_the_top!(first)
+      GenServer.stop(first)
+
+      # The entry that held 30 is gone from the file. The mark is not.
+      second = start_registry!(storage: storage)
+
+      assert {:error, {:stale_epoch, 21, 30}} =
+               Registry.deploying(wasm_attrs(artifact_id: "replay", epoch: 21), second)
+
+      GenServer.stop(second)
+
+      # A checkpoint written by a build that had no such field: the mark reads as `0` and
+      # the surviving entries are all there is to go on, which is where the number used to
+      # come from. Additive, both directions, no version move.
+      assert {:ok, held} = adapter.get_checkpoint(Registry.checkpoint_key(), adapter_opts)
+      assert Map.has_key?(held, "lane_w_epoch")
+
+      :ok =
+        adapter.put_checkpoint(
+          Registry.checkpoint_key(),
+          Map.delete(held, "lane_w_epoch"),
+          adapter_opts
+        )
+
+      third = start_registry!(storage: storage)
+
+      assert {:ok, _entry} =
+               Registry.deploying(wasm_attrs(artifact_id: "replay", epoch: 21), third)
+    end
+  end
+
+  describe "what a checkpoint is re-validated against on read" do
+    setup do
+      directory = temporary_directory!()
+      storage = {Ouroboros.Storage.DurableFile, path: directory}
+      %{directory: directory, storage: storage}
+    end
+
+    test "a planted entry is dropped, and the honest ones beside it still load", context do
+      {adapter, adapter_opts} = context.storage
+
+      # A hand-written checkpoint: an epoch far above anything `Epoch.next/2` will mint,
+      # a sha that is not a sha, and nodes that are not nodes. Nothing on the read path
+      # used to look at any of it, so one planted row refused every future lane-W deploy
+      # for as long as the file existed.
+      planted = %Registry.Entry{
+        artifact_id: "planted",
+        module: "wasm/greeter",
+        epoch: 999_999_999_999_999,
+        nodes: [node()],
+        state: :rolled_back,
+        component_sha256: "NOT HEX AT ALL",
+        created_at: "x",
+        updated_at: "x"
+      }
+
+      honest = %Registry.Entry{
+        artifact_id: "honest",
+        module: "wasm/greeter",
+        epoch: 7,
+        nodes: [node()],
+        state: :live,
+        component_sha256: String.duplicate("a", 64),
+        created_at: "x",
+        updated_at: "x"
+      }
+
+      :ok =
+        adapter.put_checkpoint(
+          Registry.checkpoint_key(),
+          Ouroboros.Upgrade.Wire.dump(%{
+            version: 3,
+            rollouts: %{"planted" => planted, "honest" => honest}
+          }),
+          adapter_opts
+        )
+
+      registry = start_registry!(storage: context.storage)
+
+      assert :not_found = Registry.get("planted", registry)
+      assert {:ok, %{epoch: 7}} = Registry.get("honest", registry)
+
+      # And the poisoned watermark went with it: a legitimately minted epoch is admitted.
+      assert {:ok, _entry} =
+               Registry.deploying(wasm_attrs(artifact_id: "legit", epoch: 42), registry)
+    end
+
+    test "every field `deploying/2` refuses is refused again on read", context do
+      {adapter, adapter_opts} = context.storage
+
+      base = %Registry.Entry{
+        artifact_id: "x",
+        module: "wasm/greeter",
+        epoch: 7,
+        nodes: [node()],
+        state: :live,
+        component_sha256: String.duplicate("a", 64),
+        created_at: "x",
+        updated_at: "x"
+      }
+
+      broken = [
+        %{base | epoch: "not-an-integer"},
+        %{base | epoch: 0},
+        %{base | component_sha256: "NOT HEX"},
+        %{base | component_sha256: String.upcase(String.duplicate("a", 64))},
+        %{base | nodes: []},
+        %{base | nodes: :not_a_list},
+        %{base | module: ""},
+        %{base | module: 42},
+        %{base | state: :invented},
+        %{base | created_at: nil},
+        %{base | test_report: :not_a_map},
+        %{base | artifact_id: "somebody-else"}
+      ]
+
+      for entry <- broken do
+        :ok =
+          adapter.put_checkpoint(
+            Registry.checkpoint_key(),
+            Ouroboros.Upgrade.Wire.dump(%{version: 3, rollouts: %{"x" => entry}}),
+            adapter_opts
+          )
+
+        registry = start_registry!(storage: context.storage)
+        assert Registry.list(registry) == [], "a checkpoint kept #{inspect(entry)}"
+        GenServer.stop(registry)
+      end
+    end
+
+    test "a module or node name this VM never interned is still a readable entry", context do
+      {adapter, adapter_opts} = context.storage
+
+      # Exactly what a rebooted VM reads: `[:safe]` cannot mint the forged module's atom or
+      # a peer it has never connected to, so `Wire` hands both back as binaries. Refusing
+      # those would refuse every record of a rollout that happened before the reboot.
+      entry = %Registry.Entry{
+        artifact_id: "rebooted",
+        module: "Elixir.Ouroboros.Capability.NeverLoaded#{System.unique_integer([:positive])}",
+        epoch: 3,
+        nodes: ["peer@never-connected"],
+        state: :live,
+        component_sha256: nil,
+        created_at: "x",
+        updated_at: "x"
+      }
+
+      :ok =
+        adapter.put_checkpoint(
+          Registry.checkpoint_key(),
+          Ouroboros.Upgrade.Wire.dump(%{version: 3, rollouts: %{"rebooted" => entry}}),
+          adapter_opts
+        )
+
+      registry = start_registry!(storage: context.storage)
+      assert {:ok, %{artifact_id: "rebooted"}} = Registry.get("rebooted", registry)
+    end
+
+    test "a legacy id that came back as an atom is migrated, not dropped", context do
+      {adapter, adapter_opts} = context.storage
+
+      # What the build before tagged keys wrote for a rollout id spelling a word: the key
+      # went to disk bare, and `Wire.load/1` resolves a bare key that names an existing
+      # atom. `"nil"` came back as `nil`, matched no clause here, and refused the whole
+      # register — including the innocent rollout beside it.
+      legacy = %{
+        "version" => 3,
+        "rollouts" => %{
+          "nil" => legacy_entry("nil", "wasm/greeter", 7, String.duplicate("a", 64)),
+          "error" => legacy_entry("error", "wasm/greeter", 8, String.duplicate("b", 64)),
+          "ordinary" => legacy_entry("ordinary", "wasm/greeter", 9, String.duplicate("c", 64))
+        }
+      }
+
+      # The premise: this file really does load with atom keys.
+      assert Map.has_key?(Ouroboros.Upgrade.Wire.load(legacy).rollouts, nil)
+
+      :ok = adapter.put_checkpoint(Registry.checkpoint_key(), legacy, adapter_opts)
+
+      registry = start_registry!(storage: context.storage)
+
+      assert registry |> Registry.list() |> Enum.map(& &1.artifact_id) |> Enum.sort() ==
+               ["error", "nil", "ordinary"]
+
+      assert {:ok, %{epoch: 7}} = Registry.get("nil", registry)
+      assert {:ok, %{epoch: 8}} = Registry.get("error", registry)
+    end
+  end
+
+  describe "reports that reach the durable checkpoint" do
+    test "test_report and detail are bounded exactly as eval_report is" do
+      registry = start_registry!()
+      big = String.duplicate("q", 2_000_000)
+
+      # `test_report` comes out of a *signed manifest*: the policy checks `failures: 0` and
+      # nothing else about it, so its size and its contents are the submitter's to choose.
+      assert {:ok, entry} =
+               Registry.deploying(
+                 wasm_attrs(artifact_id: "fat", test_report: %{failures: 0, blob: big}),
+                 registry
+               )
+
+      assert %{test_report: :too_large, bytes: bytes} = entry.test_report
+      assert bytes > 32_768
+
+      assert {:ok, unportable} =
+               Registry.deploying(
+                 wasm_attrs(
+                   artifact_id: "pid",
+                   epoch: 2,
+                   test_report: %{failures: 0, who: self()}
+                 ),
+                 registry
+               )
+
+      assert %{test_report: :unportable, rendered: rendered} = unportable.test_report
+      assert is_binary(rendered)
+
+      assert {:ok, marked} =
+               Registry.mark("fat", :quarantined, [detail: %{blob: big}], registry)
+
+      assert %{detail: :too_large} = marked.detail
+
+      assert {:ok, pid_detail} =
+               Registry.mark("pid", :quarantined, [detail: %{who: self()}], registry)
+
+      assert %{detail: :unportable} = pid_detail.detail
+    end
+
+    test "a report the boundary cannot encode is a refused write, not a dead register" do
+      registry = start_registry!()
+
+      # A map that matches `%mod{}` without being a struct. It passes the signing policy —
+      # not a struct at the top level, `failures` is 0 — and `Wire.dump/1` used to raise on
+      # it from inside `persist/2`, outside the adapter's rescue, killing the register and
+      # every rollout record it held.
+      poison = %{failures: 0, extra: %{1 => 2, __struct__: :ok}}
+
+      assert {:ok, _healthy} =
+               Registry.deploying(wasm_attrs(artifact_id: "healthy", epoch: 1), registry)
+
+      assert {:ok, _entry} =
+               Registry.deploying(
+                 wasm_attrs(artifact_id: "poison", epoch: 2, test_report: poison),
+                 registry
+               )
+
+      assert {:ok, _marked} = Registry.mark("healthy", :quarantined, [detail: poison], registry)
+
+      assert Process.whereis(registry) |> Process.alive?()
+      assert {:ok, %{artifact_id: "healthy"}} = Registry.get("healthy", registry)
+    end
+  end
+
+  test "prune never discards deploying, live, or quarantined entries" do
+    registry = start_registry!(limit: 2)
+
+    for {id, epoch, state} <- [
+          {"live-one", 10, :live},
+          {"quarantined-one", 20, :quarantined},
+          {"deploying-one", 30, nil},
+          {"settled-one", 40, :rolled_back},
+          {"settled-two", 50, :rolled_back}
+        ] do
+      assert {:ok, _entry} =
+               Registry.deploying(wasm_attrs(artifact_id: id, epoch: epoch), registry)
+
+      if state, do: assert({:ok, _marked} = Registry.mark(id, state, [], registry))
+    end
+
+    kept = registry |> Registry.list() |> Enum.map(& &1.artifact_id) |> MapSet.new()
+
+    for id <- ["live-one", "quarantined-one", "deploying-one"] do
+      assert MapSet.member?(kept, id), "prune discarded unfinished business: #{id}"
+    end
+
+    # Which is exactly what `Ouroboros.Wasm.Store.protected_shas/1` reads to decide which
+    # component bytes a prune of the *store* may never evict.
+    assert {:ok, protected} = Ouroboros.Wasm.Store.protected_shas(registry: registry)
+    assert MapSet.member?(protected, String.duplicate("c", 64))
   end
 
   test "a failed checkpoint is a failed rollout, not an in-memory one" do
@@ -248,27 +568,33 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
     assert marked.eval_report == %{passed: 0}
   end
 
-  test "an entry this build cannot read is refused rather than repaired" do
-    Process.flag(:trap_exit, true)
+  test "an entry this build cannot read is dropped rather than repaired, and only it" do
     directory = temporary_directory!()
     storage = {Ouroboros.Storage.DurableFile, path: directory}
     {adapter, adapter_opts} = storage
 
-    # A version this build has never heard of, and a version-1 entry that is not an entry:
-    # neither is something to coerce into a rollout record nobody wrote.
-    for rollouts <- [
-          %{"a" => %{artifact_id: "a", state: :live}},
-          %{"a" => Map.delete(entry!("a"), :state)}
+    # A record that is not an entry, and an entry with a field it never had: neither is
+    # something to coerce into a rollout record nobody wrote. What changed is the blast
+    # radius — refusing the whole register for one unreadable row made a single planted or
+    # legacy entry able to stop the node deploying anything, forever.
+    healthy = entry!("healthy")
+
+    for unreadable <- [
+          %{artifact_id: "a", state: :live},
+          Map.delete(entry!("a"), :state)
         ] do
       :ok =
         adapter.put_checkpoint(
           Registry.checkpoint_key(),
-          %{version: 1, rollouts: rollouts},
+          %{version: 1, rollouts: %{"a" => unreadable, "healthy" => healthy}},
           adapter_opts
         )
 
-      assert {:error, :invalid_rollout_checkpoint} =
-               Registry.start_link(name: unique_name(), storage: storage)
+      registry = start_registry!(storage: storage)
+
+      assert :not_found = Registry.get("a", registry)
+      assert {:ok, %{artifact_id: "healthy"}} = Registry.get("healthy", registry)
+      GenServer.stop(registry)
     end
   end
 
@@ -376,6 +702,45 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
            ]
   end
 
+  # Deploy three ascending lane-W epochs, settle them in reverse so the highest carries
+  # the oldest `updated_at`, and let `prune/2` take it. What survives is a register whose
+  # entries know nothing about the number 30.
+  defp spend_and_prune_the_top!(registry) do
+    for {id, epoch} <- [{"low", 10}, {"mid", 20}, {"high", 30}] do
+      {:ok, _entry} = Registry.deploying(wasm_attrs(artifact_id: id, epoch: epoch), registry)
+    end
+
+    for id <- ["high", "mid", "low"] do
+      {:ok, _marked} = Registry.mark(id, :rolled_back, [], registry)
+      Process.sleep(5)
+    end
+
+    ids = registry |> Registry.list() |> Enum.map(& &1.artifact_id)
+    refute "high" in ids, "the setup did not prune the entry that held the watermark"
+    ids
+  end
+
+  # The exact shape the build before tagged map keys wrote: every key bare, atoms tagged.
+  # `Wire.load/1` resolves a bare key that names an existing atom, so a rollout id spelling
+  # a word came back as that atom.
+  defp legacy_entry(artifact_id, module, epoch, sha) do
+    %{
+      "__struct__" => "Elixir.Ouroboros.Upgrade.Rollout.Registry.Entry",
+      "artifact_id" => artifact_id,
+      "module" => module,
+      "epoch" => epoch,
+      "nodes" => [%{"__atom__" => Atom.to_string(node())}],
+      "state" => %{"__atom__" => "live"},
+      "source_sha256" => nil,
+      "component_sha256" => sha,
+      "test_report" => %{},
+      "detail" => nil,
+      "eval_report" => nil,
+      "created_at" => "x",
+      "updated_at" => "x"
+    }
+  end
+
   defp deployment(node_receipts) do
     %DeploymentReceipt{
       id: "deployment-#{System.unique_integer([:positive])}",
@@ -431,7 +796,12 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
          table: String.to_atom("rollout_registry_#{System.unique_integer([:positive])}")}
       end)
 
-    {:ok, pid} = Registry.start_link(name: name, storage: storage)
+    {:ok, pid} =
+      opts
+      |> Keyword.drop([:storage, :name])
+      |> Keyword.merge(name: name, storage: storage)
+      |> Registry.start_link()
+
     # The registry is linked to the test process, so it can die between an
     # aliveness check and the stop; catching the exit is the only raceless form.
     on_exit(fn ->

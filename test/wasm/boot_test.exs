@@ -30,8 +30,9 @@ defmodule Ouroboros.Wasm.BootTest do
   end
 
   test "starts the wrapper for a live entry whose manifest declares one", context do
-    id = start_id()
-    artifact = seed!(context, start: %{id: id, config: ~s({"greeting":"hello"})})
+    name = unique_name()
+    id = start_id(name)
+    artifact = seed!(context, name: name, start: %{id: id, config: ~s({"greeting":"hello"})})
 
     assert %{started: [started], skipped: [], failed: []} = restart(context)
 
@@ -57,8 +58,9 @@ defmodule Ouroboros.Wasm.BootTest do
   end
 
   test "running twice is running once: an id already claimed is a success", context do
-    id = start_id()
-    seed!(context, start: %{id: id, config: "{}"})
+    name = unique_name()
+    id = start_id(name)
+    seed!(context, name: name, start: %{id: id, config: "{}"})
 
     assert %{started: [first]} = restart(context)
     refute Map.get(first, :already_started)
@@ -81,7 +83,10 @@ defmodule Ouroboros.Wasm.BootTest do
   test "a manifest this node does not hold is named, not guessed at", context do
     # The shape a node that drove a rollout it was not a target of ends up in: it has the
     # record and not the bytes.
-    artifact = seed!(context, start: %{id: start_id(), config: "{}"}, manifest?: false)
+    name = unique_name()
+
+    artifact =
+      seed!(context, name: name, start: %{id: start_id(name), config: "{}"}, manifest?: false)
 
     assert %{started: [], failed: [], skipped: [skipped]} = restart(context)
     assert skipped.reason == :manifest_missing
@@ -89,8 +94,9 @@ defmodule Ouroboros.Wasm.BootTest do
   end
 
   test "a manifest that no longer verifies does not start anything", context do
-    id = start_id()
-    seed!(context, start: %{id: id, config: "{}"})
+    name = unique_name()
+    id = start_id(name)
+    seed!(context, name: name, start: %{id: id, config: "{}"})
 
     # A different trust policy is the same fact as a tampered manifest, from here.
     assert %{started: [], failed: [], skipped: [skipped]} =
@@ -105,10 +111,15 @@ defmodule Ouroboros.Wasm.BootTest do
   end
 
   test "a manifest describing a different component than the entry is refused", context do
-    id = start_id()
+    name = unique_name()
+    id = start_id(name)
 
     artifact =
-      seed!(context, start: %{id: id, config: "{}"}, register_sha: String.duplicate("b", 64))
+      seed!(context,
+        name: name,
+        start: %{id: id, config: "{}"},
+        register_sha: String.duplicate("b", 64)
+      )
 
     assert %{started: [], failed: [], skipped: [skipped]} = restart(context)
 
@@ -120,7 +131,10 @@ defmodule Ouroboros.Wasm.BootTest do
 
   test "entries that are not live, and lane-B entries, are not looked at", context do
     # A quarantined lane-W rollout keeps its bytes as evidence (§7.4) and starts nothing.
-    quarantined = seed!(context, start: %{id: start_id(), config: "{}"}, state: :quarantined)
+    name = unique_name()
+
+    quarantined =
+      seed!(context, name: name, start: %{id: start_id(name), config: "{}"}, state: :quarantined)
 
     # And a BEAM rollout carries no component sha, so it is not this restart's business.
     {:ok, beam} =
@@ -145,14 +159,20 @@ defmodule Ouroboros.Wasm.BootTest do
     # counting the loser as started would report *its* sha as running while the winner's
     # component answered for the id — and a reboot would re-elect the same winner, so the
     # report would keep saying it.
-    # Two different capabilities — different names, so the register's supersede rule does
-    # not retire one of them — whose manifests happen to name one start id.
-    id = start_id()
-    winner = seed!(context, name: "winner", start: %{id: id, config: ~s({"who":"winner"})})
+    # A start id is `"wasm/" <> name`, so two entries naming one id are two rollouts of the
+    # same capability — the ordinary shape of a redeploy that has not finished everywhere.
+    # They target different nodes, which is what keeps the register's supersede rule from
+    # retiring one of them: overlapping targets is exactly when a later `:live` displaces
+    # an earlier one.
+    name = unique_name()
+    id = start_id(name)
+
+    winner = seed!(context, name: name, start: %{id: id, config: ~s({"who":"winner"})})
 
     loser =
       seed!(context,
-        name: "loser",
+        name: name,
+        nodes: [:"boot-test-elsewhere@nowhere"],
         bytes: "\0asm\x01 a different component",
         start: %{id: id, config: ~s({"who":"loser"})}
       )
@@ -257,7 +277,7 @@ defmodule Ouroboros.Wasm.BootTest do
           artifact_id: artifact.id,
           module: "wasm/" <> artifact.name,
           epoch: artifact.epoch,
-          nodes: [node()],
+          nodes: Keyword.get(opts, :nodes, [node()]),
           component_sha256: Keyword.get(opts, :register_sha, artifact.component_sha256)
         },
         context.registry
@@ -278,7 +298,11 @@ defmodule Ouroboros.Wasm.BootTest do
     signed
   end
 
-  defp start_id, do: "wasm/boot-test-#{System.unique_integer([:positive])}"
+  # A start id is derived from the component's own name and is never free-standing: the
+  # signer refuses any other id, and `Ouroboros.Wasm.Rollout.start_block/1` re-derives it
+  # rather than reading whatever the manifest said.
+  defp unique_name, do: "boot-test-#{System.unique_integer([:positive])}"
+  defp start_id(name), do: "wasm/" <> name
 
   defp start_registry! do
     name = String.to_atom("wasm_boot_registry_#{System.unique_integer([:positive])}")

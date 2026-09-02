@@ -45,6 +45,18 @@ defmodule Ouroboros.Wasm.Artifact do
       that id when the rollout reaches `:live`, and the boot-time restart starts it again
       from the persisted manifest. It is part of the signed manifest because "this
       capability runs continuously under this id" is a claim a signature should cover.
+      The id is not free: it is exactly `"wasm/" <> name`, so a manifest cannot claim a
+      durable id belonging to a component other than the one it describes. See
+      `Ouroboros.Upgrade.Signing.Policy.Default` and `Ouroboros.Wasm.Rollout.start_block/1`,
+      which re-derives it rather than reading it.
+
+  ## The name is narrow, and `imports` holds no duplicates
+
+  `name?/1` is the charset, and it is small because the name is load-bearing: it is the
+  rollout register's `module` field and the durable id above. `imports` is refused when it
+  repeats an entry, because the helper's own reading of a component is cross-checked
+  against this list and a repeated import can never match it — signing one would be
+  signing a manifest into a permanent quarantine.
   """
 
   alias Ouroboros.Wasm
@@ -64,6 +76,15 @@ defmodule Ouroboros.Wasm.Artifact do
   @metadata_keys [:author, :source_sha256, :language, :test_report, :eval, :start]
   @sha256_hex 64
   @signature_bytes 64
+
+  # A component's name is not decoration: it is the register's `module` field
+  # (`"wasm/" <> name`) and the durable mesh id a `start` block may claim, and both of those
+  # are compared as strings by things that trust them. So the charset is the one a name can
+  # be *compared* in without surprises — no path separators, no whitespace, no bidirectional
+  # controls, nothing outside printable ASCII — and it is bounded, because the id derived
+  # from it is bounded too.
+  @name_pattern ~r/\A[a-z0-9][a-z0-9._\-]{0,63}\z/
+  @max_name_bytes 64
 
   @type signature :: %{signer: String.t(), value: binary()}
   @type t :: %__MODULE__{
@@ -216,6 +237,22 @@ defmodule Ouroboros.Wasm.Artifact do
   def digest(bytes) when is_binary(bytes),
     do: :sha256 |> :crypto.hash(bytes) |> Base.encode16(case: :lower)
 
+  @doc """
+  Whether `value` is a name a component may be deployed under.
+
+  Lower case, starting with a letter or a digit, then letters, digits, `.`, `_` and `-`,
+  at most #{@max_name_bytes} bytes. Narrow on purpose: this name *is* the rollout
+  register's `module` field (`"wasm/" <> name`) and the durable mesh id a signed `start`
+  block claims cluster-wide, so anything a reader could confuse with a path segment, a
+  different name under a Unicode normalization, or a name reversed by a bidirectional
+  control is not a name this lane will sign.
+  """
+  @spec name?(term()) :: boolean()
+  def name?(value) when is_binary(value),
+    do: byte_size(value) <= @max_name_bytes and Regex.match?(@name_pattern, value)
+
+  def name?(_value), do: false
+
   @doc "Whether `value` is the 64-character lower-case hex a component sha is written as."
   @spec sha256?(term()) :: boolean()
   def sha256?(value) when is_binary(value),
@@ -248,16 +285,27 @@ defmodule Ouroboros.Wasm.Artifact do
   defp validate_epoch(epoch) when is_integer(epoch) and epoch > 0, do: :ok
   defp validate_epoch(epoch), do: {:error, {:invalid_epoch, describe(epoch)}}
 
-  defp validate_name(name) when is_binary(name) and name != "", do: :ok
-  defp validate_name(name), do: {:error, {:invalid_component_name, describe(name)}}
+  defp validate_name(name) do
+    if name?(name), do: :ok, else: {:error, {:invalid_component_name, describe(name)}}
+  end
 
   defp validate_world(world) when is_binary(world) and world != "", do: :ok
   defp validate_world(world), do: {:error, {:invalid_world, describe(world)}}
 
+  # Duplicates are refused here as well as at the signer: `Ouroboros.Wasm.Verifier`
+  # cross-checks the helper's sorted import list against this one, and a list holding
+  # `"log"` twice can never equal a helper's reading of the same component.
   defp validate_imports(imports) when is_list(imports) do
-    if Enum.all?(imports, &(is_binary(&1) and &1 != "")),
-      do: :ok,
-      else: {:error, {:invalid_imports, describe(imports)}}
+    cond do
+      not Enum.all?(imports, &(is_binary(&1) and &1 != "")) ->
+        {:error, {:invalid_imports, describe(imports)}}
+
+      Enum.uniq(imports) != imports ->
+        {:error, {:duplicate_imports, describe(imports)}}
+
+      true ->
+        :ok
+    end
   end
 
   defp validate_imports(imports), do: {:error, {:invalid_imports, describe(imports)}}

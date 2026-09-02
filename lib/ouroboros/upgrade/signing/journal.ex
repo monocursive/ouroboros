@@ -24,6 +24,11 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
   log. History is trimmed oldest-first like `Ouroboros.Release.Journal`; an operator who
   needs unbounded retention ships these entries somewhere that has it.
 
+  A findings map is bounded **field by field** when it does not fit as a whole. One
+  requester-chosen value inside a verdict — a guest toolchain's `test_report`, which a
+  legal manifest carries — must not be able to erase the identity fields beside it, which
+  are the ones a refusal is read for. See `findings/1`.
+
   Module names, struct modules, policy reasons, and node names all cross the checkpoint
   boundary through `Ouroboros.Upgrade.Wire`: `[:safe]` decode must not need this module
   (or any other) already loaded in the reading VM.
@@ -37,6 +42,26 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
   @default_limit 500
   @max_detail_bytes 4_096
   @max_journaled_modules 25
+
+  # The share of an entry's budget one value inside an oversized findings map may take.
+  # Small enough that every top-level key survives beside every other one.
+  @max_finding_bytes 256
+
+  # What a decision was *about*, kept even when the shape of the verdict is hostile. Lane
+  # W's identity is the sha, the world, the imports and the start id; lane B's epoch and
+  # namespace are the same question asked of the other lane.
+  @identity_findings [
+    :lane,
+    :epoch,
+    :namespace,
+    :name,
+    :world,
+    :component_sha256,
+    :size,
+    :imports,
+    :start,
+    :recomputed
+  ]
 
   @enforce_keys [:version, :next_sequence, :decisions]
   defstruct @enforce_keys
@@ -211,14 +236,64 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
 
   defp modules(_other), do: []
 
+  # Bounding the verdict as one term let a single requester-chosen value inside it take the
+  # rest down with it. `metadata.test_report` is provenance a guest toolchain writes and a
+  # manifest carries, so six kilobytes of it — perfectly legal, `failures: 0`, signed — put
+  # the whole findings map over the ceiling and collapsed it to `%{too_large: "..."}`. What
+  # was lost is exactly what a refusal is read for: `component_sha256`, `world`, `imports`,
+  # `start`. Those are tens of bytes each and were never the problem.
+  #
+  # So an oversized verdict is bounded value by value instead, one level deeper for a value
+  # that is itself a map — which is where a `test_report` sits beside the `author` that has
+  # to survive it. The result is still held to the entry's own budget, and if even that does
+  # not fit, the identity keys are kept and everything else becomes a marker.
   defp findings(findings) when is_map(findings) and not is_struct(findings) do
-    case bound(findings) do
-      bounded when is_map(bounded) -> bounded
-      other -> %{findings: other}
-    end
+    if Beam.portable_term?(findings) and fits?(findings),
+      do: findings,
+      else: per_field(findings)
   end
 
   defp findings(_other), do: %{}
+
+  defp per_field(findings) do
+    shrunk = Map.new(findings, fn {key, value} -> {scalar(key), finding(value, 1)} end)
+
+    if fits?(shrunk), do: shrunk, else: identity(shrunk)
+  end
+
+  defp finding(value, depth) do
+    cond do
+      Beam.portable_term?(value) and
+          byte_size(:erlang.term_to_binary(value)) <= @max_finding_bytes ->
+        value
+
+      # A map is opened up before it is given up on, whichever of the two bounds it failed:
+      # one unportable pid in a provenance map must not cost the author beside it any more
+      # than one oversized report does.
+      depth > 0 and is_map(value) and not is_struct(value) ->
+        Map.new(value, fn {key, inner} -> {scalar(key), finding(inner, depth - 1)} end)
+
+      not Beam.portable_term?(value) ->
+        %{unportable: render(value)}
+
+      true ->
+        %{too_large: render(value)}
+    end
+  end
+
+  # The floor: a verdict whose *shape* is hostile — thousands of small keys, so bounding
+  # each one bounds nothing — still records what the decision was about.
+  defp identity(shrunk) do
+    kept =
+      shrunk
+      |> Map.take(@identity_findings)
+      |> Map.new(fn {key, value} -> {key, finding(value, 0)} end)
+      |> Map.put(:findings, :too_large)
+
+    if fits?(kept), do: kept, else: %{too_large: :findings}
+  end
+
+  defp fits?(term), do: byte_size(:erlang.term_to_binary(term)) <= @max_detail_bytes
 
   # Everything below arrives from a requester's artifact or a policy's verdict, and lands
   # in a durable file. Portable and small, or a marker saying it was neither.

@@ -253,6 +253,29 @@ defmodule Ouroboros.Upgrade.EvaluationTest do
       refute Evaluation.passed?(report)
     end
 
+    test "no evaluation agent outlives an evaluation its caller killed at a deadline" do
+      # An evaluation runs under somebody else's deadline — `Ouroboros.Wasm.Rollout`'s
+      # local gate kills the task that holds it — and `after` does not run for an exit
+      # signal from outside. So the throwaway agent kept its cluster-wide mesh id, and the
+      # helper instance a lane-W capability would be holding, with nothing linked to it
+      # that would ever notice.
+      compile!(@slow, slow_source())
+      before = eval_agent_ids()
+
+      spec = %{
+        probes: List.duplicate(%{input: "x", expect: :any_reply}, 20),
+        budget_ms: 30_000
+      }
+
+      task = Task.async(fn -> Evaluation.run(@slow, spec) end)
+
+      assert nil == Task.yield(task, 400)
+      refute match?({:ok, _result}, Task.shutdown(task, :brutal_kill))
+
+      assert await_eval_agents(before, 200) == before,
+             "a killed evaluation left an agent behind: #{inspect(eval_agent_ids() -- before)}"
+    end
+
     test "a spec can seed the state its expectations are about" do
       compile!(@echo, echo_source())
 
@@ -453,6 +476,25 @@ defmodule Ouroboros.Upgrade.EvaluationTest do
 
       assert Signer.Deny.sign(Artifact.signing_payload(artifact, @signer), @signer) ==
                {:error, :signing_denied}
+    end
+  end
+
+  defp eval_agent_ids do
+    Ouroboros.Mesh.list_agents()
+    |> Enum.map(& &1.id)
+    |> Enum.filter(&String.starts_with?(&1, "ouroboros-eval-"))
+    |> Enum.sort()
+  end
+
+  # The janitor stops the id after the killed process goes down, which is asynchronous.
+  defp await_eval_agents(expected, 0), do: eval_agent_ids() || expected
+
+  defp await_eval_agents(expected, attempts) do
+    if eval_agent_ids() == expected do
+      expected
+    else
+      Process.sleep(20)
+      await_eval_agents(expected, attempts - 1)
     end
   end
 

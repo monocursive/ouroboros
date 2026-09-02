@@ -60,8 +60,9 @@ defmodule Ouroboros.Wasm.RolloutTwoNodeTest do
 
   @tag @needs_live
   test "one signed component deploys, live, on both nodes", context do
-    id = start_id()
-    artifact = artifact!(context, start: %{id: id, config: @config})
+    name = unique_name()
+    id = start_id(name)
+    artifact = artifact!(context, name: name, start: %{id: id, config: @config})
 
     # Snapshotted before the deploy so the assertion afterwards is about what this rollout
     # loaded, not about what a peer happened to boot with.
@@ -143,10 +144,12 @@ defmodule Ouroboros.Wasm.RolloutTwoNodeTest do
   @tag @needs_live
   test "an eval spec the component cannot satisfy rolls back, with proof from both nodes",
        context do
-    id = start_id()
+    name = unique_name()
+    id = start_id(name)
 
     artifact =
       artifact!(context,
+        name: name,
         start: %{id: id, config: @config},
         eval: %{
           probes: [%{input: %{"greet" => "x"}, expect: {:equals, "a reply it will never send"}}],
@@ -416,7 +419,10 @@ defmodule Ouroboros.Wasm.RolloutTwoNodeTest do
   defp call(target, module, function, arguments),
     do: :erpc.call(target, module, function, arguments, 30_000)
 
-  defp start_id, do: "wasm/two-node-#{System.unique_integer([:positive])}"
+  # A start id is `"wasm/" <> name` or it is nothing: the signer refuses any other, and
+  # `Ouroboros.Wasm.Rollout.start_block/1` re-derives it rather than reading it.
+  defp unique_name, do: "two-node-#{System.unique_integer([:positive])}"
+  defp start_id(name), do: "wasm/" <> name
 
   defp start_registry! do
     name = String.to_atom("wasm_two_node_registry_#{System.unique_integer([:positive])}")

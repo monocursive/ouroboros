@@ -29,6 +29,14 @@ defmodule Ouroboros.Wasm.Surface do
   integers the helper's `doctor` report carried rather than from a list restated here: it
   is the helper's contract, it grows, and this side should not need editing when it does.
 
+  ## No absolute paths
+
+  `helper.path` and `store.root` are basenames. Both verbs are `:read` — the lowest scope
+  the gateway has — and an absolute path is a fact about the operator's filesystem rather
+  than about lane W: it names the install prefix, and often the account, to anybody who may
+  merely look. What a reader wants from those fields is *which* helper binary and *whether*
+  a store is configured, and a basename answers both.
+
   ## Nothing helper-written reaches the wire unbounded
 
   The doctor report, the world strings and a broken pool's reason are all somebody else's
@@ -120,7 +128,7 @@ defmodule Ouroboros.Wasm.Surface do
 
     base = %{
       present: File.regular?(path),
-      path: path,
+      path: basename(path),
       world: Wasm.world(),
       hook_component_budget: Pool.hook_component_budget()
     }
@@ -277,13 +285,17 @@ defmodule Ouroboros.Wasm.Surface do
   # The store
   # ---------------------------------------------------------------------------
 
+  # `held` and `components` are the components; `bytes` is every file the store holds,
+  # because that is the number `budget_bytes` is compared against by the prune that
+  # enforces it. Reporting a subtotal beside a budget would be reporting a number an
+  # operator cannot act on.
   defp store(opts) do
-    entries = components(opts)
+    entries = all_entries(opts)
 
     %{
-      root: store_root(opts),
+      root: basename(store_root(opts)),
       budget_bytes: Wasm.config(:store_budget_bytes),
-      held: count(entries),
+      held: count(components_of(entries)),
       bytes: held_bytes(entries),
       protected: protected(opts)
     }
@@ -299,15 +311,27 @@ defmodule Ouroboros.Wasm.Surface do
     end
   end
 
+  # An absolute path is a fact about this operator's disk, and `wasm.status`/`wasm.list`
+  # are `:read` verbs — the lowest scope the gateway has. The basename is what an operator
+  # actually reads them for (which helper binary is this node holding, is the store where
+  # this build puts one); the directory it sits in is not on a listing's business.
+  defp basename(nil), do: nil
+  defp basename(path) when is_binary(path), do: path |> Path.basename() |> cut()
+
   # `nil` rather than `[]` for a store this node has no directory for or cannot read: an
   # empty store and an unreadable one are different facts and only one of them is safe to
   # draw as "no components here".
-  defp components(opts) do
+  defp all_entries(opts) do
     case Store.list(opts) do
       {:ok, entries} -> entries
       {:error, _unreadable} -> nil
     end
   end
+
+  defp components(opts), do: opts |> all_entries() |> components_of()
+
+  defp components_of(nil), do: nil
+  defp components_of(entries), do: Enum.filter(entries, &(&1.kind == :component))
 
   # How many components a rollout is currently keeping alive, which is the number an
   # operator reads before wondering why a prune reclaimed nothing. The store fails closed on
@@ -380,8 +404,15 @@ defmodule Ouroboros.Wasm.Surface do
 
   # `"wasm/" <> name` is the whole of a lane-W rollout's module field (docs/WASM.md D2): the
   # lane deploys a component and introduces no atom, so what a client draws is the name.
-  defp name_of("wasm/" <> name), do: name
-  defp name_of(other), do: to_string(other)
+  #
+  # Guarded the way `node_name/1` is, and for the same reason: a `module` field read back
+  # from a checkpoint this build did not write can be any term, `to_string/1` raises on
+  # most of them, and inside `safe/1` one malformed row would become `-32006` for the whole
+  # listing instead of one row worth looking at.
+  defp name_of("wasm/" <> name), do: cut(name)
+  defp name_of(name) when is_binary(name), do: cut(name)
+  defp name_of(name) when is_atom(name), do: Atom.to_string(name)
+  defp name_of(other), do: other |> inspect(limit: 5, printable_limit: @max_text_bytes) |> cut()
 
   defp component_row(entry), do: %{sha256: entry.sha256, size: entry.size, mtime: entry.mtime}
 

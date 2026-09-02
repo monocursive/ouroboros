@@ -51,6 +51,42 @@ defmodule Ouroboros.Capability.ProbeStartSpec do
   end
 end
 
+defmodule Ouroboros.Capability.SlowProbeAnswer do
+  @moduledoc false
+
+  # Starts instantly, answers slowly. That is what makes "the caller's deadline fired while
+  # the throwaway agent was alive" a fact rather than a race: the probe is still inside its
+  # message exchange, several seconds from finishing, when it is killed.
+
+  use Jido.Agent,
+    name: "ouroboros_capability_slow_probe_answer",
+    description: "A capability that answers long after any deadline a caller sets",
+    schema: [last_message: [type: :any, default: nil]],
+    signal_routes: [{"ouroboros.agent.message", __MODULE__.Wait}]
+
+  def actions, do: super() ++ [__MODULE__.Wait]
+
+  defmodule Wait do
+    @moduledoc false
+
+    use Jido.Action,
+      name: "slow_probe_answer_wait",
+      description: "Sleeps past the deadline, then echoes",
+      schema: [
+        from: [type: :string, required: true],
+        body: [type: :any, required: true],
+        correlation_id: [type: :string, required: true],
+        causation_id: [type: :any, default: nil]
+      ]
+
+    @impl true
+    def run(params, _context) do
+      Process.sleep(3_000)
+      {:ok, %{last_message: %{body: params.body}}}
+    end
+  end
+end
+
 defmodule Ouroboros.Upgrade.ProbeTest do
   # Not async: every probe joins the node-wide `:pg` mesh namespace under an id of its own,
   # and `Ouroboros.Mesh` is a singleton.
@@ -58,6 +94,7 @@ defmodule Ouroboros.Upgrade.ProbeTest do
 
   alias Ouroboros.Agent.Worker
   alias Ouroboros.Capability.ProbeStartSpec
+  alias Ouroboros.Capability.SlowProbeAnswer
   alias Ouroboros.Upgrade.Rollout.Probe
 
   describe "the bare module form, which is lane B's and always was" do
@@ -115,5 +152,47 @@ defmodule Ouroboros.Upgrade.ProbeTest do
 
     assert Ouroboros.Mesh.list_agents()
            |> Enum.all?(&(not String.starts_with?(&1.id, "ouroboros-probe-")))
+  end
+
+  test "and none outlives a probe its caller killed at a deadline" do
+    # A probe runs under somebody else's deadline, and a deadline that fires kills this
+    # process outright — `after` does not run for an exit signal from outside. So the
+    # throwaway agent kept its cluster-wide mesh id, and its helper instance where it had
+    # one, with nothing linked to it that would ever notice. `Ouroboros.Wasm.Rollout`'s
+    # local gate is the caller that does this; the agent below is slow enough that the
+    # deadline always fires while it is alive.
+    before = probe_agent_ids()
+
+    task =
+      Task.async(fn ->
+        Probe.ready?({SlowProbeAnswer, %{}})
+      end)
+
+    # Exactly what `Ouroboros.Wasm.Rollout.bounded_call/5`'s local branch does at a
+    # deadline, and it reads the same way: nothing came back, so the gate is ambiguous.
+    assert nil == Task.yield(task, 300)
+    refute match?({:ok, _result}, Task.shutdown(task, :brutal_kill))
+
+    assert await_probe_agents(before, 200) == before,
+           "a killed probe left an agent behind: #{inspect(probe_agent_ids() -- before)}"
+  end
+
+  defp probe_agent_ids do
+    Ouroboros.Mesh.list_agents()
+    |> Enum.map(& &1.id)
+    |> Enum.filter(&String.starts_with?(&1, "ouroboros-probe-"))
+    |> Enum.sort()
+  end
+
+  # The janitor stops the id after the killed process goes down, which is asynchronous.
+  defp await_probe_agents(expected, 0), do: probe_agent_ids() || expected
+
+  defp await_probe_agents(expected, attempts) do
+    if probe_agent_ids() == expected do
+      expected
+    else
+      Process.sleep(20)
+      await_probe_agents(expected, attempts - 1)
+    end
   end
 end

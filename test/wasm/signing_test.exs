@@ -125,6 +125,27 @@ defmodule Ouroboros.Wasm.SigningTest do
       # declared list has to equal what the helper actually found.
       assert {:ok, findings} = evaluate(%{artifact!() | imports: []}, context())
       assert findings.imports == []
+
+      # A repeated import is refused rather than deduplicated. The list is what gets
+      # signed, so a signer that silently rewrote it would be signing a different list from
+      # the one it was shown — and `Ouroboros.Wasm.Verifier.cross_check/2` compares the
+      # declared list against the helper's own reading, which can never repeat an import.
+      # `["log", "log"]` was therefore a manifest signed into a permanent quarantine.
+      assert {:refused, {:duplicate_component_imports, rendered}} =
+               evaluate(%{artifact!() | imports: ["log", "log"]}, context())
+
+      assert rendered =~ "log"
+    end
+
+    test "the component's name is held to the charset its durable id is compared in" do
+      # The name is the register's `module` field and the `start` block's id. A name that
+      # can hold a path separator or a bidirectional control is a name two readers can
+      # disagree about, and one of those readers claims a cluster-wide process id.
+      for name <- ["greeter/../evil", "Greeter", "greeter ", String.duplicate("g", 65), ""] do
+        assert {:refused, {:invalid_component_name, _rendered}} =
+                 evaluate(%{artifact!() | name: name}, context()),
+               "the signer accepted the name #{inspect(name)}"
+      end
     end
 
     test "5. provenance: the author is required, everything else is checked when present" do
@@ -185,23 +206,36 @@ defmodule Ouroboros.Wasm.SigningTest do
       assert {:ok, %{start: :absent}} =
                evaluate(with_metadata(&Map.delete(&1, :start)), context())
 
+      # The id is bound to *this manifest's name*, not merely to the lane's prefix. A
+      # prefix bound nothing: a component named `evil` could declare `wasm/greeter`, be
+      # signed, be recorded in the register as `wasm/evil`, and then claim the cluster-wide
+      # durable id everybody trusts as `greeter`. It also made a traversal-shaped id and a
+      # right-to-left-override id signable.
       for start <- [
             %{id: "greeter", config: "{}"},
             %{id: "wasm/", config: "{}"},
             %{id: "Elixir.Ouroboros.Capability.Sneaky", config: "{}"},
-            %{id: 42, config: "{}"}
+            %{id: 42, config: "{}"},
+            %{id: "wasm/victim", config: "{}"},
+            %{id: "wasm/greeter/../../etc/passwd", config: "{}"},
+            %{id: "wasm/../../etc/passwd", config: "{}"},
+            %{id: "wasm/ ", config: "{}"},
+            %{id: "wasm/greeter ", config: "{}"},
+            %{id: "wasm/\u{202E}retteerg", config: "{}"},
+            %{id: "wasm/" <> String.duplicate("x", 300), config: "{}"},
+            %{id: "WASM/greeter", config: "{}"},
+            %{id: "wasm/Greeter", config: "{}"}
           ] do
-        assert {:refused, {:invalid_start_id, _}} =
-                 evaluate(with_metadata(&Map.put(&1, :start, start)), context())
+        assert {:refused, {:invalid_start_id, _reason}} =
+                 evaluate(with_metadata(&Map.put(&1, :start, start)), context()),
+               "the signer accepted #{inspect(start.id)} for a component named greeter"
       end
 
-      assert {:refused, {:invalid_start_id, :bounds}} =
-               evaluate(
-                 with_metadata(
-                   &Map.put(&1, :start, %{id: "wasm/" <> String.duplicate("x", 300), config: "{}"})
-                 ),
-                 context()
-               )
+      # And a component named `evil` cannot declare the id belonging to `greeter`, which is
+      # the same rule read from the other side.
+      squat = %{artifact!() | name: "evil"}
+
+      assert {:refused, {:invalid_start_id, _reason}} = evaluate(squat, context())
 
       assert {:refused, {:invalid_start, :config}} =
                evaluate(
@@ -362,6 +396,44 @@ defmodule Ouroboros.Wasm.SigningTest do
       assert refused.lane == :wasm
       assert refused.decision == :refused
       assert refused.reason == {:world_not_supported, "other:world@1.0.0"}
+    end
+
+    test "an oversized test_report does not erase the identity of the decision" do
+      # `metadata.test_report` is provenance a guest toolchain writes and a manifest
+      # carries: `fetch_optional_tests/1` checks that it is a map whose `failures` is 0 and
+      # nothing about its size. Six kilobytes of it — legal, signable — pushed the whole
+      # findings map past the journal's ceiling, and the map collapsed to one rendered
+      # string. What went with it was every structured field the policy had just proved:
+      # the component sha, the world, the imports, the start id.
+      service = start_service!()
+
+      fat =
+        with_metadata(
+          &Map.put(&1, :test_report, %{
+            total: 1,
+            failures: 0,
+            notes: String.duplicate("z", 6_000)
+          })
+        )
+
+      assert {:ok, _signature} = sign(service, fat)
+      assert {:ok, [entry]} = Service.decisions(service)
+      assert entry.decision == :issued
+
+      assert entry.findings.lane == :wasm
+      assert entry.findings.component_sha256 == fat.component_sha256
+      assert entry.findings.world == fat.world
+      assert entry.findings.imports == fat.imports
+      assert entry.findings.epoch == fat.epoch
+      assert entry.findings.start == %{id: "wasm/greeter", config_bytes: 2}
+      assert entry.findings.provenance.author == "test-agent"
+
+      # Only the value that could not fit is a marker, and it says which value that was.
+      assert %{too_large: rendered} = entry.findings.provenance.test_report
+      assert is_binary(rendered)
+
+      # And the entry is still bounded, which is the other half of the promise.
+      assert byte_size(:erlang.term_to_binary(entry.findings)) <= 8_192
     end
 
     test "the require_wasm_eval switch is read from configuration and defaults to true" do

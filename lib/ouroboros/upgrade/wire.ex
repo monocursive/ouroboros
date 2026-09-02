@@ -14,13 +14,24 @@ defmodule Ouroboros.Upgrade.Wire do
 
   ## Exactness
 
-  `load(dump(term)) == term` whenever every atom in `term` is interned in the loading
+  `load(dump(term)) === term` whenever every atom in `term` is interned in the loading
   VM and every struct module is loaded there — the state the writing VM was in. That
   holds for map keys too: an atom key and a binary key that spell the same name are
   different keys before the boundary and stay different after it, so a signed manifest
   whose `metadata` carries a JSON-shaped map (`%{"greet" => "x"}`) hashes the same on
   both sides. A checkpoint is evidence of what was signed only if this boundary is
   exact, which is why exactness is a promise here and not a convenience.
+
+  It holds for struct-*shaped* maps too, which are not the same thing as structs.
+  `%{1 => 2, __struct__: :ok}` matches `%mod{}` and is an ordinary map with an
+  unfortunate key; `%{__struct__: :ok}`'s "module" is not one; a struct somebody put an
+  extra key on is no longer rebuildable from its fields. All three are written in the
+  pair form and come back as themselves. Only a map whose module is loaded here *and*
+  whose keys are exactly that module's fields is written as a struct, because that is the
+  only shape `load/1` can hand back unchanged. See `struct_form/1`.
+
+  `dump/1` raises on nothing, whatever a manifest's metadata carries: every term it
+  cannot express is marked where it stood rather than thrown at the writer.
 
   Two things are dropped on purpose, and marked where they stood: improper lists and
   terms with no external form (functions). Pids, references, and ports are written as
@@ -102,19 +113,22 @@ defmodule Ouroboros.Upgrade.Wire do
   defp encode(term) when is_pid(term) or is_reference(term) or is_port(term), do: term
   defp encode(term) when is_atom(term), do: %{@atom => Atom.to_string(term)}
 
-  defp encode(%mod{} = struct) when is_atom(mod) do
-    struct
-    |> Map.from_struct()
-    |> Map.new(fn {key, value} -> {Atom.to_string(key), encode(value)} end)
-    |> Map.put(@struct, Atom.to_string(mod))
-  end
-
+  # One clause for every map, struct-shaped or not, because `%mod{}` matches *any* map
+  # carrying an atom `:__struct__` and only some of those are structs. A map holding
+  # `%{1 => 2, __struct__: :ok}` is a plain map with an unfortunate key, and the struct
+  # form would have called `Atom.to_string(1)` on it — a raise, out of a writer whose
+  # input is a signed manifest's metadata. The exactness decision is made once, here.
   defp encode(map) when is_map(map) do
-    if bare_keys?(map) do
-      Map.new(map, fn {key, value} -> {Atom.to_string(key), encode(value)} end)
-    else
-      pairs = map |> Enum.sort() |> Enum.map(fn {key, value} -> [encode(key), encode(value)] end)
-      %{@map => pairs}
+    case struct_form(map) do
+      {:ok, mod} ->
+        map
+        |> Map.delete(:__struct__)
+        |> Map.to_list()
+        |> Map.new(fn {key, value} -> {Atom.to_string(key), encode(value)} end)
+        |> Map.put(@struct, Atom.to_string(mod))
+
+      :error ->
+        encode_plain_map(map)
     end
   end
 
@@ -130,10 +144,75 @@ defmodule Ouroboros.Upgrade.Wire do
 
   defp encode(other), do: %{@dropped => inspect(other, limit: 8, printable_limit: 80)}
 
+  # `Map.to_list/1` rather than iterating the map: `Enum` dispatches on `Enumerable`, which
+  # a struct-shaped map does not implement, and a map that merely holds `:__struct__` is
+  # exactly the input this clause exists for.
+  defp encode_plain_map(map) do
+    pairs = Map.to_list(map)
+
+    if bare_keys?(pairs) do
+      Map.new(pairs, fn {key, value} -> {Atom.to_string(key), encode(value)} end)
+    else
+      sorted =
+        pairs |> Enum.sort() |> Enum.map(fn {key, value} -> [encode(key), encode(value)] end)
+
+      %{@map => sorted}
+    end
+  end
+
   # A map's keys are written as bare names only when every one of them is an atom and
   # none of those names would read back as a tag.
-  defp bare_keys?(map) do
-    Enum.all?(map, fn {key, _value} -> is_atom(key) and Atom.to_string(key) not in @tags end)
+  defp bare_keys?(pairs) do
+    Enum.all?(pairs, fn {key, _value} -> is_atom(key) and Atom.to_string(key) not in @tags end)
+  end
+
+  # The struct form is written only for a map `decode/1` will hand back unchanged, which
+  # is narrower than "matches `%mod{}`" in two ways that both cost exactness:
+  #
+  #   * `mod` must be a **loaded struct module** here. `%{__struct__: :ok}` is a map, not a
+  #     struct: `struct(:ok, %{})` raises on the way back and the fallback returns a map
+  #     with the *binary* key `"__struct__"`, which is not the term that was written.
+  #   * the map's keys must be exactly that module's fields. `Map.put(%URI{}, :extra, 1)`
+  #     and `Map.delete(%URI{}, :host)` are both maps that `struct/2` cannot rebuild — it
+  #     drops unknown keys and fills missing ones with defaults, silently.
+  #
+  # Everything this refuses goes through the pair form instead, where an atom key is
+  # tagged as an atom and comes back as one, so the round trip stays exact either way.
+  # `decode/1` is deliberately *not* this strict: a checkpoint written by an older build
+  # holds structs with fewer fields than this build's, and filling those with `nil` is the
+  # widening every owner's `upgrade/2` relies on.
+  defp struct_form(%{__struct__: mod} = map) when is_atom(mod) do
+    fields = map |> Map.delete(:__struct__) |> Map.to_list()
+
+    if bare_keys?(fields) and Enum.sort(Map.keys(map)) == struct_keys(mod),
+      do: {:ok, mod},
+      else: :error
+  end
+
+  defp struct_form(_map), do: :error
+
+  # The module's own field list, or `[]` for anything that is not a loaded struct module —
+  # and no struct-shaped map's key set can equal `[]`, because every one of them holds at
+  # least `:__struct__`. That single comparison is what makes `%{__struct__: :ok}` a plain
+  # map, `%Foo{}` a struct, and `Map.put(%Foo{}, :extra, 1)` a plain map again.
+  #
+  # The `Elixir.` check is a cost guard and nothing else: a struct module's name always has
+  # that prefix, and asking the code server about an atom that has none would let a term
+  # full of `%{__struct__: :ok}`-shaped maps turn one checkpoint write into that many failed
+  # module searches. Behaviour is identical with or without it.
+  defp struct_keys(mod) do
+    case Atom.to_string(mod) do
+      "Elixir." <> _rest -> loaded_struct_keys(mod)
+      _not_a_module_name -> []
+    end
+  end
+
+  defp loaded_struct_keys(mod) do
+    if Code.ensure_loaded?(mod),
+      do: mod.__struct__() |> Map.keys() |> Enum.sort(),
+      else: []
+  rescue
+    _not_a_struct_module -> []
   end
 
   defp decode(%mod{} = struct) when is_atom(mod), do: struct

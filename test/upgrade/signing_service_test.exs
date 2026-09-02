@@ -368,6 +368,91 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
     end
   end
 
+  describe "the journal bounds a verdict field by field" do
+    test "one oversized value does not take the identity fields with it" do
+      # Bounding the map as one term let a single requester-chosen value inside it — lane
+      # W's `provenance.test_report`, which a manifest carries verbatim — collapse the
+      # whole verdict to a rendered string, and with it every field a refusal is read for.
+      findings = %{
+        lane: :wasm,
+        epoch: 7,
+        component_sha256: String.duplicate("a", 64),
+        world: "ouroboros:capability@0.1.0",
+        imports: ["log"],
+        start: %{id: "wasm/greeter", config_bytes: 2},
+        provenance: %{author: "somebody", test_report: %{failures: 0, notes: fat(6_000)}}
+      }
+
+      entry = recorded(findings)
+
+      assert entry.findings.component_sha256 == findings.component_sha256
+      assert entry.findings.world == findings.world
+      assert entry.findings.start == findings.start
+      assert entry.findings.provenance.author == "somebody"
+      assert %{too_large: _rendered} = entry.findings.provenance.test_report
+    end
+
+    test "a verdict whose shape is hostile still records what it was about" do
+      # Bounding each value bounds nothing when there are enough of them. The floor is the
+      # identity of the decision plus a marker saying the rest did not fit.
+      wide = Map.new(1..4_000, fn n -> {"k#{n}", n} end)
+
+      entry =
+        recorded(%{
+          lane: :wasm,
+          epoch: 7,
+          component_sha256: String.duplicate("a", 64),
+          world: "ouroboros:capability@0.1.0",
+          noise: wide
+        })
+
+      assert entry.findings.component_sha256 == String.duplicate("a", 64)
+      assert entry.findings.world == "ouroboros:capability@0.1.0"
+      assert entry.findings.epoch == 7
+      assert entry.findings.findings == :too_large
+      refute Map.has_key?(entry.findings, :noise)
+    end
+
+    test "an unportable value is a marker rather than a term the next boot cannot read" do
+      entry = recorded(%{lane: :wasm, epoch: 7, provenance: %{who: self(), pad: fat(6_000)}})
+
+      assert entry.findings.epoch == 7
+      assert %{unportable: _rendered} = entry.findings.provenance.who
+    end
+
+    test "and the whole entry stays inside the journal's own ceiling" do
+      for findings <- [
+            %{lane: :wasm, provenance: %{test_report: %{notes: fat(200_000)}}},
+            %{lane: :wasm, noise: Map.new(1..4_000, fn n -> {"k#{n}", fat(64)} end)},
+            %{lane: :beam, epoch: 1, modules: List.duplicate(fat(512), 500)}
+          ] do
+        entry = recorded(findings)
+        assert byte_size(:erlang.term_to_binary(entry.findings)) <= 8_192
+      end
+    end
+
+    defp fat(bytes), do: String.duplicate("z", bytes)
+
+    defp recorded(findings) do
+      [entry] =
+        Journal.new()
+        |> Journal.record(%{
+          artifact_id: "a",
+          epoch: 7,
+          lane: :wasm,
+          modules: [],
+          requester: node(),
+          signer_id: "signer",
+          decision: :issued,
+          reason: nil,
+          findings: findings
+        })
+        |> Journal.public()
+
+      entry
+    end
+  end
+
   describe "admission" do
     test "a requester beyond its rate limit is refused, and refusals count too" do
       service = start_service!(rate_limit_per_minute: 2)
@@ -388,6 +473,28 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
       assert {:ok, status} = Service.status(service)
       assert status.tracked_requesters == 2
       assert status.rate_limit_per_minute == 2
+    end
+
+    test "every refusal below the limiter still costs the requester its window" do
+      # The limiter used to run *after* the size check, the signer-id check and the
+      # component-bytes check, so each of those refusals was free and unlimited — and each
+      # one costs this process a `term_to_binary` over an artifact the caller chose the
+      # size of, plus a journal write. A refusal an attacker can generate at will is the
+      # one outcome that must not be cheaper than an issuance.
+      service = start_service!(rate_limit_per_minute: 2, max_artifact_bytes: 128)
+
+      assert {:refused, {:artifact_too_large, _bytes, 128}} = sign(service, artifact!())
+
+      assert {:refused, {:unknown_signer_id, "somebody-else"}} =
+               sign(service, artifact!(), signer_id: "somebody-else")
+
+      # Two requests, admitted and refused, is the whole window: the third is rate-limited
+      # rather than being told again what was wrong with it.
+      assert {:refused, {:rate_limited, requester, 2, 2}} = sign(service, artifact!())
+      assert requester == node()
+
+      assert {:ok, status} = Service.status(service)
+      assert status.tracked_requesters == 1
     end
 
     test "an artifact larger than the configured bound is refused before it is read" do

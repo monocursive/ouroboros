@@ -326,10 +326,45 @@ defmodule Ouroboros.Wasm.StoreTest do
       assert {:error, {:manifest_too_large, ^id, size}} = Store.fetch_manifest(artifact.id, opts)
       assert size == 2 * 1024 * 1024
 
-      # And a manifest is not a component: it is never listed and never counted.
-      assert {:ok, entries} = Store.list(opts)
-      assert entries == []
+      # A manifest is not a component — `components/1` still says nothing is held — but it
+      # is a file on this disk, so `list/1` reports it under its own kind and its bytes
+      # count against the budget a prune enforces.
+      assert {:ok, []} = Store.components(opts)
+      assert {:ok, [%{kind: :manifest, size: size}]} = Store.list(opts)
+      assert size == 2 * 1024 * 1024
       assert File.exists?(Path.join(root, Path.basename(path)))
+    end
+
+    test "a manifest is bounded on the way in at the size it is read back under", %{opts: opts} do
+      # A manifest published above the read ceiling is a durable, unprunable file that no
+      # reboot can ever use: `fetch_manifest/2` refuses it on its size, and nothing rewrites
+      # it. One bound, both directions.
+      fat = manifest_artifact!(language: String.duplicate("L", 1_200_000))
+
+      assert {:error, {:manifest_too_large, id, bytes}} = Store.put_manifest(fat, opts)
+      assert id == fat.id
+      assert bytes > 1024 * 1024
+
+      assert {:error, {:unknown_manifest, ^id}} = Store.fetch_manifest(fat.id, opts)
+      assert {:ok, []} = Store.list(opts)
+    end
+
+    test "manifest bytes count against the prune budget", %{opts: opts} do
+      registry = start_registry!()
+      artifact = manifest_artifact!()
+
+      assert {:ok, _put} = Store.put_manifest(artifact, opts)
+      assert {:ok, %{size: manifest_bytes}} = one_manifest(opts)
+
+      # A budget that ignored a whole class of files in the directory it governs was a
+      # budget the store exceeded quietly.
+      assert {:ok, report} = Store.prune([budget_bytes: 10_000_000, registry: registry] ++ opts)
+      assert report.bytes == manifest_bytes
+      assert report.evicted == []
+
+      # And a manifest is never the thing evicted to get back under it.
+      assert {:ok, _report} = Store.prune([budget_bytes: 0, registry: registry] ++ opts)
+      assert {:ok, %{size: ^manifest_bytes}} = one_manifest(opts)
     end
 
     test "a stale manifest temporary is swept like any other", %{root: root, opts: opts} do
@@ -507,16 +542,30 @@ defmodule Ouroboros.Wasm.StoreTest do
     name
   end
 
-  defp manifest_artifact! do
+  defp one_manifest(opts) do
+    with {:ok, entries} <- Store.list(opts) do
+      case Enum.filter(entries, &(&1.kind == :manifest)) do
+        [manifest] -> {:ok, manifest}
+        other -> {:error, other}
+      end
+    end
+  end
+
+  defp manifest_artifact!(extra \\ []) do
     {:ok, artifact} =
       Artifact.build(
         "\0asm\x01\x00\x00\x00 manifest fixture #{System.unique_integer([:positive])}",
-        name: "greeter",
-        author: "test-agent",
-        imports: ["log"],
-        epoch: System.unique_integer([:positive, :monotonic]),
-        eval: %{probes: [%{input: %{"n" => 1}, expect: :any_reply}], budget_ms: 1_000},
-        start: %{id: "wasm/greeter", config: "{}"}
+        Keyword.merge(
+          [
+            name: "greeter",
+            author: "test-agent",
+            imports: ["log"],
+            epoch: System.unique_integer([:positive, :monotonic]),
+            eval: %{probes: [%{input: %{"n" => 1}, expect: :any_reply}], budget_ms: 1_000},
+            start: %{id: "wasm/greeter", config: "{}"}
+          ],
+          extra
+        )
       )
 
     {:ok, signed} =

@@ -101,6 +101,10 @@ defmodule Ouroboros.Upgrade.Signing.Service do
     * The `requester` in every journal entry is **self-reported**. It is what the caller
       said, journaled as a claim. The per-requester rate limit therefore bounds
       accidents, retry storms, and honest clients — not an adversary who can vary it.
+      Within that bound it is the *first* gate a request meets, because everything after
+      it — a `term_to_binary` over the artifact, the policy that reads every byte — is
+      work a caller can ask for and a refusal that skipped the window would let them ask
+      for it without limit.
     * The policy proves the submitted bytes are internally consistent and namespaced. It
       cannot re-run a build it did not perform, so the link between `test_report` and
       those bytes is the forge's assertion, carried in signed metadata.
@@ -337,25 +341,42 @@ defmodule Ouroboros.Upgrade.Signing.Service do
 
   # ## Admission
 
-  # Cheapest refusals first, then the rate limit, then the policy that has to read every
-  # byte. The window is updated for every admitted request, refused or not: a flood of
-  # refusals is still a flood.
+  # The rate limit comes **first**, immediately after the one check that decides who is
+  # asking. Everything below it costs this process real work on a caller's terms — a
+  # `term_to_binary` over an artifact that may be sixteen megabytes, and then a policy that
+  # reads every byte of it — and a refusal that fires before the window is updated is a
+  # refusal that costs the caller nothing and this node everything. A wrong signer id, an
+  # oversized artifact, oversized component bytes: each of those was free, unlimited, and
+  # journaled, which is a log an attacker fills and a CPU an attacker owns.
   #
-  # Everything after the rate limiter runs in `decide/5` rather than in this `with`,
+  # So the order is: is this a request at all, does it name a requester, then the window,
+  # then the expensive truths. The window is updated for every admitted request, issued or
+  # refused: a flood of refusals is still a flood.
+  #
+  # Everything after the rate limiter runs in `checked/5` rather than in this `with`,
   # because a `with/else` clause only ever sees the state this function was *called*
   # with. A policy refusal returning through `else` would silently discard the window
   # update, which would make refusals free — and a refusal is the one outcome a caller
   # can generate at will.
   defp admit(artifact, signer_id, request, requester, state) do
     with :ok <- validate_request(request, requester),
-         :ok <- ensure_signer_id(signer_id, state),
-         :ok <- ensure_size(artifact, state),
-         :ok <- ensure_component_bytes(request, state),
          {:ok, admitted} <- admit_rate(requester, state) do
-      decide(artifact, signer_id, request, requester, admitted)
+      checked(artifact, signer_id, request, requester, admitted)
     else
       {:refused, reason} -> {:refused, reason, state}
       {:refused, reason, %{} = unchanged} -> {:refused, reason, unchanged}
+    end
+  end
+
+  # Held separately so every refusal below the rate limiter answers with the state that
+  # already counted this request.
+  defp checked(artifact, signer_id, request, requester, state) do
+    with :ok <- ensure_signer_id(signer_id, state),
+         :ok <- ensure_size(artifact, state),
+         :ok <- ensure_component_bytes(request, state) do
+      decide(artifact, signer_id, request, requester, state)
+    else
+      {:refused, reason} -> {:refused, reason, state}
     end
   end
 

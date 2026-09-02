@@ -103,6 +103,123 @@ defmodule Ouroboros.Upgrade.WireTest do
     end
   end
 
+  # `%mod{}` matches any map carrying an atom `:__struct__`, which is a much larger set
+  # than "the structs". The struct clause used to take all of them: it called
+  # `Atom.to_string/1` on every other key, which raises on the first one that is not an
+  # atom, and it wrote a struct form for modules that are not struct modules, which comes
+  # back as a map with a *binary* `"__struct__"` key. Both were reachable from a signed
+  # manifest — `metadata.test_report` is checked for `failures: 0` and nothing else — and
+  # the raise came out of `Registry.persist/2` and killed the register.
+  describe "struct-shaped maps that are not structs" do
+    test "a map holding :__struct__ beside a non-atom key dumps rather than raising" do
+      poison = %{1 => 2, __struct__: :ok}
+
+      assert %{"__map__" => _pairs} = Wire.dump(poison)
+      assert Wire.load(Wire.dump(poison)) === poison
+    end
+
+    test "a module that is not a struct module is a plain map, and stays one" do
+      for term <- [
+            %{__struct__: :ok},
+            %{a: %{__struct__: :ok}},
+            %{__struct__: nil},
+            %{__struct__: :ok, a: 1},
+            # A module that is loaded and is not a struct module: the one shape whose
+            # `__struct__/0` is called and raises rather than simply being absent.
+            %{__struct__: Wire},
+            %{__struct__: Wire, a: 1},
+            %{__struct__: "Elixir.Ouroboros.Upgrade.Wire"},
+            [%{__struct__: :error}],
+            {%{__struct__: :ok}}
+          ] do
+        assert Wire.load(Wire.dump(term)) === term, "#{inspect(term)} did not survive"
+      end
+    end
+
+    test "a real struct is still written as a struct, and comes back as one" do
+      artifact = %Ouroboros.Wasm.Artifact{
+        id: "a",
+        epoch: 1,
+        name: "greeter",
+        component_sha256: String.duplicate("a", 64),
+        world: "w",
+        imports: [],
+        size: 1,
+        created_at: "x"
+      }
+
+      dumped = Wire.dump(%{artifact: artifact})
+      assert dumped["artifact"]["__struct__"] == "Elixir.Ouroboros.Wasm.Artifact"
+      assert Wire.load(dumped) === %{artifact: artifact}
+    end
+
+    test "a struct with a field added or removed is a map, because struct/2 cannot rebuild it" do
+      artifact = %Ouroboros.Wasm.Artifact{
+        id: "a",
+        epoch: 1,
+        name: "greeter",
+        component_sha256: String.duplicate("a", 64),
+        world: "w",
+        imports: [],
+        size: 1,
+        created_at: "x"
+      }
+
+      widened = Map.put(artifact, :extra, 1)
+      narrowed = Map.delete(artifact, :world)
+
+      assert %{"__map__" => _} = Wire.dump(widened)
+      assert Wire.load(Wire.dump(widened)) === widened
+      assert Wire.load(Wire.dump(narrowed)) === narrowed
+    end
+
+    test "a struct-shaped test_report is signed metadata, and the boundary carries it" do
+      # The exact term the signing policy admits: not a struct at the top level, and
+      # `failures` is 0, which is the whole of `fetch_optional_tests/1`.
+      report = %{failures: 0, extra: %{1 => 2, __struct__: :ok}}
+      manifest = %{id: "x", epoch: 1, metadata: %{author: "a", test_report: report}}
+
+      assert Wire.load(Wire.dump(manifest)) === manifest
+
+      assert :erlang.term_to_binary(
+               {:ouroboros_wasm_v1, "s", Wire.load(Wire.dump(manifest))},
+               [:deterministic]
+             ) ==
+               :erlang.term_to_binary({:ouroboros_wasm_v1, "s", manifest}, [:deterministic])
+    end
+  end
+
+  describe "the promise, swept" do
+    # A seeded sweep over terms built out of exactly the pieces this boundary has to tell
+    # apart: atoms and binaries that spell each other, this module's own tag names in both
+    # kinds, non-atom keys, and struct-shaped maps. One example proves one case; the promise
+    # in the moduledoc is universal, so it is checked over a few hundred of them.
+    test "load(dump(t)) === t for every generated term" do
+      :rand.seed(:exsss, {17, 23, 42})
+
+      failures =
+        Enum.reduce(1..600, [], fn _index, acc ->
+          term = generate(4)
+
+          case round_trip(term) do
+            {:ok, ^term} -> acc
+            other -> [{term, other} | acc]
+          end
+        end)
+
+      assert failures == [],
+             "#{length(failures)} terms broke, first: #{inspect(Enum.take(failures, 1))}"
+    end
+
+    test "no dumped term needs an atom beyond the three booleans" do
+      :rand.seed(:exsss, {5, 5, 5})
+
+      for _index <- 1..300 do
+        assert atoms(Wire.dump(generate(4))) == []
+      end
+    end
+  end
+
   describe "the dumped term" do
     test "an all-atom map is a map of bare names, the shape already on disk" do
       assert Wire.dump(%{version: 2, rollouts: %{}}) == %{"version" => 2, "rollouts" => %{}}
@@ -183,6 +300,60 @@ defmodule Ouroboros.Upgrade.WireTest do
       initial_state: %{"count" => 0, "error" => "none"}
     }
   end
+
+  defp round_trip(term) do
+    {:ok, Wire.load(Wire.dump(term))}
+  rescue
+    error -> {:raised, error.__struct__}
+  end
+
+  # Every atom below is interned by this module, which is the precondition the moduledoc
+  # states for exactness. The binaries spell the same names on purpose.
+  @gen_atoms [:ok, :error, nil, true, false, :a, :b, :__map__, :__atom__, :__struct__, :""]
+  @gen_binaries ["ok", "error", "nil", "true", "a", "b", "__map__", "__atom__", "__struct__", ""]
+
+  defp generate(0) do
+    Enum.random([
+      Enum.random(@gen_atoms),
+      Enum.random(@gen_binaries),
+      Enum.random([0, 1, -1, 1.0, 0.5, 1_000_000]),
+      []
+    ])
+  end
+
+  defp generate(depth) do
+    case Enum.random(1..6) do
+      1 ->
+        generate(0)
+
+      2 ->
+        for _index <- 1..Enum.random(1..3), do: generate(depth - 1)
+
+      3 ->
+        1..Enum.random(1..3) |> Enum.map(fn _index -> generate(depth - 1) end) |> List.to_tuple()
+
+      4 ->
+        generated_map(depth)
+
+      5 ->
+        generated_map(depth)
+
+      6 ->
+        Map.put(generated_map(depth), :__struct__, Enum.random(@gen_atoms))
+    end
+  end
+
+  defp generated_map(depth) do
+    for _index <- 1..Enum.random(0..4),
+        into: %{},
+        do: {generated_key(depth - 1), generate(depth - 1)}
+  end
+
+  defp generated_key(depth) when depth <= 0,
+    do: Enum.random(@gen_atoms ++ @gen_binaries ++ [0, 1, 1.0, {:a}, %{a: 1}])
+
+  defp generated_key(depth),
+    do: Enum.random([generated_key(0), generate(depth), {generate(depth - 1)}])
 
   defp atoms(term) when term in [nil, true, false], do: []
   defp atoms(term) when is_atom(term), do: [term]
