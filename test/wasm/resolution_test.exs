@@ -16,8 +16,18 @@ defmodule Ouroboros.Wasm.ResolutionTest do
     override =
       Path.join(System.tmp_dir!(), "ouro-wasm-override-#{System.unique_integer([:positive])}")
 
+    # Restore, never delete: an operator (or a worktree without its own `priv/wasm/`) sets
+    # this variable for the whole run, and every acceptance `setup_all` scheduled after
+    # this module resolves the helper through it.
+    previous = System.get_env("OUROBOROS_WASM_HELPER")
     System.put_env("OUROBOROS_WASM_HELPER", override)
-    on_exit(fn -> System.delete_env("OUROBOROS_WASM_HELPER") end)
+
+    on_exit(fn ->
+      case previous do
+        nil -> System.delete_env("OUROBOROS_WASM_HELPER")
+        value -> System.put_env("OUROBOROS_WASM_HELPER", value)
+      end
+    end)
 
     assert Wasm.helper_path() == override
   end
@@ -46,6 +56,9 @@ defmodule Ouroboros.Wasm.ResolutionTest do
     end
 
     test "a value an operator may legitimately move is honoured" do
+      # The environment outranks config on purpose; this test is about config, so it
+      # holds the variable out of the way and puts it back.
+      without_helper_env()
       put_wasm_config(request_timeout_ms: 45_000, helper_path: "/opt/ouro/ouro-wasm")
 
       assert Wasm.config(:request_timeout_ms) == 45_000
@@ -268,6 +281,17 @@ defmodule Ouroboros.Wasm.ResolutionTest do
   # Replaces a few keys of the node's `:wasm` config for one test and restores the whole
   # keyword at teardown. This module is `async: false` precisely because this is global, and
   # the restores are LIFO, so the first snapshot taken is the last one put back.
+  defp without_helper_env do
+    case System.get_env("OUROBOROS_WASM_HELPER") do
+      nil ->
+        :ok
+
+      value ->
+        System.delete_env("OUROBOROS_WASM_HELPER")
+        on_exit(fn -> System.put_env("OUROBOROS_WASM_HELPER", value) end)
+    end
+  end
+
   defp put_wasm_config(overrides) do
     previous = Application.get_env(:ouroboros, :wasm, [])
     on_exit(fn -> Application.put_env(:ouroboros, :wasm, previous) end)
