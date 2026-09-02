@@ -295,6 +295,16 @@ ships hooks is a repository that runs commands on every machine that clones it. 
 held outside workspace contents; neither a native file tool nor an unsandboxed shell can
 make the repository authorize itself.
 
+An entry declares **exactly one** of `command` and `component`; both, or neither, is an error
+line and no hook. `command` is a shell command line and is what workspace trust gates.
+`component` names a WebAssembly component — a path, resolved relative to the workspace root
+and confined to it — and is admitted from an untrusted workspace, because its authority is
+the world's single `log` import and a verdict this runtime then narrows. A component entry may
+also carry `config`, the JSON string handed to the component's `init` verbatim, bounded at
+16 KiB; a `[checks]` entry takes both keys in table form,
+`lint = { component = "./hooks/lint.wasm", config = '{"strict":true}' }`. Every key, every
+bound, and the payload each event carries are in [the author guide](WASM_GUIDE.md).
+
 `PreToolUse` hooks run **after** the permission engine and only when it did not deny. A
 hook therefore cannot allow what a rule denied — not by convention but by construction,
 because on a denial no hook is invoked at all. It may deny what a rule allowed, may

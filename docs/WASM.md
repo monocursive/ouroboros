@@ -1711,6 +1711,44 @@ Each slice is PR-sized, lands green, and is useful alone.
   helper (including the six-second `describe` that no longer costs a message), the real echo
   guest, the live rollout, the register's checkpoint, and the native loop.
 
+- **W11 — the author guide, with its contracts pinned.** Every author-facing fact in this lane
+  lived in module docs, this spec and a test file, which is three places a developer does not
+  look and none of them the one they would. `docs/WASM_GUIDE.md` is that reader's document: a
+  hook in fifteen minutes and a capability in fifteen minutes, both as transcripts of commands
+  that were run rather than commands that ought to work; the contracts (the world, the payload
+  per event, the verdict, `[checks]`, `describe`, the `ouroboros.toml` keys); one table of
+  every bound beside the constant that holds it and one of every refusal beside what an author
+  does about it; and the operator's half — `make wasm`, the config keys, the signer, the store,
+  the readiness surfaces. The README gains a lane-W section and `docs/ARCHITECTURE.md`'s hook
+  paragraph gains the `component`/`config` keys with the exactly-one-of rule, because that is
+  where project hook configuration was documented and a second home for it would drift.
+
+  The payload half is not prose. `test/support/wasm_golden/hook_payloads.json` carries the
+  exact JSON object a component receives for every event `hooks.ex` dispatches, plus the
+  `[checks]` payload, and every byte of it was read off the wire rather than written;
+  `test/provider/native/hooks_payload_golden_test.exs` drives each case back through the
+  **public** seam a turn uses — `pre_tool_use/4`, `post_tool_use/5`, `notify/4`,
+  `session_start/2`, `session_end/2`, `pre_compact/2`, `run_checks/2` — and asserts the frame
+  the helper was handed, so no `@doc false` function was added to `hooks.ex` and the file is
+  untouched by this slice. Red for two mutations, both run: handing an untrusted `PostToolUse`
+  hook the response itself puts the output body back on the wire, and deleting a key from
+  `hook_base/1` in `provider/native/loop.ex` fails the test that reads both callers' key sets
+  out of their own source — the drift this guide could otherwise have suffered silently, since
+  the base half of every payload belongs to the caller and not to `hooks.ex`.
+
+  Three things the verification found, all reported rather than papered over. **`ouro wasm new`
+  still embeds the pre-SDK template**, not `tui/wasm/guest/template/`: the `TODO(W9)` at
+  `tui/src/wasm_cli.rs` was never closed, so a scaffolded project is standalone hand-rolled
+  ceremony with no `Hook` trait in it, and W9's entry above reads as though the swap had
+  happened. The guide documents both routes and says which is which. **`wasm.sign` cannot
+  allocate an epoch on a cluster that has a `:signer` node** — the allocation asks every node in
+  `[node() | Node.list()]` for `Upgrade.NodeExecutor.status` and the lane-W register, and a
+  `:signer` runs neither, so the topology C4 prescribes refuses with `epoch_not_allocated`
+  carrying a `noproc`; reproduced on a two-node dev cluster, and the sign→deploy→ls→rollback
+  transcript in the guide is therefore from a node running its own signing service. And
+  `ouro wasm keygen` **prints back the `--out` path it was given**, so a relative one produces
+  an `OUROBOROS_SIGNER_KEY_PATH` line the signer node then refuses as non-absolute.
+
 ## 15. Prior art and references
 
 - Golem Cloud — durable wasm workers via oplog replay; closest to lane W + REPLAY.md

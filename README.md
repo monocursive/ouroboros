@@ -66,6 +66,33 @@ make test      # run the full local test and formatting suite
 
 Run `make help` for the complete command list.
 
+## WebAssembly components
+
+Ouroboros can run third-party code — hooks and capabilities — as WebAssembly components
+instead of as processes with the ambient authority of the machine. A component's authority
+is its import list, and the only import the runtime defines is a log line: no clock, no
+filesystem, no network, and an import the host does not define fails to load. That is why a
+hook shipped by a repository nobody trusts is allowed to run, while a shell hook from the
+same file is not: a component can make a decision stricter, never looser.
+
+There are two paths, and both start with `ouro wasm new`:
+
+- **A hook** answers one lifecycle event with one verdict — deny a write, ask about a
+  command, add context to a turn. It is declared in a workspace's `ouroboros.toml`.
+- **A capability** is a signed, deployed component the runtime keeps: messages in, replies
+  out, state of its own, restarted after a reboot. An operator signs it, deploys it, and can
+  retire it without a rebuild.
+
+```sh
+make wasm                        # build the containment helper (nothing else builds it)
+ouro wasm new my-guard --hook    # scaffold a project that builds
+ouro wasm inspect my_guard.wasm  # what it declares, and whether this runtime would admit it
+```
+
+[The author guide](docs/WASM_GUIDE.md) is the fifteen-minute version of each path, the
+payload and verdict contracts, every bound with its source, and how to operate a node that
+runs them. [WASM.md](docs/WASM.md) is the design behind it.
+
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
@@ -74,6 +101,7 @@ Run `make help` for the complete command list.
 - [Web interface](docs/WEB.md)
 - [Fleet setup](docs/FLEET.md)
 - [Computer use](docs/COMPUTER_USE.md)
+- [WebAssembly components](docs/WASM_GUIDE.md)
 - [Protocol reference](docs/PROTOCOL.md)
 - [Distribution](docs/DISTRIBUTION.md)
 
