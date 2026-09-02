@@ -336,9 +336,6 @@ defmodule Ouroboros.Wasm.Rollout do
 
       {:error, reason} ->
         {:error, reason}
-
-      other ->
-        {:error, {:unexpected_result, inspect(other, limit: 10)}}
     end
   rescue
     error -> {:error, {:start_exception, Exception.message(error)}}

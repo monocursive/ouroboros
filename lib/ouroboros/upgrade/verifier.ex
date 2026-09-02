@@ -207,7 +207,6 @@ defmodule Ouroboros.Upgrade.Verifier do
       true -> {:error, {:forbidden_beam_feature, beam.module}}
       false -> {:error, {:module_verification_failed, beam.module}}
       {:error, reason} -> {:error, reason}
-      actual -> {:error, {:module_verification_failed, beam.module, actual}}
     end
   end
 
@@ -235,7 +234,6 @@ defmodule Ouroboros.Upgrade.Verifier do
       true -> {:error, {:forbidden_beam_feature, beam.module}}
       false -> {:error, {:module_verification_failed, beam.module}}
       {:error, reason} -> {:error, reason}
-      actual -> {:error, {:module_verification_failed, beam.module, actual}}
     end
   end
 

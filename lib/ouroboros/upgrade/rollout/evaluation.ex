@@ -463,7 +463,6 @@ defmodule Ouroboros.Upgrade.Rollout.Evaluation do
     case Mesh.start_agent(id, agent: module, initial_state: seeded) do
       {:ok, pid} -> {:ok, pid}
       {:error, reason} -> {:error, {:evaluation_start_failed, reason}}
-      other -> {:error, {:evaluation_start_failed, {:unexpected_result, describe(other)}}}
     end
   end
 
@@ -575,7 +574,7 @@ defmodule Ouroboros.Upgrade.Rollout.Evaluation do
   # answers under when it has one. See the moduledoc: a capability that declares no
   # answer is compared against everything it holds, which is rarely what a spec means.
   defp reply_of(agent) do
-    state = if is_struct(agent), do: Map.get(agent, :state), else: agent
+    state = Map.get(agent, :state)
 
     if is_map(state) and Map.has_key?(state, :last_answer) do
       Map.get(state, :last_answer)

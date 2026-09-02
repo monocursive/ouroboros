@@ -2307,8 +2307,6 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
        when is_atom(reason),
        do: reason
 
-  defp public_corruption_reason(_reason), do: :invalid_checkpoint
-
   defp public_operation_reason(reason) do
     case reason do
       {tag, _detail} when is_atom(tag) -> tag
@@ -2402,7 +2400,6 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
     case :code.finish_loading(prepared_code) do
       :ok -> :ok
       {:error, reason} -> {:error, {:finish_loading, reason}}
-      other -> {:error, {:finish_loading, other}}
     end
   end
 
@@ -2626,7 +2623,6 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
     case fun.() do
       :ok -> :ok
       {:error, reason} -> {:error, reason}
-      other -> {:error, other}
     end
   catch
     kind, reason -> {:error, {kind, reason}}

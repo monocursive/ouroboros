@@ -1024,10 +1024,8 @@ impl DiffOverlay {
                 }
                 return false;
             }
-            KeyCode::Enter => {
-                if self.pager.is_none() && rows > 0 {
-                    self.pager = Some(0);
-                }
+            KeyCode::Enter if self.pager.is_none() && rows > 0 => {
+                self.pager = Some(0);
             }
             KeyCode::Down | KeyCode::Char('j') => match &mut self.pager {
                 Some(offset) => *offset = offset.saturating_add(1),

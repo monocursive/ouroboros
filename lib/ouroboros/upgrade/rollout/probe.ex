@@ -146,7 +146,6 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
       :ok
     else
       {:error, reason} -> {:error, {:probe_failed, module, sanitize(reason)}}
-      other -> {:error, {:probe_failed, module, {:unexpected_result, inspect(other)}}}
     end
   end
 
@@ -164,7 +163,6 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
     case Mesh.start_agent(id, agent: module, initial_state: initial_state) do
       {:ok, pid} -> {:ok, pid}
       {:error, reason} -> {:error, {:probe_start_failed, reason}}
-      other -> {:error, {:probe_start_failed, {:unexpected_result, inspect(other)}}}
     end
   end
 

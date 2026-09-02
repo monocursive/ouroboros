@@ -310,11 +310,17 @@ defmodule Ouroboros.Wasm.PoolTest do
       # running `awk`, and it found both through PATH.
       assert MapSet.member?(names, "PATH")
 
-      # And nothing else at all, which is the half a longer deny-list would never have
-      # reached. `PWD`/`SHLVL` are the wrapper shell's own doing — `/bin/sh` exports them
-      # into every child it runs — and are not inherited from this node.
+      # And nothing else *this node holds*, which is the half a longer deny-list would never
+      # have reached. The claim is about inheritance, so it is checked against this node's
+      # own environment: a name the child shows that this node never had is the wrapper's
+      # doing, not a leak — `/bin/sh` exports `PWD`/`SHLVL` into every child it runs, and
+      # gawk on Linux plants `AWKPATH`/`AWKLIBPATH` into its own `ENVIRON` whether or not
+      # they were ever set. Both are excluded by construction rather than by name.
+      node_env = System.get_env() |> Map.keys() |> MapSet.new()
+
       leaked =
         names
+        |> MapSet.intersection(node_env)
         |> MapSet.difference(MapSet.new(~w(PATH HOME TMPDIR)))
         |> MapSet.difference(MapSet.new(~w(PWD SHLVL OLDPWD _)))
 

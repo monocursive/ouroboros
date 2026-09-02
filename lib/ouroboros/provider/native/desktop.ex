@@ -870,8 +870,6 @@ defmodule Ouroboros.Provider.Native.Desktop do
     end
   end
 
-  defp unlink_helper_temp(_raw), do: :ok
-
   defp remember(session_dir, last) do
     last = Map.put(last, :at, System.system_time(:millisecond))
 

@@ -910,8 +910,6 @@ defmodule Ouroboros.Wasm.Pool do
     }
   end
 
-  defp refusal_summary(_report), do: %{usable: false, worlds: []}
-
   # A refused report's world list is the helper's own strings. It is worth reporting and is
   # therefore bounded before it is kept anywhere a status surface can read.
   defp bounded_worlds(worlds) when is_list(worlds) do

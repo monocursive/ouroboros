@@ -1163,7 +1163,6 @@ defmodule Ouroboros.Provider.Native.Hooks do
   end
 
   defp format_error(reason) when is_atom(reason), do: :file.format_error(reason)
-  defp format_error(reason), do: Kernel.inspect(reason, limit: 10)
 
   # Every component failure carries two forms, and which one a reader gets is not a
   # convenience.
@@ -1197,12 +1196,8 @@ defmodule Ouroboros.Provider.Native.Hooks do
 
   defp refusal_name(reason) when is_atom(reason), do: Atom.to_string(reason)
 
-  defp refusal_name(reason) when is_tuple(reason) and tuple_size(reason) > 0 do
-    case elem(reason, 0) do
-      tag when is_atom(tag) -> Atom.to_string(tag)
-      _other -> "helper_error"
-    end
-  end
+  defp refusal_name(reason) when is_tuple(reason) and tuple_size(reason) > 0,
+    do: Atom.to_string(elem(reason, 0))
 
   defp refusal_name(_reason), do: "helper_error"
 

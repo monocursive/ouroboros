@@ -506,8 +506,6 @@ defmodule Ouroboros.Wasm.Capability do
       |> Enum.map(&bounded(&1, @max_key_bytes))
     end
 
-    defp keys(_other), do: []
-
     defp bounded(text, cap) when byte_size(text) <= cap, do: text
     defp bounded(text, cap), do: valid_prefix(binary_part(text, 0, cap)) <> "…"
 
