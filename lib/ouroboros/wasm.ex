@@ -38,6 +38,12 @@ defmodule Ouroboros.Wasm do
   # (docs/WASM.md D5), so the handshake compares against this constant and nothing else.
   @world "ouroboros:capability@0.1.0"
 
+  # W15. The second world the helper speaks (docs/WASM.md §8.2, D21). A different package, not
+  # a wider capability: the two declare the same single import and differ in one export, and a
+  # component admitted to one is not admitted to the other. Which of them a set of bytes is
+  # ever offered as is the *signed manifest's* `kind`, not a caller's preference.
+  @policy_world "ouroboros:policy@0.1.0"
+
   @defaults [
     helper_path: :bundled,
     # A `doctor` answer needs no wasm work at all, so a helper that cannot produce one
@@ -151,9 +157,34 @@ defmodule Ouroboros.Wasm do
   @spec allow_store_root_override?() :: boolean()
   def allow_store_root_override?, do: config(:allow_store_root_override) == true
 
-  @doc "The world id this node admits a component against."
+  @doc "The world id this node admits a capability component against."
   @spec world() :: String.t()
   def world, do: @world
+
+  @doc "The world id this node admits a policy component against (W15)."
+  @spec policy_world() :: String.t()
+  def policy_world, do: @policy_world
+
+  @doc """
+  The two kinds a signed lane-W manifest may declare.
+
+  `:capability` is what every manifest written before there were two means, and is the default
+  everywhere a kind is read.
+  """
+  @spec kinds() :: [:capability | :policy]
+  def kinds, do: [:capability, :policy]
+
+  @doc """
+  The world a component of `kind` must be in.
+
+  One function, so the signer, the pool, the rollout and the helper's `load` cannot disagree
+  about which world a `kind` means. Not configurable, for `world/0`'s reason: admitting a
+  component against a world this build does not implement is the lie the linker exists to
+  prevent (D5).
+  """
+  @spec world_for(:capability | :policy) :: String.t()
+  def world_for(:policy), do: @policy_world
+  def world_for(_capability), do: @world
 
   @doc """
   The absolute path the helper would be spawned from.

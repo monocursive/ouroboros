@@ -1222,10 +1222,17 @@ defmodule Ouroboros.Gateway.Methods do
          {"author", :required, :string, "provenance the signing policy requires"},
          {"imports", :required, {:list, :string, 8},
           "the imports the component declares, computed by the client with the operator's own helper (`ouro wasm inspect`). This node never parses unsigned bytes to find out; a list that does not match what the component imports is refused at stage by the cross-check, which is where a manifest that describes something else has always been caught"},
+         # W15
+         {"kind", {:optional, "capability"},
+          {:either, [{:const, "capability"}, {:const, "policy"}]},
+          "what this component is, and therefore which of the helper's two closed worlds its bytes are ever admitted to. A `capability` answers mesh messages and is reachable by the `capability` tool; a `policy` answers permission requests for `Ouroboros.Wasm.PolicyEngine` and is reachable by neither. It is part of the **signed** manifest, so a policy deployed as a capability is refused at stage by the helper's world check and so is the reverse; a policy's `eval` is a list of cases rather than a list of probes, and a policy may declare no `start_config`"},
          {"language", :optional, :string, nil},
          {"source_sha256", :optional, :string, "64 lower-case hex"},
          {"start_config", :optional, :string,
           "the config the durable wrapper is started with; the id is derived from `name` and is never a parameter"},
+         # W15. For `kind: "policy"` this is `{"cases": [{"request": <json object>, "expect":
+         # {"decision": "allow"|"deny"|"ask"}}], "budget_ms": <ms>}` instead: a policy is not a
+         # mesh agent, so a probe list over agent state says nothing about one.
          {"eval", :optional,
           {:object,
            [
@@ -1870,6 +1877,8 @@ defmodule Ouroboros.Gateway.Methods do
              "name",
              "author",
              "imports",
+             # W15
+             "kind",
              "language",
              "source_sha256",
              "start_config",
@@ -1880,13 +1889,14 @@ defmodule Ouroboros.Gateway.Methods do
          {:ok, name} <- wasm_name(params),
          {:ok, author} <- fetch_string(params, "author"),
          {:ok, imports} <- wasm_imports(params),
+         {:ok, kind} <- wasm_kind(params),
          {:ok, language} <- fetch_optional_string(params, "language"),
          {:ok, source_sha256} <- wasm_optional_sha256(params),
          {:ok, start_config} <- wasm_start_config(params),
-         {:ok, eval} <- wasm_eval(params),
+         {:ok, eval} <- wasm_eval(params, kind),
          {:ok, target} <- permissions_node(params) do
       attrs =
-        %{upload: upload, name: name, author: author, imports: imports}
+        %{upload: upload, name: name, author: author, imports: imports, kind: kind}
         |> wasm_put(:language, language)
         |> wasm_put(:source_sha256, source_sha256)
         |> wasm_put(:start_config, start_config)
@@ -3375,13 +3385,88 @@ defmodule Ouroboros.Gateway.Methods do
   # them, so the only keys an `initial_state` here could still choose are ones no lane-W
   # capability reads. A parameter that can only do nothing is a parameter that will one day
   # do something.
-  defp wasm_eval(params) do
-    case Map.get(params, "eval") do
-      nil -> {:ok, nil}
-      spec when is_map(spec) -> wasm_eval_spec(spec)
+  # W15. A closed set of two, and an absent one means `capability` — which is what every
+  # `wasm.sign` written before there were two kinds meant.
+  defp wasm_kind(params) do
+    case Map.get(params, "kind") do
+      nil ->
+        {:ok, :capability}
+
+      "capability" ->
+        {:ok, :capability}
+
+      "policy" ->
+        {:ok, :policy}
+
+      other ->
+        {:invalid, "params.kind must be \"capability\" or \"policy\", got #{inspect(other)}"}
+    end
+  end
+
+  defp wasm_eval(params, kind) do
+    case {Map.get(params, "eval"), kind} do
+      {nil, _kind} -> {:ok, nil}
+      {spec, :policy} when is_map(spec) -> wasm_policy_eval_spec(spec)
+      {spec, _capability} when is_map(spec) -> wasm_eval_spec(spec)
       _other -> {:invalid, "params.eval must be an object"}
     end
   end
+
+  # A policy component's signed spec: the requests it must decide, and how it must decide them.
+  # Validated here for shape and again by `Ouroboros.Wasm.PolicyEngine.validate_eval/1` at the
+  # signer, which is the one that decides — this is the gateway refusing a frame it can name a
+  # fault in rather than forwarding it.
+  defp wasm_policy_eval_spec(spec) do
+    with :ok <- only_keys(spec, ["cases", "budget_ms"]),
+         {:ok, cases} <- wasm_policy_cases(Map.get(spec, "cases")),
+         {:ok, budget} <- wasm_optional_positive(spec, "budget_ms") do
+      {:ok, %{cases: cases} |> wasm_put(:budget_ms, budget)}
+    end
+  end
+
+  defp wasm_policy_cases(cases) when is_list(cases) and cases != [] and length(cases) <= 20 do
+    cases
+    |> Enum.reduce_while({:ok, []}, fn one, {:ok, acc} ->
+      case wasm_policy_case(one) do
+        {:ok, valid} -> {:cont, {:ok, [valid | acc]}}
+        {:invalid, message} -> {:halt, {:invalid, message}}
+      end
+    end)
+    |> case do
+      {:ok, valid} -> {:ok, Enum.reverse(valid)}
+      invalid -> invalid
+    end
+  end
+
+  defp wasm_policy_cases(_other),
+    do: {:invalid, "params.eval.cases must be a list of 1 to 20 objects"}
+
+  defp wasm_policy_case(one) when is_map(one) do
+    with :ok <- only_keys(one, ["request", "expect"]),
+         request when is_map(request) <-
+           Map.get(one, "request") ||
+             {:invalid, "params.eval.cases[].request is required and must be an object"},
+         {:ok, decision} <- wasm_policy_decision(Map.get(one, "expect")) do
+      {:ok, %{request: request, expect: %{decision: decision}}}
+    else
+      {:invalid, message} -> {:invalid, message}
+      _not_an_object -> {:invalid, "params.eval.cases[].request must be an object"}
+    end
+  end
+
+  defp wasm_policy_case(_other), do: {:invalid, "params.eval.cases[] must be an object"}
+
+  defp wasm_policy_decision(%{"decision" => decision} = expect)
+       when decision in ["allow", "deny", "ask"] do
+    with :ok <- only_keys(expect, ["decision"]) do
+      {:ok, String.to_existing_atom(decision)}
+    end
+  end
+
+  defp wasm_policy_decision(_other),
+    do:
+      {:invalid,
+       "params.eval.cases[].expect must be {\"decision\": \"allow\" | \"deny\" | \"ask\"}"}
 
   defp wasm_eval_spec(spec) do
     with :ok <- only_keys(spec, ["probes", "budget_ms", "max_latency_ms", "required"]),

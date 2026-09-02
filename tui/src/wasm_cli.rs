@@ -1380,6 +1380,296 @@ pub fn read_payload(source: Option<&str>) -> Result<Value> {
     serde_json::from_str(trimmed).context("the hook payload is not JSON")
 }
 
+// ===================================================================== `ouro wasm policy`
+
+/// The bound the engine holds a component's rule string to (`Wasm.PolicyEngine`). Printed
+/// against, so an author sees a rule clipped here rather than discovering it in a ledger.
+pub const MAX_RULE_CHARS: usize = 200;
+
+/// The three words a verdict's `decision` may be. Anything else is read as `ask`, which is what
+/// the engine does with it — a policy component cannot resolve a call by being unreadable.
+const DECISIONS: [&str; 3] = ["allow", "deny", "ask"];
+
+/// What `ouro wasm policy` was asked to do.
+pub struct PolicyRequest<'a> {
+    pub helper: Option<&'a Path>,
+    pub file: &'a Path,
+    /// The permission request document, already read and parsed.
+    pub request: Value,
+    pub config: String,
+    pub json: bool,
+}
+
+/// `ouro wasm policy`: ask a policy component what it would decide about one request, and print
+/// the verdict, the rule it stated, and what the node would make of both.
+///
+/// The component is loaded as a **policy**, so a capability handed to this command is refused by
+/// the helper's world check rather than run — the same refusal a manifest whose `kind` disagrees
+/// with its bytes gets at stage, reached without a node.
+///
+/// `Ok(false)` — and therefore a non-zero exit — for a `deny`, so an author can put this in a
+/// script and read the answer out of `$?`. A `deny` is not a failure of this command; it is the
+/// answer, and it is the only one worth a distinct exit code, because `ask` is what everything
+/// else in this lane degrades to.
+pub fn policy<O: Write>(request: &PolicyRequest, out: &mut O) -> Result<bool> {
+    // Everything a node would refuse before a helper is started, in the node's own order.
+    if request.config.len() > MAX_HOOK_CONFIG_BYTES {
+        bail!(
+            "`--config` is {} bytes; a component's declared `config` is bounded at \
+             {MAX_HOOK_CONFIG_BYTES} — it is text that crosses into a guest's memory, and a \
+             config is a switch rather than a corpus",
+            request.config.len()
+        );
+    }
+    if !request.request.is_object() {
+        bail!(
+            "`--request` must be a JSON object: the engine sends the permission request \
+             document, and a policy that was handed anything else would be answering about a \
+             call this node never makes"
+        );
+    }
+
+    let binary = wasm_client::resolve(request.helper)?;
+    let mut helper = Helper::start(&binary)?;
+
+    // Statted and bounded before the helper is told anything about it, exactly as `hook` does:
+    // doing it after `inspect` would mean a sixty-megabyte file was read and walked before
+    // anybody said it was too big for this lane.
+    let metadata = std::fs::metadata(request.file)
+        .with_context(|| format!("could not read {}", request.file.display()))?;
+    if !metadata.is_file() {
+        bail!(
+            "not_a_regular_file: {} is not a regular file",
+            request.file.display()
+        );
+    }
+    if metadata.len() > HOOK_MAX_COMPONENT_BYTES {
+        bail!(
+            "oversize_component: {} bytes against the signing lane's {HOOK_MAX_COMPONENT_BYTES}",
+            metadata.len()
+        );
+    }
+
+    // The node's own bounds, unchanged. A policy component is instantiated by the engine under
+    // `Wasm.capability_limits()` like anything else in this lane, so this command must not
+    // invent a budget of its own; the helper's reported maxima still clamp them down.
+    let report = helper.doctor()?;
+    let (limits, moved) = NODE_DEFAULT_LIMITS.clamped(&report["limits"]);
+
+    let inspected = helper.inspect(request.file)?;
+    let sha = inspected["sha256"].as_str().unwrap_or_default().to_string();
+
+    // `wasm_client`'s `load`/`instantiate` do not carry a `kind` — every other caller in this
+    // binary is a capability — so the two frames are built here. `request` is the same bounded,
+    // sanitising round trip those two use.
+    helper
+        .request(
+            "load",
+            json!({ "sha256": sha, "path": request.file.to_string_lossy(), "kind": "policy" }),
+        )
+        .map_err(name_the_refusal)?;
+
+    let instance = "policy/ouro-wasm-policy";
+    helper
+        .request(
+            "instantiate",
+            json!({
+                "instance": instance,
+                "sha256": sha,
+                "config": request.config,
+                "kind": "policy",
+                // Spelled out rather than through `Limits`' own encoder, which is private to
+                // the client because every other caller reaches it through `instantiate`.
+                "limits": {
+                    "fuel": limits.fuel,
+                    "memory_bytes": limits.memory_bytes,
+                    "deadline_ms": limits.deadline_ms,
+                },
+            }),
+        )
+        .map_err(name_the_refusal)?;
+
+    let mark = helper.log_mark();
+    let started = Instant::now();
+    let answered = helper.request(
+        "call",
+        json!({
+            "instance": instance,
+            "export": "evaluate",
+            "payload": request.request.to_string(),
+        }),
+    );
+    let wall_ms = started.elapsed().as_millis() as u64;
+    // Never a bare `guest_log` after a call: stdout and stderr are different pipes read on
+    // different threads, so the reply can overtake the last line the guest wrote.
+    let expected_logs = answered
+        .as_ref()
+        .ok()
+        .and_then(|result| result["log_lines"].as_u64())
+        .unwrap_or(0);
+    let logs = helper.guest_log_counted(mark, expected_logs);
+    let _ = helper.drop_instance(instance);
+
+    let reply = match answered {
+        Ok(result) => result["payload"].as_str().unwrap_or_default().to_string(),
+        Err(error) => {
+            let refusal = refusal_or_bail(error)?;
+            // The engine's own sentence for every refusal, and the reason this command prints
+            // it rather than exiting on it: a policy that could not answer has not allowed
+            // anything, and the node asks a human.
+            writeln!(
+                out,
+                "the policy did not answer: {} — {}\nthe node would read this as `ask`, which is \
+                 what every refusal in this lane degrades to",
+                clean(&refusal.refusal),
+                clean(&refusal.message)
+            )?;
+            out.flush()?;
+            return Ok(true);
+        }
+    };
+
+    let verdict = PolicyVerdict::parse(&reply);
+
+    let text = if request.json {
+        serde_json::to_string_pretty(&json!({
+            "world": inspected["world"],
+            "request": request.request,
+            "reply": wasm_client::sanitize(&reply),
+            "decision": verdict.decision,
+            "rule": verdict.rule,
+            "readable": verdict.readable,
+            "log": logs,
+            "wall_ms": wall_ms,
+            "limits": { "clamped": moved },
+        }))?
+    } else {
+        render_policy(&verdict, &logs, wall_ms)
+    };
+
+    writeln!(out, "{text}")?;
+    out.flush()?;
+    Ok(verdict.decision != "deny")
+}
+
+/// A verdict as this command reads it: the engine's own rules, applied where an author can see
+/// them.
+struct PolicyVerdict {
+    /// `allow`, `deny` or `ask`. Anything the component said that is not one of the three is
+    /// `ask`, because that is what the engine makes of it.
+    decision: String,
+    /// The stated rule, sanitized and clipped exactly as the engine clips it.
+    rule: String,
+    /// Whether the component's reply was a verdict document at all. `false` is not an error —
+    /// it is an `ask` — but it is the difference between "this policy has no opinion" and "this
+    /// policy is broken", and an author needs to be told which.
+    readable: bool,
+}
+
+impl PolicyVerdict {
+    /// The engine's reading, restated here for display: an object with a `decision` in the
+    /// vocabulary, and a `rule` bounded and stripped of anything that could forge a line.
+    fn parse(reply: &str) -> PolicyVerdict {
+        let Ok(Value::Object(document)) = serde_json::from_str::<Value>(reply) else {
+            return PolicyVerdict::unreadable("the reply is not a JSON object");
+        };
+
+        let Some(decision) = document.get("decision").and_then(Value::as_str) else {
+            return PolicyVerdict::unreadable("the reply names no `decision`");
+        };
+
+        if !DECISIONS.contains(&decision) {
+            return PolicyVerdict::unreadable("`decision` is not allow, deny or ask");
+        }
+
+        let rule = document
+            .get("rule")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+
+        PolicyVerdict {
+            decision: decision.to_string(),
+            rule: bounded_rule(rule),
+            readable: true,
+        }
+    }
+
+    fn unreadable(why: &str) -> PolicyVerdict {
+        PolicyVerdict {
+            decision: "ask".to_string(),
+            rule: why.to_string(),
+            readable: false,
+        }
+    }
+}
+
+/// The engine's bound on a component's rule string: at most [`MAX_RULE_CHARS`] characters, with
+/// every control character flattened, because the rule is shown to a human beside the node's own
+/// words and a newline in it is a line that reads as the node speaking.
+fn bounded_rule(rule: &str) -> String {
+    wasm_client::sanitize(rule)
+        .chars()
+        .take(MAX_RULE_CHARS)
+        .collect()
+}
+
+fn render_policy(verdict: &PolicyVerdict, logs: &[String], wall_ms: u64) -> String {
+    let mut lines = vec![format!("decision: {}", verdict.decision)];
+
+    if verdict.readable {
+        lines.push(format!("rule: {}", verdict.rule));
+    } else {
+        lines.push(format!(
+            "rule: (none — {}), so the node reads this as `ask`",
+            verdict.rule
+        ));
+    }
+
+    lines.push(match verdict.decision.as_str() {
+        "deny" => "the node would refuse this call and state the rule above".to_string(),
+        "allow" => "the node would honour this only for a tool the operator listed in \
+                    `:policy_allowable_tools`, and read it as `ask` otherwise"
+            .to_string(),
+        _ask => "the node would ask a human".to_string(),
+    });
+
+    lines.push(format!("took: {wall_ms}ms"));
+
+    if !logs.is_empty() {
+        lines.push(String::new());
+        lines.push("guest log:".to_string());
+        lines.extend(logs.iter().map(|line| format!("  {line}")));
+    }
+
+    lines.join("\n")
+}
+
+/// The `--request` argument: a JSON string, a path to a file holding one, or `-` for standard
+/// input. A path is tried only when the text does not parse as JSON, so a request that happens
+/// to name an existing file is still read as the document it is.
+pub fn read_request(source: &str) -> Result<Value> {
+    if source == "-" {
+        let text = read_bounded_stdin(MAX_PAYLOAD_BYTES, "the permission request")?;
+        return serde_json::from_str(text.trim()).context("the permission request is not JSON");
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(source.trim()) {
+        return Ok(value);
+    }
+
+    let path = Path::new(source);
+    if path.is_file() {
+        let text = read_bounded(path, MAX_PAYLOAD_BYTES, "the permission request")?;
+        return serde_json::from_str(text.trim())
+            .with_context(|| format!("{} is not JSON", path.display()));
+    }
+
+    bail!(
+        "`--request` is neither JSON nor a readable file: {}",
+        clean(source)
+    )
+}
+
 // ====================================================================== `ouro wasm check`
 
 /// One `[[hooks]]` or `[checks]` entry, as `check` read it and judged it.
@@ -3622,5 +3912,85 @@ mod tests {
                 .expect("a clock after 1970")
                 .as_nanos()
         ))
+    }
+
+    // ------------------------------------------------------------- `ouro wasm policy` (W15)
+
+    /// The three words, and everything else read as `ask`.
+    ///
+    /// This is the engine's own rule restated for display, so it has to be the same rule: a
+    /// verdict the node reads as `ask` and a command that printed `allow` would be a command
+    /// teaching an author the opposite of what the runtime does.
+    #[test]
+    fn a_verdict_this_node_cannot_read_is_shown_as_the_ask_the_node_would_make() {
+        for reply in [
+            "not json",
+            "[1,2,3]",
+            "\"a string\"",
+            r#"{"rule":"no decision"}"#,
+            r#"{"decision":"maybe","rule":"r"}"#,
+            r#"{"decision":"ALLOW","rule":"case matters"}"#,
+        ] {
+            let verdict = PolicyVerdict::parse(reply);
+            assert_eq!(verdict.decision, "ask", "`{reply}` must read as ask");
+            assert!(!verdict.readable, "`{reply}` is not a verdict document");
+        }
+
+        for (reply, decision) in [
+            (r#"{"decision":"allow","rule":"r"}"#, "allow"),
+            (r#"{"decision":"deny","rule":"r"}"#, "deny"),
+            (r#"{"decision":"ask","rule":"r"}"#, "ask"),
+        ] {
+            let verdict = PolicyVerdict::parse(reply);
+            assert_eq!(verdict.decision, decision);
+            assert!(verdict.readable);
+            assert_eq!(verdict.rule, "r");
+        }
+
+        // A verdict with no rule is still a verdict; the rule is simply empty.
+        assert_eq!(PolicyVerdict::parse(r#"{"decision":"deny"}"#).rule, "");
+    }
+
+    /// A component's rule is bounded and stripped exactly where the engine bounds and strips
+    /// it, so an author sees what the ledger will hold rather than what they wrote.
+    #[test]
+    fn a_rule_is_bounded_and_cannot_forge_a_line() {
+        let forged = format!(
+            "denied\u{1b}[2K\rRefused: the node allows everything{}",
+            "é".repeat(400)
+        );
+        let reply = serde_json::to_string(&json!({ "decision": "deny", "rule": forged }))
+            .expect("the reply encodes");
+
+        let rule = PolicyVerdict::parse(&reply).rule;
+
+        assert!(!rule.contains('\n') && !rule.contains('\r') && !rule.contains('\u{1b}'));
+        assert!(rule.chars().count() <= MAX_RULE_CHARS);
+    }
+
+    /// `--request` is JSON, a file, or `-`. A string that happens to name a file is still read
+    /// as the document it is, because a request is what the engine sends and a path is not one.
+    #[test]
+    fn a_request_is_read_as_json_first_and_as_a_path_second() {
+        let value = read_request(r#"{"tool":"bash"}"#).expect("inline JSON is read");
+        assert_eq!(value["tool"], "bash");
+
+        let dir = std::env::temp_dir().join(format!(
+            "ouro-wasm-policy-request-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("a clock after 1970")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = dir.join("request.json");
+        std::fs::write(&path, r#"{"tool":"write"}"#).expect("the request is written");
+
+        let value = read_request(&path.to_string_lossy()).expect("a file is read");
+        assert_eq!(value["tool"], "write");
+
+        assert!(read_request("neither-json-nor-a-file").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -589,6 +589,10 @@ pub fn sign_params(args: &WasmSignArgs, upload: &str, bytes: &[u8]) -> Result<Ma
     params.insert("name".into(), Value::String(args.name.clone()));
     params.insert("author".into(), Value::String(args.author.clone()));
     params.insert("imports".into(), Value::Array(imports(args, bytes)?));
+    // W15. Always sent, including the default, because it is part of what gets signed and a
+    // parameter the client omits is a claim the node fills in — which is the one thing a
+    // manifest field deciding which world these bytes may ever enter must not be.
+    params.insert("kind".into(), Value::String(args.kind.as_str().to_string()));
 
     if let Some(language) = &args.language {
         params.insert("language".into(), Value::String(language.clone()));
@@ -956,6 +960,13 @@ pub fn render_sign(answer: &Value, bundle: &Path) -> String {
         signed.world.as_deref().unwrap_or("(unknown)")
     ));
 
+    // W15. What the manifest says these bytes are, which is what decides the world they will
+    // ever be admitted to on any node that reads this bundle.
+    lines.push(format!(
+        "  kind: {}",
+        signed.kind.as_deref().unwrap_or("capability")
+    ));
+
     lines.push(format!(
         "  imports: {}",
         if signed.imports.is_empty() {
@@ -1245,6 +1256,7 @@ mod tests {
             component: PathBuf::from("greeter.wasm"),
             name: "greeter".into(),
             author: "ops".into(),
+            kind: crate::cli::WasmKind::Capability,
             import,
             imports_from,
             no_local_helper: true,
@@ -1591,6 +1603,16 @@ mod tests {
         assert!(text.contains("1 of 900 rollout(s)"));
     }
 
+    /// W15. `--kind policy` reaches the wire as `kind: "policy"`.
+    #[test]
+    fn sign_params_carry_the_kind_the_operator_named() {
+        let mut args = signing_args(vec!["log".into()], None);
+        args.kind = crate::cli::WasmKind::Policy;
+
+        let params = sign_params(&args, "9f2c1d4e8a7b6053f1e2d3c4b5a69780", b"").expect("params");
+        assert_eq!(params["kind"], "policy");
+    }
+
     #[test]
     fn sign_params_send_the_operator_s_own_config_text_and_never_a_start_id() {
         let args = WasmSignArgs {
@@ -1605,6 +1627,9 @@ mod tests {
         assert_eq!(params["name"], "greeter");
         assert_eq!(params["author"], "ops");
         assert_eq!(params["imports"], json!(["log"]));
+        // W15. Always sent, including the default: it is part of what gets signed, and a
+        // parameter the client omits is a claim the node fills in.
+        assert_eq!(params["kind"], "capability");
 
         // There is no `epoch` parameter at all any more. A number a client chose could be
         // placed at the register's plausibility ceiling, which leaves no epoch that is both

@@ -354,6 +354,10 @@ impl ResourceLimiter for State {
 /// sha already held costs nothing.
 struct Loaded {
     component: Component,
+    /// The world these bytes were admitted to. `load` is told which to check (`world::Kind`),
+    /// so this is the caller's assertion, held: `instantiate` refuses a request that names a
+    /// different one, and `call`'s dispatch table is this world's.
+    kind: world::Kind,
     world: &'static str,
     size: usize,
     imports: Vec<String>,
@@ -438,11 +442,24 @@ pub struct Census {
     pub evicted: Vec<String>,
 }
 
+/// The one export a payload goes to, typed as the instance's own world declares it.
+///
+/// The two worlds differ here and nowhere else that matters at runtime: a capability answers
+/// `result<string, string>` — it may refuse a body without trapping — and a policy answers a
+/// bare `string`, because the only thing a policy could say instead of a verdict is a verdict
+/// this host cannot read, which the engine treats as `ask` either way.
+enum Message {
+    Handle(TypedFunc<(String,), (Result<String, String>,)>),
+    Evaluate(TypedFunc<(String,), (String,)>),
+}
+
 /// One live instance: its store, and the two exports `call` can reach.
 struct Live {
     store: Store<State>,
     describe: TypedFunc<(), (String,)>,
-    handle: TypedFunc<(String,), (Result<String, String>,)>,
+    message: Message,
+    /// The world this instance was stood up in, so `call` refuses an export outside it by name.
+    kind: world::Kind,
     limits: Limits,
     /// The component this instance was stood up from, so eviction can see that it is held.
     sha256: String,
@@ -675,10 +692,15 @@ impl Host {
     pub fn load(&self, params: &Value) -> Result<Value, Refusal> {
         let expected = required_str(params, "sha256")?.to_ascii_lowercase();
         let path = required_str(params, "path")?;
+        let kind = requested_kind(params)?;
 
         {
             let mut components = self.components.lock().expect("components lock");
-            if let Some(loaded) = components.touch(&expected) {
+            // A cache hit is a hit for *this* world only. The same bytes offered as the other
+            // world are read and checked again rather than answered out of the table: the
+            // cached record names one world, and handing it back for the other would be this
+            // helper agreeing to an assertion it never checked.
+            if let Some(loaded) = components.touch(&expected).filter(|held| held.kind == kind) {
                 return Ok(json!({
                     "sha256": echo(&expected),
                     "world": loaded.world,
@@ -708,12 +730,13 @@ impl Host {
         }
 
         let component = self.compile(&bytes)?;
-        world::check(&component, &self.engine)?;
+        world::check(&component, &self.engine, kind)?;
         let (imports, exports) = self.declared_names(&component);
 
         let loaded = Loaded {
             component,
-            world: world::ID,
+            kind,
+            world: kind.id(),
             size: bytes.len(),
             imports,
             exports,
@@ -753,6 +776,7 @@ impl Host {
         let name = required_str(params, "instance")?.to_string();
         let sha256 = required_str(params, "sha256")?.to_ascii_lowercase();
         let config = required_str(params, "config")?.to_string();
+        let kind = requested_kind(params)?;
         let limits = Limits::parse(params)?;
 
         {
@@ -785,6 +809,20 @@ impl Host {
                     format!("no component {} has been loaded", echo(&sha256)),
                 )
             })?;
+            // The world is asserted twice — once at `load`, once here — because the two are
+            // separate requests and a peer that loaded a sha as one world and stood it up as
+            // the other would be dispatching against a table nobody checked these bytes for.
+            if loaded.kind != kind {
+                return Err(refusal::refuse(
+                    refusal::UNSUPPORTED_WORLD,
+                    format!(
+                        "component {} was loaded as world {}, not as {}",
+                        echo(&sha256),
+                        loaded.kind.id(),
+                        kind.id()
+                    ),
+                ));
+            }
             loaded.component.clone()
         };
 
@@ -812,16 +850,23 @@ impl Host {
 
         let describe = instance
             .get_typed_func::<(), (String,)>(&mut store, world::DESCRIBE)
-            .map_err(|error| world_gap(world::DESCRIBE, &error))?;
-        let handle = instance
-            .get_typed_func::<(String,), (Result<String, String>,)>(
-                &mut store,
-                world::HANDLE_MESSAGE,
-            )
-            .map_err(|error| world_gap(world::HANDLE_MESSAGE, &error))?;
+            .map_err(|error| world_gap(kind, world::DESCRIBE, &error))?;
+        let message = match kind {
+            world::Kind::Capability => instance
+                .get_typed_func::<(String,), (Result<String, String>,)>(
+                    &mut store,
+                    world::HANDLE_MESSAGE,
+                )
+                .map(Message::Handle)
+                .map_err(|error| world_gap(kind, world::HANDLE_MESSAGE, &error))?,
+            world::Kind::Policy => instance
+                .get_typed_func::<(String,), (String,)>(&mut store, world::EVALUATE)
+                .map(Message::Evaluate)
+                .map_err(|error| world_gap(kind, world::EVALUATE, &error))?,
+        };
         let init = instance
             .get_typed_func::<(String,), (Result<(), String>,)>(&mut store, world::INIT)
-            .map_err(|error| world_gap(world::INIT, &error))?;
+            .map_err(|error| world_gap(kind, world::INIT, &error))?;
 
         // `init` is guest code and runs under the same bounds as any message. A trap here
         // retains nothing: there is no instance to poison because there is no instance yet.
@@ -849,7 +894,8 @@ impl Host {
             Live {
                 store,
                 describe,
-                handle,
+                message,
+                kind,
                 limits,
                 sha256,
             },
@@ -880,18 +926,21 @@ impl Host {
                 )
             })?;
 
-        if export != world::DESCRIBE && export != world::HANDLE_MESSAGE {
+        if export != world::DESCRIBE && export != live.kind.message() {
             // Not the guest's fault and not a reason to poison it: the dispatch table is
-            // closed, so put it back and refuse the name.
+            // closed *per world*, so put it back and refuse the name. `evaluate` on a
+            // capability and `handle-message` on a policy both land here, which is the
+            // observable half of two closed worlds in one helper.
+            let kind = live.kind;
             self.restore(name, live);
             return Err(refusal::refuse(
                 refusal::UNKNOWN_EXPORT,
                 format!(
                     "`{}` is not callable; world {} exports {} and {}",
                     echo(&export),
-                    world::ID,
+                    kind.id(),
                     world::DESCRIBE,
-                    world::HANDLE_MESSAGE
+                    kind.message()
                 ),
             ));
         }
@@ -904,9 +953,14 @@ impl Host {
                 .call(&mut live.store, ())
                 .map(|(text,)| Ok(text))
         } else {
-            live.handle
-                .call(&mut live.store, (payload,))
-                .map(|(result,)| result)
+            match &live.message {
+                Message::Handle(handle) => handle
+                    .call(&mut live.store, (payload,))
+                    .map(|(result,)| result),
+                Message::Evaluate(evaluate) => evaluate
+                    .call(&mut live.store, (payload,))
+                    .map(|(verdict,)| Ok(verdict)),
+            }
         };
 
         let result = match outcome {
@@ -1100,12 +1154,12 @@ fn nothing_evictable() -> Refusal {
 /// A component that passed [`world::check`] at load but whose export cannot be typed here. This
 /// should be unreachable; if it ever fires, the two checks have drifted and the honest answer
 /// is that these bytes are not in this world.
-fn world_gap(export: &str, error: &wasmtime::Error) -> Refusal {
+fn world_gap(kind: world::Kind, export: &str, error: &wasmtime::Error) -> Refusal {
     refusal::refuse(
         refusal::UNSUPPORTED_WORLD,
         format!(
             "export `{export}` does not have the signature world {} declares: {}",
-            world::ID,
+            kind.id(),
             bounded(&format!("{error:#}"), MAX_ERROR_BYTES)
         ),
     )
@@ -1200,6 +1254,28 @@ fn bounded(text: &str, cap: usize) -> String {
 
 fn invalid_params(message: impl Into<String>) -> Refusal {
     refusal::refuse(refusal::INVALID_PARAMS, message)
+}
+
+/// The world a `load` or an `instantiate` request named.
+///
+/// Absent means `capability`, which is what every caller written before there was a second
+/// world meant and is therefore the only default that leaves them unchanged. A *present* value
+/// this build does not implement is `invalid_params` and never a silent fallback: a peer that
+/// asked for a world by name has said something, and guessing at it is how a component ends up
+/// admitted to a world nobody checked it against.
+fn requested_kind(params: &Value) -> Result<world::Kind, Refusal> {
+    match params.get("kind") {
+        None | Some(Value::Null) => Ok(world::Kind::Capability),
+        Some(Value::String(name)) => world::Kind::parse(name).ok_or_else(|| {
+            let known: Vec<&str> = world::KINDS.iter().map(|kind| kind.name()).collect();
+            invalid_params(format!(
+                "kind must be one of {}; got `{}`",
+                known.join(", "),
+                bounded(name, MAX_ECHO_BYTES)
+            ))
+        }),
+        Some(_other) => Err(invalid_params("kind must be a string")),
+    }
 }
 
 fn required_str<'a>(params: &'a Value, key: &str) -> Result<&'a str, Refusal> {
@@ -1333,6 +1409,7 @@ mod tests {
             sha256.clone(),
             Loaded {
                 component,
+                kind: world::Kind::Capability,
                 world: world::UNKNOWN,
                 size: bytes.len(),
                 imports: vec!["now".to_string()],
@@ -1377,6 +1454,7 @@ mod tests {
                 sha.to_string(),
                 Loaded {
                     component: component.clone(),
+                    kind: world::Kind::Capability,
                     world: world::UNKNOWN,
                     size: bytes.len(),
                     imports: Vec::new(),

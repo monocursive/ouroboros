@@ -1411,6 +1411,9 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       epoch: 7,
       component_sha256: String.duplicate("a", 64),
       size: 2_097_152,
+      # W15. What the manifest says these bytes are, and therefore which of the helper's two
+      # worlds they will ever be admitted to on any node that reads this bundle.
+      kind: :capability,
       world: "ouroboros:capability@0.1.0",
       imports: ["log"],
       created_at: @timestamp,

@@ -232,7 +232,8 @@ mod tests {
         let value = answer(&host(), request(1, "doctor"));
         assert_eq!(value["id"], 1);
         assert_eq!(value["result"]["usable"], true);
-        assert_eq!(value["result"]["worlds"][0], crate::world::ID);
+        assert_eq!(value["result"]["worlds"][0], crate::world::CAPABILITY_ID);
+        assert_eq!(value["result"]["worlds"][1], crate::world::POLICY_ID);
     }
 
     #[test]

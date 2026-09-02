@@ -3771,6 +3771,10 @@ pub struct WasmSignature {
     pub component_sha256: Option<String>,
     pub size: Option<u64>,
     pub world: Option<String>,
+    /// W15. `capability` or `policy`: what this component is, as the *signed manifest* says
+    /// it. Absent from a receipt written before there were two kinds, which reads as a
+    /// capability everywhere it is used.
+    pub kind: Option<String>,
     pub imports: Vec<String>,
     pub created_at: Option<String>,
     pub signer: Option<String>,
@@ -3936,6 +3940,7 @@ impl WasmSignature {
             component_sha256: nonempty(value.get("component_sha256")),
             size: value.get("size").and_then(Value::as_u64),
             world: nonempty(value.get("world")),
+            kind: nonempty(value.get("kind")),
             imports: strings(value.get("imports")),
             created_at: nonempty(value.get("created_at")),
             signer: nonempty(value.get("signer")),
@@ -4659,6 +4664,10 @@ mod tests {
         assert_eq!(signed.epoch, Some(7));
         assert_eq!(signed.signer.as_deref(), Some("release-key"));
         assert_eq!(signed.world.as_deref(), Some("ouroboros:capability@0.1.0"));
+        // W15. The kind is on the wire because it is in the signed manifest: it decides which
+        // of the helper's two worlds these bytes are ever admitted to, and a receipt that did
+        // not carry it would be a bundle whose reader has to guess.
+        assert_eq!(signed.kind.as_deref(), Some("capability"));
         assert_eq!(signed.imports, vec!["log".to_string()]);
         assert_eq!(signed.start_id.as_deref(), Some("wasm/vet"));
         assert_eq!(signed.extension.as_deref(), Some(".ouro-wasm"));
@@ -4667,6 +4676,11 @@ mod tests {
         // The prefix stays base64 until the moment the file is written. Its length plus the
         // component's is what the bundle weighs, which is the whole of this client's
         // knowledge of the format.
+        // A receipt written before there were two kinds has no `kind` at all, and reads as the
+        // capability it was — the same widening every other optional field takes.
+        let older = WasmSignature::decode(&serde_json::json!({ "name": "vet", "epoch": 7 }));
+        assert_eq!(older.kind, None);
+
         let prefix = signed.bundle_prefix.as_deref().expect("a bundle prefix");
         let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, prefix)
             .expect("the prefix is base64");

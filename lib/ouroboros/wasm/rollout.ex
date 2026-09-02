@@ -126,7 +126,7 @@ defmodule Ouroboros.Wasm.Rollout do
   alias Ouroboros.Upgrade.Beam
   alias Ouroboros.Upgrade.Rollout.{Evaluation, Probe, Registry}
   alias Ouroboros.Wasm
-  alias Ouroboros.Wasm.{Artifact, Capability, Pool, Store, Verifier}
+  alias Ouroboros.Wasm.{Artifact, Capability, PolicyEngine, Pool, Store, Verifier}
 
   @module_prefix "wasm/"
   @proven_recoveries [:rolled_back, :not_needed, :unchanged]
@@ -231,13 +231,49 @@ defmodule Ouroboros.Wasm.Rollout do
   def deploy(artifact, bytes, nodes, _opts),
     do: {:error, {:invalid_rollout_request, inspect({artifact, byte_size_of(bytes), nodes})}}
 
-  @doc "The registry entries this plane believes are live lane-W rollouts."
+  @doc """
+  The registry entries this plane believes are live lane-W rollouts of one kind.
+
+  `kind:` is `:capability` (the default) or `:policy` (W15, contract C7). A capability is what
+  the `capability` tool lists and what a model may message; a policy is what
+  `Ouroboros.Wasm.PolicyEngine` consults and is reachable from neither.
+
+  **The kind is read out of the signed manifest, not out of the register.** The register is an
+  index — a checkpoint file this node wrote — and what decides that a component gets to answer
+  permission questions has to be the thing somebody signed. `Ouroboros.Wasm.Store` holds one
+  manifest per rollout and `Ouroboros.Wasm.Boot` already reads it on the same path for the same
+  reason.
+
+  A manifest that cannot be read at all falls back to `:capability`, which is exactly the status
+  quo for every entry written before there were two kinds: such an entry is listed where it has
+  always been listed, and a policy component whose manifest went missing becomes a capability
+  the tool can name and the helper will refuse `unknown_export`. Falling the other way would
+  have made an unreadable manifest a way to *stop* the engine consulting a policy, which is the
+  worse direction. Nothing here is a substitute for the store being the node's own directory.
+  """
   @spec live(keyword()) :: [Registry.Entry.t()]
   def live(opts \\ []) do
+    kind = Keyword.get(opts, :kind, :capability)
+    store = store_opts(opts)
+
     opts
     |> Keyword.get(:registry, Registry)
     |> Registry.live()
     |> Enum.filter(&lane_w?/1)
+    |> Enum.filter(&(entry_kind(&1, store) == kind))
+  end
+
+  # The kind the signed manifest for this entry declares. See `live/1` for why the fallback is
+  # `:capability` and what it costs.
+  defp entry_kind(entry, store_opts) do
+    case Store.fetch_manifest(Map.get(entry, :artifact_id), store_opts) do
+      {:ok, %Artifact{} = manifest} -> PolicyEngine.kind_of(manifest)
+      _unreadable -> :capability
+    end
+  rescue
+    _error -> :capability
+  catch
+    _kind, _reason -> :capability
   end
 
   @doc """
@@ -473,9 +509,10 @@ defmodule Ouroboros.Wasm.Rollout do
 
   # The signed spec, validated here so a manifest carrying one this build cannot run is
   # refused before a checkpoint exists rather than after every node has staged it.
-  defp eval_spec(%Artifact{metadata: metadata}) when is_map(metadata) do
+  defp eval_spec(%Artifact{metadata: metadata, kind: kind}) when is_map(metadata) do
     case Map.get(metadata, :eval) do
       nil -> {:ok, nil}
+      spec when kind == :policy -> PolicyEngine.validate_eval(spec)
       spec -> Evaluation.validate(spec)
     end
   end
@@ -610,11 +647,42 @@ defmodule Ouroboros.Wasm.Rollout do
     end
   end
 
+  # W15. A policy component is not a mesh agent: there is no wrapper to start, no signal to
+  # send and no `:last_answer` to read, so `Probe.ready?/1`'s question has to be asked in the
+  # shape this world has. `PolicyEngine.probe/2` asks the same thing — does it stand up and
+  # answer? — by loading it as a policy, instantiating it under the deploy's own bounds, and
+  # requiring a readable verdict for one well-formed request.
+  defp probe_node(target, %Artifact{kind: :policy} = artifact, opts) do
+    state = start_state(artifact, opts)
+
+    case remote(target, PolicyEngine, :probe, [state, []], probe_timeout(opts)) do
+      {:returned, :ok} -> :ok
+      {:returned, {:error, reason}} -> {:error, reason}
+      {:returned, other} -> {:ambiguous, {:unexpected_result, inspect(other, limit: 10)}}
+      {:ambiguous, reason} -> {:ambiguous, reason}
+    end
+  end
+
   defp probe_node(target, artifact, opts) do
     spec = {Capability, start_state(artifact, opts)}
 
     case remote(target, Probe, :ready?, [spec], probe_timeout(opts)) do
       {:returned, :ok} -> :ok
+      {:returned, {:error, reason}} -> {:error, reason}
+      {:returned, other} -> {:ambiguous, {:unexpected_result, inspect(other, limit: 10)}}
+      {:ambiguous, reason} -> {:ambiguous, reason}
+    end
+  end
+
+  # W15. A policy's signed spec is a list of permission requests and the decision this
+  # component must reach about each; `run_eval/3` answers the same summarized shape
+  # `Evaluation.summarize/1` produces, so everything downstream of this function is one code
+  # path for both kinds.
+  defp eval_node(target, %Artifact{kind: :policy} = artifact, spec, opts) do
+    state = start_state(artifact, opts)
+
+    case remote(target, PolicyEngine, :run_eval, [state, spec, []], eval_timeout(opts)) do
+      {:returned, {:ok, report}} when is_map(report) -> report
       {:returned, {:error, reason}} -> {:error, reason}
       {:returned, other} -> {:ambiguous, {:unexpected_result, inspect(other, limit: 10)}}
       {:ambiguous, reason} -> {:ambiguous, reason}
@@ -637,6 +705,14 @@ defmodule Ouroboros.Wasm.Rollout do
   # one sha — which is worth failing the deploy over rather than papering over by asking
   # one machine. `capture_describe/2` never raises and never returns anything but these
   # three shapes.
+  # W15. There is no description gate for a policy component, and that is a statement about
+  # what a description is *for* rather than an omission: contract C1's document exists so the
+  # `capability` tool can put a component's own claim about itself in front of a model, and a
+  # policy component is in no listing a model reads. The world still exports `describe` — `ouro
+  # wasm policy` and `inspect` read it — but nothing on the node does, so a gate here would be
+  # a deploy failing over prose nobody will ever be shown.
+  defp describe_node(_target, %Artifact{kind: :policy}, _opts), do: :absent
+
   defp describe_node(target, artifact, opts) do
     state = %{start_state(artifact, opts) | limits: describe_limits(opts)}
 
@@ -771,9 +847,11 @@ defmodule Ouroboros.Wasm.Rollout do
     end
   end
 
-  # A captured description is a pass; `:skipped` is what an earlier gate's failure leaves
-  # behind and says nothing on its own.
+  # A captured description is a pass; so is `:absent`, which is what a policy component's
+  # deploy records because there is no description to capture. `:skipped` is what an earlier
+  # gate's failure leaves behind and says nothing on its own.
   defp describe_outcome(%{describe: {:ok, _document}}), do: :ok
+  defp describe_outcome(%{describe: :absent}), do: :ok
   defp describe_outcome(%{describe: outcome}), do: outcome
 
   defp ambiguous?({:ambiguous, _reason}), do: true
@@ -1008,11 +1086,23 @@ defmodule Ouroboros.Wasm.Rollout do
   # the register holds the document, and the evidence holds only that there was one.
   defp described?(evidence) do
     Enum.all?(evidence, fn {_target, e} ->
-      match?({:ok, _document}, Map.get(e, :describe)) or Map.get(e, :describe) == :described
+      match?({:ok, _document}, Map.get(e, :describe)) or
+        Map.get(e, :describe) in [:described, :absent]
     end)
   end
 
   defp eval_report(_evidence, nil), do: nil
+
+  # W15. A policy's spec has cases where a capability's has probes, so the report says what it
+  # ran rather than reaching for a key the other grammar has. Both shapes carry `budget_ms` and
+  # a per-node summary, which is what every reader downstream actually uses.
+  defp eval_report(evidence, %{cases: cases} = spec) do
+    %{
+      spec: %{cases: length(cases), budget_ms: spec.budget_ms},
+      compare: false,
+      nodes: Map.new(evidence, fn {target, e} -> {target, bound(e.eval)} end)
+    }
+  end
 
   defp eval_report(evidence, spec) do
     %{
@@ -1069,8 +1159,13 @@ defmodule Ouroboros.Wasm.Rollout do
     end
   end
 
+  # W15. The kind travels from the **signed manifest** to the helper's `load`, which is where a
+  # manifest that says one thing and bytes that are another meet. A `:policy` manifest over a
+  # capability component is refused `unsupported_world` here, at stage, before the register is
+  # marked and before anything is instantiated — and so is the reverse. This is the enforcement
+  # point contract C7 names: the manifest is the claim, the helper's world check is the check.
   defp loaded(artifact, path, pool) do
-    case Pool.load(artifact.component_sha256, path, pool) do
+    case Pool.load(artifact.component_sha256, path, pool, kind: artifact.kind) do
       {:ok, report} when is_map(report) -> {:ok, report}
       {:error, reason} -> {:error, {:component_not_loaded, bound(reason)}}
       other -> {:error, {:component_not_loaded, bound(other)}}

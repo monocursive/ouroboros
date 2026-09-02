@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::capability::Capability;
 use crate::hook::{Check, CheckOutcome, Hook, HookInput};
+use crate::policy::{Policy, Verdict};
 use crate::raw::Raw;
 
 pub use dlmalloc::GlobalDlmalloc;
@@ -228,4 +229,35 @@ pub fn check_handle<C: Check>(cell: &State<Option<C>>, body: String) -> Result<S
         CheckOutcome::Pass => String::new(),
         CheckOutcome::Fail(text) => text,
     })
+}
+
+// ------------------------------------------------------------------------------ the policy world
+
+pub fn policy_describe<P: Policy>() -> String {
+    P::describe().in_world(crate::POLICY_WORLD).to_json_string()
+}
+
+pub fn policy_init<P: Policy>(cell: &State<Option<P>>, config: String) -> Result<(), String> {
+    install(cell, crate::config_json(&config).and_then(P::init))
+}
+
+/// `evaluate` has no error channel, and that is the world's design rather than an oversight:
+/// there is nothing an `Err` would mean here that [`Verdict::ask`] does not say better, and a
+/// second way to say "I could not decide" is a second thing an author can get wrong.
+///
+/// So every failure this seam can have becomes an `ask` with the reason stated as the rule: a
+/// request that is not JSON, a call that arrived before `init`, and the re-entrant call this
+/// world cannot currently produce. The engine reads all three as `ask` whatever the rule says —
+/// it is bounded, labelled untrusted, and shown to whoever is asked — and a policy that fails
+/// closed to a human question is the posture D20 requires.
+pub fn policy_evaluate<P: Policy>(cell: &State<Option<P>>, request: String) -> String {
+    let verdict = match crate::body_json(&request) {
+        Ok(request) => match with(cell, |state| state.evaluate(request)) {
+            Ok(verdict) => verdict,
+            Err(reason) => Verdict::ask(reason),
+        },
+        Err(reason) => Verdict::ask(reason),
+    };
+
+    verdict.to_reply()
 }

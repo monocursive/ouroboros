@@ -119,6 +119,7 @@ defmodule Ouroboros.Wasm.Bundle do
     :epoch,
     :name,
     :component_sha256,
+    :kind,
     :world,
     :imports,
     :size,
@@ -452,6 +453,7 @@ defmodule Ouroboros.Wasm.Bundle do
       epoch: Map.get(manifest, :epoch),
       name: Map.get(manifest, :name),
       component_sha256: Map.get(manifest, :component_sha256),
+      kind: Map.get(manifest, :kind),
       world: Map.get(manifest, :world),
       imports: Map.get(manifest, :imports),
       size: Map.get(manifest, :size),
@@ -462,6 +464,13 @@ defmodule Ouroboros.Wasm.Bundle do
     cond do
       Map.keys(manifest) -- @manifest_keys != [] ->
         {:error, {:unknown_manifest_keys, describe(Map.keys(manifest) -- @manifest_keys)}}
+
+      # W15. `:safe` refuses to *create* an atom and will hand back any atom this VM already
+      # interned, so the fixed point below would happily reconstruct a manifest whose `kind` is
+      # `:admin` or `:erlang`. The kind decides which of the helper's two worlds these bytes
+      # are offered as, so it is held to the closed set here, before anything reads it.
+      not Artifact.kind?(Map.get(manifest, :kind)) ->
+        {:error, {:invalid_component_kind, describe(Map.get(manifest, :kind))}}
 
       Artifact.manifest(artifact) != manifest ->
         {:error, :manifest_not_reconstructible}

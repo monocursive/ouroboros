@@ -64,17 +64,25 @@
 //! An author's crate must therefore still say `#![no_std]` for itself. That one line is not
 //! ceremony this crate can absorb — it is the claim — and it is the only line of it left.
 //!
-//! # The three seams
+//! # The four seams, over two worlds
 //!
 //! | trait | for | the reply it produces |
 //! |---|---|---|
 //! | [`Capability`] | a mesh capability, [`export_capability!`] | one JSON document |
 //! | [`Hook`] | a `[[hooks]]` entry, [`export_hook!`] | the stdout contract `hooks.ex` reads |
 //! | [`Check`] | a `[checks]` entry, [`export_check!`] | empty for a pass, the failure text otherwise |
+//! | [`Policy`] | the permission engine, [`export_policy!`] | `{"decision": …, "rule": …}` |
 //!
-//! [`Raw`] is underneath all three: strings in, strings out, exactly the world's exports. Use
-//! it when a reply must be stated verbatim rather than as JSON — which is what the acceptance
-//! guest needs, and what a `[checks]` failure is.
+//! [`Raw`] is underneath the first three: strings in, strings out, exactly the capability
+//! world's exports. Use it when a reply must be stated verbatim rather than as JSON — which is
+//! what the acceptance guest needs, and what a `[checks]` failure is.
+//!
+//! The first three are all [`WORLD`]; [`Policy`] is [`POLICY_WORLD`], a **second** world with
+//! the same single import and a different message export (`evaluate` rather than
+//! `handle-message`). One crate, two `wit_bindgen::generate!` invocations, and the `export_*`
+//! macro an author calls is what decides which world the finished component implements — a
+//! component cannot claim both, and `ouro-wasm` refuses one offered as the other
+//! (docs/WASM.md D21).
 //!
 //! # What a guest must never do
 //!
@@ -102,10 +110,19 @@ mod raw;
 #[doc(hidden)]
 pub mod __rt;
 pub mod bindings;
+pub mod policy;
+pub mod policy_bindings;
 
 pub use capability::Capability;
 pub use describe::{Describe, Example, MAX_EXAMPLES, MAX_SUMMARY_CHARS};
 pub use hook::{Check, CheckOutcome, Hook, HookInput, Verdict};
+pub use policy::Policy;
+/// A policy's answer. Named `PolicyVerdict` at the crate root because [`Verdict`] was already
+/// taken by the hook contract's, which is a different document for a different reader; its own
+/// module spells it [`policy::Verdict`], which is what an author who writes
+/// `use ouroboros_guest::policy::*` gets.
+pub use policy::Verdict as PolicyVerdict;
+pub use policy::MAX_RULE_CHARS;
 pub use raw::Raw;
 
 /// `String` and `Vec` without an `extern crate alloc` in the author's crate. A guest that
@@ -122,13 +139,18 @@ pub use serde_json::{json, Map, Value};
 /// The whole of `serde_json`, for the corners the re-exports above do not cover.
 pub use serde_json;
 
-/// The world this crate binds against, and the string `describe` reports as its `world`.
+/// The capability world this crate binds against, and the string `describe` reports as its
+/// `world` for [`Capability`], [`Hook`], [`Check`] and [`Raw`].
 ///
 /// Version-bearing on purpose: a v2 world is a different string, never a quietly wider v1.
 /// [`Describe`] fills this in itself, so a guest cannot claim a world it was not built for —
 /// which is a convenience, not an assurance. `inspect` reads the component's own type, and
 /// that is what the helper and the signer believe.
 pub const WORLD: &str = "ouroboros:capability@0.1.0";
+
+/// The policy world, and what a [`Policy`]'s `describe` reports. A different package, not a
+/// wider capability: the two share an import list and nothing else.
+pub const POLICY_WORLD: &str = "ouroboros:policy@0.1.0";
 
 /// A line into the daemon's log — the one import in this world, and a guest's whole reach.
 ///

@@ -320,12 +320,13 @@ exports for migration are v2 (`@since` on the world), not v1.
 (`ouroboros-guest`) is the crate that binds it so an author does not. It owns the `no_std`
 ceremony — the allocator, the panic handler, the canonical ABI's `cabi_realloc`, the
 `wit_bindgen::generate!` and the instance's state cell — behind one macro call, and offers
-four seams over the one world: `Capability` (a JSON body in, a JSON reply out) for the mesh,
+four seams over this world: `Capability` (a JSON body in, a JSON reply out) for the mesh,
 `Hook` (a typed payload, a `Verdict`) and `Check` for §8.1's two contracts, and `Raw`
-underneath them for a reply that must be stated verbatim. `#![no_std]` stays the author's own
+underneath them for a reply that must be stated verbatim — plus, since W15, `Policy` over the
+*second* world (§8.2). `#![no_std]` stays the author's own
 line, because it is the claim and not the ceremony: `std` on `wasm32-wasip2` imports thirteen
 `wasi:io`/`wasi:cli` interfaces the helper's linker refuses, and such a build does not
-instantiate at all. Four worked components live in `tui/wasm/guest/examples/` — one per seam,
+instantiate at all. Five worked components live in `tui/wasm/guest/examples/` — one per seam,
 plus a fixture that says every verdict there is — a scaffold in `tui/wasm/guest/template/`, and
 the acceptance guest is built on the same crate, which is what keeps the SDK honest (D13). None
 of it changes what the helper enforces; containment is the linker (D5).
@@ -387,14 +388,20 @@ Methods:
 |---|---|---|
 | `doctor` | — | `{usable, wasmtime, worlds: [supported world ids], imports, limits, held: {components, instances, evictions, evicted}, notes}` |
 | `inspect` | `{path}` | `{sha256, world, imports, exports, size}` — parsed from bytes / refusal (`unreadable_component`, `component_too_complex`, `compile_failed`) |
-| `load` | `{sha256, path}` | `{…as inspect, cached, evicted: [sha]}` / refusal (`sha_mismatch`, `unsupported_world`, `undefined_import`, `component_too_complex`, `too_many_components`) |
-| `instantiate` | `{instance, sha256, config, limits: {fuel, memory_bytes, deadline_ms}}` | `{instance, fuel_used, log_lines}` / init error |
+| `load` | `{sha256, path, kind?}` | `{…as inspect, cached, evicted: [sha]}` / refusal (`sha_mismatch`, `unsupported_world`, `undefined_import`, `component_too_complex`, `too_many_components`) |
+| `instantiate` | `{instance, sha256, config, kind?, limits: {fuel, memory_bytes, deadline_ms}}` | `{instance, fuel_used, log_lines}` / init error |
 | `call` | `{instance, export, payload}` | `{payload, fuel_used, log_lines}` / trap / deadline |
 | `drop` | `{instance}` | ok (idempotent) |
 
+`kind` is `"capability"` (the default, and what every request written before W15 meant) or
+`"policy"`, and it is which of the helper's two worlds these bytes are being offered as — the
+*caller's* assertion, checked here, taken on the deploy path from the signed manifest (D21).
+Absent means capability; a spelling this build does not implement is `invalid_params` and never
+a silent fallback.
+
 Enforcement lives here and is structural: the linker defines exactly the functions the
-supported world imports (`log`, in v1) and nothing else, so **an unlisted import fails
-instantiation — authority cannot be smuggled past a lying manifest** (D5). Every call
+supported worlds import — `log`, and in both of them — and nothing else, so **an unlisted
+import fails instantiation — authority cannot be smuggled past a lying manifest** (D5). Every call
 runs under a fuel budget, an epoch deadline, and a store memory cap; exhaustion is a
 typed refusal, not a hang. A wasmtime panic or segfault kills a Port, not the node —
 which is the point of the helper (D3).
@@ -771,14 +778,14 @@ must not be the way around the label.
 A `[[hooks]]` entry may declare `component = "<path>"` instead of `command`.
 
 **The world sketched below is not built.** v1 hook components are
-*capability-world* components: the helper implements exactly one world,
-`ouroboros:capability@0.1.0`, and a hook is a strict subset of a capability — one string
+*capability-world* components, and a hook is a strict subset of a capability — one string
 in, one string out, log-only. The hook payload goes in through `handle-message`, the
 stdout contract comes back as its reply, `init` receives the hook's declared `config`
 (or `"{}"`), and `describe` is unused. Containment is identical, because containment is
-the linker. The dedicated world is kept here as the deferred design, for when the helper
-grows a second one — an event of the same kind §12 makes of a world's import set, not a
-convenience:
+the linker. The helper has since grown a second world for the *policy* lane (§8.2, D21), so
+"a dedicated world" is no longer hypothetical machinery — it is a decision about whether a
+hook's contract differs from a capability's enough to be worth a package of its own, and so
+far it does not. The sketch is kept here as the deferred design:
 
 ```wit
 package ouroboros:hook@0.1.0;
@@ -847,21 +854,92 @@ in Rust for that display and both implementations are pinned to
 
 ### 8.2 Wasm policy (the C6 slot)
 
-`Ouroboros.Wasm.PolicyEngine`: an engine for `config :ouroboros,
-:permissions_engine` (`native/permissions.ex:67-69`) that delegates to the real
-`Control.Permissions` first and, only on `{:ask, :no_rule}`, consults a signed policy
-component (`world ouroboros:policy` — `evaluate: func(request: string) ->
-string`, log-only imports) whose verdict may be `allow`/`deny`/`ask` with a stated
-rule string. Deterministic, auditable (the component sha goes in the ledger entry's
-`rule_ref`; the reserved `actor: :classifier` slot at `permissions.ex:92` finally has
-an occupant), and signable with the §7.5 machinery. It can *narrow* as well as
-resolve: a deny verdict stands. Scope honesty: this covers the native loop only; the
-ACP lane reaches `Control.Permissions` directly through `Seam` and is out of scope
-until the seam grows.
+**Built (W15).** `Ouroboros.Wasm.PolicyEngine` is an engine for `config :ouroboros,
+:permissions_engine` (`native/permissions.ex:67-69`) that stands exactly where
+`Control.Permissions` stood and delegates every call to it. It adds one thing: where the rules
+said *nothing* — `{:ask, :no_rule}`, which is most calls — it asks a signed policy component,
+and lets that component **narrow** the answer.
 
-A model-backed classifier (the original C6 sketch) remains possible *behind* the same
-engine interface; the wasm module is the deterministic, offline-testable version and
-should land first.
+```wit
+package ouroboros:policy@0.1.0;
+
+world policy {
+  /// JSON metadata: name, version. Pure.
+  export describe: func() -> string;
+  /// Called once per instance with host-supplied JSON config.
+  export init: func(config: string) -> result<_, string>;
+  /// One permission request in, one verdict out. JSON both ways.
+  export evaluate: func(request: string) -> string;
+  /// Log line into the daemon's logger. The only import, in both worlds.
+  import log: func(level: string, message: string);
+}
+```
+
+The second world the helper speaks, and the first time §8.1's deferred sketch became a real
+one. It is not a wider capability: the two packages are disjoint, they declare the *same*
+single import, and the helper is told at `load` which of them a set of bytes is being offered
+as. A capability offered as a policy is refused `unsupported_world`, and so is the reverse
+(D21).
+
+**What a verdict is worth.** `{"decision": "allow"|"deny"|"ask", "rule": "<= 200 chars>"}`.
+A `deny` stands. An `ask` stands, and is the same question the node was already going to ask.
+An `allow` is honoured **only** for the tools an operator listed in
+`config :ouroboros, :policy_allowable_tools`, which is empty by default; everywhere else it is
+read as `ask`. Everything else is `ask` too — a trap, a deadline, a refusal to link, a verdict
+that is not JSON, a `decision` outside the vocabulary, a request too large to hand over whole,
+and the case where no policy is configured at all. **There is no failure mode that produces an
+`allow`** (D20).
+
+**Deterministic by construction, not by promise.** The world imports one function, so a policy
+component has no clock, no randomness, no filesystem and no network to be nondeterministic
+*with*. Instance state is the one thing left and it is the author's; the engine keeps one
+long-lived instance per component sha and re-instantiates it after any refusal, under the same
+`capability_limits` budget and the same helper eviction rules a capability gets.
+
+**What a component sees.** The JSON form of the request `Control.Permissions` already
+normalised — `tool`, `mode`, `input` (the command, the paths, the write paths, the domains),
+`principal`, `workspace`, `context` — with every credential-shaped value redacted by
+`Jido.Harness.Redaction`, the same redaction the durable session projection uses. **It is never
+truncated**: a document over 64 KiB is not sent at all and the engine answers `ask`, because a
+policy shown the first four kilobytes of a command line is one an attacker pads past. Non-scalar
+`context` values are dropped rather than serialised and the dropped keys are named in
+`context_dropped`, so a partial view is visible to the component rather than silent.
+
+**Signed, and the kind is part of the signature** (contract C7). `Wasm.Artifact` carries
+`kind: :capability | :policy`; the world follows from it (`Wasm.world_for/1`), the signer
+checks the pair, `Wasm.Verifier` checks it again on the loading node, and `Wasm.Rollout.stage/3`
+hands the *manifest's* kind to the helper's `load` — which is where a manifest that says one
+thing and bytes that are another meet. A policy manifest may declare no `start` block (there is
+no wrapper agent to start) and its signed `eval` spec is a list of `{request, expect:
+{decision}}` cases run through `evaluate` at deploy, in place of the probe grammar over agent
+state that says nothing about a policy. `Rollout.live/1` reads the kind out of the signed
+manifest rather than out of the register, so the `capability` tool lists capabilities only and
+the engine consults policies only.
+
+**Auditable.** Every decision the engine *makes* — an honoured `deny` or `allow` — is recorded
+through `Control.Permissions.record/2` with `actor: :classifier`, the slot the answer type
+reserved at `permissions.ex:92` and that nothing occupied until now; the entry's `rule_ref`
+carries the component's sha and the rule string. A verdict that degraded to `ask` writes
+nothing, because the node is about to ask a human and that answer is recorded where every human
+answer is. Everything a component authored is untrusted text: the rule is bounded at 200
+characters, stripped of every control and format character, and labelled
+`[untrusted policy component]` wherever it reaches a model or a person.
+
+**The author's loop has no node in it.** `ouro wasm policy <file> --request <json|file|->`
+loads a component as a policy into a local helper, asks it one request, and prints the verdict,
+the rule the node would record, and the guest's own log; it exits non-zero on a `deny`.
+`tui/wasm/guest`'s `Policy` trait and `export_policy!` are the fourth seam over the SDK's two
+worlds, and `examples/no-network-shell` is the worked one — it denies a `bash` whose command
+contains `curl`, `wget` or `nc `, with a stated rule, and asks about everything else.
+
+**Scope honesty.** The native loop (`Provider.Native.Permissions`) and the interactive plane's
+external approvals (`Interactive.Task.Approvals`) both read `:permissions_engine`, so both are
+covered. The remaining ACP dialect reaches `Control.Permissions` directly through `Seam` and is
+not, until the seam grows.
+
+A model-backed classifier (the original C6 sketch) remains possible *behind* the same engine
+interface; the wasm module is the deterministic, offline-testable version, and it is the one
+that landed.
 
 ## 9. Deferred lanes
 
@@ -1267,6 +1345,14 @@ machinery — it is a backend, not a lane (D9).
   cannot describe itself inside the budget its own deploy gave it does not go live — the
   gate fails like any other, and the deploy is rolled back or quarantined.
 
+  Since W15 that gate is capability-only, and the reason is what a description is *for*:
+  contract C1's document exists so the `capability` tool can put a component's own claim
+  about itself in front of a model, and a policy component is in no listing a model reads.
+  Its `describe` still exists — the world declares it, and `ouro wasm policy` and `inspect`
+  read it — but nothing on the node does, so a gate there would be a deploy failing over
+  prose nobody will be shown. A policy rollout records `describe: :absent`, which settles as
+  a pass rather than as the `:skipped` an earlier gate's failure leaves behind.
+
   It was on the message path, fetched after the first message, and that was wrong in a way
   only a clock reveals. The fetch is a synchronous pool round trip inside the caller's
   `Jido.AgentServer.call`, and `Rollout.Probe` gives its one message five seconds — so a
@@ -1312,6 +1398,89 @@ machinery — it is a backend, not a lane (D9).
       matchers, and the words "would be admitted" do not appear while any row carries one.
       Unverified is printed, never exited on: the exit code says *refused*, so an author who
       wired this into a pre-commit hook does not have it break on a pattern the node compiles.
+- **D20 — a policy component may narrow, and may only widen where an operator said so.**
+  `Ouroboros.Wasm.PolicyEngine` reaches a signed policy component only on `{:ask, :no_rule}`,
+  which is every call `Control.Permissions` had no rule for. Its `deny` stands; its `ask`
+  stands and is the question the node was already going to ask; its `allow` is honoured only
+  for the tools named in `config :ouroboros, :policy_allowable_tools`, which is empty by
+  default. Everything else is `ask`: a trap, a deadline, a refusal to link, a component this
+  node cannot load, a verdict that is not JSON, a `decision` outside the three words, a request
+  too large to hand over whole, no policy configured, a configured policy that is not a live
+  entry of kind `:policy`. **No failure mode of the engine produces an `allow`.**
+
+  The allow list is the part worth arguing, so here is the argument. A hook is dispatched for
+  the events its `matcher` matched; a *policy* component is asked about **every** call the
+  rules did not decide, which is most of them. An `allow` honoured unconditionally from one
+  would therefore be a blanket approval channel with a signature on it — and a signature in
+  this lane is provenance, not trust (D5). D8 already says an untrusted hook's `allow` is read
+  as silence; this is the same sentence for a component that is asked far more often, with the
+  one escape an operator can open tool by tool because they are the authority that a `read` is
+  fine to resolve automatically and this node is not.
+
+  Determinism is the other half, and it is structural rather than aspirational: the world
+  imports one function, so there is no clock, no randomness and no I/O in a policy component to
+  be nondeterministic with. Instance state is the only remaining source and it is the author's;
+  the engine keeps one instance per component sha, and the same request yields the same verdict
+  across two of them — proved in Rust against the real helper
+  (`the_same_request_yields_the_same_verdict_on_two_instances`) and in Elixir against the real
+  deploy (`test/wasm/policy_acceptance_test.exs`).
+
+  What a component sees is bounded and **never truncated**. The request document is the
+  normalised `Control.Permissions.Request` — tool, mode, the command and paths and domains
+  under `input`, the principal, the workspace root, the context keys — redacted by
+  `Jido.Harness.Redaction`, and a document over 64 KiB is not sent at all: the engine answers
+  `ask` instead. A policy shown the first four kilobytes of a command line is a policy an
+  attacker pads past, and a partial view is worse than no view because it produces a confident
+  wrong answer. Non-scalar `context` values are dropped and the dropped keys are named, so what
+  was withheld is visible to the component rather than silent.
+
+  The record is the ledger's. An honoured verdict is written through
+  `Control.Permissions.record/2` with `actor: :classifier` — the slot `permissions.ex:92`
+  reserved and nothing occupied until now — and a `rule_ref` carrying the component's sha and
+  the rule string. A degraded verdict writes nothing: the node is about to ask a human, and
+  that is where the record belongs. The rule itself is untrusted text and is treated as such:
+  200 characters, no control or format character, labelled `[untrusted policy component]`
+  everywhere it is read.
+
+- **D21 — two closed worlds in one helper, one linker, and the kind is signed.**
+  `ouro-wasm` implements `ouroboros:capability@0.1.0` and `ouroboros:policy@0.1.0`. They
+  declare the **same single import** and differ in one export — `handle-message: func(string)
+  -> result<string, string>` against `evaluate: func(string) -> string` — so containment is
+  unchanged by there being two of them: one linker, one host function, and a component that
+  wants a clock is refused by name whichever world it was offered as.
+
+  What the second world buys is not authority, it is *identity*. A capability answers messages
+  from the mesh and from the `capability` tool; a policy answers permission requests and is
+  reachable by neither. Those are different enough jobs that being able to deploy one as the
+  other is a defect: a component a model can send strings to and a component that decides
+  whether the model may run `rm` should not be interchangeable by an operator's typo.
+
+  So the kind is **in the signed manifest**, not a deploy-time flag. `Wasm.Artifact` carries
+  `kind: :capability | :policy`; `Wasm.world_for/1` derives the world from it so the two halves
+  cannot disagree; the signer refuses a pair that does; `Wasm.Verifier` refuses it again on the
+  loading node; and `Wasm.Rollout.stage/3` hands the manifest's kind to the helper's `load`,
+  which checks the bytes against *that* world. A `:policy` manifest over a capability component
+  is `unsupported_world` at stage, before the register is marked and before anything is
+  instantiated. Signing it rather than configuring it also makes the derived facts follow: a
+  policy declares no `start` block, its eval spec is a list of decision cases rather than a
+  probe list over agent state, and `Rollout.live/1` reads the kind out of the manifest rather
+  than out of a register row — because the thing that decides which component gets to answer
+  permission questions should be the thing somebody signed, not a checkpoint file this node
+  wrote.
+
+  Which world a set of bytes is checked against is therefore always the *caller's assertion*,
+  never something the helper infers. That matters because bytes can satisfy both: extra
+  exports are not a refusal, so a component exporting `handle-message` and `evaluate` with
+  both signatures is legal in both worlds, and a helper that guessed would be deciding what a
+  signature bought. `bytes_in_both_worlds_are_admitted_to_the_one_they_were_offered_as` pins
+  it, and `instantiate` re-asserts the world so a `load` as one and an `instantiate` as the
+  other cannot dispatch against a table nobody checked these bytes for.
+
+  One SDK builds both. `tui/wasm/guest` invokes `wit_bindgen::generate!` twice, and
+  `pub_export_macro` keeps each world's encoded custom section inside its own `export!` macro —
+  so the macro an author calls, `export_capability!` or `export_policy!`, is what decides which
+  world the finished component implements, and a crate cannot claim both by linking the SDK.
+
 ## 12. What this does not solve
 
 Stated once, so nobody reads more into the lane than is there:
@@ -1610,10 +1779,6 @@ Each slice is PR-sized, lands green, and is useful alone.
   `make wasm-sdk-check`; both CI jobs gain what they need to run all of it, under
   `OUROBOROS_REQUIRE_WASM`, so a machine that cannot build a guest fails rather than skipping
   green. The scaffold is the placeholder W10's `ouro wasm new` embeds.
-- **Deferred, in rough order:** policy engine (§8.2) → agent-reachable forge/deploy
-  effects (§7.7) → tools lane (§9.1) → microVM backend (§10, likely its own spec
-  once slice-shaped) → agent world (§9.2).
-
 - **W10 — the local dev loop.** `ouro wasm` grew five subcommands that need no node:
   `inspect`, `run`, `hook`, `check` and `new`. Each starts a local `ouro-wasm` and speaks its
   line protocol through a new `tui/src/wasm_client.rs`; `doctor` still asks a gateway and
@@ -1690,73 +1855,6 @@ Each slice is PR-sized, lands green, and is useful alone.
   comparison is what would miss a stray `0x1b`. On the helper side, `shape::check` running
   *in front of* `Component::new` is now pinned by the clock rather than by a refusal that
   looks the same either way.
-- **W12 — signing and deploy from the operator's chair.** `Ouroboros.Wasm.Bundle` (the
-  `.ouro-wasm` file: framed header, bounded JSON envelope, raw component, `:safe` term
-  decode, manifest reconstruction held to a fixed point), `Ouroboros.Wasm.Upload` (the
-  chunked, process-free staging area of D16), `Ouroboros.Wasm.Deploy` (the node side of
-  the three verbs), `Wasm.Rollout.rollback/2` reusing the eval-failure branch's own
-  `withdraw/2`, and `Wasm.Surface.deployment/1`/`rollback/1` projecting a rollout outcome
-  onto the wire. Four gateway verbs — `wasm.upload`, `wasm.sign`, `wasm.deploy`,
-  `wasm.rollback`, all `:operate` and node-routed — with protocol docs, golden fixtures
-  and typed Rust decodes for each, and `ouro wasm keygen | sign | deploy | rollback | ls`
-  on top. `keygen` contacts no runtime and writes a seed in exactly the format
-  `Signing.Service` reads, printing the `OUROBOROS_SIGNER_KEY_PATH` and
-  `OUROBOROS_UPGRADE_TRUSTED_SIGNERS` lines; its derived public half is pinned against the
-  RFC 8032 test vector, because a keygen that derived a different public key would print a
-  trust line that verifies nothing and no local round trip would catch it. Proved live on
-  this Mac end to end: `wasm.sign` over `test/support/wasm/echo.wasm` with the imports read
-  off the component, the bundle assembled from the node's prefix and the operator's bytes,
-  `wasm.deploy` reaching `:live` with both eval probes passing, the `wasm/<name>` mesh
-  agent answering a message, and `wasm.rollback` stopping it with the bytes and the
-  manifest still in the store. Refusals proved with the store, the register and the helper
-  pool asserted unchanged. The `methods.ex` comment that promised there would never be a
-  `wasm.deploy` is corrected in place, with D15 for why.
-
-  An adversarial review of the first cut found three ways in and they are all closed here,
-  each with a test that is red without its fix. A **compressed manifest term** made a 42 KiB
-  file allocate 292 MB inside `Bundle.verify/2` at `:operate`, before any trust check — tag
-  80 is refused by inspection now and the decoded term is measured in heap words rather than
-  in the length that was read. A **client-named epoch** at the register's plausibility
-  ceiling wedged lane W on a node permanently from one call — the parameter is gone, the
-  register's boundary is exclusive, and the signing policy refuses an epoch far above
-  anything the node has seen. And **`wasm.sign` handed unsigned bytes to the helper** to
-  read their imports: `imports` is the client's to declare now, computed with the operator's
-  own helper, and the upload is consumed before anything that can refuse. Three more were
-  concurrency: `Upload.take/2` is an atomic rename rather than read-then-remove, the
-  in-flight ceiling is eight `O_CREAT|O_EXCL` slot files rather than a count taken before a
-  create, and an upload has a total lifetime as well as an idle one. Two claims that outran
-  the code were deleted rather than defended: the redundant pre-flight verification in
-  `Wasm.Deploy.deploy/3` (the rollout was already verifying before its checkpoint, and no
-  test could tell the difference), and `:unchanged` counting as proof for an operator's
-  rollback — a capability whose name is still answering is not "rolled back".
-- **W13 — a live capability is a tool, and a description is deployment metadata.** Lane W
-  could deploy a capability and nothing a model or a user touched could reach one. Two
-  things can now, and neither is a mesh client. The native `capability` tool lists the
-  `:live` lane-W rollouts that name this node, with the register's facts beside each
-  component's labelled, bounded claim about itself, and `call`s one under a 64 KiB body
-  bound, a 64 KiB reply bound whose every line is prefixed with the untrusted label, and a
-  timeout of the target's own deadline plus the pool's call margin. One function resolves a
-  name — for the permission engine and for the message alike, on the exact string the model
-  wrote — and a name that is not a rollout name is refused before the register is read. The
-  rule language gains `Capability(<name>)` and `Capability(*)`, matched against a name the
-  node resolved, which is what lets them carry an allow; `Tool(capability)` is deny-and-ask
-  only, because one call reaches one component and an allow on the tool is an allow on every
-  component this node will ever deploy. The tool call's ledger entry carries the capability
-  and the component's sha256. `agents.message` is the operator's half at `:operate`, bounded
-  and labelled the same way, with a marked truncation; `agents.state` labels and bounds the
-  same two fields for a `wasm/` agent, because it is `:read` and returns them too.
-
-  A component's `describe` is read **at deploy**, as a fourth rollout gate, on a throwaway
-  instance under its own bounds, and stored on the registry entry — which is where every
-  reader gets it. It used to be read on the message path, and a component whose `describe`
-  took six seconds while answering messages instantly failed the rollout probe's
-  five-second budget and was rolled back. Contract C1 now also refuses every Unicode
-  control, format and line-separator character in every string of the document, walked
-  whole; the register re-validates on write and on read, and holds a lane-W module name to
-  the artifact charset so a planted `wasm/a/b` is refused. Proved against the scripted
-  helper (including the six-second `describe` that no longer costs a message), the real echo
-  guest, the live rollout, the register's checkpoint, and the native loop.
-
 - **W10b — `new` scaffolds on the SDK, and `sign` reads the imports itself.** The two seams
   wave 1 left open, each of them a place where a document said one thing and the code did
   another.
@@ -1884,6 +1982,128 @@ Each slice is PR-sized, lands green, and is useful alone.
   transcript in the guide is therefore from a node running its own signing service. And
   `ouro wasm keygen` **prints back the `--out` path it was given**, so a relative one produces
   an `OUROBOROS_SIGNER_KEY_PATH` line the signer node then refuses as non-absolute.
+
+- **W12 — signing and deploy from the operator's chair.** `Ouroboros.Wasm.Bundle` (the
+  `.ouro-wasm` file: framed header, bounded JSON envelope, raw component, `:safe` term
+  decode, manifest reconstruction held to a fixed point), `Ouroboros.Wasm.Upload` (the
+  chunked, process-free staging area of D16), `Ouroboros.Wasm.Deploy` (the node side of
+  the three verbs), `Wasm.Rollout.rollback/2` reusing the eval-failure branch's own
+  `withdraw/2`, and `Wasm.Surface.deployment/1`/`rollback/1` projecting a rollout outcome
+  onto the wire. Four gateway verbs — `wasm.upload`, `wasm.sign`, `wasm.deploy`,
+  `wasm.rollback`, all `:operate` and node-routed — with protocol docs, golden fixtures
+  and typed Rust decodes for each, and `ouro wasm keygen | sign | deploy | rollback | ls`
+  on top. `keygen` contacts no runtime and writes a seed in exactly the format
+  `Signing.Service` reads, printing the `OUROBOROS_SIGNER_KEY_PATH` and
+  `OUROBOROS_UPGRADE_TRUSTED_SIGNERS` lines; its derived public half is pinned against the
+  RFC 8032 test vector, because a keygen that derived a different public key would print a
+  trust line that verifies nothing and no local round trip would catch it. Proved live on
+  this Mac end to end: `wasm.sign` over `test/support/wasm/echo.wasm` with the imports read
+  off the component, the bundle assembled from the node's prefix and the operator's bytes,
+  `wasm.deploy` reaching `:live` with both eval probes passing, the `wasm/<name>` mesh
+  agent answering a message, and `wasm.rollback` stopping it with the bytes and the
+  manifest still in the store. Refusals proved with the store, the register and the helper
+  pool asserted unchanged. The `methods.ex` comment that promised there would never be a
+  `wasm.deploy` is corrected in place, with D15 for why.
+
+  An adversarial review of the first cut found three ways in and they are all closed here,
+  each with a test that is red without its fix. A **compressed manifest term** made a 42 KiB
+  file allocate 292 MB inside `Bundle.verify/2` at `:operate`, before any trust check — tag
+  80 is refused by inspection now and the decoded term is measured in heap words rather than
+  in the length that was read. A **client-named epoch** at the register's plausibility
+  ceiling wedged lane W on a node permanently from one call — the parameter is gone, the
+  register's boundary is exclusive, and the signing policy refuses an epoch far above
+  anything the node has seen. And **`wasm.sign` handed unsigned bytes to the helper** to
+  read their imports: `imports` is the client's to declare now, computed with the operator's
+  own helper, and the upload is consumed before anything that can refuse. Three more were
+  concurrency: `Upload.take/2` is an atomic rename rather than read-then-remove, the
+  in-flight ceiling is eight `O_CREAT|O_EXCL` slot files rather than a count taken before a
+  create, and an upload has a total lifetime as well as an idle one. Two claims that outran
+  the code were deleted rather than defended: the redundant pre-flight verification in
+  `Wasm.Deploy.deploy/3` (the rollout was already verifying before its checkpoint, and no
+  test could tell the difference), and `:unchanged` counting as proof for an operator's
+  rollback — a capability whose name is still answering is not "rolled back".
+- **W13 — a live capability is a tool, and a description is deployment metadata.** Lane W
+  could deploy a capability and nothing a model or a user touched could reach one. Two
+  things can now, and neither is a mesh client. The native `capability` tool lists the
+  `:live` lane-W rollouts that name this node, with the register's facts beside each
+  component's labelled, bounded claim about itself, and `call`s one under a 64 KiB body
+  bound, a 64 KiB reply bound whose every line is prefixed with the untrusted label, and a
+  timeout of the target's own deadline plus the pool's call margin. One function resolves a
+  name — for the permission engine and for the message alike, on the exact string the model
+  wrote — and a name that is not a rollout name is refused before the register is read. The
+  rule language gains `Capability(<name>)` and `Capability(*)`, matched against a name the
+  node resolved, which is what lets them carry an allow; `Tool(capability)` is deny-and-ask
+  only, because one call reaches one component and an allow on the tool is an allow on every
+  component this node will ever deploy. The tool call's ledger entry carries the capability
+  and the component's sha256. `agents.message` is the operator's half at `:operate`, bounded
+  and labelled the same way, with a marked truncation; `agents.state` labels and bounds the
+  same two fields for a `wasm/` agent, because it is `:read` and returns them too.
+
+  A component's `describe` is read **at deploy**, as a fourth rollout gate, on a throwaway
+  instance under its own bounds, and stored on the registry entry — which is where every
+  reader gets it. It used to be read on the message path, and a component whose `describe`
+  took six seconds while answering messages instantly failed the rollout probe's
+  five-second budget and was rolled back. Contract C1 now also refuses every Unicode
+  control, format and line-separator character in every string of the document, walked
+  whole; the register re-validates on write and on read, and holds a lane-W module name to
+  the artifact charset so a planted `wasm/a/b` is refused. Proved against the scripted
+  helper (including the six-second `describe` that no longer costs a message), the real echo
+  guest, the live rollout, the register's checkpoint, and the native loop.
+
+- **W15 — a policy is a component, and it can only narrow.** The helper grew a **second closed
+  world**, `ouroboros:policy@0.1.0`: the same single import, `evaluate: func(string) -> string`
+  in place of `handle-message`, and a `load` that is told which of the two a set of bytes is
+  being offered as. `Ouroboros.Wasm.PolicyEngine` is an engine for `:permissions_engine` that
+  delegates to `Control.Permissions` and, only on `{:ask, :no_rule}`, asks a signed policy
+  component: its `deny` stands, its `ask` stands, and its `allow` is honoured only for the
+  tools an operator listed in `:policy_allowable_tools` — empty by default — so a policy
+  narrows until an operator widens it (D20). Every other outcome is `ask`, including a trap, a
+  deadline, a verdict that is not JSON, and a request too large to be handed over **whole**,
+  which is not truncated but refused: a policy shown four kilobytes of a command line is one an
+  attacker pads past. The manifest gained a signed `kind` (contract C7), the world follows from
+  it, and `Wasm.Rollout.stage/3` hands that kind to the helper — so a policy manifest over
+  capability bytes is `unsupported_world` before the register is marked, and `Rollout.live/1`
+  reads the kind out of the manifest rather than out of a register row, which is what keeps a
+  policy out of the `capability` tool's listing (D21). A policy declares no `start` block and
+  its signed eval spec is a list of `{request, expect: {decision}}` cases run through
+  `evaluate` at deploy. Honoured verdicts are ledgered `actor: :classifier` — the slot
+  `permissions.ex:92` reserved and nothing occupied until now — with the component's sha and
+  its rule string in `rule_ref`; the rule is bounded at 200 characters, stripped of every
+  control and format character, and labelled `[untrusted policy component]` wherever it is
+  read.
+
+  The SDK grew a fourth seam over the second world — `Policy`, `export_policy!`, and
+  `examples/no-network-shell`, which denies a `bash` containing `curl`, `wget` or `nc ` with a
+  stated rule and asks about everything else. One crate, two `generate!` invocations, and the
+  macro an author calls is what decides which world the component implements, so a crate cannot
+  claim both. `ouro wasm policy <file> --request <json|file|->` runs one against a local helper
+  and prints the verdict, the rule the node would record and the guest's log, exiting non-zero
+  on a `deny`; `ouro wasm sign --kind policy` puts the kind on the wire, including the default,
+  because a parameter the client omits is a claim the node fills in.
+
+  Proved on both sides, because neither is sufficient. Rust: both worlds reported by `doctor`
+  and told apart by `inspect`; a policy admitted as `policy` and refused as `capability` and
+  the reverse, each naming the export the asked-for world wanted; `call evaluate` on a
+  capability instance and `call handle-message` on a policy instance both `unknown_export`,
+  with both instances still live afterwards; an absent `kind` meaning capability and an unknown
+  one being `invalid_params`; a component whose bytes satisfy **both** worlds admitted to the
+  one it was offered as and dispatching that world's export alone; `instantiate` refusing a
+  world the `load` did not admit; and the policy world refusing a clock by name. Elixir: the
+  kind through the struct, the signing payload, the bundle envelope (including a manifest
+  naming an atom this VM happens to hold), the signer's world/eval/start branches, and the
+  stage where a `:policy` manifest over capability bytes is refused. The engine: not consulted
+  when the rules decide, consulted when they do not, `deny` standing with its rule, `allow`
+  degrading for an unlisted tool and honoured for a listed one, trap and deadline and malformed
+  verdict all `ask`, the rule bounded and control-free, a credential-shaped context value
+  redacted and a non-scalar one dropped by name, an oversize request not sent at all, the
+  ledger entry carrying the sha and `actor: :classifier`, and a `:wasm_policy` naming a
+  capability-kind entry leaving the engine inert with one warning. And end to end on this Mac:
+  the real example signed as a policy with two eval cases, deployed through the real rollout's
+  gates, and asked by `Provider.Native.Permissions.evaluate/1` — `curl` denied with the rule,
+  `ls` asked, an operator's own allow rule still deciding without the component being reached.
+- **Deferred, in rough order:** agent-reachable forge/deploy effects (§7.7) → tools lane
+  (§9.1) → microVM backend (§10, likely its own spec once slice-shaped) → agent world (§9.2).
+  The policy engine (§8.2) was the first of these and is W15.
 
 ## 15. Prior art and references
 

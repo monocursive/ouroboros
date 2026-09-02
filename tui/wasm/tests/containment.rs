@@ -1825,3 +1825,309 @@ fn a_several_megabyte_payload_still_reaches_the_guest() {
     );
     assert_eq!(answered["payload"], "ok");
 }
+
+// ------------------------------------------------------- two closed worlds, one helper (W15)
+
+/// The verdict every hand-written policy fixture here answers with.
+const VERDICT: &str = r#"{"decision":"deny","rule":"the fixture always denies"}"#;
+
+/// `doctor` names both worlds, and `inspect` tells them apart without admitting either.
+///
+/// A helper that reported one world and then admitted components in two would be a helper whose
+/// handshake said nothing about what it will run — and the pool's admission check is exactly
+/// that handshake (`Ouroboros.Wasm.Pool.admissible?/1`).
+#[test]
+fn the_helper_offers_two_worlds_and_inspect_says_which_a_component_is_in() {
+    let mut helper = Helper::spawn(&[]);
+
+    let report = helper.ok("doctor", Value::Null);
+    assert_eq!(
+        report["worlds"],
+        json!(["ouroboros:capability@0.1.0", "ouroboros:policy@0.1.0"])
+    );
+
+    let capability = fixture("cap", &support::echo());
+    let policy = fixture("pol", &support::policy(VERDICT));
+
+    assert_eq!(
+        helper.ok("inspect", json!({ "path": capability.path }))["world"],
+        "ouroboros:capability@0.1.0"
+    );
+    assert_eq!(
+        helper.ok("inspect", json!({ "path": policy.path }))["world"],
+        "ouroboros:policy@0.1.0"
+    );
+}
+
+/// A policy component is admitted as `policy` and refused as `capability`; a capability is
+/// admitted as `capability` and refused as `policy`.
+///
+/// Both directions, because a world check that only ever refused in one of them would be a
+/// check that had learned to say no to the shape it was written against rather than to the
+/// world it was asked about. The refusal is `unsupported_world` and it names the world the
+/// caller asked for, which is the fact an operator needs: not "these bytes are wrong" but "you
+/// asked for the other lane".
+#[test]
+fn a_component_is_admitted_to_the_world_it_was_offered_as_and_to_no_other() {
+    let mut helper = Helper::spawn(&[]);
+
+    let capability = fixture("cap-adm", &support::echo());
+    let policy = fixture("pol-adm", &support::policy(VERDICT));
+
+    let admitted = helper.ok(
+        "load",
+        json!({ "sha256": policy.sha256, "path": policy.path, "kind": "policy" }),
+    );
+    assert_eq!(admitted["world"], "ouroboros:policy@0.1.0");
+    assert_eq!(admitted["exports"], json!(["describe", "init", "evaluate"]));
+
+    let (refusal, message) = helper.refusal(
+        "load",
+        json!({ "sha256": policy.sha256, "path": policy.path, "kind": "capability" }),
+    );
+    assert_eq!(refusal, "unsupported_world");
+    assert!(
+        message.contains("handle-message") && message.contains("ouroboros:capability@0.1.0"),
+        "the refusal names the export the asked-for world wanted: {message}"
+    );
+
+    let admitted = helper.ok(
+        "load",
+        json!({ "sha256": capability.sha256, "path": capability.path, "kind": "capability" }),
+    );
+    assert_eq!(admitted["world"], "ouroboros:capability@0.1.0");
+
+    let (refusal, message) = helper.refusal(
+        "load",
+        json!({ "sha256": capability.sha256, "path": capability.path, "kind": "policy" }),
+    );
+    assert_eq!(refusal, "unsupported_world");
+    assert!(
+        message.contains("evaluate") && message.contains("ouroboros:policy@0.1.0"),
+        "the refusal names the export the asked-for world wanted: {message}"
+    );
+}
+
+/// Omitting `kind` means `capability`, which is what every request written before there was a
+/// second world meant. A `kind` this build does not implement is `invalid_params` and never a
+/// silent fall back to the default.
+#[test]
+fn an_absent_kind_is_a_capability_and_an_unknown_one_is_a_malformed_request() {
+    let mut helper = Helper::spawn(&[]);
+    let capability = fixture("cap-default", &support::echo());
+    let policy = fixture("pol-default", &support::policy(VERDICT));
+
+    assert_eq!(
+        load(&mut helper, &capability)["world"],
+        "ouroboros:capability@0.1.0"
+    );
+
+    // The same omission against a policy component is a refusal, so the default is doing work
+    // rather than being ignored.
+    let (refusal, _message) = helper.refusal(
+        "load",
+        json!({ "sha256": policy.sha256, "path": policy.path }),
+    );
+    assert_eq!(refusal, "unsupported_world");
+
+    let reply = helper.request(
+        "load",
+        json!({ "sha256": policy.sha256, "path": policy.path, "kind": "hook" }),
+    );
+    assert_eq!(reply["error"]["code"], -32602);
+    assert_eq!(reply["error"]["data"]["refusal"], "invalid_params");
+}
+
+/// `call evaluate` on a capability instance is `unknown_export`, and `call handle-message` on a
+/// policy instance is too. The dispatch table is closed *per world*, not per helper.
+///
+/// The refusal leaves both instances live — a name the world does not have is the caller's
+/// mistake and not the guest's — which the second half of each pair proves by using it after.
+#[test]
+fn each_world_dispatches_its_own_message_export_and_no_other() {
+    let mut helper = Helper::spawn(&[]);
+
+    let capability = fixture("cap-dispatch", &support::echo());
+    load(&mut helper, &capability);
+    instantiate(&mut helper, "cap", &capability);
+
+    let policy = fixture("pol-dispatch", &support::policy(VERDICT));
+    helper.ok(
+        "load",
+        json!({ "sha256": policy.sha256, "path": policy.path, "kind": "policy" }),
+    );
+    helper.ok(
+        "instantiate",
+        json!({
+            "instance": "pol",
+            "sha256": policy.sha256,
+            "config": "",
+            "kind": "policy",
+            "limits": limits(FUEL, MIN_MEMORY_BYTES, DEADLINE_MS),
+        }),
+    );
+
+    let (refusal, message) = helper.refusal(
+        "call",
+        json!({ "instance": "cap", "export": "evaluate", "payload": "{}" }),
+    );
+    assert_eq!(refusal, "unknown_export");
+    assert!(
+        message.contains("ouroboros:capability@0.1.0") && message.contains("handle-message"),
+        "the refusal names this instance's own world and its own message export: {message}"
+    );
+
+    let (refusal, message) = helper.refusal(
+        "call",
+        json!({ "instance": "pol", "export": "handle-message", "payload": "{}" }),
+    );
+    assert_eq!(refusal, "unknown_export");
+    assert!(
+        message.contains("ouroboros:policy@0.1.0") && message.contains("evaluate"),
+        "the refusal names this instance's own world and its own message export: {message}"
+    );
+
+    // Both are still live: a closed dispatch table is not a poisoning.
+    assert_eq!(
+        helper.ok(
+            "call",
+            json!({ "instance": "pol", "export": "evaluate", "payload": "{\"tool\":\"bash\"}" })
+        )["payload"],
+        VERDICT
+    );
+    assert_eq!(
+        helper.ok(
+            "call",
+            json!({ "instance": "cap", "export": "handle-message", "payload": "hi" })
+        )["payload"],
+        "|hi"
+    );
+    // `describe` is the export both worlds share, and it is callable in both.
+    assert_eq!(
+        helper.ok(
+            "call",
+            json!({ "instance": "pol", "export": "describe", "payload": "" })
+        )["payload"],
+        "policy"
+    );
+}
+
+/// A component whose bytes satisfy *both* worlds is admitted to the one it was offered as, and
+/// dispatches that world's export alone.
+///
+/// This is where "the caller's assertion" earns its keep. These bytes export `describe`, `init`,
+/// `handle-message` and `evaluate`, all with the right signatures, so any check that tried to
+/// *infer* a world would have to pick one — and the pick would decide which export a signed
+/// manifest's `kind` had actually bought. Instead the same file is a capability when loaded as
+/// one and a policy when loaded as one, and neither instance can reach the other's export.
+#[test]
+fn bytes_in_both_worlds_are_admitted_to_the_one_they_were_offered_as() {
+    let mut helper = Helper::spawn(&[]);
+    let both = fixture("both", &support::ambidextrous());
+
+    assert_eq!(
+        helper.ok("load", json!({ "sha256": both.sha256, "path": both.path }))["world"],
+        "ouroboros:capability@0.1.0"
+    );
+    helper.ok(
+        "instantiate",
+        json!({
+            "instance": "as-capability",
+            "sha256": both.sha256,
+            "config": "",
+            "limits": limits(FUEL, MIN_MEMORY_BYTES, DEADLINE_MS),
+        }),
+    );
+    assert_eq!(
+        helper
+            .refusal(
+                "call",
+                json!({ "instance": "as-capability", "export": "evaluate", "payload": "{}" })
+            )
+            .0,
+        "unknown_export"
+    );
+
+    // The same sha, re-offered as the other world. The cache entry names one world, so this is
+    // read and checked again rather than answered out of the table.
+    assert_eq!(
+        helper.ok(
+            "load",
+            json!({ "sha256": both.sha256, "path": both.path, "kind": "policy" })
+        )["world"],
+        "ouroboros:policy@0.1.0"
+    );
+    helper.ok(
+        "instantiate",
+        json!({
+            "instance": "as-policy",
+            "sha256": both.sha256,
+            "config": "",
+            "kind": "policy",
+            "limits": limits(FUEL, MIN_MEMORY_BYTES, DEADLINE_MS),
+        }),
+    );
+    assert_eq!(
+        helper.ok(
+            "call",
+            json!({ "instance": "as-policy", "export": "evaluate", "payload": "{}" })
+        )["payload"],
+        r#"{"decision":"deny","rule":"both worlds"}"#
+    );
+}
+
+/// `instantiate` asserts the world too, and a disagreement with the load is refused.
+///
+/// `load` and `instantiate` are two requests, and between them a peer may have loaded the same
+/// sha as the other world. Standing an instance up against a dispatch table nobody checked
+/// these bytes for is the one way the two worlds could leak into each other, so the assertion is
+/// made twice.
+#[test]
+fn instantiate_refuses_a_world_the_load_did_not_admit() {
+    let mut helper = Helper::spawn(&[]);
+    let policy = fixture("pol-inst", &support::policy(VERDICT));
+
+    helper.ok(
+        "load",
+        json!({ "sha256": policy.sha256, "path": policy.path, "kind": "policy" }),
+    );
+
+    let (refusal, message) = helper.refusal(
+        "instantiate",
+        json!({
+            "instance": "mismatched",
+            "sha256": policy.sha256,
+            "config": "",
+            "limits": limits(FUEL, MIN_MEMORY_BYTES, DEADLINE_MS),
+        }),
+    );
+    assert_eq!(refusal, "unsupported_world");
+    assert!(
+        message.contains("ouroboros:policy@0.1.0"),
+        "the refusal says which world the component was loaded as: {message}"
+    );
+}
+
+/// The policy world's one import is the capability world's one import, and nothing else links.
+///
+/// The whole containment claim is unchanged by there being a second world (D21): a policy
+/// component that wants a clock is refused by name, exactly as a capability is, because there
+/// is one linker underneath both.
+#[test]
+fn the_policy_world_declares_the_same_single_import() {
+    let mut helper = Helper::spawn(&[]);
+    let fixture = fixture("pol-clock", &support::undeclared_import());
+
+    let (refusal, message) = helper.refusal(
+        "load",
+        json!({ "sha256": fixture.sha256, "path": fixture.path, "kind": "policy" }),
+    );
+    assert_eq!(refusal, "undefined_import");
+    assert!(
+        message.contains("now") && message.contains("ouroboros:policy@0.1.0"),
+        "the refusal names the import and the world that does not declare it: {message}"
+    );
+
+    let report = helper.ok("doctor", Value::Null);
+    assert_eq!(report["imports"], json!(["log"]), "one import, both worlds");
+}

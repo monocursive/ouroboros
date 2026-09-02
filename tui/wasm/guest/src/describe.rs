@@ -51,6 +51,11 @@ pub struct Example {
 pub struct Describe {
     name: String,
     version: String,
+    /// Filled in by this crate and never by the author: [`crate::WORLD`] for the three
+    /// capability-world seams, [`crate::POLICY_WORLD`] for [`crate::Policy`]. The `export_*`
+    /// macro decides it, because the macro is what decides which world the component actually
+    /// implements — an author who could set this could only make it disagree with the bytes.
+    world: &'static str,
     summary: Option<String>,
     input_schema: Option<Value>,
     examples: Vec<Example>,
@@ -64,6 +69,7 @@ impl Describe {
         Self {
             name: name.into(),
             version: version.into(),
+            world: WORLD,
             summary: None,
             input_schema: None,
             examples: Vec::new(),
@@ -93,12 +99,20 @@ impl Describe {
         self
     }
 
+    /// Restates the world this document reports. Crate-internal: the `export_*` macro that
+    /// exported this component is the only thing that knows which world it is in, so it is the
+    /// only thing that sets this.
+    pub(crate) fn in_world(mut self, world: &'static str) -> Self {
+        self.world = world;
+        self
+    }
+
     /// The C1 document. `world` is this crate's, never the author's.
     pub fn to_json(&self) -> Value {
         let mut document = Map::new();
         document.insert("name".to_string(), Value::String(self.name.clone()));
         document.insert("version".to_string(), Value::String(self.version.clone()));
-        document.insert("world".to_string(), Value::String(WORLD.to_string()));
+        document.insert("world".to_string(), Value::String(self.world.to_string()));
 
         if let Some(summary) = &self.summary {
             document.insert("summary".to_string(), Value::String(summary.clone()));

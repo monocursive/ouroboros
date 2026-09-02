@@ -304,6 +304,30 @@ config :ouroboros,
     allow_store_root_override: config_env() == :test
   ]
 
+# W15. The permission engine, and the policy component it may consult (docs/WASM.md §8.2,
+# D20). Three keys, and the defaults are the posture:
+#
+#   * `:permissions_engine` is `Ouroboros.Control.Permissions` unless an operator names
+#     another. `Ouroboros.Wasm.PolicyEngine` is `Control.Permissions` plus one thing: where
+#     the rules said *nothing* — `{:ask, :no_rule}` — it asks a signed policy component and
+#     lets it narrow the answer. Every other outcome passes through untouched.
+#   * `:wasm_policy` names the component, by the name it was deployed under. `nil` — the
+#     default — makes the engine inert: it delegates and consults nobody, which is what a
+#     node that has not been given a policy should do. A name that is not a `:live` lane-W
+#     rollout **of kind `:policy`** on this node is a misconfiguration, logged once, and is
+#     also inert; a policy is not something to half-have.
+#   * `:policy_allowable_tools` is the list of tools whose `allow` this node honours from a
+#     component. **Empty by default, and that is the decision, not a placeholder.** A policy
+#     component is asked about every call the rules did not decide, so an `allow` honoured
+#     unconditionally would be a blanket approval channel with a signature on it — and a
+#     signature is provenance, not trust (D5). A `deny` always stands, an `ask` always
+#     stands, and an `allow` for a tool nobody listed is read as `ask`. Widening this is an
+#     operator's deliberate act, tool by tool.
+config :ouroboros,
+  permissions_engine: Ouroboros.Control.Permissions,
+  wasm_policy: nil,
+  policy_allowable_tools: []
+
 # The two facts about the web endpoint that are genuinely compile-time, and no others.
 # Everything runtime — the bind, the port, the cookie key, the origin policy — is handed
 # to it as a start option by `Ouroboros.Web`, built from one `Ouroboros.Web.Config` that

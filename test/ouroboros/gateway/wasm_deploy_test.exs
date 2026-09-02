@@ -260,6 +260,84 @@ defmodule Ouroboros.Gateway.WasmDeployTest do
     end
   end
 
+  describe "the kind, which decides which world these bytes ever enter (W15)" do
+    test "it is a closed set of two, and an absent one is a capability" do
+      for hostile <- ["Policy", "hook", "", 7, %{}] do
+        assert {:error, code, message} = sign(%{"kind" => hostile})
+        assert code == Methods.code(:invalid_params)
+        assert message =~ "params.kind"
+      end
+
+      # Both spellings reach the plane rather than the validator, which is what an unknown
+      # upload id answers with — and so does an explicit `null`, which is this module's
+      # spelling of "absent" for every optional parameter it has.
+      for kind <- ["capability", "policy", nil] do
+        assert {:error, code, _message} = sign(%{"kind" => kind})
+        assert code == Methods.code(:not_found)
+      end
+    end
+
+    test "it lands in the signed manifest, and the world follows it" do
+      assert {:ok, artifact} =
+               signed(%{
+                 "kind" => "policy",
+                 "eval" => %{
+                   "cases" => [
+                     %{
+                       "request" => %{"tool" => "bash"},
+                       "expect" => %{"decision" => "deny"}
+                     }
+                   ]
+                 }
+               })
+
+      assert artifact.kind == :policy
+      assert artifact.world == Ouroboros.Wasm.policy_world()
+
+      # And an omitted kind is the capability every manifest written before W15 was.
+      assert {:ok, artifact} = signed(%{})
+      assert artifact.kind == :capability
+      assert artifact.world == Ouroboros.Wasm.world()
+    end
+
+    test "a policy's eval spec is cases, and the capability grammar is not one" do
+      # Two grammars, chosen by the kind, because a probe list over agent state says nothing
+      # about a component that is not a mesh agent.
+      assert {:error, message} =
+               build_eval_of_kind("policy", %{"probes" => [%{"input" => %{}}]})
+
+      assert message =~ "probes"
+
+      assert {:ok, eval} =
+               build_eval_of_kind("policy", %{
+                 "cases" => [
+                   %{"request" => %{"tool" => "bash"}, "expect" => %{"decision" => "ask"}}
+                 ],
+                 "budget_ms" => 5_000
+               })
+
+      # Every atom in the built spec is one this build already held: no atom is minted from a
+      # client's bytes, which is the same rule the capability grammar is held to.
+      assert eval == %{
+               cases: [%{request: %{"tool" => "bash"}, expect: %{decision: :ask}}],
+               budget_ms: 5_000
+             }
+
+      for hostile <- [
+            %{"cases" => []},
+            %{"cases" => [%{"request" => "not an object", "expect" => %{"decision" => "ask"}}]},
+            %{"cases" => [%{"request" => %{}, "expect" => %{"decision" => "maybe"}}]},
+            %{"cases" => [%{"request" => %{}, "expect" => %{"decision" => "ask", "x" => 1}}]},
+            %{"cases" => [%{"request" => %{}, "expect" => %{"decision" => "ask"}}], "x" => 1}
+          ] do
+        assert {:error, message} = build_eval_of_kind("policy", hostile)
+
+        assert message =~ "params.eval" or message =~ "unsupported fields",
+               "#{inspect(hostile)} must be refused by name: #{message}"
+      end
+    end
+  end
+
   describe "the eval spec, which is the one place a client's bytes shape a signed term" do
     test "every atom in a built spec is one this module already held" do
       assert {:ok, spec} =
@@ -596,6 +674,40 @@ defmodule Ouroboros.Gateway.WasmDeployTest do
   # A syntactically valid id that names nothing, so parameter validation is reached and the
   # plane behind it is not.
   defp upload_id, do: String.duplicate("0", 32)
+
+  # W15. A whole `wasm.sign`, read back out of the manifest it was signed into: the only way
+  # to see what actually ended up inside a signature.
+  defp signed(overrides) do
+    bytes = "\0asm\x01\x00\x00\x00 a component this test never runs"
+
+    {:ok, %{upload: upload}} =
+      invoke("wasm.upload", %{"offset" => 0, "data" => b64(bytes), "final" => true})
+
+    base = %{
+      "upload" => upload,
+      "name" => "greeter",
+      "author" => "test-agent",
+      "imports" => [],
+      "eval" => %{"probes" => [%{"input" => %{"greet" => "world"}}]}
+    }
+
+    case Methods.invoke("wasm.sign", Map.merge(base, overrides)) do
+      {:ok, receipt} ->
+        prefix = Base.decode64!(receipt.bundle_prefix)
+        {:ok, %{artifact: artifact}} = Bundle.decode(prefix <> bytes)
+        {:ok, artifact}
+
+      {:error, _code, message} ->
+        {:error, message}
+    end
+  end
+
+  defp build_eval_of_kind(kind, spec) do
+    case signed(%{"kind" => kind, "eval" => spec}) do
+      {:ok, artifact} -> {:ok, artifact.metadata.eval}
+      {:error, message} -> {:error, message}
+    end
+  end
 
   # The spec the gateway builds, read back out of the manifest it was *signed into*. There
   # is no shortcut here on purpose: what matters is not what the builder returned but what

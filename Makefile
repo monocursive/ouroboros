@@ -43,7 +43,7 @@ help:
 	@echo "make sandbox-linux-test  prove the sandbox helper enforces, in a Linux container"
 	@echo "make wasm             build ouro-wasm into priv/wasm/ (WebAssembly containment helper)"
 	@echo "make wasm-guest       build the lane-W acceptance guest into test/support/wasm/echo.wasm"
-	@echo "make wasm-examples    build the guest SDK's worked components (counter, deny-writes)"
+	@echo "make wasm-examples    build the guest SDK's worked components (counter, deny-writes, …)"
 	@echo "make wasm-sdk-check   the guest SDK's own gates: fmt, tests, clippy, wasm32 build"
 
 dev:
@@ -172,11 +172,15 @@ wasm-examples:
 	cd tui/wasm/guest/examples/deny-writes && $(CARGO) build --release --target wasm32-wasip2
 	cd tui/wasm/guest/examples/lintcheck && $(CARGO) build --release --target wasm32-wasip2
 	cd tui/wasm/guest/examples/verdicts && $(CARGO) build --release --target wasm32-wasip2
+	# W15. The fifth is the first in the *policy* world, so this line is also the standing
+	# proof that one SDK builds both: `ouroboros:policy@0.1.0`, importing exactly `log`.
+	cd tui/wasm/guest/examples/no-network-shell && $(CARGO) build --release --target wasm32-wasip2
 	@echo "==> wasm-examples: what they declare"
 	@ls -l tui/wasm/guest/examples/counter/target/wasm32-wasip2/release/counter.wasm \
 	  tui/wasm/guest/examples/deny-writes/target/wasm32-wasip2/release/deny_writes.wasm \
 	  tui/wasm/guest/examples/lintcheck/target/wasm32-wasip2/release/lintcheck.wasm \
-	  tui/wasm/guest/examples/verdicts/target/wasm32-wasip2/release/verdicts.wasm
+	  tui/wasm/guest/examples/verdicts/target/wasm32-wasip2/release/verdicts.wasm \
+	  tui/wasm/guest/examples/no-network-shell/target/wasm32-wasip2/release/no_network_shell.wasm
 
 # The SDK's own gates. Its own workspace means `make test`'s `cd tui && cargo …` never reaches
 # it, so it gets a verb rather than being checked by nobody.

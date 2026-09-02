@@ -327,14 +327,46 @@ defmodule Ouroboros.Wasm.Pool do
   eviction is logged here at debug level, and `doctor/1` reports the count and the most
   recent of them under `held`.
 
+  ## `kind:` — which of the helper's two worlds these bytes are offered as (W15)
+
+  `kind: :capability | :policy`, defaulting to `:capability`. The helper implements two closed
+  worlds and checks the bytes against the one it is told (docs/WASM.md D21), so a policy
+  component offered as a capability is refused `unsupported_world` and so is the reverse.
+
+  It is not a preference: on the deploy path it comes from the **signed manifest's** `kind`
+  (contract C7), which is what makes "this component decides permissions" a claim a signature
+  covers rather than a flag somebody set at load time. An unrecognized kind is
+  `{:error, {:invalid_kind, _}}` here, before a frame is built, for `lane:`'s reason — a caller
+  whose kind this build does not know has said something this build cannot honour either way.
+
   `opts` follows the server, as `instantiate/6`'s does and for the same reason.
   """
   @spec load(String.t(), String.t(), GenServer.server(), keyword()) ::
           {:ok, map()} | {:error, failure()}
   def load(sha256, path, server \\ __MODULE__, opts \\ [])
       when is_binary(sha256) and is_binary(path) and is_list(opts) do
-    with {:ok, lane} <- lane(opts) do
-      request(server, "load", %{"sha256" => sha256, "path" => path}, :fixed, nil, lane)
+    with {:ok, lane} <- lane(opts),
+         {:ok, kind} <- kind(opts) do
+      request(
+        server,
+        "load",
+        %{"sha256" => sha256, "path" => path, "kind" => kind},
+        :fixed,
+        nil,
+        lane
+      )
+    end
+  end
+
+  # W15. The same shape `lane/1` has, and a refusal rather than a default for the same reason.
+  # The wire spelling is the short name the helper's `world::Kind::parse` reads, not the
+  # version-bearing package id: a peer that had to reproduce `ouroboros:policy@0.1.0` to load a
+  # component would be pinned to this build's world version by its own request.
+  defp kind(opts) do
+    case Keyword.get(opts, :kind, :capability) do
+      :capability -> {:ok, "capability"}
+      :policy -> {:ok, "policy"}
+      other -> {:error, {:invalid_kind, other}}
     end
   end
 
@@ -359,8 +391,10 @@ defmodule Ouroboros.Wasm.Pool do
 
   ## `owner:` — who this instance belongs to
 
-  `opts` takes one option, `owner: pid`, and it is the answer to the only unbounded thing
-  this pool otherwise has: an instance nobody drops. The helper holds `MAX_INSTANCES` (256)
+  `opts` takes `owner: pid` and `kind: :capability | :policy` (W15, defaulting to
+  `:capability`, and the same value `load/4` was given for this sha). `owner:` is the answer to
+  the only unbounded thing this pool otherwise has: an instance nobody drops. The helper holds
+  `MAX_INSTANCES` (256)
   and evicts none of them, so a caller that stands instances up under fresh names and stops
   without dropping — every rollout probe and every evaluation does exactly that, under an id
   carrying a unique integer — walks the helper into `too_many_instances` forever. A full
@@ -382,11 +416,22 @@ defmodule Ouroboros.Wasm.Pool do
   def instantiate(instance, sha256, config, limits, server \\ __MODULE__, opts \\ [])
       when is_binary(instance) and is_binary(sha256) and is_binary(config) and is_list(opts) do
     with :ok <- valid_instance(instance),
+         {:ok, kind} <- kind(opts),
          {:ok, wire} <- wire_limits(limits) do
       request(
         server,
         "instantiate",
-        %{"instance" => instance, "sha256" => sha256, "config" => config, "limits" => wire},
+        %{
+          "instance" => instance,
+          "sha256" => sha256,
+          "config" => config,
+          # W15. Asserted here as well as at `load`, because the two are separate requests and
+          # a peer that loaded a sha as one world and stood it up as the other would be
+          # dispatching against a table nobody checked these bytes for. The helper refuses a
+          # disagreement `unsupported_world`.
+          "kind" => kind,
+          "limits" => wire
+        },
         :derived,
         owner(opts)
       )

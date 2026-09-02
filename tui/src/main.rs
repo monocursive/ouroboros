@@ -2758,6 +2758,22 @@ async fn wasm(paths: &Paths, command: WasmCommand) -> Result<()> {
             refused_unless(ouro::wasm_cli::hook(&request, &mut out)?)
         }
 
+        // W15. The second world, locally: load a policy component and ask it about one
+        // request. Non-zero on a `deny`, which is the answer rather than a failure.
+        WasmCommand::Policy(args) => {
+            let request = ouro::wasm_cli::read_request(&args.request)?;
+            let policy = ouro::wasm_cli::PolicyRequest {
+                helper: args.helper.helper.as_deref(),
+                file: &args.file,
+                request,
+                config: args.config.clone(),
+                json: args.json,
+            };
+
+            let mut out = std::io::stdout().lock();
+            refused_unless(ouro::wasm_cli::policy(&policy, &mut out)?)
+        }
+
         WasmCommand::Check(args) => {
             let workspace = args.workspace.unwrap_or_else(|| PathBuf::from("."));
             let mut out = std::io::stdout().lock();

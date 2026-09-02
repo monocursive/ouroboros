@@ -148,6 +148,12 @@ defmodule Ouroboros.Wasm.Verifier do
       not Artifact.sha256?(artifact.component_sha256) ->
         {:error, {:invalid_component_sha256, describe(artifact.component_sha256)}}
 
+      # W15. Held to the closed set here, before `verify_world/1` reads it: the kind arrives
+      # from a manifest in a file, and it is what decides which world that manifest must
+      # declare and which world the helper is told to check these bytes against.
+      not Artifact.kind?(artifact.kind) ->
+        {:error, {:invalid_component_kind, describe(artifact.kind)}}
+
       not is_integer(artifact.size) or artifact.size <= 0 ->
         {:error, {:invalid_component_size, describe(artifact.size)}}
 
@@ -164,8 +170,14 @@ defmodule Ouroboros.Wasm.Verifier do
 
   # Not configurable here either. The signer refuses a world it does not implement and so
   # does the node that would run it: one build, one linker contract, checked at both ends.
-  defp verify_world(%Artifact{world: world}) do
-    if world == Wasm.world(), do: :ok, else: {:error, {:world_not_supported, world}}
+  #
+  # W15. The world a *kind* requires, not merely a world this build implements — the same
+  # comparison the signer makes, for the same reason. Both worlds are supported, so a check
+  # against a set would admit a `:policy` manifest carrying the capability world, and the
+  # loading node would then hand the helper `kind: :policy` for bytes whose manifest said
+  # otherwise.
+  defp verify_world(%Artifact{world: world, kind: kind}) do
+    if world == Wasm.world_for(kind), do: :ok, else: {:error, {:world_not_supported, world}}
   end
 
   defp verify_signature(%Artifact{signature: nil}, trust_policy) do

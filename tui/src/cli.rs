@@ -552,6 +552,15 @@ pub enum WasmCommand {
     /// It never instantiates anything: admission is a question about a path, a size, a world
     /// and the count of an entry's siblings, and running a component answers none of it.
     Check(WasmCheckArgs),
+
+    // W15
+    /// Ask a policy component what it would decide about one permission request, and print the
+    /// verdict and the rule it stated. Exits non-zero on a `deny`.
+    ///
+    /// The component is loaded into a local helper as a **policy** — the second world — so a
+    /// capability handed to this command is refused rather than run, which is the same refusal
+    /// the node makes when a manifest's `kind` disagrees with the bytes.
+    Policy(WasmPolicyArgs),
     // W12 adds its variants below
     // W12
     /// Write an Ed25519 signer seed and print the two configuration lines that put it to
@@ -609,6 +618,14 @@ pub struct WasmSignArgs {
     /// Who built this. The signing policy requires provenance and will not sign without it.
     #[arg(long, value_name = "AUTHOR")]
     pub author: String,
+
+    // W15
+    /// What this component is: a `capability` the mesh and the `capability` tool can reach, or
+    /// a `policy` the permission engine consults. It is part of the **signed** manifest, so it
+    /// is what decides which of the helper's two worlds these bytes are ever admitted to — a
+    /// policy deployed as a capability is refused at stage, and so is the reverse.
+    #[arg(long, value_name = "KIND", default_value = "capability")]
+    pub kind: WasmKind,
 
     /// An import the component declares. Repeat it once per import, or pass none at all for
     /// a component that imports nothing.
@@ -689,6 +706,24 @@ pub struct WasmSignArgs {
     /// A file holding the gateway token. Omitted, the token beside gateway.json is used.
     #[arg(long, value_name = "PATH")]
     pub token_file: Option<PathBuf>,
+}
+
+/// W15. The two things a signed component can be. `capability` is the default and is what
+/// every manifest written before there were two kinds means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum WasmKind {
+    Capability,
+    Policy,
+}
+
+impl WasmKind {
+    /// The wire spelling, which is also the helper's `kind` and the manifest's.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WasmKind::Capability => "capability",
+            WasmKind::Policy => "policy",
+        }
+    }
 }
 
 /// `ouro wasm deploy`'s flags.
@@ -904,6 +939,36 @@ pub struct WasmHookArgs {
     pub timeout_ms: Option<u64>,
 
     /// Emit both verdicts and what was dropped as JSON.
+    #[arg(long)]
+    pub json: bool,
+
+    #[command(flatten)]
+    pub helper: WasmHelperArgs,
+}
+
+/// W15. `ouro wasm policy`'s flags.
+///
+/// There is no `--fuel` and no `--memory-bytes`, for `ouro wasm hook`'s reason: the engine gives
+/// a policy component the node's own `capability_limits`, where an operator can already see and
+/// move them, and a bound this command invented would be a bound nothing else uses.
+#[derive(Debug, Args)]
+pub struct WasmPolicyArgs {
+    /// The policy component to ask.
+    pub file: PathBuf,
+
+    /// The permission request, as JSON: the string itself, a path to a file holding it, or `-`
+    /// for standard input. It is the document `Ouroboros.Wasm.PolicyEngine` builds — `tool`,
+    /// `mode`, `input`, `principal`, `workspace`, `context` — and this command sends it
+    /// verbatim rather than filling anything in, because a request this end invented would be
+    /// one the node never sends.
+    #[arg(long, value_name = "JSON|PATH|-")]
+    pub request: String,
+
+    /// The JSON string handed to `init`, verbatim — a policy's declared config.
+    #[arg(long, value_name = "JSON", default_value = "{}")]
+    pub config: String,
+
+    /// Emit the verdict, the rule and the guest's log as JSON.
     #[arg(long)]
     pub json: bool,
 
@@ -1801,6 +1866,53 @@ mod tests {
         assert_eq!(args.into, None);
     }
 
+    /// W15. `--kind policy` parses, and a kind this build does not implement does not.
+    ///
+    /// A closed value set rather than a free string: the kind is signed into the manifest and
+    /// decides which of the helper's two worlds these bytes are ever admitted to, so a typo
+    /// has to be a parse error here rather than a refusal three round trips later.
+    #[test]
+    fn ouro_wasm_sign_takes_a_kind_and_refuses_one_this_build_does_not_have() {
+        let Some(Command::Wasm {
+            command: WasmCommand::Sign(args),
+        }) = parse(&[
+            "wasm",
+            "sign",
+            "guard.wasm",
+            "--name",
+            "guard",
+            "--author",
+            "ops",
+            "--kind",
+            "policy",
+        ])
+        .command
+        else {
+            panic!("`ouro wasm sign --kind policy` must parse");
+        };
+
+        assert_eq!(args.kind, WasmKind::Policy);
+        assert_eq!(args.kind.as_str(), "policy");
+        assert_eq!(WasmKind::Capability.as_str(), "capability");
+
+        assert!(
+            Cli::try_parse_from([
+                "ouro",
+                "wasm",
+                "sign",
+                "guard.wasm",
+                "--name",
+                "guard",
+                "--author",
+                "ops",
+                "--kind",
+                "hook",
+            ])
+            .is_err(),
+            "a kind this build does not implement is a parse error"
+        );
+    }
+
     /// W12. Signing takes the two facts a policy requires and nothing a policy decides.
     #[test]
     fn ouro_wasm_sign_names_what_is_signed_and_never_the_durable_id() {
@@ -1834,6 +1946,9 @@ mod tests {
         assert_eq!(args.start_config.as_deref(), Some(r#"{"greeting":"hi"}"#));
         assert_eq!(args.eval, Some(PathBuf::from("spec.json")));
         assert_eq!(args.out, Some(PathBuf::from("greeter.ouro-wasm")));
+        // W15. An omitted `--kind` is a capability, which is what every command written
+        // before there were two kinds meant.
+        assert_eq!(args.kind, WasmKind::Capability);
         // Imports are declared by the operator, one flag per import, and never inferred by
         // the node from bytes nobody signed.
         assert_eq!(args.import, vec!["log".to_string()]);

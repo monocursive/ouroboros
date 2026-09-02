@@ -50,6 +50,21 @@ defmodule Ouroboros.Wasm.Artifact do
       `Ouroboros.Upgrade.Signing.Policy.Default` and `Ouroboros.Wasm.Rollout.start_block/1`,
       which re-derives it rather than reading it.
 
+  ## `kind`: what these bytes are, signed (W15, contract C7)
+
+  `kind` is `:capability` or `:policy`, and it is in the manifest because it decides which of
+  the helper's two worlds these bytes are ever admitted to. A capability answers messages from
+  the mesh and from the `capability` tool; a policy answers permission requests for
+  `Ouroboros.Wasm.PolicyEngine` and is reachable from neither. The default is `:capability`,
+  which is what every manifest written before there were two kinds means.
+
+  It is **signed** rather than configured at deploy for one reason: it is the difference
+  between a component a model can send strings to and a component that decides whether the
+  model may run `rm`, and a field an operator supplies at deploy time is a field a mistake at
+  deploy time can change. The world follows from it — `Ouroboros.Wasm.world_for/1` — so a
+  manifest cannot claim one kind and the other kind's world, and the loading node hands the
+  helper the kind at `load`, where a component that is not in that world is refused.
+
   ## The name is narrow, and `imports` holds no duplicates
 
   `name?/1` is the charset, and it is small because the name is load-bearing: it is the
@@ -71,7 +86,7 @@ defmodule Ouroboros.Wasm.Artifact do
     :size,
     :created_at
   ]
-  defstruct @enforce_keys ++ [metadata: %{}, signature: nil]
+  defstruct @enforce_keys ++ [kind: :capability, metadata: %{}, signature: nil]
 
   @metadata_keys [:author, :source_sha256, :language, :test_report, :eval, :start]
   @sha256_hex 64
@@ -107,12 +122,14 @@ defmodule Ouroboros.Wasm.Artifact do
   @name_pattern ~r/\A[a-z0-9][a-z0-9._\-]{0,63}\z/
   @max_name_bytes 64
 
+  @type kind :: :capability | :policy
   @type signature :: %{signer: String.t(), value: binary()}
   @type t :: %__MODULE__{
           id: String.t(),
           epoch: pos_integer(),
           name: String.t(),
           component_sha256: String.t(),
+          kind: kind(),
           world: String.t(),
           imports: [String.t()],
           size: pos_integer(),
@@ -125,8 +142,9 @@ defmodule Ouroboros.Wasm.Artifact do
   Builds a manifest for `bytes`, computing the digest and the size from them.
 
   `attrs` is a map or keyword list. `:name`, `:epoch`, and `:author` (or
-  `metadata.author`) are required. `:id` defaults to a generated one, `:world` to
-  `Ouroboros.Wasm.world/0`, and `:imports` to `[]`. The metadata keys
+  `metadata.author`) are required. `:id` defaults to a generated one, `:kind` to
+  `:capability`, `:world` to the world that kind requires
+  (`Ouroboros.Wasm.world_for/1`), and `:imports` to `[]`. The metadata keys
   `#{inspect(@metadata_keys)}` may be given at the top level or inside an explicit
   `:metadata` map; the top-level form wins.
 
@@ -156,7 +174,12 @@ defmodule Ouroboros.Wasm.Artifact do
 
     epoch = Map.get(attrs, :epoch, :missing)
     id = Map.get_lazy(attrs, :id, &Jido.Signal.ID.generate!/0)
-    world = Map.get_lazy(attrs, :world, &Wasm.world/0)
+    kind = Map.get(attrs, :kind, :capability)
+    # The world follows the kind rather than being defaulted beside it, so a caller that names
+    # one and not the other cannot produce a manifest whose two halves disagree. A caller that
+    # names both is taken at its word here and refused by the signer, which is the layer that
+    # decides whether a world is one this fleet signs for.
+    world = Map.get_lazy(attrs, :world, fn -> Wasm.world_for(kind) end)
     imports = Map.get(attrs, :imports, [])
     name = Map.get(attrs, :name)
 
@@ -165,6 +188,7 @@ defmodule Ouroboros.Wasm.Artifact do
          :ok <- validate_id(id),
          :ok <- validate_epoch(epoch),
          :ok <- validate_name(name),
+         :ok <- validate_kind(kind),
          :ok <- validate_world(world),
          :ok <- validate_imports(imports),
          :ok <- validate_metadata(metadata) do
@@ -173,6 +197,7 @@ defmodule Ouroboros.Wasm.Artifact do
          id: id,
          epoch: epoch,
          name: name,
+         kind: kind,
          # Never `attrs`: the digest and the size are facts about the bytes in hand, and a
          # manifest that took a caller's word for either would be signing a component
          # nobody looked at.
@@ -197,6 +222,7 @@ defmodule Ouroboros.Wasm.Artifact do
       epoch: artifact.epoch,
       name: artifact.name,
       component_sha256: artifact.component_sha256,
+      kind: artifact.kind,
       world: artifact.world,
       imports: artifact.imports,
       size: artifact.size,
@@ -275,6 +301,16 @@ defmodule Ouroboros.Wasm.Artifact do
 
   def name?(_value), do: false
 
+  @doc """
+  Whether `value` is one of the two kinds a lane-W component may be (W15).
+
+  A closed set of two atoms, checked rather than pattern-matched at each reader, because the
+  kind arrives from a manifest a bundle carried and `:erlang.binary_to_term/2`'s `:safe` refuses
+  only to *create* atoms — it will happily hand back any atom this VM already interned.
+  """
+  @spec kind?(term()) :: boolean()
+  def kind?(value), do: value in Wasm.kinds()
+
   @doc "Whether `value` is the 64-character lower-case hex a component sha is written as."
   @spec sha256?(term()) :: boolean()
   def sha256?(value) when is_binary(value),
@@ -318,6 +354,10 @@ defmodule Ouroboros.Wasm.Artifact do
 
   defp validate_name(name) do
     if name?(name), do: :ok, else: {:error, {:invalid_component_name, describe(name)}}
+  end
+
+  defp validate_kind(kind) do
+    if kind?(kind), do: :ok, else: {:error, {:invalid_component_kind, describe(kind)}}
   end
 
   defp validate_world(world) when is_binary(world) and world != "", do: :ok

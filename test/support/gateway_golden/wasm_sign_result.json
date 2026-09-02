@@ -12,6 +12,7 @@
     "imports": [
       "log"
     ],
+    "kind": "capability",
     "name": "vet",
     "signer": "release-key",
     "size": 2097152,

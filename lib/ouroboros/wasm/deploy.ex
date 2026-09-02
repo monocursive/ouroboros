@@ -93,6 +93,7 @@ defmodule Ouroboros.Wasm.Deploy do
           required(:name) => String.t(),
           required(:author) => String.t(),
           required(:imports) => [String.t()],
+          optional(:kind) => :capability | :policy,
           optional(:language) => String.t() | nil,
           optional(:source_sha256) => String.t() | nil,
           optional(:start_config) => String.t() | nil,
@@ -103,8 +104,14 @@ defmodule Ouroboros.Wasm.Deploy do
   Signs the component staged under `attrs.upload` and answers the bundle's prefix.
 
   `attrs.imports` is required: this node does not read a component to find out (see the
-  moduledoc). Options are test seams and nothing else: `:upload_root`, `:signing_service`,
-  `:signing_node`, `:epoch_nodes`, `:epoch_opts`.
+  moduledoc). `attrs.kind` is `:capability` (the default) or `:policy` and decides the world
+  the manifest declares (W15, contract C7); it is a parameter rather than something derived,
+  because deriving it would mean parsing the unsigned bytes this module refuses to parse, and
+  a client that declares the wrong one is refused at stage by the helper's world check exactly
+  as a client that declares the wrong imports is.
+
+  Options are test seams and nothing else: `:upload_root`, `:signing_service`, `:signing_node`,
+  `:epoch_nodes`, `:epoch_opts`.
   """
   @spec sign(sign_attrs(), keyword()) :: {:ok, map()} | {:error, term()}
   def sign(attrs, opts \\ [])
@@ -345,13 +352,28 @@ defmodule Ouroboros.Wasm.Deploy do
   end
 
   defp build(bytes, attrs, imports, epoch) do
+    kind = kind(attrs)
+
     Artifact.build(bytes, [
       {:name, Map.get(attrs, :name)},
       {:epoch, epoch},
       {:imports, imports},
-      {:world, Wasm.world()},
+      {:kind, kind},
+      # Derived from the kind rather than taken beside it, so a request cannot produce a
+      # manifest whose two halves disagree; the signing policy checks the pair again.
+      {:world, Wasm.world_for(kind)},
       {:metadata, metadata(attrs)}
     ])
+  end
+
+  # An unrecognized kind is refused rather than defaulted: `:capability` is what an *absent*
+  # kind means, and a caller that named one this build does not implement has said something
+  # this build cannot honour either way.
+  defp kind(attrs) do
+    case Map.get(attrs, :kind, :capability) do
+      kind when kind in [:capability, :policy] -> kind
+      other -> other
+    end
   end
 
   # Only the keys `Ouroboros.Wasm.Artifact` names, and only where a value was given: a
@@ -389,6 +411,7 @@ defmodule Ouroboros.Wasm.Deploy do
       epoch: artifact.epoch,
       component_sha256: artifact.component_sha256,
       size: artifact.size,
+      kind: artifact.kind,
       world: artifact.world,
       imports: artifact.imports,
       created_at: artifact.created_at,

@@ -144,6 +144,101 @@ const SINK_HANDLE: &str = r#"
       (local.get $ret))
 "#;
 
+// -------------------------------------------------------------------- the policy world (W15)
+
+/// An `evaluate` that answers a fixed verdict document whatever it is handed.
+///
+/// The core signature is the one difference between the two worlds that matters at this level:
+/// `evaluate: func(string) -> string` lifts out of a two-word return area (`{ptr, len}`), where
+/// `handle-message: func(string) -> result<string, string>` lifts out of three (`{tag, ptr,
+/// len}`). A capability's `handle_message` therefore cannot be lifted as an `evaluate`, and the
+/// reverse is equally impossible — which is exactly what `world::check` reads when it tells the
+/// two worlds apart.
+fn evaluate_answering(verdict: &str) -> String {
+    let len = verdict.len();
+    // WAT data strings are double-quoted, and a verdict is JSON, which is mostly quotes.
+    let escaped = verdict.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        r#"
+    (data (i32.const 128) "{escaped}")
+    (func (export "evaluate") (param i32 i32) (result i32)
+      (local $ret i32)
+      (local.set $ret (call $realloc (i32.const 0) (i32.const 0) (i32.const 4) (i32.const 8)))
+      (i32.store (local.get $ret) (i32.const 128))
+      (i32.store offset=4 (local.get $ret) (i32.const {len}))
+      (local.get $ret))
+"#
+    )
+}
+
+/// The component wrapper for the policy world: the same `describe` and `init` a capability
+/// lifts, and `evaluate` in place of `handle-message`.
+const POLICY_LIFT: &str = r#"
+  (alias core export $i "memory" (core memory $mem))
+  (alias core export $i "realloc" (core func $realloc))
+  (alias core export $i "describe" (core func $c_describe))
+  (alias core export $i "init" (core func $c_init))
+  (alias core export $i "evaluate" (core func $c_evaluate))
+
+  (func (export "describe") (result string)
+    (canon lift (core func $c_describe) (memory $mem) (realloc $realloc)))
+  (func (export "init") (param "config" string) (result (result (error string)))
+    (canon lift (core func $c_init) (memory $mem) (realloc $realloc)))
+  (func (export "evaluate") (param "request" string) (result string)
+    (canon lift (core func $c_evaluate) (memory $mem) (realloc $realloc)))
+"#;
+
+/// Both worlds' message exports on one component: `describe` and `init` once, `handle-message`
+/// and `evaluate` beside each other.
+const BOTH_LIFT: &str = r#"
+  (alias core export $i "memory" (core memory $mem))
+  (alias core export $i "realloc" (core func $realloc))
+  (alias core export $i "describe" (core func $c_describe))
+  (alias core export $i "init" (core func $c_init))
+  (alias core export $i "handle_message" (core func $c_handle))
+  (alias core export $i "evaluate" (core func $c_evaluate))
+
+  (func (export "describe") (result string)
+    (canon lift (core func $c_describe) (memory $mem) (realloc $realloc)))
+  (func (export "init") (param "config" string) (result (result (error string)))
+    (canon lift (core func $c_init) (memory $mem) (realloc $realloc)))
+  (func (export "handle-message") (param "body" string) (result (result string (error string)))
+    (canon lift (core func $c_handle) (memory $mem) (realloc $realloc)))
+  (func (export "evaluate") (param "request" string) (result string)
+    (canon lift (core func $c_evaluate) (memory $mem) (realloc $realloc)))
+"#;
+
+/// A guest in `ouroboros:policy@0.1.0` that answers `verdict` to every request. Imports nothing,
+/// like every hand-written fixture here that is not about `log`.
+pub fn policy(verdict: &str) -> Vec<u8> {
+    let prelude = trivial_prelude("policy", TRIVIAL_INIT);
+    let evaluate = evaluate_answering(verdict);
+    assemble(&format!(
+        r#"(component
+  (core module $m{ALLOC}{prelude}{evaluate}
+  )
+  (core instance $i (instantiate $m)){POLICY_LIFT})"#
+    ))
+}
+
+/// A guest that exports **both** worlds' message functions with both worlds' signatures.
+///
+/// It exists to pin the one thing two closed worlds in one helper could get wrong: which world
+/// a set of bytes is admitted to has to be the caller's assertion and never a property this
+/// helper infers, because bytes that satisfy both would otherwise be admitted to whichever
+/// reading happened to run first. Extra exports are not a refusal — `world::check` skips names
+/// outside its own table — so this is a legal component in both worlds at once.
+pub fn ambidextrous() -> Vec<u8> {
+    let prelude = trivial_prelude("both", TRIVIAL_INIT);
+    let evaluate = evaluate_answering(r#"{"decision":"deny","rule":"both worlds"}"#);
+    assemble(&format!(
+        r#"(component
+  (core module $m{ALLOC}{prelude}{SINK_HANDLE}{evaluate}
+  )
+  (core instance $i (instantiate $m)){BOTH_LIFT})"#
+    ))
+}
+
 fn assemble(text: &str) -> Vec<u8> {
     wat::parse_str(text).unwrap_or_else(|error| panic!("guest does not assemble: {error}\n{text}"))
 }

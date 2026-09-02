@@ -215,10 +215,13 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
      `component_sha256`, positive `size` within `:signing_max_artifact_bytes` — the same
      bound the BEAM lane's submissions are held to — a string world, a list of string
      imports, a plain map for metadata.
-  2. **World.** `world == Ouroboros.Wasm.world()`. This is the namespace rule's analogue
-     and it is just as hard: there is no configuration that widens it. A signer that can
-     be argued into signing a component for a world this build does not implement is a
-     signer that has certified a linker contract nobody here can honour.
+  2. **World, and the kind it follows from.** `kind` is `:capability` or `:policy`, and
+     `world == Ouroboros.Wasm.world_for(kind)`. This is the namespace rule's analogue and it
+     is just as hard: there is no configuration that widens it. A signer that can be argued
+     into signing a component for a world this build does not implement is a signer that has
+     certified a linker contract nobody here can honour — and one that signed a `:policy`
+     manifest carrying the capability world would have certified a permission engine's
+     component into a world the model can send messages to (W15, contract C7).
   3. **Recomputation.** The submitted component bytes arrive in `context.component_bytes`
      — the same posture as the advisory payload, supplied per request — and the sha256
      and the size are recomputed from them. Absent bytes are a refusal
@@ -238,6 +241,14 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
      `language`, and `test_report` are optional and are checked for shape when present:
      a guest toolchain that produces a test report is welcome to say so, and lane W does
      not pretend one exists when it does not.
+  A **policy** manifest differs in exactly two more places, and both follow from what a policy
+  component is. Its `eval` spec is a list of `{request, expect: {decision}}` cases validated by
+  `Ouroboros.Wasm.PolicyEngine.validate_eval/1` rather than a probe spec over agent state — a
+  policy is not a mesh agent, so the capability grammar says nothing about one. And it may
+  **not** declare a `start` block: `metadata.start` is the claim "this runs continuously under
+  this durable mesh id", and a policy component has no wrapper agent, is reached only by the
+  permission engine, and would be claiming a cluster-wide id nothing starts.
+
   6. **Start block.** `metadata.start`, when present, must be exactly
      `%{id: binary, config: binary}` and the id must be exactly `"wasm/" <> name` for the
      name in *this* manifest. It is the claim "this capability runs continuously under this
@@ -331,13 +342,14 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
          {:ok, recomputed} <- check_component_bytes(artifact, context),
          :ok <- check_imports(artifact),
          {:ok, provenance} <- check_wasm_provenance(artifact.metadata),
-         {:ok, eval} <- check_wasm_eval(artifact.metadata, context),
+         {:ok, eval} <- check_wasm_eval(artifact, context),
          {:ok, start} <- check_start(artifact) do
       {:ok,
        %{
          lane: :wasm,
          epoch: artifact.epoch,
          name: artifact.name,
+         kind: artifact.kind,
          world: artifact.world,
          component_sha256: artifact.component_sha256,
          size: artifact.size,
@@ -663,6 +675,11 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
       not Wasm.Artifact.sha256?(artifact.component_sha256) ->
         {:refused, {:invalid_component_sha256, describe(artifact.component_sha256)}}
 
+      # W15. A closed set of two, checked here rather than assumed, because everything below
+      # branches on it: the world, the eval grammar and whether a start block is legal.
+      not Wasm.Artifact.kind?(artifact.kind) ->
+        {:refused, {:invalid_component_kind, describe(artifact.kind)}}
+
       not is_integer(artifact.size) or artifact.size <= 0 ->
         {:refused, {:invalid_component_size, describe(artifact.size)}}
 
@@ -723,8 +740,14 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
   # The lane-W analogue of the capability namespace, and hard for the same reason. A world
   # is a linker contract; certifying one this build does not implement would be certifying
   # a contract nobody on any loading node can honour.
-  defp check_world(%Wasm.Artifact{world: world}) do
-    if world == Wasm.world(), do: :ok, else: {:refused, {:world_not_supported, world}}
+  defp check_world(%Wasm.Artifact{world: world, kind: kind}) do
+    # The world a *kind* requires, not merely a world this build implements. Both are supported
+    # worlds, so comparing against a set would have signed a `:policy` manifest carrying the
+    # capability world — and the loading node would then hand the helper `kind: :policy` for
+    # bytes whose manifest said otherwise, which is a quarantine at best.
+    if world == Wasm.world_for(kind),
+      do: :ok,
+      else: {:refused, {:world_not_supported, world}}
   end
 
   # The bytes are the request's, not the manifest's. Absent bytes are a refusal rather
@@ -836,23 +859,43 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
     end
   end
 
-  # Same validator and same refusal as the BEAM arm; only the default of the switch
-  # differs, and the moduledoc says why.
-  defp check_wasm_eval(metadata, context) do
+  # Same posture as the BEAM arm — required by default, D12 — with one branch on the kind. A
+  # capability's spec is a probe list over the wrapper agent's state; a policy's is a list of
+  # permission requests and the decision this component must reach about each. They are
+  # different grammars because they judge different things, and validating one against the
+  # other's validator would refuse every honest spec in the lane it was not written for.
+  defp check_wasm_eval(%Wasm.Artifact{metadata: metadata, kind: kind}, context) do
     required? = Map.get(context, :require_wasm_eval, true) == true
 
     case {required?, Map.get(metadata, :eval)} do
       {false, nil} -> {:ok, :absent}
       {true, nil} -> {:refused, :eval_spec_required}
-      {required?, spec} -> validated_eval(spec, required?)
+      {required?, spec} -> validated_eval(spec, kind, required?)
     end
   end
 
-  defp validated_eval(spec, required?) do
-    case Evaluation.validate(spec) do
+  defp validated_eval(spec, kind, required?) do
+    validate =
+      case kind do
+        :policy -> &Wasm.PolicyEngine.validate_eval/1
+        _capability -> &Evaluation.validate/1
+      end
+
+    case validate.(spec) do
       {:ok, _valid} -> {:ok, if(required?, do: :required_and_valid, else: :present)}
-      # `Evaluation.validate/1` already names its failures `{:invalid_eval_spec, _}`.
+      # Both validators already name their failures `{:invalid_eval_spec, _}`.
       {:error, reason} -> {:refused, reason}
+    end
+  end
+
+  defp check_start(%Wasm.Artifact{kind: :policy, metadata: metadata}) do
+    # W15. A start block is the claim "this component runs continuously under this durable mesh
+    # id". A policy component has no wrapper agent and is reached only by the permission engine,
+    # so a start block on one is a claim on a cluster-wide id that nothing will ever start —
+    # and an id the register would hold against a component no message can reach.
+    case Map.get(metadata, :start) do
+      nil -> {:ok, :absent}
+      _declared -> {:refused, {:invalid_start, :policy_components_do_not_start}}
     end
   end
 

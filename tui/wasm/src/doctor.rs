@@ -39,8 +39,8 @@ pub fn report(census: Option<host::Census>) -> Value {
     let engine = wasmtime::Engine::new(&host::config());
     let mut notes = vec![
         format!(
-            "the linker defines exactly one host function, `{}`; there is no WASI at any \
-             version, so any other import fails to instantiate",
+            "the linker defines exactly one host function, `{}`, for both worlds; there is no \
+             WASI at any version, so any other import fails to instantiate",
             world::LOG
         ),
         "every instance runs under fuel, an epoch deadline, a memory ceiling summed across its \
@@ -83,7 +83,10 @@ pub fn report(census: Option<host::Census>) -> Value {
     let mut report = json!({
         "usable": engine.is_ok(),
         "wasmtime": WASMTIME_VERSION,
-        "worlds": [world::ID],
+        // Both worlds this build implements, in `world::KINDS` order. A `load` says which of
+        // them it is offering bytes as, and a component admitted to one is not admitted to the
+        // other (docs/WASM.md D21).
+        "worlds": world::KINDS.map(|kind| kind.id()),
         "imports": [world::LOG],
         "limits": {
             "max_fuel": host::MAX_FUEL,
@@ -158,7 +161,13 @@ mod tests {
         // Every machine this suite runs on can build an engine; if one cannot, the assertion
         // below is the right place to find that out.
         assert_eq!(report["usable"], true);
-        assert_eq!(report["worlds"][0], world::ID);
+        assert_eq!(report["worlds"][0], world::CAPABILITY_ID);
+        assert_eq!(report["worlds"][1], world::POLICY_ID);
+        assert_eq!(
+            report["worlds"].as_array().map(Vec::len),
+            Some(world::KINDS.len()),
+            "doctor reports exactly the worlds this build implements"
+        );
         assert_eq!(report["imports"][0], world::LOG);
         assert_eq!(report["held"]["components"], 2);
         assert_eq!(report["held"]["instances"], 1);

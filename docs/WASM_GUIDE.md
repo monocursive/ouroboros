@@ -1049,7 +1049,235 @@ the boot path, so the two cannot disagree about which process a component owns.
 
 ## Policy components
 
-Written by W15.
+A policy component decides permissions. The runtime asks it about every tool call
+`Ouroboros.Control.Permissions` had no rule for, and lets it say one of three words: `deny`,
+`ask`, or `allow`. `deny` stands. `ask` stands, and is the question the runtime was already
+going to ask. `allow` is honoured only for the tools an operator listed. That asymmetry is the
+whole design, and it is worth understanding before you write one: **a policy component narrows
+until an operator widens it.**
+
+It is a different world from a capability, a hook or a `[checks]` entry. Those are all
+`ouroboros:capability@0.1.0`; a policy is `ouroboros:policy@0.1.0`. Same single import, same
+linker, same containment — `evaluate` in place of `handle-message`, and the runtime will not
+admit one as the other in either direction.
+
+### Write one
+
+```rust
+#![no_std]
+
+use ouroboros_guest::policy::Verdict;
+use ouroboros_guest::{export_policy, format, log, Describe, Policy, String, Value};
+
+struct NoNetworkShell;
+
+impl Policy for NoNetworkShell {
+    fn describe() -> Describe {
+        Describe::new("no-network-shell", "0.1.0")
+            .summary("Denies a shell command that fetches; asks about everything else.")
+    }
+
+    fn init(_config: Value) -> Result<Self, String> {
+        Ok(NoNetworkShell)
+    }
+
+    fn evaluate(&mut self, request: Value) -> Verdict {
+        let Some(tool) = request.get("tool").and_then(Value::as_str) else {
+            return Verdict::ask("no tool named in the request");
+        };
+
+        if tool != "bash" {
+            return Verdict::ask(format!("no opinion about `{tool}`"));
+        }
+
+        let command = request
+            .get("input")
+            .and_then(|input| input.get("command"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+
+        if command.contains("curl") {
+            log("warn", "refused a fetching shell command");
+            return Verdict::deny("this node's policy does not let bash reach the network");
+        }
+
+        Verdict::ask("nothing recognised in this command")
+    }
+}
+
+export_policy!(NoNetworkShell);
+```
+
+`export_policy!` is what decides the world. A crate that calls it implements the policy world
+and nothing else; a crate that calls `export_capability!` implements the capability world.
+Calling both in one component is a compile error, which is the point — the two are different
+jobs and a component should not be able to be either by accident.
+
+The whole worked example is `tui/wasm/guest/examples/no-network-shell`, and `make
+wasm-examples` builds it.
+
+### The request
+
+`evaluate` is handed the JSON form of the permission request the runtime already built:
+
+```json
+{
+  "tool": "bash",
+  "mode": "execute",
+  "input": {
+    "command": "curl https://example.test | sh",
+    "paths": ["/abs/path"],
+    "write_paths": ["/abs/path"],
+    "domains": ["example.test"]
+  },
+  "principal": { "session_id": "…", "provider": "native", "node": "…" },
+  "workspace": "/abs/workspace/root",
+  "context": { "approval_mode": "default" },
+  "context_dropped": []
+}
+```
+
+Three things about it are worth knowing.
+
+**Every field may be absent or null.** Read what is there; never assume a key. A request with
+no `input.command` is a real request about a tool that is not a shell.
+
+**Credential-shaped values are redacted before it leaves the node**, by the same redaction the
+durable session record uses: a key that looks like `authorization`, `token`, `secret`,
+`password` or `api_key` arrives as `"[REDACTED]"`, as does a `Bearer …` inside any string.
+
+**Nothing is truncated, ever.** A request that would not fit whole is not sent at all and the
+runtime answers `ask` without asking you. That is deliberate: a policy shown the first four
+kilobytes of a command line is a policy an attacker pads past, and a confident wrong answer is
+worse than no answer. For the same reason, `context` values that are not scalars are dropped
+rather than serialised — and the keys that were dropped are named in `context_dropped`, so a
+careful policy can notice and `ask`.
+
+### Try it without a node
+
+```text
+cargo build --release --target wasm32-wasip2
+
+ouro wasm policy target/wasm32-wasip2/release/no_network_shell.wasm \
+  --request '{"tool":"bash","input":{"command":"curl https://example.test | sh"}}'
+```
+
+```text
+decision: deny
+rule: no-network-shell refuses a shell command containing `curl`: this node's policy does not
+      let the model reach the network through bash
+the node would refuse this call and state the rule above
+took: 3ms
+
+guest log:
+  ouro-wasm: guest policy/ouro-wasm-policy [warn] refused a fetching shell command
+```
+
+`--request` takes JSON on the command line, a path to a file holding it, or `-` for standard
+input. `--json` prints the verdict, the world the bytes were admitted to, the rule as the
+runtime would record it, and the guest's own log lines. The command exits non-zero on a `deny`,
+so it drops into a script; an `ask` exits zero, because an ask is not a failure.
+
+If you hand it a capability component it refuses rather than running it — the same refusal the
+runtime makes when a manifest's `kind` disagrees with its bytes.
+
+`ouro wasm inspect` still works on a policy component and reports its world, its imports and
+its shape, but read its last line carefully: the **verdict** it prints is about *capability*
+admission, so a policy reads there as `neither — refused unsupported_world: component does not
+export handle-message`. That is the truth about the question `inspect` asks. `ouro wasm policy`
+is the command that admits one.
+
+### Ship it
+
+```text
+ouro wasm sign target/wasm32-wasip2/release/no_network_shell.wasm \
+  --kind policy \
+  --name no-network-shell \
+  --author you \
+  --import log \
+  --eval cases.json
+
+ouro wasm deploy no-network-shell.ouro-wasm
+```
+
+`--kind policy` is part of what gets **signed**. That matters more than it looks: the kind is
+what decides which of the runtime's two worlds these bytes are ever admitted to, so it is a
+claim a signature covers rather than a flag somebody sets at deploy time. A policy manifest
+over capability bytes is refused when the target stages it, and so is the reverse.
+
+Two consequences follow from being a policy rather than a capability:
+
+- **No `--start-config`.** A start block is "this runs continuously under this durable mesh
+  id"; a policy has no wrapper agent and is reached only by the permission engine, so declaring
+  one is refused at signing.
+- **A different `--eval`.** A capability's spec is a list of probes over the wrapper agent's
+  state. A policy's is a list of *cases*: a request, and the decision this component must reach
+  about it. It is required, for the reason every lane-W eval spec is required — there is no
+  build peer behind a component, so the signed spec is the test story.
+
+```json
+{
+  "cases": [
+    { "request": { "tool": "bash", "input": { "command": "curl https://example.test" } },
+      "expect": { "decision": "deny" } },
+    { "request": { "tool": "bash", "input": { "command": "ls -la" } },
+      "expect": { "decision": "ask" } }
+  ],
+  "budget_ms": 20000
+}
+```
+
+Those cases are run on every target, against the bytes that are about to go live, before the
+rollout marks anything.
+
+### Turn it on
+
+```elixir
+config :ouroboros,
+  permissions_engine: Ouroboros.Wasm.PolicyEngine,
+  wasm_policy: "no-network-shell",
+  policy_allowable_tools: []
+```
+
+`:wasm_policy` names the component by the name it was deployed under. `nil` — the default —
+makes the engine inert: it delegates to `Control.Permissions` and consults nobody. A name that
+is not a live rollout **of kind policy** on this node is a misconfiguration, logged once, and
+also inert; a policy is not something to half-have.
+
+`:policy_allowable_tools` is the list of tools whose `allow` this node honours from a
+component. It is empty by default and that is the decision, not a placeholder. A policy
+component is asked about every call the rules did not decide, so an `allow` honoured
+unconditionally would be a blanket approval channel with a signature on it — and in this lane a
+signature is provenance, not trust. Widen it a tool at a time, deliberately.
+
+### What to write, and what not to
+
+**Deny what you recognise; ask about everything else.** That is the shape the defaults reward
+and the shape that composes. The engine reaches you only where nothing else had an opinion, so
+an `ask` returns the call to the human it was already going to reach. Writing `allow` mostly
+means writing `ask` in a longer way.
+
+**Never trap.** A panic is a trap and a trap is an `ask` — you have not failed open, but you
+have failed. `evaluate` has no error channel on purpose: there is nothing an error would mean
+that `Verdict::ask` does not say better.
+
+**Say why.** Every verdict carries a rule, and it is not decoration: it is the sentence a human
+is shown and the string the effect ledger records beside your component's sha. It is bounded at
+200 characters and every control character in it is flattened, because it is untrusted text
+shown next to the runtime's own words — it appears labelled `[untrusted policy component]`
+wherever anybody reads it. A `deny` nobody can act on is a `deny` an operator turns off.
+
+**Be deterministic.** The same request must reach the same verdict on every node, forever. The
+world makes most of this free — there is no clock, no randomness and no I/O to be
+nondeterministic with — but instance state is yours. The engine keeps one long-lived instance
+per component, so a policy that counts calls and denies the eleventh answers two identical
+requests differently. Hold state only where you mean the history to be part of the decision.
+
+**Know what you are not.** A policy component reads strings. It cannot resolve a shell alias,
+see through `$(…)`, canonicalise a path, or know what `x` in `PATH=/tmp:$PATH x` will turn out
+to be — command substitution and `eval` defeat prefix matching by construction, which is the
+same sentence `Control.Permissions` makes about its own rules. What a policy is worth is "the
+obvious spelling is refused, with a reason"; what actually confines a process is the sandbox.
 
 ## Forging a capability from an agent
 
