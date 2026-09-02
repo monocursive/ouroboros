@@ -25,7 +25,13 @@ const HELPER: &str = env!("CARGO_BIN_EXE_ouro-wasm");
 /// Generous enough that a debug-build compile of a component is never the reason a test fails,
 /// and short enough that a guest which escaped its deadline is reported as a failure rather than
 /// hanging the suite until CI's own timeout.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
+// Two minutes, not one: the slowest answer this suite waits for is the compile of the worst
+// component the helper admits, which the dev profile keeps under ten seconds on a laptop
+// (`tui/Cargo.toml` optimises the compiler's crates for exactly this) and which a hosted
+// runner has been measured to take several times longer. A helper that is genuinely stuck
+// costs a failing test two minutes instead of one; a helper that is merely slow on a small
+// machine no longer fails a proof that was never about the clock.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Bounds every guest here runs under unless a test is specifically about one of them.
 const FUEL: u64 = 1_000_000_000;
@@ -1265,8 +1271,10 @@ const GUEST_FUNCTIONS: usize = 4;
 /// walk its section headers; nothing is compiled.
 ///
 /// The assertion below is on the refusal and the admission, not on the clock: this suite is
-/// built with `cargo test`, and a debug wasmtime compiles the same bytes in 27 s. `REPLY_TIMEOUT`
-/// is the only wall-clock claim that survives both profiles.
+/// built with `cargo test`, and a wholly-debug wasmtime compiled the same bytes in 27 s here
+/// and past a 60 s reply window on a hosted runner. `tui/Cargo.toml` therefore optimises the
+/// compiler's own crates in the dev profile, which brings this test under ten seconds on a
+/// laptop, and `REPLY_TIMEOUT` is the only wall-clock claim that survives both profiles.
 #[test]
 fn the_worst_component_this_helper_will_compile_is_bounded_and_reachable() {
     let mut helper = Helper::spawn(&[]);
