@@ -457,6 +457,63 @@ defmodule Ouroboros.Wasm.SurfaceTest do
     end
   end
 
+  describe "the OS sandbox posture is its own half of the answer (W16, D25)" do
+    test "a running pool's posture is what the status reports, rendered and cut", context do
+      seed_store!(context)
+
+      live = Surface.status([pool: counting_pool(doctor_report())] ++ opts(context))
+
+      assert live.sandbox == %{posture: :sandboxed, backend: "sandbox-exec", reason: nil}
+    end
+
+    test "a refusal names its reason as prose, never as a term a client would branch on",
+         context do
+      seed_store!(context)
+
+      {:ok, pid} =
+        CountingPool.start_link(%{
+          phase: :broken,
+          helper_path: "/fake/ouro-wasm",
+          os_pid: nil,
+          doctor: nil,
+          instances: 0,
+          owned: 0,
+          pending_drops: 0,
+          hook_components: 0,
+          sandbox: %{
+            posture: :refused,
+            backend: "ouro-sandbox",
+            reason: {:cannot_fence_reads, :ouro_sandbox}
+          },
+          broken_reason: {:helper_sandbox_unavailable, {:cannot_fence_reads, :ouro_sandbox}}
+        })
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+
+      live = Surface.status([pool: pid] ++ opts(context))
+
+      assert live.sandbox.posture == :refused
+      assert live.sandbox.backend == "ouro-sandbox"
+      assert is_binary(live.sandbox.reason)
+      assert live.sandbox.reason =~ "cannot_fence_reads"
+
+      # `:refused` means there is no helper on that node, so the two halves agree.
+      assert live.helper.phase == :broken
+      assert live.helper.os_pid == nil
+    end
+
+    test "a node with no pool has taken no posture, and says so with nulls", context do
+      seed_store!(context)
+
+      # Nobody has asked this node for a helper, so nothing has decided — and "no posture" is
+      # not "off", the same rule `usable` follows. `phase: :absent` is the other half of it.
+      live = Surface.status([pool: :ouro_wasm_pool_that_was_never_started] ++ opts(context))
+
+      assert live.sandbox == %{posture: nil, backend: nil, reason: nil}
+      assert live.helper.phase == :absent
+    end
+  end
+
   describe "the fixtures and the live verbs describe the same shape" do
     test "wasm.status: every key path the pinned frame has, and no other", context do
       seed_store!(context)
@@ -578,6 +635,9 @@ defmodule Ouroboros.Wasm.SurfaceTest do
         owned: 1,
         pending_drops: 0,
         hook_components: 3,
+        # W16, D25. A pool answers what its child's posture is; the fixture's is the ordinary
+        # one, because that is what a working node reports.
+        sandbox: %{posture: :sandboxed, backend: "sandbox-exec", reason: nil},
         broken_reason: nil
       })
 

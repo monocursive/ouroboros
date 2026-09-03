@@ -184,9 +184,20 @@ defmodule Ouroboros.Wasm.PoolAcceptanceTest do
 
   ## Helpers
 
+  # W16. The helper is spawned under the OS sandbox by default now, so a pool has to be told
+  # the two node-local roots a real node reads from its own configuration: where its scratch
+  # goes, and what its components may be read from. Here both are this test's own directory —
+  # which is also what the pool refuses a `load` outside of, so the fence and the kernel are
+  # measuring the same list. Nothing in this file turns the sandbox off.
   defp start_pool do
     name = :"wasm_acceptance_#{System.unique_integer([:positive])}"
-    {:ok, pid} = Pool.start(name: name)
+
+    {:ok, pid} =
+      Pool.start(
+        name: name,
+        readable: [tmp_dir()],
+        scratch_root: Path.join(tmp_dir(), "scratch")
+      )
 
     on_exit(fn ->
       if Process.alive?(pid) do
@@ -207,12 +218,24 @@ defmodule Ouroboros.Wasm.PoolAcceptanceTest do
     path
   end
 
+  # One directory per *test*, not per call: the pool is told to read it and the components are
+  # written into it, and two directories would mean a component the fence has never heard of.
   defp tmp_dir do
-    dir =
-      Path.join(System.tmp_dir!(), "ouro-wasm-acceptance-#{System.unique_integer([:positive])}")
+    case Process.get(:wasm_acceptance_tmp) do
+      dir when is_binary(dir) ->
+        dir
 
-    File.mkdir_p!(dir)
-    on_exit(fn -> File.rm_rf(dir) end)
-    dir
+      nil ->
+        dir =
+          Path.join(
+            System.tmp_dir!(),
+            "ouro-wasm-acceptance-#{System.unique_integer([:positive])}"
+          )
+
+        File.mkdir_p!(dir)
+        Process.put(:wasm_acceptance_tmp, dir)
+        on_exit(fn -> File.rm_rf(dir) end)
+        dir
+    end
   end
 end

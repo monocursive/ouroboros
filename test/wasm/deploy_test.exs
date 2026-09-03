@@ -16,6 +16,7 @@ defmodule Ouroboros.Wasm.DeployTest do
   alias Ouroboros.Wasm.Download
   alias Ouroboros.Wasm.Pool
   alias Ouroboros.Wasm.Rollout
+  alias Ouroboros.Wasm.SandboxFixture
   alias Ouroboros.Wasm.Store
   alias Ouroboros.Wasm.Upload
 
@@ -461,7 +462,7 @@ defmodule Ouroboros.Wasm.DeployTest do
   describe "against the real helper, end to end" do
     @tag @needs_live
     test "sign, bundle, deploy, talk to it, roll it back", context do
-      pool = live_pool!()
+      pool = live_pool!(context)
       name = "deploy-test-#{System.unique_integer([:positive])}"
       id = "wasm/" <> name
       on_exit(fn -> Mesh.stop_agent(id) end)
@@ -945,9 +946,15 @@ defmodule Ouroboros.Wasm.DeployTest do
     end
   end
 
-  defp live_pool! do
+  # W16: told where this test's store and scratch are, because the helper is spawned under
+  # the OS sandbox and reads only the roots it is named.
+  defp live_pool!(context) do
     name = :"wasm_deploy_pool_#{System.unique_integer([:positive])}"
-    {:ok, pid} = Pool.start(name: name, handshake_timeout_ms: 15_000)
+
+    {:ok, pid} =
+      Pool.start(
+        [name: name, handshake_timeout_ms: 15_000] ++ SandboxFixture.pool_opts(context.tmp)
+      )
 
     on_exit(fn ->
       if Process.alive?(pid) do

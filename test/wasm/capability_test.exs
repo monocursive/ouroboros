@@ -8,6 +8,7 @@ defmodule Ouroboros.Wasm.CapabilityTest do
   alias Ouroboros.Wasm
   alias Ouroboros.Wasm.Capability
   alias Ouroboros.Wasm.Pool
+  alias Ouroboros.Wasm.SandboxFixture
   alias Ouroboros.Wasm.Store
 
   # A helper whose `worlds` does not include this node's is refused at the handshake, so the
@@ -1115,7 +1116,7 @@ defmodule Ouroboros.Wasm.CapabilityTest do
     %{
       journal: journal,
       describe_journal: describe_journal,
-      pool: start_pool(helper),
+      pool: start_pool(helper, dir),
       root: root,
       sha: sha
     }
@@ -1197,11 +1198,17 @@ defmodule Ouroboros.Wasm.CapabilityTest do
     journal |> requests() |> Enum.find(&(&1["method"] == method))
   end
 
-  defp start_pool(helper_path) do
+  # W16. The helper is spawned under the OS sandbox, so the pool is told where this test's
+  # own roots are — its components, its scripted helper's journals, and a scratch — exactly as
+  # a node reads its own out of `:data_dir`. Nothing here turns the sandbox off.
+  defp start_pool(helper_path, dir) do
     name = :"wasm_capability_pool_#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
-      Pool.start(name: name, helper_path: helper_path, handshake_timeout_ms: 15_000)
+      Pool.start(
+        [name: name, helper_path: helper_path, handshake_timeout_ms: 15_000] ++
+          SandboxFixture.pool_opts(dir)
+      )
 
     on_exit(fn ->
       if Process.alive?(pid) do

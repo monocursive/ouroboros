@@ -18,6 +18,7 @@ defmodule Ouroboros.Wasm.ForgeTest do
   alias Ouroboros.Wasm.Forge
   alias Ouroboros.Wasm.ForgeFixture
   alias Ouroboros.Wasm.Pool
+  alias Ouroboros.Wasm.SandboxFixture
 
   @moduletag :capture_log
 
@@ -1071,7 +1072,7 @@ defmodule Ouroboros.Wasm.ForgeTest do
 
   # The signer, the trust policy, the register and the helper pool a live forge needs, in the
   # shape `test/wasm/deploy_test.exs` already establishes them.
-  defp live!(_context) do
+  defp live!(context) do
     tmp = Path.join(System.tmp_dir!(), "ouro-forge-live-#{System.unique_integer([:positive])}")
     File.mkdir_p!(tmp)
     on_exit(fn -> File.rm_rf(tmp) end)
@@ -1124,7 +1125,16 @@ defmodule Ouroboros.Wasm.ForgeTest do
     end)
 
     pool_name = :"wasm_forge_pool_#{System.unique_integer([:positive])}"
-    {:ok, pool} = Pool.start(name: pool_name, handshake_timeout_ms: 15_000)
+
+    # W16: the helper is spawned under the OS sandbox, and what this pool is asked to read is
+    # the **build product** — `Ouroboros.Wasm.Forge` reads the imports off bytes it just built
+    # (D18) — so the build tree and this fixture's own tree are both named.
+    {:ok, pool} =
+      Pool.start(
+        [name: pool_name, handshake_timeout_ms: 15_000]
+        |> Keyword.merge(SandboxFixture.pool_opts(tmp))
+        |> Keyword.update!(:readable, &[context.tmp | &1])
+      )
 
     on_exit(fn ->
       if Process.alive?(pool) do

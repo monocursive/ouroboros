@@ -4505,6 +4505,11 @@ Pinned result, `wasm_status_result.json`:
       },
       "total": 3
     },
+    "sandbox": {
+      "backend": "sandbox-exec",
+      "posture": "sandboxed",
+      "reason": null
+    },
     "store": {
       "budget_bytes": 536870912,
       "bytes": 3145728,

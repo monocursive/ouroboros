@@ -20,6 +20,7 @@ defmodule Ouroboros.Wasm.HooksAcceptanceTest do
   alias Ouroboros.Wasm
   alias Ouroboros.Wasm.LiveFixture
   alias Ouroboros.Wasm.Pool
+  alias Ouroboros.Wasm.SandboxFixture
 
   @guest Path.expand("../support/wasm/echo.wasm", __DIR__)
 
@@ -359,9 +360,16 @@ defmodule Ouroboros.Wasm.HooksAcceptanceTest do
     end
   end
 
+  # W16. Since W16 the helper is spawned under the OS sandbox by default, so a pool is told
+  # where this test's own roots are — its components and a scratch — exactly as a node reads
+  # its own out of `:data_dir`. Nothing in this file turns the sandbox off.
   defp start_pool do
     name = :"wasm_hooks_pool_#{System.unique_integer([:positive])}"
-    {:ok, pid} = Pool.start(name: name, handshake_timeout_ms: 15_000)
+
+    {:ok, pid} =
+      Pool.start(
+        [name: name, handshake_timeout_ms: 15_000] ++ SandboxFixture.pool_opts(tmp_dir())
+      )
 
     on_exit(fn ->
       if Process.alive?(pid) do
@@ -376,10 +384,22 @@ defmodule Ouroboros.Wasm.HooksAcceptanceTest do
     pid
   end
 
+  # One directory per *test* since W16, not per call: the pool is told to read it and the
+  # components are written into it, and two directories would mean a component the fence has
+  # never heard of.
   defp tmp_dir do
-    dir = Path.join(System.tmp_dir!(), "ouro-wasm-hooks-#{System.unique_integer([:positive])}")
-    File.mkdir_p!(dir)
-    on_exit(fn -> File.rm_rf(dir) end)
-    dir
+    case Process.get(:wasm_hooks_tmp) do
+      dir when is_binary(dir) ->
+        dir
+
+      nil ->
+        dir =
+          Path.join(System.tmp_dir!(), "ouro-wasm-hooks-#{System.unique_integer([:positive])}")
+
+        File.mkdir_p!(dir)
+        Process.put(:wasm_hooks_tmp, dir)
+        on_exit(fn -> File.rm_rf(dir) end)
+        dir
+    end
   end
 end

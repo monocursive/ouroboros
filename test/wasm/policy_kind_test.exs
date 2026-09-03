@@ -15,7 +15,8 @@ defmodule Ouroboros.Wasm.PolicyKindTest do
   alias Ouroboros.Upgrade.Rollout.Registry
   alias Ouroboros.Upgrade.Signing.Policy.Default, as: SigningPolicy
   alias Ouroboros.Wasm
-  alias Ouroboros.Wasm.{Artifact, Bundle, LiveFixture, PolicyEngine, Pool, Rollout, Store}
+  alias Ouroboros.Wasm.{Artifact, Bundle, LiveFixture, PolicyEngine, Pool, Rollout}
+  alias Ouroboros.Wasm.{SandboxFixture, Store}
 
   @moduletag :capture_log
 
@@ -376,7 +377,11 @@ defmodule Ouroboros.Wasm.PolicyKindTest do
       {:ok, signed} = sign(artifact)
 
       assert {:error, {:component_not_loaded, %{refusal: "unsupported_world"}}} =
-               Rollout.stage(signed, bytes, store_root: root, epoch_registry: registry())
+               Rollout.stage(signed, bytes,
+                 store_root: root,
+                 epoch_registry: registry(),
+                 pool: live_pool!(root)
+               )
 
       # The bytes are in the store — staging publishes before it loads — and no instance and
       # no cached component came out of it.
@@ -402,7 +407,11 @@ defmodule Ouroboros.Wasm.PolicyKindTest do
         {:ok, signed} = sign(artifact)
 
         assert {:ok, _evidence} =
-                 Rollout.stage(signed, bytes, store_root: root, epoch_registry: registry())
+                 Rollout.stage(signed, bytes,
+                   store_root: root,
+                   epoch_registry: registry(),
+                   pool: live_pool!(root)
+                 )
 
         # And a capability manifest over those same bytes is refused, which is the other
         # direction of the same check.
@@ -418,7 +427,11 @@ defmodule Ouroboros.Wasm.PolicyKindTest do
         {:ok, wrong} = sign(wrong)
 
         assert {:error, {:component_not_loaded, %{refusal: "unsupported_world"}}} =
-                 Rollout.stage(wrong, bytes, store_root: root, epoch_registry: registry())
+                 Rollout.stage(wrong, bytes,
+                   store_root: root,
+                   epoch_registry: registry(),
+                   pool: live_pool!(root)
+                 )
       else
         # `make wasm-examples` builds it; without it this half is not checked, and under
         # `OUROBOROS_REQUIRE_WASM` that is a failure rather than a silence.
@@ -545,6 +558,28 @@ defmodule Ouroboros.Wasm.PolicyKindTest do
   end
 
   defp epoch, do: System.unique_integer([:positive, :monotonic]) + 1_000_000
+
+  # W16. A pool of this suite's own, told where `root` is, rather than the node's singleton:
+  # the helper is spawned under the OS sandbox now and reads only the roots it is named, and
+  # a singleton spawned by some earlier suite would have been named somebody else's.
+  defp live_pool!(root) do
+    name = :"wasm_kind_pool_#{System.unique_integer([:positive])}"
+
+    {:ok, pid} =
+      Pool.start([name: name, handshake_timeout_ms: 15_000] ++ SandboxFixture.pool_opts(root))
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        try do
+          GenServer.stop(pid, :normal, 5_000)
+        catch
+          :exit, _reason -> :ok
+        end
+      end
+    end)
+
+    pid
+  end
 
   defp tmp_dir do
     dir = Path.join(System.tmp_dir!(), "ouro-wasm-kind-#{System.unique_integer([:positive])}")

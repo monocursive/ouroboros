@@ -58,11 +58,22 @@ defmodule Ouroboros.Wasm.Deploy do
   What it costs *this* node is the compile, which is the trade: the machine that signs is the
   machine that pays.
 
-  Two things make it safe to skip rather than a requirement. A node with no helper on disk
+  That compile runs **inside the same OS sandbox a node's own helper runs inside** (W16, D25):
+  `Ouroboros.Provider.Native.Sandbox.helper_policy/1` with the sign scratch writable, the sign
+  scratch and the helper's own directory readable, no network, and `$TMPDIR` in a private
+  directory below the scratch. The bytes being compiled are a client's upload, and this is the
+  one place on the signing path where a subprocess reads them; a `precompile` that could read
+  the rest of the machine is a `precompile` that a hostile component could aim. Under
+  `helper_sandbox: :required` — the default — a signer that cannot apply that policy does not
+  run the helper at all: it signs the source form and the receipt's `precompile_skipped` names
+  the reason, which is the same shape as every other skip below.
+
+  Three things make it safe to skip rather than a requirement. A node with no helper on disk
   signs the source form alone and says so. `precompile: false` — `ouro wasm sign
-  --no-precompile` — does the same on request. In both the manifest carries no `precompiled`
-  block, the bundle carries no second section, and every node compiles the component for
-  itself exactly as it did before W8. Size is no longer one of them (W19, see below).
+  --no-precompile` — does the same on request. And a node that cannot sandbox the helper
+  refuses to spawn it (W16). In all three the manifest carries no `precompiled` block, the
+  bundle carries no second section, and every node compiles the component for itself
+  exactly as it did before W8. Size is no longer one of them (W19, see below).
 
   The compile is bounded by §7.3 and not by a timer, which is the honest statement: `shape.check`
   refuses a component shaped to be expensive *before* cranelift starts, because cranelift cannot
@@ -134,6 +145,7 @@ defmodule Ouroboros.Wasm.Deploy do
   states all three lengths, and the client concatenates what it was given with what it held.
   """
 
+  alias Ouroboros.Provider.Native.Sandbox
   alias Ouroboros.Upgrade.Epoch
   alias Ouroboros.Upgrade.Signing.Service, as: SigningService
   alias Ouroboros.Wasm
@@ -499,8 +511,7 @@ defmodule Ouroboros.Wasm.Deploy do
   end
 
   defp compile_in(dir, helper, bytes, kind, opts) do
-    tag = Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
-    source = Path.join(dir, "sign-#{tag}.wasm")
+    source = Path.join(dir, "sign-#{tag()}.wasm")
     out = source <> ".cwasm"
 
     try do
@@ -539,15 +550,27 @@ defmodule Ouroboros.Wasm.Deploy do
   # bounds the compile is §7.3's structural pass, which refuses an expensive shape before
   # cranelift starts precisely because cranelift cannot be interrupted afterwards. The timeout
   # bounds this *signature*, so a wedged helper costs one fallback rather than one hung verb.
+  #
+  # W16: what is spawned is the *wrapped* command, so the same fence a node's own helper runs
+  # behind is around the signer's. The child's private `$TMPDIR` goes with the child.
   defp invoke_helper(helper, source, out, kind, opts) do
+    case precompile_command(helper, source, out, kind, opts) do
+      {:ok, %{executable: executable, args: args, env: env, scratch: scratch}} ->
+        try do
+          await_helper(executable, args, env, opts)
+        after
+          _ = if is_binary(scratch), do: File.rm_rf(scratch)
+        end
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp await_helper(executable, args, env, opts) do
     timeout = Keyword.get(opts, :precompile_timeout, @precompile_timeout_ms)
 
-    task =
-      Task.async(fn ->
-        System.cmd(helper, ["precompile", source, out, "--kind", Atom.to_string(kind)],
-          stderr_to_stdout: false
-        )
-      end)
+    task = Task.async(fn -> System.cmd(executable, args, env: env, stderr_to_stdout: false) end)
 
     case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
       {:ok, {stdout, 0}} -> decode_report(stdout)
@@ -558,6 +581,95 @@ defmodule Ouroboros.Wasm.Deploy do
     error -> {:error, {:precompile_failed, Exception.message(error)}}
   catch
     kind, reason -> {:error, {:precompile_failed, "#{kind}: #{describe(reason)}"}}
+  end
+
+  # The command to spawn, and whether this node is willing to spawn it at all (W16, D25).
+  #
+  # The policy is the helper's own — `Sandbox.helper_policy/1`, `mode: :builder`, closed on
+  # reads — with the sign scratch as the one writable root and the helper's directory as the
+  # one readable root beyond the platform's. What that fences is the case D24 names from the
+  # other end: the bytes here are a client's upload on their way into a compiler, and a
+  # compiler that can read the node cannot be aimed at it.
+  #
+  # `:required` is the default and it refuses rather than degrades: no backend, a backend with
+  # no read allow-set (contract C11), or no scratch this node will use, and the signature goes
+  # out over the source form with the reason in `precompile_skipped`.
+  defp precompile_command(helper, source, out, kind, opts) do
+    argv = [helper, "precompile", source, out, "--kind", Atom.to_string(kind)]
+
+    case sandbox_setting(opts) do
+      :off ->
+        {:ok, %{executable: helper, args: tl(argv), env: [], scratch: nil}}
+
+      :required ->
+        wrapped_precompile(argv, Path.dirname(helper), Path.dirname(source), Sandbox.detect())
+    end
+  end
+
+  defp sandbox_setting(opts) do
+    case Keyword.get(opts, :helper_sandbox) do
+      posture when posture in [:required, :off] -> posture
+      _absent -> Wasm.helper_sandbox()
+    end
+  end
+
+  defp wrapped_precompile(argv, helper_dir, scratch_root, detection) do
+    cond do
+      detection.backend == :none ->
+        {:error, {:helper_sandbox_unavailable, :no_backend}}
+
+      not Sandbox.fences_reads?(detection) ->
+        {:error, {:helper_sandbox_unavailable, {:cannot_fence_reads, detection.backend}}}
+
+      true ->
+        wrap_precompile(argv, helper_dir, scratch_root, detection)
+    end
+  end
+
+  # A directory below the sign scratch, which `scratch_dir/1` has already created 0700 and
+  # verified with `lstat`, so this one inherits that guarantee about the path above it and adds
+  # its own 96 bits of name. `$TMPDIR` points here and the sandbox lets the child write nowhere
+  # else but this and the sign scratch it was handed.
+  defp wrap_precompile(argv, helper_dir, scratch_root, detection) do
+    scratch = Path.join(scratch_root, "tmp-" <> tag())
+
+    with :ok <- File.mkdir_p(scratch),
+         :ok <- File.chmod(scratch, 0o700),
+         {:ok, %File.Stat{type: :directory}} <- File.lstat(scratch) do
+      # Canonical: a backend's rules are evaluated against the path the kernel resolves, and
+      # `<data_dir>` under `/var/folders` on macOS is `/private/var/folders` by then. A rule
+      # written on the un-resolved form matches nothing.
+      policy =
+        Sandbox.helper_policy(
+          readable: [canonical(helper_dir)],
+          writable: [canonical(scratch_root)],
+          scratch: canonical(scratch)
+        )
+
+      case Sandbox.wrap({:argv, argv}, %{}, policy, detection) do
+        {:ok, {executable, args}} ->
+          {:ok, %{executable: executable, args: args, env: Sandbox.env(policy), scratch: scratch}}
+
+        {:error, reason} ->
+          _ = File.rm_rf(scratch)
+          {:error, {:helper_sandbox_unavailable, reason}}
+      end
+    else
+      {:ok, %File.Stat{type: type}} ->
+        {:error, {:helper_sandbox_unavailable, {:scratch_not_a_directory, type}}}
+
+      {:error, reason} ->
+        {:error, {:helper_sandbox_unavailable, {:scratch_unavailable, reason}}}
+    end
+  end
+
+  defp tag, do: Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
+
+  defp canonical(path) do
+    case Ouroboros.Workspace.Path.canonicalize(path) do
+      {:ok, canonical} -> canonical
+      {:error, _absent} -> Path.expand(path)
+    end
   end
 
   # The helper reports what it produced, including the wasmtime and the triple it really used.

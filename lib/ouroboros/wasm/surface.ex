@@ -80,9 +80,12 @@ defmodule Ouroboros.Wasm.Surface do
   """
   @spec status(keyword()) :: map()
   def status(opts \\ []) do
+    live = pool_status(opts)
+
     %{
       node: node(),
-      helper: helper(opts),
+      helper: helper(live),
+      sandbox: sandbox(live),
       store: store(opts),
       rollouts: rollout_counts(opts),
       boot: %{enabled: Boot.enabled?()}
@@ -297,9 +300,23 @@ defmodule Ouroboros.Wasm.Surface do
   # The helper
   # ---------------------------------------------------------------------------
 
-  defp helper(opts) do
-    live = pool_status(opts)
+  # W16, D25. The OS sandbox the helper runs under, as its own half of the answer rather than
+  # a field inside `helper`: an operator asking "is this node containing its helper" is asking
+  # about the node's posture, and the answer exists — `:refused` — on a node where there is no
+  # helper *because* the posture could not be applied.
+  #
+  # A node with no pool process has decided nothing, and says so with nulls rather than with a
+  # posture nobody has taken. `reason` is rendered and cut like every other term here: it
+  # carries a backend's own prose on the `no_backend` path.
+  defp sandbox(nil), do: %{posture: nil, backend: nil, reason: nil}
 
+  defp sandbox(%{sandbox: %{posture: posture, backend: backend, reason: why}}) do
+    %{posture: posture, backend: text(backend), reason: reason(why)}
+  end
+
+  defp sandbox(_older), do: %{posture: nil, backend: nil, reason: nil}
+
+  defp helper(live) do
     # The path a *running* pool holds, and this build's resolution only where no pool does.
     # A pool started against another binary is the one that would actually run, so reporting
     # the module's own answer beside it would be a readiness surface describing a helper this

@@ -24,6 +24,7 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
   alias Ouroboros.Wasm.Download
   alias Ouroboros.Wasm.PolicyEngine
   alias Ouroboros.Wasm.Pool
+  alias Ouroboros.Wasm.SandboxFixture
   alias Ouroboros.Wasm.Rollout
   alias Ouroboros.Wasm.Store
   alias Ouroboros.Wasm.Surface
@@ -410,7 +411,7 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
     @tag @needs_live
     test "a helper that refuses the artifact gets the source form, and the guest answers",
          context do
-      pool = live_pool!()
+      pool = live_pool!(context)
       bytes = File.read!(@guest)
       {:ok, receipt} = sign(context, bytes)
 
@@ -482,7 +483,7 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
 
     @tag @needs_live
     test "a component this node does not hold reaches no helper at all", context do
-      pool = live_pool!()
+      pool = live_pool!(context)
 
       assert {:error, {:store, {:unknown_component, _}}} =
                Pool.load_component(String.duplicate("a", 64), nil, pool,
@@ -508,7 +509,7 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
       assert %{wasmtime: wasmtime, target: target, sha256: sha256, size: size} =
                receipt.precompiled
 
-      doctor = helper_doctor(live_pool!())
+      doctor = helper_doctor(live_pool!(context))
       assert receipt.precompile_skipped == nil
       assert wasmtime == doctor["wasmtime"]
       assert target == doctor["target"]
@@ -531,7 +532,7 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
 
     @tag @needs_live
     test "precompile: false signs the source form alone, and it still deploys", context do
-      pool = live_pool!()
+      pool = live_pool!(context)
       name = "w8off-#{System.unique_integer([:positive])}"
       id = "wasm/" <> name
       on_exit(fn -> Mesh.stop_agent(id) end)
@@ -613,7 +614,7 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
   describe "staging and loading" do
     @tag @needs_live
     test "a matching node deserializes; a node whose build differs compiles", context do
-      pool = live_pool!()
+      pool = live_pool!(context)
       bytes = File.read!(@guest)
       {:ok, receipt} = sign(context, bytes)
 
@@ -660,7 +661,7 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
                  bytes,
                  opts
                  |> Keyword.put(:store_root, fresh_store(context))
-                 |> Keyword.put(:pool, live_pool!())
+                 |> Keyword.put(:pool, live_pool!(context))
                )
 
       assert evidence.precompiled == false
@@ -668,7 +669,7 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
 
     @tag @needs_live
     test "both rollout gates hold each form to its own digest", context do
-      pool = live_pool!()
+      pool = live_pool!(context)
       bytes = File.read!(@guest)
       {:ok, receipt} = sign(context, bytes)
 
@@ -707,7 +708,7 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
 
     @tag @needs_live
     test "an untrusted signature never reaches a deserialize", context do
-      pool = live_pool!()
+      pool = live_pool!(context)
       bytes = File.read!(@guest)
       {:ok, receipt} = sign(context, bytes)
 
@@ -737,7 +738,7 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
 
     @tag @needs_live
     test "deploy end to end, and wasm.list says which form the node loads", context do
-      pool = live_pool!()
+      pool = live_pool!(context)
       name = "w8-#{System.unique_integer([:positive])}"
       id = "wasm/" <> name
       on_exit(fn -> Mesh.stop_agent(id) end)
@@ -776,7 +777,7 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
 
     @tag @needs_live
     test "a reboot restarts a precompiled live entry, and it answers", context do
-      pool = live_pool!()
+      pool = live_pool!(context)
       name = "w8boot-#{System.unique_integer([:positive])}"
       id = "wasm/" <> name
       on_exit(fn -> Mesh.stop_agent(id) end)
@@ -818,7 +819,7 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
 
     @tag @needs_policy
     test "the policy engine stands up a precompiled policy", context do
-      pool = live_pool!()
+      pool = live_pool!(context)
       bytes = File.read!(@policy_guest)
 
       {:ok, receipt} =
@@ -859,6 +860,77 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
       state = Rollout.start_state(artifact, pool: pool, store_root: context.store_root)
       assert state.precompiled == artifact.precompiled
       assert :ok = PolicyEngine.probe(state, [])
+    end
+  end
+
+  # ---------------------------------------------------------------------------------------
+  # The signer's own helper runs behind the same fence (W16, D25)
+  # ---------------------------------------------------------------------------------------
+
+  describe "sign-time precompile runs under the helper policy" do
+    @tag @needs_live
+    test "the artifact is produced with the fence on, which is the default", context do
+      # The plainest statement of it: every other test in this file already signs with
+      # `helper_sandbox: :required`, because that is the default and nothing here sets
+      # otherwise — so a policy that broke the compile would have taken the suite with it.
+      # This one says the quiet part, and reads the posture back off the pool beside it.
+      bytes = File.read!(@guest)
+
+      assert {:ok, receipt} = sign(context, bytes)
+      assert receipt.form == :precompiled
+      assert receipt.precompile_skipped == nil
+      assert %{sha256: _sha, size: size} = receipt.precompiled
+      assert size > 0
+
+      assert %{sandbox: %{posture: :sandboxed}} = Pool.status(live_pool!(context))
+    end
+
+    @tag @needs_live
+    test "the compiling helper cannot read a file outside the roots it was given", context do
+      # A shim standing where `ouro-wasm precompile` stands, reporting through its exit status
+      # what the operating system let it do: 3 if it read a planted 0600 file outside the sign
+      # scratch, 4 if it could not. Under the policy the answer is 4.
+      %{secret: secret} = plant(context)
+      helper = probing_helper!(context, secret)
+      bytes = File.read!(@guest)
+
+      assert {:ok, fenced} = sign(context, bytes, [], helper_path: helper)
+      assert fenced.form == :source
+      assert fenced.precompile_skipped =~ "precompile_refused, 4"
+
+      # And the mutation: the same shim, the same planted file, `helper_sandbox: :off`. The
+      # exit status flips, which is the kernel saying the fence was the only thing stopping it.
+      assert {:ok, open} =
+               sign(context, bytes, [], helper_path: helper, helper_sandbox: :off)
+
+      assert open.precompile_skipped =~ "precompile_refused, 3"
+    end
+
+    @tag @needs_live
+    test "a signer that cannot sandbox its helper signs the source form and names why",
+         context do
+      previous = Application.get_env(:ouroboros, :native_sandbox)
+      Application.put_env(:ouroboros, :native_sandbox, :none)
+      on_exit(fn -> restore(:native_sandbox, previous) end)
+
+      bytes = File.read!(@guest)
+
+      assert {:ok, receipt} = sign(context, bytes)
+
+      # Not an error: the source form is what every node could always compile, so a signer
+      # with no fence costs the fleet a compile per node and says so — the same shape as
+      # every other skip reason above.
+      assert receipt.form == :source
+      assert receipt.precompiled == nil
+      assert receipt.precompile_skipped =~ "helper_sandbox_unavailable"
+      assert receipt.precompile_skipped =~ "no_backend"
+
+      # And the bundle is whole, verifiable and deployable, which is the whole claim about a
+      # skip: it is an answer, not a failure.
+      assert {:ok, %{artifact: artifact, precompiled: nil}} =
+               Bundle.verify(bundle(receipt, bytes), context.trust_policy)
+
+      assert artifact.precompiled == nil
     end
   end
 
@@ -1088,8 +1160,13 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
 
   # A shim in front of the real helper that records every invocation. The claim it settles is an
   # *ordering*, and an ordering is only observable by watching the expensive half.
+  # W16: the marker lives in the **sign scratch**, because that is the one directory the
+  # sign-time policy makes writable — a shim that journalled into `context.tmp` counted zero
+  # invocations under the fence, which is the fence working rather than the shim failing.
   defp counting_helper!(context) do
-    marker = Path.join(context.tmp, "invocations-#{System.unique_integer([:positive])}")
+    scratch = Path.join(context.tmp, "sign")
+    File.mkdir_p!(scratch)
+    marker = Path.join(scratch, "invocations-#{System.unique_integer([:positive])}")
     wrapper = Path.join(context.tmp, "helper-#{System.unique_integer([:positive])}.sh")
 
     File.write!(wrapper, """
@@ -1123,6 +1200,35 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
 
   # A stand-in for `ouro-wasm precompile`, so every failure a subprocess can have is a failure
   # this suite can produce. `$3` is the output path the real invocation passes.
+  # W16. A 0600 file in a directory the sign-time policy never names: the readable set is the
+  # platform, the helper's own directory and the sign scratch, and this is none of those.
+  #
+  # A **sibling** of `context.tmp` and not something inside it, because the helper's directory
+  # is `context.tmp` and a Seatbelt subpath rule is recursive: a secret planted below a
+  # readable root is a secret the fence was never asked about.
+  defp plant(_context) do
+    dir =
+      Path.join(System.tmp_dir!(), "ouro-wasm-planted-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf(dir) end)
+    File.mkdir_p!(dir)
+    secret = Path.join(dir, "secret")
+    File.write!(secret, "the node's own bytes")
+    File.chmod!(secret, 0o600)
+    %{dir: dir, secret: secret}
+  end
+
+  # Stands where `ouro-wasm precompile` stands and answers with its exit status: 3 if it read
+  # the planted file, 4 if the kernel refused. Either way it produces no artifact, so the
+  # signature falls back to the source form and the reason carries the status.
+  #
+  # The shim's own directory is `context.tmp`, which the sign-time policy makes readable
+  # because `process-exec` has to read the binary — so the planted file sits *outside* that
+  # tree, which is where the fence's edge actually is.
+  defp probing_helper!(context, secret) do
+    script!(context, ~s[if cat "#{secret}" > /dev/null 2>&1; then exit 3; else exit 4; fi])
+  end
+
   defp script!(context, body) do
     path = Path.join(context.tmp, "helper-#{System.unique_integer([:positive])}.sh")
     File.write!(path, "#!/bin/sh\n" <> body <> "\n")
@@ -1262,9 +1368,15 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
     id
   end
 
-  defp live_pool! do
+  # W16: the helper is spawned under the OS sandbox, so the pool is told where this test's
+  # store, its artifacts and its scratch are — `context.tmp` holds all three.
+  defp live_pool!(context) do
     name = :"wasm_w8_pool_#{System.unique_integer([:positive])}"
-    {:ok, pid} = Pool.start(name: name, handshake_timeout_ms: 15_000)
+
+    {:ok, pid} =
+      Pool.start(
+        [name: name, handshake_timeout_ms: 15_000] ++ SandboxFixture.pool_opts(context.tmp)
+      )
 
     on_exit(fn ->
       if Process.alive?(pid) do

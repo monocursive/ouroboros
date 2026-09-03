@@ -3470,6 +3470,8 @@ impl ReplayDivergence {
 pub struct WasmStatus {
     pub node: Option<String>,
     pub helper: WasmHelper,
+    /// W16. The OS sandbox that node puts around its helper, and what happened when it tried.
+    pub sandbox: WasmSandbox,
     pub store: WasmStore,
     pub rollouts: WasmRollouts,
     /// Whether this node has the durable state a boot-time restart of live components
@@ -3524,6 +3526,42 @@ impl WasmHelper {
     /// Whether a further hook component would now be refused on that node.
     pub fn hook_budget_spent(&self) -> bool {
         self.hook_component_budget > 0 && self.hook_components >= self.hook_component_budget
+    }
+}
+
+/// W16, D25. The OS sandbox around the `ouro-wasm` helper on that node.
+///
+/// Three postures and the runtime's own spelling of each: `sandboxed` (the child is wrapped,
+/// or the next one would be), `off` (the operator turned the fence off), and `refused` — the
+/// one worth reading twice, because it means that node runs **no helper at all**: it was told
+/// to require a sandbox and could not apply one, so `reason` is why and `helper.phase` is
+/// `broken`. Kept as the runtime's string for [`WasmHelper::phase`]'s reason: a fourth posture
+/// renders as itself rather than being folded into one of the three.
+///
+/// `None` everywhere is a node with no pool process, which has decided nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmSandbox {
+    pub posture: Option<String>,
+    /// `sandbox-exec`, `bwrap`, `ouro-sandbox`, or `none`.
+    pub backend: Option<String>,
+    /// Why a `refused` node refused, in the runtime's words. `None` when nothing went wrong.
+    pub reason: Option<String>,
+}
+
+impl WasmSandbox {
+    /// That node is running its helper behind the OS sandbox.
+    pub fn sandboxed(&self) -> bool {
+        self.posture.as_deref() == Some("sandboxed")
+    }
+
+    /// That node will not run a helper: it requires a sandbox it cannot apply.
+    pub fn refused(&self) -> bool {
+        self.posture.as_deref() == Some("refused")
+    }
+
+    /// The operator turned the fence off, and the helper runs with the node's own access.
+    pub fn off(&self) -> bool {
+        self.posture.as_deref() == Some("off")
     }
 }
 
@@ -3608,6 +3646,7 @@ impl WasmStatus {
         Self {
             node: nonempty(value.get("node")),
             helper: WasmHelper::decode(value.get("helper").unwrap_or(&Value::Null)),
+            sandbox: WasmSandbox::decode(value.get("sandbox").unwrap_or(&Value::Null)),
             store: WasmStore::decode(value.get("store").unwrap_or(&Value::Null)),
             rollouts: WasmRollouts::decode(value.get("rollouts").unwrap_or(&Value::Null)),
             boot_enabled: value
@@ -3651,6 +3690,16 @@ impl WasmHelper {
                 })
                 .unwrap_or_default(),
             broken_reason: nonempty(value.get("broken_reason")),
+        }
+    }
+}
+
+impl WasmSandbox {
+    fn decode(value: &Value) -> Self {
+        Self {
+            posture: nonempty(value.get("posture")),
+            backend: nonempty(value.get("backend")),
+            reason: nonempty(value.get("reason")),
         }
     }
 }
@@ -5071,6 +5120,15 @@ mod tests {
         assert_eq!(helper.hook_component_budget, 16);
         assert!(!helper.hook_budget_spent());
 
+        // W16, D25. The posture is its own half of the answer, and the three readings are
+        // exclusive: a node that reports `sandboxed` is running its helper behind the OS
+        // sandbox, one that reports `refused` is running no helper at all.
+        assert!(status.sandbox.sandboxed());
+        assert!(!status.sandbox.refused());
+        assert!(!status.sandbox.off());
+        assert_eq!(status.sandbox.backend.as_deref(), Some("sandbox-exec"));
+        assert_eq!(status.sandbox.reason, None);
+
         // A basename, not a path: both wasm verbs are `read`, and the fixture is what the
         // daemon answers (W7, `Ouroboros.Wasm.Surface`).
         assert_eq!(status.store.root.as_deref(), Some("components"));
@@ -5104,6 +5162,52 @@ mod tests {
         assert_eq!(empty.store.held, None, "unreadable is not empty");
         assert_eq!(empty.rollouts.total, None);
         assert!(!empty.boot_enabled);
+
+        // A node with no pool has taken no posture, and "no posture" is not "off": rendering
+        // an unknown fence as a missing one is the one reading an operator must never be
+        // given, which is the same rule `usable` follows two lines up.
+        assert_eq!(empty.sandbox.posture, None);
+        assert!(!empty.sandbox.off());
+        assert!(!empty.sandbox.sandboxed());
+        assert!(!empty.sandbox.refused());
+    }
+
+    /// The two postures the fixture cannot carry at once, decoded from the shapes the runtime
+    /// actually sends: a node that refused to spawn, and a node whose operator turned the
+    /// fence off. `refused` is the one that means there is no helper on that node.
+    #[test]
+    fn a_refused_and_a_disabled_wasm_sandbox_decode_as_themselves() {
+        let refused = WasmStatus::decode(&serde_json::json!({
+            "sandbox": {
+                "posture": "refused",
+                "backend": "ouro-sandbox",
+                "reason": "{:cannot_fence_reads, :ouro_sandbox}"
+            }
+        }));
+
+        assert!(refused.sandbox.refused());
+        assert!(!refused.sandbox.sandboxed());
+        assert_eq!(refused.sandbox.backend.as_deref(), Some("ouro-sandbox"));
+        assert!(refused.sandbox.reason.is_some(), "a refusal says why");
+
+        let off = WasmStatus::decode(&serde_json::json!({
+            "sandbox": {"posture": "off", "backend": "sandbox-exec", "reason": null}
+        }));
+
+        assert!(off.sandbox.off());
+        assert!(!off.sandbox.sandboxed());
+        assert_eq!(off.sandbox.reason, None);
+
+        // A fourth posture from a newer runtime renders as itself and answers none of the
+        // three questions, rather than being folded into the nearest one this build knows.
+        let future = WasmStatus::decode(&serde_json::json!({
+            "sandbox": {"posture": "audited", "backend": "landlock", "reason": null}
+        }));
+
+        assert_eq!(future.sandbox.posture.as_deref(), Some("audited"));
+        assert!(!future.sandbox.sandboxed());
+        assert!(!future.sandbox.off());
+        assert!(!future.sandbox.refused());
     }
 
     /// W5's `wasm.list`: the two registers an operator reconciles — what the rollout plane

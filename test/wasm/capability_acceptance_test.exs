@@ -8,6 +8,7 @@ defmodule Ouroboros.Wasm.CapabilityAcceptanceTest do
   alias Ouroboros.Wasm
   alias Ouroboros.Wasm.Capability
   alias Ouroboros.Wasm.Pool
+  alias Ouroboros.Wasm.SandboxFixture
   alias Ouroboros.Wasm.Store
 
   # The whole lane, end to end, against the real `ouro-wasm` and a real component built by a
@@ -431,7 +432,17 @@ defmodule Ouroboros.Wasm.CapabilityAcceptanceTest do
     File.chmod!(wrapper, 0o755)
 
     name = :"wasm_acceptance_pool_#{System.unique_integer([:positive])}"
-    {:ok, pid} = Pool.start(name: name, helper_path: wrapper, handshake_timeout_ms: 15_000)
+
+    # W16. The helper is spawned under the OS sandbox, so the pool is told this test's roots:
+    # its store and the wrapper's own directory come for free, and the **real** helper's
+    # directory is named explicitly because the wrapper `exec`s a binary that lives outside
+    # this test's tree and `process-exec` still has to read it.
+    {:ok, pid} =
+      Pool.start(
+        [name: name, helper_path: wrapper, handshake_timeout_ms: 15_000]
+        |> Keyword.merge(SandboxFixture.pool_opts(Path.dirname(stderr)))
+        |> Keyword.update!(:readable, &[Path.dirname(Wasm.helper_path()) | &1])
+      )
 
     on_exit(fn ->
       if Process.alive?(pid) do

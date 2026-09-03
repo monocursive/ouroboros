@@ -21,7 +21,7 @@ defmodule Ouroboros.Wasm.PolicyAcceptanceTest do
   alias Ouroboros.Upgrade.Rollout.Registry
   alias Ouroboros.Upgrade.Signing.Service
   alias Ouroboros.Wasm
-  alias Ouroboros.Wasm.{Artifact, LiveFixture, PolicyEngine, Rollout}
+  alias Ouroboros.Wasm.{Artifact, LiveFixture, PolicyEngine, Pool, Rollout, SandboxFixture}
 
   @moduletag :capture_log
 
@@ -139,7 +139,11 @@ defmodule Ouroboros.Wasm.PolicyAcceptanceTest do
       trust_policy: trust_policy,
       tmp: tmp,
       registry: registry,
-      store_root: store_root
+      store_root: store_root,
+      # W16. A pool of this suite's own rather than the node's singleton: the helper is
+      # spawned under the OS sandbox now and reads only the roots it is named, and a singleton
+      # some earlier suite spawned was named somebody else's directory.
+      pool: live_pool!(tmp)
     }
   end
 
@@ -152,7 +156,8 @@ defmodule Ouroboros.Wasm.PolicyAcceptanceTest do
 
     Application.put_env(:ouroboros, :wasm_policy_opts,
       registry: context.registry,
-      store_root: context.store_root
+      store_root: context.store_root,
+      pool: context.pool
     )
 
     # A `bash` nobody wrote a rule for, reaching the network. The rules say nothing, the
@@ -187,7 +192,8 @@ defmodule Ouroboros.Wasm.PolicyAcceptanceTest do
 
     Application.put_env(:ouroboros, :wasm_policy_opts,
       registry: context.registry,
-      store_root: context.store_root
+      store_root: context.store_root,
+      pool: context.pool
     )
 
     # A node rule that allows the very command the component refuses. The engine consults a
@@ -206,7 +212,8 @@ defmodule Ouroboros.Wasm.PolicyAcceptanceTest do
 
     Application.put_env(:ouroboros, :wasm_policy_opts,
       registry: context.registry,
-      store_root: context.store_root
+      store_root: context.store_root,
+      pool: context.pool
     )
 
     # This component never says `allow` — it denies what it recognises and asks about the rest,
@@ -234,7 +241,7 @@ defmodule Ouroboros.Wasm.PolicyAcceptanceTest do
               config: "{}",
               name: "no-network-shell",
               limits: Wasm.capability_limits(),
-              pool: Wasm.Pool,
+              pool: context.pool,
               store_root: context.store_root
             },
             %{
@@ -294,7 +301,8 @@ defmodule Ouroboros.Wasm.PolicyAcceptanceTest do
              Rollout.deploy(signed, bytes, [node()],
                registry: context.registry,
                store_root: context.store_root,
-               trust_policy: context.trust_policy
+               trust_policy: context.trust_policy,
+               pool: context.pool
              )
 
     assert outcome.state == :live
@@ -317,6 +325,25 @@ defmodule Ouroboros.Wasm.PolicyAcceptanceTest do
     assert Enum.any?(policies, &(&1.module == "wasm/" <> name))
 
     %{sha: signed.component_sha256, artifact: signed}
+  end
+
+  defp live_pool!(dir) do
+    name = :"wasm_policy_acceptance_pool_#{System.unique_integer([:positive])}"
+
+    {:ok, pid} =
+      Pool.start([name: name, handshake_timeout_ms: 15_000] ++ SandboxFixture.pool_opts(dir))
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        try do
+          GenServer.stop(pid, :normal, 5_000)
+        catch
+          :exit, _reason -> :ok
+        end
+      end
+    end)
+
+    pid
   end
 
   defp request(command) do

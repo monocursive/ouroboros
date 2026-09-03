@@ -18,7 +18,7 @@ defmodule Ouroboros.Wasm.PolicyEngineTest do
 
   alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.Upgrade.Rollout.Registry
-  alias Ouroboros.Wasm.{Artifact, PolicyEngine, Pool, Store}
+  alias Ouroboros.Wasm.{Artifact, PolicyEngine, Pool, SandboxFixture, Store}
 
   @signer "wasm-policy-engine-test-key"
 
@@ -459,7 +459,7 @@ defmodule Ouroboros.Wasm.PolicyEngineTest do
 
     journal = Path.join(dir, "journal")
     File.write!(journal, "")
-    pool = start_pool(write_helper(dir, journal, plans))
+    pool = start_pool(write_helper(dir, journal, plans), dir)
 
     Application.put_env(:ouroboros, :wasm_policy, "guard")
 
@@ -584,9 +584,16 @@ defmodule Ouroboros.Wasm.PolicyEngineTest do
     path
   end
 
-  defp start_pool(helper_path) do
+  # W16. The pool spawns its scripted helper under the OS sandbox like every other pool in
+  # this repository, so it is told where this test's roots are (`Ouroboros.Wasm.SandboxFixture`).
+  defp start_pool(helper_path, dir) do
     name = :"wasm_policy_pool_#{System.unique_integer([:positive])}"
-    {:ok, pid} = Pool.start(name: name, helper_path: helper_path, handshake_timeout_ms: 15_000)
+
+    {:ok, pid} =
+      Pool.start(
+        [name: name, helper_path: helper_path, handshake_timeout_ms: 15_000] ++
+          SandboxFixture.pool_opts(dir)
+      )
 
     on_exit(fn ->
       if Process.alive?(pid) do

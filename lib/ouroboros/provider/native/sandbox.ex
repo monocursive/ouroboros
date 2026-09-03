@@ -372,9 +372,10 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   with the writable roots readable by construction.
 
   It is not a `sandbox_mode` and does not come out of `decide/2`: no session picks it, no
-  operator configures it, and there is no way to ask for it from a signal. The one caller is
-  `Ouroboros.Wasm.Forge` (docs/WASM.md D18). Network is off, flatly, rather than following
-  the node's `native_sandbox_network` opt-in — that setting is about a human's shell.
+  operator configures it, and there is no way to ask for it from a signal. The callers are
+  `Ouroboros.Wasm.Forge` (docs/WASM.md D18) and, through `helper_policy/1`, the `ouro-wasm`
+  helper (D25). Network is off, flatly, rather than following the node's
+  `native_sandbox_network` opt-in — that setting is about a human's shell.
   """
   @spec builder_policy(keyword()) :: policy()
   def builder_policy(opts) do
@@ -387,6 +388,39 @@ defmodule Ouroboros.Provider.Native.Sandbox do
       scratch: nil,
       network: false
     }
+  end
+
+  @doc """
+  The policy the `ouro-wasm` helper runs under (docs/WASM.md §7.3a, D25).
+
+  `builder_policy/1`'s shape with the scratch already attached: closed by default on reads,
+  a named read allow-set, writable only where the caller says, and no network. The mode is
+  **`:builder`** and that is deliberate — `:builder` is this module's vocabulary for
+  "closed on reads", every backend already implements it (`SandboxExec.profile/1`,
+  `Bwrap.options/3`, and W17's `ouro-sandbox` request), and a helper that needed its own
+  backend arm would be a fourth profile to keep in step with three others for no rule that
+  is actually different. What differs between a build and the helper is the *lists*, and
+  lists are arguments.
+
+  `opts` takes `:readable`, `:writable` and `:scratch`. The scratch is required in practice
+  — `wrap/4` refuses a policy without one — and it is passed here rather than applied by the
+  caller so that "the policy the helper runs under" is one function with one answer, which
+  is what `Ouroboros.Wasm.Pool`'s load-path fence compares a path against.
+
+  What the helper actually needs, and the fence is that there is no more: the platform's own
+  toolchain roots (`platform_readable/0`, for the dynamic loader and the C library it links),
+  the directory its own binary lives in (`process-exec` still has to read the executable),
+  and the roots the caller names — this node's lane-W subtree, and at signing time the sign
+  scratch. It writes into the scratch and nowhere else, and it opens no socket.
+  """
+  @spec helper_policy(keyword()) :: policy()
+  def helper_policy(opts) do
+    policy = builder_policy(Keyword.take(opts, [:readable, :writable]))
+
+    case Keyword.get(opts, :scratch) do
+      dir when is_binary(dir) and dir != "" -> with_scratch(policy, dir)
+      _none -> policy
+    end
   end
 
   @doc "The read roots a build gets before its caller names any, for this operating system."

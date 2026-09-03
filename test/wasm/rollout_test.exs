@@ -48,6 +48,7 @@ defmodule Ouroboros.Wasm.RolloutTest do
   alias Ouroboros.Wasm.Capability
   alias Ouroboros.Wasm.Pool
   alias Ouroboros.Wasm.Rollout
+  alias Ouroboros.Wasm.SandboxFixture
   alias Ouroboros.Wasm.Store
 
   # One node is enough for everything except "one artifact deploys on both nodes", which
@@ -792,9 +793,16 @@ defmodule Ouroboros.Wasm.RolloutTest do
   end
 
   # A pool speaking to the real helper, named so nothing else in the suite shares it.
-  defp live_env(_context) do
+  #
+  # W16: and told where this test's store is, because the helper is spawned under the OS
+  # sandbox and reads only the roots the node — or, here, the test — names.
+  defp live_env(context) do
     name = :"wasm_rollout_pool_#{System.unique_integer([:positive])}"
-    {:ok, pid} = Pool.start(name: name, handshake_timeout_ms: 15_000)
+
+    {:ok, pid} =
+      Pool.start(
+        [name: name, handshake_timeout_ms: 15_000] ++ SandboxFixture.pool_opts(context.root)
+      )
 
     on_exit(fn ->
       if Process.alive?(pid) do

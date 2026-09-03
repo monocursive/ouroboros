@@ -27,6 +27,7 @@ defmodule Ouroboros.Wasm.SdkAcceptanceTest do
   alias Ouroboros.Wasm
   alias Ouroboros.Wasm.LiveFixture
   alias Ouroboros.Wasm.Pool
+  alias Ouroboros.Wasm.SandboxFixture
 
   # The SDK's worked components, as `make wasm-examples` builds them. Each is its own cargo
   # workspace, so each has a build directory of its own.
@@ -368,9 +369,21 @@ defmodule Ouroboros.Wasm.SdkAcceptanceTest do
     """
   end
 
+  # W16. Since W16 the helper is spawned under the OS sandbox by default, so a pool is told
+  # where this test's own roots are — its components and a scratch — exactly as a node reads
+  # its own out of `:data_dir`. This suite adds one more, `@examples`: it is the one file here
+  # that hands the helper a component out of the *checkout* rather than out of a store, and
+  # without naming it the kernel refuses the read — which is how the fence was first seen
+  # working in this suite. Nothing in this file turns the sandbox off.
   defp start_pool do
     name = :"wasm_sdk_pool_#{System.unique_integer([:positive])}"
-    {:ok, pid} = Pool.start(name: name, handshake_timeout_ms: 15_000)
+
+    {:ok, pid} =
+      Pool.start(
+        [name: name, handshake_timeout_ms: 15_000]
+        |> Keyword.merge(SandboxFixture.pool_opts(tmp_dir()))
+        |> Keyword.update!(:readable, &[@examples | &1])
+      )
 
     on_exit(fn ->
       if Process.alive?(pid) do
@@ -385,10 +398,20 @@ defmodule Ouroboros.Wasm.SdkAcceptanceTest do
     pid
   end
 
+  # One directory per *test* since W16, not per call: the pool is told to read it and the
+  # components are written into it, and two directories would mean a component the fence has
+  # never heard of.
   defp tmp_dir do
-    dir = Path.join(System.tmp_dir!(), "ouro-wasm-sdk-#{System.unique_integer([:positive])}")
-    File.mkdir_p!(dir)
-    on_exit(fn -> File.rm_rf(dir) end)
-    dir
+    case Process.get(:wasm_sdk_tmp) do
+      dir when is_binary(dir) ->
+        dir
+
+      nil ->
+        dir = Path.join(System.tmp_dir!(), "ouro-wasm-sdk-#{System.unique_integer([:positive])}")
+        File.mkdir_p!(dir)
+        Process.put(:wasm_sdk_tmp, dir)
+        on_exit(fn -> File.rm_rf(dir) end)
+        dir
+    end
   end
 end

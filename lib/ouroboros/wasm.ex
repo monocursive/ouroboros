@@ -126,7 +126,35 @@ defmodule Ouroboros.Wasm do
     # `false` refuses the fast form fleet-wide, everywhere at once, with no redeploy and no
     # resigning: every node compiles the source under §7.3's bounds exactly as it did before
     # W8. It is the switch an operator reaches for when a signing key's custody is in doubt.
-    accept_precompiled: true
+    accept_precompiled: true,
+    # W16, D25. Whether this node will run the helper without an OS sandbox around it.
+    #
+    # Default **`:required`**, and the asymmetry is the point: `:off` is a thing an operator
+    # states, and every other outcome — no backend on this node, a backend that cannot fence
+    # reads (`Ouroboros.Provider.Native.Sandbox.fences_reads?/1`), no data directory to put a
+    # scratch in — is a **refusal to spawn**, not a quieter posture. A node with no fence is a
+    # node that does not run wasm, rather than one that runs it a little less safely: the
+    # helper maps machine code a signer produced (D24), and the sandbox is the wall that
+    # bounds what a compromised artifact reaches once it is inside that process.
+    #
+    # `:off` spawns the helper plain, says so in `wasm.status` and logs one line per spawn.
+    # It is for a node whose platform this runtime cannot sandbox and whose operator has read
+    # D25 and decided the trade — never a fallback this code takes on its own.
+    helper_sandbox: :required,
+    # W16. Roots this node's helper may read **beyond** its own binary's directory, the
+    # platform's toolchain roots, and this node's own lane-W subtree (`<data_dir>/wasm`).
+    #
+    # Empty on a node that has not said otherwise, because the default answer is the whole
+    # fence: a helper reads component bytes out of this node's store and nothing else. It
+    # exists because `Ouroboros.Wasm.Store.root/1` takes a `:root` and
+    # `allow_store_root_override` can let a deployment name one, and a node that puts its
+    # components somewhere else has to say where or its own loads are refused — by this pool,
+    # before the helper, and then by the kernel.
+    #
+    # Absolute paths only. It widens a fence, so it is validated as a whole: one entry that is
+    # not an absolute path takes the list back to the default rather than being dropped
+    # silently from a list an operator believes they wrote.
+    helper_readable: []
   ]
 
   @timeout_keys [:handshake_timeout_ms, :request_timeout_ms, :call_margin_ms, :broken_ms]
@@ -182,6 +210,43 @@ defmodule Ouroboros.Wasm do
   """
   @spec accept_precompiled?() :: boolean()
   def accept_precompiled?, do: config(:accept_precompiled) == true
+
+  @doc """
+  Whether this node insists on an OS sandbox around its helper (W16, D25).
+
+  `:required` unless an operator wrote `:off`, and a malformed value reads as `:required`
+  the way every other setting here falls back to its default — which here means the safe
+  direction, because the fallback for a posture setting must never be the weaker posture.
+  """
+  @spec helper_sandbox() :: :required | :off
+  def helper_sandbox, do: config(:helper_sandbox)
+
+  @doc """
+  Extra roots this node's helper may read, beyond its binary, the platform and `data_root/0`.
+
+  Empty on a node that has not said otherwise. See the setting's comment for when a node
+  has to name one.
+  """
+  @spec helper_readable() :: [String.t()]
+  def helper_readable, do: config(:helper_readable)
+
+  @doc """
+  This node's lane-W subtree, `<data_dir>/wasm`, or `nil` where there is no data directory.
+
+  One directory, because every file the helper is ever handed a path to is under it: the
+  component store (`Ouroboros.Wasm.Store.root/1`), the artifacts beside it, the forge's build
+  directory (whose product `Ouroboros.Wasm.Forge` asks the helper to `inspect`), and the
+  scratch the pool creates for the child. Naming the subtree rather than `<data_dir>` itself
+  is the fence: the node's grants, permissions, effect ledger and signing journal are all
+  siblings of it, and none of them is a file the helper has any business opening.
+  """
+  @spec data_root() :: String.t() | nil
+  def data_root do
+    case Application.get_env(:ouroboros, :data_dir) do
+      dir when is_binary(dir) and dir != "" -> Path.join(dir, "wasm")
+      _unset -> nil
+    end
+  end
 
   @doc "The world id this node admits a capability component against."
   @spec world() :: String.t()
@@ -284,6 +349,10 @@ defmodule Ouroboros.Wasm do
 
   defp valid?(:allow_store_root_override, value), do: is_boolean(value)
   defp valid?(:accept_precompiled, value), do: is_boolean(value)
+  defp valid?(:helper_sandbox, value), do: value in [:required, :off]
+
+  defp valid?(:helper_readable, value),
+    do: is_list(value) and Enum.all?(value, &(is_binary(&1) and absolute_path?(&1)))
 
   defp valid?(key, value) when key in @timeout_keys, do: is_integer(value) and value > 0
   defp valid?(key, value) when key in @byte_keys, do: is_integer(value) and value > 0
