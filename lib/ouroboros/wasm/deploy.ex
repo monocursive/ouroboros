@@ -58,31 +58,52 @@ defmodule Ouroboros.Wasm.Deploy do
   What it costs *this* node is the compile, which is the trade: the machine that signs is the
   machine that pays.
 
-  Three things make it safe to skip rather than a requirement. A node with no helper on disk
+  Two things make it safe to skip rather than a requirement. A node with no helper on disk
   signs the source form alone and says so. `precompile: false` — `ouro wasm sign
-  --no-precompile` — does the same on request. And an artifact too large to travel in the
-  receipt this verb answers with is dropped rather than truncated (see below). In all three the
-  manifest carries no `precompiled` block, the bundle carries no second section, and every node
-  compiles the component for itself exactly as it did before W8.
+  --no-precompile` — does the same on request. In both the manifest carries no `precompiled`
+  block, the bundle carries no second section, and every node compiles the component for
+  itself exactly as it did before W8. Size is no longer one of them (W19, see below).
 
   The compile is bounded by §7.3 and not by a timer, which is the honest statement: `shape.check`
   refuses a component shaped to be expensive *before* cranelift starts, because cranelift cannot
   be interrupted once it has. What the timeout below does is stop *waiting*; it does not stop
   the compile, and it does not need to.
 
-  ## What the receipt can carry, and what that limits
+  ## What the receipt can carry, and what happens past it
 
   `sign/2` answers with the bundle's prefix, which since W8 is the header, the envelope **and**
   the precompiled artifact — the client holds the component and has never seen the artifact, so
   the artifact is the half that has to travel. That is a few hundred kibibytes for a real
   capability (the 48 KiB reference guest compiles to 258 093 bytes) and eleven mebibytes for the
-  worst shape §7.3 admits, and one gateway reply is not a file transfer. So the artifact is
-  carried only up to `max_receipt_precompiled_bytes/0`, which is three quarters of the
+  worst shape §7.3 admits, and one gateway reply is not a file transfer. So one reply carries
+  the artifact only up to `max_receipt_precompiled_bytes/0`, which is three quarters of the
   gateway's own configured frame — the number an operator already sets for this socket, since
-  the artifact travels base64 at four bytes to three. Past it the manifest is built without a
-  `precompiled` block, and the receipt says `form: :source` and
-  `precompile_skipped: {:artifact_too_large, …}` rather than leaving an absence to be noticed.
-  The capability still deploys; it compiles on each node, as it always did.
+  the artifact travels base64 at four bytes to three.
+
+  **Past that ceiling the artifact is not dropped; it is handed over in frames** (W19, D28).
+  W8 signed the source form alone there and said so, which was honest and was a limit nobody
+  had chosen: a capability whose machine code happened to exceed one reply lost the fast path
+  on every node in the fleet. Now `sign/2` puts the artifact in an `Ouroboros.Wasm.Download`
+  slot — the upload area's discipline in the other direction, bounded slots claimed
+  `O_CREAT|O_EXCL`, 0600 files, an idle clock and a total one — and the receipt carries
+  `artifact: %{download:, size:, sha256:, chunk_bytes:}` beside a `bundle_prefix` that is the
+  header and the envelope only. The manifest still carries the `precompiled` block, the
+  signature still covers it, and the receipt still says `form: :precompiled` with
+  `precompile_skipped: nil`, because nothing was skipped. The client walks the slot with
+  `wasm.download`, checks the size and the digest the receipt named, and writes
+  `prefix <> artifact <> component` — which is byte for byte what `Bundle.encode/3` would have
+  written.
+
+  Below the ceiling nothing changed: the prefix carries the artifact inline, `artifact` is
+  `nil`, and no slot is minted. The reasoning that made the ceiling honest in the first place
+  is unchanged too — one reply is still not a file transfer, and this is what a node does
+  instead of pretending otherwise.
+
+  A slot that cannot be minted — eight already in flight, a data directory that will not take
+  one — is still a *skip* rather than a failure, because the slot is claimed **before** the
+  manifest is signed: the block comes off, the source form is signed, and
+  `precompile_skipped` names why. A signature is never issued over an artifact this node has
+  no way to hand over.
 
   ## The epoch is not a parameter
 
@@ -96,20 +117,27 @@ defmodule Ouroboros.Wasm.Deploy do
   bundle signed here and deployed to a busier peer is no longer refused for a number this
   node could not see.
 
-  ## The signature comes back; the bytes do not go out again
+  ## The signature comes back; the client's own bytes do not go out again
 
-  `sign/2` answers with the bundle's **prefix** — the header and the envelope, a few
-  hundred bytes — and not with the bundle. The operator running `ouro wasm sign` already
-  holds the exact component they uploaded, so returning sixteen mebibytes through a
-  protocol whose frame is a mebibyte would mean building a chunked *download* to send
-  somebody their own file back. The client appends its bytes to the prefix and has the
-  bundle; the prefix states the component length, so the client composes nothing.
+  `sign/2` answers with the bundle's **prefix** and not with the bundle. The operator running
+  `ouro wasm sign` already holds the exact component they uploaded, so returning sixteen
+  mebibytes of it would be this node sending somebody their own file back. That half of the
+  reasoning has not moved and is not going to: the component never travels outward, in one
+  reply or in a hundred.
+
+  What W19 changed is the other half of the prefix. The artifact is **not** the client's own
+  bytes — this node compiled it, from bytes it then signed, and the client has never seen it —
+  so it is the one part of the file the client cannot supply. Where it fits one reply it rides
+  in the prefix, exactly as W8 shipped it. Where it does not, it goes out through
+  `wasm.download` in the same 512 KiB frames `wasm.upload` brought the component in, bound by
+  the sha256 the signed manifest already names. The client still composes nothing: the header
+  states all three lengths, and the client concatenates what it was given with what it held.
   """
 
   alias Ouroboros.Upgrade.Epoch
   alias Ouroboros.Upgrade.Signing.Service, as: SigningService
   alias Ouroboros.Wasm
-  alias Ouroboros.Wasm.{Artifact, Bundle, Rollout, Surface, Upload}
+  alias Ouroboros.Wasm.{Artifact, Bundle, Download, Rollout, Surface, Upload}
 
   @default_signing_timeout 15_000
 
@@ -161,8 +189,9 @@ defmodule Ouroboros.Wasm.Deploy do
   `attrs.precompile` defaults to `true` and is honoured only where this node has a helper on
   disk; see the moduledoc for what a skipped precompile means and for the three ways it happens.
 
-  Options are test seams and nothing else: `:upload_root`, `:signing_service`, `:signing_node`,
-  `:epoch_nodes`, `:epoch_opts`, `:helper_path`, `:precompile_timeout`, `:scratch_root`.
+  Options are test seams and nothing else: `:upload_root`, `:download_root`,
+  `:signing_service`, `:signing_node`, `:epoch_nodes`, `:epoch_opts`, `:helper_path`,
+  `:precompile_timeout`, `:scratch_root`.
   """
   @spec sign(sign_attrs(), keyword()) :: {:ok, map()} | {:error, term()}
   def sign(attrs, opts \\ [])
@@ -185,13 +214,25 @@ defmodule Ouroboros.Wasm.Deploy do
          {:ok, ticket} <- admit(server, source, signer_id, bytes),
          # Only now.
          {artifact_bytes, precompiled, skipped} <- precompile(bytes, attrs, opts),
-         # Attached rather than rebuilt, so the manifest that gets signed is the manifest that
-         # was admitted plus one field — which is what the ticket is checked against.
-         {:ok, artifact} <- Artifact.with_precompiled(source, precompiled),
-         {:ok, signature} <- issue(server, artifact, signer_id, bytes, ticket),
-         {:ok, signed} <- Artifact.with_signature(artifact, signature),
-         {:ok, prefix} <- Bundle.prefix(signed, artifact_bytes) do
-      {:ok, receipt(signed, prefix, skipped)}
+         # W19. Where the artifact will not fit one reply, the slot that will carry it is
+         # claimed *here* — before the manifest is signed — so a node that cannot hand an
+         # artifact over signs the source form rather than signing a promise it cannot keep.
+         {artifact_bytes, precompiled, skipped, download} <-
+           staged(artifact_bytes, precompiled, skipped, opts) do
+      sealed(
+        %{
+          server: server,
+          signer_id: signer_id,
+          bytes: bytes,
+          ticket: ticket,
+          source: source,
+          artifact: artifact_bytes,
+          precompiled: precompiled,
+          skipped: skipped,
+          download: download
+        },
+        opts
+      )
     end
   end
 
@@ -199,6 +240,60 @@ defmodule Ouroboros.Wasm.Deploy do
     do: {:error, {:invalid_sign_request, {:imports, describe(Map.get(attrs, :imports))}}}
 
   def sign(attrs, _opts), do: {:error, {:invalid_sign_request, describe(attrs)}}
+
+  # The half of `sign/2` that runs with a download slot possibly held. It is a separate
+  # function for exactly that reason: from here on every refusal has to release the slot, and
+  # a slot nobody will ever ask for is ten minutes of this node's ceiling spent on bytes no
+  # receipt names. The `else` is the whole of it, and it is why the claim happens before the
+  # signature rather than after — a node that cannot hand an artifact over must be able to
+  # fall back to the source form, which is a decision that has to be made before the manifest
+  # is signed.
+  defp sealed(plan, opts) do
+    with {:ok, artifact} <- Artifact.with_precompiled(plan.source, plan.precompiled),
+         {:ok, signature} <-
+           issue(plan.server, artifact, plan.signer_id, plan.bytes, plan.ticket),
+         {:ok, signed} <- Artifact.with_signature(artifact, signature),
+         {:ok, prefix} <- prefix(signed, plan.artifact, plan.download) do
+      {:ok, receipt(signed, prefix, plan.skipped, plan.download)}
+    else
+      refusal ->
+        _released = abandon(plan.download, opts)
+        refusal
+    end
+  end
+
+  # W19. Which of the three shapes an artifact travels in, decided here and nowhere else:
+  # inline in the receipt where it fits one reply, in a download slot where it does not, and
+  # not at all where there is none.
+  #
+  # A slot that cannot be claimed is a *skip*, with the same posture every other precompile
+  # failure has (D23): the block comes off, the source form is signed, and the reason is named
+  # in the receipt. The alternative would be signing a manifest that declares an artifact this
+  # node has no way to hand over, which is a bundle nobody can compose.
+  defp staged(nil, _precompiled, skipped, _opts), do: {nil, nil, skipped, nil}
+
+  defp staged(artifact_bytes, precompiled, skipped, opts) do
+    if byte_size(artifact_bytes) <= max_receipt_precompiled_bytes() do
+      {artifact_bytes, precompiled, skipped, nil}
+    else
+      case Download.put(artifact_bytes, download_opts(opts)) do
+        {:ok, slot} -> {artifact_bytes, precompiled, skipped, slot}
+        {:error, reason} -> {nil, nil, {:artifact_not_staged, reason}, nil}
+      end
+    end
+  end
+
+  # With a slot, the receipt carries the header and the envelope and the artifact travels
+  # through `wasm.download`; without one, the prefix is what it has been since W8. Both are
+  # the same header — the three lengths are stated either way — so a client appends what it
+  # was given in the order the format already fixed.
+  defp prefix(signed, artifact_bytes, nil), do: Bundle.prefix(signed, artifact_bytes)
+
+  defp prefix(signed, artifact_bytes, _download),
+    do: Bundle.prefix_without_artifact(signed, artifact_bytes)
+
+  defp abandon(nil, _opts), do: :ok
+  defp abandon(%{download: id}, opts), do: Download.release(id, download_opts(opts))
 
   @doc """
   Deploys the bundle staged under `upload`, which the rollout verifies before it records.
@@ -240,13 +335,19 @@ defmodule Ouroboros.Wasm.Deploy do
   end
 
   @doc """
-  The largest precompiled artifact this verb will put in a receipt (W8, M9).
+  The largest precompiled artifact this verb will put **in one reply** (W8, M9; W19, D28).
 
   Derived from the gateway's own configured frame ceiling — `OUROBOROS_GATEWAY_MAX_FRAME`, the
   number an operator already sets for this socket — rather than invented here. The artifact
   travels base64 at four bytes to three, so three quarters of a frame decoded is about one
   frame encoded: an operator who raises the frame raises this, in one place, and the default
   1 MiB frame carries 786 432 bytes of artifact, three times the reference guest's.
+
+  Since W19 this is a *routing* number and no longer a ceiling on what may be signed. Below it
+  the artifact rides in the receipt's prefix; above it the artifact is minted into an
+  `Ouroboros.Wasm.Download` slot and the receipt names it. Nothing is dropped either way, and
+  what bounds the artifact itself is `Ouroboros.Wasm.Bundle.max_precompiled_bytes/0`, which is
+  the ceiling on what a bundle could carry at all.
   """
   @spec max_receipt_precompiled_bytes() :: pos_integer()
   def max_receipt_precompiled_bytes, do: max(div(gateway_max_frame() * 3, 4), 1)
@@ -476,10 +577,15 @@ defmodule Ouroboros.Wasm.Deploy do
     _error -> {:error, :precompile_unreadable}
   end
 
+  # W19. The bound here is what a *bundle* may carry, not what one reply may carry: the reply's
+  # own number decides how the artifact travels (see `staged/4`), and holding the read to it
+  # would be this node refusing to compile something it is perfectly able to hand over. A
+  # helper that wrote more than `Bundle.max_precompiled_bytes/0` wrote a file no bundle could
+  # hold, and that is still a skip.
   defp read_artifact(path) do
     case File.stat(path) do
       {:ok, %{type: :regular, size: size}} when size > 0 ->
-        cap = max_receipt_precompiled_bytes()
+        cap = Bundle.max_precompiled_bytes()
 
         if size > cap,
           do: {:error, {:artifact_too_large, size, cap}},
@@ -720,7 +826,7 @@ defmodule Ouroboros.Wasm.Deploy do
   defp put_present(map, _key, nil), do: map
   defp put_present(map, key, value), do: Map.put(map, key, value)
 
-  defp receipt(artifact, prefix, skipped) do
+  defp receipt(artifact, prefix, skipped, download) do
     %{
       # W8, M9. Which form the client is holding, said outright rather than inferred from an
       # absence: `precompiled` when the bundle carries both, `source` when it carries one, with
@@ -732,6 +838,12 @@ defmodule Ouroboros.Wasm.Deploy do
       # then a JSON encoder, and a reason is a diagnostic line an operator reads — `no_helper`,
       # `{:artifact_too_large, 11092495, 4194304}` — never a value a client branches on.
       precompile_skipped: skip_reason(skipped),
+      # W19, D28. Where the artifact did not fit this reply: the slot that holds it, its size,
+      # its digest, and the chunk this node will answer with. `nil` is a client with nothing to
+      # fetch, because the prefix already carries the artifact — which is the ordinary case and
+      # every case there was before W19. The digest is the one the signed manifest names, so a
+      # client that reassembles to something else has been handed something else.
+      artifact: download,
       artifact_id: artifact.id,
       name: artifact.name,
       epoch: artifact.epoch,
@@ -745,9 +857,15 @@ defmodule Ouroboros.Wasm.Deploy do
       start_id: start_id(artifact),
       extension: Bundle.extension(),
       bundle_prefix: Base.encode64(prefix),
-      bundle_bytes: byte_size(prefix) + artifact.size
+      # Three parts since W19, and the third is zero in every case that is not a download. It
+      # is what the file will weigh once the client has both halves, which is the only
+      # arithmetic a client does about a format it does not otherwise implement.
+      bundle_bytes: byte_size(prefix) + downloadable(download) + artifact.size
     }
   end
+
+  defp downloadable(nil), do: 0
+  defp downloadable(%{size: size}), do: size
 
   defp skip_reason(nil), do: nil
   defp skip_reason(reason), do: describe(reason)
@@ -788,6 +906,13 @@ defmodule Ouroboros.Wasm.Deploy do
 
   defp upload_opts(opts) do
     case Keyword.get(opts, :upload_root) do
+      root when is_binary(root) and root != "" -> [root: root]
+      _unset -> []
+    end
+  end
+
+  defp download_opts(opts) do
+    case Keyword.get(opts, :download_root) do
       root when is_binary(root) and root != "" -> [root: root]
       _unset -> []
     end

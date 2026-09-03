@@ -3801,11 +3801,73 @@ pub struct WasmSignature {
     /// Why there is no artifact, when the node had a reason worth naming. Kept as the
     /// runtime's own rendering: it is a diagnostic line, not a value to branch on.
     pub precompile_skipped: Option<String>,
+    /// W19. Where the artifact is, when it did not fit this reply. `None` — an explicit
+    /// `null` on the wire — is the ordinary case and every case there was before W19: the
+    /// artifact is already inside `bundle_prefix` and there is nothing to fetch. `Some`
+    /// means the prefix is the header and the envelope alone and the artifact comes back
+    /// through `wasm.download`, in the frames `wasm.upload` sent the component in.
+    pub artifact: Option<WasmArtifactSlot>,
     /// Base64 of the bytes to write before the component. Kept encoded: this client
     /// decodes it once, at the moment it writes the file, and never inspects it. Since W8
-    /// it carries the precompiled artifact too, which is the half the client never had.
+    /// it carries the precompiled artifact too — unless `artifact` above names a download,
+    /// in which case that half arrives separately and this is the header and the envelope.
     pub bundle_prefix: Option<String>,
     pub bundle_bytes: Option<u64>,
+}
+
+/// W19. The slot a `wasm.sign` receipt names when the artifact travels separately.
+///
+/// Every field is needed and none of them is optional in a receipt this client will act on:
+/// the id to ask with, the size to know when to stop, the digest to check what was
+/// reassembled — which is the digest the *signed manifest* carries, so a mismatch is not a
+/// transport hiccup but bytes that are not this artifact — and the chunk the node will answer
+/// with, so the offsets asked for are the ones it accepts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmArtifactSlot {
+    pub download: Option<String>,
+    pub size: Option<u64>,
+    pub sha256: Option<String>,
+    pub chunk_bytes: Option<u64>,
+}
+
+impl WasmArtifactSlot {
+    fn decode(value: &Value) -> Self {
+        Self {
+            download: nonempty(value.get("download")),
+            size: value.get("size").and_then(Value::as_u64),
+            sha256: nonempty(value.get("sha256")),
+            chunk_bytes: value.get("chunk_bytes").and_then(Value::as_u64),
+        }
+    }
+}
+
+/// W19. One `wasm.download` answer: a chunk of an artifact and where it sits.
+///
+/// `data` stays base64 until the loop that appends it, for the reason a bundle prefix does:
+/// this client decodes it once and never inspects it. `is_final` is the wire's `final`, which
+/// is a reserved word here — the answer that carries it is also the answer that released the
+/// node's slot, so it is the last one this transfer can ask for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmDownloadChunk {
+    pub download: Option<String>,
+    pub offset: Option<u64>,
+    pub data: Option<String>,
+    pub size: Option<u64>,
+    pub sha256: Option<String>,
+    pub is_final: bool,
+}
+
+impl WasmDownloadChunk {
+    pub fn decode(value: &Value) -> Self {
+        Self {
+            download: nonempty(value.get("download")),
+            offset: value.get("offset").and_then(Value::as_u64),
+            data: nonempty(value.get("data")),
+            size: value.get("size").and_then(Value::as_u64),
+            sha256: nonempty(value.get("sha256")),
+            is_final: value.get("final").and_then(Value::as_bool).unwrap_or(false),
+        }
+    }
 }
 
 /// W8. The precompiled form a signed manifest names, and the exact pair of readings that may
@@ -3993,6 +4055,10 @@ impl WasmSignature {
                 .filter(|v| v.is_object())
                 .map(WasmPrecompiled::decode),
             precompile_skipped: nonempty(value.get("precompile_skipped")),
+            artifact: value
+                .get("artifact")
+                .filter(|v| v.is_object())
+                .map(WasmArtifactSlot::decode),
             bundle_prefix: nonempty(value.get("bundle_prefix")),
             bundle_bytes: value.get("bundle_bytes").and_then(Value::as_u64),
         }
@@ -4678,6 +4744,7 @@ mod tests {
                 "stream_ended_notification",
                 "stream_lagged_notification",
                 "wasm_deploy_result",
+                "wasm_download_result",
                 "wasm_list_result",
                 "wasm_rollback_result",
                 "wasm_sign_result",
@@ -4700,6 +4767,42 @@ mod tests {
         assert_eq!(receipt.sha256, None);
         // The node states its own ceiling; the client sizes the next frame from it.
         assert_eq!(receipt.chunk_bytes, 524_288);
+    }
+
+    /// W19's `wasm.download`: one chunk of an artifact on the way back out.
+    ///
+    /// The frame is `wasm.upload`'s in the other direction and the decode says so — an id, a
+    /// place, base64 bytes, and the two numbers that say when the transfer is done and what it
+    /// has to hash to. `final` is a reserved word in this language and is `is_final` here;
+    /// reading it out of the wire's own key is the whole of this test's care about that.
+    #[test]
+    fn the_wasm_download_fixture_decodes_into_the_typed_model() {
+        let chunk = WasmDownloadChunk::decode(&fixture("wasm_download_result")["result"]);
+
+        assert_eq!(
+            chunk.download.as_deref(),
+            Some("3c7a5b19e04d6f28a1b3c5d7e9f02468")
+        );
+        assert_eq!(chunk.offset, Some(524_288));
+        assert_eq!(chunk.size, Some(1_310_720));
+        assert_eq!(chunk.sha256.as_deref(), Some(&"d".repeat(64)[..]));
+
+        // Mid-transfer: there is another frame to ask for, and the node's slot is still there
+        // to answer it. The chunk that says `true` is the one that released it.
+        assert!(!chunk.is_final);
+
+        // The bytes stay base64 until the loop appends them, exactly as a bundle prefix does.
+        let data = chunk.data.as_deref().expect("a chunk of data");
+        let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
+            .expect("the chunk is base64");
+        assert_eq!(&decoded[..9], b"OUROCWASM");
+
+        // An answer that named nothing carries nothing, and `final` is false rather than
+        // unknown — a client that read a missing key as "we are done" would stop mid-file.
+        let silent = WasmDownloadChunk::decode(&serde_json::json!({}));
+        assert_eq!(silent.download, None);
+        assert_eq!(silent.offset, None);
+        assert!(!silent.is_final);
     }
 
     /// W12's `wasm.sign`: the bundle's prefix and what it describes.
@@ -4732,6 +4835,37 @@ mod tests {
         assert_eq!(precompiled.sha256.as_deref(), Some(&"d".repeat(64)[..]));
         assert_eq!(precompiled.size, Some(4_096));
         assert_eq!(signed.precompile_skipped, None);
+
+        // W19. The artifact fits this reply, so it is already in the prefix and there is
+        // nothing to fetch. That is the ordinary case and every case there was before W19,
+        // and the node says so with an explicit null rather than by leaving a key out.
+        assert_eq!(signed.artifact, None);
+
+        // And the other case: the prefix is the header and the envelope alone, and the
+        // artifact comes back through `wasm.download`. All four fields are needed — the id to
+        // ask with, the size to know when to stop, the digest the signed manifest carries, and
+        // the chunk the node will answer with.
+        let staged = WasmSignature::decode(&serde_json::json!({
+            "name": "vet",
+            "form": "precompiled",
+            "artifact": {
+                "download": "3c7a5b19e04d6f28a1b3c5d7e9f02468",
+                "size": 1_310_720,
+                "sha256": "d".repeat(64),
+                "chunk_bytes": 524_288
+            }
+        }));
+
+        let slot = staged.artifact.as_ref().expect("a download slot");
+        assert_eq!(
+            slot.download.as_deref(),
+            Some("3c7a5b19e04d6f28a1b3c5d7e9f02468")
+        );
+        assert_eq!(slot.size, Some(1_310_720));
+        assert_eq!(slot.sha256.as_deref(), Some(&"d".repeat(64)[..]));
+        assert_eq!(slot.chunk_bytes, Some(524_288));
+        // The form is still `precompiled`: nothing was skipped, the artifact merely travels.
+        assert_eq!(staged.form.as_deref(), Some("precompiled"));
 
         // A receipt from a node with no helper, or from `--no-precompile`, carries neither the
         // block nor a reason it could branch on — only a line to print.

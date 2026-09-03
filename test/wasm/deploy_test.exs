@@ -4,6 +4,7 @@ defmodule Ouroboros.Wasm.DeployTest do
   # environment, because a target is never told which signers to trust.
   use ExUnit.Case, async: false
 
+  alias Ouroboros.Gateway.Methods
   alias Ouroboros.Mesh
   alias Ouroboros.Upgrade.Rollout.Registry
   alias Ouroboros.Upgrade.Signing.Service
@@ -12,6 +13,7 @@ defmodule Ouroboros.Wasm.DeployTest do
   alias Ouroboros.Wasm.Bundle
   alias Ouroboros.Wasm.Deploy
   alias Ouroboros.Wasm.Pool
+  alias Ouroboros.Wasm.Rollout
   alias Ouroboros.Wasm.Store
   alias Ouroboros.Wasm.Upload
 
@@ -528,6 +530,170 @@ defmodule Ouroboros.Wasm.DeployTest do
     end
   end
 
+  # ---------------------------------------------------------------------------------------
+  # W19 — the artifact comes back in the frames the upload used
+  # ---------------------------------------------------------------------------------------
+
+  describe "an artifact too large for one reply, end to end over the verbs" do
+    @tag @needs_live
+    test "sign names a download, the chunks reassemble, and the bundle deploys precompiled",
+         context do
+      pool = live_pool!()
+      name = "download-test-#{System.unique_integer([:positive])}"
+      id = "wasm/" <> name
+      on_exit(fn -> Mesh.stop_agent(id) end)
+
+      bytes = File.read!(@guest)
+
+      # The whole point of the configuration: the reference guest's artifact is about 258 KiB,
+      # and three quarters of a 64 KiB frame is 49 152, so this node cannot put the artifact in
+      # the reply it answers `wasm.sign` with. Before W19 that signed the source form alone and
+      # said so; now it mints a slot.
+      previous_gateway = Application.get_env(:ouroboros, :gateway)
+
+      Application.put_env(
+        :ouroboros,
+        :gateway,
+        Keyword.put(previous_gateway || [], :max_frame, 64 * 1024)
+      )
+
+      on_exit(fn -> restore(:gateway, previous_gateway) end)
+
+      # `Gateway.Methods` routes to this node with no options at all, so the upload area, the
+      # download area and the signing service all have to be the real, configured ones.
+      previous_data_dir = Application.get_env(:ouroboros, :data_dir)
+      Application.put_env(:ouroboros, :data_dir, context.tmp)
+      on_exit(fn -> restore(:data_dir, previous_data_dir) end)
+
+      previous_signing_node = Application.get_env(:ouroboros, :signing_node)
+      Application.delete_env(:ouroboros, :signing_node)
+      on_exit(fn -> restore(:signing_node, previous_signing_node) end)
+
+      key_path = Path.join(context.tmp, "gateway-signer.key")
+      File.write!(key_path, :crypto.strong_rand_bytes(32))
+      File.chmod!(key_path, 0o600)
+
+      start_supervised!(
+        {Service,
+         [
+           name: Service,
+           key_path: key_path,
+           signer_id: @signer <> "-gateway",
+           storage:
+             {Jido.Storage.ETS,
+              table: String.to_atom("w19_journal_#{System.unique_integer([:positive])}")}
+         ]}
+      )
+
+      {:ok, %{public_key: public}} = Service.public_info(Service)
+
+      trust_policy = [
+        allow_unsigned: false,
+        trusted_signers: %{(@signer <> "-gateway") => public}
+      ]
+
+      Application.put_env(:ouroboros, :upgrade_trust_policy, trust_policy)
+
+      assert Deploy.max_receipt_precompiled_bytes() == 49_152
+
+      # 1. Up in frames, as always.
+      upload = gateway_upload!(bytes)
+
+      # 2. Signed. The artifact was compiled and signed — `form` is `precompiled` and nothing
+      #    was skipped — and it is named as a download rather than carried.
+      assert {:ok, receipt} =
+               Methods.invoke("wasm.sign", %{
+                 "upload" => upload,
+                 "name" => name,
+                 "author" => "test-agent",
+                 "imports" => ["log"],
+                 "start_config" => "{}",
+                 "eval" => %{
+                   "probes" => [
+                     %{
+                       "input" => %{"greet" => "world"},
+                       "expect" => %{"kind" => "contains", "substring" => "greet"}
+                     }
+                   ],
+                   "budget_ms" => 10_000
+                 }
+               })
+
+      assert receipt.form == :precompiled
+      assert receipt.precompile_skipped == nil
+      assert receipt.precompiled != nil
+
+      assert %{download: download, size: size, sha256: sha256, chunk_bytes: chunk_bytes} =
+               receipt.artifact
+
+      assert download =~ ~r/\A[0-9a-f]{32}\z/
+      assert size > Deploy.max_receipt_precompiled_bytes()
+      # The digest a client checks against is the one in the signed manifest, not a second
+      # number this node computed for the transfer.
+      assert sha256 == receipt.precompiled.sha256
+      assert size == receipt.precompiled.size
+      assert chunk_bytes == Upload.max_chunk_bytes()
+
+      # 3. Back in frames, walked from the offsets the answers give.
+      artifact = gateway_download!(download)
+
+      assert byte_size(artifact) == size
+      assert Artifact.digest(artifact) == sha256
+      # The container `ouro-wasm precompile` writes, arriving whole through the gateway.
+      assert <<"OUROCWASM", 1::8, _rest::binary>> = artifact
+
+      # The slot is gone: the final chunk released it, and a client that lost that answer
+      # signs again rather than asking twice (D28).
+      assert {:error, code, _message} =
+               Methods.invoke("wasm.download", %{"download" => download, "offset" => 0})
+
+      assert code == Methods.code(:not_found)
+
+      # 4. The file: what the node produced, then what this side already held. The prefix is
+      #    the header and the envelope alone this time.
+      prefix = Base.decode64!(receipt.bundle_prefix)
+      bundle = prefix <> artifact <> bytes
+
+      assert byte_size(bundle) == receipt.bundle_bytes
+      assert {:ok, decoded} = Bundle.verify(bundle, trust_policy)
+      assert decoded.bytes == bytes
+      assert decoded.precompiled == artifact
+      assert decoded.artifact.precompiled == receipt.precompiled
+
+      # And it is byte for byte the file `Bundle.encode/3` would have written. This is the
+      # claim the split prefix has to keep: `prefix_without_artifact/2` plus the two sections
+      # is the encoder's own output, so a client that concatenates has composed nothing.
+      assert {:ok, ^bundle} = Bundle.encode(decoded.artifact, bytes, artifact)
+
+      # 5. The helper's own word on which form it loaded. `Rollout.stage/3` reports what
+      #    `load` answered, so this is the artifact being *mapped* rather than a path being
+      #    guessed at — the assertion is on the helper, not on the store.
+      assert {:ok, evidence} =
+               Rollout.stage(decoded.artifact, bytes,
+                 pool: pool,
+                 store_root: Path.join(context.tmp, "stage-store"),
+                 # A register of this step's own: staging advances a watermark, and the
+                 # deploy below has to be able to spend the epoch this signature was minted
+                 # with rather than find it already called stale by a check.
+                 epoch_registry: start_registry!(),
+                 precompiled: artifact
+               )
+
+      assert evidence.precompiled == true
+
+      # 6. And the whole verb path: this bundle deploys, live, and the capability answers.
+      #    The trust policy is the one that trusts the service this test registered under the
+      #    module's own name, because a target reads its own and is never told which to use.
+      assert {:ok, outcome} =
+               deploy(context, upload!(context, bundle), pool: pool, trust_policy: trust_policy)
+
+      assert outcome.state == :live
+      assert outcome.name == name
+      assert is_pid(Mesh.whereis(id))
+      assert {:ok, _agent} = Mesh.send_message("w19", id, %{"greet" => "world"})
+    end
+  end
+
   describe "wasm.rollback's plane" do
     test "a name with no live lane-W entry is not found", context do
       assert {:error, {:no_live_rollout, "greeter"}} =
@@ -654,6 +820,60 @@ defmodule Ouroboros.Wasm.DeployTest do
   defp upload!(context, bytes) do
     {:ok, %{upload: id}} = Upload.append(nil, 0, bytes, true, root: context.uploads)
     id
+  end
+
+  # W19. An upload through the verb rather than through the module, in the frames a client
+  # would use, because the end-to-end case is about what crosses the wire.
+  defp gateway_upload!(bytes) do
+    chunk = Upload.max_chunk_bytes()
+
+    {id, _offset} =
+      bytes
+      |> chunks(chunk)
+      |> Enum.reduce({nil, 0}, fn slice, {id, offset} ->
+        params =
+          %{"offset" => offset, "data" => Base.encode64(slice)}
+          |> then(&if id, do: Map.put(&1, "upload", id), else: &1)
+          |> then(
+            &if offset + byte_size(slice) >= byte_size(bytes),
+              do: Map.put(&1, "final", true),
+              else: &1
+          )
+
+        {:ok, receipt} = Methods.invoke("wasm.upload", params)
+        {receipt.upload, offset + byte_size(slice)}
+      end)
+
+    id
+  end
+
+  # And the artifact back out of the slot the signature named, walked exactly as
+  # `ouro wasm sign` walks it: sequentially, from the offsets the node's own answers give,
+  # until one of them says it was the last.
+  defp gateway_download!(download) do
+    Enum.reduce_while(Stream.iterate(0, & &1), <<>>, fn _step, acc ->
+      {:ok, chunk} =
+        Methods.invoke("wasm.download", %{"download" => download, "offset" => byte_size(acc)})
+
+      assert chunk.offset == byte_size(acc)
+      assert chunk.download == download
+
+      acc = acc <> Base.decode64!(chunk.data)
+
+      if chunk.final, do: {:halt, acc}, else: {:cont, acc}
+    end)
+  end
+
+  defp chunks(bytes, size) do
+    Stream.unfold(0, fn
+      offset when offset >= byte_size(bytes) ->
+        nil
+
+      offset ->
+        length = min(size, byte_size(bytes) - offset)
+        {binary_part(bytes, offset, length), offset + length}
+    end)
+    |> Enum.to_list()
   end
 
   # A bundle whose manifest nobody signed. Built by hand because `Bundle.encode/2` refuses

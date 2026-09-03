@@ -112,6 +112,7 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Wasm.Capability, as: WasmCapability
   alias Ouroboros.Wasm.Deploy, as: WasmDeploy
   alias Ouroboros.Wasm.Upload, as: WasmUpload
+  alias Ouroboros.Wasm.Download, as: WasmDownload
 
   import Ouroboros.Gateway.Methods.Safe,
     only: [
@@ -189,6 +190,10 @@ defmodule Ouroboros.Gateway.Methods do
   # `@forge_timeout` is: a rollout that settles `:quarantined` is a named answer an operator
   # can act on, and a gateway ceiling firing first would replace it with `-32005` and no
   # detail about which node did not report.
+  # W19. `wasm.download` reads at most half a mebibyte out of a node-local file: it is
+  # `wasm.upload`'s own ceiling, in the other direction, for the same work.
+  @wasm_download_timeout 15_000
+
   @wasm_upload_timeout 15_000
   @wasm_sign_timeout 60_000
   @wasm_deploy_timeout 180_000
@@ -539,7 +544,12 @@ defmodule Ouroboros.Gateway.Methods do
     "wasm.upload" => %{scope: :operate, timeout: @wasm_upload_timeout},
     "wasm.sign" => %{scope: :operate, timeout: @wasm_sign_timeout},
     "wasm.deploy" => %{scope: :operate, timeout: @wasm_deploy_timeout, outcome: :unknown},
-    "wasm.rollback" => %{scope: :operate, timeout: @wasm_rollback_timeout}
+    "wasm.rollback" => %{scope: :operate, timeout: @wasm_rollback_timeout},
+    # W19. The reply direction of the same transport, and `:operate` for the same reason
+    # `wasm.upload` is: it is not a read of anything a node holds *about* itself, it is a node
+    # handing out bytes — and only the bytes its own `sign/2` compiled and signed, from a slot
+    # that verb minted, bound by a digest the signed manifest already names (D28).
+    "wasm.download" => %{scope: :operate, timeout: @wasm_download_timeout}
   }
 
   # The exact terms the upstream schemas declare, spelled out here so that a client string
@@ -1267,7 +1277,18 @@ defmodule Ouroboros.Gateway.Methods do
          {"name", :required, :string, "the live lane-W capability to retire"},
          @authority_node
        ],
-       "stops the wrapper agent on every node the entry names and marks the entry; the component bytes stay in the store (D6), so redeploying needs a new epoch and a new signature but no new build"}
+       "stops the wrapper agent on every node the entry names and marks the entry; the component bytes stay in the store (D6), so redeploying needs a new epoch and a new signature but no new build"},
+    # W19
+    "wasm.download" =>
+      {:closed,
+       [
+         {"download", :required, :string,
+          "the id a `wasm.sign` receipt named under `artifact.download`; this node minted it and no client may choose one"},
+         {"offset", :required, :non_negative_integer,
+          "a chunk boundary — a multiple of the receipt's `chunk_bytes`, below `size`. It is not a seek: a client walks the file with the offsets these answers hand it, and anything else is refused rather than answered with bytes from the middle of something"},
+         @authority_node
+       ],
+       "the reply direction of `wasm.upload` (docs/WASM.md D28). A node hands out **only** bytes its own `wasm.sign` compiled and signed: there is no verb that puts one here, the slot is minted by `sign/2` alone, and what comes back is bound by the `sha256` the signed manifest already carries. `data` is base64 of at most `chunk_bytes` decoded bytes; `final` marks the chunk that completes the artifact, and reading it **releases the slot** — a client that loses that answer signs again rather than asking twice. Slots, their count and their two clocks are `Ouroboros.Wasm.Upload`'s, read from that module rather than restated"}
   }
 
   @type entry :: %{
@@ -1955,6 +1976,35 @@ defmodule Ouroboros.Gateway.Methods do
         :rollback,
         [name, []],
         @wasm_rollback_timeout - @wasm_erpc_slack
+      )
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # W19 — the artifact comes back in the frames the upload used
+  #
+  # `wasm.upload` cuts a component into frames on the way in; this cuts an artifact into the
+  # same frames on the way out, because since W8 the bundle carries a second section the
+  # client has never seen and one reply is not a file transfer (D28). What makes it safe is
+  # not this module either: a node hands out only what its own `sign/2` compiled and signed,
+  # from a slot that verb minted, bound by a digest the signed manifest already carries. There
+  # is deliberately no verb that *puts* — a download area a client could fill would be a node
+  # storing other people's bytes on request.
+  # ---------------------------------------------------------------------------
+
+  def invoke("wasm.download", params) do
+    with :ok <- only_keys(params, ["download", "offset", "node"]),
+         {:ok, download} <- wasm_download(params),
+         {:ok, offset} <- option_value("offset", :non_negative_integer, Map.get(params, "offset")),
+         {:ok, target} <- permissions_node(params) do
+      wasm_node_call(
+        target,
+        WasmDownload,
+        :read,
+        [download, offset, []],
+        @wasm_download_timeout - @wasm_erpc_slack
       )
     else
       {:invalid, message} -> invalid_params(message)
@@ -3255,6 +3305,30 @@ defmodule Ouroboros.Gateway.Methods do
   defp wasm_reply({:error, {:no_live_rollout, name}}),
     do: not_found("no live lane-W rollout named #{inspect(name)} on this node")
 
+  # W19. The three ways a `wasm.download` is a client's own mistake about a transfer. "There
+  # is no such slot" and "you asked from the wrong place" send an operator to different
+  # places: the first is a signature to make again, the second is a client that lost its
+  # place in a file it is halfway through.
+  defp wasm_reply({:error, {:unknown_download, id}}) do
+    not_found(
+      "no download #{id} on this node; a slot ends when its final chunk is read, and " <>
+        "otherwise when its clocks run out — sign again to mint another"
+    )
+  end
+
+  defp wasm_reply({:error, {:offset_not_a_chunk_boundary, _offset, chunk}}) do
+    invalid_params(
+      "params.offset must be a multiple of #{chunk}, which is this node's chunk: a download " <>
+        "is walked with the offsets its own answers hand back, never seeked into"
+    )
+  end
+
+  defp wasm_reply({:error, {:offset_past_size, _offset, size}}),
+    do: invalid_params("params.offset must be below #{size}, which is this download's size")
+
+  defp wasm_reply({:error, {:invalid_download_id, _id}}),
+    do: invalid_params("params.download must be a download id this node minted")
+
   defp wasm_reply(other), do: reply(other)
 
   ## W12 parameters
@@ -3268,6 +3342,16 @@ defmodule Ouroboros.Gateway.Methods do
       nil -> {:ok, nil}
       value when is_binary(value) -> wasm_upload_id(value)
       _other -> {:invalid, "params.upload must be the id a previous frame returned"}
+    end
+  end
+
+  # W19. The same shape and the same reasoning as an upload id, and validated here for the
+  # same reason: it becomes a filename on the far side.
+  defp wasm_download(params) do
+    with {:ok, value} <- fetch_string(params, "download") do
+      if Regex.match?(~r/\A[0-9a-f]{32}\z/, value),
+        do: {:ok, value},
+        else: {:invalid, "params.download must be a download id this node minted"}
     end
   end
 

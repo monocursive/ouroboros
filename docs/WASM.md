@@ -750,11 +750,32 @@ unsigned bytes from a socket, and pointing the helper at them is what this lane 
 avoid (D15). The epoch is not a parameter either; it is allocated over the connected
 cluster.
 It answers with the bundle's **prefix** rather than the bundle: the operator already holds
-the bytes they uploaded, so returning them would mean building a chunked download to hand
-somebody their own file back. `wasm.deploy` verifies the bundle against the node's own
+the bytes they uploaded, and sending somebody their own file back is not a transfer worth
+building. `wasm.deploy` verifies the bundle against the node's own
 trust policy **before** the store, the helper or the register hears about it, then runs
 `Wasm.Rollout.deploy/4` unchanged; a rollout that ran answers with its state rather than
 with an error, because `:rolled_back` and `:quarantined` are outcomes a client renders.
+**What comes back the other way, and how it is bounded (W19, D28).** The prefix stopped being
+"a few hundred bytes" at W8: it also carries the precompiled artifact, which is the one part of
+the file the client never had — this node compiled it, from bytes it then signed. That is 258 093
+bytes for the reference guest and eleven mebibytes for the worst shape §7.3 admits, and one reply
+is not a file transfer, so W8 dropped an artifact past three quarters of the frame and signed the
+source form alone. W19 hands it over instead. `Wasm.Download` is `Wasm.Upload` in the other
+direction — `<data_dir>/wasm/download/`, slots claimed `O_CREAT|O_EXCL`, 0600 files, the same
+512 KiB chunk and the same two clocks, all four numbers read from that module rather than
+restated — and `wasm.download` `{download, offset}` walks one. The receipt then carries
+`artifact: {download, size, sha256, chunk_bytes}` beside a `bundle_prefix` that is the header and
+the envelope alone, the manifest keeps its `precompiled` block, the signature still covers it,
+and `form` is still `precompiled`. What bounds the verb is that a node hands out **only** bytes
+its own `sign/2` produced: there is no verb that puts, the slot is minted by that function alone
+and *before* the manifest is signed (so a node that cannot stage one falls back to the source form
+rather than signing a promise it cannot keep), the offsets are chunk boundaries below the size
+rather than a seek, and what comes out is bound by the sha256 the signed manifest already names.
+The client writes `prefix <> artifact <> component`, which is byte for byte what `Bundle.encode/3`
+would have written; below the ceiling nothing changed at all. Reading the final chunk releases the
+slot, because the verb's closed parameters give a client no other way to say it is finished — the
+cost, stated rather than hidden, is that a lost last frame means signing again.
+
 `wasm.rollback` reaches the same `withdraw/2` the eval-failure branch uses — a wrapper
 running some other component's sha is left alone and reported `:unchanged` — and marks the
 entry `:rolled_back` only where every node proved **absence**. `:unchanged` is not absence:
@@ -1503,9 +1524,11 @@ machinery — it is a backend, not a lane (D9).
   node — a client-chosen id is a client-chosen filename — and is still validated as 32 hex
   characters on the way back in. An upload carries no authority whatsoever: the sha it
   reports at commit is a receipt for the transfer, and what comes out of it is verified by
-  whichever verb consumes it. The **result** direction needs no chunking, because
-  `wasm.sign` answers with the bundle's prefix and the client appends the bytes it already
-  holds.
+  whichever verb consumes it. The **result** direction needed no chunking when this was
+  written, because `wasm.sign` answered with a prefix of a few hundred bytes and the client
+  appended what it already held; W8 put the precompiled artifact in that prefix and W19 gave
+  the other direction the same treatment, in the same frames and with the same slots and
+  clocks (D28). The component still never travels outward.
 
   The same reasoning applies to everything else the SDK *says* about the node. A `Verdict`'s
   documentation of the untrusted narrowing and a `Check`'s "an empty reply is a pass" are
@@ -2023,6 +2046,55 @@ machinery — it is a backend, not a lane (D9).
   (`Provider.Native.Permissions.planning_refusal/1`) is native-lane only: an ACP session in a
   planning posture is not refused writes by that mechanism.
 
+- **D28 — a node hands back what it made, in the frames it was handed things in.** W8 put the
+  precompiled artifact into `wasm.sign`'s reply, because the client holds the component and has
+  never seen the artifact, and then bounded it at three quarters of the gateway frame and
+  dropped anything larger. The ceiling was honest and the reasoning behind it still holds: one
+  JSON-RPC reply is not a file transfer, and the answer to bytes that do not fit a frame is the
+  one D16 already gave — cut them into frames that do. W19 is that reasoning carried to the end
+  rather than a reversal of it.
+
+  `Ouroboros.Wasm.Download` is `Ouroboros.Wasm.Upload` read backwards, and deliberately not a
+  second design: `<data_dir>/wasm/download/` created 0700 and held to `lstat`, a slot claimed
+  `O_CREAT|O_EXCL` whose file *is* the claim, an id minted here as sixteen random bytes and
+  re-validated as `[0-9a-f]{32}` on the way back in, 0600 files, and the chunk, the slot count
+  and both clocks read from `Upload` rather than restated. `wasm.download {download, offset}` is
+  `:operate` and node-routed, like the upload it mirrors. A slot line carries the digest, so
+  every chunk repeats the *whole* artifact's sha256 without re-hashing eleven mebibytes per
+  frame, and the slot rather than the file is the authority: bytes whose slot the clocks took
+  are not a download, whatever is still lying under their name.
+
+  **What makes it safe is what it will not do.** There is no verb that *puts*. The only caller
+  of `put/2` is `Wasm.Deploy.sign/2`, handing over an artifact this node's own helper compiled
+  from a component this node's own signing service has just signed — so a node hands out only
+  bytes it made, under `:operate`, bound by a digest that is already inside the signed manifest,
+  and never a byte a client sent it. The slot is claimed **before** the manifest is signed,
+  which is what keeps the W8 fallback intact: a node with no data directory or with its eight
+  slots already spent signs the source form and says `artifact_not_staged`, rather than signing
+  a manifest declaring an artifact nobody can fetch. Offsets are chunk boundaries below the
+  size and not a seek, because a client walks the file with the offsets the node's own answers
+  give it and anything else is a client that has lost its place.
+
+  **Reading the final chunk releases the slot**, and the alternative was reasonable enough to
+  say why. The verb's parameters are closed at `download`, `offset` and `node`, so there is no
+  frame in which a client says "done" other than the one where it asks for the last chunk; a
+  slot held to its clocks after a finished transfer is thirty minutes of a ceiling of eight, and
+  eight of those make the ninth signature fall back to the source form for half an hour. The
+  cost is the other end of it and is not hidden: a client that loses that last answer cannot ask
+  again and signs again instead, paying a compile and a rate-limit slot. Everything else is what
+  the clocks are for.
+
+  What the client does with it is a concatenation, not a composition: `prefix <> artifact <>
+  component`, in the order the header's three lengths already fix, checked against the size and
+  the sha256 the receipt named before a file is written. `Bundle.prefix_without_artifact/2` is
+  the seam that makes it byte-identical to `Bundle.encode/3` — `prefix/2` is *defined* as that
+  followed by the artifact, so the two cannot drift — and `test/wasm/deploy_test.exs` pins the
+  equality against a real signed artifact travelling over the real verbs. Proved there and in
+  `test/wasm/download_test.exs`: chunks that reassemble to the byte, an offset off a boundary or
+  past the size or naming an unknown slot each refused by name, a slot past either clock gone
+  for a reader too, the ninth `put` refused, files 0600 and roots and staged files never
+  followed through a symlink, and no lane-W verb minting a slot whatever it is handed.
+
 ## 12. What this does not solve
 
 Stated once, so nobody reads more into the lane than is there:
@@ -2061,15 +2133,18 @@ Stated once, so nobody reads more into the lane than is there:
   a node's own engine did not vouch for — is the one thing D24 exists to refuse. What the
   design does buy is that the failure is a *fallback*, named in a log line and in
   `wasm.list`'s `form`, rather than a refusal an operator has to diagnose.
-- **The artifact only reaches an operator when it fits one reply.** `wasm.sign` answers with
-  the bundle's prefix, which since W8 carries the artifact the client has never seen — a few
-  hundred kibibytes for a real capability, and eleven mebibytes for the worst shape §7.3
-  admits. One gateway reply is not a file transfer, so past three quarters of the gateway's own
-  configured frame (786 432 bytes at the 1 MiB default, since the artifact travels base64 at
-  four bytes to three) the signer signs the source form alone and says so in `form` and
-  `precompile_skipped`. The capability still deploys and still runs; it compiles on each node,
-  as it always did. Raising `OUROBOROS_GATEWAY_MAX_FRAME` raises it; building a chunked
-  *download* would lift it properly, and that is not this slice.
+- **The artifact reaches an operator in frames, and a node with nowhere to stage one still
+  falls back.** This used to say the artifact reached an operator only when it fit one reply.
+  W19 built the chunked download that sentence named as the proper fix: past three quarters of
+  the gateway's configured frame the signer mints a `Wasm.Download` slot and the receipt names
+  it, so the fast form is no longer a function of how large a capability's machine code happens
+  to be. What is left is smaller and is still real. A node with no data directory, or already
+  holding its eight slots, cannot stage an artifact it cannot fit in a reply, and signs the
+  source form with `precompile_skipped: artifact_not_staged` — which is the right fallback and
+  is still a fallback. A transfer whose final frame is lost cannot be resumed, because that
+  frame released the slot, so the client signs again. And the 512 KiB chunk is `wasm.upload`'s,
+  which means a node whose operator set `OUROBOROS_GATEWAY_MAX_FRAME` below what one chunk
+  needs can no more download than it can upload.
 - **Two forms are two ceilings, and both are staging.** A bundle now carries a component and an
   artifact, so `Wasm.Upload` sizes a slot at `Bundle.max_bytes/0` — 16 MiB of component plus
   64 MiB of artifact plus the envelope, and eight slots in flight. That is 640 MiB one
@@ -2401,8 +2476,12 @@ Each slice is PR-sized, lands green, and is useful alone.
   `precompile` refusing an artifact as its input; and a reconnect re-reading the helper's build.
 
   What W8 does **not** remove is in §12: the artifact is bound to one wasmtime and one triple,
-  it only reaches an operator when it fits one gateway reply, and engine-embedding guests still
-  need `wasi:io`, which is a signing-policy decision and not this slice.
+  and engine-embedding guests still need `wasi:io`, which is a signing-policy decision and not
+  this slice. It also left the artifact reaching an operator only when it fit one gateway
+  reply — past three quarters of the frame this slice dropped it and signed the source form
+  alone. **W19 removed that one**: the artifact now travels through `wasm.download` in the
+  frames `wasm.upload` already uses, the manifest keeps its block, and nothing is skipped for
+  being large (D28).
 - **W9 — the guest SDK.** `tui/wasm/guest` (`ouroboros-guest`): its own cargo workspace, the
   `no_std` ceremony behind one macro call, and four seams over the one world — `Capability`
   for a mesh capability, `Hook` and `Check` for lane H's two contracts, `Raw` underneath them
@@ -2916,6 +2995,53 @@ Each slice is PR-sized, lands green, and is useful alone.
   example component never says one — that half of D20 is a scripted verdict in
   `policy_engine_test.exs`, which is also where "the component is not reached at all" is
   observable, since only a scripted helper lets a test count frames.
+
+- **W19 — the artifact comes back in the frames the upload used.** The last residual W8 left
+  in §12: an artifact past three quarters of the gateway frame was dropped and the source form
+  signed alone, so whether a capability got the fast path was a function of how large its
+  machine code happened to be. New `Ouroboros.Wasm.Download` — `Wasm.Upload`'s discipline in
+  the other direction, with that module's own chunk, slot count and two clocks rather than a
+  second set: `<data_dir>/wasm/download/` 0700 and `lstat`-checked, slots claimed
+  `O_CREAT|O_EXCL`, 0600 files, an id minted here and re-validated on the way in, and the
+  digest in the slot line so a chunk states the whole artifact's sha without re-hashing it.
+  `wasm.sign` now claims a slot *before* it signs and answers `artifact: {download, size,
+  sha256, chunk_bytes}` beside a `bundle_prefix` that is the header and the envelope alone,
+  with `form: precompiled` and `precompile_skipped: null` — nothing is skipped for being large
+  any more. `Bundle.prefix_without_artifact/2` is the seam, and `prefix/2` is defined as it
+  followed by the artifact, so the split cannot drift from the encoder. `wasm.download` is
+  `:operate`, node-routed, closed at three parameters, and answers a chunk of at most
+  `Upload.max_chunk_bytes/0`; `ouro wasm sign` walks the slot from the node's own offsets,
+  refuses an answer about a different place, holds the reassembled bytes to the receipt's size
+  and digest, writes `prefix <> artifact <> component`, and prints which of the two ways the
+  artifact arrived.
+
+  Proved. Elixir: put → read → the bytes back to the byte and the digest matching; an offset
+  off a chunk boundary, at or past the size, or naming an id this node did not mint each
+  refused by its own name; a download past its idle clock and one past its total lifetime both
+  gone, for a reader as well as a writer; a file whose slot went is not a download and is
+  swept; the ninth `put` refused with eight held; the file and the directory 0600/0700, a
+  symlinked root refused rather than `chmod`-ed through and a symlinked staged file never read
+  through; the final chunk releasing the slot and a non-final one re-readable; and — the
+  threat model's own claim — every lane-W verb given every bytes-shaped parameter shape,
+  minting no slot at all, beside the closed three-parameter contract that has nowhere to put
+  one. End to end over the real verbs with `max_frame` at 64 KiB and the real helper:
+  `wasm.sign` names a download whose digest is the signed manifest's, `wasm.download` chunks
+  reassemble to the `OUROCWASM` container, the slot is gone after the final chunk, the composed
+  bundle passes `Bundle.verify/2` **and is byte-identical to `Bundle.encode/3`'s output**,
+  `Rollout.stage/3` reports `precompiled: true` from the helper's own `load`, and the rollout
+  settles `live` with the capability answering a message. The W8 fallback is kept and pinned:
+  a node with no data directory to stage into signs the source form with
+  `artifact_not_staged` and still produces a whole verifiable bundle. Rust: the three-part
+  bundle total, the compose order, a chunk answered about the wrong offset (and one that is
+  empty, oversized, or whose size changed under the transfer) refused, a reassembled artifact
+  that does not match the manifest's digest or size refused before anything is written, the new
+  `wasm_download_result` golden decoded typed, and the receipt's `artifact` block in both its
+  shapes.
+
+  What it does **not** remove is in §12, smaller than what it replaced: a node with nowhere to
+  stage still falls back to the source form, a transfer whose final frame is lost is a signature
+  to make again rather than a chunk to re-ask for, and the chunk is `wasm.upload`'s, so a frame
+  too small for one is too small for either direction.
 
 ## 15. Prior art and references
 

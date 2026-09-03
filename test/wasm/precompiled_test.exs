@@ -21,6 +21,7 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
   alias Ouroboros.Wasm.Boot
   alias Ouroboros.Wasm.Bundle
   alias Ouroboros.Wasm.Deploy
+  alias Ouroboros.Wasm.Download
   alias Ouroboros.Wasm.PolicyEngine
   alias Ouroboros.Wasm.Pool
   alias Ouroboros.Wasm.Rollout
@@ -932,14 +933,19 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
       end
     end
 
+    # W19 changed this branch and the test says so rather than being deleted. Until W19 an
+    # artifact past the reply's ceiling was dropped and the source form was signed; now it is
+    # handed over in frames and the manifest keeps its block. What is still true — and is the
+    # half worth keeping a test for — is that a node which cannot *stage* one falls back
+    # rather than signing a promise it cannot keep.
     @tag @needs_live
-    test "an artifact too large for one reply is dropped rather than truncated", context do
+    test "an artifact too large for one reply travels in frames instead", context do
       bytes = File.read!(@guest)
 
       # The ceiling is three quarters of the gateway's own configured frame, because the
       # artifact travels base64 at four bytes to three (M9). An operator who raises the frame
       # raises this, in one place — so a frame small enough makes the reference guest's 258 KiB
-      # artifact too large, which is the branch nothing exercised.
+      # artifact too large for one reply, which is the branch this exercises.
       previous = Application.get_env(:ouroboros, :gateway)
 
       Application.put_env(:ouroboros, :gateway, Keyword.put(previous || [], :max_frame, 4_096))
@@ -947,10 +953,56 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
 
       assert Deploy.max_receipt_precompiled_bytes() == 3_072
 
+      downloads = Path.join(context.tmp, "downloads")
+      assert {:ok, receipt} = sign(context, bytes, [], download_root: downloads)
+
+      # Nothing was skipped: the artifact was compiled, it is in the signed manifest, and the
+      # receipt says which form the client is holding.
+      assert receipt.form == :precompiled
+      assert receipt.precompiled != nil
+      assert receipt.precompile_skipped == nil
+
+      # And the prefix is the header and the envelope alone — the artifact is not in it.
+      assert %{download: id, size: size, sha256: sha256} = receipt.artifact
+      assert sha256 == receipt.precompiled.sha256
+      assert byte_size(Base.decode64!(receipt.bundle_prefix)) < size
+
+      assert receipt.bundle_bytes ==
+               byte_size(Base.decode64!(receipt.bundle_prefix)) + size + receipt.size
+
+      assert {:ok, %{download: ^id, size: ^size}} = Download.read(id, 0, root: downloads)
+    end
+
+    # The fallback W19 keeps. A slot is claimed before the manifest is signed precisely so
+    # that a node which cannot hand an artifact over signs the source form instead — remove
+    # the `{:error, reason}` arm of `staged/4` and this node signs a manifest declaring an
+    # artifact no client can ever fetch.
+    @tag @needs_live
+    test "a node that cannot stage the artifact signs the source form and says why", context do
+      bytes = File.read!(@guest)
+
+      previous = Application.get_env(:ouroboros, :gateway)
+      Application.put_env(:ouroboros, :gateway, Keyword.put(previous || [], :max_frame, 4_096))
+      on_exit(fn -> restore(:gateway, previous) end)
+
+      previous_data_dir = Application.get_env(:ouroboros, :data_dir)
+      Application.delete_env(:ouroboros, :data_dir)
+      on_exit(fn -> restore(:data_dir, previous_data_dir) end)
+
+      # No `download_root`, and no data directory to derive one from: this node has nowhere to
+      # put an artifact it cannot fit in a reply.
       assert {:ok, receipt} = sign(context, bytes)
+
       assert receipt.form == :source
       assert receipt.precompiled == nil
-      assert receipt.precompile_skipped =~ "artifact_too_large"
+      assert receipt.artifact == nil
+      assert receipt.precompile_skipped =~ "artifact_not_staged"
+
+      # And the bundle it produced is a whole, verifiable, deployable one.
+      assert {:ok, %{artifact: artifact, precompiled: nil}} =
+               Bundle.verify(bundle(receipt, bytes), context.trust_policy)
+
+      assert artifact.precompiled == nil
     end
 
     test "the receipt ceiling follows the gateway's own frame" do

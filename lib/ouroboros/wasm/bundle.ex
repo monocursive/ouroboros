@@ -254,11 +254,47 @@ defmodule Ouroboros.Wasm.Bundle do
   `precompiled` must be present exactly when the manifest declares a block, and must be the
   bytes that block's sha names. Both are checked here rather than at the reader: a prefix that
   could only ever be refused is one worth refusing where it is built.
+
+  W19. An artifact past `Ouroboros.Wasm.Deploy.max_receipt_precompiled_bytes/0` does not fit
+  one gateway reply, and then what the receipt carries is
+  `prefix_without_artifact/2` — this, without the trailing section — with the artifact
+  travelling through `wasm.download` in the frames an upload uses. The client's knowledge of
+  the format does not grow: it appends two things instead of one, in the order the header
+  already states.
   """
   @spec prefix(Artifact.t(), binary() | nil) :: {:ok, binary()} | {:error, term()}
-  def prefix(artifact, precompiled \\ nil)
+  def prefix(artifact, precompiled \\ nil) do
+    with {:ok, head} <- prefix_without_artifact(artifact, precompiled) do
+      {:ok, head <> (precompiled || "")}
+    end
+  end
 
-  def prefix(%Artifact{signature: %{signer: signer, value: value}} = artifact, precompiled)
+  @doc """
+  The same prefix with the artifact section left out: the header and the envelope alone.
+
+  W19. `prefix/2` answers with everything the client did not produce, which since W8 means
+  the artifact too — and past `Ouroboros.Wasm.Deploy.max_receipt_precompiled_bytes/0` that
+  is more than one gateway reply carries. So the artifact travels through `wasm.download`
+  instead and this is what the receipt holds beside it: the header, whose three lengths
+  still state exactly what the whole file weighs, and the envelope.
+
+  The `precompiled` argument is still required and still checked, because the header
+  **declares its length**: a head built without the bytes would be a header stating zero
+  and a client composing a file no reader accepts. What comes back is `prefix/2`'s answer
+  minus its trailing section, which is not a claim about two functions that happen to
+  agree — `prefix/2` is defined as this followed by those bytes — so
+  `prefix_without_artifact/2 <> artifact <> component` is byte for byte what
+  `encode/3` would have written. `test/wasm/download_test.exs` pins that equality against a
+  real signed artifact rather than against the definition.
+  """
+  @spec prefix_without_artifact(Artifact.t(), binary() | nil) ::
+          {:ok, binary()} | {:error, term()}
+  def prefix_without_artifact(artifact, precompiled \\ nil)
+
+  def prefix_without_artifact(
+        %Artifact{signature: %{signer: signer, value: value}} = artifact,
+        precompiled
+      )
       when is_binary(signer) and is_binary(value) do
     with :ok <- signed?(artifact),
          :ok <- carries_precompiled?(artifact, precompiled),
@@ -266,13 +302,14 @@ defmodule Ouroboros.Wasm.Bundle do
       {:ok,
        @magic <>
          <<@format_version::8, byte_size(envelope)::32, precompiled_size(precompiled)::32,
-           artifact.size::32>> <>
-         envelope <> (precompiled || "")}
+           artifact.size::32>> <> envelope}
     end
   end
 
-  def prefix(%Artifact{}, _precompiled), do: {:error, :signature_required}
-  def prefix(artifact, _precompiled), do: {:error, {:invalid_artifact, describe(artifact)}}
+  def prefix_without_artifact(%Artifact{}, _precompiled), do: {:error, :signature_required}
+
+  def prefix_without_artifact(artifact, _precompiled),
+    do: {:error, {:invalid_artifact, describe(artifact)}}
 
   @doc """
   Parses one bundle into the manifest it carries and the bytes beside it.

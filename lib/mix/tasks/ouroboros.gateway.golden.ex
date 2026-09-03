@@ -136,6 +136,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       {"wasm_list_result", wasm_list_result()},
       {"agents_message_result", agents_message_result()},
       {"wasm_upload_result", wasm_upload_result()},
+      {"wasm_download_result", wasm_download_result()},
       {"wasm_sign_result", wasm_sign_result()},
       {"wasm_deploy_result", wasm_deploy_result()},
       {"wasm_rollback_result", wasm_rollback_result()},
@@ -1408,6 +1409,22 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
     })
   end
 
+  # W19. One chunk of an artifact on the way back out, mid-transfer. `final` is `false` here,
+  # which is the only shape worth pinning: it is the frame a client asks for another after,
+  # and `data` is base64 for the same reason `wasm.upload`'s is — a JSON frame is text. The
+  # `sha256` is the whole artifact's, repeated in every chunk, because it is what the client
+  # checks the reassembled file against and it is the number the signed manifest carries.
+  defp wasm_download_result do
+    Conn.result_frame(22, %{
+      download: "3c7a5b19e04d6f28a1b3c5d7e9f02468",
+      offset: 524_288,
+      data: Base.encode64("OUROCWASM" <> String.duplicate("\0", 55)),
+      size: 1_310_720,
+      sha256: String.duplicate("d", 64),
+      final: false
+    })
+  end
+
   # What a signature buys, and what comes back for it. Not the bundle: the **prefix** —
   # the header and the envelope — which the client writes followed by the component it
   # already holds. `bundle_bytes` is what that file will weigh, so a client can say so
@@ -1446,6 +1463,12 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         size: @wasm_precompiled_bytes
       },
       precompile_skipped: nil,
+      # W19. `null` is the ordinary case and every case there was before W19: the artifact fits
+      # this reply, so it is already in the prefix and there is nothing to fetch. Where it does
+      # not fit, this is `{"download", "size", "sha256", "chunk_bytes"}` and the prefix is the
+      # header and the envelope alone. It is on the wire as an explicit null rather than as an
+      # absent key so a client reads which case it is rather than deducing it.
+      artifact: nil,
       bundle_prefix: Base.encode64(wasm_bundle_prefix()),
       bundle_bytes: byte_size(wasm_bundle_prefix()) + 2_097_152
     })

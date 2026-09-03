@@ -94,6 +94,7 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
     "wasm_list_result" => {:method, "wasm.list"},
     "agents_message_result" => {:method, "agents.message"},
     "wasm_upload_result" => {:method, "wasm.upload"},
+    "wasm_download_result" => {:method, "wasm.download"},
     "wasm_sign_result" => {:method, "wasm.sign"},
     "wasm_deploy_result" => {:method, "wasm.deploy"},
     "wasm_rollback_result" => {:method, "wasm.rollback"},

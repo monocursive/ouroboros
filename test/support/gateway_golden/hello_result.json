@@ -98,6 +98,7 @@
       "upgrade.rollouts",
       "upgrade.status",
       "wasm.deploy",
+      "wasm.download",
       "wasm.list",
       "wasm.rollback",
       "wasm.sign",

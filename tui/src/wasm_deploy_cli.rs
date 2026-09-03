@@ -34,11 +34,20 @@
 //!
 //! ## Why `sign` writes the file rather than downloading one
 //!
-//! The node answers with the bundle's *prefix* — the header and the envelope, a few
-//! hundred bytes — and this client appends the component it just uploaded. It is the same
-//! file the runtime's own encoder would have written, and it needs no chunked download to
-//! hand an operator back their own bytes. The prefix states the component length, so this
-//! client concatenates and does not compose.
+//! The node answers with the bundle's *prefix* and this client appends the component it just
+//! uploaded. It is the same file the runtime's own encoder would have written, and it needs no
+//! chunked download to hand an operator back their own bytes. The prefix states every length,
+//! so this client concatenates and does not compose.
+//!
+//! Since W8 the prefix also carries the precompiled artifact, which is the one part of the
+//! file this side did **not** produce — the node compiled it, from the bytes it then signed.
+//! Where that fits one reply it arrives inside the prefix. Where it does not, W19 sends it
+//! back through `wasm.download` in the same 512 KiB frames the component went up in, and
+//! `sign` fetches it chunk by chunk before it writes anything: the offsets come from the
+//! node's own answers, the reassembled bytes are held to the size and the sha256 the receipt
+//! named, and a file is written only once both agree. A mismatch is refused by name and
+//! nothing lands on disk, because a bundle whose artifact is not the artifact the manifest
+//! signs for is a file whose only future is a refusal on somebody else's machine.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -48,11 +57,15 @@ use base64::Engine as _;
 use serde_json::{json, Map, Value};
 
 use crate::cli::{WasmDeployArgs, WasmKeygenArgs, WasmRollbackArgs, WasmSignArgs};
-use crate::model::{WasmDeployment, WasmList, WasmRollback, WasmSignature, WasmUploadReceipt};
+use crate::model::{
+    WasmArtifactSlot, WasmDeployment, WasmDownloadChunk, WasmList, WasmRollback, WasmSignature,
+    WasmUploadReceipt,
+};
 use crate::transport::Client;
 use crate::wasm_client::{self, Helper};
 
 const UPLOAD_METHOD: &str = "wasm.upload";
+const DOWNLOAD_METHOD: &str = "wasm.download";
 const SIGN_METHOD: &str = "wasm.sign";
 const DEPLOY_METHOD: &str = "wasm.deploy";
 const ROLLBACK_METHOD: &str = "wasm.rollback";
@@ -74,6 +87,20 @@ const MAX_UPLOAD_BYTES: u64 = 17 * 1024 * 1024;
 
 /// An Ed25519 seed is 32 bytes. This is the whole of the private half.
 const SEED_BYTES: usize = 32;
+
+/// The largest artifact this client will fetch, checked against the receipt's own claim
+/// **before** a byte is allocated for it. It mirrors `Ouroboros.Wasm.Bundle`'s own ceiling —
+/// the helper's 64 MiB read cap, which is what any bundle could legitimately carry — so a
+/// receipt naming more than that is a receipt for a bundle nobody could load, and refusing it
+/// here costs a sentence rather than sixty-four mebibytes of RAM.
+const MAX_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// How many `wasm.download` frames one artifact may take. At the node's 512 KiB chunk the
+/// ceiling above is 128 of them; this is that with room for a node whose chunk is smaller,
+/// and it is here so that an answering node which never advances the offset is a refusal
+/// rather than a loop. The offset check below already refuses a repeated frame — this is the
+/// bound that does not depend on the node being wrong in a way we predicted.
+const MAX_ARTIFACT_CHUNKS: usize = 4096;
 
 /// `ouro wasm keygen` — write a signer seed and print the two lines that put it to work.
 ///
@@ -198,17 +225,26 @@ pub async fn sign<O: Write>(
         .decode(prefix)
         .context("the runtime's bundle prefix is not base64")?;
 
+    // W19. The half of the file this side never had. `None` is the ordinary case — the
+    // artifact fits one reply and is already inside the prefix — and `Some` is a slot to walk,
+    // chunk by chunk, checked against the size and the digest the receipt named before any of
+    // it is used for anything.
+    let artifact = match signed.artifact.as_ref() {
+        Some(slot) => fetch_artifact(client, slot, args.node.as_deref()).await?,
+        None => Vec::new(),
+    };
+
     // The manifest that came back must describe the file that went up. This client cannot
     // verify a signature — it holds no trusted key, and the node it is talking to is the
     // one that would have to be lying — but it can refuse to write a bundle whose two
     // halves disagree, which is the failure a truncated upload or a confused node produces
     // and which would otherwise surface as a quarantine on some other machine later.
-    describes(&signed, &bytes, prefix.len())?;
+    describes(&signed, &bytes, prefix.len(), artifact.len())?;
 
-    // The whole of this client's knowledge of the format: the node's prefix, then the
-    // bytes it just uploaded.
-    let mut file = prefix;
-    file.extend_from_slice(&bytes);
+    // The whole of this client's knowledge of the format: the node's prefix, then whatever of
+    // the node's own artifact travelled separately, then the bytes it just uploaded. The
+    // header states all three lengths, so this is a concatenation and not a composition.
+    let file = compose(&prefix, &artifact, &bytes);
 
     std::fs::write(&bundle, &file)
         .with_context(|| format!("writing the bundle to {}", bundle.display()))?;
@@ -441,8 +477,188 @@ async fn upload(client: &Client, bytes: &[u8], node: Option<&str>) -> Result<Str
     id.ok_or_else(|| anyhow!("the upload produced no id"))
 }
 
+/// Pulls the precompiled artifact back out of a `wasm.download` slot (W19, D28).
+///
+/// Sequential and bounded, and every step of it is the node's own answer being checked rather
+/// than believed. The offsets are the ones this client asked for; a frame that came back about
+/// somewhere else is refused rather than appended, because appending it would silently produce
+/// a file with a hole in it. The size and the digest are the receipt's, and the digest is the
+/// one in the *signed manifest* — so a mismatch is not a transport hiccup to retry, it is
+/// bytes that are not this artifact, and nothing is written.
+async fn fetch_artifact(
+    client: &Client,
+    slot: &WasmArtifactSlot,
+    node: Option<&str>,
+) -> Result<Vec<u8>> {
+    let id = slot
+        .download
+        .as_deref()
+        .ok_or_else(|| anyhow!("the runtime named an artifact download with no id"))?;
+
+    let size = slot
+        .size
+        .ok_or_else(|| anyhow!("the runtime named an artifact download with no size"))?;
+
+    // Bounded before a byte is allocated: the size is a number the far side chose.
+    if size == 0 || size > MAX_ARTIFACT_BYTES {
+        bail!(
+            "the runtime says its artifact is {size} bytes; this client will not fetch more \
+             than {MAX_ARTIFACT_BYTES}, which is the most any bundle could carry"
+        );
+    }
+
+    let mut artifact: Vec<u8> = Vec::with_capacity(size as usize);
+    let mut offset: u64 = 0;
+    let mut frames: usize = 0;
+
+    while offset < size {
+        frames += 1;
+
+        if frames > MAX_ARTIFACT_CHUNKS {
+            bail!(
+                "the runtime answered {MAX_ARTIFACT_CHUNKS} {DOWNLOAD_METHOD} frames without \
+                 finishing a {size}-byte artifact"
+            );
+        }
+
+        let mut params = Map::new();
+        params.insert("download".into(), Value::String(id.to_string()));
+        params.insert("offset".into(), Value::from(offset));
+
+        if let Some(node) = node {
+            params.insert("node".into(), Value::String(node.to_string()));
+        }
+
+        let answer = client
+            .call(DOWNLOAD_METHOD, Value::Object(params))
+            .await
+            .map_err(|error| anyhow!("the runtime refused {DOWNLOAD_METHOD}: {error}"))?;
+
+        let (data, last) = artifact_chunk(&answer, offset, size)?;
+
+        offset += data.len() as u64;
+        artifact.extend_from_slice(&data);
+
+        // `final` is the node saying it has released the slot. Believing it over the
+        // arithmetic would leave a short file; believing the arithmetic over it is what the
+        // loop condition already does, so the only thing worth refusing is the pair
+        // disagreeing in the direction that ends the transfer early.
+        if last && offset < size {
+            bail!(
+                "the runtime marked a {DOWNLOAD_METHOD} chunk final at {offset} of {size} \
+                 bytes; the artifact it signed for is longer than the one it sent"
+            );
+        }
+    }
+
+    artifact_whole(&artifact, slot)?;
+
+    Ok(artifact)
+}
+
+/// One `wasm.download` answer, checked and decoded: the bytes and whether it was the last.
+///
+/// The offset check is the point. A node that answered about a different place — a retried
+/// frame, a confused slot, a proxy replaying an old reply — would otherwise have its bytes
+/// appended at the position this client happened to be at, producing a file that hashes to
+/// nothing and a refusal with no cause in it. Delete the `chunk.offset` comparison and a
+/// replayed frame silently corrupts the artifact.
+fn artifact_chunk(answer: &Value, expected: u64, size: u64) -> Result<(Vec<u8>, bool)> {
+    let chunk = WasmDownloadChunk::decode(answer);
+
+    match chunk.offset {
+        Some(offset) if offset == expected => {}
+        Some(offset) => bail!(
+            "asked {DOWNLOAD_METHOD} for offset {expected} and the runtime answered about \
+             {offset}; a download is walked with the offsets its own answers give"
+        ),
+        None => bail!("the runtime answered {DOWNLOAD_METHOD} without an offset"),
+    }
+
+    // The size may not change under a transfer: it is what the loop terminates on.
+    if let Some(reported) = chunk.size {
+        if reported != size {
+            bail!(
+                "the runtime said its artifact was {size} bytes and now says {reported}; \
+                 nothing is written from a transfer that changed size under it"
+            );
+        }
+    }
+
+    let data = chunk
+        .data
+        .as_deref()
+        .ok_or_else(|| anyhow!("the runtime answered {DOWNLOAD_METHOD} without any data"))?;
+
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .context("a chunk of the artifact is not base64")?;
+
+    if data.is_empty() {
+        bail!("the runtime answered {DOWNLOAD_METHOD} at {expected} with no bytes at all");
+    }
+
+    if expected + data.len() as u64 > size {
+        bail!(
+            "the runtime answered {DOWNLOAD_METHOD} at {expected} with {} bytes, which is past \
+             the {size} it said the artifact weighs",
+            data.len()
+        );
+    }
+
+    Ok((data, chunk.is_final))
+}
+
+/// The reassembled artifact, held to what the receipt said it would be.
+///
+/// The digest is the one inside the signed manifest, so this is the only check on this side of
+/// the wire that binds bytes to a signature — not by verifying it (this client holds no
+/// trusted key) but by refusing to write a bundle whose artifact section is not the section
+/// the manifest is about. Delete either comparison and a truncated or substituted artifact is
+/// written to disk and refused on another machine, later, with the cause on this one.
+fn artifact_whole(artifact: &[u8], slot: &WasmArtifactSlot) -> Result<()> {
+    match slot.size {
+        Some(size) if size == artifact.len() as u64 => {}
+        Some(size) => bail!(
+            "the runtime said its artifact is {size} bytes and sent {}; nothing is written \
+             from a transfer that did not finish",
+            artifact.len()
+        ),
+        None => bail!("the runtime named an artifact download with no size"),
+    }
+
+    let digest = sha256_hex(artifact);
+
+    match slot.sha256.as_deref() {
+        Some(sha) if sha.eq_ignore_ascii_case(&digest) => Ok(()),
+        Some(sha) => bail!(
+            "the artifact the runtime sent hashes to {digest}, and the manifest it signed \
+             names {sha}. These bytes are not that artifact, so no bundle is written."
+        ),
+        None => bail!("the runtime named an artifact download with no digest to check it by"),
+    }
+}
+
+/// The bundle, in the one order the format has: everything the node produced, then the
+/// component this side already held.
+///
+/// The artifact is empty in every case but a download — it is already inside the prefix — so
+/// this is `prefix <> component` there, byte for byte what it has been since W12.
+fn compose(prefix: &[u8], artifact: &[u8], component: &[u8]) -> Vec<u8> {
+    let mut file = Vec::with_capacity(prefix.len() + artifact.len() + component.len());
+    file.extend_from_slice(prefix);
+    file.extend_from_slice(artifact);
+    file.extend_from_slice(component);
+    file
+}
+
 /// Refuses a signature whose manifest is not about the bytes this client uploaded.
-pub fn describes(signed: &WasmSignature, bytes: &[u8], prefix_len: usize) -> Result<()> {
+pub fn describes(
+    signed: &WasmSignature,
+    bytes: &[u8],
+    prefix_len: usize,
+    artifact_len: usize,
+) -> Result<()> {
     let digest = sha256_hex(bytes);
 
     match signed.component_sha256.as_deref() {
@@ -463,13 +679,16 @@ pub fn describes(signed: &WasmSignature, bytes: &[u8], prefix_len: usize) -> Res
         None => bail!("the runtime answered {SIGN_METHOD} without a component size"),
     }
 
-    let expected = prefix_len as u64 + bytes.len() as u64;
+    // W19. Three parts, and the third is zero unless the artifact travelled on its own. The
+    // node states the total before either half moves, so this is the arithmetic that says the
+    // file about to be written is the file the receipt described.
+    let expected = prefix_len as u64 + artifact_len as u64 + bytes.len() as u64;
 
     match signed.bundle_bytes {
         Some(total) if total == expected => Ok(()),
         Some(total) => bail!(
-            "the runtime says the bundle is {total} bytes; the prefix and the component are \
-             {expected}"
+            "the runtime says the bundle is {total} bytes; the prefix, the artifact and the \
+             component are {expected}"
         ),
         None => Ok(()),
     }
@@ -988,6 +1207,17 @@ pub fn render_sign(answer: &Value, bundle: &Path) -> String {
                 precompiled.wasmtime.as_deref().unwrap_or("(unknown)"),
                 precompiled.target.as_deref().unwrap_or("(unknown)")
             ));
+
+            // W19. Which of the two ways it got here, said out loud: an operator debugging a
+            // slow `sign` on a big capability should be able to see that a second transfer
+            // happened rather than infer it from the clock.
+            match &signed.artifact {
+                Some(slot) => lines.push(format!(
+                    "  artifact form: fetched in {} frame(s) — too large for one reply",
+                    frames(slot)
+                )),
+                None => lines.push("  artifact form: carried in the signature's own reply".into()),
+            }
         }
         None => lines.push(format!(
             "  precompiled: none ({}){}",
@@ -1255,6 +1485,17 @@ fn count(total: Option<u64>, drawn: usize) -> String {
         Some(total) if total as usize > drawn => format!("{drawn} of {total}"),
         Some(total) => total.to_string(),
         None => format!("{drawn} (the register did not answer)"),
+    }
+}
+
+/// How many `wasm.download` frames a slot took, from the two numbers the receipt named.
+///
+/// Rendering only. A node that named neither is drawn as `?` rather than as a number this
+/// client made up, which is the posture every other optional field on a receipt gets.
+fn frames(slot: &WasmArtifactSlot) -> String {
+    match (slot.size, slot.chunk_bytes) {
+        (Some(size), Some(chunk)) if chunk > 0 => size.div_ceil(chunk).to_string(),
+        _unstated => "?".into(),
     }
 }
 
@@ -1851,14 +2092,14 @@ mod tests {
             "bundle_bytes": bytes.len() + 300
         }));
 
-        assert!(describes(&good, &bytes, 300).is_ok());
+        assert!(describes(&good, &bytes, 300, 0).is_ok());
 
         let wrong_sha = WasmSignature::decode(&json!({
             "component_sha256": "a".repeat(64),
             "size": bytes.len(),
         }));
 
-        let error = describes(&wrong_sha, &bytes, 300).expect_err("a different component");
+        let error = describes(&wrong_sha, &bytes, 300, 0).expect_err("a different component");
         assert!(error.to_string().contains("hashes to"));
 
         let wrong_size = WasmSignature::decode(&json!({
@@ -1866,7 +2107,7 @@ mod tests {
             "size": bytes.len() + 1,
         }));
 
-        assert!(describes(&wrong_size, &bytes, 300)
+        assert!(describes(&wrong_size, &bytes, 300, 0)
             .expect_err("a different size")
             .to_string()
             .contains("bytes, but the file uploaded"));
@@ -1877,14 +2118,168 @@ mod tests {
             "bundle_bytes": 7
         }));
 
-        assert!(describes(&wrong_total, &bytes, 300)
+        assert!(describes(&wrong_total, &bytes, 300, 0)
             .expect_err("a bundle that does not add up")
             .to_string()
-            .contains("the prefix and the component are"));
+            .contains("the prefix, the artifact and the component are"));
 
         // A runtime that named no digest at all is not a runtime to write a file from.
         let silent = WasmSignature::decode(&json!({}));
-        assert!(describes(&silent, &bytes, 300).is_err());
+        assert!(describes(&silent, &bytes, 300, 0).is_err());
+    }
+
+    /// W19. The total is three parts once the artifact travels on its own, and a client that
+    /// still added two would refuse every large signature it ever made. Drop `artifact_len`
+    /// from `describes`'s `expected` and this is red while the inline case above stays green,
+    /// which is the whole reason it is a separate test.
+    #[test]
+    fn the_bundle_total_counts_an_artifact_that_arrived_on_its_own() {
+        let bytes = b"\0asm\x0d\x00\x01\x00 a component".to_vec();
+        let digest = sha256_hex(&bytes);
+
+        let signed = WasmSignature::decode(&json!({
+            "component_sha256": digest,
+            "size": bytes.len(),
+            "bundle_bytes": bytes.len() + 300 + 9_000
+        }));
+
+        assert!(describes(&signed, &bytes, 300, 9_000).is_ok());
+
+        // And the arithmetic is not a formality: a client that fetched a short artifact and
+        // wrote it anyway would produce a file whose declared lengths do not add up, refused
+        // by `Bundle.decode/1` on some other machine.
+        assert!(describes(&signed, &bytes, 300, 8_999).is_err());
+    }
+
+    /// W19. The order of the three parts is the format, and it is the whole of this client's
+    /// knowledge of it: everything the node produced, then the bytes this side already held.
+    #[test]
+    fn the_bundle_is_the_prefix_then_the_artifact_then_the_component() {
+        assert_eq!(compose(b"HEAD", b"ART", b"WASM"), b"HEADARTWASM".to_vec());
+
+        // The inline case is unchanged and is the same function: an empty artifact is a
+        // concatenation of two, byte for byte what W12 wrote.
+        assert_eq!(compose(b"HEAD", b"", b"WASM"), b"HEADWASM".to_vec());
+    }
+
+    /// W19. A `wasm.download` answer is checked, never believed. The offset is the one this
+    /// client asked for; delete the comparison in `artifact_chunk` and a replayed or reordered
+    /// frame is appended wherever the loop happens to be, producing a file that hashes to
+    /// nothing and a refusal with no cause in it.
+    #[test]
+    fn a_download_chunk_about_somewhere_else_is_refused_rather_than_appended() {
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+
+        let answer = json!({
+            "download": "a".repeat(32),
+            "offset": 4,
+            "data": encode(b"cdef"),
+            "size": 8,
+            "final": true
+        });
+
+        let (data, last) = artifact_chunk(&answer, 4, 8).expect("the chunk asked for");
+        assert_eq!(data, b"cdef".to_vec());
+        assert!(last);
+
+        let error = artifact_chunk(&answer, 0, 8).expect_err("a frame about somewhere else");
+        assert!(
+            error.to_string().contains("answered about 4"),
+            "the refusal names both places: {error}"
+        );
+
+        // A node that stopped naming a place at all is not one to append bytes from.
+        let placeless = json!({"data": encode(b"cdef"), "size": 8});
+        assert!(artifact_chunk(&placeless, 0, 8).is_err());
+
+        // Nor one that answered with nothing, which would be a loop rather than a transfer.
+        let empty = json!({"offset": 0, "data": encode(b""), "size": 8});
+        assert!(artifact_chunk(&empty, 0, 8).is_err());
+
+        // Nor one whose chunk runs past the size it declared.
+        let over = json!({"offset": 4, "data": encode(b"cdefgh"), "size": 8});
+        assert!(artifact_chunk(&over, 4, 8).is_err());
+
+        // Nor one whose size changed under the transfer, which is what the loop terminates on.
+        let shifting = json!({"offset": 4, "data": encode(b"cd"), "size": 12});
+        assert!(artifact_chunk(&shifting, 4, 8).is_err());
+    }
+
+    /// W19. The reassembled artifact is held to the digest the **signed manifest** names, and
+    /// a mismatch is refused before `sign` reaches `std::fs::write` at all — the fetch is a
+    /// `?` several statements above it. Delete either comparison in `artifact_whole` and a
+    /// truncated or substituted artifact is written to disk here and refused on another
+    /// machine later.
+    #[test]
+    fn an_artifact_that_is_not_the_one_the_manifest_signs_for_is_not_written() {
+        let artifact = b"OUROCWASM and then some machine code".to_vec();
+
+        let slot = WasmArtifactSlot {
+            download: Some("b".repeat(32)),
+            size: Some(artifact.len() as u64),
+            sha256: Some(sha256_hex(&artifact)),
+            chunk_bytes: Some(524_288),
+        };
+
+        assert!(artifact_whole(&artifact, &slot).is_ok());
+
+        let substituted = WasmArtifactSlot {
+            sha256: Some("c".repeat(64)),
+            ..slot.clone()
+        };
+
+        let error =
+            artifact_whole(&artifact, &substituted).expect_err("bytes that are not that artifact");
+        assert!(
+            error.to_string().contains("no bundle is written"),
+            "the refusal says what did not happen: {error}"
+        );
+
+        let truncated = WasmArtifactSlot {
+            size: Some(artifact.len() as u64 + 1),
+            ..slot.clone()
+        };
+
+        assert!(artifact_whole(&artifact, &truncated)
+            .expect_err("a transfer that did not finish")
+            .to_string()
+            .contains("did not finish"));
+
+        // A receipt that named a slot and no digest is a receipt with nothing to check
+        // against, which is not a receipt to write a file from.
+        let uncheckable = WasmArtifactSlot {
+            sha256: None,
+            ..slot
+        };
+
+        assert!(artifact_whole(&artifact, &uncheckable).is_err());
+    }
+
+    /// W19. What an operator reads: which of the two ways the artifact got here, and how many
+    /// frames it took, from the node's own two numbers.
+    #[test]
+    fn the_signature_says_whether_the_artifact_travelled_on_its_own() {
+        let inline = render_sign(&fixture("wasm_sign_result"), Path::new("vet.ouro-wasm"));
+        assert!(inline.contains("carried in the signature's own reply"));
+
+        let mut answer = fixture("wasm_sign_result");
+        answer["artifact"] = json!({
+            "download": "d".repeat(32),
+            "size": 1_310_720,
+            "sha256": "e".repeat(64),
+            "chunk_bytes": 524_288
+        });
+
+        let fetched = render_sign(&answer, Path::new("vet.ouro-wasm"));
+        assert!(
+            fetched.contains("fetched in 3 frame(s)"),
+            "1 310 720 bytes at 524 288 is three frames: {fetched}"
+        );
+
+        // A node that named neither number is drawn as `?` rather than as one this client
+        // invented.
+        answer["artifact"] = json!({"download": "d".repeat(32)});
+        assert!(render_sign(&answer, Path::new("vet.ouro-wasm")).contains("fetched in ? frame(s)"));
     }
 
     /// L5. A node that answers "you are not where you think you are" says where it is, in
