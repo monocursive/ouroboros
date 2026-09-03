@@ -1392,6 +1392,17 @@ component is asked about every call the rules did not decide, so an `allow` hono
 unconditionally would be a blanket approval channel with a signature on it — and in this lane a
 signature is provenance, not trust. Widen it a tool at a time, deliberately.
 
+**One setting covers every seam.** `:permissions_engine` is read by the native loop, by the
+interactive plane's external approvals, and — since W18 — by the ACP seam too, which is both the
+`session/request_permission` a vendor process sends and the `fs/write_text_file` and
+`terminal/create` an ACP agent asks this runtime to perform. You do not configure it three
+times and you do not get it on two lanes out of three. A `terminal/create` reaches your
+component as `tool: "bash"` with the command line, so the policy you wrote for a shell already
+covers it; a write reaches it as `edit` when the file exists and `write` when it does not. If
+the engine cannot answer at all — it raises, it exits, or it says something in none of the three
+shapes — that seam asks the human, exactly as it did before an engine was named. Nothing an
+engine does there widens anything.
+
 ### What to write, and what not to
 
 **Deny what you recognise; ask about everything else.** That is the shape the defaults reward

@@ -23,6 +23,30 @@ defmodule Ouroboros.Control.Permissions.Seam do
   and `locations`; the command line is in `rawInput.command` and the paths in `locations`.
   It is mapped onto the request shape `Ouroboros.Control.Permissions.evaluate/1` takes.
 
+  ## Which engine answers (W18, D27)
+
+  `config :ouroboros, :permissions_engine`, the same node-level setting the native loop
+  (`Ouroboros.Provider.Native.Permissions`) and the interactive plane's external approvals
+  (`Ouroboros.Interactive.Task.Approvals`) read, and the same default —
+  `Ouroboros.Control.Permissions` — when an operator has named nothing. One setting names
+  the engine for every seam, so a node configured with `Ouroboros.Wasm.PolicyEngine` is
+  covered on the ACP lane too rather than on two of three.
+
+  The tolerance is `Approvals`', verbatim, because a decision seam that can crash is a
+  session that can crash: `{:allow, ref}`, `{:deny, ref}` and `{:ask, reason}` pass
+  through, an answer in none of those shapes is `:ask`, and an engine that raises or
+  exits is `:ask` with the payload the dialect would have emitted anyway. **The seam can
+  only narrow.** Nothing here turns a failure into an allow, and an `allow` is honoured
+  only as far as the engine itself honoured it — `PolicyEngine`'s allow, for instance, is
+  already bounded by the tools an operator listed (D20).
+
+  `remember/4` and `forget_session/1` stay on `Control.Permissions` whatever engine is
+  named: they are rule-store operations rather than decisions. C13 asks an engine for
+  `evaluate/1`, `record/2` and `suggest/1` and for nothing else, and a "don't ask again"
+  a human wrote belongs in the node's own store — an engine that wrapped the store would
+  have to reimplement scopes, session forgetting and the gateway's `permissions.add` to
+  be asked for it.
+
   ## What the seam does with the answer
 
     * `:allow` — answer the provider immediately with its own approve option. The decision
@@ -38,6 +62,11 @@ defmodule Ouroboros.Control.Permissions.Seam do
   alias Ouroboros.Control.Permissions
 
   @binding :ouroboros_permission_principal
+
+  # The engine an operator has not replaced. The same default `Provider.Native.Permissions`
+  # and `Interactive.Task.Approvals` hold, so an unconfigured node behaves exactly as this
+  # seam did before W18.
+  @default_engine Permissions
 
   @type verdict :: {:allow, map()} | {:deny, map()} | {:ask, map()}
 
@@ -83,7 +112,7 @@ defmodule Ouroboros.Control.Permissions.Seam do
     bound = principal()
     request = request(dialect, method, params, bound)
 
-    case Permissions.evaluate(request) do
+    case evaluate(request) do
       {:allow, ref} -> {:allow, ref}
       {:deny, ref} -> {:deny, ref}
       {:ask, _reason} -> {:ask, suggested(payload, request)}
@@ -119,7 +148,7 @@ defmodule Ouroboros.Control.Permissions.Seam do
     bound = principal()
     request = service_request(dialect, fields, bound)
 
-    case Permissions.evaluate(request) do
+    case evaluate(request) do
       {:allow, ref} -> {:allow, ref}
       {:deny, ref} -> {:deny, ref}
       {:ask, _reason} -> {:ask, suggested(payload, request)}
@@ -162,7 +191,7 @@ defmodule Ouroboros.Control.Permissions.Seam do
 
   defp record_answer(decision_id, request, _stash, response) do
     _ =
-      Permissions.record(decision_id, %{
+      record(decision_id, %{
         decision: response.decision,
         scope: response.scope,
         actor: :human,
@@ -185,6 +214,10 @@ defmodule Ouroboros.Control.Permissions.Seam do
   A `:session` rule is one human's "don't ask again *here*". Forgetting it when the
   session ends is what makes that scope mean what it says, and it is also what keeps the
   store from growing by one rule per conversation this node has ever had.
+
+  `Control.Permissions` whatever `:permissions_engine` names, because this drops rows from
+  the rule store rather than deciding anything (C13); an engine that never held those rows
+  has nothing to forget.
   """
   @spec forget_session() :: :ok
   def forget_session do
@@ -207,17 +240,44 @@ defmodule Ouroboros.Control.Permissions.Seam do
     "approval-" <> session <> ":" <> to_string(request_id)
   end
 
-  @doc "A refusal reason that names the rule, for the provider and for the transcript."
-  @spec refusal(map()) :: String.t()
+  @doc """
+  A refusal reason that names the rule, for the provider and for the transcript.
+
+  A `rule_ref` is whatever the engine returned. `Control.Permissions` returns the rule that
+  matched; `Ouroboros.Wasm.PolicyEngine` returns a sentence it composed — the component's
+  name and sha, the `[untrusted policy component]` label, and the component's own rule — so
+  a binary is passed through rather than flattened into "a permission rule", which is what
+  makes an ACP refusal say the same thing the native loop's `deny_message/2` says.
+
+  Bounded and stripped of control characters here as well as at the engine, because this
+  string is written into a JSON-RPC error a vendor process reads, and how long somebody
+  else's sentence may be is not a question to answer once.
+  """
+  @spec refusal(term()) :: String.t()
   def refusal(%{scope: scope, pattern: pattern}),
     do: "refused by the #{scope}-scope permission rule #{pattern}"
 
+  def refusal(rule) when is_binary(rule) and rule != "", do: "refused by " <> stated(rule)
+
   def refusal(_ref), do: "refused by a permission rule"
+
+  @max_refusal_chars 400
+
+  defp stated(rule) do
+    rule
+    |> String.replace(~r/\p{C}/u, " ")
+    |> String.slice(0, @max_refusal_chars)
+  end
 
   # A "don't ask again" answer is exactly a rule the human just wrote by hand. `:once`
   # writes nothing, because that is what once means.
+  #
+  # The pattern is the engine's — `suggest/1` is where the rule language lives — and the
+  # rule is written into `Control.Permissions`, which is the store `permissions.add`,
+  # `permissions.list` and `forget_session/1` all speak to. A pattern the store will not
+  # parse is refused there and no rule is written, which is the safe direction.
   defp remember(%{decision: decision, scope: :session}, request, bound) do
-    with pattern when is_binary(pattern) <- Permissions.suggest(request) do
+    with pattern when is_binary(pattern) <- suggest(request) do
       Permissions.remember(
         bound,
         pattern,
@@ -230,10 +290,65 @@ defmodule Ouroboros.Control.Permissions.Seam do
   defp remember(_response, _request, _bound), do: :ok
 
   defp suggested(payload, request) do
-    case Permissions.suggest(request) do
-      nil -> payload
-      pattern -> Map.put(payload, "suggested_rule", pattern)
+    case suggest(request) do
+      pattern when is_binary(pattern) and pattern != "" ->
+        Map.put(payload, "suggested_rule", pattern)
+
+      _nothing_to_suggest ->
+        payload
     end
+  end
+
+  # ── the engine (C13, D27) ──────────────────────────────────────────────────────────
+  #
+  # `Ouroboros.Interactive.Task.Approvals`' tolerance, verbatim: three shapes pass, an
+  # answer in none of them is an ask, and a raise or an exit is an ask. The rescue and
+  # catch live in `decide/4` and `decide_service/3`, where the payload the dialect would
+  # have emitted is still in hand — the answer to an engine that failed is the approval
+  # the human was always going to see, unannotated.
+
+  defp evaluate(request) do
+    case engine(:evaluate, 1) do
+      nil ->
+        {:ask, :no_permission_engine}
+
+      engine ->
+        case apply(engine, :evaluate, [request]) do
+          {:allow, ref} -> {:allow, ref}
+          {:deny, ref} -> {:deny, ref}
+          {:ask, reason} -> {:ask, reason}
+          _unrecognised -> {:ask, :engine_answer_unrecognised}
+        end
+    end
+  end
+
+  # Best effort, exactly as it was: the human's answer has already reached the provider,
+  # and a failed audit write must not turn a delivered approval into an error.
+  defp record(decision_id, answer) do
+    case engine(:record, 2) do
+      nil -> {:error, :no_permission_engine}
+      engine -> apply(engine, :record, [decision_id, answer])
+    end
+  end
+
+  # `nil` rather than a raise where the engine has nothing to say, so a caller omits the
+  # key instead of inventing a rule this node cannot parse.
+  defp suggest(request) do
+    case engine(:suggest, 1) do
+      nil -> nil
+      engine -> apply(engine, :suggest, [request])
+    end
+  end
+
+  # A module that is not loaded, or that does not export what C13 asks for, is no engine.
+  # Answering `nil` here rather than letting `apply/3` raise is what keeps a half-built or
+  # mistyped engine an ask rather than a crashed session.
+  defp engine(function, arity) do
+    engine = Application.get_env(:ouroboros, :permissions_engine, @default_engine)
+
+    if is_atom(engine) and not is_nil(engine) and Code.ensure_loaded?(engine) and
+         function_exported?(engine, function, arity),
+       do: engine
   end
 
   # ── provider → request ─────────────────────────────────────────────────────────────

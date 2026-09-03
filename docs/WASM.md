@@ -213,8 +213,9 @@ Two variants exist; `ouro-wasm` copies the **server-shaped** one.
   unrecordable allows (`control/permissions.ex:436-470`). The native loop reaches it
   through a guarded swap seam: `config :ouroboros, :permissions_engine`
   (`provider/native/permissions.ex:67-69`) — **the cleanest existing plug for a wasm
-  policy stage**. Note: the ACP lane calls `Control.Permissions` directly through
-  `Seam` and is not covered by that seam.
+  policy stage**. Note: at the time of this survey the ACP lane called
+  `Control.Permissions` directly through `Seam` and was not covered by that seam; W18
+  put it behind the same setting (D27).
 - Classifier auto mode (C6): no code, only the reserved
   `actor: :rule | :human | :classifier` in the ledger entry type
   (`permissions.ex:92`) and AGENT_EXPERIENCE.md rows.
@@ -1093,10 +1094,19 @@ the rule the node would record, and the guest's own log; it exits non-zero on a 
 worlds, and `examples/no-network-shell` is the worked one — it denies a `bash` whose command
 contains `curl`, `wget` or `nc `, with a stated rule, and asks about everything else.
 
-**Scope honesty.** The native loop (`Provider.Native.Permissions`) and the interactive plane's
-external approvals (`Interactive.Task.Approvals`) both read `:permissions_engine`, so both are
-covered. The remaining ACP dialect reaches `Control.Permissions` directly through `Seam` and is
-not, until the seam grows.
+**Every seam reads one setting** (W18, D27). The native loop (`Provider.Native.Permissions`),
+the interactive plane's external approvals (`Interactive.Task.Approvals`) and the ACP lane
+(`Control.Permissions.Seam` — both the `session/request_permission` a vendor process sends and
+the `fs/write_text_file` and `terminal/create` an agent asks this runtime to perform) all read
+`:permissions_engine`, so a node given a policy component has one on every lane a permission
+question arrives on rather than on two of three. The seam takes `Interactive.Task.Approvals`'
+tolerance verbatim — an answer in none of the three shapes, an exception and an exit are each an
+ask, with the approval reaching the human exactly as it did before an engine was named — so it
+can only narrow, and an `allow` is honoured only as far as this engine honoured it. `remember/4`
+and `forget_session/1` stay on `Control.Permissions` whatever engine is named: they are
+rule-store operations rather than decisions (C13). Proved end to end in
+`test/wasm/policy_acp_test.exs`, against the real `no-network-shell` signed and deployed through
+the real rollout.
 
 A model-backed classifier (the original C6 sketch) remains possible *behind* the same engine
 interface; the wasm module is the deterministic, offline-testable version, and it is the one
@@ -1949,6 +1959,41 @@ machinery — it is a backend, not a lane (D9).
   takes the form away fleet-wide, with no redeploy and no resigning, for an operator whose key
   custody is in doubt. And the source form is always there: a node that refuses artifacts is a
   node that compiles, which is exactly what every node did before W8.
+
+- **D27 — one setting names the permission engine for every seam, and a seam may only narrow.**
+  `config :ouroboros, :permissions_engine` was read by the native loop and by the interactive
+  plane's external approvals. `Ouroboros.Control.Permissions.Seam` — the ACP lane, which is both
+  the `session/request_permission` a vendor process sends and the `fs/write_text_file` and
+  `terminal/create` an agent asks *this runtime* to perform — called `Control.Permissions` by
+  name, so a node that named `Wasm.PolicyEngine` had a policy on two of its three seams and §8.2
+  said so. It now evaluates, records and suggests through the named module, with
+  `Interactive.Task.Approvals`' tolerance copied verbatim: `{:allow, ref}`, `{:deny, ref}` and
+  `{:ask, reason}` pass through, an answer in none of those shapes is an ask, and an engine that
+  raises or exits is an ask carrying the payload the dialect would have emitted anyway. **No
+  failure of an engine widens anything here**, and an `allow` is honoured only as far as the
+  engine itself honoured it — `PolicyEngine`'s is already bounded by the tools an operator
+  listed (D20).
+
+  `remember/4` and `forget_session/1` stay on `Control.Permissions`. They are rule-store
+  operations rather than decisions: C13 asks an engine for `evaluate/1`, `record/2` and
+  `suggest/1` and for nothing else, and an engine that wrapped the store would have to
+  reimplement scopes, session forgetting and `permissions.add` to be asked for them. The
+  *pattern* a `:session` answer is remembered as is still the engine's, because the rule
+  language is; one the store will not parse is refused there and no rule is written, which is
+  the safe direction.
+
+  A refusal says what refused it. `Seam.refusal/1` flattened anything that was not a rule map
+  into "refused by a permission rule" — and a `PolicyEngine` deny is exactly that: a sentence
+  naming the component, its sha and the `[untrusted policy component]` label. A binary now
+  passes through, bounded at 400 characters and stripped of control characters here as well as
+  at the engine, because that string is written into a JSON-RPC error a vendor process reads.
+  An ACP refusal now says what the native loop's `deny_message/2` says.
+
+  **What is still not covered.** Nothing on this lane: `Ouroboros.Provider.Session.Dialect` has
+  exactly one implementation, `Dialect.ACP`, and a second would reach the same three functions.
+  What has no test is a run through `Session.Jsonl` with a live vendor process — the proofs call
+  `Seam.decide/4` and `Seam.decide_service/3` with the frames `Dialect.ACP` and `Session.Service`
+  build, which is where the seam is, and this tree has no harness that starts a real ACP agent.
 
 ## 12. What this does not solve
 
@@ -2804,6 +2849,38 @@ Each slice is PR-sized, lands green, and is useful alone.
   and the cache can no longer be asked to hold two; and D20 stopped claiming determinism as a
   property this seam enforces — the world has none of the ingredients, the eval spec exercises
   what an author asserts, and instance state is still theirs.
+
+- **W18 — every permission seam reads one setting.** `Control.Permissions.Seam` — the ACP lane,
+  and the last seam that called `Control.Permissions` by name — now evaluates, records and
+  suggests through the module `config :ouroboros, :permissions_engine` names, so a node given
+  `Wasm.PolicyEngine` has a policy component on all three of its lanes rather than on the native
+  loop and the interactive plane alone (D27). The tolerance is `Interactive.Task.Approvals`',
+  copied rather than reinvented: the three answer shapes pass through, an answer in none of them
+  is an ask, and an engine that raises or exits is an ask carrying the payload the dialect would
+  have emitted anyway — proved against a test-local engine that records what it was asked and can
+  be told to answer nonsense, to raise and to exit. `remember/4` and `forget_session/1` stayed on
+  `Control.Permissions`, because a "don't ask again" and a session's rules dying with it are
+  rule-store operations and not decisions (C13); the *pattern* a `:session` answer is remembered
+  as is the engine's, because the rule language is. `Seam.refusal/1` had flattened every
+  non-map `rule_ref` into "refused by a permission rule", which is precisely what a policy
+  component's deny is, so an ACP refusal said nothing about what refused it: a binary passes
+  through now, bounded and control-free, and the vendor process reads the sentence the native
+  loop's `deny_message/2` reads.
+
+  Settled on the real wire in `test/wasm/policy_acp_test.exs`, which is
+  `policy_acceptance_test.exs`' harness with the other caller: the real `no-network-shell`,
+  signed by the real signing service and deployed through the real rollout, refusing an ACP
+  `session/request_permission` whose `rawInput.command` reaches the network and refusing the
+  `terminal/create` that arrives — deliberately — as `tool: "bash"`, each with the component's
+  sha in the stated rule and in the ledger row's `rule_ref` under `actor: :classifier` and this
+  session's id as the principal; an `ls -la` it does not recognise staying the ask it already
+  was, with `suggested_rule` on the payload; `:policy_allowable_tools: ["bash"]` widening
+  nothing by itself; and an operator's own node rule still deciding without the component being
+  reached. What that file cannot show is an `allow` degrading, because the example component
+  never says one — that half of D20 is a scripted verdict in `policy_engine_test.exs` — and
+  nothing here runs a live vendor process through `Session.Jsonl`, which this tree has no
+  harness for. ACP is the only `Provider.Session.Dialect` implementation, so there is no second
+  dialect left uncovered.
 
 ## 15. Prior art and references
 
