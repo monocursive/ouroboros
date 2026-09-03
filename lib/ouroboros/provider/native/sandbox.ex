@@ -183,13 +183,20 @@ defmodule Ouroboros.Provider.Native.Sandbox do
     "/Applications/Xcode.app"
   ]
 
-  # Observed under both Linux backends, in a privileged Ubuntu container on kernel 7.0.14:
-  # under bubblewrap by `scripts/forge-linux-test.sh` (W14) and under `ouro-sandbox` by the
-  # same script since W17, which is where the escape tests — `include_str!` of a planted
-  # secret, a `#[path]` module outside the project — are red without the fence and the
-  # honest fixture builds beside them. What remains unverified is the *composition* of this
-  # list with a distribution whose toolchain lives somewhere it does not name; a build there
-  # fails closed, loudly, rather than reading more than it should.
+  # Observed under both Linux backends on kernel 7.0.14, but no longer by the same run:
+  # `scripts/forge-linux-test.sh` proved the bubblewrap form in W14 and, since W17 builds
+  # `ouro-sandbox` in that container, now proves the `ouro-sandbox` form instead — because
+  # detection prefers the helper once it is installed. bubblewrap's half is CI's ubuntu-24.04
+  # job, which installs `bwrap` and does not build the helper. Either way the escape tests —
+  # `include_str!` of a planted secret, a `#[path]` module outside the project — are red
+  # without the fence, with the honest fixture building beside them.
+  #
+  # Two things this list does not fence, on any backend, and both are D26's to state: `/etc`
+  # is in it, so an operator's secrets under `/etc` are readable by build-time code; and a
+  # path outside it is still *stat*-able, because a read fence governs opening a file and not
+  # learning that it is there. What remains unverified is the composition of this list with a
+  # distribution whose toolchain lives somewhere it does not name; a build there fails closed,
+  # loudly, rather than reading more than it should.
   # No `/dev` and no `/proc`: bubblewrap mounts a fresh devtmpfs and a fresh procfs for the
   # namespace, and a read-only bind of the host's over the top of either replaces it — which
   # is how the first cut of this list produced a build whose very first act was
@@ -420,11 +427,28 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   def fences_reads?(:ouro_sandbox), do: false
   def fences_reads?(:none), do: false
 
+  # Canonicalised, because a root that is a symlink is its *target* to every backend that
+  # applies one: Seatbelt's `subpath` resolves it and Landlock's `O_PATH` open follows it, so
+  # a policy naming the link would grant the thing it points at under a name that does not
+  # say so. `Wasm.Forge.read_set/2` already canonicalises what it puts in the list; doing it
+  # here as well means the property belongs to the policy rather than to one caller.
+  #
+  # A path that cannot be canonicalised — it does not exist yet — is kept exactly as it was
+  # written. Dropping it would narrow the policy silently, and a relative one left in is a
+  # refusal the helper makes out loud (exit 125) rather than a fence with a hole.
   defp roots(paths) do
     paths
     |> Enum.filter(&(is_binary(&1) and &1 != ""))
+    |> Enum.map(&canonical_root/1)
     |> Enum.uniq()
     |> Enum.sort()
+  end
+
+  defp canonical_root(path) do
+    case Ouroboros.Workspace.Path.canonicalize(path) do
+      {:ok, canonical} -> canonical
+      {:error, _absent} -> path
+    end
   end
 
   @doc "Attaches a scratch directory to a policy, so `$TMPDIR` has somewhere to point."

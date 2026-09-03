@@ -94,6 +94,20 @@ fn exec(source: Source, target: &[String]) -> Result<std::convert::Infallible, S
     let raw = read_request(source)?;
     let policy = request::Policy::from_json(&raw).map_err(|error| error.to_string())?;
 
+    // Before anything is compiled into a plan: a read allow-set naming a symlink is a
+    // policy whose text and whose effect disagree, and the effect is the target. Refused by
+    // name rather than resolved here, because resolving it would mean this helper widening
+    // a root of its own — the one thing `readable` exists to stop.
+    let links = plan::symlinked_read_roots(&policy);
+    if !links.is_empty() {
+        return Err(format!(
+            "readable roots {} are symbolic links; Landlock would attach the rule to what \
+             they point at, under a name that does not say so. Send the canonical path \
+             (the daemon's `Sandbox.builder_policy/1` does) rather than the link.",
+            links.join(", ")
+        ));
+    }
+
     // The request wins; the environment is the hand-run fallback.
     let library = policy
         .fs_filter_library

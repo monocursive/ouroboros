@@ -134,6 +134,31 @@ fn handled_fs(abi: i32) -> u64 {
     read_set(abi) | write_set(abi)
 }
 
+/// The rights a rule on a single **file** may carry.
+///
+/// A `path_beneath` rule whose parent is not a directory is refused with `EINVAL` if it
+/// names a directory-only right — `READ_DIR`, any `MAKE_*`, `REMOVE_*`, `REFER`. So the
+/// file grants are built from their own sets rather than by masking the directory ones,
+/// which would be a mask somebody would later widen without noticing what it is for.
+fn file_read_set(abi: i32) -> u64 {
+    let mut set = FS_READ_FILE;
+    if abi >= 5 {
+        // `isatty` and every `TCGETS` a build script runs against `/dev/null` is an ioctl,
+        // and an unhandled-but-denied ioctl answers `EACCES` where the device would have
+        // answered `ENOTTY`.
+        set |= FS_IOCTL_DEV;
+    }
+    set
+}
+
+fn file_write_set(abi: i32) -> u64 {
+    let mut set = file_read_set(abi) | FS_WRITE_FILE;
+    if abi >= 3 {
+        set |= FS_TRUNCATE;
+    }
+    set
+}
+
 // ----------------------------------------------------------------------------- structures
 
 #[repr(C)]
@@ -243,6 +268,20 @@ fn build_landlock(plan: &Plan, abi: i32) -> Result<libc::c_int> {
                 .read_only_overrides
                 .iter()
                 .map(|path| (path, read)),
+        )
+        // The file grants last, and narrowest of all: a rule on `/dev/null` governs that
+        // node and grants nothing else in a `/dev` the builder has no rule for.
+        .chain(
+            plan.landlock
+                .read_files
+                .iter()
+                .map(|path| (path, file_read_set(abi))),
+        )
+        .chain(
+            plan.landlock
+                .write_files
+                .iter()
+                .map(|path| (path, file_write_set(abi))),
         );
 
     for (path, access) in rules {
@@ -493,6 +532,21 @@ fn apply_mounts(plan: &Plan, snapshot: &[mountinfo::Mount]) -> Result<()> {
                     libc::MS_NOSUID | libc::MS_NODEV,
                     Some("mode=0700"),
                 )?;
+            }
+
+            MountOp::SealedTmpfs { path } => {
+                // Fresh first — which is what takes the host's shared segments out of the
+                // namespace — and read-only immediately after, so nothing can be put in
+                // their place either. `0555` rather than tmpfs's usual `1777`: a build has
+                // no business creating anything here, and the mount flag already says so.
+                mount(
+                    Some("tmpfs"),
+                    path,
+                    Some("tmpfs"),
+                    libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+                    Some("mode=0555"),
+                )?;
+                set_read_only(path)?;
             }
 
             MountOp::ReadOnlySweep { keep_writable } => {

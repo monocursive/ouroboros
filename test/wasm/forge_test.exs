@@ -257,9 +257,11 @@ defmodule Ouroboros.Wasm.ForgeTest do
     # bound writes and not reads is half a sandbox, and half of this lane's claim.
     #
     # Since W17 the third backend can fence reads — but only a helper binary that says so.
-    # Delete the `Map.get(detection, :read_fence, false)` clause in `fences_reads?/1` and
-    # this goes red in the first half: a stale helper starts claiming a fence it has not
-    # got. Delete the `read_fence` the probe carries and it goes red in the second: a
+    # The two mutations and what each reddens, corrected after a review found this comment
+    # naming the wrong one: make `fences_reads?/1` answer `true` for `:ouro_sandbox` however
+    # it was probed and *this* test reddens, because a stale helper starts claiming a fence
+    # it has not got. Delete the `%{backend: :ouro_sandbox}` clause instead — so the map
+    # falls through to the bare-atom `false` — and the sibling test below reddens, because a
     # current helper stops being allowed to forge at all.
     test "a helper that does not claim the read allow-set is refused rather than used",
          context do
@@ -313,7 +315,12 @@ defmodule Ouroboros.Wasm.ForgeTest do
       assert policy.mode == :builder
       assert policy.network == false
       assert "/sdk" in policy.readable
-      assert Enum.sort(policy.writable) == Enum.sort([context.builds, context.tmp])
+      # Canonical on both sides: `builder_policy/1` resolves the roots it names, and on this
+      # Mac the temp directory reaches the test through a symlink (`/var` -> `/private/var`).
+      # The forge already canonicalises its build directory for the same reason — a root in
+      # the other spelling is a rule the kernel matches nothing against.
+      assert Enum.sort(policy.writable) ==
+               Enum.sort(Enum.map([context.builds, context.tmp], &canonical_root/1))
 
       # And the request that reaches the helper carries the allow-set — for this mode and
       # for no other. Red without `Helper.request/2`'s `readable` clause.
@@ -334,12 +341,19 @@ defmodule Ouroboros.Wasm.ForgeTest do
       assert policy.network == false
       assert policy.protected == []
       assert policy.protected_segments == []
-      assert Enum.sort(policy.writable) == Enum.sort([context.builds, context.tmp])
+      # Canonical on both sides: `builder_policy/1` resolves the roots it names, and on this
+      # Mac the temp directory reaches the test through a symlink (`/var` -> `/private/var`).
+      # The forge already canonicalises its build directory for the same reason — a root in
+      # the other spelling is a rule the kernel matches nothing against.
+      assert Enum.sort(policy.writable) ==
+               Enum.sort(Enum.map([context.builds, context.tmp], &canonical_root/1))
+
       assert "/a-toolchain-root" in policy.readable
 
       # Every platform root is in it, and the profile is closed by default rather than
       # opening reads the way every other policy this module makes does.
-      for root <- Sandbox.platform_readable(), do: assert(root in policy.readable)
+      for root <- Sandbox.platform_readable(),
+          do: assert(canonical_root(root) in policy.readable)
 
       profile = SandboxExec.profile(policy)
       assert profile =~ "(deny default)"
@@ -462,6 +476,12 @@ defmodule Ouroboros.Wasm.ForgeTest do
       assert preview.build.outcome == :failed
       assert preview.build.output =~ "x.rs"
       assert preview.build.output =~ denial_pattern()
+
+      # The companion its sibling has, and for the same reason: `Permission denied` on one
+      # file proves a fence only beside a build that succeeds under the same policy. Without
+      # this, a mode-000 file or a broken toolchain would pass the assertion above.
+      assert {:ok, honest} = Forge.preview(%{files: fixture()}, forge_opts(context))
+      assert honest.build.outcome == :ok
     end
   end
 
@@ -816,6 +836,17 @@ defmodule Ouroboros.Wasm.ForgeTest do
   ## --------------------------------------------------------------------- helpers
 
   defp validate(files, _context), do: Forge.preview(%{files: files}, build?: false)
+
+  # `/bin` is a symlink to `usr/bin` on Debian-family Linux, and `builder_policy/1`
+  # canonicalises every root it names (a root that is a link is the thing it points at, to
+  # Landlock and to Seatbelt alike). So the assertion is that each platform root is covered,
+  # in whichever spelling names that directory.
+  defp canonical_root(path) do
+    case Ouroboros.Workspace.Path.canonicalize(path) do
+      {:ok, canonical} -> canonical
+      {:error, _absent} -> path
+    end
+  end
 
   defp fixture, do: ForgeFixture.project()
 

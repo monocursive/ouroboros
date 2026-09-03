@@ -167,6 +167,7 @@ pub enum RequestError {
     WritableWithoutRoots,
     ReadableWithoutBuilder(Mode),
     DeniedNamesInBuilder,
+    FsFilterInBuilder,
 }
 
 impl fmt::Display for RequestError {
@@ -206,6 +207,13 @@ impl fmt::Display for RequestError {
                 "mode builder was given denied_names; the name filter is an LD_PRELOAD \
                  shim for a shell's `.git`, a build's fence is the read allow-set, and \
                  carrying the field would be a rule nothing enforces"
+            ),
+            RequestError::FsFilterInBuilder => write!(
+                f,
+                "mode builder was given fs_filter_library; the same rule as denied_names \
+                 and for the same reason — a builder plan carries no preload filter, so \
+                 accepting the library would be a layer the caller believes in and this \
+                 helper never loads"
             ),
         }
     }
@@ -287,6 +295,18 @@ impl Policy {
         // plan deliberately does not carry.
         if request.mode.fences_reads() && !request.denied_names.is_empty() {
             return Err(RequestError::DeniedNamesInBuilder);
+        }
+
+        // And the library that shim lives in, for the same reason. A refusal rather than a
+        // silent discard: the daemon that sent it thinks a layer is being applied, and the
+        // one thing this helper must never do is let a caller believe that.
+        if request.mode.fences_reads()
+            && request
+                .fs_filter_library
+                .as_deref()
+                .is_some_and(|library| !library.is_empty())
+        {
+            return Err(RequestError::FsFilterInBuilder);
         }
 
         Ok(Policy {
@@ -478,6 +498,26 @@ mod tests {
             Policy::from_json(r#"{"mode":"builder","scratch":"/tmp/s","writable":["/build"]}"#)
                 .unwrap();
         assert!(policy.readable.is_empty());
+    }
+
+    #[test]
+    fn a_builder_request_carrying_a_preload_library_is_refused() {
+        // §14 said the preload filter was "refused under builder" while the daemon sent the
+        // library on every request and this helper quietly dropped it. Now it is refused,
+        // in both places: delete this check and the request is accepted again.
+        assert_eq!(
+            Policy::from_json(
+                r#"{"mode":"builder","scratch":"/tmp/s","fs_filter_library":"/priv/f.so"}"#
+            ),
+            Err(RequestError::FsFilterInBuilder)
+        );
+
+        // An empty string is how the daemon says "no library"; refusing that would be
+        // refusing a no-op.
+        assert!(Policy::from_json(
+            r#"{"mode":"builder","scratch":"/tmp/s","fs_filter_library":""}"#
+        )
+        .is_ok());
     }
 
     #[test]

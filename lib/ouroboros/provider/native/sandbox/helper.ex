@@ -27,6 +27,7 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
   | loopback still usable | loopback brought up inside the namespace |
   | **creating a `.git` that did not exist when the command started** | **`LD_PRELOAD` only — unchanged, and still leaky** |
   | reads fenced to an allow-set, in `builder` mode only | Landlock alone (`EACCES`) — there is no mount that can express it |
+  | a build's `/dev` and `/proc`, in `builder` mode only | `/dev/null` by name, `/proc` read-only, a sealed tmpfs over `/dev/shm` |
   | remounting out of the policy | capabilities dropped, seccomp denial, **and** Landlock, which survives both |
   | narrowing the syscall surface | seccomp (the bwrap backend has none) |
 
@@ -252,7 +253,7 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
     base
     |> readable(policy)
     |> maybe_put("cwd", chdir(scope))
-    |> maybe_put("fs_filter_library", filter_library())
+    |> maybe_put("fs_filter_library", filter_library(policy))
   end
 
   defp readable(request, %{mode: :builder} = policy),
@@ -270,7 +271,14 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
   # `compile.ouroboros_fs_filter` task puts it. Absent on a node where no C compiler was
   # available at build time, and absent on macOS, in which case the helper simply has no
   # name-based create filter — which is the documented gap, not a silent one.
-  defp filter_library do
+  #
+  # Never for a builder. The shim fences the *creation* of a `.git`, a build has no
+  # workspace and no such fence, and the builder plan carries no preload — so sending the
+  # library was a layer this side named and the helper dropped. The helper refuses the field
+  # under `builder` now, which makes this omission a rule rather than a courtesy.
+  defp filter_library(%{mode: :builder}), do: nil
+
+  defp filter_library(_shell) do
     path = Application.app_dir(:ouroboros, "priv/native/libouro_fs_filter.so")
     if File.regular?(path), do: path, else: nil
   rescue

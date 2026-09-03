@@ -1684,10 +1684,16 @@ machinery — it is a backend, not a lane (D9).
   the failure and, beside them, that the honest fixture still builds under the same policy,
   because a fence that broke the toolchain would pass the first assertion and be useless.
 
-  What is still readable is the toolchain and the SDK, and that is not nothing: a project
-  can read the compiler's own source and the guest crate. Neither is a secret, and both have
-  to be readable for a build to exist at all. The node's data directory, the operator's home,
-  the workspace, `/etc/ssh`, another user's files: none of them are.
+  What is still readable is the toolchain, the SDK **and the platform roots those lists
+  name** — and the last of those includes `/etc`, on every backend. That was written here as
+  "`/etc/ssh` … none of them are", and it was never true: an adversarial review put a file at
+  `/etc/ouroboros/credentials` and a build read it. `/etc` stays, because a compiler that
+  cannot read `ld.so.cache`, `passwd`, `localtime` and the CA bundle does not link; what
+  changes is the sentence and the operator advice that follows from it — **anything secret
+  belongs outside the platform roots**, which is where this runtime already puts its own
+  (the node's data directory is not readable, and is where `wasm_forge_cargo_home` lives).
+  The node's data directory, the operator's home, the workspace and another user's files
+  are still outside the fence.
 
   On Linux the same policy is a bubblewrap namespace that binds *only* those roots rather
   than `--ro-bind / /`, and it is **verified**: `scripts/forge-linux-test.sh` runs the forge
@@ -2028,6 +2034,46 @@ machinery — it is a backend, not a lane (D9).
   honest fixture still builds under the same policy. Three strings, one fence, and the pair of
   assertions is what tells a fence from a broken toolchain.
 
+  **A read fence is not a write fence, and the first cut of this decision confused the two.**
+  The mount half of a shell policy keeps `/dev` and `/proc` writable on purpose — a shell
+  needs `/dev/null` and its own `/proc/self` knobs, and this helper has no fresh root to
+  mount minimal ones into. The builder inherited that, so it inherited the host's `/dev/shm`:
+  an adversarial review wrote `/dev/shm/pwned` and read a canary another process of the same
+  uid had left there, which is a bidirectional channel to every process on the node out of
+  the one policy whose claim is that what a compiler carries into its output is bounded. A
+  builder now keeps nothing writable that the policy did not name. `/dev/null` is granted by
+  name — a Landlock rule on the file, so it governs that node and grants nothing else in a
+  `/dev` the builder has no rule for, which is the same single node
+  `Sandbox.SandboxExec`'s builder profile grants and for the same reason. `/dev/zero`,
+  `/dev/urandom` and `/dev/random` are readable for `getrandom`'s fallback. `/proc` is
+  readable and not writable. `/dev/shm` and `/dev/mqueue` get a fresh **read-only** tmpfs, so
+  the host's segments are gone rather than merely refused — which is what bubblewrap gets
+  from mounting its own `/dev`, arrived at from the other side. There is no `/dev` listing at
+  all.
+
+  **What the fence does not do, said once here so it is not discovered later.** It does not
+  keep an operator's secret out of a build if that secret is under a platform root: `/etc` is
+  in the read set on every backend, because `ld.so.cache`, `passwd`, `localtime` and the CA
+  bundle are what a compiler opens before it compiles anything, and a planted
+  `/etc/ouroboros/credentials` was read by a build under all of them. The advice is the
+  ordinary one and it is an operator's to take: keep credentials outside the platform roots.
+  And it does not hide existence. Landlock governs `open` and `readdir`, not path resolution,
+  so `stat` succeeds on anything the ordinary permissions let a process walk to: a build can
+  learn that a file is there, how big it is and when it changed, without reading a byte of
+  it. `SandboxExec`'s builder profile grants `file-read-metadata` on `/` for exactly that
+  reason — a compiler stats its way down a path and a `stat` denial reads as a missing file —
+  so the two backends have the same oracle, deliberately, and only bubblewrap's namespace,
+  which never held the path at all, answers `ENOENT`.
+
+  **A root that is a symlink is the thing it points at.** Landlock opens a rule's path with
+  `O_PATH` and follows it, and Seatbelt's `subpath` resolves the same way, so a `readable`
+  naming a link would fence *its target* under a name that does not say so. Two halves:
+  `Sandbox.builder_policy/1` canonicalises every root it names, and the helper refuses a
+  `readable` entry that is still a symlink rather than following it. The second half is there
+  because the first can fail — `Workspace.Path.canonicalize/1` returns an error rather than a
+  path in one case this slice found — and a policy whose text and whose effect disagree is
+  the shape this whole decision exists to refuse.
+
   **And the capability is asked of the binary, not of the backend's name.** An `ouro-sandbox`
   installed before this slice speaks protocol version 1, applies every shell policy correctly,
   and would refuse `readable` as an unknown field — which is the right refusal and arrives too
@@ -2198,10 +2244,27 @@ Stated once, so nobody reads more into the lane than is there:
   privileged Ubuntu 24.04 container on kernel 7.0.14 and on CI's ubuntu-24.04.
   **`ouro-sandbox`** stays in the host's own path namespace and fences reads with Landlock
   alone, so it answers `Permission denied` (`EACCES`) — the same two tests, in the same
-  container, under the backend this runtime actually prefers on Linux (W17). What is *not*
-  covered is a helper binary older than the allow-set: it applies every other part of the
-  policy and has no `readable` field, so the forge asks the helper rather than the backend
-  name (`doctor`'s `features.read_allow_set`) and refuses that node by name.
+  container, under the backend this runtime actually prefers on Linux (W17).
+
+  Three things that fence does **not** do, each proved rather than supposed. It does not keep
+  a secret an operator left under `/etc`: the platform roots are inside the allow-set on every
+  backend, `/etc` is one of them because a compiler needs `ld.so.cache` and the CA bundle, and
+  a planted `/etc/ouroboros/credentials` was read by a build. Keep credentials out of the
+  platform roots. It does not hide *existence*: a read fence governs opening a file, so
+  `stat` still succeeds on any path the ordinary permissions let a process walk to, and a
+  build can learn that `/home/someone/.ssh/id_rsa` is there and how big it is without reading
+  a byte — Seatbelt's profile grants `file-read-metadata` on `/` deliberately for the same
+  reason, and only bubblewrap, whose namespace never held the path, answers `ENOENT`. And it
+  is not, by itself, a bound on *writes*: W17's first cut left `ouro-sandbox`'s builder with
+  the host's `/dev` and `/proc` writable, and a build wrote `/dev/shm/pwned` and read a
+  canary another process of the same uid had left there. That is closed — a builder gets
+  `/dev/null` by name, `/proc` read-only, a sealed tmpfs over `/dev/shm`, and nothing else —
+  and it is written here because the sentence "writes only into the build directory" had been
+  true of the intent and not of the kernel.
+
+  What is *not* covered is a helper binary older than the allow-set: it applies every other
+  part of the policy and has no `readable` field, so the forge asks the helper rather than the
+  backend name (`doctor`'s `features.read_allow_set`) and refuses that node by name.
 - **Engine-embedding guests are still out, and W8 removed only the first precondition.**
   A JavaScript or Python guest carries an engine, which is millions of code bytes and far past
   §7.3's 4 MiB — a bound that now applies at the *signer* rather than at every node, which is
@@ -3108,6 +3171,33 @@ Each slice is PR-sized, lands green, and is useful alone.
   the stale `_build/.../ouroboros/priv` symlink before `make` was first written as a `find -name
   priv -type l -delete` over the whole build tree, which also took erlexec's port-binary link
   and left the suite unable to start a single native tool. It names the one path now.
+
+  **Then an adversarial review took the first cut apart on the kernel, and the headline finding
+  was that a read fence is not a write fence.** The builder inherited the shell policy's
+  `/dev` and `/proc` — writable, because a shell needs `/dev/null` and this helper has no fresh
+  root to mount a minimal one into — so a build wrote `/dev/shm/pwned` and read a canary another
+  process of the same uid had left in `/dev/shm`, and `/dev/pts` was the same class. Three
+  sentences in this repository said "writes only into the build directory, the cargo home and
+  `TMPDIR`" while that was true. A builder now keeps nothing writable that its policy did not
+  name: `/dev/null` by name as a Landlock rule on the file (the same single node Seatbelt's
+  builder profile grants), `/dev/zero`, `/dev/urandom` and `/dev/random` readable for
+  `getrandom`'s fallback, `/proc` readable and not writable, a fresh **read-only** tmpfs over
+  `/dev/shm` and `/dev/mqueue`, no `/dev` listing at all, and a sweep that spares nothing.
+  Proved on the same kernel: the canary is unreadable and its name is not even in the listing,
+  `/dev/shm/ouro-pwned` is refused and does not appear on the host, `/dev/null` is still
+  writable and `/dev/urandom` still readable — the half that has to hold for a build to build —
+  `/proc/self/oom_score_adj` is refused, and a real forge still completes under it.
+
+  Three more from the same review, each with the test that reddens for it. The read set names
+  `/etc`, so an operator's secret under a platform root is readable by build-time code on every
+  backend — D18 said `/etc/ssh` was outside the fence and it never was; the sentence is fixed
+  and the advice is to keep credentials out of the platform roots. The fence is an existence
+  oracle: `stat` still succeeds on any path the ordinary permissions reach, which Seatbelt's
+  profile grants deliberately and which only bubblewrap's namespace avoids; D26 says so now.
+  And the daemon carried `fs_filter_library` on every builder request while the helper silently
+  discarded it, which §14 had already described as a refusal — the daemon omits it and the
+  helper refuses it now, so the sentence is true from both ends. A symlinked `readable` root
+  was granting its target: canonicalised on the daemon, refused by the helper, both tested.
 
 - **W18 — every permission seam reads one setting.** `Control.Permissions.Seam` — the ACP lane,
   and the last seam that called `Control.Permissions` by name — now evaluates, records and

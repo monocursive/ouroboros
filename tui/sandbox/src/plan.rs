@@ -64,6 +64,10 @@ pub enum MountOp {
     BindWritable { path: String },
     /// A fresh private tmpfs at `path`.
     Tmpfs { path: String },
+    /// A fresh private tmpfs at `path`, immediately made read-only: the host's contents are
+    /// gone and nothing can be put in their place. Only ever `SEALED_TMPFS`, only ever in
+    /// `builder` mode.
+    SealedTmpfs { path: String },
     /// Make every mount that existed before this plan started read-only, except the ones
     /// named here.
     ReadOnlySweep { keep_writable: Vec<String> },
@@ -81,7 +85,7 @@ pub enum ReadOnlyReason {
     DeniedName,
 }
 
-/// The mounts this helper deliberately does not touch.
+/// The mounts a **shell** policy deliberately does not touch.
 ///
 /// A read-only `/dev` makes `open("/dev/null", O_WRONLY)` fail, which breaks essentially
 /// every shell pipeline, and a read-only `/proc` breaks tools that write their own
@@ -98,7 +102,43 @@ pub enum ReadOnlyReason {
 /// follow the process's namespace, so a network-denied command still gets `ENETUNREACH`.
 /// Remounting `/proc` would fix the latter and is deliberately not done, because inside a
 /// container it would also unmask the paths the container runtime masked there.
+///
+/// **`builder` does not get this**, and W17's first cut giving it this was a hole an
+/// adversarial review walked through: a build wrote `/dev/shm/pwned` and read a canary
+/// another process of the same uid had left in `/dev/shm`, which is a bidirectional channel
+/// to every process on the node — through the one policy whose whole claim is that what a
+/// compiler can carry into its output is bounded. A builder keeps nothing writable but the
+/// roots it was given; see `BUILDER_DEVICE_*` and `SEALED_TMPFS`.
 pub const KEEP_WRITABLE: &[&str] = &["/dev", "/proc"];
+
+/// The one device a build may **write**, and the reason it is exactly one.
+///
+/// `> /dev/null` is in every build script, every `configure`, and the shell this helper
+/// execs. `Sandbox.SandboxExec`'s builder profile grants the same single node with the same
+/// reasoning — `(allow file-write-data (require-all (path "/dev/null") …))` — so the two
+/// backends grant the same write, and neither grants `/dev/tty`: the build's stdio is a pipe
+/// the daemon owns, and the controlling terminal is the operator's, not the build's.
+pub const BUILDER_DEVICE_WRITE: &[&str] = &["/dev/null"];
+
+/// The devices a build may **read**, and what each is for.
+///
+/// `/dev/zero` is still mapped by allocators and linkers; `/dev/urandom` and `/dev/random`
+/// are what `getrandom` falls back to reading when the syscall is filtered, which is how
+/// `libstd` seeds a `HashMap` and how cargo seeds its own hashing. Nothing else: no
+/// `/dev/shm`, no `/dev/pts`, no listing of `/dev` at all. bubblewrap's `--dev` builds a
+/// fresh tmpfs holding roughly this set plus `tty` and `full`, so this is the same posture
+/// arrived at from the other side — a grant instead of a fresh mount.
+pub const BUILDER_DEVICE_READ: &[&str] = &["/dev/zero", "/dev/urandom", "/dev/random"];
+
+/// Shared-memory filesystems a builder gets a fresh, read-only tmpfs over.
+///
+/// Landlock alone would already deny these, since a builder has no read or write root under
+/// `/dev`. The mount is the second layer and the one that makes the *contents* gone rather
+/// than merely refused: bubblewrap gives a build an empty `/dev/shm` because its `/dev` is
+/// fresh, and this is how a helper with no fresh root reaches the same place. Read-only
+/// rather than merely fresh, because nothing a build legitimately does needs POSIX shared
+/// memory and an empty writable segment is still a channel between two builds on one node.
+pub const SEALED_TMPFS: &[&str] = &["/dev/shm", "/dev/mqueue"];
 
 /// The Landlock half of the plan.
 ///
@@ -142,6 +182,16 @@ pub struct LandlockPlan {
     /// Granted the read set again, more specifically than an enclosing `write_root`, which
     /// is how Landlock expresses "writable, except here".
     pub read_only_overrides: Vec<String>,
+    /// Individual **files** granted read rights, with no rule on the directory holding them.
+    ///
+    /// Landlock resolves an access against the closest rule above the path, so a rule on a
+    /// file governs that file and grants nothing else in its directory — which is the only
+    /// way to say "this build may read `/dev/urandom` and may not list `/dev`". Empty for
+    /// every mode but `builder`; a rule on a non-directory may carry only file-applicable
+    /// rights, or the kernel refuses the whole ruleset with `EINVAL`.
+    pub read_files: Vec<String>,
+    /// Individual files granted read **and** write rights. `builder` only, and `/dev/null`.
+    pub write_files: Vec<String>,
 }
 
 /// The network posture.
@@ -232,8 +282,26 @@ impl Plan {
             path: policy.scratch.clone(),
         });
 
-        let mut keep_writable: Vec<String> =
-            KEEP_WRITABLE.iter().map(|s| (*s).to_string()).collect();
+        // A builder seals the shared-memory filesystems before the sweep, while it still
+        // holds the capability to mount. Before, and not after, for the same reason the
+        // writable binds come first: the sweep is the line after which the namespace only
+        // gets narrower.
+        if policy.mode.fences_reads() {
+            for path in SEALED_TMPFS.iter().filter(|path| Path::new(path).is_dir()) {
+                mounts.push(MountOp::SealedTmpfs {
+                    path: (*path).to_string(),
+                });
+            }
+        }
+
+        // `/dev` and `/proc` stay writable for a shell, which needs `/dev/null` and its own
+        // `/proc/self` knobs. A builder needs neither: it gets `/dev/null` by name through
+        // Landlock and `/proc` read-only, so its sweep keeps nothing.
+        let mut keep_writable: Vec<String> = if policy.mode.fences_reads() {
+            Vec::new()
+        } else {
+            KEEP_WRITABLE.iter().map(|s| (*s).to_string()).collect()
+        };
         keep_writable.sort();
         mounts.push(MountOp::ReadOnlySweep { keep_writable });
 
@@ -264,10 +332,13 @@ impl Plan {
         }
 
         // Derived from the mount plan rather than rebuilt alongside it, so the two cannot
-        // drift: whatever the mounts leave writable is exactly what Landlock grants. The
-        // `/dev` and `/proc` the sweep skips are added for the same reason.
+        // drift: whatever the mounts leave writable is exactly what Landlock grants. For a
+        // shell that includes the `/dev` and `/proc` the sweep skips; for a builder the
+        // sweep skips nothing, so neither is here, and `/dev/null` arrives as a file grant.
         let mut write_roots = writable_mount_paths(&mounts);
-        write_roots.extend(KEEP_WRITABLE.iter().map(|s| (*s).to_string()));
+        if !policy.mode.fences_reads() {
+            write_roots.extend(KEEP_WRITABLE.iter().map(|s| (*s).to_string()));
+        }
         let write_roots = dedup_sorted(write_roots);
 
         let mut read_only_overrides: Vec<String> = mounts
@@ -292,13 +363,21 @@ impl Plan {
         // The read set. For a shell it is `/`; for a build it is the allow-set plus what
         // the build can already write, and the union is taken from the mount plan for the
         // same reason the write set is — so a root that is writable is readable by
-        // construction rather than by two lists agreeing.
-        let read_roots = if policy.mode.fences_reads() {
+        // construction rather than by two lists agreeing. `/proc` is the one root this
+        // helper adds: a compiler reads `/proc/self/maps` and `/proc/cpuinfo`, and
+        // bubblewrap's builder arm mounts a fresh readable `/proc` for the same reason.
+        // `/dev` is *not* here — see `BUILDER_DEVICE_READ`.
+        let (read_roots, read_files, write_files) = if policy.mode.fences_reads() {
             let mut roots = policy.readable.clone();
             roots.extend(write_roots.iter().cloned());
-            dedup_sorted(roots)
+            roots.push("/proc".to_string());
+            (
+                dedup_sorted(roots),
+                strings(BUILDER_DEVICE_READ),
+                strings(BUILDER_DEVICE_WRITE),
+            )
         } else {
-            vec!["/".to_string()]
+            (vec!["/".to_string()], Vec::new(), Vec::new())
         };
 
         Plan {
@@ -308,6 +387,8 @@ impl Plan {
                 read_roots,
                 write_roots,
                 read_only_overrides,
+                read_files,
+                write_files,
             },
             network: if policy.network {
                 NetworkPosture::Inherit
@@ -349,6 +430,36 @@ fn depth(path: &str) -> usize {
         .count()
 }
 
+/// The `readable` entries that are symbolic links, which a builder policy may not have.
+///
+/// Landlock opens a rule's path with `O_PATH` and no `O_NOFOLLOW`, so a rule written for a
+/// link is a rule on its **target** — a `readable` of `/opt/toolchain` that happens to point
+/// at somebody's home directory would be a fence with that directory inside it, under a name
+/// that does not say so. The daemon canonicalises the roots it sends
+/// (`Sandbox.builder_policy/1`), and this is the half that does not depend on the daemon
+/// having succeeded: a link here is refused by name rather than silently followed.
+///
+/// `symlink_metadata`, never `metadata`: the question is what the last component *is*, and
+/// following it to ask is the mistake this exists to catch. An entry that does not exist is
+/// not a link and gets no rule at all, which is narrower rather than wider.
+pub fn symlinked_read_roots(policy: &Policy) -> Vec<String> {
+    if !policy.mode.fences_reads() {
+        return Vec::new();
+    }
+
+    policy
+        .readable
+        .iter()
+        .filter(|path| {
+            matches!(
+                std::fs::symlink_metadata(path),
+                Ok(meta) if meta.file_type().is_symlink()
+            )
+        })
+        .cloned()
+        .collect()
+}
+
 /// Whether `path` is `root` or lies beneath it. Component-wise, so `/ws-extra` is not
 /// inside `/ws` — the string-prefix version of this test is a classic sandbox hole.
 pub fn inside(path: &str, root: &str) -> bool {
@@ -359,6 +470,10 @@ pub fn inside(path: &str, root: &str) -> bool {
 
 fn inside_any(path: &str, roots: &[String]) -> bool {
     roots.iter().any(|root| inside(path, root))
+}
+
+fn strings(items: &[&str]) -> Vec<String> {
+    items.iter().map(|item| (*item).to_string()).collect()
 }
 
 fn dedup_sorted(items: Vec<String>) -> Vec<String> {
@@ -631,7 +746,6 @@ mod tests {
             vec![
                 "/build".to_string(),
                 "/cargo".to_string(),
-                "/dev".to_string(),
                 "/proc".to_string(),
                 "/sdk".to_string(),
                 "/tmp/s".to_string(),
@@ -644,8 +758,8 @@ mod tests {
         // writable roots first and then sweeps everything else read-only, so a build gets
         // both layers rather than trading one for the other.
         assert_eq!(
-            plan.mounts,
-            vec![
+            &plan.mounts[..3],
+            &[
                 MountOp::BindWritable {
                     path: "/build".to_string()
                 },
@@ -655,27 +769,116 @@ mod tests {
                 MountOp::Tmpfs {
                     path: "/tmp/s".to_string()
                 },
-                sweep(),
             ]
         );
-        // The write set is unchanged by any of it: a root a build may read is not a root
-        // it may write, which is the difference between the toolchain and the build tree.
+        // The write set is the roots the policy named and its scratch, and nothing else. It
+        // held `/dev` and `/proc` until an adversarial review wrote `/dev/shm/pwned`
+        // through them: delete the `fences_reads()` guard on `write_roots` and this is the
+        // assertion that reddens.
         assert_eq!(
             plan.landlock.write_roots,
             vec![
                 "/build".to_string(),
                 "/cargo".to_string(),
-                "/dev".to_string(),
-                "/proc".to_string(),
                 "/tmp/s".to_string(),
             ]
         );
     }
 
     #[test]
+    fn a_builder_keeps_nothing_writable_that_the_policy_did_not_name() {
+        // The rest of H1's fix, in the plan: the sweep spares nothing, the shared-memory
+        // filesystems are sealed before it, and the one device a build may write is a file
+        // grant rather than a root.
+        let plan = Plan::compile(
+            &policy(r#"{"mode":"builder","scratch":"/tmp/s","writable":["/build"]}"#),
+            None,
+        );
+
+        assert_eq!(
+            plan.mounts
+                .iter()
+                .find(|op| matches!(op, MountOp::ReadOnlySweep { .. })),
+            Some(&MountOp::ReadOnlySweep {
+                keep_writable: Vec::new()
+            })
+        );
+
+        assert_eq!(plan.landlock.write_files, vec!["/dev/null".to_string()]);
+        assert_eq!(
+            plan.landlock.read_files,
+            vec![
+                "/dev/zero".to_string(),
+                "/dev/urandom".to_string(),
+                "/dev/random".to_string(),
+            ]
+        );
+
+        // `/proc` is readable and not writable; `/dev` is neither.
+        assert!(plan.landlock.read_roots.contains(&"/proc".to_string()));
+        assert!(!plan.landlock.write_roots.contains(&"/proc".to_string()));
+        assert!(!plan.landlock.read_roots.contains(&"/dev".to_string()));
+        assert!(!plan.landlock.write_roots.contains(&"/dev".to_string()));
+
+        // Every shared-memory filesystem this machine actually has is sealed, and sealed
+        // *before* the sweep — after it, the capability to mount is on its way out.
+        let sweep_at = plan
+            .mounts
+            .iter()
+            .position(|op| matches!(op, MountOp::ReadOnlySweep { .. }))
+            .expect("a sweep");
+
+        for path in SEALED_TMPFS.iter().filter(|p| Path::new(p).is_dir()) {
+            let sealed = MountOp::SealedTmpfs {
+                path: (*path).to_string(),
+            };
+            let at = plan.mounts.iter().position(|op| op == &sealed);
+            assert!(
+                at.is_some_and(|at| at < sweep_at),
+                "{path} exists here and is not sealed before the sweep: {:?}",
+                plan.mounts
+            );
+        }
+    }
+
+    #[test]
+    fn a_shell_mode_keeps_dev_and_proc_writable_and_seals_nothing() {
+        // The other side of the same rule, and what keeps every non-builder plan identical
+        // to what it was before W17 touched any of this.
+        for mode in ["read_only", "workspace_write", "workspace_write_escalated"] {
+            let plan = Plan::compile(
+                &policy(&format!(r#"{{"mode":"{mode}","scratch":"/tmp/s"}}"#)),
+                None,
+            );
+
+            assert_eq!(
+                plan.mounts,
+                vec![
+                    MountOp::Tmpfs {
+                        path: "/tmp/s".to_string()
+                    },
+                    sweep(),
+                ],
+                "{mode}"
+            );
+            assert_eq!(
+                plan.landlock.write_roots,
+                vec![
+                    "/dev".to_string(),
+                    "/proc".to_string(),
+                    "/tmp/s".to_string()
+                ],
+                "{mode}"
+            );
+            assert!(plan.landlock.read_files.is_empty(), "{mode}");
+            assert!(plan.landlock.write_files.is_empty(), "{mode}");
+        }
+    }
+
+    #[test]
     fn a_builder_with_an_empty_allow_set_gets_no_root_beyond_its_own() {
         // No fallback to `/`. A policy that named nothing readable is a build that reads
-        // its own directories, `/dev` and `/proc`, and is refused everything else.
+        // its own directories and `/proc`, and is refused everything else.
         let plan = Plan::compile(
             &policy(r#"{"mode":"builder","scratch":"/tmp/s","writable":["/build"]}"#),
             None,
@@ -685,11 +888,36 @@ mod tests {
             plan.landlock.read_roots,
             vec![
                 "/build".to_string(),
-                "/dev".to_string(),
                 "/proc".to_string(),
                 "/tmp/s".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn a_readable_root_that_is_a_symlink_is_named_rather_than_followed() {
+        let tree = TempTree::new("symlinked-root");
+        let real = tree.dir("real-toolchain");
+        let link = tree.0.join("toolchain-link");
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let link = link.to_string_lossy().to_string();
+        let builder = policy(&format!(
+            r#"{{"mode":"builder","scratch":"/tmp/s","writable":["/build"],
+                 "readable":["{}","{link}"]}}"#,
+            real.to_string_lossy()
+        ));
+
+        assert_eq!(symlinked_read_roots(&builder), vec![link.clone()]);
+
+        // The real directory beside it is not a link and is not named.
+        assert_eq!(symlinked_read_roots(&builder).len(), 1);
+
+        // And a shell policy has no read allow-set to check, so it is never refused for one.
+        let shell = policy(r#"{"mode":"workspace_write","scratch":"/tmp/s"}"#);
+        assert!(symlinked_read_roots(&shell).is_empty());
     }
 
     #[test]

@@ -1519,7 +1519,9 @@ sandbox the native agent's shell runs in:
 * writes only into the build directory, the node's cargo home and a private `TMPDIR`;
 * **reads** only from the toolchain, the guest SDK, the `wit` world file beside it and those
   same directories — everything else fails at compile time, in whichever words your node's
-  sandbox refuses a read with;
+  sandbox refuses a read with. "The toolchain" includes the platform roots, and `/etc` is one
+  of them on every backend, so **an operator's secrets do not belong under `/etc`**: a build
+  can read what is there, and can `stat` (not read) anything the ordinary permissions reach;
 * a five-minute wall-clock ceiling and bounded output;
 * a node with no sandbox backend does not build at all.
 

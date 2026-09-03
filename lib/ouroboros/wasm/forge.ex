@@ -34,9 +34,11 @@ defmodule Ouroboros.Wasm.Forge do
       directories and nothing else — `include_str!` of anything else fails at compile time,
       in whichever words the backend refuses a read with (`Operation not permitted` from
       Seatbelt, `No such file or directory` from a bubblewrap namespace,
-      `Permission denied` from `ouro-sandbox`'s Landlock read set). No network (`--offline` as well, so a cold
-      cache is a refusal rather than a fetch), writes only into the build directory, the
-      node-local cargo home and a private `TMPDIR`, a five-minute ceiling, bounded output.
+      `Permission denied` from `ouro-sandbox`'s Landlock read set). No network
+      (`--offline` as well, so a cold cache is a refusal rather than a fetch), writes only
+      into the build directory, the node-local cargo home and a private `TMPDIR` — and, on
+      Linux, `/dev/null` and nothing else under `/dev` — a five-minute ceiling, bounded
+      output.
 
   The manifest is read twice. First by a deliberately small scanner that refuses every line it
   cannot classify — the set of manifests this lane accepts is the scaffold's shape, so
@@ -954,12 +956,12 @@ defmodule Ouroboros.Wasm.Forge do
       not Sandbox.fences_reads?(detection) ->
         {:error,
          {:sandbox_cannot_fence_reads, detection.backend,
-          "this node's #{Sandbox.label(detection)} cannot express a read allow-set, so a " <>
-            "build under it could read anything the node can (docs/WASM.md D18, D26). " <>
-            "An `ouro-sandbox` from before the allow-set reports no `read_allow_set` " <>
-            "feature and is refused here by that report rather than by its name: install " <>
-            "a helper built from this tree (`make sandbox`) or let detection fall through " <>
-            "to bubblewrap."}}
+          "the #{Sandbox.label(detection)} at #{detection.executable || "(no path)"} " <>
+            "cannot express a read allow-set, so a build under it could read anything the " <>
+            "node can (docs/WASM.md D18, D26). A binary from before the allow-set reports " <>
+            "no `read_allow_set` feature to `doctor` and is refused by that report rather " <>
+            "than by its name — which is why this names the file: replace that one " <>
+            "(`make sandbox`) or let detection fall through to bubblewrap."}}
 
       true ->
         {:ok,
