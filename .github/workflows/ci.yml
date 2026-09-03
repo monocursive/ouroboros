@@ -77,6 +77,14 @@ jobs:
       # block those capabilities even when the binary itself starts.
       - run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - run: bwrap --version
+      # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor, so the
+      # unprivileged `bwrap` this job installs cannot apply its read-only mount and runtime
+      # detection reports no backend — which made the forge (W14) refuse every build here
+      # (run 33707120271: "installed but cannot apply its read-only mount on this host").
+      # Lifting the restriction for this runner is what lets the suite exercise the Linux
+      # sandbox at all; a node that keeps it is a node with no backend, and the forge says so.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: bwrap --ro-bind / / --unshare-net --dev /dev --proc /proc -- /bin/true && echo "bwrap can apply its mounts"
 
       # The wasm half of the Elixir suite is opt-in on a developer's machine and was
       # therefore never opted in *here*: with no `ouro-wasm` and no guest on the runner, the
