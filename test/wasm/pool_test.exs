@@ -7,6 +7,11 @@ defmodule Ouroboros.Wasm.PoolTest do
   alias Ouroboros.Wasm.Pool
   alias Ouroboros.Wasm.SandboxFixture
 
+  # Written with the quotes already escaped, because these strings are interpolated into an
+  # `awk` printf *format*, not into JSON.
+  @doctor_ok ~S(\"usable\":true,\"worlds\":[\"ouroboros:capability@0.1.0\"],) <>
+               ~S(\"wasmtime\":\"48.0.1\",\"limits\":{\"max_deadline_ms\":60000})
+
   @world "ouroboros:capability@0.1.0"
 
   describe "Codec — newline-delimited JSON-RPC, bounded" do
@@ -1583,11 +1588,6 @@ defmodule Ouroboros.Wasm.PoolTest do
   # `Ouroboros.Provider.Native.Desktop.PoolTest` uses: `awk` reads a line at a time and
   # `fflush()` puts each answer on the pipe immediately, which is the one portable way to
   # keep a shell's stdout buffering out of the handshake.
-
-  # Written with the quotes already escaped, because these strings are interpolated into an
-  # `awk` printf *format*, not into JSON.
-  @doctor_ok ~S(\"usable\":true,\"worlds\":[\"ouroboros:capability@0.1.0\"],) <>
-               ~S(\"wasmtime\":\"48.0.1\",\"limits\":{\"max_deadline_ms\":60000})
 
   defp responding_helper, do: write_helper(awk_body(@doctor_ok, "", ""))
 

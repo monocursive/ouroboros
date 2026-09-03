@@ -541,7 +541,7 @@ defmodule Ouroboros.Wasm.DeployTest do
     @tag @needs_live
     test "sign names a download, the chunks reassemble, and the bundle deploys precompiled",
          context do
-      pool = live_pool!()
+      pool = live_pool!(context)
       name = "download-test-#{System.unique_integer([:positive])}"
       id = "wasm/" <> name
       on_exit(fn -> Mesh.stop_agent(id) end)
