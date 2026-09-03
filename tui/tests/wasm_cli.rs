@@ -1715,6 +1715,29 @@ fn new_never_takes_the_sdk_from_a_directory_near_where_it_was_run() {
     );
 }
 
+/// Runs a binary this test just wrote, on Linux too.
+///
+/// `fs::copy` closes its descriptor before it returns, but a sibling test's `Command` that
+/// forked in the meantime inherits that descriptor until its own `exec` applies `CLOEXEC`, and
+/// Linux refuses to exec a file some process still holds open for writing: `ETXTBSY`, "Text
+/// file busy" (seen once on the hosted ubuntu runner with 49 tests in flight). The window is
+/// one fork-to-exec, so a bounded retry is the whole fix, and the ceiling is there so a binary
+/// that truly cannot run still fails here rather than spinning.
+fn output_of_fresh_binary(command: &mut Command) -> std::process::Output {
+    let mut attempts = 0;
+    loop {
+        match command.output() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 50 =>
+            {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            result => return result.expect("the installed binary runs"),
+        }
+    }
+}
+
 /// H1. With no checkout above the binary there is nothing to point at, and `--sdk-path` is
 /// named rather than a guess made.
 ///
@@ -1730,11 +1753,11 @@ fn new_refuses_when_no_checkout_is_above_the_binary_and_names_the_flag() {
     std::fs::create_dir_all(installed.parent().expect("a bin directory")).expect("a bin");
     std::fs::copy(OURO, &installed).expect("an installed ouro");
 
-    let output = Command::new(&installed)
-        .args(["wasm", "new", "orphan", "--into"])
-        .arg(scratch.path())
-        .output()
-        .expect("the installed binary runs");
+    let output = output_of_fresh_binary(
+        Command::new(&installed)
+            .args(["wasm", "new", "orphan", "--into"])
+            .arg(scratch.path()),
+    );
 
     assert!(
         !output.status.success(),
