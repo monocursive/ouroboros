@@ -7,6 +7,11 @@ name: CI
 # Long-lived branches and release tags only. PR branches already run every job through
 # the pull_request event, so an unfiltered `push` ran each PR commit twice. Tags stay
 # because release.yml's publication gate assumes the ordinary CI workflow also sees them.
+#
+# The other half of the same rule: a PR whose head *is* a long-lived branch (`dev` into
+# `main`, the release cut) is already covered by the push that landed it, so every job
+# below carries the same `if:` guard — the pull_request run is skipped when the head is `main`
+# or `dev` in this repository. A fork's `dev` still runs, because no push here saw it.
 on:
   push:
     branches: [main, dev]
@@ -40,6 +45,8 @@ jobs:
   elixir:
     name: Elixir
     runs-on: ubuntu-24.04
+    # See the `on:` note: a push to a long-lived branch already ran this.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork || (github.head_ref != 'main' && github.head_ref != 'dev') }}
     # 45, not 20: this job now builds `ouro-wasm` before `mix test`, and a cold cargo build
     # of wasmtime is 10+ minutes on a hosted runner (361 s for build plus suite locally). A
     # run that hits the cargo cache is far shorter; the ceiling is for the run that does not.
@@ -152,6 +159,8 @@ jobs:
   browser:
     name: Browser journeys
     runs-on: ubuntu-24.04
+    # See the `on:` note: a push to a long-lived branch already ran this.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork || (github.head_ref != 'main' && github.head_ref != 'dev') }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -174,6 +183,8 @@ jobs:
   dialyzer:
     name: Dialyzer
     runs-on: ubuntu-24.04
+    # See the `on:` note: a push to a long-lived branch already ran this.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork || (github.head_ref != 'main' && github.head_ref != 'dev') }}
     # Generous because a cache miss rebuilds the PLT from scratch, which is most of this.
     timeout-minutes: 30
     steps:
@@ -216,6 +227,8 @@ jobs:
   rust:
     name: Rust
     runs-on: ubuntu-24.04
+    # See the `on:` note: a push to a long-lived branch already ran this.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork || (github.head_ref != 'main' && github.head_ref != 'dev') }}
     # 45, not 30: W10 added `tui/tests/wasm_cli.rs`, which drives the real helper, so this job
     # builds `ouro-wasm` in release and the acceptance guest before `cargo test`; W9 added four
     # guest projects and the scaffold for `tests/sdk.rs`, and the SDK's own gates. All of it is
@@ -312,6 +325,8 @@ jobs:
   golden:
     name: Golden fixtures
     runs-on: ubuntu-24.04
+    # See the `on:` note: a push to a long-lived branch already ran this.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork || (github.head_ref != 'main' && github.head_ref != 'dev') }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -345,6 +360,8 @@ jobs:
   fleet-e2e:
     name: Packaged three-node fleet
     runs-on: ubuntu-24.04
+    # See the `on:` note: a push to a long-lived branch already ran this.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork || (github.head_ref != 'main' && github.head_ref != 'dev') }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
