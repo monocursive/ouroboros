@@ -59,14 +59,17 @@ defmodule Ouroboros.Wasm.Deploy do
   machine that pays.
 
   That compile runs **inside the same OS sandbox a node's own helper runs inside** (W16, D25):
-  `Ouroboros.Provider.Native.Sandbox.helper_policy/1` with the sign scratch writable, the sign
-  scratch and the helper's own directory readable, no network, and `$TMPDIR` in a private
-  directory below the scratch. The bytes being compiled are a client's upload, and this is the
-  one place on the signing path where a subprocess reads them; a `precompile` that could read
-  the rest of the machine is a `precompile` that a hostile component could aim. Under
-  `helper_sandbox: :required` — the default — a signer that cannot apply that policy does not
-  run the helper at all: it signs the source form and the receipt's `precompile_skipped` names
-  the reason, which is the same shape as every other skip below.
+  `Ouroboros.Provider.Native.Sandbox.helper_policy/1` with **this signature's own directory**
+  writable, that directory and the helper's own readable, no network at all — loopback
+  included — and `$TMPDIR` below it. One signature, one directory: the shared
+  `<data_dir>/wasm/sign/` root is neither readable nor writable, because the first cut made it
+  both and a review read a concurrent signature's uploaded component out of it and overwrote a
+  concurrent signature's artifact, which is the file the next signature is issued over. The
+  bytes being compiled are a client's upload, and this is the one place on the signing path
+  where a subprocess reads them. Under `helper_sandbox: :required` — the default — a signer
+  that cannot apply that policy does not run the helper at all: it signs the source form and
+  the receipt's `precompile_skipped` names the reason, which is the same shape as every other
+  skip below.
 
   Three things make it safe to skip rather than a requirement. A node with no helper on disk
   signs the source form alone and says so. `precompile: false` — `ouro wasm sign
@@ -510,12 +513,22 @@ defmodule Ouroboros.Wasm.Deploy do
     end
   end
 
+  # One signature, one directory, and the shared root is not in the policy at all (W16 fix
+  # wave). The first cut wrote `sign-<tag>.wasm` and its `.cwasm` straight into
+  # `<data_dir>/wasm/sign/` and made that whole root writable, which a review walked through:
+  # a wrapped helper listed the root, read a **concurrent** signature's source — a client's
+  # uploaded component — and overwrote a concurrent signature's artifact, which is the file the
+  # next signature is then issued over. Both are gone: this directory holds the source, the
+  # output and the child's `$TMPDIR`, it is the only writable root, and the root above it is
+  # neither readable nor writable.
   defp compile_in(dir, helper, bytes, kind, opts) do
-    source = Path.join(dir, "sign-#{tag()}.wasm")
-    out = source <> ".cwasm"
+    run = Path.join(dir, "sign-" <> tag())
 
     try do
-      with {:ok, source} <- write_scratch(source, bytes),
+      with {:ok, run} <- private_dir(run),
+           source = Path.join(run, "component.wasm"),
+           out = Path.join(run, "component.cwasm"),
+           {:ok, source} <- write_scratch(source, bytes),
            {:ok, report} <- invoke_helper(helper, source, out, kind, opts),
            {:ok, artifact} <- read_artifact(out) do
         block(report, artifact)
@@ -523,11 +536,24 @@ defmodule Ouroboros.Wasm.Deploy do
         {:error, reason} -> {nil, nil, reason}
       end
     after
-      # Both halves, on every path. The component is bytes a client uploaded and the artifact is
-      # several times its size; leaving either behind after a signature would be this node
-      # accumulating other people's components on disk, unbounded, forever.
-      _ = File.rm(source)
-      _ = File.rm(out)
+      # The whole directory, on every path. The component is bytes a client uploaded and the
+      # artifact is several times its size; leaving either behind after a signature would be
+      # this node accumulating other people's components on disk, unbounded, forever.
+      _ = File.rm_rf(run)
+    end
+  end
+
+  # 0700 and `lstat`-verified, the same discipline `scratch_dir/1` applies to the root above
+  # it: this directory holds a client's uploaded bytes and the machine code compiled from them,
+  # and it is the one place the wrapped helper may write.
+  defp private_dir(path) do
+    with :ok <- File.mkdir_p(path),
+         :ok <- File.chmod(path, 0o700),
+         {:ok, %File.Stat{type: :directory}} <- File.lstat(path) do
+      {:ok, path}
+    else
+      {:ok, %File.Stat{type: type}} -> {:error, {:precompile_scratch, {:not_a_directory, type}}}
+      {:error, reason} -> {:error, {:precompile_scratch, reason}}
     end
   end
 
@@ -602,6 +628,8 @@ defmodule Ouroboros.Wasm.Deploy do
         {:ok, %{executable: helper, args: tl(argv), env: [], scratch: nil}}
 
       :required ->
+        # `Path.dirname(source)` is **this signature's own** directory, not the shared sign
+        # root: it is what `compile_in/5` made for this one compile and what it removes after.
         wrapped_precompile(argv, Path.dirname(helper), Path.dirname(source), Sandbox.detect())
     end
   end
@@ -626,12 +654,12 @@ defmodule Ouroboros.Wasm.Deploy do
     end
   end
 
-  # A directory below the sign scratch, which `scratch_dir/1` has already created 0700 and
-  # verified with `lstat`, so this one inherits that guarantee about the path above it and adds
-  # its own 96 bits of name. `$TMPDIR` points here and the sandbox lets the child write nowhere
-  # else but this and the sign scratch it was handed.
-  defp wrap_precompile(argv, helper_dir, scratch_root, detection) do
-    scratch = Path.join(scratch_root, "tmp-" <> tag())
+  # `run` is this signature's own directory — created 0700 and `lstat`-verified by
+  # `compile_in/5`, holding the source, the output and nothing else — and it is the **only**
+  # writable root. `$TMPDIR` is a directory below it, because bubblewrap mounts a `--tmpfs` at
+  # the scratch and a tmpfs over `run` itself would hide the source this node just wrote.
+  defp wrap_precompile(argv, helper_dir, run, detection) do
+    scratch = Path.join(run, "tmp")
 
     with :ok <- File.mkdir_p(scratch),
          :ok <- File.chmod(scratch, 0o700),
@@ -642,7 +670,7 @@ defmodule Ouroboros.Wasm.Deploy do
       policy =
         Sandbox.helper_policy(
           readable: [canonical(helper_dir)],
-          writable: [canonical(scratch_root)],
+          writable: [canonical(run)],
           scratch: canonical(scratch)
         )
 

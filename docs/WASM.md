@@ -533,59 +533,93 @@ under, with different lists.
 
 **What it may read.** The platform's own toolchain roots (`Sandbox.platform_readable/0` — the
 dynamic loader and the C library, without which the process does not start), the directory its
-own binary lives in (`process-exec` still has to read the executable), this node's lane-W
-subtree `<data_dir>/wasm` — the component store, the artifacts beside it, the forge's build
-directory, the scratch below — the node's **workspace roots**, and whatever
-`config :ouroboros, :wasm, helper_readable:` names. The data directory's other children —
-grants, permissions, the effect ledger, the signing journal, the signer's own key — are
-siblings of that subtree and are not in it, which is the whole reason the root named is
-`<data_dir>/wasm` and not `<data_dir>`.
+own binary lives in (bubblewrap has to bind the executable into the namespace before it can
+`execve` it; Seatbelt does not need it, and the sentence that once claimed otherwise was
+false), this node's **component store** (`Wasm.Store.root/1`), the forge's **build directory**
+— `inspect` on a freshly built product is the one path this node hands the helper that is not
+a store entry (D18) — and whatever `config :ouroboros, :wasm, helper_readable:` names once
+`Wasm.helper_readable/0` has vetted it.
 
-The workspace roots are the one entry that is wider than "the store", and they are there
-because the hook lane is the one `load` in this repository whose path is not in the store: a
-`component =` hook is read out of the repository it is configured in (`Native.Hooks`, confined
-to that workspace) and handed to the pool as a path. Those bytes are D8's untrusted half and
-the helper is what contains them, so the roots have to be readable for lane H to work at all.
-It is stated rather than solved: on a node with workspace roots configured, what a compromised
-artifact reaches includes the operator's repositories.
+The store and the build directory, and **not** `<data_dir>/wasm`: that subtree also holds the
+upload staging area, the sign scratch, the forged bundles and the forge's cargo home, and a
+cargo home's `config.toml` on a builder node can name a `rustc-wrapper` and hold a registry
+credential. And not the node's **workspace roots**, which the first cut of this slice did name:
+the hook lane read a `component =` hook out of the repository it was configured in and handed
+the pool that path, so every repository an operator served was readable to a process holding a
+signer's machine code. That is closed rather than documented — `Native.Hooks` already had the
+bytes and their digest in hand, so it publishes them into the node's own content-addressed
+store and the helper reads only from there. A store that will not take them is a hook that does
+not run, named `component_not_staged`: a node with no data directory has no store, and a store
+over budget fails closed, and both of those are better answers than a component loaded from
+somewhere the fence does not cover.
 
-**What it may write.** A per-child scratch under `<data_dir>/wasm/scratch/`, created `0700`
-with ninety-six bits of name and **verified with `lstat`** to be a real directory this process
-made rather than a link somebody planted — `Wasm.Deploy`'s sign-scratch discipline verbatim,
-and never a shared `/tmp`, where any account on the machine can create a directory first.
-`$TMPDIR`, `$TMP` and `$TEMP` point at it, it is removed when the child is, and abandoned ones
-are swept on the way in because a node killed with `-9` runs no `after` clause. Nothing else,
-anywhere. And no network.
+`helper_readable` is the one knob that widens this, so it is vetted whole rather than trusted:
+every entry must be an absolute path resolving to a directory that exists, must not be `/` nor
+resolve to it, and must not be the data directory nor an ancestor of it. One offending entry
+rejects the **whole list** with a warning naming it, because a fence with three roots where
+four were configured is a fence nobody can reason about. `helper_readable: ["/"]` was accepted
+before this existed and removed both walls in a line.
 
-**The fence is stated twice.** Every `load` in this repository names a file this node put where
-it is, and the sandbox is only one of the two things that say so. The other is the pool: a
-`load` whose path is not under the policy's readable roots is `{:refused, :path_outside_store}`
-**before a frame is built**, so the kernel denies what the pool has already refused. The pool's
-half resolves symlinks in a path's directory and not in its leaf; the kernel's half resolves
-both. That asymmetry is why there are two walls and not one.
+**What it may write.** A per-child scratch under `<data_dir>/wasm/scratch/`, created `0700` with
+ninety-six bits of name and **verified with `lstat`** to be a real directory this process made
+rather than a link somebody planted — `Wasm.Deploy`'s sign-scratch discipline verbatim, and
+never a shared `/tmp`, where any account on the machine can create a directory first. `$TMPDIR`,
+`$TMP` and `$TEMP` point at it, it is removed when the child is, and abandoned ones are swept on
+the way in. A sweep takes a directory only when it is six hours old **and** the BEAM named in
+the marker beside it is gone: two nodes sharing one data directory is ordinary, a helper that
+writes no temp files leaves its scratch's mtime at creation, and age alone had a sibling
+deleting a live child's only writable directory. The marker sits beside the scratch rather than
+inside it, so the child cannot rewrite it. Nothing else is writable, anywhere.
+
+**And no network at all, loopback included.** Every other policy this runtime makes keeps a
+`localhost` exception on macOS, because `mix` and `cargo` coordinate concurrent compilers over
+loopback sockets and a build without it fails `:eperm` having reached no other machine. The
+helper speaks stdio, so `Sandbox.helper_policy/1` sets `loopback: false` and the Seatbelt
+profile is `(deny network*)` with nothing after it. It matters because the exception was not
+theoretical: under the first cut a probe connected to a loopback listener, and loopback is every
+service on this machine — this node's own gateway among them. The two Linux backends unshare the
+network namespace, so there is no host loopback in the child to take away; a `bwrap` that
+*cannot* unshare one (`unshare_net: false`, a host without `CLONE_NEWNET`) is a refusal to
+spawn rather than a child on the host's network, which is the second question
+`Sandbox.fences_network?/1` exists to ask.
+
+**The fence is stated twice.** Every `load` in this repository names a file in this node's own
+store, and the one `inspect` names a product the forge just built in this node's own build
+directory. The sandbox is only one of the two things that say so. The other is the pool: a
+`load` **or an `inspect`** whose path is not under the policy's readable roots is
+`{:refused, :path_outside_roots}` **before a frame is built**, so the kernel denies what the
+pool has already refused. The pool's half resolves symlinks in a path's directory and not in its
+leaf, and a path it cannot resolve is measured as written and therefore refused; the kernel's
+half resolves both. That asymmetry is why there are two walls and not one.
 
 **And it does not degrade quietly.** `config :ouroboros, :wasm, helper_sandbox:` is
 `:required` by default. Under it a node with no backend, a backend that cannot fence reads
-(`Sandbox.fences_reads?/1`, contract C11 — `ouro-sandbox` before W17), or no data directory to
-put a scratch in **refuses to spawn**: the pool goes broken with
-`{:helper_sandbox_unavailable, reason}`, every request answers at once, and `wasm.status`
-reports `sandbox: %{posture: :refused, backend: …, reason: …}` beside a helper phase of
+(`Sandbox.fences_reads?/1`, contract C11 — `ouro-sandbox` before W17), a backend that cannot
+fence the network (`Sandbox.fences_network?/1`), or no data directory to put a scratch in
+**refuses to spawn**: the pool goes broken with `{:helper_sandbox_unavailable, reason}`, every
+request answers at once, and `wasm.status` reports
+`sandbox: %{posture: :refused, backend: …, reason: …, readable: […]}` beside a helper phase of
 `broken`. `:off` spawns the helper plain, says `posture: :off`, and logs one line per spawn.
-D25 is why the default is that way round.
+D25 is why the default is that way round. The `readable` field is the **effective** read set —
+four sources and a vetted configuration key are not readable off `config` — rendered as
+basenames on the wire for the reason `helper.path` is.
 
 The signing path is the same policy with different lists. `Wasm.Deploy.sign/2` runs
-`ouro-wasm precompile` wrapped — the sign scratch writable, the sign scratch and the helper's
-directory readable, no network, `$TMPDIR` in a private directory below the scratch — and under
-`:required` a signer that cannot apply it signs the source form and names
-`{:helper_sandbox_unavailable, …}` in the receipt's `precompile_skipped`, exactly as it names
-every other reason it did not compile.
+`ouro-wasm precompile` wrapped, with **this signature's own directory** writable and readable
+and the shared `<data_dir>/wasm/sign/` root neither: the first cut made that root writable and
+wrote every signature's source and output directly into it, and a review read a concurrent
+signature's uploaded component out of it and overwrote a concurrent signature's artifact —
+which is the file the next signature is issued over. Under `:required` a signer that cannot
+apply the policy signs the source form and names `{:helper_sandbox_unavailable, …}` in the
+receipt's `precompile_skipped`, exactly as it names every other reason it did not compile.
 
 **What this is not.** It is a second wall around a process that maps unvalidated machine code.
 It is not validation. A patched artifact still executes inside the helper with the helper's own
 authority; what changed is that the helper's own authority is now the platform roots, this
-node's lane-W subtree, the workspace, a scratch and no network, rather than everything the
-daemon's user can reach. D24's four mitigations are still four mitigations and none of them is
-a fix.
+node's component store, the forge's build directory, a scratch it may write and no network at
+all, rather than everything the daemon's user can reach. D24's four mitigations are still four
+mitigations and none of them is a fix — and D25 lists, by name, the things the macOS wall does
+not close.
 
 ### 7.4 The store: bytes survive, deliberately
 
@@ -2079,9 +2113,9 @@ machinery — it is a backend, not a lane (D9).
   Four things bound it and none of them makes it safe. The helper is a separate process, so
   what a patched artifact reaches is a Port and a pool cooldown rather than the node (D3) — and
   since W16 that process runs **inside an OS sandbox** (§7.3a, D25), so within it a patched
-  artifact has the platform's toolchain roots, this node's `<data_dir>/wasm` subtree, the
-  node's workspace roots, a scratch it may write, and no network, rather than everything the
-  daemon's user can reach. What that is *not* is validation: the machine code still executes,
+  artifact has the platform's toolchain roots, this node's component store, the forge's build
+  directory, a scratch it may write and no network at all, rather than everything the daemon's
+  user can reach. What that is *not* is validation: the machine code still executes,
   with the helper's own authority, and the wall is around it rather than in front of it. A node
   that cannot apply the wall runs no helper at all, which is D25's whole shape. The artifact is content-addressed and re-digested on every load, so
   tampering *after* signing is refused. `config :ouroboros, :wasm, accept_precompiled: false`
@@ -2454,20 +2488,40 @@ machinery — it is a backend, not a lane (D9).
   be a fourth profile to keep in step with three others for a rule that is the same rule. What
   differs between a build and a helper is the lists, and lists are arguments (contract C10).
 
-  Two things about the lists are worth stating rather than leaving to be discovered. The
-  readable root is `<data_dir>/wasm` and not `<data_dir>`, because the signing journal, the
-  grants, the permissions and the effect ledger are siblings of the lane's own subtree and are
-  none of the helper's business. And the node's **workspace roots** are in the list, because
-  lane H's `component =` hooks are read out of the repository they are configured in and never
-  staged into the store — the one `load` in this repository whose path is not the store's. That
-  is the fence being wider than "the store", stated in §7.3a and in §12 rather than quietly
-  true.
+  The lists are the whole of it, so they are narrow and they are stated. Readable: the platform
+  roots, the helper's own directory, this node's **component store**, the forge's build
+  directory, and a vetted `helper_readable`. Not `<data_dir>` — the signing journal, the grants,
+  the permissions and the effect ledger live there. Not `<data_dir>/wasm` either, which was the
+  first cut's answer: that subtree holds the upload staging area, the sign scratch, the forged
+  bundles and the forge's cargo home, and a cargo home's `config.toml` on a builder can hold a
+  credential. And not the node's **workspace roots**, which the first cut did name because lane
+  H read its hooks out of a repository; `Native.Hooks` stages those bytes into the store now, so
+  the lane costs the fence nothing. Writable: a per-child scratch and nothing else. Network:
+  none, loopback included — the helper speaks stdio, and a loopback socket is every service on
+  this machine.
 
   The fence is stated twice for the reason the forge's is not: a forge refuses without a
   backend, but the pool has callers on every lane, so the rule "a load names a file in this
-  node's own roots" is enforced by the pool *and* by the kernel. A `load` outside the readable
-  roots is `{:refused, :path_outside_store}` before a frame is built. One of the two walls is
-  this node's own and holds wherever it runs.
+  node's own roots" is enforced by the pool *and* by the kernel. A `load` or an `inspect`
+  outside the readable roots is `{:refused, :path_outside_roots}` before a frame is built. One
+  of the two walls is this node's own and holds wherever it runs.
+
+  **What the wall does not close, on macOS, named.** Seatbelt is a filesystem and network
+  policy, and the `:builder` profile keeps four things open that a helper-specific profile could
+  narrow. `process-exec` is unrestricted, and `/usr/bin` and `/bin` are readable platform
+  roots — so a compromised artifact can run `curl`, `ssh`, `python3` or `osascript`, and
+  `osascript`'s `do shell script` runs its command **outside** this sandbox. `mach-lookup` is
+  unrestricted, which reaches the launchd domain and the pasteboard. `sysctl-read` is
+  unrestricted. And `file-read-metadata` is allowed on all of `/`, which is an existence oracle
+  over the whole filesystem — it is there because a compiler stats its way down a path and a
+  `stat` denial reads as a missing file, and it is a real residual for a process that is not a
+  compiler. None of these was narrowed here because C10's argument is that `:builder` is the
+  backend vocabulary for closed-on-reads and a fourth profile is a fourth thing to keep in step
+  with three others; whether that argument survives a helper that wants none of `process-exec`,
+  `mach-lookup` or `sysctl-read` is a decision, not an omission, and it is the integrator's.
+  What the wall does close is the filesystem — the operator's home, `/etc/ssh`, the node's own
+  data directory outside the store, every repository it serves — and the network, and those are
+  the reaches D24's residual was about.
 
 
 ## 12. What this does not solve
@@ -2523,7 +2577,8 @@ Stated once, so nobody reads more into the lane than is there:
 - **wasmtime is a dependency, not a proof.** It has had escape CVEs; they are rare and
   patched fast, and the helper process — since W16 an OS-sandboxed one (§7.3a, D25) — is the
   second wall. What that wall bounds is what an escape reaches: the platform's toolchain roots,
-  this node's `<data_dir>/wasm` subtree, the node's workspace roots, a scratch, and no network.
+  this node's component store, the forge's build directory, a scratch, and no network — not
+  loopback either, which is what the first cut of that wall left open.
   What it does not do is make an escape not an escape. Pin it, watch its advisories, and keep
   its dialect small — §7.3's disabled proposal list is surface removed from cranelift, not just
   from the spec.
@@ -2634,17 +2689,19 @@ Stated once, so nobody reads more into the lane than is there:
   of them. `messages_received` still counts every one; the bodies of the old ones are gone.
   Nothing in this runtime reads the inbox as an audit trail — the effect ledger is that —
   but a caller that assumed otherwise would now be wrong.
-- **The helper's fence is a wall, not a validator, and the workspace is inside it.** W16 puts
-  `ouro-wasm` behind `Sandbox.helper_policy/1` (§7.3a, D25), which bounds what a compromised
-  artifact or an escaped guest *reaches*: the platform's toolchain roots, this node's
-  `<data_dir>/wasm` subtree, the node's configured workspace roots, a scratch the node created
-  `0700`, and no network. Three honesties about that. The machine code still runs — the wall is
-  around the process, not in front of the bytes, and D24's residual is unchanged in kind. The
-  **workspace roots** are in the readable set because lane H reads `component =` hooks out of
-  the repository they are configured in, so on a node with workspace roots a compromised
-  artifact reaches the operator's repositories; narrowing that means staging hook components
-  into the store first, which is a later slice. And `helper_readable` is a widening knob: a node
-  that names a root there has named it for the helper too.
+- **The helper's fence is a wall, not a validator, and on macOS it is a filesystem-and-network
+  wall only.** W16 puts `ouro-wasm` behind `Sandbox.helper_policy/1` (§7.3a, D25), which bounds
+  what a compromised artifact or an escaped guest *reaches*: the platform's toolchain roots, the
+  helper's own directory, this node's component store, the forge's build directory, a scratch
+  the node created `0700`, and no network at all. Three honesties. The machine code still runs —
+  the wall is around the process, not in front of the bytes, and D24's residual is unchanged in
+  kind. The Seatbelt profile leaves `process-exec`, `mach-lookup` and `sysctl-read`
+  unrestricted and `file-read-metadata` open on `/`, so within the fence a compromised artifact
+  can still run `/usr/bin` binaries — `osascript`'s `do shell script` escapes the sandbox
+  outright — talk to launchd and the pasteboard, and probe for the existence of any path; D25
+  names each one and why no helper-specific profile was written. And `helper_readable` is a
+  widening knob, though a vetted one: `/`, a non-directory, and any ancestor of the data
+  directory are refused, and one bad entry rejects the list.
 
 - **The workspace.** §10 is the axis for `bash`/git/LSP; nothing in lanes W/H/T
   touches it.
@@ -3675,28 +3732,33 @@ Each slice is PR-sized, lands green, and is useful alone.
   key crosses (D24). It is now sandboxed. `Ouroboros.Wasm.Pool` spawns the helper through
   `Sandbox.wrap/4` under a new `Sandbox.helper_policy/1` — `builder_policy/1`'s closed-on-reads
   `:builder` shape with a scratch attached, so no backend grew an arm (contract C10) — readable
-  in the platform's toolchain roots, the helper binary's own directory, this node's
-  `<data_dir>/wasm` subtree, the node's workspace roots and whatever `helper_readable` names;
-  writable in a per-child scratch under `<data_dir>/wasm/scratch/`, created `0700` and verified
-  with `lstat` exactly as `Wasm.Deploy`'s sign scratch is, `$TMPDIR` pointed at it, removed with
-  the child and swept on the way in; no network. `Wasm.Deploy.sign/2` runs
-  `ouro-wasm precompile` under the same policy with the sign scratch writable.
+  in the platform's toolchain roots, the helper binary's own directory, this node's **component
+  store**, the forge's build directory and a vetted `helper_readable`; writable in a per-child
+  scratch under `<data_dir>/wasm/scratch/`, created `0700` and verified with `lstat` exactly as
+  `Wasm.Deploy`'s sign scratch is, `$TMPDIR` pointed at it, removed with the child and swept on
+  the way in behind an owner marker; **no network at all, loopback included**.
+  `Wasm.Deploy.sign/2` runs `ouro-wasm precompile` under the same policy with that signature's
+  own directory writable and the shared sign root neither readable nor writable.
 
   **`config :ouroboros, :wasm, helper_sandbox:` is `:required` by default and does not degrade
-  quietly** (D25). No backend, a backend that cannot fence reads (`fences_reads?/1`, C11), or no
-  data directory is a **refusal to spawn**: `{:helper_sandbox_unavailable, reason}`, the pool
+  quietly** (D25). No backend, a backend that cannot fence reads (`fences_reads?/1`, C11), a
+  backend that cannot fence the network (`fences_network?/1` — a `bwrap` on a host that refuses
+  `CLONE_NEWNET` applies every filesystem rule and leaves the child on the host's network), or
+  no data directory is a **refusal to spawn**: `{:helper_sandbox_unavailable, reason}`, the pool
   `:broken`, and `wasm.status` carrying `sandbox: %{posture: :refused | :sandboxed | :off,
-  backend, reason}` — a new top-level half of that verb, with its fixture, its protocol row and
-  its typed decode in `tui/src/model.rs`. `:off` spawns plain, says so, and logs one line per
-  spawn.
+  backend, reason, readable}` — a new top-level half of that verb, with its fixture, its
+  protocol row and its typed decode in `tui/src/model.rs`. `readable` is the **effective** read
+  set as basenames, because four sources and a vetted `helper_readable` are not readable off
+  `config`. `:off` spawns plain, says so, and logs one line per spawn.
 
   **The fence is stated twice.** Every `load` in this repository was enumerated: the wrapper
-  agent, the policy engine's two, and the rollout's staging and boot restart all resolve their
-  path through `Wasm.Store`; the **hook lane does not** — `Native.Hooks` reads a `component =`
-  hook out of the workspace it is configured in and hands the pool that path — which is why the
-  readable set names the node's workspace roots and why §12 now says so. The pool refuses a
-  `load` outside those roots `{:refused, :path_outside_store}` before a frame is built, and a
-  source-census test fails if a sixth `load` site appears anywhere in `lib/`.
+  agent, the policy engine's two, the rollout's staging and boot restart, and the hook lane —
+  which was the odd one out, reading a `component =` hook out of the workspace it was configured
+  in, and is not any more: `Native.Hooks` already held the bytes and their digest, so it
+  publishes them into the node's own store and hands the pool a store path. The pool refuses a
+  `load` **or an `inspect`** outside the readable roots `{:refused, :path_outside_roots}` before
+  a frame is built, and a source-census test fails if a sixth `load` site appears anywhere in
+  `lib/`.
 
   Proofs, and the mutation each catches. A `/bin/sh` fake helper reads a planted `0600` file
   outside the roots and writes outside its scratch and reports what the kernel did: both
@@ -3722,11 +3784,34 @@ Each slice is PR-sized, lands green, and is useful alone.
   fence is one function, `Ouroboros.Wasm.SandboxFixture.pool_opts/1`, so a suite that forgot
   cannot look like a suite that was exempted.
 
-  What W16 does **not** do is in §12: the wall is around a process that maps unvalidated machine
-  code and is not validation, the workspace roots are inside the readable set because lane H
-  reads hooks from there, and `helper_readable` is a widening knob. The Linux half is CI's:
-  this Mac has Seatbelt, the bubblewrap arm is `Bwrap.options/3`'s existing `:builder` branch
-  with different lists, and what proves it is the ubuntu-24.04 job running these suites.
+  **Then an adversarial review took the first cut apart, and this is what it found.** The
+  `(deny network*)` was followed by three `localhost` re-allows that exist for `mix`, so a probe
+  under the helper's own policy connected to a loopback listener — every service on the machine,
+  this node's gateway among them; the policy shape gained `loopback`, `builder_policy/1` keeps
+  it and `helper_policy/1` does not, and a kernel probe now proves a listener reachable under
+  one and unreachable under the other. The sign-time policy made the whole shared
+  `<data_dir>/wasm/sign/` root writable and `compile_in/5` wrote every signature's files
+  straight into it, so a wrapped helper read a **concurrent** signature's uploaded component and
+  overwrote a concurrent signature's artifact; one signature is one directory now, and the
+  shared root is neither readable nor writable. `helper_readable: ["/"]` was accepted and
+  removed both walls; the list is vetted whole. A `bwrap` that cannot unshare a network
+  namespace satisfied `:required` while the child kept the host network; `fences_network?/1` is
+  the second question. The six-hour sweep deleted a *live* sibling node's scratch, because a
+  helper's life is not a wall-clock bound; an owner marker beside each scratch is. The comment
+  justifying the helper's own directory in the read set was false on Seatbelt — the mutation
+  that drops it is green there — and true on Linux, where bubblewrap must bind the binary into
+  the namespace; the comment says so and the bwrap option list is pinned. `inspect` was not
+  fenced pool-side though it names a path; it is. And the dead third `sandbox/1` clause in
+  `Wasm.Surface` that made dialyzer's skip count 91 is gone.
+
+  What W16 does **not** do is in §12 and named in D25: the wall is around a process that maps
+  unvalidated machine code and is not validation, and on macOS it is a filesystem-and-network
+  wall only — `process-exec`, `mach-lookup` and `sysctl-read` stay unrestricted and
+  `file-read-metadata` stays open on `/`, so `osascript`'s `do shell script` escapes it
+  outright. Whether C10's no-fourth-profile argument survives that is the integrator's decision.
+  The Linux half is CI's: this Mac has Seatbelt, the bubblewrap arm is `Bwrap.options/3`'s
+  existing `:builder` branch with different lists, and what proves it is the ubuntu-24.04 job
+  running these suites.
 
 
 ## 15. Prior art and references

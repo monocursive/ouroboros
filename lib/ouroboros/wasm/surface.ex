@@ -67,6 +67,10 @@ defmodule Ouroboros.Wasm.Surface do
   # The most entries the projected `limits` table holds. The helper reports sixteen.
   @max_limit_keys 32
 
+  # The most readable roots the sandbox projection names. A node's own are four; the rest are
+  # an operator's `helper_readable`, and a listing is not a place to repeat a long one.
+  @max_readable_roots 16
+
   # The register's own states, restated so a state with no rollouts in it is still reported
   # as zero rather than as a missing key. A sixth state the register grows appears here the
   # moment an entry is in it, because the counts are folded over what is actually held.
@@ -308,13 +312,30 @@ defmodule Ouroboros.Wasm.Surface do
   # A node with no pool process has decided nothing, and says so with nulls rather than with a
   # posture nobody has taken. `reason` is rendered and cut like every other term here: it
   # carries a backend's own prose on the `no_backend` path.
-  defp sandbox(nil), do: %{posture: nil, backend: nil, reason: nil}
+  defp sandbox(nil), do: %{posture: nil, backend: nil, reason: nil, readable: []}
 
-  defp sandbox(%{sandbox: %{posture: posture, backend: backend, reason: why}}) do
-    %{posture: posture, backend: text(backend), reason: reason(why)}
+  defp sandbox(%{sandbox: %{posture: posture, backend: backend, reason: why} = report}) do
+    %{
+      posture: posture,
+      backend: text(backend),
+      reason: reason(why),
+      # **Basenames**, for `helper.path`'s and `store.root`'s reason: both wasm verbs are
+      # `:read`, the lowest scope this gateway has, and an absolute path names an install
+      # prefix and often an account to anyone who may merely look. What a reader gets here is
+      # how many roots are in force and which ones they are by name — enough to see that a
+      # rejected `helper_readable` list is not in force — and the absolute list stays on the
+      # node, in `Ouroboros.Wasm.Pool.status/1`.
+      readable: readable(Map.get(report, :readable, []))
+    }
   end
 
-  defp sandbox(_older), do: %{posture: nil, backend: nil, reason: nil}
+  defp readable(roots) when is_list(roots) do
+    roots
+    |> Enum.take(@max_readable_roots)
+    |> Enum.flat_map(fn root -> List.wrap(text(basename(root))) end)
+  end
+
+  defp readable(_absent), do: []
 
   defp helper(live) do
     # The path a *running* pool holds, and this build's resolution only where no pool does.

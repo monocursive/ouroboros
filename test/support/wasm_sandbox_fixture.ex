@@ -12,8 +12,16 @@ defmodule Ouroboros.Wasm.SandboxFixture do
   So a test says where its own roots are, the way a node says where its own are — and it says
   it *once*, here, so that "what does a test have to widen" has one answer and a suite that
   forgot cannot look like a suite that was exempted. Nothing here turns the sandbox off:
-  `helper_sandbox: :off` appears in exactly one place in this repository, the W16 test that
-  proves the difference between the two postures.
+  `helper_sandbox: :off` appears only in the two W16 tests that prove the difference between
+  the postures — the pool's kernel probe and the signer's — and nowhere else in this
+  repository.
+
+  **`pool_opts/1` is wider than production in one way, deliberately.** It names a writable
+  root, because a scripted helper journals what it was asked; a node names none at all, and
+  its child's only writable directory is the scratch the pool made. The readable half is the
+  same shape as a node's — a directory the node itself put components in — and the pool-side
+  load fence measures a path against exactly this list, so a test that widened it too far
+  would be a test whose fence proves nothing.
   """
 
   @doc """
@@ -27,39 +35,5 @@ defmodule Ouroboros.Wasm.SandboxFixture do
   @spec pool_opts(Path.t()) :: keyword()
   def pool_opts(dir) when is_binary(dir) do
     [readable: [dir], writable: [dir], scratch_root: Path.join(dir, "scratch")]
-  end
-
-  @doc """
-  The same, for a test that reaches the node's **singleton** pool and cannot pass options.
-
-  Points `:data_dir` at `dir` — which is what gives the pool a scratch root and makes
-  `<dir>/wasm` readable — and adds `dir` itself to `helper_readable`, because a suite's store
-  root is usually beside the data directory rather than under it. Both are restored when the
-  test ends.
-  """
-  @spec node!(Path.t()) :: :ok
-  def node!(dir) when is_binary(dir) do
-    restore(:data_dir, dir)
-    restore(:wasm, Keyword.put(wasm_config(), :helper_readable, [dir]))
-    :ok
-  end
-
-  defp wasm_config do
-    case Application.get_env(:ouroboros, :wasm, []) do
-      configured when is_list(configured) -> configured
-      _other -> []
-    end
-  end
-
-  defp restore(key, value) do
-    previous = Application.fetch_env(:ouroboros, key)
-    Application.put_env(:ouroboros, key, value)
-
-    ExUnit.Callbacks.on_exit(fn ->
-      case previous do
-        {:ok, held} -> Application.put_env(:ouroboros, key, held)
-        :error -> Application.delete_env(:ouroboros, key)
-      end
-    end)
   end
 end

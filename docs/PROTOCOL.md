@@ -4508,6 +4508,10 @@ Pinned result, `wasm_status_result.json`:
     "sandbox": {
       "backend": "sandbox-exec",
       "posture": "sandboxed",
+      "readable": [
+        "wasm",
+        "components"
+      ],
       "reason": null
     },
     "store": {

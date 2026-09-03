@@ -311,4 +311,108 @@ defmodule Ouroboros.Wasm.ResolutionTest do
 
     System.cmd(elixir, args, stderr_to_stdout: true)
   end
+
+  describe "helper_readable/0 — a widening knob is vetted whole (W16 MEDIUM-5, D25)" do
+    setup do
+      dir = Path.join(System.tmp_dir!(), "ouro-readable-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf(dir) end)
+
+      data = Path.join(dir, "data")
+      File.mkdir_p!(data)
+
+      previous_wasm = Application.fetch_env(:ouroboros, :wasm)
+      previous_data = Application.fetch_env(:ouroboros, :data_dir)
+      Application.put_env(:ouroboros, :data_dir, data)
+
+      on_exit(fn ->
+        restore(:wasm, previous_wasm)
+        restore(:data_dir, previous_data)
+        :persistent_term.erase({Wasm, :helper_readable_warned})
+      end)
+
+      elsewhere = Path.join(dir, "elsewhere")
+      File.mkdir_p!(elsewhere)
+
+      %{dir: dir, data: data, elsewhere: elsewhere}
+    end
+
+    test "a directory that exists and covers nothing of the node's is kept", %{
+      elsewhere: elsewhere
+    } do
+      configure([elsewhere])
+      assert Wasm.helper_readable() == [elsewhere]
+    end
+
+    test "`/` is refused, and so is anything that resolves to it", %{dir: dir} do
+      # The one a review proved: `helper_readable: ["/"]` was accepted and took both of W16's
+      # walls away in a line — the pool's load fence admits every path under a root, and the
+      # kernel's read fence allows every file under it.
+      configure(["/"])
+      assert Wasm.helper_readable() == []
+
+      link = Path.join(dir, "everything")
+      File.ln_s!("/", link)
+      configure([link])
+      assert Wasm.helper_readable() == []
+    end
+
+    test "the data directory and its ancestors are refused", %{dir: dir, data: data} do
+      # `<data_dir>` holds the signing journal, the grants, the permissions and the effect
+      # ledger. Naming it — or anything above it — undoes the narrowing from `<data_dir>/wasm`
+      # to the component store that this same slice made.
+      configure([data])
+      assert Wasm.helper_readable() == []
+
+      configure([dir])
+      assert Wasm.helper_readable() == [], "an ancestor of the data directory is an ancestor"
+    end
+
+    test "a relative path, a file, and a path that is not there are each refused", %{dir: dir} do
+      file = Path.join(dir, "a-file")
+      File.write!(file, "")
+
+      for bad <- ["relative/path", file, Path.join(dir, "never-created"), :not_a_path] do
+        configure([bad])
+        assert Wasm.helper_readable() == [], "#{inspect(bad)} was admitted"
+      end
+    end
+
+    test "one bad entry rejects the whole list, and the good ones with it", %{
+      elsewhere: good
+    } do
+      configure([good])
+      assert Wasm.helper_readable() == [good]
+
+      # A fence with three roots where four were configured is a fence nobody can reason
+      # about, and `[]` is what the node has when nothing is configured at all.
+      configure([good, "/"])
+      assert Wasm.helper_readable() == []
+    end
+
+    test "the refusal is logged once per configured value, naming the entry", %{
+      elsewhere: good
+    } do
+      configure([good, "/"])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert Wasm.helper_readable() == []
+          assert Wasm.helper_readable() == []
+          assert Wasm.helper_readable() == []
+        end)
+
+      assert log =~ "helper_readable"
+      assert log =~ "the_whole_filesystem"
+
+      # Read on the way to every load, so a misconfigured node must say so once rather than
+      # once per component.
+      assert length(String.split(log, "refused whole list")) == 2
+    end
+  end
+
+  defp configure(roots), do: Application.put_env(:ouroboros, :wasm, helper_readable: roots)
+
+  defp restore(key, {:ok, value}), do: Application.put_env(:ouroboros, key, value)
+  defp restore(key, :error), do: Application.delete_env(:ouroboros, key)
 end

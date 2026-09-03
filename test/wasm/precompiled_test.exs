@@ -128,7 +128,10 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
         signing_service: service,
         upload_root: context.uploads,
         helper_path: wrapper,
-        scratch_root: Path.join(context.tmp, "sign")
+        scratch_root: Path.join(context.tmp, "sign"),
+        # See `counting_helper!/1`: the shim's journal has nowhere to live under the fence,
+        # and what this test measures is the order of admission and compile.
+        helper_sandbox: :off
       ]
 
       # One admission spends the window.
@@ -907,6 +910,58 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
     end
 
     @tag @needs_live
+    test "one signature, one directory: a concurrent sign is neither readable nor writable",
+         context do
+      # W16 HIGH-2, proved and then closed. The first cut wrote `sign-<tag>.wasm` and its
+      # `.cwasm` straight into `<data_dir>/wasm/sign/` and made that whole root writable, and a
+      # review walked through it: a wrapped helper listed the root, read a **concurrent**
+      # signature's source — a client's uploaded component — and overwrote a concurrent
+      # signature's artifact, which is the file the next signature is issued over.
+      scratch = Path.join(context.tmp, "sign")
+      File.mkdir_p!(scratch)
+
+      # A signature in flight beside this one, in the shape `compile_in/5` writes.
+      victim = Path.join(scratch, "sign-VICTIM")
+      File.mkdir_p!(victim)
+      File.write!(Path.join(victim, "component.wasm"), "another client's upload")
+
+      # The shim lives in a directory of its **own**, not in `context.tmp`: the readable set
+      # names the helper's directory, and a Seatbelt subpath rule is recursive, so a shim
+      # sitting above the sign root would have been handed the very thing under test.
+      shim = Path.join(context.tmp, "shim")
+      File.mkdir_p!(shim)
+
+      helper =
+        script!(context, ~s[if ls #{scratch} > /dev/null 2>&1; then exit 3; else exit 4; fi],
+          dir: shim
+        )
+
+      bytes = File.read!(@guest)
+
+      assert {:ok, listed} = sign(context, bytes, [], helper_path: helper)
+      assert listed.precompile_skipped =~ "precompile_refused, 4", "the shared root was listed"
+
+      writer =
+        script!(
+          context,
+          ~s[if echo MALICIOUS > #{victim}/component.wasm 2>/dev/null; then exit 3; else exit 4; fi],
+          dir: shim
+        )
+
+      assert {:ok, written} = sign(context, bytes, [], helper_path: writer)
+      assert written.precompile_skipped =~ "precompile_refused, 4"
+      assert File.read!(Path.join(victim, "component.wasm")) == "another client's upload"
+
+      # And the directory this signature *does* own is writable, or the fence would be a
+      # broken compiler rather than a fence: the ordinary sign below produces its artifact.
+      assert {:ok, receipt} = sign(context, bytes)
+      assert receipt.form == :precompiled
+
+      # Nothing of it survives: the whole per-sign directory goes, not just two files.
+      assert File.ls!(scratch) == ["sign-VICTIM"]
+    end
+
+    @tag @needs_live
     test "a signer that cannot sandbox its helper signs the source form and names why",
          context do
       previous = Application.get_env(:ouroboros, :native_sandbox)
@@ -1160,13 +1215,14 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
 
   # A shim in front of the real helper that records every invocation. The claim it settles is an
   # *ordering*, and an ordering is only observable by watching the expensive half.
-  # W16: the marker lives in the **sign scratch**, because that is the one directory the
-  # sign-time policy makes writable — a shim that journalled into `context.tmp` counted zero
-  # invocations under the fence, which is the fence working rather than the shim failing.
+  # W16 fix wave. Counting invocations needs a side channel that outlives the invocation, and
+  # after HIGH-2 there is none: the only directory a wrapped `precompile` may write is the
+  # per-signature one, which `compile_in/5` removes on the way out. So the one test that counts
+  # runs its shim with `helper_sandbox: :off` — it is about `sign/2`'s **admission order**, not
+  # about containment, and the fence itself is proved by the kernel in
+  # `Ouroboros.Wasm.PoolTest` and by the two sign-time tests below.
   defp counting_helper!(context) do
-    scratch = Path.join(context.tmp, "sign")
-    File.mkdir_p!(scratch)
-    marker = Path.join(scratch, "invocations-#{System.unique_integer([:positive])}")
+    marker = Path.join(context.tmp, "invocations-#{System.unique_integer([:positive])}")
     wrapper = Path.join(context.tmp, "helper-#{System.unique_integer([:positive])}.sh")
 
     File.write!(wrapper, """
@@ -1229,8 +1285,9 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
     script!(context, ~s[if cat "#{secret}" > /dev/null 2>&1; then exit 3; else exit 4; fi])
   end
 
-  defp script!(context, body) do
-    path = Path.join(context.tmp, "helper-#{System.unique_integer([:positive])}.sh")
+  defp script!(context, body, opts \\ []) do
+    dir = Keyword.get(opts, :dir, context.tmp)
+    path = Path.join(dir, "helper-#{System.unique_integer([:positive])}.sh")
     File.write!(path, "#!/bin/sh\n" <> body <> "\n")
     File.chmod!(path, 0o755)
     path

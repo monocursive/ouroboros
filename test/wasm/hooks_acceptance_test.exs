@@ -363,7 +363,27 @@ defmodule Ouroboros.Wasm.HooksAcceptanceTest do
   # W16. Since W16 the helper is spawned under the OS sandbox by default, so a pool is told
   # where this test's own roots are — its components and a scratch — exactly as a node reads
   # its own out of `:data_dir`. Nothing in this file turns the sandbox off.
+  # W16, D25. A component hook's bytes are staged into this node's own component store before
+  # the helper is given a path, so a test is a node and says where its data directory is.
+  # Without one there is no store, and the hook is refused `component_not_staged` — which is
+  # the posture, not a gap in the test.
+  defp node_data_dir! do
+    dir = Path.join(tmp_dir(), "data")
+    previous = Application.fetch_env(:ouroboros, :data_dir)
+    Application.put_env(:ouroboros, :data_dir, dir)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, held} -> Application.put_env(:ouroboros, :data_dir, held)
+        :error -> Application.delete_env(:ouroboros, :data_dir)
+      end
+    end)
+
+    dir
+  end
+
   defp start_pool do
+    _ = node_data_dir!()
     name = :"wasm_hooks_pool_#{System.unique_integer([:positive])}"
 
     {:ok, pid} =

@@ -144,9 +144,20 @@ defmodule Ouroboros.Provider.Native.Sandbox do
           read_fence: boolean()
         }
 
-  @typedoc "The resolved rules one wrapped command runs under."
+  @typedoc """
+  The resolved rules one wrapped command runs under.
+
+  `network` is the external network. `loopback` is separate and defaults to **true** where it
+  is absent, because every policy but the helper's wants it: `network: false` on macOS has
+  always re-allowed `localhost` bind, inbound and outbound, since `mix` coordinates its
+  concurrent compilers over loopback sockets and a build that cannot open one fails `:eperm`
+  without ever reaching another machine. `loopback: false` takes that exception away — the
+  helper speaks stdio and has no use for a socket, and a loopback it could open is every
+  service on this machine, this node's own gateway included (W16, D25).
+  """
   @type policy :: %{
           optional(:readable) => [String.t()],
+          optional(:loopback) => boolean(),
           mode: :read_only | :workspace_write | :workspace_write_escalated | :builder,
           writable: [String.t()],
           protected: [String.t()],
@@ -386,7 +397,12 @@ defmodule Ouroboros.Provider.Native.Sandbox do
       protected: [],
       protected_segments: [],
       scratch: nil,
-      network: false
+      network: false,
+      # A build keeps the loopback exception: `mix` and `cargo` coordinate concurrent
+      # compilers over `localhost` sockets, and a build that cannot open one fails `:eperm`
+      # without ever having reached another machine. `helper_policy/1` is the caller that
+      # does not want it.
+      loopback: Keyword.get(opts, :loopback, true) == true
     }
   end
 
@@ -409,13 +425,23 @@ defmodule Ouroboros.Provider.Native.Sandbox do
 
   What the helper actually needs, and the fence is that there is no more: the platform's own
   toolchain roots (`platform_readable/0`, for the dynamic loader and the C library it links),
-  the directory its own binary lives in (`process-exec` still has to read the executable),
-  and the roots the caller names — this node's lane-W subtree, and at signing time the sign
-  scratch. It writes into the scratch and nowhere else, and it opens no socket.
+  the directory its own binary lives in (which bubblewrap has to bind into the namespace
+  before it can `execve` it), and the roots the caller names — this node's component store,
+  and at signing time the one directory that signature's files live in. It writes into the
+  scratch and nowhere else.
+
+  **And it opens no socket at all, loopback included.** Every other policy this module makes
+  keeps a `localhost` exception on macOS, because `mix` and `cargo` coordinate concurrent
+  compilers over loopback and a build without it fails `:eperm`. The helper speaks stdio; a
+  loopback socket buys it nothing and reaches every service on this machine — this node's own
+  gateway among them. So `loopback: false`, which is what `SandboxExec.network_rules/1` reads.
+  The two Linux backends unshare the network namespace outright, so the host's loopback is not
+  in the child's namespace to begin with and there is nothing there to take away.
   """
   @spec helper_policy(keyword()) :: policy()
   def helper_policy(opts) do
-    policy = builder_policy(Keyword.take(opts, [:readable, :writable]))
+    policy =
+      builder_policy(Keyword.take(opts, [:readable, :writable]) ++ [loopback: false])
 
     case Keyword.get(opts, :scratch) do
       dir when is_binary(dir) and dir != "" -> with_scratch(policy, dir)
@@ -432,6 +458,35 @@ defmodule Ouroboros.Provider.Native.Sandbox do
       _unsupported -> []
     end
   end
+
+  @doc """
+  Whether this backend can enforce a policy's **network** denial on this host (W16, D25).
+
+  A second question beside `fences_reads?/1`, and a separate one because a backend can be
+  present, apply its filesystem rules, and still leave the child on the host's network.
+  `bwrap` is exactly that case: `Bwrap.probe/1` records `unshare_net: false` when the host
+  refuses an unshared network namespace (an unprivileged container without
+  `CLONE_NEWNET`), and `Bwrap.options/3` then emits no `--unshare-net`, so a policy that says
+  `network: false` runs with the host's network anyway. For a shell that is a documented
+  weaker posture; for the helper it is a wall with a hole in it, so `Wasm.Pool` asks this
+  beside `fences_reads?/1` and refuses `{:cannot_fence_network, backend}` rather than
+  reporting a child as sandboxed when it is not.
+
+  Seatbelt denies `network*` in the profile itself, and since W16 a `loopback: false` policy
+  emits no local exception either. `ouro-sandbox` unshares the network namespace in its own
+  plan and fails to apply — exit 125, which `backend_failure/3` surfaces — rather than running
+  the command unfenced.
+  """
+  @spec fences_network?(detection() | backend()) :: boolean()
+  def fences_network?(%{backend: :bwrap} = detection),
+    do: Map.get(detection, :unshare_net) == true
+
+  def fences_network?(%{backend: backend}), do: fences_network?(backend)
+  def fences_network?(:sandbox_exec), do: true
+  def fences_network?(:ouro_sandbox), do: true
+  # A backend with no detection map to read `unshare_net` from is not one this can vouch for.
+  def fences_network?(:bwrap), do: false
+  def fences_network?(:none), do: false
 
   @doc """
   Whether this backend can enforce a builder policy's read fence.

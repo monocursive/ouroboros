@@ -215,6 +215,14 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
 
   defp network_rules(%{network: true}), do: ["(allow network*)"]
 
+  # `loopback: false` (W16, D25): no local exception at all, so `(deny network*)` is the whole
+  # of it. `Ouroboros.Provider.Native.Sandbox.helper_policy/1` is the caller — the `ouro-wasm`
+  # helper speaks stdio and has no use for a socket, and a loopback socket it *could* open
+  # reaches every service on this machine, this node's own gateway included. Proved by a probe
+  # under this exact policy: a loopback listener that the builder policy connects to is
+  # `Operation not permitted` under the helper's.
+  defp network_rules(%{loopback: false}), do: ["(deny network*)"]
+
   # Mix coordinates concurrent compilers and its event bus through TCP sockets bound
   # to loopback. Denying network* without this local exception makes ordinary
   # `mix compile` fail with :eperm even though it is not reaching another machine.

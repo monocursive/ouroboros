@@ -79,7 +79,7 @@ defmodule Ouroboros.Wasm.PoolTest do
       pool = start_pool(Path.join(System.tmp_dir!(), "ouro-wasm-that-was-never-built"))
 
       assert {:error, :unavailable} = Pool.doctor(pool)
-      assert {:error, :unavailable} = Pool.inspect("/tmp/whatever", pool)
+      assert {:error, :unavailable} = Pool.inspect(component("whatever"), pool)
 
       # Idle, not broken: installing a helper has to take effect at once, with no cooldown.
       assert %{phase: :idle, os_pid: nil} = Pool.status(pool)
@@ -237,7 +237,7 @@ defmodule Ouroboros.Wasm.PoolTest do
       pool = start_pool(dying_helper())
       assert {:ok, %{"usable" => true}} = Pool.doctor(pool)
 
-      assert {:error, :broken} = Pool.inspect("/tmp/anything", pool)
+      assert {:error, :broken} = Pool.inspect(component("anything"), pool)
 
       assert Process.alive?(pool)
       assert %{phase: :broken, broken_reason: {:helper_exited, _status}} = Pool.status(pool)
@@ -247,7 +247,7 @@ defmodule Ouroboros.Wasm.PoolTest do
       pool = start_pool(malformed_helper())
       assert {:ok, %{"usable" => true}} = Pool.doctor(pool)
 
-      assert {:error, :broken} = Pool.inspect("/tmp/anything", pool)
+      assert {:error, :broken} = Pool.inspect(component("anything"), pool)
       assert Process.alive?(pool)
       assert %{phase: :broken, broken_reason: {:malformed_frame, "inspect"}} = Pool.status(pool)
     end
@@ -270,7 +270,7 @@ defmodule Ouroboros.Wasm.PoolTest do
       os_pid = Pool.status(pool).os_pid
       assert is_integer(os_pid)
 
-      assert {:error, :timeout} = Pool.inspect("/tmp/anything", pool)
+      assert {:error, :timeout} = Pool.inspect(component("anything"), pool)
       assert %{phase: :broken, broken_reason: {:request_timeout, "inspect"}} = Pool.status(pool)
       assert Process.alive?(pool)
       assert wait_until_gone(os_pid), "the wedged helper is still running as pid #{os_pid}"
@@ -309,7 +309,7 @@ defmodule Ouroboros.Wasm.PoolTest do
       pool = start_pool(responding_helper())
 
       assert {:ok, %{"method" => "inspect", "echo_id" => first}} =
-               Pool.inspect("/tmp/one", pool)
+               Pool.inspect(component("one"), pool)
 
       assert {:ok, %{"method" => "drop", "echo_id" => second}} = Pool.drop("instance-a", pool)
       assert second > first
@@ -318,7 +318,9 @@ defmodule Ouroboros.Wasm.PoolTest do
     test "a frame whose id matches nothing in flight is dropped, not answered with" do
       pool = start_pool(unsolicited_helper())
 
-      assert {:ok, %{"method" => "inspect", "echo_id" => id}} = Pool.inspect("/tmp/one", pool)
+      assert {:ok, %{"method" => "inspect", "echo_id" => id}} =
+               Pool.inspect(component("one"), pool)
+
       refute id == 9999
       assert %{phase: :ready} = Pool.status(pool)
     end
@@ -327,7 +329,8 @@ defmodule Ouroboros.Wasm.PoolTest do
       pool = start_pool(slow_helper())
       assert {:ok, _report} = Pool.doctor(pool)
 
-      first = Task.async(fn -> Pool.inspect("/tmp/first", pool) end)
+      first_path = component("first")
+      first = Task.async(fn -> Pool.inspect(first_path, pool) end)
       Process.sleep(60)
       second = Task.async(fn -> Pool.drop("instance-b", pool) end)
 
@@ -486,6 +489,137 @@ defmodule Ouroboros.Wasm.PoolTest do
     end
 
     @tag :capture_log
+    test "`:required` on a bwrap that cannot unshare a network namespace refuses (MEDIUM-4)" do
+      # A backend can be present, apply every filesystem rule, and still leave the child on the
+      # host's network: `Bwrap.probe/1` records `unshare_net: false` on a host that refuses
+      # `CLONE_NEWNET`, and `Bwrap.options/3` then emits no `--unshare-net`. For a human's
+      # shell that is a documented weaker posture; for the process that holds a signer's
+      # machine code it is a wall with a hole in it, so the pool asks `fences_network?/1`
+      # beside `fences_reads?/1`. Planted, because this Mac has Seatbelt.
+      :persistent_term.put(
+        {Ouroboros.Provider.Native.Sandbox, :detection},
+        %{
+          backend: :bwrap,
+          executable: "/nonexistent/bwrap",
+          version: "0.9.0",
+          notes: "planted",
+          unshare_net: false
+        }
+      )
+
+      on_exit(&Ouroboros.Provider.Native.Sandbox.forget/0)
+
+      pool = start_pool(responding_helper())
+
+      assert %{posture: :refused, reason: {:cannot_fence_network, :bwrap}} =
+               Pool.status(pool).sandbox
+
+      assert {:error, :broken} = Pool.doctor(pool)
+
+      assert %{
+               phase: :broken,
+               os_pid: nil,
+               broken_reason: {:helper_sandbox_unavailable, {:cannot_fence_network, :bwrap}}
+             } = Pool.status(pool)
+
+      # And the same backend *with* a namespace is admitted, so what is measured is the one
+      # field and not the backend's name.
+      :persistent_term.put(
+        {Ouroboros.Provider.Native.Sandbox, :detection},
+        %{
+          backend: :bwrap,
+          executable: "/nonexistent/bwrap",
+          version: "0.9.0",
+          notes: "planted",
+          unshare_net: true
+        }
+      )
+
+      assert %{posture: :sandboxed} = Pool.status(start_pool(responding_helper())).sandbox
+    end
+
+    test "the effective read set is on the status, and it names the helper's own directory" do
+      # W16 MEDIUM-8 and MEDIUM-5. Two things a node cannot otherwise be asked: what the fence
+      # actually is — four sources and a vetted configuration key are not readable off
+      # `config` — and whether a `helper_readable` an operator wrote is in force. The helper's
+      # own directory is asserted by name because dropping it from `readable_roots/1` is a
+      # mutation that stays green on Seatbelt and breaks every Linux node.
+      # The helper lives in a directory of its own and the pool is told **no** roots, so the
+      # only thing that can put its directory in the set is `readable_roots/1`'s first entry.
+      # Told `[tmp_dir()]` instead, this assertion would pass with that entry deleted, which is
+      # how the mutation stayed green the first time it was tried.
+      binaries = Path.join(tmp_dir(), "binaries")
+      File.mkdir_p!(binaries)
+      helper = Path.join(binaries, "ouro-wasm-fake.sh")
+      File.write!(helper, awk_body(@doctor_ok, "", ""))
+      File.chmod!(helper, 0o755)
+
+      # Idle, deliberately: this is about the set the next spawn *would* be fenced to, which is
+      # the same `readable_roots/1` a spawn uses and the only thing a status can report before
+      # a child exists. That the child really runs under it is every other test in this block.
+      pool = start_pool(helper, readable: [], writable: [])
+
+      assert %{phase: :idle, sandbox: %{readable: readable}} = Pool.status(pool)
+
+      # Canonical, because that is what a backend's rules are written on: on macOS
+      # `System.tmp_dir!()` is `/var/folders/…` and the kernel sees `/private/var/folders/…`.
+      {:ok, helper_dir} = Ouroboros.Workspace.Path.canonicalize(binaries)
+
+      assert helper_dir in readable,
+             "the helper's own directory is not in the read set bubblewrap binds from"
+
+      # The platform's own roots are in the *effective* set the child ran under, which is what
+      # this reports — a process that cannot read the dynamic loader does not start.
+      assert Enum.all?(Ouroboros.Provider.Native.Sandbox.platform_readable(), &(&1 in readable))
+    end
+
+    test "a live sibling's scratch survives this pool's sweep (LOW-9)" do
+      # Two BEAMs on one data directory is an ordinary thing, and the six-hour window is not a
+      # bound on a helper's life: a pool whose helper writes no temp files leaves its scratch's
+      # mtime at creation, so a sibling's sweep deleted a **live** child's only writable
+      # directory. The owner marker is what makes the age question answerable.
+      root = Path.join(tmp_dir(), "scratch")
+      File.mkdir_p!(root)
+      old = System.os_time(:second) - 7 * 60 * 60
+
+      live = Path.join(root, "helper-live")
+      File.mkdir_p!(live)
+      File.write!(live <> ".owner", System.pid())
+      File.touch!(live, old)
+
+      gone = Path.join(root, "helper-gone")
+      File.mkdir_p!(gone)
+      File.write!(gone <> ".owner", "not-a-pid")
+      File.touch!(gone, old)
+
+      unmarked = Path.join(root, "helper-unmarked")
+      File.mkdir_p!(unmarked)
+      File.touch!(unmarked, old)
+
+      pool = start_pool(responding_helper())
+      assert {:ok, _report} = Pool.doctor(pool)
+
+      assert File.exists?(live), "a live BEAM's scratch was swept by a sibling pool"
+      refute File.exists?(gone), "a scratch whose owner is unreadable was kept"
+      refute File.exists?(gone <> ".owner"), "the marker outlived the directory"
+      refute File.exists?(unmarked), "a scratch with no owner at all was kept"
+    end
+
+    test "the child's own scratch carries an owner marker it cannot rewrite" do
+      pool = start_pool(env_dump_helper())
+
+      assert {:ok, %{"tmpdir" => scratch}} = Pool.inspect(component(), pool)
+
+      marker = scratch <> ".owner"
+      assert File.read!(marker) == System.pid()
+
+      # Beside the directory, not inside it: the scratch is the child's one writable root, and
+      # a marker a hostile helper could rewrite to a pid that never dies is a scratch that
+      # never gets reclaimed.
+      refute File.exists?(Path.join(scratch, ".owner"))
+    end
+
+    @tag :capture_log
     test "`:required` with nowhere private to put a scratch refuses, and the status says so" do
       # No data directory and no `scratch_root`: `System.tmp_dir!()` is writable by every
       # account on the machine, so there is nowhere this node will put the one directory its
@@ -570,7 +704,7 @@ defmodule Ouroboros.Wasm.PoolTest do
 
       %{secret: secret} = plant()
 
-      assert {:error, {:refused, :path_outside_store}} =
+      assert {:error, {:refused, :path_outside_roots}} =
                Pool.load(String.duplicate("a", 64), secret, pool)
 
       # The whole claim: no frame was built. The helper is not what refused this, and on a
@@ -614,6 +748,25 @@ defmodule Ouroboros.Wasm.PoolTest do
                |> Enum.sort()
     end
 
+    test "an `inspect` outside the roots is refused too, before the helper is asked (LOW-12)" do
+      # `inspect` names a path as much as `load` does — it is the forge reading the imports of
+      # a product it just built (D18) — so "stated twice" has to cover both verbs or the pool's
+      # half is a fence with one side missing.
+      journal = journal_file()
+      pool = start_pool(journaling_helper(journal))
+
+      assert {:ok, _report} = Pool.doctor(pool)
+      before = length(requests(journal))
+
+      %{secret: secret} = plant()
+
+      assert {:error, {:refused, :path_outside_roots}} = Pool.inspect(secret, pool)
+      assert length(requests(journal)) == before
+
+      assert {:ok, _result} = Pool.inspect(component(), pool)
+      assert length(requests(journal)) == before + 1
+    end
+
     test "a path whose parent resolves out of the roots is refused too" do
       # The directory is resolved and the leaf is not, which is stated in the moduledoc: a
       # link *above* the file is caught here, a link *at* the file is left to the kernel.
@@ -623,7 +776,7 @@ defmodule Ouroboros.Wasm.PoolTest do
 
       pool = start_pool(responding_helper())
 
-      assert {:error, {:refused, :path_outside_store}} =
+      assert {:error, {:refused, :path_outside_roots}} =
                Pool.load(String.duplicate("a", 64), Path.join(link, "secret"), pool)
     end
   end
@@ -658,7 +811,7 @@ defmodule Ouroboros.Wasm.PoolTest do
 
       pool = start_pool(env_dump_helper())
 
-      assert {:ok, %{"env" => dumped}} = Pool.inspect("/tmp/one", pool)
+      assert {:ok, %{"env" => dumped}} = Pool.inspect(component("one"), pool)
       names = dumped |> String.split(" ", trim: true) |> MapSet.new()
 
       for {name, _value} <- @secret_env do
@@ -742,14 +895,15 @@ defmodule Ouroboros.Wasm.PoolTest do
       # The oversize request never touched the port, so the helper is untouched and the very
       # next caller — a legitimate small one — is answered.
       assert %{phase: :ready} = Pool.status(pool)
-      assert {:ok, %{"method" => "inspect"}} = Pool.inspect("/tmp/small", pool)
+      assert {:ok, %{"method" => "inspect"}} = Pool.inspect(component("small"), pool)
     end
 
     test "an oversize request queued behind a slow one is refused without breaking it" do
       pool = start_pool(slow_helper(), max_frame_bytes: 4_096)
       assert {:ok, _report} = Pool.doctor(pool)
 
-      slow = Task.async(fn -> Pool.inspect("/tmp/slow", pool) end)
+      slow_path = component("slow")
+      slow = Task.async(fn -> Pool.inspect(slow_path, pool) end)
       Process.sleep(60)
       oversize = String.duplicate("x", 20_000)
       big = Task.async(fn -> Pool.call("i", "handle-message", oversize, pool) end)
@@ -1014,7 +1168,7 @@ defmodule Ouroboros.Wasm.PoolTest do
       assert {:ok, _result} = instantiate(pool, "doomed", owner: owner)
       assert %{owned: 1} = Pool.status(pool)
 
-      assert {:error, :broken} = Pool.inspect("/tmp/anything", pool)
+      assert {:error, :broken} = Pool.inspect(component("anything"), pool)
       assert %{phase: :broken, owned: 0, pending_drops: 0, instances: 0} = Pool.status(pool)
 
       # And the owner dying afterwards is a `:DOWN` for a monitor that no longer exists.
@@ -1105,15 +1259,18 @@ defmodule Ouroboros.Wasm.PoolTest do
       pool = start_pool(slow_helper())
       assert {:ok, _report} = Pool.doctor(pool)
 
+      paths = Map.new(1..9, fn n -> {n, component("#{n}")} end)
+
       waiting =
         for n <- 1..9 do
-          Task.async(fn -> Pool.inspect("/tmp/#{n}", pool) end)
+          path = Map.fetch!(paths, n)
+          Task.async(fn -> Pool.inspect(path, pool) end)
         end
 
       # Give the nine time to arrive: one takes the in-flight slot, eight fill the queue.
       Process.sleep(120)
 
-      assert {:error, :busy} = Pool.inspect("/tmp/too-many", pool)
+      assert {:error, :busy} = Pool.inspect(component("too-many"), pool)
 
       # Every queued caller is still answered — `:busy` refused the arrival, not the queue.
       for task <- waiting do
@@ -1230,7 +1387,7 @@ defmodule Ouroboros.Wasm.PoolTest do
                Pool.load(sha(17), component("x.wasm"), pool, lane: :untrusted_hook)
 
       # `inspect` is the method this fake answers with a frame the pool refuses.
-      assert {:error, :broken} = Pool.inspect("/tmp/anything", pool)
+      assert {:error, :broken} = Pool.inspect(component("anything"), pool)
       assert %{phase: :broken, hook_components: 0} = Pool.status(pool)
     end
 
@@ -1794,7 +1951,7 @@ defmodule Ouroboros.Wasm.PoolTest do
 
   # A component path inside this test's own directory, which is the directory the pool was
   # told its components come from (W16). `/tmp/whatever.wasm` was fine while the pool measured
-  # nothing about a path; now it is refused `:path_outside_store` before the frame is built,
+  # nothing about a path; now it is refused `:path_outside_roots` before the frame is built,
   # which is the fence and not a test to route around.
   defp component(name \\ "component.wasm"), do: Path.join(tmp_dir(), name)
 

@@ -19,6 +19,7 @@ defmodule Ouroboros.Provider.Native.HooksComponentTest do
 
   alias Ouroboros.Provider.Native.Hooks
   alias Ouroboros.Wasm.Pool
+  alias Ouroboros.Wasm.SandboxFixture
 
   @moduletag :capture_log
 
@@ -33,6 +34,19 @@ defmodule Ouroboros.Provider.Native.HooksComponentTest do
     workspace = Path.join(root, "workspace")
     File.mkdir_p!(Path.join(workspace, "hooks"))
     on_exit(fn -> File.rm_rf(root) end)
+
+    # W16, D25. This lane stages a hook's bytes into the node's own component store before it
+    # names a path to the helper, so a node without a data directory has nowhere to put them
+    # and the hook is refused. A test is a node: it says where its data directory is.
+    previous = Application.fetch_env(:ouroboros, :data_dir)
+    Application.put_env(:ouroboros, :data_dir, Path.join(root, "data"))
+
+    on_exit(fn ->
+      case previous do
+        {:ok, held} -> Application.put_env(:ouroboros, :data_dir, held)
+        :error -> Application.delete_env(:ouroboros, :data_dir)
+      end
+    end)
 
     # Real bytes on disk: this seam stats, reads and hashes the file before it says a word
     # to the helper, so a component path that names nothing would never reach the fake.
@@ -545,7 +559,7 @@ defmodule Ouroboros.Provider.Native.HooksComponentTest do
       # Spend the whole budget under the lane an untrusted hook uses. If this seam stopped
       # deriving the lane from the hook's own trust, this hook's load would sail past the
       # budget and the deny below would stand.
-      spend_budget(pool)
+      spend_budget(pool, context)
 
       log =
         capture_log(fn ->
@@ -567,7 +581,7 @@ defmodule Ouroboros.Provider.Native.HooksComponentTest do
       # own hook loads anyway, and its `deny` stands.
       %{config: config, pool: pool} = loaded(context, reply: @deny, full: true)
 
-      spend_budget(pool)
+      spend_budget(pool, context)
 
       assert {:deny, "no"} = Hooks.pre_tool_use(config, "bash", %{"command" => "ls"}, base())
 
@@ -781,6 +795,76 @@ defmodule Ouroboros.Provider.Native.HooksComponentTest do
   end
 
   # ================================================================ path confinement
+
+  describe "a hook's bytes are staged into the node's store before the helper is asked (W16)" do
+    test "the path the helper is given is the store's, never the workspace's", context do
+      %{config: config, journal: journal} = loaded(context, reply: @deny, full: true)
+
+      assert {:deny, "no"} = Hooks.pre_tool_use(config, "bash", %{"command" => "ls"}, base())
+
+      # The whole of HIGH-3, in one assertion. This lane used to hand the pool the file inside
+      # the repository the hook was configured in, and the cost was not the path: the helper's
+      # sandbox had to make every workspace root readable for component hooks to work at all,
+      # so a compromised precompiled artifact (D24) reached the operator's repositories.
+      assert %{"params" => %{"path" => path, "sha256" => sha}} = request(journal, "load")
+
+      {:ok, store} = Ouroboros.Wasm.Store.root([])
+      assert String.starts_with?(path, store)
+      refute String.starts_with?(path, context.workspace)
+      assert path == Path.join(store, "sha256-#{sha}.wasm")
+
+      # And the bytes there are the bytes the workspace held: content-addressed, so the name
+      # of the file is the digest of what is in it.
+      assert File.read!(path) == File.read!(context.component)
+    end
+
+    test "the store holds them before the load goes out, not after", context do
+      # LOW-11's ordering invariant. A `load` naming a path the store has not published yet is
+      # a helper reading a file that is not there — `unreadable_component` on every first run
+      # of every hook — so the publish is not merely *somewhere* before the call, it is before
+      # the frame. The scripted helper asserts it from the other side of the wire: it reads the
+      # path out of the frame it was handed and records whether the file was there.
+      %{config: config, journal: journal} = loaded(context, reply: @deny, full: true)
+
+      assert {:deny, "no"} = Hooks.pre_tool_use(config, "bash", %{"command" => "ls"}, base())
+
+      assert %{"params" => %{"path" => path}} = request(journal, "load")
+      assert File.regular?(path)
+
+      # Publish-once: running the same hook again costs a `File.stat`, and the digest is the
+      # same file, so a repository's hook is one store entry however often it fires.
+      assert {:deny, "no"} = Hooks.pre_tool_use(config, "bash", %{"command" => "ls"}, base())
+      {:ok, store} = Ouroboros.Wasm.Store.root([])
+      assert length(Path.wildcard(Path.join(store, "sha256-*.wasm"))) == 1
+    end
+
+    test "a node with no store refuses the hook by name, rather than reaching past the fence",
+         context do
+      # A node with no data directory has no component store, and the honest answer is a hook
+      # that does not run — not a component loaded from a directory the fence does not cover.
+      %{config: config, journal: journal} = loaded(context, reply: @deny, full: true)
+      previous = Application.fetch_env(:ouroboros, :data_dir)
+      Application.delete_env(:ouroboros, :data_dir)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, held} -> Application.put_env(:ouroboros, :data_dir, held)
+          :error -> Application.delete_env(:ouroboros, :data_dir)
+        end
+      end)
+
+      log =
+        capture_log(fn ->
+          assert {:none, _input, [], false} =
+                   Hooks.pre_tool_use(config, "bash", %{"command" => "ls"}, base())
+        end)
+
+      assert log =~ "component_not_staged"
+
+      # And the helper was never asked: a hook this node cannot stage is one it does not run.
+      assert requests(journal, "load") == []
+    end
+  end
 
   describe "a workspace component may not name a file outside the workspace" do
     test "`..` cannot climb out", context do
@@ -1297,12 +1381,15 @@ defmodule Ouroboros.Provider.Native.HooksComponentTest do
   # The whole untrusted-hook budget, spent on this pool by somebody else. Sixteen distinct
   # shas under `lane: :untrusted_hook` — the lane a repository's component hook uses — so
   # what the tests below vary is only whose bytes come next.
-  defp spend_budget(pool) do
+  defp spend_budget(pool, context) do
+    # A path inside this node's own roots, because since W16 the pool refuses a `load` outside
+    # them before it builds a frame. The fake helper never opens it; what is being spent here
+    # is the budget, not the file.
+    path = Path.join(context.root, "x.wasm")
+
     for n <- 1..Pool.hook_component_budget() do
       assert {:ok, _result} =
-               Pool.load(String.pad_leading("#{n}", 64, "0"), "/tmp/x.wasm", pool,
-                 lane: :untrusted_hook
-               )
+               Pool.load(String.pad_leading("#{n}", 64, "0"), path, pool, lane: :untrusted_hook)
     end
 
     assert Pool.status(pool).hook_components == Pool.hook_component_budget()
@@ -1365,7 +1452,11 @@ defmodule Ouroboros.Provider.Native.HooksComponentTest do
 
     # Detached, like `Ouroboros.Wasm.PoolTest`'s: a child's exit must not travel through the
     # test process, and teardown reaps the helper through `terminate/2`.
-    {:ok, pid} = Pool.start(name: name, helper_path: path, handshake_timeout_ms: 15_000)
+    {:ok, pid} =
+      Pool.start(
+        [name: name, helper_path: path, handshake_timeout_ms: 15_000] ++
+          SandboxFixture.pool_opts(context.root)
+      )
 
     on_exit(fn ->
       if Process.alive?(pid) do

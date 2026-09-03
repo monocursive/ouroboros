@@ -1297,10 +1297,21 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       # W16, D25. The OS sandbox the helper runs under, as its own half of the answer: an
       # operator asking whether this node contains its helper is asking about the node, and
       # `:refused` is an answer a node gives *while there is no helper at all*. The fixture is
-      # the ordinary posture — wrapped, on a node whose backend fences reads — because that is
-      # what a working node reports and a decode proved against a refusal would ship blind to
-      # it. `reason` is prose, not a code: a client renders it and branches on `posture`.
-      sandbox: %{posture: :sandboxed, backend: "sandbox-exec", reason: nil},
+      # the ordinary posture — wrapped, on a node whose backend fences reads and network —
+      # because that is what a working node reports and a decode proved against a refusal
+      # would ship blind to it. `reason` is prose, not a code: a client renders it and
+      # branches on `posture`.
+      #
+      # `readable` is the effective read set as **basenames**, for `helper.path`'s reason: an
+      # absolute path names an install prefix and often an account, and both wasm verbs are
+      # `:read`. Two roots here — the helper's own directory and this node's component store —
+      # which is what a node with nothing configured has.
+      sandbox: %{
+        posture: :sandboxed,
+        backend: "sandbox-exec",
+        reason: nil,
+        readable: ["wasm", "components"]
+      },
       store: %{
         root: "components",
         budget_bytes: 536_870_912,

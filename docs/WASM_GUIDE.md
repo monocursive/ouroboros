@@ -1065,25 +1065,46 @@ back to the default rather than widening one:
 | `capability_limits` | fuel 100 000 000, memory 64 MiB, deadline 5 000 ms | the bounds a capability runs under when its deployment names none. Declared whole — all three keys or none |
 | `capability_limits_max` | fuel 10¹⁰, memory 256 MiB, deadline 30 000 ms | the ceiling a deployment's own declaration is clamped to, element-wise |
 | `helper_sandbox` | `:required` | whether this node insists on an OS sandbox around the helper. `:off` spawns it plain |
-| `helper_readable` | `[]` | extra absolute roots the sandboxed helper may read, for a node whose components are not under its own data directory |
+| `helper_readable` | `[]` | extra absolute roots the sandboxed helper may read, for a node whose components are not under its own data directory. Vetted whole: see below |
 
 **The helper runs inside the OS sandbox, and a node that cannot apply one runs no helper.**
 Since W16 `ouro-wasm` is spawned through the same sandbox the native agent's shell uses, under a
 policy that is closed on reads: it may read the platform's toolchain roots, the directory its own
-binary is in, this node's `<data_dir>/wasm` subtree (the component store, the artifacts, the
-forge's build directory) and your configured workspace roots — the hook lane reads `component =`
-hooks out of the repository they are configured in, which is why those are in the list — and it
-may write only in a `0700` scratch this node creates under `<data_dir>/wasm/scratch/` and
-removes with the child. No network. `helper_sandbox` is `:required` by default, and under it a
-node with no sandbox backend, a backend with no read allow-set (`ouro-sandbox` before W17), or
-no data directory **refuses to start the helper at all**: every lane-W request answers
-`{:error, :broken}` and `wasm.status` carries `sandbox: {posture: "refused", backend, reason}`
-beside a helper phase of `broken`. (`ouro wasm doctor` does not print that block yet; read it
-from the verb.) That is deliberate — a contained helper that is not contained is worse than none —
-and the way out is a backend (`bwrap` on Linux, `sandbox-exec` on macOS), a data directory, or
-the explicit `helper_sandbox: :off`, which spawns it plain, says so in `wasm.status` and logs a
-warning on every spawn. The same policy wraps `ouro-wasm precompile` at signing time; a signer
-that cannot apply it signs the source form and names why in the receipt's `precompile_skipped`.
+binary is in, this node's **component store** (`<data_dir>/wasm/components`) and the forge's
+build directory — and nothing else under your data directory, because the signing journal, the
+grants, the upload area and the forge's cargo home are none of its business. Component hooks are
+staged into that store before the helper is told a path, so serving a repository does not widen
+the fence. It may write only in a `0700` scratch this node creates under
+`<data_dir>/wasm/scratch/` and removes with the child. **No network, and that includes
+loopback** — the helper speaks over a pipe, and a loopback socket would reach every service on
+the machine, this node's gateway included.
+
+`helper_sandbox` is `:required` by default, and under it a node with no sandbox backend, a
+backend with no read allow-set (`ouro-sandbox` before W17), a `bwrap` that cannot unshare a
+network namespace, or no data directory **refuses to start the helper at all**: every lane-W
+request answers `{:error, :broken}` and `wasm.status` carries
+`sandbox: {posture: "refused", backend, reason, readable}` beside a helper phase of `broken`.
+(`ouro wasm doctor` does not print that block yet; read it from the verb. `readable` is the
+effective read set as basenames — the full paths are on the node, in `Wasm.Pool.status/1` — and
+it is where you check that a `helper_readable` you configured is actually in force.) That is
+deliberate — a contained helper that is not contained is worse than none — and the way out is a
+backend (`bwrap` on Linux, `sandbox-exec` on macOS), a data directory, or the explicit
+`helper_sandbox: :off`, which spawns it plain, says so in `wasm.status` and logs a warning on
+every spawn. The same policy wraps `ouro-wasm precompile` at signing time, with that
+signature's own directory writable and nothing else; a signer that cannot apply it signs the
+source form and names why in the receipt's `precompile_skipped`.
+
+`helper_readable` widens the read set for a node whose components are not under its own data
+directory, and it is **vetted whole**: each entry must be an absolute path that resolves to a
+directory that exists, must not be `/`, and must not be your data directory or an ancestor of
+it. One bad entry rejects the entire list with a warning naming it, and `wasm.status` then shows
+the node's own roots alone — which is how you tell "configured" from "in force".
+
+What the macOS wall does **not** close is written down in docs/WASM.md D25: `process-exec` over
+the readable `/usr/bin` and `/bin`, `mach-lookup`, `sysctl-read`, and metadata reads over the
+whole filesystem. A compromised artifact inside the fence can still run `curl` or `osascript`,
+and `osascript`'s `do shell script` leaves the sandbox. The fence bounds what it can *read and
+write* and takes its network away; it is not a syscall policy.
 
 Two more keys govern the lane from outside `:wasm`:
 
@@ -1201,9 +1222,10 @@ code into your helper process, where before W8 the worst it could put there was 
 component: bounded by fuel, by a deadline, by a memory ceiling, by a linker that defines one
 function. The helper is still a separate process, so what that reaches is a Port rather than the
 node — and since W16 that process is OS-sandboxed, so inside it the reachable surface is the
-platform's toolchain roots, this node's `<data_dir>/wasm` subtree, your workspace roots, a
-scratch and no network, rather than everything the daemon's user can open. That is a wall around
-the code, not a check on it: the machine code still executes.
+platform's toolchain roots, this node's component store, the forge's build directory, a scratch
+and no network at all, rather than everything the daemon's user can open. That is a wall around
+the code, not a check on it: the machine code still executes, and on macOS it can still run
+`/usr/bin` binaries inside the fence (docs/WASM.md D25 names what the wall leaves open).
 
 Set this to `false` and every node compiles every component for itself, exactly as before W8:
 no redeploy, no resigning, nothing to change in any bundle. What it costs is the compile, per

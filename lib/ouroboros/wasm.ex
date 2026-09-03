@@ -33,6 +33,10 @@ defmodule Ouroboros.Wasm do
 
   @helper "ouro-wasm"
 
+  # The last `helper_readable` value warned about, so a misconfigured node logs once rather
+  # than once per load. One term, replaced rather than grown.
+  @warned_key {__MODULE__, :helper_readable_warned}
+
   # The world this node speaks. It is not configurable: admitting a component against a
   # world this build does not implement is exactly the lie the linker exists to prevent
   # (docs/WASM.md D5), so the handshake compares against this constant and nothing else.
@@ -142,7 +146,7 @@ defmodule Ouroboros.Wasm do
     # D25 and decided the trade — never a fallback this code takes on its own.
     helper_sandbox: :required,
     # W16. Roots this node's helper may read **beyond** its own binary's directory, the
-    # platform's toolchain roots, and this node's own lane-W subtree (`<data_dir>/wasm`).
+    # platform's toolchain roots, this node's component store and the forge's build directory.
     #
     # Empty on a node that has not said otherwise, because the default answer is the whole
     # fence: a helper reads component bytes out of this node's store and nothing else. It
@@ -151,9 +155,9 @@ defmodule Ouroboros.Wasm do
     # components somewhere else has to say where or its own loads are refused — by this pool,
     # before the helper, and then by the kernel.
     #
-    # Absolute paths only. It widens a fence, so it is validated as a whole: one entry that is
-    # not an absolute path takes the list back to the default rather than being dropped
-    # silently from a list an operator believes they wrote.
+    # It widens a fence, so `helper_readable/0` vets it whole rather than trusting it: see the
+    # rules there. `["/"]` was accepted before that vetting existed and took both walls away
+    # at once.
     helper_readable: []
   ]
 
@@ -222,29 +226,137 @@ defmodule Ouroboros.Wasm do
   def helper_sandbox, do: config(:helper_sandbox)
 
   @doc """
-  Extra roots this node's helper may read, beyond its binary, the platform and `data_root/0`.
+  Extra roots this node's helper may read, **vetted**, or `[]` (W16, D25).
 
-  Empty on a node that has not said otherwise. See the setting's comment for when a node
-  has to name one.
+  A widening knob is the one setting that cannot fall back quietly to whatever it was given,
+  so every entry has to survive four rules: it is an absolute path; it resolves to a directory
+  that exists; it is not `/` and does not resolve to `/`; and it is not the node's data
+  directory nor an ancestor of it. The last two are the ones that matter — `["/"]` was
+  accepted before this existed and removed both of W16's walls in one line, and `["$HOME"]`
+  or `[<data_dir>]` hands the helper the signing journal, the grants and the effect ledger.
+
+  One offending entry rejects the **whole list**, with a warning naming it. A list an operator
+  believes they wrote is not one this node silently prunes to the half it liked: a fence with
+  three roots where four were configured is a fence nobody can reason about, and `[]` is the
+  posture the node has when nothing is configured at all. The warning is logged once per
+  distinct offending value rather than on every load.
+
+  `Ouroboros.Wasm.Pool.status/1` reports the effective list, so what the fence actually is can
+  be read off the node rather than inferred from configuration.
   """
   @spec helper_readable() :: [String.t()]
-  def helper_readable, do: config(:helper_readable)
+  def helper_readable do
+    case config(:helper_readable) do
+      [] -> []
+      roots -> vetted(roots)
+    end
+  end
+
+  defp vetted(roots) do
+    case Enum.find_value(roots, fn root ->
+           case unusable_root(root) do
+             nil -> nil
+             why -> {root, why}
+           end
+         end) do
+      nil ->
+        roots
+
+      {root, why} ->
+        warn_once(roots, root, why)
+        []
+    end
+  end
+
+  defp unusable_root(root) when not is_binary(root), do: :not_a_path
+  defp unusable_root(""), do: :not_a_path
+  defp unusable_root("/"), do: :the_whole_filesystem
+
+  defp unusable_root(root) do
+    if Path.type(root) == :absolute do
+      resolved_root(root)
+    else
+      :not_an_absolute_path
+    end
+  end
+
+  defp resolved_root(root) do
+    case Ouroboros.Workspace.Path.canonicalize(root) do
+      {:ok, "/"} -> :the_whole_filesystem
+      {:ok, canonical} -> covers_data_dir(canonical)
+      {:error, reason} -> {:not_a_directory_that_exists, reason}
+    end
+  end
+
+  # `within?(data_dir, root)` is "the data directory is inside this root", which is exactly
+  # what an ancestor is — and equality counts, because naming `<data_dir>` itself hands the
+  # helper the signing journal, the grants, the permissions and the effect ledger, which are
+  # the files the store root was narrowed away from in the first place.
+  defp covers_data_dir(canonical) do
+    case Application.get_env(:ouroboros, :data_dir) do
+      dir when is_binary(dir) and dir != "" ->
+        data_dir =
+          case Ouroboros.Workspace.Path.canonicalize(dir) do
+            {:ok, resolved} -> resolved
+            {:error, _absent} -> Path.expand(dir)
+          end
+
+        if Ouroboros.Workspace.Path.within?(data_dir, canonical),
+          do: :ancestor_of_the_data_directory
+
+      _unset ->
+        nil
+    end
+  end
+
+  # Once per distinct configured value: this is read on the way to every load, and a node
+  # whose configuration is wrong should say so rather than say so ten thousand times.
+  defp warn_once(roots, root, why) do
+    if :persistent_term.get(@warned_key, :none) != roots do
+      :persistent_term.put(@warned_key, roots)
+
+      require Logger
+
+      Logger.warning(
+        "config :ouroboros, :wasm, helper_readable: refused whole list — " <>
+          "#{inspect(root)} is #{inspect(why)}; the helper reads only this node's own roots " <>
+          "(docs/WASM.md D25)"
+      )
+    end
+
+    :ok
+  end
 
   @doc """
   This node's lane-W subtree, `<data_dir>/wasm`, or `nil` where there is no data directory.
 
-  One directory, because every file the helper is ever handed a path to is under it: the
-  component store (`Ouroboros.Wasm.Store.root/1`), the artifacts beside it, the forge's build
-  directory (whose product `Ouroboros.Wasm.Forge` asks the helper to `inspect`), and the
-  scratch the pool creates for the child. Naming the subtree rather than `<data_dir>` itself
-  is the fence: the node's grants, permissions, effect ledger and signing journal are all
-  siblings of it, and none of them is a file the helper has any business opening.
+  Where the pool puts a child's scratch and where the forge builds. It is deliberately **not**
+  a readable root: `Ouroboros.Wasm.Pool` names the component store and the forge's build
+  directory below it and nothing else, because this subtree also holds the upload staging
+  area, the sign scratch, the forged bundles and the forge's cargo home — and a cargo home's
+  `config.toml` on a builder node can name a `rustc-wrapper` and hold a registry credential.
   """
   @spec data_root() :: String.t() | nil
   def data_root do
     case Application.get_env(:ouroboros, :data_dir) do
       dir when is_binary(dir) and dir != "" -> Path.join(dir, "wasm")
       _unset -> nil
+    end
+  end
+
+  @doc """
+  Where `Ouroboros.Wasm.Forge` builds, `<data_dir>/wasm/builds`, or `nil`.
+
+  Named here because the pool has to make it readable: the forge reads the import list off the
+  product it just built with `Ouroboros.Wasm.Pool.inspect/2` (docs/WASM.md D18), and that path
+  is a build directory rather than a store entry. Mirrors `Forge`'s own default; a forge told
+  to build somewhere else says so to the pool as well.
+  """
+  @spec builds_root() :: String.t() | nil
+  def builds_root do
+    case data_root() do
+      dir when is_binary(dir) -> Path.join(dir, "builds")
+      nil -> nil
     end
   end
 
@@ -351,8 +463,9 @@ defmodule Ouroboros.Wasm do
   defp valid?(:accept_precompiled, value), do: is_boolean(value)
   defp valid?(:helper_sandbox, value), do: value in [:required, :off]
 
-  defp valid?(:helper_readable, value),
-    do: is_list(value) and Enum.all?(value, &(is_binary(&1) and absolute_path?(&1)))
+  # Shape only. What makes an entry *usable* is `helper_readable/0`'s four rules, which need
+  # the filesystem and the data directory and so cannot live in a pure validator.
+  defp valid?(:helper_readable, value), do: is_list(value)
 
   defp valid?(key, value) when key in @timeout_keys, do: is_integer(value) and value > 0
   defp valid?(key, value) when key in @byte_keys, do: is_integer(value) and value > 0

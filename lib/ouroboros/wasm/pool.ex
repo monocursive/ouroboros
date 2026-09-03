@@ -96,11 +96,20 @@ defmodule Ouroboros.Wasm.Pool do
   producer (D24) — so the process itself is now something worth walling in. It is spawned
   through `Ouroboros.Provider.Native.Sandbox.wrap/4` under `Sandbox.helper_policy/1`: closed
   by default on reads, readable in the platform's toolchain roots, its own binary's
-  directory, this node's lane-W subtree `<data_dir>/wasm`, the node's workspace roots (the
-  hook lane's components are read out of a repository, not out of the store) and whatever
-  `helper_readable` names; writable in a per-child scratch this node creates 0700 under
-  `<data_dir>/wasm/scratch/` and nowhere else; no network. `$TMPDIR` points at that scratch,
-  and the scratch is removed when the child is.
+  directory, this node's **component store**, the forge's build directory and whatever
+  `helper_readable` names once `Ouroboros.Wasm.helper_readable/0` has vetted it; writable in a
+  per-child scratch this node creates 0700 under `<data_dir>/wasm/scratch/` and nowhere else.
+  `$TMPDIR` points at that scratch, and the scratch is removed when the child is.
+
+  **No network, and that now includes loopback.** Every other policy this runtime makes keeps
+  a `localhost` exception on macOS, because `mix` and `cargo` coordinate concurrent compilers
+  over loopback sockets. The helper speaks stdio, so `Sandbox.helper_policy/1` sets
+  `loopback: false` and the Seatbelt profile emits `(deny network*)` and nothing after it. A
+  review proved why it matters: under the old policy a probe connected to a loopback listener,
+  and a loopback socket reaches every service on this machine — this node's own gateway
+  included. The two Linux backends unshare the network namespace, so the host's loopback is
+  not in the child's namespace at all; a `bwrap` that could not unshare one is a refusal to
+  spawn (`Sandbox.fences_network?/1`) rather than a child on the host's network.
 
   **Nothing degrades quietly.** `config :ouroboros, :wasm, helper_sandbox:` is `:required` by
   default, and under it a node with no backend, a backend that cannot fence reads
@@ -111,13 +120,14 @@ defmodule Ouroboros.Wasm.Pool do
 
   ## The fence is stated twice
 
-  Every `load` this pool issues names a file this node put where it is — four of the five call
-  sites resolve it through `Ouroboros.Wasm.Store`, and the fifth is the hook lane, which reads
-  a `component =` hook out of the workspace it is configured in — and the sandbox is one of
-  the two things that say so. The other is here: a `load` whose path is not under the policy's
-  readable roots is `{:error, {:refused, :path_outside_store}}` **before** a frame is built,
-  so the kernel denies what the pool has already refused. Two statements of one rule, because
-  a fence stated only by a backend is a fence that a node without one does not have.
+  Every `load` this pool issues names a file in this node's own **component store** — all five
+  call sites, the hook lane included since it stages its bytes there — and the one `inspect`
+  names a product the forge just built in this node's own build directory. The sandbox is one
+  of the two things that say so. The other is here: a `load` or an `inspect` whose path is not
+  under the policy's readable roots is `{:error, {:refused, :path_outside_roots}}` **before** a
+  frame is built, so the kernel denies what the pool has already refused. Two statements of
+  one rule, because a fence stated only by a backend is a fence that a node without one does
+  not have.
 
   The pool's half resolves symlinks in a path's *directory* and not in its leaf, so a
   symlinked file inside a readable root passes here and is caught by the kernel, which
@@ -254,11 +264,19 @@ defmodule Ouroboros.Wasm.Pool do
   # predict is a name it can create first.
   @scratch_prefix "helper-"
 
-  # A scratch older than this belongs to no live child. A helper's own life is bounded by the
-  # pool that owns it and every ordinary exit removes its directory, so what this reclaims is
-  # what a `kill -9` of the node left behind. Six hours is the window
-  # `Ouroboros.Provider.Native.Sandbox.sweep/0` uses, for the same reason: wide enough that a
-  # live directory can never be mistaken for an abandoned one.
+  # The owner marker that sits **beside** a scratch, `<name>.owner`, holding the OS pid of the
+  # BEAM that made it. Beside and not inside, so it is outside the child's one writable root:
+  # a helper cannot rewrite its own marker to a pid that never dies.
+  @owner_suffix ".owner"
+
+  # Half of what makes a scratch reclaimable; the owner marker is the other half.
+  #
+  # Age alone was wrong and a review proved it: two BEAMs sharing one data directory is an
+  # ordinary thing, a pool whose helper writes no temp files leaves its scratch's mtime at
+  # creation, and after six hours the *sibling's* sweep deleted a live child's only writable
+  # directory. "A helper's life is bounded by the pool that owns it" is true and is not a
+  # bound on wall-clock time. So a directory is reclaimed only when it is this old **and** the
+  # BEAM named in its marker is gone.
   @scratch_abandoned_after_seconds 6 * 60 * 60
 
   # Bounded per sweep, so a crowded scratch root costs a bounded amount of work on the way in
@@ -272,11 +290,18 @@ defmodule Ouroboros.Wasm.Pool do
   `helper_sandbox: :off`) or `:refused` (`:required` on a node that cannot apply one — the
   pool spawns nothing and `reason` says why). Before a child exists this is the posture the
   next spawn *would* take; `phase` is how a reader tells the two apart.
+
+  `readable` is the **effective** read set — what the child was actually fenced to, or what
+  the next one would be. It is here because a fence assembled from four sources and a vetted
+  configuration key is a fence an operator cannot otherwise read back off the node, and
+  because `helper_readable` rejects a whole list on one bad entry: the difference between
+  "configured" and "in force" has to be visible somewhere.
   """
   @type sandbox :: %{
           posture: :sandboxed | :off | :refused,
           backend: String.t(),
-          reason: term() | nil
+          reason: term() | nil,
+          readable: [String.t()]
         }
 
   @typedoc """
@@ -316,7 +341,7 @@ defmodule Ouroboros.Wasm.Pool do
           | :busy
           | :timeout
           | :hook_component_budget
-          | {:refused, :path_outside_store}
+          | {:refused, :path_outside_roots}
           | {:frame_too_large, non_neg_integer(), pos_integer()}
           | {:invalid_lane, term()}
           | {:invalid_limits, term()}
@@ -766,7 +791,12 @@ defmodule Ouroboros.Wasm.Pool do
         hook_components: 0,
         # No process answered, so nothing is known about what it would have spawned. `:refused`
         # is the honest reading of "there is no helper and there will not be one from here".
-        sandbox: %{posture: :refused, backend: "unknown", reason: :pool_unavailable},
+        sandbox: %{
+          posture: :refused,
+          backend: "unknown",
+          reason: :pool_unavailable,
+          readable: []
+        },
         broken_reason: {:pool_unavailable, reason}
       }
   end
@@ -807,6 +837,10 @@ defmodule Ouroboros.Wasm.Pool do
        # What the last spawn actually did, or `nil` before there has been one — in which case
        # `status/1` answers what the next one would do.
        sandbox: nil,
+       # The roots the live child was fenced to, as this pool computed them — the input to the
+       # policy rather than the policy's own list, so `ensure_connected/1` compares like with
+       # like. `nil` until a child exists.
+       fenced: nil,
        scratch: nil,
        port: nil,
        os_pid: nil,
@@ -882,13 +916,15 @@ defmodule Ouroboros.Wasm.Pool do
   # pool already refused, which is the point: the rule is stated by this node and not only by
   # whatever backend the node happens to have.
   #
-  # `load` only. `inspect` is the forge reading the imports of bytes *it just built* (D18),
-  # which is a build directory rather than the store, and `instantiate`/`call`/`drop` name a
-  # component the helper already holds and no path at all.
-  defp check_path(state, "load", %{"path" => path}) when is_binary(path) do
+  # Both verbs that name a path, which is what "stated twice" has to mean: `load` and
+  # `inspect`. `inspect` is the forge reading the imports of bytes it just built (D18), whose
+  # directory is in the readable set for exactly that reason; `instantiate`/`call`/`drop` name
+  # a component the helper already holds and no path at all.
+  defp check_path(state, method, %{"path" => path})
+       when method in ["load", "inspect"] and is_binary(path) do
     if under_readable?(state, path),
       do: :ok,
-      else: {:error, {:refused, :path_outside_store}}
+      else: {:error, {:refused, :path_outside_roots}}
   end
 
   defp check_path(_state, _method, _params), do: :ok
@@ -1121,6 +1157,24 @@ defmodule Ouroboros.Wasm.Pool do
   # Answers whether a request may proceed, opening the child if one is needed. A missing
   # binary is `:unavailable` and leaves the pool idle rather than broken: nothing failed,
   # the operator has not opted in, and installing a helper must take effect at once.
+  # A child whose fence is still the fence this node would build now. When it is not — a data
+  # directory that moved, a `helper_readable` an operator corrected, a pool told different
+  # roots — the child is replaced rather than kept: a running helper's policy is fixed at
+  # spawn, so a stale one is a fence describing a store this node no longer uses, in both
+  # directions. Replacing costs the helper's cache and its live instances, which is what
+  # every other reconnect costs, and configuration does not move on a running node.
+  defp ensure_connected(%{phase: phase, fenced: fenced} = state)
+       when phase in [:ready, :handshaking] and is_list(fenced) do
+    if fenced == readable_roots(state) do
+      {:ok, state}
+    else
+      case connect(state) do
+        %{phase: :broken} = state -> {:broken, state}
+        state -> {:ok, state}
+      end
+    end
+  end
+
   defp ensure_connected(%{phase: phase} = state) when phase in [:ready, :handshaking],
     do: {:ok, state}
 
@@ -1166,7 +1220,7 @@ defmodule Ouroboros.Wasm.Pool do
       # not a helper that failed, it is a node that will not run one, and `wasm.status` has
       # to be able to say which.
       {:error, {:helper_sandbox_unavailable, why} = reason} ->
-        go_broken(%{state | sandbox: refused_sandbox(why)}, reason)
+        go_broken(%{state | sandbox: refused_sandbox(state, why)}, reason)
 
       {:error, reason} ->
         go_broken(state, {:spawn_failed, reason})
@@ -1517,7 +1571,15 @@ defmodule Ouroboros.Wasm.Pool do
       args: ["serve"],
       env: filtered_env(),
       scratch: nil,
-      sandbox: %{posture: :off, backend: Sandbox.label(Sandbox.detect()), reason: nil}
+      fenced: readable_roots(state),
+      sandbox: %{
+        posture: :off,
+        backend: Sandbox.label(Sandbox.detect()),
+        reason: nil,
+        # What the pool *would* have fenced to, so `:off` and `:sandboxed` are read the same
+        # way and the difference between them is the posture and nothing else.
+        readable: effective_readable(state)
+      }
     }
   end
 
@@ -1535,6 +1597,14 @@ defmodule Ouroboros.Wasm.Pool do
       not Sandbox.fences_reads?(detection) ->
         {:error, {:helper_sandbox_unavailable, {:cannot_fence_reads, detection.backend}}}
 
+      # A backend can be present, apply every filesystem rule, and still leave the child on the
+      # host's network: `bwrap` on a host that refuses `CLONE_NEWNET` records
+      # `unshare_net: false` and emits no `--unshare-net`, so a policy that says `network:
+      # false` is not one. For a human's shell that is a documented weaker posture; for the
+      # process that holds a signer's machine code it is a wall with a hole in it.
+      not Sandbox.fences_network?(detection) ->
+        {:error, {:helper_sandbox_unavailable, {:cannot_fence_network, detection.backend}}}
+
       true ->
         wrapped_plan(state, detection)
     end
@@ -1542,6 +1612,8 @@ defmodule Ouroboros.Wasm.Pool do
 
   defp wrapped_plan(state, detection) do
     with {:ok, scratch} <- open_scratch(state) do
+      roots = readable_roots(state)
+
       # Canonical, all of it. A backend evaluates the path the kernel resolves, and on macOS
       # `System.tmp_dir!()` is `/var/folders/…`, which is `/private/var/folders/…` by the time
       # `open` sees it — a rule written on the un-resolved form matches nothing and the fence
@@ -1549,7 +1621,7 @@ defmodule Ouroboros.Wasm.Pool do
       # the scratch are resolved here for the same reason.
       policy =
         Sandbox.helper_policy(
-          readable: readable_roots(state),
+          readable: roots,
           writable: Enum.map(List.wrap(state.writable), &canonical/1),
           scratch: scratch
         )
@@ -1562,7 +1634,13 @@ defmodule Ouroboros.Wasm.Pool do
              args: args,
              env: filtered_env() ++ scratch_env(policy),
              scratch: scratch,
-             sandbox: %{posture: :sandboxed, backend: Sandbox.label(detection), reason: nil}
+             fenced: roots,
+             sandbox: %{
+               posture: :sandboxed,
+               backend: Sandbox.label(detection),
+               reason: nil,
+               readable: policy.readable
+             }
            }}
 
         {:error, reason} ->
@@ -1600,7 +1678,15 @@ defmodule Ouroboros.Wasm.Pool do
         _absent -> nil
       end
 
-    {:ok, %{state | port: port, os_pid: os_pid, scratch: plan.scratch, sandbox: plan.sandbox}}
+    {:ok,
+     %{
+       state
+       | port: port,
+         os_pid: os_pid,
+         scratch: plan.scratch,
+         sandbox: plan.sandbox,
+         fenced: plan.fenced
+     }}
   rescue
     error ->
       _ = if is_binary(plan.scratch), do: File.rm_rf(plan.scratch)
@@ -1653,32 +1739,47 @@ defmodule Ouroboros.Wasm.Pool do
   #
   #   * `Sandbox.platform_readable/0` — the dynamic loader and the C library the helper links,
   #     without which the process does not start at all;
-  #   * the **helper binary's own directory**, because `process-exec` still has to read the
-  #     executable;
-  #   * this node's **lane-W subtree**, `<data_dir>/wasm` — the component store and the
-  #     artifacts beside it, the forge's build directory (whose product the forge asks this
-  #     helper to `inspect`, D18) and the scratch below. Its siblings under the data directory
-  #     — grants, permissions, the effect ledger, the signing journal — are not in it, and
-  #     that is the whole reason the root named is the subtree and not the data directory;
-  #   * the node's **workspace roots**, because the hook lane is the one `load` in this
-  #     repository whose path is not in the store: `Ouroboros.Provider.Native.Hooks` reads a
-  #     `component =` hook out of the repository it is configured in, confined to that
-  #     workspace, and hands the pool that path. Those bytes are the untrusted half of D8, and
-  #     the helper is what contains them — so the roots have to be readable for the lane to
-  #     work at all, and the fence is honest about being that much wider (docs/WASM.md D25);
-  #   * `helper_readable`, for a node whose components are somewhere else, plus whatever this
-  #     pool was started with.
+  #   * the **helper binary's own directory**, because bubblewrap has to `--ro-bind` the
+  #     executable into the namespace before it can `execve` it. Seatbelt does not need it —
+  #     a mutation that dropped this root stayed green on macOS, and the sentence that used to
+  #     stand here ("`process-exec` still has to read the executable") was simply false there.
+  #     It is a Linux requirement, pinned as one in
+  #     `test/provider/native/sandbox_helper_policy_test.exs`;
+  #   * this node's **component store**, `Ouroboros.Wasm.Store.root/1` — the one directory
+  #     every `load` in this repository resolves a path in, the hook lane included since W16's
+  #     fix wave staged its bytes there. Not `<data_dir>/wasm`: that subtree also holds the
+  #     upload staging area, the sign scratch, the forged bundles and the forge's cargo home,
+  #     and a cargo home's `config.toml` on a builder node can hold a credential;
+  #   * the forge's **build directory**, `Ouroboros.Wasm.Forge`'s own, because `inspect` on a
+  #     freshly built product is the one path this node hands the helper that is not a store
+  #     entry (D18). It is the node's own directory, holding a project this node validated and
+  #     bytes cargo just wrote;
+  #   * `helper_readable` — **vetted** (`Ouroboros.Wasm.helper_readable/0`) — for a node whose
+  #     components are somewhere else, plus whatever this pool was started with.
   #
-  # The same list is what `check_path/3` measures a `load` against, so the two walls cannot
-  # disagree about where a component may come from.
+  # What is **not** here, and was in W16's first cut: the node's workspace roots. The hook lane
+  # was the reason — `Ouroboros.Provider.Native.Hooks` read a `component =` hook out of the
+  # repository it was configured in and handed the pool that path — and it is gone because
+  # `run_component/4` now stages those bytes into the store first (docs/WASM.md D25). A fence
+  # that had to name every repository an operator serves was a fence around nothing much.
+  #
+  # The same list is what `check_path/3` measures a `load` and an `inspect` against, so the two
+  # walls cannot disagree about where a component may come from.
   defp readable_roots(state) do
     ([Path.dirname(state.helper_path)] ++
-       List.wrap(Wasm.data_root()) ++
-       Application.get_env(:ouroboros, :workspace_allowed_roots, []) ++
+       store_root() ++
+       List.wrap(Wasm.builds_root()) ++
        Wasm.helper_readable() ++ List.wrap(state.readable))
     |> Enum.filter(&(is_binary(&1) and &1 != ""))
-    |> Enum.map(&canonical/1)
+    |> Enum.map(&canonical_root/1)
     |> Enum.uniq()
+  end
+
+  defp store_root do
+    case Store.root([]) do
+      {:ok, dir} -> [dir]
+      {:error, _no_data_dir} -> []
+    end
   end
 
   # The path the kernel would resolve, or — when this side cannot resolve it — the path as
@@ -1701,6 +1802,31 @@ defmodule Ouroboros.Wasm.Pool do
     end
   end
 
+  # A **root**, resolved as far as it exists and appended for the rest — the opposite fallback
+  # from `canonical/1`, and for the opposite reason.
+  #
+  # A root's job is to match: the store's own directory is created lazily by
+  # `Ouroboros.Wasm.Store` on its first publish, so a pool that spawns before a node has ever
+  # held a component is asked to fence a directory that is not there yet. `Path.expand/1` would
+  # then leave `/var/folders/…` un-resolved where the kernel sees `/private/var/folders/…`, and
+  # the rule would name a directory that never matches — the store unreadable, every load
+  # `unreadable_component`, on a node that looks correctly configured. Resolving the deepest
+  # ancestor that does exist keeps the two spellings the same one. A *load path* still fails
+  # closed (`canonical/1`): an unresolvable path there is refused, never admitted.
+  defp canonical_root(path) do
+    case WorkspacePath.canonicalize(path) do
+      {:ok, canonical} ->
+        canonical
+
+      {:error, _absent} ->
+        parent = Path.dirname(path)
+
+        if parent == path,
+          do: Path.expand(path),
+          else: Path.join(canonical_root(parent), Path.basename(path))
+    end
+  end
+
   # A directory only this child writes into, created the way `Ouroboros.Wasm.Deploy`'s sign
   # scratch is and for the same reason: `System.tmp_dir!()` is writable by every account on
   # the machine, so a root this process `mkdir_p`s there may already exist, be owned by
@@ -1715,10 +1841,17 @@ defmodule Ouroboros.Wasm.Pool do
       sweep_scratch(root)
 
       name = @scratch_prefix <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
+      dir = Path.join(root, name)
 
-      case private_dir(Path.join(root, name)) do
-        {:ok, dir} -> {:ok, canonical(dir)}
-        {:error, _reason} = error -> error
+      case private_dir(dir) do
+        {:ok, dir} ->
+          # Written after the directory exists and before the child does, so a sweep that runs
+          # between the two sees a fresh directory and leaves it alone on age anyway.
+          _ = File.write(dir <> @owner_suffix, System.pid())
+          {:ok, canonical(dir)}
+
+        {:error, _reason} = error ->
+          error
       end
     end
   end
@@ -1747,10 +1880,10 @@ defmodule Ouroboros.Wasm.Pool do
   end
 
   # On the way in, because "removed when the child ends" is not always in this runtime's gift:
-  # a node killed with `-9` runs no `terminate/2`. Bounded in both directions — only
-  # directories this pool named, only ones old enough to belong to no live child, and at most
-  # `@scratch_sweep_limit` of them per spawn — so a crowded root costs a bounded amount of
-  # work rather than a growing one.
+  # a node killed with `-9` runs no `terminate/2`. Bounded in three directions — only
+  # directories this pool named, only ones old enough *and* whose owning BEAM is gone, and at
+  # most `@scratch_sweep_limit` of them per spawn — so a crowded root costs a bounded amount
+  # of work rather than a growing one, and a sibling node's live child is never the cost.
   defp sweep_scratch(root) do
     cutoff = System.os_time(:second) - @scratch_abandoned_after_seconds
 
@@ -1758,10 +1891,14 @@ defmodule Ouroboros.Wasm.Pool do
       {:ok, entries} ->
         entries
         |> Stream.filter(&String.starts_with?(&1, @scratch_prefix))
+        |> Stream.reject(&String.ends_with?(&1, @owner_suffix))
         |> Stream.map(&Path.join(root, &1))
         |> Stream.filter(&abandoned_scratch?(&1, cutoff))
         |> Enum.take(@scratch_sweep_limit)
-        |> Enum.each(&File.rm_rf/1)
+        |> Enum.each(fn dir ->
+          _ = File.rm_rf(dir)
+          _ = File.rm(dir <> @owner_suffix)
+        end)
 
       {:error, _unreadable} ->
         :ok
@@ -1770,15 +1907,50 @@ defmodule Ouroboros.Wasm.Pool do
     :ok
   end
 
+  # Old enough first, because that is a `stat` and the other is a process check: on a healthy
+  # node nothing passes the first filter and nothing spends the second.
   defp abandoned_scratch?(path, cutoff) do
+    old_scratch?(path, cutoff) and not owner_alive?(path <> @owner_suffix)
+  end
+
+  defp old_scratch?(path, cutoff) do
     match?(
       {:ok, %File.Stat{type: :directory, mtime: mtime}} when mtime < cutoff,
       File.stat(path, time: :posix)
     )
   end
 
-  defp refused_sandbox(why),
-    do: %{posture: :refused, backend: Sandbox.label(Sandbox.detect()), reason: why}
+  # A marker naming a pid this machine still has. Pid reuse can make a dead owner look alive,
+  # which only postpones a reclaim; the direction that matters is the other one, and a missing,
+  # unreadable or unparseable marker is "no owner" and therefore reclaimable.
+  defp owner_alive?(marker) do
+    with {:ok, text} <- File.read(marker),
+         {pid, _rest} when pid > 0 <- Integer.parse(String.trim(text)),
+         exe when is_binary(exe) <- System.find_executable("kill") do
+      match?(
+        {_output, 0},
+        System.cmd(exe, ["-0", Integer.to_string(pid)], stderr_to_stdout: true)
+      )
+    else
+      _no_living_owner -> false
+    end
+  end
+
+  # The read set as the **policy** states it — this pool's own roots plus the platform's — so
+  # the field means the same thing whether a child exists or not. A spawned child reports the
+  # policy it actually ran under; everything else reports what the policy would be, built the
+  # same way and creating nothing.
+  defp effective_readable(state) do
+    Sandbox.helper_policy(readable: readable_roots(state), writable: []).readable
+  end
+
+  defp refused_sandbox(state, why),
+    do: %{
+      posture: :refused,
+      backend: Sandbox.label(Sandbox.detect()),
+      reason: why,
+      readable: effective_readable(state)
+    }
 
   # What the last spawn did, or — before there has been one — what the next one would do. The
   # second half is computed rather than assumed, including the scratch root, so a node that
@@ -1788,28 +1960,55 @@ defmodule Ouroboros.Wasm.Pool do
 
   defp sandbox_report(state) do
     case sandbox_setting(state) do
-      :off -> %{posture: :off, backend: Sandbox.label(Sandbox.detect()), reason: nil}
-      :required -> intended_sandbox(state, Sandbox.detect())
+      :off ->
+        %{
+          posture: :off,
+          backend: Sandbox.label(Sandbox.detect()),
+          reason: nil,
+          readable: effective_readable(state)
+        }
+
+      :required ->
+        intended_sandbox(state, Sandbox.detect())
     end
   end
 
   defp intended_sandbox(state, detection) do
     label = Sandbox.label(detection)
+    roots = effective_readable(state)
 
     cond do
       detection.backend == :none ->
-        %{posture: :refused, backend: label, reason: {:no_backend, bounded(detection.notes)}}
+        %{
+          posture: :refused,
+          backend: label,
+          reason: {:no_backend, bounded(detection.notes)},
+          readable: roots
+        }
 
       not Sandbox.fences_reads?(detection) ->
-        %{posture: :refused, backend: label, reason: {:cannot_fence_reads, detection.backend}}
+        %{
+          posture: :refused,
+          backend: label,
+          reason: {:cannot_fence_reads, detection.backend},
+          readable: roots
+        }
+
+      not Sandbox.fences_network?(detection) ->
+        %{
+          posture: :refused,
+          backend: label,
+          reason: {:cannot_fence_network, detection.backend},
+          readable: roots
+        }
 
       true ->
         case scratch_root(state) do
           {:ok, _root} ->
-            %{posture: :sandboxed, backend: label, reason: nil}
+            %{posture: :sandboxed, backend: label, reason: nil, readable: roots}
 
           {:error, {:helper_sandbox_unavailable, why}} ->
-            %{posture: :refused, backend: label, reason: why}
+            %{posture: :refused, backend: label, reason: why, readable: roots}
         end
     end
   end

@@ -1022,29 +1022,60 @@ defmodule Ouroboros.Provider.Native.Hooks do
   @spec run_component(map(), GenServer.server(), String.t(), pos_integer() | nil) ::
           {:ok, String.t()} | {:ignored, note()}
   defp run_component(hook, pool, payload, ceiling) do
-    case read_component(hook) do
-      {:ok, path, bytes} ->
-        # Hashed from the bytes this side read; the helper recomputes the digest from the
-        # bytes it reads and refuses `sha_mismatch` if they differ, so a file swapped
-        # between the two reads is a refusal rather than a substituted component.
-        sha = :sha256 |> :crypto.hash(bytes) |> Base.encode16(case: :lower)
+    with {:ok, _path, bytes} <- read_component(hook),
+         # Hashed from the bytes this side read; the helper recomputes the digest from the
+         # bytes it reads and refuses `sha_mismatch` if they differ, so a file swapped
+         # between the two reads is a refusal rather than a substituted component.
+         sha = :sha256 |> :crypto.hash(bytes) |> Base.encode16(case: :lower),
+         {:ok, staged} <- stage_component(bytes, sha) do
+      # `lane: :hook` is what subjects a repository's components to the pool's shared-cache
+      # budget. The helper evicts at its ceiling, so a clone can no longer fill its table
+      # and silence the operator's own `deny`; what the budget bounds is how many compiles,
+      # and how many of somebody else's evictions, a repository can cause per helper life.
+      # This `load` is also how an evicted sha comes back: the helper forgets a component
+      # nothing holds, and loading it again — a cache hit whenever it is still held — is
+      # what makes the `instantiate` after it safe to issue.
+      case Wasm.Pool.load(sha, staged, pool,
+             lane: if(Map.get(hook, :trusted, false), do: :hook, else: :untrusted_hook)
+           ) do
+        {:ok, _report} -> stand_and_call(hook, pool, sha, payload, ceiling)
+        {:error, reason} -> {:ignored, note(reason, "load")}
+      end
+    else
+      {:error, note} -> {:ignored, note}
+    end
+  end
 
-        # `lane: :hook` is what subjects a repository's components to the pool's shared-cache
-        # budget. The helper evicts at its ceiling, so a clone can no longer fill its table
-        # and silence the operator's own `deny`; what the budget bounds is how many compiles,
-        # and how many of somebody else's evictions, a repository can cause per helper life.
-        # This `load` is also how an evicted sha comes back: the helper forgets a component
-        # nothing holds, and loading it again — a cache hit whenever it is still held — is
-        # what makes the `instantiate` after it safe to issue.
-        case Wasm.Pool.load(sha, path, pool,
-               lane: if(Map.get(hook, :trusted, false), do: :hook, else: :untrusted_hook)
-             ) do
-          {:ok, _report} -> stand_and_call(hook, pool, sha, payload, ceiling)
-          {:error, reason} -> {:ignored, note(reason, "load")}
-        end
+  # W16, D25. The path the helper is given is a **store** path, never the workspace one.
+  #
+  # This lane used to hand `Ouroboros.Wasm.Pool` the file inside the repository the hook was
+  # configured in, and it was the only `load` in this runtime that did. The cost was not the
+  # path, it was the fence: the helper's sandbox had to make every workspace root readable for
+  # component hooks to work at all, so a compromised precompiled artifact (D24) reached the
+  # operator's repositories. Nothing here needed that — the bytes are already in hand and their
+  # digest is already computed — so they are published into the node's own content-addressed
+  # store first, and the helper reads only from there.
+  #
+  # `Ouroboros.Wasm.Store.put/3` is content-addressed and publish-once, so re-running the same
+  # hook costs one `File.stat`; it is bounded by `store_budget_bytes` and pruned like every
+  # other component, and a repository's hook is unreferenced by any rollout so a prune may
+  # evict it — after which the next run publishes it again. **A store that will not take the
+  # bytes is a hook that does not run**, named `component_not_staged`: a node with no data
+  # directory has no store, and a store over budget that cannot prune is a store that fails
+  # closed (`Wasm.Store`'s posture), so the honest answer is a refused hook rather than a
+  # component loaded from somewhere the fence does not cover.
+  defp stage_component(bytes, sha) do
+    case Wasm.Store.put(bytes, sha, []) do
+      {:ok, %{path: path}} ->
+        {:ok, path}
 
-      {:error, note} ->
-        {:ignored, note}
+      {:error, reason} ->
+        {:error,
+         note(
+           "component_not_staged",
+           "component_not_staged: the component could not be published into this node's " <>
+             "store: " <> Kernel.inspect(reason, limit: 10)
+         )}
     end
   end
 

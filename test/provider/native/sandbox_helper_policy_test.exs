@@ -74,6 +74,74 @@ defmodule Ouroboros.Provider.Native.SandboxHelperPolicyTest do
       }
     end
 
+    test "Seatbelt denies the network with no loopback exception (W16 HIGH-1)", %{
+      policy: policy
+    } do
+      profile = SandboxExec.profile(policy)
+
+      assert profile =~ "(deny network*)"
+
+      # The three lines that used to follow the deny, and the reason they are gone: SBPL is
+      # last-match-wins, so they re-allowed every `localhost` bind, inbound and outbound after
+      # the deny. A review connected to a loopback listener under this exact policy — which is
+      # every service on the machine, this node's own gateway included.
+      refute profile =~ "network-bind"
+      refute profile =~ "network-inbound"
+      refute profile =~ "network-outbound"
+
+      # And the exception is still there for the one caller that needs it: `mix` and `cargo`
+      # coordinate concurrent compilers over loopback, and a build without it fails `:eperm`.
+      builder = SandboxExec.profile(Sandbox.builder_policy(writable: ["/opt/build"]))
+      assert builder =~ "(deny network*)"
+      assert builder =~ ~s[(allow network-outbound (remote ip "localhost:*"))]
+    end
+
+    @tag :tmp_dir
+    test "and the kernel agrees: a loopback listener is unreachable", %{tmp_dir: tmp} do
+      detection = Sandbox.detect()
+
+      # A listener this test owns, on a port the OS chose, so nothing here depends on what
+      # else happens to be running.
+      {:ok, socket} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}, active: false])
+      {:ok, port} = :inet.port(socket)
+      on_exit(fn -> :gen_tcp.close(socket) end)
+
+      scratch = Path.join(tmp, "scratch")
+      File.mkdir_p!(scratch)
+      File.chmod!(scratch, 0o700)
+
+      reach = fn policy ->
+        {:ok, {exe, args}} =
+          Sandbox.wrap(
+            {:shell, "/usr/bin/nc -w 2 -z 127.0.0.1 #{port}; echo rc=$?"},
+            %{},
+            policy,
+            detection
+          )
+
+        {output, _status} =
+          System.cmd(exe, args, stderr_to_stdout: true, env: Sandbox.env(policy))
+
+        String.contains?(output, "rc=0")
+      end
+
+      helper = Sandbox.helper_policy(readable: [tmp], writable: [], scratch: scratch)
+
+      refute reach.(helper), "the helper policy let a child open a loopback socket"
+
+      # The other half, and what makes the first half a fence rather than a broken `nc`: the
+      # builder policy — the same shape, one field different — reaches the same listener.
+      # Only on Seatbelt: the Linux backends unshare the network namespace for *both*, so
+      # there is no loopback in either child to compare.
+      if detection.backend == :sandbox_exec do
+        builder =
+          Sandbox.builder_policy(readable: [tmp], writable: [])
+          |> Sandbox.with_scratch(scratch)
+
+        assert reach.(builder), "the builder policy lost the loopback exception cargo needs"
+      end
+    end
+
     test "Seatbelt closes on reads and names the roots as parameters", %{policy: policy} do
       profile = SandboxExec.profile(policy)
 
@@ -104,6 +172,29 @@ defmodule Ouroboros.Provider.Native.SandboxHelperPolicyTest do
       assert "--die-with-parent" in options
       assert "--unshare-net" in options
       assert "--tmpfs" in options
+    end
+
+    test "and it ro-binds the helper's own directory, which is why that root is in the set" do
+      # W16 MEDIUM-8. A mutation dropping the helper binary's directory from
+      # `Ouroboros.Wasm.Pool`'s readable roots stayed green on macOS: Seatbelt's
+      # `(allow process-exec)` does not need the file readable to `execve` it, so the comment
+      # that used to justify the root ("`process-exec` still has to read the executable") was
+      # false there. It is a **Linux** requirement — bubblewrap builds a namespace, and a
+      # binary that is not bound into it is not there to run — so this is where it is pinned.
+      #
+      # `Bwrap.options/3` filters the readable list to what is on disk, so the root used here
+      # is one that exists on every machine this suite runs on.
+      here = Path.dirname(__ENV__.file)
+
+      binds =
+        Sandbox.helper_policy(readable: [here], writable: [], scratch: "/opt/scratch")
+        |> then(&Bwrap.options(%{}, &1, true))
+        |> Enum.chunk_every(3, 1, :discard)
+
+      assert ["--ro-bind", here, here] in binds,
+             "the helper's own directory is not bound into the namespace"
+
+      refute ["--bind", here, here] in binds, "a readable root must not be writable"
     end
   end
 end

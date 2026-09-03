@@ -3546,6 +3546,11 @@ pub struct WasmSandbox {
     pub backend: Option<String>,
     /// Why a `refused` node refused, in the runtime's words. `None` when nothing went wrong.
     pub reason: Option<String>,
+    /// The effective read set, as **basenames** — the runtime sends no absolute paths over a
+    /// `read` verb. Empty on a node that has taken no posture; on a node whose
+    /// `helper_readable` was rejected whole this is the node's own roots and nothing else,
+    /// which is how an operator sees that a configured list is not in force.
+    pub readable: Vec<String>,
 }
 
 impl WasmSandbox {
@@ -3700,6 +3705,7 @@ impl WasmSandbox {
             posture: nonempty(value.get("posture")),
             backend: nonempty(value.get("backend")),
             reason: nonempty(value.get("reason")),
+            readable: strings(value.get("readable")),
         }
     }
 }
@@ -5129,6 +5135,18 @@ mod tests {
         assert_eq!(status.sandbox.backend.as_deref(), Some("sandbox-exec"));
         assert_eq!(status.sandbox.reason, None);
 
+        // Basenames, never paths: the effective read set is readable as a shape without
+        // naming an install prefix or an account.
+        assert_eq!(status.sandbox.readable, vec!["wasm", "components"]);
+        assert!(
+            !status
+                .sandbox
+                .readable
+                .iter()
+                .any(|root| root.contains('/')),
+            "a read verb sends no absolute paths"
+        );
+
         // A basename, not a path: both wasm verbs are `read`, and the fixture is what the
         // daemon answers (W7, `Ouroboros.Wasm.Surface`).
         assert_eq!(status.store.root.as_deref(), Some("components"));
@@ -5170,6 +5188,7 @@ mod tests {
         assert!(!empty.sandbox.off());
         assert!(!empty.sandbox.sandboxed());
         assert!(!empty.sandbox.refused());
+        assert!(empty.sandbox.readable.is_empty());
     }
 
     /// The two postures the fixture cannot carry at once, decoded from the shapes the runtime
@@ -5189,6 +5208,23 @@ mod tests {
         assert!(!refused.sandbox.sandboxed());
         assert_eq!(refused.sandbox.backend.as_deref(), Some("ouro-sandbox"));
         assert!(refused.sandbox.reason.is_some(), "a refusal says why");
+        assert!(
+            refused.sandbox.readable.is_empty(),
+            "a node that refused to spawn fenced nothing"
+        );
+
+        // The other refusal W16's fix wave added: a backend that applies its filesystem rules
+        // and still leaves the child on the host's network.
+        let unfenced = WasmStatus::decode(&serde_json::json!({
+            "sandbox": {
+                "posture": "refused",
+                "backend": "bwrap",
+                "reason": "{:cannot_fence_network, :bwrap}"
+            }
+        }));
+
+        assert!(unfenced.sandbox.refused());
+        assert_eq!(unfenced.sandbox.backend.as_deref(), Some("bwrap"));
 
         let off = WasmStatus::decode(&serde_json::json!({
             "sandbox": {"posture": "off", "backend": "sandbox-exec", "reason": null}

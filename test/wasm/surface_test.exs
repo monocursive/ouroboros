@@ -463,7 +463,12 @@ defmodule Ouroboros.Wasm.SurfaceTest do
 
       live = Surface.status([pool: counting_pool(doctor_report())] ++ opts(context))
 
-      assert live.sandbox == %{posture: :sandboxed, backend: "sandbox-exec", reason: nil}
+      assert live.sandbox == %{
+               posture: :sandboxed,
+               backend: "sandbox-exec",
+               reason: nil,
+               readable: ["components"]
+             }
     end
 
     test "a refusal names its reason as prose, never as a term a client would branch on",
@@ -483,7 +488,8 @@ defmodule Ouroboros.Wasm.SurfaceTest do
           sandbox: %{
             posture: :refused,
             backend: "ouro-sandbox",
-            reason: {:cannot_fence_reads, :ouro_sandbox}
+            reason: {:cannot_fence_reads, :ouro_sandbox},
+            readable: []
           },
           broken_reason: {:helper_sandbox_unavailable, {:cannot_fence_reads, :ouro_sandbox}}
         })
@@ -496,6 +502,7 @@ defmodule Ouroboros.Wasm.SurfaceTest do
       assert live.sandbox.backend == "ouro-sandbox"
       assert is_binary(live.sandbox.reason)
       assert live.sandbox.reason =~ "cannot_fence_reads"
+      assert live.sandbox.readable == []
 
       # `:refused` means there is no helper on that node, so the two halves agree.
       assert live.helper.phase == :broken
@@ -509,7 +516,7 @@ defmodule Ouroboros.Wasm.SurfaceTest do
       # not "off", the same rule `usable` follows. `phase: :absent` is the other half of it.
       live = Surface.status([pool: :ouro_wasm_pool_that_was_never_started] ++ opts(context))
 
-      assert live.sandbox == %{posture: nil, backend: nil, reason: nil}
+      assert live.sandbox == %{posture: nil, backend: nil, reason: nil, readable: []}
       assert live.helper.phase == :absent
     end
   end
@@ -636,8 +643,14 @@ defmodule Ouroboros.Wasm.SurfaceTest do
         pending_drops: 0,
         hook_components: 3,
         # W16, D25. A pool answers what its child's posture is; the fixture's is the ordinary
-        # one, because that is what a working node reports.
-        sandbox: %{posture: :sandboxed, backend: "sandbox-exec", reason: nil},
+        # one, because that is what a working node reports. `readable` is absolute on the node
+        # and **basenames** on the wire, for `helper.path`'s reason.
+        sandbox: %{
+          posture: :sandboxed,
+          backend: "sandbox-exec",
+          reason: nil,
+          readable: ["/opt/ouroboros/data/wasm/components"]
+        },
         broken_reason: nil
       })
 
