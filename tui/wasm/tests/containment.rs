@@ -2180,6 +2180,8 @@ fn precompile(tag: &str, bytes: &[u8], kind: &str) -> Result<Precompiled, (Strin
         .expect("ouro-wasm precompile runs");
 
     if !produced.status.success() {
+        // Nothing was written, and the input is this suite's own: take it back.
+        let _ = std::fs::remove_file(&source.path);
         let refusal: Value = serde_json::from_slice(&produced.stderr).unwrap_or_else(
             |_| json!({ "refusal": "", "message": String::from_utf8_lossy(&produced.stderr) }),
         );
@@ -2520,12 +2522,18 @@ fn precompiled_bytes_no_manifest_named_are_refused() {
     assert_eq!(refusal, "precompiled_mismatch");
 
     // And `precompiled` is not a string, an integer, or anything but a boolean: which form a
-    // set of bytes is is not something to be lenient about. That one is a statement about the
-    // *request*, so it is the transport's `invalid_params` rather than a refusal about a
-    // component, and it is read off the raw reply for that reason.
+    // set of bytes is is not something to be lenient about. Asked over a request that is
+    // otherwise **completely valid** — a real artifact, its own digest, the component it was
+    // compiled from — so what is refused is the type of that one field and not some other
+    // thing wrong with the frame.
     let reply = helper.request(
         "load",
-        json!({ "precompiled": "yes", "sha256": source.sha256, "path": source.path }),
+        json!({
+            "precompiled": "yes",
+            "sha256": artifact.sha256,
+            "component": artifact.component_sha256,
+            "path": artifact.path,
+        }),
     );
     assert_eq!(reply["error"]["code"], -32602);
     assert_eq!(reply["error"]["data"]["refusal"], "invalid_params");
@@ -2630,4 +2638,91 @@ fn the_signer_applies_the_structural_bound_before_it_compiles() {
     let (refusal, _) = precompile("w8-wrongworld", &support::echo(), "policy")
         .expect_err("a capability is not a policy");
     assert_eq!(refusal, "unsupported_world");
+}
+
+/// The signer refuses to compile something that is already compiled, and both readers say which
+/// form they are looking at.
+///
+/// Three claims the first cut left to a comment. `precompile` reads its input through the node's
+/// own source reader, which refuses a container by name — without it a signer would hand
+/// wasmtime an object file and report whatever `compile_failed` fell out, and an operator who
+/// re-ran `precompile` on its own output would get a refusal about WebAssembly rather than about
+/// what they did. And `inspect` and `load` both report `precompiled` for the *source* form too,
+/// so a reader never has to infer a form from an absent key.
+#[test]
+fn a_precompiled_artifact_is_not_a_component_and_both_readers_say_which_is_which() {
+    let artifact = precompile("w8-again", &support::echo(), "capability").expect("it compiles");
+
+    let (refusal, message) = Command::new(HELPER)
+        .args([
+            "precompile",
+            &artifact.path,
+            &format!("{}.2", artifact.path),
+        ])
+        .output()
+        .map(|produced| {
+            let refusal: Value = serde_json::from_slice(&produced.stderr).unwrap_or(json!({}));
+            (
+                refusal["refusal"].as_str().unwrap_or_default().to_string(),
+                refusal["message"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .expect("ouro-wasm precompile runs");
+
+    assert_eq!(refusal, "precompiled_mismatch");
+    assert!(
+        message.contains("already holds a precompiled artifact"),
+        "the signer must say what it was pointed at: {message}"
+    );
+
+    let mut helper = Helper::spawn(&[]);
+    let source = fixture("w8-again-src", &support::echo());
+
+    // The source form, at both readers, says so.
+    let inspected = helper.ok("inspect", json!({ "path": source.path }));
+    assert_eq!(inspected["precompiled"], false);
+    assert!(inspected["shape"].is_object(), "and it was walked");
+
+    let loaded = load(&mut helper, &source);
+    assert_eq!(loaded["precompiled"], false);
+
+    // The artifact, at `inspect`, says the opposite — and carries no `shape`, because nothing
+    // was walked and reporting a census of an object file would be inventing one.
+    let inspected = helper.ok("inspect", json!({ "path": artifact.path }));
+    assert_eq!(inspected["precompiled"], true);
+    assert!(inspected.get("shape").is_none());
+}
+
+/// A file too large for the form it is is refused under **that form's** cap, and is not read to
+/// the other one first.
+///
+/// The caps differ, and neither form can be told from the other without looking at the first
+/// nine bytes — so the reader peeks those and then reads under the cap that applies. Reading
+/// under the larger of the two and checking afterwards was the obvious shape and the wrong one:
+/// a 65 MiB source component would reach this process's heap in full before the 64 MiB cap that
+/// governs it was consulted, which is a bound applied after the allocation it exists to prevent.
+/// The refusal names the cap that fired, which is how this test can tell the two apart.
+#[test]
+fn a_source_component_is_bounded_by_the_source_cap_and_not_by_the_artifact_one() {
+    const SOURCE_CAP: u64 = 64 * 1024 * 1024;
+
+    let mut oversize = b"\0asm\x0d\x00\x01\x00".to_vec();
+    oversize.resize(SOURCE_CAP as usize + 1, 0);
+    let fat = fixture("w8-oversize", &oversize);
+
+    let mut helper = Helper::spawn(&[]);
+    let (refusal, message) = helper.refusal("inspect", json!({ "path": fat.path }));
+
+    assert_eq!(refusal, "unreadable_component");
+    assert!(
+        message.contains(&SOURCE_CAP.to_string()),
+        "the refusal must name the cap that fired, which is the source one: {message}"
+    );
+
+    let (refusal, message) =
+        helper.refusal("load", json!({ "sha256": fat.sha256, "path": fat.path }));
+    assert_eq!(refusal, "unreadable_component");
+    assert!(message.contains(&SOURCE_CAP.to_string()), "{message}");
+
+    let _ = std::fs::remove_file(&fat.path);
 }

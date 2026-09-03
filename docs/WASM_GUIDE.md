@@ -1143,6 +1143,31 @@ had. What it costs is the compile, on each node, for that capability. If you wan
 across a mixed fleet, sign once per build — or sign with `ouro wasm sign --no-precompile` and
 keep the bundle small, which is also what a signing node with no helper does by itself.
 
+If the node's helper refuses the artifact after all — a file that rotted on disk, a header that
+does not describe it — the node loads the source form and logs one line saying so. A fallback is
+never a fault: the slow path is the path every node has always had, and nothing about a
+capability's behaviour depends on which form ran.
+
+### Refusing the fast form on purpose
+
+```
+config :ouroboros, :wasm, accept_precompiled: false
+```
+
+This is the one setting in lane W an operator reaches for because of *who signed*, not because
+of what a component does, and it is worth knowing before you need it. The precompiled form is
+machine code, and `Component::deserialize` does not validate machine code against a malicious
+producer — that is what the signature is for. So a signing key you trust can now put executing
+code into your helper process, where before W8 the worst it could put there was a contained
+component: bounded by fuel, by a deadline, by a memory ceiling, by a linker that defines one
+function. The helper is still a separate process, so what that reaches is a Port rather than the
+node — but it is not OS-sandboxed today, so inside that process it has the helper's own access.
+
+Set this to `false` and every node compiles every component for itself, exactly as before W8:
+no redeploy, no resigning, nothing to change in any bundle. What it costs is the compile, per
+node, per capability. It is the right answer while a signing key's custody is in question, and
+`ouro wasm ls` will read `source` everywhere while it is set.
+
 ### Reboot
 
 At `:core` boot a supervised one-shot task restarts the wrapper agents for `:live` lane-W

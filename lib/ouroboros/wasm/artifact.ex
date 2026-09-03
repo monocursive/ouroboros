@@ -328,6 +328,27 @@ defmodule Ouroboros.Wasm.Artifact do
 
   def with_signature(artifact, _signature), do: {:error, {:invalid_artifact, describe(artifact)}}
 
+  @doc """
+  Attaches the precompiled block to a manifest that was built without one (W8, D23).
+
+  The signing path builds the source manifest first, has it *admitted* — rate limit charged,
+  policy applied — and only then compiles; this is how the block reaches the manifest that gets
+  signed without rebuilding it. Rebuilding would mint a new `id` and a new `created_at`, so the
+  manifest the signer signs would no longer be the manifest the admission was about, which is
+  the one thing the two-phase order exists to guarantee.
+
+  `nil` is the identity: a node that compiled nothing signs exactly what it admitted.
+  """
+  @spec with_precompiled(t(), precompiled() | nil) :: {:ok, t()} | {:error, term()}
+  def with_precompiled(%__MODULE__{} = artifact, precompiled) do
+    if precompiled?(precompiled),
+      do: {:ok, %{artifact | precompiled: precompiled}},
+      else: {:error, {:invalid_precompiled, describe(precompiled)}}
+  end
+
+  def with_precompiled(artifact, _precompiled),
+    do: {:error, {:invalid_artifact, describe(artifact)}}
+
   @doc "The lower-case hex sha256 of `bytes`, the one identity a lane-W capability has."
   @spec digest(binary()) :: String.t()
   def digest(bytes) when is_binary(bytes),

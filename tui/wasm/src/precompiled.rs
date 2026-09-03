@@ -64,19 +64,24 @@ pub const MAX_HEADER_BYTES: usize = 4 * 1024;
 
 /// The largest serialized artifact this helper will read.
 ///
-/// Twice [`crate::host::MAX_COMPONENT_BYTES`], and generous by a wide margin on purpose. What
-/// actually bounds a serialized artifact is not the source file's size but its *code*, which
-/// §7.3 caps at [`crate::shape::MAX_CODE_BYTES`]: measured here, the worst shape the helper
-/// admits — 20 000 functions and just under 4 MiB of code — serializes to 11 092 495 bytes,
-/// 2.75× its source, and the 48 KiB reference guest to 258 093, 5.3× its own (fixed overhead
-/// dominates a small one). So this ceiling is an order of magnitude above anything a signer
-/// applying §7.3 can produce, and it is here to be a *bound*, not a fit.
+/// Exactly [`crate::host::MAX_COMPONENT_BYTES`], and the equality is the point: **one number**
+/// bounds what this helper will read, whichever form the bytes are in. A separate, larger cap
+/// for artifacts was a staging ceiling nobody had stated — `Ouroboros.Wasm.Upload` sizes its
+/// slots from what a bundle may weigh, so a second cap here raised what a client could park on
+/// a node's disk without anybody deciding to.
+///
+/// It is generous against measurement rather than a fit. What bounds a serialized artifact is
+/// not the source file's size but its *code*, which §7.3 caps at
+/// [`crate::shape::MAX_CODE_BYTES`]: the worst shape this helper admits — 20 000 functions and
+/// just under 4 MiB of code — serializes to 11 092 495 bytes, 2.75× its source, and the 48 KiB
+/// reference guest to 258 093, 5.3× its own (fixed overhead dominates a small one). Sixty-four
+/// mebibytes is five times the worst artifact a signer applying §7.3 can produce.
 ///
 /// This is the bound W8 trades the structural pass for on the loading node. Deserializing is
 /// linear in the input and compiles nothing, so a byte cap is a bound on the work — which is
 /// exactly what a byte cap was not while `Component::new` was on the hot path, and why §7.3
 /// had to count functions instead.
-pub const MAX_PAYLOAD_BYTES: u64 = 2 * crate::host::MAX_COMPONENT_BYTES;
+pub const MAX_PAYLOAD_BYTES: u64 = crate::host::MAX_COMPONENT_BYTES;
 
 /// What the header says, once it has been read and bounded.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -365,11 +370,84 @@ mod tests {
         assert_eq!(error.refusal, "precompiled_mismatch");
         assert!(error.message.contains("version 2"), "{}", error.message);
 
+        assert_eq!(read(&[]).unwrap_err().refusal, "precompiled_mismatch");
+    }
+
+    /// A file of exactly this framing, whatever the lengths say. The lengths are what the
+    /// *reader* is asked to believe, so a test about the bounds on them has to be able to
+    /// declare numbers no writer would.
+    fn framed(version: u8, header_len: u32, payload_len: u32, tail: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(MAGIC);
+        out.push(version);
+        out.extend_from_slice(&header_len.to_be_bytes());
+        out.extend_from_slice(&payload_len.to_be_bytes());
+        out.extend_from_slice(tail);
+        out
+    }
+
+    /// The magic, on a file long enough to reach the check.
+    ///
+    /// A short input is refused by the length clause before the magic is ever compared, so a
+    /// test that only offered eight bytes proved the *length* bound twice and the magic not at
+    /// all: delete the `is_container` clause from [`read`] and it stayed green. This one is a
+    /// component's own preamble padded past the header, which is exactly what an operator who
+    /// pointed a precompiled `load` at a `.wasm` hands over.
+    #[test]
+    fn bytes_that_are_not_one_of_these_containers_are_refused_by_the_magic() {
+        let mut component = b"\0asm\x0d\x00\x01\x00".to_vec();
+        component.resize(HEADER_BYTES + 64, 0);
+
+        let error = read(&component).unwrap_err();
+        assert_eq!(error.refusal, "precompiled_mismatch");
+        assert!(
+            error.message.contains("magic"),
+            "the refusal must say what it did not begin with: {}",
+            error.message
+        );
+        assert!(!is_container(&component));
+    }
+
+    /// Both declared lengths are bounded **before** either slice is taken, which is the whole of
+    /// what stands between a peer-chosen `u32` and this process's heap. The ceilings are the
+    /// numbers §14 names, so they are asserted by value rather than by "some refusal happened".
+    #[test]
+    fn a_declared_length_past_its_ceiling_is_refused_before_the_slice() {
+        // A header block larger than the cap, on a file that is nothing but its own claim.
+        let error = read(&framed(FORMAT_VERSION, MAX_HEADER_BYTES as u32 + 1, 1, &[])).unwrap_err();
+        assert_eq!(error.refusal, "precompiled_mismatch");
+        assert!(
+            error.message.contains(&(MAX_HEADER_BYTES + 1).to_string()),
+            "the refusal names the length that was declared: {}",
+            error.message
+        );
+
+        // And a payload past the artifact cap. A `u32` cannot express more than 4 GiB, so this
+        // is the ceiling that matters: 64 MiB, the same number the component read cap is.
+        assert_eq!(MAX_PAYLOAD_BYTES, 64 * 1024 * 1024);
+        let over = MAX_PAYLOAD_BYTES as u32 + 1;
+        let error = read(&framed(FORMAT_VERSION, 16, over, &[])).unwrap_err();
+        assert_eq!(error.refusal, "precompiled_mismatch");
+        assert!(
+            error.message.contains(&over.to_string()),
+            "the refusal names the payload length that was declared: {}",
+            error.message
+        );
+
+        // Zero is not a length either: a container with no header or no payload describes
+        // nothing, and admitting one would mean deserializing an empty slice.
         assert_eq!(
-            read(b"\0asm\x0d\x00\x01\x00").unwrap_err().refusal,
+            read(&framed(FORMAT_VERSION, 0, 1, &[]))
+                .unwrap_err()
+                .refusal,
             "precompiled_mismatch"
         );
-        assert_eq!(read(&[]).unwrap_err().refusal, "precompiled_mismatch");
+        assert_eq!(
+            read(&framed(FORMAT_VERSION, 16, 0, &[]))
+                .unwrap_err()
+                .refusal,
+            "precompiled_mismatch"
+        );
     }
 
     /// The two halves of the world claim are held to each other, so a header cannot name one

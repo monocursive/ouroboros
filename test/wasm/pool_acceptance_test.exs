@@ -3,6 +3,7 @@ defmodule Ouroboros.Wasm.PoolAcceptanceTest do
   use ExUnit.Case, async: false
 
   alias Ouroboros.Wasm
+  alias Ouroboros.Wasm.Bundle
   alias Ouroboros.Wasm.Pool
   alias Ouroboros.Wasm.Store
 
@@ -38,6 +39,29 @@ defmodule Ouroboros.Wasm.PoolAcceptanceTest do
       status = Pool.status(pool)
       assert status.phase == :ready
       assert status.doctor["worlds"] == report["worlds"]
+    end
+
+    @tag @needs_helper
+    test "the pair a precompiled artifact is bound to, and the ceiling both sides hold (W8)" do
+      pool = start_pool()
+
+      assert {:ok, report} = Pool.doctor(pool)
+
+      # The two strings `Ouroboros.Wasm.Store.form/4` compares before this node will map an
+      # artifact its signer compiled. `helper_build/2` reads them off the accepted report rather
+      # than asking again, so what it answers has to be what the helper actually said.
+      assert is_binary(report["target"]) and report["target"] != ""
+
+      assert Pool.helper_build(pool) == %{
+               "wasmtime" => report["wasmtime"],
+               "target" => report["target"]
+             }
+
+      # M6. One number, two implementations. `Ouroboros.Wasm.Bundle` mirrors the helper's own
+      # artifact ceiling because a bundle this build admits and the helper refuses is a file an
+      # operator moves around and a node will not load, for a reason neither of them named.
+      assert report["limits"]["max_precompiled_bytes"] == Bundle.helper_precompiled_bytes()
+      assert Bundle.max_precompiled_bytes() <= report["limits"]["max_precompiled_bytes"]
     end
   end
 

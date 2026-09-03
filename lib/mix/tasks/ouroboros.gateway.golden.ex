@@ -1432,7 +1432,10 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       signer: "release-key",
       start_id: "wasm/vet",
       extension: ".ouro-wasm",
-      # W8. The serialized form the signing node compiled, named by the exact pair of readings
+      # W8. Which form the client is holding, said by the node rather than deduced from an
+      # absent key, and then the form itself.
+      form: :precompiled,
+      # The serialized form the signing node compiled, named by the exact pair of readings
       # a node has to match before it may map it, and by its own digest — which is what the
       # signature covers beside the component's (D22, D24). `precompile_skipped` is `null` here
       # because there was an artifact; a receipt without one says why in that field instead.

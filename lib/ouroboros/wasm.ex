@@ -112,7 +112,21 @@ defmodule Ouroboros.Wasm do
     # read: a starter that names a root runs whatever unsigned, unregistered bytes sit at
     # `<root>/wasm/components/sha256-<hex>.wasm` for any directory the BEAM user can read.
     # With this false the node's own store root is used whatever the state says (F3).
-    allow_store_root_override: false
+    allow_store_root_override: false,
+    # W8. Whether this node will `Component::deserialize` an artifact its signer compiled.
+    #
+    # Default **true**, and the trade is written down rather than assumed (docs/WASM.md D24,
+    # §12): the precompiled form turns a `load` from a compile into a mapping, and what it
+    # costs is that a signer this node trusts can now hand it machine code instead of a
+    # component — bytes wasmtime does not validate, running with the helper's own authority
+    # rather than inside the guest's fence. Every containment bound in §7.3 is a bound on a
+    # *component*, and an artifact skips all of them. The signature is the whole of the
+    # boundary, which it always was for *what* a node runs and is now also for *how*.
+    #
+    # `false` refuses the fast form fleet-wide, everywhere at once, with no redeploy and no
+    # resigning: every node compiles the source under §7.3's bounds exactly as it did before
+    # W8. It is the switch an operator reaches for when a signing key's custody is in doubt.
+    accept_precompiled: true
   ]
 
   @timeout_keys [:handshake_timeout_ms, :request_timeout_ms, :call_margin_ms, :broken_ms]
@@ -156,6 +170,18 @@ defmodule Ouroboros.Wasm do
   """
   @spec allow_store_root_override?() :: boolean()
   def allow_store_root_override?, do: config(:allow_store_root_override) == true
+
+  @doc """
+  Whether this node will map a precompiled artifact at all (W8, D24).
+
+  `true` unless an operator said otherwise, and a malformed value reads as the default the way
+  every other setting here does. `false` makes `Ouroboros.Wasm.Store.form/4` answer the source
+  form for every component on this node whatever its manifest declares — which every node can
+  always compile — and is the one switch that takes the deserialize path away fleet-wide
+  without resigning anything.
+  """
+  @spec accept_precompiled?() :: boolean()
+  def accept_precompiled?, do: config(:accept_precompiled) == true
 
   @doc "The world id this node admits a capability component against."
   @spec world() :: String.t()
@@ -257,6 +283,7 @@ defmodule Ouroboros.Wasm do
   end
 
   defp valid?(:allow_store_root_override, value), do: is_boolean(value)
+  defp valid?(:accept_precompiled, value), do: is_boolean(value)
 
   defp valid?(key, value) when key in @timeout_keys, do: is_integer(value) and value > 0
   defp valid?(key, value) when key in @byte_keys, do: is_integer(value) and value > 0

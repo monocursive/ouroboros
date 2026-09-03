@@ -96,6 +96,7 @@ defmodule Ouroboros.Wasm.Pool do
 
   alias Ouroboros.Wasm
   alias Ouroboros.Wasm.Codec
+  alias Ouroboros.Wasm.Store
 
   # The only environment variables the helper is given. Deny-by-default, not a deny-list
   # (F4): see the moduledoc for why the name-shaped deny-list this replaces could not hold.
@@ -550,6 +551,86 @@ defmodule Ouroboros.Wasm.Pool do
   def hook_component_budget, do: @hook_component_budget
 
   @doc """
+  Loads one component in whichever form this node can, falling back when it cannot (W8, H3).
+
+  This is the one place a lane-W load happens outside the untrusted hook lane, and it exists
+  because "otherwise it falls back to the source form" was a sentence `refusal.rs`, D24 and the
+  helper's own `doctor` note all made and nothing carried out. `Ouroboros.Wasm.Store.form/4`
+  chooses; if the helper then refuses the artifact for a reason that means *these bytes are not
+  this node's to map* — `precompiled_mismatch`, `sha_mismatch`, `unreadable_component` — the
+  source form is loaded under §7.3's bounds and **one** line says why.
+
+  The refusals it falls back on are exactly the ones the source form answers. A guest that is
+  not in its world, a component past a structural bound, a full cache: those are facts about
+  the component, they will be true of the source form too, and retrying would spend a second
+  load to hear the same thing.
+
+  `opts` takes `:kind` and `:lane` as `load/4` does, plus `:store` — the keyword list the store
+  is read under. `precompiled` is the **verified manifest's** block, or `nil`.
+
+  A fault reading the store answers `{:error, {:store, reason}}`, tagged so a caller can tell it
+  from a refusal about the component: a component this node does not hold reaches no helper, and
+  saying so is the difference between "your store is missing bytes" and "your component is
+  wrong".
+  """
+  @spec load_component(String.t(), map() | nil, GenServer.server(), keyword()) ::
+          {:ok, map()} | {:error, failure()}
+  def load_component(component_sha256, precompiled, server \\ __MODULE__, opts \\ [])
+      when is_binary(component_sha256) and is_list(opts) do
+    store = Keyword.get(opts, :store, [])
+    load_opts = Keyword.take(opts, [:kind, :lane])
+
+    case Store.form(component_sha256, precompiled, fn -> helper_build(server) end, store) do
+      {:precompiled, path, artifact} ->
+        mapped(component_sha256, path, artifact, server, load_opts, store)
+
+      {:source, path, why} ->
+        note_fallback(component_sha256, why)
+        load(component_sha256, path, server, load_opts)
+
+      # Tagged, because the caller has to tell "this node does not hold these bytes" from
+      # "the helper refused them": one is a store fault and reaches no helper at all, and the
+      # other is a component fact. `Ouroboros.Wasm.Capability` records them at different stages
+      # for exactly that reason.
+      {:error, reason} ->
+        {:error, {:store, reason}}
+    end
+  end
+
+  # The refusals that mean "not this node's to map", and therefore the ones a source load can
+  # answer. Everything else is a fact about the component and is reported as it stands.
+  @fallback_refusals ~w(precompiled_mismatch sha_mismatch unreadable_component)
+
+  defp mapped(sha, path, artifact, server, load_opts, store) do
+    case load(sha, path, server, Keyword.put(load_opts, :precompiled, artifact)) do
+      {:ok, report} ->
+        {:ok, report}
+
+      {:error, %{refusal: refusal} = reason} when refusal in @fallback_refusals ->
+        case Store.path(sha, store) do
+          {:ok, source} ->
+            note_fallback(sha, {:helper_refused, refusal})
+            load(sha, source, server, load_opts)
+
+          {:error, _absent} ->
+            {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # One line, at every call site rather than only at stage (M7): a node that quietly compiles
+  # what it was told it could map is a node whose operator cannot explain its own latency.
+  # A manifest that declares no artifact is not a fallback and says nothing.
+  defp note_fallback(_sha, :not_precompiled), do: :ok
+
+  defp note_fallback(sha, why) do
+    Logger.info("wasm load #{String.slice(sha, 0, 12)}: the source form (#{Kernel.inspect(why)})")
+  end
+
+  @doc """
   The wasmtime and the target triple this node's helper reports, or `nil` (W8).
 
   The pair a precompiled artifact is bound to, read off the `doctor` report the pool already
@@ -942,12 +1023,19 @@ defmodule Ouroboros.Wasm.Pool do
 
     # `hook_shas` goes with `deadlines`: both are facts about a child that no longer exists,
     # and a fresh helper's cache is empty whatever the last one held.
+    #
+    # `doctor` goes with them for the same reason and one more (W8, H3): the accepted report
+    # names the wasmtime and the target triple a precompiled artifact is bound to, and the
+    # binary on disk can have been replaced between one child and the next. Carrying the old
+    # report over a reconnect would have this node deserialize artifacts for a build it is no
+    # longer running, on the strength of a reading from a process that is gone.
     case open_port(%{
            state
            | buffer: <<>>,
              noise: 0,
              inflight: nil,
              deadlines: %{},
+             doctor: nil,
              hook_shas: MapSet.new()
          }) do
       {:ok, state} -> start_handshake(state)
@@ -1245,6 +1333,13 @@ defmodule Ouroboros.Wasm.Pool do
         buffer: <<>>,
         deadlines: %{},
         owners: %{},
+        # W8, H3. The accepted report goes with the rest of the dead child's facts. It names
+        # the wasmtime and the target triple a precompiled artifact is bound to, and the binary
+        # on disk can have been replaced — `make wasm` while a node runs is the ordinary way.
+        # Keeping it would have `wasm.list` draw a form, and a reader with `connect: false`
+        # answer one, out of a reading from a process that is gone; `nil` is "this node does not
+        # know", which is what it is until a fresh helper says otherwise.
+        doctor: nil,
         pending_drops: [],
         hook_shas: MapSet.new(),
         broken_until: now() + state.settings.broken_ms,

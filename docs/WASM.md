@@ -708,7 +708,8 @@ moving any of the authority.
 `.ouro-wasm`: a 21-byte header (magic, format version, and the envelope, precompiled and
 component lengths), a bounded JSON envelope carrying the manifest as its own
 `term_to_binary` plus the signer id and the 64-byte signature, then — since W8 (format 2) —
-the precompiled artifact if the manifest declares one, and then the component bytes **raw**.
+the precompiled artifact if the manifest declares one — bounded at four times the component
+ceiling, and never above what `ouro-wasm` will read — and then the component bytes **raw**.
 The artifact sits before the component rather than after it, and that is not a taste:
 `wasm.sign` answers with the bundle's *prefix* and the client appends the exact bytes it
 uploaded, so the only ordering in which the client still composes nothing is the one where
@@ -1403,6 +1404,25 @@ machinery — it is a backend, not a lane (D9).
   are a *component* remains the helper's answer, under §7.3's bounds, on the node that will
   run them. The upload is consumed before anything that can refuse.
 
+  **And since W8 the signing node compiles — after the limiter, never before it.** A signer
+  that hands its own helper a component is not parsing bytes it has not verified; it is
+  compiling bytes it is about to sign, which is D23's whole point. But a compile is 1.4 s of a
+  core and a couple of hundred mebibytes at the worst shape §7.3 admits, and the first cut ran
+  it *upstream* of the signing service — so a requester the rate limiter was about to refuse
+  still spent it, once per request, for free. That is the same defect the limiter-first ordering
+  inside `Upgrade.Signing.Service` exists to prevent, arriving through a caller instead of
+  through the module.
+  So `wasm.sign` is two calls. `Signing.Service.admit/4` charges a rate-limit slot and applies
+  the **whole** policy to the *source* manifest — the one with no `precompiled` block, because
+  nothing has been compiled — and journals the verdict as `:admitted`; a refusal there stops
+  everything, and no byte of the upload reaches the helper. Only then does the node compile.
+  `sign_artifact/4` is then presented with a single-use ticket keyed to that admission — same
+  requester, same manifest but for the block — and charges no second slot; anything that does
+  not match pays the limiter again, which is the direction a mismatch has to fail in. One
+  sentence, whole: **the signer is the machine that pays for compilation, under §7.3, for a
+  requester the rate limit admitted and a manifest the policy accepted — and a node never
+  compiles bytes it did not sign.**
+
   **And the epoch is not a client's to name.** `Rollout.Registry` admits a lane-W epoch only
   strictly above its watermark and refuses one at its plausibility ceiling, so a single
   deploy *at* the ceiling left no number that was both — on every lane-W capability on that
@@ -1843,24 +1863,47 @@ machinery — it is a backend, not a lane (D9).
   artifact>", size: <bytes>}` beside the source component's own sha256, and the bundle carries
   both sets of bytes in two length-prefixed sections. A node admits the precompiled form only
   when its **own** helper's `doctor` reports exactly that version and exactly that triple and
-  its own store holds the artifact; otherwise it compiles the source form under §7.3's bounds,
-  so there is no regression for a node that cannot use it. The comparison is string equality on
+  its own store holds the artifact and the operator has not refused the form
+  (`accept_precompiled`); otherwise it compiles the source form under §7.3's bounds, so there is
+  no regression for a node that cannot use it — and if the helper then refuses the artifact
+  anyway, the source form is loaded rather than the rollout quarantined (D24). The comparison is string equality on
   both halves and nothing cleverer: wasmtime's serialized form is checked against an exact
   build and an exact configuration hash, so "close enough" is not a judgment anybody here is
   entitled to make. `component_sha256` remains the identity — the register, the ledger, the
   labels and the helper's cache key are all unchanged (D2) — and the artifact's digest is
   provenance about a *form*, not a second name for the thing.
 
-- **D23 — compilation runs where the signature is made.** `Wasm.Deploy.sign/2` compiles on the
-  node that builds the manifest, with `ouro-wasm precompile`: the same binary, the same
-  `Engine` (there is one `host::engine()`, shared by `serve` and `precompile`, because a second
-  configuration would be a second world — an artifact `precompile` produced that `serve` could
-  not map, discovered at the far end of a deploy), and the same structural bounds. The signer
-  is now the machine that pays for compilation, and it applies §7.3 in full before it does: a
+- **D23 — compilation runs where the signature is made, after the request has been admitted.**
+  `Wasm.Deploy.sign/2` compiles on the node that builds the manifest, with `ouro-wasm
+  precompile`: the same binary, the same `Engine` (there is one `host::engine()`, shared by
+  `serve` and `precompile`, because a second configuration would be a second world — an
+  artifact `precompile` produced that `serve` could not map, discovered at the far end of a
+  deploy), and the same structural bounds. It applies §7.3 in full before it compiles: a
   component past a bound is refused at sign time with the same name a node's `load` would have
-  used, and so is one that is not in the world it was offered as. Skipping is an answer, never
-  an error — no helper on disk, `--no-precompile`, or an artifact too large to travel in the
-  receipt — and each one leaves exactly the source-only path lane W already had.
+  used, and so is one that is not in the world it was offered as.
+
+  **The order is half the decision.** The signer is the machine that pays for compilation, and
+  it pays only for a requester the rate limit admitted and a manifest the policy accepted —
+  `Signing.Service.admit/4` first, on the source manifest, journaled; the compile second; the
+  signature third, on a single-use ticket that charges no second slot (D15). Running the compile
+  first made the expensive half free to exactly the callers the limiter exists to refuse.
+
+  The compile itself is bounded by §7.3 and not by a timer, which is worth stating rather than
+  implying: `shape::check` refuses an expensive shape *before* cranelift starts, because
+  cranelift cannot be interrupted once it has. The 30 s the signing node waits stops it
+  *waiting*; it does not stop the compile, and it does not need to.
+
+  Its scratch is this node's own — `<data_dir>/wasm/sign/`, created 0700 and held to `lstat`,
+  files 0600 — and never a shared `/tmp`, because what is written there is every component a
+  client uploads and the machine code compiled from it, and a root under `/tmp` is a directory
+  somebody else may have created or symlinked first. A node with no data directory does not
+  precompile, which is `Wasm.Store`'s posture for the same reason.
+
+  Skipping is an answer, never an error: no helper on disk, no data directory, a scratch root
+  this node will not use, a helper that refuses or does not answer in time or whose report does
+  not describe what it wrote, `--no-precompile`, or an artifact too large to travel in the
+  receipt. Each one is named in `precompile_skipped`, the receipt says `form: "source"`, and
+  each leaves exactly the source-only path lane W already had.
 
 - **D24 — what `deserialize` trusts is the signature, and nothing in the file.**
   `Component::deserialize` is `unsafe` because wasmtime does not validate a serialized artifact
@@ -1877,6 +1920,35 @@ machinery — it is a backend, not a lane (D9).
   as it does on a compiled one — a form of the bytes is not an exemption from the linker's
   contract — and the refusal for everything else is one name, `precompiled_mismatch`, because
   the answer to all of them is the same: use the source form, which every node can compile.
+  That fallback is carried out rather than promised: `Wasm.Pool.load_component/4` is the one
+  place a lane-W load happens, and a `precompiled_mismatch`, `sha_mismatch` or
+  `unreadable_component` on the artifact loads the source form under §7.3's bounds with one
+  logged line saying why. `Store.precompiled_path/2` re-reads the digest before offering a file
+  at all, because for an artifact "the name of a file is its content" is load-bearing in a way
+  it is not for a component: a rotted component is refused by the helper before anything is
+  compiled, and a rotted artifact would be *mapped*.
+
+  **And the residual, in the words it deserves. A compromised signing key now escapes the
+  fence.** Before W8 a signer this node trusted could place a *component* on it — bytes
+  wasmtime validates, a linker that defines one function, fuel and an epoch deadline and a
+  memory ceiling, every one of §7.3's bounds. After W8 the same key can place an **artifact**:
+  machine code in an object file, mapped by `Component::deserialize`, which wasmtime does not
+  validate against a malicious producer. A thousand bytes patched into its `.text` executes with
+  the helper's own authority — measured, on this build, as a SIGILL in the helper process from a
+  1 KiB patch that passed the digest, the world check and `Wasm.Verifier.cross_check/2` because
+  all three read the *header* and the component type, not the code. So §12's old sentence that
+  signer custody is "unchanged by this spec" is false, and this is what changed: the signature
+  was always the boundary for *what* a node runs, and it is now also the boundary for *how*.
+
+  Four things bound it and none of them makes it safe. The helper is a separate process, so
+  what a patched artifact reaches is a Port and a pool cooldown rather than the node (D3) —
+  though it is **not OS-sandboxed today**, so within that process it has the helper's own file
+  and network access, which is the boundary a compromised signer crosses and the reason this
+  paragraph exists. The artifact is content-addressed and re-digested on every load, so
+  tampering *after* signing is refused. `config :ouroboros, :wasm, accept_precompiled: false`
+  takes the form away fleet-wide, with no redeploy and no resigning, for an operator whose key
+  custody is in doubt. And the source form is always there: a node that refuses artifacts is a
+  node that compiles, which is exactly what every node did before W8.
 
 ## 12. What this does not solve
 
@@ -1919,10 +1991,28 @@ Stated once, so nobody reads more into the lane than is there:
 - **The artifact only reaches an operator when it fits one reply.** `wasm.sign` answers with
   the bundle's prefix, which since W8 carries the artifact the client has never seen — a few
   hundred kibibytes for a real capability, and eleven mebibytes for the worst shape §7.3
-  admits. One gateway reply is not a file transfer, so past 4 MiB the signer signs the source
-  form alone and says so in `precompile_skipped`. The capability still deploys and still runs;
-  it compiles on each node, as it always did. Building a chunked *download* would lift that,
-  and it is not this slice.
+  admits. One gateway reply is not a file transfer, so past three quarters of the gateway's own
+  configured frame (786 432 bytes at the 1 MiB default, since the artifact travels base64 at
+  four bytes to three) the signer signs the source form alone and says so in `form` and
+  `precompile_skipped`. The capability still deploys and still runs; it compiles on each node,
+  as it always did. Raising `OUROBOROS_GATEWAY_MAX_FRAME` raises it; building a chunked
+  *download* would lift it properly, and that is not this slice.
+- **Two forms are two ceilings, and both are staging.** A bundle now carries a component and an
+  artifact, so `Wasm.Upload` sizes a slot at `Bundle.max_bytes/0` — 16 MiB of component plus
+  64 MiB of artifact plus the envelope, and eight slots in flight. That is 640 MiB one
+  `:operate` client can park on a node's disk, up from 128 MiB, and it is stated here because
+  D16's "never more than a signer would look at" now needs the second half spelled out: the
+  artifact ceiling is **four times** the component ceiling, which clears the worst measured
+  ratio (2.75× at the shape §7.3 admits) with half again to spare, and is capped by what
+  `ouro-wasm` will read. It was eight times, which put a slot at 144 MiB and the eight of them
+  at 1152 MiB, and nobody had chosen that number.
+- **And `store_budget_bytes` now has to hold both forms of anything live.** The component store
+  keeps the artifact beside the component for every rollout that carried one, and a prune may
+  not evict either while the rollout is `:live`, `:deploying` or `:quarantined`. So the
+  512 MiB default is a budget over roughly 3.75× the component bytes a fleet deploys rather
+  than over the component bytes alone; an operator who sized it by counting components will
+  find it tighter than they meant. Pruning still fails closed, so the failure mode is a store
+  that stays over budget rather than a capability that loses its bytes.
 - **The compile bound is a bound on admission, not a theorem about compile time.**
   §7.3's structural pass bounds what the helper will hand to cranelift, and the worst case
   it admits was measured at 1.19 s on this Mac. Cranelift's cost is not a function of
@@ -1977,9 +2067,18 @@ Stated once, so nobody reads more into the lane than is there:
   but a caller that assumed otherwise would now be wrong.
 - **The workspace.** §10 is the axis for `bash`/git/LSP; nothing in lanes W/H/T
   touches it.
-- **Signer custody and node-local authority.** A signer is still a cluster member
-  reachable by `:erpc`; `Control.Grants` is still one process per node. Unchanged by
-  this spec, still on ARCHITECTURE.md's external list.
+- **Signer custody, and what W8 added to it.** A signer is still a cluster member reachable by
+  `:erpc`; `Control.Grants` is still one process per node. Those are unchanged by this spec and
+  still on ARCHITECTURE.md's external list. What is **not** unchanged is what a compromised
+  signing key reaches: before W8 it could place a contained *component* on every node that
+  trusts it; since W8 it can place an **artifact**, which is machine code `Component::deserialize`
+  maps without validating, running with the helper's own authority rather than inside the
+  guest's fence. Measured: a 1 KiB patch in a legitimate artifact's `.text` passed the digest,
+  the world check and the manifest cross-check and executed in the helper. The mitigations are
+  in D24 and none of them is a fix: the helper is a separate process but is not OS-sandboxed
+  today, the artifact is re-digested on every load so post-signing tampering is refused, and
+  `config :ouroboros, :wasm, accept_precompiled: false` takes the form away fleet-wide without
+  a redeploy. The trade is real and it is an operator's to make.
 
 ## 13. Defects and doc drift found during this spec's verification
 
@@ -2216,6 +2315,17 @@ Each slice is PR-sized, lands green, and is useful alone.
   precompiled policy up. The two skew tests craft the mismatch rather than building with two
   toolchains — the container's header is this build's own format, and what a node reads *is*
   the header — and the scripted-`doctor` half is proved separately, on `Pool.helper_build/2`.
+  Then, from the adversarial review: a rate-limited and a policy-refused sign each invoke the
+  helper **zero** times, counted through a shim in front of it; the admission is journaled and
+  the signature spends no second slot; a ticket is single-use and is honoured only for its own
+  requester and its own source manifest; `accept_precompiled: false` answers the source form; a
+  rotted artifact is not offered, and when the helper refuses one anyway the source form is
+  loaded and the guest answers; a component this node does not hold reaches no helper at all;
+  all eight skip reasons are exercised and each signs a whole verifiable bundle; both rollout
+  gates hold each form to its own digest; the store's publish, prune and protection of
+  artifacts; the bundle's two-halves-one-statement rule and its ceilings; the helper's magic and
+  both declared lengths; a source file past the source cap refused under *that* cap;
+  `precompile` refusing an artifact as its input; and a reconnect re-reading the helper's build.
 
   What W8 does **not** remove is in §12: the artifact is bound to one wasmtime and one triple,
   it only reaches an operator when it fits one gateway reply, and engine-embedding guests still

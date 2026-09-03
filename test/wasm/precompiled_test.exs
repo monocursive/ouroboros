@@ -112,6 +112,160 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
   end
 
   # ---------------------------------------------------------------------------------------
+  # The order: admitted first, compiled second (H1)
+  # ---------------------------------------------------------------------------------------
+
+  describe "two-phase signing — nothing compiles before the limiter has admitted it" do
+    @tag @needs_live
+    test "a rate-limited request never reaches the helper", context do
+      bytes = File.read!(@guest)
+      service = limited_service!(context, 1)
+      {wrapper, invocations} = counting_helper!(context)
+
+      opts = [
+        signing_service: service,
+        upload_root: context.uploads,
+        helper_path: wrapper,
+        scratch_root: Path.join(context.tmp, "sign")
+      ]
+
+      # One admission spends the window.
+      assert {:ok, first} = Deploy.sign(base(context, bytes), opts)
+      assert first.form == :precompiled
+      assert invocations.() == 1, "the admitted request compiled, exactly once"
+
+      # The second is refused by the limiter — which runs on the *admission*, before this node
+      # spends a core on a requester it is about to turn away. Move `admit/4` back below the
+      # compile in `Deploy.sign/2` (or drop the `admit` step entirely) and the count below is 2:
+      # a refused sign that cost 1.4 s of a core at the worst shape §7.3 admits.
+      assert {:error, {:signing_refused, {:rate_limited, _, _, _}}} =
+               Deploy.sign(base(context, bytes), opts)
+
+      assert invocations.() == 1,
+             "the helper was invoked for a request the rate limiter refused"
+    end
+
+    @tag @needs_live
+    test "a policy refusal never reaches the helper either", context do
+      bytes = File.read!(@guest)
+      {wrapper, invocations} = counting_helper!(context)
+
+      opts = [
+        signing_service: context.service,
+        upload_root: context.uploads,
+        helper_path: wrapper,
+        scratch_root: Path.join(context.tmp, "sign")
+      ]
+
+      # D12: lane W's signer requires an eval spec. The refusal is the policy's, and it is made
+      # on the *source* manifest — the one with no block, because nothing has been compiled.
+      assert {:error, {:signing_refused, :eval_spec_required}} =
+               Deploy.sign(Map.delete(base(context, bytes), :eval), opts)
+
+      assert invocations.() == 0, "a manifest the policy refuses is never compiled"
+
+      # And an import outside the world's one, which the policy also refuses.
+      assert {:error, {:signing_refused, {:import_not_in_world, "socket"}}} =
+               Deploy.sign(%{base(context, bytes) | imports: ["socket"]}, opts)
+
+      assert invocations.() == 0
+    end
+
+    @tag @needs_live
+    test "the admission is journaled, and the signature spends no second slot", context do
+      bytes = File.read!(@guest)
+      service = limited_service!(context, 1)
+
+      opts = [
+        signing_service: service,
+        upload_root: context.uploads,
+        scratch_root: Path.join(context.tmp, "sign")
+      ]
+
+      assert {:ok, receipt} = Deploy.sign(base(context, bytes), opts)
+
+      # Two entries for one signature: the admission this node committed a rate-limit slot and
+      # a policy verdict to, and the issuance that followed the compile. An admission is a real
+      # thing the signer did — folding it into the issuance would claim a signature before there
+      # was one, and folding it into a refusal would claim a refusal that never happened.
+      assert {:ok, decisions} = Service.decisions(service)
+      mine = Enum.filter(decisions, &(&1.artifact_id == receipt.artifact_id))
+
+      assert [%{decision: :admitted, lane: :wasm}, %{decision: :issued, lane: :wasm}] = mine
+
+      # And one slot, not two: with a limit of one per minute, a second *whole* sign is refused
+      # — which it would not be if the signature had spent a slot of its own, because then the
+      # first sign would already have spent both.
+      assert {:ok, status} = Service.status(service)
+      assert status.rate_limit_per_minute == 1
+      assert status.decisions.admitted == 1
+      assert status.decisions.issued == 1
+      assert status.outstanding_admissions == 0, "the ticket was spent by the signature"
+    end
+
+    test "a ticket is single use, and is honoured only for its own requester and manifest",
+         context do
+      bytes = "\0asm\x01\x00\x00\x00 a component this test never runs"
+      service = limited_service!(context, 1)
+
+      {:ok, source} =
+        Artifact.build(bytes,
+          name: "greeter",
+          epoch: 4_242,
+          author: "test-agent",
+          imports: [],
+          eval: @eval
+        )
+
+      request = %{requester: node(), component_bytes: bytes}
+
+      assert {:ok, %{artifact_id: ticket}} = Service.admit(source, @signer, request, service)
+      assert ticket == source.id
+
+      # A ticket for a manifest whose source half moved is not this manifest's ticket, so the
+      # limiter is charged again — and the window is spent, so this is refused by it.
+      moved = %{source | name: "other"}
+
+      assert {:refused, {:rate_limited, _, _, _}} =
+               Service.sign_artifact(
+                 moved,
+                 @signer,
+                 Map.put(request, :admission, ticket),
+                 service
+               )
+
+      # The *precompiled* block is the one thing that may differ, and it does not spend a slot.
+      block = %{
+        wasmtime: "48.0.1",
+        target: "aarch64-apple-darwin",
+        sha256: String.duplicate("a", 64),
+        size: 1024
+      }
+
+      {:ok, full} = Artifact.with_precompiled(source, block)
+
+      assert {:ok, signature} =
+               Service.sign_artifact(
+                 full,
+                 @signer,
+                 Map.put(request, :admission, ticket),
+                 service
+               )
+
+      assert byte_size(signature) == 64
+
+      # Single use: the same ticket a second time is not a ticket, and the window is gone.
+      assert {:refused, {:rate_limited, _, _, _}} =
+               Service.sign_artifact(
+                 full,
+                 @signer,
+                 Map.put(request, :admission, ticket),
+                 service
+               )
+    end
+  end
+
+  # ---------------------------------------------------------------------------------------
   # The choice itself: two strings, compared for equality, and no cleverness anywhere
   # ---------------------------------------------------------------------------------------
 
@@ -192,6 +346,150 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
       # problem it actually has.
       assert {:error, {:unknown_component, _}} =
                Store.form(String.duplicate("e", 64), context.block, matching, opts)
+    end
+  end
+
+  # ---------------------------------------------------------------------------------------
+  # The fallback, and the switch that takes the form away entirely (H2, H3)
+  # ---------------------------------------------------------------------------------------
+
+  describe "a node that will not or cannot map an artifact compiles the component" do
+    test "an operator can refuse the precompiled form fleet-wide", context do
+      block = staged_artifact(context)
+      matching = %{"wasmtime" => "48.0.1", "target" => "aarch64-apple-darwin"}
+      opts = [root: context.store_root]
+
+      assert {:precompiled, _path, _sha} = Store.form(block.sha, block.block, matching, opts)
+
+      # `config :ouroboros, :wasm, accept_precompiled: false`. What it takes away is the one
+      # thing a signature now authorizes that it did not before W8: this node deserializing
+      # machine code its signer produced, which wasmtime does not validate and which runs with
+      # the helper's own authority rather than inside a guest's fence (D24, §12). Every node can
+      # still compile the source, so refusing costs latency and nothing else.
+      previous = Application.get_env(:ouroboros, :wasm)
+
+      Application.put_env(
+        :ouroboros,
+        :wasm,
+        Keyword.put(previous || [], :accept_precompiled, false)
+      )
+
+      on_exit(fn -> restore(:wasm, previous) end)
+
+      assert {:source, _path, :precompiled_refused_here} =
+               Store.form(block.sha, block.block, matching, opts)
+
+      # And a manifest that declares no artifact still reads as what it is, rather than as
+      # something this node turned down.
+      assert {:source, _path, :not_precompiled} = Store.form(block.sha, nil, matching, opts)
+    end
+
+    test "an artifact that rotted on disk is not offered", context do
+      block = staged_artifact(context)
+      matching = %{"wasmtime" => "48.0.1", "target" => "aarch64-apple-darwin"}
+      opts = [root: context.store_root]
+
+      {:ok, path} = Store.precompiled_path(block.block.sha256, opts)
+      File.write!(path, :crypto.strong_rand_bytes(block.block.size))
+
+      # A truncated write, a bad block, an rsync. The store's whole story is that the name of a
+      # file is its content, and for an artifact that is load-bearing in a way it is not for a
+      # component: a rotted component is refused by the helper's own `sha_mismatch` before
+      # anything is compiled, and a rotted artifact would be mapped. Delete the digest from
+      # `precompiled_path/2` and this reads `{:precompiled, …}` for bytes nobody signed.
+      assert {:source, _source, {:precompiled_unusable, {:corrupt_precompiled, _}}} =
+               Store.form(block.sha, block.block, matching, opts)
+
+      # A listing does not pay for that digest and says so by answering the other way: fifty
+      # rows at 25 ms each is a `:read` verb doing a second's work.
+      assert {:precompiled, ^path, _sha} =
+               Store.form(block.sha, block.block, matching, Keyword.put(opts, :verify, false))
+    end
+
+    @tag @needs_live
+    test "a helper that refuses the artifact gets the source form, and the guest answers",
+         context do
+      pool = live_pool!()
+      bytes = File.read!(@guest)
+      {:ok, receipt} = sign(context, bytes)
+
+      {:ok, %{artifact: artifact, precompiled: artifact_bytes}} =
+        Bundle.decode(bundle(receipt, bytes))
+
+      {:ok, _} = Store.put(bytes, artifact.component_sha256, root: context.store_root)
+
+      {:ok, _} =
+        Store.put_precompiled(artifact_bytes, receipt.precompiled.sha256,
+          root: context.store_root
+        )
+
+      # The artifact is intact and its digest is right — so the store offers it — and the helper
+      # refuses it, because its header names a wasmtime this node is not running. That is the
+      # gap `refusal.rs`, D24 and `doctor`'s own note all promised a fallback for and nothing
+      # carried out: before H3 this was a dead capability with the source form sitting on the
+      # same disk. Delete the `@fallback_refusals` branch in `Pool.load_component/4` and this
+      # goes red at the load.
+      # The manifest's block still names *this* node's build, so `Store.form/4` offers the
+      # artifact — the fallback under test is the one after the helper has looked at it. Only
+      # the container's own header lies, which is the one thing the store cannot see.
+      {:ok, path} = Store.precompiled_path(receipt.precompiled.sha256, root: context.store_root)
+      rewritten = rewrite_header(File.read!(path), &Map.put(&1, "wasmtime", "1.0.0"))
+
+      {:ok, put} =
+        Store.put_precompiled(rewritten, Artifact.digest(rewritten), root: context.store_root)
+
+      offered = %{
+        artifact.precompiled
+        | sha256: put.sha256,
+          size: byte_size(rewritten)
+      }
+
+      assert {:precompiled, _path, _sha} =
+               Store.form(
+                 artifact.component_sha256,
+                 offered,
+                 Pool.helper_build(pool),
+                 root: context.store_root
+               )
+
+      assert {:ok, report} =
+               Pool.load_component(artifact.component_sha256, offered, pool,
+                 store: [root: context.store_root]
+               )
+
+      assert report["precompiled"] == false, "the source form was compiled instead"
+      assert report["sha256"] == artifact.component_sha256
+
+      # And it is a working component, not merely a load that returned.
+      helper_instance = "w8-fallback-#{System.unique_integer([:positive])}"
+
+      assert {:ok, _} =
+               Pool.instantiate(
+                 helper_instance,
+                 artifact.component_sha256,
+                 ~s({"greeting":"hi"}),
+                 Wasm.capability_limits(),
+                 pool
+               )
+
+      assert {:ok, %{"payload" => payload}} =
+               Pool.call(helper_instance, "handle-message", ~s({"greet":"world"}), pool)
+
+      assert payload =~ "greet"
+      Pool.drop(helper_instance, pool)
+    end
+
+    @tag @needs_live
+    test "a component this node does not hold reaches no helper at all", context do
+      pool = live_pool!()
+
+      assert {:error, {:store, {:unknown_component, _}}} =
+               Pool.load_component(String.duplicate("a", 64), nil, pool,
+                 store: [root: context.store_root]
+               )
+
+      # `:idle`: nothing spawned a helper to discover a missing file.
+      assert %{phase: :idle} = Pool.status(pool)
     end
   end
 
@@ -368,6 +666,45 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
     end
 
     @tag @needs_live
+    test "both rollout gates hold each form to its own digest", context do
+      pool = live_pool!()
+      bytes = File.read!(@guest)
+      {:ok, receipt} = sign(context, bytes)
+
+      {:ok, %{artifact: artifact, precompiled: artifact_bytes}} =
+        Bundle.decode(bundle(receipt, bytes))
+
+      opts = [
+        pool: pool,
+        store_root: context.store_root,
+        registry: context.registry,
+        epoch_registry: context.registry,
+        trust_policy: context.trust_policy
+      ]
+
+      # The **driving** node checks before its `:deploying` checkpoint, because it is about to
+      # hand a peer machine code the peer will deserialize: a corrupt section refused here is a
+      # refusal, and one that got past would be a per-node quarantine on every target. Delete
+      # the `verify_precompiled` step from `Rollout.deploy/4` and this deploys.
+      rotted = :crypto.strong_rand_bytes(byte_size(artifact_bytes))
+
+      assert {:error, {:precompiled_sha256_mismatch, _}} =
+               Rollout.deploy(artifact, bytes, [node()], Keyword.put(opts, :precompiled, rotted))
+
+      # And **every target** checks again, on its own, because a driver is not a trust boundary.
+      # Delete `verified_precompiled/2` from `stage/3` and this stages.
+      assert {:error, {:precompiled_rejected, {:precompiled_sha256_mismatch, _}}} =
+               Rollout.stage(artifact, bytes, Keyword.put(opts, :precompiled, rotted))
+
+      # A manifest that declares a block and a caller that brought no section is the same
+      # disagreement from the other side, and is refused at both gates too.
+      assert {:error, {:precompiled_rejected, :missing_precompiled}} =
+               Rollout.stage(artifact, bytes, opts)
+
+      assert {:ok, []} = Store.list(root: context.store_root)
+    end
+
+    @tag @needs_live
     test "an untrusted signature never reaches a deserialize", context do
       pool = live_pool!()
       bytes = File.read!(@guest)
@@ -524,9 +861,194 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
     end
   end
 
+  # ---------------------------------------------------------------------------------------
+  # Every way a signing node ends up with no artifact, and what it says about each
+  # ---------------------------------------------------------------------------------------
+
+  describe "a skipped precompile is an answer, and it names itself" do
+    @tag @needs_live
+    test "every reason this node can have for signing the source form alone", context do
+      bytes = File.read!(@guest)
+      scratch = Path.join(context.tmp, "sign")
+
+      # A directory this node cannot use. `scratch_root` is normally `<data_dir>/wasm/sign/`,
+      # created 0700 and held to `lstat` — a shared `/tmp` root somebody else may have created
+      # or symlinked is where every uploaded component and every artifact compiled from one
+      # would otherwise be written (M5).
+      elsewhere = Path.join(context.tmp, "somebody-elses")
+      File.mkdir_p!(elsewhere)
+      planted = Path.join(context.tmp, "planted")
+      File.ln_s!(elsewhere, planted)
+
+      link = Path.join(context.tmp, "not-a-directory")
+      File.write!(Path.join(context.tmp, "plain"), "")
+      File.ln_s!(Path.join(context.tmp, "plain"), link)
+
+      cases = [
+        {"no helper on disk", ":no_helper", [helper_path: Path.join(context.tmp, "absent")]},
+        {"no data directory", ":no_data_dir", [scratch_root: nil]},
+        {"a scratch root that is a link to a file", ":enotdir", [scratch_root: link]},
+        # The one that matters on a shared filesystem: a link somebody else planted, pointing
+        # at a directory they own. `mkdir_p` is happy — the directory exists — and only `lstat`
+        # sees that this is not a directory this node made.
+        {"a scratch root somebody else planted", "not_a_directory", [scratch_root: planted]},
+        {"a helper that will not answer in time", ":precompile_timeout",
+         [scratch_root: scratch, precompile_timeout: 0]},
+        {"a helper that refuses", "precompile_refused",
+         [scratch_root: scratch, helper_path: script!(context, "exit 3")]},
+        {"a helper that answers with something else", ":precompile_unreadable",
+         [scratch_root: scratch, helper_path: script!(context, ~s(echo 'not json'))]},
+        {"a helper whose report does not describe what it wrote", "precompile_digest",
+         [
+           scratch_root: scratch,
+           helper_path:
+             script!(
+               context,
+               ~s[printf 'machine code' > "$3"\n] <>
+                 ~s[echo '{"precompiled":{"wasmtime":"48.0.1","target":"t","sha256":"] <>
+                 String.duplicate("a", 64) <> ~s["}}']
+             )
+         ]}
+      ]
+
+      for {label, marker, extra} <- cases do
+        assert {:ok, receipt} = sign(context, bytes, [], extra), label
+
+        # Every one of them signs, and signs the *source* form: the fast path is an
+        # optimisation a signer offers when it can, never a requirement it imposes.
+        assert receipt.precompiled == nil, label
+        assert receipt.form == :source, label
+
+        assert receipt.precompile_skipped =~ marker,
+               "#{label}: expected a reason naming #{marker}, got " <>
+                 inspect(receipt.precompile_skipped)
+
+        # And the bundle it produced is a whole, verifiable, deployable one.
+        assert {:ok, %{artifact: artifact, precompiled: nil}} =
+                 Bundle.verify(bundle(receipt, bytes), context.trust_policy),
+               label
+
+        assert artifact.precompiled == nil, label
+      end
+    end
+
+    @tag @needs_live
+    test "an artifact too large for one reply is dropped rather than truncated", context do
+      bytes = File.read!(@guest)
+
+      # The ceiling is three quarters of the gateway's own configured frame, because the
+      # artifact travels base64 at four bytes to three (M9). An operator who raises the frame
+      # raises this, in one place — so a frame small enough makes the reference guest's 258 KiB
+      # artifact too large, which is the branch nothing exercised.
+      previous = Application.get_env(:ouroboros, :gateway)
+
+      Application.put_env(:ouroboros, :gateway, Keyword.put(previous || [], :max_frame, 4_096))
+      on_exit(fn -> restore(:gateway, previous) end)
+
+      assert Deploy.max_receipt_precompiled_bytes() == 3_072
+
+      assert {:ok, receipt} = sign(context, bytes)
+      assert receipt.form == :source
+      assert receipt.precompiled == nil
+      assert receipt.precompile_skipped =~ "artifact_too_large"
+    end
+
+    test "the receipt ceiling follows the gateway's own frame" do
+      previous = Application.get_env(:ouroboros, :gateway)
+      on_exit(fn -> restore(:gateway, previous) end)
+
+      Application.delete_env(:ouroboros, :gateway)
+      assert Deploy.max_receipt_precompiled_bytes() == 786_432
+
+      Application.put_env(:ouroboros, :gateway, max_frame: 8 * 1024 * 1024)
+      assert Deploy.max_receipt_precompiled_bytes() == 6_291_456
+
+      # A malformed setting reads as the default rather than as no bound at all, which is the
+      # posture every other setting in this lane takes.
+      Application.put_env(:ouroboros, :gateway, max_frame: :lots)
+      assert Deploy.max_receipt_precompiled_bytes() == 786_432
+    end
+  end
+
   ## Helpers
 
-  defp sign(context, bytes, attrs \\ []) do
+  # A signing service of this test's own with a chosen rate limit, so the ordering claim above
+  # is observable in one call rather than in thirty.
+  defp limited_service!(context, per_minute) do
+    seed = :crypto.strong_rand_bytes(32)
+    key_path = Path.join(context.tmp, "limited-#{System.unique_integer([:positive])}.key")
+    File.write!(key_path, seed)
+    File.chmod!(key_path, 0o600)
+
+    service =
+      start_supervised!(
+        {Service,
+         [
+           name: nil,
+           key_path: key_path,
+           signer_id: @signer,
+           rate_limit_per_minute: per_minute,
+           storage:
+             {Jido.Storage.ETS,
+              table: String.to_atom("wasm_w8_limited_#{System.unique_integer([:positive])}")}
+         ]},
+        id: {Service, System.unique_integer([:positive])}
+      )
+
+    {:ok, %{public_key: public}} = Service.public_info(service)
+    policy = [allow_unsigned: false, trusted_signers: %{@signer => public}]
+    previous = Application.get_env(:ouroboros, :upgrade_trust_policy)
+    Application.put_env(:ouroboros, :upgrade_trust_policy, policy)
+    on_exit(fn -> restore(:upgrade_trust_policy, previous) end)
+
+    service
+  end
+
+  # A shim in front of the real helper that records every invocation. The claim it settles is an
+  # *ordering*, and an ordering is only observable by watching the expensive half.
+  defp counting_helper!(context) do
+    marker = Path.join(context.tmp, "invocations-#{System.unique_integer([:positive])}")
+    wrapper = Path.join(context.tmp, "helper-#{System.unique_integer([:positive])}.sh")
+
+    File.write!(wrapper, """
+    #!/bin/sh
+    echo "$@" >> #{marker}
+    exec #{Wasm.helper_path()} "$@"
+    """)
+
+    File.chmod!(wrapper, 0o755)
+
+    count = fn ->
+      case File.read(marker) do
+        {:ok, text} -> text |> String.split("\n", trim: true) |> length()
+        {:error, :enoent} -> 0
+      end
+    end
+
+    {wrapper, count}
+  end
+
+  defp base(context, bytes) do
+    %{
+      upload: upload!(context, bytes),
+      name: "greeter",
+      author: "test-agent",
+      imports: ["log"],
+      start_config: "{}",
+      eval: @eval
+    }
+  end
+
+  # A stand-in for `ouro-wasm precompile`, so every failure a subprocess can have is a failure
+  # this suite can produce. `$3` is the output path the real invocation passes.
+  defp script!(context, body) do
+    path = Path.join(context.tmp, "helper-#{System.unique_integer([:positive])}.sh")
+    File.write!(path, "#!/bin/sh\n" <> body <> "\n")
+    File.chmod!(path, 0o755)
+    path
+  end
+
+  defp sign(context, bytes, attrs \\ [], extra \\ []) do
     attrs = Map.new(attrs)
 
     base = %{
@@ -544,7 +1066,20 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
       |> Enum.reject(fn {_key, value} -> is_nil(value) end)
       |> Map.new()
 
-    Deploy.sign(attrs, signing_service: context.service, upload_root: context.uploads)
+    Deploy.sign(
+      attrs,
+      Keyword.merge(
+        [
+          signing_service: context.service,
+          upload_root: context.uploads,
+          # W8, M5. The compile's scratch is this node's own, under its data directory and
+          # never a shared `/tmp` — a test names its own for the same reason it names its own
+          # store.
+          scratch_root: Path.join(context.tmp, "sign")
+        ],
+        extra
+      )
+    )
   end
 
   # The file an operator would `scp`: the node's prefix — header, envelope and, since W8, the
@@ -590,8 +1125,43 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
   end
 
   defp flip(binary, at) do
-    <<head::binary-size(at), byte, tail::binary>> = binary
+    head = binary_part(binary, 0, at)
+    <<byte>> = binary_part(binary, at, 1)
+    tail = binary_part(binary, at + 1, byte_size(binary) - at - 1)
     <<head::binary, Bitwise.bxor(byte, 0xFF), tail::binary>>
+  end
+
+  # One component and one artifact in a store of this test's own, with the block a manifest
+  # would name for them. The subject of the tests above is the *choice*, not the signature.
+  defp staged_artifact(context) do
+    bytes = "\0asm\x0d\x00\x01\x00 a component"
+    artifact = "OUROCWASM and its machine code"
+
+    {:ok, put} = Store.put(bytes, nil, root: context.store_root)
+
+    {:ok, _} =
+      Store.put_precompiled(artifact, Artifact.digest(artifact), root: context.store_root)
+
+    %{
+      sha: put.sha256,
+      block: %{
+        wasmtime: "48.0.1",
+        target: "aarch64-apple-darwin",
+        sha256: Artifact.digest(artifact),
+        size: byte_size(artifact)
+      }
+    }
+  end
+
+  # Rewrites a container's JSON header, keeping the framing exact. The attacker's move, and the
+  # only way to put a header in front of a payload it does not describe without a second
+  # wasmtime on this machine.
+  defp rewrite_header(container, edit) do
+    <<magic::binary-size(9), 1::8, header_len::32, payload_len::32, rest::binary>> = container
+    header = rest |> binary_part(0, header_len) |> JSON.decode!() |> edit.() |> JSON.encode!()
+    payload = binary_part(rest, header_len, payload_len)
+
+    magic <> <<1::8, byte_size(header)::32, payload_len::32>> <> header <> payload
   end
 
   defp fresh_store(context) do

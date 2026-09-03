@@ -157,13 +157,23 @@ defmodule Ouroboros.Upgrade.Signing.Service do
   @signer_id_env "OUROBOROS_SIGNER_ID"
   @seed_bytes 32
   @default_rate_limit 30
+
+  # W8. How many admissions this service tracks, and for how long. Small on purpose: an
+  # admission is held only for as long as one signing node takes to compile one component,
+  # which §7.3 bounds at seconds, and a ledger a requester could grow without limit is the
+  # thing the rate limit exists to stop.
+  @max_admissions 64
+  @admission_ttl_ms 120_000
   @default_max_artifact_bytes 16 * 1024 * 1024
   @call_timeout 15_000
 
   @type request :: %{
           optional(:requester) => node(),
           optional(:payload) => binary(),
-          optional(:component_bytes) => binary()
+          optional(:component_bytes) => binary(),
+          # W8. The single-use ticket `admit/4` issued, which is what lets a two-phase lane-W
+          # sign charge the rate limit once rather than twice.
+          optional(:admission) => String.t()
         }
   @type artifact :: Artifact.t() | Wasm.Artifact.t()
   @type decision :: {:ok, binary()} | {:refused, term()}
@@ -213,6 +223,47 @@ defmodule Ouroboros.Upgrade.Signing.Service do
       call(
         server,
         {:sign, artifact, signer_id, request},
+        {:refused, :signing_service_unavailable}
+      )
+    else
+      {:refused, {:invalid_signing_request, describe(signer_id)}}
+    end
+  end
+
+  @doc """
+  Charges the rate limit and applies the policy, without signing anything (W8, D15/D23).
+
+  The first half of lane W's two-phase signing, and it exists for one reason: since W8 the
+  signing node **compiles** the component it is about to sign, and a compile is 1.4 s of a core
+  and a couple of hundred mebibytes at the worst shape §7.3 admits. Running that before the rate
+  limiter had admitted anything made the expensive work free to a requester the limiter was
+  about to refuse — the exact defect the limiter-first ordering in `admit/5` exists to prevent,
+  arriving through a caller instead of through this module.
+
+  So a lane-W sign is now two calls. This one is handed the **source** manifest — the one with
+  no `precompiled` block, because nothing has been compiled yet — charges a rate-limit slot,
+  applies the whole policy, and journals the verdict as `:admitted`. A refusal here stops
+  everything: no byte of the upload reaches the helper.
+
+  On success it answers `{:ok, %{artifact_id: id, expires_at: ms}}`. That is a **single-use
+  ticket**: `sign_artifact/4` presented with `admission: id` for the same requester and a
+  manifest whose source half is byte-identical to the one admitted charges no second slot, and
+  consumes the ticket whatever it then decides. Anything else about the presented manifest —
+  a different requester, a source half that moved, an id this service never admitted, an
+  expired one — falls through to the ordinary path and pays the limiter, which is the safe
+  direction: a bogus ticket costs a slot rather than skipping one.
+
+  Tickets are bounded (#{@max_admissions} at a time, #{div(@admission_ttl_ms, 1000)} s each);
+  the oldest is dropped when a new one would exceed that. An unbounded ledger of admissions
+  would be the thing the rate limit is for, wearing a different name.
+  """
+  @spec admit(artifact(), String.t(), request(), GenServer.server()) ::
+          {:ok, map()} | {:refused, term()}
+  def admit(artifact, signer_id, request \\ %{}, server \\ __MODULE__) do
+    if is_binary(signer_id) and signer_id != "" and is_map(request) do
+      call(
+        server,
+        {:admit, artifact, signer_id, request},
         {:refused, :signing_service_unavailable}
       )
     else
@@ -295,6 +346,8 @@ defmodule Ouroboros.Upgrade.Signing.Service do
          rate_limit: rate_limit(opts),
          max_artifact_bytes: max_artifact_bytes(opts),
          window: %{},
+         # W8. The tickets `admit/4` has issued and `sign_artifact/4` has not yet spent.
+         admissions: %{},
          durability: durability_level(adapter)
        }}
     else
@@ -306,9 +359,24 @@ defmodule Ouroboros.Upgrade.Signing.Service do
   def handle_call({:sign, artifact, signer_id, request}, _from, state) do
     requester = requester(request)
 
-    case admit(artifact, signer_id, request, requester, state) do
+    case admission(artifact, signer_id, request, requester, state, :sign) do
       {:ok, payload, findings, state} ->
         settle(:issued, payload, artifact, signer_id, requester, findings, state)
+
+      {:refused, reason, state} ->
+        settle(:refused, reason, artifact, signer_id, requester, %{}, state)
+    end
+  end
+
+  # W8. The same admission path, stopping one step earlier: the rate limit is charged and the
+  # policy has spoken, and nothing has been signed because nothing has been compiled yet.
+  def handle_call({:admit, artifact, signer_id, request}, _from, state) do
+    requester = requester(request)
+
+    case admission(artifact, signer_id, request, requester, state, :admit) do
+      {:ok, :admitted, findings, state} ->
+        {ticket, state} = hold(artifact, requester, state)
+        settle(:admitted, ticket, artifact, signer_id, requester, findings, state)
 
       {:refused, reason, state} ->
         settle(:refused, reason, artifact, signer_id, requester, %{}, state)
@@ -332,6 +400,10 @@ defmodule Ouroboros.Upgrade.Signing.Service do
         durability: state.durability,
         decisions: Journal.tally(state.journal),
         tracked_requesters: map_size(state.window),
+        # W8. How many admissions are outstanding: tickets issued and not yet presented.
+        # Bounded, and an operator reading a number near the ceiling is reading a fleet whose
+        # signing nodes are compiling more than they are finishing.
+        outstanding_admissions: map_size(live_admissions(state.admissions)),
         require_eval: state.require_eval,
         require_wasm_eval: state.require_wasm_eval,
         rate_limit_per_minute: state.rate_limit,
@@ -358,29 +430,107 @@ defmodule Ouroboros.Upgrade.Signing.Service do
   # with. A policy refusal returning through `else` would silently discard the window
   # update, which would make refusals free — and a refusal is the one outcome a caller
   # can generate at will.
-  defp admit(artifact, signer_id, request, requester, state) do
+  defp admission(artifact, signer_id, request, requester, state, mode) do
     with :ok <- validate_request(request, requester),
-         {:ok, admitted} <- admit_rate(requester, state) do
-      checked(artifact, signer_id, request, requester, admitted)
+         {:ok, admitted} <- charge(artifact, request, requester, state) do
+      checked(artifact, signer_id, request, requester, admitted, mode)
     else
       {:refused, reason} -> {:refused, reason, state}
       {:refused, reason, %{} = unchanged} -> {:refused, reason, unchanged}
     end
   end
 
+  # The rate limit, or the ticket that already paid it (W8).
+  #
+  # A ticket is spent by being *presented*, not by being honoured: whatever this sign then
+  # decides, the admission is gone. One admission, one attempt. A ticket that does not match —
+  # another requester, a source manifest that moved since it was admitted, an id this service
+  # never issued or has since expired — is not a ticket at all and the request pays the
+  # limiter, which is the direction a mismatch has to fail in.
+  defp charge(artifact, request, requester, state) do
+    case ticket(artifact, request, requester, state) do
+      {:ok, spent} -> {:ok, spent}
+      :none -> admit_rate(requester, state)
+    end
+  end
+
+  defp ticket(artifact, request, requester, state) do
+    with id when is_binary(id) and id != "" <- Map.get(request, :admission),
+         live = live_admissions(state.admissions),
+         {%{} = held, rest} <- Map.pop(live, id),
+         true <- held.requester == requester,
+         true <- held.source == source_manifest(artifact) do
+      {:ok, %{state | admissions: rest}}
+    else
+      _no_ticket -> :none
+    end
+  end
+
+  # What an admission is *about*: the manifest without the second form, because the second
+  # form is the whole of what may legitimately have changed between the two calls. Everything
+  # else moving means this is a different manifest and a different request.
+  defp source_manifest(%Wasm.Artifact{} = artifact),
+    do: artifact |> Wasm.Artifact.manifest() |> Map.delete(:precompiled)
+
+  defp source_manifest(%Artifact{} = artifact), do: Artifact.manifest(artifact)
+  defp source_manifest(other), do: other
+
+  defp hold(artifact, requester, state) do
+    id = artifact_field(artifact, :id)
+    now = now_ms()
+
+    held =
+      state.admissions
+      |> live_admissions(now)
+      |> Map.put(id, %{requester: requester, source: source_manifest(artifact), at: now})
+      |> bound_admissions()
+
+    {%{artifact_id: id, expires_at: now + @admission_ttl_ms}, %{state | admissions: held}}
+  end
+
+  defp live_admissions(admissions, now \\ nil) do
+    cutoff = (now || now_ms()) - @admission_ttl_ms
+    :maps.filter(fn _id, held -> held.at > cutoff end, admissions)
+  end
+
+  # Oldest first, because the oldest is the one whose compile has most plausibly finished or
+  # been abandoned. A ceiling with no eviction would refuse admissions instead, which turns a
+  # bounded ledger into a denial of the whole verb.
+  defp bound_admissions(admissions) when map_size(admissions) <= @max_admissions, do: admissions
+
+  defp bound_admissions(admissions) do
+    admissions
+    |> Enum.sort_by(fn {_id, held} -> held.at end, :desc)
+    |> Enum.take(@max_admissions)
+    |> Map.new()
+  end
+
   # Held separately so every refusal below the rate limiter answers with the state that
   # already counted this request.
-  defp checked(artifact, signer_id, request, requester, state) do
+  defp checked(artifact, signer_id, request, requester, state, mode) do
     with :ok <- ensure_signer_id(signer_id, state),
          :ok <- ensure_size(artifact, state),
          :ok <- ensure_component_bytes(request, state) do
-      decide(artifact, signer_id, request, requester, state)
+      decide(artifact, signer_id, request, requester, state, mode)
     else
       {:refused, reason} -> {:refused, reason, state}
     end
   end
 
-  defp decide(artifact, signer_id, request, requester, state) do
+  # `:admit` stops at the policy: there is nothing to sign, because there is nothing compiled.
+  # `:sign` goes on to derive the payload. The policy runs in **both** phases, and deliberately:
+  # the second manifest differs from the admitted one by the `precompiled` block alone (the
+  # ticket holds the source half to equality), so re-evaluating is how that block is checked —
+  # and it costs nothing a requester can spend, because reaching it at all required a ticket
+  # the limiter charged for.
+  defp decide(artifact, signer_id, request, requester, state, :admit) do
+    case evaluate(artifact, signer_id, request, requester, state) do
+      {:ok, findings} -> {:ok, :admitted, findings, state}
+      {:refused, reason} -> {:refused, reason, state}
+    end
+  end
+
+  defp decide(artifact, signer_id, request, requester, state, :sign) do
     with {:ok, findings} <- evaluate(artifact, signer_id, request, requester, state),
          {:ok, payload} <- derive_payload(artifact, signer_id, request) do
       {:ok, payload, findings, state}
@@ -527,6 +677,13 @@ defmodule Ouroboros.Upgrade.Signing.Service do
     end
   end
 
+  # W8. An admission is journaled before it is answered, exactly as an issuance is: it commits
+  # a rate-limit slot and a policy verdict, and a signer that could not record that has not
+  # made it.
+  defp settle(:admitted, ticket, artifact, signer_id, requester, findings, state) do
+    journal(:admitted, nil, artifact, signer_id, requester, findings, state, {:ok, ticket})
+  end
+
   defp settle(:refused, reason, artifact, signer_id, requester, findings, state) do
     journal(:refused, reason, artifact, signer_id, requester, findings, state, {:refused, reason})
   end
@@ -572,6 +729,13 @@ defmodule Ouroboros.Upgrade.Signing.Service do
     Logger.info(
       "signing issued artifact=#{inspect(artifact_field(artifact, :id))} " <>
         "epoch=#{inspect(artifact_field(artifact, :epoch))} requester=#{inspect(requester)}"
+    )
+  end
+
+  defp log(:admitted, _reason, artifact, requester) do
+    Logger.info(
+      "signing admitted artifact=#{inspect(artifact_field(artifact, :id))} " <>
+        "requester=#{inspect(requester)}; the compile it pays for runs next"
     )
   end
 

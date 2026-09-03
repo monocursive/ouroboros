@@ -3789,6 +3789,10 @@ pub struct WasmSignature {
     /// `None` when the manifest declares no start block.
     pub start_id: Option<String>,
     pub extension: Option<String>,
+    /// W8. Which form this bundle carries — `precompiled` or `source` — said by the node
+    /// rather than inferred from whether the block below is present. A client deducing its own
+    /// file's shape from an absent key is a client guessing.
+    pub form: Option<String>,
     /// W8. The serialized form the signing node compiled, as the signed manifest names it:
     /// the wasmtime and the target triple only a matching node may map it on, and its own
     /// digest and size. `None` when the manifest carries none, which is what a node with no
@@ -3983,6 +3987,7 @@ impl WasmSignature {
             signer: nonempty(value.get("signer")),
             start_id: nonempty(value.get("start_id")),
             extension: nonempty(value.get("extension")),
+            form: nonempty(value.get("form")),
             precompiled: value
                 .get("precompiled")
                 .filter(|v| v.is_object())
@@ -4720,6 +4725,7 @@ mod tests {
         // signed manifest: what makes `Component::deserialize` sound is a signature over this
         // digest, so a receipt that did not carry it would be a bundle whose reader cannot say
         // which half of it a node will run.
+        assert_eq!(signed.form.as_deref(), Some("precompiled"));
         let precompiled = signed.precompiled.as_ref().expect("a precompiled block");
         assert_eq!(precompiled.wasmtime.as_deref(), Some("48.0.1"));
         assert_eq!(precompiled.target.as_deref(), Some("aarch64-apple-darwin"));
@@ -4729,11 +4735,17 @@ mod tests {
 
         // A receipt from a node with no helper, or from `--no-precompile`, carries neither the
         // block nor a reason it could branch on — only a line to print.
-        let source_only = WasmSignature::decode(
-            &serde_json::json!({ "name": "vet", "precompile_skipped": "no_helper" }),
-        );
+        let source_only = WasmSignature::decode(&serde_json::json!({
+            "name": "vet",
+            "form": "source",
+            "precompile_skipped": ":no_helper"
+        }));
         assert_eq!(source_only.precompiled, None);
-        assert_eq!(source_only.precompile_skipped.as_deref(), Some("no_helper"));
+        assert_eq!(source_only.form.as_deref(), Some("source"));
+        assert_eq!(
+            source_only.precompile_skipped.as_deref(),
+            Some(":no_helper")
+        );
 
         // The prefix stays base64 until the moment the file is written. Its length plus the
         // component's is what the bundle weighs, which is the whole of this client's

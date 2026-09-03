@@ -431,6 +431,92 @@ defmodule Ouroboros.Wasm.StoreTest do
     end
   end
 
+  describe "the second form (W8)" do
+    test "an artifact is published under its own digest, and a wrong one is refused", %{
+      opts: opts
+    } do
+      artifact = "OUROCWASM and its machine code"
+      sha = sha256(artifact)
+
+      # The caller says which artifact it believes it is holding, and a mismatch means one of
+      # the two is wrong. Delete `check_expected/2` from `put_precompiled/3` and this file is
+      # published under a name that is not its content — which is the whole of what makes it
+      # safe for a helper to map without validating it (D24).
+      assert {:error, {:sha_mismatch, _, ^sha}} =
+               Store.put_precompiled(artifact, String.duplicate("a", 64), opts)
+
+      assert {:ok, %{sha256: ^sha, published: true}} = Store.put_precompiled(artifact, sha, opts)
+      assert {:ok, %{published: false}} = Store.put_precompiled(artifact, sha, opts)
+
+      assert {:ok, path} = Store.precompiled_path(sha, opts)
+      assert Path.basename(path) == "cwasm-#{sha}.cwasm"
+
+      # A listing sees it as its own kind, beside the components and the manifests.
+      assert {:ok, entries} = Store.list(opts)
+      assert [%{kind: :precompiled, sha256: ^sha}] = entries
+    end
+
+    test "a rotted artifact is not offered, and `verify: false` says so", %{opts: opts} do
+      artifact = "OUROCWASM and its machine code"
+      sha = sha256(artifact)
+      {:ok, %{path: path}} = Store.put_precompiled(artifact, sha, opts)
+
+      File.write!(path, "OUROCWASM and somebody else's")
+
+      assert {:error, {:corrupt_precompiled, ^sha}} = Store.precompiled_path(sha, opts)
+      assert {:ok, ^path} = Store.precompiled_path(sha, [verify: false] ++ opts)
+      assert {:error, {:unknown_precompiled, _}} = Store.precompiled_path(sha256("absent"), opts)
+    end
+
+    test "an artifact is a prune candidate, and a live entry's artifact is protected", %{
+      opts: opts
+    } do
+      component = publish(opts, "\0asm\x0d\x00\x01\x00 a live component")
+      artifact = "OUROCWASM for the live one"
+      {:ok, %{sha256: held}} = Store.put_precompiled(artifact, sha256(artifact), opts)
+
+      orphan = "OUROCWASM for nothing at all"
+      {:ok, %{sha256: unreferenced}} = Store.put_precompiled(orphan, sha256(orphan), opts)
+
+      registry = start_registry!()
+      artifact_id = record_live!(registry, "wasm/live", component)
+
+      {:ok, manifest} =
+        Artifact.build("\0asm\x0d\x00\x01\x00 a live component",
+          id: artifact_id,
+          name: "live",
+          epoch: 7,
+          author: "test",
+          imports: [],
+          precompiled: %{
+            wasmtime: "48.0.1",
+            target: "aarch64-apple-darwin",
+            sha256: held,
+            size: byte_size(artifact)
+          }
+        )
+
+      {:ok, _} = Store.put_manifest(manifest, opts)
+
+      # The register names the component and nothing else — identity is the component (D2) — so
+      # the artifact a live entry depends on is read out of the *manifest* that entry points at.
+      # Delete `precompiled_shas/2` from `protected_shas/1` and a prune evicts the fast form of
+      # a running capability, which then silently recompiles on every helper restart.
+      assert {:ok, protected} = Store.protected_shas([registry: registry] ++ opts)
+      assert MapSet.member?(protected, component)
+      assert MapSet.member?(protected, held)
+      refute MapSet.member?(protected, unreferenced)
+
+      # And an artifact nothing references *is* evictable, which it has to be: it is several
+      # times the component it came from, and a budget that could not reach it would be one the
+      # fast path walked straight through. Delete `:precompiled` from the prune's candidate
+      # filter and `evicted` is empty here.
+      assert {:ok, report} = Store.prune([budget_bytes: 0, registry: registry] ++ opts)
+      assert report.evicted == [unreferenced]
+      assert {:ok, _still_there} = Store.precompiled_path(held, opts)
+    end
+  end
+
   describe "a component file is what it claims (F10)" do
     @describetag :symlink
 
@@ -489,6 +575,26 @@ defmodule Ouroboros.Wasm.StoreTest do
       end)
 
     {old, middle, new}
+  end
+
+  # One `:live` lane-W entry, and the artifact id it was recorded under.
+  defp record_live!(registry, module, component_sha256) do
+    artifact_id = "rollout-#{System.unique_integer([:positive])}"
+
+    {:ok, _entry} =
+      Registry.deploying(
+        %{
+          artifact_id: artifact_id,
+          module: module,
+          epoch: System.unique_integer([:positive, :monotonic]),
+          nodes: [node()],
+          component_sha256: component_sha256
+        },
+        registry
+      )
+
+    {:ok, _live} = Registry.mark(artifact_id, :live, [], registry)
+    artifact_id
   end
 
   defp publish(opts, bytes) do

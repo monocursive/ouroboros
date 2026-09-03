@@ -704,7 +704,6 @@ impl Host {
             return Ok(precompiled::report(&framing, &sha256, bytes.len()));
         }
 
-        source_sized(path, bytes.len())?;
         let (component, census) = self.compile_measured(&bytes)?;
         let (imports, exports) = self.declared_names(&component);
 
@@ -825,8 +824,6 @@ impl Host {
                 ),
             ));
         }
-        source_sized(path, bytes.len())?;
-
         let actual = sha256_hex(&bytes);
         if actual != expected {
             return Err(refusal::refuse(
@@ -1447,21 +1444,40 @@ fn world_gap(kind: world::Kind, export: &str, error: &wasmtime::Error) -> Refusa
     )
 }
 
-/// The largest file `inspect` or `load` will read off disk before it knows which form it is.
+/// Reads whatever the peer pointed at, under the cap that applies to what it turns out to be.
 ///
-/// Neither method can tell a component from a precompiled artifact without looking at the first
-/// nine bytes, so the read is bounded by the larger of the two ceilings and the *applicable* one
-/// is enforced the moment the form is known ([`source_sized`], and
-/// [`crate::precompiled::read`]'s own framing check). One read, both bounds.
-const MAX_OFFERED_BYTES: u64 = MAX_COMPONENT_BYTES
-    + precompiled::MAX_PAYLOAD_BYTES
-    + precompiled::MAX_HEADER_BYTES as u64
-    + precompiled::HEADER_BYTES as u64;
-
-/// Reads whatever the peer pointed at, bounded by [`MAX_OFFERED_BYTES`].
+/// The two forms have different ceilings and neither can be told from the other without looking
+/// at the first nine bytes, so this **peeks** those nine and then reads under the applicable cap.
+/// Reading under the larger of the two and checking afterwards was the obvious shape and the
+/// wrong one: a source component would be read to 192 MiB of this process's heap before the
+/// 64 MiB cap that governs it was consulted, which is a bound applied after the allocation it
+/// exists to prevent.
 fn read_offered(path: &str) -> Result<Vec<u8>, Refusal> {
-    read_component(path, MAX_OFFERED_BYTES)
+    let cap = if peek_is_container(path)? {
+        precompiled::MAX_PAYLOAD_BYTES
+            + precompiled::MAX_HEADER_BYTES as u64
+            + precompiled::HEADER_BYTES as u64
+    } else {
+        MAX_COMPONENT_BYTES
+    };
+
+    read_component(path, cap)
 }
+
+/// The nine bytes that say which cap governs this file. One read of a fixed-size buffer; a file
+/// shorter than the magic is not a container and is read as a component, whose own parser
+/// refuses it.
+fn peek_is_container(path: &str) -> Result<bool, Refusal> {
+    let mut file = open_regular(path)?;
+    let mut magic = [0u8; MAGIC_LEN];
+
+    match file.read_exact(&mut magic) {
+        Ok(()) => Ok(magic == precompiled::MAGIC),
+        Err(_too_short) => Ok(false),
+    }
+}
+
+const MAGIC_LEN: usize = precompiled::MAGIC.len();
 
 /// Reads source component bytes under the same ceiling `load` holds them to.
 ///
@@ -1483,20 +1499,6 @@ pub fn read_source(path: &str) -> Result<Vec<u8>, Refusal> {
     Ok(bytes)
 }
 
-/// The source-component ceiling, applied once the bytes are known not to be a container.
-fn source_sized(path: &str, len: usize) -> Result<(), Refusal> {
-    if len as u64 > MAX_COMPONENT_BYTES {
-        return Err(refusal::refuse(
-            refusal::UNREADABLE_COMPONENT,
-            format!(
-                "{}: larger than the {MAX_COMPONENT_BYTES} byte cap",
-                echo(path)
-            ),
-        ));
-    }
-    Ok(())
-}
-
 fn read_component(path: &str, cap: u64) -> Result<Vec<u8>, Refusal> {
     let unreadable = |detail: String| {
         refusal::refuse(
@@ -1505,15 +1507,7 @@ fn read_component(path: &str, cap: u64) -> Result<Vec<u8>, Refusal> {
         )
     };
 
-    // Before opening it, not after: opening a named pipe with no writer blocks in the kernel,
-    // and a path is a peer-supplied string. `metadata` follows symlinks, so a link to a fifo is
-    // caught here too. A component is a file; anything else is not a component.
-    let metadata = std::fs::metadata(path).map_err(|error| unreadable(error.to_string()))?;
-    if !metadata.is_file() {
-        return Err(unreadable("not a regular file".to_string()));
-    }
-
-    let file = std::fs::File::open(path).map_err(|error| unreadable(error.to_string()))?;
+    let file = open_regular(path)?;
 
     let mut bytes = Vec::new();
     // One byte past the cap, so an over-cap file is detected without being read whole.
@@ -1525,6 +1519,27 @@ fn read_component(path: &str, cap: u64) -> Result<Vec<u8>, Refusal> {
         return Err(unreadable(format!("larger than the {cap} byte cap")));
     }
     Ok(bytes)
+}
+
+/// Opens a path that must be a regular file.
+///
+/// The `metadata` check comes *before* the open, not after: opening a named pipe with no writer
+/// blocks in the kernel, and a path is a peer-supplied string. `metadata` follows symlinks, so a
+/// link to a fifo is caught here too. A component is a file; anything else is not a component.
+fn open_regular(path: &str) -> Result<std::fs::File, Refusal> {
+    let unreadable = |detail: String| {
+        refusal::refuse(
+            refusal::UNREADABLE_COMPONENT,
+            format!("{}: {detail}", echo(path)),
+        )
+    };
+
+    let metadata = std::fs::metadata(path).map_err(|error| unreadable(error.to_string()))?;
+    if !metadata.is_file() {
+        return Err(unreadable("not a regular file".to_string()));
+    }
+
+    std::fs::File::open(path).map_err(|error| unreadable(error.to_string()))
 }
 
 /// The census as `inspect` reports it. Every key here is the `doctor` limit key of the same

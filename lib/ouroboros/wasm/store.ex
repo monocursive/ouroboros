@@ -281,13 +281,46 @@ defmodule Ouroboros.Wasm.Store do
     end
   end
 
-  @doc "Where the precompiled artifact `sha256` is on disk, if it is there at all (W8)."
+  @doc """
+  Where the precompiled artifact `sha256` is on disk, if it is there **and still hashes to its
+  own name** (W8).
+
+  `verify: false` skips the digest and answers on presence alone.
+
+  The default verifies, and that is not belt and braces: the helper is about to
+  `Component::deserialize` this file, which wasmtime does not validate, so "the name of a file
+  means its content" is load-bearing here in a way it is not for a component — a component that
+  rotted is refused by the helper's own `sha_mismatch` before anything is compiled, and a
+  rotted *artifact* would be mapped. It costs one read and one sha256: 0.4 ms for the 258 KiB
+  reference artifact and about 25 ms for the 11 MiB worst case, against a 37 ms mapping, and it
+  happens once per component per helper lifetime because the helper caches what it holds.
+
+  `wasm.list` asks with `verify: false`, because a listing that digested fifty artifacts to
+  draw a column would be a `:read` verb doing a second's work.
+  """
   @spec precompiled_path(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def precompiled_path(sha256, opts \\ []) when is_binary(sha256) do
     with {:ok, sha} <- normalize(sha256),
          {:ok, dir} <- root(opts) do
       path = precompiled_path_at(dir, sha)
-      if regular_file?(path), do: {:ok, path}, else: {:error, {:unknown_precompiled, sha}}
+
+      cond do
+        not regular_file?(path) -> {:error, {:unknown_precompiled, sha}}
+        Keyword.get(opts, :verify, true) != true -> {:ok, path}
+        true -> verified_precompiled(path, sha)
+      end
+    end
+  end
+
+  defp verified_precompiled(path, sha) do
+    case File.read(path) do
+      {:ok, bytes} ->
+        if digest(bytes) == sha,
+          do: {:ok, path},
+          else: {:error, {:corrupt_precompiled, sha}}
+
+      {:error, reason} ->
+        {:error, {:precompiled_unreadable, sha, reason}}
     end
   end
 
@@ -327,25 +360,40 @@ defmodule Ouroboros.Wasm.Store do
     end
   end
 
-  # The precompiled branch, taken only when nothing disagreed and the file is there. Written as
-  # an upgrade of the source answer rather than as a branch in front of it so the source path is
-  # resolved either way: a node whose store lost the component has a problem the fast form does
-  # not fix, and it should hear about that one.
+  # The precompiled branch, taken only when nothing disagreed and the file is there and still
+  # hashes to its name. Written as an upgrade of the source answer rather than as a branch in
+  # front of it so the source path is resolved either way: a node whose store lost the component
+  # has a problem the fast form does not fix, and it should hear about that one.
   defp upgrade({:source, source, :usable}, %{sha256: sha}, opts) do
     case precompiled_path(sha, opts) do
       {:ok, path} -> {:precompiled, path, sha}
-      {:error, _absent} -> {:source, source, :precompiled_not_stored}
+      {:error, {:unknown_precompiled, _sha}} -> {:source, source, :precompiled_not_stored}
+      {:error, reason} -> {:source, source, {:precompiled_unusable, reason}}
     end
   end
 
   defp upgrade(answer, _precompiled, _opts), do: answer
 
-  # The block first, so a manifest that declares none never asks the pool anything.
+  # The block first, so a manifest that declares none never asks the pool anything and never
+  # renders as though an operator had refused something that was not offered. Then the
+  # operator's fleet-wide switch, because a node that refuses the form has nothing to compare
+  # (docs/WASM.md D24).
   defp why(nil, _helper), do: :not_precompiled
-  defp why(precompiled, helper) when is_function(helper, 0), do: why(precompiled, helper.())
-  defp why(_precompiled, nil), do: :helper_build_unknown
 
-  defp why(%{wasmtime: wasmtime, target: target}, helper) when is_map(helper) do
+  defp why(precompiled, helper) do
+    if Wasm.accept_precompiled?(),
+      do: compare(precompiled, helper),
+      else: :precompiled_refused_here
+  end
+
+  defp compare(nil, _helper), do: :not_precompiled
+
+  defp compare(precompiled, helper) when is_function(helper, 0),
+    do: compare(precompiled, helper.())
+
+  defp compare(_precompiled, nil), do: :helper_build_unknown
+
+  defp compare(%{wasmtime: wasmtime, target: target}, helper) when is_map(helper) do
     cond do
       Map.get(helper, "wasmtime") != wasmtime ->
         {:wasmtime_mismatch, wasmtime, Map.get(helper, "wasmtime")}
@@ -358,7 +406,7 @@ defmodule Ouroboros.Wasm.Store do
     end
   end
 
-  defp why(_precompiled, _helper), do: :helper_build_unknown
+  defp compare(_precompiled, _helper), do: :helper_build_unknown
 
   @doc """
   Every file held, oldest first, with sizes and a `:kind`.

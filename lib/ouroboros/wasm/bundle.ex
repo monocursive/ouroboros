@@ -130,10 +130,20 @@ defmodule Ouroboros.Wasm.Bundle do
   # What a *precompiled* section may be, as a multiple of the component ceiling. Machine code is
   # bigger than the wasm it came from and the ratio is not constant: measured on this build the
   # 48 KiB reference guest serializes to 258 093 bytes (5.3×, fixed overhead dominating) and the
-  # worst shape §7.3 admits — 4 035 787 bytes, 20 000 functions — to 11 092 495 (2.75×). Eight
-  # times the component ceiling is generous against both and is still a number, which is the
-  # requirement: a section a file sizes is a section this node allocates.
-  @precompiled_multiple 8
+  # worst shape §7.3 admits — 4 035 787 bytes, 20 000 functions — to 11 092 495 (2.75×). Four
+  # times the component ceiling clears the worst measured ratio with half again to spare, and
+  # every byte above that is staging ceiling this lane would be spending without deciding to:
+  # `Ouroboros.Wasm.Upload` sizes a slot from `max_bytes/0`, so this number is also how much
+  # disk one client may park on a node. It was eight, which put an upload slot at 144 MiB and
+  # the eight of them at 1152 MiB — a number nobody had chosen (D16, §12).
+  @precompiled_multiple 4
+
+  # And what `ouro-wasm` itself will read, mirrored rather than re-derived: the helper caps a
+  # precompiled artifact at exactly its own 64 MiB component read cap (`precompiled.rs`,
+  # `MAX_PAYLOAD_BYTES`). A bundle that admitted more than the helper will read would be a file
+  # this node accepts and cannot use, so the two are held to each other here and pinned by a
+  # test against the live `doctor` (`max_precompiled_bytes` under `limits`).
+  @helper_precompiled_bytes 64 * 1024 * 1024
 
   @signature_bytes 64
   @max_signer_bytes 256
@@ -178,11 +188,25 @@ defmodule Ouroboros.Wasm.Bundle do
   @doc """
   The largest precompiled artifact a bundle may carry (W8).
 
-  Derived from the component ceiling rather than configured beside it, so an operator who raises
-  what a signer will look at raises what its output may be in one place.
+  Four times the component ceiling — clear of the 2.75× worst measured ratio — and never above
+  what `ouro-wasm` will read. Derived from the component ceiling rather than configured beside
+  it, so an operator who raises what a signer will look at raises what its output may be in one
+  place; capped by the helper's own number, because a bundle this build admits and the helper
+  refuses is a file nobody can use.
   """
   @spec max_precompiled_bytes() :: pos_integer()
-  def max_precompiled_bytes, do: max_component_bytes() * @precompiled_multiple
+  def max_precompiled_bytes,
+    do: min(max_component_bytes() * @precompiled_multiple, @helper_precompiled_bytes)
+
+  @doc """
+  The artifact ceiling `ouro-wasm` itself enforces, mirrored here (W8, M6).
+
+  Public so a test can hold it to the helper's own `doctor` rather than to a comment. If the
+  two ever disagree this build admits bundles it cannot load, which is a file an operator moves
+  around and a node refuses for a reason neither of them named.
+  """
+  @spec helper_precompiled_bytes() :: pos_integer()
+  def helper_precompiled_bytes, do: @helper_precompiled_bytes
 
   @doc "The largest legal bundle: both ceilings plus the header and envelope."
   @spec max_bytes() :: pos_integer()

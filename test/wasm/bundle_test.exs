@@ -80,6 +80,70 @@ defmodule Ouroboros.Wasm.BundleTest do
     end
   end
 
+  describe "the two forms are one statement (W8)" do
+    test "a section the manifest does not declare, and a declaration with no section", context do
+      {:ok, bundle} = Bundle.encode(signed!(context), @bytes)
+      artifact = "OUROCWASM and its machine code"
+
+      # A bundle whose manifest names no artifact and which carries one anyway. Nothing signed
+      # for those bytes, and a reader that shrugged would have to decide what to do with them.
+      # Delete `carries_precompiled?/2` from `decode/1` and this file decodes, with a section
+      # nobody covered sitting in it.
+      assert {:error, {:unexpected_precompiled, _}} =
+               Bundle.decode(with_section(bundle, artifact))
+
+      # And the reverse: a manifest that declares one, in a file that has none. Both are two
+      # statements about one file that disagree, so both are refused rather than resolved.
+      {:ok, declared} =
+        Artifact.build(@bytes,
+          name: "greeter",
+          epoch: 9,
+          author: "test",
+          imports: [],
+          precompiled: %{
+            wasmtime: "48.0.1",
+            target: "aarch64-apple-darwin",
+            sha256: Artifact.digest(artifact),
+            size: byte_size(artifact)
+          }
+        )
+
+      assert {:error, :missing_precompiled} =
+               Bundle.prefix(attach(declared, sign(declared, context.secret)), nil)
+    end
+
+    test "the ceilings are one number, and one an operator can reconcile" do
+      # M4. It was eight times the component cap, which put an upload slot at 144 MiB and the
+      # eight of them at 1152 MiB — a staging ceiling nobody had chosen. The worst measured
+      # ratio is 2.75×; four clears it with half again to spare.
+      assert Bundle.max_precompiled_bytes() == 64 * 1024 * 1024
+
+      # And the multiple itself, read where the helper's own ceiling is not the binding
+      # constraint — at the default 16 MiB component cap the two numbers coincide, so a test
+      # that only compared them there would have proved nothing about the multiple.
+      previous = Application.get_env(:ouroboros, :signing_max_artifact_bytes)
+      Application.put_env(:ouroboros, :signing_max_artifact_bytes, 4 * 1024 * 1024)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:ouroboros, :signing_max_artifact_bytes)
+          value -> Application.put_env(:ouroboros, :signing_max_artifact_bytes, value)
+        end
+      end)
+
+      assert Bundle.max_component_bytes() == 4 * 1024 * 1024
+      assert Bundle.max_precompiled_bytes() == 16 * 1024 * 1024
+
+      # And never above what `ouro-wasm` itself will read, because a bundle this build admits
+      # and the helper refuses is a file nobody can use. The helper's own number is pinned
+      # against its live `doctor` in `test/wasm/pool_acceptance_test.exs`.
+      assert Bundle.max_precompiled_bytes() <= Bundle.helper_precompiled_bytes()
+
+      assert Bundle.max_bytes() ==
+               Bundle.max_component_bytes() + Bundle.max_precompiled_bytes() + 64 * 1024 + 21
+    end
+  end
+
   describe "verify/2 — what a bundle cannot talk its way past" do
     test "a trusted signature over the manifest that describes these bytes is admitted",
          context do
@@ -459,6 +523,18 @@ defmodule Ouroboros.Wasm.BundleTest do
   defp attach(artifact, value) do
     {:ok, signed} = Artifact.with_signature(artifact, %{signer: @signer, value: value})
     signed
+  end
+
+  # Puts a precompiled section into a well-framed bundle whose manifest declares none. The
+  # framing stays exact; what is wrong with the file is that two halves of it disagree.
+  defp with_section(bundle, artifact) do
+    <<"OUROWASM", 2::8, envelope_len::32, 0::32, component_len::32, rest::binary>> = bundle
+    envelope = binary_part(rest, 0, envelope_len)
+    component = binary_part(rest, envelope_len, component_len)
+
+    "OUROWASM" <>
+      <<2::8, envelope_len::32, byte_size(artifact)::32, component_len::32>> <>
+      envelope <> artifact <> component
   end
 
   # Re-frames a bundle with a mutated envelope, keeping both lengths honest so that what

@@ -1,6 +1,6 @@
 defmodule Ouroboros.Upgrade.Signing.Journal do
   @moduledoc """
-  The durable record of every decision a signer node made, issued and refused alike.
+  The durable record of every decision a signer node made — admitted, issued and refused alike.
 
   A signature is evidence that a key was applied to some bytes. It is not evidence of
   *why*, of who asked, or of what the signer was shown when it agreed. This journal is
@@ -37,7 +37,13 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
   alias Ouroboros.Upgrade.{Beam, ModuleName, Wire}
 
   @version 1
-  @decisions [:issued, :refused]
+  # W8. `:admitted` is the first half of a two-phase lane-W signing: the rate limit was
+  # charged and the policy accepted the *source* manifest, and only then did the signing node
+  # spend a compile on it (docs/WASM.md D15, D23). It is journaled as its own decision because
+  # an admission is a real thing this signer did — it committed a rate-limit slot and a policy
+  # verdict — and folding it into `:issued` would claim a signature that does not exist yet,
+  # while folding it into `:refused` would claim a refusal that never happened.
+  @decisions [:issued, :admitted, :refused]
   @lanes [:beam, :wasm]
   @default_limit 500
   @max_detail_bytes 4_096
@@ -66,7 +72,7 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
   @enforce_keys [:version, :next_sequence, :decisions]
   defstruct @enforce_keys
 
-  @type decision :: :issued | :refused
+  @type decision :: :issued | :admitted | :refused
 
   @typedoc """
   Which signing lane a decision was about.
@@ -188,9 +194,13 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
   def public(%__MODULE__{} = journal), do: journal.decisions
 
   @doc "Counts by decision, for a status surface that must not page through history."
-  @spec tally(t()) :: %{issued: non_neg_integer(), refused: non_neg_integer()}
+  @spec tally(t()) :: %{
+          issued: non_neg_integer(),
+          admitted: non_neg_integer(),
+          refused: non_neg_integer()
+        }
   def tally(%__MODULE__{} = journal) do
-    Enum.reduce(journal.decisions, %{issued: 0, refused: 0}, fn entry, acc ->
+    Enum.reduce(journal.decisions, %{issued: 0, admitted: 0, refused: 0}, fn entry, acc ->
       Map.update(acc, entry.decision, 1, &(&1 + 1))
     end)
   end

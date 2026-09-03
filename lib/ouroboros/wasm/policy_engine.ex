@@ -513,11 +513,12 @@ defmodule Ouroboros.Wasm.PolicyEngine do
   defp stand_up(sha, instance, precompiled, opts, deadline) do
     pool = Keyword.get(opts, :pool, Pool)
 
-    with {:ok, path, load_opts} <-
-           store_form(sha, precompiled, pool, Keyword.get(opts, :store_root)),
-         {:ok, {:ok, _loaded}} <-
+    with {:ok, {:ok, _loaded}} <-
            bounded(deadline, fn ->
-             Pool.load(sha, path, pool, Keyword.put(load_opts, :kind, :policy))
+             Pool.load_component(sha, precompiled, pool,
+               kind: :policy,
+               store: store_opts(Keyword.get(opts, :store_root))
+             )
            end),
          {:ok, {:ok, _stood}} <-
            bounded(deadline, fn ->
@@ -1100,10 +1101,8 @@ defmodule Ouroboros.Wasm.PolicyEngine do
            # W8. The deploy gates take the same form the live engine will: the state carries the
            # verified manifest's block (`Ouroboros.Wasm.Rollout.start_state/2`), so a probe or an
            # evaluation exercises the artifact this node would actually load rather than a form
-           # nothing will run.
-           {:ok, path, load_opts} <-
-             component_form(state, sha, pool),
-           {:ok, _loaded} <- Pool.load(sha, path, pool, Keyword.put(load_opts, :kind, :policy)),
+           # nothing will run — and falls back the same way if the helper refuses it.
+           {:ok, _loaded} <- load_component(state, sha, pool),
            {:ok, _stood} <-
              Pool.instantiate(instance, sha, config(state), limits(state), pool,
                kind: :policy,
@@ -1153,26 +1152,17 @@ defmodule Ouroboros.Wasm.PolicyEngine do
   defp component_sha(sha) when is_binary(sha) and sha != "", do: {:ok, sha}
   defp component_sha(other), do: {:error, {:invalid_component, describe(other)}}
 
-  defp component_form(state, sha, pool) do
+  defp load_component(state, sha, pool) do
     precompiled =
       case Map.get(state, :precompiled) do
         block when is_map(block) -> if Artifact.precompiled?(block), do: block
         _absent -> nil
       end
 
-    store_form(sha, precompiled, pool, Map.get(state, :store_root))
-  end
-
-  # W8. Which form the engine hands the helper, from a manifest it has just verified and this
-  # node's own helper reading. A node whose wasmtime or triple does not match the one that
-  # compiled the artifact loads the source form under §7.3's bounds, which is the path the
-  # policy engine has always taken.
-  defp store_form(sha, precompiled, pool, root) do
-    case Store.form(sha, precompiled, fn -> Pool.helper_build(pool) end, store_opts(root)) do
-      {:precompiled, path, artifact} -> {:ok, path, [precompiled: artifact]}
-      {:source, path, _why} -> {:ok, path, []}
-      {:error, reason} -> {:error, reason}
-    end
+    Pool.load_component(sha, precompiled, pool,
+      kind: :policy,
+      store: store_opts(Map.get(state, :store_root))
+    )
   end
 
   # The node's own store root unless a caller named one *and* this build honours the override,

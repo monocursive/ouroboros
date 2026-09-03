@@ -390,7 +390,7 @@ defmodule Ouroboros.Wasm.Rollout do
          {:ok, put} <- published(artifact, bytes, store_opts),
          :ok <- publish_precompiled(artifact, Keyword.get(opts, :precompiled), store_opts),
          {:ok, manifest} <- published_manifest(artifact, store_opts),
-         {:ok, report} <- loaded(artifact, put.path, pool, store_opts),
+         {:ok, report} <- loaded(artifact, pool, store_opts),
          :ok <- cross_checked(artifact, report) do
       {:ok,
        %{
@@ -1181,38 +1181,13 @@ defmodule Ouroboros.Wasm.Rollout do
   # not trust never reaches a deserialize), this node's own helper reading, and the file being
   # on disk. Anything short of all three is the source form under §7.3's bounds, with one line
   # saying which half disagreed — a fallback is not a fault, it is the path every node had.
-  defp loaded(artifact, path, pool, store_opts) do
-    load_opts =
-      case Store.form(
-             artifact.component_sha256,
-             artifact.precompiled,
-             fn -> Pool.helper_build(pool) end,
-             store_opts
-           ) do
-        {:precompiled, artifact_path, sha} ->
-          [path: artifact_path, precompiled: sha]
-
-        {:source, source_path, reason} ->
-          if reason != :not_precompiled do
-            Logger.info(
-              "wasm stage #{String.slice(artifact.component_sha256, 0, 12)}: loading the " <>
-                "source form (#{inspect(reason)})"
-            )
-          end
-
-          [path: source_path]
-
-        {:error, _unknown} ->
-          [path: path]
-      end
-
-    {load_path, opts} = Keyword.pop!(load_opts, :path)
-
-    case Pool.load(
-           artifact.component_sha256,
-           load_path,
-           pool,
-           Keyword.put(opts, :kind, artifact.kind)
+  # W8, H3. One function decides the form and one function falls back when the helper refuses
+  # it, and both of them live in the pool now — a stage that chose once and quarantined on a
+  # rotted artifact was a rollout the source form on the same disk would have carried.
+  defp loaded(artifact, pool, store_opts) do
+    case Pool.load_component(artifact.component_sha256, artifact.precompiled, pool,
+           kind: artifact.kind,
+           store: store_opts
          ) do
       {:ok, report} when is_map(report) -> {:ok, report}
       {:error, reason} -> {:error, {:component_not_loaded, bound(reason)}}

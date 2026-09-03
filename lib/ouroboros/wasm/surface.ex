@@ -585,12 +585,17 @@ defmodule Ouroboros.Wasm.Surface do
   #
   # This says which form a load *would* take. It is not a record of one that happened — the
   # register keeps none — and it is deliberately computed the same way `Ouroboros.Wasm.Store.form/4`
-  # computes it, so an operator reading this and a node deciding are reading one rule.
+  # computes it, so an operator reading this and a node deciding are reading one rule. The one
+  # difference is stated where it is made: this does not re-digest the artifact, so a row can
+  # read `precompiled` for a file a load will find rotted and fall back on.
   defp form_of(entry, build, opts) do
     with id when is_binary(id) <- Map.get(entry, :artifact_id),
          sha when is_binary(sha) <- Map.get(entry, :component_sha256),
          {:ok, %{precompiled: precompiled}} <- Store.fetch_manifest(id, opts) do
-      case Store.form(sha, precompiled, build, opts) do
+      # `verify: false`: a listing that digested fifty artifacts to draw a column would be a
+      # `:read` verb doing a second's work. What this says is which form a load *would* choose
+      # on the readings it can see for free; a load re-reads the digest for itself.
+      case Store.form(sha, precompiled, build, Keyword.put(opts, :verify, false)) do
         {:precompiled, _path, _sha} -> :precompiled
         {:source, _path, _why} -> :source
         {:error, _unreadable} -> nil

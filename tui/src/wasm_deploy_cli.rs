@@ -990,7 +990,8 @@ pub fn render_sign(answer: &Value, bundle: &Path) -> String {
             ));
         }
         None => lines.push(format!(
-            "  precompiled: none{}",
+            "  precompiled: none ({}){}",
+            signed.form.as_deref().unwrap_or("source"),
             signed
                 .precompile_skipped
                 .as_deref()

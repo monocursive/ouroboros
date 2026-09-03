@@ -77,9 +77,12 @@ defmodule Ouroboros.Wasm.Deploy do
   the artifact is the half that has to travel. That is a few hundred kibibytes for a real
   capability (the 48 KiB reference guest compiles to 258 093 bytes) and eleven mebibytes for the
   worst shape §7.3 admits, and one gateway reply is not a file transfer. So the artifact is
-  carried only up to `@max_receipt_precompiled_bytes`; past it the manifest is built without a
-  `precompiled` block and the receipt says `precompile_skipped: :artifact_too_large`. The
-  capability still deploys; it compiles on each node, as it always did.
+  carried only up to `max_receipt_precompiled_bytes/0`, which is three quarters of the
+  gateway's own configured frame — the number an operator already sets for this socket, since
+  the artifact travels base64 at four bytes to three. Past it the manifest is built without a
+  `precompiled` block, and the receipt says `form: :source` and
+  `precompile_skipped: {:artifact_too_large, …}` rather than leaving an absence to be noticed.
+  The capability still deploys; it compiles on each node, as it always did.
 
   ## The epoch is not a parameter
 
@@ -117,12 +120,9 @@ defmodule Ouroboros.Wasm.Deploy do
   # that hung forever on a wedged helper would be worse than one that fell back.
   @precompile_timeout_ms 30_000
 
-  # The largest precompiled artifact this verb will put in a receipt. `Ouroboros.Wasm.Bundle`
-  # admits eight times the component ceiling in a *file*; what bounds this is one JSON-RPC reply,
-  # which the terminal client reads at 8 MiB (`tui/src/transport.rs`) and which carries the
-  # artifact base64-encoded at four bytes to three. Four mebibytes decoded is 5.4 encoded, well
-  # inside that, and above every real capability's artifact.
-  @max_receipt_precompiled_bytes 4 * 1024 * 1024
+  # The gateway frame ceiling this node falls back to, mirroring `Ouroboros.Gateway.Config`'s
+  # own default rather than inventing a second one.
+  @default_gateway_max_frame 1_048_576
 
   # The two processes that make a node able to hold a lane-W rollout, and therefore able to
   # call an epoch stale: the register that records one and the executor `Ouroboros.Upgrade.
@@ -162,7 +162,7 @@ defmodule Ouroboros.Wasm.Deploy do
   disk; see the moduledoc for what a skipped precompile means and for the three ways it happens.
 
   Options are test seams and nothing else: `:upload_root`, `:signing_service`, `:signing_node`,
-  `:epoch_nodes`, `:epoch_opts`, `:helper_path`, `:precompile_timeout`.
+  `:epoch_nodes`, `:epoch_opts`, `:helper_path`, `:precompile_timeout`, `:scratch_root`.
   """
   @spec sign(sign_attrs(), keyword()) :: {:ok, map()} | {:error, term()}
   def sign(attrs, opts \\ [])
@@ -176,12 +176,19 @@ defmodule Ouroboros.Wasm.Deploy do
          {:ok, server} <- signer(opts),
          {:ok, signer_id} <- signer_id(server),
          {:ok, epoch} <- epoch(opts),
-         # W8. Before the manifest, because the digest of what this produces is inside the
-         # manifest and therefore inside what the signature covers (D24). A skip is an answer,
-         # never an error: every one of them leaves the source-only path this lane already had.
+         # The **source** manifest: no `precompiled` block, because nothing has been compiled.
+         {:ok, source} <- build(bytes, attrs, imports, epoch),
+         # W8, D23. The rate limit and the whole policy, on the source manifest, before a byte
+         # of this upload reaches the helper. A refusal here stops everything — which is the
+         # point: the compile below is 1.4 s of a core at the worst shape §7.3 admits, and a
+         # requester the limiter is about to refuse must not be able to spend it.
+         {:ok, ticket} <- admit(server, source, signer_id, bytes),
+         # Only now.
          {artifact_bytes, precompiled, skipped} <- precompile(bytes, attrs, opts),
-         {:ok, artifact} <- build(bytes, attrs, imports, epoch, precompiled),
-         {:ok, signature} <- issue(server, artifact, signer_id, bytes),
+         # Attached rather than rebuilt, so the manifest that gets signed is the manifest that
+         # was admitted plus one field — which is what the ticket is checked against.
+         {:ok, artifact} <- Artifact.with_precompiled(source, precompiled),
+         {:ok, signature} <- issue(server, artifact, signer_id, bytes, ticket),
          {:ok, signed} <- Artifact.with_signature(artifact, signature),
          {:ok, prefix} <- Bundle.prefix(signed, artifact_bytes) do
       {:ok, receipt(signed, prefix, skipped)}
@@ -232,6 +239,27 @@ defmodule Ouroboros.Wasm.Deploy do
     end
   end
 
+  @doc """
+  The largest precompiled artifact this verb will put in a receipt (W8, M9).
+
+  Derived from the gateway's own configured frame ceiling — `OUROBOROS_GATEWAY_MAX_FRAME`, the
+  number an operator already sets for this socket — rather than invented here. The artifact
+  travels base64 at four bytes to three, so three quarters of a frame decoded is about one
+  frame encoded: an operator who raises the frame raises this, in one place, and the default
+  1 MiB frame carries 786 432 bytes of artifact, three times the reference guest's.
+  """
+  @spec max_receipt_precompiled_bytes() :: pos_integer()
+  def max_receipt_precompiled_bytes, do: max(div(gateway_max_frame() * 3, 4), 1)
+
+  defp gateway_max_frame do
+    with settings when is_list(settings) <- Application.get_env(:ouroboros, :gateway, []),
+         bytes when is_integer(bytes) and bytes > 0 <- Keyword.get(settings, :max_frame) do
+      bytes
+    else
+      _unset_or_invalid -> @default_gateway_max_frame
+    end
+  end
+
   ## Signing
 
   # An explicit service (tests), then the configured `:signer`-role node, then a service
@@ -272,14 +300,37 @@ defmodule Ouroboros.Wasm.Deploy do
     end
   end
 
-  defp issue(server, artifact, signer_id, bytes) do
+  # W8, D15/D23. The admission: the rate limit charged and the policy applied to the manifest
+  # this node has *not yet* compiled for. It is a separate round trip rather than a flag,
+  # because what it buys is an ordering — nothing this node does on a requester's behalf that
+  # costs a core is upstream of the limiter that decides whether the requester may ask.
+  defp admit(server, artifact, signer_id, bytes) do
+    request = %{
+      requester: node(),
+      payload: Artifact.signing_payload(artifact, signer_id),
+      component_bytes: bytes
+    }
+
+    case call(server, :admit, [artifact, signer_id, request], signing_timeout()) do
+      {:ok, %{artifact_id: id}} when is_binary(id) -> {:ok, id}
+      {:refused, reason} -> {:error, {:signing_refused, reason}}
+      {:error, reason} -> {:error, {:signing_service_unavailable, reason}}
+      other -> {:error, {:signing_refused, describe(other)}}
+    end
+  end
+
+  defp issue(server, artifact, signer_id, bytes, ticket) do
     request = %{
       requester: node(),
       # Advisory and cross-checked, exactly as `Ouroboros.Upgrade.Forge.Signer.Remote`
       # sends it: the service signs its own derivation and a disagreement is version skew
       # worth stopping at.
       payload: Artifact.signing_payload(artifact, signer_id),
-      component_bytes: bytes
+      component_bytes: bytes,
+      # The ticket the admission issued. It spends no second rate-limit slot, and it is
+      # honoured only for the requester it was issued to and a manifest whose source half is
+      # byte-identical to the admitted one; anything else pays the limiter again.
+      admission: ticket
     }
 
     case call(server, :sign_artifact, [artifact, signer_id, request], signing_timeout()) do
@@ -340,8 +391,15 @@ defmodule Ouroboros.Wasm.Deploy do
   end
 
   defp run_precompile(helper, bytes, kind, opts) do
+    case scratch_dir(opts) do
+      {:ok, dir} -> compile_in(dir, helper, bytes, kind, opts)
+      {:error, reason} -> {nil, nil, reason}
+    end
+  end
+
+  defp compile_in(dir, helper, bytes, kind, opts) do
     tag = Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
-    source = Path.join(scratch_dir(), "ouro-wasm-sign-#{tag}.wasm")
+    source = Path.join(dir, "sign-#{tag}.wasm")
     out = source <> ".cwasm"
 
     try do
@@ -354,17 +412,21 @@ defmodule Ouroboros.Wasm.Deploy do
       end
     after
       # Both halves, on every path. The component is bytes a client uploaded and the artifact is
-      # several times its size; leaving either in a temp directory after a signature would be
-      # this node accumulating other people's components on disk, unbounded, forever.
+      # several times its size; leaving either behind after a signature would be this node
+      # accumulating other people's components on disk, unbounded, forever.
       _ = File.rm(source)
       _ = File.rm(out)
     end
   end
 
+  # 0600, and written where only this node can read it. The component is a client's upload and
+  # the artifact is compiled from it, so both are somebody else's bytes: a default-umask file
+  # is world-readable and a directory this process merely `mkdir_p`s under a shared `/tmp` is a
+  # directory somebody else may have created, or symlinked, first. `Ouroboros.Wasm.Upload`'s
+  # discipline, verbatim.
   defp write_scratch(source, bytes) do
-    with :ok <- File.mkdir_p(Path.dirname(source)),
-         _ = File.chmod(Path.dirname(source), 0o700),
-         :ok <- File.write(source, bytes) do
+    with :ok <- File.write(source, bytes),
+         :ok <- File.chmod(source, 0o600) do
       {:ok, source}
     else
       {:error, reason} -> {:error, {:precompile_scratch, reason}}
@@ -416,18 +478,22 @@ defmodule Ouroboros.Wasm.Deploy do
 
   defp read_artifact(path) do
     case File.stat(path) do
-      {:ok, %{type: :regular, size: size}}
-      when size > 0 and size <= @max_receipt_precompiled_bytes ->
-        case File.read(path) do
-          {:ok, bytes} -> {:ok, bytes}
-          {:error, reason} -> {:error, {:precompile_unreadable, reason}}
-        end
+      {:ok, %{type: :regular, size: size}} when size > 0 ->
+        cap = max_receipt_precompiled_bytes()
 
-      {:ok, %{type: :regular, size: size}} when size > @max_receipt_precompiled_bytes ->
-        {:error, {:artifact_too_large, size, @max_receipt_precompiled_bytes}}
+        if size > cap,
+          do: {:error, {:artifact_too_large, size, cap}},
+          else: read_bounded(path)
 
       _absent_or_odd ->
         {:error, :precompile_missing}
+    end
+  end
+
+  defp read_bounded(path) do
+    case File.read(path) do
+      {:ok, bytes} -> {:ok, bytes}
+      {:error, reason} -> {:error, {:precompile_unreadable, reason}}
     end
   end
 
@@ -445,9 +511,41 @@ defmodule Ouroboros.Wasm.Deploy do
     end
   end
 
-  # This node's own scratch, never the upload directory: an upload root is a place a client
-  # writes to, and a compile's inputs and outputs are this node's.
-  defp scratch_dir, do: Path.join(System.tmp_dir!(), "ouroboros-wasm-sign")
+  # This node's own scratch, under its own data directory and never under a shared `/tmp`.
+  #
+  # `System.tmp_dir!()` is a directory every account on the machine can write to, so a root this
+  # process creates with `mkdir_p` may already exist, owned by somebody else, or be a symlink
+  # into a directory they control — and what would then be written into it is every component a
+  # client uploads and the machine code compiled from it. So the root lives at
+  # `<data_dir>/wasm/sign/`, is created 0700, and is **verified** with `lstat` to be a real
+  # directory this process owns rather than a link; a node with no data directory does not
+  # precompile at all, which is the same posture `Ouroboros.Wasm.Store` takes and for the same
+  # reason: a store under `/tmp` is one that quietly is not one.
+  defp scratch_dir(opts) do
+    with {:ok, root} <- scratch_root(opts),
+         :ok <- File.mkdir_p(root),
+         _ = File.chmod(root, 0o700),
+         {:ok, %File.Stat{type: :directory}} <- File.lstat(root) do
+      {:ok, root}
+    else
+      {:error, :no_data_dir} -> {:error, :no_data_dir}
+      {:ok, %File.Stat{type: type}} -> {:error, {:precompile_scratch, {:not_a_directory, type}}}
+      {:error, reason} -> {:error, {:precompile_scratch, reason}}
+    end
+  end
+
+  defp scratch_root(opts) do
+    case Keyword.get(opts, :scratch_root) do
+      dir when is_binary(dir) and dir != "" ->
+        {:ok, dir}
+
+      _unset ->
+        case Application.get_env(:ouroboros, :data_dir) do
+          dir when is_binary(dir) and dir != "" -> {:ok, Path.join([dir, "wasm", "sign"])}
+          _unset -> {:error, :no_data_dir}
+        end
+    end
+  end
 
   ## The manifest
 
@@ -569,7 +667,7 @@ defmodule Ouroboros.Wasm.Deploy do
     end
   end
 
-  defp build(bytes, attrs, imports, epoch, precompiled) do
+  defp build(bytes, attrs, imports, epoch) do
     kind = kind(attrs)
 
     Artifact.build(bytes, [
@@ -577,7 +675,6 @@ defmodule Ouroboros.Wasm.Deploy do
       {:epoch, epoch},
       {:imports, imports},
       {:kind, kind},
-      {:precompiled, precompiled},
       # Derived from the kind rather than taken beside it, so a request cannot produce a
       # manifest whose two halves disagree; the signing policy checks the pair again.
       {:world, Wasm.world_for(kind)},
@@ -625,6 +722,11 @@ defmodule Ouroboros.Wasm.Deploy do
 
   defp receipt(artifact, prefix, skipped) do
     %{
+      # W8, M9. Which form the client is holding, said outright rather than inferred from an
+      # absence: `precompiled` when the bundle carries both, `source` when it carries one, with
+      # `precompile_skipped` naming why. A client that had to deduce it from a null would be a
+      # client guessing at what its own file is.
+      form: if(artifact.precompiled, do: :precompiled, else: :source),
       precompiled: artifact.precompiled,
       # Rendered here rather than sent as a term: this crosses `:erpc` to a gateway task and
       # then a JSON encoder, and a reason is a diagnostic line an operator reads — `no_helper`,

@@ -304,7 +304,11 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
 
       # A refusal is a decision, so it counts.
       assert {:ok, status} = Service.status(service)
-      assert status.decisions == %{issued: 1, refused: 1}
+      # W8 widened the vocabulary: a lane-W sign is admitted, then issued, and an admission is
+      # a real thing the signer did — it committed a rate-limit slot and a policy verdict. The
+      # tally seeds all three so a surface reading it never has to ask whether a key is missing
+      # because nothing happened or because this build does not know the word.
+      assert status.decisions == %{issued: 1, admitted: 0, refused: 1}
     end
 
     test "a signature is never returned before its entry is durably acknowledged" do

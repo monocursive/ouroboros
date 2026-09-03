@@ -271,8 +271,7 @@ defmodule Ouroboros.Wasm.Capability do
     instance = "wasm/d/" <> Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
 
     try do
-      with {:ok, path, load_opts} <- component_form(state, pool),
-           {:ok, _loaded} <- Wasm.Pool.load(Map.get(state, :component), path, pool, load_opts),
+      with {:ok, _loaded} <- load_component(state, pool),
            {:ok, _stood} <- stand(state, pool, instance, opts),
            {:ok, payload} <- ask(pool, instance) do
         __MODULE__.Describe.parse(payload)
@@ -290,22 +289,19 @@ defmodule Ouroboros.Wasm.Capability do
   end
 
   @doc """
-  Which file this capability's component is read from, and how the helper should be told to
-  read it (W8).
+  Loads this capability's component in whichever form this node can (W8).
 
-  Answers `{:ok, path, load_opts}` where `load_opts` is what `Ouroboros.Wasm.Pool.load/4` takes:
-  empty for the source form, `[precompiled: <artifact sha>]` for the form the signer compiled.
-  `Ouroboros.Wasm.Store.form/4` makes the choice out of the state's `:precompiled` block — which
+  `Ouroboros.Wasm.Pool.load_component/4` chooses out of the state's `:precompiled` block — which
   `Ouroboros.Wasm.Rollout.start_state/2` copied from the **verified** manifest — and this node's
-  own helper reading; a node that does not match reads the source form, which is what every node
-  did before W8 and what every node can always do.
+  own helper reading, and falls back to the source form under §7.3's bounds when the helper
+  refuses the artifact. A node that cannot map one compiles it, which is what every node did
+  before W8 and what every node can always do.
 
   Public because both callers are in this module's own nested action and because the seam is
   worth naming: this is the one place a wrapper decides which bytes it runs.
   """
-  @spec component_form(map(), GenServer.server()) ::
-          {:ok, String.t(), keyword()} | {:error, term()}
-  def component_form(state, pool) do
+  @spec load_component(map(), GenServer.server()) :: {:ok, map()} | {:error, term()}
+  def load_component(state, pool) do
     root = Map.get(state, :store_root)
 
     opts =
@@ -321,11 +317,7 @@ defmodule Ouroboros.Wasm.Capability do
             _absent -> nil
           end
 
-        case Wasm.Store.form(sha, precompiled, fn -> Wasm.Pool.helper_build(pool) end, opts) do
-          {:precompiled, path, artifact} -> {:ok, path, [precompiled: artifact]}
-          {:source, path, _why} -> {:ok, path, []}
-          {:error, reason} -> {:error, reason}
-        end
+        Wasm.Pool.load_component(sha, precompiled, pool, store: opts)
 
       other ->
         {:error, {:invalid_component, inspect(other, limit: 5)}}
@@ -771,25 +763,27 @@ defmodule Ouroboros.Wasm.Capability do
       do: {:ok, name}
 
     defp stand_up(state, pool, name, owner) do
-      with {:ok, path, load_opts} <- store_path(state, pool),
-           :ok <- load(state, pool, path, load_opts),
+      with :ok <- load(state, pool),
            :ok <- instantiate(state, pool, name, owner) do
         {:ok, name}
       end
     end
 
-    defp store_path(state, pool) do
-      case Capability.component_form(state, pool) do
-        {:ok, path, load_opts} -> {:ok, path, load_opts}
-        {:error, reason} -> {:refused, :store, reason}
-      end
-    end
-
     # `load` is idempotent helper-side: a component already in its cache is reported as
-    # cached rather than compiled again.
-    defp load(state, pool, path, load_opts) do
-      case Pool.load(state.component, path, pool, load_opts) do
+    # cached rather than compiled again. Which *form* it reads, and what it does when the
+    # helper refuses that form, is `Ouroboros.Wasm.Pool.load_component/4`'s (W8).
+    #
+    # A component this node's store does not hold is still a `:store` refusal and still reaches
+    # no helper: `Store.form/4` resolves the source path before anything else and answers
+    # `{:unknown_component, _}` without asking the pool a thing.
+    defp load(state, pool) do
+      case Capability.load_component(state, pool) do
         {:ok, _report} -> :ok
+        # A fault reading this node's store is not a refusal about the component, and it
+        # reaches no helper: `Store.form/4` resolves the source path before it asks the pool
+        # anything at all.
+        {:error, {:store, reason}} -> {:refused, :store, reason}
+        {:error, {:invalid_component, _} = reason} -> {:refused, :store, reason}
         {:error, reason} -> {:refused, :load, reason}
       end
     end

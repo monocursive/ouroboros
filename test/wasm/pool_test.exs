@@ -153,6 +153,58 @@ defmodule Ouroboros.Wasm.PoolTest do
       assert %{phase: :idle} = Pool.status(pool)
     end
 
+    # W8, H3. The accepted report names the wasmtime and the target triple a precompiled
+    # artifact is bound to, and the binary on disk can be replaced between one child and the
+    # next — `make wasm` while a node is running is the ordinary way. Carrying the old report
+    # over a reconnect would have this node deserialize artifacts for a build it is no longer
+    # running, on the strength of a reading from a process that is gone. Delete `doctor: nil`
+    # from `connect/1` and the second assertion below still reads the first helper's answer.
+    test "a reconnect re-reads the helper's build rather than carrying the old one" do
+      first =
+        doctor_helper(
+          ~S(\"usable\":true,\"worlds\":[\"ouroboros:capability@0.1.0\"],) <>
+            ~S(\"wasmtime\":\"48.0.1\",\"target\":\"aarch64-apple-darwin\")
+        )
+
+      pool = start_pool(first, broken_ms: 50)
+      assert {:ok, _report} = Pool.doctor(pool)
+      assert Pool.helper_build(pool)["wasmtime"] == "48.0.1"
+
+      # The child is taken down and the binary at that path is replaced — `make wasm` while a
+      # node is running, which is the ordinary way a helper changes under a live pool. The pool
+      # reconnects on the next request and has to ask the new one what it is.
+      %{os_pid: os_pid} = Pool.status(pool)
+      System.cmd("kill", ["-9", Integer.to_string(os_pid)])
+      wait_until_gone(os_pid)
+
+      # Once the pool has noticed, it holds no build at all: a reading from a process that is
+      # gone is not a reading, and a reader that asked without connecting would otherwise be
+      # told a form this node can no longer promise.
+      assert {:error, :broken} = Pool.doctor(pool)
+      assert Pool.status(pool).doctor == nil
+      assert Pool.helper_build(pool, connect: false) == nil
+
+      replacement =
+        doctor_helper(
+          ~S(\"usable\":true,\"worlds\":[\"ouroboros:capability@0.1.0\"],) <>
+            ~S(\"wasmtime\":\"99.0.0\",\"target\":\"s390x-unknown-linux-gnu\")
+        )
+
+      File.rm!(first)
+      File.cp!(replacement, first)
+      File.chmod!(first, 0o755)
+
+      # A request to notice the death, then one to reconnect. Both are `doctor`, which is the
+      # cheapest thing this pool can ask for; the retry is for the notice, which arrives as a
+      # port message rather than as an answer.
+      assert {:ok, _fresh} = doctor_until_ready(pool)
+
+      assert Pool.helper_build(pool) == %{
+               "wasmtime" => "99.0.0",
+               "target" => "s390x-unknown-linux-gnu"
+             }
+    end
+
     test "a helper that never answers its handshake is broken, not waited on" do
       pool = start_pool(silent_helper(), handshake_timeout_ms: 150)
 
@@ -1024,6 +1076,21 @@ defmodule Ouroboros.Wasm.PoolTest do
     |> File.read!()
     |> String.split("\n", trim: true)
     |> Enum.map(&JSON.decode!/1)
+  end
+
+  # `doctor` until the pool has noticed a dead child and reconnected, or the window is up.
+  defp doctor_until_ready(pool, attempts \\ 40) do
+    case Pool.doctor(pool) do
+      {:ok, report} ->
+        {:ok, report}
+
+      {:error, _not_yet} when attempts > 0 ->
+        Process.sleep(50)
+        doctor_until_ready(pool, attempts - 1)
+
+      other ->
+        other
+    end
   end
 
   defp start_pool(helper_path, opts \\ []) do
