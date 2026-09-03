@@ -167,7 +167,12 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   # list that says which one it is rather than a comment somewhere else saying it might be
   # wrong. `Ouroboros.Wasm.Forge` refuses the one Linux backend that cannot express a read
   # fence at all rather than building under a weaker one.
-  @linux_readable ["/usr", "/bin", "/lib", "/lib64", "/etc", "/opt", "/dev", "/proc"]
+  # No `/dev` and no `/proc`: bubblewrap mounts a fresh devtmpfs and a fresh procfs for the
+  # namespace, and a read-only bind of the host's over the top of either replaces it — which
+  # is how the first cut of this list produced a build whose very first act was
+  # `cannot create /dev/null: Permission denied`. They are the backend's to provide, not
+  # this list's to name.
+  @linux_readable ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32", "/etc", "/opt"]
 
   @scratch_prefix "ouroboros-sandbox-"
   # Six hours against a ten-minute command ceiling: wide enough that a live scratch

@@ -1565,10 +1565,27 @@ machinery — it is a backend, not a lane (D9).
   the workspace, `/etc/ssh`, another user's files: none of them are.
 
   On Linux the same policy is a bubblewrap namespace that binds *only* those roots rather
-  than `--ro-bind / /`. **That is unverified** — no Linux build has run under this module —
-  and `ouro-sandbox`, the backend this runtime prefers on Linux, has no read allow-set in its
-  request protocol at all, so the forge refuses it by name rather than building under a
-  fence it does not have. Giving that helper one is a `tui/` change and a later slice's.
+  than `--ro-bind / /`, and it is **verified**: `scripts/forge-linux-test.sh` runs the forge
+  suites in a privileged Ubuntu 24.04 container (bubblewrap 0.9.0, kernel 7.0.14) and CI runs
+  them on ubuntu-24.04. It was written blind first, and shipped wrong in the way writing a
+  namespace blind is wrong: `/dev` and `/proc` were in the readable list, so the ro-binds
+  built from that list landed *on top of* bubblewrap's own `--dev` and `--proc` and replaced
+  a fresh devtmpfs with a read-only view of the host's. The first thing every build then did
+  was fail to open `/dev/null`, and it died with `SIGABRT` and no output at all. Those two
+  are the backend's to provide and are gone from the list.
+
+  The two backends also refuse a read differently, and the difference is worth stating
+  because a test that matched one string would have been a test that only ran on one
+  platform. Seatbelt denies an `open` on a path that is there: `Operation not permitted`.
+  bubblewrap never puts the file in the namespace, so the compiler is told
+  `No such file or directory`. Both are the fence; only one of them is a permission error,
+  and what the tests assert on both is the pair — the escape failed, and the honest fixture
+  built under the same policy.
+
+  `ouro-sandbox`, the backend this runtime prefers on Linux where it is installed, still has
+  no read allow-set in its request protocol, so the forge refuses it by name rather than
+  building under a fence it does not have. Giving that helper one is a `tui/` change and a
+  later slice's; until then a node that has it forges under bubblewrap or not at all.
 - **D19 — a forge input is bounded before it is read, and a cold cache is a refusal.**
   Thirty-two files and one mebibyte, paths relative and free of `..`, no symlink followed,
   every bound applied *before* a byte is copied into the build directory. The numbers are the
@@ -1765,14 +1782,14 @@ Stated once, so nobody reads more into the lane than is there:
 - **The host functions are the new surface.** Every import added to a world is
   boundary code. v1's answer is austerity: `log` only. Growth of any world's import
   set is a signing-policy event, not a convenience.
-- **A forge's read fence is verified on macOS and unverified on Linux.** A build reads only
-  the roots in D18's list — proved on this Mac by builds that fail with
-  `Operation not permitted` — and what remains readable inside that list is the toolchain and
-  the guest SDK, which have to be readable for a compiler to run. The bubblewrap form of the
-  same policy binds only those roots and **has not been exercised**; `ouro-sandbox`, the
-  preferred Linux backend, cannot express a read allow-set at all and is refused by name
-  rather than used. So on Linux this lane either builds under bubblewrap with an unverified
-  fence or does not build, and neither of those is the same sentence as the macOS one.
+- **A forge's read fence covers two backends, and one Linux backend has no fence at all.**
+  A build reads only the roots in D18's list — proved on macOS by builds that fail with
+  `Operation not permitted` and on Linux, in a container and in CI, by builds that fail with
+  `No such file or directory` — and what remains readable inside that list is the toolchain
+  and the guest SDK, which have to be readable for a compiler to run. `ouro-sandbox`, the
+  backend this runtime prefers on Linux when it is installed, cannot express a read
+  allow-set, so the forge refuses it by name: a node whose only sandbox is that helper does
+  not forge. That is the honest state of it, not a fence.
 - **wasmtime is a dependency, not a proof.** It has had escape CVEs; they are rare and
   patched fast, and the helper process (which can itself be OS-sandboxed later) is the
   second wall. Pin it, watch its advisories, and keep its dialect small — §7.3's disabled
@@ -2371,8 +2388,8 @@ Each slice is PR-sized, lands green, and is useful alone.
   `capabilities.admit` from a workspace proposal. Every C9 refusal has a test that is red
   without its check, and the sandbox is proved by what the kernel actually did: a probe
   spawned through the same `Sandbox.wrap/4` the build goes through wrote inside the build
-  directory, was denied outside it, could not read a file the fence did not name, and got
-  `Operation not permitted` from a connect.
+  directory, could not write into a root it may only read, could not read a file the fence
+  did not name, and could not open a connection.
 
   **The first cut of this slice did not fence reads, and an adversarial review walked
   through the hole end to end**: a component that `include_str!`s a planted secret was
@@ -2380,13 +2397,29 @@ Each slice is PR-sized, lands green, and is useful alone.
   real `~/.ssh/id_rsa` built fine. The excuse written into D18 — that this was "no wider than
   a lane-B capability" — was true only of `modules: :any`, and the narrow grant is the one an
   operator reaches for *because* it is narrow. Builds now run under a policy that is closed
-  on reads (D18 lists what it opens), the two escapes are tests asserting
-  `Operation not permitted` beside a test that the honest fixture still builds, and the
-  Linux half is marked unverified rather than claimed. Two more the same review proved: a
-  stored `modules: :any` grant silently came to cover lane W — `:any` now keeps its pre-W14
-  meaning and `"wasm/*"` is how the broad thing is said — and a forge on the effect path
-  could be cut by the runner's `brutal_kill`, which runs no cleanup, so the forge's budget
-  now sits strictly inside the effect's and the test for it asserts `pgrep` finds nothing.
+  on reads (D18 lists what it opens) and the two escapes are tests asserting the refusal
+  beside a test that the honest fixture still builds under the same policy. Two more the same
+  review proved: a stored `modules: :any` grant silently came to cover lane W — `:any` now
+  keeps its pre-W14 meaning and `"wasm/*"` is how the broad thing is said — and a forge on
+  the effect path could be cut by the runner's `brutal_kill`, which runs no cleanup, so the
+  forge's budget now sits strictly inside the effect's and the test for it asserts `pgrep`
+  finds nothing.
+
+  **The Linux half was then run, and it did not work.** The bubblewrap namespace had `/dev`
+  and `/proc` in its readable list, so the ro-binds made from that list landed on top of the
+  fresh devtmpfs and procfs bubblewrap had just mounted and replaced them with a read-only
+  view of the host's. Every build then aborted on `/dev/null` with `SIGABRT` and produced no
+  output at all — which is also how a failed build came to report an empty string. Both are
+  fixed: those two mounts are the backend's to provide and are gone from the list, and a
+  build that says nothing now reports the signal that killed it. The suite is portable now
+  too: the probe uses no `nc` and asserts effects rather than one platform's kernel prose,
+  and the read denial is matched per backend — `Operation not permitted` from Seatbelt,
+  `No such file or directory` from a namespace the file was never in. One test-isolation
+  defect came out with them, a test that set `CARGO_HOME` and deleted rather than restored it
+  on the way out, invisible on a developer machine and stone cold in a container.
+  `scripts/forge-linux-test.sh` (`make forge-linux-test`) runs all of it in a privileged
+  Ubuntu 24.04 container from a Mac: **127 passed** on kernel 7.0.14 with bubblewrap 0.9.0,
+  beside **131 passed** on macOS.
 - **W15 — a policy is a component, and it can only narrow.** The helper grew a **second closed
   world**, `ouroboros:policy@0.1.0`: the same single import, `evaluate: func(string) -> string`
   in place of `handle-message`, and a `load` that is told which of the two a set of bytes is

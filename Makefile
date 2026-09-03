@@ -13,7 +13,7 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
+.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test forge-linux-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -41,6 +41,7 @@ help:
 	@echo "make computer-use     build ouro-computer-use into priv/computer-use/"
 	@echo "make sandbox          build ouro-sandbox into priv/sandbox/ (Linux sandbox helper)"
 	@echo "make sandbox-linux-test  prove the sandbox helper enforces, in a Linux container"
+	@echo "make forge-linux-test    prove the forge's builder namespace, in a Linux container"
 	@echo "make wasm             build ouro-wasm into priv/wasm/ (WebAssembly containment helper)"
 	@echo "make wasm-guest       build the lane-W acceptance guest into test/support/wasm/echo.wasm"
 	@echo "make wasm-examples    build the guest SDK's worked components (counter, deny-writes, …)"
@@ -222,6 +223,13 @@ wasm-sdk-cache:
 	cd tui/wasm/guest && CARGO_HOME="$(FORGE_CARGO_HOME)" $(CARGO) fetch --locked
 	@echo "==> wasm-sdk-cache: crates now cached"
 	@find "$(FORGE_CARGO_HOME)/registry/cache" -name '*.crate' | wc -l
+
+# The forge's builder namespace, on a real kernel, from a Mac. `--privileged` is what allows
+# the user namespace bubblewrap needs; the script's header says why that is a fact about
+# Docker rather than about the sandbox.
+forge-linux-test:
+	@echo "==> forge-linux-test: the builder namespace on a Linux kernel"
+	scripts/forge-linux-test.sh
 
 computer-use-debug:
 	@echo "==> computer-use-debug: debug helper into priv/computer-use/"

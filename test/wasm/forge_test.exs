@@ -319,10 +319,12 @@ defmodule Ouroboros.Wasm.ForgeTest do
       {:ok, sdk} = Forge.sdk_root([])
       set = Forge.read_set("/opt/rust/bin/cargo", sdk)
 
+      rustup = System.get_env("RUSTUP_HOME") || Path.expand("~/.rustup")
+
       assert "/opt/rust/bin" in set
       assert sdk in set
       assert Path.expand("../wit", sdk) in set
-      assert Enum.any?(set, &String.ends_with?(&1, ".rustup"))
+      assert rustup in set or Path.expand(rustup) in set
       assert length(set) == 4
     end
 
@@ -331,10 +333,13 @@ defmodule Ouroboros.Wasm.ForgeTest do
     # exactly the profile a `cargo build` runs behind.
     @tag @needs_build
     @tag timeout: 120_000
-    test "on this Mac the fence denies a write outside the build directory and the network",
+    test "on this node the fence denies a write outside the build directory and the network",
          context do
       outside = Path.join(context.tmp, "outside.txt")
-      probe = probe_script!(context, outside)
+      {:ok, sdk} = Forge.sdk_root([])
+      readonly = Path.join(sdk, "PROBE-SHOULD-NOT-EXIST")
+      on_exit(fn -> File.rm(readonly) end)
+      probe = probe_script!(context, outside, readonly)
 
       assert {:ok, preview} =
                Forge.preview(%{files: fixture()}, Keyword.put(forge_opts(context), :cargo, probe))
@@ -344,14 +349,21 @@ defmodule Ouroboros.Wasm.ForgeTest do
       assert preview.build.outcome == :failed
       output = preview.build.output
 
-      assert File.regular?("/usr/bin/nc"), "the network half of this probe needs /usr/bin/nc"
-
       assert output =~ "inside-ok"
-      assert output =~ "outside-denied"
       assert output =~ "read-denied"
-      # The kernel's own words, quoted back: Seatbelt denies a connect as EPERM, which is
-      # what `Sandbox.violation/3` matches and what a closed loopback port is not.
-      assert output =~ "Operation not permitted"
+      assert output =~ "network-denied"
+
+      # A write into a root the build may *read* is denied by both backends, and that is the
+      # assertion worth making about a write: Seatbelt has no write rule for it, bubblewrap
+      # bound it read-only.
+      assert output =~ "ro-denied"
+      refute File.exists?(readonly)
+
+      # A write to a path outside the namespace altogether is where the two differ, and the
+      # difference is mechanism rather than outcome. Seatbelt denies it: the path is there
+      # and the profile says no. bubblewrap does not deny it — the host path is simply not
+      # in the mount namespace, so the write lands in a throwaway tmpfs that dies with the
+      # build. Both mean the same thing about the host, so that is what is asserted.
       refute File.exists?(outside)
     end
 
@@ -373,8 +385,8 @@ defmodule Ouroboros.Wasm.ForgeTest do
 
       assert {:ok, preview} = Forge.preview(%{files: files}, forge_opts(context))
       assert preview.build.outcome == :failed
-      assert preview.build.output =~ "Operation not permitted"
       assert preview.build.output =~ "secret.txt"
+      assert preview.build.output =~ denial_pattern()
 
       # And the fence is a fence and not a broken toolchain: the same project without that
       # line builds under the same policy.
@@ -397,8 +409,8 @@ defmodule Ouroboros.Wasm.ForgeTest do
 
       assert {:ok, preview} = Forge.preview(%{files: files}, forge_opts(context))
       assert preview.build.outcome == :failed
-      assert preview.build.output =~ "Operation not permitted"
       assert preview.build.output =~ "x.rs"
+      assert preview.build.output =~ denial_pattern()
     end
   end
 
@@ -474,8 +486,19 @@ defmodule Ouroboros.Wasm.ForgeTest do
       Application.delete_env(:ouroboros, :wasm_forge_cargo_home)
       on_exit(fn -> restore(:wasm_forge_cargo_home, previous_home) end)
 
+      # Restored, not deleted. Deleting it left every test that ran afterwards with no
+      # `CARGO_HOME` at all, so `ForgeFixture.cargo_home/0` fell back to `~/.cargo` — warm on
+      # a developer machine, and stone cold in the Linux container, where three later tests
+      # failed for a reason that had nothing to do with them.
+      ambient = System.get_env("CARGO_HOME")
       System.put_env("CARGO_HOME", "/an/ambient/cargo/home")
-      on_exit(fn -> System.delete_env("CARGO_HOME") end)
+
+      on_exit(fn ->
+        case ambient do
+          nil -> System.delete_env("CARGO_HOME")
+          value -> System.put_env("CARGO_HOME", value)
+        end
+      end)
 
       assert Forge.cargo_home([]) == Path.join([context.tmp, "wasm", "cargo-home"])
       assert Forge.cargo_home(cargo_home: "/named/by/an/operator") == "/named/by/an/operator"
@@ -747,6 +770,24 @@ defmodule Ouroboros.Wasm.ForgeTest do
 
   defp operator_cargo_home, do: ForgeFixture.cargo_home()
 
+  # A `bash` for the probe's network half: `/dev/tcp` is a bash feature and `sh` is dash on
+  # Ubuntu. It is inside the read set on both platforms because the toolchain roots that hold
+  # it are (`/bin` on macOS, `/usr` on Linux).
+  defp bash!, do: System.find_executable("bash") || "/bin/bash"
+
+  # The two backends refuse a read differently, and the difference is not cosmetic: Seatbelt
+  # denies an open on a path that exists (`EPERM`), while bubblewrap does not put the file in
+  # the namespace at all, so the compiler is told it is not there (`ENOENT`). Both are the
+  # fence; only one of them is a permission error. The assertion beside this one — that the
+  # honest fixture still builds — is what makes either message mean the fence rather than a
+  # broken toolchain.
+  defp denial_pattern do
+    case Sandbox.detect().backend do
+      :sandbox_exec -> ~r/Operation not permitted/
+      _linux -> ~r/No such file or directory/
+    end
+  end
+
   # Nothing of this build may outlive its own refusal: no cargo or rustc still compiling in
   # the tree, and no tree. `pgrep -f` over the scratch root catches a survivor because every
   # rustc this build spawns carries an `--out-dir` beneath it.
@@ -843,7 +884,7 @@ defmodule Ouroboros.Wasm.ForgeTest do
   # `read_set/2` allows the *cargo executable's* directory — `process-exec` still has to read
   # the binary — so a probe sitting beside the file it is testing would be reading a
   # directory the fence is supposed to allow, and would prove nothing.
-  defp probe_script!(context, outside) do
+  defp probe_script!(context, outside, readonly) do
     directory = Path.join(context.tmp, "probe")
     File.mkdir_p!(directory)
     path = Path.join(directory, "probe.sh")
@@ -852,12 +893,21 @@ defmodule Ouroboros.Wasm.ForgeTest do
     File.mkdir_p!(Path.dirname(unreadable))
     File.write!(unreadable, "not for a build")
 
+    # Effects, not kernel prose. Seatbelt refuses a connect with EPERM and an unshared
+    # network namespace refuses it with ENETUNREACH; `nc` is spelled differently on the two
+    # platforms and its macOS `-G` is not an option elsewhere. What both backends agree on is
+    # whether the connection happened, so the probe reports that and the test asserts it.
     File.write!(path, """
     #!/bin/sh
     if echo ok > ./inside.txt 2>/dev/null; then echo inside-ok; else echo inside-denied; fi
     if echo ok > #{outside} 2>/dev/null; then echo outside-ok; else echo outside-denied; fi
+    if echo ok > #{readonly} 2>/dev/null; then echo ro-ok; else echo ro-denied; fi
     if cat #{unreadable} >/dev/null 2>&1; then echo read-ok; else echo read-denied; fi
-    echo "network: $(/usr/bin/nc -z -G 2 1.1.1.1 443 2>&1)"
+    if #{bash!()} -c 'exec 3<>/dev/tcp/1.1.1.1/443' 2>/dev/null; then
+      echo network-open
+    else
+      echo network-denied
+    fi
     exit 3
     """)
 

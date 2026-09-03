@@ -1451,9 +1451,10 @@ sandbox the native agent's shell runs in:
 files at compile time and a `#[path]` module reaches one outside `src/`; all of them are
 denied unless the file is inside your project. A capability that needs data ships it as a
 `src/**.rs` file or receives it in its `init` config — those are the two doors, and both are
-inside the manifest that gets signed. On Linux this is bubblewrap and **unverified**; a node
-whose only sandbox is `ouro-sandbox` refuses to forge rather than building behind a fence it
-cannot apply (docs/WASM.md D18).
+inside the manifest that gets signed. macOS enforces this with Seatbelt and says
+`Operation not permitted`; Linux enforces it with a bubblewrap namespace the file was never
+in, and says `No such file or directory`. A node whose only sandbox is `ouro-sandbox`
+refuses to forge rather than building behind a fence it cannot apply (docs/WASM.md D18).
 
 ### Warming the cache, once, per builder
 

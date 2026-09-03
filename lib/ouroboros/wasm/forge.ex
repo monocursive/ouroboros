@@ -1029,10 +1029,27 @@ defmodule Ouroboros.Wasm.Forge do
 
   defp settle(%{status: status, output: output}, label) do
     case Sandbox.backend_failure(label, output, status) do
-      nil -> {:error, {:build_failed, {:exit, status, clip(output)}}}
+      nil -> {:error, {:build_failed, {:exit, status, diagnosed(status, clip(output))}}}
       message -> {:error, {:sandbox_unavailable, {:backend_failed, label, message}}}
     end
   end
+
+  # A build that fails and says nothing is the hardest kind to fix, and the first Linux run
+  # of this lane produced exactly that: `{:exit, 134, ""}`, over and over, because the
+  # namespace had re-bound `/dev` read-only and everything downstream of that died before it
+  # could write a word. An empty output is now a sentence rather than an empty string, and a
+  # status above 128 is the signal it stands for.
+  defp diagnosed(status, "") when status > 128 and status < 192,
+    do: "(no output; the build was killed by #{signal(status - 128)})"
+
+  defp diagnosed(_status, ""), do: "(the build produced no output)"
+  defp diagnosed(_status, output), do: output
+
+  defp signal(6), do: "SIGABRT — a process aborted"
+  defp signal(9), do: "SIGKILL"
+  defp signal(11), do: "SIGSEGV"
+  defp signal(15), do: "SIGTERM"
+  defp signal(number), do: "signal #{number}"
 
   # Cargo's diagnostics are the author's text quoted back. Bounded, and never anything a
   # caller is invited to read as this node's own words.

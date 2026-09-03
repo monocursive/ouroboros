@@ -75,7 +75,12 @@ defmodule Ouroboros.Wasm.ForgeFixture do
   own that does not build.
   """
   @spec cargo_home() :: Path.t()
-  def cargo_home, do: Path.expand("~/.cargo")
+  def cargo_home do
+    case System.get_env("CARGO_HOME") do
+      path when is_binary(path) and path != "" -> path
+      _unset -> Path.expand("~/.cargo")
+    end
+  end
 
   @doc "The first thing that is not here, said the way an operator has to fix it."
   @spec missing() :: String.t() | nil
