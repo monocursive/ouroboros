@@ -21,15 +21,17 @@ The component is `target/wasm32-wasip2/release/{{name_snake}}.wasm`.
 ouroboros-guest = { path = "{{sdk_path}}" }
 ```
 
-`ouro wasm new` filled that in by walking up from the directory it created this project in
-until it found a checkout's `tui/wasm/guest`; where there is no checkout above the output
-directory it refuses and asks for `--sdk-path <PATH>` instead of guessing.
+`ouro wasm new` wrote that absolute path from the checkout it was itself installed in, or from
+the `--sdk-path` you named, having checked that the directory really is an `ouroboros-guest`
+crate reached without a symlink. It never goes looking for one near the directory you ran the
+command in: a path dependency's `build.rs` runs during `cargo build`, so an SDK you did not
+choose is code you did not choose.
 
 That path has to point at an ouroboros checkout on this machine, and this project stops
-building the moment the checkout moves or goes away. Move the project, and the path moves with
-it; hand the project to somebody else, and they need a checkout of their own and have to edit
-that line. When the crate is published this becomes a version, and the dependency stops being
-a fact about your filesystem.
+building the moment the checkout moves or goes away — edit the line when it does. Hand the
+project to somebody else and they need a checkout of their own and a path of their own. When
+the crate is published this becomes a version, and the dependency stops being a fact about your
+filesystem.
 
 ## What it is allowed to do
 

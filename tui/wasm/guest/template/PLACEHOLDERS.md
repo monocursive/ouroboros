@@ -45,20 +45,31 @@ reason that a pass in the other order turns the first into `<name>_snake`. That 
 hold: `{{name}}` is not a substring of `{{name_snake}}`, because the `}}` is not there. W10b
 replaced the rule with the single pass, which needs no ordering at all.)
 
-## `{{sdk_path}}` is a fact about a filesystem
+## `{{sdk_path}}` is a fact about a filesystem, and it is executed
 
 `ouroboros-guest` is not published, so `Cargo.toml` reaches it by path, and that path has to be
-true on the machine the project is built on. `ouro wasm new` fills it in by walking up from the
-**output directory** looking for a checkout's `tui/wasm/guest`, and writes the result relative
-to the project it just created — so a project scaffolded inside a checkout moves with the
-checkout. Nothing about the helper's location or the `ouro` binary's location is consulted:
-this is a source path in a `Cargo.toml`, not something that gets executed, and the containment
-rule about where an executable may come from (docs/WASM.md D14) is about the other thing.
+true on the machine the project is built on. It is also **run**: a cargo path dependency's
+`build.rs` and its proc-macros execute during `cargo build`, so where this value comes from is
+the same question docs/WASM.md D14 asks about the helper, and gets the same answer.
 
-Where the walk finds nothing, `ouro wasm new` refuses and asks for `--sdk-path <PATH>` rather
-than guessing. The README the scaffold writes says the same, because a project whose dependency
-path is wrong fails at `cargo build` with a message about a missing manifest and not about
-this.
+`ouro wasm new` fills it in from exactly two places, and the working directory is not among
+them:
+
+1. `--sdk-path <PATH>` — a person naming one.
+2. The checkout the running `ouro` binary lives in, found by walking the ancestors of the
+   canonicalised `current_exe` (`tui/target/{debug,release}/ouro` in a checkout).
+
+Whichever it is, it is vetted before it is written: no symlink at `guest` or at the two levels
+above it, a regular `Cargo.toml` read under a bound, and a `[package] name` of exactly
+`ouroboros-guest` — a directory merely *laid out* like the SDK is not the SDK. What lands in
+the manifest is the **canonical absolute** path, so the line an author reads names the
+directory that was checked.
+
+An earlier version walked up from the output directory instead. An `ouroboros-guest` planted on
+any shared ancestor of where a developer worked — `/tmp`, a home directory, a mounted share —
+was found, written in, and had its build script executed by the project's first build. Where
+neither source above yields an SDK, `ouro wasm new` refuses and asks for `--sdk-path` rather
+than guessing; the README the scaffold writes says the same.
 
 ## What holds the template to its word
 

@@ -1060,6 +1060,24 @@ machinery — it is a backend, not a lane (D9).
       account, not less, and refusing the safest install would push a developer to `--helper`,
       which this same function vets anyway.
 
+  **A cargo path dependency is executed, so the SDK obeys this decision too (W10b).** `ouro
+  wasm new` writes `ouroboros-guest = { path = "…" }`, and the first version computed that
+  path by walking up from the *output directory* — on the reasoning that a source path is not
+  something that runs. It is: a path dependency's `build.rs` and its proc-macros execute
+  during `cargo build`. Review planted an `ouroboros-guest` on a shared ancestor of a working
+  directory (`/tmp` is one, a home directory is one, a mounted share is one) and the scaffolded
+  project's first build ran its build script. So the SDK now comes from exactly two places, and
+  the working directory is not among them: `--sdk-path <PATH>`, or the checkout the running
+  `ouro` binary lives in — its ancestors, from a **canonicalised** `current_exe`, which in a
+  checkout is `tui/target/{debug,release}/ouro`. Whichever it is, it is vetted the way the
+  helper is: no symlink at `guest` or the two levels above it, a regular bounded `Cargo.toml`,
+  and a `[package] name` of exactly `ouroboros-guest` — a directory laid out like the SDK is
+  not the SDK. The path written into the manifest is **canonical and absolute**, because the
+  relative form was byte-identical in the benign case and the planted one, so a manifest an
+  author read told them nothing about which SDK they had. With neither source available the
+  command refuses and names `--sdk-path`; an installed `ouro` outside a checkout is that case,
+  and it is the honest one.
+
   **Outside the model, stated:** a local attacker who can already write into the directory the
   real `ouro` lives in, or who can hard-link that binary into a directory they control. A hard
   link needs local write access to a directory on the same filesystem, and the link is
@@ -1140,8 +1158,8 @@ machinery — it is a backend, not a lane (D9).
   remain the ways to say it by hand on a machine with no helper (W10b) — and a declared list
   that does not match what the component actually imports is refused at stage by
   `Wasm.Verifier.cross_check/2`, which is D5's posture and always was: the manifest's import
-  list is provenance, and the linker is the boundary. Which side of the wire *types* the list
-  was never the point; which side *parses the bytes* is, and it is still not the node. `Wasm.Artifact.build/2` does
+  list is provenance, and the linker is the boundary. Which side of the wire *types* the
+  list was never the point; which side *parses the bytes* is, and it is still not the node. `Wasm.Artifact.build/2` does
   check eight bytes of preamble, because every other check a signer makes is about numbers
   computed *from* the bytes and would sign a text file just as happily; whether those bytes
   are a *component* remains the helper's answer, under §7.3's bounds, on the node that will
@@ -1765,15 +1783,29 @@ Each slice is PR-sized, lands green, and is useful alone.
   integration suite scaffolds both, builds them with a plain `cargo build --release --target
   wasm32-wasip2`, and asserts `imports: log` and `verdict: admitted` on what came out.
 
-  `ouroboros-guest` is unpublished, so the generated `Cargo.toml` reaches it by **path**, and
-  a path that is not true on this filesystem is a project that does not build. `ouro wasm
-  new` fills it in by walking up from the **output directory** to a checkout's
-  `tui/wasm/guest` and writing the result relative to the project, so a project scaffolded
-  inside a checkout moves with it; with nothing above, it refuses and names `--sdk-path`
-  rather than guessing. The walk is cwd-relative and D14's rule is not violated by that: D14
-  is about where an executable may come from, because the helper is the containment boundary
-  and gets *run*. This is a `path =` line in a manifest a person then builds themselves. The
-  asymmetry is stated in the code, in `PLACEHOLDERS.md` and in the README the scaffold writes.
+  `ouroboros-guest` is unpublished, so the generated `Cargo.toml` reaches it by **path** — and
+  the first cut of this slice computed that path by walking up from the output directory,
+  carved out of D14 on the reasoning that a source path is not something that gets executed.
+  That reasoning was wrong and adversarial review proved it: a cargo path dependency's
+  `build.rs` and proc-macros run during `cargo build`, so an SDK planted on any shared ancestor
+  of the directory a developer works in got its build script executed by the scaffolded
+  project's first build. The carve-out is gone and D14 applies verbatim (see it there): the SDK
+  comes from `--sdk-path` or from the checkout the running `ouro` lives in — never from the
+  working or output directory — is vetted for symlinks, a regular bounded manifest and a
+  `[package] name` of exactly `ouroboros-guest`, and is written **canonical and absolute**
+  because the relative form read the same whether the SDK was the real one or the plant. With
+  neither source available the command refuses and names `--sdk-path`.
+
+  Three more ways `new` wrote a file it had not checked, all of them the same shape — an
+  operator's argument spliced into a structured document. `--sdk-path` went into a TOML string
+  and a `"` or a newline in it wrote a `Cargo.toml` key nobody typed; `--summary` went into a
+  Rust string literal, where `x" ; compile_error!("` is a scaffold that hands somebody a crate
+  that will not build, and the "at most 200 characters" in the flag's help was not enforced
+  anywhere. Both are refused rather than escaped, because neither is a character an SDK path or
+  a one-line description has. And the name charset was "letters, digits, `-` and `_`", which
+  accepted `MyThing` — a name `Wasm.Artifact.name?/1` refuses, learned only after the component
+  was written. It is now that function's charset exactly, plus cargo's narrower rule on top
+  (no leading digit, no `.`), with a separate sentence for each so a refusal says which one.
 
   `ouro wasm sign` required an operator to run `ouro wasm inspect --json` and pipe the answer
   back into `--imports-from`, because D15 makes the import list the client's to declare — the
@@ -1783,17 +1815,38 @@ Each slice is PR-sized, lands green, and is useful alone.
   now resolves a helper by D14's three-place rule, canonicalised and vetted exactly as
   `inspect` resolves one, asks it `inspect` for the imports and `load` for the world, and
   **refuses to sign a component its own helper would not admit** — naming the helper's own
-  refusal, before a byte is uploaded and before a signing service spends a policy decision on
-  a signature nobody could use. `--import` and `--imports-from` still override it and are
-  never second-guessed. `--no-local-helper` starts nothing and requires one of them, which is
-  the machine that has no helper; an empty import list is still a real answer and arrives
-  through a report. `--dry-run` prints the `wasm.sign` parameters and opens no socket, which
-  is how the integration suite asserts on them: the real echo guest gives `["log"]`, a
-  hand-built component importing `wasi:cli/environment` is refused by name, and a scripted
-  `ouro-wasm` records that the only two requests `sign` makes of a helper are `inspect` and
-  `load` on the path named on the command line — never an `instantiate` that would *run* a
-  component nobody has signed yet.
+  refusal, rather than spending a signing service's policy decision on a signature nobody could
+  use. `--import` and `--imports-from` still override it and are never second-guessed.
+  `--no-local-helper` starts nothing and requires one of them, which is the machine that has no
+  helper; an empty import list is still a real answer and arrives through a report, now read
+  under a 64 KiB bound like every other input.
 
+  **The order is the claim, and the first cut had it only in `--dry-run`.** Three sentences in
+  this repository said the helper was asked "before a byte is uploaded" and "before it opens a
+  socket at all"; the code connected, read, uploaded and *then* started the helper, and every
+  test that asserted the order used `--dry-run` — the one path where it was true. A recording
+  gateway and a spy helper showed a refused component reaching the gateway with the helper
+  never started. The code moved rather than the documents: reading the component and putting it
+  to the helper is now a `plan_sign` that runs before `wasm_connect`, and the same recorder and
+  spy assert both halves on the **real** path — a refused component reaches no gateway at all,
+  and an admitted one reaches the helper first and the gateway second. `--dry-run` remains the
+  only path that opens no socket ever; what it no longer is, is the only path with the
+  documented order.
+
+  **And the bytes are bound to the answer.** This command reads the component into memory and
+  uploads what it read; the helper opens the path again for itself. A file swapped in that
+  window produced a signed manifest whose import list described bytes nobody uploaded — caught
+  at stage, by the node's cross-check, on somebody else's machine. The sha the helper reports
+  must now equal the sha of the bytes in hand, and that sha is what `load` is asked about, so
+  the window is closed at both ends. Proved with a scripted helper that reports a different
+  digest: refused, and no gateway contacted.
+
+  The rest of the proofs: the real echo guest gives `["log"]`, a hand-built component importing
+  `wasi:cli/environment` is refused by name, a helper reporting nine imports is refused against
+  the node's ceiling before an upload, a component past the 17 MiB ceiling is refused before a
+  helper is started, and a scripted `ouro-wasm` records that the only two requests `sign` makes
+  of a helper are `inspect` and `load` on the path named on the command line — never an
+  `instantiate` that would *run* a component nobody has signed yet.
 - **W11 — the author guide, with its contracts pinned.** Every author-facing fact in this lane
   lived in module docs, this spec and a test file, which is three places a developer does not
   look and none of them the one they would. `docs/WASM_GUIDE.md` is that reader's document: a

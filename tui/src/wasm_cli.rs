@@ -2009,48 +2009,57 @@ const TEMPLATE_HOOK: &str = include_str!("../wasm/guest/template/src/lib.hook.rs
 /// rule for the template itself.
 const TEMPLATE_GITIGNORE: &str = include_str!("../wasm/guest/template/gitignore");
 
-/// The template's own path inside a checkout, which is also what the SDK walk below looks for.
+/// The SDK's path inside a checkout, relative to the checkout root.
 const SDK_RELATIVE: [&str; 3] = ["tui", "wasm", "guest"];
+
+/// The package name the manifest at that path must declare. A directory laid out like the SDK
+/// is not the SDK.
+const SDK_CRATE: &str = "ouroboros-guest";
+
+/// How much of a candidate `Cargo.toml` is read before it is parsed. The SDK's own is under two
+/// kilobytes; this is a file that may have been planted, and every input is bounded before it
+/// is parsed.
+const MAX_SDK_MANIFEST_BYTES: u64 = 64 * 1024;
+
+/// Contract C1's bound on a `describe` summary, which is where `--summary` ends up.
+const MAX_SUMMARY_CHARS: usize = 200;
+
+/// `Wasm.Artifact`'s `@max_name_bytes`.
+const MAX_NAME_BYTES: usize = 64;
+
+/// The refusal when there is no SDK to point at. Named here because two paths reach it.
+const NO_SDK: &str = "no `ouroboros-guest` to depend on. It is not published to crates.io, so a \
+                      scaffolded project reaches the SDK by path — and this command will not go \
+                      looking for one near the directory it was typed in, because a path \
+                      dependency's `build.rs` and proc-macros run at build time and a checkout \
+                      that supplied one would be choosing what your `cargo build` executes \
+                      (docs/WASM.md D14). It comes from `--sdk-path <PATH>`, or from the \
+                      checkout the running `ouro` binary lives in. Neither is available here: \
+                      pass `--sdk-path` naming a checkout's `tui/wasm/guest`.";
 
 /// `ouro wasm new <name>`: a component project that builds, in the shape this world wants.
 ///
 /// Two shapes over one world: a `Capability` by default, a `Hook` under `--hook`. Both are the
-/// SDK's template with the table in `tui/wasm/guest/template/PLACEHOLDERS.md` substituted, and
-/// the substitution order is that table's contract — `{{name_snake}}` before `{{name}}`,
-/// because a plain textual pass in the other order turns the first into `<name>_snake`.
+/// SDK's template with the table in `tui/wasm/guest/template/PLACEHOLDERS.md` substituted.
 ///
-/// `sdk_path` is where the generated `Cargo.toml` reaches `ouroboros-guest`. It is not a
-/// dependency an author can honour by magic — the crate is unpublished, so it is a path on
-/// this filesystem — and when the caller names none it is computed by walking up from the
-/// **output directory** to a checkout. See [`sdk_path_for`] for why that walk is allowed to be
-/// cwd-relative when nothing else here is.
+/// `sdk_path` is where the generated `Cargo.toml` reaches `ouroboros-guest`, and everything
+/// interesting about this command is in [`sdk_path`]: a path dependency is **executed** at
+/// build time, so where it comes from is D14's question and gets D14's answer.
 pub fn new<O: Write>(
     into: &Path,
     name: &str,
     hook: bool,
     summary: Option<&str>,
-    sdk_path: Option<&Path>,
+    named_sdk: Option<&Path>,
     out: &mut O,
 ) -> Result<()> {
     let name = name.trim();
-    if name.is_empty() || !name.chars().all(is_name_character) {
-        bail!(
-            "`{}` is not a project name: use letters, digits, `-` and `_`",
-            clean(name)
-        );
-    }
+    project_name(name)?;
 
     let root = into.join(name);
     if root.exists() {
         bail!("{} already exists", root.display());
     }
-
-    let sdk = match sdk_path {
-        // A path the developer named is honoured wherever it points, verbatim: `--sdk-path`
-        // is a person choosing, which is the only thing that may choose.
-        Some(named) => named.to_string_lossy().into_owned(),
-        None => sdk_path_for(&root)?,
-    };
 
     let summary = summary
         .map(str::trim)
@@ -2060,6 +2069,9 @@ pub fn new<O: Write>(
         } else {
             "A capability component."
         });
+    project_summary(summary)?;
+
+    let sdk = sdk_path(named_sdk, installed_exe().as_deref())?;
 
     let files = [
         ("Cargo.toml", TEMPLATE_CARGO),
@@ -2092,15 +2104,78 @@ pub fn new<O: Write>(
         root.display(),
         if hook { "hook" } else { "capability" },
         crate_world(),
-        clean(&sdk),
+        sdk,
         crate_name(name),
     )?;
     out.flush()?;
     Ok(())
 }
 
-fn is_name_character(character: char) -> bool {
-    character.is_ascii_alphanumeric() || character == '-' || character == '_'
+/// The project's name, held to two rules at once.
+///
+/// The first is `Wasm.Artifact.name?/1`'s, verbatim — `[a-z0-9][a-z0-9._-]{0,63}` — because
+/// this name *is* what a manifest will carry and what a rollout will be registered under, and
+/// a scaffold that let somebody start on a name the signer will refuse has taught them the
+/// wrong charset. The second is cargo's, which is narrower in two places the first allows: a
+/// package name may not begin with a digit and may not contain `.`. Both are stated, because a
+/// name refused by one is refused for a different reason than a name refused by the other.
+fn project_name(name: &str) -> Result<()> {
+    let first = name.chars().next();
+
+    if name.is_empty()
+        || name.len() > MAX_NAME_BYTES
+        || !first.is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+    {
+        bail!(
+            "`{}` is not a capability name. The rule is `Wasm.Artifact.name?/1`'s: lower-case \
+             letters and digits, `.`, `_` and `-`, starting with a letter or a digit, at most \
+             {MAX_NAME_BYTES} bytes.",
+            clean(name)
+        );
+    }
+
+    // Cargo's own, applied second so its message is about cargo and not about the manifest.
+    if !first.is_some_and(|c| c.is_ascii_lowercase()) || name.contains('.') {
+        bail!(
+            "`{}` is a capability name but not a cargo package name: cargo refuses a package \
+             name that starts with a digit or contains `.`, and this name is the crate's. Pick \
+             one that is both.",
+            clean(name)
+        );
+    }
+
+    Ok(())
+}
+
+/// The `describe` summary, which is spliced into a Rust string literal in `src/lib.rs`.
+///
+/// A `"` or a `\` in it would close or escape that literal — `--summary '"; compile_error!("' `
+/// is a scaffold that writes a crate refusing to build, and a longer version is a scaffold that
+/// writes whatever the caller wanted. Refused rather than escaped: this is a one-line
+/// description, and there is nothing a quote in it buys anybody.
+fn project_summary(summary: &str) -> Result<()> {
+    if summary.chars().count() > MAX_SUMMARY_CHARS {
+        bail!(
+            "--summary is {} characters; contract C1 bounds a summary at {MAX_SUMMARY_CHARS}",
+            summary.chars().count()
+        );
+    }
+
+    if let Some(character) = summary
+        .chars()
+        .find(|c| matches!(c, '"' | '\\') || c.is_control())
+    {
+        bail!(
+            "--summary holds {character:?}, which cannot go into a Rust string literal without \
+             changing what the literal is. Quotes, backslashes and control characters are \
+             refused rather than escaped."
+        );
+    }
+
+    Ok(())
 }
 
 fn crate_world() -> &'static str {
@@ -2114,15 +2189,15 @@ fn crate_name(name: &str) -> String {
 
 /// `{{Name}}`: the project name as a Rust type, UpperCamelCase.
 ///
-/// A name may begin with a digit — `Wasm.Artifact.name?/1` allows it and so does this command
-/// — and `9Lives` is not an identifier, so a leading non-letter gets a `Component` in front of
-/// it rather than a project that does not parse.
+/// The leading-non-letter branch is unreachable through [`new`], which refuses such a name for
+/// cargo's sake before this is called. It is here because this is a total function over a
+/// `&str` and a partial one would be a trap for the next caller.
 fn type_name(name: &str) -> String {
     let mut camel = String::with_capacity(name.len());
     let mut capitalise = true;
 
     for character in name.chars() {
-        if character == '-' || character == '_' {
+        if character == '-' || character == '_' || character == '.' {
             capitalise = true;
             continue;
         }
@@ -2142,54 +2217,166 @@ fn type_name(name: &str) -> String {
     }
 }
 
-/// Where the generated `Cargo.toml` should reach `ouroboros-guest`, as a path relative to the
-/// project being created.
+/// The `ouro` binary this process actually is, canonicalised **first**.
 ///
-/// The walk starts at the project's **parent** — the directory the developer asked for — and
-/// climbs looking for `tui/wasm/guest/Cargo.toml`. Nothing about the `ouro` binary's location
-/// or the helper's is consulted, and that asymmetry is deliberate rather than an oversight:
-/// D14 forbids deriving a *helper* from the working directory because the helper is the
-/// containment boundary and gets executed. This is a `path =` line in a `Cargo.toml` that a
-/// person then reads and builds themselves, in a project this command just created for them,
-/// with the SDK's own source on the other end. A cwd-relative search is the right answer for
-/// it, and the wrong answer for the other thing.
+/// The same line `wasm_client::sibling` takes and for the same reason: `current_exe` returns
+/// the path the process was started through, symlinks and all, so a repository shipping
+/// `./ouro -> /usr/local/bin/ouro` beside its own `tui/wasm/guest` would otherwise be "where
+/// `ouro` was installed". Canonicalising makes this the directory the real binary lives in.
+fn installed_exe() -> Option<PathBuf> {
+    std::fs::canonicalize(std::env::current_exe().ok()?).ok()
+}
+
+/// Where the generated `Cargo.toml` reaches `ouroboros-guest`, as a **canonical absolute** path.
 ///
-/// Where the walk finds nothing there is no guess to make: the crate is unpublished, so a
-/// `Cargo.toml` without a true path is a project that does not build, and refusing with the
-/// flag named is more use than a scaffold that fails later with a message about a missing
-/// manifest.
-fn sdk_path_for(root: &Path) -> Result<String> {
-    let parent = root.parent().unwrap_or(Path::new("."));
-    // Canonicalised so the walk is over real directories: `.` and `a/../b` have ancestors that
-    // are not the ancestors they look like.
-    let from = std::fs::canonicalize(parent)
-        .with_context(|| format!("could not resolve {}", parent.display()))?;
+/// # Why this is D14's question and not a matter of taste
+///
+/// The first cut of this command walked up from the *output directory* to the nearest
+/// `tui/wasm/guest`, on the reasoning that a `path =` line in a manifest is a source path and
+/// not something that gets executed. That reasoning is wrong, and review proved it wrong: a
+/// cargo path dependency's `build.rs` and its proc-macros run during `cargo build`, so an SDK
+/// planted on any shared ancestor of the directory a developer scaffolds in — `/tmp`, a home
+/// directory, a mounted share — got its build script executed by the first build of the
+/// scaffolded project. That is a checkout choosing what runs on a developer's machine, which is
+/// exactly what D14 exists to stop, arriving through the seam nobody was watching.
+///
+/// So the rule is D14's, verbatim: **nothing cwd-derived**. Two sources and no third:
+///
+///   1. `--sdk-path <PATH>` — a person naming one, honoured wherever it points.
+///   2. The checkout the running `ouro` lives in, found by walking the ancestors of the
+///      **canonicalised `current_exe`** and never of the working directory. In a checkout that
+///      is `tui/target/{debug,release}/ouro`, whose ancestors include the checkout root.
+///
+/// Whichever it is, it is vetted by [`vet_sdk`] and written **absolute**. Absolute because the
+/// relative form was byte-identical in the benign case and the planted one, so a manifest an
+/// author read told them nothing about which SDK they had.
+fn sdk_path(named: Option<&Path>, installed: Option<&Path>) -> Result<String> {
+    let vetted = match named {
+        Some(path) => vet_sdk(path, "--sdk-path")?,
+        None => {
+            let installed = installed.ok_or_else(|| anyhow!("{NO_SDK}"))?;
 
-    for (climbed, ancestor) in from.ancestors().enumerate() {
-        let candidate = SDK_RELATIVE
-            .iter()
-            .fold(ancestor.to_path_buf(), |path, part| path.join(part));
+            let candidate = installed
+                .ancestors()
+                .map(|ancestor| {
+                    SDK_RELATIVE
+                        .iter()
+                        .fold(ancestor.to_path_buf(), |path, part| path.join(part))
+                })
+                .find(|candidate| candidate.join("Cargo.toml").exists())
+                .ok_or_else(|| anyhow!("{NO_SDK}"))?;
 
-        if candidate.join("Cargo.toml").is_file() {
-            // Relative to the project directory, which is one below `from`: so one `..` for
-            // the project itself plus one per ancestor climbed.
-            let mut relative = PathBuf::new();
-            for _ in 0..=climbed {
-                relative.push("..");
-            }
-            for part in SDK_RELATIVE {
-                relative.push(part);
-            }
-            return Ok(relative.to_string_lossy().into_owned());
+            // Vetted rather than skipped past: a directory laid out like the SDK above the
+            // binary and failing a check is a fact worth printing, not one to walk around.
+            vet_sdk(&candidate, "the checkout this `ouro` binary lives in")?
         }
+    };
+
+    let text = vetted.to_string_lossy().into_owned();
+
+    // The value is spliced into a TOML string. A `"` closes it, a `\` starts an escape, and a
+    // newline ends the line and starts a key — `--sdk-path '/x"\nevil = "…'` is a `Cargo.toml`
+    // this command wrote and the operator did not. Refused rather than escaped: these are
+    // characters no SDK checkout has in its path.
+    if let Some(character) = text
+        .chars()
+        .find(|c| matches!(c, '"' | '\\') || c.is_control())
+    {
+        bail!(
+            "the SDK path {} holds {character:?}, which cannot go into a Cargo.toml string \
+             without changing what the manifest says. Quotes, backslashes and control \
+             characters are refused rather than escaped.",
+            clean(&text)
+        );
     }
 
-    bail!(
-        "no ouroboros checkout above {}, so there is nowhere for `ouroboros-guest` to come \
-         from. It is not published to crates.io yet, so a scaffolded project reaches it by \
-         path: pass `--sdk-path <PATH>` naming a checkout's `tui/wasm/guest`.",
-        from.display()
-    )
+    Ok(text)
+}
+
+/// Whether a directory is an `ouroboros-guest` checkout this command may point a build at.
+///
+/// It is about to become a cargo path dependency, which means its `build.rs` and its
+/// proc-macros will run on this machine. Four questions, in the order that makes each one
+/// meaningful — the shape [`crate::wasm_client::vet`] applies to the helper, for the same
+/// reason:
+///
+///   1. **No symlink on the way in.** The directory itself and the two levels above it —
+///      `guest`, `wasm`, `tui` in the SDK's own layout — must each be a real directory.
+///      A `guest -> /somewhere/else` under a checkout is a redirection nobody reading the path
+///      would see.
+///   2. **A regular `Cargo.toml`.** Not a symlink, not a directory, not a device, and bounded
+///      before it is read.
+///   3. **It is the SDK.** `[package] name` must be exactly `ouroboros-guest`. A directory that
+///      is merely *shaped* like `tui/wasm/guest` is not the SDK, and this is the check that
+///      says so.
+///   4. **Canonicalised**, and the canonical path is what is written — so the path in the
+///      manifest is the directory that was checked.
+fn vet_sdk(candidate: &Path, source: &str) -> Result<PathBuf> {
+    let mut level = Some(candidate);
+    for _ in 0..SDK_RELATIVE.len() {
+        let Some(path) = level else { break };
+
+        let metadata = std::fs::symlink_metadata(path)
+            .with_context(|| format!("{source}: {} could not be inspected", path.display()))?;
+
+        if metadata.file_type().is_symlink() {
+            bail!(
+                "{source}: {} is a symlink. The SDK becomes a cargo path dependency, whose \
+                 build script runs on this machine, so a link that sends the build somewhere \
+                 the path does not name is refused.",
+                path.display()
+            );
+        }
+        if !metadata.is_dir() {
+            bail!("{source}: {} is not a directory", path.display());
+        }
+
+        level = path.parent();
+    }
+
+    let manifest = candidate.join("Cargo.toml");
+    let metadata = std::fs::symlink_metadata(&manifest).with_context(|| {
+        format!(
+            "{source}: {} has no Cargo.toml, so it is not a crate",
+            candidate.display()
+        )
+    })?;
+
+    if !metadata.file_type().is_file() {
+        bail!(
+            "{source}: {} is not a regular file, so it is not a manifest",
+            manifest.display()
+        );
+    }
+    if metadata.len() > MAX_SDK_MANIFEST_BYTES {
+        bail!(
+            "{source}: {} is {} bytes; a crate manifest is not that big",
+            manifest.display(),
+            metadata.len()
+        );
+    }
+
+    let text = std::fs::read_to_string(&manifest)
+        .with_context(|| format!("{source}: reading {}", manifest.display()))?;
+    let document: toml::Value = toml::from_str(&text)
+        .with_context(|| format!("{source}: {} is not TOML", manifest.display()))?;
+
+    let package = document
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(toml::Value::as_str);
+
+    if package != Some(SDK_CRATE) {
+        bail!(
+            "{source}: {} declares the package `{}`, not `{SDK_CRATE}`. A directory laid out \
+             like the SDK is not the SDK, and this build would have run its build script.",
+            manifest.display(),
+            clean(package.unwrap_or("(none)"))
+        );
+    }
+
+    std::fs::canonicalize(candidate)
+        .with_context(|| format!("{source}: could not resolve {}", candidate.display()))
 }
 
 /// The template's substitution table (`tui/wasm/guest/template/PLACEHOLDERS.md`), applied in
@@ -3153,75 +3340,240 @@ mod tests {
         assert_eq!(written, "/x/{{name}}/guest :: my-guard :: my_guard");
     }
 
-    /// The Rust type name, including the case a name starting with a digit produces: `9Lives`
-    /// is not an identifier and a scaffold that emitted it would not compile.
+    /// The Rust type name. The `Component` prefix branch is belt-and-braces — `new` refuses a
+    /// name starting with a digit before it is reached, because cargo refuses such a package
+    /// name — and this is where that stays true of the function itself.
     #[test]
     fn the_type_name_is_always_an_identifier() {
         assert_eq!(type_name("my-guard"), "MyGuard");
         assert_eq!(type_name("my_guard"), "MyGuard");
+        assert_eq!(type_name("my.guard"), "MyGuard");
         assert_eq!(type_name("guard"), "Guard");
         assert_eq!(type_name("9lives"), "Component9Lives");
     }
 
-    /// The SDK path is found by walking up from the **output** directory, and is written
-    /// relative to the project so the project moves with the checkout.
+    /// The name charset is `Wasm.Artifact.name?/1`'s, and then cargo's on top of it.
     ///
-    /// Delete the `for _ in 0..=climbed` loop's `=` and this goes red: the path would be one
-    /// `..` short, which is a `Cargo.toml` that does not resolve.
+    /// L8: relax `project_name` to the old "letters, digits, `-` and `_`" and this goes red on
+    /// `MyThing` and on the hundred-character name — a scaffold that taught an author a name
+    /// the signer will refuse, after they had written the component.
     #[test]
-    fn the_sdk_path_is_relative_to_the_project_and_found_by_climbing() {
-        let scratch = scratch_dir("sdk-walk");
-        let guest = scratch.join("checkout/tui/wasm/guest");
-        std::fs::create_dir_all(&guest).expect("a fake checkout");
-        std::fs::write(guest.join("Cargo.toml"), "[package]\n").expect("a fake SDK manifest");
+    fn a_project_name_is_the_artifact_charset_and_a_cargo_package_name() {
+        for good in ["guard", "my-guard", "my_guard", "g9"] {
+            project_name(good).unwrap_or_else(|error| panic!("`{good}` is a name: {error}"));
+        }
 
-        // Scaffolding straight into the checkout root: `<checkout>/thing` reaches the SDK by
-        // one `..`.
-        std::fs::create_dir_all(scratch.join("checkout/work/deep")).expect("a nested directory");
-        assert_eq!(
-            sdk_path_for(&scratch.join("checkout/thing")).expect("the checkout is above it"),
-            "../tui/wasm/guest"
-        );
+        for bad in ["MyThing", "_leading", "-leading", "", "a b", "a/b"] {
+            let refusal = project_name(bad).unwrap_err().to_string();
+            assert!(refusal.contains("lower-case"), "{bad}: {refusal}");
+        }
 
-        // Two directories down, two `..` plus the project's own.
-        assert_eq!(
-            sdk_path_for(&scratch.join("checkout/work/deep/thing")).expect("still above it"),
-            "../../../tui/wasm/guest"
-        );
+        let long = "a".repeat(MAX_NAME_BYTES + 1);
+        assert!(project_name(&long)
+            .expect_err("65 bytes is past the artifact bound")
+            .to_string()
+            .contains("64 bytes"));
+        project_name(&"a".repeat(MAX_NAME_BYTES)).expect("64 bytes is the bound, not past it");
 
-        // And nothing above: refused, naming the flag that answers it.
-        let elsewhere = scratch.join("elsewhere");
-        std::fs::create_dir_all(&elsewhere).expect("a directory with no checkout above it");
-        let refusal = sdk_path_for(&elsewhere.join("thing"))
-            .expect_err("there is no ouroboros checkout above a scratch directory")
+        // Allowed by the artifact charset, refused by cargo's — and the refusal says which.
+        for bad in ["9lives", "my.guard"] {
+            let refusal = project_name(bad).unwrap_err().to_string();
+            assert!(refusal.contains("cargo"), "{bad}: {refusal}");
+        }
+    }
+
+    /// M7. `--summary` is spliced into a Rust string literal in `src/lib.rs`, so a `"` in it
+    /// writes a crate that is not the crate this command meant to write.
+    ///
+    /// Delete `project_summary`'s call in `new` and this goes red: the scaffold would carry
+    /// `"; compile_error!("` into the source, and the author's first `cargo build` would fail
+    /// with a message about their own file.
+    #[test]
+    fn a_summary_that_would_escape_its_string_literal_is_refused() {
+        project_summary("Does one thing.").expect("plain text is a summary");
+
+        for bad in [r#"a" ; compile_error!("pwn"#, "a\\", "a\nb", "a\u{1b}[31m"] {
+            let refusal = project_summary(bad).unwrap_err().to_string();
+            assert!(refusal.contains("refused rather than escaped"), "{refusal}");
+        }
+
+        // C1's bound, enforced here rather than only claimed in the flag's help.
+        let long = "x".repeat(MAX_SUMMARY_CHARS + 1);
+        assert!(project_summary(&long)
+            .expect_err("201 characters is past C1's bound")
+            .to_string()
+            .contains("200"));
+        project_summary(&"x".repeat(MAX_SUMMARY_CHARS)).expect("200 is the bound, not past it");
+    }
+
+    /// H1. The SDK never comes from an ancestor of the working or output directory — it comes
+    /// from `--sdk-path` or from the checkout the running binary lives in, and nowhere else.
+    ///
+    /// The planted layout is the reviewer's: an `ouroboros-guest` on a shared ancestor
+    /// (`/tmp`, a home directory, a mounted share) of the place a developer scaffolds in. It
+    /// used to be found and written into the manifest, and the first `cargo build` of the
+    /// scaffolded project ran its `build.rs`. Restore a walk over the output directory's
+    /// ancestors and this goes red.
+    #[test]
+    fn the_sdk_is_never_taken_from_a_directory_near_the_output() {
+        let scratch = scratch_dir("sdk-plant");
+        let plant = scratch.join("shared/tui/wasm/guest");
+        std::fs::create_dir_all(&plant).expect("a planted SDK");
+        std::fs::write(
+            plant.join("Cargo.toml"),
+            "[package]\nname = \"ouroboros-guest\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("a planted manifest");
+        std::fs::create_dir_all(scratch.join("shared/dev/work")).expect("somewhere to work");
+
+        // A binary installed where no checkout is above it: there is no SDK, and the plant on
+        // the output directory's ancestor is not consulted at all.
+        let elsewhere = scratch.join("usr/local/bin/ouro");
+        std::fs::create_dir_all(elsewhere.parent().expect("a bin directory")).expect("a bin");
+        std::fs::write(&elsewhere, "").expect("an installed binary");
+
+        let refusal = sdk_path(None, Some(&elsewhere))
+            .expect_err("nothing above the binary, so nothing to point at")
             .to_string();
+        assert!(refusal.contains("--sdk-path"), "{refusal}");
         assert!(
-            refusal.contains("--sdk-path"),
-            "the refusal must name the flag that answers it: {refusal}"
+            !refusal.contains("shared"),
+            "the plant was not even looked at: {refusal}"
+        );
+
+        // The same plant, named by a person: honoured, because that is a person choosing.
+        let named = sdk_path(Some(&plant), None).expect("--sdk-path is a person choosing");
+        assert!(named.ends_with("shared/tui/wasm/guest"), "{named}");
+        assert!(Path::new(&named).is_absolute(), "written absolute: {named}");
+
+        // And a binary inside a checkout finds that checkout's SDK.
+        let checkout = scratch.join("co");
+        std::fs::create_dir_all(checkout.join("tui/wasm/guest")).expect("a checkout");
+        std::fs::write(
+            checkout.join("tui/wasm/guest/Cargo.toml"),
+            "[package]\nname = \"ouroboros-guest\"\n",
+        )
+        .expect("the SDK's manifest");
+        let binary = checkout.join("tui/target/debug/ouro");
+        std::fs::create_dir_all(binary.parent().expect("a target directory")).expect("a target");
+        std::fs::write(&binary, "").expect("a built binary");
+
+        let found = sdk_path(None, Some(&binary)).expect("the checkout above the binary");
+        assert!(found.ends_with("co/tui/wasm/guest"), "{found}");
+
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// H1. What `vet_sdk` refuses, and each refusal is a way the path would not have been the
+    /// directory it named.
+    ///
+    /// Delete the symlink check and the first case goes red; delete the package-name check and
+    /// the second does. Both are a `build.rs` this command would have pointed a build at.
+    #[test]
+    fn an_sdk_that_is_not_the_sdk_is_refused_by_name() {
+        let scratch = scratch_dir("sdk-vet");
+        let real = scratch.join("real/tui/wasm/guest");
+        std::fs::create_dir_all(&real).expect("a real SDK");
+        std::fs::write(
+            real.join("Cargo.toml"),
+            "[package]\nname = \"ouroboros-guest\"\n",
+        )
+        .expect("a real manifest");
+
+        // A `guest` that is a link to somewhere else: a redirection nobody reading the path
+        // would see.
+        #[cfg(unix)]
+        {
+            let linked = scratch.join("link/tui/wasm");
+            std::fs::create_dir_all(&linked).expect("a checkout shape");
+            std::os::unix::fs::symlink(&real, linked.join("guest")).expect("a symlinked guest");
+
+            let refusal = sdk_path(Some(&linked.join("guest")), None)
+                .expect_err("a symlinked guest is refused")
+                .to_string();
+            assert!(refusal.contains("symlink"), "{refusal}");
+        }
+
+        // A directory laid out like the SDK, holding some other crate.
+        let impostor = scratch.join("fake/tui/wasm/guest");
+        std::fs::create_dir_all(&impostor).expect("an impostor");
+        std::fs::write(
+            impostor.join("Cargo.toml"),
+            "[package]\nname = \"not-the-sdk\"\n",
+        )
+        .expect("an impostor manifest");
+
+        let refusal = sdk_path(Some(&impostor), None)
+            .expect_err("a directory shaped like the SDK is not the SDK")
+            .to_string();
+        assert!(refusal.contains("ouroboros-guest"), "{refusal}");
+        assert!(refusal.contains("not-the-sdk"), "{refusal}");
+
+        // A `Cargo.toml` that is a directory is not a manifest.
+        let hollow = scratch.join("hollow/tui/wasm/guest/Cargo.toml");
+        std::fs::create_dir_all(&hollow).expect("a Cargo.toml that is a directory");
+        assert!(
+            sdk_path(Some(hollow.parent().expect("the guest dir")), None)
+                .expect_err("a directory is not a manifest")
+                .to_string()
+                .contains("not a regular file")
         );
 
         std::fs::remove_dir_all(&scratch).ok();
     }
 
-    /// `new` writes four files and no fifth, in the shape asked for, with the SDK path the
-    /// caller named.
+    /// M5. The SDK path is spliced into a TOML string, so a `"` or a newline in it writes a
+    /// manifest the operator did not. Refused rather than escaped.
+    ///
+    /// Delete the character check in `sdk_path` and this goes red with a `Cargo.toml` carrying
+    /// an extra key.
+    #[cfg(unix)]
+    #[test]
+    fn an_sdk_path_that_would_escape_its_toml_string_is_refused() {
+        let scratch = scratch_dir("sdk-toml");
+        let guest = scratch.join("a\"b/tui/wasm/guest");
+        std::fs::create_dir_all(&guest).expect("a directory with a quote in its path");
+        std::fs::write(
+            guest.join("Cargo.toml"),
+            "[package]\nname = \"ouroboros-guest\"\n",
+        )
+        .expect("a manifest");
+
+        let refusal = sdk_path(Some(&guest), None)
+            .expect_err("a quote cannot go into a TOML string")
+            .to_string();
+        assert!(refusal.contains("refused rather than escaped"), "{refusal}");
+
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// `new` writes four files and no fifth, in the shape asked for, with the SDK the caller
+    /// named — canonical and absolute.
     #[test]
     fn new_writes_the_four_files_of_the_shape_it_was_asked_for() {
         let scratch = scratch_dir("new-files");
-        std::fs::create_dir_all(&scratch).expect("a scratch directory");
+        let sdk = scratch.join("co/tui/wasm/guest");
+        std::fs::create_dir_all(&sdk).expect("an SDK to point at");
+        std::fs::write(
+            sdk.join("Cargo.toml"),
+            "[package]\nname = \"ouroboros-guest\"\n",
+        )
+        .expect("the SDK's manifest");
+        let into = scratch.join("work");
+        std::fs::create_dir_all(&into).expect("a scratch directory");
 
         let mut out = Vec::new();
         new(
-            &scratch,
+            &into,
             "my-guard",
             true,
             Some("Guards the writes."),
-            Some(Path::new("/somewhere/tui/wasm/guest")),
+            Some(&sdk),
             &mut out,
         )
         .expect("the scaffold is written");
 
-        let root = scratch.join("my-guard");
+        let root = into.join("my-guard");
         for expected in ["Cargo.toml", "src/lib.rs", "README.md", ".gitignore"] {
             assert!(root.join(expected).is_file(), "missing {expected}");
         }
@@ -3234,24 +3586,28 @@ mod tests {
         );
 
         let cargo = std::fs::read_to_string(root.join("Cargo.toml")).expect("the manifest");
-        assert!(cargo.contains(r#"path = "/somewhere/tui/wasm/guest""#));
+        let canonical = std::fs::canonicalize(&sdk).expect("the SDK resolves");
+        assert!(
+            cargo.contains(&format!(r#"path = "{}""#, canonical.display())),
+            "the manifest carries the canonical absolute SDK path:\n{cargo}"
+        );
         assert!(cargo.contains(r#"name = "my-guard""#));
 
         let source = std::fs::read_to_string(root.join("src/lib.rs")).expect("the crate root");
         assert!(source.contains("export_hook!(MyGuard)"));
         assert!(source.contains("Guards the writes."));
 
+        // What it printed names the SDK it wrote, absolutely — the relative form read the same
+        // whether the SDK was the real one or one planted on a shared ancestor.
+        let printed = String::from_utf8(out).expect("the summary is text");
+        assert!(
+            printed.contains(&canonical.display().to_string()),
+            "{printed}"
+        );
+
         // A second `new` into the same place refuses rather than overwriting somebody's work.
         let mut again = Vec::new();
-        assert!(new(
-            &scratch,
-            "my-guard",
-            true,
-            None,
-            Some(Path::new("/somewhere")),
-            &mut again
-        )
-        .is_err());
+        assert!(new(&into, "my-guard", true, None, Some(&sdk), &mut again).is_err());
 
         std::fs::remove_dir_all(&scratch).ok();
     }

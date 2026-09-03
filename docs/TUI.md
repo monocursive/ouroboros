@@ -1000,11 +1000,18 @@ ouro wasm new NAME [--hook] [--into DIR] [--summary TEXT] [--sdk-path PATH]
                       this binary — one source of truth, and a test compares the
                       embedded bytes with the files on disk. --hook writes the
                       Hook shape, which reads a hook payload and answers the
-                      verdict contract; without it, the Capability shape.
+                      verdict contract; without it, the Capability shape. NAME is
+                      Wasm.Artifact.name?/1's charset and a cargo package name;
+                      --summary is bounded at 200 characters and refuses quotes,
+                      backslashes and control characters, as --sdk-path does.
                       ouroboros-guest is unpublished, so the generated Cargo.toml
-                      reaches it by path: --sdk-path names it, and omitted, this
-                      walks up from --into looking for a checkout's
-                      tui/wasm/guest and refuses rather than guessing
+                      reaches it by path — and that path is EXECUTED, because a
+                      path dependency's build.rs runs at cargo build. So it comes
+                      from --sdk-path or from the checkout this ouro binary lives
+                      in, never from the working or output directory (D14); it is
+                      vetted (no symlink, a real ouroboros-guest manifest) and
+                      written canonical and absolute. Neither available, it
+                      refuses and names --sdk-path
 ouro wasm inspect FILE [--json] [--helper PATH]
                       what a component declares, how its shape sits against the
                       bounds that decide whether it compiles at all, and one
@@ -1044,12 +1051,17 @@ ouro wasm sign FILE --name NAME --author WHO [--import NAME]...
                       parses the bytes to find out what they import (docs/WASM.md
                       D15), so this end declares the import list — and reads it
                       for itself with a local ouro-wasm, resolved by the same
-                      three-place rule below. A component that helper will not
-                      admit is refused here, naming the helper's own refusal,
-                      rather than at stage. --import and --imports-from override
-                      it; --no-local-helper starts no helper and requires one of
-                      them; --dry-run prints the wasm.sign parameters and opens
-                      no socket
+                      three-place rule below. That read happens BEFORE anything
+                      is dialled: the component is put to the helper first, so
+                      one it will not admit is refused — naming the helper's own
+                      refusal — without a gateway being contacted at all. The
+                      bytes uploaded and the bytes inspected are bound by their
+                      sha, so a file swapped in between is refused rather than
+                      signed. --import and --imports-from override the helper
+                      (a report is read under a 64 KiB bound); --no-local-helper
+                      starts no helper and requires one of them; --dry-run
+                      prints the wasm.sign parameters and, alone among these,
+                      opens no socket ever
                       new, inspect, run, hook and check need no node at all;
                       `doctor` asks a node and starts nothing; `sign` does both,
                       because the import list is this side's to declare and the

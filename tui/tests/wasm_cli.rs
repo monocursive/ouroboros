@@ -1660,52 +1660,80 @@ fn new_scaffolds_a_project_that_builds() {
     }
 }
 
-/// The SDK path is found by walking up from the **output directory**, and is written relative
-/// to the project so the project moves with the checkout it was scaffolded inside.
+/// H1. The SDK comes from the checkout the running `ouro` lives in, and **never** from a
+/// directory near the one the command was typed in.
 ///
-/// The checkout here is a fake one — a `tui/wasm/guest/Cargo.toml` and nothing else — because
-/// the claim under test is the walk, and scaffolding into the real checkout would leave a
-/// project in it.
+/// The planted layout is the reviewer's, and it was a real compromise: an `ouroboros-guest` on
+/// a shared ancestor (`/tmp`, a home directory, a mounted share) of where a developer
+/// scaffolds. The first version walked up from `--into`, found it, wrote it into the manifest,
+/// and the scaffolded project's first `cargo build` ran its `build.rs` — a checkout choosing
+/// what executes on a developer's machine, which is the thing D14 exists to stop.
+///
+/// Here the whole command runs with its working directory *inside* the plant and its output
+/// directory *inside* the plant, and the manifest still names this checkout's SDK. Restore a
+/// walk over the cwd's or the output's ancestors and this goes red.
 #[test]
-fn new_finds_the_sdk_by_walking_up_from_the_output_directory() {
-    let scratch = Scratch::new("sdk-walk");
-    scratch.write("checkout/tui/wasm/guest/Cargo.toml", "[package]\n");
-    let into = scratch.path().join("checkout/a/b");
-    std::fs::create_dir_all(&into).expect("a nested output directory");
+fn new_never_takes_the_sdk_from_a_directory_near_where_it_was_run() {
+    let scratch = Scratch::new("sdk-plant");
+    scratch.write(
+        "shared/tui/wasm/guest/Cargo.toml",
+        "[package]\nname = \"ouroboros-guest\"\nversion = \"0.1.0\"\n",
+    );
+    // A build script that would announce itself, so a claim that it did not run is a file that
+    // is not there rather than an absence of evidence.
+    scratch.write(
+        "shared/tui/wasm/guest/build.rs",
+        "fn main() { std::fs::write(\"/tmp/ouro-w10b-should-not-exist\", \"x\").ok(); }",
+    );
+    let work = scratch.path().join("shared/dev/work");
+    std::fs::create_dir_all(&work).expect("somewhere to work");
 
     let output = Command::new(OURO)
         .args(["wasm", "new", "walked", "--into"])
-        .arg(&into)
+        .arg(&work)
+        // Typed from inside the planted tree, which is the situation the plant is for.
+        .current_dir(&work)
         .output()
         .expect("the ouro binary runs");
     assert!(
         output.status.success(),
-        "`ouro wasm new` must find the checkout above its output directory:\n{}",
+        "`ouro wasm new` runs from a checkout, so it has an SDK:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let cargo = std::fs::read_to_string(into.join("walked/Cargo.toml")).expect("the manifest");
+    let cargo = std::fs::read_to_string(work.join("walked/Cargo.toml")).expect("the manifest");
+    let real = std::fs::canonicalize(sdk_path()).expect("this checkout's SDK");
+
     assert!(
-        cargo.contains(r#"path = "../../../tui/wasm/guest""#),
-        "the SDK path must be relative to the project it was written into:\n{cargo}"
+        cargo.contains(&format!(r#"path = "{}""#, real.display())),
+        "the manifest must name the checkout this binary lives in:\n{cargo}"
+    );
+    assert!(
+        !cargo.contains("shared/tui/wasm/guest"),
+        "the plant on the output directory's ancestor was taken:\n{cargo}"
     );
 }
 
-/// With no checkout above the output directory there is nothing to guess: `ouroboros-guest` is
-/// unpublished, so a `path =` that is not true is a project that does not build. This refuses
-/// and names the flag that answers it.
+/// H1. With no checkout above the binary there is nothing to point at, and `--sdk-path` is
+/// named rather than a guess made.
 ///
-/// Delete the `bail!` at the end of `sdk_path_for` and this goes red — with a scaffolded
-/// project whose `Cargo.toml` points at nothing.
+/// `ouro` is copied out of its checkout so the walk over `current_exe`'s ancestors finds
+/// nothing — which is every installed `ouro`, and is exactly the case an author hits.
+///
+/// Delete the `NO_SDK` refusal and this goes red with a project whose `Cargo.toml` points at
+/// nothing.
 #[test]
-fn new_refuses_when_no_checkout_is_above_it_and_names_the_flag() {
+fn new_refuses_when_no_checkout_is_above_the_binary_and_names_the_flag() {
     let scratch = Scratch::new("no-sdk");
+    let installed = scratch.path().join("usr/local/bin/ouro");
+    std::fs::create_dir_all(installed.parent().expect("a bin directory")).expect("a bin");
+    std::fs::copy(OURO, &installed).expect("an installed ouro");
 
-    let output = Command::new(OURO)
+    let output = Command::new(&installed)
         .args(["wasm", "new", "orphan", "--into"])
         .arg(scratch.path())
         .output()
-        .expect("the ouro binary runs");
+        .expect("the installed binary runs");
 
     assert!(
         !output.status.success(),
@@ -1714,12 +1742,84 @@ fn new_refuses_when_no_checkout_is_above_it_and_names_the_flag() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("--sdk-path"), "{stderr}");
     assert!(
+        stderr.contains("build.rs") || stderr.contains("build time"),
+        "the refusal says why it will not go looking: {stderr}"
+    );
+    assert!(
         !scratch.path().join("orphan").exists(),
         "a refused scaffold leaves nothing behind"
     );
 }
 
-// ------------------------------------------------------------------------------- the sign
+/// H1/M5/M7/L8: the refusals `new` makes about its own arguments, through the real binary.
+#[test]
+fn new_refuses_a_name_a_summary_or_an_sdk_it_cannot_write_safely() {
+    let scratch = Scratch::new("new-refusals");
+    let sdk = sdk_path();
+
+    let refused = |args: &[&str]| -> String {
+        let output = Command::new(OURO)
+            .args(["wasm", "new"])
+            .args(args)
+            .args(["--sdk-path"])
+            .arg(&sdk)
+            .args(["--into"])
+            .arg(scratch.path())
+            .output()
+            .expect("the ouro binary runs");
+        assert!(
+            !output.status.success(),
+            "expected a refusal for {args:?}, got success"
+        );
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+
+    // L8: the artifact charset, and cargo's on top of it.
+    assert!(refused(&["MyThing"]).contains("lower-case"));
+    assert!(refused(&["9lives"]).contains("cargo"));
+    assert!(refused(&[&"a".repeat(65)]).contains("64 bytes"));
+
+    // M7: a summary that would close the Rust string literal it is spliced into.
+    assert!(
+        refused(&["guard", "--summary", r#"x" ; compile_error!("pwn"#])
+            .contains("refused rather than escaped")
+    );
+    assert!(refused(&["guard", "--summary", &"x".repeat(201)]).contains("200"));
+
+    // Nothing was written for any of them.
+    for name in ["MyThing", "9lives", "guard"] {
+        assert!(
+            !scratch.path().join(name).exists(),
+            "a refused scaffold leaves nothing behind ({name})"
+        );
+    }
+}
+
+/// H1. A directory laid out like the SDK but holding some other crate is refused by name, so
+/// `--sdk-path` cannot be talked into pointing a build at a stranger's `build.rs`.
+#[test]
+fn new_refuses_an_sdk_path_that_is_not_the_sdk() {
+    let scratch = Scratch::new("sdk-impostor");
+    scratch.write(
+        "fake/tui/wasm/guest/Cargo.toml",
+        "[package]\nname = \"not-the-sdk\"\nversion = \"0.1.0\"\n",
+    );
+
+    let output = Command::new(OURO)
+        .args(["wasm", "new", "guard", "--sdk-path"])
+        .arg(scratch.path().join("fake/tui/wasm/guest"))
+        .args(["--into"])
+        .arg(scratch.path())
+        .output()
+        .expect("the ouro binary runs");
+
+    assert!(!output.status.success(), "an impostor SDK must be refused");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not-the-sdk"), "{stderr}");
+    assert!(stderr.contains("ouroboros-guest"), "{stderr}");
+}
+
+// ------------------------------------------------------------------------------- the sign// ------------------------------------------------------------------------------- the sign
 
 /// `ouro wasm sign` reads the component's import list with the operator's own helper, and the
 /// parameters it would send carry the helper's answer.
@@ -1852,6 +1952,318 @@ fn sign_refuses_a_component_the_helper_will_not_admit() {
     .stderr_says("undefined_import");
 }
 
+/// A gateway that records the fact of a connection and nothing else.
+///
+/// Not a gateway: it accepts, appends one line to the shared order log, and closes. That is
+/// enough for the only question these tests ask — *whether, and when*, `ouro wasm sign` dialled
+/// a node — and a real gateway would answer it no better.
+#[cfg(unix)]
+struct Recorder {
+    port: u16,
+    _thread: std::thread::JoinHandle<()>,
+}
+
+#[cfg(unix)]
+impl Recorder {
+    fn listening(order: &Path) -> Recorder {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port to record on");
+        let port = listener.local_addr().expect("a bound address").port();
+        let order = order.to_path_buf();
+
+        let thread = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                note(&order, "gateway");
+                drop(stream);
+            }
+        });
+
+        Recorder {
+            port,
+            _thread: thread,
+        }
+    }
+
+    fn addr(&self) -> String {
+        format!("127.0.0.1:{}", self.port)
+    }
+}
+
+/// One line onto the order log, appended, so two writers interleave rather than overwrite.
+#[cfg(unix)]
+fn note(order: &Path, what: &str) {
+    use std::io::Write as _;
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(order)
+        .expect("the order log");
+    writeln!(file, "{what}").expect("a line on the order log");
+}
+
+/// A scripted `ouro-wasm` that notes it was started and answers `inspect` and `load`.
+///
+/// `sha` is what its `inspect` reports; `imports` is the JSON array. Both are the test's, so a
+/// helper that reports a sha the file does not hash to — or nine imports — is one line here.
+#[cfg(unix)]
+fn spy_helper(path: &Path, order: &Path, sha: &str, imports: &str) {
+    plant_executable(
+        path,
+        &format!(
+            r#"#!/bin/sh
+printf 'helper\n' >> {order}
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"inspect"'*)
+      printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"sha256":"{sha}","world":"ouroboros:capability@0.1.0","imports":{imports},"exports":["describe"],"size":8,"shape":{{}}}}}}' ;;
+    *'"method":"load"'*)
+      printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"world":"ouroboros:capability@0.1.0"}}}}' ;;
+    *)
+      printf '%s\n' '{{"jsonrpc":"2.0","id":3,"error":{{"code":-32601,"message":"this helper answers inspect and load","data":{{"refusal":"unexpected_method"}}}}}}' ;;
+  esac
+done
+"#,
+            order = order.display(),
+        ),
+    );
+}
+
+/// The sha256 of a file, as the helper would report it.
+#[cfg(unix)]
+fn sha256_of(path: &Path) -> String {
+    let output = Command::new("shasum")
+        .args(["-a", "256"])
+        .arg(path)
+        .output()
+        .expect("shasum runs");
+    assert!(output.status.success(), "shasum failed");
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .expect("a digest")
+        .to_string()
+}
+
+/// H2. On the **real** path — no `--dry-run` — the helper is asked first and the gateway is
+/// dialled second, and a component the helper refuses never reaches a gateway at all.
+///
+/// This is the finding, stated as a test. Three documents said `sign` read the imports "before
+/// it opens a socket"; the code connected, read, uploaded and *then* started the helper, and a
+/// recording gateway plus a spy helper showed a refused component reaching the gateway while
+/// the helper was never started. Every ordering test at the time used `--dry-run`, which was
+/// the one path that had the documented order.
+///
+/// Move `plan_sign` back below `wasm_connect` in `main.rs` and both halves go red.
+#[cfg(unix)]
+#[test]
+fn sign_asks_the_helper_before_it_dials_anything() {
+    let Some(live) = live() else { return };
+    let scratch = Scratch::new("sign-order");
+    let component = scratch.write("thing.wasm", "\0asm\u{d}\0\u{1}\0");
+    let helper = scratch.path().join("ouro-wasm");
+
+    // --- a component the helper admits: helper first, gateway second.
+    let order = scratch.path().join("admitted.log");
+    spy_helper(&helper, &order, &sha256_of(&component), r#"["log"]"#);
+    let recorder = Recorder::listening(&order);
+
+    ouro_with(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "sign",
+            &component.to_string_lossy(),
+            "--name",
+            "thing",
+            "--author",
+            "ops",
+            "--helper",
+            &helper.to_string_lossy(),
+            "--addr",
+            &recorder.addr(),
+        ],
+        |command| {
+            command.env_remove(HELPER_ENV);
+        },
+    );
+
+    let lines: Vec<String> = std::fs::read_to_string(&order)
+        .expect("the order log")
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        lines.first().map(String::as_str),
+        Some("helper"),
+        "the helper is asked before anything is dialled: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line == "gateway"),
+        "and the gateway is dialled after it: {lines:?}"
+    );
+
+    // --- a component the helper refuses: the gateway is never reached.
+    let refused_order = scratch.path().join("refused.log");
+    let refused_component = scratch.path().join("environment.wasm");
+    std::fs::write(&refused_component, importing_the_environment()).expect("a component on disk");
+    let refuser = Recorder::listening(&refused_order);
+
+    let ran = ouro_with(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "sign",
+            &refused_component.to_string_lossy(),
+            "--name",
+            "envy",
+            "--author",
+            "ops",
+            "--addr",
+            &refuser.addr(),
+        ],
+        |command| {
+            command.env(HELPER_ENV, &live.helper);
+        },
+    );
+
+    ran.refused().stderr_says("refused by your own helper");
+
+    let after = std::fs::read_to_string(&refused_order).unwrap_or_default();
+    assert!(
+        !after.contains("gateway"),
+        "a component this machine's helper refuses must not reach a gateway: {after:?}"
+    );
+}
+
+/// M3. The bytes this command uploads and the bytes the helper inspected are bound by their
+/// sha, so a file swapped between the two does not produce a manifest describing neither.
+///
+/// The helper opens the path for itself, a moment after this process read it. In that window a
+/// component can be replaced, and the import list signed over would describe bytes nobody
+/// uploaded — caught only at stage, on somebody else's machine. Here the helper reports a
+/// different sha, which is the same fact arriving faster.
+///
+/// Delete the `reported != held` check in `imports_of` and this goes red: the mismatch would be
+/// uploaded and signed, and the gateway would be dialled.
+#[cfg(unix)]
+#[test]
+fn sign_refuses_when_the_helper_inspected_other_bytes() {
+    let Some(live) = live() else { return };
+    let scratch = Scratch::new("sign-swap");
+    let component = scratch.write("thing.wasm", "\0asm\u{d}\0\u{1}\0");
+    let helper = scratch.path().join("ouro-wasm");
+    let order = scratch.path().join("order.log");
+
+    // A digest of the right shape and the wrong value: the file changed under the helper.
+    spy_helper(&helper, &order, &"a".repeat(64), r#"["log"]"#);
+    let recorder = Recorder::listening(&order);
+
+    let ran = ouro_with(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "sign",
+            &component.to_string_lossy(),
+            "--name",
+            "thing",
+            "--author",
+            "ops",
+            "--helper",
+            &helper.to_string_lossy(),
+            "--addr",
+            &recorder.addr(),
+        ],
+        |command| {
+            command.env_remove(HELPER_ENV);
+        },
+    );
+
+    ran.refused()
+        .stderr_says("the file changed between this command reading it");
+
+    let after = std::fs::read_to_string(&order).unwrap_or_default();
+    assert!(
+        !after.contains("gateway"),
+        "nothing is signed over bytes that are not the bytes in hand: {after:?}"
+    );
+}
+
+/// M4. The import ceiling on the helper's own answer, not only on a report handed in.
+///
+/// Delete the `declared.len() > MAX_IMPORTS` guard in `imports_of` and this goes red: nine
+/// imports would be uploaded and put to a signing service that refuses them, having spent the
+/// upload and the policy decision to say so.
+#[cfg(unix)]
+#[test]
+fn sign_refuses_more_imports_than_the_node_accepts() {
+    let Some(live) = live() else { return };
+    let scratch = Scratch::new("sign-many");
+    let component = scratch.write("thing.wasm", "\0asm\u{d}\0\u{1}\0");
+    let helper = scratch.path().join("ouro-wasm");
+    let order = scratch.path().join("order.log");
+
+    let many = r#"["a","b","c","d","e","f","g","h","i"]"#;
+    spy_helper(&helper, &order, &sha256_of(&component), many);
+
+    ouro_with(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "sign",
+            &component.to_string_lossy(),
+            "--name",
+            "thing",
+            "--author",
+            "ops",
+            "--helper",
+            &helper.to_string_lossy(),
+            "--dry-run",
+        ],
+        |command| {
+            command.env_remove(HELPER_ENV);
+        },
+    )
+    .refused()
+    .stderr_says("at most 8");
+}
+
+/// M4. A component past the byte ceiling is refused by `plan_sign`, before a helper is started
+/// and before a socket is opened.
+///
+/// Delete the `read_bounded` call in `plan_sign` and this goes red: the file would be read
+/// whole — seventeen megabytes here, and a `/dev/zero` symlink without end — on the way to an
+/// upload the node would refuse anyway.
+#[test]
+fn sign_refuses_a_component_past_the_byte_ceiling() {
+    let Some(live) = live() else { return };
+    let scratch = Scratch::new("sign-huge");
+    let huge = scratch.path().join("huge.wasm");
+    // One byte past `MAX_UPLOAD_BYTES` (17 MiB): the component cap plus the envelope.
+    sparse(&huge, 17 * 1024 * 1024 + 1);
+
+    ouro(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "sign",
+            &huge.to_string_lossy(),
+            "--name",
+            "huge",
+            "--author",
+            "ops",
+            "--dry-run",
+        ],
+    )
+    .refused()
+    .stderr_says("will not accept more than");
+}
+
 /// The request `sign` makes of the helper, recorded by a helper that is a shell script.
 ///
 /// Two things the assertions above cannot see: that the method is `inspect` (and not, say, an
@@ -1866,6 +2278,10 @@ fn sign_asks_its_helper_to_inspect_the_file_and_nothing_more() {
     let component = scratch.write("thing.wasm", "\0asm\u{d}\0\u{1}\0");
     let log = scratch.path().join("requests.jsonl");
     let helper = scratch.path().join("ouro-wasm");
+    // The real digest of the file on disk: since W10b's review the bytes this command holds and
+    // the bytes the helper inspected are bound by their sha, so a scripted helper has to be
+    // telling the truth about *this* file to get past it.
+    let sha = sha256_of(&component);
 
     plant_executable(
         &helper,
@@ -1875,7 +2291,7 @@ while IFS= read -r line; do
   printf '%s\n' "$line" >> {log}
   case "$line" in
     *'"method":"inspect"'*)
-      printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"sha256":"ab","world":"ouroboros:capability@0.1.0","imports":["log"],"exports":["describe"],"size":8,"shape":{{}}}}}}' ;;
+      printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"sha256":"{sha}","world":"ouroboros:capability@0.1.0","imports":["log"],"exports":["describe"],"size":8,"shape":{{}}}}}}' ;;
     *'"method":"load"'*)
       printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"world":"ouroboros:capability@0.1.0"}}}}' ;;
     *)
@@ -1883,7 +2299,8 @@ while IFS= read -r line; do
   esac
 done
 "#,
-            log = log.display()
+            log = log.display(),
+            sha = sha,
         ),
     );
 

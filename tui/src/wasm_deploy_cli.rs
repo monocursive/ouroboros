@@ -124,12 +124,55 @@ pub fn keygen<O: Write>(args: &WasmKeygenArgs, out: &mut O) -> Result<()> {
     Ok(())
 }
 
-/// `ouro wasm sign` — upload a component, ask the node to sign it, write the bundle.
-pub async fn sign<O: Write>(client: &Client, args: &WasmSignArgs, out: &mut O) -> Result<()> {
+/// Everything `ouro wasm sign` settles **before** it opens a socket: the component read once
+/// into memory, and the `wasm.sign` parameters over it — including the import list, which is
+/// this side's to declare (D15) and which comes from a local helper.
+///
+/// It is a separate step from [`sign`] so that the order is a fact about the program rather
+/// than a sentence in a document. The first cut connected, read, uploaded and *then* started
+/// the helper, while three documents said the helper came first; a recording gateway and a spy
+/// helper showed a refused component reaching the gateway and never reaching a helper at all.
+pub struct SignPlan {
+    /// The component, read once. The bytes uploaded are these bytes.
+    bytes: Vec<u8>,
+    /// The `wasm.sign` parameters, with no `upload` yet — that is the one thing a socket
+    /// produces.
+    params: Map<String, Value>,
+}
+
+impl SignPlan {
+    /// The parameters as they would be sent, with `upload` null. `--dry-run` prints this.
+    pub fn as_params(&self) -> Map<String, Value> {
+        let mut params = self.params.clone();
+        params.insert("upload".into(), Value::Null);
+        params
+    }
+}
+
+/// Read the component and settle the parameters, contacting nothing but a local helper.
+///
+/// Every refusal this command can reach on its own — a file past the byte ceiling, a component
+/// this machine's helper will not admit, an import list the node would not accept, a
+/// `--start-config` that is not JSON — happens here, which is before a gateway has been dialled
+/// and therefore before an operator's credentials have been offered to anything.
+pub fn plan_sign(args: &WasmSignArgs) -> Result<SignPlan> {
     let bytes = read_bounded(&args.component)?;
+    let params = sign_params(args, "", &bytes)?;
+
+    Ok(SignPlan { bytes, params })
+}
+
+/// `ouro wasm sign` — upload the planned component, ask the node to sign it, write the bundle.
+pub async fn sign<O: Write>(
+    client: &Client,
+    args: &WasmSignArgs,
+    plan: SignPlan,
+    out: &mut O,
+) -> Result<()> {
+    let SignPlan { bytes, mut params } = plan;
 
     let upload = upload(client, &bytes, args.node.as_deref()).await?;
-    let mut params = sign_params(args, &upload)?;
+    params.insert("upload".into(), Value::String(upload));
 
     if let Some(node) = &args.node {
         params.insert("node".into(), Value::String(node.clone()));
@@ -182,19 +225,14 @@ pub async fn sign<O: Write>(client: &Client, args: &WasmSignArgs, out: &mut O) -
     Ok(())
 }
 
-/// `ouro wasm sign --dry-run` — the parameters this command would send, and no socket.
+/// `ouro wasm sign --dry-run` — the parameters a plan would send, and then nothing.
 ///
-/// It resolves the imports exactly as the real run does, which is the whole point: the answer
-/// it prints is the one your helper gave about these bytes, so a component the helper refuses
-/// is refused here too, before a node is asked for anything. `upload` is `null` because
-/// nothing was uploaded.
-pub fn sign_dry_run<O: Write>(args: &WasmSignArgs, out: &mut O) -> Result<()> {
-    // The same bounded read the real path takes, so a file past the ceiling is refused by the
-    // dry run as well and an operator does not learn about it only from the node.
-    read_bounded(&args.component)?;
-
-    let mut params = sign_params(args, "")?;
-    params.insert("upload".into(), Value::Null);
+/// The plan is the same one the real run makes, so this prints the answer your helper gave
+/// about these bytes. What `--dry-run` adds over the real path is only where it stops: the
+/// real path also reads the component and puts it to the helper before it dials anything, and
+/// then goes on to dial.
+pub fn render_plan<O: Write>(plan: &SignPlan, args: &WasmSignArgs, out: &mut O) -> Result<()> {
+    let mut params = plan.as_params();
 
     if let Some(node) = &args.node {
         params.insert("node".into(), Value::String(node.clone()));
@@ -467,6 +505,58 @@ pub fn held_offset(error: &crate::transport::ClientError) -> Option<usize> {
         .map(|offset| offset as usize)
 }
 
+/// How much of an `ouro wasm inspect --json` report is read before it is parsed.
+///
+/// A real one over a component with eight imports is a couple of kilobytes. This is a file (or
+/// a pipe) somebody else may have written, and an unbounded `read_to_string` on a FIFO with a
+/// generous writer is a client that never returns — the same fault `check` had for
+/// `ouroboros.toml` and the same fix.
+const MAX_REPORT_BYTES: u64 = 64 * 1024;
+
+/// An inspect report, from a file or from stdin, bounded either way.
+///
+/// `take(limit + 1)` and not a `metadata()` check: a bound taken from a stat is not a bound,
+/// because `/dev/zero` and a growing file both report a length that has nothing to do with
+/// what a read returns.
+fn read_report(path: &Path) -> Result<String> {
+    use std::io::Read as _;
+
+    let mut buffer = Vec::new();
+
+    if path.as_os_str() == "-" {
+        std::io::stdin()
+            .lock()
+            .take(MAX_REPORT_BYTES + 1)
+            .read_to_end(&mut buffer)
+            .context("reading the inspect report from stdin")?;
+    } else {
+        let metadata = std::fs::symlink_metadata(path)
+            .with_context(|| format!("reading the inspect report at {}", path.display()))?;
+
+        if !metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
+            bail!(
+                "{} is not a regular file, so it is not an inspect report",
+                path.display()
+            );
+        }
+
+        std::fs::File::open(path)
+            .with_context(|| format!("reading the inspect report at {}", path.display()))?
+            .take(MAX_REPORT_BYTES + 1)
+            .read_to_end(&mut buffer)
+            .with_context(|| format!("reading the inspect report at {}", path.display()))?;
+    }
+
+    if buffer.len() as u64 > MAX_REPORT_BYTES {
+        bail!(
+            "that inspect report is larger than {MAX_REPORT_BYTES} bytes; a report over a \
+             component with at most {MAX_IMPORTS} imports is a few kilobytes"
+        );
+    }
+
+    String::from_utf8(buffer).context("--imports-from expects `ouro wasm inspect --json` output")
+}
+
 fn read_bounded(path: &Path) -> Result<Vec<u8>> {
     let size = std::fs::metadata(path)
         .with_context(|| format!("reading {}", path.display()))?
@@ -492,13 +582,13 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>> {
 /// runtime and by the signing policy, so there is no spelling of it a request could get
 /// wrong (docs/WASM.md §7.5). `--start-config` supplies the config it starts with, and
 /// nothing else about the block is a client's to say.
-pub fn sign_params(args: &WasmSignArgs, upload: &str) -> Result<Map<String, Value>> {
+pub fn sign_params(args: &WasmSignArgs, upload: &str, bytes: &[u8]) -> Result<Map<String, Value>> {
     let mut params = Map::new();
 
     params.insert("upload".into(), Value::String(upload.to_string()));
     params.insert("name".into(), Value::String(args.name.clone()));
     params.insert("author".into(), Value::String(args.author.clone()));
-    params.insert("imports".into(), Value::Array(imports(args)?));
+    params.insert("imports".into(), Value::Array(imports(args, bytes)?));
 
     if let Some(language) = &args.language {
         params.insert("language".into(), Value::String(language.clone()));
@@ -548,7 +638,7 @@ pub fn sign_params(args: &WasmSignArgs, upload: &str) -> Result<Map<String, Valu
 /// first two is required rather than silently becoming an empty list. An empty list is still
 /// a real answer — a component that imports nothing is in this world — and reaches the node
 /// through a report whose `imports` array is empty.
-fn imports(args: &WasmSignArgs) -> Result<Vec<Value>> {
+fn imports(args: &WasmSignArgs, bytes: &[u8]) -> Result<Vec<Value>> {
     let Some(path) = &args.imports_from else {
         if !args.import.is_empty() {
             return Ok(args
@@ -566,18 +656,10 @@ fn imports(args: &WasmSignArgs) -> Result<Vec<Value>> {
             );
         }
 
-        return imports_of(args);
+        return imports_of(args, bytes);
     };
 
-    let text = if path.as_os_str() == "-" {
-        let mut buffer = String::new();
-        std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut buffer)
-            .context("reading the inspect report from stdin")?;
-        buffer
-    } else {
-        std::fs::read_to_string(path)
-            .with_context(|| format!("reading the inspect report at {}", path.display()))?
-    };
+    let text = read_report(path)?;
 
     let report: Value = serde_json::from_str(&text)
         .context("--imports-from expects `ouro wasm inspect --json` output")?;
@@ -626,7 +708,7 @@ fn imports(args: &WasmSignArgs) -> Result<Vec<Value>> {
 ///     `ouroboros:capability@0.1.0` is refused *here*, before a byte is uploaded and long
 ///     before a signing service applies a policy to it — because a signature over a component
 ///     no node will admit is a signature nobody can use.
-fn imports_of(args: &WasmSignArgs) -> Result<Vec<Value>> {
+fn imports_of(args: &WasmSignArgs, bytes: &[u8]) -> Result<Vec<Value>> {
     let binary = wasm_client::resolve(args.helper.helper.as_deref())?;
     let mut helper = Helper::start(&binary)?;
 
@@ -634,9 +716,28 @@ fn imports_of(args: &WasmSignArgs) -> Result<Vec<Value>> {
         .inspect(&args.component)
         .map_err(|error| refused_by_helper(&args.component, error))?;
 
-    let sha = inspected["sha256"].as_str().unwrap_or_default();
+    // The helper opened the path for itself; this process read it a moment earlier and will
+    // upload what *it* read. Between the two there is a window, and a file swapped inside it
+    // produces a signed manifest whose import list describes bytes nobody uploaded — caught
+    // only at stage, by the node's cross-check, on somebody else's machine. So the two are
+    // bound here: the sha the helper reports must be the sha of the bytes in hand.
+    let reported = inspected["sha256"].as_str().unwrap_or_default();
+    let held = sha256_hex(bytes);
+
+    if !reported.eq_ignore_ascii_case(&held) {
+        bail!(
+            "{} hashes to {held}, and the helper inspected {} — the file changed between this \
+             command reading it and the helper opening it. Nothing is signed over bytes that \
+             are not the bytes that would be uploaded.",
+            args.component.display(),
+            crate::wasm_client::sanitize(reported)
+        );
+    }
+
+    // `load` recomputes the sha from the file it opens, so passing the one held here closes
+    // the same window a second time, at the helper.
     helper
-        .load(sha, &args.component)
+        .load(&held, &args.component)
         .map_err(|error| refused_by_helper(&args.component, error))?;
 
     let declared = inspected["imports"]
@@ -1498,7 +1599,7 @@ mod tests {
             ..signing_args(vec!["log".into()], None)
         };
 
-        let params = sign_params(&args, "9f2c1d4e8a7b6053f1e2d3c4b5a69780").expect("params");
+        let params = sign_params(&args, "9f2c1d4e8a7b6053f1e2d3c4b5a69780", b"").expect("params");
 
         assert_eq!(params["upload"], "9f2c1d4e8a7b6053f1e2d3c4b5a69780");
         assert_eq!(params["name"], "greeter");
@@ -1528,7 +1629,7 @@ mod tests {
             ..signing_args(vec!["log".into()], None)
         };
 
-        let error = sign_params(&args, "abc").expect_err("must refuse");
+        let error = sign_params(&args, "abc", b"").expect_err("must refuse");
         assert!(error.to_string().contains("--start-config must be JSON"));
     }
 
@@ -1545,7 +1646,7 @@ mod tests {
         let path = dir.join("report.json");
         std::fs::write(&path, r#"{"imports": []}"#).unwrap();
 
-        let params = sign_params(&signing_args(vec![], Some(path)), "abc").expect("params");
+        let params = sign_params(&signing_args(vec![], Some(path)), "abc", b"").expect("params");
 
         assert_eq!(params["imports"], json!([]));
         assert!(params.contains_key("imports"));
@@ -1559,7 +1660,7 @@ mod tests {
     /// missing binary rather than about the thing they forgot to type.
     #[test]
     fn no_local_helper_with_nothing_declared_is_refused_and_names_both_flags() {
-        let error = sign_params(&signing_args(vec![], None), "abc")
+        let error = sign_params(&signing_args(vec![], None), "abc", b"")
             .expect_err("nothing to declare and nothing to ask");
         let text = error.to_string();
 
@@ -1575,7 +1676,8 @@ mod tests {
     /// `--import` still overrides, and is not second-guessed against a helper.
     #[test]
     fn a_declared_import_list_is_sent_verbatim() {
-        let params = sign_params(&signing_args(vec!["log".into()], None), "abc").expect("params");
+        let params =
+            sign_params(&signing_args(vec!["log".into()], None), "abc", b"").expect("params");
         assert_eq!(params["imports"], json!(["log"]));
     }
 
@@ -1589,11 +1691,53 @@ mod tests {
         std::fs::write(&flat, r#"{"imports": ["log"], "world": "x"}"#).unwrap();
         std::fs::write(&nested, r#"{"component": {"imports": ["log", "clock"]}}"#).unwrap();
 
-        let params = sign_params(&signing_args(vec![], Some(flat)), "abc").expect("flat");
+        let params = sign_params(&signing_args(vec![], Some(flat)), "abc", b"").expect("flat");
         assert_eq!(params["imports"], json!(["log"]));
 
-        let params = sign_params(&signing_args(vec![], Some(nested)), "abc").expect("nested");
+        let params = sign_params(&signing_args(vec![], Some(nested)), "abc", b"").expect("nested");
         assert_eq!(params["imports"], json!(["log", "clock"]));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The node's manifest accepts at most eight imports, and a report claiming more is refused
+    /// here with a sentence about the list rather than on the far side with one about a
+    /// manifest. M4: delete the `imports.len() > MAX_IMPORTS` guard in `imports` and this goes
+    /// red — nine imports would be uploaded and signed against.
+    #[test]
+    fn a_report_past_the_import_ceiling_is_refused_before_anything_is_uploaded() {
+        let dir = scratch("imports-many");
+        let path = dir.join("report.json");
+        let many: Vec<String> = (0..=MAX_IMPORTS).map(|n| format!("i{n}")).collect();
+        std::fs::write(&path, json!({ "imports": many }).to_string()).unwrap();
+
+        let error = sign_params(&signing_args(vec![], Some(path)), "abc", b"")
+            .expect_err("nine imports is more than the node accepts");
+        assert!(
+            error.to_string().contains("at most 8"),
+            "the refusal names the ceiling: {error}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An inspect report is somebody else's file, and every input is bounded before it is
+    /// parsed. L9: delete the `take(MAX_REPORT_BYTES + 1)` in `read_report` and this goes red
+    /// — a 65 KiB report would be parsed, and a FIFO with a generous writer would never return.
+    #[test]
+    fn an_oversize_inspect_report_is_refused_before_it_is_parsed() {
+        let dir = scratch("imports-huge");
+        let path = dir.join("report.json");
+        // Valid JSON, so a refusal can only be the bound and never the parser.
+        let padding = " ".repeat(MAX_REPORT_BYTES as usize);
+        std::fs::write(&path, format!(r#"{{"imports": ["log"]}}{padding}"#)).unwrap();
+
+        let error = sign_params(&signing_args(vec![], Some(path)), "abc", b"")
+            .expect_err("a report past the bound is not read");
+        assert!(
+            error.to_string().contains("larger than"),
+            "the refusal is about the bound: {error}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1604,7 +1748,7 @@ mod tests {
         let path = dir.join("report.json");
         std::fs::write(&path, r#"{"world": "x"}"#).unwrap();
 
-        let error = sign_params(&signing_args(vec![], Some(path)), "abc").expect_err("refuse");
+        let error = sign_params(&signing_args(vec![], Some(path)), "abc", b"").expect_err("refuse");
         assert!(error.to_string().contains("no `imports` array"));
 
         std::fs::remove_dir_all(&dir).ok();

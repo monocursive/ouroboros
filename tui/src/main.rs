@@ -2777,17 +2777,21 @@ async fn wasm(paths: &Paths, command: WasmCommand) -> Result<()> {
             ouro::wasm_deploy_cli::keygen(&args, &mut out)
         }
         WasmCommand::Sign(args) => {
-            // W10b. `--dry-run` prints the parameters this command would send and opens no
-            // socket, so it is answered before the connection rather than inside `sign`.
+            // W10b. The component is read and put to a local helper *before* anything is
+            // dialled: the import list is this side's to declare (D15), and a component this
+            // machine's helper refuses must not reach a gateway at all. `--dry-run` is the
+            // same plan, printed instead of sent.
+            let plan = ouro::wasm_deploy_cli::plan_sign(&args)?;
+
             if args.dry_run {
                 let mut out = std::io::stdout().lock();
-                return ouro::wasm_deploy_cli::sign_dry_run(&args, &mut out);
+                return ouro::wasm_deploy_cli::render_plan(&plan, &args, &mut out);
             }
 
             let connected = wasm_connect(paths, args.addr.clone(), args.token_file.clone()).await?;
 
             let mut out = std::io::stdout().lock();
-            ouro::wasm_deploy_cli::sign(&connected.client, &args, &mut out).await
+            ouro::wasm_deploy_cli::sign(&connected.client, &args, plan, &mut out).await
         }
         WasmCommand::Deploy(args) => {
             let connected = wasm_connect(paths, args.addr.clone(), args.token_file.clone()).await?;
