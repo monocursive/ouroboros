@@ -1019,7 +1019,14 @@ defmodule Ouroboros.Wasm.Pool do
       )
 
     cond do
-      state.phase == :ready and state.inflight == nil ->
+      # A ready, idle pool issues at once — unless the roots it was fenced to are no longer
+      # the roots this node has (a data directory that moved between two callers), in which
+      # case the request queues behind the reconnect `ensure_connected/1` performs below. The
+      # load fence would have admitted the path on today's roots while the child still lived
+      # inside yesterday's namespace, and answered `unreadable_component` for a file that is
+      # there (the container proof found it: a forge's product, on a node whose data
+      # directory had changed since the helper spawned).
+      state.phase == :ready and state.inflight == nil and fence_fresh?(state) ->
         case issue_item(state, item) do
           {:ok, state} ->
             {:noreply, state}
@@ -1172,9 +1179,14 @@ defmodule Ouroboros.Wasm.Pool do
   # spawn, so a stale one is a fence describing a store this node no longer uses, in both
   # directions. Replacing costs the helper's cache and its live instances, which is what
   # every other reconnect costs, and configuration does not move on a running node.
+  defp fence_fresh?(%{fenced: fenced} = state) when is_list(fenced),
+    do: fenced == readable_roots(state)
+
+  defp fence_fresh?(_unfenced), do: true
+
   defp ensure_connected(%{phase: phase, fenced: fenced} = state)
        when phase in [:ready, :handshaking] and is_list(fenced) do
-    if fenced == readable_roots(state) do
+    if fence_fresh?(state) do
       {:ok, state}
     else
       case connect(state) do

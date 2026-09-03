@@ -680,6 +680,37 @@ defmodule Ouroboros.Wasm.PoolTest do
     end
   end
 
+  describe "a child is fenced to the roots its node has, not the ones it had (W16)" do
+    # The child's policy is fixed at spawn. A node whose data directory moved between two
+    # callers has a child fenced to yesterday's store: the load fence, which recomputes the
+    # roots on every request, admits today's path, and yesterday's child answers
+    # `unreadable_component` for a file that is there — bubblewrap binds a directory, not a
+    # name, so it never sees the new one. Red without `fence_fresh?/1` in the ready branch of
+    # `issue_request/7`: the pid stays, and the second doctor is answered by the old child.
+    test "a data directory that moved replaces the child before the next request" do
+      previous = Application.get_env(:ouroboros, :data_dir)
+      first = Path.join(tmp_dir(), "data-first")
+      second = Path.join(tmp_dir(), "data-second")
+      Application.put_env(:ouroboros, :data_dir, first)
+      on_exit(fn -> restore_env(:data_dir, previous) end)
+
+      pool = start_pool(responding_helper())
+      assert {:ok, _report} = Pool.doctor(pool)
+      assert %{os_pid: before, phase: :ready} = Pool.status(pool)
+      assert is_integer(before)
+
+      # Nothing moved: the same child answers, because a respawn per request would be a
+      # cache and every live instance thrown away for nothing.
+      assert {:ok, _report} = Pool.doctor(pool)
+      assert %{os_pid: ^before} = Pool.status(pool)
+
+      Application.put_env(:ouroboros, :data_dir, second)
+      assert {:ok, _report} = Pool.doctor(pool)
+      assert %{os_pid: moved, phase: :ready} = Pool.status(pool)
+      assert is_integer(moved) and moved != before
+    end
+  end
+
   describe "the load-path fence is stated twice (W16)" do
     # The readable set names this node's **workspace roots** (the hook lane reads a
     # `component =` hook out of the repository it is configured in), and this suite shares an

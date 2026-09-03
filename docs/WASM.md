@@ -3576,7 +3576,15 @@ Each slice is PR-sized, lands green, and is useful alone.
   link it exists to refuse, so an unresolvable parent is now a refusal outright; and the Linux
   half of this slice has a proof of its own, `make wasm-linux-test`, which runs the wasm suites
   under bubblewrap in the container with `ouro-sandbox` disabled by name — reproduced the 219
-  failures first, then the fix.
+  failures first, then the fix. The second push left one: a forge's product unreadable to the
+  helper on Linux and nowhere else. Bubblewrap binds a directory, not a name, and the node's
+  store and builds directories are created lazily — so they are created before the child
+  spawns now — and a ready, idle pool issued a request without asking whether the roots it
+  was fenced to were still the roots the node had, so a data directory that moved between
+  two callers left the load fence admitting today's path while yesterday's child answered
+  from yesterday's namespace. The ready branch asks now, and the pinned test moves the data
+  directory between two `doctor`s and expects a new child for the second and the same one
+  for a call where nothing moved.
 
 - **W17 — the preferred Linux backend fences reads, and the forge builds under it.** D18 left
   one residual with a name in it: `ouro-sandbox` had writable roots, protected roots and denied
