@@ -1162,98 +1162,128 @@ defmodule Ouroboros.Wasm.ForgeTest do
 
   defp restore(key, nil), do: Application.delete_env(:ouroboros, key)
   defp restore(key, value), do: Application.put_env(:ouroboros, key, value)
-
   ## ------------------------------------------------------- W20: roles as a check
 
-  # An `:erpc` that answers instead of travelling, so the *contents* of a forward can be
-  # asserted rather than the fact that a remote node was unreachable. It runs in the calling
-  # process, which is what lets the test read what was sent out of its own mailbox.
+  # An `:erpc` that records the call instead of making it, so the *contents* of a forward can
+  # be asserted rather than the fact that a remote node was unreachable. It runs in the calling
+  # process, which is what lets a test read what was sent out of its own mailbox.
+  #
+  # `:answer` in the process dictionary is what it hands back; `:builder_opts`, when set, is
+  # merged over the wire options and `forge_here/2` is then invoked **for real** on this node —
+  # a loopback builder, with the builder's own configuration arriving where a real builder's
+  # comes from (its own node) rather than off the wire.
   defmodule ForwardProbe do
     @moduledoc false
 
-    def call(target, module, function, args, timeout) do
+    def call(target, module, function, [input, opts] = args, timeout) do
       send(self(), {:forwarded, target, module, function, args, timeout})
-      {:ok, %{forwarded: true}}
+
+      case {Process.get({__MODULE__, :answer}), Process.get({__MODULE__, :builder_opts})} do
+        {nil, nil} -> {:ok, %{forwarded: true}}
+        {nil, builder} -> apply(module, function, [input, Keyword.merge(opts, builder)])
+        {answer, _builder} -> answer
+      end
     end
   end
 
   describe "W20: where a forge runs is a check (D29, C14)" do
-    # The whole table, pinned. Red on the `:signer` clause: the six-way loop below goes green
-    # only while a signer refuses under every setting and every fleet. Red on the
-    # `:no_builder_node` branch: without it a `:builder` placement with nothing to forward to
-    # falls through to some other answer, and "some other answer" here means building on the
-    # node the operator was moving the build off.
-    test "placement/3 is a table over role, setting and the connected roles" do
+    # All thirty-six: three roles × four settings × three fleets, with the expectation written
+    # out here rather than computed from the code under test. Red on the `:signer` clause, on
+    # the `:no_builder_node` branch, on the `:builder`-builds-locally clause, on the lowest-name
+    # ordering, and on the refusal of a setting that is neither word.
+    test "placement/3 is the whole table" do
       core = :core@example
       signer = :signer@example
-      builder = :"m-builder@example"
+      later = :"m-builder@example"
       earlier = :"a-builder@example"
-      peers = [{core, :core}, {builder, :builder}, {signer, :signer}, {earlier, :builder}]
 
-      # `:local` is the default and is what lane W did before this decision: build where the
-      # effect lands, whatever the fleet holds.
-      assert Forge.placement(:core, :local, peers) == :local
-      assert Forge.placement(:builder, :local, peers) == :local
-      assert Forge.placement(:core, :local, []) == :local
+      fleets = [
+        {:none, []},
+        {:one_builder, [{core, :core}, {later, :builder}, {signer, :signer}]},
+        {:two_builders,
+         [{core, :core}, {later, :builder}, {signer, :signer}, {earlier, :builder}]}
+      ]
 
-      # `:builder` forwards from a non-builder, and to the lowest node name — so the decision
-      # is one this test can pin rather than whichever peer answered first.
-      assert Forge.placement(:core, :builder, peers) == {:forward, earlier}
+      combinations =
+        for role <- [:core, :builder, :signer],
+            setting <- [:local, :builder, :buidler, nil],
+            {shape, fleet} <- fleets,
+            do: {role, setting, shape, fleet}
 
-      assert Forge.placement(:core, :builder, [{core, :core}, {builder, :builder}]) ==
-               {:forward, builder}
+      assert length(combinations) == 36
 
-      # A builder under `:builder` builds here. A builder that re-dispatched to a builder is a
-      # loop, which is why `forge_here/2` exists as its own entry point.
-      assert Forge.placement(:builder, :builder, peers) == :local
+      for {role, setting, shape, fleet} <- combinations do
+        expected =
+          cond do
+            # A signer refuses under every setting and every fleet. This is C14's word
+            # "unconditionally", written out.
+            role == :signer -> :signer_node
+            setting == :local -> :local
+            setting != :builder -> :invalid_placement
+            role == :builder -> :local
+            shape == :none -> :no_builder_node
+            shape == :one_builder -> {:forward, later}
+            shape == :two_builders -> {:forward, earlier}
+          end
 
-      # Nothing to forward to is a refusal by name, never a fallback to building here.
-      assert {:refuse, {:no_builder_node, why}} =
-               Forge.placement(:core, :builder, [{core, :core}, {signer, :signer}])
+        actual =
+          case Forge.placement(role, setting, fleet) do
+            :local -> :local
+            {:forward, target} -> {:forward, target}
+            {:refuse, {reason, why}} when is_binary(why) and why != "" -> reason
+          end
 
-      assert why =~ ":builder"
-      assert {:refuse, {:no_builder_node, _}} = Forge.placement(:core, :builder, [])
-
-      # And a signer refuses under every setting and every fleet, which is C14's word
-      # "unconditionally" written as a test.
-      for setting <- [:local, :builder, :buidler, nil],
-          fleet <- [peers, [], [{builder, :builder}]] do
-        assert {:refuse, {:signer_node, signer_why}} =
-                 Forge.placement(:signer, setting, fleet),
-               "a :signer forged under #{inspect(setting)} with #{inspect(fleet)}"
-
-        assert signer_why =~ "signing key"
+        assert actual == expected,
+               "placement(#{inspect(role)}, #{inspect(setting)}, #{shape}) was " <>
+                 "#{inspect(actual)} and should be #{inspect(expected)}"
       end
 
-      # A setting that is neither word is refused rather than read as `:local`.
-      assert {:refuse, {:invalid_placement, invalid}} = Forge.placement(:core, :buidler, peers)
-      assert invalid =~ ":local or :builder"
+      # And each refusal says which one it is, in words an operator can act on.
+      assert {:refuse, {:signer_node, signer_why}} = Forge.placement(:signer, :local, [])
+      assert signer_why =~ "signing key"
+      assert {:refuse, {:no_builder_node, none}} = Forge.placement(:core, :builder, [])
+      assert none =~ ":builder"
+      assert {:refuse, {:invalid_placement, typo}} = Forge.placement(:core, :buidler, [])
+      assert typo =~ ":local or :builder"
     end
 
     # Red without the `:signer` clause of `placement/3`, twice over: once through `forge/2`,
     # which is the path an effect and `capabilities.admit` take, and once through
-    # `forge_here/2`, which is the entry point a *forwarded* forge lands on — so the check
-    # cannot be deleted from one end and left standing at the other.
-    test "a :signer node refuses to forge, and nothing is written on the way to saying so",
-         context do
+    # `forge_here/2`, which is the entry point a *forwarded* forge lands on.
+    #
+    # And red without the check being **in front of** the input, which is the property the
+    # first cut asserted nowhere: both inputs here are ones the forge would refuse on their own
+    # merits — a directory that does not exist, and an inline project that violates C9 — so a
+    # role check that ran after `collect/1` would answer the input's refusal instead of this
+    # one. Moving the check behind collect+validate turns both of these red.
+    test "a :signer refuses before the input is read at all", context do
       opts = forge_opts(context, nil, author: "server-owned-principal")
+      absent = Path.join(context.tmp, "no-such-proposal")
+      refute File.exists?(absent)
 
-      refute File.exists?(context.builds),
-             "the scratch root must not exist before a refused forge"
+      # A C9 violation this suite already proves is caught: thirty-three files.
+      oversized =
+        Enum.reduce(1..29, fixture(), fn index, acc ->
+          Map.put(acc, "src/module#{index}.rs", "// filler\n")
+        end)
+
+      assert {:error, {:too_many_files, 33, 32}} = Forge.forge(%{files: oversized}, opts)
+      assert {:error, {:forge_input_unreadable, _}} = Forge.forge(%{dir: absent}, opts)
 
       with_role(:signer)
 
-      assert {:error, {:forge_refused, :signer_node, why}} =
-               Forge.forge(%{files: fixture()}, opts)
+      for input <- [%{dir: absent}, %{files: oversized}, %{files: fixture()}] do
+        assert {:error, {:forge_refused, :signer_node, why}} = Forge.forge(input, opts),
+               "a :signer answered something other than its own refusal for #{inspect(Map.keys(input))}"
 
-      assert why =~ "signing key"
-      assert why =~ "D29"
+        assert why =~ "signing key"
+        assert why =~ "D29"
+      end
 
       assert {:error, {:forge_refused, :signer_node, _}} =
-               Forge.forge_here(%{files: fixture()}, opts)
+               Forge.forge_here(%{files: oversized}, opts)
 
-      # The refusal is in front of `collect/1`, so no scratch root, no build directory, and
-      # no forged bundle: a build is arbitrary code, and this node declined to run any.
+      # Nothing on the way to saying so: no scratch root, no bundle directory, no tree at all.
       refute File.exists?(context.builds), "a refused forge created a scratch root"
       refute File.exists?(context.forged), "a refused forge created a bundle directory"
       assert File.ls!(context.tmp) == []
@@ -1276,38 +1306,152 @@ defmodule Ouroboros.Wasm.ForgeTest do
       assert {:refuse, {:signer_node, _}} = Forge.placement_here()
     end
 
-    # Red without `forward/3`: the same input, the same attrs, the same server-owned principal
-    # and the origin's own build budget have to reach the builder, and the entry point has to
-    # be `forge_here/2` so the far end cannot forward again.
-    test "a :builder placement forwards the input, the attrs and the principal", context do
+    # H1. Red without the origin's own `collect/1` + `validate/2` in `forward/3`: a path is a
+    # fact about *this* filesystem, and a builder handed one walks its own at that name —
+    # `ENOENT` on a good day, and on a bad one whatever this other machine keeps there, built
+    # and signed under the origin's principal. Its refusals are also a filesystem oracle for
+    # whoever reached the origin.
+    #
+    # M2. Red without the allow-list: every path, process name and service in `opts` is a fact
+    # about the origin, and D29's sentence is that everything the builder does is its own.
+    test "a forward carries the validated project inline and nothing about this machine",
+         context do
       builder = :"a-builder@example"
-      input = %{files: fixture()}
+      project = Path.join(context.tmp, "proposal")
+      File.mkdir_p!(project)
 
-      opts =
+      for {path, contents} <- fixture() do
+        target = Path.join(project, path)
+        File.mkdir_p!(Path.dirname(target))
+        File.write!(target, contents)
+      end
+
+      poisoned =
         forge_opts(context, nil,
           author: "server-owned-principal",
           name: "forge-fixture",
           eval: %{probes: [], budget_ms: 1_000, required: :all},
+          start_config: "{}",
           placement: :builder,
           peers: [{:core@example, :core}, {builder, :builder}],
           rpc: ForwardProbe,
-          timeout_ms: 60_000
+          timeout_ms: 60_000,
+          # Every one of these would decide something on the builder if it travelled.
+          signing_service: self(),
+          signing_node: :signer@example,
+          epoch_nodes: [:core@example],
+          sdk_path: "/origin/sdk",
+          pool: :origin_pool,
+          trust_policy: [allow_unsigned: true]
         )
 
-      assert {:ok, %{forwarded: true}} = Forge.forge(input, opts)
+      # The probe answers with no bundle, so the forward is refused by name — which is itself
+      # the right answer and is asserted on its own below. What this test reads is what was
+      # *sent*.
+      assert {:error, {:forge_forward_failed, ^builder, {:no_bundle, _}}} =
+               Forge.forge(%{dir: project}, poisoned)
 
-      assert_received {:forwarded, ^builder, Ouroboros.Wasm.Forge, :forge_here, [^input, remote],
+      assert_received {:forwarded, ^builder, Ouroboros.Wasm.Forge, :forge_here, [input, remote],
                        timeout}
+
+      # The project, inline, exactly as this node collected and validated it — and never a
+      # path, which is the whole of H1.
+      assert input == %{files: fixture()}
+      refute Map.has_key?(input, :dir)
+
+      # The attrs, and only the attrs, plus the two deadlines.
+      assert Enum.sort(Keyword.keys(remote)) ==
+               [:author, :eval, :forge_deadline_ms, :name, :start_config, :timeout_ms]
 
       assert Keyword.fetch!(remote, :author) == "server-owned-principal"
       assert Keyword.fetch!(remote, :name) == "forge-fixture"
-      assert Keyword.fetch!(remote, :eval) == Keyword.fetch!(opts, :eval)
-      # The origin's budget, resolved here so the builder's own configuration cannot widen it,
-      # and a transport that waits a little longer so the builder's typed refusal wins.
-      assert Keyword.fetch!(remote, :timeout_ms) == 60_000
-      assert timeout == 70_000
-      # And the seam that got it there does not travel: a builder never forwards again.
-      refute Keyword.has_key?(remote, :rpc)
+      assert Keyword.fetch!(remote, :eval) == Keyword.fetch!(poisoned, :eval)
+      assert Keyword.fetch!(remote, :start_config) == "{}"
+
+      # M1. Three deadlines, each strictly inside the next: cargo, then the builder's whole
+      # forge, then what the origin waits — which is itself inside the effect runner's own, so
+      # a brutal-kill never lands on a caller that is still owed an answer.
+      assert Keyword.fetch!(remote, :timeout_ms) == 40_000
+      assert Keyword.fetch!(remote, :forge_deadline_ms) == 50_000
+      assert timeout == 60_000
+
+      assert Keyword.fetch!(remote, :timeout_ms) < Keyword.fetch!(remote, :forge_deadline_ms)
+      assert Keyword.fetch!(remote, :forge_deadline_ms) < timeout
+    end
+
+    # H1's other half. An input the origin's own C9 refuses never reaches the wire, so the
+    # builder is never the thing that says no — and the oracle closes.
+    test "a project this node refuses is refused here, and nothing is sent", context do
+      opts =
+        forge_opts(context, nil,
+          author: "server-owned-principal",
+          placement: :builder,
+          peers: [{:"a-builder@example", :builder}],
+          rpc: ForwardProbe
+        )
+
+      files = Map.put(fixture(), "src/../../escape.rs", "// no\n")
+      assert {:error, {:path_escape, _path}} = Forge.forge(%{files: files}, opts)
+      refute_received {:forwarded, _target, _module, _function, _args, _timeout}
+    end
+
+    # H1. The far end refuses a path by name rather than walking its own filesystem at it.
+    test "forge_here refuses an input that names a directory", context do
+      assert {:error, {:forge_refused, :path_over_the_wire, why}} =
+               Forge.forge_here(%{dir: context.tmp}, author: "server-owned-principal")
+
+      assert why =~ "origin's filesystem"
+      refute File.exists?(context.builds)
+    end
+
+    # M2. A builder never forwards again, whatever the options say. The project is one C9
+    # refuses, so this costs no build and still reaches the point where a re-dispatch would
+    # have happened.
+    test "forge_here never forwards, however its options are shaped", context do
+      files = Map.put(fixture(), "src/../../escape.rs", "// no\n")
+
+      assert {:error, {:path_escape, _path}} =
+               Forge.forge_here(
+                 %{files: files},
+                 forge_opts(context, nil,
+                   author: "server-owned-principal",
+                   placement: :builder,
+                   peers: [{:"a-builder@example", :builder}],
+                   rpc: ForwardProbe
+                 )
+               )
+
+      refute_received {:forwarded, _target, _module, _function, _args, _timeout}
+    end
+
+    # M1's second half. The builder bounds the **whole** forge, not only cargo, in a task it
+    # can stop — and sweeps what the stop left behind, because `Task.shutdown/2` runs no
+    # `after`. Driven with a cargo that sleeps and a deadline far inside its ceiling, which is
+    # the shape of "the origin has stopped waiting and this node is still working".
+    test "a forwarded forge that outlives its deadline is stopped and leaves no build behind",
+         context do
+      sleeper = Path.join(context.tmp, "sleepy-cargo")
+      File.write!(sleeper, "#!/bin/sh\nsleep 30\n")
+      File.chmod!(sleeper, 0o755)
+
+      opts =
+        forge_opts(context, nil,
+          author: "server-owned-principal",
+          cargo: sleeper,
+          timeout_ms: 30_000,
+          forge_deadline_ms: 300
+        )
+
+      assert {:error, {:forge_timeout, 300}} = Forge.forge_here(%{files: fixture()}, opts)
+
+      # The tree the killed task could not remove for itself is gone.
+      leftovers =
+        case File.ls(context.builds) do
+          {:ok, entries} -> Enum.filter(entries, &String.starts_with?(&1, "forge-"))
+          {:error, _absent} -> []
+        end
+
+      assert leftovers == [], "a stopped forge left its build tree behind: #{inspect(leftovers)}"
     end
 
     # A build is expensive and a refusal is not, so an operator learns which node would do the
@@ -1332,6 +1476,121 @@ defmodule Ouroboros.Wasm.ForgeTest do
       assert refused.build == :not_placed_here
       assert is_binary(JSON.encode!(refused))
     end
+
+    # H2 and M4, on a real build. `forge_here/2` runs for real through the rpc seam — one
+    # cargo build, one real signature, one real `.ouro-wasm` — and what comes back is bytes.
+    # Red without `dispose(:return, …)`: the bundle would sit in the *builder's* forged root
+    # and `deploy/3` on the origin would answer `{:forged_bundle_unreadable, :enoent}`.
+    # Red without `receive_forged/3`'s `retain/3`: the same.
+    @tag @needs_build
+    @tag timeout: 900_000
+    test "a forwarded forge comes back as bytes, is verified here, and deploys from here",
+         context do
+      live = live!(context)
+      name = "counter-forward-#{System.unique_integer([:positive])}"
+      id = "wasm/" <> name
+      on_exit(fn -> Mesh.stop_agent(id) end)
+
+      builder_root = Path.join(context.tmp, "builder-forged")
+
+      # The builder's own configuration, arriving where a real builder's comes from.
+      Process.put(
+        {ForwardProbe, :builder_opts},
+        forge_opts(context, live, forged_root: builder_root)
+      )
+
+      on_exit(fn -> Process.delete({ForwardProbe, :builder_opts}) end)
+
+      origin =
+        forge_opts(context, live,
+          author: "forge-test-agent",
+          name: name,
+          start_config: "{}",
+          placement: :builder,
+          peers: [{:"a-builder@example", :builder}],
+          rpc: ForwardProbe
+        )
+
+      assert {:ok, forged} = Forge.forge(%{files: counter_files(name)}, origin)
+
+      # The receipt is a local forge's in every respect an operator or an effect reads.
+      assert forged.name == name
+      assert forged.module == id
+      assert forged.imports == ["log"]
+      assert forged.signer == @signer
+      assert forged.artifact.metadata.author == "forge-test-agent"
+
+      # The bytes are here, in **this** node's forged root, and never in the reply the effect
+      # surface projects.
+      refute Map.has_key?(forged, :bundle)
+      assert String.starts_with?(forged.bundle_path, context.forged)
+      assert File.regular?(forged.bundle_path)
+
+      # And the builder kept nothing: a builder accumulating other people's signed capabilities
+      # on its own disk is a second copy nobody asked for.
+      refute File.exists?(builder_root)
+
+      # H2's actual claim: the receipt is deployable from the origin.
+      assert {:ok, outcome} = Forge.deploy(forged.artifact, [node()], forge_opts(context, live))
+      assert outcome.state == :live
+      assert outcome.component_sha256 == forged.component_sha256
+      assert {:ok, _agent} = Mesh.send_message("forge-forward", id, %{"add" => 2})
+      assert %{"count" => 2} = state(id).last_answer
+
+      assert {:ok, %{state: :rolled_back}} = Deploy.rollback(name, registry: live.registry)
+
+      # M4. The same real bundle, replayed through a canned answer, against an origin that
+      # asked for something else. A bundle is exactly what `Bundle.verify/2` exists for, and
+      # the builder is the one node in this exchange whose output the origin did not produce.
+      bundle = File.read!(forged.bundle_path)
+      returned = forged |> Map.delete(:bundle_path) |> Map.put(:bundle, bundle)
+
+      Process.delete({ForwardProbe, :builder_opts})
+      Process.put({ForwardProbe, :answer}, {:ok, returned})
+      on_exit(fn -> Process.delete({ForwardProbe, :answer}) end)
+
+      # The author inside the signature is the principal, or the bundle is not the one that
+      # was asked for. This is the check that makes a forwarded forge's provenance mean
+      # anything at all: the origin never sees the component bytes before they are signed.
+      assert {:error, {:forged_bundle_refused, _target, {:author_mismatch, _}}} =
+               Forge.forge(
+                 %{files: counter_files(name)},
+                 Keyword.put(origin, :author, "somebody-else")
+               )
+
+      # And the capability it claims to be. A `:name` the *input* disagrees with never gets
+      # this far — `declared_name/2` refuses it on the origin before a forward — so the case
+      # this arm is for is the one an honest builder cannot produce: a well-formed, correctly
+      # signed bundle for a different capability entirely, returned for this request.
+      assert {:error, {:name_mismatch, _asked, ^name}} =
+               Forge.forge(%{files: counter_files(name)}, Keyword.put(origin, :name, "elsewhere"))
+
+      other = "another-capability"
+
+      assert {:error, {:forged_bundle_refused, _target, {:name_mismatch, _, ^name}}} =
+               Forge.forge(%{files: counter_files(other)}, Keyword.put(origin, :name, other))
+
+      # And the signature, against this node's own trust policy.
+      Process.put(
+        {ForwardProbe, :answer},
+        {:ok, Map.put(returned, :bundle, flip_last(bundle))}
+      )
+
+      assert {:error, {:forged_bundle_refused, _target, _reason}} =
+               Forge.forge(%{files: counter_files(name)}, origin)
+
+      # A builder that answers with no bundle at all is a forward that failed, by name.
+      Process.put({ForwardProbe, :answer}, {:ok, Map.delete(returned, :bundle)})
+
+      assert {:error, {:forge_forward_failed, _target, {:no_bundle, _}}} =
+               Forge.forge(%{files: counter_files(name)}, origin)
+
+      # And a refusal the builder made travels back as the builder's, not as this node's.
+      Process.put({ForwardProbe, :answer}, {:error, {:no_cargo, "no cargo on that node"}})
+
+      assert {:error, {:forge_refused_by, _target, {:no_cargo, _}}} =
+               Forge.forge(%{files: counter_files(name)}, origin)
+    end
   end
 
   # `boot_role!/0`'s own key, so the role a test sets is the role every reader sees —
@@ -1349,5 +1608,13 @@ defmodule Ouroboros.Wasm.ForgeTest do
         restored -> :persistent_term.put(key, restored)
       end
     end)
+  end
+
+  # One byte of the component section, changed. Enough that the signature no longer covers
+  # what is in the file.
+  defp flip_last(binary) do
+    at = byte_size(binary) - 1
+    <<byte>> = binary_part(binary, at, 1)
+    binary_part(binary, 0, at) <> <<Bitwise.bxor(byte, 1)>>
   end
 end

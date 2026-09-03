@@ -116,6 +116,12 @@ defmodule Ouroboros.Wasm.Forge do
                         "node running this runtime is in the :builder role. Connect one, or " <>
                         "set the placement back to :local to build where the effect lands (D29)"
 
+  # Everything a forwarded forge carries, by name. An allow-list rather than a deny-list,
+  # because the list of options that are facts about *this* machine — every path, every
+  # process name, every service — is the one that grows (D29).
+  @forwarded_opts [:author, :name, :eval, :start_config]
+  # …plus the two deadlines `forwarded_opts/2` sets itself, which are numbers and not machines.
+
   @manifest_file "Cargo.toml"
   @lock_file "Cargo.lock"
   @readme_file "README.md"
@@ -201,33 +207,64 @@ defmodule Ouroboros.Wasm.Forge do
   `placement_here/1` decides where this runs before a byte is read: a `:signer` node refuses,
   and under `:builder` placement a forge that landed on a non-builder is forwarded to one
   (D29). Nothing below this line has happened when either of those answers.
+
+  A forward carries the **validated project inline** — this node collects and validates C9
+  itself, and a directory name never crosses the wire — plus `:author`, `:name`, `:eval` and
+  `:start_config` and nothing else. The bundle comes back as bytes, is verified against this
+  node's own trust policy and held to what was asked for, and is retained here: the receipt a
+  forwarded forge answers with is deployable by `deploy/3` exactly as a local one's is.
   """
   @spec forge(input(), keyword()) :: {:ok, map()} | {:error, term()}
   def forge(input, opts \\ [])
 
   def forge(input, opts) when is_list(opts) do
     case placement_here(opts) do
-      :local -> forge_here(input, opts)
+      :local -> run_forge(input, opts, :retain)
       {:forward, target} -> forward(target, input, opts)
       {:refuse, {reason, why}} -> {:error, {:forge_refused, reason, why}}
     end
   end
 
   @doc false
-  # The build itself, on whichever node is running this code. Named separately from `forge/2`
-  # so a builder can never re-dispatch to a builder — `Ouroboros.Upgrade.Forge.BuildPeer` is
-  # split for exactly that reason — and the placement question is therefore asked here with the
-  # one setting that cannot forward. What it still answers is the role check: the node that
-  # runs the build is the node that must not be holding a signing key (C14, D29).
+  # The entry point a **forwarded** forge lands on, and the only one `forward/3` names.
+  #
+  # Three things are true here and not in `forge/2`. It never asks the placement question with
+  # a setting that could forward, so a builder cannot re-dispatch to a builder —
+  # `Ouroboros.Upgrade.Forge.BuildPeer` is split for exactly that reason. It refuses an input
+  # that names a **path**, because a path is a fact about the origin's filesystem and walking
+  # one here would build whatever this machine happens to keep there (D29). And it runs the
+  # whole forge — not only cargo — under the deadline the origin set, in a task it can stop,
+  # because an origin that has given up must not leave this node compiling, signing and
+  # spending an epoch for nobody.
+  #
+  # What it still answers is the role check: the node that runs the build is the node that must
+  # not be holding a signing key (C14, D29).
   @spec forge_here(input(), keyword()) :: {:ok, map()} | {:error, term()}
   def forge_here(input, opts) when is_list(opts) do
-    case placement(Cluster.role(), :local, []) do
-      :local -> run_forge(input, opts)
+    with :ok <- inline_only(input),
+         :local <- placement(Cluster.role(), :local, []) do
+      bounded(opts, fn -> run_forge(input, opts, :return) end)
+    else
       {:refuse, {reason, why}} -> {:error, {:forge_refused, reason, why}}
+      {:error, _reason} = error -> error
     end
   end
 
-  defp run_forge(input, opts) do
+  # A forwarded input is the project itself, never a name for one. `collect/1` would otherwise
+  # walk this node's own filesystem at a path the origin canonicalised on its own — which is
+  # `ENOENT` on a good day and, on a bad one, a directory this machine happens to hold at the
+  # same path, built and signed under the origin's principal. The refusals of that walk are
+  # also a filesystem oracle for whoever reached the origin.
+  defp inline_only(%{dir: _path}) do
+    {:error,
+     {:forge_refused, :path_over_the_wire,
+      "a forwarded forge carries the validated project inline; a directory name is a fact " <>
+        "about the origin's filesystem and this node will not walk its own at it (D29)"}}
+  end
+
+  defp inline_only(_inline), do: :ok
+
+  defp run_forge(input, opts, disposition) do
     with {:ok, author} <- author(opts),
          {:ok, project} <- collect(input),
          {:ok, project} <- validate(project, opts),
@@ -237,13 +274,27 @@ defmodule Ouroboros.Wasm.Forge do
              {:ok, receipt} <- sign(project, built, report, author, opts),
              {:ok, bundle} <- bundle(receipt, built),
              {:ok, decoded} <- Bundle.decode(bundle),
-             {:ok, path} <- retain(decoded.artifact, bundle, opts) do
-          {:ok, forged(project, built, receipt, decoded.artifact, path)}
+             {:ok, disposed} <- dispose(disposition, decoded.artifact, bundle, opts) do
+          {:ok, forged(project, built, receipt, decoded.artifact, disposed)}
         end
       after
         _ = File.rm_rf(built.directory)
       end
     end
+  end
+
+  # Where the bundle goes. A local forge keeps it, which is what `deploy/3` reads back. A
+  # forwarded one hands the bytes to the origin and keeps **nothing**: the node that will
+  # deploy the bundle is the node that has to hold it, and a builder accumulating other
+  # people's signed capabilities in a ring on its own disk is a second copy nobody asked for.
+  defp dispose(:retain, artifact, bundle, opts) do
+    with {:ok, path} <- retain(artifact, bundle, opts), do: {:ok, %{bundle_path: path}}
+  end
+
+  defp dispose(:return, _artifact, bundle, _opts) do
+    if byte_size(bundle) > Bundle.max_bytes(),
+      do: {:error, {:forged_bundle_too_large, byte_size(bundle), Bundle.max_bytes()}},
+      else: {:ok, %{bundle: bundle}}
   end
 
   @doc """
@@ -442,18 +493,172 @@ defmodule Ouroboros.Wasm.Forge do
 
   defp connected_roles(_other), do: []
 
-  # The same input, the same attrs and the same server-owned principal, under the origin's own
-  # build budget so the builder's configuration cannot widen it — and `forge_here/2` rather than
-  # `forge/2` as the entry point, so the far end cannot forward again. Everything the builder
-  # does with it is its own: its sandbox, its cache, its role check, its signing service.
+  # What travels, what waits, and what comes back.
+  #
+  # **The project travels, never a path.** The origin collects and validates C9 itself — 32
+  # files, a mebibyte, no `..`, no symlink followed, the lock pinned, the manifest read twice —
+  # and what crosses the wire is that validated inline map. The builder re-validates it, which
+  # is the half that must not be dropped: this node is not an authority on the far one.
+  #
+  # **The attrs travel and nothing else.** An allow-list, not a filter: `:author`, `:name`,
+  # `:eval`, `:start_config` and the deadline. Every path, every process name and every service
+  # in `opts` is a fact about *this* machine, and D29's sentence is that everything the builder
+  # does is its own — a `signing_service` or a `cargo_home` that rode along would make that
+  # false in the direction nobody would notice, because it would still work.
+  #
+  # **Three deadlines, each strictly inside the next.** Cargo gets `budget - 2 * slack`, the
+  # builder's whole forge `budget - slack` (`bounded/2`), and the origin waits `budget` — which
+  # is itself inside the effect runner's own, so the runner never brutal-kills a caller that is
+  # still owed an answer while the builder carries on compiling.
   defp forward(target, input, opts) do
     budget = build_timeout(opts)
-    rpc = Keyword.get(opts, :rpc, :erpc)
-    remote = opts |> Keyword.delete(:rpc) |> Keyword.put(:timeout_ms, budget)
 
-    rpc.call(target, __MODULE__, :forge_here, [input, remote], budget + @remote_slack)
+    with {:ok, project} <- collect(input),
+         {:ok, _validated} <- validate(project, opts),
+         {:ok, forged} <- request(target, project.files, opts, budget) do
+      receive_forged(target, forged, opts)
+    end
+  end
+
+  defp request(target, files, opts, budget) do
+    rpc = Keyword.get(opts, :rpc, :erpc)
+    remote = forwarded_opts(opts, budget)
+
+    case rpc.call(target, __MODULE__, :forge_here, [%{files: files}, remote], budget) do
+      {:ok, %{bundle: bundle} = forged} when is_binary(bundle) ->
+        {:ok, forged}
+
+      # A refusal the builder made, named as the builder's. "This node cannot forge" and "that
+      # node would not" are different problems with different remedies, and an error that did
+      # not say which machine spoke leaves an operator looking at the wrong one.
+      {:error, reason} ->
+        {:error, {:forge_refused_by, target, reason}}
+
+      other ->
+        {:error, {:forge_forward_failed, target, {:no_bundle, describe(other)}}}
+    end
   catch
     kind, reason -> {:error, {:forge_forward_failed, target, {kind, describe(reason)}}}
+  end
+
+  # The two deadlines the builder is *told*, rather than left to re-derive from a number whose
+  # meaning is the origin's. `:timeout_ms` is cargo's ceiling and `:forge_deadline_ms` is the
+  # whole forge's, one slack apart and both inside what the origin waits.
+  defp forwarded_opts(opts, budget) do
+    opts
+    |> Keyword.take(@forwarded_opts)
+    |> Keyword.put(:timeout_ms, max(budget - 2 * @remote_slack, 1_000))
+    |> Keyword.put(:forge_deadline_ms, max(budget - @remote_slack, 2_000))
+  end
+
+  # The bundle came back; nothing about it is believed yet.
+  #
+  # A bundle is exactly the thing `Bundle.verify/2` exists for, and the builder is the one node
+  # in this exchange whose output the origin did not produce: it verifies the signature against
+  # **this** node's trust policy, holds both digests to the manifest, and then checks that what
+  # was signed is what was asked for — the name, the kind, and above all the author, which is
+  # the server-owned principal and the whole of what provenance means here. Then the origin
+  # retains it in its own forged root, so the receipt it answers with is deployable from the
+  # origin exactly as a local forge's is.
+  defp receive_forged(target, %{bundle: bundle} = forged, opts) do
+    with :ok <- bound_bundle(byte_size(bundle)),
+         {:ok, decoded} <- Bundle.verify(bundle, trust_policy(opts)),
+         :ok <- as_asked(decoded.artifact, forged, opts),
+         {:ok, path} <- retain(decoded.artifact, bundle, opts) do
+      {:ok, forged |> Map.delete(:bundle) |> Map.put(:bundle_path, path)}
+    else
+      {:error, reason} -> {:error, {:forged_bundle_refused, target, reason}}
+    end
+  end
+
+  defp as_asked(%Wasm.Artifact{} = artifact, forged, opts) do
+    cond do
+      artifact.kind != :capability ->
+        {:error, {:unexpected_kind, artifact.kind}}
+
+      not is_nil(Keyword.get(opts, :name)) and artifact.name != Keyword.get(opts, :name) ->
+        {:error, {:name_mismatch, describe(Keyword.get(opts, :name)), artifact.name}}
+
+      Map.get(artifact.metadata, :author) != Keyword.get(opts, :author) ->
+        {:error, {:author_mismatch, describe(Map.get(artifact.metadata, :author))}}
+
+      Map.get(forged, :component_sha256) != artifact.component_sha256 ->
+        {:error, {:receipt_does_not_describe_the_bundle, :component_sha256}}
+
+      Map.get(forged, :artifact_id) != artifact.id ->
+        {:error, {:receipt_does_not_describe_the_bundle, :artifact_id}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp trust_policy(opts) do
+    Keyword.get_lazy(opts, :trust_policy, fn ->
+      Application.get_env(:ouroboros, :upgrade_trust_policy, [])
+    end)
+  end
+
+  # The builder's own deadline for the **whole** forge, one slack inside what the origin waits
+  # and one slack outside cargo's own — so the ordinary refusal always wins and this is the
+  # backstop for the steps *after* cargo. A task rather than a timer, because the work has to
+  # be stoppable: an origin that has stopped waiting must not leave this node signing, spending
+  # an epoch, and answering nobody.
+  #
+  # `Task.shutdown/2` runs no `after`, so the build tree the forge would have removed is swept
+  # here instead — the directories that appeared under the scratch root while this task ran, and
+  # only those. What it does not do is kill a process group, and it does not need to: cargo is
+  # bounded by `Ouroboros.Provider.Native.Exec` at a ceiling strictly smaller than this one,
+  # which is the reason the ladder is ordered the way it is (D19).
+  defp bounded(opts, work) do
+    deadline = forge_deadline(opts)
+    root = scratch_or_nil(opts)
+    before = builds_in(root)
+    task = Task.async(work)
+
+    case Task.yield(task, deadline) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} ->
+        result
+
+      _expired ->
+        sweep(root, before)
+        {:error, {:forge_timeout, deadline}}
+    end
+  end
+
+  # What the origin told this node the whole forge may take. A builder that was told nothing —
+  # a direct call rather than a forward — falls back to the same ladder computed from its own
+  # build ceiling, which is the widest this can be and is still bounded.
+  defp forge_deadline(opts) do
+    case Keyword.get(opts, :forge_deadline_ms) do
+      ms when is_integer(ms) and ms > 0 -> min(ms, @max_timeout_ms + @remote_slack)
+      _unset -> build_timeout(opts) + @remote_slack
+    end
+  end
+
+  defp scratch_or_nil(opts) do
+    case scratch_root(opts) do
+      {:ok, root} -> root
+      {:error, _absent} -> nil
+    end
+  end
+
+  defp builds_in(nil), do: MapSet.new()
+
+  defp builds_in(root) do
+    case File.ls(root) do
+      {:ok, entries} -> entries |> Enum.filter(&String.starts_with?(&1, "forge-")) |> MapSet.new()
+      {:error, _absent} -> MapSet.new()
+    end
+  end
+
+  defp sweep(nil, _before), do: :ok
+
+  defp sweep(root, before) do
+    root
+    |> builds_in()
+    |> MapSet.difference(before)
+    |> Enum.each(&File.rm_rf(Path.join(root, &1)))
   end
 
   ## ------------------------------------------------------------------ collection
@@ -1378,7 +1583,7 @@ defmodule Ouroboros.Wasm.Forge do
     end
   end
 
-  defp forged(project, built, receipt, artifact, path) do
+  defp forged(project, built, receipt, artifact, disposed) do
     receipt
     |> Map.merge(%{
       artifact: artifact,
@@ -1386,9 +1591,9 @@ defmodule Ouroboros.Wasm.Forge do
       source_sha256: project.sha256,
       files: project.files |> Map.keys() |> Enum.sort(),
       input_bytes: project.bytes,
-      build_bytes: byte_size(built.output),
-      bundle_path: path
+      build_bytes: byte_size(built.output)
     })
+    |> Map.merge(disposed)
   end
 
   ## -------------------------------------------------------------- the bundle store

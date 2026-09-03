@@ -841,10 +841,15 @@ is on that node, and those two do not share a machine. `config :ouroboros,
 :wasm_forge_placement` is `:local` by default — a forge runs where the effect lands, exactly as
 before — and `:builder` forwards a forge that landed on a non-builder node to a connected
 `:builder`, under the same server-owned principal, where every fence above is that node's own;
-with no builder connected it refuses by name rather than quietly building here. The decision is
-a pure function of this node's role, the setting and the roles `Ouroboros.Cluster` reports, so
-a test pins the whole table and `capabilities.preview` reports the answer before an operator
-spends a build finding it out.
+with no builder connected it refuses by name rather than quietly building here. What travels is
+the **validated project inline** — this node collects and validates C9 itself, and a directory
+name, which is a fact about *this* filesystem, never crosses the wire — plus the attrs and two
+deadlines and nothing else about this machine. The bundle comes back as bytes, is verified here
+against this node's own trust policy and held to the name, the kind and the principal that were
+asked for, and is retained here, so a forwarded forge's receipt deploys from the origin exactly
+as a local one's does. The decision is a pure function of this node's role, the setting and the
+roles `Ouroboros.Cluster` reports, so a test pins all thirty-six combinations and
+`capabilities.preview` reports the answer before an operator spends a build finding it out.
 
 **The imports are read, not declared.** `Wasm.Deploy.sign/2` never parses a component,
 because those bytes came off a socket (D15). Here the node built them itself, from source it
@@ -2265,9 +2270,64 @@ machinery — it is a backend, not a lane (D9).
   default would build on the node the operator was moving the build off.
 
   A builder never forwards again. `forge/2` decides and `forge_here/2` builds, which is
-  `Ouroboros.Upgrade.Forge.BuildPeer`'s split for the same reason, and the far end asks the
-  placement question with the one setting that cannot forward — so the role check runs there
-  too, on the machine that will actually run the compiler.
+  `Ouroboros.Upgrade.Forge.BuildPeer`'s split for the same reason, and the far end never asks
+  the placement question with a setting that could forward — so the role check runs there too,
+  on the machine that will actually run the compiler, and no option a caller writes can turn
+  that entry point back into a dispatcher.
+
+  **The project travels; a path never does.** The origin collects and validates C9 itself and
+  what crosses the wire is that validated inline map — at most 32 files and a mebibyte, every
+  path relative, no symlink followed, the lock pinned, the manifest read twice. The builder
+  re-validates it, because this node is not an authority on that one. The first cut forwarded
+  the caller's input verbatim, and the only production caller
+  (`Ouroboros.Runtime.Capabilities.admit_lane/2`) passes a **directory** — an absolute path
+  this node canonicalised on its own filesystem. Three things followed and all of them were
+  wrong: `capabilities.admit` under `:builder` placement could not work at all, a directory
+  the builder happened to keep at the same path would have been built and signed under the
+  origin's principal, and the builder's own refusals — `enoent`, `eacces`, `not_a_directory`,
+  `symlink_refused` — came back to an `:operate` client as a filesystem oracle for a machine
+  they had not asked about.
+
+  **The attrs travel and nothing else.** An allow-list — `:author`, `:name`, `:eval`,
+  `:start_config`, and the two deadlines below — rather than a filter, because the list of
+  options that are facts about *this* machine is the one that grows. A `signing_service`, a
+  `cargo_home`, a `pool` or an `sdk_path` that rode along would make "everything the builder
+  does is its own" false in the direction nobody notices, because it would still work.
+
+  **The bundle comes back as bytes, and the origin is the node that keeps it.** A forwarded
+  forge writes nothing durable on the builder: the `.ouro-wasm` travels in the reply, bounded
+  by `Wasm.Bundle.max_bytes/0`, and the origin retains it in its own forged root — so the
+  receipt a forwarded forge answers with is deployable by `Forge.deploy/3` exactly as a local
+  one's is. Without that the receipt named a file on another machine and both consumers, the
+  operator's `capabilities.admit` and the agent's `DeployWasmCapability`, answered
+  `{:forged_bundle_unreadable, :enoent}`.
+
+  **And the origin verifies what came back, because it never saw what was signed.** This is
+  the trust an operator extends by turning `:builder` on, stated plainly. A peer's role is
+  that peer's own claim, answered over the distribution handshake (`Cluster.local_posture/0`);
+  the lowest node name wins deterministically; and the node so chosen receives the source of
+  every capability this fleet forges and produces the bytes the fleet's signer then signs
+  under the **origin's** principal. The origin never sees those bytes before they are signed.
+  So the trust is exactly two things — cluster membership, and that builder's own sandbox —
+  and naming builders is delegating the forge to whichever member claims the role. What the
+  origin can still check, it does: `Bundle.verify/2` against **this** node's trust policy
+  (signature, and both forms bound to their own digests), the kind, the name, the author —
+  which must be the server-owned principal it sent — and that the receipt describes the bundle
+  beside it. A bundle is precisely the thing `Bundle.verify/2` exists for, and a forwarded
+  forge is the one place in this lane where a node deploys something another machine produced.
+
+  **Three deadlines, each strictly inside the next.** Cargo gets `budget - 2 * slack`, the
+  builder's whole `forge_here/2` gets `budget - slack` in a task it can stop, and the origin
+  waits `budget` — which is itself inside the effect runner's own ceiling, because
+  `ForgeWasmCapability` asks for `Runner.timeout() - 5 s` (D19). The first cut had the origin
+  waiting `budget + 10 s`, which is *past* the runner's brutal kill: the caller was cut down
+  five seconds before its own transport gave up, and the builder went on compiling, signing,
+  spending an epoch and retaining a bundle for a request that had already reported
+  `{:effect_timeout, …}`. The builder is *told* both numbers rather than left to re-derive an
+  arithmetic whose meaning is the origin's. An expiry sweeps the build directories that
+  appeared while the task ran, because `Task.shutdown/2` runs no `after`; it does not have to
+  kill a process group, because cargo's own ceiling is strictly smaller and
+  `Ouroboros.Provider.Native.Exec` signals that group at it.
 
   **The decision is a pure function, and that is not tidiness.** `placement/3` takes this
   node's role, the setting, and the connected nodes with the roles `Cluster` reports for them,
@@ -2279,6 +2339,18 @@ machinery — it is a backend, not a lane (D9).
   multicall and putting one in front of every default forge would be a cost no decision depends
   on. The forward target is the lowest node name among the connected builders, so the choice is
   pinned rather than "whichever peer answered first".
+
+  **Two costs, stated.** `capabilities.preview` is an `:operate` verb and now asks the
+  placement question, so on a node configured `:builder` it fans out `Cluster.nodes_by_role/1`
+  — an `:erpc` multicall bounded at five seconds — once per preview. That is bounded and it is
+  not free; under `:local`, the default, no probe happens at all, which is why the fleet is
+  read only where the answer can change. And a node where this runtime never started reports
+  `:core` (`Cluster.role/0` falls back to configuration and then to `:core`), which is the
+  open direction: such a node forges rather than refusing. It is acceptable here because that
+  fallback cannot make a *signer* look like a core node — `config :ouroboros, :node_role` is
+  what `boot_role!/0` reads and what the fallback reads, so a signer misreports only if its
+  configuration says it is not one — and because every check that consumes a role also requires
+  the target to be running this runtime.
 
   What this is **not** is a boundary against a hostile node. `Ouroboros.Cluster`'s own "Limits"
   section says it: any node that completes the distribution handshake has full `:erpc` authority
@@ -3368,18 +3440,48 @@ Each slice is PR-sized, lands green, and is useful alone.
   as the default. `capabilities.preview` reports the decision — `%{decision: …}` beside the
   toolchain — and a preview on a node that would not forge does not dry-build.
 
-  Proofs. The whole table, pinned literal by literal: three roles × four settings × three
-  fleets, including a `:signer` refusing under all twelve combinations and a `:builder`-role
-  node under `:builder` placement building locally rather than dispatching. Through the real
-  `Ouroboros.Cluster.role/0` — set through the same `:persistent_term` key `boot_role!/0`
-  writes — a `:signer` refuses `forge/2` *and* `forge_here/2` with the scratch root, the bundle
-  directory and the whole temporary tree still empty afterwards, which is what "before anything
-  is written" means. The forward is asserted on its contents through a fake `:erpc` target
-  module: the target, `forge_here` as the entry point, the same input map, the author, the name,
-  the eval spec, the resolved budget, the transport's ten seconds of slack, and the seam itself
-  not travelling. And `capabilities.preview` on a real workspace proposal reports `:local` on
-  this node and the signer refusal with its reason on a node that holds a key, still answering
-  C9 in both.
+  What a forward carries is the **validated project inline** — the origin runs C9 itself and a
+  directory name never crosses the wire — plus `:author`, `:name`, `:eval`, `:start_config` and
+  two deadlines, by allow-list. The bundle comes back as bytes, is verified here with
+  `Bundle.verify/2` against this node's own trust policy and held to the kind, the name, the
+  principal and the receipt beside it, and is retained in the origin's forged root, so
+  `Forge.deploy/3` works from the origin exactly as it does after a local forge. Cargo, the
+  builder's whole forge and the origin's wait are three deadlines each strictly inside the
+  next, the innermost two told to the builder rather than re-derived there, and an expiry stops
+  the task and sweeps what it left. D29 has the reasoning and the four defects the first cut of
+  this slice shipped.
+
+  Proofs. The **whole** table, thirty-six combinations pinned against an expectation written
+  out separately: three roles × four settings (`:local`, `:builder`, a typo, `nil`) × three
+  fleets (none, one builder, two). Through the real `Ouroboros.Cluster.role/0` — set through
+  the same `:persistent_term` key `boot_role!/0` writes — a `:signer` refuses `forge/2` and
+  `forge_here/2`, and refuses **before the input is read**: the same three inputs answer their
+  own C9 or filesystem refusals a line earlier and the signer's refusal afterwards, so a role
+  check moved behind `collect/1` turns the test red rather than staying green. The scratch
+  root, the bundle directory and the whole temporary tree are still empty afterwards.
+
+  The forward is asserted on its contents through a fake `:erpc` target: given a *directory*
+  input and an options list poisoned with a signing service, a signing node, epoch nodes, an
+  SDK path, a pool and a trust policy, what is sent is the inline file map — never the path —
+  and exactly six option keys, with the deadlines 40 s / 50 s / 60 s in their required order. A
+  project this node's own C9 refuses is refused here and nothing is sent; `forge_here/2`
+  refuses a `%{dir: …}` by name; and `forge_here/2` with `:builder` placement, builder peers
+  and an rpc seam in its options never calls the seam. A forwarded forge whose deadline expires
+  answers `{:forge_timeout, …}` and leaves no build directory behind, driven with a cargo that
+  sleeps.
+
+  And the round trip, on a real build: `forge_here/2` runs for real through the rpc seam — one
+  cargo build, one real signature, one real `.ouro-wasm` — the bytes come back, the origin
+  verifies and retains them, the builder's forged root does not exist, and `Forge.deploy/3`
+  deploys that receipt to `:live` on this node, where the counter answers and rolls back. That
+  same real bundle, replayed through a canned answer, is then refused for an author that is not
+  the principal, for a capability that is not the one asked for, for one flipped byte, for no
+  bundle at all, and a refusal the builder made comes back named as the builder's. What is
+  **not** proved is a forward across a real node boundary: a peer VM with cargo, a warm cache
+  and a signing service was out of budget for this slice, so the loopback proves everything
+  except that `:erpc` copies terms between machines. `capabilities.preview` on a real workspace
+  proposal reports `:local` on this node and the signer refusal with its reason on a node that
+  holds a key, still answering C9 in both.
 
   **A policy deploy was verified on one node.** `test/wasm/policy_two_node_test.exs` is
   `rollout_two_node_test.exs`'s harness with `no-network-shell` in it: two full-application peer
@@ -3414,6 +3516,11 @@ Each slice is PR-sized, lands green, and is useful alone.
       precompiled_mismatch (-32021): the artifact was produced by wasmtime 48.0.0 for
       aarch64-apple-darwin; this helper is wasmtime 48.0.1 for aarch64-apple-darwin
 
+  Neither half runs in CI and neither is a `mix test` away: only `make wasm-skew-test` produces
+  the artifacts, and `test/wasm/skew_test.exs` skips with that target in its reason when they
+  are absent — including under `OUROBOROS_REQUIRE_WASM`, because a machine without Docker and a
+  spare wasmtime cannot make them and a failure there would say nothing.
+
   Both artifacts are then put to the Elixir half in `test/wasm/skew_test.exs`, twice each,
   because a deploy is only honest if both fallbacks hold. A manifest recording the *producing*
   build — what a signer on that machine would really have signed — makes `Wasm.Store.form/4`
@@ -3428,7 +3535,11 @@ Each slice is PR-sized, lands green, and is useful alone.
   What W20 does **not** change: role is still not a boundary against a hostile connected node
   (`Ouroboros.Cluster`, "Limits") — a peer that completed the handshake calls `forge_here/2`
   directly, and a compromised signer does not need to build at all. What the check stops is the
-  accident. And a precompiled artifact is still bound to one wasmtime and one triple; W20 proves
+  accident. And turning `:builder` on is a trust an operator extends rather than a fence they
+  raise: a peer's role is that peer's own claim over the handshake, the lowest name wins, and
+  the node so chosen sees the source of every capability the fleet forges and produces bytes
+  the fleet's signer signs under the origin's principal. D29 says what the origin can still
+  check when the bundle comes back, and what it cannot. And a precompiled artifact is still bound to one wasmtime and one triple; W20 proves
   what §12 says about that with two real toolchains instead of asserting it from one.
 
 ## 15. Prior art and references
