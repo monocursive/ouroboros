@@ -1162,4 +1162,192 @@ defmodule Ouroboros.Wasm.ForgeTest do
 
   defp restore(key, nil), do: Application.delete_env(:ouroboros, key)
   defp restore(key, value), do: Application.put_env(:ouroboros, key, value)
+
+  ## ------------------------------------------------------- W20: roles as a check
+
+  # An `:erpc` that answers instead of travelling, so the *contents* of a forward can be
+  # asserted rather than the fact that a remote node was unreachable. It runs in the calling
+  # process, which is what lets the test read what was sent out of its own mailbox.
+  defmodule ForwardProbe do
+    @moduledoc false
+
+    def call(target, module, function, args, timeout) do
+      send(self(), {:forwarded, target, module, function, args, timeout})
+      {:ok, %{forwarded: true}}
+    end
+  end
+
+  describe "W20: where a forge runs is a check (D29, C14)" do
+    # The whole table, pinned. Red on the `:signer` clause: the six-way loop below goes green
+    # only while a signer refuses under every setting and every fleet. Red on the
+    # `:no_builder_node` branch: without it a `:builder` placement with nothing to forward to
+    # falls through to some other answer, and "some other answer" here means building on the
+    # node the operator was moving the build off.
+    test "placement/3 is a table over role, setting and the connected roles" do
+      core = :core@example
+      signer = :signer@example
+      builder = :"m-builder@example"
+      earlier = :"a-builder@example"
+      peers = [{core, :core}, {builder, :builder}, {signer, :signer}, {earlier, :builder}]
+
+      # `:local` is the default and is what lane W did before this decision: build where the
+      # effect lands, whatever the fleet holds.
+      assert Forge.placement(:core, :local, peers) == :local
+      assert Forge.placement(:builder, :local, peers) == :local
+      assert Forge.placement(:core, :local, []) == :local
+
+      # `:builder` forwards from a non-builder, and to the lowest node name — so the decision
+      # is one this test can pin rather than whichever peer answered first.
+      assert Forge.placement(:core, :builder, peers) == {:forward, earlier}
+
+      assert Forge.placement(:core, :builder, [{core, :core}, {builder, :builder}]) ==
+               {:forward, builder}
+
+      # A builder under `:builder` builds here. A builder that re-dispatched to a builder is a
+      # loop, which is why `forge_here/2` exists as its own entry point.
+      assert Forge.placement(:builder, :builder, peers) == :local
+
+      # Nothing to forward to is a refusal by name, never a fallback to building here.
+      assert {:refuse, {:no_builder_node, why}} =
+               Forge.placement(:core, :builder, [{core, :core}, {signer, :signer}])
+
+      assert why =~ ":builder"
+      assert {:refuse, {:no_builder_node, _}} = Forge.placement(:core, :builder, [])
+
+      # And a signer refuses under every setting and every fleet, which is C14's word
+      # "unconditionally" written as a test.
+      for setting <- [:local, :builder, :buidler, nil],
+          fleet <- [peers, [], [{builder, :builder}]] do
+        assert {:refuse, {:signer_node, signer_why}} =
+                 Forge.placement(:signer, setting, fleet),
+               "a :signer forged under #{inspect(setting)} with #{inspect(fleet)}"
+
+        assert signer_why =~ "signing key"
+      end
+
+      # A setting that is neither word is refused rather than read as `:local`.
+      assert {:refuse, {:invalid_placement, invalid}} = Forge.placement(:core, :buidler, peers)
+      assert invalid =~ ":local or :builder"
+    end
+
+    # Red without the `:signer` clause of `placement/3`, twice over: once through `forge/2`,
+    # which is the path an effect and `capabilities.admit` take, and once through
+    # `forge_here/2`, which is the entry point a *forwarded* forge lands on — so the check
+    # cannot be deleted from one end and left standing at the other.
+    test "a :signer node refuses to forge, and nothing is written on the way to saying so",
+         context do
+      opts = forge_opts(context, nil, author: "server-owned-principal")
+
+      refute File.exists?(context.builds),
+             "the scratch root must not exist before a refused forge"
+
+      with_role(:signer)
+
+      assert {:error, {:forge_refused, :signer_node, why}} =
+               Forge.forge(%{files: fixture()}, opts)
+
+      assert why =~ "signing key"
+      assert why =~ "D29"
+
+      assert {:error, {:forge_refused, :signer_node, _}} =
+               Forge.forge_here(%{files: fixture()}, opts)
+
+      # The refusal is in front of `collect/1`, so no scratch root, no build directory, and
+      # no forged bundle: a build is arbitrary code, and this node declined to run any.
+      refute File.exists?(context.builds), "a refused forge created a scratch root"
+      refute File.exists?(context.forged), "a refused forge created a bundle directory"
+      assert File.ls!(context.tmp) == []
+    end
+
+    # The impure half, against the real `Ouroboros.Cluster.role/0` and this node's own
+    # configuration rather than an argument a test chose.
+    test "placement_here/1 reads this node's role and this node's setting" do
+      assert Forge.placement_here() == :local
+
+      previous = Application.get_env(:ouroboros, :wasm_forge_placement)
+      Application.put_env(:ouroboros, :wasm_forge_placement, :builder)
+      on_exit(fn -> restore(:wasm_forge_placement, previous) end)
+
+      # This node is `:core` and no `:builder` is connected, which is exactly the refusal an
+      # operator who set the key on a one-node fleet should get.
+      assert {:refuse, {:no_builder_node, _}} = Forge.placement_here()
+
+      with_role(:signer)
+      assert {:refuse, {:signer_node, _}} = Forge.placement_here()
+    end
+
+    # Red without `forward/3`: the same input, the same attrs, the same server-owned principal
+    # and the origin's own build budget have to reach the builder, and the entry point has to
+    # be `forge_here/2` so the far end cannot forward again.
+    test "a :builder placement forwards the input, the attrs and the principal", context do
+      builder = :"a-builder@example"
+      input = %{files: fixture()}
+
+      opts =
+        forge_opts(context, nil,
+          author: "server-owned-principal",
+          name: "forge-fixture",
+          eval: %{probes: [], budget_ms: 1_000, required: :all},
+          placement: :builder,
+          peers: [{:core@example, :core}, {builder, :builder}],
+          rpc: ForwardProbe,
+          timeout_ms: 60_000
+        )
+
+      assert {:ok, %{forwarded: true}} = Forge.forge(input, opts)
+
+      assert_received {:forwarded, ^builder, Ouroboros.Wasm.Forge, :forge_here, [^input, remote],
+                       timeout}
+
+      assert Keyword.fetch!(remote, :author) == "server-owned-principal"
+      assert Keyword.fetch!(remote, :name) == "forge-fixture"
+      assert Keyword.fetch!(remote, :eval) == Keyword.fetch!(opts, :eval)
+      # The origin's budget, resolved here so the builder's own configuration cannot widen it,
+      # and a transport that waits a little longer so the builder's typed refusal wins.
+      assert Keyword.fetch!(remote, :timeout_ms) == 60_000
+      assert timeout == 70_000
+      # And the seam that got it there does not travel: a builder never forwards again.
+      refute Keyword.has_key?(remote, :rpc)
+    end
+
+    # A build is expensive and a refusal is not, so an operator learns which node would do the
+    # work from the cheap verb. Red without the `placement` field in `Forge.preview/2` or the
+    # one `Ouroboros.Runtime.Capabilities` carries out of it.
+    test "capabilities.preview reports the placement, and does not dry-build where it would not forge",
+         context do
+      workspace = proposal!(context, "counter-proposal")
+
+      assert {:ok, preview} = Capabilities.preview(workspace, ".ouroboros/capabilities/Counter")
+      assert preview.placement == %{decision: :local, node: node()}
+
+      with_role(:signer)
+
+      assert {:ok, refused} = Capabilities.preview(workspace, ".ouroboros/capabilities/Counter")
+      assert %{decision: :refuse, reason: :signer_node, detail: detail} = refused.placement
+      assert detail =~ "signing key"
+
+      # C9 still answered — the proposal is as valid as it was a moment ago — but no build was
+      # attempted, because a dry build on a signer is the very thing being refused.
+      assert refused.lock == :sdk_lock
+      assert refused.build == :not_placed_here
+      assert is_binary(JSON.encode!(refused))
+    end
+  end
+
+  # `boot_role!/0`'s own key, so the role a test sets is the role every reader sees —
+  # `Ouroboros.Cluster.role/0` reads `:persistent_term` first and falls back to configuration
+  # only where this runtime never started. Restored rather than erased: this VM booted with a
+  # role and the suites after this one read it.
+  defp with_role(role) do
+    key = {Ouroboros.Cluster, :node_role}
+    previous = :persistent_term.get(key, :absent)
+    :persistent_term.put(key, role)
+
+    on_exit(fn ->
+      case previous do
+        :absent -> :persistent_term.erase(key)
+        restored -> :persistent_term.put(key, restored)
+      end
+    end)
+  end
 end

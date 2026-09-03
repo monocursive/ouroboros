@@ -833,6 +833,19 @@ shell runs in.
    backend cannot express a read allow-set — those are refusals and not weaker postures,
    because the fence is one of the three things this lane's claim rests on.
 
+**And a fourth thing, which is about *which* machine** (W20, D29). The three above bound what
+a build may do; `Wasm.Forge.placement/3` decides where it happens, and it is a check rather
+than advice. A **`:signer`-role node refuses to forge**, whatever the configuration says and
+whatever the fleet looks like: a Cargo build is arbitrary code at build time, the signing key
+is on that node, and those two do not share a machine. `config :ouroboros,
+:wasm_forge_placement` is `:local` by default — a forge runs where the effect lands, exactly as
+before — and `:builder` forwards a forge that landed on a non-builder node to a connected
+`:builder`, under the same server-owned principal, where every fence above is that node's own;
+with no builder connected it refuses by name rather than quietly building here. The decision is
+a pure function of this node's role, the setting and the roles `Ouroboros.Cluster` reports, so
+a test pins the whole table and `capabilities.preview` reports the answer before an operator
+spends a build finding it out.
+
 **The imports are read, not declared.** `Wasm.Deploy.sign/2` never parses a component,
 because those bytes came off a socket (D15). Here the node built them itself, from source it
 validated against a dependency set it pinned, inside its own sandbox — so
@@ -1775,11 +1788,15 @@ machinery — it is a backend, not a lane (D9).
   `"wasm/<name>"` for one capability or `"wasm/*"` for all of them, which is how the broad
   thing gets said out loud.
 
-  **Where a forge runs is placement, not a mechanism.** Nothing here checks a node's role: a
-  forge runs where the effect lands, and an operator who wants a dedicated builder puts the
-  toolchain, the warmed cache and the `:forge` grant on that node — the same way a `:signer`
-  node is one because it is the node holding the key. Saying `:builder` in a sentence about
-  this lane describes a deployment and not a check.
+  **Where a forge runs was placement and is now also a check (D29).** Until W20 nothing here
+  read a node's role: a forge ran where the effect landed, an operator who wanted a dedicated
+  builder put the toolchain, the warmed cache and the `:forge` grant on that node, and saying
+  `:builder` in a sentence about this lane described a deployment. Most of that still holds —
+  `:local` is still the default and is still what the paragraph above describes — but one half
+  of it was a gap rather than a posture: a `:signer` node, the one machine in a fleet that must
+  never run arbitrary code at build time, would forge on request like any other. It refuses now,
+  unconditionally, and `config :ouroboros, :wasm_forge_placement: :builder` is the opt-in that
+  turns "put the toolchain over there" into routing. D29 is the whole of it.
 - **D20 — a policy component may narrow, and may only widen where an operator said so.**
   `Ouroboros.Wasm.PolicyEngine` reaches a signed policy component only on `{:ask, :no_rule}`,
   which is every call `Control.Permissions` had no rule for. Its `deny` stands; its `ask`
@@ -2221,6 +2238,54 @@ machinery — it is a backend, not a lane (D9).
   past the size or naming an unknown slot each refused by name, a slot past either clock gone
   for a reader too, the ninth `put` refused, files 0600 and roots and staged files never
   followed through a symlink, and no lane-W verb minting a slot whatever it is handed.
+
+- **D29 — a `:signer` never builds, and `:builder` is opt-in routing rather than a default.**
+  D18 said role was placement and not a mechanism in this lane, and it was half right. The half
+  that was a gap is now closed: `Ouroboros.Wasm.Forge` refuses `{:forge_refused, :signer_node,
+  …}` when `Ouroboros.Cluster.role/0` is `:signer`, before a byte of the input is read and
+  whatever `config :ouroboros, :wasm_forge_placement` says. The argument is one sentence. A
+  Cargo build is arbitrary code at build time by construction (D18, D19) and the three fences
+  around it are containment, not proof; a signing key is the thing that makes bytes admissible
+  on every node that trusts it. Running the first beside the second is a bet on the fences, and
+  the fences were never offered as a bet. There is no configuration that turns this off, because
+  an operator who could turn it off is a misconfiguration away from having done so.
+
+  The other half stays placement, and stays `:local` by default. `:local` forges where the
+  effect lands, which is what this lane has always done and what a single-machine operator
+  wants: the toolchain, the warmed cache and the `:forge` grant are already there, and a
+  default that forwarded would make a one-node fleet refuse to do something it can do.
+  `:builder` is the fleet-shaped answer: a forge that lands on a non-builder node is forwarded
+  by `:erpc` to a connected `:builder`, carrying the same input, the same attrs and the same
+  server-owned principal, under the origin's own build budget so the builder's configuration
+  cannot widen it. Everything the builder then does is its own — its sandbox backend, its
+  cargo home, its role check, its signing service — which is the point of moving the build.
+  With no builder connected it refuses `:no_builder_node` by name and does **not** fall back to
+  building here, because building here is precisely what the setting was chosen to prevent. A
+  setting that is neither word is refused for the same reason: reading `:buidler` as the
+  default would build on the node the operator was moving the build off.
+
+  A builder never forwards again. `forge/2` decides and `forge_here/2` builds, which is
+  `Ouroboros.Upgrade.Forge.BuildPeer`'s split for the same reason, and the far end asks the
+  placement question with the one setting that cannot forward — so the role check runs there
+  too, on the machine that will actually run the compiler.
+
+  **The decision is a pure function, and that is not tidiness.** `placement/3` takes this
+  node's role, the setting, and the connected nodes with the roles `Cluster` reports for them,
+  and answers `:local | {:forward, node} | {:refuse, reason}`. A decision taken inside the build
+  path is one nobody can ask about without running a build, and this is a decision an operator
+  needs to be able to ask about: `capabilities.preview` reports it, and a preview on a node that
+  would refuse says so and does not dry-build. The fleet is read only where the answer can
+  change — `:local` needs no probe — because `Cluster.nodes_by_role/1` is a five-second
+  multicall and putting one in front of every default forge would be a cost no decision depends
+  on. The forward target is the lowest node name among the connected builders, so the choice is
+  pinned rather than "whichever peer answered first".
+
+  What this is **not** is a boundary against a hostile node. `Ouroboros.Cluster`'s own "Limits"
+  section says it: any node that completes the distribution handshake has full `:erpc` authority
+  over every other, so a compromised peer ignores every check here by calling `forge_here/2`
+  directly — and a compromised *signer* does not need to build at all. What the check stops is
+  the accident and the misconfiguration: an effect landing on the key-holding machine, a fleet
+  where the builder role was set up and the builds still ran on the core node. Contract C14.
 
 ## 12. What this does not solve
 
@@ -3284,6 +3349,87 @@ Each slice is PR-sized, lands green, and is useful alone.
   stage still falls back to the source form, a transfer whose final frame is lost is a signature
   to make again rather than a chunk to re-ask for, and the chunk is `wasm.upload`'s, so a frame
   too small for one is too small for either direction.
+
+- **W20 — a role is a check, and the second node is real.** Three sentences §12 and §14 had
+  written down as true are now false, and this slice is what made them so.
+
+  **`:builder` was placement advice; a `:signer` now refuses to forge.**
+  `Ouroboros.Wasm.Forge.placement/3` is a pure function of this node's role, `config :ouroboros,
+  :wasm_forge_placement` and the connected nodes with the roles `Ouroboros.Cluster` reports —
+  `:local | {:forward, node} | {:refuse, reason}` — and `forge/2` asks it before a byte of the
+  input is read. A `:signer` node is `{:forge_refused, :signer_node, …}` under every setting and
+  every fleet (D29, contract C14); `:local` stays the default and builds where the effect lands,
+  as before; `:builder` forwards a forge that landed on a non-builder node to the lowest-named
+  connected `:builder` — same input, same attrs, same server-owned principal, the origin's own
+  build budget so the builder's configuration cannot widen it — through `forge_here/2`, which is
+  a separate entry point so a builder never forwards again and re-asks the role question on the
+  machine that will run the compiler. No builder connected is `:no_builder_node` by name and
+  never a fallback to building here; a setting that is neither word is refused rather than read
+  as the default. `capabilities.preview` reports the decision — `%{decision: …}` beside the
+  toolchain — and a preview on a node that would not forge does not dry-build.
+
+  Proofs. The whole table, pinned literal by literal: three roles × four settings × three
+  fleets, including a `:signer` refusing under all twelve combinations and a `:builder`-role
+  node under `:builder` placement building locally rather than dispatching. Through the real
+  `Ouroboros.Cluster.role/0` — set through the same `:persistent_term` key `boot_role!/0`
+  writes — a `:signer` refuses `forge/2` *and* `forge_here/2` with the scratch root, the bundle
+  directory and the whole temporary tree still empty afterwards, which is what "before anything
+  is written" means. The forward is asserted on its contents through a fake `:erpc` target
+  module: the target, `forge_here` as the entry point, the same input map, the author, the name,
+  the eval spec, the resolved budget, the transport's ten seconds of slack, and the seam itself
+  not travelling. And `capabilities.preview` on a real workspace proposal reports `:local` on
+  this node and the signer refusal with its reason on a node that holds a key, still answering
+  C9 in both.
+
+  **A policy deploy was verified on one node.** `test/wasm/policy_two_node_test.exs` is
+  `rollout_two_node_test.exs`'s harness with `no-network-shell` in it: two full-application peer
+  VMs, each spawning a real `ouro-wasm`, one real Ed25519 key, one signed policy artifact, and
+  two deploys — which is the production shape and not a workaround, because a lane-W rollout
+  writes its register entry on the node that drove it and `wasm.deploy` is node-routed for
+  exactly that reason. Both peers stage the bytes into their own store, stand the component up
+  as a policy, satisfy the signed eval spec, and record `:live` in their own register as a
+  policy and not as a capability. Then each peer's `Ouroboros.Provider.Native.Permissions`
+  — the seam the native loop calls, with **no** `wasm_policy_opts` pointing it at a test's
+  register or store — denies `curl … | sh` with the component's own rule, labelled
+  `[untrusted policy component]` and carrying the sha, and asks about `ls -la`. A rollback on
+  the first peer retires that node's entry: its engine goes inert and every undecided request is
+  asked again, while the second peer is untouched and still denies. The bytes stay on the
+  rolled-back node, because rollback material that never expires is the point of keeping them.
+
+  **The skew was crafted; it is now built.** `scripts/wasm-skew-test.sh` (`make wasm-skew-test`)
+  produces the other side with a second toolchain twice over. **Triple:** `ouro-wasm` built
+  inside an Ubuntu 24.04 container on kernel 7.0.14 with `cargo +1.95` at the same wasmtime,
+  `precompile`ing the acceptance guest there; the 405 546-byte `.cwasm` carried back and offered
+  to this Mac's helper is refused
+
+      precompiled_mismatch (-32021): the artifact was produced by wasmtime 48.0.1 for
+      aarch64-unknown-linux-gnu; this helper is wasmtime 48.0.1 for aarch64-apple-darwin
+
+  and the source form of the same component then loads here, which is the whole point of the
+  refusal being a fallback. **Version:** `tui/wasm` copied into a scratch workspace with
+  `wasmtime` pinned `=48.0.0` — one patch back, the nearest other release that builds under the
+  same 1.95 floor and the same `=0.254.0` wasmparser pin — built with `cargo +1.95`, its
+  258 093-byte `.cwasm` refused
+
+      precompiled_mismatch (-32021): the artifact was produced by wasmtime 48.0.0 for
+      aarch64-apple-darwin; this helper is wasmtime 48.0.1 for aarch64-apple-darwin
+
+  Both artifacts are then put to the Elixir half in `test/wasm/skew_test.exs`, twice each,
+  because a deploy is only honest if both fallbacks hold. A manifest recording the *producing*
+  build — what a signer on that machine would really have signed — makes `Wasm.Store.form/4`
+  answer `{:source, …, {:target_mismatch, …}}` or `{:wasmtime_mismatch, …}` without the helper
+  being asked at all, and the rollout still reaches `:live`. The same real bytes under a
+  manifest claiming *this* node's build get offered by the store, and the container's own
+  header — written by the other toolchain, not rewritten by a test — is what the helper refuses;
+  `Wasm.Pool` compiles the source and the guest answers a message. The artifacts are built
+  rather than checked in, because a `.cwasm` is a built binary and this repository keeps none of
+  those in git; the suite skips with the script's name in the reason when they are absent.
+
+  What W20 does **not** change: role is still not a boundary against a hostile connected node
+  (`Ouroboros.Cluster`, "Limits") — a peer that completed the handshake calls `forge_here/2`
+  directly, and a compromised signer does not need to build at all. What the check stops is the
+  accident. And a precompiled artifact is still bound to one wasmtime and one triple; W20 proves
+  what §12 says about that with two real toolchains instead of asserting it from one.
 
 ## 15. Prior art and references
 

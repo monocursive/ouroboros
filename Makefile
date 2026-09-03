@@ -13,7 +13,7 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test forge-linux-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
+.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test forge-linux-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-skew-test test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -47,6 +47,7 @@ help:
 	@echo "make wasm-examples    build the guest SDK's worked components (counter, deny-writes, …)"
 	@echo "make wasm-sdk-check   the guest SDK's own gates: fmt, tests, clippy, wasm32 build"
 	@echo "make wasm-sdk-cache   warm this node's cargo cache with exactly the SDK's dependencies"
+	@echo "make wasm-skew-test   prove the precompiled skew refusals with two real toolchains"
 
 dev:
 	@echo "==> dev: Elixir deps if this checkout has none, then ouro --dev"
@@ -230,6 +231,15 @@ wasm-sdk-cache:
 forge-linux-test:
 	@echo "==> forge-linux-test: the builder namespace on a Linux kernel"
 	scripts/forge-linux-test.sh
+
+# W8's precompiled-artifact skew, with two real toolchains instead of a crafted header. Builds
+# `ouro-wasm` on a Linux kernel and again at one other wasmtime, precompiles the acceptance
+# guest with each, and offers both to this machine's own helper: each must be refused
+# `precompiled_mismatch` naming both sides, and the source form must still load. The artifacts
+# land in `_build/wasm-skew/`, which `test/wasm/skew_test.exs` reads.
+wasm-skew-test:
+	@echo "==> wasm-skew-test: a precompiled artifact from another toolchain, refused by name"
+	scripts/wasm-skew-test.sh
 
 computer-use-debug:
 	@echo "==> computer-use-debug: debug helper into priv/computer-use/"

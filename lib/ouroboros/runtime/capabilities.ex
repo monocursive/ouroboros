@@ -95,6 +95,12 @@ defmodule Ouroboros.Runtime.Capabilities do
          source_sha256: result.source_sha256,
          lock: result.lock,
          toolchain: result.toolchain,
+         # W20. Where an admit of this proposal would build: here, on a named `:builder`, or
+         # nowhere because this node holds a signing key (docs/WASM.md D29). Reported beside
+         # the toolchain because they answer the same operator question — "is this node going
+         # to be able to do this?" — and a preview that reported a warm cache on a node that
+         # refuses to forge answered half of it.
+         placement: result.placement,
          build: result.build
        }}
     end

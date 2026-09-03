@@ -43,6 +43,15 @@ config :ouroboros,
   # Relaxes only the builder's *role* requirement, for tests that have a real peer but
   # not a role-shaped fleet. Connectivity and a running runtime are still required.
   forge_builder_allow_any_role: false,
+  # Lane W's half of the same question, and unlike the two above it is a check rather than
+  # advice (docs/WASM.md D29, contract C14). `:local` — the default — forges where the effect
+  # lands, exactly as lane W always did; `:builder` forwards a forge that landed on a
+  # non-builder node to a connected `:builder` and refuses by name when there is none, rather
+  # than quietly building here. A `:signer` node refuses to forge under **either** setting and
+  # is not configurable: a Cargo build is arbitrary code at build time, and it does not run on
+  # the machine holding the key. Anything but these two words is refused, not read as the
+  # default — a typo asked for a forge not to run here.
+  wasm_forge_placement: :local,
   coding_storage: {Jido.Storage.ETS, table: :ouroboros_coding},
   interactive_storage: {Jido.Storage.ETS, table: :ouroboros_interactive},
   team_storage: {Jido.Storage.ETS, table: :ouroboros_teams},

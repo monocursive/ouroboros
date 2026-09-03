@@ -50,6 +50,16 @@ defmodule Ouroboros.Wasm.Forge do
   disagreement is the refusal, so that gap has to be a TOML feature *neither* reader
   understands rather than one.
 
+  ## And a fourth thing, which is about *which* machine
+
+  The three fences bound what a build may do. `placement/3` decides where it happens, and it is
+  a check rather than advice (D29, contract C14): a `:signer`-role node refuses to forge at all,
+  because the two things this lane keeps apart are arbitrary code at build time and the key that
+  makes bytes admissible everywhere. `config :ouroboros, :wasm_forge_placement` is `:local` by
+  default — a forge runs where the effect lands, exactly as before — and `:builder` forwards one
+  that landed elsewhere to a connected `:builder` node, under the same server-owned principal,
+  where every fence above is that node's own.
+
   ## Why this node may read the imports of these bytes
 
   `Ouroboros.Wasm.Deploy.sign/2` never parses a component, because those bytes arrived from a
@@ -69,6 +79,7 @@ defmodule Ouroboros.Wasm.Forge do
   digest do.
   """
 
+  alias Ouroboros.Cluster
   alias Ouroboros.Provider.Native.Exec
   alias Ouroboros.Provider.Native.Sandbox
   alias Ouroboros.Wasm
@@ -86,10 +97,24 @@ defmodule Ouroboros.Wasm.Forge do
 
   @default_timeout_ms 300_000
   @max_timeout_ms 300_000
+  # What a forwarded forge waits beyond the build's own budget, so the builder's typed refusal
+  # arrives instead of an opaque `:erpc` timeout. `Upgrade.Forge.BuildPeer`'s number, for the
+  # same reason.
+  @remote_slack 10_000
+
   @max_output_bytes 64 * 1024
   @reported_output_bytes 8 * 1024
   @forged_bundles 8
   @target "wasm32-wasip2"
+
+  @signer_refusal "this node is in the :signer role, and a forge is arbitrary code at build " <>
+                    "time (docs/WASM.md D18, D19). A build never runs beside the signing key: " <>
+                    "forge on a :core or :builder node and deploy the bundle from there " <>
+                    "(D29, contract C14)"
+
+  @no_builder_refusal "config :ouroboros, :wasm_forge_placement is :builder and no connected " <>
+                        "node running this runtime is in the :builder role. Connect one, or " <>
+                        "set the placement back to :local to build where the effect lands (D29)"
 
   @manifest_file "Cargo.toml"
   @lock_file "Cargo.lock"
@@ -145,6 +170,11 @@ defmodule Ouroboros.Wasm.Forge do
 
   @type input :: %{optional(:dir) => Path.t(), optional(:files) => %{String.t() => binary()}}
 
+  @typedoc """
+  Where a forge lands: here, on a named builder, or nowhere with the reason said out loud.
+  """
+  @type placement :: :local | {:forward, node()} | {:refuse, {atom(), String.t()}}
+
   @doc "The most files one forge input may carry."
   @spec max_files() :: pos_integer()
   def max_files, do: @max_files
@@ -165,12 +195,39 @@ defmodule Ouroboros.Wasm.Forge do
   `:start_config`, `:name` (the capability this input must turn out to be), and the test
   seams `:sdk_path`,
   `:cargo_home`, `:cargo`, `:scratch_root`, `:forged_root`, `:upload_root`,
-  `:signing_service`, `:signing_node`, `:epoch_nodes`, `:pool`, `:timeout_ms`.
+  `:signing_service`, `:signing_node`, `:epoch_nodes`, `:pool`, `:timeout_ms`, `:placement`,
+  `:peers` and `:rpc`.
+
+  `placement_here/1` decides where this runs before a byte is read: a `:signer` node refuses,
+  and under `:builder` placement a forge that landed on a non-builder is forwarded to one
+  (D29). Nothing below this line has happened when either of those answers.
   """
   @spec forge(input(), keyword()) :: {:ok, map()} | {:error, term()}
   def forge(input, opts \\ [])
 
   def forge(input, opts) when is_list(opts) do
+    case placement_here(opts) do
+      :local -> forge_here(input, opts)
+      {:forward, target} -> forward(target, input, opts)
+      {:refuse, {reason, why}} -> {:error, {:forge_refused, reason, why}}
+    end
+  end
+
+  @doc false
+  # The build itself, on whichever node is running this code. Named separately from `forge/2`
+  # so a builder can never re-dispatch to a builder — `Ouroboros.Upgrade.Forge.BuildPeer` is
+  # split for exactly that reason — and the placement question is therefore asked here with the
+  # one setting that cannot forward. What it still answers is the role check: the node that
+  # runs the build is the node that must not be holding a signing key (C14, D29).
+  @spec forge_here(input(), keyword()) :: {:ok, map()} | {:error, term()}
+  def forge_here(input, opts) when is_list(opts) do
+    case placement(Cluster.role(), :local, []) do
+      :local -> run_forge(input, opts)
+      {:refuse, {reason, why}} -> {:error, {:forge_refused, reason, why}}
+    end
+  end
+
+  defp run_forge(input, opts) do
     with {:ok, author} <- author(opts),
          {:ok, project} <- collect(input),
          {:ok, project} <- validate(project, opts),
@@ -197,9 +254,14 @@ defmodule Ouroboros.Wasm.Forge do
 
   `build?: false` stops after validation, which is what a caller asking only "would this be
   accepted" wants and what a node with no toolchain can answer.
+
+  `placement` reports where a forge of this input would run (D29), so an operator learns that
+  this node refuses or forwards *before* they spend a build finding out.
   """
   @spec preview(input(), keyword()) :: {:ok, map()} | {:error, term()}
   def preview(input, opts \\ []) when is_list(opts) do
+    placement = placement_here(opts)
+
     with {:ok, project} <- collect(input),
          {:ok, project} <- validate(project, opts) do
       {:ok,
@@ -211,10 +273,20 @@ defmodule Ouroboros.Wasm.Forge do
          source_sha256: project.sha256,
          lock: :sdk_lock,
          toolchain: toolchain(opts),
-         build: if(Keyword.get(opts, :build?, true), do: dry_build(project, opts), else: :skipped)
+         placement: placement_report(placement),
+         build: preview_build(project, opts, placement)
        }}
     end
   end
+
+  # A preview builds only where a forge would. On a `:signer` that is nowhere at all; on a node
+  # whose forge would be forwarded it is the *builder's* toolchain that decides, and a dry build
+  # run here would be an answer about a machine that is not going to do the work.
+  defp preview_build(project, opts, :local) do
+    if Keyword.get(opts, :build?, true), do: dry_build(project, opts), else: :skipped
+  end
+
+  defp preview_build(_project, _opts, _elsewhere), do: :not_placed_here
 
   @doc """
   Deploys a bundle this node forged, named by the artifact it produced.
@@ -266,6 +338,122 @@ defmodule Ouroboros.Wasm.Forge do
       {:ok, root} -> root
       {:error, _absent} -> nil
     end
+  end
+
+  ## ------------------------------------------------------------------- placement
+
+  @doc """
+  Where a forge of this input would run, decided before anything is read (D29, contract C14).
+
+  Pure, and total over the three roles: this node's role, the `:wasm_forge_placement` setting,
+  and the connected nodes with the roles `Ouroboros.Cluster` reports for them. Pure because
+  "would this node build, forward, or refuse" is a question an operator asks and a test pins,
+  and a decision taken inside the build path is one nobody can ask about without running a
+  build.
+
+    * A **`:signer`** node refuses, whatever the setting and whatever the fleet looks like. A
+      Cargo build is arbitrary code at build time (D18, D19) and the signing key is on that
+      node; those two do not share a machine. This is the check D18 said did not exist.
+    * **`:local`** — the default — builds where the effect lands, which is what this lane did
+      before this decision. An operator who wants a dedicated builder still gets one by putting
+      the toolchain, the warmed cache and the `:forge` grant on that node.
+    * **`:builder`** forwards a forge that landed on a non-builder node to a connected
+      `:builder`, and refuses `:no_builder_node` when there is none — never falling back to
+      building here, because "build it locally instead" is the exact outcome the setting was
+      chosen to prevent. A `:builder` node under `:builder` builds here: a builder that
+      re-dispatched to a builder is a loop.
+
+  The forward target is the lowest node name among the connected builders, so the decision is
+  one a test can pin rather than whichever peer answered first. Role here is what `Cluster`
+  reports and is a *placement* fact, not a boundary: a hostile connected node has `:erpc`
+  authority over this one regardless (`Ouroboros.Cluster`, "Limits"). What this stops is a
+  build landing on the machine holding the key.
+
+  An unrecognized setting is a refusal rather than a fallback to `:local`: an operator who
+  typed `:buidler` asked for a forge *not* to run here, and reading their typo as the default
+  would build on precisely the node they were moving the build off.
+  """
+  @spec placement(Cluster.role(), term(), [{node(), Cluster.role()}]) :: placement()
+  def placement(role, setting, peers)
+
+  def placement(:signer, _setting, _peers), do: {:refuse, {:signer_node, @signer_refusal}}
+  def placement(_role, :local, _peers), do: :local
+  def placement(:builder, :builder, _peers), do: :local
+
+  def placement(_role, :builder, peers) when is_list(peers) do
+    peers
+    |> Enum.flat_map(fn
+      {target, :builder} when is_atom(target) and not is_nil(target) -> [target]
+      _other -> []
+    end)
+    |> Enum.sort()
+    |> case do
+      [target | _rest] -> {:forward, target}
+      [] -> {:refuse, {:no_builder_node, @no_builder_refusal}}
+    end
+  end
+
+  def placement(_role, other, _peers),
+    do:
+      {:refuse,
+       {:invalid_placement,
+        "config :ouroboros, :wasm_forge_placement is #{describe(other)}; it is :local or " <>
+          ":builder, and a value that is neither is refused rather than read as the default"}}
+
+  @doc """
+  This node's placement decision, read from its role, its configuration and the fleet.
+
+  `:placement` overrides the configured setting for one call and `:peers` the fleet reading,
+  which is how a test pins the impure half against a real `Ouroboros.Cluster.role/0` without a
+  role-shaped cluster. Neither reaches this function from a socket: `forge/2`'s options are
+  built by the effect surface and by `Ouroboros.Runtime.Capabilities`, the same place `:cargo`
+  and `:scratch_root` come from.
+  """
+  @spec placement_here(keyword()) :: placement()
+  def placement_here(opts \\ []) when is_list(opts) do
+    setting = placement_setting(opts)
+    placement(Cluster.role(), setting, peer_roles(setting, opts))
+  end
+
+  @doc "The placement decision in the shape `capabilities.preview` puts on the wire."
+  @spec placement_report(placement()) :: map()
+  def placement_report(:local), do: %{decision: :local, node: node()}
+  def placement_report({:forward, target}), do: %{decision: :forward, node: target}
+
+  def placement_report({:refuse, {reason, why}}),
+    do: %{decision: :refuse, reason: reason, detail: why}
+
+  defp placement_setting(opts) do
+    Keyword.get_lazy(opts, :placement, fn ->
+      Application.get_env(:ouroboros, :wasm_forge_placement, :local)
+    end)
+  end
+
+  # The cluster is asked only where the answer can change the decision. `:local` builds here
+  # whatever the fleet looks like, and `Cluster.nodes_by_role/1` is an `:erpc` multicall with a
+  # five-second ceiling — putting one in front of every default forge would be a probe no
+  # decision depends on.
+  defp peer_roles(setting, opts) do
+    Keyword.get_lazy(opts, :peers, fn -> connected_roles(setting) end)
+  end
+
+  defp connected_roles(:builder),
+    do: Enum.map(Cluster.nodes_by_role(:builder), &{&1, :builder})
+
+  defp connected_roles(_other), do: []
+
+  # The same input, the same attrs and the same server-owned principal, under the origin's own
+  # build budget so the builder's configuration cannot widen it — and `forge_here/2` rather than
+  # `forge/2` as the entry point, so the far end cannot forward again. Everything the builder
+  # does with it is its own: its sandbox, its cache, its role check, its signing service.
+  defp forward(target, input, opts) do
+    budget = build_timeout(opts)
+    rpc = Keyword.get(opts, :rpc, :erpc)
+    remote = opts |> Keyword.delete(:rpc) |> Keyword.put(:timeout_ms, budget)
+
+    rpc.call(target, __MODULE__, :forge_here, [input, remote], budget + @remote_slack)
+  catch
+    kind, reason -> {:error, {:forge_forward_failed, target, {kind, describe(reason)}}}
   end
 
   ## ------------------------------------------------------------------ collection
