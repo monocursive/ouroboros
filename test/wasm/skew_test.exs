@@ -39,6 +39,7 @@ defmodule Ouroboros.Wasm.SkewTest do
   alias Ouroboros.Wasm.Artifact
   alias Ouroboros.Wasm.Pool
   alias Ouroboros.Wasm.Rollout
+  alias Ouroboros.Wasm.SandboxFixture
   alias Ouroboros.Wasm.Store
 
   @moduletag :capture_log
@@ -102,6 +103,7 @@ defmodule Ouroboros.Wasm.SkewTest do
       private: private,
       trust_policy: trust_policy,
       store_root: Path.join(tmp, "store"),
+      pool: live_pool!(tmp),
       registry: start_registry!()
     }
   end
@@ -115,7 +117,7 @@ defmodule Ouroboros.Wasm.SkewTest do
       skew = read_record!(@record)
       artifact_bytes = File.read!(Path.join(@skew_dir, skew["artifact"]))
       bytes = File.read!(@guest)
-      pool = live_pool!()
+      pool = context.pool
 
       # The script compiled the *same* component this node is about to deploy. Without this the
       # rest of the file would be about two unrelated things that happen to disagree.
@@ -257,13 +259,18 @@ defmodule Ouroboros.Wasm.SkewTest do
       registry: context.registry,
       store_root: context.store_root,
       trust_policy: context.trust_policy,
-      precompiled: artifact_bytes
+      precompiled: artifact_bytes,
+      pool: context.pool
     )
   end
 
-  defp live_pool! do
+  # W16, D25: the helper runs under the sandbox, so the test names its roots (the store
+  # under `tmp`) and a scratch, exactly as every other wasm suite does through the fixture.
+  defp live_pool!(tmp) do
     name = :"wasm_skew_pool_#{System.unique_integer([:positive])}"
-    {:ok, pid} = Pool.start(name: name, handshake_timeout_ms: 15_000)
+
+    {:ok, pid} =
+      Pool.start([name: name, handshake_timeout_ms: 15_000] ++ SandboxFixture.pool_opts(tmp))
 
     on_exit(fn ->
       if Process.alive?(pid) do
