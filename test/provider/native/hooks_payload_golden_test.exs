@@ -91,6 +91,19 @@ defmodule Ouroboros.Provider.Native.HooksPayloadGoldenTest do
     File.mkdir_p!(Path.join(workspace, "hooks"))
     on_exit(fn -> File.rm_rf(root) end)
 
+    # W16, D25. This lane stages a hook's bytes into the node's own component store before it
+    # names a path to the helper, so a node without a data directory has nowhere to put them
+    # and the hook is refused. A test is a node: it says where its data directory is.
+    previous = Application.fetch_env(:ouroboros, :data_dir)
+    Application.put_env(:ouroboros, :data_dir, Path.join(root, "data"))
+
+    on_exit(fn ->
+      case previous do
+        {:ok, held} -> Application.put_env(:ouroboros, :data_dir, held)
+        :error -> Application.delete_env(:ouroboros, :data_dir)
+      end
+    end)
+
     # Real bytes on disk: the seam stats, reads and hashes the file before it says a word to
     # the helper, so a component path naming nothing would never reach the fake.
     component = Path.join([workspace, "hooks", "vet.wasm"])
@@ -240,7 +253,7 @@ defmodule Ouroboros.Provider.Native.HooksPayloadGoldenTest do
 
     config =
       Hooks.load(context.workspace,
-        pool: pool(fake),
+        pool: pool(context, fake),
         trusted_workspaces: if(trusted?, do: [context.workspace], else: []),
         # Never the machine's own user file, and never one this test did not write.
         user_hooks_path: Path.join(context.root, "no-such-user-hooks.toml")
@@ -321,13 +334,16 @@ defmodule Ouroboros.Provider.Native.HooksPayloadGoldenTest do
 
   # ================================================================ the harness
 
-  defp pool(fake) do
+  defp pool(context, fake) do
     name = :"hooks_payload_pool_#{System.unique_integer([:positive])}"
 
     # Detached, like `Ouroboros.Wasm.PoolTest`'s: a child's exit must not travel through the
     # test process, and teardown reaps the helper through `terminate/2`.
     {:ok, pid} =
-      Ouroboros.Wasm.Pool.start(name: name, helper_path: fake.path, handshake_timeout_ms: 15_000)
+      Ouroboros.Wasm.Pool.start(
+        [name: name, helper_path: fake.path, handshake_timeout_ms: 15_000] ++
+          Ouroboros.Wasm.SandboxFixture.pool_opts(context.root)
+      )
 
     on_exit(fn ->
       if Process.alive?(pid) do

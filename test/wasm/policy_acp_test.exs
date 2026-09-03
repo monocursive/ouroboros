@@ -35,7 +35,7 @@ defmodule Ouroboros.Wasm.PolicyAcpTest do
   alias Ouroboros.Upgrade.Rollout.Registry
   alias Ouroboros.Upgrade.Signing.Service
   alias Ouroboros.Wasm
-  alias Ouroboros.Wasm.{Artifact, LiveFixture, PolicyEngine, Rollout}
+  alias Ouroboros.Wasm.{Artifact, LiveFixture, PolicyEngine, Pool, Rollout, SandboxFixture}
 
   @moduletag :capture_log
 
@@ -175,14 +175,38 @@ defmodule Ouroboros.Wasm.PolicyAcpTest do
       end)
     end)
 
+    # W16, D25: the pool this test deploys through runs its helper under the sandbox, so the
+    # test names its own roots exactly as `policy_acceptance_test.exs` does.
+    pool = live_pool!(tmp)
+
     %{
       service: service,
       trust_policy: trust_policy,
       tmp: tmp,
       registry: registry,
       store_root: store_root,
-      session: session
+      session: session,
+      pool: pool
     }
+  end
+
+  defp live_pool!(dir) do
+    name = :"wasm_policy_acp_pool_#{System.unique_integer([:positive])}"
+
+    {:ok, pid} =
+      Pool.start([name: name, handshake_timeout_ms: 15_000] ++ SandboxFixture.pool_opts(dir))
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        try do
+          GenServer.stop(pid, :normal, 5_000)
+        catch
+          :exit, _reason -> :ok
+        end
+      end
+    end)
+
+    pid
   end
 
   describe "a provider asking permission (session/request_permission)" do
@@ -393,7 +417,8 @@ defmodule Ouroboros.Wasm.PolicyAcpTest do
 
     Application.put_env(:ouroboros, :wasm_policy_opts,
       registry: context.registry,
-      store_root: context.store_root
+      store_root: context.store_root,
+      pool: context.pool
     )
 
     deployed
@@ -431,7 +456,8 @@ defmodule Ouroboros.Wasm.PolicyAcpTest do
              Rollout.deploy(signed, bytes, [node()],
                registry: context.registry,
                store_root: context.store_root,
-               trust_policy: context.trust_policy
+               trust_policy: context.trust_policy,
+               pool: context.pool
              )
 
     assert outcome.state == :live
