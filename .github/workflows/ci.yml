@@ -120,7 +120,15 @@ jobs:
       # themselves.
       - run: make wasm-examples
 
-      # `OUROBOROS_REQUIRE_WASM` is the switch that makes the three steps above load-bearing.
+      # The forge (W14) builds `--locked --offline` against a cargo registry cache somebody
+      # warmed, and refuses by name when any crate in the SDK's lock is missing — including
+      # crates only another platform links, which a `cargo build` on this runner never fetches
+      # (`windows-sys` was the one that failed run 33706382632). `cargo fetch --locked` takes
+      # the whole lock, for every platform. The forge tests read the cache the suite's user
+      # owns, so it is warmed there rather than in a node's data directory.
+      - run: make wasm-sdk-cache CARGO_HOME=$HOME/.cargo
+
+      # `OUROBOROS_REQUIRE_WASM` is the switch that makes the four steps above load-bearing.
       # Without it a runner that failed to build any of them would skip the acceptance suites
       # and pass, which is exactly the silence this job is being fixed for; with it, a missing
       # helper, guest or example fails the suites that needed it and names the `make` target.
