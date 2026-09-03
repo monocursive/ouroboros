@@ -76,6 +76,21 @@ defmodule Ouroboros.Wasm.EpochNodesTest do
       assert is_integer(receipt.epoch) and receipt.epoch > 0
     end
 
+    # Half a plane is not a node that admits nothing: a register with no executor may hold
+    # a watermark above the number about to be minted, and the executor that would report it
+    # is not there. Excluding it would mint a stale epoch; asking it would fail anyway. It is
+    # the unreachable answer. Make `classify_plane/1` return `:absent` for a partial plane
+    # and this is red.
+    test "a candidate with a register but no executor fails the allocation closed", context do
+      half_peer = start_bare_peer!()
+      plant!(half_peer, [Ouroboros.Upgrade.Rollout.Registry])
+
+      assert {:error, {:epoch_not_allocated, {:candidates_unreachable, faults}}} =
+               sign(context, epoch_nodes: [node(), half_peer])
+
+      assert %{^half_peer => {:partial_plane, [Ouroboros.Upgrade.NodeExecutor]}} = faults
+    end
+
     # The floor comes from the nodes that hold a register, not from the one doing the
     # signing. A signer node driving its own signature is the case that has to work.
     test "a plane-holding candidate's watermark is still the floor", context do
