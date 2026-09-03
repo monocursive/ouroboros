@@ -16,7 +16,11 @@ defmodule Ouroboros.Upgrade.EpochTest do
     peer_node = start_app_peer!()
     binary = compile_capability!()
 
-    local = NodeExecutor.status().last_epoch
+    # "Any target node reports" is both planes since lane W: `Epoch.next/2` reads a node's
+    # last committed epoch *and* the highest epoch its rollout register holds for a wasm
+    # component, so the peer has to be moved ahead of whichever is higher here — a lane-W
+    # suite that ran earlier leaves its live epochs in this node's register (W22's CI run).
+    local = max(NodeExecutor.status().last_epoch, Registry.wasm_epoch())
     peer_epoch = local + 1_000
 
     # Move one node's journal well ahead of the other's. The forge has to notice.

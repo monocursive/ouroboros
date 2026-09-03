@@ -407,10 +407,16 @@ defmodule Ouroboros.Provider.Native.SandboxHelperPolicyTest do
       assert "OURO_LINK_#{index}=#{Path.join(tmp, "link")}" in parameters
       refute profile =~ ~s[(allow file-read-metadata (subpath]
 
-      # Neither the platform roots nor a root that is spelled canonically add a line.
+      # A root that is spelled canonically adds no line of its own. The platform roots may:
+      # on a merged-`/usr` Linux `/bin`, `/lib`, `/lib64` and `/sbin` are themselves symlinks
+      # into `/usr` (the shape lesson W16 learned for bubblewrap), so the comparison is against
+      # what the platform alone contributes, not against nothing.
+      platform = Sandbox.helper_policy(readable: [], writable: [], scratch: "/opt/scratch")
       plain = Sandbox.helper_policy(readable: [real], writable: [], scratch: "/opt/scratch")
-      assert SandboxExec.links(plain) == []
-      refute SandboxExec.profile(plain) =~ "OURO_LINK"
+      assert SandboxExec.links(plain) == SandboxExec.links(platform)
+      refute Path.join(tmp, "link") in SandboxExec.links(plain)
+
+      assert Enum.count(SandboxExec.links(platform), &String.starts_with?(&1, tmp)) == 0
     end
 
     test "bubblewrap binds only the named roots and never `/`", %{policy: policy} do
