@@ -2795,6 +2795,32 @@ Stated once, so nobody reads more into the lane than is there:
   is re-digested on every load so post-signing tampering is refused, and
   `config :ouroboros, :wasm, accept_precompiled: false` takes the form away fleet-wide without
   a redeploy. The trade is real and it is an operator's to make.
+- **A forwarded forge is proved across two VMs on one host, and not across two machines.**
+  W22's `test/wasm/forge_two_node_test.exs` watched a `:builder`-placed forge cross real
+  distribution: the origin is the test VM in the `:core` role, the builder and the signer are
+  full-application peer VMs booted with their own `config :ouroboros, :node_role`, the fleet is
+  read off `Ouroboros.Cluster.nodes_by_role/1` and the call is made by the real `:erpc` — no
+  `:peers`, no `:rpc` seam, and no option on the origin that names a peer. What crossed the
+  wire was the project map and the bundle bytes. The builder built with its own cargo home and
+  its own helper pool, asked the signer peer's own named `Ouroboros.Upgrade.Signing.Service`
+  — which journaled the signature under the builder's name and never the origin's — and kept
+  nothing: no bundle anywhere under its data directory, no forged root, an empty build scratch.
+  The origin verified the bytes against its own trust policy and deployed them to `:live`. The
+  signer refused `forge_here/2` and `forge/2` over the wire without creating a build
+  directory; a fleet with no builder was refused before any RPC; a build the builder could not
+  finish came back as the builder's own `{:build_failed, {:timeout, :deadline}}` inside the
+  origin's budget, its scratch swept; a builder VM stopped mid-cargo answered
+  `{:forge_forward_failed, builder, {:error, "…noconnection…"}}` within seconds of dying rather
+  than after the budget, and no compiler of its outlived it. Three honesties. It is **one
+  host**: both VMs share a kernel, a toolchain, a sandbox backend and a filesystem — the test
+  reads the builder's scratch directory from the origin's side — so a different kernel, a
+  different cargo, a different sandbox backend and a bundle the builder produces that the wire
+  will not carry are unwatched, and CI's Linux job running the same file on one Linux host is
+  the other half of the same limit, not a second machine. The epoch was allocated by the builder
+  over the origin's rollout plane alone, because `Ouroboros.Wasm.Deploy`'s plane probe excludes
+  a node that runs no register — the signer and the builder itself — and that is read from the
+  code and observed as a signature that was issued rather than as a number the test pinned. And
+  the first run found W-F31: a `:builder` node had no helper pool and could not finish any forge.
 
 ## 13. Defects and doc drift found during this spec's verification
 
@@ -2907,6 +2933,18 @@ re-verification pass found it last, and it closed in the same wave.
 - **W-F30 (MED; fixed):** relative helper overrides still resolved from cwd after the
   candidate walk was removed. Wasm, Computer Use and sandbox overrides now require absolute
   paths.
+- **W-F31 (HIGH; fixed in W22):** a `:builder` node could not finish a lane-W forge.
+  `Ouroboros.Application`'s `:builder` tree was cluster formation alone — the honest minimum
+  for a lane-B build peer — and `Ouroboros.Wasm.Forge.forge_here/2` reads the imports off the
+  component it just built through this node's helper pool (D18), so every forge forwarded to
+  a real builder ran a whole cargo build and then came back `{:forge_refused_by, builder,
+  {:imports_unreadable, {:pool_unavailable, {:noproc, …}}}}`. W20's loopback could not see it:
+  its builder was the origin's own VM, whose pool the test had started. Watched on the first
+  run of `test/wasm/forge_two_node_test.exs`. `Ouroboros.Wasm.Supervisor` now starts on a
+  `:builder` too; the pool is lazy and owns nothing durable, so the role's posture is
+  unchanged. Regression: the same file boots a `:builder` peer without a toolchain and reads
+  its supervision tree — exactly cluster formation and the wasm supervisor — and a `:signer`
+  peer runs no pool at all.
 
 ## 14. Slices
 
@@ -3854,10 +3892,13 @@ Each slice is PR-sized, lands green, and is useful alone.
   deploys that receipt to `:live` on this node, where the counter answers and rolls back. That
   same real bundle, replayed through a canned answer, is then refused for an author that is not
   the principal, for a capability that is not the one asked for, for one flipped byte, for no
-  bundle at all, and a refusal the builder made comes back named as the builder's. What is
-  **not** proved is a forward across a real node boundary: a peer VM with cargo, a warm cache
-  and a signing service was out of budget for this slice, so the loopback proves everything
-  except that `:erpc` copies terms between machines. `capabilities.preview` on a real workspace
+  bundle at all, and a refusal the builder made comes back named as the builder's. What was
+  **not** proved here is a forward across a real node boundary: a peer VM with cargo, a warm
+  cache and a signing service was out of budget for this slice, so the loopback proves
+  everything except that `:erpc` copies terms between machines — the half W22 then proved, on
+  two full-application peer VMs with no seam (`test/wasm/forge_two_node_test.exs`), finding
+  W-F31 on its first run: the loopback's builder had a pool because the test had started one,
+  and a real `:builder` node had none. `capabilities.preview` on a real workspace
   proposal reports `:local` on this node and the signer refusal with its reason on a node that
   holds a key, still answering C9 in both.
 
@@ -3996,6 +4037,74 @@ Each slice is PR-sized, lands green, and is useful alone.
   was. And the wall is still around the process and not in front of the bytes: D24's residual
   is unchanged in kind, a patched artifact still runs with the helper's authority — an authority
   that is now the roots, the scratch, no network, and one process that can only be itself.
+
+- **W22 — the forward crosses a real node boundary.** W20 left one sentence standing: the
+  loopback proved everything about a forwarded forge except that `:erpc` copies terms between
+  machines. `test/wasm/forge_two_node_test.exs` is that half, and it is
+  `rollout_two_node_test.exs`'s harness with a role in it: the origin is the test VM as `:core`;
+  the builder is a full-application peer VM booted with `config :ouroboros, :node_role,
+  :builder`, a warm cargo home named in its configuration, an SDK that resolves from the code
+  path it runs from, and `:signing_node` pointing at a third peer; the signer is a peer booted
+  `:signer`, running the application's own named `Ouroboros.Upgrade.Signing.Service` from a seed
+  file `OUROBOROS_SIGNER_KEY_PATH` names in its environment and a `:signer_id` from
+  configuration — the shape a signer host has, not a service a test started and named. One
+  Ed25519 seed is generated by the test so the origin and every peer trust the same public half
+  before anything boots, and the signer's `public_info/1`, asked over `:erpc`, answers that key.
+  Nothing the origin passes names a peer: placement is read from `:wasm_forge_placement`, the
+  builder from `Ouroboros.Cluster.nodes_by_role/1`'s real multicall, the signer from the
+  builder's own configuration. No `:peers`, no `:rpc`.
+
+  Proofs. **The round trip**, on one real cargo build: the origin forwards the counter, the
+  builder builds it under its own pool and sandbox, asks the signer peer, and answers with bytes;
+  the origin verifies them with `Bundle.verify/2` against its own trust policy, retains them in
+  its own forged root with no `:bundle` key in the receipt, deploys that receipt to `:live` on
+  itself, and the counter answers `%{"count" => 2}` and rolls back. The signer's journal holds
+  the `:issued` decision under the **builder's** node name and none under the origin's. **The
+  builder kept nothing**: no `.ouro-wasm` anywhere under its data directory, no forged root, and
+  an empty build scratch once its `after` ran. **A `:signer` refuses over the wire**: `forge_here/2`
+  and `forge/2` called on the signer peer by `:erpc` with a valid inline project answer
+  `{:forge_refused, :signer_node, …}` and its build root never appears — the check is in front of
+  the input on a real peer too. **No builder connected** — the origin and the signer peer — is
+  `{:forge_refused, :no_builder_node, …}` before any RPC, with neither node's scratch root
+  created. **The deadline crosses the wire**: a 22 s budget hands cargo 2 s, the origin sends a
+  `%{dir: …}` proposal — the production caller's shape — and the builder's build directory holds
+  the origin's `src/lib.rs` byte for byte while cargo runs, so what crossed was the files; the
+  refusal that comes back is the builder's own `{:build_failed, {:timeout, :deadline}}` —
+  cargo's ceiling, the innermost of the three — named as the builder's, after cargo's two
+  seconds and inside the origin's twenty-two, and the builder's scratch is swept. The same peer
+  handed a directory name directly refuses `:path_over_the_wire` and builds nothing. **A builder
+  that dies mid-build**: the forge runs in a task, the builder's build directory appears, its VM
+  is stopped, and the origin answers `{:forge_forward_failed, builder, {:error, "…noconnection…"}}`
+  within fifteen seconds of the stop against a 120 s budget — distribution closes the socket, it
+  does not wait for the tick — and no cargo or rustc of that builder's survives on the host.
+  **Preview reports the decision**: `capabilities.preview` on the origin answers
+  `%{decision: :forward, node: builder}` with `build: :not_placed_here` while the builder is
+  connected, and `%{decision: :refuse, reason: :no_builder_node, detail: …}` when it is not,
+  still answering C9 in both; `Forge.placement_report(Forge.placement_here())` says the same.
+
+  The first run found **W-F31**: a `:builder` node's supervision tree was cluster formation
+  alone, and `forge_here/2` reads the imports off the product through this node's helper pool,
+  so a real builder ran the whole cargo build and then answered `{:imports_unreadable,
+  {:pool_unavailable, …}}`. The loopback could not have seen it — its builder was the origin,
+  whose pool the test had started. `Ouroboros.Wasm.Supervisor` now starts on a `:builder`; a
+  test without a toolchain boots one and reads its tree, and the `:signer` is proved to run no
+  pool. The W11 lesson did not bite: the builder allocated its epoch over the origin's rollout
+  plane alone, because the plane probe excludes the signer and the builder itself, and that was
+  observed as a signature issued rather than `{:epoch_not_allocated, …}`.
+
+  Honesties. **One host.** Two VMs share a kernel, a toolchain, a sandbox backend and a
+  filesystem, and the test leans on the last of these — it watches the builder's scratch from
+  the origin's side of the boundary. A second physical machine with a different kernel, cargo
+  and sandbox backend on the builder is still unwatched; CI's Linux job running this file on one
+  Linux host is the other half of the same limit. **One build.** The `%{dir: …}` shape is proved
+  through the deadline test's smaller assertion rather than a second completed forge, so a
+  directory proposal that builds to completion over the wire is inferred from the files having
+  crossed and the inline shape having completed, not watched end to end. **The dead builder's
+  cargo** is watched only on this host's process table; that the builder's own `Exec` signals its
+  group when the VM's port closes is what made it true here. And the `nodeup` log line names a
+  freshly connected peer `:core` — it is probed before its application has booted and D29's
+  fallback answers — which is not what `nodes_by_role/1` reports once the peer is running, and
+  is the documented open direction rather than a defect.
 
 ## 15. Prior art and references
 

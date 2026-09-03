@@ -1,6 +1,8 @@
 defmodule Ouroboros.Wasm.Supervisor do
   @moduledoc """
-  Owns the one `ouro-wasm` helper pool on a `:core` node.
+  Owns the one `ouro-wasm` helper pool on a `:core` node, and since W22 on a `:builder` too:
+  a builder reads the imports off the component it just built through this pool
+  (`Ouroboros.Wasm.Forge`, docs/WASM.md D18), and without one it cannot finish a forge.
 
   The same tail posture as `Ouroboros.Provider.Native.Desktop.Supervisor` and
   `Ouroboros.Provider.Native.Mcp.Supervisor`: somebody else's program on the end of a pipe,

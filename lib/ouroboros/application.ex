@@ -113,11 +113,16 @@ defmodule Ouroboros.Application do
     do: "; retained: " <> Enum.map_join(kept, ", ", & &1.path)
 
   # A `:builder` node is a least-privileged member of the same release: it holds the code
-  # and the cluster membership needed to be asked for a build, and nothing else. A forge
-  # build is `:peer.start/1` plus a call, so the honest minimum is cluster formation
-  # alone. No teams, stores, schedulers, registries, workspaces, recovery loops, or
-  # control plane exist on that host to be reached.
-  defp children(:builder), do: [Ouroboros.Cluster]
+  # and the cluster membership needed to be asked for a build, and nothing else. A lane-B
+  # build is `:peer.start/1` plus a call, so cluster formation alone was the honest minimum
+  # for it. A lane-W build is not: `Ouroboros.Wasm.Forge.forge_here/2` reads the imports off
+  # the component it just built through this node's own helper pool (docs/WASM.md D18), and a
+  # builder with no pool answered every forwarded forge `{:imports_unreadable,
+  # {:pool_unavailable, …}}` — found the first time a forward crossed a real node boundary
+  # (W22, §13 W-F31). The pool is lazy and owns nothing durable, so the posture is unchanged:
+  # no teams, stores, schedulers, registries, workspaces, recovery loops, or control plane
+  # exist on that host to be reached.
+  defp children(:builder), do: [Ouroboros.Cluster, Ouroboros.Wasm.Supervisor]
 
   # A `:signer` node is the same posture plus the one process its role names. The service
   # owns a key, a policy, and a durable decision journal; it refuses to boot without all
