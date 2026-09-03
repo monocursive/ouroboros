@@ -2012,67 +2012,92 @@ fn each_world_dispatches_its_own_message_export_and_no_other() {
     );
 }
 
-/// A component whose bytes satisfy *both* worlds is admitted to the one it was offered as, and
-/// dispatches that world's export alone.
+/// Bytes that satisfy **both** worlds are refused, whichever world they are offered as.
 ///
-/// This is where "the caller's assertion" earns its keep. These bytes export `describe`, `init`,
-/// `handle-message` and `evaluate`, all with the right signatures, so any check that tried to
-/// *infer* a world would have to pick one — and the pick would decide which export a signed
-/// manifest's `kind` had actually bought. Instead the same file is a capability when loaded as
-/// one and a policy when loaded as one, and neither instance can reach the other's export.
+/// This is the case that would otherwise let one sha stand for two different things: extra
+/// exports are not a refusal, so a component exporting `handle-message` and `evaluate` with
+/// both signatures was legal in both worlds, and which one it *was* depended on which request
+/// arrived first. A signature buys a `kind`, and a kind has to mean one thing about the bytes,
+/// so the bytes are refused rather than the ambiguity resolved. `inspect` reports `unknown` for
+/// the same reason: no world claims them.
 #[test]
-fn bytes_in_both_worlds_are_admitted_to_the_one_they_were_offered_as() {
+fn bytes_that_claim_both_worlds_are_refused_as_ambiguous() {
     let mut helper = Helper::spawn(&[]);
     let both = fixture("both", &support::ambidextrous());
 
     assert_eq!(
-        helper.ok("load", json!({ "sha256": both.sha256, "path": both.path }))["world"],
-        "ouroboros:capability@0.1.0"
-    );
-    helper.ok(
-        "instantiate",
-        json!({
-            "instance": "as-capability",
-            "sha256": both.sha256,
-            "config": "",
-            "limits": limits(FUEL, MIN_MEMORY_BYTES, DEADLINE_MS),
-        }),
-    );
-    assert_eq!(
-        helper
-            .refusal(
-                "call",
-                json!({ "instance": "as-capability", "export": "evaluate", "payload": "{}" })
-            )
-            .0,
-        "unknown_export"
+        helper.ok("inspect", json!({ "path": both.path }))["world"],
+        "unknown",
+        "bytes claiming both worlds are in neither"
     );
 
-    // The same sha, re-offered as the other world. The cache entry names one world, so this is
-    // read and checked again rather than answered out of the table.
-    assert_eq!(
-        helper.ok(
+    for kind in ["capability", "policy"] {
+        let (refusal, message) = helper.refusal(
             "load",
-            json!({ "sha256": both.sha256, "path": both.path, "kind": "policy" })
-        )["world"],
-        "ouroboros:policy@0.1.0"
-    );
-    helper.ok(
-        "instantiate",
-        json!({
-            "instance": "as-policy",
-            "sha256": both.sha256,
-            "config": "",
-            "kind": "policy",
-            "limits": limits(FUEL, MIN_MEMORY_BYTES, DEADLINE_MS),
-        }),
+            json!({ "sha256": both.sha256, "path": both.path, "kind": kind }),
+        );
+        assert_eq!(refusal, "unsupported_world", "offered as {kind}");
+        assert!(
+            message.contains("a component is in one world"),
+            "the refusal says what was ambiguous: {message}"
+        );
+    }
+}
+
+/// A cached component is not answered out of the table for the other world.
+///
+/// `touch` is keyed by the sha alone, so a `load` of a capability offered as a policy would find
+/// the entry and hand back its capability record as a *success*. The kind filter on the cache
+/// hit is what turns that into a re-read and a refusal. Delete the `.filter(|held| held.kind ==
+/// kind)` in `Host::load` and this test goes green on the wrong answer.
+#[test]
+fn a_cached_capability_offered_as_a_policy_is_refused_rather_than_answered_from_the_table() {
+    let mut helper = Helper::spawn(&[]);
+    let capability = fixture("cap-cache", &support::echo());
+
+    assert_eq!(
+        load(&mut helper, &capability)["cached"],
+        false,
+        "the first load compiles"
     );
     assert_eq!(
-        helper.ok(
-            "call",
-            json!({ "instance": "as-policy", "export": "evaluate", "payload": "{}" })
-        )["payload"],
-        r#"{"decision":"deny","rule":"both worlds"}"#
+        load(&mut helper, &capability)["cached"],
+        true,
+        "the second is a hit, so the table really does hold it"
+    );
+
+    let (refusal, _message) = helper.refusal(
+        "load",
+        json!({ "sha256": capability.sha256, "path": capability.path, "kind": "policy" }),
+    );
+    assert_eq!(refusal, "unsupported_world");
+}
+
+/// The name is not the signature: an `evaluate` returning `result<string, string>` is not the
+/// policy world's `evaluate`.
+///
+/// The two worlds differ in exactly one type, so that type is the whole of what tells them
+/// apart in a component's own declaration. Loosen `Sig::Verdict` in `world::signed_as` to any
+/// function taking a string and these bytes are admitted as a policy — a component whose
+/// verdict the helper would then lift as the wrong shape.
+#[test]
+fn an_evaluate_with_the_other_worlds_signature_is_not_a_policy() {
+    let mut helper = Helper::spawn(&[]);
+    let mistyped = fixture("mistyped", &support::policy_with_the_wrong_evaluate());
+
+    let (refusal, message) = helper.refusal(
+        "load",
+        json!({ "sha256": mistyped.sha256, "path": mistyped.path, "kind": "policy" }),
+    );
+    assert_eq!(refusal, "unsupported_world");
+    assert!(
+        message.contains("evaluate"),
+        "the refusal names the export whose signature was wrong: {message}"
+    );
+
+    assert_eq!(
+        helper.ok("inspect", json!({ "path": mistyped.path }))["world"],
+        "unknown"
     );
 }
 

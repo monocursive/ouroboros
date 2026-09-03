@@ -130,23 +130,32 @@ impl Verdict {
 /// }
 /// ```
 ///
-/// `workspace` and every `input` field may be absent or null. `context` carries only scalars,
-/// bounded, with credential-shaped values redacted before they leave the node; a context value
-/// that was not a scalar is dropped and its key is named in `context_dropped`, so a policy that
-/// cares can see that something was withheld and answer `ask`. The whole document either
-/// arrives intact or is not sent at all — nothing here is ever truncated. The engine's
-/// documentation is the contract and this is the summary of it: read what is there, and never
-/// assume a key.
+/// `workspace` and every `input` field may be absent or null. A context value that was not a
+/// scalar is dropped and its key is named in `context_dropped`, so a policy that cares can see
+/// that something was withheld and answer `ask`. The whole document either arrives intact or is
+/// not sent at all — nothing here is ever truncated. The engine's documentation is the contract
+/// and this is the summary of it: read what is there, and never assume a key.
 ///
-/// # Determinism is the requirement, and the world is the proof
+/// **What is taken out, exactly.** Credential-shaped map keys, and well-known token shapes in
+/// every string: `Bearer` runs, AWS access key ids, `sk-…`, GitHub and Slack token prefixes, PEM
+/// private-key blocks, `NAME=value` and `NAME: value` where the name is credential-shaped, and
+/// the node's own environment secrets. That second pass is a **heuristic**: a credential in no
+/// recognised shape reaches you verbatim, and it has to — a policy that may deny `curl` needs to
+/// read the `curl`. Treat the whole document as sensitive; your reach is a log line either way.
 ///
-/// The same request must yield the same verdict, on every node, forever. That is not asked of
-/// an author as discipline: this world imports one function, `log`, so there is no clock, no
-/// randomness and no I/O to be nondeterministic *with*. Instance state is the one thing that
-/// could break it — a policy that counts calls and denies the eleventh answers two identical
-/// requests differently — so hold state only where you mean the history to be part of the
-/// decision, and know that the engine keeps one long-lived instance per component sha and
-/// re-instantiates it after any refusal.
+/// # Determinism, and what actually holds it
+///
+/// The same request should yield the same verdict, on every node, forever — and most of the way
+/// there is free rather than disciplined: this world imports one function, `log`, so there is no
+/// clock, no randomness and no I/O to be nondeterministic *with*.
+///
+/// What is **not** free is instance state, and nothing enforces it. The engine keeps one
+/// long-lived instance per component sha, so a policy that counts calls and denies the eleventh
+/// answers two identical requests differently and no seam will stop it. What stands in for
+/// enforcement is your signed eval spec — it runs your own cases on every target at deploy — and
+/// the fact that the one verdict a drift could turn into authority, `allow`, is the one an
+/// operator has to list a tool for. So hold state only where you mean the history to be part of
+/// the decision, and say so in what you sign.
 ///
 /// # Never a trap
 ///

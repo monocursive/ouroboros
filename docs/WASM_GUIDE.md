@@ -1230,9 +1230,17 @@ Three things about it are worth knowing.
 **Every field may be absent or null.** Read what is there; never assume a key. A request with
 no `input.command` is a real request about a tool that is not a shell.
 
-**Credential-shaped values are redacted before it leaves the node**, by the same redaction the
-durable session record uses: a key that looks like `authorization`, `token`, `secret`,
-`password` or `api_key` arrives as `"[REDACTED]"`, as does a `Bearer …` inside any string.
+**Some credentials are redacted before it leaves the node, and it is worth knowing which.** A
+map key that looks like `authorization`, `token`, `secret`, `password` or `api_key` arrives as
+`"[REDACTED]"` whatever its value. In every string, so do the shapes worth recognising: `Bearer
+…`, AWS access key ids, `sk-…`, GitHub (`ghp_`, `github_pat_`) and Slack (`xox…`) tokens, PEM
+private-key blocks, `NAME=value` and `NAME: value` where the name is credential-shaped, and any
+value this node holds in a credential-named environment variable.
+
+That second list is a **heuristic**. A credential in no recognised shape — an opaque database
+URL's password, a company's own key format — reaches you verbatim, and it has to: a policy that
+may deny `curl` needs to read the `curl`. Write your policy as if the whole request were
+sensitive, because some of it is.
 
 **Nothing is truncated, ever.** A request that would not fit whole is not sent at all and the
 runtime answers `ask` without asking you. That is deliberate: a policy shown the first four
@@ -1269,11 +1277,10 @@ so it drops into a script; an `ask` exits zero, because an ask is not a failure.
 If you hand it a capability component it refuses rather than running it — the same refusal the
 runtime makes when a manifest's `kind` disagrees with its bytes.
 
-`ouro wasm inspect` still works on a policy component and reports its world, its imports and
-its shape, but read its last line carefully: the **verdict** it prints is about *capability*
-admission, so a policy reads there as `neither — refused unsupported_world: component does not
-export handle-message`. That is the truth about the question `inspect` asks. `ouro wasm policy`
-is the command that admits one.
+`ouro wasm inspect` works on a policy component too: it asks both worlds and its verdict line
+says which one took the bytes (`admitted as a policy component`), with `admitted_as` under
+`--json`. A component in neither world reports both refusals, so you can see whether the other
+door was even tried.
 
 ### Ship it
 
@@ -1315,6 +1322,11 @@ Two consequences follow from being a policy rather than a capability:
 }
 ```
 
+At least one case must expect a `deny` or an `ask`. A spec whose every expectation is `allow`
+certifies nothing this lane cares about: `allow` is the verdict the runtime does not honour by
+default, so a component could satisfy such a spec on every target and still be the only thing it
+must never be.
+
 Those cases are run on every target, against the bytes that are about to go live, before the
 rollout marks anything.
 
@@ -1349,17 +1361,33 @@ means writing `ask` in a longer way.
 have failed. `evaluate` has no error channel on purpose: there is nothing an error would mean
 that `Verdict::ask` does not say better.
 
+**Answer quickly.** One decision is a synchronous round trip on the pool every capability on the
+node shares, bounded by `:policy_decision_timeout_ms` — five seconds by default, for the whole
+decision. Past it the runtime answers `ask`, drops your instance, and stands a fresh one up for
+the next request. A policy is a step function over a request; if yours needs longer than that,
+what it is doing is not a permission decision.
+
+**Answer in the grammar.** A verdict is an object with exactly `decision` and `rule` — no third
+key, no key twice, `decision` exactly `allow`, `deny` or `ask` in lower case, `rule` a string,
+the whole document under a kibibyte. `Verdict::to_json` builds one correctly; write your own and
+anything outside that is read as `ask`. The strictness is not fussiness: two implementations read
+this document — the runtime and `ouro wasm policy` — and a duplicated key used to make them
+disagree about what you said.
+
 **Say why.** Every verdict carries a rule, and it is not decoration: it is the sentence a human
 is shown and the string the effect ledger records beside your component's sha. It is bounded at
 200 characters and every control character in it is flattened, because it is untrusted text
 shown next to the runtime's own words — it appears labelled `[untrusted policy component]`
 wherever anybody reads it. A `deny` nobody can act on is a `deny` an operator turns off.
 
-**Be deterministic.** The same request must reach the same verdict on every node, forever. The
-world makes most of this free — there is no clock, no randomness and no I/O to be
-nondeterministic with — but instance state is yours. The engine keeps one long-lived instance
-per component, so a policy that counts calls and denies the eleventh answers two identical
-requests differently. Hold state only where you mean the history to be part of the decision.
+**Be deterministic — nothing here will make you.** The world does most of the work: no clock, no
+randomness, no I/O, so there is nothing to be nondeterministic *with*. What is left is instance
+state, and it is yours. The runtime keeps one long-lived instance per component, so a policy that
+counts calls and denies the eleventh answers two identical requests differently and no seam will
+catch it. What stands in for enforcement is the eval spec you signed — your own cases, run on
+every target at deploy — and the fact that `allow`, the one verdict a drift could turn into
+authority, needs an operator to list the tool. Hold state only where you mean the history to be
+part of the decision, and put a case in your spec that says so.
 
 **Know what you are not.** A policy component reads strings. It cannot resolve a shell alias,
 see through `$(…)`, canonicalise a path, or know what `x` in `PATH=/tmp:$PATH x` will turn out

@@ -485,11 +485,31 @@ pub fn tool_response(response: &Value, trusted: bool) -> Value {
 /// than from a second copy of `world::check`: `inspect` says what the bytes declare, and a
 /// `load` of the same bytes is what runs the admission check and names its refusal.
 struct Admission {
-    /// `Ok(())` when the helper admitted these bytes to its component cache.
+    /// `Ok(())` when the helper admitted these bytes to its component cache as a **capability**.
     capability: Result<(), wasm_client::Refusal>,
-    /// Why a hook would refuse it even so. The hook lane's own bound is tighter than the
-    /// helper's: `hooks.ex`'s `@max_component_bytes` is 16 MiB against the helper's 64.
+    /// The same question for the **policy** world (W15). A component is in one world or the
+    /// other, never both — the helper refuses bytes that claim two — so at most one of these is
+    /// `Ok`, and a component that is neither carries a refusal in each.
+    policy: Result<(), wasm_client::Refusal>,
+    /// Why a hook would refuse a *capability* even so. The hook lane's own bound is tighter than
+    /// the helper's: `hooks.ex`'s `@max_component_bytes` is 16 MiB against the helper's 64.
     hook: Option<String>,
+}
+
+impl Admission {
+    /// The world that admitted these bytes, or `None`.
+    fn world(&self) -> Option<&'static str> {
+        match (&self.capability, &self.policy) {
+            (Ok(()), _) => Some("ouroboros:capability@0.1.0"),
+            (_, Ok(())) => Some("ouroboros:policy@0.1.0"),
+            _neither => None,
+        }
+    }
+
+    /// Whether any world took them. What `ouro wasm inspect` exits on.
+    fn admitted(&self) -> bool {
+        self.world().is_some()
+    }
 }
 
 /// `hooks.ex`'s `@max_component_bytes`, the ceiling a hook or a `[checks]` component is read
@@ -548,8 +568,20 @@ pub fn inspect<O: Write>(
     };
 
     let sha = inspected["sha256"].as_str().unwrap_or_default().to_string();
+
+    // Both worlds, because "would this node admit these bytes" has two answers now and a
+    // command that asked only the first called every policy component `neither` and exited
+    // non-zero on it (W15 review M6). The helper is told which world each `load` is offering
+    // them as; a component is in one world or the other, so at most one of these succeeds.
     let admission = Admission {
         capability: match helper.load(&sha, file) {
+            Ok(_admitted) => Ok(()),
+            Err(error) => Err(refusal_or_bail(error)?),
+        },
+        policy: match helper.request(
+            "load",
+            json!({ "sha256": sha, "path": file.to_string_lossy(), "kind": "policy" }),
+        ) {
             Ok(_admitted) => Ok(()),
             Err(error) => Err(refusal_or_bail(error)?),
         },
@@ -564,7 +596,7 @@ pub fn inspect<O: Write>(
 
     writeln!(out, "{text}")?;
     out.flush()?;
-    Ok(admission.capability.is_ok())
+    Ok(admission.admitted())
 }
 
 /// Why the hook lane would refuse a component the capability lane admits. Only the byte ceiling
@@ -655,18 +687,23 @@ fn headroom(reading: u64, bound: u64) -> String {
 }
 
 fn verdict_line(admission: &Admission) -> String {
-    match (&admission.capability, &admission.hook) {
-        (Ok(()), None) => {
-            "  verdict: admitted — as a capability and as a hook component".to_string()
+    match (&admission.capability, &admission.policy, &admission.hook) {
+        (Ok(()), _, None) => {
+            "  verdict: admitted as a capability — and as a hook component".to_string()
         }
-        (Ok(()), Some(reason)) => format!(
+        (Ok(()), _, Some(reason)) => format!(
             "  verdict: admitted as a capability; refused as a hook component: {}",
             clean(reason)
         ),
-        (Err(refusal), _) => format!(
-            "  verdict: neither — refused {}: {}",
+        // W15. A policy component is admitted, to the world it is in. The hook lane is a
+        // capability-world question and says nothing here.
+        (_, Ok(()), _) => "  verdict: admitted as a policy component".to_string(),
+        (Err(refusal), Err(policy), _) => format!(
+            "  verdict: neither world — as a capability, {}: {}; as a policy, {}: {}",
             clean(&refusal.refusal),
-            clean(&refusal.message)
+            clean(&refusal.message),
+            clean(&policy.refusal),
+            clean(&policy.message)
         ),
     }
 }
@@ -674,16 +711,25 @@ fn verdict_line(admission: &Admission) -> String {
 fn inspect_json(inspected: &Value, report: &Value, admission: &Admission) -> Value {
     let mut value = inspected.clone();
     value["limits"] = report["limits"].clone();
+    // W15. `admitted_as` is the world that took these bytes, or null. The two booleans stay
+    // for the readers that already have them; `lane` no longer spells `both`, which read as
+    // "both worlds" the moment there were two.
+    value["admitted_as"] = match admission.world() {
+        Some(world) => json!(world),
+        None => Value::Null,
+    };
     value["admitted_as_capability"] = json!(admission.capability.is_ok());
+    value["admitted_as_policy"] = json!(admission.policy.is_ok());
     value["admitted_as_hook"] = json!(admission.capability.is_ok() && admission.hook.is_none());
-    value["refusal"] = match (&admission.capability, &admission.hook) {
-        (Err(refusal), _) => json!({
+    value["refusal"] = match (&admission.capability, &admission.policy, &admission.hook) {
+        (Err(refusal), Err(policy), _) => json!({
             "refusal": refusal.refusal,
             "message": refusal.message,
-            "lane": "both",
+            "lane": "capability",
+            "policy": { "refusal": policy.refusal, "message": policy.message },
         }),
-        (Ok(()), Some(reason)) => json!({ "message": reason, "lane": "hook" }),
-        (Ok(()), None) => Value::Null,
+        (Ok(()), _, Some(reason)) => json!({ "message": reason, "lane": "hook" }),
+        _admitted => Value::Null,
     };
     value
 }
@@ -1386,9 +1432,75 @@ pub fn read_payload(source: Option<&str>) -> Result<Value> {
 /// against, so an author sees a rule clipped here rather than discovering it in a ledger.
 pub const MAX_RULE_CHARS: usize = 200;
 
+/// The engine's `@max_request_bytes`: the whole request document, encoded.
+///
+/// Enforced here as well as there, and the reason is what the node does past it — a request
+/// this large is not truncated and sent, it is **not sent at all** and the engine answers `ask`.
+/// A command that happily asked a component about a 200 KB request was showing an author a
+/// verdict for a call the node would never have put to it.
+pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
+
 /// The three words a verdict's `decision` may be. Anything else is read as `ask`, which is what
 /// the engine does with it — a policy component cannot resolve a call by being unreadable.
 const DECISIONS: [&str; 3] = ["allow", "deny", "ask"];
+
+/// The whole verdict document, in bytes, refused before it is decoded.
+/// `Ouroboros.Wasm.PolicyEngine`'s `@max_verdict_bytes`.
+pub const MAX_VERDICT_BYTES: usize = 1024;
+
+/// A verdict as the grammar declares it: exactly two keys, neither repeated.
+///
+/// Hand-written rather than derived, and that is the point. `serde_json`'s map deserializer
+/// keeps the **last** occurrence of a duplicated key while Elixir's decoder keeps the **first**,
+/// so `{"decision":"ask","decision":"deny"}` read as `deny` here and as `ask` on the node — a
+/// component could show an operator one word and hand the runtime another, and in the other
+/// order it turned a reviewed `ask` into an honoured `allow`. The visitor below refuses a
+/// repeated key and an unknown one, so there is one reading on both sides;
+/// `test/support/wasm_golden/policy_verdicts.json` is where the two are held to each other.
+struct RawVerdict {
+    decision: String,
+    rule: String,
+}
+
+impl<'de> serde::Deserialize<'de> for RawVerdict {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(RawVerdictVisitor)
+    }
+}
+
+struct RawVerdictVisitor;
+
+impl<'de> serde::de::Visitor<'de> for RawVerdictVisitor {
+    type Value = RawVerdict;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("an object with exactly `decision` and `rule`")
+    }
+
+    fn visit_map<M: serde::de::MapAccess<'de>>(self, mut map: M) -> Result<RawVerdict, M::Error> {
+        use serde::de::Error;
+
+        let mut decision: Option<String> = None;
+        let mut rule: Option<String> = None;
+
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "decision" if decision.is_some() => {
+                    return Err(M::Error::duplicate_field("decision"))
+                }
+                "rule" if rule.is_some() => return Err(M::Error::duplicate_field("rule")),
+                "decision" => decision = Some(map.next_value()?),
+                "rule" => rule = Some(map.next_value()?),
+                other => return Err(M::Error::unknown_field(other, &["decision", "rule"])),
+            }
+        }
+
+        Ok(RawVerdict {
+            decision: decision.ok_or_else(|| M::Error::missing_field("decision"))?,
+            rule: rule.ok_or_else(|| M::Error::missing_field("rule"))?,
+        })
+    }
+}
 
 /// What `ouro wasm policy` was asked to do.
 pub struct PolicyRequest<'a> {
@@ -1426,6 +1538,17 @@ pub fn policy<O: Write>(request: &PolicyRequest, out: &mut O) -> Result<bool> {
             "`--request` must be a JSON object: the engine sends the permission request \
              document, and a policy that was handed anything else would be answering about a \
              call this node never makes"
+        );
+    }
+
+    let document = request.request.to_string();
+    if document.len() > MAX_REQUEST_BYTES {
+        bail!(
+            "the request is {} bytes; the engine's ceiling is {MAX_REQUEST_BYTES} and a document \
+             past it is not truncated and sent — it is not sent at all, and the node answers \
+             `ask` without asking the component. A policy shown the first four kilobytes of a \
+             command line is one an attacker pads past",
+            document.len()
         );
     }
 
@@ -1493,11 +1616,7 @@ pub fn policy<O: Write>(request: &PolicyRequest, out: &mut O) -> Result<bool> {
     let started = Instant::now();
     let answered = helper.request(
         "call",
-        json!({
-            "instance": instance,
-            "export": "evaluate",
-            "payload": request.request.to_string(),
-        }),
+        json!({ "instance": instance, "export": "evaluate", "payload": document }),
     );
     let wall_ms = started.elapsed().as_millis() as u64;
     // Never a bare `guest_log` after a call: stdout and stderr are different pipes read on
@@ -1567,29 +1686,31 @@ struct PolicyVerdict {
 }
 
 impl PolicyVerdict {
-    /// The engine's reading, restated here for display: an object with a `decision` in the
-    /// vocabulary, and a `rule` bounded and stripped of anything that could forge a line.
+    /// The engine's reading, restated here for display, and held to it by
+    /// `test/support/wasm_golden/policy_verdicts.json`.
+    ///
+    /// A verdict is an object with exactly `decision` and `rule`, no key repeated, `decision`
+    /// exactly one of the three lower-case words, `rule` a string, and the whole document at
+    /// most [`MAX_VERDICT_BYTES`] bytes. `serde_json::from_str` refuses trailing content, so a
+    /// second document after the first is not a parse of the first half.
     fn parse(reply: &str) -> PolicyVerdict {
-        let Ok(Value::Object(document)) = serde_json::from_str::<Value>(reply) else {
-            return PolicyVerdict::unreadable("the reply is not a JSON object");
+        if reply.len() > MAX_VERDICT_BYTES {
+            return PolicyVerdict::unreadable("the reply is larger than a verdict may be");
+        }
+
+        let Ok(raw) = serde_json::from_str::<RawVerdict>(reply) else {
+            return PolicyVerdict::unreadable(
+                "the reply is not an object with exactly `decision` and `rule`",
+            );
         };
 
-        let Some(decision) = document.get("decision").and_then(Value::as_str) else {
-            return PolicyVerdict::unreadable("the reply names no `decision`");
-        };
-
-        if !DECISIONS.contains(&decision) {
+        if !DECISIONS.contains(&raw.decision.as_str()) {
             return PolicyVerdict::unreadable("`decision` is not allow, deny or ask");
         }
 
-        let rule = document
-            .get("rule")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-
         PolicyVerdict {
-            decision: decision.to_string(),
-            rule: bounded_rule(rule),
+            decision: raw.decision,
+            rule: bounded_rule(&raw.rule),
             readable: true,
         }
     }
@@ -3071,6 +3192,10 @@ mod tests {
             &echo_limits(),
             &Admission {
                 capability: Ok(()),
+                policy: Err(wasm_client::Refusal {
+                    refusal: "unsupported_world".into(),
+                    message: "component does not export evaluate".into(),
+                }),
                 hook: None,
             },
         );
@@ -3086,7 +3211,7 @@ mod tests {
         assert!(row.contains("101"), "the reading is shown: {row}");
         assert!(row.contains("20000"), "the ceiling is shown: {row}");
         assert!(row.contains("198×"), "the headroom is shown: {row}");
-        assert!(text.contains("verdict: admitted — as a capability and as a hook component"));
+        assert!(text.contains("verdict: admitted as a capability — and as a hook component"));
     }
 
     #[test]
@@ -3105,12 +3230,66 @@ mod tests {
                               ouroboros:capability@0.1.0 does not declare"
                         .into(),
                 }),
+                policy: Err(wasm_client::Refusal {
+                    refusal: "undefined_import".into(),
+                    message: "component imports `wasi:cli/environment`, which world \
+                              ouroboros:policy@0.1.0 does not declare"
+                        .into(),
+                }),
                 hook: None,
             },
         );
 
-        assert!(text.contains("verdict: neither — refused undefined_import"));
+        // W15. "Neither world", and both refusals, because there are two doors now and an
+        // author refused at one needs to know whether the other was even tried.
+        assert!(text.contains("verdict: neither world"));
         assert!(text.contains("wasi:cli/environment"));
+        assert!(text.contains("ouroboros:policy@0.1.0"));
+    }
+
+    /// W15. A policy component is admitted — to the world it is in.
+    ///
+    /// Before this, `inspect` asked one question, so every policy component came back
+    /// `neither` with a non-zero exit: a command telling an author their perfectly good
+    /// component was nothing at all.
+    #[test]
+    fn a_policy_component_is_admitted_as_one_rather_than_called_neither() {
+        let admission = Admission {
+            capability: Err(wasm_client::Refusal {
+                refusal: "unsupported_world".into(),
+                message: "component does not export handle-message".into(),
+            }),
+            policy: Ok(()),
+            hook: None,
+        };
+
+        let text = render_inspect(
+            Path::new("guard.wasm"),
+            &json!({
+                "sha256": "aa", "world": "ouroboros:policy@0.1.0",
+                "imports": ["log"], "exports": ["describe", "init", "evaluate"], "size": 53080,
+            }),
+            &echo_limits(),
+            &admission,
+        );
+
+        assert!(
+            text.contains("verdict: admitted as a policy component"),
+            "{text}"
+        );
+        assert!(admission.admitted(), "and the command exits zero on it");
+        assert_eq!(admission.world(), Some("ouroboros:policy@0.1.0"));
+
+        let document = inspect_json(
+            &json!({ "sha256": "aa", "world": "ouroboros:policy@0.1.0" }),
+            &echo_limits(),
+            &admission,
+        );
+
+        assert_eq!(document["admitted_as"], "ouroboros:policy@0.1.0");
+        assert_eq!(document["admitted_as_policy"], true);
+        assert_eq!(document["admitted_as_capability"], false);
+        assert_eq!(document["refusal"], Value::Null);
     }
 
     /// The hook lane's ceiling is tighter than the helper's, so a component can be a capability
@@ -3124,6 +3303,10 @@ mod tests {
             &echo_limits(),
             &Admission {
                 capability: Ok(()),
+                policy: Err(wasm_client::Refusal {
+                    refusal: "unsupported_world".into(),
+                    message: "component does not export evaluate".into(),
+                }),
                 hook: hook_refusal(&json!({ "size": HOOK_MAX_COMPONENT_BYTES + 1 })),
             },
         );
@@ -3146,6 +3329,10 @@ mod tests {
             &echo_limits(),
             &Admission {
                 capability: Ok(()),
+                policy: Err(wasm_client::Refusal {
+                    refusal: "unsupported_world".into(),
+                    message: "component does not export evaluate".into(),
+                }),
                 hook: None,
             },
         );
@@ -3918,18 +4105,17 @@ mod tests {
 
     /// The three words, and everything else read as `ask`.
     ///
-    /// This is the engine's own rule restated for display, so it has to be the same rule: a
-    /// verdict the node reads as `ask` and a command that printed `allow` would be a command
-    /// teaching an author the opposite of what the runtime does.
+    /// The fixture above is the authority on which documents fall which side of the grammar;
+    /// this states the two properties a reader of it could still get wrong — an unreadable
+    /// verdict is `ask` and never a third answer, and a readable one carries the component's own
+    /// sentence rather than a paraphrase.
     #[test]
     fn a_verdict_this_node_cannot_read_is_shown_as_the_ask_the_node_would_make() {
         for reply in [
             "not json",
             "[1,2,3]",
-            "\"a string\"",
-            r#"{"rule":"no decision"}"#,
             r#"{"decision":"maybe","rule":"r"}"#,
-            r#"{"decision":"ALLOW","rule":"case matters"}"#,
+            r#"{"decision":"ask","decision":"deny","rule":"r"}"#,
         ] {
             let verdict = PolicyVerdict::parse(reply);
             assert_eq!(verdict.decision, "ask", "`{reply}` must read as ask");
@@ -3946,9 +4132,53 @@ mod tests {
             assert!(verdict.readable);
             assert_eq!(verdict.rule, "r");
         }
+    }
 
-        // A verdict with no rule is still a verdict; the rule is simply empty.
-        assert_eq!(PolicyVerdict::parse(r#"{"decision":"deny"}"#).rule, "");
+    /// The fixture both readings of a verdict are pinned to (W15 review H1). Embedded rather
+    /// than read at run time so the test needs no working directory to be right about.
+    const VERDICTS: &str = include_str!("../../test/support/wasm_golden/policy_verdicts.json");
+
+    /// Every case in `policy_verdicts.json`, read here exactly as
+    /// `Ouroboros.Wasm.PolicyEngineTest` reads it.
+    ///
+    /// This is the file's whole purpose: two implementations of one grammar, in two languages,
+    /// held to the same answers. Loosen either — accept a duplicate key, drop the byte bound,
+    /// take a `decision` outside the vocabulary — and the side that loosened goes red while the
+    /// other stays green, which is exactly the drift a shared reading has to make visible.
+    #[test]
+    fn every_verdict_in_the_fixture_reads_the_way_the_node_reads_it() {
+        let fixture: Value = serde_json::from_str(VERDICTS).expect("the verdict fixture is JSON");
+
+        assert_eq!(
+            fixture["max_document_bytes"].as_u64(),
+            Some(MAX_VERDICT_BYTES as u64),
+            "the fixture states the bound this side enforces"
+        );
+
+        let cases = fixture["cases"].as_array().expect("the fixture has cases");
+        assert!(cases.len() >= 30, "a grammar this strict earns its cases");
+
+        for case in cases {
+            let raw = case["raw"].as_str().expect("every case has raw text");
+            let verdict = PolicyVerdict::parse(raw);
+            let why = case["why"].as_str().unwrap_or_default();
+
+            match case["decision"].as_str() {
+                Some(expected) => {
+                    assert!(
+                        verdict.readable,
+                        "{raw:?} must be readable ({why}), and read as `{expected}`"
+                    );
+                    assert_eq!(verdict.decision, expected, "{raw:?} ({why})");
+                }
+                None => {
+                    assert!(!verdict.readable, "{raw:?} must be unreadable ({why})");
+                    // Unreadable is `ask`, never a third answer and never a refusal: the
+                    // component answered, and what it answered cannot be read.
+                    assert_eq!(verdict.decision, "ask", "{raw:?} ({why})");
+                }
+            }
+        }
     }
 
     /// A component's rule is bounded and stripped exactly where the engine bounds and strips

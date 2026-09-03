@@ -61,6 +61,9 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   durable store nobody can bound, so an oversized or unportable report is replaced by a
   marker saying so rather than truncated into something that reads like evidence.
 
+  `describe` (W13) and `kind` (W15) are additive in the same sense and need no version of their
+  own: an entry that recorded neither reads back with both absent, which is the truth about it.
+
   Those two fields are why the checkpoint is version 3. Version 1 knew neither; version 2
   knew `eval_report`. Both are *upgraded* on read by the same widening: every entry keeps
   every field it recorded and gains the ones it never had as `nil`, which is the truth
@@ -207,7 +210,8 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
                   test_report: %{},
                   detail: nil,
                   eval_report: nil,
-                  describe: nil
+                  describe: nil,
+                  kind: :capability
                 ]
 
     @type state :: :deploying | :live | :superseded | :rolled_back | :quarantined
@@ -235,6 +239,15 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
             # Untrusted text with a trusted *shape*: this register is the only place a
             # description is read from, so every surface that shows one shows the same one.
             describe: {:ok, map()} | {:invalid, term()} | nil,
+            # W15. What a lane-W component *is*: `:capability` for one the mesh and the
+            # `capability` tool can reach, `:policy` for one `Ouroboros.Wasm.PolicyEngine`
+            # consults. Recorded at `deploying/2` from the manifest the rollout has already
+            # verified, so every later reader gets it without opening a file — and, being a
+            # checkpoint field, it is a claim about the bytes rather than proof of them: the
+            # engine re-verifies the manifest against this node's trust policy before it loads
+            # anything (docs/WASM.md D21). `:capability` for lane B and for every entry written
+            # before there were two kinds.
+            kind: :capability | :policy,
             created_at: String.t(),
             updated_at: String.t()
           }
@@ -249,7 +262,8 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
   Checkpoints the intent to deploy a capability, before anything is mutated.
 
   Requires `:artifact_id`, `:module`, `:epoch`, and `:nodes`; accepts `:source_sha256`,
-  `:component_sha256`, and `:test_report`.
+  `:component_sha256`, `:kind` (W15: `:capability` or `:policy`, defaulting to `:capability`)
+  and `:test_report`.
 
   A request carrying `:component_sha256` is a lane-W rollout and is also held to this
   register's epoch watermark — `{:stale_epoch, epoch, highest}` — in the same serialized
@@ -407,7 +421,8 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
          {:ok, module} <- fetch_module(attrs),
          {:ok, epoch} <- fetch_epoch(attrs),
          {:ok, nodes} <- fetch_nodes(attrs),
-         {:ok, component_sha256} <- fetch_component_sha256(attrs) do
+         {:ok, component_sha256} <- fetch_component_sha256(attrs),
+         {:ok, kind} <- fetch_kind(attrs) do
       timestamp = now()
 
       {:ok,
@@ -419,10 +434,21 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
          state: :deploying,
          source_sha256: Map.get(attrs, :source_sha256),
          component_sha256: component_sha256,
+         kind: kind,
          test_report: bound_report(Map.get(attrs, :test_report, %{}), :test_report) || %{},
          created_at: timestamp,
          updated_at: timestamp
        }}
+    end
+  end
+
+  # W15. A closed set of two, refused rather than defaulted when a caller names something else:
+  # this decides which of the helper's two worlds a component is ever offered as, and a value
+  # this build does not implement is a caller saying something it cannot honour.
+  defp fetch_kind(attrs) do
+    case Map.get(attrs, :kind, :capability) do
+      kind when kind in [:capability, :policy] -> {:ok, kind}
+      other -> {:error, {:invalid_attribute, :kind, describe(other)}}
     end
   end
 
@@ -993,6 +1019,12 @@ defmodule Ouroboros.Upgrade.Rollout.Registry do
       # epoch and a sha are.
       not loaded_describe?(Map.get(entry, :describe)) ->
         {:error, {:invalid_attribute, :describe, describe(Map.get(entry, :describe))}}
+
+      # W15. `nil` is the widening: an entry written before there were two kinds recorded none,
+      # and `Ouroboros.Wasm.Rollout.live/1` reads a missing kind as the capability it was.
+      # Anything else is a planted value and the row is dropped, exactly as a planted epoch is.
+      Map.get(entry, :kind) not in [nil, :capability, :policy] ->
+        {:error, {:invalid_attribute, :kind, describe(Map.get(entry, :kind))}}
 
       true ->
         :ok

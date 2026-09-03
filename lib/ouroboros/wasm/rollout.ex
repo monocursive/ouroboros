@@ -238,42 +238,30 @@ defmodule Ouroboros.Wasm.Rollout do
   the `capability` tool lists and what a model may message; a policy is what
   `Ouroboros.Wasm.PolicyEngine` consults and is reachable from neither.
 
-  **The kind is read out of the signed manifest, not out of the register.** The register is an
-  index — a checkpoint file this node wrote — and what decides that a component gets to answer
-  permission questions has to be the thing somebody signed. `Ouroboros.Wasm.Store` holds one
-  manifest per rollout and `Ouroboros.Wasm.Boot` already reads it on the same path for the same
-  reason.
+  **The kind is the register's, recorded at deploy from the manifest this rollout verified.**
+  It is a checkpoint field and therefore a *claim* — a file on disk says it — so it is what this
+  listing filters on and nothing more: a row saying `:policy` is a row the engine will look at,
+  not a row it will trust. `Ouroboros.Wasm.PolicyEngine` re-verifies the manifest against this
+  node's trust policy, and holds its sha to the row's, before it loads a byte.
 
-  A manifest that cannot be read at all falls back to `:capability`, which is exactly the status
-  quo for every entry written before there were two kinds: such an entry is listed where it has
-  always been listed, and a policy component whose manifest went missing becomes a capability
-  the tool can name and the helper will refuse `unknown_export`. Falling the other way would
-  have made an unreadable manifest a way to *stop* the engine consulting a policy, which is the
-  worse direction. Nothing here is a substitute for the store being the node's own directory.
+  An earlier cut read the kind out of the store's manifest here instead. That was worse in both
+  directions: it opened a file per entry on the `capability` tool's path, and it read the kind
+  from one document while the sha that actually got loaded came from another — so a planted row
+  naming a genuine policy manifest and somebody else's bytes was a policy engine made of those
+  bytes. One reader, one row, and the verification where the loading happens.
+
+  An entry with no kind at all — every entry written before there were two — is a capability,
+  which is exactly where it has always been listed.
   """
   @spec live(keyword()) :: [Registry.Entry.t()]
   def live(opts \\ []) do
     kind = Keyword.get(opts, :kind, :capability)
-    store = store_opts(opts)
 
     opts
     |> Keyword.get(:registry, Registry)
     |> Registry.live()
     |> Enum.filter(&lane_w?/1)
-    |> Enum.filter(&(entry_kind(&1, store) == kind))
-  end
-
-  # The kind the signed manifest for this entry declares. See `live/1` for why the fallback is
-  # `:capability` and what it costs.
-  defp entry_kind(entry, store_opts) do
-    case Store.fetch_manifest(Map.get(entry, :artifact_id), store_opts) do
-      {:ok, %Artifact{} = manifest} -> PolicyEngine.kind_of(manifest)
-      _unreadable -> :capability
-    end
-  rescue
-    _error -> :capability
-  catch
-    _kind, _reason -> :capability
+    |> Enum.filter(&(PolicyEngine.kind_of(&1) == kind))
   end
 
   @doc """
@@ -534,6 +522,9 @@ defmodule Ouroboros.Wasm.Rollout do
       epoch: artifact.epoch,
       nodes: nodes,
       component_sha256: artifact.component_sha256,
+      # W15. From the manifest this rollout has already verified, so every later reader has the
+      # kind without opening a file. It is an index, not a proof — see `live/1`.
+      kind: artifact.kind,
       source_sha256: Map.get(artifact.metadata, :source_sha256),
       test_report: Map.get(artifact.metadata, :test_report) || %{}
     }

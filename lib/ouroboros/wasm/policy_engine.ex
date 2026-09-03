@@ -106,7 +106,7 @@ defmodule Ouroboros.Wasm.PolicyEngine do
   alias Ouroboros.Control.Permissions
   alias Ouroboros.Control.Permissions.Request
   alias Ouroboros.Wasm
-  alias Ouroboros.Wasm.{Artifact, Pool, Rollout, Store}
+  alias Ouroboros.Wasm.{Artifact, Pool, Rollout, Store, Verifier}
 
   # The whole document, encoded. A request larger than this is not sent — see the moduledoc on
   # why nothing here truncates. Sized to hold a realistic `bash` command line, sixty-four
@@ -124,12 +124,68 @@ defmodule Ouroboros.Wasm.PolicyEngine do
   # The label every string a component authored wears wherever a model or a person reads it.
   @untrusted "[untrusted policy component]"
 
+  # What a redacted value is replaced with. `Jido.Harness.Redaction`'s word, so one grep finds
+  # every redaction this runtime performs.
+  @redacted "[REDACTED]"
+
+  # A key whose value is a credential whatever the value looks like. `Jido.Harness.Redaction`'s
+  # pattern, applied to a key with every run of non-alphanumerics folded to `_`.
+  @credential_key ~r/(^|_)(authorization|credential|password|secret|token|api_?key)($|_)/i
+
+  # Token shapes worth recognising in a *value*, most specific first.
+  #
+  # `Bearer` stops at a quote and a bracket as well as at whitespace, which the harness's own
+  # pattern does not: `-H "Authorization: Bearer abc"` had its closing quote eaten, and a
+  # document that loses a quote is a document a component reads differently from the one this
+  # node built.
+  #
+  # The `NAME=value` and `NAME: value` rules are what catch a credential passed on a command
+  # line — `AWS_SECRET_ACCESS_KEY=…`, `X-Api-Key: …` — where the name is the only thing that
+  # says the value is a secret. The name is kept; only the value goes.
+  @token_shapes [
+    # A PEM block, terminated or not. The terminated form first, so an unterminated one is not
+    # matched by a lazy `.*?` that stops immediately and leaves the key body behind.
+    {~r/-----BEGIN[A-Z ]*PRIVATE KEY-----.*?-----END[A-Z ]*PRIVATE KEY-----/su,
+     "-----BEGIN PRIVATE KEY-----[REDACTED]-----END PRIVATE KEY-----"},
+    # The unterminated form, which must not re-match what the terminated one just wrote.
+    {~r/-----BEGIN[A-Z ]*PRIVATE KEY-----(?!\[REDACTED\]).*/su,
+     "-----BEGIN PRIVATE KEY-----[REDACTED]"},
+    {~r/\bBearer\s+[^\s,;"'\)\]}]+/i, "Bearer [REDACTED]"},
+    {~r/\b((?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{12,})\b/,
+     "[REDACTED]"},
+    {~r/\bsk-[A-Za-z0-9_-]{8,}/, "[REDACTED]"},
+    {~r/\bgithub_pat_[A-Za-z0-9_]{20,}/, "[REDACTED]"},
+    {~r/\bgh[pousr]_[A-Za-z0-9]{16,}/, "[REDACTED]"},
+    {~r/\bxox[abposr]-[A-Za-z0-9-]{8,}/, "[REDACTED]"},
+    # `NAME=value` and `NAME: value` where the name is the only thing saying the value is a
+    # secret. The name and its separator are kept verbatim — a rewritten separator is a
+    # different command line — and a value a pass above already redacted is left alone.
+    {~r/((?:^|[\s"'({\[,;])[A-Za-z0-9_.-]*(?:AUTHORIZATION|CREDENTIALS?|PASSWORD|SECRET|TOKEN|API_?KEY)[A-Za-z0-9_.-]*)(\s*[:=]\s*)("?)(?!(?:Bearer\s+)?\[REDACTED\])[^\s"'&;]+/i,
+     "\\1\\2\\3[REDACTED]"}
+  ]
+
+  # Where this process caches the node's own environment secrets. Per process rather than
+  # global: this runs on the permission path and `System.get_env/0` is not free.
+  @secrets_key {__MODULE__, :environment_secrets}
+
   # The three words a verdict may carry. Anything else is `ask`.
   @decisions %{"allow" => :allow, "deny" => :deny, "ask" => :ask}
+
+  # The whole verdict document, in bytes, refused before it is decoded. A verdict is two keys
+  # and a sentence; a kibibyte is five times the largest one this grammar admits.
+  @max_verdict_bytes 1024
+
+  # Exactly the keys a verdict has. Closed, and checked as a sorted list, which is also what
+  # refuses a repeated key — `["decision", "decision"]` is not this.
+  @verdict_keys ["decision", "rule"]
 
   # The instance name a policy component is held under: derived from the sha, so one component
   # is one instance whichever process asks and a second concurrent caller finds it already up.
   @instance_prefix "wasm/policy/"
+
+  # How long one *decision* may take, end to end, including a re-instantiate. See `evaluate/1`.
+  @default_decision_timeout_ms 5_000
+  @max_decision_timeout_ms 60_000
 
   # Bounds on a signed policy eval spec, matching `Ouroboros.Upgrade.Rollout.Evaluation`'s in
   # spirit: a spec is signed, replicated to every target and stored in a durable registry, so an
@@ -206,6 +262,10 @@ defmodule Ouroboros.Wasm.PolicyEngine do
   @spec max_request_bytes() :: pos_integer()
   def max_request_bytes, do: @max_request_bytes
 
+  @doc false
+  @spec max_verdict_bytes() :: pos_integer()
+  def max_verdict_bytes, do: @max_verdict_bytes
+
   ## ── the component path ────────────────────────────────────────────────────────────────
 
   defp consult(request, asked) do
@@ -213,12 +273,32 @@ defmodule Ouroboros.Wasm.PolicyEngine do
 
     with {:ok, name} <- policy_name(),
          {:ok, entry} <- live_policy(name, opts),
+         :ok <- provenance(name, entry, opts),
          normalized = Request.new(request),
          {:ok, document} <- document(normalized),
-         {:ok, verdict, rule} <- ask_component(entry, document, opts) do
+         {:ok, verdict, rule} <- ask_component(name, entry, document, opts) do
       settle(verdict, rule, name, entry, normalized, asked)
     else
       _no_policy_or_no_answer -> asked
+    end
+  end
+
+  @doc """
+  How long one decision may take, end to end. `config :ouroboros, :policy_decision_timeout_ms`.
+
+  A malformed or out-of-range value falls back to the default rather than widening: this is a
+  bound on a synchronous round trip that sits in front of every tool call the rules did not
+  decide, and a bound a typo can remove is not one.
+  """
+  @spec decision_timeout() :: pos_integer()
+  def decision_timeout do
+    case Application.get_env(
+           :ouroboros,
+           :policy_decision_timeout_ms,
+           @default_decision_timeout_ms
+         ) do
+      ms when is_integer(ms) and ms > 0 and ms <= @max_decision_timeout_ms -> ms
+      _invalid -> @default_decision_timeout_ms
     end
   end
 
@@ -239,13 +319,13 @@ defmodule Ouroboros.Wasm.PolicyEngine do
 
   # The `:live` lane-W entry of kind `:policy` with this name, on this node.
   #
-  # `Rollout.live/1` reads the kind out of the **signed manifest** rather than out of a register
-  # row, so what decides that a component is consulted for permissions is the thing somebody
-  # signed. A name that is not live, or is live as a capability, is a misconfiguration and is
-  # said out loud once — a node that silently ran with no policy because of a typo is a node
-  # whose operator believes it has one.
+  # `Rollout.live/1` filters on the *register's* kind, which is an index rather than a proof:
+  # `provenance/3` is what holds the row to a manifest this node can verify, and it runs before
+  # anything is loaded. A name that is not live, or is live as a capability, is a
+  # misconfiguration and is said out loud once — a node that silently ran with no policy because
+  # of a typo is a node whose operator believes it has one.
   defp live_policy(name, opts) do
-    live = Rollout.live(Keyword.take(opts, [:registry, :store_root]) ++ [kind: :policy])
+    live = Rollout.live(Keyword.take(opts, [:registry]) ++ [kind: :policy])
 
     case Enum.find(live, &(Map.get(&1, :module) == "wasm/" <> name)) do
       %{component_sha256: sha} = entry when is_binary(sha) ->
@@ -263,68 +343,262 @@ defmodule Ouroboros.Wasm.PolicyEngine do
     end
   end
 
-  # One request, one verdict. The instance is stood up on first use and reused after that; any
-  # refusal drops it and is retried exactly once against a fresh one, because the commonest
-  # refusal by far is the benign one — the helper was restarted, or the component was evicted,
-  # and the instance this engine remembers is gone.
-  defp ask_component(entry, document, opts) do
+  # What the register row says has to be what somebody signed, and the two are separate files.
+  #
+  # The row supplies the sha this engine loads and instantiates. Its `kind` is written at deploy
+  # from a manifest the rollout verified — but a checkpoint is a file on disk, and anything that
+  # can write one can write a row whose `artifact_id` names a genuine policy manifest and whose
+  # `component_sha256` names other bytes in the store. Without this check those bytes became the
+  # node's permission engine, labelled with the planted sha.
+  #
+  # So before anything is loaded: the manifest the row names is verified against **this node's**
+  # trust policy, its sha must be the row's sha, and its kind must be `:policy`. That is
+  # `Ouroboros.Wasm.Boot`'s discipline for the same reason — a reboot restarting a wrapper from
+  # a checkpoint is the same act as an engine consulting one.
+  #
+  # It runs once per decision and reads one small file; a failure makes the engine inert for
+  # that name, said once, because a policy nobody can verify is not a policy this node has.
+  defp provenance(name, entry, opts) do
+    with {:ok, manifest} <- signed_manifest(entry, opts),
+         :ok <- Verifier.verify_manifest(manifest, trust_policy(opts)),
+         :ok <- matches_entry(manifest, entry) do
+      :ok
+    else
+      reason ->
+        warn_once(
+          {name, :provenance},
+          "config :ouroboros, :wasm_policy names #{inspect(name)}, whose register entry does " <>
+            "not match a manifest this node can verify (#{inspect(bounded_reason(reason))}); " <>
+            "the policy engine is inert and every request the rules do not decide is asked"
+        )
+
+        :no_policy
+    end
+  end
+
+  defp signed_manifest(entry, opts) do
+    root = Keyword.get(opts, :store_root)
+
+    store_opts =
+      if is_binary(root) and root != "" and Wasm.allow_store_root_override?(),
+        do: [root: root],
+        else: []
+
+    case Store.fetch_manifest(Map.get(entry, :artifact_id), store_opts) do
+      {:ok, %Artifact{} = manifest} -> {:ok, manifest}
+      {:error, reason} -> {:error, {:manifest_unusable, reason}}
+    end
+  rescue
+    # `fetch_manifest/2` is total, but this sits in front of every permission decision and an
+    # exception here would be one the caller's `rescue` reports as an authority failure rather
+    # than as the inert engine it is.
+    error -> {:error, {:manifest_unusable, Exception.message(error)}}
+  end
+
+  # The manifest describes the bytes the row names, and it describes a policy. Both halves:
+  # a verified manifest for *some other* component is not provenance for this row, and a
+  # verified capability manifest is not a policy however the row is labelled.
+  defp matches_entry(%Artifact{} = manifest, entry) do
+    cond do
+      manifest.component_sha256 != Map.get(entry, :component_sha256) ->
+        {:error, {:component_mismatch, :sha256}}
+
+      kind_of(manifest) != :policy ->
+        {:error, {:component_mismatch, :kind}}
+
+      true ->
+        :ok
+    end
+  end
+
+  # This node's own trust policy, and **only** this node's — `Ouroboros.Wasm.Rollout`'s rule
+  # verbatim, and unlike the register and the store it is not one of `:wasm_policy_opts`' test
+  # seams. A node that could be told which signers to trust for its permission engine would be
+  # verifying the sender rather than the artifact, and there is no test worth that.
+  defp trust_policy(_opts), do: Application.get_env(:ouroboros, :upgrade_trust_policy, [])
+
+  # One request, one verdict, **bounded**.
+  #
+  # This is a synchronous round trip through the node's one shared helper pool, sitting in front
+  # of every tool call the rules did not decide, so it is the engine's job to bound it rather
+  # than the pool's: a wedged helper otherwise cost one decision the instance deadline plus the
+  # transport margin, twice over for the retry, while every other pool user queued behind it.
+  # The decision has one deadline, the work runs in a process this one can kill, and a re-try is
+  # spent only on the refusal that means "the instance I remember is gone".
+  defp ask_component(name, entry, document, opts) do
     sha = entry.component_sha256
     pool = Keyword.get(opts, :pool, Pool)
     instance = @instance_prefix <> sha
+    deadline = System.monotonic_time(:millisecond) + decision_timeout()
 
-    case Pool.call(instance, "evaluate", document, pool) do
-      {:ok, %{"payload" => payload}} when is_binary(payload) ->
-        read_verdict(payload)
+    case bounded(deadline, fn -> Pool.call(instance, "evaluate", document, pool) end) do
+      {:ok, {:ok, %{"payload" => payload}}} when is_binary(payload) ->
+        verdict_or_ask(payload)
 
-      _refused_or_malformed ->
-        _ = Pool.drop(instance, pool)
-
-        with :ok <- stand_up(sha, instance, opts),
-             {:ok, %{"payload" => payload}} when is_binary(payload) <-
-               Pool.call(instance, "evaluate", document, pool) do
-          read_verdict(payload)
+      # The one refusal a second attempt can fix, and the commonest one by far: nothing is
+      # standing under this name — the first decision of the process's life, a helper that was
+      # restarted, a component the cache evicted. Every other refusal has already spent the
+      # round trip and a retry would only spend another.
+      {:ok, {:error, %{refusal: "unknown_instance"}}} ->
+        with :ok <- stand_up(sha, instance, opts, deadline),
+             {:ok, {:ok, %{"payload" => payload}}} when is_binary(payload) <-
+               bounded(deadline, fn -> Pool.call(instance, "evaluate", document, pool) end) do
+          verdict_or_ask(payload)
         else
           _still_no -> :no_answer
         end
+
+      :expired ->
+        expired(name, instance, pool)
+
+      _refused ->
+        :no_answer
+    end
+  end
+
+  # The decision's deadline arrived. The answer is `ask`; the instance is dropped so the next
+  # request stands a fresh one up rather than queueing behind whatever this one is still doing.
+  #
+  # The drop is issued from a process of its own and not waited on, deliberately: it goes to the
+  # same pool that has just failed to answer in time, and making the *decision* wait for it
+  # would be spending the bound this function exists to hold. The pool bounds it in turn — every
+  # request it accepts carries a deadline, and a helper that answers neither is marked broken.
+  defp expired(name, instance, pool) do
+    _ = spawn(fn -> Pool.drop(instance, pool) end)
+
+    warn_once(
+      {name, :timeout},
+      "the policy component #{inspect(name)} did not answer within " <>
+        "#{decision_timeout()}ms; this request is asked, its instance is dropped, and the " <>
+        "next request stands a fresh one up"
+    )
+
+    :no_answer
+  end
+
+  # Runs `fun` in a process this one can kill, and answers `:expired` at `deadline`.
+  #
+  # `spawn_monitor` rather than `Task.async`: a `Task` is *linked*, and the work here is a
+  # `GenServer.call` that exits on its own timeout — an exit this function must absorb rather
+  # than propagate into whatever turn is asking for a permission decision.
+  defp bounded(deadline, fun) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+    owner = self()
+    tag = make_ref()
+
+    {pid, monitor} = spawn_monitor(fn -> send(owner, {tag, fun.()}) end)
+
+    receive do
+      {^tag, result} ->
+        Process.demonitor(monitor, [:flush])
+        {:ok, result}
+
+      {:DOWN, ^monitor, :process, ^pid, _reason} ->
+        :no_answer
+    after
+      remaining ->
+        Process.exit(pid, :kill)
+        Process.demonitor(monitor, [:flush])
+        :expired
     end
   end
 
   # Load and instantiate, as the policy world. The kind travels to the helper so a component
   # that is not in that world is refused at `load` — the manifest said `policy`, and this is
   # where that claim is checked against the bytes rather than believed.
-  defp stand_up(sha, instance, opts) do
+  defp stand_up(sha, instance, opts, deadline) do
     pool = Keyword.get(opts, :pool, Pool)
 
     with {:ok, path} <- store_path(sha, Keyword.get(opts, :store_root)),
-         {:ok, _loaded} <- Pool.load(sha, path, pool, kind: :policy),
-         {:ok, _stood} <-
-           Pool.instantiate(instance, sha, "{}", Wasm.capability_limits(), pool, kind: :policy) do
+         {:ok, {:ok, _loaded}} <-
+           bounded(deadline, fn -> Pool.load(sha, path, pool, kind: :policy) end),
+         {:ok, {:ok, _stood}} <-
+           bounded(deadline, fn ->
+             Pool.instantiate(instance, sha, "{}", Wasm.capability_limits(), pool, kind: :policy)
+           end) do
       :ok
     else
       # Another process won the race and stood the same instance up. That is the instance this
       # request wants, so it is not a failure.
-      {:error, %{refusal: "instance_exists"}} -> :ok
-      _refused -> :error
+      {:ok, {:error, %{refusal: "instance_exists"}}} -> :ok
+      _refused_or_expired -> :error
     end
   end
 
   ## ── the verdict ───────────────────────────────────────────────────────────────────────
 
-  # Everything a component said, read under the rules the moduledoc states. A reply this cannot
-  # read is `ask` with a rule saying so, never a refusal that would make the caller retry.
-  defp read_verdict(payload) do
-    with {:ok, document} when is_map(document) <- decode(payload),
-         decision when not is_nil(decision) <- Map.get(@decisions, Map.get(document, "decision")) do
-      {:ok, decision, rule(Map.get(document, "rule"))}
+  @doc """
+  One strict reading of a component's verdict: `{:ok, decision, rule}` or `:unreadable`.
+
+  Public because it is a **contract between two implementations**, not an internal detail.
+  `ouro`'s `wasm_cli::PolicyVerdict::parse` reads the same documents so an author can see what
+  the node will make of a verdict before deploying one, and the two are pinned to
+  `test/support/wasm_golden/policy_verdicts.json` by a test on each side — the discipline W10
+  used for the hook narrowing (D14).
+
+  ## Why it is this strict
+
+  A verdict is an object with **exactly** the keys `decision` and `rule`, no key repeated,
+  `decision` exactly one of the three lower-case words, `rule` a string, and the whole document
+  at most #{@max_verdict_bytes} bytes.
+
+  The repeated key is the reason the grammar is written down rather than left to a decoder.
+  Elixir's JSON decoder keeps the **first** occurrence of a duplicated key and `serde_json`
+  keeps the **last**, so `{"decision":"ask","decision":"deny"}` was `ask` here and `deny` in
+  `ouro wasm policy` — a component could show an operator one word and hand this node another,
+  and in the other order it turned a reviewed `ask` into an honoured `allow`. So the document is
+  decoded into an ordered list of pairs and the key list is checked as a whole, rather than
+  through a map that has already thrown the evidence away.
+
+  Everything the grammar rejects is `:unreadable`, which the engine answers as `ask`.
+  """
+  @spec read_verdict(term()) :: {:ok, verdict(), String.t()} | :unreadable
+  def read_verdict(payload) when is_binary(payload) do
+    if byte_size(payload) > @max_verdict_bytes do
+      :unreadable
     else
-      _unreadable -> {:ok, :ask, "the component's verdict could not be read"}
+      with {:ok, pairs} <- decode_pairs(payload) do
+        verdict_of(pairs)
+      end
     end
   end
 
-  defp decode(payload) do
-    JSON.decode(payload)
+  def read_verdict(_payload), do: :unreadable
+
+  # `:json.decode/3` with the object accumulator left as the list it builds, rather than the map
+  # the default `object_finish` folds it into: a map cannot say that a key arrived twice. The
+  # third element of the return is what is left over, so trailing data — a second document, a
+  # byte-order mark's remains — is a refusal rather than a parse of the first half.
+  defp decode_pairs(payload) do
+    # Tagged, because an object and an array both come back as lists once `object_finish` stops
+    # folding: `[1,2,3]` is not a verdict with three keys, and `elem/2` on its elements raises.
+    decoders = %{object_finish: fn acc, old -> {{:object, :lists.reverse(acc)}, old} end}
+
+    case :json.decode(payload, :ok, decoders) do
+      {{:object, pairs}, :ok, <<>>} -> {:ok, pairs}
+      _not_one_object -> :unreadable
+    end
   rescue
-    _error -> :error
+    _error -> :unreadable
+  catch
+    _kind, _reason -> :unreadable
+  end
+
+  defp verdict_of(pairs) do
+    keys = Enum.map(pairs, &elem(&1, 0))
+
+    with true <- Enum.all?(keys, &is_binary/1),
+         # Exactly these two, each once. A repeated key sorts to `["decision", "decision"]`,
+         # which is not this list, so the closed-key check is also the duplicate check.
+         true <- Enum.sort(keys) == @verdict_keys,
+         {"decision", spelling} <- List.keyfind(pairs, "decision", 0),
+         {"rule", rule} <- List.keyfind(pairs, "rule", 0),
+         true <- is_binary(rule),
+         decision when not is_nil(decision) <- Map.get(@decisions, spelling) do
+      {:ok, decision, rule(rule)}
+    else
+      _outside_the_grammar -> :unreadable
+    end
   end
 
   # A component's own sentence, made safe to put beside the node's: no control character, no
@@ -332,6 +606,7 @@ defmodule Ouroboros.Wasm.PolicyEngine do
   # left. The same class `Ouroboros.Wasm.Capability.Describe` refuses in a description, flattened
   # here rather than refused, because a rule this node cannot render is not a reason to turn a
   # `deny` into an `ask`.
+  # `rule` is a required string in the grammar above, so this is only ever handed one.
   defp rule(text) when is_binary(text) do
     cleaned =
       text
@@ -344,7 +619,14 @@ defmodule Ouroboros.Wasm.PolicyEngine do
       else: cleaned
   end
 
-  defp rule(_absent), do: "the component stated no rule"
+  # A verdict outside the grammar is not a refusal to retry: the component answered, and what it
+  # answered is unreadable, which this lane spells `ask`.
+  defp verdict_or_ask(payload) do
+    case read_verdict(payload) do
+      {:ok, decision, rule} -> {:ok, decision, rule}
+      :unreadable -> {:ok, :ask, "the component's verdict could not be read"}
+    end
+  end
 
   ## ── settling ──────────────────────────────────────────────────────────────────────────
 
@@ -368,7 +650,7 @@ defmodule Ouroboros.Wasm.PolicyEngine do
   defp decided(outcome, ledger_decision, rule, name, entry, request) do
     stated = "Policy(#{name}@#{short(entry.component_sha256)}): #{@untrusted} #{rule}"
 
-    _ =
+    written =
       Permissions.record(decision_id(entry, request), %{
         decision: ledger_decision,
         scope: :once,
@@ -386,7 +668,26 @@ defmodule Ouroboros.Wasm.PolicyEngine do
         request: request
       })
 
-    {outcome, stated}
+    recorded(outcome, stated, written)
+  end
+
+  # `Control.Permissions`' rule, applied to a component's verdict for the same reasons.
+  #
+  # An **allow** nobody can account for has not been granted: it is downgraded to `ask`, which
+  # is a human question rather than a silent authorisation. A **deny** stands, because refusing
+  # without an audit entry is still refusing — and turning it into an ask would be the one thing
+  # this lane never does, which is widen. Before this the result was discarded, so a component's
+  # allow stood with a dead ledger while an operator's own rule was already becoming
+  # `{:ask, :unrecordable}` two functions away.
+  defp recorded(outcome, stated, :ok = _written), do: {outcome, stated}
+  defp recorded(:deny, stated, _failed), do: {:deny, stated}
+
+  defp recorded(:allow, _stated, {:error, reason}) do
+    Logger.warning(
+      "wasm policy allow not recorded, downgrading to ask: #{inspect(bounded_reason(reason))}"
+    )
+
+    {:ask, :unrecordable}
   end
 
   # Stable per request and per component, so a retry after a lost answer records the same entry
@@ -442,10 +743,7 @@ defmodule Ouroboros.Wasm.PolicyEngine do
         "context" => kept,
         "context_dropped" => dropped
       }
-      # The same redaction the durable session projection applies: credential-shaped keys,
-      # `Bearer` tokens, and every secret this node's own environment holds are replaced before
-      # the document leaves. A component's whole reach is a log line, but a log line is a reach.
-      |> Redaction.redact()
+      |> redact()
 
     encoded = JSON.encode!(body)
 
@@ -484,6 +782,80 @@ defmodule Ouroboros.Wasm.PolicyEngine do
   defp scalar(value) when is_atom(value), do: Atom.to_string(value)
   defp scalar(_other), do: :drop
 
+  ## ── redaction ─────────────────────────────────────────────────────────────────────────
+
+  @doc """
+  What is taken out of a request document before a component sees it.
+
+  Three passes, and it is worth being exact about each because the first version of this
+  sentence claimed more than the code did:
+
+    1. **Credential-shaped keys.** A map key matching `#{inspect(@credential_key)}` — after
+       every run of non-alphanumerics is folded to `_`, so `X-Api-Key` and `apiKey` both
+       match — has its whole value replaced. This is `Jido.Harness.Redaction`'s rule.
+    2. **Well-known token shapes, in every string.** `Bearer <run>`, AWS access key ids,
+       `sk-…`, GitHub `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`/`github_pat_`, Slack `xox…`, PEM
+       private-key blocks, and `NAME=value` or `NAME: value` where NAME is credential-shaped.
+    3. **This node's own secrets.** Every environment value under a credential-shaped name,
+       longest first, wherever it appears.
+
+  **It is a heuristic and the second pass is the heuristic part.** A credential that does not
+  look like any of these — an opaque database URL's password, a bearer token spelled without
+  the word, a company's own key format — reaches the component. And it must: the whole reason a
+  policy sees the command line is that a policy that may deny `curl` needs to read the `curl`,
+  and that is the same sentence D8 makes about what a hook may see. What this pass buys is that
+  the *obvious* spellings do not travel; what bounds the rest is that a component's whole reach
+  is a log line the helper truncates.
+  """
+  @spec redact(term()) :: term()
+  def redact(value), do: scrub(value, environment_secrets())
+
+  defp scrub(map, secrets) when is_map(map) and not is_struct(map) do
+    Map.new(map, fn {key, inner} ->
+      if credential_key?(key),
+        do: {key, @redacted},
+        else: {key, scrub(inner, secrets)}
+    end)
+  end
+
+  defp scrub(list, secrets) when is_list(list), do: Enum.map(list, &scrub(&1, secrets))
+
+  defp scrub(text, secrets) when is_binary(text) do
+    text
+    |> then(
+      &Enum.reduce(@token_shapes, &1, fn {pattern, into}, acc ->
+        Regex.replace(pattern, acc, into)
+      end)
+    )
+    |> then(
+      &Enum.reduce(secrets, &1, fn secret, acc -> String.replace(acc, secret, @redacted) end)
+    )
+  end
+
+  defp scrub(scalar, _secrets), do: scalar
+
+  defp credential_key?(key) do
+    key
+    |> to_string()
+    |> String.replace(~r/[^a-zA-Z0-9]+/, "_")
+    |> String.match?(@credential_key)
+  end
+
+  # The node's own environment, asked of the harness's own reader so there is one list of what
+  # counts as a secret name. Computed once per process rather than per string: this runs on the
+  # permission path.
+  defp environment_secrets do
+    case Process.get(@secrets_key) do
+      nil ->
+        secrets = Redaction.secrets_from_env(System.get_env())
+        Process.put(@secrets_key, secrets)
+        secrets
+
+      secrets ->
+        secrets
+    end
+  end
+
   ## ── the signed eval spec (the rollout's gate for a policy component) ──────────────────
 
   @doc """
@@ -511,6 +883,7 @@ defmodule Ouroboros.Wasm.PolicyEngine do
   def validate_eval(spec) when is_map(spec) and not is_struct(spec) do
     with :ok <- known_keys(spec, [:cases, :budget_ms]),
          {:ok, cases} <- validate_cases(Map.get(spec, :cases)),
+         :ok <- certifies_a_refusal(cases),
          {:ok, budget} <- validate_budget(Map.get(spec, :budget_ms, @default_case_budget_ms)),
          normalized = %{cases: cases, budget_ms: budget},
          :ok <- bounded_spec(normalized) do
@@ -519,6 +892,20 @@ defmodule Ouroboros.Wasm.PolicyEngine do
   end
 
   def validate_eval(other), do: {:error, {:invalid_eval_spec, {:not_a_map, describe(other)}}}
+
+  # At least one case must expect a `deny` or an `ask`.
+  #
+  # A spec whose every expectation is `allow` certifies nothing this lane cares about. An
+  # `allow` is the one verdict the node does not honour by default, so a component could satisfy
+  # such a spec on every target and still be the only thing it must never be — something that
+  # denies what it should not, or asks about everything. What the signed spec *is* here is the
+  # test story (D12), and a test story with no refusal in it is a claim that the component said
+  # yes twice.
+  defp certifies_a_refusal(cases) do
+    if Enum.any?(cases, &(&1.expect.decision in [:deny, :ask])),
+      do: :ok,
+      else: {:error, {:invalid_eval_spec, :no_case_expects_a_refusal}}
+  end
 
   defp known_keys(spec, allowed) do
     case Map.keys(spec) -- allowed do
@@ -727,8 +1114,7 @@ defmodule Ouroboros.Wasm.PolicyEngine do
   defp evaluate_once(instance, pool, document) do
     case Pool.call(instance, "evaluate", document, pool) do
       {:ok, %{"payload" => payload}} when is_binary(payload) ->
-        {:ok, decision, rule} = read_verdict(payload)
-        {:ok, decision, rule}
+        verdict_or_ask(payload)
 
       {:ok, other} ->
         {:error, {:malformed_evaluate_result, other |> Map.keys() |> Enum.take(8)}}
@@ -815,8 +1201,16 @@ defmodule Ouroboros.Wasm.PolicyEngine do
 
   defp describe(term), do: inspect(term, limit: 10, printable_limit: 200)
 
-  @doc false
+  @doc """
+  The kind a manifest or a register entry declares, defaulting to `:capability`.
+
+  One reading for both, because both are documents this build may have written before there were
+  two kinds: a manifest decoded out of the store with no `:kind` key, and a checkpoint entry
+  whose struct default is `nil`. Neither is a policy — a policy is something a manifest says
+  positively — so anything that is not `:policy` is a capability, which is where every such
+  record has always been read.
+  """
   @spec kind_of(Artifact.t() | map()) :: :capability | :policy
-  def kind_of(%{kind: kind}) when kind in [:capability, :policy], do: kind
-  def kind_of(_manifest), do: :capability
+  def kind_of(%{kind: :policy}), do: :policy
+  def kind_of(_capability_or_unstated), do: :capability
 end

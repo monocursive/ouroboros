@@ -20,6 +20,8 @@ defmodule Ouroboros.Wasm.PolicyEngineTest do
   alias Ouroboros.Upgrade.Rollout.Registry
   alias Ouroboros.Wasm.{Artifact, PolicyEngine, Pool, Store}
 
+  @signer "wasm-policy-engine-test-key"
+
   @moduletag :capture_log
 
   # A helper whose `worlds` does not include this node's is refused at the handshake, so the
@@ -45,7 +47,9 @@ defmodule Ouroboros.Wasm.PolicyEngineTest do
           :permissions_ledger,
           :wasm_policy,
           :wasm_policy_opts,
-          :policy_allowable_tools
+          :policy_allowable_tools,
+          :policy_decision_timeout_ms,
+          :upgrade_trust_policy
         ],
         &{&1, Application.get_env(:ouroboros, &1)}
       )
@@ -127,8 +131,9 @@ defmodule Ouroboros.Wasm.PolicyEngineTest do
       assert stated =~ "the second instance answered"
 
       # And the recovery is the whole lifecycle, in order, with the world named at both ends.
-      assert ["call", "drop", "load", "instantiate", "call"] =
-               requests(env) |> Enum.map(& &1["method"])
+      # No blanket `drop` and no second wait: `unknown_instance` is the one refusal a second
+      # attempt can fix, and there is nothing standing to drop.
+      assert ["call", "load", "instantiate", "call"] = requests(env) |> Enum.map(& &1["method"])
 
       load = env |> requests() |> Enum.find(&(&1["method"] == "load"))
       instantiate = env |> requests() |> Enum.find(&(&1["method"] == "instantiate"))
@@ -260,13 +265,19 @@ defmodule Ouroboros.Wasm.PolicyEngineTest do
       end
     end
 
-    test "a verdict this node cannot read is an ask" do
+    test "a verdict this node cannot read is an ask, even for a tool the operator listed" do
+      # The listed tool is the point: an `allow` for `bash` *is* honoured here, so a reader that
+      # took any string as a decision would turn every one of these into a resolved call.
+      Application.put_env(:ouroboros, :policy_allowable_tools, ["bash"])
+
       for reply <- [
             ~s(not json at all),
             ~s([1,2,3]),
             ~s({"decision":"maybe","rule":"r"}),
             ~s({"rule":"no decision named"}),
             ~s({"decision":"ALLOW","rule":"case matters"}),
+            ~s({"decision":"anything at all","rule":"r"}),
+            ~s({"decision":"allow","rule":"r","extra":1}),
             ~s("just a string")
           ] do
         live_policy(evaluate: [result(%{"payload" => reply, "fuel_used" => 1})])
@@ -315,11 +326,12 @@ defmodule Ouroboros.Wasm.PolicyEngineTest do
       assert String.length(rule) <= PolicyEngine.max_rule_chars()
     end
 
-    test "a verdict with no rule at all still states something" do
+    test "a verdict with no rule at all is not a verdict" do
+      # `rule` is required by the grammar: a refusal with no stated reason is one an operator
+      # cannot act on, and the SDK emits both keys for every verdict it builds.
       live_policy(evaluate: [result(verdict("deny", nil))])
 
-      assert {:deny, stated} = PolicyEngine.evaluate(@bash)
-      assert stated =~ "the component stated no rule"
+      assert {:ask, :no_rule} = PolicyEngine.evaluate(@bash)
     end
   end
 
@@ -402,16 +414,31 @@ defmodule Ouroboros.Wasm.PolicyEngineTest do
 
     {:ok, %{sha256: sha}} = Store.put(bytes, nil, root: root)
 
+    kind = Keyword.get(opts, :kind, :policy)
+
     {:ok, artifact} =
       Artifact.build(bytes,
         name: "guard",
         epoch: System.unique_integer([:positive, :monotonic]) + 1_000_000,
-        kind: Keyword.get(opts, :kind, :policy),
+        kind: kind,
         imports: ["log"],
         author: "test-agent"
       )
 
-    {:ok, _manifest} = Store.put_manifest(artifact, root: root)
+    # Signed, and this node's trust policy pointed at the key — because the engine verifies the
+    # manifest against it before it loads anything (W15 review H3). A fixture that skipped this
+    # would be testing an engine that skipped it too.
+    {:ok, signed} = signature(artifact, Keyword.get(opts, :signed?, true))
+    {:ok, _manifest} = Store.put_manifest(signed, root: root)
+
+    # A planted checkpoint: the register row names bytes the signed manifest does not describe.
+    register_sha =
+      if Keyword.get(opts, :plant_other_sha, false) do
+        {:ok, %{sha256: planted}} = Store.put(bytes <> " and not these", nil, root: root)
+        planted
+      else
+        sha
+      end
 
     registry = start_registry!()
 
@@ -422,7 +449,8 @@ defmodule Ouroboros.Wasm.PolicyEngineTest do
           module: "wasm/guard",
           epoch: artifact.epoch,
           nodes: [node()],
-          component_sha256: sha
+          component_sha256: register_sha,
+          kind: Keyword.get(opts, :register_kind, kind)
         },
         registry
       )
@@ -441,7 +469,44 @@ defmodule Ouroboros.Wasm.PolicyEngineTest do
       pool: pool
     )
 
-    %{sha: sha, journal: journal, pool: pool, registry: registry, store_root: root}
+    %{
+      sha: sha,
+      register_sha: register_sha,
+      journal: journal,
+      pool: pool,
+      registry: registry,
+      store_root: root,
+      artifact_id: artifact.id
+    }
+  end
+
+  # A signature this node will accept, by pointing its trust policy at a key made here. Passing
+  # `signed?: false` leaves the manifest unsigned, which is what a store somebody else wrote
+  # looks like — and which the engine must refuse.
+  defp signature(artifact, false) do
+    # This checkout's test environment allows unsigned artifacts, so "unverifiable" has to be
+    # arranged rather than assumed: a trust policy that admits nothing unsigned and trusts
+    # nobody is what a node whose store somebody else wrote to looks like.
+    Application.put_env(:ouroboros, :upgrade_trust_policy,
+      allow_unsigned: false,
+      trusted_signers: %{}
+    )
+
+    {:ok, artifact}
+  end
+
+  defp signature(artifact, true) do
+    {public, private} = :crypto.generate_key(:eddsa, :ed25519, :crypto.strong_rand_bytes(32))
+
+    Application.put_env(:ouroboros, :upgrade_trust_policy,
+      allow_unsigned: false,
+      trusted_signers: %{@signer => public}
+    )
+
+    value =
+      :crypto.sign(:eddsa, :none, Artifact.signing_payload(artifact, @signer), [private, :ed25519])
+
+    Artifact.with_signature(artifact, %{signer: @signer, value: value})
   end
 
   defp result(map) when is_map(map), do: "result " <> JSON.encode!(map)
@@ -467,6 +532,13 @@ defmodule Ouroboros.Wasm.PolicyEngineTest do
   # `Ouroboros.Wasm.CapabilityTest`'s scripted helper, with `evaluate` in place of the message
   # export: answers each method out of its own plan file, one line per request, and journals
   # every frame it saw.
+  # A ledger that cannot record anything, so an honoured verdict has nowhere to be written.
+  defmodule DeadLedger do
+    @moduledoc false
+    def record_settled(_attrs, _ledger), do: {:error, :ledger_is_gone}
+    def record_denied(_attrs, _ledger), do: {:error, :ledger_is_gone}
+  end
+
   defp write_helper(dir, journal, plans) do
     files =
       Map.new([:evaluate, :instantiate, :load, :drop], fn method ->
@@ -487,6 +559,7 @@ defmodule Ouroboros.Wasm.PolicyEngineTest do
       method = $0
       sub(/.*"method":"/, "", method)
       sub(/".*/, "", method)
+      if (method == "call" && #{if Keyword.get(plans, :silent?, false), do: 1, else: 0}) { next }
       file = ""
       if (method == "call") { file = "#{files.evaluate}" } else if (method == "instantiate") { file = "#{files.instantiate}" } else if (method == "load") { file = "#{files.load}" } else if (method == "drop") { file = "#{files.drop}" }
       plan = ""
@@ -550,5 +623,262 @@ defmodule Ouroboros.Wasm.PolicyEngineTest do
     File.mkdir_p!(dir)
     on_exit(fn -> File.rm_rf(dir) end)
     dir
+  end
+
+  ## ── one reading of a verdict, on both sides of the wire (review H1) ───────────────────
+
+  describe "the verdict grammar" do
+    @fixture Path.expand("../support/wasm_golden/policy_verdicts.json", __DIR__)
+
+    test "every case in the shared fixture reads the way this side reads it" do
+      document = @fixture |> File.read!() |> JSON.decode!()
+
+      assert document["max_document_bytes"] == PolicyEngine.max_verdict_bytes()
+      cases = document["cases"]
+      assert length(cases) >= 30, "a grammar this strict earns its cases"
+
+      for %{"raw" => raw, "decision" => expected, "why" => why} <- cases do
+        got = PolicyEngine.read_verdict(raw)
+
+        case expected do
+          nil ->
+            assert got == :unreadable,
+                   "#{inspect(raw)} must be unreadable (#{why}): #{inspect(got)}"
+
+          word ->
+            assert {:ok, decision, rule} = got, "#{inspect(raw)} must read (#{why})"
+            assert Atom.to_string(decision) == word, "#{inspect(raw)} (#{why})"
+            assert is_binary(rule)
+        end
+      end
+    end
+
+    test "a duplicated key is the case both readers used to disagree about" do
+      # First-wins here, last-wins in serde_json: `ouro wasm policy` showed one word and this
+      # node answered the other, and in the allow/ask order it turned a reviewed ask into an
+      # honoured allow. Delete the sorted-key check in `verdict_of/1` and this goes red.
+      for raw <- [
+            ~s({"decision":"ask","decision":"deny","rule":"r"}),
+            ~s({"decision":"allow","decision":"ask","rule":"r"}),
+            ~s({"decision":"deny","rule":"a","rule":"b"})
+          ] do
+        assert PolicyEngine.read_verdict(raw) == :unreadable, raw
+      end
+    end
+
+    test "and a duplicated key reaches the seam as an ask, whatever the operator listed" do
+      Application.put_env(:ouroboros, :policy_allowable_tools, ["bash"])
+
+      live_policy(
+        evaluate: [
+          result(%{
+            "payload" => ~s({"decision":"allow","decision":"ask","rule":"first wins?"}),
+            "fuel_used" => 1
+          })
+        ]
+      )
+
+      assert {:ask, :no_rule} = PolicyEngine.evaluate(@bash)
+    end
+
+    test "a verdict larger than the grammar admits is refused without being decoded" do
+      big = ~s({"decision":"allow","rule":") <> String.duplicate("r", 2_000) <> ~s("})
+      assert byte_size(big) > PolicyEngine.max_verdict_bytes()
+      assert PolicyEngine.read_verdict(big) == :unreadable
+    end
+  end
+
+  ## ── the delegate's answer is the answer (review e5) ───────────────────────────────────
+
+  describe "a component is reached only where the rules said nothing at all" do
+    test "an operator's ask rule does not reach the component" do
+      env = live_policy(evaluate: [result(verdict("deny", "never reached"))])
+      Application.put_env(:ouroboros, :permissions, [{"Bash(curl *)", :ask}])
+
+      # `{:ask, :rule}` is a rule speaking, not silence. Widen `consult/2`'s guard to any ask
+      # and a component gets to answer over an operator who said "ask me".
+      assert {:ask, :rule} = PolicyEngine.evaluate(@bash)
+      assert requests(env) == []
+    end
+
+    test "an allow the delegate could not record does not reach the component either" do
+      env = live_policy(evaluate: [result(verdict("deny", "never reached"))])
+      Application.put_env(:ouroboros, :permissions, [{"Bash(curl *)", :allow}])
+      Application.put_env(:ouroboros, :permissions_ledger, :a_ledger_that_is_not_running)
+
+      # No pipe: `Control.Permissions` will not let an allow rule resolve a command line whose
+      # shell metacharacters defeat prefix matching, which is its own rule and not this one's.
+      assert {:ask, :unrecordable} =
+               PolicyEngine.evaluate(%{@bash | command: "curl https://example.test"})
+
+      assert requests(env) == []
+    end
+  end
+
+  ## ── an honoured verdict is one the ledger holds (review H2/B2) ────────────────────────
+
+  describe "a verdict nobody can account for" do
+    test "an allow whose ledger entry cannot be written is downgraded to ask" do
+      # `Control.Permissions`' own rule, applied to a component's verdict: an approval nobody
+      # can later account for has not been granted. Discard the result of `Permissions.record/2`
+      # in `decided/6` and the allow stands with a dead ledger.
+      live_policy(evaluate: [result(verdict("allow", "policy said fine"))])
+      Application.put_env(:ouroboros, :policy_allowable_tools, ["bash"])
+      Application.put_env(:ouroboros, :permissions_ledger, DeadLedger)
+
+      assert {:ask, :unrecordable} = PolicyEngine.evaluate(@bash)
+    end
+
+    test "a deny whose ledger entry cannot be written still denies" do
+      # The other half of the same rule, and the direction that matters: refusing without an
+      # audit entry is still refusing, and turning a deny into an ask would be a widening.
+      live_policy(evaluate: [result(verdict("deny", "no network from a shell"))])
+      Application.put_env(:ouroboros, :permissions_ledger, DeadLedger)
+
+      assert {:deny, stated} = PolicyEngine.evaluate(@bash)
+      assert stated =~ "no network from a shell"
+    end
+  end
+
+  ## ── the row and the manifest have to agree (review H3/B3) ─────────────────────────────
+
+  describe "provenance: what the register says has to be what somebody signed" do
+    test "a row naming bytes the signed manifest does not describe is refused" do
+      # The planted checkpoint: a genuine policy manifest's `artifact_id`, and some other
+      # component's sha in the same row. The engine loads the *row's* sha, so without this
+      # check those bytes became the node's permission engine. Delete `matches_entry/2`'s
+      # sha comparison and the planted bytes answer.
+      env =
+        live_policy(
+          [evaluate: [result(verdict("deny", "the planted bytes answered"))]],
+          plant_other_sha: true
+        )
+
+      refute env.register_sha == env.sha
+
+      assert {:ask, :no_rule} = PolicyEngine.evaluate(@bash)
+      assert requests(env) == [], "nothing is loaded and nothing is instantiated"
+    end
+
+    test "a manifest this node cannot verify is refused" do
+      # Unsigned, which is what a store somebody else wrote looks like. Drop the
+      # `Verifier.verify_manifest/2` call and an unsigned manifest is provenance.
+      env = live_policy([evaluate: [result(verdict("deny", "unsigned"))]], signed?: false)
+
+      assert {:ask, :no_rule} = PolicyEngine.evaluate(@bash)
+      assert requests(env) == []
+    end
+
+    test "a row labelled policy whose verified manifest says capability is refused" do
+      # The register's kind is an index, not a proof: this row says `:policy` and the manifest
+      # it names — signed, verifiable — says `:capability`. Delete `matches_entry/2`'s kind
+      # comparison and a capability answers permission questions.
+      env =
+        live_policy([evaluate: [result(verdict("deny", "wrong kind"))]],
+          kind: :capability,
+          register_kind: :policy
+        )
+
+      assert {:ask, :no_rule} = PolicyEngine.evaluate(@bash)
+      assert requests(env) == []
+    end
+
+    test "the kind a document does not state is the capability it has always been" do
+      assert PolicyEngine.kind_of(%{kind: :policy}) == :policy
+      assert PolicyEngine.kind_of(%{kind: :capability}) == :capability
+      # A manifest decoded out of a store that predates two kinds, and a register entry whose
+      # struct default is nil. Neither is a policy — a policy is something a manifest says.
+      assert PolicyEngine.kind_of(%{kind: nil}) == :capability
+      assert PolicyEngine.kind_of(%{}) == :capability
+      assert PolicyEngine.kind_of(%{kind: "policy"}) == :capability
+    end
+  end
+
+  ## ── one decision, bounded (review H4/C2) ──────────────────────────────────────────────
+
+  describe "a helper that does not answer" do
+    @tag timeout: 60_000
+    test "costs one bounded wait and one round trip, not two" do
+      Application.put_env(:ouroboros, :policy_decision_timeout_ms, 1_000)
+      env = live_policy(silent?: true)
+
+      started = System.monotonic_time(:millisecond)
+      assert {:ask, :no_rule} = PolicyEngine.evaluate(@bash)
+      elapsed = System.monotonic_time(:millisecond) - started
+
+      # The engine's own bound, not the pool's instance deadline plus the transport margin —
+      # and not that twice, which is what the blanket retry cost. Remove the `bounded/2` wrapper
+      # in `ask_component/4` and this waits fifteen seconds instead of one.
+      assert elapsed < 5_000,
+             "one decision took #{elapsed}ms against a #{PolicyEngine.decision_timeout()}ms bound"
+
+      assert Enum.count(requests(env), &(&1["method"] == "call")) == 1,
+             "a decision that timed out is not retried into a second full wait"
+    end
+
+    test "the bound is the operator's, and a malformed one falls back rather than widening" do
+      Application.put_env(:ouroboros, :policy_decision_timeout_ms, 250)
+      assert PolicyEngine.decision_timeout() == 250
+
+      for invalid <- [0, -1, "5000", nil, 10 * 60 * 1_000] do
+        Application.put_env(:ouroboros, :policy_decision_timeout_ms, invalid)
+        assert PolicyEngine.decision_timeout() == 5_000, inspect(invalid)
+      end
+    end
+  end
+
+  ## ── what a credential-shaped value costs to send (review M5) ──────────────────────────
+
+  describe "redaction is by key, by shape, and by this node's own environment" do
+    test "the well-known token shapes do not travel, and the command line still reads" do
+      env = live_policy(evaluate: [result(verdict("ask", "seen"))])
+
+      command =
+        ~s(AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY aws s3 cp .; ) <>
+          ~s(curl -H "X-Api-Key: sk-live-9f3a2b1c" -H "Authorization: Bearer abc123def456" x; ) <>
+          ~s(echo "-----BEGIN OPENSSH PRIVATE KEY-----b3BlbnNzaA==-----END OPENSSH PRIVATE KEY-----" > k; ) <>
+          ~s(export AKIAIOSFODNN7EXAMPLE; gh auth login --with-token ghp_deadbeefdeadbeef1234)
+
+      PolicyEngine.evaluate(%{
+        @bash
+        | command: command,
+          context: %{
+            "note" => "GITHUB_TOKEN=ghp_aaaaaaaaaaaaaaaaaaaa",
+            "api_key" => "hunter2hunter2"
+          }
+      })
+
+      document =
+        env
+        |> requests()
+        |> Enum.find(&(&1["method"] == "call"))
+        |> get_in(["params", "payload"])
+        |> JSON.decode!()
+
+      sent = document["input"]["command"]
+
+      # Every one of these reached a component verbatim before this pass existed.
+      for secret <- [
+            "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY",
+            "sk-live-9f3a2b1c",
+            "abc123def456",
+            "b3BlbnNzaA==",
+            "AKIAIOSFODNN7EXAMPLE",
+            "ghp_deadbeefdeadbeef1234"
+          ] do
+        refute sent =~ secret, "#{secret} still reaches the component: #{sent}"
+      end
+
+      assert document["context"]["note"] == "GITHUB_TOKEN=[REDACTED]"
+      assert document["context"]["api_key"] == "[REDACTED]"
+
+      # And the command is still a command: a policy that may deny `curl` has to read the
+      # `curl`, which is the same sentence D8 makes about what a hook may see. The quotes
+      # survive too — the harness's own `Bearer` pattern ate the closing one.
+      assert sent =~ "curl"
+      assert sent =~ "aws s3 cp"
+      assert sent =~ ~s("X-Api-Key: [REDACTED]")
+      assert sent =~ ~s("Authorization: Bearer [REDACTED]")
+    end
   end
 end

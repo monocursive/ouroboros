@@ -293,7 +293,7 @@ fn inspect_reports_the_world_the_shape_and_one_verdict() {
         // The shape the compiler gate measured, beside the ceiling it measured it against.
         .says("functions")
         .says("code_bytes")
-        .says("verdict: admitted — as a capability and as a hook component");
+        .says("verdict: admitted as a capability — and as a hook component");
 }
 
 #[test]
@@ -1437,7 +1437,8 @@ fn inspect_names_the_refusal_for_a_component_that_wants_the_environment() {
     );
 
     ran.refused()
-        .says("verdict: neither — refused undefined_import")
+        .says("verdict: neither world")
+        .says("undefined_import")
         .says("wasi:cli/environment")
         // `world: unknown` and not the world id: it declares an import this world does not.
         .says("world:   unknown");
@@ -2515,6 +2516,81 @@ fn policy_refuses_a_capability_component() {
     )
     .refused()
     .stderr_says("unsupported_world");
+}
+
+/// `ouro wasm inspect` admits a policy component, as one.
+///
+/// It used to ask a single question — "would this load as a capability?" — so every policy
+/// component came back `verdict: neither` with a non-zero exit: a command telling an author
+/// their perfectly good component was nothing at all (W15 review M6). Both worlds are asked
+/// now, and the verdict line and `--json`'s `admitted_as` say which took it.
+#[test]
+fn inspect_admits_a_policy_component_as_one() {
+    let Some(live) = live() else { return };
+    let Some(component) = policy_example() else {
+        return;
+    };
+    let component = component.to_string_lossy().into_owned();
+
+    let ran = ouro(&live, &repository_root(), &["wasm", "inspect", &component]);
+    ran.ok()
+        .says("world:   ouroboros:policy@0.1.0")
+        .says("verdict: admitted as a policy component")
+        .does_not_say("neither");
+
+    let ran = ouro(
+        &live,
+        &repository_root(),
+        &["wasm", "inspect", &component, "--json"],
+    );
+    ran.ok();
+    let json = ran.json();
+    assert_eq!(json["admitted_as"], "ouroboros:policy@0.1.0");
+    assert_eq!(json["admitted_as_policy"], true);
+    assert_eq!(json["admitted_as_capability"], false);
+    assert_eq!(json["refusal"], Value::Null);
+
+    // And the acceptance guest is still the capability it always was, with both booleans the
+    // other way round.
+    let ran = ouro(
+        &live,
+        &repository_root(),
+        &["wasm", "inspect", &live.guest.to_string_lossy(), "--json"],
+    );
+    ran.ok();
+    let json = ran.json();
+    assert_eq!(json["admitted_as"], "ouroboros:capability@0.1.0");
+    assert_eq!(json["admitted_as_policy"], false);
+}
+
+/// A request the node would never put to a component is refused here rather than answered.
+///
+/// The engine does not truncate an oversize request — it does not send it, and answers `ask`.
+/// A command that happily asked a component about a 200 KB request was showing an author a
+/// verdict for a call that will never be made (W15 review M7).
+#[test]
+fn policy_refuses_a_request_the_engine_would_not_send() {
+    let Some(live) = live() else { return };
+    let Some(component) = policy_example() else {
+        return;
+    };
+
+    let padding = "x".repeat(200 * 1024);
+    let request = format!(r#"{{"tool":"bash","input":{{"command":"curl {padding}"}}}}"#);
+
+    ouro(
+        &live,
+        &repository_root(),
+        &[
+            "wasm",
+            "policy",
+            &component.to_string_lossy(),
+            "--request",
+            &request,
+        ],
+    )
+    .refused()
+    .stderr_says("is not truncated and sent");
 }
 
 /// `--request` takes JSON, a file, or `-`; a request that is not a JSON object is refused

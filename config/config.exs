@@ -323,10 +323,19 @@ config :ouroboros,
 #     signature is provenance, not trust (D5). A `deny` always stands, an `ask` always
 #     stands, and an `allow` for a tool nobody listed is read as `ask`. Widening this is an
 #     operator's deliberate act, tool by tool.
+#   * `:policy_decision_timeout_ms` bounds **one decision**, end to end. This is a synchronous
+#     round trip through the node's one shared `Ouroboros.Wasm.Pool`, in front of every tool
+#     call the rules did not decide, so the cost is worth stating plainly: one such decision is
+#     one helper round trip on a pool every capability on this node also uses, and a wedged
+#     helper is bounded here rather than by the pool's instance deadline plus its transport
+#     margin. On expiry the answer is `ask` and the instance is dropped; only the refusal that
+#     means "the instance I remember is gone" is retried, because any other retry doubles what
+#     a wedged helper costs. Five seconds, and a value outside 1..60_000 falls back to it.
 config :ouroboros,
   permissions_engine: Ouroboros.Control.Permissions,
   wasm_policy: nil,
-  policy_allowable_tools: []
+  policy_allowable_tools: [],
+  policy_decision_timeout_ms: 5_000
 
 # The two facts about the web endpoint that are genuinely compile-time, and no others.
 # Everything runtime — the bind, the port, the cookie key, the origin policy — is handed

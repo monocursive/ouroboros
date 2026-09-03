@@ -151,6 +151,36 @@ defmodule Ouroboros.Wasm.PolicyKindTest do
       assert {:refused, {:invalid_eval_spec, _reason}} = evaluate(artifact)
     end
 
+    test "a spec whose every case expects an allow certifies nothing" do
+      # An `allow` is the one verdict this node does not honour by default, so a component can
+      # satisfy such a spec on every target and still be the only thing it must never be. The
+      # signed spec *is* the test story for this lane (D12), and a test story with no refusal in
+      # it is a claim that the component said yes twice. Delete `certifies_a_refusal/1` and
+      # this goes green on a spec that proves nothing.
+      only_allows = %{
+        cases: [
+          %{request: %{"tool" => "read"}, expect: %{decision: :allow}},
+          %{request: %{"tool" => "ls"}, expect: %{decision: :allow}}
+        ]
+      }
+
+      assert {:error, {:invalid_eval_spec, :no_case_expects_a_refusal}} =
+               PolicyEngine.validate_eval(only_allows)
+
+      {:ok, artifact} = build(kind: :policy, eval: only_allows)
+      assert {:refused, {:invalid_eval_spec, :no_case_expects_a_refusal}} = evaluate(artifact)
+
+      # One refusal is enough, in either spelling.
+      for refusal <- [:deny, :ask] do
+        spec =
+          put_in(only_allows.cases, [
+            %{request: %{"tool" => "bash"}, expect: %{decision: refusal}}
+          ])
+
+        assert {:ok, _valid} = PolicyEngine.validate_eval(spec)
+      end
+    end
+
     test "a policy's cases are bounded and named" do
       for {spec, expected} <- [
             {%{cases: []}, :cases_required},
@@ -187,6 +217,90 @@ defmodule Ouroboros.Wasm.PolicyKindTest do
         build(eval: @capability_eval, start: %{id: "wasm/guard", config: "{}"})
 
       assert {:ok, %{start: %{id: "wasm/guard"}}} = evaluate(artifact)
+    end
+
+    test "the verifier refuses a kind and a world that disagree, on the loading node too" do
+      # The signer refuses this pair, and so does every node that reads the bundle — one build,
+      # one linker contract, checked at both ends. Compare against `Wasm.world()` in
+      # `Verifier.verify_world/1` and a policy manifest carrying the capability world verifies.
+      {:ok, artifact} = build(kind: :policy, world: Wasm.world(), eval: @policy_eval)
+
+      assert {:error, {:world_not_supported, world}} =
+               Ouroboros.Wasm.Verifier.verify_manifest(artifact, allow_unsigned: true)
+
+      assert world == Wasm.world()
+
+      {:ok, artifact} = build(world: Wasm.policy_world(), eval: @capability_eval)
+
+      assert {:error, {:world_not_supported, _world}} =
+               Ouroboros.Wasm.Verifier.verify_manifest(artifact, allow_unsigned: true)
+
+      # And a kind outside the closed set is refused before the world is even looked at: it
+      # arrives from a manifest in a file, and `:safe` hands back any atom this VM holds.
+      forged = %{artifact | kind: :erlang, world: Wasm.world()}
+
+      assert {:error, {:invalid_component_kind, _rendered}} =
+               Ouroboros.Wasm.Verifier.verify_manifest(forged, allow_unsigned: true)
+    end
+
+    test "the register carries the kind, and refuses one it does not implement" do
+      # W15 review H3. The kind is recorded at deploy from the manifest the rollout verified, so
+      # `Rollout.live/1` filters without opening a file per entry — and a caller naming a third
+      # kind is refused rather than defaulted.
+      registry = registry()
+
+      {:ok, entry} =
+        Registry.deploying(
+          %{
+            artifact_id: "policy-entry",
+            module: "wasm/guard",
+            epoch: epoch(),
+            nodes: [node()],
+            component_sha256: String.duplicate("a", 64),
+            kind: :policy
+          },
+          registry
+        )
+
+      assert entry.kind == :policy
+
+      {:ok, capability} =
+        Registry.deploying(
+          %{
+            artifact_id: "capability-entry",
+            module: "wasm/greeter",
+            epoch: epoch(),
+            nodes: [node()],
+            component_sha256: String.duplicate("b", 64)
+          },
+          registry
+        )
+
+      # An unstated kind is the capability every entry written before W15 was.
+      assert capability.kind == :capability
+
+      assert {:error, {:invalid_attribute, :kind, _rendered}} =
+               Registry.deploying(
+                 %{
+                   artifact_id: "third",
+                   module: "wasm/other",
+                   epoch: epoch(),
+                   nodes: [node()],
+                   component_sha256: String.duplicate("c", 64),
+                   kind: :hook
+                 },
+                 registry
+               )
+
+      {:ok, _live} = Registry.mark("policy-entry", :live, [], registry)
+      {:ok, _live} = Registry.mark("capability-entry", :live, [], registry)
+
+      # And the listing filters on the row rather than on a file it opens per entry.
+      capabilities = Rollout.live(registry: registry)
+      policies = Rollout.live(registry: registry, kind: :policy)
+
+      assert Enum.map(capabilities, & &1.module) == ["wasm/greeter"]
+      assert Enum.map(policies, & &1.module) == ["wasm/guard"]
     end
 
     test "the name charset is the kind-independent one it always was" do

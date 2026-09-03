@@ -1,0 +1,181 @@
+{
+  "note": "One reading of a policy component's verdict, pinned for both implementations (docs/WASM.md D20, W15 review H1). `Ouroboros.Wasm.PolicyEngine.read_verdict/1` and `ouro`'s `wasm_cli::PolicyVerdict::parse` are separate readers of the same untrusted document, and a component that could make them disagree could show an operator one word and hand the node another. `decision` here is the word both must reach; null is `unreadable`, which the node answers as `ask` and the CLI prints as such.",
+  "max_document_bytes": 1024,
+  "cases": [
+    {
+      "why": "a verdict is an object with exactly `decision` and `rule`",
+      "raw": "{\"decision\":\"deny\",\"rule\":\"no network from a shell\"}",
+      "decision": "deny"
+    },
+    {
+      "why": "the other two decisions read the same way",
+      "raw": "{\"decision\":\"allow\",\"rule\":\"r\"}",
+      "decision": "allow"
+    },
+    {
+      "why": "",
+      "raw": "{\"decision\":\"ask\",\"rule\":\"r\"}",
+      "decision": "ask"
+    },
+    {
+      "why": "whitespace between tokens is JSON, not a second grammar",
+      "raw": "{ \"decision\" : \"ask\" , \"rule\" : \"r\" }",
+      "decision": "ask"
+    },
+    {
+      "why": "key order is not part of the grammar",
+      "raw": "{\"rule\":\"r\",\"decision\":\"deny\"}",
+      "decision": "deny"
+    },
+    {
+      "why": "a repeated `decision` is the whole reason this grammar is strict: Elixir's decoder takes the first and serde_json takes the last, so two readers of one document disagreed about what a component said",
+      "raw": "{\"decision\":\"ask\",\"decision\":\"deny\",\"rule\":\"r\"}",
+      "decision": null
+    },
+    {
+      "why": "and in the other order, which is the direction that turned a reviewed ask into an honoured allow",
+      "raw": "{\"decision\":\"allow\",\"decision\":\"ask\",\"rule\":\"r\"}",
+      "decision": null
+    },
+    {
+      "why": "a repeated `rule` is refused for the same reason",
+      "raw": "{\"decision\":\"deny\",\"rule\":\"a\",\"rule\":\"b\"}",
+      "decision": null
+    },
+    {
+      "why": "`rule` is required: a verdict with no stated reason is a refusal nobody can act on",
+      "raw": "{\"decision\":\"deny\"}",
+      "decision": null
+    },
+    {
+      "why": "`decision` is required",
+      "raw": "{\"rule\":\"r\"}",
+      "decision": null
+    },
+    {
+      "why": "a third key is not ignored — the grammar is closed",
+      "raw": "{\"decision\":\"deny\",\"rule\":\"r\",\"extra\":1}",
+      "decision": null
+    },
+    {
+      "why": "including one that merely looks like the second",
+      "raw": "{\"decision\":\"allow\",\"rule\":\"r\",\"decision2\":\"x\"}",
+      "decision": null
+    },
+    {
+      "why": "`decision` is exactly one of three lower-case words",
+      "raw": "{\"decision\":\"Allow\",\"rule\":\"r\"}",
+      "decision": null
+    },
+    {
+      "why": "",
+      "raw": "{\"decision\":\"ALLOW\",\"rule\":\"r\"}",
+      "decision": null
+    },
+    {
+      "why": "leading space",
+      "raw": "{\"decision\":\" allow\",\"rule\":\"r\"}",
+      "decision": null
+    },
+    {
+      "why": "trailing space",
+      "raw": "{\"decision\":\"allow \",\"rule\":\"r\"}",
+      "decision": null
+    },
+    {
+      "why": "a control character inside the word",
+      "raw": "{\"decision\":\"allow\\u0000\",\"rule\":\"r\"}",
+      "decision": null
+    },
+    {
+      "why": "a decision that is not a string at all",
+      "raw": "{\"decision\":[\"allow\"],\"rule\":\"r\"}",
+      "decision": null
+    },
+    {
+      "why": "",
+      "raw": "{\"decision\":{\"allow\":true},\"rule\":\"r\"}",
+      "decision": null
+    },
+    {
+      "why": "",
+      "raw": "{\"decision\":1,\"rule\":\"r\"}",
+      "decision": null
+    },
+    {
+      "why": "",
+      "raw": "{\"decision\":true,\"rule\":\"r\"}",
+      "decision": null
+    },
+    {
+      "why": "",
+      "raw": "{\"decision\":null,\"rule\":\"r\"}",
+      "decision": null
+    },
+    {
+      "why": "keys are case-sensitive",
+      "raw": "{\"DECISION\":\"allow\",\"rule\":\"r\"}",
+      "decision": null
+    },
+    {
+      "why": "`rule` must be a string",
+      "raw": "{\"decision\":\"deny\",\"rule\":7}",
+      "decision": null
+    },
+    {
+      "why": "",
+      "raw": "{\"decision\":\"deny\",\"rule\":null}",
+      "decision": null
+    },
+    {
+      "why": "a verdict is an object",
+      "raw": "[\"deny\"]",
+      "decision": null
+    },
+    {
+      "why": "a JSON string that spells one is not one",
+      "raw": "\"{\\\"decision\\\":\\\"allow\\\",\\\"rule\\\":\\\"r\\\"}\"",
+      "decision": null
+    },
+    {
+      "why": "",
+      "raw": "17",
+      "decision": null
+    },
+    {
+      "why": "",
+      "raw": "null",
+      "decision": null
+    },
+    {
+      "why": "nothing at all",
+      "raw": "",
+      "decision": null
+    },
+    {
+      "why": "not JSON",
+      "raw": "deny",
+      "decision": null
+    },
+    {
+      "why": "a second document after the first is trailing data, not a verdict",
+      "raw": "{\"decision\":\"allow\",\"rule\":\"r\"} {\"decision\":\"allow\",\"rule\":\"r\"}",
+      "decision": null
+    },
+    {
+      "why": "a byte-order mark is not whitespace",
+      "raw": "﻿{\"decision\":\"allow\",\"rule\":\"r\"}",
+      "decision": null
+    },
+    {
+      "why": "a rule at the grammar's own ceiling still reads",
+      "raw": "{\"decision\":\"deny\",\"rule\":\"rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr\"}",
+      "decision": "deny"
+    },
+    {
+      "why": "a document past it is refused without being decoded",
+      "raw": "{\"decision\":\"allow\",\"rule\":\"rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr\"}",
+      "decision": null
+    }
+  ]
+}

@@ -941,14 +941,37 @@ single import, and the helper is told at `load` which of them a set of bytes is 
 as. A capability offered as a policy is refused `unsupported_world`, and so is the reverse
 (D21).
 
-**What a verdict is worth.** `{"decision": "allow"|"deny"|"ask", "rule": "<= 200 chars>"}`.
+**What a verdict is worth.** A verdict is an object with **exactly** the keys `decision` and
+`rule`, neither repeated, `decision` exactly one of the three lower-case words, `rule` a string,
+and the whole document at most 1 KiB. Anything else is unreadable, which is `ask`. The grammar
+is that strict because two implementations read it: Elixir's JSON decoder keeps the *first*
+occurrence of a duplicated key and `serde_json` keeps the *last*, so
+`{"decision":"ask","decision":"deny"}` was `ask` on the node and `deny` in `ouro wasm policy` —
+a component could show an operator one word and hand the runtime another, and in the other
+order it turned a reviewed `ask` into an honoured `allow`. Both readers are pinned to
+`test/support/wasm_golden/policy_verdicts.json` by a test on each side, the way W10 pinned the
+hook narrowing (D14).
 A `deny` stands. An `ask` stands, and is the same question the node was already going to ask.
-An `allow` is honoured **only** for the tools an operator listed in
-`config :ouroboros, :policy_allowable_tools`, which is empty by default; everywhere else it is
-read as `ask`. Everything else is `ask` too — a trap, a deadline, a refusal to link, a verdict
-that is not JSON, a `decision` outside the vocabulary, a request too large to hand over whole,
-and the case where no policy is configured at all. **There is no failure mode that produces an
-`allow`** (D20).
+A `deny` stands, an `ask` stands, and an `allow` is honoured **only** for the tools an operator
+listed in `config :ouroboros, :policy_allowable_tools`, which is empty by default; everywhere
+else it is read as `ask`. Everything else is `ask` too — a trap, a deadline, a refusal to link,
+a verdict outside the grammar, a request too large to hand over whole, a register row this node
+cannot tie to a manifest it can verify, and the case where no policy is configured at all.
+**There is no failure mode that produces an `allow`** (D20). An honoured verdict whose ledger
+entry cannot be written follows `Control.Permissions`' own rule: the `allow` becomes
+`{:ask, :unrecordable}`, because an approval nobody can account for has not been granted, while
+the `deny` stands, because refusing without an audit entry is still refusing.
+
+**One decision, bounded.** A consulted decision is a synchronous round trip through the node's
+one shared helper pool, sitting in front of every tool call the rules did not decide — so the
+engine bounds it rather than the pool: `config :ouroboros, :policy_decision_timeout_ms`, five
+seconds by default, over the whole decision including a re-instantiate. On expiry the answer is
+`ask`, the instance is dropped so the next request stands a fresh one up, and the warning is
+said once. Only one refusal is retried — `unknown_instance`, which means the instance this
+engine remembers is gone — because every other has already spent the round trip and a second
+would only double the wait. The residual is stated rather than solved: the *decision* is bounded
+here, and the pool's own queue entry drains on the pool's schedule, so an unrelated pool user
+still waits out that one request's deadline.
 
 **Deterministic by construction, not by promise.** The world imports one function, so a policy
 component has no clock, no randomness, no filesystem and no network to be nondeterministic
@@ -958,9 +981,13 @@ long-lived instance per component sha and re-instantiates it after any refusal, 
 
 **What a component sees.** The JSON form of the request `Control.Permissions` already
 normalised — `tool`, `mode`, `input` (the command, the paths, the write paths, the domains),
-`principal`, `workspace`, `context` — with every credential-shaped value redacted by
-`Jido.Harness.Redaction`, the same redaction the durable session projection uses. **It is never
-truncated**: a document over 64 KiB is not sent at all and the engine answers `ask`, because a
+`principal`, `workspace`, `context` — with **credential-shaped keys and well-known token shapes**
+redacted: a map key matching the credential pattern, `Bearer` runs, AWS access key ids, `sk-…`,
+GitHub and Slack token prefixes, PEM private-key blocks, `NAME=value` and `NAME: value` where the
+name is credential-shaped, and every secret value in this node's own environment. That is a
+heuristic and it is worth saying so: a credential in no recognised shape reaches the component,
+and it must — a policy that may deny `curl` has to read the `curl`, which is the same sentence
+D8 makes about what a hook may see. **It is never truncated**: a document over 64 KiB is not sent at all and the engine answers `ask`, because a
 policy shown the first four kilobytes of a command line is one an attacker pads past. Non-scalar
 `context` values are dropped rather than serialised and the dropped keys are named in
 `context_dropped`, so a partial view is visible to the component rather than silent.
@@ -971,10 +998,17 @@ checks the pair, `Wasm.Verifier` checks it again on the loading node, and `Wasm.
 hands the *manifest's* kind to the helper's `load` — which is where a manifest that says one
 thing and bytes that are another meet. A policy manifest may declare no `start` block (there is
 no wrapper agent to start) and its signed `eval` spec is a list of `{request, expect:
-{decision}}` cases run through `evaluate` at deploy, in place of the probe grammar over agent
-state that says nothing about a policy. `Rollout.live/1` reads the kind out of the signed
-manifest rather than out of the register, so the `capability` tool lists capabilities only and
-the engine consults policies only.
+{decision}}` cases run through `evaluate` at deploy, at least one of which must expect a `deny`
+or an `ask`: an `allow` is the verdict this node does not honour by default, so a spec that
+certifies only allows certifies nothing.
+
+The register carries the kind too, recorded at deploy from the manifest the rollout verified, so
+`Rollout.live/1` filters an index rather than opening a file per entry — the `capability` tool
+lists capabilities only, and the engine looks only at policies. That row is a **claim**, and the
+engine treats it as one: before it loads a byte it fetches the manifest the row names, verifies
+it against this node's own trust policy, and holds the manifest's sha to the row's sha and its
+kind to `:policy`. Without that, a planted checkpoint naming a genuine policy manifest and some
+other component's bytes was a permission engine made of those bytes.
 
 **Auditable.** Every decision the engine *makes* — an honoured `deny` or `allow` — is recorded
 through `Control.Permissions.record/2` with `actor: :classifier`, the slot the answer type
@@ -1614,18 +1648,45 @@ machinery — it is a backend, not a lane (D9).
   one escape an operator can open tool by tool because they are the authority that a `read` is
   fine to resolve automatically and this node is not.
 
-  Determinism is the other half, and it is structural rather than aspirational: the world
-  imports one function, so there is no clock, no randomness and no I/O in a policy component to
-  be nondeterministic with. Instance state is the only remaining source and it is the author's;
-  the engine keeps one instance per component sha, and the same request yields the same verdict
-  across two of them — proved in Rust against the real helper
+  **Determinism is a property of the world, not a rule this seam enforces**, and the difference
+  matters. What the world guarantees is that there is nothing to be nondeterministic *with*: one
+  import, so no clock, no randomness, no filesystem, no network. What it does not guarantee is
+  that a given component is a function of its request — the engine keeps one long-lived instance
+  per component sha, so a component that holds state can answer two identical requests
+  differently, and nothing here stops it. Three things stand in for enforcement: the world's
+  poverty, the signed eval spec, which exercises whatever the author is willing to assert about
+  their own component at deploy on every target, and the fact that the only verdict a stateful
+  drift could turn into authority — `allow` — is the one an operator has to list a tool for. The
+  standing proofs are of the stateless example rather than of every component: the same request
+  answering the same across two instances, in Rust against the real helper
   (`the_same_request_yields_the_same_verdict_on_two_instances`) and in Elixir against the real
   deploy (`test/wasm/policy_acceptance_test.exs`).
 
+  **One reading of a verdict.** A verdict is an object with exactly `decision` and `rule`,
+  neither key repeated, `decision` one of three lower-case words, `rule` a string, the whole
+  document ≤ 1 KiB. Strict because there are two readers: Elixir's decoder keeps a duplicated
+  key's first occurrence and `serde_json` keeps its last, so one component could show an operator
+  one word and hand the node another. `test/support/wasm_golden/policy_verdicts.json` pins both.
+
+  **One decision, bounded.** `config :ouroboros, :policy_decision_timeout_ms` (5 s) bounds the
+  whole decision, enforced by the engine in a process it can kill, because the round trip goes
+  through the node's one shared sequential pool and sits in front of every undecided tool call.
+  Expiry is `ask`, the instance is dropped, and only `unknown_instance` is retried — a blanket
+  retry doubled the wait a wedged helper cost.
+
+  **An honoured verdict is one the ledger holds.** `Control.Permissions`' rule, unchanged: an
+  `allow` whose entry cannot be written is `{:ask, :unrecordable}`, because an approval nobody
+  can account for has not been granted; a `deny` stands, because refusing without an audit entry
+  is still refusing and downgrading it would be the one thing this lane never does.
+
   What a component sees is bounded and **never truncated**. The request document is the
   normalised `Control.Permissions.Request` — tool, mode, the command and paths and domains
-  under `input`, the principal, the workspace root, the context keys — redacted by
-  `Jido.Harness.Redaction`, and a document over 64 KiB is not sent at all: the engine answers
+  under `input`, the principal, the workspace root, the context keys — with credential-shaped
+  *keys* and well-known *token shapes* redacted (`Bearer` runs, AWS key ids, `sk-…`, GitHub and
+  Slack prefixes, PEM blocks, `NAME=value` where the name is credential-shaped, and this node's
+  own environment secrets). That last pass is a heuristic and is documented as one: a credential
+  in no recognised shape reaches the component, and has to, because a policy that may deny
+  `curl` needs to read the `curl`. A document over 64 KiB is not sent at all: the engine answers
   `ask` instead. A policy shown the first four kilobytes of a command line is a policy an
   attacker pads past, and a partial view is worse than no view because it produces a confident
   wrong answer. Non-scalar `context` values are dropped and the dropped keys are named, so what
@@ -1659,19 +1720,35 @@ machinery — it is a backend, not a lane (D9).
   which checks the bytes against *that* world. A `:policy` manifest over a capability component
   is `unsupported_world` at stage, before the register is marked and before anything is
   instantiated. Signing it rather than configuring it also makes the derived facts follow: a
-  policy declares no `start` block, its eval spec is a list of decision cases rather than a
-  probe list over agent state, and `Rollout.live/1` reads the kind out of the manifest rather
-  than out of a register row — because the thing that decides which component gets to answer
-  permission questions should be the thing somebody signed, not a checkpoint file this node
-  wrote.
+  policy declares no `start` block, and its eval spec is a list of decision cases rather than a
+  probe list over agent state.
+
+  **Where the kind is read, and what that reading is worth.** The rollout records it on the
+  register entry, from the manifest it has just verified, and `Rollout.live/1` filters on that —
+  which is an *index*, not a proof. A checkpoint is a file on disk: anything that can write one
+  can write a row whose `artifact_id` names a genuine policy manifest and whose
+  `component_sha256` names other bytes in the store, and the engine loads the row's sha. So
+  `Ouroboros.Wasm.PolicyEngine` re-establishes the chain before it loads anything: it fetches
+  the manifest the row names, verifies it against **this node's own** trust policy, and holds
+  the manifest's sha to the row's sha and its kind to `:policy`. A mismatch, or a manifest this
+  node cannot verify, makes the engine inert for that name with one logged warning. An earlier
+  cut read the kind from the manifest and the sha from the row without ever comparing them,
+  which is the planted-row hole exactly; the fix is not "read it from the signed side" but "tie
+  the two together at the point of use".
 
   Which world a set of bytes is checked against is therefore always the *caller's assertion*,
-  never something the helper infers. That matters because bytes can satisfy both: extra
-  exports are not a refusal, so a component exporting `handle-message` and `evaluate` with
-  both signatures is legal in both worlds, and a helper that guessed would be deciding what a
-  signature bought. `bytes_in_both_worlds_are_admitted_to_the_one_they_were_offered_as` pins
-  it, and `instantiate` re-asserts the world so a `load` as one and an `instantiate` as the
-  other cannot dispatch against a table nobody checked these bytes for.
+  never something the helper infers — and a set of bytes has exactly one world to be asserted
+  about. Extra exports are otherwise fine, but the *other* world's message export with the
+  other world's signature is not an extra export, it is a second claim: a component exporting
+  `handle-message` and `evaluate` with both signatures would have been legal in both worlds, so
+  which one it *was* depended on which request arrived first, and one sha would have stood for
+  two things. `check` refuses such bytes as ambiguous whichever world they are offered as
+  (`bytes_that_claim_both_worlds_are_refused_as_ambiguous`), the cache hit is per-world so a
+  capability re-offered as a policy is re-read and refused rather than answered out of the
+  table, and `instantiate` re-asserts the world so a `load` as one and an `instantiate` as the
+  other cannot dispatch against a table nobody checked these bytes for. The two worlds differ in
+  exactly one type, so that type is the whole of the distinction: an `evaluate` returning
+  `result<string, string>` is not the policy world's `evaluate`, and is refused by name.
 
   One SDK builds both. `tui/wasm/guest` invokes `wit_bindgen::generate!` twice, and
   `pub_export_macro` keeps each world's encoded custom section inside its own `export!` macro —
@@ -2364,6 +2441,48 @@ Each slice is PR-sized, lands green, and is useful alone.
 - **Deferred, in rough order:** agent-reachable forge/deploy effects (§7.7) → tools lane
   (§9.1) → microVM backend (§10, likely its own spec once slice-shaped) → agent world (§9.2).
   The policy engine (§8.2) was the first of these and is W15.
+
+  **Adversarial review found four ways in and five enforcement points with no test that was red
+  without them.** All are closed here, each with the test that reddens for its mutation.
+
+    * **Two readers of one verdict disagreed.** Elixir's JSON decoder keeps a duplicated key's
+      first occurrence and `serde_json` keeps its last, so `{"decision":"ask","decision":"deny"}`
+      was `ask` on the node and `deny` in `ouro wasm policy` — and in the other order it turned a
+      reviewed `ask` into an honoured `allow` for a listed tool. There is one grammar now,
+      written down: exactly `decision` and `rule`, no key twice, three lower-case words, a string
+      rule, a kibibyte. Elixir decodes to an ordered pair list rather than a map so a repeat is
+      still visible; Rust uses a `serde` visitor that refuses one.
+      `test/support/wasm_golden/policy_verdicts.json` pins both, 35 cases, a test on each side.
+    * **An honoured verdict rode a dead ledger.** `decided/6` discarded
+      `Permissions.record/2`'s answer, so a component's `allow` stood while an operator's own
+      rule was already becoming `{:ask, :unrecordable}` two functions away. It follows
+      `Control.Permissions` exactly now: an unrecordable allow is an ask, an unrecordable deny
+      still denies.
+    * **A planted register row was a permission engine.** The kind was read from the store's
+      manifest while the sha that got loaded came from the row, and the two were never compared
+      — so a row naming a genuine policy manifest and somebody else's bytes ran those bytes. The
+      register carries the kind now, recorded at deploy from the manifest the rollout verified
+      (which also ends a per-turn file read), and the engine verifies that manifest against this
+      node's own trust policy and holds its sha and kind to the row's before loading anything.
+    * **The permission path was an unbounded round trip.** A wedged helper cost one decision the
+      instance deadline plus the transport margin, twice over for a blanket retry.
+      `:policy_decision_timeout_ms` (5 s) bounds the whole decision in a process the engine can
+      kill; expiry is `ask` and drops the instance; only `unknown_instance` is retried.
+    * **"Every credential-shaped value redacted" was false.** The harness's redaction is by
+      *key*; an AWS secret, an `X-Api-Key`, a PEM body and a `GITHUB_TOKEN=…` on a command line
+      travelled verbatim, and its `Bearer` pattern ate a closing quote. There is a value-level
+      pass now — `Bearer` runs, AWS ids, `sk-`, GitHub and Slack prefixes, PEM blocks,
+      credential-shaped `NAME=value`, this node's own env secrets — documented as the heuristic
+      it is, and the three headline claims say what it actually does.
+
+  Five more, smaller: `ouro wasm inspect` asked one world and so called every policy component
+  `neither` with a non-zero exit — it asks both and names the one that admitted them; `ouro wasm
+  policy` refused to send a request the node would not have sent; a policy eval spec must
+  certify at least one `deny` or `ask`, because a spec of pure allows certifies nothing this
+  lane honours; bytes claiming *both* worlds are refused as ambiguous, so one sha is one world
+  and the cache can no longer be asked to hold two; and D20 stopped claiming determinism as a
+  property this seam enforces — the world has none of the ingredients, the eval spec exercises
+  what an author asserts, and instance state is still theirs.
 
 ## 15. Prior art and references
 

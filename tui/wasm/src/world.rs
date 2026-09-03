@@ -26,13 +26,21 @@
 //! deterministic by construction rather than by promise: there is nothing here to be
 //! nondeterministic with.
 //!
-//! # Which world a set of bytes is checked against is the caller's assertion
+//! # A component is in exactly one world
 //!
 //! `load` is told a [`Kind`], and the check is run for that world alone. A capability offered as
 //! a policy is refused `unsupported_world`, and so is the reverse. The helper has no opinion
 //! about which a component *ought* to be — on the node, that opinion is the signed manifest's
 //! `kind` (contract C7), and the helper is where the assertion is enforced rather than where it
 //! is made. `inspect`, which admits nothing, reports whichever world the bytes satisfy.
+//!
+//! Bytes that satisfy **both** worlds are refused by [`check`] as ambiguous, whichever world
+//! they were offered as. Extra exports are otherwise fine — a component may export more than a
+//! world names and `call` reaches none of it — but the *other world's message export, with the
+//! other world's signature*, is not an extra export: it is a second claim about what this
+//! component is. Admitting such bytes would mean one sha standing for two different things, so
+//! that the world a signature bought depended on which request arrived first. One sha, one
+//! world, decided by the bytes rather than by an order of arrival.
 //!
 //! # What this module is, and what it is not
 //!
@@ -118,6 +126,25 @@ const POLICY_TABLE: &[(&str, Sig)] = &[
 ];
 
 impl Kind {
+    /// The other world. There are two, so this is total; it exists because [`check`] has to ask
+    /// "and is it also that one?" and a `match` at the call site would be a third place the set
+    /// of worlds is written down.
+    fn other(self) -> Kind {
+        match self {
+            Kind::Capability => Kind::Policy,
+            Kind::Policy => Kind::Capability,
+        }
+    }
+
+    /// The signature this world's message export carries. The one thing that tells the two
+    /// worlds apart in a component's own type.
+    fn message_sig(self) -> Sig {
+        match self {
+            Kind::Capability => Sig::Answer,
+            Kind::Policy => Sig::Verdict,
+        }
+    }
+
     /// The world a request named, or `None` for a spelling this build does not implement. A
     /// caller that omits the field means `capability`, which is what every caller written before
     /// there was a second world meant.
@@ -209,16 +236,24 @@ pub fn check(component: &Component, engine: &Engine, kind: Kind) -> Result<(), R
     }
 
     let table = kind.table();
+    let other = kind.other();
     let mut seen = [false; 3];
+    // Whether the *other* world's message export is here with the other world's signature —
+    // which is the one extra export that is not merely extra. See the module header.
+    let mut ambidextrous = false;
+
     for (name, item) in ty.exports(engine) {
-        // Extra exports are not a refusal. A component may export more than a world names, and
-        // `call` reaches none of it: the dispatch table is closed, not the component. That is
-        // also what lets one set of bytes satisfy both worlds — which decides nothing, because
-        // `load` is told which world to check and `call` dispatches the one it was loaded as.
-        let Some(index) = table.iter().position(|(export, _)| *export == name) else {
+        let ComponentItem::ComponentFunc(func) = item.ty else {
             continue;
         };
-        let ComponentItem::ComponentFunc(func) = item.ty else {
+
+        if name == other.message() && signed_as(&func, other.message_sig()) {
+            ambidextrous = true;
+        }
+
+        // Extra exports are not a refusal. A component may export more than a world names, and
+        // `call` reaches none of it: the dispatch table is closed, not the component.
+        let Some(index) = table.iter().position(|(export, _)| *export == name) else {
             continue;
         };
         seen[index] = signed_as(&func, table[index].1);
@@ -231,26 +266,38 @@ pub fn check(component: &Component, engine: &Engine, kind: Kind) -> Result<(), R
         .filter_map(|(name, ok)| (!ok).then_some(name))
         .collect();
 
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(refusal::refuse(
+    if !missing.is_empty() {
+        return Err(refusal::refuse(
             refusal::UNSUPPORTED_WORLD,
             format!(
                 "component does not export {} with the signature world {id} declares",
                 missing.join(", ")
             ),
-        ))
+        ));
     }
+
+    if ambidextrous {
+        return Err(refusal::refuse(
+            refusal::UNSUPPORTED_WORLD,
+            format!(
+                "component exports `{}` as well as `{}`, so it claims both {id} and {}; a \
+                 component is in one world",
+                other.message(),
+                kind.message(),
+                other.id()
+            ),
+        ));
+    }
+
+    Ok(())
 }
 
 /// The world these bytes are in, or `"unknown"`. `inspect` reports this without refusing, so an
 /// operator can look at a component before deciding to load it.
 ///
-/// The worlds are tried in [`KINDS`] order and the first match answers. A component exporting
-/// both worlds' functions is therefore reported as a capability, which is a statement about what
-/// this reading found first and not a decision about anything: `load` checks the world it was
-/// asked for, and the signed manifest is what says which that is.
+/// At most one world can match, because [`check`] refuses bytes that satisfy both, so the order
+/// [`KINDS`] is walked in decides nothing. Bytes claiming both read as `"unknown"` here and are
+/// refused by `load` whichever world they are offered as.
 pub fn identify(component: &Component, engine: &Engine) -> &'static str {
     KINDS
         .iter()

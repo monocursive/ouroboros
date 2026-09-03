@@ -221,6 +221,46 @@ pub fn policy(verdict: &str) -> Vec<u8> {
     ))
 }
 
+/// A guest exporting `evaluate` with the **capability** world's signature —
+/// `result<string, string>` where the policy world declares a bare `string`.
+///
+/// The one fixture that separates "the name is right" from "the type is right". Delete the
+/// `Sig::Verdict` arm's result check in `world::signed_as` — make it accept anything taking a
+/// string — and these bytes load as a policy, which is a component whose `evaluate` the helper
+/// would then try to lift as the wrong type.
+pub fn policy_with_the_wrong_evaluate() -> Vec<u8> {
+    let prelude = trivial_prelude("mistyped", TRIVIAL_INIT);
+    // The `handle_message` core function under another name: same three-word return area, which
+    // is exactly what a `result<string, string>` lifts out of.
+    let core = SINK_HANDLE.replace("handle_message", "evaluate");
+    let lift = r#"
+  (alias core export $i "memory" (core memory $mem))
+  (alias core export $i "realloc" (core func $realloc))
+  (alias core export $i "describe" (core func $c_describe))
+  (alias core export $i "init" (core func $c_init))
+  (alias core export $i "evaluate" (core func $c_evaluate))
+
+  (func (export "describe") (result string)
+    (canon lift (core func $c_describe) (memory $mem) (realloc $realloc)))
+  (func (export "init") (param "config" string) (result (result (error string)))
+    (canon lift (core func $c_init) (memory $mem) (realloc $realloc)))
+  (func (export "evaluate") (param "request" string) (result (result string (error string))))
+"#;
+    // The lift's `canon` is written out separately so the signature above stays readable.
+    let lift = lift.replace(
+        r#"(func (export "evaluate") (param "request" string) (result (result string (error string))))"#,
+        r#"(func (export "evaluate") (param "request" string) (result (result string (error string)))
+    (canon lift (core func $c_evaluate) (memory $mem) (realloc $realloc)))"#,
+    );
+
+    assemble(&format!(
+        r#"(component
+  (core module $m{ALLOC}{prelude}{core}
+  )
+  (core instance $i (instantiate $m)){lift})"#
+    ))
+}
+
 /// A guest that exports **both** worlds' message functions with both worlds' signatures.
 ///
 /// It exists to pin the one thing two closed worlds in one helper could get wrong: which world
