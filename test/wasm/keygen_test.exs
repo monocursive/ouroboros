@@ -75,10 +75,32 @@ defmodule Ouroboros.Wasm.KeygenTest do
     test "the printed instructions name the file, the id and the public half" do
       printed = File.read!(Path.join(@fixture, "keygen.out"))
 
-      assert printed =~ "OUROBOROS_SIGNER_KEY_PATH=test/support/wasm_keygen/signer.key"
       assert printed =~ "OUROBOROS_SIGNER_ID=#{@signer_id}"
       assert printed =~ "OUROBOROS_UPGRADE_TRUSTED_SIGNERS=#{@signer_id}:"
       assert printed =~ "never leaves the signer"
+    end
+
+    # The line an operator pastes into a signer node's environment. `config/runtime.exs`
+    # refuses a relative `OUROBOROS_SIGNER_KEY_PATH` — a `:signer` node started with one does
+    # not boot — and `ouro wasm keygen --out ./signer.key` used to print exactly that, with
+    # the refusal landing on a different machine, later, with nothing in it pointing back.
+    # Remove `absolute/1` from the CLI's keygen and this fixture regenerates relative.
+    test "the key path it prints is absolute, because a signer node refuses anything else" do
+      path =
+        @fixture
+        |> Path.join("keygen.out")
+        |> File.read!()
+        |> String.split("\n")
+        |> Enum.find_value(fn line ->
+          case String.split(String.trim(line), "OUROBOROS_SIGNER_KEY_PATH=", parts: 2) do
+            ["", value] -> value
+            _other -> nil
+          end
+        end)
+
+      assert is_binary(path)
+      assert Path.type(path) == :absolute, "config/runtime.exs refuses #{inspect(path)}"
+      assert Path.basename(path) == "signer.key"
     end
   end
 

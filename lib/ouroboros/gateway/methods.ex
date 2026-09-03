@@ -568,6 +568,10 @@ defmodule Ouroboros.Gateway.Methods do
     "max" => :max
   }
 
+  # W12. The whole of a probe, named here so the refusal can list them rather than say only
+  # which key was wrong.
+  @probe_keys ["input", "expect"]
+
   @approval_decisions %{"approve" => :approve, "deny" => :deny}
   @approval_scopes %{"once" => :once, "session" => :session}
   # The one shape of `provider_options` an answer may carry: a plan-exit question's
@@ -1226,7 +1230,7 @@ defmodule Ouroboros.Gateway.Methods do
           {:object,
            [
              {"probes", :required, {:list, :object, 20},
-              "each `{\"input\": <json>, \"expect\": {\"kind\": ..., ...}}`. The kinds are `any_reply`, `contains` (takes `substring`), `equals` (takes `value`) and `state_matches` (takes `key`, a state field this build already knows, and `value`)"},
+              "each `{\"input\": <json>, \"expect\": {\"kind\": ..., ...}}` — `input` is the message body handed to the capability, whatever the capability itself calls it. The kinds are `any_reply`, `contains` (takes `substring`), `equals` (takes `value`) and `state_matches` (takes `key`, a state field this build already knows, and `value`). What each one is held against differs: `contains` matches its substring against the answer *rendered* as text, so it reads a decoded JSON object the way `inspect/1` writes one (`%{\"echo\" => …}`), while `equals` and `state_matches` compare terms — a `state_matches` on `last_answer` must be the whole decoded reply as JSON (`{\"echo\": {\"greet\": \"world\"}}`), not a string of it, and `messages_received` is the counter to reach for when the shape of the answer is not the point"},
              {"budget_ms", :optional, :positive_integer, "the deadline every probe runs under"},
              {"max_latency_ms", :optional, :positive_integer,
               "a gate on the latency observed, checked after the answer arrives"},
@@ -3410,8 +3414,14 @@ defmodule Ouroboros.Gateway.Methods do
   defp wasm_probes(_other),
     do: {:invalid, "params.eval.probes must be a list of 1 to 20 objects"}
 
+  # `only_keys/2`'s sentence is right for a method's own envelope, where a client has the
+  # parameter reference in front of it, and wrong two levels down inside a spec: "params
+  # contains unsupported fields: message" is a true statement that tells somebody writing
+  # their first eval spec nothing about what to write instead. The author of W11's guide hit
+  # exactly that, spelling the body `message` because that is what `agents.message` calls it.
+  # So this one says what a probe takes.
   defp wasm_probe(probe) when is_map(probe) do
-    with :ok <- only_keys(probe, ["input", "expect"]),
+    with :ok <- wasm_probe_keys(probe),
          true <-
            Map.has_key?(probe, "input") or {:invalid, "params.eval.probes[].input is required"},
          {:ok, expect} <- wasm_expect(Map.get(probe, "expect")) do
@@ -3422,6 +3432,22 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   defp wasm_probe(_other), do: {:invalid, "params.eval.probes[] must be an object"}
+
+  defp wasm_probe_keys(probe) do
+    case Map.keys(probe) -- @probe_keys do
+      [] ->
+        :ok
+
+      unknown ->
+        {:invalid,
+         "params.eval.probes[] takes " <>
+           Enum.join(@probe_keys, " and ") <>
+           " and nothing else, got: " <>
+           (unknown |> Enum.sort() |> Enum.join(", ")) <>
+           ". `input` is the message body handed to the capability, whatever the capability " <>
+           "itself calls it"}
+    end
+  end
 
   defp wasm_expect(nil), do: {:ok, :any_reply}
 

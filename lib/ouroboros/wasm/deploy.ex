@@ -76,6 +76,16 @@ defmodule Ouroboros.Wasm.Deploy do
   alias Ouroboros.Wasm.{Artifact, Bundle, Rollout, Surface, Upload}
 
   @default_signing_timeout 15_000
+
+  # The two processes that make a node able to hold a lane-W rollout, and therefore able to
+  # call an epoch stale: the register that records one and the executor `Ouroboros.Upgrade.
+  # Epoch.next/2` reads a node's last committed epoch from. A node running neither is a node
+  # no epoch can be too small for.
+  @rollout_plane [Ouroboros.Upgrade.Rollout.Registry, Ouroboros.Upgrade.NodeExecutor]
+
+  # One bounded question per candidate, per process. Well under `wasm.sign`'s own ceiling,
+  # because this runs before the signing round trip rather than instead of it.
+  @epoch_probe_timeout 5_000
   @signing_slack 5_000
 
   @type sign_attrs :: %{
@@ -233,18 +243,105 @@ defmodule Ouroboros.Wasm.Deploy do
 
   ## The manifest
 
-  # Over every connected node, not over this one. `Ouroboros.Upgrade.Epoch.next/2` reads
-  # each target's executor and lane-W register and allocates above the highest, so a bundle
-  # signed here is above what the busiest machine in the cluster has admitted — which is the
-  # difference between a signature that deploys and one refused `{:stale_epoch, _, _}` by a
-  # peer this node never asked.
+  # Over the nodes that could make this epoch stale, which is not the same set as the nodes
+  # that are connected.
+  #
+  # `Ouroboros.Upgrade.Epoch.next/2` asks every node it is given for
+  # `Ouroboros.Upgrade.NodeExecutor.status/0` and for its lane-W register's watermark, and a
+  # node that runs neither answers neither: the call exits `:noproc` and the whole allocation
+  # fails. Handing it `[node() | Node.list()]` therefore made signing impossible on exactly
+  # the topology D15 prescribes — the key on a `:signer`-role node, whose supervision tree is
+  # the signing service and cluster formation and nothing else — and on any `:builder` or
+  # bare client node that happens to be connected. It was proved live: `wasm.sign` on a core
+  # node with a signer peer refused with `{:epoch_not_allocated, {:epoch_status_unavailable,
+  # …}}`, and the operator had no way to proceed at all.
+  #
+  # What an epoch has to be above is what some register has already admitted, because
+  # `Ouroboros.Upgrade.Rollout.Registry.ensure_fresh_epoch/2` is the only thing that ever
+  # calls one stale. A node with no register admits nothing, holds no watermark, and cannot
+  # refuse anything later — so asking it is not merely useless, it is the failure. The
+  # candidates are still every connected node; what is allocated over is the subset that runs
+  # the rollout plane.
+  #
+  # The probe distinguishes the two answers that look alike from here. A node that answers
+  # "no such process" is a node with no plane and is excluded. A node that does not answer at
+  # all is **not** excluded: it may be running a register this allocation cannot see, and an
+  # epoch minted below its watermark is one it will refuse at stage time, so an unreachable
+  # candidate fails the allocation closed rather than quietly narrowing it.
+  #
+  # If no candidate holds a register — a fresh fleet, or a lone signer — the epoch is 1 and
+  # the signature proceeds. Nothing can call 1 stale, because nothing has admitted anything.
+  # The honest cost is that two signatures on such a fleet both carry 1: the first deploy to
+  # whichever node first grows a register wins, and the second is an ordinary
+  # `{:stale_epoch, 1, 1}` that re-signing clears. Once one register exists this stops
+  # happening, because `Epoch.next/2`'s durable watermark advances on every allocation.
   defp epoch(opts) do
-    nodes = Keyword.get_lazy(opts, :epoch_nodes, fn -> [node() | Node.list()] end)
+    case epoch_nodes(opts) do
+      {:ok, []} ->
+        {:ok, 1}
 
-    case Epoch.next(nodes, Keyword.get(opts, :epoch_opts, [])) do
-      {:ok, epoch} -> {:ok, epoch}
-      {:error, reason} -> {:error, {:epoch_not_allocated, reason}}
+      {:ok, nodes} ->
+        case Epoch.next(nodes, Keyword.get(opts, :epoch_opts, [])) do
+          {:ok, epoch} -> {:ok, epoch}
+          {:error, reason} -> {:error, {:epoch_not_allocated, reason}}
+        end
+
+      {:error, unreachable} ->
+        {:error, {:epoch_not_allocated, {:candidates_unreachable, unreachable}}}
     end
+  end
+
+  # The connected nodes that run the rollout plane, or the ones that could not be asked.
+  defp epoch_nodes(opts) do
+    candidates =
+      Keyword.get_lazy(opts, :epoch_nodes, fn -> Enum.uniq([node() | Node.list()]) end)
+
+    timeout = Keyword.get(opts, :epoch_probe_timeout, @epoch_probe_timeout)
+
+    {held, unreachable} =
+      candidates
+      |> Task.async_stream(&{&1, rollout_plane(&1, timeout)},
+        ordered: true,
+        max_concurrency: max(1, length(candidates)),
+        timeout: :infinity
+      )
+      |> Enum.reduce({[], %{}}, fn
+        {:ok, {target, :holds}}, {held, faults} ->
+          {[target | held], faults}
+
+        {:ok, {_target, :absent}}, acc ->
+          acc
+
+        {:ok, {target, {:unreachable, why}}}, {held, faults} ->
+          {held, Map.put(faults, target, why)}
+
+        {:exit, reason}, {held, faults} ->
+          {held, Map.put(faults, node(), describe(reason))}
+      end)
+
+    if unreachable == %{},
+      do: {:ok, Enum.reverse(held)},
+      else: {:error, unreachable}
+  end
+
+  # `:erlang.whereis/1` and nothing of ours, so a node too old to hold these modules answers
+  # `:undefined` rather than failing to find a function. The local branch does not go through
+  # `:erpc` at all: a node cannot be unreachable from itself, and rendering it as such would
+  # make the one case a lone signer needs — "I have no register either" — a hard failure.
+  defp rollout_plane(target, _timeout) when target == node() do
+    if Enum.all?(@rollout_plane, &is_pid(Process.whereis(&1))), do: :holds, else: :absent
+  end
+
+  defp rollout_plane(target, timeout) do
+    Enum.reduce_while(@rollout_plane, :holds, fn name, _acc ->
+      case :erpc.call(target, :erlang, :whereis, [name], timeout) do
+        pid when is_pid(pid) -> {:cont, :holds}
+        :undefined -> {:halt, :absent}
+        other -> {:halt, {:unreachable, {:unexpected, describe(other)}}}
+      end
+    end)
+  catch
+    kind, reason -> {:unreachable, {kind, describe(reason)}}
   end
 
   defp build(bytes, attrs, imports, epoch) do

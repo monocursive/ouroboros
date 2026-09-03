@@ -374,6 +374,20 @@ defmodule Ouroboros.Gateway.WasmDeployTest do
 
       assert message =~ "extra"
 
+      # And the refusal says what a probe *does* take. `only_keys/2`'s sentence — "params
+      # contains unsupported fields: message" — is right for a method's own envelope and
+      # useless two levels down in a spec somebody is writing for the first time: the author
+      # of W11's guide spelled the body `message`, because that is what `agents.message`
+      # calls it, and the refusal named the mistake without naming the fix. Restore
+      # `only_keys/2` here and this is red.
+      assert {:error, code, message} =
+               sign(%{"eval" => %{"probes" => [%{"message" => %{"greet" => "world"}}]}})
+
+      assert code == Methods.code(:invalid_params)
+      assert message =~ "takes input and expect"
+      assert message =~ "got: message"
+      assert message =~ "the message body handed to the capability"
+
       assert {:error, _code, message} =
                sign(%{
                  "eval" => %{"probes" => [%{"input" => 1, "expect" => %{"kind" => "guess"}}]}

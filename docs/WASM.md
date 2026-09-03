@@ -1152,14 +1152,35 @@ machinery — it is a backend, not a lane (D9).
   deploy *at* the ceiling left no number that was both — on every lane-W capability on that
   node, durably, since the watermark is carried in the checkpoint and pruning cannot lower
   it. One `:operate` call, unrecoverable. There is no `epoch` parameter now: it is allocated
-  with `Upgrade.Epoch.next/2` over `[node() | Node.list()]`, which also closes the other end
-  of it — a bundle signed on a quiet node is no longer refused by a busier peer for a number
-  the signer could not see. The register's own boundary became exclusive (`>=`, not `>`), and
-  the signing policy gained a second guard in front of it: an epoch more than a million above
-  anything this node has seen is refused at signing time, because a signature is what makes a
-  large epoch deployable at all. Its honest limit is that a dedicated signer sees no register
-  and no allocator, so its floor there is zero and the bound is a flat million. Proved in
-  `test/wasm/epoch_test.exs`.
+  with `Upgrade.Epoch.next/2`, which also closes the other end of it — a bundle signed on a
+  quiet node is no longer refused by a busier peer for a number the signer could not see. The
+  register's own boundary became exclusive (`>=`, not `>`), and the signing policy gained a
+  second guard in front of it: an epoch more than a million above anything this node has seen
+  is refused at signing time, because a signature is what makes a large epoch deployable at
+  all. Its honest limit is that a dedicated signer sees no register and no allocator, so its
+  floor there is zero and the bound is a flat million. Proved in `test/wasm/epoch_test.exs`.
+
+  **Over which nodes.** Not the connected ones — the ones that could call the number stale.
+  `Epoch.next/2` asks every node it is given for `NodeExecutor.status/0` and for its lane-W
+  register's watermark, and a node running neither answers neither: the call exits `:noproc`
+  and the allocation fails. Allocating over `[node() | Node.list()]` therefore made signing
+  impossible on exactly the topology this decision prescribes — the key on a `:signer`-role
+  node, whose tree is the signing service and cluster formation and nothing else — and on any
+  connected `:builder` or bare client. W11's author hit it on a real two-node cluster and had
+  no way past it. So the candidates are still every connected node and the allocation is over
+  the subset that runs the rollout plane, probed with a bounded `:erlang.whereis/1` per
+  process. A node with no register admits nothing, holds no watermark, and cannot refuse
+  anything later, so excluding it changes no outcome; a node that does not *answer* is not
+  excluded, because from here "no plane" and "no answer" look alike and the second may be
+  hiding a watermark above the one being minted — an unreachable candidate fails the
+  allocation closed. With no register among the candidates at all — a fresh fleet, or a lone
+  signer — the epoch is 1 and the signature proceeds: nothing has admitted anything, so
+  nothing can call 1 stale. The honest cost of that case is that two signatures on such a
+  fleet both carry 1; the first deploy to whichever node first grows a register wins and the
+  second is an ordinary `{:stale_epoch, 1, 1}` that re-signing clears. Proved in
+  `test/wasm/epoch_nodes_test.exs` against real peer VMs: one with no rollout plane (excluded,
+  and the signature succeeds), one holding the plane but not answering in time, and one that
+  has gone away (both fail closed).
 - **D16 — bytes cross the socket in frames, because one frame will not hold them.**
   `Gateway.Config` bounds an inbound frame at `OUROBOROS_GATEWAY_MAX_FRAME`, a mebibyte
   by default, and the Rust client refuses to send more than the same number. A component
