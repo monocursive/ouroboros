@@ -94,15 +94,20 @@ defmodule Ouroboros.Wasm.PolicyEngine do
 
   ## Scope
 
-  Every seam reads `:permissions_engine` (W18, D27): the native loop
+  Four readers, one setting (W18, D27): the native loop
   (`Ouroboros.Provider.Native.Permissions`), the interactive plane's external approvals
-  (`Ouroboros.Interactive.Task.Approvals`), and the ACP lane through
-  `Ouroboros.Control.Permissions.Seam` — which is both the `session/request_permission` a vendor
-  process sends and the `fs/write_text_file` and `terminal/create` an ACP agent asks this runtime
-  to perform. A node that names this module has a policy on every lane a permission question can
-  arrive on, and `test/wasm/policy_acp_test.exs` is the ACP half of that end to end. The seam
-  carries this module's answer and narrows on any failure of its own, so nothing there can turn
-  a verdict into more than what `settle/6` already honoured.
+  (`Ouroboros.Interactive.Task.Approvals`), the interactive shell
+  (`Ouroboros.Interactive.Task.Shell`, through `Approvals.permissions_engine/2`), and the ACP
+  lane through `Ouroboros.Control.Permissions.Seam` — which is both the
+  `session/request_permission` a vendor process sends and the `fs/write_text_file` and
+  `terminal/create` an ACP agent asks this runtime to perform. A node that names this module has
+  a policy on every lane a permission question arrives on, and `test/wasm/policy_acp_test.exs` is
+  the ACP half of that end to end, through a real `Session.Jsonl` and a vendor process.
+
+  The seam carries this module's answer and turns every failure of its own into an ask, so
+  nothing there widens a verdict — and nothing there narrows one either. **The bound on an
+  `allow` is this module's**, `allowable_tools/0`, and it is the only one: a seam that added a
+  second gate would be a refusal an operator could not find in either place.
   """
 
   require Logger
