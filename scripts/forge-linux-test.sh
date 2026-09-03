@@ -14,11 +14,17 @@
 # about the container and not about bubblewrap needing privilege — see
 # `scripts/sandbox-linux-test.sh`, which says the same thing for the same reason.
 #
-# What the container has to build before it can test: the helper (`make wasm`) and the
-# acceptance guest and examples (`make wasm-guest`, `make wasm-examples`), because the ones
-# in a Mac checkout are Mach-O and a `wasm32-wasip2` component built for a different host
-# toolchain is not something to reuse on faith. Then a warmed cargo cache, because the forge
-# builds `--offline` (D19).
+# Since W17 it runs under the *preferred* Linux backend rather than the fallback. `make
+# sandbox` builds `ouro-sandbox` here, so `Sandbox.detect/0` finds a helper whose `doctor`
+# reports `usable` and `features.read_allow_set`, selects it ahead of bubblewrap, and the
+# forge's escape tests are then a proof about Landlock rather than about mount namespaces.
+# A run where that helper were missing would silently prove the bubblewrap half twice.
+#
+# What the container has to build before it can test: the helper (`make wasm`), the sandbox
+# helper (`make sandbox`), and the acceptance guest and examples (`make wasm-guest`,
+# `make wasm-examples`), because the ones in a Mac checkout are Mach-O and a
+# `wasm32-wasip2` component built for a different host toolchain is not something to reuse
+# on faith. Then a warmed cargo cache, because the forge builds `--offline` (D19).
 #
 # Usage: scripts/forge-linux-test.sh [extra mix test args]
 
@@ -35,6 +41,7 @@ VOLUME_DEPS=ouro-forge-deps
 # the container's ELF helper would land on top of the Mach-O one this Mac's own `mix test`
 # uses, and cargo would rebuild every crate on every switch between the two hosts.
 VOLUME_HELPER=ouro-forge-helper
+VOLUME_SANDBOX_HELPER=ouro-forge-sandbox-helper
 VOLUME_PRIV_NATIVE=ouro-forge-priv-native
 VOLUME_TUI_TARGET=ouro-forge-tui-target
 VOLUME_GUEST_TARGET=ouro-forge-guest-target
@@ -53,8 +60,8 @@ fi
 EXAMPLES="counter deny-writes lintcheck verdicts no-network-shell"
 
 for volume in "$VOLUME_CARGO" "$VOLUME_RUSTUP" "$VOLUME_BUILD" "$VOLUME_DEPS" \
-  "$VOLUME_HELPER" "$VOLUME_PRIV_NATIVE" "$VOLUME_TUI_TARGET" "$VOLUME_GUEST_TARGET" \
-  "$VOLUME_SDK_TARGET"; do
+  "$VOLUME_HELPER" "$VOLUME_SANDBOX_HELPER" "$VOLUME_PRIV_NATIVE" "$VOLUME_TUI_TARGET" \
+  "$VOLUME_GUEST_TARGET" "$VOLUME_SDK_TARGET"; do
   docker volume create "$volume" >/dev/null
 done
 
@@ -72,6 +79,7 @@ exec docker run --rm --privileged \
   -v "$VOLUME_DEPS:/src/deps" \
   -v "$root/deps:/host-deps:ro" \
   -v "$VOLUME_HELPER:/src/priv/wasm" \
+  -v "$VOLUME_SANDBOX_HELPER:/src/priv/sandbox" \
   -v "$VOLUME_PRIV_NATIVE:/src/priv/native" \
   -v "$VOLUME_TUI_TARGET:/src/tui/target" \
   -v "$VOLUME_GUEST_TARGET:/src/test/support/wasm/echo-guest/target" \
@@ -100,7 +108,7 @@ exec docker run --rm --privileged \
     builder_gid=1000
     mkdir -p /home/builder
     chown -R "$builder_uid:$builder_gid" /home/builder /cargo /rustup /src/_build /src/deps \
-      /src/priv/wasm /src/priv/native /src/tui/target \
+      /src/priv/wasm /src/priv/sandbox /src/priv/native /src/tui/target \
       /src/test/support/wasm/echo-guest/target \
       /src/tui/wasm/guest/target /src/tui/wasm/guest/examples/*/target
 
@@ -139,7 +147,23 @@ git config --global --add safe.directory "*" || true
 # The helper and the guests, built here: a Mac checkout carries a Mach-O helper, and a
 # component built by another host toolchain is not something to reuse on faith.
 cd /src
+
+# `_build` is a volume that outlives one run, and `mix` links `.../lib/ouroboros/priv` at
+# the priv directory of the checkout. The install loop in `make wasm` / `make sandbox`
+# would then copy a file onto itself, which coreutils refuses — so the second run of this
+# script would die inside `make` rather than in a test. `mix compile` remakes the link.
+#
+# Exactly that one link, by full path. A `find -name priv -type l` over `_build` also takes
+# every dependency’s own priv link with it, and erlexec’s is the port binary every native
+# tool in this runtime goes through: the suite then fails to start at all, which is how
+# this line came to be written twice.
+for env in dev test prod; do
+  link="/src/_build/$env/lib/ouroboros/priv"
+  if [ -L "$link" ]; then rm -f "$link"; fi
+done
+
 make wasm
+make sandbox
 make wasm-guest
 make wasm-examples
 
@@ -150,6 +174,30 @@ mix local.hex --force >/dev/null
 mix local.rebar --force >/dev/null
 mix deps.get >/dev/null
 mix compile
+
+# Which backend the suite is about to run under, recorded before it runs: an
+# `ouro-sandbox` that reported itself unusable would fall through to bubblewrap silently,
+# and this run would then prove the fallback twice over rather than the preferred backend
+# once. `mix compile` has remade the priv link by now, so this is the path detection reads.
+cat > /tmp/forge-linux-backend.exs <<"EXS"
+detection = Ouroboros.Provider.Native.Sandbox.detect()
+
+IO.puts([
+  "    backend: ",
+  to_string(detection.backend),
+  ", read_fence: ",
+  inspect(Map.get(detection, :read_fence)),
+  ", fences_reads?: ",
+  inspect(Ouroboros.Provider.Native.Sandbox.fences_reads?(detection)),
+  "\n    executable: ",
+  to_string(detection.executable),
+  "\n    ",
+  detection.notes
+])
+EXS
+
+echo "==> backend the forge will build under:"
+mix run --no-start /tmp/forge-linux-backend.exs
 
 mix test test/wasm/forge_test.exs test/agent_effects_test.exs \
   test/provider/native/sandbox_test.exs $OURO_FORGE_TEST_ARGS

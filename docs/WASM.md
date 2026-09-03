@@ -1707,10 +1707,13 @@ machinery — it is a backend, not a lane (D9).
   and what the tests assert on both is the pair — the escape failed, and the honest fixture
   built under the same policy.
 
-  `ouro-sandbox`, the backend this runtime prefers on Linux where it is installed, still has
-  no read allow-set in its request protocol, so the forge refuses it by name rather than
-  building under a fence it does not have. Giving that helper one is a `tui/` change and a
-  later slice's; until then a node that has it forges under bubblewrap or not at all.
+  `ouro-sandbox`, the backend this runtime prefers on Linux where it is installed, was the
+  one without a fence: its request protocol had writable roots, protected roots and denied
+  names, and no read allow-set. It has one since W17 (D26), and the forge now builds under
+  it in the container — so what is refused is no longer a backend but a *binary*, the
+  pre-W17 helper that still answers `doctor` and still has no `readable` field.
+  `Sandbox.fences_reads?/1` therefore asks the probed helper rather than the backend name,
+  and a node carrying an old one forges under bubblewrap or not at all.
 - **D19 — a forge input is bounded before it is read, and a cold cache is a refusal.**
   Thirty-two files and one mebibyte, paths relative and free of `..`, no symlink followed,
   every bound applied *before* a byte is copied into the build directory. The numbers are the
@@ -1988,6 +1991,51 @@ machinery — it is a backend, not a lane (D9).
   takes the form away fleet-wide, with no redeploy and no resigning, for an operator whose key
   custody is in doubt. And the source form is always there: a node that refuses artifacts is a
   node that compiles, which is exactly what every node did before W8.
+- **D26 — a read allow-set is a list the daemon widens, and a read denial is Landlock's
+  alone.** D18 fenced a build's reads on two backends and refused the third by name, because
+  `ouro-sandbox`'s wire format had no way to say what a build may read. It has one now:
+  `mode: "builder"` and `readable: [...]`, and the three rules around it are what make the
+  field a fence rather than a hint.
+
+  **The daemon widens; the helper never does.** Every root a build can read is one the node
+  put in the list — `Sandbox.builder_policy/1`'s `platform_readable/0` plus
+  `Wasm.Forge.read_set/2` — and the helper adds nothing of its own except `/dev` and `/proc`,
+  which it keeps writable in *every* mode and which a compiler cannot start without. An entry
+  that is not absolute is refused with exit 125 rather than resolved against a working
+  directory the policy is about to change. And an empty `readable` is an empty read set: not a
+  missing one, not a reason to fall back to `/`. Under such a policy `/bin/sh` is not
+  executable and the helper's own `execvp` fails, which is the strongest form the rule takes —
+  it applied a policy it could have called too narrow to be meant.
+
+  **The read fence is Landlock's alone, and that is this backend's shape rather than an
+  omission.** bubblewrap builds a fresh root and simply does not bind what a build may not
+  read; `ouro-sandbox` stays in the host's own path namespace, because it has no root to mount
+  a placeholder into and would litter a workspace with empty directories if it tried
+  (`plan.rs`). A mount can make a path read-*only*. Nothing in a mount can make it unreadable.
+  So the write half stays doubly fenced — the writable roots are bound first, everything that
+  existed before is swept read-only, and Landlock grants writes on exactly what the mounts
+  left writable — and the read half is one layer, the LSM, which cannot be left and governs
+  mounts created after it was installed.
+
+  **Which means a builder read denial is `EACCES`, and that is legible here and nowhere
+  else.** `Sandbox.violation/3` refuses to read `Permission denied` as a sandbox signal, and
+  that rule does not change: it reads the output of an opaque shell line, where an ordinary
+  file mode produces the same string and attributing it to the sandbox would be a guess. A
+  build is the other case. It is one program this node spawned, with a policy this node wrote,
+  from source this node validated — so the forge's own suite matches `Permission denied` for
+  this backend the way it matches `Operation not permitted` for Seatbelt and
+  `No such file or directory` for bubblewrap, and beside each of those it asserts that the
+  honest fixture still builds under the same policy. Three strings, one fence, and the pair of
+  assertions is what tells a fence from a broken toolchain.
+
+  **And the capability is asked of the binary, not of the backend's name.** An `ouro-sandbox`
+  installed before this slice speaks protocol version 1, applies every shell policy correctly,
+  and would refuse `readable` as an unknown field — which is the right refusal and arrives too
+  late, at the first build a node tries. So `doctor` reports
+  `"features": {"read_allow_set": true}`, `Helper.probe/1` turns that into `read_fence` in the
+  detection map, and `Sandbox.fences_reads?/1` reads it for `:ouro_sandbox` alone. A detection
+  with no such key at all — an old cache, a hand-built map — is `false`. Failing closed there
+  costs a node its forge; failing open would cost it the fence the forge's claim rests on.
 
 - **D27 — one setting names the permission engine for every seam, and no engine failure
   widens anything.** `config :ouroboros, :permissions_engine` was read by the native loop, by
@@ -2138,14 +2186,22 @@ Stated once, so nobody reads more into the lane than is there:
 - **The host functions are the new surface.** Every import added to a world is
   boundary code. v1's answer is austerity: `log` only. Growth of any world's import
   set is a signing-policy event, not a convenience.
-- **A forge's read fence covers two backends, and one Linux backend has no fence at all.**
-  A build reads only the roots in D18's list — proved on macOS by builds that fail with
-  `Operation not permitted` and on Linux, in a container and in CI, by builds that fail with
-  `No such file or directory` — and what remains readable inside that list is the toolchain
-  and the guest SDK, which have to be readable for a compiler to run. `ouro-sandbox`, the
-  backend this runtime prefers on Linux when it is installed, cannot express a read
-  allow-set, so the forge refuses it by name: a node whose only sandbox is that helper does
-  not forge. That is the honest state of it, not a fence.
+- **A forge's read fence now covers all three backends, and each of them refuses a read in
+  its own words.** A build reads only the roots in D18's list, and what remains readable
+  inside that list is the toolchain and the guest SDK, which have to be readable for a
+  compiler to run. What each backend does with the rest, and where it was watched doing it:
+  **Seatbelt** denies an `open` on a path that is there, so the compiler is told
+  `Operation not permitted` — observed on macOS, by `include_str!` of a planted secret and a
+  `#[path]` module outside the project failing to compile beside the honest fixture that
+  builds under the same policy. **bubblewrap** never binds the path into the namespace, so
+  the compiler is told `No such file or directory` — the same two tests, observed in a
+  privileged Ubuntu 24.04 container on kernel 7.0.14 and on CI's ubuntu-24.04.
+  **`ouro-sandbox`** stays in the host's own path namespace and fences reads with Landlock
+  alone, so it answers `Permission denied` (`EACCES`) — the same two tests, in the same
+  container, under the backend this runtime actually prefers on Linux (W17). What is *not*
+  covered is a helper binary older than the allow-set: it applies every other part of the
+  policy and has no `readable` field, so the forge asks the helper rather than the backend
+  name (`doctor`'s `features.read_allow_set`) and refuses that node by name.
 - **Engine-embedding guests are still out, and W8 removed only the first precondition.**
   A JavaScript or Python guest carries an engine, which is millions of code bytes and far past
   §7.3's 4 MiB — a bound that now applies at the *signer* rather than at every node, which is
@@ -3007,6 +3063,51 @@ Each slice is PR-sized, lands green, and is useful alone.
   and the cache can no longer be asked to hold two; and D20 stopped claiming determinism as a
   property this seam enforces — the world has none of the ingredients, the eval spec exercises
   what an author asserts, and instance state is still theirs.
+- **W17 — the preferred Linux backend fences reads, and the forge builds under it.** D18 left
+  one residual with a name in it: `ouro-sandbox` had writable roots, protected roots and denied
+  names and no way to say what a build may *read*, so a node whose only sandbox was the helper
+  this repository ships did not forge at all. The wire format now carries `mode: "builder"` and
+  `readable: [...]`, and in that mode the Landlock read set is exactly the allow-set, the
+  writable roots, the scratch and the `/dev` and `/proc` every mode keeps — never `/`, and
+  never `/` as a fallback when the list is empty. The mount half is unchanged, so writes stay
+  fenced twice; `denied_names` and the `LD_PRELOAD` filter are refused in builder mode rather
+  than carried unenforced, and a `readable` under any other mode is refused for the mirror
+  reason. Every non-builder request is byte-identical to what it was, which the pinned Elixir
+  and Rust tests are there to keep true.
+
+  The capability is asked of the binary and not of the backend name (C11): `doctor` reports
+  `"features": {"read_allow_set": true}`, `Helper.probe/1` turns it into `read_fence` in the
+  detection map, and `Sandbox.fences_reads?/1` reads that for `:ouro_sandbox` alone — so a node
+  still carrying a pre-W17 helper is refused the forge by its own report rather than fenced by
+  a field that helper would reject as unknown. A detection with no such key is `false`.
+
+  **Proved on a kernel, twice over.** `scripts/sandbox-linux-test.sh` in a privileged container
+  on Linux 7.0.14 with Landlock ABI 8: **64 unit tests and 25 enforcement tests passed**, six of
+  them new — a build reads the roots it was given and its own tree, cannot read a canary beside
+  them (`Permission denied`, and the bytes never appear), an empty allow-set cannot even exec
+  `/bin/sh`, a write outside the writable roots and into a merely-readable root both still fail,
+  the network is still `Network is unreachable`, and a relative `readable` is exit 125 with the
+  `ouro-sandbox: ` prefix. Then `scripts/forge-linux-test.sh`, which now builds the helper in the
+  container (`make sandbox`) so detection prefers it: the run records `backend: ouro_sandbox,
+  read_fence: true` before the suite starts, and the forge's own escape tests — `include_str!` of
+  a planted secret, a `#[path]` module outside the project — now assert *this* backend's own
+  denial string, with the honest fixture building beside them under the same policy.
+  **123 passed, 18 skipped** in 116.6 s, the two escape tests being real cargo builds of 22.2 s
+  and 14.2 s. The 18 are the backend-specific live *shell* tests: Seatbelt's because this is
+  Linux, and bubblewrap's because detection now prefers the helper — so this script no longer
+  covers bwrap's live denials, and CI's ubuntu-24.04 job, which installs `bwrap` and does not
+  build the helper, is what still does.
+
+  A read denial here is `EACCES` and nothing else, because this backend has no fresh root to
+  leave a path out of and a mount cannot express a read (D26). `Sandbox.violation/3`'s rule that
+  `Permission denied` is not a sandbox signal is unchanged and is a rule about *shell* output,
+  where an ordinary file mode says the same thing; the forge reads the string where the program,
+  the policy and the source are all this node's own.
+
+  One defect came out of the container with it, in this slice's own change: the line that drops
+  the stale `_build/.../ouroboros/priv` symlink before `make` was first written as a `find -name
+  priv -type l -delete` over the whole build tree, which also took erlexec's port-binary link
+  and left the suite unable to start a single native tool. It names the one path now.
 
 - **W18 — every permission seam reads one setting.** `Control.Permissions.Seam` — the ACP lane,
   and the last seam that called `Control.Permissions` by name — now evaluates, records and

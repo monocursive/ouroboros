@@ -26,6 +26,7 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
   | external network denied | `unshare(CLONE_NEWNET)` (`ENETUNREACH`) |
   | loopback still usable | loopback brought up inside the namespace |
   | **creating a `.git` that did not exist when the command started** | **`LD_PRELOAD` only — unchanged, and still leaky** |
+  | reads fenced to an allow-set, in `builder` mode only | Landlock alone (`EACCES`) — there is no mount that can express it |
   | remounting out of the policy | capabilities dropped, seccomp denial, **and** Landlock, which survives both |
   | narrowing the syscall surface | seccomp (the bwrap backend has none) |
 
@@ -69,6 +70,21 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
   precisely so that every denial a command can actually provoke is decided by the mount
   check, which the kernel consults first. A Landlock denial would arrive as `EACCES`, which
   this runtime correctly refuses to treat as a sandbox signal.
+
+  The one exception is `builder` (docs/WASM.md D26), where a **read** denial has no mount
+  layer to arrive through — this helper stays in the host's own path namespace, and a mount
+  can make a path read-only but not unreadable. So a builder read denial *is* `EACCES`, and
+  it is legible there for a reason that does not generalise: a build is one program this
+  node spawned with a policy it wrote, not an opaque shell line, so the string is read as a
+  fence in `Ouroboros.Wasm.Forge`'s own suite and nowhere else.
+
+  ## What the helper says it can do
+
+  `doctor` carries `"features": {"read_allow_set": true}`, and `probe/1` turns that into
+  `read_fence: true` in the detection map. It is asked rather than assumed because a helper
+  binary installed before W17 speaks the same protocol version and applies the same
+  policies, and silently has no read allow-set: a node that inferred the fence from the
+  backend's name would run a build under one that helper does not have.
   """
 
   @helper_name "ouro-sandbox"
@@ -141,15 +157,23 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
   `"usable": false`, this returns `nil`, and detection falls through to bubblewrap rather
   than selecting a backend that would refuse every command. A binary that cannot be run at
   all is treated the same way.
+
+  `read_fence` is the second thing this asks, and it is a question about the *binary*
+  rather than about the kernel: only a helper whose report carries
+  `"features": {"read_allow_set": true}` gets it, so a node still running a pre-W17
+  `ouro-sandbox` answers `false` and `Sandbox.fences_reads?/1` refuses the forge that
+  backend rather than fencing a build with a field the helper would refuse to parse.
   """
-  @spec probe(String.t()) :: %{version: String.t() | nil, notes: String.t()} | nil
+  @spec probe(String.t()) ::
+          %{version: String.t() | nil, notes: String.t(), read_fence: boolean()} | nil
   def probe(path) when is_binary(path) do
     with {output, 0} <- System.cmd(path, ["doctor"], stderr_to_stdout: true),
          {:ok, report} <- JSON.decode(output),
          true <- Map.get(report, "usable") == true do
       %{
         version: report |> Map.get("version") |> version_string(report),
-        notes: Map.get(report, "notes", "")
+        notes: Map.get(report, "notes", ""),
+        read_fence: read_fence?(report)
       }
     else
       _unusable -> nil
@@ -166,6 +190,12 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
   end
 
   defp version_string(_absent, _report), do: nil
+
+  # Pattern-matched rather than `get_in`, so a report whose `features` is a string — a
+  # helper from some other lineage, or a truncated read — is a helper that does not claim
+  # the fence rather than an exception on the detection path.
+  defp read_fence?(%{"features" => %{"read_allow_set" => true}}), do: true
+  defp read_fence?(_no_claim), do: false
 
   @doc """
   The executable and argv that run `command` under this policy.
@@ -201,6 +231,11 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
   `.git` directories exist is deliberately left to the helper, because the sandbox should
   read the filesystem at the moment it locks it rather than trusting a list assembled a few
   milliseconds earlier.
+
+  A `builder` policy is the one shape that carries `readable`, and it is the only change
+  this function makes for it: the read allow-set is a field the helper fences with Landlock
+  and refuses under any other mode, so emitting it for a shell would be a request the helper
+  rejects rather than a shell with a narrower fence.
   """
   @spec request(Ouroboros.Provider.Native.Sandbox.policy(), map()) :: map()
   def request(policy, scope) do
@@ -215,9 +250,15 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
     }
 
     base
+    |> readable(policy)
     |> maybe_put("cwd", chdir(scope))
     |> maybe_put("fs_filter_library", filter_library())
   end
+
+  defp readable(request, %{mode: :builder} = policy),
+    do: Map.put(request, "readable", List.wrap(Map.get(policy, :readable, [])))
+
+  defp readable(request, _shell), do: request
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)

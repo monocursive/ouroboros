@@ -7,6 +7,7 @@ defmodule Ouroboros.Wasm.ForgeTest do
   alias Ouroboros.Mesh
   alias Ouroboros.Provider.Native.Sandbox
   alias Ouroboros.Provider.Native.Sandbox.Bwrap
+  alias Ouroboros.Provider.Native.Sandbox.Helper
   alias Ouroboros.Provider.Native.Sandbox.SandboxExec
   alias Ouroboros.Runtime.Capabilities
   alias Ouroboros.Upgrade.Rollout.Registry
@@ -254,21 +255,71 @@ defmodule Ouroboros.Wasm.ForgeTest do
 
     # Red without `Sandbox.fences_reads?/1` and the arm that consults it. A backend that can
     # bound writes and not reads is half a sandbox, and half of this lane's claim.
-    test "a backend with no read allow-set is refused rather than used", context do
+    #
+    # Since W17 the third backend can fence reads — but only a helper binary that says so.
+    # Delete the `Map.get(detection, :read_fence, false)` clause in `fences_reads?/1` and
+    # this goes red in the first half: a stale helper starts claiming a fence it has not
+    # got. Delete the `read_fence` the probe carries and it goes red in the second: a
+    # current helper stops being allowed to forge at all.
+    test "a helper that does not claim the read allow-set is refused rather than used",
+         context do
+      stale = %{
+        backend: :ouro_sandbox,
+        executable: "/nowhere",
+        version: nil,
+        notes: "",
+        read_fence: false
+      }
+
+      refute Sandbox.fences_reads?(stale)
+      # And a detection with no such key at all — a cache written by an older node, a map
+      # somebody built by hand — is the same answer. This fails closed.
+      refute Sandbox.fences_reads?(Map.delete(stale, :read_fence))
+      # The bare backend name claims nothing: the capability is the binary's, not the name's.
       refute Sandbox.fences_reads?(:ouro_sandbox)
+
+      assert {:error, {:sandbox_cannot_fence_reads, :ouro_sandbox, why}} =
+               Forge.sandbox_policy("/nowhere/cargo", context.builds, context.tmp, "/sdk", stale)
+
+      assert why =~ "read allow-set"
+
+      # The other two answer by name, because neither is a binary this repository ships.
       assert Sandbox.fences_reads?(:sandbox_exec)
       assert Sandbox.fences_reads?(:bwrap)
+    end
 
-      detection = %{backend: :ouro_sandbox, executable: "/nowhere", version: nil, notes: ""}
+    # The other half of C11, and the reason W17 is not just a Rust change: a helper that
+    # reports the feature is admitted, with the same builder policy the other two get.
+    test "a helper that reports the read allow-set builds under the builder policy", context do
+      current = %{
+        backend: :ouro_sandbox,
+        executable: "/nowhere",
+        version: "0.1.0",
+        notes: "",
+        read_fence: true
+      }
 
-      assert {:error, {:sandbox_cannot_fence_reads, :ouro_sandbox, _why}} =
+      assert Sandbox.fences_reads?(current)
+
+      assert {:ok, policy} =
                Forge.sandbox_policy(
                  "/nowhere/cargo",
                  context.builds,
                  context.tmp,
                  "/sdk",
-                 detection
+                 current
                )
+
+      assert policy.mode == :builder
+      assert policy.network == false
+      assert "/sdk" in policy.readable
+      assert Enum.sort(policy.writable) == Enum.sort([context.builds, context.tmp])
+
+      # And the request that reaches the helper carries the allow-set — for this mode and
+      # for no other. Red without `Helper.request/2`'s `readable` clause.
+      request = Helper.request(Sandbox.with_scratch(policy, "/scratch"), %{root: context.builds})
+      assert request["mode"] == "builder"
+      assert request["readable"] == policy.readable
     end
 
     test "the builder policy denies the network, names its writable roots, and fences reads",
@@ -775,16 +826,20 @@ defmodule Ouroboros.Wasm.ForgeTest do
   # it are (`/bin` on macOS, `/usr` on Linux).
   defp bash!, do: System.find_executable("bash") || "/bin/bash"
 
-  # The two backends refuse a read differently, and the difference is not cosmetic: Seatbelt
-  # denies an open on a path that exists (`EPERM`), while bubblewrap does not put the file in
-  # the namespace at all, so the compiler is told it is not there (`ENOENT`). Both are the
-  # fence; only one of them is a permission error. The assertion beside this one — that the
-  # honest fixture still builds — is what makes either message mean the fence rather than a
-  # broken toolchain.
+  # The three backends refuse a read in three different words, and the difference is
+  # mechanism rather than cosmetics. Seatbelt denies an open on a path that is there
+  # (`EPERM`). bubblewrap never puts the file in the namespace, so the compiler is told it
+  # is not there (`ENOENT`). `ouro-sandbox` stays in the host's own path namespace — a mount
+  # can make a path read-only and cannot make it unreadable — so its read fence is Landlock
+  # alone and arrives as `EACCES`. All three are the fence; only one is a permission error,
+  # and one is not even an error about permission. The assertion beside this one — that the
+  # honest fixture still builds under the same policy — is what makes any of the three mean
+  # the fence rather than a broken toolchain.
   defp denial_pattern do
     case Sandbox.detect().backend do
       :sandbox_exec -> ~r/Operation not permitted/
-      _linux -> ~r/No such file or directory/
+      :ouro_sandbox -> ~r/Permission denied/
+      _bwrap -> ~r/No such file or directory/
     end
   end
 

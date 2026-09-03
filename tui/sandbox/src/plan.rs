@@ -35,6 +35,15 @@
 //! Nested roots are applied shallowest-first within each step, so a policy that puts a
 //! writable worktree under the node's read-only data directory (the D7 case the bwrap
 //! backend calls out) resolves the same way it does there.
+//!
+//! # Reads, and the one mode that fences them
+//!
+//! Steps 1 to 4 are about writes, and for a shell that is the whole policy: its Landlock
+//! read set is `/`. `builder` (docs/WASM.md D26) is the exception — the read set is the
+//! policy's `readable`, its writable roots, its scratch and the two mounts the sweep keeps
+//! — and it has no mount half at all, because this helper has no fresh root to leave a
+//! path out of. So the mount plan under `builder` is exactly what it would be for the same
+//! roots under `workspace_write`, and everything the fence adds is in `LandlockPlan`.
 
 use crate::request::{Limits, Mode, Policy};
 use std::collections::BTreeSet;
@@ -115,7 +124,18 @@ pub const KEEP_WRITABLE: &[&str] = &["/dev", "/proc"];
 /// makes the mount policy true rather than merely intended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LandlockPlan {
-    /// Granted the read set. Always `/`: reads go anywhere the process could already read.
+    /// Granted the read set. `/` for every shell mode — reads go anywhere the process
+    /// could already read — and in `builder` mode exactly the policy's `readable`, its
+    /// writable roots, its scratch, and `KEEP_WRITABLE`.
+    ///
+    /// **The read fence is Landlock's alone, and that is a property of this backend
+    /// rather than an oversight.** bubblewrap builds a fresh root and simply does not bind
+    /// what a build may not read; this helper stays in the host's own path namespace, so a
+    /// mount can make a path read-*only* and has no way to make it unreadable. Hence a
+    /// read denial here is `EACCES` where a write denial is `EROFS`, and hence a builder
+    /// policy with an empty `readable` is a build that can read its own directories and
+    /// nothing else: there is no `/` to fall back to, because falling back is what a fence
+    /// is for.
     pub read_roots: Vec<String>,
     /// Granted the read set and the write set.
     pub write_roots: Vec<String>,
@@ -259,19 +279,33 @@ impl Plan {
             .collect();
         read_only_overrides = dedup_sorted(read_only_overrides);
 
+        // A builder carries no name filter: `request.rs` refuses a builder request that
+        // names one, so this is the second half of one rule rather than a second rule.
         let preload = match (fs_filter_library, policy.denied_names.as_slice()) {
-            (Some(library), [_, ..]) => Some(PreloadFilter {
+            (Some(library), [_, ..]) if !policy.mode.fences_reads() => Some(PreloadFilter {
                 library: library.to_string(),
                 denied_names: policy.denied_names.clone(),
             }),
             _ => None,
         };
 
+        // The read set. For a shell it is `/`; for a build it is the allow-set plus what
+        // the build can already write, and the union is taken from the mount plan for the
+        // same reason the write set is — so a root that is writable is readable by
+        // construction rather than by two lists agreeing.
+        let read_roots = if policy.mode.fences_reads() {
+            let mut roots = policy.readable.clone();
+            roots.extend(write_roots.iter().cloned());
+            dedup_sorted(roots)
+        } else {
+            vec!["/".to_string()]
+        };
+
         Plan {
             mode: policy.mode,
             mounts,
             landlock: LandlockPlan {
-                read_roots: vec!["/".to_string()],
+                read_roots,
                 write_roots,
                 read_only_overrides,
             },
@@ -578,6 +612,109 @@ mod tests {
 
         assert_eq!(plan.landlock.write_roots, mount_writable);
         assert_eq!(plan.landlock.read_roots, vec!["/".to_string()]);
+    }
+
+    #[test]
+    fn a_builder_plan_reads_only_what_it_was_given_and_never_the_root() {
+        // The whole of W17 in one assertion: `/` is not in the read set, so every path the
+        // policy did not name is denied to a compiler that goes looking for it.
+        let plan = Plan::compile(
+            &policy(
+                r#"{"mode":"builder","scratch":"/tmp/s","writable":["/build","/cargo"],
+                    "readable":["/toolchain","/sdk"]}"#,
+            ),
+            None,
+        );
+
+        assert_eq!(
+            plan.landlock.read_roots,
+            vec![
+                "/build".to_string(),
+                "/cargo".to_string(),
+                "/dev".to_string(),
+                "/proc".to_string(),
+                "/sdk".to_string(),
+                "/tmp/s".to_string(),
+                "/toolchain".to_string(),
+            ]
+        );
+        assert!(!plan.landlock.read_roots.contains(&"/".to_string()));
+
+        // And the writes are fenced exactly as before: the mount plan still binds the
+        // writable roots first and then sweeps everything else read-only, so a build gets
+        // both layers rather than trading one for the other.
+        assert_eq!(
+            plan.mounts,
+            vec![
+                MountOp::BindWritable {
+                    path: "/build".to_string()
+                },
+                MountOp::BindWritable {
+                    path: "/cargo".to_string()
+                },
+                MountOp::Tmpfs {
+                    path: "/tmp/s".to_string()
+                },
+                sweep(),
+            ]
+        );
+        // The write set is unchanged by any of it: a root a build may read is not a root
+        // it may write, which is the difference between the toolchain and the build tree.
+        assert_eq!(
+            plan.landlock.write_roots,
+            vec![
+                "/build".to_string(),
+                "/cargo".to_string(),
+                "/dev".to_string(),
+                "/proc".to_string(),
+                "/tmp/s".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_builder_with_an_empty_allow_set_gets_no_root_beyond_its_own() {
+        // No fallback to `/`. A policy that named nothing readable is a build that reads
+        // its own directories, `/dev` and `/proc`, and is refused everything else.
+        let plan = Plan::compile(
+            &policy(r#"{"mode":"builder","scratch":"/tmp/s","writable":["/build"]}"#),
+            None,
+        );
+
+        assert_eq!(
+            plan.landlock.read_roots,
+            vec![
+                "/build".to_string(),
+                "/dev".to_string(),
+                "/proc".to_string(),
+                "/tmp/s".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_shell_mode_still_reads_the_whole_filesystem() {
+        // The other half of the same rule, and the one that keeps every non-builder plan
+        // byte-identical to what it was before this slice.
+        for mode in ["read_only", "workspace_write", "workspace_write_escalated"] {
+            let plan = Plan::compile(
+                &policy(&format!(r#"{{"mode":"{mode}","scratch":"/tmp/s"}}"#)),
+                None,
+            );
+            assert_eq!(plan.landlock.read_roots, vec!["/".to_string()], "{mode}");
+        }
+    }
+
+    #[test]
+    fn a_builder_carries_no_preload_filter_even_where_a_library_exists() {
+        // A builder request naming `denied_names` is refused outright (`request.rs`), so
+        // this pins the other direction: a library on disk does not conjure a filter for a
+        // policy whose fence is the read allow-set.
+        let plan = Plan::compile(
+            &policy(r#"{"mode":"builder","scratch":"/tmp/s","writable":["/build"]}"#),
+            Some("/priv/libouro_fs_filter.so"),
+        );
+        assert_eq!(plan.preload, None);
     }
 
     #[test]

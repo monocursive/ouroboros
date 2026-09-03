@@ -436,6 +436,35 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
                )
     end
 
+    test "a builder policy carries its read allow-set, and no other mode carries one" do
+      # C10 on the wire. Red without `Helper.request/2`'s `readable` clause: a builder
+      # request with no allow-set is one the helper fences to its writable roots alone, so
+      # the omission would not be a wider build — it would be a build that cannot read its
+      # own toolchain, which is a failure nobody would read as a policy bug.
+      policy =
+        Sandbox.builder_policy(writable: ["/build"], readable: ["/toolchain"])
+        |> Sandbox.with_scratch("/scratch")
+
+      request = Helper.request(policy, %{root: "/build"})
+
+      assert request["mode"] == "builder"
+      assert request["writable"] == ["/build"]
+      assert "/toolchain" in request["readable"]
+      # Every platform root the builder policy starts from travels too.
+      for root <- Sandbox.platform_readable(), do: assert(root in request["readable"])
+      # A builder has no name fence and no protected roots: the read allow-set is the
+      # fence, and the helper refuses a builder request that carries `denied_names`.
+      assert request["denied_names"] == []
+      assert request["network"] == false
+
+      # And the field belongs to that mode alone. A shell's read set is `/`, so a
+      # `readable` in one of these would be a fence the helper refuses outright.
+      for mode <- [:read_only, :workspace_write, :workspace_write_escalated] do
+        refute Map.has_key?(Helper.request(fixed_policy(mode), %{root: "/ws"}), "readable"),
+               "mode #{mode} must not carry a read allow-set"
+      end
+    end
+
     test "carries the fs_filter library when this build has one, because Landlock cannot" do
       # The documented gap: denying the *creation* of a `.git` that does not exist yet is
       # not expressible in Landlock, so the helper is handed the same LD_PRELOAD shim the
@@ -492,6 +521,42 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       File.chmod!(fake, 0o755)
 
       assert %{version: "0.1.0 (landlock abi 8)", notes: "ok"} = Helper.probe(fake)
+    end
+
+    test "the read fence is claimed by the helper's own report, never by its name", %{root: root} do
+      # C11. Delete the `read_fence:` key from `probe/1` and the second half goes red; make
+      # it a constant `true` and the first half does. A helper installed before the read
+      # allow-set existed reports no feature, and a node that inferred the fence from the
+      # backend's name would run a build under one it does not have.
+      stale = Path.join(root, "stale-helper")
+      File.write!(stale, ~s(#!/bin/sh\necho '{"usable":true,"version":"0.1.0","notes":"ok"}'\n))
+      File.chmod!(stale, 0o755)
+
+      assert %{read_fence: false} = Helper.probe(stale)
+
+      current = Path.join(root, "current-helper")
+
+      File.write!(
+        current,
+        ~s(#!/bin/sh\necho '{"usable":true,"version":"0.1.0","notes":"ok","features":{"read_allow_set":true}}'\n)
+      )
+
+      File.chmod!(current, 0o755)
+
+      assert %{read_fence: true} = Helper.probe(current)
+
+      # A `features` that is not an object is a helper that claims nothing, not an
+      # exception on the detection path every `bash` call crosses.
+      odd = Path.join(root, "odd-helper")
+
+      File.write!(
+        odd,
+        ~s(#!/bin/sh\necho '{"usable":true,"version":"0.1.0","notes":"ok","features":"yes"}'\n)
+      )
+
+      File.chmod!(odd, 0o755)
+
+      assert %{read_fence: false} = Helper.probe(odd)
     end
   end
 

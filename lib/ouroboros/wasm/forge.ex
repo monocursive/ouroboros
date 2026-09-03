@@ -31,8 +31,10 @@ defmodule Ouroboros.Wasm.Forge do
       is otherwise a file the allow-list admits.
     * **The sandbox.** A `Sandbox.builder_policy/1`: deny-by-default on **reads** as well as
       on writes, so a build reads the toolchain, the SDK, the `wit` world file and its own
-      directories and nothing else — `include_str!` of anything else is
-      `Operation not permitted` at compile time. No network (`--offline` as well, so a cold
+      directories and nothing else — `include_str!` of anything else fails at compile time,
+      in whichever words the backend refuses a read with (`Operation not permitted` from
+      Seatbelt, `No such file or directory` from a bubblewrap namespace,
+      `Permission denied` from `ouro-sandbox`'s Landlock read set). No network (`--offline` as well, so a cold
       cache is a refusal rather than a fetch), writes only into the build directory, the
       node-local cargo home and a private `TMPDIR`, a five-minute ceiling, bounded output.
 
@@ -933,6 +935,12 @@ defmodule Ouroboros.Wasm.Forge do
   things that make this lane's claim true, and half a sandbox makes half of it. Public
   because "what would this build run under" is a question worth being able to ask without
   running one.
+
+  All three backends can fence reads since W17, and the third is still asked rather than
+  assumed. `Sandbox.fences_reads?/1` answers for `:ouro_sandbox` out of the probed helper's
+  own `doctor` report, so the refusal below is no longer "this backend cannot" but "the
+  binary installed on this node cannot" — an operator's remedy is a newer helper, and until
+  they have one the node forges under bubblewrap or not at all.
   """
   @spec sandbox_policy(String.t(), Path.t(), Path.t(), Path.t(), Sandbox.detection()) ::
           {:ok, Sandbox.policy()} | {:error, term()}
@@ -946,8 +954,12 @@ defmodule Ouroboros.Wasm.Forge do
       not Sandbox.fences_reads?(detection) ->
         {:error,
          {:sandbox_cannot_fence_reads, detection.backend,
-          "this backend has no read allow-set, so a build under it could read anything the " <>
-            "node can (docs/WASM.md D18)"}}
+          "this node's #{Sandbox.label(detection)} cannot express a read allow-set, so a " <>
+            "build under it could read anything the node can (docs/WASM.md D18, D26). " <>
+            "An `ouro-sandbox` from before the allow-set reports no `read_allow_set` " <>
+            "feature and is refused here by that report rather than by its name: install " <>
+            "a helper built from this tree (`make sandbox`) or let detection fall through " <>
+            "to bubblewrap."}}
 
       true ->
         {:ok,

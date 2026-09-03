@@ -93,6 +93,14 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   legitimate `mkdir` in the workspace. Static binaries that never call libc are outside that
   net, on either backend. `Sandbox.Helper`'s moduledoc has the layer-by-layer table.
 
+  All three backends now fence **reads** as well, in the one policy that asks for it:
+  `builder_policy/1` names its read roots and everything else is denied — Seatbelt by
+  `(deny default)`, bubblewrap by never binding `/` into the namespace, `ouro-sandbox` by a
+  Landlock read set that is the allow-list rather than `/`. `fences_reads?/1` is the
+  question a caller asks first, and for `ouro-sandbox` it is answered by the probed helper
+  rather than by the backend's name, because a helper binary older than the field would
+  apply the rest of the policy and silently drop the fence.
+
   No domain allowlist and no proxy: external network is on or off, never "these hosts". A
   network-denied macOS command retains loopback for build-tool IPC; both Linux backends
   keep an isolated network namespace with loopback up. `sandbox-exec` is deprecated by
@@ -102,7 +110,9 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   Live bubblewrap behaviour is claimed only where the live suite runs: Linux CI on
   ubuntu-24.04, which installs `bwrap` and exercises the filesystem denials. The
   `ouro-sandbox` helper's enforcement was observed on Linux 7.0 with Landlock ABI 8 —
-  filesystem denials, the network posture, capability drop, and the seccomp belt — by
+  filesystem denials, the network posture, capability drop, the seccomp belt, and the
+  builder read fence (a build reads the roots it was given, is refused a canary beside them
+  with `Permission denied`, and gets no root at all from an empty allow-set) — by
   `tui/sandbox/tests/linux_enforcement.rs`, which is skipped with a printed reason where
   the kernel or the container cannot enforce. Neither Linux suite runs on a Mac.
   """
@@ -116,12 +126,22 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   @typedoc "Which OS mechanism this node can actually use."
   @type backend :: :sandbox_exec | :ouro_sandbox | :bwrap | :none
 
-  @typedoc "What `detect/0` found, once, for this node."
+  @typedoc """
+  What `detect/0` found, once, for this node.
+
+  `read_fence` says whether this particular backend, as installed here, can enforce a
+  builder policy's read allow-set. It is part of the detection rather than a property of
+  the backend name because one of the three backends is a helper binary this repository
+  ships: an `ouro-sandbox` older than W17 is the same backend under the same name with no
+  read allow-set in its wire format, and `fences_reads?/1` asks the probe rather than the
+  name so that node refuses to forge instead of forging unfenced.
+  """
   @type detection :: %{
           backend: backend(),
           executable: String.t() | nil,
           version: String.t() | nil,
-          notes: String.t()
+          notes: String.t(),
+          read_fence: boolean()
         }
 
   @typedoc "The resolved rules one wrapped command runs under."
@@ -163,15 +183,20 @@ defmodule Ouroboros.Provider.Native.Sandbox do
     "/Applications/Xcode.app"
   ]
 
-  # Unverified. No Linux build has run under this module, and the honest form of that is a
-  # list that says which one it is rather than a comment somewhere else saying it might be
-  # wrong. `Ouroboros.Wasm.Forge` refuses the one Linux backend that cannot express a read
-  # fence at all rather than building under a weaker one.
+  # Observed under both Linux backends, in a privileged Ubuntu container on kernel 7.0.14:
+  # under bubblewrap by `scripts/forge-linux-test.sh` (W14) and under `ouro-sandbox` by the
+  # same script since W17, which is where the escape tests — `include_str!` of a planted
+  # secret, a `#[path]` module outside the project — are red without the fence and the
+  # honest fixture builds beside them. What remains unverified is the *composition* of this
+  # list with a distribution whose toolchain lives somewhere it does not name; a build there
+  # fails closed, loudly, rather than reading more than it should.
   # No `/dev` and no `/proc`: bubblewrap mounts a fresh devtmpfs and a fresh procfs for the
   # namespace, and a read-only bind of the host's over the top of either replaces it — which
   # is how the first cut of this list produced a build whose very first act was
   # `cannot create /dev/null: Permission denied`. They are the backend's to provide, not
-  # this list's to name.
+  # this list's to name. `ouro-sandbox` keeps both writable in every mode for the same
+  # reason and adds them to the builder read set itself, so neither belongs here for either
+  # backend.
   @linux_readable ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32", "/etc", "/opt"]
 
   @scratch_prefix "ouroboros-sandbox-"
@@ -186,7 +211,8 @@ defmodule Ouroboros.Provider.Native.Sandbox do
     version: nil,
     notes:
       "no OS sandbox on this node: none of ouro-sandbox, sandbox-exec, or bwrap is available",
-    unshare_net: false
+    unshare_net: false,
+    read_fence: false
   }
 
   # ------------------------------------------------------------------ detection
@@ -366,15 +392,31 @@ defmodule Ouroboros.Provider.Native.Sandbox do
     end
   end
 
-  @doc "Whether this backend can enforce a builder policy's read fence."
+  @doc """
+  Whether this backend can enforce a builder policy's read fence.
+
+  Two of the three answer by name. Seatbelt's `(deny default)` and bubblewrap's refusal to
+  bind `/` are properties of mechanisms an operator installs and this repository does not
+  version, so `builder_policy/1` either compiles to a fence there or it does not compile
+  at all.
+
+  `ouro-sandbox` is the exception and the reason this takes a detection: it is a binary
+  *this* repository ships, and one installed before W17 speaks the same protocol version,
+  applies the same shell policies, and has no `readable` field to fence a build with. So
+  the answer comes from what the probed helper said about itself (`read_fence`, from
+  `doctor`'s `features.read_allow_set`), and a detection with no such key — a stale cache,
+  a map a test built by hand — is a `false`. Failing closed here costs a node the forge;
+  failing open would cost it the fence the forge's whole claim rests on (docs/WASM.md D26).
+  """
   @spec fences_reads?(detection() | backend()) :: boolean()
+  def fences_reads?(%{backend: :ouro_sandbox} = detection),
+    do: Map.get(detection, :read_fence, false) == true
+
   def fences_reads?(%{backend: backend}), do: fences_reads?(backend)
   def fences_reads?(:sandbox_exec), do: true
   def fences_reads?(:bwrap), do: true
-  # `ouro-sandbox`'s request protocol has writable roots, protected roots and denied names,
-  # and no read allow-set; Landlock could express one, the wire format cannot yet. A caller
-  # that needs the fence is told so rather than given a policy that silently does not have
-  # it.
+  # A bare `:ouro_sandbox` is a backend name with no probe behind it, and the capability is
+  # the helper's to claim rather than the name's, so the name alone claims nothing.
   def fences_reads?(:ouro_sandbox), do: false
   def fences_reads?(:none), do: false
 
@@ -532,7 +574,12 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   every program spells `EPERM` the same way — `Operation not permitted` — which is why
   that string, and only that string, is what is matched here; `Permission denied` is
   `EACCES`, an ordinary file mode, and treating it as a sandbox denial would be a
-  guess. bubblewrap denies differently: a read-only bind answers `EROFS`
+  guess. That rule is unchanged by W17, which made `EACCES` the signal a *builder* read
+  denial arrives as: this function reads the output of an opaque shell line, where a
+  chmod nobody thought about produces the same string, while a build is one program this
+  node spawned under a policy it wrote and its denial is read where that is known
+  (`Ouroboros.Wasm.Forge`'s suite). One errno, two contexts, and only one of them can
+  tell them apart. bubblewrap denies differently: a read-only bind answers `EROFS`
   (`Read-only file system`) and an unshared network answers `ENETUNREACH`
   (`Network is unreachable`). The matched line is quoted back, so a reader can judge
   the attribution instead of trusting it.
@@ -674,6 +721,7 @@ defmodule Ouroboros.Provider.Native.Sandbox do
           executable: path,
           # `sandbox-exec` has no version flag; claiming one would mean inventing it.
           version: nil,
+          read_fence: true,
           notes:
             "macOS Seatbelt through #{path}. Apple marks sandbox-exec deprecated; it is " <>
               "still functional and is the mechanism Codex CLI and Cursor use."
@@ -695,21 +743,33 @@ defmodule Ouroboros.Provider.Native.Sandbox do
 
   defp probe_helper do
     with path when is_binary(path) <- Helper.executable(),
-         %{version: version, notes: notes} <- Helper.probe(path) do
+         %{version: version, notes: notes, read_fence: read_fence} <- Helper.probe(path) do
       %{
         backend: :ouro_sandbox,
         executable: path,
         version: version,
+        # What the helper said about itself, not what this node hopes: a binary from before
+        # the read allow-set existed reports no feature and this stays `false`.
+        read_fence: read_fence,
         notes:
           "Linux ouro-sandbox through #{path}. #{notes}. Filesystem via read-only mounts " <>
             "and a Landlock domain, network via an unshared namespace, and a minimal " <>
-            "seccomp denylist. Creating a `.git` that did not exist when the command " <>
-            "started is still carried by the LD_PRELOAD filter, not by the kernel."
+            "seccomp denylist#{read_fence_note(read_fence)}. Creating a `.git` that did " <>
+            "not exist when the command started is still carried by the LD_PRELOAD " <>
+            "filter, not by the kernel."
       }
     else
       _absent_or_unusable -> nil
     end
   end
+
+  defp read_fence_note(true),
+    do: ", and a Landlock read allow-set for builder policies"
+
+  defp read_fence_note(false),
+    do:
+      ". This build has no read allow-set, so a builder policy cannot be fenced with it " <>
+        "(docs/WASM.md D26)"
 
   defp probe_bwrap do
     case System.find_executable("bwrap") do
@@ -723,6 +783,7 @@ defmodule Ouroboros.Provider.Native.Sandbox do
               backend: :bwrap,
               executable: path,
               version: version,
+              read_fence: true,
               notes:
                 "Linux bubblewrap through #{path}. #{notes}. Filesystem and network " <>
                   "namespace only: no seccomp filter, so the syscall surface is not narrowed.",
@@ -734,6 +795,7 @@ defmodule Ouroboros.Provider.Native.Sandbox do
               backend: :bwrap,
               executable: path,
               version: version,
+              read_fence: true,
               notes:
                 "Linux bubblewrap through #{path}. #{notes}. Filesystem namespace only: " <>
                   "the host refused an unshared network, so commands keep the host network. " <>

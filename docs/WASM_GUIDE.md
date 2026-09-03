@@ -1518,7 +1518,8 @@ sandbox the native agent's shell runs in:
 * no network — `--offline` as well, so a missing crate is a refusal rather than a download;
 * writes only into the build directory, the node's cargo home and a private `TMPDIR`;
 * **reads** only from the toolchain, the guest SDK, the `wit` world file beside it and those
-  same directories — everything else is `Operation not permitted` at compile time;
+  same directories — everything else fails at compile time, in whichever words your node's
+  sandbox refuses a read with;
 * a five-minute wall-clock ceiling and bounded output;
 * a node with no sandbox backend does not build at all.
 
@@ -1526,10 +1527,14 @@ sandbox the native agent's shell runs in:
 files at compile time and a `#[path]` module reaches one outside `src/`; all of them are
 denied unless the file is inside your project. A capability that needs data ships it as a
 `src/**.rs` file or receives it in its `init` config — those are the two doors, and both are
-inside the manifest that gets signed. macOS enforces this with Seatbelt and says
-`Operation not permitted`; Linux enforces it with a bubblewrap namespace the file was never
-in, and says `No such file or directory`. A node whose only sandbox is `ouro-sandbox`
-refuses to forge rather than building behind a fence it cannot apply (docs/WASM.md D18).
+inside the manifest that gets signed. The three backends say it in three different ways, and
+none of them is a bug in your project: macOS enforces it with Seatbelt and says
+`Operation not permitted`; a Linux node on bubblewrap enforces it with a namespace the file
+was never in, and says `No such file or directory`; a Linux node on `ouro-sandbox` enforces
+it with a Landlock read set and says `Permission denied` (docs/WASM.md D26). The one case
+that is not a fence is a node carrying an `ouro-sandbox` older than that read set: it reports
+no `read_allow_set` feature to `doctor`, and the forge refuses to build there at all rather
+than behind a fence that helper cannot apply. `make sandbox` installs a current one.
 
 ### Warming the cache, once, per builder
 
