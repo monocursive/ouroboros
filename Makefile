@@ -13,7 +13,7 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
+.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test forge-linux-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-skew-test test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -41,6 +41,13 @@ help:
 	@echo "make computer-use     build ouro-computer-use into priv/computer-use/"
 	@echo "make sandbox          build ouro-sandbox into priv/sandbox/ (Linux sandbox helper)"
 	@echo "make sandbox-linux-test  prove the sandbox helper enforces, in a Linux container"
+	@echo "make forge-linux-test    prove the forge's builder namespace, in a Linux container"
+	@echo "make wasm             build ouro-wasm into priv/wasm/ (WebAssembly containment helper)"
+	@echo "make wasm-guest       build the lane-W acceptance guest into test/support/wasm/echo.wasm"
+	@echo "make wasm-examples    build the guest SDK's worked components (counter, deny-writes, …)"
+	@echo "make wasm-sdk-check   the guest SDK's own gates: fmt, tests, clippy, wasm32 build"
+	@echo "make wasm-sdk-cache   warm this node's cargo cache with exactly the SDK's dependencies"
+	@echo "make wasm-skew-test   prove the precompiled skew refusals with two real toolchains"
 
 dev:
 	@echo "==> dev: Elixir deps if this checkout has none, then ouro --dev"
@@ -120,6 +127,127 @@ sandbox-linux-test:
 	@echo "==> sandbox-linux-test: enforcement suite in a privileged Linux container"
 	scripts/sandbox-linux-test.sh
 
+# The WebAssembly containment helper. Unlike the sandbox helper this one enforces the same on
+# every platform — the boundary is wasmtime's linker, not a kernel feature — so there is no
+# per-OS caveat here. `ouro-wasm` carries a wasmtime, which needs a newer Rust than the rest of
+# this workspace; see the rust-version note in tui/wasm/Cargo.toml.
+wasm:
+	@echo "==> wasm: release helper into priv/wasm/"
+	cd tui && $(CARGO) build --release -p ouro-wasm
+	mkdir -p priv/wasm
+	cp tui/target/release/ouro-wasm priv/wasm/ouro-wasm
+	chmod 0755 priv/wasm/ouro-wasm
+	@for env in dev test prod; do \
+	  dest="_build/$$env/lib/ouroboros/priv/wasm"; \
+	  if [ -d "_build/$$env/lib/ouroboros/priv" ]; then \
+	    mkdir -p "$$dest"; \
+	    cp priv/wasm/ouro-wasm "$$dest/ouro-wasm"; \
+	    chmod 0755 "$$dest/ouro-wasm"; \
+	  fi; \
+	done
+	@echo "==> wasm: what this build can contain"
+	@priv/wasm/ouro-wasm doctor
+
+# The lane-W acceptance guest: a real component, built by a real toolchain, from the world at
+# tui/wasm/wit/capability.wit — and, since W9, on the guest SDK at tui/wasm/guest, which it
+# reaches by path dependency. It is a *test fixture* and deliberately not a `release-tarball`
+# prerequisite — nothing a node runs needs it. Its own workspace and its own lockfile, so it
+# can never enter `ouro`'s dependency graph, and its output is gitignored like every other
+# built binary here. Needs one toolchain addition: `rustup target add wasm32-wasip2`.
+wasm-guest:
+	@echo "==> wasm-guest: release component into test/support/wasm/echo.wasm"
+	cd test/support/wasm/echo-guest && $(CARGO) build --release --target wasm32-wasip2
+	cp test/support/wasm/echo-guest/target/wasm32-wasip2/release/ouroboros_echo_guest.wasm \
+	  test/support/wasm/echo.wasm
+	@echo "==> wasm-guest: what it declares"
+	@ls -l test/support/wasm/echo.wasm
+
+# The SDK's worked components, one per seam plus the verdict fixture. Each is a standalone
+# workspace built with a plain `cargo build`, because that is the claim: an author writes their
+# own logic and one macro call, and what comes out is a component in this world whose whole
+# authority is `log`. `tui/wasm/tests/sdk.rs` builds these same four and puts that claim to the
+# real helper; `test/wasm/sdk_acceptance_test.exs` runs the built artifacts through
+# `provider/native/hooks.ex` and asserts the decision the node reaches — which is why this
+# target is a prerequisite of that suite rather than a convenience.
+wasm-examples:
+	@echo "==> wasm-examples: the guest SDK's worked components"
+	cd tui/wasm/guest/examples/counter && $(CARGO) build --release --target wasm32-wasip2
+	cd tui/wasm/guest/examples/deny-writes && $(CARGO) build --release --target wasm32-wasip2
+	cd tui/wasm/guest/examples/lintcheck && $(CARGO) build --release --target wasm32-wasip2
+	cd tui/wasm/guest/examples/verdicts && $(CARGO) build --release --target wasm32-wasip2
+	# W15. The fifth is the first in the *policy* world, so this line is also the standing
+	# proof that one SDK builds both: `ouroboros:policy@0.1.0`, importing exactly `log`.
+	cd tui/wasm/guest/examples/no-network-shell && $(CARGO) build --release --target wasm32-wasip2
+	@echo "==> wasm-examples: what they declare"
+	@ls -l tui/wasm/guest/examples/counter/target/wasm32-wasip2/release/counter.wasm \
+	  tui/wasm/guest/examples/deny-writes/target/wasm32-wasip2/release/deny_writes.wasm \
+	  tui/wasm/guest/examples/lintcheck/target/wasm32-wasip2/release/lintcheck.wasm \
+	  tui/wasm/guest/examples/verdicts/target/wasm32-wasip2/release/verdicts.wasm \
+	  tui/wasm/guest/examples/no-network-shell/target/wasm32-wasip2/release/no_network_shell.wasm
+
+# The SDK's own gates. Its own workspace means `make test`'s `cd tui && cargo …` never reaches
+# it, so it gets a verb rather than being checked by nobody.
+#
+# Twice through clippy on purpose. The host pass is the only one that can lint the unit tests —
+# `Describe`'s document and `Verdict`'s reply are checked there, on a target with a test
+# harness — and the `wasm32-wasip2` pass is the build that actually ships. A lint that fires on
+# one and not the other is exactly the kind of thing a single pass would miss.
+wasm-sdk-check:
+	@echo "==> wasm-sdk-check: the guest SDK's own gates"
+	cd tui/wasm/guest && $(CARGO) fmt --check
+	cd tui/wasm/guest && $(CARGO) test
+	cd tui/wasm/guest && $(CARGO) clippy --all-targets -- -D warnings
+	cd tui/wasm/guest && $(CARGO) clippy --target wasm32-wasip2 -- -D warnings
+	cd tui/wasm/guest && $(CARGO) build --release --target wasm32-wasip2
+
+# The registry cache a `:builder` node forges against (docs/WASM.md D19). `Ouroboros.Wasm.Forge`
+# builds `--locked --offline` inside a sandbox with no network, so every crate the SDK's lock
+# names has to already be in `$CARGO_HOME/registry/cache` before a forge starts; a cache that is
+# missing one is a refusal naming it, not a fetch. `cargo fetch --locked` in the SDK's own
+# directory downloads exactly that set and nothing else — it is the SDK's lock that decides,
+# which is the same lock the forge pins a submitted project to.
+#
+# It warms the node's OWN cache by default — `<data_dir>/wasm/cargo-home`, derived here
+# exactly as `Ouroboros.DataDir` derives it — and not `~/.cargo`. That is the whole of D19's
+# second half: a cargo home carries `config.toml`, `[build] rustc-wrapper` in it is a program
+# cargo runs on every crate, and a developer's `~/.cargo` is a directory many things write
+# to. The forge uses this path unless an operator names another one.
+#
+# CARGO_HOME= names a different cache, for a builder that keeps its own:
+#   make wasm-sdk-cache CARGO_HOME=/var/lib/ouroboros/cargo
+OURO_DATA_DIR := $(or $(OUROBOROS_DATA_DIR),$(if $(XDG_DATA_HOME),$(XDG_DATA_HOME)/ouroboros,$(HOME)/.local/share/ouroboros))
+FORGE_CARGO_HOME := $(or $(CARGO_HOME),$(OURO_DATA_DIR)/wasm/cargo-home)
+
+wasm-sdk-cache:
+	@echo "==> wasm-sdk-cache: warming $(FORGE_CARGO_HOME) with the SDK's dependency set"
+	mkdir -p "$(FORGE_CARGO_HOME)"
+	cd tui/wasm/guest && CARGO_HOME="$(FORGE_CARGO_HOME)" $(CARGO) fetch --locked
+	@echo "==> wasm-sdk-cache: crates now cached"
+	@find "$(FORGE_CARGO_HOME)/registry/cache" -name '*.crate' | wc -l
+
+# The forge's builder namespace, on a real kernel, from a Mac. `--privileged` is what allows
+# the user namespace bubblewrap needs; the script's header says why that is a fact about
+# Docker rather than about the sandbox.
+forge-linux-test:
+	@echo "==> forge-linux-test: the builder namespace on a Linux kernel"
+	scripts/forge-linux-test.sh
+
+# Lane W under bubblewrap: the backend the hosted CI job runs every wasm suite under, and
+# the one no Mac exercises. `ouro-sandbox` is disabled by name inside the container so
+# detection falls through to `bwrap`, which is what found W16's merged-`/usr` namespace hole.
+wasm-linux-test:
+	@echo "==> wasm-linux-test: the wasm suites under bubblewrap on a Linux kernel"
+	scripts/wasm-linux-test.sh
+
+# W8's precompiled-artifact skew, with two real toolchains instead of a crafted header. Builds
+# `ouro-wasm` on a Linux kernel and again at one other wasmtime, precompiles the acceptance
+# guest with each, and offers both to this machine's own helper: each must be refused
+# `precompiled_mismatch` naming both sides, and the source form must still load. The artifacts
+# land in `_build/wasm-skew/`, which `test/wasm/skew_test.exs` reads.
+wasm-skew-test:
+	@echo "==> wasm-skew-test: a precompiled artifact from another toolchain, refused by name"
+	scripts/wasm-skew-test.sh
+
 computer-use-debug:
 	@echo "==> computer-use-debug: debug helper into priv/computer-use/"
 	cd tui && $(CARGO) build -p ouro-computer-use
@@ -190,7 +318,7 @@ protocol-docs: golden
 	$(MIX) ouroboros.protocol.docs
 	git diff --exit-code docs/PROTOCOL.md
 
-release-tarball: computer-use sandbox
+release-tarball: computer-use sandbox wasm
 	@echo "==> release-tarball: MIX_ENV=prod mix release"
 	MIX_ENV=prod $(MIX) release --overwrite
 	@ls _build/prod/$(RELEASE)-*.tar.gz

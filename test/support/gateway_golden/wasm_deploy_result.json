@@ -1,0 +1,88 @@
+{
+  "id": 20,
+  "jsonrpc": "2.0",
+  "result": {
+    "artifact_id": "wasm-0000000000000000000001",
+    "component_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "deployment": {
+      "ouroboros@golden": {
+        "eval": {
+          "detail": null,
+          "failed": 0,
+          "outcome": "passed",
+          "passed": 2,
+          "probes": 2,
+          "total_ms": 41
+        },
+        "probe": {
+          "detail": null,
+          "outcome": "ok"
+        },
+        "recovery": null,
+        "stage": {
+          "detail": null,
+          "outcome": "ok"
+        }
+      },
+      "ouroboros@peer": {
+        "eval": {
+          "detail": null,
+          "failed": 0,
+          "outcome": "passed",
+          "passed": 2,
+          "probes": 2,
+          "total_ms": 63
+        },
+        "probe": {
+          "detail": null,
+          "outcome": "ok"
+        },
+        "recovery": null,
+        "stage": {
+          "detail": null,
+          "outcome": "ok"
+        }
+      }
+    },
+    "epoch": 7,
+    "eval": {
+      "budget_ms": 10000,
+      "nodes": {
+        "ouroboros@golden": {
+          "detail": null,
+          "failed": 0,
+          "outcome": "passed",
+          "passed": 2,
+          "probes": 2,
+          "total_ms": 41
+        },
+        "ouroboros@peer": {
+          "detail": null,
+          "failed": 0,
+          "outcome": "passed",
+          "passed": 2,
+          "probes": 2,
+          "total_ms": 63
+        }
+      },
+      "probes": 2,
+      "required": "all"
+    },
+    "module": "wasm/vet",
+    "name": "vet",
+    "nodes": [
+      "ouroboros@golden",
+      "ouroboros@peer"
+    ],
+    "stage": "evaluate",
+    "started": {
+      "already_started": false,
+      "claimed_by": null,
+      "errors": {},
+      "id": "wasm/vet",
+      "node": "ouroboros@golden"
+    },
+    "state": "live",
+    "warnings": []
+  }
+}

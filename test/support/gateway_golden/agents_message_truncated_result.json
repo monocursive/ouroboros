@@ -1,0 +1,11 @@
+{
+  "id": 19,
+  "jsonrpc": "2.0",
+  "result": {
+    "from": "gateway",
+    "reply": "{\"findings\":[{\"file\":\"lib/a.ex\"… truncated at 65536 bytes.",
+    "to": "wasm/vet",
+    "truncated": true,
+    "untrusted": true
+  }
+}

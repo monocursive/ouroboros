@@ -12,6 +12,18 @@
 
 use serde_json::{json, Value};
 
+/// What this *binary* can express, as against what this kernel can enforce.
+///
+/// The daemon reads it to answer one question — `Sandbox.fences_reads?/1` — and the reason
+/// it is asked of the binary rather than assumed from the backend's name is upgrade skew:
+/// an `ouro-sandbox` installed before W17 speaks the same protocol version, applies the
+/// same policies, and silently has no read allow-set. A node that assumed the feature from
+/// the name would run a build under a fence that helper does not have. So the capability
+/// travels with the binary, and a report without it is a helper that does not claim it.
+fn features() -> Value {
+    json!({ "read_allow_set": true })
+}
+
 /// Runs the probe and returns the report.
 pub fn report() -> Value {
     #[cfg(target_os = "linux")]
@@ -27,6 +39,7 @@ pub fn report() -> Value {
             "version": env!("CARGO_PKG_VERSION"),
             "protocol": crate::request::PROTOCOL_VERSION,
             "os": os,
+            "features": features(),
             "usable": false,
             "notes": format!(
                 "ouro-sandbox enforces with Linux user namespaces, Landlock, and seccomp; \
@@ -69,6 +82,7 @@ fn linux_report() -> Value {
         "version": env!("CARGO_PKG_VERSION"),
         "protocol": crate::request::PROTOCOL_VERSION,
         "os": "linux",
+        "features": features(),
         "kernel": kernel,
         "landlock": {
             "available": abi.is_some(),
@@ -101,6 +115,15 @@ mod tests {
         assert!(report["notes"].is_string());
         assert!(report["version"].is_string());
         assert_eq!(report["protocol"], crate::request::PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn the_report_states_the_read_allow_set_on_every_platform() {
+        // `Sandbox.Helper.probe/1` reads exactly this key and `Sandbox.fences_reads?/1`
+        // keys the forge's whole backend choice on it, so a build of this helper that
+        // stopped reporting it would be a node that stops forging rather than a node that
+        // forges under a fence it does not have.
+        assert_eq!(report()["features"]["read_allow_set"], true);
     }
 
     #[cfg(not(target_os = "linux"))]

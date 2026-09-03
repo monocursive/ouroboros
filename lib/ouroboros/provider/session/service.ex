@@ -8,8 +8,8 @@ defmodule Ouroboros.Provider.Session.Service do
   perform them. Ouroboros wants to be that client rather than let each agent reach the
   filesystem behind the runtime's back: an edit that arrives here becomes a real
   `file_change` with a unified diff, a command that arrives here runs under the same OS
-  sandbox the native `bash` runs under, and both are decided by
-  `Ouroboros.Control.Permissions` before anything happens.
+  sandbox the native `bash` runs under, and both are decided before anything happens by
+  the engine `config :ouroboros, :permissions_engine` names (W18, D27).
 
   Everything in this module runs **inside the `Session.Jsonl` process**. Nothing blocks:
   a terminal is a port owned by that process, its output arrives as ordinary messages,

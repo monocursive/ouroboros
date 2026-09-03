@@ -292,8 +292,12 @@ defmodule Ouroboros.Control.Permissions do
   @spec suggest(map() | keyword() | Request.t()) :: String.t() | nil
   def suggest(%Request{} = request) do
     computer_use = computer_use_app(request)
+    capability = capability_name(request)
 
     cond do
+      is_binary(capability) ->
+        "Capability(#{capability})"
+
       is_binary(computer_use) ->
         "ComputerUse(app:#{computer_use})"
 
@@ -767,4 +771,18 @@ defmodule Ouroboros.Control.Permissions do
   end
 
   defp computer_use_app(_request), do: nil
+
+  # W13. The rule an operator would write for a capability keys on the capability, never on
+  # the tool: `Tool(capability)` is "let this session run every component this node has
+  # deployed", which is not what somebody answering one prompt about `vet` meant to say.
+  # The name is the one the node resolved against its live lane-W entries, so `nil` here is
+  # a call whose target this node could not name — and there is nothing honest to suggest.
+  defp capability_name(%Request{tool: "capability", context: context}) when is_map(context) do
+    case Map.get(context, :capability) || Map.get(context, "capability") do
+      name when is_binary(name) and name != "" -> name
+      _other -> nil
+    end
+  end
+
+  defp capability_name(_request), do: nil
 end

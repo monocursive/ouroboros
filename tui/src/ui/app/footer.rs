@@ -101,10 +101,10 @@ impl TranscriptFacts {
                 // Newest-first, so a terminator is always met before the start it ends.
                 // Kept per turn id: a queued follow-up can start while an earlier turn's
                 // terminator is still the newest one in the window.
-                EventType::TurnCompleted | EventType::TurnFailed | EventType::TurnInterrupted => {
-                    if turn_ended.is_none() {
-                        turn_ended = Some(event.turn_id.as_deref().unwrap_or(""));
-                    }
+                EventType::TurnCompleted | EventType::TurnFailed | EventType::TurnInterrupted
+                    if turn_ended.is_none() =>
+                {
+                    turn_ended = Some(event.turn_id.as_deref().unwrap_or(""));
                 }
                 EventType::TurnStarted if elapsed_ms.is_none() => {
                     let ended = turn_ended.is_some_and(|turn| {

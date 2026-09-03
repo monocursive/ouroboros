@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "computer-use", "sandbox"]
+members = [".", "computer-use", "sandbox", "wasm"]
 
 [package]
 name = "ouro"
@@ -89,6 +89,48 @@ sha2 = { version = "0.10", optional = true }
 
 [build-dependencies]
 sha2 = { version = "0.10", optional = true }
+
+# `cargo test` builds `ouro-wasm` in the dev profile, and a debug cranelift compiles the
+# worst component the helper admits (`tui/wasm/src/shape.rs`: 20 000 functions, 4 MiB of
+# code) in ~27 s on a laptop and past the containment suite's 60 s reply timeout on a hosted
+# runner, where the first W7 run failed. The suite's proof is that the at-bound component is
+# admitted and compiles; its wall clock is not the claim. Optimising only the compiler's own
+# crates in dev keeps `ouro-wasm`'s code debuggable and the suite's timing honest — the
+# release helper is unaffected, and `cargo test` for `ouro` never links these crates.
+[profile.dev.package.cranelift-codegen]
+opt-level = 3
+[profile.dev.package.cranelift-frontend]
+opt-level = 3
+[profile.dev.package.cranelift-entity]
+opt-level = 3
+[profile.dev.package.cranelift-bforest]
+opt-level = 3
+[profile.dev.package.cranelift-control]
+opt-level = 3
+[profile.dev.package.regalloc2]
+opt-level = 3
+[profile.dev.package.wasmparser]
+opt-level = 3
+[profile.dev.package.wasmtime-environ]
+opt-level = 3
+[profile.dev.package.wasmtime-internal-cranelift]
+opt-level = 3
+[profile.dev.package.wasmtime-internal-core]
+opt-level = 3
+[profile.dev.package.wasmtime]
+opt-level = 3
+[profile.dev.package.wasmtime-internal-fiber]
+opt-level = 3
+[profile.dev.package.cranelift-codegen-shared]
+opt-level = 3
+[profile.dev.package.cranelift-native]
+opt-level = 3
+[profile.dev.package.wasm-encoder]
+opt-level = 3
+# The helper digests every component twice (`inspect`, then `load`); a debug `sha2` over
+# 4 MiB is a visible share of what remains.
+[profile.dev.package.sha2]
+opt-level = 3
 
 [profile.release]
 strip = true

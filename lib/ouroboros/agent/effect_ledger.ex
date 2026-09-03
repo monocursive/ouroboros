@@ -689,6 +689,12 @@ defmodule Ouroboros.Agent.EffectLedger do
     |> put_if(:app, subject_name(Map.get(subject, :app)))
     |> put_if(:desktop_action, subject_name(Map.get(subject, :desktop_action)))
     |> put_if(:window_id, subject_name(Map.get(subject, :window_id)))
+    # W13. Lane W's two identities for one tool call: the name the rollout register holds,
+    # and the sha256 of the component bytes a signature bound. The digest goes through
+    # `subject_digest/1` like a command's, so a value that is not 64 lower-case hex is
+    # dropped rather than stored as whatever a caller passed by mistake.
+    |> put_if(:capability, subject_name(Map.get(subject, :capability)))
+    |> put_if(:component_sha256, subject_digest(Map.get(subject, :component_sha256)))
   end
 
   defp sanitize_subject(_subject), do: %{}

@@ -13,10 +13,11 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
   ## The contract this imposes
 
   A capability agent must be startable by `Ouroboros.Mesh.start_agent/2` with no options
-  beyond an id, and must route `ouroboros.agent.message` to something that answers. That
-  is the smallest contract under which a generic probe can say anything at all about code
-  it has never seen. A capability whose real work needs seeded state should still answer
-  a bare message; the probe is a liveness check, not an acceptance test.
+  beyond an id and whatever state the start spec carries, and must route
+  `ouroboros.agent.message` to something that answers. That is the smallest contract under
+  which a generic probe can say anything at all about code it has never seen. A capability
+  whose real work needs seeded state should still answer a bare message; the probe is a
+  liveness check, not an acceptance test.
 
   ## Why every path is defended
 
@@ -29,6 +30,15 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
   into `{:error, reason}`, including the ones in the cleanup path, and the return value
   is always a plain serializable term: `:ok` or `{:error, term}`, never a pid, struct, or
   reference crossing back over the wire.
+
+  ## The throwaway agent outlives a killed probe unless something else stops it
+
+  A probe runs under a caller's deadline, and a deadline that fires kills this process.
+  `after` does not run for an exit signal from outside, so the agent started here would be
+  left holding a cluster-wide mesh id — and, for a lane-W capability, a helper instance —
+  with nothing linked to it that would ever notice. The cleanup is therefore also held by a
+  separate process that monitors this one and stops the id if this one dies. See
+  `janitor/1`.
   """
 
   alias Ouroboros.Mesh
@@ -54,36 +64,88 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
     (@call_timeout + @visibility_retries * @visibility_delay_ms) * 4
   end
 
-  @doc "Starts, messages, and stops one throwaway instance of `module` on this node."
-  @spec ready?(module()) :: :ok | {:error, term()}
-  def ready?(module) when is_atom(module) and not is_nil(module) do
+  @typedoc """
+  What to start: a module, or a module and the state to seed it with.
+
+  Lane B passes the bare module and always has. A lane-W capability is one shipped module
+  standing in for every component (docs/WASM.md §7.2, D7), so *which* capability is being
+  probed is a fact about its state — `%{component: sha, config: json, …}` — and not about
+  its name. Both forms start the same way; the second one simply has something to seed.
+  """
+  @type start_spec :: module() | {module(), map()}
+
+  @doc "Starts, messages, and stops one throwaway instance of `spec` on this node."
+  @spec ready?(start_spec()) :: :ok | {:error, term()}
+  def ready?(spec) do
+    case normalize(spec) do
+      {:ok, module, initial_state} -> run(module, initial_state)
+      :error -> {:error, {:invalid_probe_module, inspect(spec)}}
+    end
+  end
+
+  defp normalize(module) when is_atom(module) and not is_nil(module), do: {:ok, module, %{}}
+
+  defp normalize({module, initial_state})
+       when is_atom(module) and not is_nil(module) and is_map(initial_state) and
+              not is_struct(initial_state),
+       do: {:ok, module, initial_state}
+
+  defp normalize(_spec), do: :error
+
+  defp run(module, initial_state) do
     id = probe_id(module)
+    janitor = janitor(id)
 
     try do
-      probe(id, module)
+      probe(id, module, initial_state)
     rescue
       error -> {:error, {:probe_exception, module, Exception.message(error)}}
     catch
       kind, reason -> {:error, {:probe_failure, module, kind, inspect(reason)}}
     after
       stop(id)
+      dismiss(janitor)
     end
   end
 
-  def ready?(module), do: {:error, {:invalid_probe_module, inspect(module)}}
+  # `after` is not cleanup that survives being killed. A probe runs under somebody else's
+  # deadline — `Ouroboros.Wasm.Rollout.bounded_call/5` on this node, `:erpc.call/5` from a
+  # peer — and a deadline that fires kills this process outright, at which point the block
+  # above never runs and the throwaway agent this function started is still holding an id, a
+  # mesh registration, and (for a lane-W capability) a helper instance. Nothing else would
+  # ever remove it: the agent is supervised, not linked to the prober.
+  #
+  # So the id's cleanup is also held by a process that is not the one being killed. It
+  # monitors this one and stops whatever still answers to `id` if this process goes down
+  # any way other than normally. On the ordinary path it is dismissed, and the `after`
+  # block above does the stopping, so nothing is stopped twice.
+  defp janitor(id) do
+    owner = self()
 
-  defp probe(id, module) do
+    spawn(fn ->
+      ref = Process.monitor(owner)
+
+      receive do
+        {:dismiss, ^owner} -> :ok
+        {:DOWN, ^ref, :process, ^owner, :normal} -> :ok
+        {:DOWN, ^ref, :process, ^owner, _killed} -> stop(id)
+      end
+    end)
+  end
+
+  defp dismiss(janitor), do: send(janitor, {:dismiss, self()})
+
+  defp probe(id, module, initial_state) do
     body = %{probe: id, node: node()}
 
     with :ok <- ensure_loaded(module),
-         {:ok, _pid} <- start(id, module),
+         {:ok, _pid} <- start(id, module, initial_state),
          :ok <- await_visible(id, @visibility_retries),
          {:ok, agent} <- exchange(id, body),
          :ok <- sane_reply?(agent, body) do
       :ok
     else
       {:error, reason} -> {:error, {:probe_failed, module, sanitize(reason)}}
-      other -> {:error, {:probe_failed, module, {:unexpected_result, inspect(other)}}}
     end
   end
 
@@ -97,11 +159,10 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
     end
   end
 
-  defp start(id, module) do
-    case Mesh.start_agent(id, agent: module) do
+  defp start(id, module, initial_state) do
+    case Mesh.start_agent(id, agent: module, initial_state: initial_state) do
       {:ok, pid} -> {:ok, pid}
       {:error, reason} -> {:error, {:probe_start_failed, reason}}
-      other -> {:error, {:probe_start_failed, {:unexpected_result, inspect(other)}}}
     end
   end
 

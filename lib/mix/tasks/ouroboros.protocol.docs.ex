@@ -90,6 +90,15 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
     "ledger_list_result" => {:method, "ledger.list"},
     "ledger_export_result" => {:method, "ledger.export"},
     "mcp_list_result" => {:method, "mcp.list"},
+    "wasm_status_result" => {:method, "wasm.status"},
+    "wasm_list_result" => {:method, "wasm.list"},
+    "agents_message_result" => {:method, "agents.message"},
+    "wasm_upload_result" => {:method, "wasm.upload"},
+    "wasm_download_result" => {:method, "wasm.download"},
+    "wasm_sign_result" => {:method, "wasm.sign"},
+    "wasm_deploy_result" => {:method, "wasm.deploy"},
+    "wasm_rollback_result" => {:method, "wasm.rollback"},
+    "agents_message_truncated_result" => {:method, "agents.message"},
     "workspace_browse_result" => {:method, "workspace.browse"},
     "interactive_event_notification" => {:notification, "interactive.event"},
     "interactive_event_excerpt_notification" => {:notification, "interactive.event"},
@@ -127,7 +136,7 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
   @band_order ~w(
     handshake runtime fleet account agents interactive coding teams
     plans control permissions grants code_intel ledger workspace capabilities
-    upgrade signing
+    upgrade signing wasm
   )
 
   @impl Mix.Task
@@ -724,6 +733,7 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
   defp type(:positive_integer), do: "positive integer"
   defp type(:non_negative_integer), do: "non-negative integer"
   defp type(:object), do: "JSON object"
+  defp type(:json), do: "any JSON value"
   defp type(:event_limit), do: "integer, 1..100000"
   defp type(:provider), do: "a provider this node serves (see `runtime.providers`)"
   defp type(:node), do: "a machine name or BEAM node this one is connected to"

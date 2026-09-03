@@ -4,9 +4,23 @@
 
 name: CI
 
+# Long-lived branches and release tags only. PR branches already run every job through
+# the pull_request event, so an unfiltered `push` ran each PR commit twice. Tags stay
+# because release.yml's publication gate assumes the ordinary CI workflow also sees them.
+#
+# The other half of the same rule: a PR whose head *is* a long-lived branch (`dev` into
+# `main`, the release cut) is already covered by the push that landed it, so every job
+# below carries the same `if:` guard — the pull_request run is skipped when the head is `main`
+# or `dev` in this repository. A fork's `dev` still runs, because no push here saw it.
 on:
   push:
+    branches: [main, dev]
+    tags: ["v*"]
   pull_request:
+
+# Nothing in this workflow writes to the repository; don't hold a token that could.
+permissions:
+  contents: read
 
 # A push that lands while an older run is still going makes that run answer a question
 # nobody is asking any more.
@@ -18,14 +32,25 @@ env:
   # The versions this project is developed on. `mix.exs` requires ~> 1.20, and the release
   # bakes whatever ERTS built it, so a runner on a different OTP produces an artifact this
   # project has never run.
+  #
+  # Rust is 1.95 because that is wasmtime 48's own MSRV and `make release-tarball` builds
+  # `ouro-wasm` (tui/wasm). Every other crate here still declares `rust-version = "1.88"` and
+  # still builds on it; this is the floor a *release* needs, kept in one place so the release
+  # workflow's pin and this one cannot drift.
   ELIXIR_VERSION: "1.20"
   OTP_VERSION: "29"
-  RUST_VERSION: "1.88"
+  RUST_VERSION: "1.95"
 
 jobs:
   elixir:
     name: Elixir
     runs-on: ubuntu-24.04
+    # See the `on:` note: a push to a long-lived branch already ran this.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork || (github.head_ref != 'main' && github.head_ref != 'dev') }}
+    # 45, not 20: this job now builds `ouro-wasm` before `mix test`, and a cold cargo build
+    # of wasmtime is 10+ minutes on a hosted runner (361 s for build plus suite locally). A
+    # run that hits the cargo cache is far shorter; the ceiling is for the run that does not.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
@@ -59,12 +84,83 @@ jobs:
       # block those capabilities even when the binary itself starts.
       - run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - run: bwrap --version
+      # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor, so the
+      # unprivileged `bwrap` this job installs cannot apply its read-only mount and runtime
+      # detection reports no backend — which made the forge (W14) refuse every build here
+      # (run 33707120271: "installed but cannot apply its read-only mount on this host").
+      # Lifting the restriction for this runner is what lets the suite exercise the Linux
+      # sandbox at all; a node that keeps it is a node with no backend, and the forge says so.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: bwrap --ro-bind / / --unshare-net --dev /dev --proc /proc -- /bin/true && echo "bwrap can apply its mounts"
 
+      # The wasm half of the Elixir suite is opt-in on a developer's machine and was
+      # therefore never opted in *here*: with no `ouro-wasm` and no guest on the runner, the
+      # twenty-five lane-W acceptance tests skipped on every hosted run and the job stayed
+      # green. A containment boundary that CI has never once exercised is a claim, not a
+      # test. So both halves are built before `mix test`, and `OUROBOROS_REQUIRE_WASM` below
+      # turns a missing one back into a failure.
+      #
+      # 1.95 is the same floor `env.RUST_VERSION` pins for the release, because `ouro-wasm`
+      # carries a wasmtime. `wasm32-wasip2` is the guest's target and emits a component
+      # straight from `cargo build` on 1.82 and later.
+      - run: rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal && rustup default ${{ env.RUST_VERSION }} && rustup target add wasm32-wasip2
+
+      # A cache namespace of its own, not the `rust` job's, for the reason the dialyzer job
+      # has one: `actions/cache` writes an entry once, so a shared key means whichever job
+      # finished first saved its `tui/target` and the other restored that. This job builds
+      # one package; that one builds all of them with two feature sets, and neither is a
+      # useful starting point for the other. The guest and example target directories are in
+      # the paths because each is a separate cargo workspace with a lockfile of its own.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tui/target
+            test/support/wasm/echo-guest/target
+            tui/wasm/guest/examples/counter/target
+            tui/wasm/guest/examples/deny-writes/target
+            tui/wasm/guest/examples/lintcheck/target
+            tui/wasm/guest/examples/verdicts/target
+          key: ${{ runner.os }}-cargo-wasm-${{ env.RUST_VERSION }}-${{ hashFiles('tui/Cargo.lock', 'test/support/wasm/echo-guest/Cargo.lock', 'tui/wasm/guest/examples/*/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-wasm-${{ env.RUST_VERSION }}-
+
+      - run: make wasm
+      - run: make wasm-guest
+
+      # `test/wasm/sdk_acceptance_test.exs` runs the SDK's built components through
+      # `provider/native/hooks.ex` — it is where `Verdict`'s claims about the untrusted
+      # narrowing and `Check`'s claim about the empty reply are actually observed. Without
+      # this step it would skip, and the SDK's docstrings would be back to asserting
+      # themselves.
+      - run: make wasm-examples
+
+      # The forge (W14) builds `--locked --offline` against a cargo registry cache somebody
+      # warmed, and refuses by name when any crate in the SDK's lock is missing — including
+      # crates only another platform links, which a `cargo build` on this runner never fetches
+      # (`windows-sys` was the one that failed run 33706382632). `cargo fetch --locked` takes
+      # the whole lock, for every platform. The forge tests read the cache the suite's user
+      # owns, so it is warmed there rather than in a node's data directory.
+      - run: make wasm-sdk-cache CARGO_HOME=$HOME/.cargo
+
+      # `OUROBOROS_REQUIRE_WASM` is the switch that makes the four steps above load-bearing.
+      # Without it a runner that failed to build any of them would skip the acceptance suites
+      # and pass, which is exactly the silence this job is being fixed for; with it, a missing
+      # helper, guest or example fails the suites that needed it and names the `make` target.
+      #
+      # W8's end-to-end proof rides on all three: `test/wasm/precompiled_test.exs` signs the
+      # acceptance guest with this runner's own helper, deploys the bundle both forms travel
+      # in, and asserts the helper answered `precompiled: true` — and stands the policy example
+      # up the same way.
       - run: mix test
+        env:
+          OUROBOROS_REQUIRE_WASM: "1"
 
   browser:
     name: Browser journeys
     runs-on: ubuntu-24.04
+    # See the `on:` note: a push to a long-lived branch already ran this.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork || (github.head_ref != 'main' && github.head_ref != 'dev') }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -87,6 +183,10 @@ jobs:
   dialyzer:
     name: Dialyzer
     runs-on: ubuntu-24.04
+    # See the `on:` note: a push to a long-lived branch already ran this.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork || (github.head_ref != 'main' && github.head_ref != 'dev') }}
+    # Generous because a cache miss rebuilds the PLT from scratch, which is most of this.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -127,21 +227,47 @@ jobs:
   rust:
     name: Rust
     runs-on: ubuntu-24.04
+    # See the `on:` note: a push to a long-lived branch already ran this.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork || (github.head_ref != 'main' && github.head_ref != 'dev') }}
+    # 45, not 30: W10 added `tui/tests/wasm_cli.rs`, which drives the real helper, so this job
+    # builds `ouro-wasm` in release and the acceptance guest before `cargo test`; W9 added four
+    # guest projects and the scaffold for `tests/sdk.rs`, and the SDK's own gates. All of it is
+    # cached; the ceiling is for the run that misses.
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: tui
     steps:
       - uses: actions/checkout@v7
 
-      - run: rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal --component rustfmt,clippy && rustup default ${{ env.RUST_VERSION }}
+      # `wasm32-wasip2` because this job now builds guests with it: the acceptance guest
+      # (`make wasm-guest`), `ouro wasm new`'s scaffold, and the three projects `tests/sdk.rs`
+      # builds — the SDK's two examples and the scaffold template — each put to the real
+      # helper to prove it is in this world and imports exactly `log`. Without the target
+      # those tests skip, and a skip here is what `OUROBOROS_REQUIRE_WASM` below turns back
+      # into a failure.
+      - run: rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal --component rustfmt,clippy && rustup default ${{ env.RUST_VERSION }} && rustup target add wasm32-wasip2
 
+      # The guest projects are separate cargo workspaces with build directories of their own, so
+      # `tui/target` alone would leave every run compiling serde_json, dlmalloc and wit-bindgen
+      # from scratch — once per example, once more for the scaffold, and four times over for
+      # `make wasm-sdk-check`, which builds the SDK for two targets in two profiles (measured
+      # at 104 s of CPU and 684 MB cold). All six directories are listed, including the SDK's
+      # own, and `tests/sdk.rs` scaffolds the template *into* `tui/wasm/guest/target` for the
+      # same reason: a temp directory named after a nanosecond cannot be cached.
       - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             tui/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('tui/Cargo.lock') }}
+            tui/wasm/guest/target
+            tui/wasm/guest/examples/counter/target
+            tui/wasm/guest/examples/deny-writes/target
+            tui/wasm/guest/examples/lintcheck/target
+            tui/wasm/guest/examples/verdicts/target
+            test/support/wasm/echo-guest/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('tui/Cargo.lock', 'tui/wasm/guest/Cargo.lock', 'tui/wasm/guest/examples/*/Cargo.lock', 'test/support/wasm/echo-guest/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
       - run: cargo fmt --check
@@ -151,12 +277,57 @@ jobs:
       # extractor — only to bake bytes into it — so this stays independent of `mix`.
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo clippy --all-targets --features embed -- -D warnings
+
+      # Both halves of the wasm lane, exactly as the Elixir job builds them — and for the same
+      # reason. `tui/tests/wasm_cli.rs` drives `ouro wasm inspect|run|hook|check` against the
+      # real helper and the real guest; without these two steps it would skip green on every
+      # run, which is the silence W7 already had to fix once on the Elixir side. `make` from the
+      # repository root, since this job's default working directory is `tui`.
+      - run: make wasm
+        working-directory: .
+      - run: make wasm-guest
+        working-directory: .
+
+      # `OUROBOROS_REQUIRE_WASM` is what makes the two steps above load-bearing: with it a
+      # missing helper or guest fails the suite that needed it and names the `make` target,
+      # instead of printing a skip nobody reads. `OUROBOROS_WASM_HELPER` is absolute because
+      # `ouro wasm` refuses a relative one — resolving one is a read of the working directory,
+      # which is the one place the containment boundary may not come from (D14).
       - run: cargo test
+        env:
+          OUROBOROS_REQUIRE_WASM: "1"
+          OUROBOROS_WASM_HELPER: ${{ github.workspace }}/priv/wasm/ouro-wasm
       - run: cargo test --features embed
+        env:
+          OUROBOROS_REQUIRE_WASM: "1"
+          OUROBOROS_WASM_HELPER: ${{ github.workspace }}/priv/wasm/ouro-wasm
+
+      # `ouro-wasm` explicitly: this job's cwd selects the root package, so the helper's
+      # containment suite — the tests that prove the linker refuses undeclared imports, that
+      # the fuel/deadline/memory bounds hold, and (W8) that `precompile` applies §7.3 before it
+      # compiles while a precompiled `load` refuses another wasmtime, another triple, a tampered
+      # artifact and a component it was not compiled from — would otherwise never run on a PR.
+      #
+      # `OUROBOROS_REQUIRE_WASM` is what makes `tests/sdk.rs` load-bearing: without it a runner
+      # missing the wasm32 target would print its skip and pass, which is the same silence the
+      # Elixir job was fixed for. With it, a guest the SDK cannot build fails the job.
+      - run: cargo clippy -p ouro-wasm --all-targets -- -D warnings
+      - run: cargo test -p ouro-wasm
+        env:
+          OUROBOROS_REQUIRE_WASM: "1"
+
+      # The guest SDK is its own workspace, so nothing above reaches it: `cargo` in `tui`
+      # selects `tui/Cargo.toml`'s members and the SDK is deliberately not one. `wasm-sdk-check`
+      # is its fmt, its unit tests, both clippy passes and the wasm32 build.
+      - run: make wasm-sdk-check
+        working-directory: ${{ github.workspace }}
 
   golden:
     name: Golden fixtures
     runs-on: ubuntu-24.04
+    # See the `on:` note: a push to a long-lived branch already ran this.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork || (github.head_ref != 'main' && github.head_ref != 'dev') }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -189,6 +360,8 @@ jobs:
   fleet-e2e:
     name: Packaged three-node fleet
     runs-on: ubuntu-24.04
+    # See the `on:` note: a push to a long-lived branch already ran this.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork || (github.head_ref != 'main' && github.head_ref != 'dev') }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7

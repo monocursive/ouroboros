@@ -88,6 +88,7 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Gateway.Methods.Placement
   alias Ouroboros.Gateway.Methods.Present
   alias Ouroboros.Gateway.Methods.Safe
+  alias Ouroboros.Gateway.Wire
   alias Ouroboros.Interactive.State, as: InteractiveState
   alias Ouroboros.Interactive.Ref, as: InteractiveRef
   alias Ouroboros.Interactive.Task, as: InteractiveTask
@@ -106,6 +107,12 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Upgrade.NodeExecutor
   alias Ouroboros.Upgrade.Rollout.Registry, as: Rollouts
   alias Ouroboros.Upgrade.Signing.Service, as: SigningService
+  alias Ouroboros.Wasm.Surface, as: WasmSurface
+  alias Ouroboros.Wasm.Artifact, as: WasmArtifact
+  alias Ouroboros.Wasm.Capability, as: WasmCapability
+  alias Ouroboros.Wasm.Deploy, as: WasmDeploy
+  alias Ouroboros.Wasm.Upload, as: WasmUpload
+  alias Ouroboros.Wasm.Download, as: WasmDownload
 
   import Ouroboros.Gateway.Methods.Safe,
     only: [
@@ -127,6 +134,31 @@ defmodule Ouroboros.Gateway.Methods do
   # Permissions, MCP, and ledger get share this bound on owner-routed `:erpc`.
   @fleet_query_timeout 5_000
 
+  # W13. `agents.message` waits on an agent, and for a lane-W capability that agent is
+  # waiting on a component under its own deadline. The caller's `timeout_ms` is capped at
+  # `@max_agent_message_timeout_ms` and this ceiling sits above it, so the gateway is never
+  # the thing that gives up first: a client that asked for thirty seconds and got a
+  # gateway timeout at fifteen would have no way to tell a slow capability from a wedged
+  # one.
+  @agent_message_timeout 45_000
+  @default_agent_message_timeout_ms 5_000
+  @max_agent_message_timeout_ms 30_000
+
+  # What may cross into an agent, and what may come back. Both are the same number because
+  # both are a message body — one written by a gateway client, one written by whatever the
+  # agent is. The reply is additionally *marked* when it is cut, because a JSON document
+  # that was silently truncated is a JSON document a client will try to parse.
+  @max_agent_message_bytes 64 * 1024
+
+  # A mesh agent id. Long enough for the `"wasm/" <> name` a rollout mints and for the
+  # opaque ids the forge does, short enough that a refused lookup costs nothing.
+  @max_agent_id_bytes 512
+
+  # The id prefix a lane-W capability runs under. `Ouroboros.Wasm.Rollout` mints it; it is
+  # restated here rather than imported because this module must not depend on the wasm plane
+  # to answer a verb about the mesh, and it is one short literal.
+  @wasm_agent_prefix "wasm/"
+
   # E2/E3. Code intelligence is the one read whose upstream is a foreign OS process, and
   # its own defaults are generous on purpose: `initialize_timeout_ms` is 45s because
   # ElixirLS and jdtls compile the world on first launch. A gateway method cannot wait
@@ -142,6 +174,34 @@ defmodule Ouroboros.Gateway.Methods do
   # would be reported as `-32005 upstream_timeout` with no detail; letting `:erpc` decide
   # first produces the honest answer, which is that the signing node did not respond.
   @signing_erpc_timeout 10_000
+
+  # W12. Lane W's four operator verbs, each bounded by the work it actually does rather
+  # than by one number covering all of them.
+  #
+  # `wasm.upload` writes at most half a mebibyte to a local file: it is a `@default_timeout`
+  # verb wearing its own name so the number is not silently inherited.
+  #
+  # `wasm.sign` may inspect the component with this node's helper (a compile-free read, but
+  # a helper that has to be spawned first) and then wait on a signing service that bounds
+  # itself at `:signing_call_timeout` — fifteen seconds by default — on another host.
+  #
+  # `wasm.deploy` runs a whole rollout: stage (60s per node), probe, evaluate (30s), and a
+  # durable start (15s), gate after gate. Its ceiling is above the sum on purpose, the way
+  # `@forge_timeout` is: a rollout that settles `:quarantined` is a named answer an operator
+  # can act on, and a gateway ceiling firing first would replace it with `-32005` and no
+  # detail about which node did not report.
+  # W19. `wasm.download` reads at most half a mebibyte out of a node-local file: it is
+  # `wasm.upload`'s own ceiling, in the other direction, for the same work.
+  @wasm_download_timeout 15_000
+
+  @wasm_upload_timeout 15_000
+  @wasm_sign_timeout 60_000
+  @wasm_deploy_timeout 180_000
+  @wasm_rollback_timeout 30_000
+
+  # Below each ceiling above, so the plane's own typed refusal wins the race against a
+  # transport deadline that says nothing about why.
+  @wasm_erpc_slack 5_000
 
   @replay_limit 500
   @default_replay_limit 100
@@ -303,6 +363,39 @@ defmodule Ouroboros.Gateway.Methods do
     "mcp.list" => %{scope: :read, timeout: @default_timeout},
     "computer_use.status" => %{scope: :read, timeout: @default_timeout},
     "computer_use.artifact" => %{scope: :read, timeout: @default_timeout},
+    # ---------------------------------------------------------------------------------
+    # W5. Lane W on the wire.
+    #
+    # `:read` on the same dividing line the rest of this table draws, and a stricter one
+    # than usual: these two do not merely avoid changing state, they avoid *starting* the
+    # containment helper. `Ouroboros.Wasm.Surface` reads a pool process that already
+    # exists, a directory, and a register. A node that has never built `ouro-wasm` answers
+    # both as readily as one that runs it hourly.
+    #
+    # These two were once the whole of lane W on the wire, and this comment used to say
+    # there would deliberately never be a `wasm.deploy`. W12 reversed that, and D15 says
+    # why: the authority in a deployment is the **signature**, which the target verifies
+    # against its own trust policy, so a socket that carries a signed bundle adds nothing
+    # a client did not already have — while a `:operate` client could always start any BEAM
+    # capability through the mesh. What is still true is the sentence underneath it: **no
+    # unsigned bytes reach the helper through any path**, and there is still no `wasm.drop`,
+    # `wasm.load`, `wasm.instantiate` or `wasm.call`, because those would be a socket
+    # deciding what this node runs rather than a signer deciding what may exist.
+    #
+    # That first claim was briefly false and is worth saying twice. `wasm.sign` once read a
+    # component's import list off the staged file with this node's own helper, which handed
+    # attacker-supplied bytes to the one process whose job is running other people's code,
+    # at `:operate`, before a signature existed and upstream of the signing service's rate
+    # limit. `imports` is required now, the client computes it with the *operator's* helper
+    # (`ouro wasm inspect`), and a wrong list is refused at stage by
+    # `Ouroboros.Wasm.Verifier.cross_check/2` — which is D5's posture and always was.
+    #
+    # Node-routed like `computer_use.status`, because a helper, a store and a register are
+    # node-local authorities: a fleet answer is one call per machine, not a merged view
+    # this node could invent.
+    # ---------------------------------------------------------------------------------
+    "wasm.status" => %{scope: :read, timeout: @default_timeout},
+    "wasm.list" => %{scope: :read, timeout: @default_timeout},
     # Starts the helper so `ouro desktop doctor` can report TCC. Status stays start-nothing.
     "computer_use.probe" => %{scope: :operate, timeout: @default_timeout},
     "code_intel.touch" => %{scope: :operate, timeout: @default_timeout},
@@ -418,7 +511,45 @@ defmodule Ouroboros.Gateway.Methods do
     # Answered by the connection: it holds the listener configuration this verb needs a
     # second permission from, and it owns the socket the acknowledgement has to reach
     # before the node stops.
-    "runtime.shutdown" => %{scope: :operate, timeout: @default_timeout}
+    "runtime.shutdown" => %{scope: :operate, timeout: @default_timeout},
+    # ---------------------------------------------------------------------------------
+    # W13. One message into one mesh agent.
+    #
+    # `:operate` and not `:read`, twice over: it changes the agent's state by definition,
+    # and for a lane-W capability it *runs a component* — the containment helper starts if
+    # it is not already up, which is the exact thing `wasm.status` and `wasm.list` are
+    # `:read` because they never do.
+    #
+    # Not node-routed. `Ouroboros.Mesh.send_message/4` resolves the agent through the
+    # cluster-wide `:pg` directory and calls it wherever it lives, so this verb already
+    # reaches a peer's agent and a `node` parameter would be a second, weaker answer to a
+    # question the mesh has already answered. What that means for lane W is worth saying
+    # plainly: an `:operate` client on any node in the cluster can message a capability on
+    # any other, and the containment boundary that makes that safe is the helper's linker,
+    # not this table.
+    # ---------------------------------------------------------------------------------
+    "agents.message" => %{scope: :operate, timeout: @agent_message_timeout},
+    # W12. Lane W from the operator's chair, and why these are `:operate` and not more.
+    #
+    # A deployment's authority is the signature on it. Every one of these verbs hands the
+    # target node bytes that the target then verifies against its **own**
+    # `upgrade_trust_policy` before anything is written, so the socket is a courier and
+    # never a signer — which is the whole of D15. `:operate` is the same scope that already
+    # starts a BEAM capability through `capabilities.admit` and a session through
+    # `interactive.start`; a listener held at `:read` reaches none of them.
+    #
+    # Node-routed like `wasm.status`, because everything they touch — the upload directory,
+    # the component store, the helper, the rollout register — is node-local.
+    # ---------------------------------------------------------------------------------
+    "wasm.upload" => %{scope: :operate, timeout: @wasm_upload_timeout},
+    "wasm.sign" => %{scope: :operate, timeout: @wasm_sign_timeout},
+    "wasm.deploy" => %{scope: :operate, timeout: @wasm_deploy_timeout, outcome: :unknown},
+    "wasm.rollback" => %{scope: :operate, timeout: @wasm_rollback_timeout},
+    # W19. The reply direction of the same transport, and `:operate` for the same reason
+    # `wasm.upload` is: it is not a read of anything a node holds *about* itself, it is a node
+    # handing out bytes — and only the bytes its own `sign/2` compiled and signed, from a slot
+    # that verb minted, bound by a digest the signed manifest already names (D28).
+    "wasm.download" => %{scope: :operate, timeout: @wasm_download_timeout}
   }
 
   # The exact terms the upstream schemas declare, spelled out here so that a client string
@@ -446,6 +577,10 @@ defmodule Ouroboros.Gateway.Methods do
     "xhigh" => :xhigh,
     "max" => :max
   }
+
+  # W12. The whole of a probe, named here so the refusal can list them rather than say only
+  # which key was wrong.
+  @probe_keys ["input", "expect"]
 
   @approval_decisions %{"approve" => :approve, "deny" => :deny}
   @approval_scopes %{"once" => :once, "session" => :session}
@@ -733,7 +868,9 @@ defmodule Ouroboros.Gateway.Methods do
       {:closed, [{"api_key", :required, :string, "replaces the privately stored xAI API key"}],
        "updates the node-owned xAI API key without returning it; `XAI_API_KEY` still takes precedence"},
     "agents.list" => {:open, []},
-    "agents.state" => {:open, [{"id", :required, :string, "the agent id"}]},
+    "agents.state" =>
+      {:open, [{"id", :required, :string, "the agent id"}],
+       "for a lane-W capability (`wasm/<name>`) the answer additionally carries `untrusted: true` and `truncated`, and `agent.state.last_answer`/`last_message` are bounded at 64 KiB with an in-band marker: both are written by a component, and this verb is `read`"},
     "agents.stop" => {:open, [{"id", :required, :string, "the agent id"}]},
     "interactive.list" => {:open, []},
     "interactive.info" => {:closed, [@session_id, @session_node]},
@@ -841,6 +978,18 @@ defmodule Ouroboros.Gateway.Methods do
        [
          @authority_node
        ]},
+    "wasm.status" =>
+      {:closed,
+       [
+         @authority_node
+       ],
+       "`helper.path` and `store.root` are basenames, not paths: both verbs are `read`, and an absolute path names an install prefix rather than anything about lane W"},
+    "wasm.list" =>
+      {:closed,
+       [
+         @authority_node
+       ],
+       "`components[].sha256` names a component; nothing here is a filesystem path. `rollouts[].form` is which of the two forms this node loads that component from — `precompiled` when the signed manifest names an artifact for exactly this node's wasmtime and target triple and the store holds it, `source` otherwise, `null` where this node cannot say (no readable manifest, or no helper that has reported its build)"},
     "computer_use.artifact" =>
       {:closed,
        [
@@ -1045,7 +1194,101 @@ defmodule Ouroboros.Gateway.Methods do
          {"path", :required, :string, nil},
          {"session_id", :optional, :string,
           "recorded as `session:<id>` in the admission's authorship"}
-       ]}
+       ]},
+    # W13
+    "agents.message" =>
+      {:closed,
+       [
+         {"to", :required, :string,
+          "the agent id, at most #{@max_agent_id_bytes} bytes; a lane-W capability is `wasm/<name>`"},
+         {"body", :required, :json,
+          "the message body, any JSON value, at most #{@max_agent_message_bytes} bytes encoded"},
+         {"from", :optional, :string,
+          "who the message is from, at most #{@max_agent_id_bytes} bytes; defaults to `gateway`"},
+         {"timeout_ms", :optional, {:integer, 1, @max_agent_message_timeout_ms},
+          "how long to wait for the agent; defaults to #{@default_agent_message_timeout_ms}"}
+       ],
+       "`reply` is the agent's `last_answer` and is **untrusted**: for a lane-W capability it is prose and JSON the component wrote. It is returned whole when it encodes within #{@max_agent_message_bytes} bytes and as a marked, truncated string otherwise, which is what `truncated` distinguishes. A message an agent refused is still a delivered message: this verb says the agent answered nothing, and `agents.state` says why"},
+    # W12
+    "wasm.upload" =>
+      {:closed,
+       [
+         {"upload", :optional, :string,
+          "the id a previous frame returned; omitted, this frame opens a new upload and the reply names it"},
+         {"offset", :required, :non_negative_integer,
+          "must equal what the node already holds; a mismatch answers `-32602` naming the offset it has, which is where to resume"},
+         {"data", :required, :string,
+          "base64 of at most 512 KiB of the file, bounded before it is decoded"},
+         {"final", {:optional, false}, :boolean,
+          "closes the upload: the bytes become readable by `wasm.sign` and `wasm.deploy`, and the reply carries their sha256"},
+         @authority_node
+       ],
+       "the transport for bytes a JSON frame cannot carry (docs/WASM.md D16). An upload carries no authority: what comes out of it is verified by whichever verb consumes it, it is consumed once, and it is swept ten minutes after the last frame that touched it"},
+    "wasm.sign" =>
+      {:closed,
+       [
+         {"upload", :required, :string, "a committed `wasm.upload` holding the component bytes"},
+         {"name", :required, :string,
+          "lower case, starting with a letter or digit, then letters, digits, `.`, `_`, `-`, at most 64 bytes; it is the register's module and the durable wrapper's id"},
+         {"author", :required, :string, "provenance the signing policy requires"},
+         {"imports", :required, {:list, :string, 8},
+          "the imports the component declares, computed by the client with the operator's own helper (`ouro wasm inspect`). This node never parses unsigned bytes to find out; a list that does not match what the component imports is refused at stage by the cross-check, which is where a manifest that describes something else has always been caught"},
+         # W8
+         {"precompile", {:optional, true}, :boolean,
+          "whether this node compiles the component into wasmtime's serialized form at sign time and records its digest in the signed manifest (docs/WASM.md D22–D24). Default true, and honoured only where this node has an `ouro-wasm` on disk; the artifact travels in the bundle beside the source and is loaded on a target **only** where that node's own helper reports exactly this node's wasmtime version and target triple, which turns that node's `load` from a compile into a mapping. Every node that does not match compiles the source form under §7.3's bounds, so a precompiled bundle deploys everywhere an ordinary one does. `false` — `ouro wasm sign --no-precompile` — signs the source form alone, which is also what a node with no helper does and what happens when the artifact is too large to travel in this verb's reply"},
+         # W15
+         {"kind", {:optional, "capability"},
+          {:either, [{:const, "capability"}, {:const, "policy"}]},
+          "what this component is, and therefore which of the helper's two closed worlds its bytes are ever admitted to. A `capability` answers mesh messages and is reachable by the `capability` tool; a `policy` answers permission requests for `Ouroboros.Wasm.PolicyEngine` and is reachable by neither. It is part of the **signed** manifest, so a policy deployed as a capability is refused at stage by the helper's world check and so is the reverse; a policy's `eval` is a list of cases rather than a list of probes, and a policy may declare no `start_config`"},
+         {"language", :optional, :string, nil},
+         {"source_sha256", :optional, :string, "64 lower-case hex"},
+         {"start_config", :optional, :string,
+          "the config the durable wrapper is started with; the id is derived from `name` and is never a parameter"},
+         # W15. For `kind: "policy"` this is `{"cases": [{"request": <json object>, "expect":
+         # {"decision": "allow"|"deny"|"ask"}}], "budget_ms": <ms>}` instead: a policy is not a
+         # mesh agent, so a probe list over agent state says nothing about one.
+         {"eval", :optional,
+          {:object,
+           [
+             {"probes", :required, {:list, :object, 20},
+              "each `{\"input\": <json>, \"expect\": {\"kind\": ..., ...}}` — `input` is the message body handed to the capability, whatever the capability itself calls it. The kinds are `any_reply`, `contains` (takes `substring`), `equals` (takes `value`) and `state_matches` (takes `key`, a state field this build already knows, and `value`). What each one is held against differs: `contains` matches its substring against the answer *rendered* as text, so it reads a decoded JSON object the way `inspect/1` writes one (`%{\"echo\" => …}`), while `equals` and `state_matches` compare terms — a `state_matches` on `last_answer` must be the whole decoded reply as JSON (`{\"echo\": {\"greet\": \"world\"}}`), not a string of it, and `messages_received` is the counter to reach for when the shape of the answer is not the point"},
+             {"budget_ms", :optional, :positive_integer, "the deadline every probe runs under"},
+             {"max_latency_ms", :optional, :positive_integer,
+              "a gate on the latency observed, checked after the answer arrives"},
+             {"required", :optional, {:either, [{:const, "all"}, :object]},
+              "`\"all\"`, or `{\"at_least\": n}`"}
+           ]},
+          "the signed evaluation spec; required by default for lane W (D12) and refused by the signer when absent. There is no `initial_state`: what a capability is evaluated as is the deployment's statement, not the test's"},
+         @authority_node
+       ],
+       "answers the bundle's **prefix** rather than the bundle: the client already holds the bytes it uploaded, and a sixteen-mebibyte result would need a chunked download to hand somebody their own file back. There is no `epoch` parameter: it is allocated over the connected cluster with `Ouroboros.Upgrade.Epoch.next/2`, because an epoch a client chose could be placed at the rollout register's plausibility ceiling, which leaves no number that is both fresh and plausible and wedges lane W on that node durably"},
+    "wasm.deploy" =>
+      {:closed,
+       [
+         {"upload", :required, :string,
+          "a committed `wasm.upload` holding one `.ouro-wasm` bundle"},
+         {"nodes", :optional, {:list, :node, 32}, "the targets; this node alone by default"},
+         @authority_node
+       ],
+       "the bundle is parsed under its bounds and verified against the driving node's own trust policy before the store, the helper or the rollout register hears about it. A rollout that ran answers with its state — `live`, `rolled_back` or `quarantined` — rather than with an error"},
+    "wasm.rollback" =>
+      {:closed,
+       [
+         {"name", :required, :string, "the live lane-W capability to retire"},
+         @authority_node
+       ],
+       "stops the wrapper agent on every node the entry names and marks the entry; the component bytes stay in the store (D6), so redeploying needs a new epoch and a new signature but no new build"},
+    # W19
+    "wasm.download" =>
+      {:closed,
+       [
+         {"download", :required, :string,
+          "the id a `wasm.sign` receipt named under `artifact.download`; this node minted it and no client may choose one"},
+         {"offset", :required, :non_negative_integer,
+          "a chunk boundary — a multiple of the receipt's `chunk_bytes`, below `size`. It is not a seek: a client walks the file with the offsets these answers hand it, and anything else is refused rather than answered with bytes from the middle of something"},
+         @authority_node
+       ],
+       "the reply direction of `wasm.upload` (docs/WASM.md D28). A node hands out **only** bytes its own `wasm.sign` compiled and signed: there is no verb that puts one here, the slot is minted by `sign/2` alone, and what comes back is bound by the `sha256` the signed manifest already carries — repeated in every chunk, so a client checks each frame as well as the whole. `data` is base64 of at most the slot's `chunk_bytes` decoded bytes, and that number is **this node's own frame**: `min(512 KiB, (OUROBOROS_GATEWAY_MAX_FRAME - 1 KiB) * 3/4)`, because nothing on the outbound path is held to the frame and a reply larger than it is a line this node writes and its own client refuses. `final` marks the chunk that completes the artifact, and reading it **releases the slot** — a client that loses that answer signs again rather than asking twice. The slot count and the two clocks are `Ouroboros.Wasm.Upload`'s, read from that module rather than restated; the idle one is moved by a read, because nothing writes to a download after it is minted"}
   }
 
   @type entry :: %{
@@ -1069,6 +1312,16 @@ defmodule Ouroboros.Gateway.Methods do
   @doc "The method table: name to the scope it requires and the ceiling it runs under."
   @spec table() :: %{String.t() => entry()}
   def table, do: @table
+
+  @doc """
+  The state fields a signed eval spec's `state_matches` check may name.
+
+  Read from `Ouroboros.Wasm.Capability`'s own schema rather than restated, so the closed
+  set cannot drift from the agent it describes. Public because the test that pins the set
+  must assert against the agent and not against a copy in this module.
+  """
+  @spec wasm_state_fields() :: [atom()]
+  def wasm_state_fields, do: WasmCapability.new().state |> Map.keys()
 
   @doc "Every method name this build serves, as reported in the `hello` result."
   @spec names() :: [String.t()]
@@ -1349,8 +1602,15 @@ defmodule Ouroboros.Gateway.Methods do
 
   def invoke("agents.list", _params), do: safe(fn -> reply(Mesh.list_agents()) end)
 
+  # W13/F4. `agents.state` is `:read` and hands back an agent's whole state. For a lane-W
+  # capability that state holds `last_answer` and `last_message` — a component's own prose,
+  # unbounded, through the one verb a read-only listener may call. So for a `wasm/` agent
+  # the two fields are bounded exactly as `agents.message`'s reply is and the answer carries
+  # `untrusted: true` beside them, which is the same label its sibling verb carries and for
+  # the same reason. Every other agent is answered unchanged: this is a statement about who
+  # wrote the content, not a general cap on introspection.
   def invoke("agents.state", params) do
-    with_id(params, fn id -> safe(fn -> reply(Mesh.state(id)) end) end)
+    with_id(params, fn id -> safe(fn -> reply(bounded_agent_state(id, Mesh.state(id))) end) end)
   end
 
   def invoke("interactive.list", _params),
@@ -1583,6 +1843,169 @@ defmodule Ouroboros.Gateway.Methods do
           reply(:erpc.call(target, Desktop, :artifact, [sha, session_id], @fleet_query_timeout))
         end
       end)
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # W5 — lane W on the wire
+  #
+  # Both start nothing: `Surface` reads a pool process that already exists rather than
+  # asking for one, so `ouro wasm doctor` against a node that has never built the helper is
+  # a report and not a spawn. The remote branch is the `computer_use.status` one — a
+  # bounded `:erpc` to the machine whose helper is being described, so an unreachable node
+  # reads as unreachable instead of as a gateway ceiling with no detail.
+  # ---------------------------------------------------------------------------
+
+  def invoke("wasm.status", params), do: wasm_call(params, :status)
+  def invoke("wasm.list", params), do: wasm_call(params, :list)
+
+  # ---------------------------------------------------------------------------
+  # W12 — signing and deploy on the wire
+  #
+  # Three verbs and the transport underneath them. What makes them safe is not this
+  # module: it is that the bytes carry a signature the **target** checks against its own
+  # `upgrade_trust_policy` before the store, the helper or the rollout register sees them
+  # (docs/WASM.md D15). This end validates shapes, bounds what it decodes, converts no
+  # client byte into an atom it did not already hold, and routes.
+  #
+  # `wasm.upload` is the only one that takes bytes, because a component is bounded at
+  # sixteen mebibytes and a frame at one (D16). It writes to a node-local file under the
+  # data directory, and every bound on it — the chunk, the total, how many may be in
+  # flight, how long an abandoned one lives — is in `Ouroboros.Wasm.Upload`.
+  # ---------------------------------------------------------------------------
+
+  def invoke("wasm.upload", params) do
+    with :ok <- only_keys(params, ["upload", "offset", "data", "final", "node"]),
+         {:ok, upload} <- wasm_optional_upload(params),
+         {:ok, offset} <- option_value("offset", :non_negative_integer, Map.get(params, "offset")),
+         {:ok, chunk} <- wasm_chunk(params),
+         {:ok, final?} <- wasm_flag(params, "final"),
+         {:ok, target} <- permissions_node(params) do
+      wasm_node_call(
+        target,
+        WasmUpload,
+        :append,
+        [upload, offset, chunk, final?, []],
+        @wasm_upload_timeout - @wasm_erpc_slack
+      )
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("wasm.sign", params) do
+    with :ok <-
+           only_keys(params, [
+             "upload",
+             "name",
+             "author",
+             "imports",
+             # W8
+             "precompile",
+             # W15
+             "kind",
+             "language",
+             "source_sha256",
+             "start_config",
+             "eval",
+             "node"
+           ]),
+         {:ok, upload} <- wasm_upload(params),
+         {:ok, name} <- wasm_name(params),
+         {:ok, author} <- fetch_string(params, "author"),
+         {:ok, imports} <- wasm_imports(params),
+         {:ok, kind} <- wasm_kind(params),
+         {:ok, precompile} <- wasm_precompile(params),
+         {:ok, language} <- fetch_optional_string(params, "language"),
+         {:ok, source_sha256} <- wasm_optional_sha256(params),
+         {:ok, start_config} <- wasm_start_config(params),
+         {:ok, eval} <- wasm_eval(params, kind),
+         {:ok, target} <- permissions_node(params) do
+      attrs =
+        %{
+          upload: upload,
+          name: name,
+          author: author,
+          imports: imports,
+          kind: kind,
+          precompile: precompile
+        }
+        |> wasm_put(:language, language)
+        |> wasm_put(:source_sha256, source_sha256)
+        |> wasm_put(:start_config, start_config)
+        |> wasm_put(:eval, eval)
+
+      wasm_node_call(
+        target,
+        WasmDeploy,
+        :sign,
+        [attrs, []],
+        @wasm_sign_timeout - @wasm_erpc_slack
+      )
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("wasm.deploy", params) do
+    with :ok <- only_keys(params, ["upload", "nodes", "node"]),
+         {:ok, upload} <- wasm_upload(params),
+         {:ok, target} <- permissions_node(params),
+         {:ok, nodes} <- wasm_targets(params, target) do
+      wasm_node_call(
+        target,
+        WasmDeploy,
+        :deploy,
+        [upload, nodes, []],
+        @wasm_deploy_timeout - @wasm_erpc_slack
+      )
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  def invoke("wasm.rollback", params) do
+    with :ok <- only_keys(params, ["name", "node"]),
+         {:ok, name} <- wasm_name(params),
+         {:ok, target} <- permissions_node(params) do
+      wasm_node_call(
+        target,
+        WasmDeploy,
+        :rollback,
+        [name, []],
+        @wasm_rollback_timeout - @wasm_erpc_slack
+      )
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # W19 — the artifact comes back in the frames the upload used
+  #
+  # `wasm.upload` cuts a component into frames on the way in; this cuts an artifact into the
+  # same frames on the way out, because since W8 the bundle carries a second section the
+  # client has never seen and one reply is not a file transfer (D28). What makes it safe is
+  # not this module either: a node hands out only what its own `sign/2` compiled and signed,
+  # from a slot that verb minted, bound by a digest the signed manifest already carries. There
+  # is deliberately no verb that *puts* — a download area a client could fill would be a node
+  # storing other people's bytes on request.
+  # ---------------------------------------------------------------------------
+
+  def invoke("wasm.download", params) do
+    with :ok <- only_keys(params, ["download", "offset", "node"]),
+         {:ok, download} <- wasm_download(params),
+         {:ok, offset} <- option_value("offset", :non_negative_integer, Map.get(params, "offset")),
+         {:ok, target} <- permissions_node(params) do
+      wasm_node_call(
+        target,
+        WasmDownload,
+        :read,
+        [download, offset, []],
+        @wasm_download_timeout - @wasm_erpc_slack
+      )
     else
       {:invalid, message} -> invalid_params(message)
     end
@@ -2113,6 +2536,36 @@ defmodule Ouroboros.Gateway.Methods do
     with_id(params, fn id -> safe(fn -> reply(Mesh.stop_agent(id)) end) end)
   end
 
+  # ---------------------------------------------------------------------------
+  # W13 — one message into one mesh agent
+  #
+  # The scriptable half of §7.7: `ouro` and anything else holding an `:operate` listener
+  # can now reach a deployed capability the way the native `capability` tool does, without
+  # a model and without an IEx shell. Every bound is settled here, before the mesh is
+  # touched, because the parameters arrive over a socket: an id longer than any this
+  # runtime mints, a body larger than a message, and a timeout past this verb's own
+  # ceiling are all refused rather than clamped — a client that asked for something this
+  # node will not do should be told so, not quietly given something else.
+  #
+  # The reply is the agent's `last_answer` and is untrusted by construction. It is
+  # returned whole when it encodes small and as a marked truncated string when it does
+  # not, and `untrusted: true` rides beside it so a client rendering it has no excuse.
+  # ---------------------------------------------------------------------------
+
+  def invoke("agents.message", params) do
+    safe(fn ->
+      with :ok <- only_keys(params, ["to", "body", "from", "timeout_ms"]),
+           {:ok, to} <- agent_id(params, "to"),
+           {:ok, from} <- agent_from(params),
+           {:ok, body} <- agent_message_body(params),
+           {:ok, timeout} <- agent_message_timeout(params) do
+        reply(send_agent_message(from, to, body, timeout))
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
   def invoke("capabilities.list", params) do
     safe(fn ->
       with :ok <- only_keys(params, ["workspace"]),
@@ -2590,6 +3043,708 @@ defmodule Ouroboros.Gateway.Methods do
       end
     end)
   end
+
+  # W5. Same posture as `permissions_call/3` and `mcp_call/2`: a helper, a component store
+  # and a rollout register are node-local, so the machine that owns them is the machine
+  # that describes them. `Ouroboros.Wasm.Surface` raises nothing and blocks on nothing
+  # without a deadline — a pool it does not find is `:absent`, a store it cannot read is
+  # `nil` — so what crosses `:erpc` is always an ordinary map. A peer too old to hold the
+  # module answers `-32006` naming it, which is the honest reading of "that node cannot
+  # describe a lane it does not have".
+  defp wasm_call(params, function) do
+    with :ok <- only_keys(params, ["node"]),
+         {:ok, target} <- permissions_node(params) do
+      safe(fn ->
+        if target == node() do
+          {:ok, apply(WasmSurface, function, [[]])}
+        else
+          {:ok, :erpc.call(target, WasmSurface, function, [[]], @fleet_query_timeout)}
+        end
+      end)
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  # W13 ------------------------------------------------------------------------------
+  defp bounded_agent_state(@wasm_agent_prefix <> _name, {:ok, %{agent: %{state: state}} = server})
+       when is_map(state) do
+    {answer, answer_truncated?} = bounded_answer(Map.get(state, :last_answer))
+    {message, message_truncated?} = bounded_answer(Map.get(state, :last_message))
+
+    bounded =
+      state
+      |> Map.replace(:last_answer, answer)
+      |> Map.replace(:last_message, message)
+
+    {:ok,
+     server
+     |> Map.put(:agent, Map.put(server.agent, :state, bounded))
+     |> Map.put(:untrusted, true)
+     |> Map.put(:truncated, answer_truncated? or message_truncated?)}
+  end
+
+  defp bounded_agent_state(_id, result), do: result
+
+  defp agent_id(params, key) do
+    case Map.get(params, key) do
+      value when is_binary(value) and value != "" ->
+        if byte_size(value) <= @max_agent_id_bytes,
+          do: {:ok, value},
+          else: {:invalid, "params.#{key} must be at most #{@max_agent_id_bytes} bytes"}
+
+      _other ->
+        {:invalid, "params.#{key} must be a nonempty string"}
+    end
+  end
+
+  # A `from` is a label on the message, and an absent one is not an error: the caller is a
+  # gateway client, and saying so is more honest than making every script invent an
+  # identity the mesh does not check anyway.
+  defp agent_from(params) do
+    case Map.get(params, "from") do
+      nil -> {:ok, "gateway"}
+      _present -> agent_id(params, "from")
+    end
+  end
+
+  # Bounded by what it costs on the wire into the agent, not by what the decoded term costs
+  # here: the number in the contract is the number a client can measure. Measured by
+  # encoding, and an unencodable body is refused rather than carried to an agent that would
+  # have to refuse it later with less to say about why.
+  defp agent_message_body(params) do
+    case Map.fetch(params, "body") do
+      :error ->
+        {:invalid, "params.body is required and may be any JSON value"}
+
+      {:ok, body} ->
+        case encoded_bytes(body) do
+          {:ok, size} when size <= @max_agent_message_bytes ->
+            {:ok, body}
+
+          {:ok, size} ->
+            {:invalid,
+             "params.body encodes to #{size} bytes; the bound is #{@max_agent_message_bytes}"}
+
+          :error ->
+            {:invalid, "params.body must be a JSON value"}
+        end
+    end
+  end
+
+  defp encoded_bytes(term) do
+    {:ok, byte_size(JSON.encode!(term))}
+  rescue
+    _error -> :error
+  end
+
+  defp agent_message_timeout(params) do
+    case Map.get(params, "timeout_ms") do
+      nil ->
+        {:ok, @default_agent_message_timeout_ms}
+
+      value when is_integer(value) and value >= 1 and value <= @max_agent_message_timeout_ms ->
+        {:ok, value}
+
+      _other ->
+        {:invalid,
+         "params.timeout_ms must be an integer between 1 and #{@max_agent_message_timeout_ms}"}
+    end
+  end
+
+  defp send_agent_message(from, to, body, timeout) do
+    case Mesh.send_message(from, to, body, timeout: timeout) do
+      {:ok, agent} -> {:ok, agent_message_result(from, to, agent)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp agent_message_result(from, to, agent) do
+    {answer, truncated?} = bounded_answer(agent_answer(agent, to))
+
+    %{
+      to: to,
+      from: from,
+      # Stated in the result and not only in the reference. Every path a component's words
+      # take to a reader carries this label (docs/WASM.md D17), and a client that drew this
+      # into a transcript beside the operator's own text without it would be the one place
+      # the rule was not enforced.
+      untrusted: true,
+      truncated: truncated?,
+      reply: answer
+    }
+  end
+
+  # `Jido.AgentServer.call/3` answers with the agent as it stands after the signal, which
+  # is where `Ouroboros.Mesh`'s whole message convention puts a reply. A shape this build
+  # does not recognise falls back to the directory rather than to a guess.
+  defp agent_answer(%{state: %{last_answer: answer}}, _to), do: answer
+
+  defp agent_answer(_agent, to) do
+    case Mesh.state(to) do
+      {:ok, %{agent: %{state: %{last_answer: answer}}}} -> answer
+      _unreadable -> nil
+    end
+  end
+
+  # Whole when it fits, and a marked string when it does not — never a silently cut JSON
+  # document, which is a document a client will try to parse and fail on with no idea why.
+  defp bounded_answer(answer) do
+    case encoded_bytes(answer) do
+      {:ok, size} when size <= @max_agent_message_bytes ->
+        {answer, false}
+
+      {:ok, _size} ->
+        {truncate(JSON.encode!(answer)), true}
+
+      :error ->
+        {truncate(inspect(answer, limit: 200, printable_limit: @max_agent_message_bytes)), true}
+    end
+  end
+
+  defp truncate(text) when byte_size(text) <= @max_agent_message_bytes, do: text
+
+  # In band, and by design. A client holding a JSON document that was silently cut has a
+  # document it will try to parse and fail on with no idea why; the marker is the only thing
+  # in the value itself that says what happened, and it is the same sentence the native
+  # `capability` tool appends for the same reason. Room is made for it *inside* the bound,
+  # so a truncated reply is never larger than an untruncated one may be.
+  defp truncate(text) do
+    marker = "… truncated at #{@max_agent_message_bytes} bytes."
+    keep = @max_agent_message_bytes - byte_size(marker)
+
+    text |> binary_part(0, max(keep, 0)) |> valid_prefix() |> Kernel.<>(marker)
+  end
+
+  # The cut is by bytes and walked back to a whole character: half a codepoint is a string
+  # the JSON encoder on the way out would refuse.
+  defp valid_prefix(binary) do
+    cond do
+      String.valid?(binary) -> binary
+      byte_size(binary) == 0 -> binary
+      true -> binary |> binary_part(0, byte_size(binary) - 1) |> valid_prefix()
+    end
+  end
+
+  # W12. The same routing as `wasm_call/2`, with a per-verb deadline: these do real work
+  # on the machine they name — a file write, a signing round trip, a whole rollout — so one
+  # `@fleet_query_timeout` covering all of them would kill the longest of them at five
+  # seconds. The `:erpc` deadline sits below the method's ceiling so the plane's own typed
+  # refusal wins the race against a transport timeout with nothing in it.
+  defp wasm_node_call(target, module, function, args, timeout) do
+    safe(fn ->
+      if target == node() do
+        wasm_reply(apply(module, function, args))
+      else
+        wasm_reply(:erpc.call(target, module, function, args, timeout))
+      end
+    end)
+  end
+
+  # The refusals worth naming. Everything below them is a client's own mistake about a
+  # transfer or a file it supplied, so it is `-32602` rather than an upstream failure; a
+  # node that cannot sign at all is `-32004`, because "this node has no signer" and "this
+  # signer said no" need different operator responses.
+  defp wasm_reply({:ok, value}), do: {:ok, value}
+
+  defp wasm_reply({:error, :no_signing_service}) do
+    unavailable(
+      "this node has no signing service: OUROBOROS_SIGNING_NODE must name the :signer " <>
+        "node that holds the key, or this node must run one itself. A component is signed " <>
+        "where the key is, never here"
+    )
+  end
+
+  defp wasm_reply({:error, {:signing_service_unavailable, _detail} = reason}),
+    do: {:error, code(:unavailable), "the signing service did not answer", Wire.to_json(reason)}
+
+  defp wasm_reply({:error, {:signer_unreachable, target, _detail} = reason}) do
+    {:error, code(:unavailable), "signing node #{target} did not answer", Wire.to_json(reason)}
+  end
+
+  defp wasm_reply({:error, {:signing_refused, _reason} = reason}) do
+    {:error, code(:upstream_error), "the signing policy refused this manifest",
+     Wire.to_json(reason)}
+  end
+
+  defp wasm_reply({:error, {:imports_not_derivable, _detail} = reason}) do
+    invalid_params(
+      "params.imports must be given: this node could not read the component's own import " <>
+        "list (#{inspect(reason, limit: 5, printable_limit: 120)}), and a manifest that " <>
+        "declares the wrong imports is quarantined at stage time rather than warned about"
+    )
+  end
+
+  # The held offset travels in `data` as well as in the sentence, because resuming is what a
+  # client does with it and parsing a number out of an error message is not a protocol.
+  defp wasm_reply({:error, {:offset_mismatch, held, _sent}}) do
+    {:error, code(:invalid_params),
+     "params.offset must be #{held}, which is what this upload holds",
+     %{"reason" => "offset_mismatch", "offset" => held}}
+  end
+
+  defp wasm_reply({:error, {:unknown_upload, id}}),
+    do: not_found("no upload #{id} on this node; it may have expired or been consumed")
+
+  defp wasm_reply({:error, {:upload_incomplete, id}}),
+    do: invalid_params("upload #{id} has not been committed; send its last frame with final")
+
+  defp wasm_reply({:error, {:upload_closed, id}}),
+    do: invalid_params("upload #{id} is already committed and takes no further frames")
+
+  defp wasm_reply({:error, {:too_many_uploads, _held, max}}) do
+    unavailable(
+      "this node already holds #{max} uploads; they expire ten minutes after their last frame"
+    )
+  end
+
+  defp wasm_reply({:error, :no_data_dir}) do
+    unavailable("this node has no data directory, so it can stage nothing and store nothing")
+  end
+
+  defp wasm_reply({:error, {:no_live_rollout, name}}),
+    do: not_found("no live lane-W rollout named #{inspect(name)} on this node")
+
+  # W19. The three ways a `wasm.download` is a client's own mistake about a transfer. "There
+  # is no such slot" and "you asked from the wrong place" send an operator to different
+  # places: the first is a signature to make again, the second is a client that lost its
+  # place in a file it is halfway through.
+  defp wasm_reply({:error, {:unknown_download, id}}) do
+    not_found(
+      "no download #{id} on this node; a slot ends when its final chunk is read, and " <>
+        "otherwise when its clocks run out — sign again to mint another"
+    )
+  end
+
+  defp wasm_reply({:error, {:offset_not_a_chunk_boundary, _offset, chunk}}) do
+    invalid_params(
+      "params.offset must be a multiple of #{chunk}, which is this node's chunk: a download " <>
+        "is walked with the offsets its own answers hand back, never seeked into"
+    )
+  end
+
+  defp wasm_reply({:error, {:offset_past_size, _offset, size}}),
+    do: invalid_params("params.offset must be below #{size}, which is this download's size")
+
+  defp wasm_reply({:error, {:invalid_download_id, _id}}),
+    do: invalid_params("params.download must be a download id this node minted")
+
+  defp wasm_reply(other), do: reply(other)
+
+  ## W12 parameters
+
+  defp wasm_upload(params) do
+    with {:ok, value} <- fetch_string(params, "upload"), do: wasm_upload_id(value)
+  end
+
+  defp wasm_optional_upload(params) do
+    case Map.get(params, "upload") do
+      nil -> {:ok, nil}
+      value when is_binary(value) -> wasm_upload_id(value)
+      _other -> {:invalid, "params.upload must be the id a previous frame returned"}
+    end
+  end
+
+  # W19. The same shape and the same reasoning as an upload id, and validated here for the
+  # same reason: it becomes a filename on the far side.
+  defp wasm_download(params) do
+    with {:ok, value} <- fetch_string(params, "download") do
+      if Regex.match?(~r/\A[0-9a-f]{32}\z/, value),
+        do: {:ok, value},
+        else: {:invalid, "params.download must be a download id this node minted"}
+    end
+  end
+
+  # Bounded and validated here as well as on the node that minted it: an id that made a
+  # round trip through a client is a value that arrived from a client, and it becomes a
+  # filename there.
+  defp wasm_upload_id(value) do
+    if Regex.match?(~r/\A[0-9a-f]{32}\z/, value),
+      do: {:ok, value},
+      else: {:invalid, "params.upload must be an upload id this node minted"}
+  end
+
+  # The manifest's own charset, checked at the edge so a name that could hold a path
+  # separator or a bidirectional control never reaches the register's module field.
+  defp wasm_name(params) do
+    with {:ok, value} <- fetch_string(params, "name") do
+      if WasmArtifact.name?(value) do
+        {:ok, value}
+      else
+        {:invalid,
+         "params.name must be lower case, start with a letter or digit, then letters, " <>
+           "digits, `.`, `_` or `-`, and be at most 64 bytes: it is the rollout register's " <>
+           "module and the durable id a start block claims cluster-wide"}
+      end
+    end
+  end
+
+  # Bounded before it is decoded, not after: base64 is four characters to three bytes, so
+  # the encoded length already states what a decode would allocate.
+  defp wasm_chunk(params) do
+    max = WasmUpload.max_chunk_bytes()
+
+    case Map.get(params, "data") do
+      value when is_binary(value) and value != "" ->
+        if byte_size(value) > div(max + 2, 3) * 4 + 4 do
+          {:invalid, "params.data must be base64 of at most #{max} bytes"}
+        else
+          wasm_decode64(value, max)
+        end
+
+      _other ->
+        {:invalid, "params.data must be a nonempty base64 string"}
+    end
+  end
+
+  defp wasm_decode64(value, max) do
+    case Base.decode64(value) do
+      {:ok, ""} -> {:invalid, "params.data must decode to at least one byte"}
+      {:ok, chunk} when byte_size(chunk) <= max -> {:ok, chunk}
+      {:ok, _oversize} -> {:invalid, "params.data must be base64 of at most #{max} bytes"}
+      :error -> {:invalid, "params.data must be base64"}
+    end
+  end
+
+  defp wasm_flag(params, key) do
+    case Map.get(params, key, false) do
+      value when is_boolean(value) -> {:ok, value}
+      _other -> {:invalid, "params.#{key} must be a boolean"}
+    end
+  end
+
+  defp wasm_optional_positive(params, key) do
+    case Map.get(params, key) do
+      nil -> {:ok, nil}
+      value -> option_value(key, :positive_integer, value)
+    end
+  end
+
+  defp wasm_optional_sha256(params) do
+    case Map.get(params, "source_sha256") do
+      nil ->
+        {:ok, nil}
+
+      value when is_binary(value) ->
+        if WasmArtifact.sha256?(value),
+          do: {:ok, value},
+          else: {:invalid, "params.source_sha256 must be 64 lower-case hex characters"}
+
+      _other ->
+        {:invalid, "params.source_sha256 must be 64 lower-case hex characters"}
+    end
+  end
+
+  # Required, and `[]` is a legitimate answer meaning "this component imports nothing" —
+  # which is why it must be *said* rather than inferred from an absent key. The node does
+  # not read the component to find out (D15): it is unsigned input from a socket, and the
+  # helper is not a parser this end gets to point at it.
+  defp wasm_imports(params) do
+    case Map.get(params, "imports") do
+      nil ->
+        {:invalid,
+         "params.imports is required: this node does not parse unsigned bytes to find out " <>
+           "what a component imports. Compute it with `ouro wasm inspect`, or send [] for a " <>
+           "component that imports nothing"}
+
+      values when is_list(values) and length(values) <= 8 ->
+        if Enum.all?(values, &(is_binary(&1) and &1 != "" and byte_size(&1) <= 64)),
+          do: {:ok, values},
+          else:
+            {:invalid, "params.imports must contain only nonempty strings of at most 64 bytes"}
+
+      _other ->
+        {:invalid, "params.imports must be a list of at most 8 nonempty strings"}
+    end
+  end
+
+  # The signer bounds this at 16 KiB and refuses anything larger; refusing it here too
+  # means a config nobody could sign is not first uploaded, hashed, and journalled.
+  defp wasm_start_config(params) do
+    case Map.get(params, "start_config") do
+      nil ->
+        {:ok, nil}
+
+      value when is_binary(value) and byte_size(value) <= 16_384 ->
+        {:ok, value}
+
+      _other ->
+        {:invalid, "params.start_config must be a string of at most 16384 bytes"}
+    end
+  end
+
+  # A signed eval spec is the only place in this table where a client's bytes decide an
+  # atom, and they do not: every atom below is a literal in this module, and the one field
+  # that names something outside it — a capability's own state key — goes through
+  # `String.to_existing_atom/1` in a rescue, exactly as `upgrade.history`'s module does.
+  #
+  # `initial_state` is deliberately not accepted. `Ouroboros.Wasm.Rollout.start_state/2`
+  # names the six keys that decide what is being evaluated and a signed spec merges *under*
+  # them, so the only keys an `initial_state` here could still choose are ones no lane-W
+  # capability reads. A parameter that can only do nothing is a parameter that will one day
+  # do something.
+  # W15. A closed set of two, and an absent one means `capability` — which is what every
+  # `wasm.sign` written before there were two kinds meant.
+  # W8. Absent means true, which is what an operator asking a node with a helper to sign
+  # something means. A present value that is not a boolean is refused rather than coerced: a
+  # client that wrote `"false"` and got a precompile has been told the opposite of what happened.
+  defp wasm_precompile(params) do
+    case Map.get(params, "precompile") do
+      nil -> {:ok, true}
+      value when is_boolean(value) -> {:ok, value}
+      other -> {:invalid, "params.precompile must be a boolean, got #{inspect(other)}"}
+    end
+  end
+
+  defp wasm_kind(params) do
+    case Map.get(params, "kind") do
+      nil ->
+        {:ok, :capability}
+
+      "capability" ->
+        {:ok, :capability}
+
+      "policy" ->
+        {:ok, :policy}
+
+      other ->
+        {:invalid, "params.kind must be \"capability\" or \"policy\", got #{inspect(other)}"}
+    end
+  end
+
+  defp wasm_eval(params, kind) do
+    case {Map.get(params, "eval"), kind} do
+      {nil, _kind} -> {:ok, nil}
+      {spec, :policy} when is_map(spec) -> wasm_policy_eval_spec(spec)
+      {spec, _capability} when is_map(spec) -> wasm_eval_spec(spec)
+      _other -> {:invalid, "params.eval must be an object"}
+    end
+  end
+
+  # A policy component's signed spec: the requests it must decide, and how it must decide them.
+  # Validated here for shape and again by `Ouroboros.Wasm.PolicyEngine.validate_eval/1` at the
+  # signer, which is the one that decides — this is the gateway refusing a frame it can name a
+  # fault in rather than forwarding it.
+  defp wasm_policy_eval_spec(spec) do
+    with :ok <- only_keys(spec, ["cases", "budget_ms"]),
+         {:ok, cases} <- wasm_policy_cases(Map.get(spec, "cases")),
+         {:ok, budget} <- wasm_optional_positive(spec, "budget_ms") do
+      {:ok, %{cases: cases} |> wasm_put(:budget_ms, budget)}
+    end
+  end
+
+  defp wasm_policy_cases(cases) when is_list(cases) and cases != [] and length(cases) <= 20 do
+    cases
+    |> Enum.reduce_while({:ok, []}, fn one, {:ok, acc} ->
+      case wasm_policy_case(one) do
+        {:ok, valid} -> {:cont, {:ok, [valid | acc]}}
+        {:invalid, message} -> {:halt, {:invalid, message}}
+      end
+    end)
+    |> case do
+      {:ok, valid} -> {:ok, Enum.reverse(valid)}
+      invalid -> invalid
+    end
+  end
+
+  defp wasm_policy_cases(_other),
+    do: {:invalid, "params.eval.cases must be a list of 1 to 20 objects"}
+
+  defp wasm_policy_case(one) when is_map(one) do
+    with :ok <- only_keys(one, ["request", "expect"]),
+         request when is_map(request) <-
+           Map.get(one, "request") ||
+             {:invalid, "params.eval.cases[].request is required and must be an object"},
+         {:ok, decision} <- wasm_policy_decision(Map.get(one, "expect")) do
+      {:ok, %{request: request, expect: %{decision: decision}}}
+    else
+      {:invalid, message} -> {:invalid, message}
+      _not_an_object -> {:invalid, "params.eval.cases[].request must be an object"}
+    end
+  end
+
+  defp wasm_policy_case(_other), do: {:invalid, "params.eval.cases[] must be an object"}
+
+  defp wasm_policy_decision(%{"decision" => decision} = expect)
+       when decision in ["allow", "deny", "ask"] do
+    with :ok <- only_keys(expect, ["decision"]) do
+      {:ok, String.to_existing_atom(decision)}
+    end
+  end
+
+  defp wasm_policy_decision(_other),
+    do:
+      {:invalid,
+       "params.eval.cases[].expect must be {\"decision\": \"allow\" | \"deny\" | \"ask\"}"}
+
+  defp wasm_eval_spec(spec) do
+    with :ok <- only_keys(spec, ["probes", "budget_ms", "max_latency_ms", "required"]),
+         {:ok, probes} <- wasm_probes(Map.get(spec, "probes")),
+         {:ok, budget} <- wasm_optional_positive(spec, "budget_ms"),
+         {:ok, latency} <- wasm_optional_positive(spec, "max_latency_ms"),
+         {:ok, required} <- wasm_required(Map.get(spec, "required")) do
+      {:ok,
+       %{probes: probes}
+       |> wasm_put(:budget_ms, budget)
+       |> wasm_put(:max_latency_ms, latency)
+       |> wasm_put(:required, required)}
+    end
+  end
+
+  defp wasm_probes(probes) when is_list(probes) and probes != [] and length(probes) <= 20 do
+    probes
+    |> Enum.reduce_while({:ok, []}, fn probe, {:ok, acc} ->
+      case wasm_probe(probe) do
+        {:ok, valid} -> {:cont, {:ok, [valid | acc]}}
+        {:invalid, message} -> {:halt, {:invalid, message}}
+      end
+    end)
+    |> case do
+      {:ok, valid} -> {:ok, Enum.reverse(valid)}
+      invalid -> invalid
+    end
+  end
+
+  defp wasm_probes(_other),
+    do: {:invalid, "params.eval.probes must be a list of 1 to 20 objects"}
+
+  # `only_keys/2`'s sentence is right for a method's own envelope, where a client has the
+  # parameter reference in front of it, and wrong two levels down inside a spec: "params
+  # contains unsupported fields: message" is a true statement that tells somebody writing
+  # their first eval spec nothing about what to write instead. The author of W11's guide hit
+  # exactly that, spelling the body `message` because that is what `agents.message` calls it.
+  # So this one says what a probe takes.
+  defp wasm_probe(probe) when is_map(probe) do
+    with :ok <- wasm_probe_keys(probe),
+         true <-
+           Map.has_key?(probe, "input") or {:invalid, "params.eval.probes[].input is required"},
+         {:ok, expect} <- wasm_expect(Map.get(probe, "expect")) do
+      {:ok, %{input: Map.get(probe, "input"), expect: expect}}
+    else
+      {:invalid, message} -> {:invalid, message}
+    end
+  end
+
+  defp wasm_probe(_other), do: {:invalid, "params.eval.probes[] must be an object"}
+
+  defp wasm_probe_keys(probe) do
+    case Map.keys(probe) -- @probe_keys do
+      [] ->
+        :ok
+
+      unknown ->
+        {:invalid,
+         "params.eval.probes[] takes " <>
+           Enum.join(@probe_keys, " and ") <>
+           " and nothing else, got: " <>
+           (unknown |> Enum.sort() |> Enum.join(", ")) <>
+           ". `input` is the message body handed to the capability, whatever the capability " <>
+           "itself calls it"}
+    end
+  end
+
+  defp wasm_expect(nil), do: {:ok, :any_reply}
+
+  defp wasm_expect(%{"kind" => "any_reply"} = expect) do
+    with :ok <- only_keys(expect, ["kind"]), do: {:ok, :any_reply}
+  end
+
+  defp wasm_expect(%{"kind" => "contains", "substring" => substring} = expect)
+       when is_binary(substring) and substring != "" do
+    with :ok <- only_keys(expect, ["kind", "substring"]) do
+      if String.valid?(substring) and byte_size(substring) <= 1_024,
+        do: {:ok, {:contains, substring}},
+        else:
+          {:invalid, "params.eval.probes[].expect.substring must be text of at most 1024 bytes"}
+    end
+  end
+
+  defp wasm_expect(%{"kind" => "equals"} = expect) do
+    with :ok <- only_keys(expect, ["kind", "value"]) do
+      if Map.has_key?(expect, "value"),
+        do: {:ok, {:equals, Map.get(expect, "value")}},
+        else: {:invalid, "params.eval.probes[].expect.value is required for an equals check"}
+    end
+  end
+
+  defp wasm_expect(%{"kind" => "state_matches", "key" => key} = expect) when is_binary(key) do
+    with :ok <- only_keys(expect, ["kind", "key", "value"]),
+         {:ok, field} <- wasm_state_key(key) do
+      if Map.has_key?(expect, "value"),
+        do: {:ok, {:state_matches, field, Map.get(expect, "value")}},
+        else:
+          {:invalid, "params.eval.probes[].expect.value is required for a state_matches check"}
+    end
+  end
+
+  defp wasm_expect(_other) do
+    {:invalid,
+     "params.eval.probes[].expect must name a kind: any_reply, contains, equals or state_matches"}
+  end
+
+  # A field of the wrapper agent's own state, and nothing else.
+  #
+  # `String.to_existing_atom/1` was the first answer and it is the wrong bound: it admits
+  # every atom the VM happens to hold — thousands of module names, every option key of
+  # every dependency — as a state field to match on. What an eval spec may name is what
+  # `Ouroboros.Wasm.Capability` declares, so the list is read from the agent itself rather
+  # than restated here, and the comparison is a string against `Atom.to_string/1` so no
+  # conversion happens at all: a name outside the list never becomes an atom, existing or
+  # otherwise.
+  defp wasm_state_key(key) when byte_size(key) <= 128 do
+    case Enum.find(wasm_state_fields(), &(Atom.to_string(&1) == key)) do
+      nil ->
+        {:invalid,
+         "params.eval.probes[].expect.key must name a field of the wasm capability's state (" <>
+           Enum.join(wasm_state_names(), ", ") <> "), got: " <> inspect(key)}
+
+      field ->
+        {:ok, field}
+    end
+  end
+
+  defp wasm_state_key(_key),
+    do: {:invalid, "params.eval.probes[].expect.key must be at most 128 bytes"}
+
+  defp wasm_state_names, do: wasm_state_fields() |> Enum.map(&Atom.to_string/1) |> Enum.sort()
+
+  defp wasm_required(nil), do: {:ok, nil}
+  defp wasm_required("all"), do: {:ok, :all}
+
+  defp wasm_required(%{"at_least" => n}) when is_integer(n) and n >= 1,
+    do: {:ok, {:at_least, n}}
+
+  defp wasm_required(_other),
+    do: {:invalid, ~s(params.eval.required must be "all" or {"at_least": n})}
+
+  # The targets a rollout drives. Defaulted to the driving node, because a deployment to
+  # nowhere is not a shorter deployment, and bounded and deduplicated here so the rollout's
+  # own `{:duplicate_nodes, _}` is a refusal a client cannot reach by accident.
+  defp wasm_targets(params, driver) do
+    case Map.get(params, "nodes") do
+      nil ->
+        {:ok, [driver]}
+
+      values when is_list(values) and values != [] and length(values) <= 32 ->
+        values
+        |> Enum.reduce_while({:ok, []}, fn value, {:ok, acc} ->
+          case option_value("nodes", :node, value) do
+            {:ok, target} -> {:cont, {:ok, [target | acc]}}
+            {:invalid, message} -> {:halt, {:invalid, message}}
+          end
+        end)
+        |> case do
+          {:ok, targets} -> {:ok, targets |> Enum.reverse() |> Enum.uniq()}
+          invalid -> invalid
+        end
+
+      _other ->
+        {:invalid, "params.nodes must be a list of 1 to 32 connected machines"}
+    end
+  end
+
+  defp wasm_put(map, _key, nil), do: map
+  defp wasm_put(map, key, value), do: Map.put(map, key, value)
 
   # Same posture as `permissions_call/3` and `code_intel_call/3`, and for the same
   # reason: an MCP server runs on the machine whose session asked for it, so a session

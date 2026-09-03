@@ -1,0 +1,70 @@
+# The guest SDK: everything a component author would otherwise copy out of the acceptance
+# guest, owned once (docs/WASM.md §7.1, D13).
+#
+# Its own workspace, deliberately, and here it is load-bearing rather than merely prudent:
+# this directory sits *inside* `tui/`, and without an empty `[workspace]` table cargo would
+# walk up to `tui/Cargo.toml` and refuse a package that workspace does not list. `ouro` must
+# not grow a dependency on a wasm guest, and a guest must not inherit `ouro`'s profile,
+# features, or lockfile — the same reason `test/support/wasm/echo-guest` states, with a
+# stronger obligation to state it.
+#
+# `exclude` keeps the examples and the scaffold template out of this workspace for the same
+# reason: each is a standalone project an author copies, so each is its own workspace root,
+# and `template/Cargo.toml` is not even valid until its placeholders are substituted.
+[workspace]
+exclude = ["examples", "template"]
+
+[package]
+name = "ouroboros-guest"
+version = "0.1.0"
+edition = "2021"
+# `wasm32-wasip2` emits a component directly from `cargo build` on 1.82 and later, which is
+# what keeps an author's build a plain `cargo build` rather than a `cargo component`
+# toolchain. Pinned here as well as in the acceptance guest, so the floor is the SDK's own
+# and not a property of whatever depends on it.
+rust-version = "1.82"
+description = "Write an ouroboros:capability@0.1.0 component without writing the ceremony"
+publish = false
+# There are no cargo `examples/*.rs` here: `examples/` holds whole projects, each with its
+# own manifest, because that is what an author copies. Said explicitly so autodiscovery
+# cannot decide otherwise if one of them ever grows a stray `.rs` at its top level.
+autoexamples = false
+
+[lib]
+# An rlib and nothing else. The component is the *author's* cdylib; this crate is linked
+# into it, and a second crate type here would be a second artifact nobody builds.
+crate-type = ["rlib"]
+
+[dependencies]
+# The bindings generator for the world, generated *here* and re-exported, which is the whole
+# point of this crate: `pub_export_macro` plus `default_bindings_module` are wit-bindgen's
+# supported way to let a downstream crate call `export!` against types it does not own.
+#
+# `default-features = false` plus exactly what the world needs: the `generate!`/`export!`
+# macros and the canonical ABI's `realloc` export. What that drops is `std` — see the
+# `no_std` note in src/lib.rs — plus `async` (the world is synchronous by decision,
+# docs/WASM.md D4) and `bitflags` (no flags type in this world).
+wit-bindgen = { version = "0.57", default-features = false, features = [
+  "macros",
+  "realloc",
+] }
+# JSON in and JSON out is the world's contract, so a guest parses rather than splices. The
+# `alloc` configuration is supported rather than a workaround, and it is what lets the API
+# below hand an author a `Value` instead of a `&str`.
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+# The allocator a `no_std` build has to bring itself. This is the same implementation Rust's
+# standard library uses on wasm targets, so choosing it is choosing what the `std` build
+# would have linked anyway — without the WASI imports that came with it.
+dlmalloc = { version = "0.2", features = ["global"] }
+
+# The defaults an author inherits by copying `examples/` or `template/`, and therefore the
+# ecosystem's posture. `panic = "abort"` keeps the unwinder out of the component; LTO and a
+# size-shaped opt level let the linker drop what is unreachable, which is what keeps the
+# import list at exactly `log`. Repeated in every example and in the template, because cargo
+# reads a profile only from a workspace root and each of those is its own.
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = "s"
+strip = true
+codegen-units = 1

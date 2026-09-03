@@ -292,7 +292,7 @@ reading.
 | `runtime.models` | `Ouroboros.Models.list/0` — the packaged `llm_db` catalogue. Native combines its OpenAI, Anthropic, and xAI lanes and carries full ReqLLM specs such as `openai_codex:gpt-5.6-sol`, `anthropic:claude-sonnet-5`, and `xai:grok-4.6`, the configured direct default, context/output limits and public token pricing; non-secret credential readiness is reported separately by `runtime.providers`. |
 | `account.read` `{}` | `OpenAIAuth.read/1` — non-secret API-key/OAuth readiness, ChatGPT identity claims, and managed-login state. Tokens remain only in the runtime's private OAuth file and never cross the gateway. |
 | `agents.list` | `Mesh.list_agents/0` |
-| `agents.state` `{id}` | `Mesh.state/1` |
+| `agents.state` `{id}` | `Mesh.state/1`. For a lane-W capability (`wasm/<name>`) the answer additionally carries `untrusted: true` and `truncated`, and `agent.state.last_answer`/`last_message` are bounded at 64 KiB with the same in-band marker: both are written by a component, this verb is `read`, and a read-only listener must not be the way around the label `agents.message` carries (docs/WASM.md §7.7) |
 | `interactive.list` / `coding.list` | `InteractiveSession.list/0` / `CodingSession.list/0`. Interactive rows are **rows**, not whole sessions (`State.summary/1`): same struct, same `_struct` tag, same field names, with `events` emptied, `turns` emptied, and `usage` reduced to `{total_tokens, cost_usd}`. They carry `title`, `title_source`, `cursor` (the contiguous high-water mark, previously readable only by fetching an entire `info` window), `forked_from`, `handed_off_from`, `forks`, `worktree_requested`, `worktree` (the record `Workspace.Worktree` made: `path`, `root`, `branch`, `base_commit`, `repository`, and `retired` once it was removed or kept), `children` (the coding task ids this conversation delegated — **ids only**, the records being one `interactive.delegations` away), and `options.capabilities`. Coding rows carry `parent` for the other half of that nesting. This list is fanned out over `:erpc` to every fleet node and then across the socket on every refresh, which is why it is bounded; anything a row drops is one `interactive.info` away. This list is fanned out over `:erpc` to every fleet node and then across the socket on every refresh, which is why it is bounded; anything a row drops is one `interactive.info` away |
 | `interactive.info` `{id}` | `InteractiveSession.info/1`. `options.approval_mode`/`options.sandbox_mode` are `null` when the plane omitted an unenforceable default — the provider's own behavior governs — where they previously always echoed the plane default. Also carries `options.capabilities` and `usage`, described below |
 | `interactive.replay` `{id, cursor, limit}` | `InteractiveSession.replay/2` (cursor exclusive, limit ≤ 500) |
@@ -325,6 +325,13 @@ reading.
 | `mcp.list` `{workspace?, node?}` | `Provider.Native.Mcp.status/1` — every MCP server this node runs for the native agent: `state` of `configured`/`starting`/`ready`/`broken`, the `mcp__server__tool` names it advertises, restarts, claims, uptime, and the `broken_reason` when there is one. `workspace` adds the servers this node has *configured* for that workspace but not started, plus every entry the loader **refused** with a typed `reason` (`unsupported_transport` for a `url` server, `invalid_name`, `missing_command`, `untrusted_workspace`, …) — the only way to tell "my mcp.json was ignored" from "my mcp.json was read and rejected". A server's environment appears as `env_count` and never as values. Node-routed over a bounded `:erpc` like `permissions.list`, because a server runs where its session runs. There is no `mcp.add`: a definition is code that runs on somebody's machine and is never authored over the socket |
 | `computer_use.status` `{node?}` | `Provider.Native.Desktop.status/0` — Computer Use readiness on the node, starting nothing: the config posture (`enabled`, `flag`, `helper_path`, `helper_present`, `denied_app_ids`, `always_allowed_apps`, `helper_version`) always; `running` is true only when the helper handshake completed. Node-routed over a bounded `:erpc` like `mcp.list` |
 | `computer_use.artifact` `{sha256, session_id?, node?}` | `Provider.Native.Desktop.artifact/2` — one staged screenshot by content hash, base64 with its media type and size. With `session_id` (a native provider session id), only that session's existing `desktop/` dir is searched — never created. Without it, only the live helper pool's session dirs. An unknown or non-64-hex sha is `not_found` (`-32007`). No path ever crosses the wire, and the pool is never started to answer a fetch |
+| `wasm.status` `{node?}` | `Wasm.Surface.status/1` — WebAssembly containment readiness on the node, starting nothing: `helper` (disk `present`, `path`, `world`, `phase` of `absent`/`idle`/`handshaking`/`ready`/`broken`, live instance counts, `hook_components` against `hook_component_budget`, and the accepted `doctor` report's `usable`/`worlds`/`wasmtime`/`limits`), `store` (root, held count and bytes, budget, how many a rollout protects), `rollouts` (lane-W counts by state) and `boot`. Reads a pool process that already exists and never asks for one, so a node that never built the helper answers as readily as one running it — absence is the operator's opt-in, not a fault. A fact this node cannot answer is `null` rather than a missing key or `false`: an unreadable store and an empty one are different. Node-routed over a bounded `:erpc` like `computer_use.status`. `ouro wasm doctor` is the surface, and it has no `--probe` — starting the helper to see whether it starts is what a read-scope readiness verb must not do |
+| `wasm.list` `{node?}` | `Wasm.Surface.list/1` — every lane-W rollout the register holds (`artifact_id`, `name` with the register's `wasm/` prefix removed, `component_sha256`, `epoch`, `state`, `nodes` as strings, timestamps) and every component the store holds (`sha256`, `size`, `mtime`). Both bounded and sorted by their own identity, with `rollout_count`/`component_count` beside them so a cut list is visible as one. Carries no `detail` and no `eval_report`: those are arbitrary deployment terms and this is a listing. There is still no `wasm.drop`, `wasm.load`, `wasm.instantiate` or `wasm.call` — those would be a socket deciding what this node runs |
+| `wasm.upload` `{upload?, offset, data, final?, node?}` | `Wasm.Upload.append/5` (operate) — the transport for bytes a JSON frame cannot carry (W12, D16): a component is bounded at 16 MiB and a frame at `OUROBOROS_GATEWAY_MAX_FRAME`, a mebibyte by default. `data` is base64 of at most 512 KiB, bounded before it is decoded; `offset` must equal what the node already holds and a mismatch answers `-32602` naming the offset it has. Omitting `upload` opens one and the reply names it; `final` closes it and the reply carries the sha256 of everything received. Files under `<data_dir>/wasm/uploads`; at most eight in flight per node, enforced by `O_CREAT|O_EXCL` slot files rather than by a count; reclaimed ten minutes after the last frame or thirty minutes after the slot was claimed, whichever comes first; taken by an atomic rename so two frames naming one upload cannot both receive the bytes; and no symlink is followed on the way in or out. An `offset` refusal carries the held offset in `data` so a client resumes rather than restarts. An upload carries no authority: it is verified by whichever verb consumes it, and consumed once |
+| `wasm.sign` `{upload, name, author, imports, language?, source_sha256?, start_config?, eval?, node?}` | `Wasm.Deploy.sign/2` (operate) — builds a manifest over the uploaded bytes and hands it to `Upgrade.Signing.Service` on the `:signer` node, which applies the whole lane-W policy (world, recomputed digest and size, imports ⊆ the world's, provenance, a validated eval spec by default, a `start.id` bound to the name) and journals the decision. The epoch is allocated with `Upgrade.Epoch.next/2` over the connected cluster and is **not** a parameter: a client-chosen number at the register's plausibility ceiling wedged lane W on that node durably (D15). `imports` is **required** and the client computes it with the operator's own helper — `ouro wasm sign` starts one itself, and `ouro wasm inspect --json` piped into `--imports-from` is the explicit form — because this node never parses unsigned bytes; and a list that does not match what the component imports is refused at stage by the cross-check. Answers the `.ouro-wasm` bundle's **prefix** — header and envelope — not the bundle: the client already holds the bytes it uploaded. A node with no signing service answers `-32004` naming `OUROBOROS_SIGNING_NODE` |
+| `wasm.deploy` `{upload, nodes?, node?}` | `Wasm.Deploy.deploy/3` (operate) — parses the uploaded bundle under its bounds and verifies it against the **driving node's own** `upgrade_trust_policy` before the store, the helper or the rollout register hears about it, then `Wasm.Rollout.deploy/4` with every gate unchanged. A rollout that ran answers with its state — `live`, `rolled_back` or `quarantined` — plus per-node evidence for stage, probe and eval; only a rollout that never started is an error. `outcome: unknown` on a gateway ceiling: the rollout does not stop because this socket did |
+| `wasm.download` `{download, offset, node?}` | `Wasm.Download.read/3` (operate) — the reply direction of `wasm.upload` (W19, D28). Since W8 a bundle carries a precompiled artifact the client has never seen, and past three quarters of the frame it does not fit the reply `wasm.sign` answers with; rather than dropping it, the node mints a slot and this verb walks it. `data` is base64 of at most 512 KiB decoded, `offset` must be a chunk boundary below `size`, and `final` marks the chunk that completes the artifact — reading it **releases the slot**, so a client that loses that answer signs again rather than asking twice. Files under `<data_dir>/wasm/download`, 0600, with `Wasm.Upload`'s own slot count and both its clocks. A node hands out **only** bytes its own `sign/2` compiled and signed: there is no verb that puts one here, and what comes back is bound by the `sha256` the signed manifest carries |
+| `wasm.rollback` `{name, node?}` | `Wasm.Deploy.rollback/2` (operate) — stops the `wasm/<name>` wrapper on every node the live entry names and marks the entry, by the same `withdraw/2` the eval-failure branch uses: a wrapper running some other component's sha is left alone and reported `unchanged`. `rolled_back` only where every node proved **absence**, else `quarantined` — and `unchanged` is not absence, so a capability whose durable id is still answering is `quarantined` rather than reported as rolled back. Component bytes stay in the store (D6) |
 | `ledger.export` `{since?, node?}` | The same query in JSONL, bounded to the ledger's own maximum (500), ordered ascending, with a SHA-256 chain: `hash(n) = sha256(hash(n-1) ‖ line(n))` where `hash(-1)` is `seed` (64 zeros) and `line` is the exact text its hash covers. A client verifies by hashing the strings it was handed, in order — nothing about how this runtime encodes an entry has to be reimplemented. **The chain is computed for the answer and stored nowhere.** It makes an export self-verifying; it is not tamper-evident storage, and a node that rewrote its own checkpoint would produce a perfectly consistent chain over the rewritten history |
 
 **`operate` scope** (additionally require `scope=operate`; each call emits one
@@ -378,6 +385,7 @@ this repository and moves in lockstep.
 | `control.submit` `{objective, opts}` / `control.cancel` `{id}` | control opts: `id`, `max_revisions` |
 | `code_intel.touch` `{workspace, path, action, node?}` | `CodeIntel.touch_with_baseline/3` — `action` is `changed`, `open`, `ensure_open`, or `closed`. `ensure_open` is the one to reach for when *asking* about a file rather than reporting a change to it: it opens a document the server has never seen and does nothing to one it already holds, where `open` re-reads and assigns a new version. Every version bump invalidates the diagnostics cache, so a caller that asked "what is wrong with this file" by re-opening it would wait out the freshness gate for a push a server with nothing new to say never sends — which is exactly what a live run against `clangd` did before this existed. `operate` rather than `read` because telling a language server about a document is this node spending memory on a caller's say-so; nothing else here mutates a pool. Answers `{version, baseline}`, where `baseline` is the picture *before* the touch: `fresh?`, `version` (`null` when the server had never published for the file, which is how "there is no baseline" is said rather than "the baseline was empty"), `counts`, `truncated`, and `signatures`. Reading the baseline and assigning the new version happen in one call because there is no ordering in two: a push landing between them turns a pre-existing error into a new one |
 | `agents.stop` `{id}` | `Mesh.stop_agent/1` |
+| `agents.message` `{to, body, from?, timeout_ms?}` | `Mesh.send_message/4` — the scriptable way to reach a deployed lane-W capability at `wasm/<name>` (docs/WASM.md §7.7), and any other mesh agent besides. `operate` rather than `read` twice over: it changes the agent's state by definition, and for a capability it *runs a component*, starting the containment helper that `wasm.status` and `wasm.list` are `read` precisely because they never do. Not node-routed — `:pg` already resolves an agent wherever in the cluster it lives, so this verb reaches a peer's capability and the boundary that makes that safe is the helper's linker, not the scope table. `to` and `from` are bounded at 512 bytes, `body` at 64 KiB *encoded*, and `timeout_ms` at 30s under a 45s gateway ceiling so the gateway is never the thing that gives up first. Answers `{to, from, untrusted: true, truncated, reply}`, where `reply` is the agent's `last_answer`: **untrusted** — for a capability it is prose and JSON a component wrote — returned whole when it encodes within the bound and as a truncated *string* carrying an in-band `… truncated at N bytes.` marker otherwise, which is what `truncated` distinguishes. A message an agent refused is still a delivered message: this verb reports that the agent answered nothing, and `agents.state` says why |
 | `runtime.shutdown` | `System.stop/0` — **also** requires `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN=1`, else `-32003`. Answered by the `Conn` rather than a task: the acknowledgement is written *and flushed to the socket* before the stop is called, because the client that asked is owed the ack |
 
 Every option a plane accepts is an atom, and none of them are built from client bytes:
@@ -980,6 +988,97 @@ ouro fleet doctor     actionable profile/network/runtime/service checks
 ouro fleet service install|status|remove
                       generate and inspect launchd/systemd user recovery
 ouro fleet leave      remove a stopped non-owner/empty-fleet profile safely
+ouro wasm doctor [--json] [--addr HOST:PORT] [--token-file PATH]
+                      WebAssembly containment readiness on a node: helper presence
+                      and phase, the world and bounds, the hook-component budget,
+                      the component store, lane-W rollouts. Asks wasm.status,
+                      which starts nothing — and there is no --probe and no
+                      --helper, because a readiness surface must not spawn the
+                      thing it is reporting on
+ouro wasm new NAME [--hook] [--into DIR] [--summary TEXT] [--sdk-path PATH]
+                      scaffold a component project that builds, from the guest
+                      SDK's own template (tui/wasm/guest/template) embedded in
+                      this binary — one source of truth, and a test compares the
+                      embedded bytes with the files on disk. --hook writes the
+                      Hook shape, which reads a hook payload and answers the
+                      verdict contract; without it, the Capability shape. NAME is
+                      Wasm.Artifact.name?/1's charset and a cargo package name;
+                      --summary is bounded at 200 characters and refuses quotes,
+                      backslashes and control characters, as --sdk-path does.
+                      ouroboros-guest is unpublished, so the generated Cargo.toml
+                      reaches it by path — and that path is EXECUTED, because a
+                      path dependency's build.rs runs at cargo build. So it comes
+                      from --sdk-path or from the checkout this ouro binary lives
+                      in, never from the working or output directory (D14); it is
+                      vetted (no symlink, a real ouroboros-guest manifest) and
+                      written canonical and absolute. Neither available, it
+                      refuses and names --sdk-path
+ouro wasm inspect FILE [--json] [--helper PATH]
+                      what a component declares, how its shape sits against the
+                      bounds that decide whether it compiles at all, and one
+                      verdict: admitted as a capability, as a hook component, as
+                      both, or as neither with the refusal named. Compiles it
+                      inside the helper; never instantiates it. Exits non-zero on
+                      a refusal
+ouro wasm run FILE [--config JSON] [--message JSON]... [--messages PATH]
+         [--describe] [--fuel N] [--memory-bytes N] [--deadline-ms MS]
+         [--json] [--helper PATH]
+                      stand one instance up and send it messages. Every message
+                      goes to the SAME instance, because state in this world is
+                      instance-held. Prints each reply, the fuel it cost, the
+                      guest's own log lines and the wall clock. Bounds default to
+                      the node's capability_limits and are clamped DOWN to the
+                      helper's maxima, never up
+ouro wasm hook FILE --event EVENT [--payload PATH|-] [--config JSON]
+         [--trusted] [--timeout-ms MS] [--json] [--helper PATH]
+                      run a component the way the node's hook seam would and print
+                      BOTH verdicts: what it said, and what the node would act on
+                      after the untrusted narrowing (D8), naming what was dropped
+                      and why. Defaults to the untrusted lane, which is the one a
+                      cloned repository gets. No --fuel and no --memory-bytes: a
+                      hook declares one bound for itself and the other two are the
+                      operator's
+ouro wasm check [--workspace DIR] [--json] [--helper PATH]
+                      validate an ouroboros.toml's [[hooks]] and [checks]
+                      component entries the way this runtime judges an UNTRUSTED
+                      workspace — path confinement, byte ceiling, world, the
+                      eight-component budget shared across both tables — and exit
+                      non-zero on any refusal. Instantiates nothing
+ouro wasm sign FILE --name NAME --author WHO [--import NAME]...
+         [--imports-from PATH|-] [--no-local-helper] [--dry-run]
+         [--eval PATH] [--start-config JSON] [--out PATH] [--json]
+         [--helper PATH] [--node MACHINE]
+                      sign a component into a .ouro-wasm bundle. The node never
+                      parses the bytes to find out what they import (docs/WASM.md
+                      D15), so this end declares the import list — and reads it
+                      for itself with a local ouro-wasm, resolved by the same
+                      three-place rule below. That read happens BEFORE anything
+                      is dialled: the component is put to the helper first, so
+                      one it will not admit is refused — naming the helper's own
+                      refusal — without a gateway being contacted at all. The
+                      bytes uploaded and the bytes inspected are bound by their
+                      sha, so a file swapped in between is refused rather than
+                      signed. --import and --imports-from override the helper
+                      (a report is read under a 64 KiB bound); --no-local-helper
+                      starts no helper and requires one of them; --dry-run
+                      prints the wasm.sign parameters and, alone among these,
+                      opens no socket ever
+                      new, inspect, run, hook and check need no node at all;
+                      `doctor` asks a node and starts nothing; `sign` does both,
+                      because the import list is this side's to declare and the
+                      signature is the node's to make. The helper is
+                      found in exactly three places — --helper, an absolute
+                      $OUROBOROS_WASM_HELPER, or beside the resolved ouro binary.
+                      Nothing cwd-derived unless you said so: you may point at a
+                      helper inside a checkout, because that is a person choosing;
+                      what this never does is go looking for one where it happens
+                      to have been run. Every candidate is canonicalised and must
+                      be an executable regular file, owned by you or root, that
+                      nobody else can rewrite — and the canonical path is the one
+                      spawned, so the file checked is the file run (docs/WASM.md D14)
+ouro desktop doctor [--probe] [--json] [--addr HOST:PORT] [--token-file PATH]
+                      Computer Use readiness on a node. --probe is the operator
+                      surface that starts the helper; the default starts nothing
 ouro acp [--provider NAME] [--workspace PATH] [--approval-mode MODE]
          [--sandbox-mode MODE] [--addr HOST:PORT] [--token-file PATH]
                       an Agent Client Protocol agent on stdio, spawned by an

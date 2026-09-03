@@ -1102,8 +1102,21 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
     map_journal_modules(journal, &ModuleName.to_wire/1, &beam_to_wire/1)
   end
 
+  # `expected_modules` keys are resolved last, after the receipts' bytes have interned
+  # what they define, and only on the way in. On the way out they stay the atoms they
+  # are: `Wire` writes an atom key as its bare name and reads it back only when this VM
+  # has the atom, which is the fallback `ModuleName.from_wire/1` applies here anyway.
+  # Turning them into binaries first would declare them strings, and `Wire` would then
+  # carry the whole map in its tagged pair form to keep that promise — for nothing.
   defp journal_from_wire(%Journal{} = journal) do
-    map_journal_modules(journal, &ModuleName.from_wire/1, &beam_from_wire/1)
+    journal = map_journal_modules(journal, &ModuleName.from_wire/1, &beam_from_wire/1)
+
+    expected_modules =
+      Map.new(journal.expected_modules, fn {module, identity} ->
+        {ModuleName.from_wire(module), identity}
+      end)
+
+    %{journal | expected_modules: expected_modules}
   end
 
   defp map_journal_modules(journal, name, beam) do
@@ -1117,15 +1130,11 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
         {digest, map_reservation(reservation, name)}
       end)
 
-    expected_modules =
-      Map.new(journal.expected_modules, fn {module, identity} -> {name.(module), identity} end)
-
     %{
       journal
       | receipts: receipts,
         operations: operations,
         reservations: reservations,
-        expected_modules: expected_modules,
         quarantine_reason: map_reason(journal.quarantine_reason, name)
     }
   end
@@ -2298,8 +2307,6 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
        when is_atom(reason),
        do: reason
 
-  defp public_corruption_reason(_reason), do: :invalid_checkpoint
-
   defp public_operation_reason(reason) do
     case reason do
       {tag, _detail} when is_atom(tag) -> tag
@@ -2393,7 +2400,6 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
     case :code.finish_loading(prepared_code) do
       :ok -> :ok
       {:error, reason} -> {:error, {:finish_loading, reason}}
-      other -> {:error, {:finish_loading, other}}
     end
   end
 
@@ -2617,7 +2623,6 @@ defmodule Ouroboros.Upgrade.NodeExecutor do
     case fun.() do
       :ok -> :ok
       {:error, reason} -> {:error, reason}
-      other -> {:error, other}
     end
   catch
     kind, reason -> {:error, {kind, reason}}

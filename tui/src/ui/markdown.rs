@@ -1540,11 +1540,19 @@ Done.";
         let _ = time(&small);
         let _ = time(&large);
 
+        // The fastest of several interleaved samples is the render's own cost; a single
+        // sample is that plus whatever the scheduler did to the thread in between, and on
+        // a shared runner that once read as the budget failing to bound the work.
+        let fastest = |text: &str| (0..5).map(|_| time(text)).min().unwrap();
+        let (mut small_time, mut large_time) = (fastest(&small), fastest(&large));
+        small_time = small_time.min(fastest(&small));
+        large_time = large_time.min(fastest(&large));
+
         // Eight times the input for the same 256 rows. Linear-in-input work would show up
         // as roughly eight times the time; the budget check means it does not.
         assert!(
-            time(&large) < time(&small) * 4 + std::time::Duration::from_millis(8),
-            "budget did not bound the work"
+            large_time < small_time * 4 + std::time::Duration::from_millis(8),
+            "budget did not bound the work: {large_time:?} for 8x versus {small_time:?}"
         );
     }
 

@@ -1,0 +1,12 @@
+{
+  "id": 22,
+  "jsonrpc": "2.0",
+  "result": {
+    "data": "T1VST0NXQVNNAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+    "download": "3c7a5b19e04d6f28a1b3c5d7e9f02468",
+    "final": false,
+    "offset": 524288,
+    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "size": 1310720
+  }
+}

@@ -982,6 +982,44 @@ defmodule Ouroboros.InteractiveSessionTest do
     if Process.alive?(adapter), do: HarnessAdapter.finish(adapter)
   end
 
+  # The same loss, landed in the window the suite only reaches under load. A poll asks
+  # the Harness session `info` and then `await`s each turn; a session killed between the
+  # two makes the `await` exit `:killed` instead of answering `:not_found`. A turn marked
+  # ambiguous from that exit used to keep its `harness_turn_await_failed` sentence through
+  # the loss that followed — the loss is the fact, and the turn reports it. Suspending the
+  # session makes the window a state rather than a race: every call the coordinator makes
+  # queues behind the suspension, and the kill lands while the `await` is in flight.
+  test "a Harness session killed under the poll's await is reported as the session loss",
+       %{id: id} do
+    assert {:ok, ref} =
+             InteractiveSession.start(id: id, provider: @provider, workspace: File.cwd!())
+
+    turn_id = unique_id("killed-under-await")
+    assert {:ok, _turn} = InteractiveSession.send_message(ref, "do not duplicate", id: turn_id)
+    assert_receive {:ouroboros_test_adapter_started, _run, _request, adapter}, 1_000
+    assert {:ok, %State{harness_session_id: harness_id}} = InteractiveSession.info(ref)
+    [{harness_pid, _value}] = Registry.lookup(Jido.Harness.SessionRegistry, harness_id)
+    coordinator = Task.whereis(id)
+    assert is_pid(coordinator)
+    waiter = Elixir.Task.async(fn -> InteractiveSession.await(ref, turn_id, 5_000) end)
+
+    :ok = :sys.suspend(harness_pid)
+    kill_under_call(harness_pid, coordinator, &match?({:turn_result, _}, &1))
+
+    assert_eventually(fn ->
+      match?({:ok, %State{status: :lost}}, InteractiveSession.info(ref))
+    end)
+
+    assert {:ok, %{status: :ambiguous, error: {:session_lost, :harness_session_not_found}}} =
+             Elixir.Task.await(waiter, 2_500)
+
+    assert {:ok, %State{turns: %{^turn_id => turn}}} = Store.get(id)
+    assert %{status: :ambiguous, error: {:session_lost, :harness_session_not_found}} = turn
+
+    refute_receive {:ouroboros_test_adapter_started, _duplicate, _request, _adapter}, 100
+    if Process.alive?(adapter), do: HarnessAdapter.finish(adapter)
+  end
+
   test "subscription is atomic across backlog and live delivery", %{id: id} do
     assert {:ok, ref} =
              InteractiveSession.start(id: id, provider: @provider, workspace: File.cwd!())
@@ -1266,6 +1304,37 @@ defmodule Ouroboros.InteractiveSessionTest do
     unless Node.alive?() do
       name = String.to_atom("ouroboros_interactive_root_#{System.unique_integer([:positive])}")
       assert {:ok, _pid} = :net_kernel.start([name, :shortnames])
+    end
+  end
+
+  # Kills a suspended `pid` while `caller` is blocked in a `GenServer.call` to it whose
+  # message satisfies `target?`. A call that is not the target is let through by resuming
+  # and suspending again; both are synchronous and the caller makes one call at a time, so
+  # the next call queues behind the new suspension and the search resumes from there.
+  defp kill_under_call(pid, caller, target?) do
+    message =
+      assert_eventually(fn ->
+        case Process.info(pid, :messages) do
+          {:messages, messages} ->
+            Enum.find_value(messages, fn
+              {:"$gen_call", {^caller, _tag}, message} -> message
+              _other -> nil
+            end)
+
+          nil ->
+            flunk("harness session #{inspect(pid)} died before the call under test")
+        end
+      end)
+
+    if target?.(message) do
+      monitor = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^monitor, :process, ^pid, :killed}, 2_000
+      :ok
+    else
+      :ok = :sys.resume(pid)
+      :ok = :sys.suspend(pid)
+      kill_under_call(pid, caller, target?)
     end
   end
 

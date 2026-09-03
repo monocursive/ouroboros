@@ -6960,22 +6960,32 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
 
-        // `wait` proves this child was reaped, but another test may have forked while the
-        // parent still held the descriptor and retain the same open-file description
-        // until its exec applies FD_CLOEXEC. Production cleanup already treats that as a
-        // short bounded release window; exercise the same contract under test load.
+        // `wait` proves this child was reaped; the lock may still outlive it by the
+        // window `assert_epmd_lock_released` describes.
+        assert_epmd_lock_released(&lock_path, &metadata);
+        remove_epmd_owner_artifacts(&data).unwrap();
+        fs::remove_dir_all(data).ok();
+    }
+
+    /// Asserts the lock at `lock_path` is released within production's own bounded window
+    /// rather than at this instant. Another test in this process may have forked while the
+    /// parent still held the descriptor; that child retains the same open-file description
+    /// — and with it the lock — until its exec applies FD_CLOEXEC, which is a window the
+    /// hosted runner's two cores stretch to tens of milliseconds. Production cleanup already
+    /// treats that as a short bounded release, so the tests assert the same contract. An
+    /// unrelated child that had truly inherited the lock would hold it for its whole life,
+    /// well past this window, so the bound keeps the distinction it is there to prove.
+    fn assert_epmd_lock_released(lock_path: &Path, metadata: &fs::Metadata) {
         let deadline = Instant::now() + EPMD_STOP_DEADLINE;
-        while epmd_lock_held(&lock_path, metadata.dev(), metadata.ino()).unwrap()
+        while epmd_lock_held(lock_path, metadata.dev(), metadata.ino()).unwrap()
             && Instant::now() < deadline
         {
             thread::sleep(Duration::from_millis(25));
         }
         assert!(
-            !epmd_lock_held(&lock_path, metadata.dev(), metadata.ino()).unwrap(),
-            "the inherited EPMD lock remained held after its bounded release window"
+            !epmd_lock_held(lock_path, metadata.dev(), metadata.ino()).unwrap(),
+            "the EPMD lock remained held after its bounded release window"
         );
-        remove_epmd_owner_artifacts(&data).unwrap();
-        fs::remove_dir_all(data).ok();
     }
 
     #[test]
@@ -6992,7 +7002,9 @@ mod tests {
         let mut child = Command::new(sleep).arg("30").spawn().unwrap();
         drop(lock);
 
-        assert!(!epmd_lock_held(&lock_path, metadata.dev(), metadata.ino()).unwrap());
+        // The child lives for thirty seconds; a lock it had inherited would be held for
+        // all of them, so a release inside the bounded window proves it was not.
+        assert_epmd_lock_released(&lock_path, &metadata);
         child.kill().unwrap();
         child.wait().unwrap();
         remove_epmd_owner_artifacts(&data).unwrap();

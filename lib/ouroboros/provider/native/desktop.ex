@@ -53,6 +53,10 @@ defmodule Ouroboros.Provider.Native.Desktop do
   # jpeg or a png, never a gif or a user's webp.
   @image_media_types ["image/jpeg", "image/png"]
 
+  # The helper binary's name, in the one place both the candidate list and the last-resort
+  # answer of `helper_path/0` read it from.
+  @helper_name "ouro-computer-use"
+
   # The bundle ids Computer Use must never drive, baked so config can only widen the deny,
   # never narrow it. Mirrors `config/config.exs`'s `denied_app_ids` default; the two are
   # kept in step by `test/provider/native/desktop_test.exs`.
@@ -174,56 +178,53 @@ defmodule Ouroboros.Provider.Native.Desktop do
   @doc """
   The absolute path the helper would be spawned from.
 
-  `OUROBOROS_COMPUTER_USE_HELPER` wins, then a configured absolute `:helper_path`, then
-  the first existing candidate: app priv, the checkout `priv/` (mix), or a sibling of
-  `ouro` / this executable (the macOS app bundle).
+  An absolute `OUROBOROS_COMPUTER_USE_HELPER` wins, then a configured absolute `:helper_path`, then
+  the first existing candidate: app priv, or a sibling of `ouro` / `ouro-desktop` (the
+  macOS app bundle).
+
+  No candidate is derived from the working directory (F1). The helper is a containment
+  boundary and the set of paths that may supply it is a property of the installation, never
+  of where the daemon was started: a `Path.expand("priv/computer-use/…")` and a walk up the
+  cwd's ancestors were both here, and either let a cloned repository hand this node the
+  binary it spawns. A checkout that wants its own build names it with the env override or
+  builds it into the `_build` fan-out `make computer-use` already writes.
   """
   @spec helper_path() :: String.t()
   def helper_path do
     case System.get_env("OUROBOROS_COMPUTER_USE_HELPER") do
       path when is_binary(path) and path != "" ->
-        path
+        if absolute_path?(path), do: path, else: configured_helper_path()
 
       _unset ->
-        case config(:helper_path) do
-          path when is_binary(path) and path != "" -> path
-          _bundled -> resolve_bundled_helper()
-        end
+        configured_helper_path()
+    end
+  end
+
+  defp configured_helper_path do
+    case config(:helper_path) do
+      path when is_binary(path) and path != "" -> path
+      _bundled -> resolve_bundled_helper()
     end
   end
 
   defp resolve_bundled_helper do
-    Enum.find(helper_candidates(), &File.regular?/1) || hd(helper_candidates())
+    candidates = helper_candidates()
+    # Never `hd([])`: with every cwd-derived candidate gone the list can be empty on a node
+    # whose app has no `priv/` and that has no `ouro` on PATH, and `helper_path/0` is
+    # documented to always answer a string.
+    Enum.find(candidates, &File.regular?/1) || List.first(candidates) || @helper_name
   end
 
   defp helper_candidates do
-    name = "ouro-computer-use"
-
+    # No cwd-derived candidate, in either of the two shapes this used to carry (F1): see
+    # `helper_path/0`.
     [
-      priv_helper(name),
-      Path.expand(Path.join(["priv", "computer-use", name])),
-      walk_priv_helper(name),
-      sibling_helper(name, :os.find_executable(~c"ouro")),
-      sibling_helper(name, :os.find_executable(~c"ouro-desktop"))
+      priv_helper(@helper_name),
+      sibling_helper(@helper_name, :os.find_executable(~c"ouro")),
+      sibling_helper(@helper_name, :os.find_executable(~c"ouro-desktop"))
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.uniq()
-  end
-
-  defp walk_priv_helper(name) do
-    case File.cwd() do
-      {:ok, cwd} ->
-        cwd
-        |> Stream.iterate(&Path.dirname/1)
-        |> Enum.take(6)
-        |> Enum.find_value(fn dir ->
-          path = Path.join([dir, "priv", "computer-use", name])
-          if File.regular?(path), do: path
-        end)
-
-      {:error, _reason} ->
-        nil
-    end
   end
 
   defp priv_helper(name) do
@@ -873,8 +874,6 @@ defmodule Ouroboros.Provider.Native.Desktop do
     end
   end
 
-  defp unlink_helper_temp(_raw), do: :ok
-
   defp remember(session_dir, last) do
     last = Map.put(last, :at, System.system_time(:millisecond))
 
@@ -1497,7 +1496,10 @@ defmodule Ouroboros.Provider.Native.Desktop do
   defp valid?(:enabled, _default, value), do: is_boolean(value)
   defp valid?(:act_enabled, _default, value), do: is_boolean(value)
   defp valid?(:helper_path, _default, :bundled), do: true
-  defp valid?(:helper_path, _default, value), do: is_binary(value) and value != ""
+
+  defp valid?(:helper_path, _default, value),
+    do: is_binary(value) and value != "" and absolute_path?(value)
+
   defp valid?(:denied_app_ids, _default, value), do: is_list(value)
 
   defp valid?(:jpeg_quality, _default, value),
@@ -1509,4 +1511,6 @@ defmodule Ouroboros.Provider.Native.Desktop do
     do: is_integer(value) and value > 0 and value <= default
 
   defp valid?(_key, _default, _value), do: true
+
+  defp absolute_path?(path), do: Path.type(path) == :absolute
 end

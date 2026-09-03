@@ -3009,7 +3009,11 @@ pub fn attachment_refusal(diagnostic: &str) -> bool {
 /// `Control.Permissions.Pattern` validates it, and an unvalidatable pattern comes back as
 /// `-32602` naming itself rather than as a rule that matches nothing.
 pub fn permission_add_params(pattern: &str, workspace: &str) -> Value {
-    if pattern.starts_with("ComputerUse(") {
+    // Node facts, not directory facts: a Computer Use grant names an app and this operator,
+    // and a `Capability(…)` grant names a component the rollout plane deployed to this
+    // machine (docs/WASM.md §7.7). Either one scoped to a workspace would be unrememberable
+    // from a session that never chose one.
+    if pattern.starts_with("ComputerUse(") || pattern.starts_with("Capability(") {
         return serde_json::json!({
             "scope": "user",
             "pattern": pattern,
@@ -3450,6 +3454,797 @@ impl ReplayDivergence {
         self.kind.as_deref() == Some("boundary")
     }
 }
+
+/// W5. What `wasm.status` answers for one node — the containment lane's posture.
+///
+/// Decoded tolerantly for the reason [`McpList`] is: this is a status projection whose
+/// keys the runtime extends, and a strict struct would be the one place this client
+/// refuses to show an operator their helper because the runtime described it more fully
+/// than it used to.
+///
+/// **`None` is not `false` here.** The runtime answers `null` for a fact it does not know
+/// — an unreadable store, a rollout register that is not running — and `0` for a fact it
+/// does. Folding the two together would report an unreadable store as an empty one, which
+/// is the one reading an operator must never be given.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmStatus {
+    pub node: Option<String>,
+    pub helper: WasmHelper,
+    /// W16. The OS sandbox that node puts around its helper, and what happened when it tried.
+    pub sandbox: WasmSandbox,
+    pub store: WasmStore,
+    pub rollouts: WasmRollouts,
+    /// Whether this node has the durable state a boot-time restart of live components
+    /// reads. `false` is a posture — no data directory — and not a failure.
+    pub boot_enabled: bool,
+}
+
+/// The `ouro-wasm` helper this node owns, as the pool holds it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmHelper {
+    /// The bytes are on disk. This is the whole opt-in: a node that never built the helper
+    /// reports `false` and is not broken.
+    pub present: bool,
+    pub path: Option<String>,
+    /// The world this build links against, whatever the helper says it offers.
+    pub world: Option<String>,
+    /// `absent` (no pool process on that node), `idle` (no helper spawned yet),
+    /// `handshaking`, `ready`, or `broken`. Kept as the runtime's own string: an unknown
+    /// sixth phase renders as itself rather than being folded into one of the five.
+    pub phase: Option<String>,
+    pub os_pid: Option<u64>,
+    pub instances: u64,
+    pub owned: u64,
+    pub pending_drops: u64,
+    /// Distinct hook components admitted since this helper spawned, and the ceiling. At the
+    /// ceiling no further component hook loads on that node until the pool restarts.
+    pub hook_components: u64,
+    pub hook_component_budget: u64,
+    /// The helper's own probe of whether an engine can be built on that host. `None` where
+    /// no report has been accepted — which is not the same as "it cannot".
+    pub usable: Option<bool>,
+    pub worlds: Vec<String>,
+    pub wasmtime: Option<String>,
+    /// The helper's bounds table, under the names it reported them with. Kept as a map
+    /// rather than named fields because it is the helper's contract and it grows.
+    pub limits: BTreeMap<String, i64>,
+    /// Why the pool is broken, in the runtime's words. Present only in the `broken` phase.
+    pub broken_reason: Option<String>,
+}
+
+impl WasmHelper {
+    /// The helper has handshaked and will answer.
+    pub fn ready(&self) -> bool {
+        self.phase.as_deref() == Some("ready")
+    }
+
+    /// No pool process on that node at all — nobody has asked for a helper there.
+    pub fn absent(&self) -> bool {
+        self.phase.as_deref() == Some("absent")
+    }
+
+    /// Whether a further hook component would now be refused on that node.
+    pub fn hook_budget_spent(&self) -> bool {
+        self.hook_component_budget > 0 && self.hook_components >= self.hook_component_budget
+    }
+}
+
+/// W16, D25. The OS sandbox around the `ouro-wasm` helper on that node.
+///
+/// Three postures and the runtime's own spelling of each: `sandboxed` (the child is wrapped,
+/// or the next one would be), `off` (the operator turned the fence off), and `refused` — the
+/// one worth reading twice, because it means that node runs **no helper at all**: it was told
+/// to require a sandbox and could not apply one, so `reason` is why and `helper.phase` is
+/// `broken`. Kept as the runtime's string for [`WasmHelper::phase`]'s reason: a fourth posture
+/// renders as itself rather than being folded into one of the three.
+///
+/// `None` everywhere is a node with no pool process, which has decided nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmSandbox {
+    pub posture: Option<String>,
+    /// `sandbox-exec`, `bwrap`, `ouro-sandbox`, or `none`.
+    pub backend: Option<String>,
+    /// Why a `refused` node refused, in the runtime's words. `None` when nothing went wrong.
+    pub reason: Option<String>,
+    /// The effective read set, as **basenames** — the runtime sends no absolute paths over a
+    /// `read` verb. Empty on a node that has taken no posture; on a node whose
+    /// `helper_readable` was rejected whole this is the node's own roots and nothing else,
+    /// which is how an operator sees that a configured list is not in force.
+    pub readable: Vec<String>,
+}
+
+impl WasmSandbox {
+    /// That node is running its helper behind the OS sandbox.
+    pub fn sandboxed(&self) -> bool {
+        self.posture.as_deref() == Some("sandboxed")
+    }
+
+    /// That node will not run a helper: it requires a sandbox it cannot apply.
+    pub fn refused(&self) -> bool {
+        self.posture.as_deref() == Some("refused")
+    }
+
+    /// The operator turned the fence off, and the helper runs with the node's own access.
+    pub fn off(&self) -> bool {
+        self.posture.as_deref() == Some("off")
+    }
+}
+
+/// The content-addressed component store, and what it is allowed to hold.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmStore {
+    /// `None` on a node with no data directory: there is no store, rather than an empty one.
+    pub root: Option<String>,
+    pub budget_bytes: Option<u64>,
+    /// How many components are held and how many bytes they occupy. `None` means the
+    /// directory could not be read — never "none held".
+    pub held: Option<u64>,
+    pub bytes: Option<u64>,
+    /// How many of them a rollout is keeping alive, which a prune may not evict. `None`
+    /// when the register did not answer, so nothing is known to be referenced.
+    pub protected: Option<u64>,
+}
+
+/// Lane-W rollouts, counted by the state the register holds them in.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmRollouts {
+    /// `None` when the register did not answer.
+    pub total: Option<u64>,
+    pub by_state: BTreeMap<String, u64>,
+}
+
+impl WasmRollouts {
+    pub fn state(&self, name: &str) -> u64 {
+        self.by_state.get(name).copied().unwrap_or(0)
+    }
+}
+
+/// W5. What `wasm.list` answers: every lane-W rollout and every component held.
+///
+/// Both lists arrive sorted by their own identity and bounded by the runtime. The count
+/// beside each is the total that node holds, which is how a client sees a list that was
+/// cut rather than a node that holds less than it does.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmList {
+    pub node: Option<String>,
+    pub rollouts: Vec<WasmRollout>,
+    pub rollout_count: Option<u64>,
+    pub components: Vec<WasmComponent>,
+    pub component_count: Option<u64>,
+}
+
+/// One lane-W rollout, as the register holds it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmRollout {
+    pub artifact_id: String,
+    /// The capability's name. The register's `"wasm/"` prefix is the runtime's way of
+    /// keeping a component out of the atom table and is already removed here.
+    pub name: Option<String>,
+    pub component_sha256: Option<String>,
+    pub epoch: Option<u64>,
+    /// `deploying`, `live`, `superseded`, `rolled_back`, or `quarantined` — the runtime's
+    /// own string, because an unknown sixth state is still worth showing.
+    pub state: Option<String>,
+    /// W8. Which form the answering node loads this component from: `precompiled` when the
+    /// signed manifest names an artifact for exactly that node's wasmtime and target triple
+    /// and its store holds it, `source` otherwise. `None` where that node could not say —
+    /// no readable manifest, or no helper that has reported its build — and kept as the
+    /// runtime's own string for the reason `state` is.
+    pub form: Option<String>,
+    /// Node names as strings. They stay strings: a node name this client turned back into
+    /// anything else would be a value minted from the wire.
+    pub nodes: Vec<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// One component the store holds.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmComponent {
+    pub sha256: String,
+    pub size: u64,
+    pub mtime: Option<i64>,
+}
+
+impl WasmStatus {
+    pub fn decode(value: &Value) -> Self {
+        Self {
+            node: nonempty(value.get("node")),
+            helper: WasmHelper::decode(value.get("helper").unwrap_or(&Value::Null)),
+            sandbox: WasmSandbox::decode(value.get("sandbox").unwrap_or(&Value::Null)),
+            store: WasmStore::decode(value.get("store").unwrap_or(&Value::Null)),
+            rollouts: WasmRollouts::decode(value.get("rollouts").unwrap_or(&Value::Null)),
+            boot_enabled: value
+                .pointer("/boot/enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        }
+    }
+}
+
+impl WasmHelper {
+    fn decode(value: &Value) -> Self {
+        let number = |key: &str| value.get(key).and_then(Value::as_u64);
+
+        Self {
+            present: value
+                .get("present")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            path: nonempty(value.get("path")),
+            world: nonempty(value.get("world")),
+            phase: nonempty(value.get("phase")),
+            os_pid: number("os_pid"),
+            instances: number("instances").unwrap_or(0),
+            owned: number("owned").unwrap_or(0),
+            pending_drops: number("pending_drops").unwrap_or(0),
+            hook_components: number("hook_components").unwrap_or(0),
+            hook_component_budget: number("hook_component_budget").unwrap_or(0),
+            usable: value.get("usable").and_then(Value::as_bool),
+            worlds: strings(value.get("worlds")),
+            wasmtime: nonempty(value.get("wasmtime")),
+            limits: value
+                .get("limits")
+                .and_then(Value::as_object)
+                .map(|table| {
+                    table
+                        .iter()
+                        .take(MAX_WASM_ROWS)
+                        .filter_map(|(key, bound)| Some((key.clone(), bound.as_i64()?)))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            broken_reason: nonempty(value.get("broken_reason")),
+        }
+    }
+}
+
+impl WasmSandbox {
+    fn decode(value: &Value) -> Self {
+        Self {
+            posture: nonempty(value.get("posture")),
+            backend: nonempty(value.get("backend")),
+            reason: nonempty(value.get("reason")),
+            readable: strings(value.get("readable")),
+        }
+    }
+}
+
+impl WasmStore {
+    fn decode(value: &Value) -> Self {
+        let number = |key: &str| value.get(key).and_then(Value::as_u64);
+
+        Self {
+            root: nonempty(value.get("root")),
+            budget_bytes: number("budget_bytes"),
+            held: number("held"),
+            bytes: number("bytes"),
+            protected: number("protected"),
+        }
+    }
+}
+
+impl WasmRollouts {
+    fn decode(value: &Value) -> Self {
+        Self {
+            total: value.get("total").and_then(Value::as_u64),
+            by_state: value
+                .pointer("/by_state")
+                .and_then(Value::as_object)
+                .map(|states| {
+                    states
+                        .iter()
+                        .take(MAX_WASM_ROWS)
+                        .filter_map(|(state, count)| Some((state.clone(), count.as_u64()?)))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+}
+
+impl WasmList {
+    pub fn decode(value: &Value) -> Self {
+        Self {
+            node: nonempty(value.get("node")),
+            rollouts: value
+                .get("rollouts")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .take(MAX_WASM_ROWS)
+                        .filter_map(WasmRollout::decode)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            rollout_count: value.get("rollout_count").and_then(Value::as_u64),
+            components: value
+                .get("components")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .take(MAX_WASM_ROWS)
+                        .filter_map(WasmComponent::decode)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            component_count: value.get("component_count").and_then(Value::as_u64),
+        }
+    }
+}
+
+impl WasmRollout {
+    /// `None` for a row with no artifact id: a rollout this client cannot address is a row
+    /// it cannot honestly draw.
+    fn decode(value: &Value) -> Option<Self> {
+        Some(Self {
+            artifact_id: nonempty(value.get("artifact_id"))?,
+            name: nonempty(value.get("name")),
+            component_sha256: nonempty(value.get("component_sha256")),
+            epoch: value.get("epoch").and_then(Value::as_u64),
+            state: nonempty(value.get("state")),
+            form: nonempty(value.get("form")),
+            nodes: strings(value.get("nodes")),
+            created_at: nonempty(value.get("created_at")),
+            updated_at: nonempty(value.get("updated_at")),
+        })
+    }
+}
+
+impl WasmComponent {
+    /// `None` for a row with no digest: the digest *is* the component's identity here.
+    fn decode(value: &Value) -> Option<Self> {
+        Some(Self {
+            sha256: nonempty(value.get("sha256"))?,
+            size: value.get("size").and_then(Value::as_u64).unwrap_or(0),
+            mtime: value.get("mtime").and_then(Value::as_i64),
+        })
+    }
+}
+
+/// W12. What one `wasm.upload` frame is answered with.
+///
+/// `sha256` is `None` until the frame that closes the upload — a digest over part of a
+/// file is a number that means nothing, and offering one would invite a client to check
+/// it. `chunk_bytes` is the node's own ceiling, so a client sizes its next frame from the
+/// answer rather than from a constant compiled into it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmUploadReceipt {
+    pub upload: String,
+    pub received: u64,
+    pub complete: bool,
+    pub sha256: Option<String>,
+    pub chunk_bytes: u64,
+}
+
+/// W12. What `wasm.sign` answers with: the bundle's prefix, and what it describes.
+///
+/// Not the bundle. The operator already holds the component they uploaded, so the node
+/// returns the header and the envelope and the client writes those followed by its own
+/// file. `bundle_bytes` is what that file will weigh, which is the only arithmetic the
+/// client does about a format it does not otherwise implement.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmSignature {
+    pub artifact_id: Option<String>,
+    pub name: Option<String>,
+    pub epoch: Option<u64>,
+    pub component_sha256: Option<String>,
+    pub size: Option<u64>,
+    pub world: Option<String>,
+    /// W15. `capability` or `policy`: what this component is, as the *signed manifest* says
+    /// it. Absent from a receipt written before there were two kinds, which reads as a
+    /// capability everywhere it is used.
+    pub kind: Option<String>,
+    pub imports: Vec<String>,
+    pub created_at: Option<String>,
+    pub signer: Option<String>,
+    /// The durable id a `start` block claims, derived from the name by the runtime.
+    /// `None` when the manifest declares no start block.
+    pub start_id: Option<String>,
+    pub extension: Option<String>,
+    /// W8. Which form this bundle carries — `precompiled` or `source` — said by the node
+    /// rather than inferred from whether the block below is present. A client deducing its own
+    /// file's shape from an absent key is a client guessing.
+    pub form: Option<String>,
+    /// W8. The serialized form the signing node compiled, as the signed manifest names it:
+    /// the wasmtime and the target triple only a matching node may map it on, and its own
+    /// digest and size. `None` when the manifest carries none, which is what a node with no
+    /// helper, `--no-precompile`, and an artifact too large to travel all produce.
+    pub precompiled: Option<WasmPrecompiled>,
+    /// Why there is no artifact, when the node had a reason worth naming. Kept as the
+    /// runtime's own rendering: it is a diagnostic line, not a value to branch on.
+    pub precompile_skipped: Option<String>,
+    /// W19. Where the artifact is, when it did not fit this reply. `None` — an explicit
+    /// `null` on the wire — is the ordinary case and every case there was before W19: the
+    /// artifact is already inside `bundle_prefix` and there is nothing to fetch. `Some`
+    /// means the prefix is the header and the envelope alone and the artifact comes back
+    /// through `wasm.download`, in the frames `wasm.upload` sent the component in.
+    pub artifact: Option<WasmArtifactSlot>,
+    /// Base64 of the bytes to write before the component. Kept encoded: this client
+    /// decodes it once, at the moment it writes the file, and never inspects it. Since W8
+    /// it carries the precompiled artifact too — unless `artifact` above names a download,
+    /// in which case that half arrives separately and this is the header and the envelope.
+    pub bundle_prefix: Option<String>,
+    pub bundle_bytes: Option<u64>,
+}
+
+/// W19. The slot a `wasm.sign` receipt names when the artifact travels separately.
+///
+/// Every field is needed and none of them is optional in a receipt this client will act on:
+/// the id to ask with, the size to know when to stop, the digest to check what was
+/// reassembled — which is the digest the *signed manifest* carries, so a mismatch is not a
+/// transport hiccup but bytes that are not this artifact — and the chunk the node will answer
+/// with, so the offsets asked for are the ones it accepts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmArtifactSlot {
+    pub download: Option<String>,
+    pub size: Option<u64>,
+    pub sha256: Option<String>,
+    pub chunk_bytes: Option<u64>,
+}
+
+impl WasmArtifactSlot {
+    fn decode(value: &Value) -> Self {
+        Self {
+            download: nonempty(value.get("download")),
+            size: value.get("size").and_then(Value::as_u64),
+            sha256: nonempty(value.get("sha256")),
+            chunk_bytes: value.get("chunk_bytes").and_then(Value::as_u64),
+        }
+    }
+}
+
+/// W19. One `wasm.download` answer: a chunk of an artifact and where it sits.
+///
+/// `data` stays base64 until the loop that appends it, for the reason a bundle prefix does:
+/// this client decodes it once and never inspects it. `is_final` is the wire's `final`, which
+/// is a reserved word here — the answer that carries it is also the answer that released the
+/// node's slot, so it is the last one this transfer can ask for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmDownloadChunk {
+    pub download: Option<String>,
+    pub offset: Option<u64>,
+    pub data: Option<String>,
+    pub size: Option<u64>,
+    pub sha256: Option<String>,
+    pub is_final: bool,
+}
+
+impl WasmDownloadChunk {
+    pub fn decode(value: &Value) -> Self {
+        Self {
+            download: nonempty(value.get("download")),
+            offset: value.get("offset").and_then(Value::as_u64),
+            data: nonempty(value.get("data")),
+            size: value.get("size").and_then(Value::as_u64),
+            sha256: nonempty(value.get("sha256")),
+            is_final: value.get("final").and_then(Value::as_bool).unwrap_or(false),
+        }
+    }
+}
+
+/// W8. The precompiled form a signed manifest names, and the exact pair of readings that may
+/// map it. Rendered, never acted on: this client compiles nothing and deserializes nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmPrecompiled {
+    pub wasmtime: Option<String>,
+    pub target: Option<String>,
+    pub sha256: Option<String>,
+    pub size: Option<u64>,
+}
+
+impl WasmPrecompiled {
+    fn decode(value: &Value) -> Self {
+        Self {
+            wasmtime: nonempty(value.get("wasmtime")),
+            target: nonempty(value.get("target")),
+            sha256: nonempty(value.get("sha256")),
+            size: value.get("size").and_then(Value::as_u64),
+        }
+    }
+}
+
+/// W12. What `wasm.deploy` answers with: a rollout that ran, and what each node did.
+///
+/// `state` is the answer — `live`, `rolled_back` or `quarantined` — and it arrives as the
+/// runtime's own string, because a sixth state is still worth showing. Only a rollout that
+/// never started is an error rather than one of these.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmDeployment {
+    pub artifact_id: Option<String>,
+    pub name: Option<String>,
+    pub module: Option<String>,
+    pub component_sha256: Option<String>,
+    pub epoch: Option<u64>,
+    pub state: Option<String>,
+    /// How far it got: `stage`, `probe`, `evaluate`, `settle` or `start`.
+    pub stage: Option<String>,
+    pub nodes: Vec<String>,
+    pub started: Option<WasmStarted>,
+    /// Rendered sentences, not terms. The one that exists today says the driver was not
+    /// one of the targets, which costs reboot survival and is reported rather than refused.
+    pub warnings: Vec<String>,
+    pub eval: Option<WasmEvalReport>,
+    /// Per node, the three gates and what compensation proved. Keyed by node name.
+    pub nodes_evidence: BTreeMap<String, WasmNodeEvidence>,
+}
+
+impl WasmDeployment {
+    /// Whether the rollout is running everywhere it was sent.
+    pub fn live(&self) -> bool {
+        self.state.as_deref() == Some("live")
+    }
+
+    /// Whether anybody may still be running something nobody accounted for. This is the
+    /// state that needs a person, and it is never reachable by retrying.
+    pub fn quarantined(&self) -> bool {
+        self.state.as_deref() == Some("quarantined")
+    }
+}
+
+/// Where the durable wrapper landed, if the manifest declared one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmStarted {
+    pub id: Option<String>,
+    /// The node hosting it. `None` when no target accepted, or when the id was claimed.
+    pub node: Option<String>,
+    pub already_started: bool,
+    /// The component sha of whatever holds the id instead. Present only when a start was
+    /// refused because somebody else's capability owns the name.
+    pub claimed_by: Option<String>,
+    pub errors: BTreeMap<String, String>,
+}
+
+/// The signed evaluation spec, and what it proved per node.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmEvalReport {
+    pub probes: Option<u64>,
+    /// `all`, or `at_least <n>`. Words rather than an Elixir term's spelling.
+    pub required: Option<String>,
+    pub budget_ms: Option<u64>,
+    pub nodes: BTreeMap<String, WasmGate>,
+}
+
+/// One node's three gates, plus what a compensation proved about it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmNodeEvidence {
+    pub stage: WasmGate,
+    pub probe: WasmGate,
+    pub eval: WasmGate,
+    /// `not_needed`, `rolled_back`, `unchanged`, or `quarantined`. `None` where the rollout
+    /// passed and nothing was withdrawn.
+    pub recovery: Option<String>,
+}
+
+/// One gate: what happened, and the reason where something did not.
+///
+/// The outcome is the runtime's own word — `ok`, `skipped`, `absent`, `mismatch`, `error`,
+/// `ambiguous`, `passed`, `failed`, `unknown` — kept as a string so a word this build has
+/// not heard of still renders as itself. The four counts are present only for an
+/// evaluation gate.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmGate {
+    pub outcome: Option<String>,
+    pub detail: Option<String>,
+    pub probes: Option<u64>,
+    pub passed: Option<u64>,
+    pub failed: Option<u64>,
+    pub total_ms: Option<u64>,
+}
+
+impl WasmGate {
+    pub fn ok(&self) -> bool {
+        matches!(self.outcome.as_deref(), Some("ok") | Some("passed"))
+    }
+
+    /// What to draw: the outcome, and the reason after it where there is one.
+    pub fn describe(&self) -> String {
+        match (self.outcome.as_deref(), self.detail.as_deref()) {
+            (Some(outcome), Some(detail)) => format!("{outcome} — {detail}"),
+            (Some(outcome), None) => outcome.to_string(),
+            (None, _) => "unknown".into(),
+        }
+    }
+}
+
+/// W12. What `wasm.rollback` answers with.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmRollback {
+    pub artifact_id: Option<String>,
+    pub name: Option<String>,
+    pub module: Option<String>,
+    pub component_sha256: Option<String>,
+    pub epoch: Option<u64>,
+    pub start_id: Option<String>,
+    pub state: Option<String>,
+    pub nodes: Vec<String>,
+    /// Per node, what absence was proved by: `rolled_back`, `not_needed`, `unchanged`, or
+    /// `quarantined` where it could not be shown either way.
+    pub recovery: BTreeMap<String, String>,
+}
+
+impl WasmRollback {
+    pub fn rolled_back(&self) -> bool {
+        self.state.as_deref() == Some("rolled_back")
+    }
+}
+
+impl WasmUploadReceipt {
+    pub fn decode(value: &Value) -> Self {
+        Self {
+            upload: nonempty(value.get("upload")).unwrap_or_default(),
+            received: value.get("received").and_then(Value::as_u64).unwrap_or(0),
+            complete: value
+                .get("complete")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            sha256: nonempty(value.get("sha256")),
+            chunk_bytes: value
+                .get("chunk_bytes")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        }
+    }
+}
+
+impl WasmSignature {
+    pub fn decode(value: &Value) -> Self {
+        Self {
+            artifact_id: nonempty(value.get("artifact_id")),
+            name: nonempty(value.get("name")),
+            epoch: value.get("epoch").and_then(Value::as_u64),
+            component_sha256: nonempty(value.get("component_sha256")),
+            size: value.get("size").and_then(Value::as_u64),
+            world: nonempty(value.get("world")),
+            kind: nonempty(value.get("kind")),
+            imports: strings(value.get("imports")),
+            created_at: nonempty(value.get("created_at")),
+            signer: nonempty(value.get("signer")),
+            start_id: nonempty(value.get("start_id")),
+            extension: nonempty(value.get("extension")),
+            form: nonempty(value.get("form")),
+            precompiled: value
+                .get("precompiled")
+                .filter(|v| v.is_object())
+                .map(WasmPrecompiled::decode),
+            precompile_skipped: nonempty(value.get("precompile_skipped")),
+            artifact: value
+                .get("artifact")
+                .filter(|v| v.is_object())
+                .map(WasmArtifactSlot::decode),
+            bundle_prefix: nonempty(value.get("bundle_prefix")),
+            bundle_bytes: value.get("bundle_bytes").and_then(Value::as_u64),
+        }
+    }
+}
+
+impl WasmDeployment {
+    pub fn decode(value: &Value) -> Self {
+        Self {
+            artifact_id: nonempty(value.get("artifact_id")),
+            name: nonempty(value.get("name")),
+            module: nonempty(value.get("module")),
+            component_sha256: nonempty(value.get("component_sha256")),
+            epoch: value.get("epoch").and_then(Value::as_u64),
+            state: nonempty(value.get("state")),
+            stage: nonempty(value.get("stage")),
+            nodes: strings(value.get("nodes")),
+            started: value
+                .get("started")
+                .filter(|v| v.is_object())
+                .map(WasmStarted::decode),
+            warnings: strings(value.get("warnings")),
+            eval: value
+                .get("eval")
+                .filter(|v| v.is_object())
+                .map(WasmEvalReport::decode),
+            nodes_evidence: keyed(value.get("deployment"), WasmNodeEvidence::decode),
+        }
+    }
+}
+
+impl WasmStarted {
+    fn decode(value: &Value) -> Self {
+        Self {
+            id: nonempty(value.get("id")),
+            node: nonempty(value.get("node")),
+            already_started: value
+                .get("already_started")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            claimed_by: nonempty(value.get("claimed_by")),
+            errors: keyed(value.get("errors"), |reason| {
+                nonempty(Some(reason)).unwrap_or_else(|| reason.to_string())
+            }),
+        }
+    }
+}
+
+impl WasmEvalReport {
+    fn decode(value: &Value) -> Self {
+        Self {
+            probes: value.get("probes").and_then(Value::as_u64),
+            required: nonempty(value.get("required")),
+            budget_ms: value.get("budget_ms").and_then(Value::as_u64),
+            nodes: keyed(value.get("nodes"), WasmGate::decode),
+        }
+    }
+}
+
+impl WasmNodeEvidence {
+    fn decode(value: &Value) -> Self {
+        let gate = |key: &str| {
+            value
+                .get(key)
+                .filter(|inner| inner.is_object())
+                .map(WasmGate::decode)
+                .unwrap_or_default()
+        };
+
+        Self {
+            stage: gate("stage"),
+            probe: gate("probe"),
+            eval: gate("eval"),
+            recovery: nonempty(value.get("recovery")),
+        }
+    }
+}
+
+impl WasmGate {
+    fn decode(value: &Value) -> Self {
+        let number = |key: &str| value.get(key).and_then(Value::as_u64);
+
+        Self {
+            outcome: nonempty(value.get("outcome")),
+            detail: nonempty(value.get("detail")),
+            probes: number("probes"),
+            passed: number("passed"),
+            failed: number("failed"),
+            total_ms: number("total_ms"),
+        }
+    }
+}
+
+impl WasmRollback {
+    pub fn decode(value: &Value) -> Self {
+        Self {
+            artifact_id: nonempty(value.get("artifact_id")),
+            name: nonempty(value.get("name")),
+            module: nonempty(value.get("module")),
+            component_sha256: nonempty(value.get("component_sha256")),
+            epoch: value.get("epoch").and_then(Value::as_u64),
+            start_id: nonempty(value.get("start_id")),
+            state: nonempty(value.get("state")),
+            nodes: strings(value.get("nodes")),
+            recovery: keyed(value.get("recovery"), |value| {
+                nonempty(Some(value)).unwrap_or_else(|| value.to_string())
+            }),
+        }
+    }
+}
+
+/// A bounded map keyed by node name. The runtime writes node names as strings for exactly
+/// this reason: a key a client turned into anything else would be a value minted from the
+/// wire.
+fn keyed<T>(value: Option<&Value>, decode: impl Fn(&Value) -> T) -> BTreeMap<String, T> {
+    value
+        .and_then(Value::as_object)
+        .map(|table| {
+            table
+                .iter()
+                .take(MAX_WASM_ROWS)
+                .map(|(node, inner)| (node.clone(), decode(inner)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// At most this many rows, limit entries, or state counts out of one lane-W answer. The
+/// runtime bounds all four itself; this is the client refusing to be the place a bound is
+/// only claimed.
+const MAX_WASM_ROWS: usize = native::MAX_ROWS;
 
 /// A trimmed, nonempty string out of an optional JSON value.
 fn nonempty(value: Option<&Value>) -> Option<String> {
@@ -3933,6 +4728,8 @@ mod tests {
         assert_eq!(
             found,
             vec![
+                "agents_message_result",
+                "agents_message_truncated_result",
                 "code_intel_diagnostics_result",
                 "coding_event_detail_result",
                 "coding_event_notification",
@@ -4001,9 +4798,570 @@ mod tests {
                 "runtime_status_result",
                 "stream_ended_notification",
                 "stream_lagged_notification",
+                "wasm_deploy_result",
+                "wasm_download_result",
+                "wasm_list_result",
+                "wasm_rollback_result",
+                "wasm_sign_result",
+                "wasm_status_result",
+                "wasm_upload_result",
                 "workspace_browse_result",
             ]
         );
+    }
+
+    /// W12's `wasm.upload`: one frame's receipt, mid-transfer.
+    #[test]
+    fn the_wasm_upload_fixture_decodes_into_the_typed_model() {
+        let receipt = WasmUploadReceipt::decode(&fixture("wasm_upload_result")["result"]);
+
+        assert_eq!(receipt.upload, "9f2c1d4e8a7b6053f1e2d3c4b5a69780");
+        assert_eq!(receipt.received, 524_288);
+        assert!(!receipt.complete);
+        // A digest over part of a file is not offered, so there is nothing to check yet.
+        assert_eq!(receipt.sha256, None);
+        // The node states its own ceiling; the client sizes the next frame from it.
+        assert_eq!(receipt.chunk_bytes, 524_288);
+    }
+
+    /// W19's `wasm.download`: one chunk of an artifact on the way back out.
+    ///
+    /// The frame is `wasm.upload`'s in the other direction and the decode says so — an id, a
+    /// place, base64 bytes, and the two numbers that say when the transfer is done and what it
+    /// has to hash to. `final` is a reserved word in this language and is `is_final` here;
+    /// reading it out of the wire's own key is the whole of this test's care about that.
+    #[test]
+    fn the_wasm_download_fixture_decodes_into_the_typed_model() {
+        let chunk = WasmDownloadChunk::decode(&fixture("wasm_download_result")["result"]);
+
+        assert_eq!(
+            chunk.download.as_deref(),
+            Some("3c7a5b19e04d6f28a1b3c5d7e9f02468")
+        );
+        assert_eq!(chunk.offset, Some(524_288));
+        assert_eq!(chunk.size, Some(1_310_720));
+        assert_eq!(chunk.sha256.as_deref(), Some(&"d".repeat(64)[..]));
+
+        // Mid-transfer: there is another frame to ask for, and the node's slot is still there
+        // to answer it. The chunk that says `true` is the one that released it.
+        assert!(!chunk.is_final);
+
+        // The bytes stay base64 until the loop appends them, exactly as a bundle prefix does.
+        let data = chunk.data.as_deref().expect("a chunk of data");
+        let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
+            .expect("the chunk is base64");
+        assert_eq!(&decoded[..9], b"OUROCWASM");
+
+        // An answer that named nothing carries nothing, and `final` is false rather than
+        // unknown — a client that read a missing key as "we are done" would stop mid-file.
+        let silent = WasmDownloadChunk::decode(&serde_json::json!({}));
+        assert_eq!(silent.download, None);
+        assert_eq!(silent.offset, None);
+        assert!(!silent.is_final);
+    }
+
+    /// W12's `wasm.sign`: the bundle's prefix and what it describes.
+    #[test]
+    fn the_wasm_sign_fixture_decodes_into_the_typed_model() {
+        let signed = WasmSignature::decode(&fixture("wasm_sign_result")["result"]);
+
+        assert_eq!(signed.name.as_deref(), Some("vet"));
+        assert_eq!(signed.epoch, Some(7));
+        assert_eq!(signed.signer.as_deref(), Some("release-key"));
+        assert_eq!(signed.world.as_deref(), Some("ouroboros:capability@0.1.0"));
+        // W15. The kind is on the wire because it is in the signed manifest: it decides which
+        // of the helper's two worlds these bytes are ever admitted to, and a receipt that did
+        // not carry it would be a bundle whose reader has to guess.
+        assert_eq!(signed.kind.as_deref(), Some("capability"));
+        assert_eq!(signed.imports, vec!["log".to_string()]);
+        assert_eq!(signed.start_id.as_deref(), Some("wasm/vet"));
+        assert_eq!(signed.extension.as_deref(), Some(".ouro-wasm"));
+        assert_eq!(signed.size, Some(2_097_152));
+
+        // W8. The serialized form the signing node compiled, named by the pair of readings a
+        // node has to match before it may map it. It is on the wire because it is in the
+        // signed manifest: what makes `Component::deserialize` sound is a signature over this
+        // digest, so a receipt that did not carry it would be a bundle whose reader cannot say
+        // which half of it a node will run.
+        assert_eq!(signed.form.as_deref(), Some("precompiled"));
+        let precompiled = signed.precompiled.as_ref().expect("a precompiled block");
+        assert_eq!(precompiled.wasmtime.as_deref(), Some("48.0.1"));
+        assert_eq!(precompiled.target.as_deref(), Some("aarch64-apple-darwin"));
+        assert_eq!(precompiled.sha256.as_deref(), Some(&"d".repeat(64)[..]));
+        assert_eq!(precompiled.size, Some(4_096));
+        assert_eq!(signed.precompile_skipped, None);
+
+        // W19. The artifact fits this reply, so it is already in the prefix and there is
+        // nothing to fetch. That is the ordinary case and every case there was before W19,
+        // and the node says so with an explicit null rather than by leaving a key out.
+        assert_eq!(signed.artifact, None);
+
+        // And the other case: the prefix is the header and the envelope alone, and the
+        // artifact comes back through `wasm.download`. All four fields are needed — the id to
+        // ask with, the size to know when to stop, the digest the signed manifest carries, and
+        // the chunk the node will answer with.
+        let staged = WasmSignature::decode(&serde_json::json!({
+            "name": "vet",
+            "form": "precompiled",
+            "artifact": {
+                "download": "3c7a5b19e04d6f28a1b3c5d7e9f02468",
+                "size": 1_310_720,
+                "sha256": "d".repeat(64),
+                "chunk_bytes": 524_288
+            }
+        }));
+
+        let slot = staged.artifact.as_ref().expect("a download slot");
+        assert_eq!(
+            slot.download.as_deref(),
+            Some("3c7a5b19e04d6f28a1b3c5d7e9f02468")
+        );
+        assert_eq!(slot.size, Some(1_310_720));
+        assert_eq!(slot.sha256.as_deref(), Some(&"d".repeat(64)[..]));
+        assert_eq!(slot.chunk_bytes, Some(524_288));
+        // The form is still `precompiled`: nothing was skipped, the artifact merely travels.
+        assert_eq!(staged.form.as_deref(), Some("precompiled"));
+
+        // A receipt from a node with no helper, or from `--no-precompile`, carries neither the
+        // block nor a reason it could branch on — only a line to print.
+        let source_only = WasmSignature::decode(&serde_json::json!({
+            "name": "vet",
+            "form": "source",
+            "precompile_skipped": ":no_helper"
+        }));
+        assert_eq!(source_only.precompiled, None);
+        assert_eq!(source_only.form.as_deref(), Some("source"));
+        assert_eq!(
+            source_only.precompile_skipped.as_deref(),
+            Some(":no_helper")
+        );
+
+        // The prefix stays base64 until the moment the file is written. Its length plus the
+        // component's is what the bundle weighs, which is the whole of this client's
+        // knowledge of the format.
+        // A receipt written before there were two kinds has no `kind` at all, and reads as the
+        // capability it was — the same widening every other optional field takes.
+        let older = WasmSignature::decode(&serde_json::json!({ "name": "vet", "epoch": 7 }));
+        assert_eq!(older.kind, None);
+
+        let prefix = signed.bundle_prefix.as_deref().expect("a bundle prefix");
+        let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, prefix)
+            .expect("the prefix is base64");
+        assert_eq!(&decoded[..8], b"OUROWASM");
+        assert_eq!(
+            signed.bundle_bytes,
+            Some(decoded.len() as u64 + signed.size.unwrap_or(0))
+        );
+    }
+
+    /// W12's `wasm.deploy`: a rollout that ran, and the evidence each node gave.
+    #[test]
+    fn the_wasm_deploy_fixture_decodes_into_the_typed_model() {
+        let deployment = WasmDeployment::decode(&fixture("wasm_deploy_result")["result"]);
+
+        assert!(deployment.live());
+        assert!(!deployment.quarantined());
+        assert_eq!(deployment.stage.as_deref(), Some("evaluate"));
+        assert_eq!(deployment.name.as_deref(), Some("vet"));
+        assert_eq!(deployment.module.as_deref(), Some("wasm/vet"));
+        assert_eq!(deployment.nodes.len(), 2);
+        assert!(deployment.warnings.is_empty());
+
+        let started = deployment.started.as_ref().expect("a durable wrapper");
+        assert_eq!(started.id.as_deref(), Some("wasm/vet"));
+        assert_eq!(started.node.as_deref(), Some("ouroboros@golden"));
+        assert!(!started.already_started);
+        assert_eq!(started.claimed_by, None);
+
+        let eval = deployment.eval.as_ref().expect("a signed eval spec ran");
+        assert_eq!(eval.probes, Some(2));
+        // Words, not an Elixir term's spelling.
+        assert_eq!(eval.required.as_deref(), Some("all"));
+        assert_eq!(eval.budget_ms, Some(10_000));
+        assert_eq!(eval.nodes.len(), 2);
+
+        let evidence = deployment
+            .nodes_evidence
+            .get("ouroboros@golden")
+            .expect("evidence for the node that hosted it");
+
+        assert!(evidence.stage.ok());
+        assert!(evidence.probe.ok());
+        assert!(evidence.eval.ok());
+        assert_eq!(evidence.eval.passed, Some(2));
+        assert_eq!(evidence.eval.failed, Some(0));
+        // Nothing was withdrawn, because nothing failed.
+        assert_eq!(evidence.recovery, None);
+        assert_eq!(evidence.stage.describe(), "ok");
+    }
+
+    /// A failed rollout is still an answer, and the reason arrives beside the outcome.
+    #[test]
+    fn a_deployment_that_did_not_settle_live_still_decodes_whole() {
+        let deployment = WasmDeployment::decode(&serde_json::json!({
+            "state": "quarantined",
+            "stage": "stage",
+            "nodes": ["a@h", "b@h"],
+            "started": null,
+            "warnings": ["{:driver_not_a_target, :c@h}"],
+            "eval": null,
+            "deployment": {
+                "a@h": {
+                    "stage": {"outcome": "mismatch", "detail": "{:component_mismatch, :imports}"},
+                    "probe": {"outcome": "skipped", "detail": null},
+                    "eval": {"outcome": "skipped", "detail": null},
+                    "recovery": "quarantined"
+                },
+                "b@h": {
+                    "stage": {"outcome": "ambiguous", "detail": ":timeout"},
+                    "probe": {"outcome": "skipped", "detail": null},
+                    "eval": {"outcome": "skipped", "detail": null},
+                    "recovery": "not_needed"
+                }
+            }
+        }));
+
+        assert!(deployment.quarantined());
+        assert!(!deployment.live());
+        assert_eq!(deployment.warnings.len(), 1);
+        assert!(deployment.eval.is_none());
+        assert!(deployment.started.is_none());
+
+        let a = &deployment.nodes_evidence["a@h"];
+        assert!(!a.stage.ok());
+        assert_eq!(
+            a.stage.describe(),
+            "mismatch — {:component_mismatch, :imports}"
+        );
+        assert_eq!(a.recovery.as_deref(), Some("quarantined"));
+
+        let b = &deployment.nodes_evidence["b@h"];
+        assert_eq!(b.stage.describe(), "ambiguous — :timeout");
+    }
+
+    /// W12's `wasm.rollback`: what absence was proved by, per node.
+    #[test]
+    fn the_wasm_rollback_fixture_decodes_into_the_typed_model() {
+        let rollback = WasmRollback::decode(&fixture("wasm_rollback_result")["result"]);
+
+        assert!(rollback.rolled_back());
+        assert_eq!(rollback.name.as_deref(), Some("vet"));
+        assert_eq!(rollback.start_id.as_deref(), Some("wasm/vet"));
+        assert_eq!(rollback.nodes.len(), 2);
+        assert_eq!(
+            rollback
+                .recovery
+                .get("ouroboros@golden")
+                .map(String::as_str),
+            Some("rolled_back")
+        );
+        // A node that had nothing to stop proved absence just as well as one that stopped
+        // something, which is why both are `rolled_back` overall.
+        assert_eq!(
+            rollback.recovery.get("ouroboros@peer").map(String::as_str),
+            Some("not_needed")
+        );
+    }
+
+    /// An empty answer is a shape, not a panic — the same rule the other lane-W models keep.
+    #[test]
+    fn the_w12_answers_all_decode_from_nothing() {
+        let empty = serde_json::json!({});
+
+        assert_eq!(WasmUploadReceipt::decode(&empty).received, 0);
+        assert_eq!(WasmSignature::decode(&empty).bundle_prefix, None);
+
+        let deployment = WasmDeployment::decode(&empty);
+        assert!(!deployment.live());
+        assert!(!deployment.quarantined());
+        assert!(deployment.nodes_evidence.is_empty());
+
+        let rollback = WasmRollback::decode(&empty);
+        assert!(!rollback.rolled_back());
+        assert!(rollback.recovery.is_empty());
+
+        // An unknown gate word renders as itself rather than being folded into a known one.
+        let gate = WasmGate::decode(&serde_json::json!({"outcome": "a_word_from_2027"}));
+        assert!(!gate.ok());
+        assert_eq!(gate.describe(), "a_word_from_2027");
+        assert_eq!(WasmGate::default().describe(), "unknown");
+    }
+
+    /// W5's `wasm.status`: what an operator reads to know whether this node could contain a
+    /// component, and under what bounds.
+    ///
+    /// The fixture is a ready helper on purpose, because a quiet node fills two of these
+    /// fields and a decode proved against one would ship blind to the rest.
+    #[test]
+    fn the_wasm_status_fixture_decodes_into_the_typed_model() {
+        let status = WasmStatus::decode(&fixture("wasm_status_result")["result"]);
+
+        assert_eq!(status.node.as_deref(), Some("ouroboros@golden"));
+        assert!(status.boot_enabled);
+
+        let helper = &status.helper;
+        assert!(helper.present, "the bytes are on disk, which is the opt-in");
+        assert!(helper.ready());
+        assert!(!helper.absent());
+        assert_eq!(helper.os_pid, Some(4242));
+        assert_eq!(helper.world.as_deref(), Some("ouroboros:capability@0.1.0"));
+        assert_eq!(helper.usable, Some(true));
+        assert_eq!(
+            helper.worlds,
+            vec!["ouroboros:capability@0.1.0".to_string()]
+        );
+        assert_eq!(helper.wasmtime.as_deref(), Some("43.0.1"));
+        assert_eq!(helper.instances, 2);
+        assert_eq!(helper.owned, 1);
+        assert_eq!(helper.pending_drops, 0);
+        assert_eq!(helper.broken_reason, None);
+
+        // The bounds table arrives under the helper's own names, which is what lets it
+        // grow one without this client being edited.
+        assert_eq!(helper.limits.get("max_deadline_ms"), Some(&60_000));
+        assert_eq!(helper.limits.get("max_components"), Some(&64));
+
+        // Two of sixteen: room left, so nothing here warns.
+        assert_eq!(helper.hook_components, 2);
+        assert_eq!(helper.hook_component_budget, 16);
+        assert!(!helper.hook_budget_spent());
+
+        // W16, D25. The posture is its own half of the answer, and the three readings are
+        // exclusive: a node that reports `sandboxed` is running its helper behind the OS
+        // sandbox, one that reports `refused` is running no helper at all.
+        assert!(status.sandbox.sandboxed());
+        assert!(!status.sandbox.refused());
+        assert!(!status.sandbox.off());
+        assert_eq!(status.sandbox.backend.as_deref(), Some("sandbox-exec"));
+        assert_eq!(status.sandbox.reason, None);
+
+        // Basenames, never paths: the effective read set is readable as a shape without
+        // naming an install prefix or an account.
+        assert_eq!(status.sandbox.readable, vec!["wasm", "components"]);
+        assert!(
+            !status
+                .sandbox
+                .readable
+                .iter()
+                .any(|root| root.contains('/')),
+            "a read verb sends no absolute paths"
+        );
+
+        // A basename, not a path: both wasm verbs are `read`, and the fixture is what the
+        // daemon answers (W7, `Ouroboros.Wasm.Surface`).
+        assert_eq!(status.store.root.as_deref(), Some("components"));
+        assert_eq!(status.store.held, Some(2));
+        assert_eq!(status.store.bytes, Some(3_145_728));
+        assert_eq!(status.store.protected, Some(1));
+        assert_eq!(status.store.budget_bytes, Some(536_870_912));
+
+        assert_eq!(status.rollouts.total, Some(3));
+        assert_eq!(status.rollouts.state("live"), 1);
+        assert_eq!(status.rollouts.state("quarantined"), 1);
+        assert_eq!(status.rollouts.state("superseded"), 1);
+        assert_eq!(status.rollouts.state("deploying"), 0);
+        // A state the answer never mentioned reads as zero, not as a panic.
+        assert_eq!(status.rollouts.state("a_sixth_state_from_2027"), 0);
+    }
+
+    /// A node that never built the helper, and a runtime too old to have heard of lane W,
+    /// decode to the same thing: "nothing here", never a panic and never a fabricated
+    /// helper. `absent` is the phase, and `false` is not what an unknown fact decodes to.
+    #[test]
+    fn an_empty_wasm_status_decodes_to_a_node_with_no_helper() {
+        let empty = WasmStatus::decode(&serde_json::json!({}));
+
+        assert!(!empty.helper.present);
+        assert!(!empty.helper.ready());
+        assert_eq!(empty.helper.phase, None);
+        assert_eq!(empty.helper.usable, None, "unknown is not `false`");
+        assert!(empty.helper.limits.is_empty());
+        assert!(!empty.helper.hook_budget_spent(), "0 of 0 is not spent");
+        assert_eq!(empty.store.held, None, "unreadable is not empty");
+        assert_eq!(empty.rollouts.total, None);
+        assert!(!empty.boot_enabled);
+
+        // A node with no pool has taken no posture, and "no posture" is not "off": rendering
+        // an unknown fence as a missing one is the one reading an operator must never be
+        // given, which is the same rule `usable` follows two lines up.
+        assert_eq!(empty.sandbox.posture, None);
+        assert!(!empty.sandbox.off());
+        assert!(!empty.sandbox.sandboxed());
+        assert!(!empty.sandbox.refused());
+        assert!(empty.sandbox.readable.is_empty());
+    }
+
+    /// The two postures the fixture cannot carry at once, decoded from the shapes the runtime
+    /// actually sends: a node that refused to spawn, and a node whose operator turned the
+    /// fence off. `refused` is the one that means there is no helper on that node.
+    #[test]
+    fn a_refused_and_a_disabled_wasm_sandbox_decode_as_themselves() {
+        let refused = WasmStatus::decode(&serde_json::json!({
+            "sandbox": {
+                "posture": "refused",
+                "backend": "ouro-sandbox",
+                "reason": "{:cannot_fence_reads, :ouro_sandbox}"
+            }
+        }));
+
+        assert!(refused.sandbox.refused());
+        assert!(!refused.sandbox.sandboxed());
+        assert_eq!(refused.sandbox.backend.as_deref(), Some("ouro-sandbox"));
+        assert!(refused.sandbox.reason.is_some(), "a refusal says why");
+        assert!(
+            refused.sandbox.readable.is_empty(),
+            "a node that refused to spawn fenced nothing"
+        );
+
+        // The other refusal W16's fix wave added: a backend that applies its filesystem rules
+        // and still leaves the child on the host's network.
+        let unfenced = WasmStatus::decode(&serde_json::json!({
+            "sandbox": {
+                "posture": "refused",
+                "backend": "bwrap",
+                "reason": "{:cannot_fence_network, :bwrap}"
+            }
+        }));
+
+        assert!(unfenced.sandbox.refused());
+        assert_eq!(unfenced.sandbox.backend.as_deref(), Some("bwrap"));
+
+        let off = WasmStatus::decode(&serde_json::json!({
+            "sandbox": {"posture": "off", "backend": "sandbox-exec", "reason": null}
+        }));
+
+        assert!(off.sandbox.off());
+        assert!(!off.sandbox.sandboxed());
+        assert_eq!(off.sandbox.reason, None);
+
+        // A fourth posture from a newer runtime renders as itself and answers none of the
+        // three questions, rather than being folded into the nearest one this build knows.
+        let future = WasmStatus::decode(&serde_json::json!({
+            "sandbox": {"posture": "audited", "backend": "landlock", "reason": null}
+        }));
+
+        assert_eq!(future.sandbox.posture.as_deref(), Some("audited"));
+        assert!(!future.sandbox.sandboxed());
+        assert!(!future.sandbox.off());
+        assert!(!future.sandbox.refused());
+    }
+
+    /// W5's `wasm.list`: the two registers an operator reconciles — what the rollout plane
+    /// believes is deployed, and what bytes this node actually holds.
+    #[test]
+    fn the_wasm_list_fixture_decodes_into_the_typed_model() {
+        let list = WasmList::decode(&fixture("wasm_list_result")["result"]);
+
+        assert_eq!(list.node.as_deref(), Some("ouroboros@golden"));
+        assert_eq!(list.rollout_count, Some(3));
+        assert_eq!(list.rollouts.len(), 3);
+        assert_eq!(list.component_count, Some(2));
+        assert_eq!(list.components.len(), 2);
+
+        // Sorted by artifact id, so two reads of an unchanged node agree.
+        let live = &list.rollouts[0];
+        assert_eq!(live.artifact_id, "wasm-0000000000000000000001");
+        assert_eq!(live.state.as_deref(), Some("live"));
+        // The `wasm/` prefix keeps a component out of the runtime's atom table and is not
+        // part of what anybody deployed, so what arrives here is the name.
+        assert_eq!(live.name.as_deref(), Some("vet"));
+        assert_eq!(live.epoch, Some(7));
+        assert_eq!(live.component_sha256.as_deref(), Some(&"a".repeat(64)[..]));
+        // W8. Which of the two forms the answering node loads that component from — the
+        // difference between a `load` that compiles and one that maps. All three values are
+        // pinned across these rows, `null` included: a node that cannot say is not a node
+        // saying `source`.
+        assert_eq!(live.form.as_deref(), Some("precompiled"));
+        assert_eq!(
+            live.nodes,
+            vec!["ouroboros@golden".to_string(), "ouroboros@peer".to_string()]
+        );
+        assert!(live.created_at.is_some());
+
+        // The three states in the fixture are three an operator has to tell apart: what is
+        // running, what it replaced, and what was held back as evidence.
+        assert_eq!(list.rollouts[1].state.as_deref(), Some("superseded"));
+        assert_eq!(list.rollouts[1].form.as_deref(), Some("source"));
+        assert_eq!(list.rollouts[2].state.as_deref(), Some("quarantined"));
+        assert_eq!(list.rollouts[2].form, None);
+        assert_eq!(list.rollouts[2].name.as_deref(), Some("lint"));
+
+        // A listing, not a record: no arbitrary deployment term rides along.
+        let raw = &fixture("wasm_list_result")["result"]["rollouts"][0];
+        assert!(raw.get("detail").is_none());
+        assert!(raw.get("eval_report").is_none());
+
+        let component = &list.components[0];
+        assert_eq!(component.sha256, "a".repeat(64));
+        assert_eq!(component.size, 2_097_152);
+        assert!(component.mtime.is_some());
+    }
+
+    /// W13's `agents.message`: one message into one mesh agent, and the reply back.
+    ///
+    /// There is no typed model for it here on purpose — a client sends a body and reads a
+    /// reply, and both are whatever the agent's own contract says. What this pins is the
+    /// envelope around them, which is the part a client must not get wrong: `untrusted` is
+    /// always present and always true, because a reply from a lane-W capability is prose a
+    /// component wrote and drawing it beside the operator's own words unlabelled is the
+    /// injection this lane exists to bound. `truncated` is the other half: it says whether
+    /// what arrived is the reply or a prefix of one, which is the difference between JSON a
+    /// client can parse and JSON it cannot.
+    #[test]
+    fn the_agents_message_fixture_labels_the_reply_it_carries() {
+        let result = &fixture("agents_message_result")["result"];
+
+        assert_eq!(result["to"], "wasm/vet");
+        assert_eq!(result["from"], "gateway");
+
+        // Not `is_truthy`, not "present": exactly `true`. A client that read this key as
+        // optional would render an unlabelled component's words the first time a node
+        // omitted it.
+        assert_eq!(result["untrusted"], true);
+        assert_eq!(result["truncated"], false);
+
+        // Untruncated, so the reply is the structure the agent answered with rather than a
+        // string holding an encoding of it.
+        assert!(result["reply"].is_object());
+        assert_eq!(result["reply"]["checked"], 12);
+        assert!(result["reply"]["findings"].as_array().unwrap().is_empty());
+    }
+
+    /// The same verb when the reply did not fit. This is the case a client gets wrong by
+    /// treating `truncated` as decoration: `reply` stops being the structure the agent
+    /// answered with and becomes a **string** holding a prefix of its encoding, and the
+    /// marker inside that string is the only thing in the value itself that says so. A
+    /// client that parsed it as JSON would report a syntax error the user cannot act on.
+    #[test]
+    fn a_truncated_agents_message_reply_is_a_marked_string_not_a_document() {
+        let result = &fixture("agents_message_truncated_result")["result"];
+
+        assert_eq!(result["untrusted"], true);
+        assert_eq!(result["truncated"], true);
+
+        let reply = result["reply"]
+            .as_str()
+            .expect("a truncated reply is a string");
+        assert!(
+            !result["reply"].is_object(),
+            "a cut document is not a document"
+        );
+        assert!(
+            reply.ends_with("truncated at 65536 bytes."),
+            "nothing in the value said it was cut: {reply}"
+        );
+    }
+
+    #[test]
+    fn an_empty_wasm_list_decodes_to_an_empty_listing() {
+        let empty = WasmList::decode(&serde_json::json!({}));
+
+        assert!(empty.rollouts.is_empty());
+        assert!(empty.components.is_empty());
+        // Nothing listed and nothing known are different, and only one is safe to draw as
+        // "this node holds no components".
+        assert_eq!(empty.rollout_count, None);
+        assert_eq!(empty.component_count, None);
     }
 
     /// D4's `mcp.list`: what a client reads to draw a node's MCP servers — the state

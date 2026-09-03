@@ -1,0 +1,25 @@
+# A worked `[checks]` component. Its own workspace, like every project built on this SDK: it
+# is a `wasm32-wasip2` cdylib with its own profile, and it must not join anything.
+[workspace]
+
+[package]
+name = "lintcheck"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "An ouroboros [checks] component: empty is a pass, anything else is the failure"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ouroboros-guest = { path = "../.." }
+
+# The defaults, verbatim from the SDK's own manifest — see the note in `examples/counter`.
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = "s"
+strip = true
+codegen-units = 1

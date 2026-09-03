@@ -34,6 +34,7 @@ use serde_json::{json, Value};
 use ouro::cli::{
     AcpArgs, Cli, Command, DesktopCommand, FleetCommand, ForkArgs, HookCommand, InviteCommand,
     LedgerArgs, McpCommand, ReplayArgs, RunArgs, ServiceCommand, SessionsCommand, SyncCommand,
+    WasmCommand,
 };
 use ouro::config::{self, Loaded, StartFlags};
 use ouro::fleet_add;
@@ -212,6 +213,7 @@ async fn run(cli: Cli) -> Result<()> {
         Some(Command::Replay(args)) => replay(&paths, args).await,
         Some(Command::Fork(args)) => fork(&paths, args).await,
         Some(Command::Desktop { command }) => desktop(&paths, command).await,
+        Some(Command::Wasm { command }) => wasm(&paths, command).await,
         Some(Command::Fleet { command }) => fleet_command(&paths, cli.dev, command).await,
         Some(Command::ServiceRun) => service_run(&paths, cli.dev).await,
         // Answered at the top of this function, before the terminal existed as far as
@@ -2666,6 +2668,189 @@ async fn desktop(paths: &Paths, command: DesktopCommand) -> Result<()> {
             ouro::desktop_cli::doctor(&connected.client, args.json, args.probe, &mut out).await
         }
     }
+}
+
+/// `ouro wasm` — the WebAssembly containment operator surface and the component author's local
+/// loop (docs/WASM.md W5, W10).
+///
+/// `doctor` asks a node and starts nothing. The other five ask a local `ouro-wasm` and no node
+/// at all: that is what makes them a loop, and it is why `doctor` keeps its own property rather
+/// than inheriting theirs.
+async fn wasm(paths: &Paths, command: WasmCommand) -> Result<()> {
+    match command {
+        WasmCommand::Doctor(args) => {
+            let (address, token) = remote_endpoint(paths, args.addr, args.token_file).await?;
+            let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
+            let connected = attach_with(address, token, false, None, hook).await?;
+
+            let mut out = std::io::stdout().lock();
+            ouro::wasm_cli::doctor(&connected.client, args.json, &mut out).await
+        }
+
+        WasmCommand::New(args) => {
+            let into = args.into.unwrap_or_else(|| PathBuf::from("."));
+            let mut out = std::io::stdout().lock();
+            ouro::wasm_cli::new(
+                &into,
+                &args.name,
+                args.hook,
+                args.summary.as_deref(),
+                args.sdk_path.as_deref(),
+                &mut out,
+            )
+        }
+
+        WasmCommand::Inspect(args) => {
+            let mut out = std::io::stdout().lock();
+            let admitted = ouro::wasm_cli::inspect(
+                args.helper.helper.as_deref(),
+                &args.file,
+                args.json,
+                &mut out,
+            )?;
+            // A refused component is an answer, not a crash — and an answer a script should be
+            // able to read out of an exit code rather than out of prose.
+            refused_unless(admitted)
+        }
+
+        WasmCommand::Run(args) => {
+            let messages = ouro::wasm_cli::read_messages(&args.message, args.messages.as_deref())?;
+            let request = ouro::wasm_cli::RunRequest {
+                helper: args.helper.helper.as_deref(),
+                file: &args.file,
+                config: args.config.clone(),
+                messages,
+                limits: ouro::wasm_client::Limits {
+                    fuel: args
+                        .fuel
+                        .unwrap_or(ouro::wasm_client::NODE_DEFAULT_LIMITS.fuel),
+                    memory_bytes: args
+                        .memory_bytes
+                        .unwrap_or(ouro::wasm_client::NODE_DEFAULT_LIMITS.memory_bytes),
+                    deadline_ms: args
+                        .deadline_ms
+                        .unwrap_or(ouro::wasm_client::NODE_DEFAULT_LIMITS.deadline_ms),
+                },
+                describe: args.describe,
+                json: args.json,
+            };
+
+            let mut out = std::io::stdout().lock();
+            refused_unless(ouro::wasm_cli::run(&request, &mut out)?)
+        }
+
+        WasmCommand::Hook(args) => {
+            let payload = ouro::wasm_cli::read_payload(args.payload.as_deref())?;
+            let request = ouro::wasm_cli::HookRequest {
+                helper: args.helper.helper.as_deref(),
+                file: &args.file,
+                event: args.event.clone(),
+                payload,
+                config: args.config.clone(),
+                trusted: args.trusted,
+                timeout_ms: args
+                    .timeout_ms
+                    .unwrap_or(ouro::wasm_cli::DEFAULT_HOOK_TIMEOUT_MS),
+                json: args.json,
+            };
+
+            let mut out = std::io::stdout().lock();
+            refused_unless(ouro::wasm_cli::hook(&request, &mut out)?)
+        }
+
+        // W15. The second world, locally: load a policy component and ask it about one
+        // request. Non-zero on a `deny`, which is the answer rather than a failure.
+        WasmCommand::Policy(args) => {
+            let request = ouro::wasm_cli::read_request(&args.request)?;
+            let policy = ouro::wasm_cli::PolicyRequest {
+                helper: args.helper.helper.as_deref(),
+                file: &args.file,
+                request,
+                config: args.config.clone(),
+                json: args.json,
+            };
+
+            let mut out = std::io::stdout().lock();
+            refused_unless(ouro::wasm_cli::policy(&policy, &mut out)?)
+        }
+
+        WasmCommand::Check(args) => {
+            let workspace = args.workspace.unwrap_or_else(|| PathBuf::from("."));
+            let mut out = std::io::stdout().lock();
+            refused_unless(ouro::wasm_cli::check(
+                args.helper.helper.as_deref(),
+                &workspace,
+                args.json,
+                &mut out,
+            )?)
+        }
+
+        // W12. `keygen` is the one arm that never opens a socket: custody is set up on the
+        // operator's own machine and the key must not travel. The other four connect the
+        // way `doctor` does, and every decision they depend on is made on the far side.
+        WasmCommand::Keygen(args) => {
+            let mut out = std::io::stdout().lock();
+            ouro::wasm_deploy_cli::keygen(&args, &mut out)
+        }
+        WasmCommand::Sign(args) => {
+            // W10b. The component is read and put to a local helper *before* anything is
+            // dialled: the import list is this side's to declare (D15), and a component this
+            // machine's helper refuses must not reach a gateway at all. `--dry-run` is the
+            // same plan, printed instead of sent.
+            let plan = ouro::wasm_deploy_cli::plan_sign(&args)?;
+
+            if args.dry_run {
+                let mut out = std::io::stdout().lock();
+                return ouro::wasm_deploy_cli::render_plan(&plan, &args, &mut out);
+            }
+
+            let connected = wasm_connect(paths, args.addr.clone(), args.token_file.clone()).await?;
+
+            let mut out = std::io::stdout().lock();
+            ouro::wasm_deploy_cli::sign(&connected.client, &args, plan, &mut out).await
+        }
+        WasmCommand::Deploy(args) => {
+            let connected = wasm_connect(paths, args.addr.clone(), args.token_file.clone()).await?;
+
+            let mut out = std::io::stdout().lock();
+            ouro::wasm_deploy_cli::deploy(&connected.client, &args, &mut out).await
+        }
+        WasmCommand::Rollback(args) => {
+            let connected = wasm_connect(paths, args.addr.clone(), args.token_file.clone()).await?;
+
+            let mut out = std::io::stdout().lock();
+            ouro::wasm_deploy_cli::rollback(&connected.client, &args, &mut out).await
+        }
+        WasmCommand::Ls(args) => {
+            let connected = wasm_connect(paths, args.addr, args.token_file).await?;
+
+            let mut out = std::io::stdout().lock();
+            ouro::wasm_deploy_cli::ls(&connected.client, args.json, &mut out).await
+        }
+    }
+}
+
+/// A refusal the command already printed, turned into a non-zero exit without a second copy of
+/// the reason on stderr.
+fn refused_unless(admitted: bool) -> Result<()> {
+    if admitted {
+        Ok(())
+    } else {
+        std::process::exit(1)
+    }
+}
+
+/// The connection every `ouro wasm` verb but `keygen` makes: the same endpoint resolution
+/// `doctor` uses, with no reconnect, because these are one-shot operator commands and a
+/// silently re-established socket would hide a runtime that went away mid-deploy.
+async fn wasm_connect(
+    paths: &Paths,
+    addr: Option<String>,
+    token_file: Option<PathBuf>,
+) -> Result<Connected> {
+    let (address, token) = remote_endpoint(paths, addr, token_file).await?;
+    let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
+    attach_with(address, token, false, None, hook).await
 }
 
 /// Where a runtime this client did not start listens, and the token to present to it.

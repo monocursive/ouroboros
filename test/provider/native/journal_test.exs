@@ -341,19 +341,6 @@ defmodule Ouroboros.Provider.Native.JournalTest do
     assert journal.seq == 1
   end
 
-  test "the budget is read from application config when the caller names none", %{dir: dir} do
-    previous = Application.get_env(:ouroboros, :native_journal_budget_bytes)
-    Application.put_env(:ouroboros, :native_journal_budget_bytes, 4_242)
-
-    on_exit(fn ->
-      if previous,
-        do: Application.put_env(:ouroboros, :native_journal_budget_bytes, previous),
-        else: Application.delete_env(:ouroboros, :native_journal_budget_bytes)
-    end)
-
-    assert Journal.open(dir).budget_bytes == 4_242
-  end
-
   # ---------------------------------------------------------------- windowing
 
   test "a window is bounded and cursored exclusively", %{dir: dir, path: path} do
@@ -406,5 +393,36 @@ defmodule Ouroboros.Provider.Native.JournalTest do
     assert is_binary(record["pid"])
     assert record["binary"] == %{"base64" => Base.encode64(<<0xFF, 0xFE>>)}
     assert {:ok, %{verified_through: 1}} = Journal.verify(path)
+  end
+end
+
+defmodule Ouroboros.Provider.Native.JournalBudgetConfigTest do
+  # Not async: this sets the global `:ouroboros, :native_journal_budget_bytes` key, which
+  # `Journal.open/2` reads at call time whenever the caller names no budget. An async
+  # writer of that key would hand every journal opened alongside it a 4 KiB budget and
+  # trim turns those tests never meant to lose, so the one test that exercises the config
+  # fallback lives here, serial, rather than making the whole journal file serial (F8).
+  use ExUnit.Case, async: false
+
+  alias Ouroboros.Provider.Native.Journal
+
+  setup do
+    dir = Path.join(System.tmp_dir!(), "native-journal-cfg-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf(dir) end)
+    %{dir: dir}
+  end
+
+  test "the budget is read from application config when the caller names none", %{dir: dir} do
+    previous = Application.get_env(:ouroboros, :native_journal_budget_bytes)
+    Application.put_env(:ouroboros, :native_journal_budget_bytes, 4_242)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:ouroboros, :native_journal_budget_bytes, previous),
+        else: Application.delete_env(:ouroboros, :native_journal_budget_bytes)
+    end)
+
+    assert Journal.open(dir).budget_bytes == 4_242
   end
 end

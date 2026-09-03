@@ -3,9 +3,9 @@ defmodule Ouroboros.Agent.Effects do
   The actions that let an agent act on the world, and the grant that gates each one.
 
   Every other action in this codebase is a pure state projection: it reads a signal and
-  writes the agent's own state. These six reach outside — they start and stop mesh
+  writes the agent's own state. These eight reach outside — they start and stop mesh
   agents, message them, delegate real coding work through a team, forge a capability from
-  source, and deploy that capability onto nodes. They are wired into
+  source in either lane, and deploy that capability onto nodes. They are wired into
   `Ouroboros.Agent.Worker` as ordinary signal routes, so an agent acts by receiving a
   typed signal, exactly like everything else it does.
 
@@ -40,6 +40,7 @@ defmodule Ouroboros.Agent.Effects do
   alias Ouroboros.Upgrade.Forge
   alias Ouroboros.Upgrade.Forge.Source
   alias Ouroboros.Upgrade.Rollout
+  alias Ouroboros.Wasm
 
   @doc "Every grant-gated effect action, plus the settlement action that records them."
   @spec actions() :: [module()]
@@ -51,6 +52,8 @@ defmodule Ouroboros.Agent.Effects do
       __MODULE__.DelegateTask,
       __MODULE__.ForgeCapability,
       __MODULE__.DeployCapability,
+      __MODULE__.ForgeWasmCapability,
+      __MODULE__.DeployWasmCapability,
       __MODULE__.RecordEffect
     ]
   end
@@ -65,6 +68,8 @@ defmodule Ouroboros.Agent.Effects do
       {"ouroboros.agent.effect.delegate", __MODULE__.DelegateTask},
       {"ouroboros.agent.effect.forge", __MODULE__.ForgeCapability},
       {"ouroboros.agent.effect.deploy", __MODULE__.DeployCapability},
+      {"ouroboros.agent.effect.forge_wasm", __MODULE__.ForgeWasmCapability},
+      {"ouroboros.agent.effect.deploy_wasm", __MODULE__.DeployWasmCapability},
       {"ouroboros.agent.effect.settled", __MODULE__.RecordEffect}
     ]
   end
@@ -304,13 +309,22 @@ defmodule Ouroboros.Agent.Effects do
     # deploy can only ship bytes that already came back through a granted forge.
     defp deploy(params, forged, nodes, _principal) do
       case Enum.find(forged, &(&1.artifact_id == params.artifact_id)) do
-        %{artifact: artifact, module: module} ->
+        %{artifact: %Ouroboros.Upgrade.Artifact{} = artifact, module: module} ->
           artifact |> Rollout.deploy(module, nodes) |> settle(params, module, nodes)
+
+        # One `forged` ring holds both lanes' artifacts, and they are not interchangeable:
+        # a lane-W manifest handed to the BEAM rollout is not a deploy this action can do,
+        # so it is refused by name rather than by whatever fails first downstream.
+        %{artifact: other} ->
+          {:error, {:wrong_lane, params.artifact_id, lane(other)}}
 
         nil ->
           {:error, {:unknown_artifact, params.artifact_id}}
       end
     end
+
+    defp lane(%Ouroboros.Wasm.Artifact{}), do: :wasm
+    defp lane(_other), do: :unknown
 
     defp settle({:ok, outcome}, params, module, nodes) do
       {:ok,
@@ -338,6 +352,182 @@ defmodule Ouroboros.Agent.Effects do
     end
 
     defp settle({:error, reason}, _params, _module, _nodes), do: {:error, reason}
+
+    defp nodes([]), do: [node()]
+    defp nodes(nodes), do: nodes
+  end
+
+  defmodule ForgeWasmCapability do
+    @moduledoc false
+
+    use Jido.Action,
+      name: "forge_wasm_capability",
+      description:
+        "Build and sign a wasm capability from source, if this agent is granted :forge",
+      schema: [
+        from: [type: :string, required: true],
+        name: [type: :string, required: true],
+        files: [type: {:map, :string, :string}, required: true],
+        eval: [type: :any, default: nil],
+        start_config: [type: :any, default: nil],
+        nodes: [type: {:list, :atom}, default: []]
+      ]
+
+    @impl true
+    def run(params, context) do
+      Runner.dispatch(
+        :forge,
+        %{module: attempt(params)},
+        &forge(params, &1),
+        params,
+        context
+      )
+    end
+
+    # The grant is asked about `"wasm/<name>"`, which is the same string the rollout register
+    # calls this capability's module and the same one a signed `start` block claims. So a
+    # grant narrowed to one capability admits that capability in this lane and nothing in the
+    # other, and `modules: :any` still means what it always meant: forge whatever you like.
+    defp attempt(%{name: name}) when is_binary(name), do: "wasm/" <> name
+    defp attempt(_params), do: nil
+
+    # The author inside the signed manifest is the principal — the identity the agent server
+    # holds — and never the `from` the signal carried (`runner.ex:126`).
+    # No `:nodes`. The epoch is allocated over the whole connected cluster by
+    # `Ouroboros.Wasm.Deploy.sign/2` on purpose (W12), so a signature minted here deploys to
+    # the busiest machine in it; narrowing that to the nodes this signal happens to name is
+    # how a bundle comes back `{:stale_epoch, _, _}` from a peer nobody asked.
+    defp forge(params, principal) do
+      opts =
+        [author: principal, name: params.name, timeout_ms: build_timeout()]
+        |> put_present(:eval, params.eval)
+        |> put_present(:start_config, params.start_config)
+
+      case Wasm.Forge.forge(%{files: params.files}, opts) do
+        {:ok, forged} -> {:ok, projection(forged, params)}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+
+    # The bundle is on the node's disk, keyed by the artifact id. What travels back is the
+    # manifest and the digest: sixteen mebibytes of component in an agent's audit trail is
+    # not a record, it is a copy.
+    defp projection(forged, params) do
+      forged
+      |> Map.take([
+        :artifact,
+        :artifact_id,
+        :module,
+        :name,
+        :epoch,
+        :component_sha256,
+        :size,
+        :imports,
+        :world,
+        :signer,
+        :source_sha256,
+        :start_id,
+        :bundle_prefix,
+        :bundle_bytes,
+        :files,
+        :input_bytes
+      ])
+      |> Map.put(:nodes, nodes(params.nodes))
+    end
+
+    defp put_present(opts, _key, nil), do: opts
+    defp put_present(opts, key, value), do: Keyword.put(opts, key, value)
+
+    # The build has to lose the race with the runner's deadline, for `DelegateTask`'s reason
+    # and with a sharper consequence. The runner ends an overrunning effect with
+    # `Task.shutdown(task, :brutal_kill)`, and a killed process runs no `after` — so a forge
+    # cut there leaves its scratch tree on disk and, worse, a cargo process group still
+    # compiling inside it. Ending inside the forge's own ceiling means `Exec` signals that
+    # group and the `after` removes the tree. Five minutes remains the forge's own ceiling;
+    # on this path the smaller of the two wins (docs/WASM.md D19).
+    defp build_timeout, do: max(Runner.timeout() - 5_000, 1_000)
+
+    defp nodes([]), do: [node()]
+    defp nodes(nodes), do: nodes
+  end
+
+  defmodule DeployWasmCapability do
+    @moduledoc false
+
+    use Jido.Action,
+      name: "deploy_wasm_capability",
+      description: "Deploy a wasm capability this agent forged, if this agent is granted :deploy",
+      schema: [
+        from: [type: :string, required: true],
+        artifact_id: [type: :string, required: true],
+        nodes: [type: {:list, :atom}, default: []]
+      ]
+
+    @impl true
+    def run(params, context) do
+      nodes = nodes(params.nodes)
+
+      Runner.dispatch(
+        :deploy,
+        %{nodes: nodes},
+        &deploy(params, forged(context), nodes, &1),
+        params,
+        context
+      )
+    end
+
+    defp forged(%{agent: %{state: %{forged: forged}}}) when is_list(forged), do: forged
+    defp forged(_context), do: []
+
+    # Same rule as the BEAM lane's: the artifact comes from what this agent forged, never
+    # from the signal, so a deploy can only ship bytes a granted forge already produced —
+    # and here the bytes themselves are the bundle this node wrote, re-verified on the way
+    # in against the manifest named here.
+    defp deploy(params, forged, nodes, _principal) do
+      case Enum.find(forged, &(&1.artifact_id == params.artifact_id)) do
+        %{artifact: %Wasm.Artifact{} = artifact} ->
+          artifact |> Wasm.Forge.deploy(nodes) |> settle(params, artifact, nodes)
+
+        %{artifact: _other} ->
+          {:error, {:wrong_lane, params.artifact_id, :beam}}
+
+        nil ->
+          {:error, {:unknown_artifact, params.artifact_id}}
+      end
+    end
+
+    # `Ouroboros.Wasm.Deploy.deploy/3` answers `{:ok, _}` for every rollout that *ran*,
+    # because `:rolled_back` and `:quarantined` are outcomes a client renders. An effect
+    # trail is not a client: a deploy that did not go live is a failed effect here, exactly
+    # as it is in the BEAM lane's `DeployCapability`, and the per-node evidence stays in the
+    # rollout register where it already is.
+    defp settle({:ok, %{state: :live} = outcome}, params, artifact, nodes) do
+      {:ok,
+       %{
+         artifact_id: params.artifact_id,
+         module: "wasm/" <> artifact.name,
+         name: artifact.name,
+         component_sha256: artifact.component_sha256,
+         epoch: artifact.epoch,
+         nodes: nodes,
+         state: :live,
+         started: Map.get(outcome, :started)
+       }}
+    end
+
+    defp settle({:ok, outcome}, params, artifact, nodes) do
+      {:error,
+       {:rollout_not_live,
+        %{
+          state: Map.get(outcome, :state),
+          artifact_id: params.artifact_id,
+          module: "wasm/" <> artifact.name,
+          nodes: nodes,
+          epoch: artifact.epoch
+        }}}
+    end
+
+    defp settle({:error, reason}, _params, _artifact, _nodes), do: {:error, reason}
 
     defp nodes([]), do: [node()]
     defp nodes(nodes), do: nodes

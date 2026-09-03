@@ -161,7 +161,22 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
   # under the node's data directory (D7) writable while the rest of that directory stays
   # read-only — and the `.git`/`.ouroboros` directories beneath each writable root are
   # re-bound read-only last.
-  def options(scope, policy, unshare_net \\ true) when is_boolean(unshare_net) do
+  def options(scope, policy, unshare_net \\ true)
+
+  # The builder's namespace (docs/WASM.md D18), and the difference from every other policy
+  # here is the first bind: `/` is **not** bound at all, so the roots named below are the
+  # whole of what the build can see. Unverified — no Linux build has run under this — which
+  # is why `Ouroboros.Wasm.Forge` states it as unverified rather than as a claim.
+  def options(scope, %{mode: :builder} = policy, unshare_net) when is_boolean(unshare_net) do
+    ["--die-with-parent", "--dev", "/dev", "--proc", "/proc"] ++
+      Enum.flat_map(on_disk(Map.get(policy, :readable, [])), &["--ro-bind", &1, &1]) ++
+      Enum.flat_map(on_disk(writable(policy)), &["--bind", &1, &1]) ++
+      ["--tmpfs", policy.scratch] ++
+      network(policy, unshare_net) ++
+      chdir(scope)
+  end
+
+  def options(scope, policy, unshare_net) when is_boolean(unshare_net) do
     ["--die-with-parent", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"] ++
       Enum.flat_map(on_disk(policy.protected), &["--ro-bind", &1, &1]) ++
       Enum.flat_map(writable(policy), &["--bind", &1, &1]) ++

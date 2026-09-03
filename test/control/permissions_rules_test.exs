@@ -1,5 +1,29 @@
+defmodule Ouroboros.Control.PermissionsRulesTest.Fixture do
+  @moduledoc false
+
+  # A canonical, unique scratch directory. Shared by both modules in this file: the async
+  # rules tests and the serial data-directory tests below.
+  def tmp_root(name) do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "ouroboros-permissions-#{name}-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(path)
+    {:ok, canonical} = Ouroboros.Workspace.Path.canonicalize(path)
+    canonical
+  end
+end
+
 defmodule Ouroboros.Control.PermissionsRulesTest do
+  # Async: every test here builds its own request and its own rules, and touches nothing
+  # global. The protected-path tests that need a node data directory set the global
+  # `:ouroboros, :data_dir` key, so they live in `PermissionsRulesDataDirTest` below,
+  # serial, rather than making this whole file serial.
   use ExUnit.Case, async: true
+
+  import Ouroboros.Control.PermissionsRulesTest.Fixture
 
   alias Ouroboros.Control.Permissions.{Request, Rule, Rules}
 
@@ -87,37 +111,8 @@ defmodule Ouroboros.Control.PermissionsRulesTest do
       root = tmp_root("protected")
       File.mkdir_p!(Path.join(root, ".git"))
       File.mkdir_p!(Path.join(root, ".ouroboros"))
-      data_dir = tmp_root("protected-data")
-      File.mkdir_p!(data_dir)
-
-      previous = Application.get_env(:ouroboros, :data_dir)
-      Application.put_env(:ouroboros, :data_dir, data_dir)
-
-      on_exit(fn ->
-        if previous,
-          do: Application.put_env(:ouroboros, :data_dir, previous),
-          else: Application.delete_env(:ouroboros, :data_dir)
-
-        File.rm_rf(root)
-        File.rm_rf(data_dir)
-      end)
-
-      {:ok, root: root, data_dir: data_dir}
-    end
-
-    test "a write inside the node's worktree root is not protected, but its .git still is",
-         %{data_dir: data_dir} do
-      # D7 puts the workspaces it provisions under `<data_dir>/worktrees`; a session
-      # running in one has to be able to write there, and nowhere else beneath the data
-      # directory.
-      worktree = Path.join(data_dir, "worktrees/repo/session")
-      File.mkdir_p!(Path.join(worktree, ".git"))
-      {:ok, worktree} = Ouroboros.Control.Permissions.Paths.canonicalize(worktree, nil)
-      {:ok, data_dir} = Ouroboros.Control.Permissions.Paths.canonicalize(data_dir, nil)
-
-      refute Rules.protected_write?(Path.join(worktree, "lib/a.ex"))
-      assert Rules.protected_write?(Path.join(worktree, ".git/HEAD"))
-      assert Rules.protected_write?(Path.join(data_dir, "sessions/s1/conversation.json"))
+      on_exit(fn -> File.rm_rf(root) end)
+      {:ok, root: root}
     end
 
     test "a write into .git is denied whatever the rules say", %{root: root} do
@@ -194,11 +189,8 @@ defmodule Ouroboros.Control.PermissionsRulesTest do
                Rules.decide(request, [rule(:node, :allow, "Write(**)")])
     end
 
-    test "a write into .ouroboros or the data directory is denied", %{
-      root: root,
-      data_dir: data_dir
-    } do
-      ouroboros =
+    test "a write into .ouroboros is denied", %{root: root} do
+      request =
         Request.new(%{
           tool: "write",
           mode: :write,
@@ -206,34 +198,7 @@ defmodule Ouroboros.Control.PermissionsRulesTest do
           context: %{workspace: root}
         })
 
-      assert {:deny, %{pattern: "**/.ouroboros/**"}} = Rules.decide(ouroboros, [])
-
-      data =
-        Request.new(%{
-          tool: "write",
-          mode: :write,
-          paths: [Path.join(data_dir, "permissions/rules")]
-        })
-
-      assert {:deny, %{id: "protected-path"}} = Rules.decide(data, [])
-    end
-
-    test "a redirect cannot hide a protected path behind a missing parent", %{
-      root: root,
-      data_dir: data_dir
-    } do
-      relative_data_dir = "../" <> Path.basename(data_dir)
-
-      request =
-        Request.new(%{
-          tool: "bash",
-          command: "mkdir gap && echo pwned > gap/../#{relative_data_dir}/permissions/rules.json",
-          mode: :execute,
-          context: %{workspace: root}
-        })
-
-      assert request.write_paths == [Path.join(data_dir, "permissions/rules.json")]
-      assert {:deny, %{id: "protected-path"}} = Rules.decide(request, [])
+      assert {:deny, %{pattern: "**/.ouroboros/**"}} = Rules.decide(request, [])
     end
 
     test "reading a protected path is not protected", %{root: root} do
@@ -331,16 +296,81 @@ defmodule Ouroboros.Control.PermissionsRulesTest do
 
     rule
   end
+end
 
-  defp tmp_root(name) do
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "ouroboros-permissions-#{name}-#{System.unique_integer([:positive])}"
-      )
+defmodule Ouroboros.Control.PermissionsRulesDataDirTest do
+  # Not async: these set the global `:ouroboros, :data_dir` application key, which every
+  # store, journal, and worktree test resolving the node data directory reads. An async
+  # writer of that key poisons whichever async reader happens to run alongside it — seen
+  # once in 3,044 runs as the Wasm store finding a data directory the suite never
+  # configured. Every other rules test touches nothing global and stays async above.
+  use ExUnit.Case, async: false
 
-    File.mkdir_p!(path)
-    {:ok, canonical} = Ouroboros.Workspace.Path.canonicalize(path)
-    canonical
+  import Ouroboros.Control.PermissionsRulesTest.Fixture
+
+  alias Ouroboros.Control.Permissions.{Paths, Request, Rules}
+
+  setup do
+    root = tmp_root("protected")
+    File.mkdir_p!(Path.join(root, ".git"))
+    data_dir = tmp_root("protected-data")
+
+    previous = Application.get_env(:ouroboros, :data_dir)
+    Application.put_env(:ouroboros, :data_dir, data_dir)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:ouroboros, :data_dir, previous),
+        else: Application.delete_env(:ouroboros, :data_dir)
+
+      File.rm_rf(root)
+      File.rm_rf(data_dir)
+    end)
+
+    {:ok, root: root, data_dir: data_dir}
+  end
+
+  test "a write inside the node's worktree root is not protected, but its .git still is",
+       %{data_dir: data_dir} do
+    # D7 puts the workspaces it provisions under `<data_dir>/worktrees`; a session
+    # running in one has to be able to write there, and nowhere else beneath the data
+    # directory.
+    worktree = Path.join(data_dir, "worktrees/repo/session")
+    File.mkdir_p!(Path.join(worktree, ".git"))
+    {:ok, worktree} = Paths.canonicalize(worktree, nil)
+    {:ok, data_dir} = Paths.canonicalize(data_dir, nil)
+
+    refute Rules.protected_write?(Path.join(worktree, "lib/a.ex"))
+    assert Rules.protected_write?(Path.join(worktree, ".git/HEAD"))
+    assert Rules.protected_write?(Path.join(data_dir, "sessions/s1/conversation.json"))
+  end
+
+  test "a write into the data directory is denied", %{data_dir: data_dir} do
+    request =
+      Request.new(%{
+        tool: "write",
+        mode: :write,
+        paths: [Path.join(data_dir, "permissions/rules")]
+      })
+
+    assert {:deny, %{id: "protected-path"}} = Rules.decide(request, [])
+  end
+
+  test "a redirect cannot hide a protected path behind a missing parent", %{
+    root: root,
+    data_dir: data_dir
+  } do
+    relative_data_dir = "../" <> Path.basename(data_dir)
+
+    request =
+      Request.new(%{
+        tool: "bash",
+        command: "mkdir gap && echo pwned > gap/../#{relative_data_dir}/permissions/rules.json",
+        mode: :execute,
+        context: %{workspace: root}
+      })
+
+    assert request.write_paths == [Path.join(data_dir, "permissions/rules.json")]
+    assert {:deny, %{id: "protected-path"}} = Rules.decide(request, [])
   end
 end

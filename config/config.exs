@@ -43,6 +43,15 @@ config :ouroboros,
   # Relaxes only the builder's *role* requirement, for tests that have a real peer but
   # not a role-shaped fleet. Connectivity and a running runtime are still required.
   forge_builder_allow_any_role: false,
+  # Lane W's half of the same question, and unlike the two above it is a check rather than
+  # advice (docs/WASM.md D29, contract C14). `:local` — the default — forges where the effect
+  # lands, exactly as lane W always did; `:builder` forwards a forge that landed on a
+  # non-builder node to a connected `:builder` and refuses by name when there is none, rather
+  # than quietly building here. A `:signer` node refuses to forge under **either** setting and
+  # is not configurable: a Cargo build is arbitrary code at build time, and it does not run on
+  # the machine holding the key. Anything but these two words is refused, not read as the
+  # default — a typo asked for a forge not to run here.
+  wasm_forge_placement: :local,
   coding_storage: {Jido.Storage.ETS, table: :ouroboros_coding},
   interactive_storage: {Jido.Storage.ETS, table: :ouroboros_interactive},
   team_storage: {Jido.Storage.ETS, table: :ouroboros_teams},
@@ -262,7 +271,80 @@ config :ouroboros,
       "com.apple.keychainaccess",
       "com.apple.SecurityAgent"
     ]
+  ],
+  # WebAssembly containment (docs/WASM.md §7). Same posture as `:computer_use`: the helper
+  # on disk is the operator opt-in — `make wasm` builds it, nothing else does — and
+  # everything here is a bound, so a typo falls back to the default rather than widening
+  # one. `OUROBOROS_WASM_HELPER=/path` overrides `:bundled`, which resolves the application's
+  # own priv/ or a sibling of `ouro` — and nothing derived from the working directory, since
+  # the helper is the containment boundary and a cloned repository must not be able to supply
+  # it. The guest's own bounds — fuel, deadline, memory — are per-request and never defaulted
+  # by the pool; `ouro-wasm` refuses a request that omits one, and inventing a value there
+  # would be the transport deciding how much of the machine a guest may have.
+  # `:capability_limits` is where that decision is made instead: the bounds
+  # `Ouroboros.Wasm.Capability` sends when the state a capability was deployed with names
+  # none of its own, and `:capability_limits_max` is the ceiling a deployment's own
+  # declaration is clamped to — `initial_state` reaches this node over a remote-reachable
+  # start surface, so how much a capability may ask for is the node's answer and not the
+  # deployment's. Both are declared whole — all three keys or none — because a half-stated
+  # bound is not a bound; two of the three keys falls back to all three defaults.
+  wasm: [
+    helper_path: :bundled,
+    handshake_timeout_ms: 5_000,
+    request_timeout_ms: 30_000,
+    call_margin_ms: 10_000,
+    max_frame_bytes: 8 * 1024 * 1024,
+    broken_ms: 15_000,
+    store_budget_bytes: 512 * 1024 * 1024,
+    capability_limits: [
+      fuel: 100_000_000,
+      memory_bytes: 64 * 1024 * 1024,
+      deadline_ms: 5_000
+    ],
+    capability_limits_max: [
+      fuel: 10_000_000_000,
+      memory_bytes: 256 * 1024 * 1024,
+      deadline_ms: 30_000
+    ],
+    # A capability's `initial_state` may name the directory its component bytes are read
+    # from only where this is true — which is this repository's own test environment, and
+    # nowhere else. It is a test seam, and on a remote-reachable start surface a test seam
+    # that names a directory is an arbitrary read of unsigned bytes.
+    allow_store_root_override: config_env() == :test
   ]
+
+# W15. The permission engine, and the policy component it may consult (docs/WASM.md §8.2,
+# D20). Three keys, and the defaults are the posture:
+#
+#   * `:permissions_engine` is `Ouroboros.Control.Permissions` unless an operator names
+#     another. `Ouroboros.Wasm.PolicyEngine` is `Control.Permissions` plus one thing: where
+#     the rules said *nothing* — `{:ask, :no_rule}` — it asks a signed policy component and
+#     lets it narrow the answer. Every other outcome passes through untouched.
+#   * `:wasm_policy` names the component, by the name it was deployed under. `nil` — the
+#     default — makes the engine inert: it delegates and consults nobody, which is what a
+#     node that has not been given a policy should do. A name that is not a `:live` lane-W
+#     rollout **of kind `:policy`** on this node is a misconfiguration, logged once, and is
+#     also inert; a policy is not something to half-have.
+#   * `:policy_allowable_tools` is the list of tools whose `allow` this node honours from a
+#     component. **Empty by default, and that is the decision, not a placeholder.** A policy
+#     component is asked about every call the rules did not decide, so an `allow` honoured
+#     unconditionally would be a blanket approval channel with a signature on it — and a
+#     signature is provenance, not trust (D5). A `deny` always stands, an `ask` always
+#     stands, and an `allow` for a tool nobody listed is read as `ask`. Widening this is an
+#     operator's deliberate act, tool by tool.
+#   * `:policy_decision_timeout_ms` bounds **one decision**, end to end. This is a synchronous
+#     round trip through the node's one shared `Ouroboros.Wasm.Pool`, in front of every tool
+#     call the rules did not decide, so the cost is worth stating plainly: one such decision is
+#     one helper round trip on a pool every capability on this node also uses, and a wedged
+#     helper is bounded here rather than by the pool's instance deadline plus its transport
+#     margin. On expiry the answer is `ask` and the instance is dropped; only the refusal that
+#     means "the instance I remember is gone" is retried, because any other retry doubles what
+#     a wedged helper costs. Five seconds, and a value outside 1..60_000 falls back to it.
+config :ouroboros,
+  permissions_engine: Ouroboros.Control.Permissions,
+  wasm_policy: nil,
+  policy_allowable_tools: [],
+  policy_decision_timeout_ms: 5_000
 
 # The two facts about the web endpoint that are genuinely compile-time, and no others.
 # Everything runtime — the bind, the port, the cookie key, the origin policy — is handed
