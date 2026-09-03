@@ -1625,6 +1625,114 @@ defmodule Ouroboros.Wasm.ForgeTest do
 
       assert {:error, {:forge_refused_by, _target, {:no_cargo, _}}} =
                Forge.forge(%{files: counter_files(name)}, origin)
+
+      # W-F32. A genuine bundle beside a **lying** receipt: every field the origin answers with
+      # is the verified artifact's, and the builder contributed bytes and nothing else. Red
+      # without `received/4`: `honest.signer` was `"nobody"`, `honest.epoch` was `999`, and
+      # `honest.artifact` was the struct the builder sent rather than the one it signed.
+      {:ok, %{artifact: signed, bytes: bytes, precompiled: precompiled}} = Bundle.decode(bundle)
+
+      liar =
+        returned
+        |> Map.put(:artifact, %{
+          signed
+          | epoch: 999,
+            metadata: Map.put(signed.metadata, :author, "evil")
+        })
+        |> Map.merge(%{
+          epoch: 999,
+          signer: "nobody",
+          imports: ["wasi:filesystem/preopens"],
+          module: "wasm/something-else",
+          source_sha256: String.duplicate("0", 64),
+          start_id: "wasm/elsewhere",
+          size: 1,
+          world: "nobody:world@9.9.9",
+          kind: :policy,
+          build_bytes: -1,
+          bundle_prefix: "AAAA"
+        })
+
+      Process.put({ForwardProbe, :answer}, {:ok, liar})
+      assert {:ok, honest} = Forge.forge(%{files: counter_files(name)}, origin)
+
+      assert honest.artifact == signed
+      assert honest.signer == @signer
+      assert honest.epoch == signed.epoch
+      assert honest.imports == ["log"]
+      assert honest.module == id
+      assert honest.start_id == id
+      assert honest.source_sha256 == forged.source_sha256
+      refute Map.has_key?(honest, :build_bytes)
+
+      # In every field the effect surface projects, the forwarded receipt is the local receipt
+      # of the same bundle — derived twice, from the same signed artifact, on two paths.
+      projected = [
+        :artifact,
+        :artifact_id,
+        :module,
+        :name,
+        :epoch,
+        :component_sha256,
+        :size,
+        :imports,
+        :world,
+        :signer,
+        :source_sha256,
+        :start_id,
+        :bundle_prefix,
+        :bundle_bytes,
+        :files,
+        :input_bytes
+      ]
+
+      assert Map.take(honest, projected) == Map.take(forged, projected)
+
+      # W-F32's other half: a bundle signed by a **second** trusted signer reports that signer
+      # — the one in the signature the origin verified — and not the one the reply claimed.
+      # Red without `received/4`: `other.signer` was still `@signer`.
+      other_signer = "wasm-forge-other-trusted-key"
+      {public2, seed2} = :crypto.generate_key(:eddsa, :ed25519)
+      unsigned = %{signed | signature: nil}
+      payload = Wasm.Artifact.signing_payload(unsigned, other_signer)
+      value = :crypto.sign(:eddsa, :none, payload, [seed2, :ed25519])
+
+      {:ok, resigned} =
+        Wasm.Artifact.with_signature(unsigned, %{signer: other_signer, value: value})
+
+      {:ok, other_bundle} = Bundle.encode(resigned, bytes, precompiled)
+      Process.put({ForwardProbe, :answer}, {:ok, Map.put(returned, :bundle, other_bundle)})
+
+      both =
+        Keyword.put(origin, :trust_policy,
+          allow_unsigned: false,
+          trusted_signers: Map.put(live.trust_policy[:trusted_signers], other_signer, public2)
+        )
+
+      assert {:ok, other} = Forge.forge(%{files: counter_files(name)}, both)
+      assert other.signer == other_signer
+      assert other.artifact.signature.signer == other_signer
+
+      # And under the policy that trusts one signer, the same bundle is refused outright.
+      assert {:error, {:forged_bundle_refused, _target, _reason}} =
+               Forge.forge(%{files: counter_files(name)}, origin)
+
+      # W-F33. A builder's refusal is bounded before it is this node's: ten mebibytes of
+      # reason arrive whole over `:erpc` and are rendered, not relayed. Red without
+      # `bounded_refusal/1`: `bounded` was the ten-mebibyte binary itself.
+      Process.put({ForwardProbe, :answer}, {:error, :binary.copy(<<0>>, 10 * 1024 * 1024)})
+
+      assert {:error, {:forge_refused_by, _target, bounded}} =
+               Forge.forge(%{files: counter_files(name)}, origin)
+
+      assert is_binary(bounded)
+      assert byte_size(bounded) < 1024
+
+      # A small, typed refusal still passes through as the builder shaped it.
+      Process.put({ForwardProbe, :answer}, {:error, {:build_failed, {:timeout, :deadline}}})
+
+      assert {:error, {:forge_refused_by, _target, {:build_failed, {:timeout, :deadline}}}} =
+               Forge.forge(%{files: counter_files(name)}, origin)
     end
   end
 

@@ -122,6 +122,16 @@ defmodule Ouroboros.Wasm.Forge do
   @forwarded_opts [:author, :name, :eval, :start_config]
   # …plus the two deadlines `forwarded_opts/2` sets itself, which are numbers and not machines.
 
+  # The most a builder's refusal may weigh once it is this node's to carry. A refusal crosses
+  # `:erpc` whole — there is no bounding a term before it has arrived — and then goes on to the
+  # effect ledger and an `:operate` client, which is where a ten-mebibyte reason would land if
+  # it were passed through as received (W-F33). Past this it is rendered, not relayed.
+  @max_refusal_bytes 64 * 1024
+
+  # Why a forwarded receipt's `precompile_skipped` is a sentence and not the builder's reason:
+  # the reason is the builder's own diagnostic and nothing in it is verifiable here (W-F32).
+  @precompile_not_reported "the builder signed the source form; its reason does not cross the wire"
+
   @manifest_file "Cargo.toml"
   @lock_file "Cargo.lock"
   @readme_file "README.md"
@@ -514,9 +524,9 @@ defmodule Ouroboros.Wasm.Forge do
     budget = build_timeout(opts)
 
     with {:ok, project} <- collect(input),
-         {:ok, _validated} <- validate(project, opts),
+         {:ok, project} <- validate(project, opts),
          {:ok, forged} <- request(target, project.files, opts, budget) do
-      receive_forged(target, forged, opts)
+      receive_forged(target, project, forged, opts)
     end
   end
 
@@ -530,9 +540,11 @@ defmodule Ouroboros.Wasm.Forge do
 
       # A refusal the builder made, named as the builder's. "This node cannot forge" and "that
       # node would not" are different problems with different remedies, and an error that did
-      # not say which machine spoke leaves an operator looking at the wrong one.
+      # not say which machine spoke leaves an operator looking at the wrong one. Bounded before
+      # it is anybody else's: a small, typed refusal passes through as the builder shaped it, and
+      # anything past `@max_refusal_bytes` is rendered here instead.
       {:error, reason} ->
-        {:error, {:forge_refused_by, target, reason}}
+        {:error, {:forge_refused_by, target, bounded_refusal(reason)}}
 
       other ->
         {:error, {:forge_forward_failed, target, {:no_bundle, describe(other)}}}
@@ -551,27 +563,37 @@ defmodule Ouroboros.Wasm.Forge do
     |> Keyword.put(:forge_deadline_ms, max(budget - @remote_slack, 2_000))
   end
 
-  # The bundle came back; nothing about it is believed yet.
+  # The bundle came back; nothing about it is believed yet — and neither is the receipt beside
+  # it, which is why there is no receipt beside it any more.
   #
   # A bundle is exactly the thing `Bundle.verify/2` exists for, and the builder is the one node
   # in this exchange whose output the origin did not produce: it verifies the signature against
   # **this** node's trust policy, holds both digests to the manifest, and then checks that what
-  # was signed is what was asked for — the name, the kind, and above all the author, which is
-  # the server-owned principal and the whole of what provenance means here. Then the origin
-  # retains it in its own forged root, so the receipt it answers with is deployable from the
-  # origin exactly as a local forge's is.
-  defp receive_forged(target, %{bundle: bundle} = forged, opts) do
+  # was signed is what was asked for — the name, the kind, the source digest of the project
+  # this node sent, and above all the author, which is the server-owned principal and the whole
+  # of what provenance means here. Then the origin retains it in its own forged root, so the
+  # receipt it answers with is deployable from the origin exactly as a local forge's is.
+  #
+  # **The receipt is derived from the verified artifact, never taken from the reply** (W-F32).
+  # The first cut answered with the builder's own map beside the verified bundle, cross-checking
+  # two of its fields, and a builder could therefore report a signer it had not used, an epoch it
+  # did not have, imports the component does not make and an `artifact` struct that was not the
+  # one in the bundle — all of it deployable, because `deploy/3` reads the bundle and the caller
+  # reads the receipt. So the builder now contributes bytes and nothing else: every field below
+  # is the verified artifact's, the bundle's own arithmetic, or this node's knowledge of what it
+  # sent, in the shape `Deploy.sign/2`'s receipt has so both consumers read one thing.
+  defp receive_forged(target, project, %{bundle: bundle}, opts) do
     with :ok <- bound_bundle(byte_size(bundle)),
          {:ok, decoded} <- Bundle.verify(bundle, trust_policy(opts)),
-         :ok <- as_asked(decoded.artifact, forged, opts),
+         :ok <- as_asked(decoded.artifact, project, opts),
          {:ok, path} <- retain(decoded.artifact, bundle, opts) do
-      {:ok, forged |> Map.delete(:bundle) |> Map.put(:bundle_path, path)}
+      {:ok, received(project, decoded, bundle, path)}
     else
       {:error, reason} -> {:error, {:forged_bundle_refused, target, reason}}
     end
   end
 
-  defp as_asked(%Wasm.Artifact{} = artifact, forged, opts) do
+  defp as_asked(%Wasm.Artifact{} = artifact, project, opts) do
     cond do
       artifact.kind != :capability ->
         {:error, {:unexpected_kind, artifact.kind}}
@@ -582,15 +604,59 @@ defmodule Ouroboros.Wasm.Forge do
       Map.get(artifact.metadata, :author) != Keyword.get(opts, :author) ->
         {:error, {:author_mismatch, describe(Map.get(artifact.metadata, :author))}}
 
-      Map.get(forged, :component_sha256) != artifact.component_sha256 ->
-        {:error, {:receipt_does_not_describe_the_bundle, :component_sha256}}
-
-      Map.get(forged, :artifact_id) != artifact.id ->
-        {:error, {:receipt_does_not_describe_the_bundle, :artifact_id}}
+      # The signed manifest names the source it was built from, and this node knows what it
+      # sent: a signature over some other project's digest is a bundle for something else.
+      Map.get(artifact.metadata, :source_sha256) != project.sha256 ->
+        {:error, {:source_mismatch, describe(Map.get(artifact.metadata, :source_sha256))}}
 
       true ->
         :ok
     end
+  end
+
+  # `Deploy.sign/2`'s receipt (`receipt/4` there) plus what `forged/5` adds to a local one, from
+  # the verified bundle and this node's own project. `build_bytes` is absent: it is the size of
+  # cargo's output on the builder, a diagnostic nothing here can check, and a forwarded receipt
+  # carries no number this node did not compute.
+  defp received(project, %{artifact: artifact, bytes: bytes}, bundle, path) do
+    prefix = binary_part(bundle, 0, byte_size(bundle) - byte_size(bytes))
+
+    %{
+      form: if(artifact.precompiled, do: :precompiled, else: :source),
+      precompiled: artifact.precompiled,
+      precompile_skipped: if(artifact.precompiled, do: nil, else: @precompile_not_reported),
+      artifact: artifact,
+      artifact_id: artifact.id,
+      name: artifact.name,
+      epoch: artifact.epoch,
+      component_sha256: artifact.component_sha256,
+      size: artifact.size,
+      kind: artifact.kind,
+      world: artifact.world,
+      imports: artifact.imports,
+      created_at: artifact.created_at,
+      signer: artifact.signature.signer,
+      start_id: start_id(artifact),
+      extension: Bundle.extension(),
+      bundle_prefix: Base.encode64(prefix),
+      bundle_bytes: byte_size(bundle),
+      module: "wasm/" <> artifact.name,
+      source_sha256: project.sha256,
+      files: project.files |> Map.keys() |> Enum.sort(),
+      input_bytes: project.bytes,
+      bundle_path: path
+    }
+  end
+
+  defp start_id(artifact) do
+    case Wasm.Rollout.start_block(artifact) do
+      %{id: id} -> id
+      nil -> nil
+    end
+  end
+
+  defp bounded_refusal(reason) do
+    if :erlang.external_size(reason) > @max_refusal_bytes, do: describe(reason), else: reason
   end
 
   defp trust_policy(opts) do

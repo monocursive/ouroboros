@@ -161,10 +161,17 @@ defmodule Ouroboros.Wasm.ForgeTwoNodeTest do
     assert File.regular?(forged.bundle_path)
 
     # What was retained verifies against this node's trust policy and is the artifact the
-    # receipt describes — the check the origin makes because it never saw what was signed.
+    # receipt describes — the check the origin makes because it never saw what was signed. And
+    # the receipt **is** that artifact's (W-F32): what the builder answered beside the bytes is
+    # not what the origin answers with.
     assert {:ok, decoded} = Bundle.verify(File.read!(forged.bundle_path), context.trust_policy)
+    assert forged.artifact == decoded.artifact
     assert decoded.artifact.id == forged.artifact_id
     assert decoded.artifact.component_sha256 == forged.component_sha256
+    assert decoded.artifact.epoch == forged.epoch
+    assert decoded.artifact.signature.signer == forged.signer
+    assert decoded.artifact.imports == forged.imports
+    refute Map.has_key?(forged, :build_bytes)
 
     # And the signer journaled the decision under the **builder's** name: it was the builder
     # that asked, from its own configuration, and not this node.
@@ -257,6 +264,7 @@ defmodule Ouroboros.Wasm.ForgeTwoNodeTest do
     assert detail =~ ":builder"
     assert preview.build == :not_placed_here
     assert preview.lock == :sdk_lock
+    assert Forge.placement_report(Forge.placement_here()) == preview.placement
 
     # Proof 3. The signer, asked directly over `:erpc` with a valid inline project — which is
     # what a compromised or misconfigured origin would send — refuses as a signer through
@@ -382,7 +390,9 @@ defmodule Ouroboros.Wasm.ForgeTwoNodeTest do
     await_disconnected!(builder.node)
     refute File.exists?(context.forged)
 
-    # And the compiler the dead builder was running did not outlive it on this host.
+    # And the compiler the dead builder was running did not outlive it on this host — the
+    # rustc processes, which carry the build directory on their command line; a bare `cargo`
+    # that had not yet spawned one would not be matched.
     await_settled!(builder)
   end
 
@@ -461,7 +471,13 @@ defmodule Ouroboros.Wasm.ForgeTwoNodeTest do
       forged_root: context.forged,
       upload_root: context.uploads,
       store_root: context.store_root,
-      cargo_home: ForgeFixture.cargo_home(),
+      # Deliberately **cold and absent**. The origin never builds under `:builder` placement,
+      # so this is a fact about this machine that must not travel: a builder that received it
+      # would refuse the build for a cold cache, and the review's M5 mutation — forwarding
+      # `:cargo_home` — stayed green while this was the same warm directory the builder names
+      # in its own configuration. What the positive path proves is that the builder built from
+      # its OWN configuration; the allow-list itself is W20's seam pin.
+      cargo_home: Path.join(context.tmp, "cold-cargo-home"),
       registry: live.registry,
       pool: live.pool,
       trust_policy: context.trust_policy,
@@ -655,8 +671,9 @@ defmodule Ouroboros.Wasm.ForgeTwoNodeTest do
   end
 
   # Nothing of the dead builder's build may outlive it: `pgrep -f` over its data directory
-  # catches a cargo or rustc still compiling in the tree, because every rustc this build
-  # spawned carries an `--out-dir` beneath it (`test/wasm/forge_test.exs`'s own check). The
+  # catches a rustc still compiling in the tree, because every rustc this build spawned carries
+  # an `--out-dir` beneath it (`test/wasm/forge_test.exs`'s own check); cargo itself is not
+  # matched, so what is watched is the compiler and not its driver. The
   # builder's sandboxed process group is signalled when its VM's port closes, and this is where
   # that is watched rather than supposed.
   defp await_settled!(peer, attempts \\ 400)

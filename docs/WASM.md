@@ -2511,9 +2511,12 @@ machinery — it is a backend, not a lane (D9).
 
   **The bundle comes back as bytes, and the origin is the node that keeps it.** A forwarded
   forge writes nothing durable on the builder: the `.ouro-wasm` travels in the reply, bounded
-  by `Wasm.Bundle.max_bytes/0`, and the origin retains it in its own forged root — so the
-  receipt a forwarded forge answers with is deployable by `Forge.deploy/3` exactly as a local
-  one's is. Without that the receipt named a file on another machine and both consumers, the
+  by `Wasm.Bundle.max_bytes/0` — a bound applied **after** the reply term has arrived, because
+  `:erpc` delivers a term whole before anything on this side can measure it, so what the cap
+  protects is the verifier and the disk and not the origin's memory (W22's review watched a
+  256 MiB reply cost 256 MiB of heap before it was refused) — and the origin retains it in its
+  own forged root — so the receipt a forwarded forge answers with is deployable by
+  `Forge.deploy/3` exactly as a local one's is. Without that the receipt named a file on another machine and both consumers, the
   operator's `capabilities.admit` and the agent's `DeployWasmCapability`, answered
   `{:forged_bundle_unreadable, :enoent}`.
 
@@ -2527,9 +2530,18 @@ machinery — it is a backend, not a lane (D9).
   and naming builders is delegating the forge to whichever member claims the role. What the
   origin can still check, it does: `Bundle.verify/2` against **this** node's trust policy
   (signature, and both forms bound to their own digests), the kind, the name, the author —
-  which must be the server-owned principal it sent — and that the receipt describes the bundle
-  beside it. A bundle is precisely the thing `Bundle.verify/2` exists for, and a forwarded
+  which must be the server-owned principal it sent — and the source digest, which must be the
+  project it sent. A bundle is precisely the thing `Bundle.verify/2` exists for, and a forwarded
   forge is the one place in this lane where a node deploys something another machine produced.
+  And what the origin **answers with** is derived from that verified artifact — id, epoch,
+  signer, imports, world, name, module, start id, the bundle's own prefix and size — and never
+  taken from the reply: the first cut returned the builder's own receipt map beside the verified
+  bundle, cross-checking two fields of it, and W22's review showed a builder reporting a signer
+  it had not used, an epoch it did not have, imports the component does not make and an
+  `artifact` struct that was not the one in the bundle, all of it deployable (W-F32). A builder
+  contributes bytes and nothing else; and a refusal it makes is bounded before it is relayed,
+  because a term that crossed `:erpc` whole would otherwise go on whole to the effect ledger and
+  an `:operate` client (W-F33).
 
   **Three deadlines, each strictly inside the next.** Cargo gets `budget - 2 * slack`, the
   builder's whole `forge_here/2` gets `budget - slack` in a task it can stop, and the origin
@@ -2807,20 +2819,27 @@ Stated once, so nobody reads more into the lane than is there:
   nothing: no bundle anywhere under its data directory, no forged root, an empty build scratch.
   The origin verified the bytes against its own trust policy and deployed them to `:live`. The
   signer refused `forge_here/2` and `forge/2` over the wire without creating a build
-  directory; a fleet with no builder was refused before any RPC; a build the builder could not
-  finish came back as the builder's own `{:build_failed, {:timeout, :deadline}}` inside the
-  origin's budget, its scratch swept; a builder VM stopped mid-cargo answered
-  `{:forge_forward_failed, builder, {:error, "…noconnection…"}}` within seconds of dying rather
-  than after the budget, and no compiler of its outlived it. Three honesties. It is **one
-  host**: both VMs share a kernel, a toolchain, a sandbox backend and a filesystem — the test
+  directory; a fleet with no builder was refused before any `forge_here/2` was asked (the
+  fleet reading itself is an `:erpc` multicall); a build the builder could not finish came back
+  as the builder's own `{:build_failed, {:timeout, :deadline}}` inside the origin's budget, its
+  scratch swept; a builder VM stopped mid-cargo answered `{:forge_forward_failed, builder,
+  {:error, "…noconnection…"}}` within seconds of dying rather than after the budget, and no
+  rustc of its outlived it. The allow-list of what a forward carries is W20's pin, through its
+  seam; what this proves on the real path is that the builder built from its **own**
+  configuration — the origin names a cold, absent cargo home that would refuse the build had it
+  travelled. Four honesties. It is **one host**: both VMs share a kernel, a toolchain, a sandbox backend and a filesystem — the test
   reads the builder's scratch directory from the origin's side — so a different kernel, a
   different cargo, a different sandbox backend and a bundle the builder produces that the wire
   will not carry are unwatched, and CI's Linux job running the same file on one Linux host is
   the other half of the same limit, not a second machine. The epoch was allocated by the builder
   over the origin's rollout plane alone, because `Ouroboros.Wasm.Deploy`'s plane probe excludes
   a node that runs no register — the signer and the builder itself — and that is read from the
-  code and observed as a signature that was issued rather than as a number the test pinned. And
-  the first run found W-F31: a `:builder` node had no helper pool and could not finish any forge.
+  code and observed as a signature that was issued rather than as a number the test pinned. The
+  bundle's size cap is applied after the reply has arrived, so a hostile builder can still make
+  the origin hold a large term for a moment (D29). And the first run found W-F31 — a `:builder`
+  node had no helper pool and could not finish any forge — while the review found W-F32 and
+  W-F33: the receipt the origin answered with was the builder's rather than the verified
+  artifact's, and a refusal crossed unbounded.
 
 ## 13. Defects and doc drift found during this spec's verification
 
@@ -2945,6 +2964,23 @@ re-verification pass found it last, and it closed in the same wave.
   unchanged. Regression: the same file boots a `:builder` peer without a toolchain and reads
   its supervision tree — exactly cluster formation and the wasm supervisor — and a `:signer`
   peer runs no pool at all.
+- **W-F32 (HIGH; fixed in the W22 fix wave):** a forwarded forge's receipt was the **builder's**.
+  `Forge.receive_forged/3` verified the bundle and then answered with the map the builder sent
+  beside it, cross-checking only `component_sha256` and `artifact_id`. The review's hostile
+  builder returned a genuine bundle with a lying receipt — author `"evil"`, epoch 999, signer
+  `"nobody"`, imports `["wasi:filesystem/preopens"]`, module `"wasm/something-else"` — and the
+  origin answered `{:ok, forged}` and deployed it `:live`; a bundle signed by a *second* trusted
+  signer was accepted while `forged.signer` still named the first. The receipt is now derived
+  from the verified artifact and the bundle's own bytes (`received/4`), in `Deploy.sign/2`'s
+  shape, and `as_asked/3` also holds the signed source digest to the project this node sent.
+  Regression through `forge_test.exs`'s canned seam (a lying receipt comes back as the verified
+  artifact's in every projected field; a second trusted signer is reported as the signer) and
+  `forge_two_node_test.exs` (the receipt equals the retained bundle's artifact).
+- **W-F33 (MED; fixed in the W22 fix wave):** a builder's refusal crossed unbounded.
+  `request/4` relayed `{:error, reason}` as received; a 10 MiB reason arrived intact and would
+  have gone on to the effect ledger and the `:operate` client. Past 64 KiB it is now rendered
+  with `describe/1`; a small typed refusal — the deadline test's `{:build_failed, {:timeout,
+  :deadline}}` — passes through unchanged.
 
 ## 14. Slices
 
@@ -4065,8 +4101,8 @@ Each slice is PR-sized, lands green, and is useful alone.
   and `forge/2` called on the signer peer by `:erpc` with a valid inline project answer
   `{:forge_refused, :signer_node, …}` and its build root never appears — the check is in front of
   the input on a real peer too. **No builder connected** — the origin and the signer peer — is
-  `{:forge_refused, :no_builder_node, …}` before any RPC, with neither node's scratch root
-  created. **The deadline crosses the wire**: a 22 s budget hands cargo 2 s, the origin sends a
+  `{:forge_refused, :no_builder_node, …}` before any `forge_here/2` is asked — the fleet reading
+  that answers it is itself an `:erpc` multicall — with neither node's scratch root created. **The deadline crosses the wire**: a 22 s budget hands cargo 2 s, the origin sends a
   `%{dir: …}` proposal — the production caller's shape — and the builder's build directory holds
   the origin's `src/lib.rs` byte for byte while cargo runs, so what crossed was the files; the
   refusal that comes back is the builder's own `{:build_failed, {:timeout, :deadline}}` —
@@ -4076,7 +4112,9 @@ Each slice is PR-sized, lands green, and is useful alone.
   that dies mid-build**: the forge runs in a task, the builder's build directory appears, its VM
   is stopped, and the origin answers `{:forge_forward_failed, builder, {:error, "…noconnection…"}}`
   within fifteen seconds of the stop against a 120 s budget — distribution closes the socket, it
-  does not wait for the tick — and no cargo or rustc of that builder's survives on the host.
+  does not wait for the tick — and no rustc of that builder's survives on the host (`pgrep -f`
+  over its build directory matches the compilers, which carry it in `--out-dir`, and not a bare
+  cargo that had spawned none).
   **Preview reports the decision**: `capabilities.preview` on the origin answers
   `%{decision: :forward, node: builder}` with `build: :not_placed_here` while the builder is
   connected, and `%{decision: :refuse, reason: :no_builder_node, detail: …}` when it is not,
@@ -4101,10 +4139,27 @@ Each slice is PR-sized, lands green, and is useful alone.
   directory proposal that builds to completion over the wire is inferred from the files having
   crossed and the inline shape having completed, not watched end to end. **The dead builder's
   cargo** is watched only on this host's process table; that the builder's own `Exec` signals its
-  group when the VM's port closes is what made it true here. And the `nodeup` log line names a
-  freshly connected peer `:core` — it is probed before its application has booted and D29's
-  fallback answers — which is not what `nodes_by_role/1` reports once the peer is running, and
-  is the documented open direction rather than a defect.
+  group when the VM's port closes is what made it true here. And the `nodeup` log line **may**
+  name a freshly connected peer `:core` — it is probed at connection, which races the peer's
+  `put_env` (two of the review's five runs), and D29's fallback answers — which is not what
+  `nodes_by_role/1` reports once the peer is running, and is the documented open direction
+  rather than a defect.
+
+  **The fix wave.** The review's hostile builder — the same peer harness with `Forge` replaced
+  on that VM only, the origin unpatched over real `:erpc` — found what the round trip could not:
+  the origin verified the bundle and then answered with the *builder's* receipt (W-F32), and
+  relayed a refusal unbounded (W-F33). Both are fixed in `lib/` with regressions through
+  `forge_test.exs`'s canned seam, which is where a lying reply is cheap to shape; the hostile
+  harness itself is not adopted into this file, because a second real build is outside its
+  budget and the seam proves the same receipt logic. The review also showed that the allow-list
+  test is W20's — its M5 mutation, forwarding `:cargo_home`, stayed green here because the origin
+  named the same warm directory the builder does — so the origin now names a cold, absent cargo
+  home: what this file proves on the real path is that the builder built from its own
+  configuration, and a leaked key turns it red. A leaked `:forged_root` is not observable here,
+  because a returning forge retains nothing on the builder, and a leaked `:signing_service` is
+  not either, because the origin passes none. Two precisions the review asked for are above:
+  the bundle cap is applied after the reply has arrived, and the refusal of a builder-less
+  fleet is before any `forge_here/2` rather than before any RPC.
 
 ## 15. Prior art and references
 
