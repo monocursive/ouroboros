@@ -41,6 +41,16 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
                       []
                   end)
 
+  # What a denied write looks like from inside each backend. Seatbelt refuses the syscall
+  # (`EPERM`, which every program spells `Operation not permitted`); bubblewrap mounts the
+  # protected root read-only, so the same write fails `EROFS` (`Read-only file system`).
+  # `Sandbox.denial_line?/1` recognises both; these assertions have to expect the one this
+  # node's backend produces, or they pass only on the platform they were written on.
+  @denial (case @backend do
+             :bwrap -> "Read-only file system"
+             _other -> "Operation not permitted"
+           end)
+
   # An engine whose whole job is to answer the escalation question a specific way, so the
   # "a rule pre-answered it" paths are exercised without inventing rule syntax here.
   defmodule ScriptedEngine do
@@ -179,7 +189,7 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
                "dir=$(printf '\\056git'); echo escaped > \"$PWD/$dir/escalated.txt\""
 
       assert ask.payload["tool_call"]["cwd"] == context.workspace
-      assert ask.payload["reason"] =~ "Operation not permitted"
+      assert ask.payload["reason"] =~ @denial
       assert ask.payload["reason"] =~ "allows writes only under"
       assert ask.payload["reason"] =~ context.workspace
 
@@ -231,9 +241,9 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
       assert event.payload["granted_by"] == "human"
       assert event.payload["call_id"] == "c1"
       assert event.payload["constraint"] == "filesystem"
-      assert event.payload["evidence"] =~ "Operation not permitted"
+      assert event.payload["evidence"] =~ @denial
       assert event.payload["stopped_by"] == Sandbox.label(Sandbox.detect())
-      assert event.payload["sandboxed_output"] =~ "Operation not permitted"
+      assert event.payload["sandboxed_output"] =~ @denial
       assert event.request_id == ask.request_id
     end
 
@@ -255,7 +265,7 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
 
       [result] = all(events, :tool_result)
       assert result.payload["is_error"]
-      assert result.payload["output"] =~ "Operation not permitted"
+      assert result.payload["output"] =~ @denial
       assert result.payload["output"] =~ "declined: not that one"
       assert result.payload["output"] =~ "Do not ask for it again"
 
@@ -414,7 +424,7 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
       [result] = all(events, :tool_result)
       assert result.payload["is_error"]
       assert result.payload["output"] =~ "fenced workspace profile"
-      assert result.payload["output"] =~ "Operation not permitted"
+      assert result.payload["output"] =~ @denial
     end
 
     test "an engine deny refuses the escalation without putting anything to a human",
@@ -471,7 +481,7 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
 
       [result] = all(events, :tool_result)
       assert result.payload["is_error"]
-      assert result.payload["output"] =~ "Operation not permitted"
+      assert result.payload["output"] =~ @denial
       # The pre-escalation advice, unchanged: ask a human, do not expect a way out.
       assert result.payload["output"] =~ "ask_user"
       refute result.payload["output"] =~ "re-runs the command once inside a fenced profile"
