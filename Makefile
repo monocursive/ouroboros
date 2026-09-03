@@ -13,7 +13,7 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test wasm wasm-guest wasm-examples wasm-sdk-check test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
+.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -45,6 +45,7 @@ help:
 	@echo "make wasm-guest       build the lane-W acceptance guest into test/support/wasm/echo.wasm"
 	@echo "make wasm-examples    build the guest SDK's worked components (counter, deny-writes, …)"
 	@echo "make wasm-sdk-check   the guest SDK's own gates: fmt, tests, clippy, wasm32 build"
+	@echo "make wasm-sdk-cache   warm this node's cargo cache with exactly the SDK's dependencies"
 
 dev:
 	@echo "==> dev: Elixir deps if this checkout has none, then ouro --dev"
@@ -196,6 +197,22 @@ wasm-sdk-check:
 	cd tui/wasm/guest && $(CARGO) clippy --all-targets -- -D warnings
 	cd tui/wasm/guest && $(CARGO) clippy --target wasm32-wasip2 -- -D warnings
 	cd tui/wasm/guest && $(CARGO) build --release --target wasm32-wasip2
+
+# The registry cache a `:builder` node forges against (docs/WASM.md D19). `Ouroboros.Wasm.Forge`
+# builds `--locked --offline` inside a sandbox with no network, so every crate the SDK's lock
+# names has to already be in `$CARGO_HOME/registry/cache` before a forge starts; a cache that is
+# missing one is a refusal naming it, not a fetch. `cargo fetch --locked` in the SDK's own
+# directory downloads exactly that set and nothing else — it is the SDK's lock that decides,
+# which is the same lock the forge pins a submitted project to.
+#
+# CARGO_HOME= names a node-local cache instead of the operator's own:
+#   make wasm-sdk-cache CARGO_HOME=/var/lib/ouroboros/cargo
+wasm-sdk-cache:
+	@echo "==> wasm-sdk-cache: warming $${CARGO_HOME:-$$HOME/.cargo} with the SDK's dependency set"
+	cd tui/wasm/guest && $(CARGO) fetch --locked
+	@echo "==> wasm-sdk-cache: crates now cached"
+	@ls "$${CARGO_HOME:-$$HOME/.cargo}/registry/cache" >/dev/null 2>&1 && \
+	  find "$${CARGO_HOME:-$$HOME/.cargo}/registry/cache" -name '*.crate' | wc -l
 
 computer-use-debug:
 	@echo "==> computer-use-debug: debug helper into priv/computer-use/"

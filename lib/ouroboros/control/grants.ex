@@ -10,8 +10,17 @@ defmodule Ouroboros.Control.Grants do
       :stop_agent    agents:  :any | [agent_id]
       :send_message  agents:  :any | [agent_id]
       :delegate      teams:   :any | [team_id]
-      :forge         modules: :any | [module]
+      :forge         modules: :any | [module | "wasm/<name>"]
       :deploy        nodes:   :any | [node]
+
+  A `:forge` allow-list holds atoms — BEAM capability modules — and `"wasm/<name>"` strings,
+  because lane W's capabilities have no module name at all: identity there is the component's
+  digest, and the name a rollout, a `start` block and this allow-list all agree on is
+  `"wasm/" <> Ouroboros.Wasm.Artifact.name?/1`. The two spellings can never match each other,
+  so a grant narrowed to `[Ouroboros.Capability.Echo]` admits no wasm forge and a grant
+  narrowed to `["wasm/counter"]` admits no BEAM one. `modules: :any` is what it has always
+  been — forge whatever you like — and it now reaches both lanes, which is the widening this
+  spelling makes explicit rather than hides.
 
   `granted?/3` is asked about a *concrete attempt*, not about an effect in the abstract,
   so a grant to start `Ouroboros.Capability.Echo` refuses a request to start anything
@@ -375,10 +384,16 @@ defmodule Ouroboros.Control.Grants do
 
   defp validate_values(_key, :any), do: :ok
 
-  defp validate_values(key, values) when key in [:modules, :nodes] do
+  defp validate_values(:nodes, values) do
     if Enum.all?(values, &(is_atom(&1) and not is_nil(&1))),
       do: :ok,
-      else: {:error, {:invalid_constraint, key, values}}
+      else: {:error, {:invalid_constraint, :nodes, values}}
+  end
+
+  defp validate_values(:modules, values) do
+    if Enum.all?(values, &module_or_capability?/1),
+      do: :ok,
+      else: {:error, {:invalid_constraint, :modules, values}}
   end
 
   defp validate_values(key, values) when key in [:agents, :teams] do
@@ -386,6 +401,15 @@ defmodule Ouroboros.Control.Grants do
       do: :ok,
       else: {:error, {:invalid_constraint, key, values}}
   end
+
+  # A lane-W name is admitted in exactly the spelling everything else uses it in. Accepting
+  # any binary here would let an operator write a grant that silently matches nothing, which
+  # is a grant that reads as narrow and is not.
+  defp module_or_capability?(value) when is_atom(value) and not is_nil(value), do: true
+
+  defp module_or_capability?("wasm/" <> name), do: Ouroboros.Wasm.Artifact.name?(name)
+
+  defp module_or_capability?(_value), do: false
 
   defp checkpoint(grants), do: %{version: @checkpoint_version, grants: grants}
 

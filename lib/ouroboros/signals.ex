@@ -127,6 +127,35 @@ defmodule Ouroboros.Signals.EffectDeployCapability do
     ]
 end
 
+defmodule Ouroboros.Signals.EffectForgeWasmCapability do
+  @moduledoc "Asks an agent to forge a wasm capability from source, if it is granted `:forge`."
+
+  use Jido.Signal,
+    type: "ouroboros.agent.effect.forge_wasm",
+    default_source: "/ouroboros/effects",
+    schema: [
+      from: [type: :string, required: true],
+      name: [type: :string, required: true],
+      files: [type: {:map, :string, :string}, required: true],
+      eval: [type: :any, default: nil],
+      start_config: [type: :any, default: nil],
+      nodes: [type: {:list, :atom}, default: []]
+    ]
+end
+
+defmodule Ouroboros.Signals.EffectDeployWasmCapability do
+  @moduledoc "Asks an agent to deploy a wasm capability it forged, if it is granted `:deploy`."
+
+  use Jido.Signal,
+    type: "ouroboros.agent.effect.deploy_wasm",
+    default_source: "/ouroboros/effects",
+    schema: [
+      from: [type: :string, required: true],
+      artifact_id: [type: :string, required: true],
+      nodes: [type: {:list, :atom}, default: []]
+    ]
+end
+
 defmodule Ouroboros.Signals.EffectSettled do
   @moduledoc """
   Reports the outcome of an effect back to the agent that requested it.

@@ -702,17 +702,74 @@ when identity is a digest rather than a module name still needs a rule. Until th
 component is a new rollout, and the register's own supersede rule retires the entry it
 displaces.
 
-### 7.7 Forging and the effect surface (later slices)
+### 7.7 Forging, and the effect surface
 
-Slice 0–3 deploy *operator-supplied* components (the `Runtime.Capabilities` admit
-posture: gateway `:operate` is the authority). The agent-reachable path —
-`ForgeWasmCapability` (source in Rust/TS → build → sign) and `DeployWasmCapability` —
-reuses the `Control.Grants` `:forge`/`:deploy` constraint kinds and the
-server-owned-principal discipline verbatim (`runner.ex:126`), and is deferred until
-the deploy lane is proven. Building components on `:builder` nodes is a toolchain
-question (`cargo component` / `rustup target add wasm32-wasip2` on the builder host),
-not a code question; the build subprocess can itself run under `Native.Sandbox`,
-which the BEAM lane's `:peer` builds cannot.
+Slices 0–3 deploy *operator-supplied* components. W14 closes the loop: a capability is
+built here, from source, by an agent or an operator, and it never leaves the fence to do
+it.
+
+`Ouroboros.Wasm.Forge.forge/2` is `Ouroboros.Upgrade.Forge`'s shape with one substitution.
+Both validate before they compile, compile somewhere the cluster cannot be reached from, hold
+the product to the rules the loading node will re-check, and only then allocate a number and
+ask for a signature. What differs is what "somewhere" means: lane B's build peer is a separate
+BEAM with no distribution, which is isolation from the cluster and not from the machine — its
+own moduledoc says that compiling hostile source needs a container around it. A Cargo build
+*is* arbitrary code at build time, so this lane does what that sentence asks for and runs the
+subprocess under `Ouroboros.Provider.Native.Sandbox`, the same OS sandbox the native agent's
+shell runs in.
+
+**The input is C9's, and the three things that make it safe are not "we read the Rust."**
+
+1. **The lock pin.** `Cargo.lock`, minus this project's own `[[package]]` entry, must be
+   byte-identical to the SDK's own resolved lock — which is exactly what a scaffolded project
+   resolves to, pinned by `test/support/wasm_forge/`. So the dependency set is the SDK's: the
+   same crates, versions and checksums, and the only code that runs at build time is the
+   SDK's own proc macros, which this repository already builds on every `make wasm-examples`.
+2. **The file allow-list.** `Cargo.toml`, `Cargo.lock`, `src/**.rs`, an optional `README.md`,
+   and — for a workspace proposal — the operator's own `manifest.json`, which is bounded and
+   path-checked like everything else and then left out of the build. At most 32 files and a
+   mebibyte, every path relative and free of `..`, no symlinks (`File.lstat/1` at every step,
+   never followed), and no `build.rs` — refused by name *and* by refusing the `[package]
+   build` key that would give one power, because `src/build.rs` is otherwise a path the
+   allow-list admits. The manifest is read by a scanner that refuses every line it cannot
+   classify **and** by `Toml`, the parser this repository already reads `ouroboros.toml`
+   with, and the two must produce the same document: a scanner that is not a TOML parser is
+   the thing an author would write a manifest to fool, and the disagreement is the refusal.
+3. **The sandbox.** `cargo build --release --target wasm32-wasip2 --locked --offline` with no
+   network, writes confined to the build directory and the cargo home, a five-minute default
+   ceiling and bounded output. A node with no sandbox backend **does not build at all** —
+   that is a refusal and not a weaker posture, because the fence is one of the three things
+   this lane's claim rests on.
+
+**The imports are read, not declared.** `Wasm.Deploy.sign/2` never parses a component,
+because those bytes came off a socket (D15). Here the node built them itself, from source it
+validated against a dependency set it pinned, inside its own sandbox — so
+`Wasm.Pool.inspect/2` reads the import list under the W7 bounds, and it is still cross-checked
+against the signed manifest at stage like every other deploy (D18).
+
+Everything downstream is unchanged: `Wasm.Deploy.sign/2` builds the manifest and the signing
+service applies the whole policy, `Wasm.Rollout.deploy/4` verifies and gates, the bundle is
+the same `.ouro-wasm` W12 defined. The forge writes that bundle into `<data_dir>/wasm/forged/`,
+bounded to the newest eight, and `deploy/3` reads it back and holds it to the artifact it was
+asked for before staging a byte — it is this node's own output, but it is a file, and a file
+is what somebody else can replace.
+
+**The two effects.** `ForgeWasmCapability` and `DeployWasmCapability` go through
+`Runner.dispatch(:forge, …)` and `(:deploy, …)` exactly as the BEAM lane's do: the acting
+principal is `context.agent.id`, the signal's `from` is recorded as `claimed_from` and
+authorizes nothing (`runner.ex:126`), and the author written into the signed manifest is the
+principal. The `:forge` grant is asked about `"wasm/<name>"` — the same string the rollout
+register calls the module and a signed `start` block claims — so `modules: ["wasm/counter"]`
+is a grant to forge that capability and nothing else. A deploy resolves its artifact from the
+agent's own `forged` ring and never from the signal, and one ring now holds both lanes'
+manifests, so each deploy action refuses the other lane's by name rather than by whatever
+would have failed first downstream.
+
+**The operator's half is the same code.** A proposal directory under
+`.ouroboros/capabilities/` that holds a `Cargo.toml` is a lane-W proposal;
+`capabilities.preview` reports the C9 validation and, where the toolchain is present and the
+cache warm, a dry build; `capabilities.admit` forges and deploys it at `:operate`. No new
+gateway verb: the three that existed already name the thing being asked for.
 
 **Reaching a capability** (W13). A deployed capability is a mesh agent at `wasm/<name>`,
 and there are exactly two ways to reach one. Neither is `Mesh.send_message/4` from a
@@ -1398,6 +1455,76 @@ machinery — it is a backend, not a lane (D9).
       matchers, and the words "would be admitted" do not appear while any row carries one.
       Unverified is printed, never exited on: the exit code says *refused*, so an author who
       wired this into a pre-commit hook does not have it break on a pattern the node compiles.
+- **D18 — a node may read the imports of bytes it built itself, and the build-time boundary
+  is three checks and a kernel.** D15 says a node never parses unsigned bytes from a socket:
+  `wasm.sign` takes the import list from the client, because pointing the helper at
+  attacker-supplied input upstream of every trust check is the shape lane W exists to avoid.
+  A forged component is the other case, and the difference is provenance rather than
+  optimism. These bytes were produced *here*, by `cargo` this node spawned, from source this
+  node validated, against a dependency set this node pinned, inside a sandbox this node
+  applied — nobody else chose them. So `Ouroboros.Wasm.Forge` reads the import list with
+  `Wasm.Pool.inspect/2` under the W7 bounds instead of asking a caller to declare it, which
+  also removes the one thing a caller could have got wrong; and the list is still
+  cross-checked at stage by `Wasm.Verifier.cross_check/2`, because the security boundary is
+  the linker (D5) and stays there.
+
+  What that provenance rests on is *build-time* code execution, and a Cargo project is
+  arbitrary code at build time — build scripts, proc macros, `include!`. Three checks and a
+  kernel:
+
+    * **The lock pin.** `Cargo.lock` minus this project's own entry must be byte-identical to
+      the SDK's resolved lock, so the crates, versions and checksums are the SDK's and the
+      only proc macros that run are the ones `make wasm-sdk-check` already runs.
+    * **The file allow-list.** `Cargo.toml`, `Cargo.lock`, `src/**.rs`, `README.md`, and a
+      workspace proposal's `manifest.json` (bounded and path-checked, then left out of the
+      build). No `build.rs`, refused by name *and* by refusing the `[package] build` key —
+      one check without the other is not a rule, because `src/build.rs` is a path the
+      allow-list admits and a `build` key is what would make it run. The manifest is read
+      twice, by a scanner that refuses every line it cannot classify and by `Toml`, and the
+      two must produce the same document: a hand-written scanner is precisely the thing an
+      author would write a manifest to fool, so the disagreement is the refusal rather than a
+      gap.
+    * **The sandbox.** `Native.Sandbox` at `workspace_write`, writable only in the build
+      directory and the cargo home, network denied, `--offline` and `--locked` besides, a
+      five-minute ceiling and bounded output. A node with no backend refuses to build.
+
+  **And one thing it is not.** The sandbox's filesystem policy denies *writes*; reads are
+  open, on every backend, because that is what a compiler needs. So `include_str!` of any
+  path this node can read compiles, and its contents end up inside a signed component that
+  can be messaged. That is a real path from a `:forge` grant to a file's contents, it is
+  proved by a test that asserts the build **succeeds**, and it is stated in §12 rather than
+  papered over with a regex on Rust source that `core::include_str!` would walk around. It is
+  also not a lane-W regression: an agent-authored BEAM capability runs `File.read!/1` with
+  full VM authority the moment it is deployed. What bounds it here is what bounds the rest of
+  the effect surface — the grant is deny-by-default and per-capability, the author recorded
+  in the signature is the server-owned principal, and the signing service journals the
+  decision.
+- **D19 — a forge input is bounded before it is read, and a cold cache is a refusal.**
+  Thirty-two files and one mebibyte, paths relative and free of `..`, no symlink followed,
+  every bound applied *before* a byte is copied into the build directory. The numbers are the
+  scaffold's shape with room to grow a module tree, and they are deliberately far below
+  anything that could be a vendored dependency, a fixture corpus or a repository: this lane
+  builds capabilities, and a capability that needs a thousand files needs a different lane.
+  The point of bounding first is the ordinary one — a refusal that happens after the copy is
+  a refusal that already wrote the files — and it is what lets the effect surface promise
+  that an ungranted forge touches nothing, since the grant is checked before the closure runs
+  at all.
+
+  The cache is the other half of it. `--offline` means the build cannot fetch, so every crate
+  the SDK's lock names must already be in `$CARGO_HOME/registry/cache` before a forge starts.
+  `make wasm-sdk-cache` (`cargo fetch --locked` in `tui/wasm/guest`) warms exactly that set,
+  and `CARGO_HOME=` points it at a node-local cache instead of the operator's own. A cache
+  missing one crate is **a refusal naming it**, checked before cargo is spawned — 8 ms on
+  this Mac, against a build that takes ten seconds — rather than a fetch, a hang, or a
+  resolver error somewhere inside a subprocess. The crates it checks for are parsed out of
+  the SDK's own embedded lock, so a dependency the SDK adds is a crate the cache has to hold
+  and there is no second list to keep in step.
+
+  The cargo home is *writable* inside the sandbox, which is the one place this fence is wider
+  than the build directory: cargo extracts `.crate` files into `registry/src` and takes a
+  lock file, and a read-only cache is a build that cannot start. What makes that acceptable
+  is the lock pin — nothing untrusted runs at build time to abuse it — and an operator who
+  wants it narrower gives each builder a `CARGO_HOME` of its own.
 - **D20 — a policy component may narrow, and may only widen where an operator said so.**
   `Ouroboros.Wasm.PolicyEngine` reaches a signed policy component only on `{:ask, :no_rule}`,
   which is every call `Control.Permissions` had no rule for. Its `deny` stands; its `ask`
@@ -1491,6 +1618,15 @@ Stated once, so nobody reads more into the lane than is there:
 - **The host functions are the new surface.** Every import added to a world is
   boundary code. v1's answer is austerity: `log` only. Growth of any world's import
   set is a signing-policy event, not a convenience.
+- **A forge fences writes, the network and the dependency set — not reads.** The OS sandbox
+  a build runs in allows `file-read*`, because a compiler needs to read, so a `src/**.rs`
+  that `include_str!`s any path the node can read compiles and carries those bytes into a
+  signed component. `test/wasm/forge_test.exs` proves it by asserting that build *succeeds*.
+  Closing it means a read-fenced profile for builds — a different policy from the one
+  `Native.Sandbox` gives a shell, and one nothing in this lane has yet — not a pattern match
+  on Rust source, which `core::include_str!` walks around. Until then a `:forge` grant is
+  read authority over this node's filesystem, attributable to the granted principal and
+  journalled by the signer, and no wider than what a deployed lane-B capability already has.
 - **wasmtime is a dependency, not a proof.** It has had escape CVEs; they are rare and
   patched fast, and the helper process (which can itself be OS-sandboxed later) is the
   second wall. Pin it, watch its advisories, and keep its dialect small — §7.3's disabled
@@ -2050,6 +2186,46 @@ Each slice is PR-sized, lands green, and is useful alone.
   helper (including the six-second `describe` that no longer costs a message), the real echo
   guest, the live rollout, the register's checkpoint, and the native loop.
 
+- **W14 — a capability is forged from an agent, inside the fence.** Lane W could deploy
+  components somebody else had built. `Ouroboros.Wasm.Forge` builds them here: a Cargo project
+  on the guest SDK in, a signed `.ouro-wasm` out, through `Wasm.Deploy.sign/2` and
+  `deploy/3` unchanged. What it adds is the fence around a build. C9's input is bounded and
+  path-checked before a byte is copied — 32 files, a mebibyte, no `..`, no symlink followed,
+  no `build.rs` and no `[package] build` key that would make one of `src/**.rs` run. The
+  `Cargo.lock` minus this project's own entry must be byte-identical to the SDK's resolved
+  lock, so the dependency set is the SDK's and the only proc macros that run at build time
+  are the ones this repository already builds. The manifest is read by a scanner that refuses
+  every line it cannot classify *and* by `Toml`, and a disagreement between them is the
+  refusal. `cargo build --release --target wasm32-wasip2 --locked --offline` then runs under
+  `Native.Sandbox` — no network, writes only in the build directory and the cargo home, a
+  five-minute ceiling — and a node with no sandbox backend refuses to build at all. The
+  registry cache the build needs is warmed by `make wasm-sdk-cache`; a cache missing a crate
+  is a refusal naming it in 8 ms, not a fetch.
+
+  The node then reads the product's imports with its own helper, which D18 argues is exactly
+  the case D15 does not cover: it built these bytes. Two effects — `ForgeWasmCapability` and
+  `DeployWasmCapability` — reach it through `Runner.dispatch/5` with the server-owned
+  principal as the signed manifest's author, the `:forge` grant asked about
+  `"wasm/<name>"` so one narrow grant admits one capability, and the deploy resolving its
+  artifact from the agent's own `forged` ring; that ring now holds both lanes, so each deploy
+  action refuses the other lane's manifest by name. `Control.Grants` learned to hold a
+  `"wasm/<name>"` in a `:forge` allow-list for that, which is the one widening this slice
+  makes explicit: `modules: :any` now reaches both lanes. The operator's half is the same
+  code — a proposal directory holding a `Cargo.toml` is lane W, `capabilities.preview` reports
+  C9 plus a dry build, `capabilities.admit` forges and deploys at `:operate` — and needs no
+  new gateway verb.
+
+  Proved live on this Mac, end to end and twice: the `counter` example forged through the
+  agent effect surface (signal in, sandboxed build, imports read off the product, signed,
+  deployed `:live`, messaged, rolled back, with the author inside the signature being the
+  principal and not the signal's `from`), and the same project forged through
+  `capabilities.admit` from a workspace proposal. Every C9 refusal has a test that is red
+  without its check, and the sandbox is proved by what the kernel actually did: a probe
+  spawned through the same `Sandbox.wrap/4` the build goes through wrote inside the build
+  directory, was denied outside it, and got `Operation not permitted` from a connect. The
+  limit that fence does not cover — reads are open, so `include_str!` of a readable path
+  compiles — is proved by a test asserting that build succeeds, and is written down in D18
+  and §12 rather than defended.
 - **W15 — a policy is a component, and it can only narrow.** The helper grew a **second closed
   world**, `ouroboros:policy@0.1.0`: the same single import, `evaluate: func(string) -> string`
   in place of `handle-message`, and a `load` that is told which of the two a set of bytes is

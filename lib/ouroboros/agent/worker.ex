@@ -49,6 +49,8 @@ defmodule Ouroboros.Agent.Worker do
       {"ouroboros.agent.effect.delegate", Ouroboros.Agent.Effects.DelegateTask},
       {"ouroboros.agent.effect.forge", Ouroboros.Agent.Effects.ForgeCapability},
       {"ouroboros.agent.effect.deploy", Ouroboros.Agent.Effects.DeployCapability},
+      {"ouroboros.agent.effect.forge_wasm", Ouroboros.Agent.Effects.ForgeWasmCapability},
+      {"ouroboros.agent.effect.deploy_wasm", Ouroboros.Agent.Effects.DeployWasmCapability},
       {"ouroboros.agent.effect.settled", Ouroboros.Agent.Effects.RecordEffect}
     ]
 
