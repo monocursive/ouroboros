@@ -205,14 +205,23 @@ wasm-sdk-check:
 # directory downloads exactly that set and nothing else — it is the SDK's lock that decides,
 # which is the same lock the forge pins a submitted project to.
 #
-# CARGO_HOME= names a node-local cache instead of the operator's own:
+# It warms the node's OWN cache by default — `<data_dir>/wasm/cargo-home`, derived here
+# exactly as `Ouroboros.DataDir` derives it — and not `~/.cargo`. That is the whole of D19's
+# second half: a cargo home carries `config.toml`, `[build] rustc-wrapper` in it is a program
+# cargo runs on every crate, and a developer's `~/.cargo` is a directory many things write
+# to. The forge uses this path unless an operator names another one.
+#
+# CARGO_HOME= names a different cache, for a builder that keeps its own:
 #   make wasm-sdk-cache CARGO_HOME=/var/lib/ouroboros/cargo
+OURO_DATA_DIR := $(or $(OUROBOROS_DATA_DIR),$(if $(XDG_DATA_HOME),$(XDG_DATA_HOME)/ouroboros,$(HOME)/.local/share/ouroboros))
+FORGE_CARGO_HOME := $(or $(CARGO_HOME),$(OURO_DATA_DIR)/wasm/cargo-home)
+
 wasm-sdk-cache:
-	@echo "==> wasm-sdk-cache: warming $${CARGO_HOME:-$$HOME/.cargo} with the SDK's dependency set"
-	cd tui/wasm/guest && $(CARGO) fetch --locked
+	@echo "==> wasm-sdk-cache: warming $(FORGE_CARGO_HOME) with the SDK's dependency set"
+	mkdir -p "$(FORGE_CARGO_HOME)"
+	cd tui/wasm/guest && CARGO_HOME="$(FORGE_CARGO_HOME)" $(CARGO) fetch --locked
 	@echo "==> wasm-sdk-cache: crates now cached"
-	@ls "$${CARGO_HOME:-$$HOME/.cargo}/registry/cache" >/dev/null 2>&1 && \
-	  find "$${CARGO_HOME:-$$HOME/.cargo}/registry/cache" -name '*.crate' | wc -l
+	@find "$(FORGE_CARGO_HOME)/registry/cache" -name '*.crate' | wc -l
 
 computer-use-debug:
 	@echo "==> computer-use-debug: debug helper into priv/computer-use/"

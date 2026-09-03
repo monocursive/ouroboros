@@ -29,9 +29,12 @@ defmodule Ouroboros.Wasm.Forge do
       relative and free of `..`, no symlinks, and no `build.rs` — checked by name *and* by
       refusing the `[package] build` key that would give one power, because `src/build.rs`
       is otherwise a file the allow-list admits.
-    * **The sandbox.** No network (`--offline` as well, so a cold cache is a refusal rather
-      than a fetch), writes only into the scratch directory and the cargo home, a five-minute
-      default ceiling, and bounded output.
+    * **The sandbox.** A `Sandbox.builder_policy/1`: deny-by-default on **reads** as well as
+      on writes, so a build reads the toolchain, the SDK, the `wit` world file and its own
+      directories and nothing else — `include_str!` of anything else is
+      `Operation not permitted` at compile time. No network (`--offline` as well, so a cold
+      cache is a refusal rather than a fetch), writes only into the build directory, the
+      node-local cargo home and a private `TMPDIR`, a five-minute ceiling, bounded output.
 
   The manifest is read twice. First by a deliberately small scanner that refuses every line it
   cannot classify — the set of manifests this lane accepts is the scaffold's shape, so
@@ -78,6 +81,7 @@ defmodule Ouroboros.Wasm.Forge do
   @max_depth 6
 
   @default_timeout_ms 300_000
+  @max_timeout_ms 300_000
   @max_output_bytes 64 * 1024
   @reported_output_bytes 8 * 1024
   @forged_bundles 8
@@ -382,14 +386,16 @@ defmodule Ouroboros.Wasm.Forge do
     end
   end
 
+  # Bytes only. The **count** is bounded by `collect/1` — by its own guard for an inline map
+  # and by `walk_entry/5` for a directory, which refuses at the thirty-third entry rather
+  # than after reading a repository into memory — and a second count here was a check no
+  # input could reach, which is the same thing as no check at all.
   defp bound(files) do
     total = total(files)
 
-    cond do
-      map_size(files) > @max_files -> {:error, {:too_many_files, map_size(files), @max_files}}
-      total > @max_total_bytes -> {:error, {:input_too_large, total, @max_total_bytes}}
-      true -> :ok
-    end
+    if total > @max_total_bytes,
+      do: {:error, {:input_too_large, total, @max_total_bytes}},
+      else: :ok
   end
 
   defp total(files),
@@ -718,9 +724,17 @@ defmodule Ouroboros.Wasm.Forge do
   # agree, and the one that names the crate is the one worth reading.
   defp dependencies(sections) do
     case Map.get(sections, "dependencies") do
-      %{@guest_crate => %{"path" => path}} = deps
-      when map_size(deps) == 1 and is_binary(path) ->
+      %{@guest_crate => %{"path" => path} = table} = deps
+      when map_size(deps) == 1 and map_size(table) == 1 and is_binary(path) ->
         :ok
+
+      # `features`, `version`, `git`, `default-features` — every one of them changes what
+      # cargo resolves or how it builds, and the path is replaced by this module anyway, so
+      # the honest shape of this dependency is one key.
+      %{@guest_crate => table} = deps when map_size(deps) == 1 and is_map(table) ->
+        {:error,
+         {:invalid_guest_dependency,
+          table |> Map.keys() |> Enum.reject(&(&1 == "path")) |> Enum.sort()}}
 
       %{@guest_crate => _other} = deps when map_size(deps) == 1 ->
         {:error, {:invalid_guest_dependency, "the SDK is reached by `path`"}}
@@ -822,13 +836,13 @@ defmodule Ouroboros.Wasm.Forge do
     with {:ok, root} <- scratch_root(opts),
          {:ok, sdk} <- sdk_root(opts),
          {:ok, cargo} <- require_cargo(opts),
-         home <- cargo_home(opts),
+         {:ok, home} <- require_cargo_home(opts),
          :ok <- warm?(home) do
       directory = Path.join(root, "forge-" <> unique())
 
       case (with {:ok, directory} <- prepared(directory),
                  :ok <- materialize(project, directory, sdk),
-                 {:ok, output} <- run_cargo(cargo, directory, home, opts),
+                 {:ok, output} <- run_cargo(cargo, directory, home, sdk, opts),
                  {:ok, bytes, path} <- product(project, directory) do
               {:ok, %{bytes: bytes, path: path, output: output, directory: directory}}
             end) do
@@ -884,13 +898,12 @@ defmodule Ouroboros.Wasm.Forge do
     |> Enum.join("\n")
   end
 
-  defp run_cargo(cargo, directory, home, opts) do
+  defp run_cargo(cargo, directory, home, sdk, opts) do
     home = canonical(home)
-    scope = %{sandbox_mode: :workspace_write, root: directory, roots: [home]}
+    scope = %{root: directory}
     detection = Sandbox.detect()
 
-    with :ok <- fenceable(directory, home),
-         {:ok, policy} <- sandboxed(scope, detection),
+    with {:ok, policy} <- sandbox_policy(cargo, directory, home, sdk, detection),
          {:ok, scratch} <- Sandbox.scratch() do
       policy = Sandbox.with_scratch(policy, scratch)
 
@@ -905,16 +918,6 @@ defmodule Ouroboros.Wasm.Forge do
     end
   end
 
-  # A writable root under a `.git` or `.ouroboros` segment is denied by the sandbox's last
-  # rule, whatever the allows above it said. Refusing here says so; the alternative is a
-  # build that fails with a permission error nobody can attribute.
-  defp fenceable(directory, home) do
-    case Enum.find([directory, home], &protected_segment?/1) do
-      nil -> :ok
-      path -> {:error, {:build_root_inside_protected_segment, path}}
-    end
-  end
-
   defp canonical(path) do
     case Ouroboros.Workspace.Path.canonicalize(path) do
       {:ok, canonical} -> canonical
@@ -922,17 +925,73 @@ defmodule Ouroboros.Wasm.Forge do
     end
   end
 
-  defp protected_segment?(path),
-    do: Enum.any?(Path.split(path), &(&1 in [".git", ".ouroboros"]))
+  @doc """
+  The policy this node would build under, or the reason it will not build at all.
 
-  # No backend is a refusal, not a weaker posture. A Cargo build is arbitrary code at build
-  # time and the sandbox is one of the three things that make this lane's claim true, so a
-  # node that cannot apply one does not build components.
-  defp sandboxed(scope, detection) do
-    case Sandbox.decide(scope, detection) do
-      {:sandboxed, _label, policy} -> {:ok, policy}
-      {:unsandboxed, reason} -> {:error, {:sandbox_unavailable, reason}}
-      {:refused, reason} -> {:error, {:sandbox_unavailable, reason}}
+  No backend is a refusal rather than a weaker posture, and so is a backend that cannot fence
+  reads: a Cargo build is arbitrary code at build time, the sandbox is one of the three
+  things that make this lane's claim true, and half a sandbox makes half of it. Public
+  because "what would this build run under" is a question worth being able to ask without
+  running one.
+  """
+  @spec sandbox_policy(String.t(), Path.t(), Path.t(), Path.t(), Sandbox.detection()) ::
+          {:ok, Sandbox.policy()} | {:error, term()}
+  def sandbox_policy(cargo, directory, home, sdk, detection \\ Sandbox.detect())
+
+  def sandbox_policy(cargo, directory, home, sdk, detection) do
+    cond do
+      detection.backend == :none ->
+        {:error, {:sandbox_unavailable, {:no_backend, detection}}}
+
+      not Sandbox.fences_reads?(detection) ->
+        {:error,
+         {:sandbox_cannot_fence_reads, detection.backend,
+          "this backend has no read allow-set, so a build under it could read anything the " <>
+            "node can (docs/WASM.md D18)"}}
+
+      true ->
+        {:ok,
+         Sandbox.builder_policy(
+           writable: [directory, home],
+           readable: read_set(cargo, sdk)
+         )}
+    end
+  end
+
+  @doc """
+  Everything a build may read beyond `Sandbox.platform_readable/0`, and why each one is here.
+
+  Five roots, and the fence is that there is no sixth:
+
+    * the **cargo executable's own directory**, because `process-exec` still has to read the
+      binary — with rustup that is a shim, and the shim is what execs the real one;
+    * the **rustup home**, which is where that real one and every library it links live;
+    * the **guest SDK checkout**, which is the one path dependency a forged project has;
+    * the **`wit` directory beside it**, because `wit_bindgen::generate!` reads
+      `../wit` at macro-expansion time — a project that could not read it would fail to
+      build, and a fence that let it read anything else to find it would not be one;
+    * the **build directory and the cargo home**, which are writable and therefore readable.
+
+  `Ouroboros.Wasm.Forge.read_set/2` is public so a test can assert on the list rather than on
+  a profile, and so the answer to "what can a build read" is one function.
+  """
+  @spec read_set(String.t(), Path.t()) :: [Path.t()]
+  def read_set(cargo, sdk) do
+    [
+      Path.dirname(cargo),
+      rustup_home(),
+      sdk,
+      Path.expand("../wit", sdk)
+    ]
+    |> Enum.filter(&(is_binary(&1) and &1 != ""))
+    |> Enum.map(&canonical/1)
+    |> Enum.uniq()
+  end
+
+  defp rustup_home do
+    case System.get_env("RUSTUP_HOME") do
+      path when is_binary(path) and path != "" -> path
+      _unset -> Path.join(System.user_home() || "/nonexistent", ".rustup")
     end
   end
 
@@ -955,7 +1014,7 @@ defmodule Ouroboros.Wasm.Forge do
       env:
         Sandbox.env(policy) ++
           [{"CARGO_HOME", home}, {"CARGO_NET_OFFLINE", "true"}, {"CARGO_TERM_COLOR", "never"}],
-      timeout_ms: timeout(opts),
+      timeout_ms: build_timeout(opts),
       max_bytes: @max_output_bytes
     )
     |> case do
@@ -977,8 +1036,18 @@ defmodule Ouroboros.Wasm.Forge do
 
   # Cargo's diagnostics are the author's text quoted back. Bounded, and never anything a
   # caller is invited to read as this node's own words.
-  defp clip(output) when byte_size(output) > @reported_output_bytes,
-    do: binary_part(output, 0, @reported_output_bytes) <> "\n... truncated"
+  #
+  # The **tail**, not the head: a build says `Compiling …` once per crate and then says why
+  # it failed, so a bound that kept the first eight kibibytes kept forty lines of progress
+  # and threw away the error. A sandbox denial is one line at the very end of that.
+  defp clip(output) when byte_size(output) > @reported_output_bytes do
+    "... truncated\n" <>
+      binary_part(
+        output,
+        byte_size(output) - @reported_output_bytes,
+        @reported_output_bytes
+      )
+  end
 
   defp clip(output), do: output
 
@@ -1029,10 +1098,20 @@ defmodule Ouroboros.Wasm.Forge do
           # Wider than `describe/1`: this string is the whole of what an operator running
           # `capabilities.preview` is told about why a build did not happen, and a refusal
           # whose remedy was elided by an inspect limit is a refusal with its answer cut off.
-          reason: inspect(reason, limit: 50, printable_limit: 1_000)
+          reason: inspect(reason, limit: 50, printable_limit: 1_000),
+          # And the compiler's own words in a field of their own rather than escaped inside
+          # that string. `inspect`'s printable limit cuts from the front, so a build whose
+          # last line is the sandbox denial had exactly that line elided by the bound meant
+          # to keep the refusal readable.
+          output: build_output(reason)
         }
     end
   end
+
+  @doc false
+  @spec build_output(term()) :: String.t() | nil
+  def build_output({:build_failed, {:exit, _status, output}}) when is_binary(output), do: output
+  def build_output(_reason), do: nil
 
   ## ---------------------------------------------------------------------- imports
 
@@ -1210,6 +1289,19 @@ defmodule Ouroboros.Wasm.Forge do
 
   ## ------------------------------------------------------------------ the toolchain
 
+  defp require_cargo_home(opts) do
+    case cargo_home(opts) do
+      path when is_binary(path) and path != "" ->
+        {:ok, path}
+
+      _unset ->
+        {:error,
+         {:no_cargo_home,
+          "this node has no data directory, so it has nowhere to keep the registry cache a " <>
+            "forge builds from; name one with `config :ouroboros, :wasm_forge_cargo_home`"}}
+    end
+  end
+
   defp require_cargo(opts) do
     case cargo(opts) do
       path when is_binary(path) ->
@@ -1217,7 +1309,10 @@ defmodule Ouroboros.Wasm.Forge do
 
       nil ->
         {:error,
-         {:no_cargo, "no cargo on this node's PATH; a :builder node needs the Rust toolchain"}}
+         {:no_cargo,
+          "no cargo on this node's PATH. A forge runs where the effect lands; an operator " <>
+            "who wants a dedicated builder puts the toolchain, the warmed cache and the " <>
+            "grant on that node"}}
     end
   end
 
@@ -1228,16 +1323,20 @@ defmodule Ouroboros.Wasm.Forge do
     end
   end
 
-  defp cargo_home(opts) do
-    case Keyword.get(opts, :cargo_home) || Application.get_env(:ouroboros, :wasm_forge_cargo_home) do
-      path when is_binary(path) and path != "" ->
-        path
+  @doc """
+  The registry cache this node builds against: node-local, never the operator's own by default.
 
-      _unset ->
-        case System.get_env("CARGO_HOME") do
-          path when is_binary(path) and path != "" -> path
-          _unset -> Path.join(System.user_home() || "/nonexistent", ".cargo")
-        end
+  `<data_dir>/wasm/cargo-home`, warmed by `make wasm-sdk-cache`. Neither `$CARGO_HOME` nor
+  `~/.cargo` is consulted unless an operator names one, and the reason is a file: a cargo
+  home carries `config.toml`, and `[build] rustc-wrapper` in it is a program cargo runs on
+  every crate. A developer's `~/.cargo` is a directory a great many things write to; making
+  it the default put all of them inside the build (D19).
+  """
+  @spec cargo_home(keyword()) :: Path.t() | nil
+  def cargo_home(opts \\ []) do
+    case Keyword.get(opts, :cargo_home) || Application.get_env(:ouroboros, :wasm_forge_cargo_home) do
+      path when is_binary(path) and path != "" -> path
+      _unset -> data_subdir("cargo-home")
     end
   end
 
@@ -1269,6 +1368,8 @@ defmodule Ouroboros.Wasm.Forge do
   # than a build that fails somewhere inside a resolver.
   # A map and not a tuple: this reaches `capabilities.preview`, which answers a JSON-RPC
   # client, and a tuple is a shape that gets all the way there and then cannot be encoded.
+  defp cache_state(nil), do: %{state: :no_cargo_home, missing: [], missing_count: 0}
+
   defp cache_state(home) do
     case missing_crates(home) do
       [] -> :warm
@@ -1280,6 +1381,9 @@ defmodule Ouroboros.Wasm.Forge do
     case cache_state(home) do
       :warm ->
         :ok
+
+      %{state: :no_cargo_home} ->
+        {:error, {:no_cargo_home, "this node has no data directory to keep a cache in"}}
 
       %{missing: missing, missing_count: count} ->
         {:error,
@@ -1367,11 +1471,26 @@ defmodule Ouroboros.Wasm.Forge do
     end
   end
 
-  defp timeout(opts) do
-    case Keyword.get(opts, :timeout_ms) || Application.get_env(:ouroboros, :wasm_forge_timeout) do
-      ms when is_integer(ms) and ms > 0 -> ms
-      _unset -> @default_timeout_ms
-    end
+  @doc """
+  The wall-clock ceiling one build runs under, which is never more than five minutes.
+
+  Two ceilings, and the smaller one wins. This one is the forge's, and it is the one that
+  fires: `Ouroboros.Provider.Native.Exec` signals the sandboxed process group at it, so the
+  build stops and the `after` that removes the scratch directory runs. The other belongs to
+  whoever called — on the effect path `config :ouroboros, :effect_timeout` bounds the whole
+  effect, and `Ouroboros.Agent.Effects.ForgeWasmCapability` therefore asks for a build budget
+  strictly inside it, because the runner's own deadline is a `brutal_kill` that runs no
+  cleanup and would leave a cargo tree, and a compiler, behind (docs/WASM.md D19).
+  """
+  @spec build_timeout(keyword()) :: pos_integer()
+  def build_timeout(opts \\ []) do
+    configured =
+      case Keyword.get(opts, :timeout_ms) || Application.get_env(:ouroboros, :wasm_forge_timeout) do
+        ms when is_integer(ms) and ms > 0 -> ms
+        _unset -> @default_timeout_ms
+      end
+
+    min(configured, @max_timeout_ms)
   end
 
   defp pool(opts), do: Keyword.get(opts, :pool, Pool)

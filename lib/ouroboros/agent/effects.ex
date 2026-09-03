@@ -399,7 +399,7 @@ defmodule Ouroboros.Agent.Effects do
     # how a bundle comes back `{:stale_epoch, _, _}` from a peer nobody asked.
     defp forge(params, principal) do
       opts =
-        [author: principal, name: params.name]
+        [author: principal, name: params.name, timeout_ms: build_timeout()]
         |> put_present(:eval, params.eval)
         |> put_present(:start_config, params.start_config)
 
@@ -437,6 +437,15 @@ defmodule Ouroboros.Agent.Effects do
 
     defp put_present(opts, _key, nil), do: opts
     defp put_present(opts, key, value), do: Keyword.put(opts, key, value)
+
+    # The build has to lose the race with the runner's deadline, for `DelegateTask`'s reason
+    # and with a sharper consequence. The runner ends an overrunning effect with
+    # `Task.shutdown(task, :brutal_kill)`, and a killed process runs no `after` — so a forge
+    # cut there leaves its scratch tree on disk and, worse, a cargo process group still
+    # compiling inside it. Ending inside the forge's own ceiling means `Exec` signals that
+    # group and the `after` removes the tree. Five minutes remains the forge's own ceiling;
+    # on this path the smaller of the two wins (docs/WASM.md D19).
+    defp build_timeout, do: max(Runner.timeout() - 5_000, 1_000)
 
     defp nodes([]), do: [node()]
     defp nodes(nodes), do: nodes

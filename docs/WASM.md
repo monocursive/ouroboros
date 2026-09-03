@@ -735,11 +735,14 @@ shell runs in.
    classify **and** by `Toml`, the parser this repository already reads `ouroboros.toml`
    with, and the two must produce the same document: a scanner that is not a TOML parser is
    the thing an author would write a manifest to fool, and the disagreement is the refusal.
-3. **The sandbox.** `cargo build --release --target wasm32-wasip2 --locked --offline` with no
-   network, writes confined to the build directory and the cargo home, a five-minute default
-   ceiling and bounded output. A node with no sandbox backend **does not build at all** —
-   that is a refusal and not a weaker posture, because the fence is one of the three things
-   this lane's claim rests on.
+3. **The sandbox.** `cargo build --release --target wasm32-wasip2 --locked --offline` under
+   `Sandbox.builder_policy/1`, which is deny-by-default on **reads** as well as on writes:
+   a build reads the toolchain, the guest SDK, the `wit` world file beside it and its own
+   directories, and nothing else. No network; writes confined to the build directory, a
+   node-local cargo home and a private `TMPDIR`; a five-minute ceiling; bounded output. A
+   node with no sandbox backend **does not build at all**, and neither does one whose only
+   backend cannot express a read allow-set — those are refusals and not weaker postures,
+   because the fence is one of the three things this lane's claim rests on.
 
 **The imports are read, not declared.** `Wasm.Deploy.sign/2` never parses a component,
 because those bytes came off a socket (D15). Here the node built them itself, from source it
@@ -1488,17 +1491,50 @@ machinery — it is a backend, not a lane (D9).
       directory and the cargo home, network denied, `--offline` and `--locked` besides, a
       five-minute ceiling and bounded output. A node with no backend refuses to build.
 
-  **And one thing it is not.** The sandbox's filesystem policy denies *writes*; reads are
-  open, on every backend, because that is what a compiler needs. So `include_str!` of any
-  path this node can read compiles, and its contents end up inside a signed component that
-  can be messaged. That is a real path from a `:forge` grant to a file's contents, it is
-  proved by a test that asserts the build **succeeds**, and it is stated in §12 rather than
-  papered over with a regex on Rust source that `core::include_str!` would walk around. It is
-  also not a lane-W regression: an agent-authored BEAM capability runs `File.read!/1` with
-  full VM authority the moment it is deployed. What bounds it here is what bounds the rest of
-  the effect surface — the grant is deny-by-default and per-capability, the author recorded
-  in the signature is the server-owned principal, and the signing service journals the
-  decision.
+  **Reads are fenced too, and the first cut of this slice got that wrong.** It shipped the
+  ordinary `workspace_write` policy, whose filesystem rules bound writes and open reads —
+  what a shell needs — and argued in this decision that a `:forge` grant was therefore "no
+  wider than a lane-B capability". It was not. That argument holds only for `modules: :any`;
+  the narrow grant, the one an operator reaches for precisely because it is narrow, still
+  yielded read authority over the whole node. An adversarial review proved it end to end: a
+  component that `include_str!`s a planted secret was built, signed, deployed and **answered
+  the secret through a mesh message**, and a build that included the real `~/.ssh/id_rsa`
+  succeeded.
+
+  A build now runs under `Sandbox.builder_policy/1`, which is `(deny default)` on reads as
+  well as on writes. It is not a `sandbox_mode`: no session selects it, no operator
+  configures it, and there is no spelling of it a signal can ask for. What a build may read
+  is exactly this, and the fence is that there is no more:
+
+    * the platform's own toolchain roots (`Sandbox.platform_readable/0`; on macOS
+      `/usr/lib`, `/usr/bin`, `/usr/share`, `/bin`, `/System`, `/private/var/db`, `/dev`,
+      `/private/etc`, `/Library/Preferences`, `/Applications/Xcode.app`), plus
+      `file-read-metadata` on `/` — a compiler stats its way down a path before it opens
+      anything, and a `stat` denial reads as a missing file rather than as a fence;
+    * the **cargo executable's own directory**, because `process-exec` still has to read the
+      binary, and with rustup that binary is a shim that execs another;
+    * the **rustup home**, where the real compiler and everything it links live;
+    * the **guest SDK checkout** and the **`wit` directory beside it**, because
+      `wit_bindgen::generate!` reads `../wit` at macro-expansion time;
+    * the **build directory** and the **cargo home**, which are writable and therefore
+      readable, and a private `TMPDIR`.
+
+  `Ouroboros.Wasm.Forge.read_set/2` is that list as one function, so "what can a build read"
+  has one answer. `include_str!` of anything else, and a `#[path]` module outside the
+  project, are `Operation not permitted` **at compile time** — proved by tests that assert
+  the failure and, beside them, that the honest fixture still builds under the same policy,
+  because a fence that broke the toolchain would pass the first assertion and be useless.
+
+  What is still readable is the toolchain and the SDK, and that is not nothing: a project
+  can read the compiler's own source and the guest crate. Neither is a secret, and both have
+  to be readable for a build to exist at all. The node's data directory, the operator's home,
+  the workspace, `/etc/ssh`, another user's files: none of them are.
+
+  On Linux the same policy is a bubblewrap namespace that binds *only* those roots rather
+  than `--ro-bind / /`. **That is unverified** — no Linux build has run under this module —
+  and `ouro-sandbox`, the backend this runtime prefers on Linux, has no read allow-set in its
+  request protocol at all, so the forge refuses it by name rather than building under a
+  fence it does not have. Giving that helper one is a `tui/` change and a later slice's.
 - **D19 — a forge input is bounded before it is read, and a cold cache is a refusal.**
   Thirty-two files and one mebibyte, paths relative and free of `..`, no symlink followed,
   every bound applied *before* a byte is copied into the build directory. The numbers are the
@@ -1523,8 +1559,42 @@ machinery — it is a backend, not a lane (D9).
   The cargo home is *writable* inside the sandbox, which is the one place this fence is wider
   than the build directory: cargo extracts `.crate` files into `registry/src` and takes a
   lock file, and a read-only cache is a build that cannot start. What makes that acceptable
-  is the lock pin — nothing untrusted runs at build time to abuse it — and an operator who
-  wants it narrower gives each builder a `CARGO_HOME` of its own.
+  is the lock pin — nothing untrusted runs at build time to abuse it.
+
+  **And whose directory it is decides who runs code inside the build.** A cargo home carries
+  `config.toml`, and `[build] rustc-wrapper` in one is a program cargo runs on every crate it
+  compiles. `~/.cargo` is a directory a great many things write to, so the default is
+  node-local — `<data_dir>/wasm/cargo-home`, which is what `make wasm-sdk-cache` warms — and
+  neither `$CARGO_HOME` nor the operator's own home is consulted unless an operator names one
+  with `config :ouroboros, :wasm_forge_cargo_home`. A node with no data directory has nowhere
+  to keep a cache and says so rather than falling back to somebody's.
+
+  **Two ceilings, and the smaller one has to be the forge's.** The forge's own is five
+  minutes and is enforced by `Ouroboros.Provider.Native.Exec`, which signals the sandboxed
+  process group and lets the `after` that removes the scratch tree run. The effect surface
+  has a second one, `config :ouroboros, :effect_timeout`, and it is not a deadline of the
+  same kind: the runner ends an overrunning effect with `Task.shutdown(task, :brutal_kill)`,
+  and a killed process runs no `after`. A forge cut there left its build tree on disk and a
+  cargo process group still compiling inside it — which is why
+  `Ouroboros.Agent.Effects.ForgeWasmCapability` asks for a build budget strictly inside the
+  effect's, the same idiom `DelegateTask` uses against the same deadline, and why the test
+  for it asserts `pgrep` finds nothing rather than only that the refusal has the right name.
+
+  **`:any` does not cross the lanes.** `Ouroboros.Control.Grants` holds `"wasm/<name>"` in a
+  `:forge` allow-list, and it would have been easy to let `modules: :any` cover those too —
+  it reads as the broad grant, and this is the broad case. It must not, and the reason is
+  that a grant is a durable checkpoint: an operator wrote `modules: :any` when the only thing
+  *forge* could do was compile a BEAM module, and a release that made their stored grant also
+  mean "build and sign any component this machine can" would have widened their authority
+  without them touching it. `:any` keeps its pre-W14 meaning; lane W is reached by
+  `"wasm/<name>"` for one capability or `"wasm/*"` for all of them, which is how the broad
+  thing gets said out loud.
+
+  **Where a forge runs is placement, not a mechanism.** Nothing here checks a node's role: a
+  forge runs where the effect lands, and an operator who wants a dedicated builder puts the
+  toolchain, the warmed cache and the `:forge` grant on that node — the same way a `:signer`
+  node is one because it is the node holding the key. Saying `:builder` in a sentence about
+  this lane describes a deployment and not a check.
 - **D20 — a policy component may narrow, and may only widen where an operator said so.**
   `Ouroboros.Wasm.PolicyEngine` reaches a signed policy component only on `{:ask, :no_rule}`,
   which is every call `Control.Permissions` had no rule for. Its `deny` stands; its `ask`
@@ -1618,15 +1688,14 @@ Stated once, so nobody reads more into the lane than is there:
 - **The host functions are the new surface.** Every import added to a world is
   boundary code. v1's answer is austerity: `log` only. Growth of any world's import
   set is a signing-policy event, not a convenience.
-- **A forge fences writes, the network and the dependency set — not reads.** The OS sandbox
-  a build runs in allows `file-read*`, because a compiler needs to read, so a `src/**.rs`
-  that `include_str!`s any path the node can read compiles and carries those bytes into a
-  signed component. `test/wasm/forge_test.exs` proves it by asserting that build *succeeds*.
-  Closing it means a read-fenced profile for builds — a different policy from the one
-  `Native.Sandbox` gives a shell, and one nothing in this lane has yet — not a pattern match
-  on Rust source, which `core::include_str!` walks around. Until then a `:forge` grant is
-  read authority over this node's filesystem, attributable to the granted principal and
-  journalled by the signer, and no wider than what a deployed lane-B capability already has.
+- **A forge's read fence is verified on macOS and unverified on Linux.** A build reads only
+  the roots in D18's list — proved on this Mac by builds that fail with
+  `Operation not permitted` — and what remains readable inside that list is the toolchain and
+  the guest SDK, which have to be readable for a compiler to run. The bubblewrap form of the
+  same policy binds only those roots and **has not been exercised**; `ouro-sandbox`, the
+  preferred Linux backend, cannot express a read allow-set at all and is refused by name
+  rather than used. So on Linux this lane either builds under bubblewrap with an unverified
+  fence or does not build, and neither of those is the same sentence as the macOS one.
 - **wasmtime is a dependency, not a proof.** It has had escape CVEs; they are rare and
   patched fast, and the helper process (which can itself be OS-sandboxed later) is the
   second wall. Pin it, watch its advisories, and keep its dialect small — §7.3's disabled
@@ -2196,10 +2265,14 @@ Each slice is PR-sized, lands green, and is useful alone.
   are the ones this repository already builds. The manifest is read by a scanner that refuses
   every line it cannot classify *and* by `Toml`, and a disagreement between them is the
   refusal. `cargo build --release --target wasm32-wasip2 --locked --offline` then runs under
-  `Native.Sandbox` — no network, writes only in the build directory and the cargo home, a
-  five-minute ceiling — and a node with no sandbox backend refuses to build at all. The
-  registry cache the build needs is warmed by `make wasm-sdk-cache`; a cache missing a crate
-  is a refusal naming it in 8 ms, not a fetch.
+  `Sandbox.builder_policy/1` — deny-by-default on reads as well as writes, so a build sees
+  the toolchain, the SDK, the `wit` world file and its own directories and nothing else; no
+  network; writes only in the build directory, the node-local cargo home and a private
+  `TMPDIR`; a five-minute ceiling — and a node with no backend, or whose only backend cannot
+  express a read allow-set, refuses to build at all. The registry cache is `<data_dir>/wasm/
+  cargo-home`, warmed by `make wasm-sdk-cache` and never the operator's own `~/.cargo` unless
+  they name it, because a cargo home's `config.toml` can name a `rustc-wrapper`; a cache
+  missing a crate is a refusal naming it in 8 ms, not a fetch.
 
   The node then reads the product's imports with its own helper, which D18 argues is exactly
   the case D15 does not cover: it built these bytes. Two effects — `ForgeWasmCapability` and
@@ -2221,10 +2294,22 @@ Each slice is PR-sized, lands green, and is useful alone.
   `capabilities.admit` from a workspace proposal. Every C9 refusal has a test that is red
   without its check, and the sandbox is proved by what the kernel actually did: a probe
   spawned through the same `Sandbox.wrap/4` the build goes through wrote inside the build
-  directory, was denied outside it, and got `Operation not permitted` from a connect. The
-  limit that fence does not cover — reads are open, so `include_str!` of a readable path
-  compiles — is proved by a test asserting that build succeeds, and is written down in D18
-  and §12 rather than defended.
+  directory, was denied outside it, could not read a file the fence did not name, and got
+  `Operation not permitted` from a connect.
+
+  **The first cut of this slice did not fence reads, and an adversarial review walked
+  through the hole end to end**: a component that `include_str!`s a planted secret was
+  signed, deployed and answered the secret through a mesh message, and one that included the
+  real `~/.ssh/id_rsa` built fine. The excuse written into D18 — that this was "no wider than
+  a lane-B capability" — was true only of `modules: :any`, and the narrow grant is the one an
+  operator reaches for *because* it is narrow. Builds now run under a policy that is closed
+  on reads (D18 lists what it opens), the two escapes are tests asserting
+  `Operation not permitted` beside a test that the honest fixture still builds, and the
+  Linux half is marked unverified rather than claimed. Two more the same review proved: a
+  stored `modules: :any` grant silently came to cover lane W — `:any` now keeps its pre-W14
+  meaning and `"wasm/*"` is how the broad thing is said — and a forge on the effect path
+  could be cut by the runner's `brutal_kill`, which runs no cleanup, so the forge's budget
+  now sits strictly inside the effect's and the test for it asserts `pgrep` finds nothing.
 - **W15 — a policy is a component, and it can only narrow.** The helper grew a **second closed
   world**, `ouroboros:policy@0.1.0`: the same single import, `evaluate: func(string) -> string`
   in place of `handle-message`, and a `load` that is told which of the two a set of bytes is

@@ -1393,8 +1393,10 @@ code on the node before anything else could check it.
 `Cargo.toml` may hold exactly `[workspace]` (empty), `[package]`, `[lib]`, `[dependencies]`
 and `[profile.release]`. `[lib]` must be `crate-type = ["cdylib"]`; `[profile.release]` must
 be the SDK's, verbatim, because that profile is what keeps the import list at exactly `log`;
-`[dependencies]` must name `ouroboros-guest` and nothing else. Whatever path you wrote for
-the SDK is replaced with the node's own checkout — your path is a fact about your machine.
+`[dependencies]` must name `ouroboros-guest` and nothing else, with exactly one key —
+`path`. `features`, `version` and `git` each change what cargo resolves or how it builds,
+and the path is replaced with the node's own checkout anyway: your path is a fact about your
+machine.
 
 `Cargo.lock` must be, byte for byte, the lock the SDK resolves to, plus your own project's
 entry. That is what `cargo generate-lockfile` writes for a project scaffolded with
@@ -1411,27 +1413,35 @@ If any of that is wrong the forge says which rule and which file, before it copi
 sandbox the native agent's shell runs in:
 
 * no network — `--offline` as well, so a missing crate is a refusal rather than a download;
-* writes only into the build directory and the cargo home;
+* writes only into the build directory, the node's cargo home and a private `TMPDIR`;
+* **reads** only from the toolchain, the guest SDK, the `wit` world file beside it and those
+  same directories — everything else is `Operation not permitted` at compile time;
 * a five-minute wall-clock ceiling and bounded output;
 * a node with no sandbox backend does not build at all.
 
-**Reads are not fenced.** A compiler has to read, so the profile allows it: an
-`include_str!("/etc/hosts")` in your `src/` compiles, and those bytes end up inside the
-component. That is written down in docs/WASM.md D18 and §12 rather than hidden. Treat a
-`:forge` grant as read access to the builder's filesystem.
+**The read fence is the part to design around.** `include_str!` and `include_bytes!` reach
+files at compile time and a `#[path]` module reaches one outside `src/`; all of them are
+denied unless the file is inside your project. A capability that needs data ships it as a
+`src/**.rs` file or receives it in its `init` config — those are the two doors, and both are
+inside the manifest that gets signed. On Linux this is bubblewrap and **unverified**; a node
+whose only sandbox is `ouro-sandbox` refuses to forge rather than building behind a fence it
+cannot apply (docs/WASM.md D18).
 
 ### Warming the cache, once, per builder
 
 `--offline` means every crate the SDK's lock names has to already be on the machine:
 
 ```sh
-make wasm-sdk-cache                                  # into ~/.cargo
-make wasm-sdk-cache CARGO_HOME=/var/lib/ouro/cargo   # into a node-local cache
+make wasm-sdk-cache                                  # into <data_dir>/wasm/cargo-home
+make wasm-sdk-cache CARGO_HOME=/var/lib/ouro/cargo   # into a cache you keep elsewhere
 ```
 
 which is `cargo fetch --locked` in `tui/wasm/guest` — exactly the SDK's dependency set and
-nothing else. A cold cache is refused in milliseconds, naming the crates that are missing and
-the command that fixes it. It never waits on a network.
+nothing else. The default is the **node's own** cache and not your `~/.cargo`, because a
+cargo home carries a `config.toml` and `[build] rustc-wrapper` in one is a program cargo runs
+on every crate; point the forge at another with
+`config :ouroboros, :wasm_forge_cargo_home`. A cold cache is refused in milliseconds, naming
+the crates that are missing and the command that fixes it. It never waits on a network.
 
 ### From an agent
 
@@ -1444,7 +1454,10 @@ Ouroboros.Control.Grants.grant(agent_id, :deploy, nodes: [node()])
 
 A `:forge` allow-list holds BEAM module atoms and `"wasm/<name>"` strings, and the two
 spellings never match each other, so the grant above admits forging `counter` in lane W and
-nothing else. `modules: :any` is what it has always been and now reaches both lanes.
+nothing else. **`modules: :any` does not reach lane W**: it means what it meant before this
+lane existed — any BEAM module — so that a grant somebody wrote and forgot could not come to
+mean more because a release added a second thing *forge* can do. `modules: ["wasm/*"]` is how
+you say "any component", out loud.
 
 ```elixir
 {:ok, signal} =
@@ -1461,6 +1474,11 @@ nothing else. `modules: :any` is what it has always been and now reaches both la
     nodes: [node()]
   })
 ```
+
+A forge is bounded twice: five minutes of wall clock in the forge itself, and
+`config :ouroboros, :effect_timeout` around the whole effect. The effect asks for a build
+budget strictly inside the second, so a build that runs long is stopped by the forge — which
+signals the compiler and removes its tree — rather than by the runner, which would not.
 
 `eval` is not optional in practice: lane W requires a signed evaluation spec (D12), because
 there is no build peer running your tests here — the spec *is* the test story, and the

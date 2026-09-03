@@ -65,10 +65,22 @@ defmodule Ouroboros.Wasm.ForgeFixture do
     end
   end
 
+  @doc """
+  The cargo home these suites build against, as an operator naming their own would.
+
+  `Ouroboros.Wasm.Forge`'s default is node-local — `<data_dir>/wasm/cargo-home`, warmed by
+  `make wasm-sdk-cache` — and a test that used it would warm a fresh cache per temporary data
+  directory, which is a download per test rather than a build. Naming `~/.cargo` is the same
+  thing an operator does on a developer machine, and the node-local default has a test of its
+  own that does not build.
+  """
+  @spec cargo_home() :: Path.t()
+  def cargo_home, do: Path.expand("~/.cargo")
+
   @doc "The first thing that is not here, said the way an operator has to fix it."
   @spec missing() :: String.t() | nil
   def missing do
-    toolchain = Forge.toolchain()
+    toolchain = Forge.toolchain(cargo_home: cargo_home())
 
     cond do
       is_nil(toolchain.cargo) ->
@@ -78,7 +90,8 @@ defmodule Ouroboros.Wasm.ForgeFixture do
         "no wasm32-wasip2 target; run `rustup target add wasm32-wasip2`"
 
       toolchain.cache != :warm ->
-        "cold cargo registry cache at #{toolchain.cargo_home}; run `make wasm-sdk-cache`"
+        "cold cargo registry cache at #{toolchain.cargo_home || "(no data directory)"}; " <>
+          "run `make wasm-sdk-cache`"
 
       is_nil(toolchain.sdk) ->
         "no guest SDK checkout at tui/wasm/guest to build a component against"

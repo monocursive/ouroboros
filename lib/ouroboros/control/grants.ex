@@ -18,9 +18,15 @@ defmodule Ouroboros.Control.Grants do
   digest, and the name a rollout, a `start` block and this allow-list all agree on is
   `"wasm/" <> Ouroboros.Wasm.Artifact.name?/1`. The two spellings can never match each other,
   so a grant narrowed to `[Ouroboros.Capability.Echo]` admits no wasm forge and a grant
-  narrowed to `["wasm/counter"]` admits no BEAM one. `modules: :any` is what it has always
-  been — forge whatever you like — and it now reaches both lanes, which is the widening this
-  spelling makes explicit rather than hides.
+  narrowed to `["wasm/counter"]` admits no BEAM one.
+
+  **`:any` does not cross the lanes, and this is the important sentence in this moduledoc.**
+  `modules: :any` means what it meant before lane W existed: any BEAM module. A grant an
+  operator wrote — and, worse, a grant they wrote and forgot, sitting in a durable
+  checkpoint — cannot come to mean more than it did on the day it was written because a
+  later release added a second thing the word *forge* can do. Lane W is reached only by an
+  entry that says so: `"wasm/<name>"` for one capability, or `"wasm/*"` for all of them, and
+  the wildcard is the only way to say the broad thing, out loud, on purpose.
 
   `granted?/3` is asked about a *concrete attempt*, not about an effect in the abstract,
   so a grant to start `Ouroboros.Capability.Echo` refuses a request to start anything
@@ -328,11 +334,22 @@ defmodule Ouroboros.Control.Grants do
     key = Map.fetch!(@constraints, effect)
 
     case {Map.fetch(constraints, key), Map.fetch(attempt, Map.fetch!(@attempt_keys, key))} do
-      {{:ok, :any}, {:ok, _value}} -> true
-      {{:ok, allowed}, {:ok, value}} when is_list(allowed) -> value in allowed
+      {{:ok, allowed}, {:ok, value}} -> admits?(key, allowed, value)
       _other -> false
     end
   end
+
+  # `:any` is scoped to the shape the constraint had before lane W: a module allow-list is
+  # about modules, and a lane-W capability is not one. Widening a stored grant by shipping a
+  # release is the one thing a durable authority must not do.
+  defp admits?(:modules, :any, value), do: is_atom(value)
+
+  defp admits?(:modules, allowed, "wasm/" <> _rest = value) when is_list(allowed),
+    do: value in allowed or "wasm/*" in allowed
+
+  defp admits?(_key, :any, _value), do: true
+  defp admits?(_key, allowed, value) when is_list(allowed), do: value in allowed
+  defp admits?(_key, _allowed, _value), do: false
 
   defp denied_decision(reason), do: %{granted?: false, grant: nil, reason: reason}
 
@@ -407,6 +424,7 @@ defmodule Ouroboros.Control.Grants do
   # is a grant that reads as narrow and is not.
   defp module_or_capability?(value) when is_atom(value) and not is_nil(value), do: true
 
+  defp module_or_capability?("wasm/*"), do: true
   defp module_or_capability?("wasm/" <> name), do: Ouroboros.Wasm.Artifact.name?(name)
 
   defp module_or_capability?(_value), do: false

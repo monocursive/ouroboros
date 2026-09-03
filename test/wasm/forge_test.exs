@@ -6,10 +6,13 @@ defmodule Ouroboros.Wasm.ForgeTest do
 
   alias Ouroboros.Mesh
   alias Ouroboros.Provider.Native.Sandbox
+  alias Ouroboros.Provider.Native.Sandbox.Bwrap
+  alias Ouroboros.Provider.Native.Sandbox.SandboxExec
   alias Ouroboros.Runtime.Capabilities
   alias Ouroboros.Upgrade.Rollout.Registry
   alias Ouroboros.Upgrade.Signing.Service
   alias Ouroboros.Wasm
+  alias Ouroboros.Wasm.Bundle
   alias Ouroboros.Wasm.Deploy
   alias Ouroboros.Wasm.Forge
   alias Ouroboros.Wasm.ForgeFixture
@@ -185,6 +188,39 @@ defmodule Ouroboros.Wasm.ForgeTest do
       assert {:error, {:invalid_manifest, _reason}} = validate(files, context)
     end
 
+    # Red without `dependencies/1`'s `map_size(table) == 1`. `features`, `version` and `git`
+    # each change what cargo resolves or how it builds, and the path is rewritten by this
+    # module anyway, so one key is the honest shape of this dependency.
+    test "a guest dependency carrying anything but a path is refused", context do
+      for extra <- [~s(features = ["x"]), ~s(version = "0.1"), ~s(git = "https://example")] do
+        files =
+          manifest(fixture(), fn toml ->
+            String.replace(
+              toml,
+              ~s(ouroboros-guest = { path = "../../tui/wasm/guest" }),
+              ~s(ouroboros-guest = { path = "../../tui/wasm/guest", #{extra} })
+            )
+          end)
+
+        assert {:error, {:invalid_guest_dependency, [_key]}} = validate(files, context)
+      end
+    end
+
+    # The count is bounded twice, in the two places an input can arrive, and each one has a
+    # test: this is the directory half, which refuses at the thirty-third entry rather than
+    # after reading a repository into memory.
+    test "thirty-three files in a directory are refused during the walk", context do
+      directory = Path.join(context.tmp, "too-many")
+      copy!(ForgeFixture.project_root(), directory)
+      File.mkdir_p!(Path.join(directory, "src"))
+
+      for index <- 1..29 do
+        File.write!(Path.join([directory, "src", "module#{index}.rs"]), "// filler\n")
+      end
+
+      assert {:error, {:too_many_files, 33, 32}} = Forge.preview(%{dir: directory}, build?: false)
+    end
+
     test "a project missing its lock, its manifest or its entry point is refused", context do
       for file <- ["Cargo.lock", "Cargo.toml", "src/lib.rs"] do
         assert {:error, {:missing_files, [^file]}} =
@@ -196,12 +232,14 @@ defmodule Ouroboros.Wasm.ForgeTest do
   ## ------------------------------------------------------------------ the sandbox
 
   describe "the sandbox is the third fence" do
-    # Red without `sandboxed/2`'s `{:unsandboxed, reason}` arm. A build is arbitrary code at
-    # build time, so a node that cannot fence one does not run one.
+    # Red without `sandboxed/5`'s `:none` arm. A build is arbitrary code at build time, so a
+    # node that cannot fence one does not run one.
     test "a node with no sandbox backend refuses to build at all", context do
       previous = Application.get_env(:ouroboros, :native_sandbox)
       Application.put_env(:ouroboros, :native_sandbox, :none)
+      Sandbox.forget()
       on_exit(fn -> restore(:native_sandbox, previous) end)
+      on_exit(&Sandbox.forget/0)
 
       assert {:ok, preview} = Forge.preview(%{files: fixture()}, forge_opts(context))
       assert preview.build.outcome == :failed
@@ -214,37 +252,78 @@ defmodule Ouroboros.Wasm.ForgeTest do
       assert preview.build.reason =~ "sandbox disabled"
     end
 
-    # Red without `fenceable/2`. `sandbox-exec`'s segment denies are the last rules in the
-    # profile, so a writable root under one of them is denied whatever the allows said.
-    test "a build root under a protected segment is refused rather than silently denied",
-         context do
-      root = Path.join([context.tmp, ".ouroboros", "builds"])
+    # Red without `Sandbox.fences_reads?/1` and the arm that consults it. A backend that can
+    # bound writes and not reads is half a sandbox, and half of this lane's claim.
+    test "a backend with no read allow-set is refused rather than used", context do
+      refute Sandbox.fences_reads?(:ouro_sandbox)
+      assert Sandbox.fences_reads?(:sandbox_exec)
+      assert Sandbox.fences_reads?(:bwrap)
 
-      assert {:ok, preview} =
-               Forge.preview(
-                 %{files: fixture()},
-                 Keyword.put(forge_opts(context), :scratch_root, root)
+      detection = %{backend: :ouro_sandbox, executable: "/nowhere", version: nil, notes: ""}
+
+      assert {:error, {:sandbox_cannot_fence_reads, :ouro_sandbox, _why}} =
+               Forge.sandbox_policy(
+                 "/nowhere/cargo",
+                 context.builds,
+                 context.tmp,
+                 "/sdk",
+                 detection
                )
-
-      assert preview.build.outcome == :failed
-      assert preview.build.reason =~ "build_root_inside_protected_segment"
     end
 
-    test "the policy the forge computes denies the network and names two writable roots",
+    test "the builder policy denies the network, names its writable roots, and fences reads",
          context do
-      scope = %{
-        sandbox_mode: :workspace_write,
-        root: context.builds,
-        roots: [Forge.toolchain().cargo_home]
-      }
+      policy =
+        Sandbox.builder_policy(
+          writable: [context.builds, context.tmp],
+          readable: ["/a-toolchain-root"]
+        )
 
-      assert {:sandboxed, _label, policy} = Sandbox.decision(scope, Sandbox.detect())
+      assert policy.mode == :builder
       assert policy.network == false
+      assert policy.protected == []
+      assert policy.protected_segments == []
+      assert Enum.sort(policy.writable) == Enum.sort([context.builds, context.tmp])
+      assert "/a-toolchain-root" in policy.readable
 
-      assert Enum.sort(policy.writable) ==
-               Enum.sort([context.builds, Forge.toolchain().cargo_home])
+      # Every platform root is in it, and the profile is closed by default rather than
+      # opening reads the way every other policy this module makes does.
+      for root <- Sandbox.platform_readable(), do: assert(root in policy.readable)
 
-      assert ".git" in policy.protected_segments
+      profile = SandboxExec.profile(policy)
+      assert profile =~ "(deny default)"
+      refute profile =~ "\n(allow file-read*)\n"
+      assert profile =~ "(allow file-read* (subpath (param \"OURO_READABLE_0\")))"
+      assert profile =~ "(allow file-write* (subpath (param \"OURO_WRITABLE_0\")))"
+      assert profile =~ "(deny network*)"
+    end
+
+    # The Linux half, as far as a pure function can be pinned: `/` is not bound at all, so
+    # the roots below are the whole of what a build can see. Live behaviour is unverified and
+    # docs/WASM.md D18 and §12 say so — this asserts the argv, not the kernel.
+    test "the bubblewrap form of the builder policy binds only the roots it names" do
+      policy =
+        Sandbox.builder_policy(writable: ["/build"], readable: ["/toolchain"])
+        |> Sandbox.with_scratch("/scratch")
+
+      options = Bwrap.options(%{root: "/build"}, policy)
+
+      refute Enum.chunk_every(options, 2, 1, :discard) |> Enum.any?(&(&1 == ["--ro-bind", "/"]))
+      assert "--die-with-parent" in options
+      assert "--unshare-net" in options
+      assert "--tmpfs" in options
+    end
+
+    # The read set, as one list, because "what can a build read" should have one answer.
+    test "the read set is the toolchain, the SDK and the world file — and nothing else" do
+      {:ok, sdk} = Forge.sdk_root([])
+      set = Forge.read_set("/opt/rust/bin/cargo", sdk)
+
+      assert "/opt/rust/bin" in set
+      assert sdk in set
+      assert Path.expand("../wit", sdk) in set
+      assert Enum.any?(set, &String.ends_with?(&1, ".rustup"))
+      assert length(set) == 4
     end
 
     # What the kernel actually enforces on this Mac, through the seam the real build uses:
@@ -252,7 +331,7 @@ defmodule Ouroboros.Wasm.ForgeTest do
     # exactly the profile a `cargo build` runs behind.
     @tag @needs_build
     @tag timeout: 120_000
-    test "on this Mac the fence denies a write outside the scratch directory and the network",
+    test "on this Mac the fence denies a write outside the build directory and the network",
          context do
       outside = Path.join(context.tmp, "outside.txt")
       probe = probe_script!(context, outside)
@@ -263,33 +342,90 @@ defmodule Ouroboros.Wasm.ForgeTest do
       # The probe exits non-zero on purpose, so the forge reports the build as failed and
       # quotes what the kernel said.
       assert preview.build.outcome == :failed
-      output = preview.build.reason
+      output = preview.build.output
 
       assert File.regular?("/usr/bin/nc"), "the network half of this probe needs /usr/bin/nc"
 
       assert output =~ "inside-ok"
       assert output =~ "outside-denied"
+      assert output =~ "read-denied"
       # The kernel's own words, quoted back: Seatbelt denies a connect as EPERM, which is
       # what `Sandbox.violation/3` matches and what a closed loopback port is not.
       assert output =~ "Operation not permitted"
       refute File.exists?(outside)
     end
 
-    # The limit, stated as a test rather than as a sentence: Seatbelt's profile allows reads
-    # everywhere, so a compile-time `include_str!` of a readable path outside the project
-    # succeeds. See docs/WASM.md D18 and §12 — the fence is on writes, the network and the
-    # dependency set, and it is not on reads.
+    # The HIGH the review found, now the other way round. This was a test asserting the
+    # build *succeeded*; a component that `include_str!`s a planted secret was signed,
+    # deployed and answered the secret through a mesh message. Red without the builder
+    # policy — with the old `workspace_write` profile the compile succeeds.
     @tag @needs_build
     @tag timeout: 600_000
-    test "reads are not fenced, and this is the limit that says so", context do
+    test "a build cannot read a file outside the set, and the honest one still builds",
+         context do
+      secret = Path.join(context.tmp, "secret.txt")
+      File.write!(secret, "CANARY-#{System.unique_integer([:positive])}")
+
       files =
         Map.update!(fixture(), "src/lib.rs", fn source ->
-          source <>
-            "\nconst _HOSTS: &str = include_str!(\"/etc/hosts\");\n"
+          source <> "\nconst _S: &str = include_str!(\"#{secret}\");\n"
         end)
 
       assert {:ok, preview} = Forge.preview(%{files: files}, forge_opts(context))
-      assert preview.build.outcome == :ok
+      assert preview.build.outcome == :failed
+      assert preview.build.output =~ "Operation not permitted"
+      assert preview.build.output =~ "secret.txt"
+
+      # And the fence is a fence and not a broken toolchain: the same project without that
+      # line builds under the same policy.
+      assert {:ok, honest} = Forge.preview(%{files: fixture()}, forge_opts(context))
+      assert honest.build.outcome == :ok
+    end
+
+    # `#[path]` reaches outside `src/` without an `include!` anywhere, which is why the fence
+    # rather than the file allow-list is what has to stop it.
+    @tag @needs_build
+    @tag timeout: 600_000
+    test "a module declared with #[path] outside the project cannot be read", context do
+      File.mkdir_p!(context.builds)
+      File.write!(Path.join(context.builds, "x.rs"), "pub fn hi() {}\n")
+
+      files =
+        fixture()
+        |> Map.put("src/evil.rs", "#[path = \"../../x.rs\"]\npub mod x;\n")
+        |> Map.update!("src/lib.rs", &(&1 <> "\nmod evil;\n"))
+
+      assert {:ok, preview} = Forge.preview(%{files: files}, forge_opts(context))
+      assert preview.build.outcome == :failed
+      assert preview.build.output =~ "Operation not permitted"
+      assert preview.build.output =~ "x.rs"
+    end
+  end
+
+  ## ------------------------------------------------------------------ the ceiling
+
+  describe "the wall-clock ceiling" do
+    # Red without `Exec`'s own deadline being the one that fires: a build cut somewhere else
+    # leaves the tree and the compiler behind it.
+    @tag @needs_build
+    @tag timeout: 300_000
+    test "a build past its ceiling is a named refusal that leaves nothing running", context do
+      assert {:ok, preview} =
+               Forge.preview(
+                 %{files: fixture()},
+                 Keyword.put(forge_opts(context), :timeout_ms, 3_000)
+               )
+
+      assert preview.build.outcome == :failed
+      assert preview.build.reason =~ "{:timeout, :deadline}"
+
+      assert_settled(context)
+    end
+
+    test "five minutes is the ceiling, whatever a caller asks for" do
+      assert Forge.build_timeout(timeout_ms: 3_000) == 3_000
+      assert Forge.build_timeout(timeout_ms: 9_000_000) == 300_000
+      assert Forge.build_timeout([]) == 300_000
     end
   end
 
@@ -324,6 +460,30 @@ defmodule Ouroboros.Wasm.ForgeTest do
       # This map is what `capabilities.preview` answers a JSON-RPC client with, and a cold
       # cache is the branch that carries the most structure. A tuple in it encodes nowhere.
       assert is_binary(JSON.encode!(preview))
+    end
+
+    # Red without `cargo_home/1`'s node-local default. A `~/.cargo/config.toml` carrying
+    # `[build] rustc-wrapper` is a program cargo runs on every crate, so whose directory this
+    # is decides who runs code inside the build.
+    test "the cache is the node's own, not the operator's, unless one is named", context do
+      previous = Application.get_env(:ouroboros, :data_dir)
+      Application.put_env(:ouroboros, :data_dir, context.tmp)
+      on_exit(fn -> restore(:data_dir, previous) end)
+
+      previous_home = Application.get_env(:ouroboros, :wasm_forge_cargo_home)
+      Application.delete_env(:ouroboros, :wasm_forge_cargo_home)
+      on_exit(fn -> restore(:wasm_forge_cargo_home, previous_home) end)
+
+      System.put_env("CARGO_HOME", "/an/ambient/cargo/home")
+      on_exit(fn -> System.delete_env("CARGO_HOME") end)
+
+      assert Forge.cargo_home([]) == Path.join([context.tmp, "wasm", "cargo-home"])
+      assert Forge.cargo_home(cargo_home: "/named/by/an/operator") == "/named/by/an/operator"
+
+      # Neither the ambient variable nor the developer's own directory is reachable by
+      # default, which is the whole point of the default.
+      refute Forge.cargo_home([]) =~ "ambient"
+      refute Forge.cargo_home([]) == operator_cargo_home()
     end
 
     test "the crates the cache must hold are read from the SDK's own lock" do
@@ -429,6 +589,43 @@ defmodule Ouroboros.Wasm.ForgeTest do
 
       assert {:error, {:forged_bundle_unreadable, _reason}} =
                Forge.deploy(artifact, [node()], forged_root: context.forged)
+    end
+
+    # Red without `prune/2`'s `keep`. The eight planted bundles carry mtimes an hour in the
+    # future, so the one this forge just wrote is the oldest file in the directory and is
+    # exactly what a prune that did not know to keep it would drop — while a deploy was
+    # about to read it.
+    @tag @needs_build
+    @tag timeout: 900_000
+    test "pruning never drops the bundle the forge just wrote", context do
+      live = live!(context)
+      File.mkdir_p!(context.forged)
+      future = System.os_time(:second) + 3_600
+
+      for index <- 1..8 do
+        path = Path.join(context.forged, "planted-#{index}.ouro-wasm")
+        File.write!(path, "not a real bundle")
+        File.touch!(path, future)
+      end
+
+      name = "prune-#{System.unique_integer([:positive])}"
+
+      assert {:ok, forged} =
+               Forge.forge(
+                 %{files: ForgeFixture.counter(name)},
+                 forge_opts(context, live, author: "prune-test")
+               )
+
+      assert File.regular?(forged.bundle_path)
+
+      # Intact, and still the artifact it is filed under — which is what the deploy that
+      # runs next would read.
+      assert {:ok, %{artifact: decoded}} = Bundle.decode(File.read!(forged.bundle_path))
+      assert decoded.id == forged.artifact_id
+
+      bundles = context.forged |> File.ls!() |> Enum.filter(&String.ends_with?(&1, ".ouro-wasm"))
+      assert length(bundles) == 8
+      assert Path.basename(forged.bundle_path) in bundles
     end
 
     test "a deploy naming no node at all is refused", context do
@@ -548,6 +745,27 @@ defmodule Ouroboros.Wasm.ForgeTest do
 
   defp fixture, do: ForgeFixture.project()
 
+  defp operator_cargo_home, do: ForgeFixture.cargo_home()
+
+  # Nothing of this build may outlive its own refusal: no cargo or rustc still compiling in
+  # the tree, and no tree. `pgrep -f` over the scratch root catches a survivor because every
+  # rustc this build spawns carries an `--out-dir` beneath it.
+  defp assert_settled(context) do
+    {output, _status} =
+      System.cmd("/usr/bin/pgrep", ["-f", context.builds], stderr_to_stdout: true)
+
+    assert String.trim(output) == "",
+           "a build process outlived its ceiling: #{inspect(output)}"
+
+    leftovers =
+      case File.ls(context.builds) do
+        {:ok, entries} -> Enum.filter(entries, &String.starts_with?(&1, "forge-"))
+        {:error, _absent} -> []
+      end
+
+    assert leftovers == [], "the build directory outlived its refusal: #{inspect(leftovers)}"
+  end
+
   defp counter_files(name), do: ForgeFixture.counter(name)
 
   defp manifest(files, transform), do: Map.update!(files, "Cargo.toml", transform)
@@ -561,6 +779,13 @@ defmodule Ouroboros.Wasm.ForgeTest do
     previous = Application.get_env(:ouroboros, :data_dir)
     Application.put_env(:ouroboros, :data_dir, context.tmp)
     on_exit(fn -> restore(:data_dir, previous) end)
+
+    # The operator path takes every root from configuration, including the cache. Naming an
+    # already-warm one here is what an operator does with `make wasm-sdk-cache`; the default
+    # this overrides is `<data_dir>/wasm/cargo-home`, which has its own test.
+    previous_home = Application.get_env(:ouroboros, :wasm_forge_cargo_home)
+    Application.put_env(:ouroboros, :wasm_forge_cargo_home, operator_cargo_home())
+    on_exit(fn -> restore(:wasm_forge_cargo_home, previous_home) end)
 
     workspace = Path.join(context.tmp, "workspace-#{System.unique_integer([:positive])}")
     directory = Path.join(workspace, ".ouroboros/capabilities/Counter")
@@ -614,13 +839,24 @@ defmodule Ouroboros.Wasm.ForgeTest do
   # A stand-in for cargo that reports, in its own output, what the kernel let it do. It is
   # spawned by the same `Sandbox.wrap/4` the real build goes through, so what it proves is
   # the profile the forge computes and not a profile a test wrote.
+  # The probe lives in a directory of its own, and the file it tries to read in another.
+  # `read_set/2` allows the *cargo executable's* directory — `process-exec` still has to read
+  # the binary — so a probe sitting beside the file it is testing would be reading a
+  # directory the fence is supposed to allow, and would prove nothing.
   defp probe_script!(context, outside) do
-    path = Path.join(context.tmp, "probe.sh")
+    directory = Path.join(context.tmp, "probe")
+    File.mkdir_p!(directory)
+    path = Path.join(directory, "probe.sh")
+
+    unreadable = Path.join(context.tmp, "secrets/unreadable.txt")
+    File.mkdir_p!(Path.dirname(unreadable))
+    File.write!(unreadable, "not for a build")
 
     File.write!(path, """
     #!/bin/sh
     if echo ok > ./inside.txt 2>/dev/null; then echo inside-ok; else echo inside-denied; fi
     if echo ok > #{outside} 2>/dev/null; then echo outside-ok; else echo outside-denied; fi
+    if cat #{unreadable} >/dev/null 2>&1; then echo read-ok; else echo read-denied; fi
     echo "network: $(/usr/bin/nc -z -G 2 1.1.1.1 443 2>&1)"
     exit 3
     """)
@@ -634,6 +870,9 @@ defmodule Ouroboros.Wasm.ForgeTest do
       scratch_root: context.builds,
       forged_root: context.forged,
       upload_root: context.uploads,
+      # An operator naming their own cache, which is the only way `~/.cargo` is ever used
+      # (D19). The default is node-local and there is a test for that below.
+      cargo_home: operator_cargo_home(),
       build?: true
     ]
 

@@ -126,7 +126,8 @@ defmodule Ouroboros.Provider.Native.Sandbox do
 
   @typedoc "The resolved rules one wrapped command runs under."
   @type policy :: %{
-          mode: :read_only | :workspace_write | :workspace_write_escalated,
+          optional(:readable) => [String.t()],
+          mode: :read_only | :workspace_write | :workspace_write_escalated | :builder,
           writable: [String.t()],
           protected: [String.t()],
           protected_segments: [String.t()],
@@ -142,6 +143,31 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   # `.git` is Codex's rule; `.ouroboros` is this runtime's own, and both are already the
   # protected write segments `Ouroboros.Control.Permissions.Rules` denies.
   @protected_segments [".git", ".ouroboros"]
+
+  # The read set every build starts from on this OS: the toolchain's own world and nothing
+  # else. A compiler has to read a great deal — its libraries, its linker, the SDK it links
+  # against, the caches it keeps — and the mistake the first cut of the builder made was
+  # concluding from that that reads could not be fenced at all. They can; the set is just
+  # long. Everything a *project* could want to read that is not in here plus the roots the
+  # caller names is denied, and that is the whole of D18's read half.
+  @darwin_readable [
+    "/usr/lib",
+    "/usr/bin",
+    "/usr/share",
+    "/bin",
+    "/System",
+    "/private/var/db",
+    "/dev",
+    "/private/etc",
+    "/Library/Preferences",
+    "/Applications/Xcode.app"
+  ]
+
+  # Unverified. No Linux build has run under this module, and the honest form of that is a
+  # list that says which one it is rather than a comment somewhere else saying it might be
+  # wrong. `Ouroboros.Wasm.Forge` refuses the one Linux backend that cannot express a read
+  # fence at all rather than building under a weaker one.
+  @linux_readable ["/usr", "/bin", "/lib", "/lib64", "/etc", "/opt", "/dev", "/proc"]
 
   @scratch_prefix "ouroboros-sandbox-"
   # Six hours against a ten-minute command ceiling: wide enough that a live scratch
@@ -295,6 +321,63 @@ defmodule Ouroboros.Provider.Native.Sandbox do
       scratch: nil,
       network: network_allowed?()
     }
+  end
+
+  @doc """
+  The policy a build runs under: deny-by-default on **reads** as well as on writes.
+
+  Every other policy this module makes allows `file-read*` everywhere, because a shell that
+  cannot read is not a shell. A build is the case where that is wrong: the thing being
+  contained is a compiler running code an author wrote, and the whole point of the fence is
+  that what it can carry into its output is bounded. So a builder policy names its readable
+  roots and everything else is denied — a `readable` list on top of `platform_readable/0`,
+  with the writable roots readable by construction.
+
+  It is not a `sandbox_mode` and does not come out of `decide/2`: no session picks it, no
+  operator configures it, and there is no way to ask for it from a signal. The one caller is
+  `Ouroboros.Wasm.Forge` (docs/WASM.md D18). Network is off, flatly, rather than following
+  the node's `native_sandbox_network` opt-in — that setting is about a human's shell.
+  """
+  @spec builder_policy(keyword()) :: policy()
+  def builder_policy(opts) do
+    %{
+      mode: :builder,
+      writable: roots(Keyword.get(opts, :writable, [])),
+      readable: roots(platform_readable() ++ Keyword.get(opts, :readable, [])),
+      protected: [],
+      protected_segments: [],
+      scratch: nil,
+      network: false
+    }
+  end
+
+  @doc "The read roots a build gets before its caller names any, for this operating system."
+  @spec platform_readable() :: [String.t()]
+  def platform_readable do
+    case :os.type() do
+      {:unix, :darwin} -> @darwin_readable
+      {:unix, _other} -> @linux_readable
+      _unsupported -> []
+    end
+  end
+
+  @doc "Whether this backend can enforce a builder policy's read fence."
+  @spec fences_reads?(detection() | backend()) :: boolean()
+  def fences_reads?(%{backend: backend}), do: fences_reads?(backend)
+  def fences_reads?(:sandbox_exec), do: true
+  def fences_reads?(:bwrap), do: true
+  # `ouro-sandbox`'s request protocol has writable roots, protected roots and denied names,
+  # and no read allow-set; Landlock could express one, the wire format cannot yet. A caller
+  # that needs the fence is told so rather than given a policy that silently does not have
+  # it.
+  def fences_reads?(:ouro_sandbox), do: false
+  def fences_reads?(:none), do: false
+
+  defp roots(paths) do
+    paths
+    |> Enum.filter(&(is_binary(&1) and &1 != ""))
+    |> Enum.uniq()
+    |> Enum.sort()
   end
 
   @doc "Attaches a scratch directory to a policy, so `$TMPDIR` has somewhere to point."
@@ -803,6 +886,12 @@ defmodule Ouroboros.Provider.Native.Sandbox do
 
   defp constraint_text(:network, _policy),
     do: "This session's sandbox denies external network access; loopback remains local-only."
+
+  defp constraint_text(:filesystem, %{mode: :builder, writable: writable}),
+    do:
+      "This build's sandbox allows writes only under " <>
+        Enum.join(writable, ", ") <>
+        " and reads only under the toolchain roots it was given."
 
   defp constraint_text(:filesystem, %{mode: :read_only}),
     do:

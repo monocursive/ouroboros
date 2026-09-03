@@ -133,6 +133,43 @@ defmodule Ouroboros.AgentEffectsTest do
       assert entry.attempt == %{module: "wasm/some-other-one"}
     end
 
+    # The MEDIUM the review found. A grant is a durable checkpoint: one written before lane
+    # W existed says "any BEAM module", and a release that quietly made it also mean "any
+    # component this node can build" would have widened an operator's authority without
+    # their action. Red without `Grants.admits?/3`'s `:modules` clauses.
+    test "a forge grant of :any does not reach lane W, and a wildcard is how you say it" do
+      {actor, _pid} = start_actor!("any-forge")
+
+      assert {:ok, _grant} = Grants.grant(actor, :forge, modules: :any)
+
+      assert Grants.granted?(actor, :forge, %{module: Ouroboros.Capability.EffectLoop})
+      refute Grants.granted?(actor, :forge, %{module: "wasm/anything"})
+
+      # Said out loud, on purpose, and only then.
+      assert {:ok, _grant} = Grants.grant(actor, :forge, modules: ["wasm/*"])
+      assert Grants.granted?(actor, :forge, %{module: "wasm/anything"})
+      refute Grants.granted?(actor, :forge, %{module: Ouroboros.Capability.EffectLoop})
+
+      assert {:ok, _grant} = Grants.grant(actor, :forge, modules: ["wasm/exactly-one"])
+      assert Grants.granted?(actor, :forge, %{module: "wasm/exactly-one"})
+      refute Grants.granted?(actor, :forge, %{module: "wasm/anything"})
+    end
+
+    test "an agent holding only a :any forge grant is refused a wasm forge end to end" do
+      {actor, pid} = start_actor!("any-forge-effect")
+      assert {:ok, _grant} = Grants.grant(actor, :forge, modules: :any)
+
+      signal!(pid, EffectForgeWasmCapability, %{
+        from: actor,
+        name: "not-covered",
+        files: ForgeFixture.project()
+      })
+
+      entry = await_effect!(pid, :forge)
+      assert entry.status == :denied
+      assert entry.authority.reason == :outside_constraints
+    end
+
     # The `:deploy` constraint is the node set, and it is the same one for both lanes.
     test "a deploy grant constrained to this node refuses a deploy to another" do
       {actor, pid} = start_actor!("narrow-deploy")
@@ -453,18 +490,7 @@ defmodule Ouroboros.AgentEffectsTest do
   @tag @needs_build
   @tag timeout: 900_000
   test "an agent forges a wasm capability, deploys it, and the author is the principal" do
-    data_dir =
-      Path.join(System.tmp_dir!(), "ouro-effects-wasm-#{System.unique_integer([:positive])}")
-
-    File.mkdir_p!(data_dir)
-    previous_data = Application.get_env(:ouroboros, :data_dir)
-    Application.put_env(:ouroboros, :data_dir, data_dir)
-
-    on_exit(fn ->
-      File.rm_rf(data_dir)
-      restore_ouroboros(:data_dir, previous_data)
-    end)
-
+    data_dir = builder!()
     trust!(data_dir)
 
     {actor, pid} = start_actor!("wasm-self-improver")
@@ -540,6 +566,69 @@ defmodule Ouroboros.AgentEffectsTest do
     assert {:effect_failed, :deploy, {:wrong_lane, ^artifact_id, :wasm}} = crossed.error
 
     assert {:ok, _rolled} = Ouroboros.Wasm.Deploy.rollback(name)
+  end
+
+  # The MEDIUM the review proved by inspection: the runner ends an overrunning effect with
+  # `brutal_kill`, which runs no `after`, so a forge whose own ceiling was larger than the
+  # effect budget left its scratch tree and a live cargo process group behind. Red without
+  # `ForgeWasmCapability.build_timeout/0`: with the forge's own five minutes the runner's
+  # kill is what fires, and this asserts that nothing is left when it does not.
+  @tag @needs_build
+  @tag timeout: 300_000
+  test "a forge that cannot finish inside the effect's budget stops and leaves nothing" do
+    data_dir = builder!()
+    {actor, pid} = start_actor!("slow-forge")
+    name = "too-slow-#{System.unique_integer([:positive])}"
+
+    previous = Application.get_env(:ouroboros, :effect_timeout)
+    Application.put_env(:ouroboros, :effect_timeout, 8_000)
+    on_exit(fn -> restore_ouroboros(:effect_timeout, previous) end)
+
+    assert {:ok, _grant} = Grants.grant(actor, :forge, modules: ["wasm/" <> name])
+
+    signal!(pid, EffectForgeWasmCapability, %{
+      from: actor,
+      name: name,
+      files: ForgeFixture.counter(name),
+      nodes: [node()]
+    })
+
+    entry = await_effect!(pid, :forge, 600)
+
+    # The forge's own deadline, not the runner's: a `{:effect_timeout, _}` here would mean
+    # the brutal kill won the race and the cleanup below never ran.
+    assert entry.status == :failed
+    assert {:effect_failed, :forge, {:build_failed, {:timeout, :deadline}}} = entry.error
+
+    builds = Path.join([data_dir, "wasm", "builds"])
+    {output, _status} = System.cmd("/usr/bin/pgrep", ["-f", builds], stderr_to_stdout: true)
+    assert String.trim(output) == "", "a build outlived the effect: #{inspect(output)}"
+
+    left = if File.dir?(builds), do: File.ls!(builds), else: []
+    assert left == [], "the build directory outlived the effect: #{inspect(left)}"
+  end
+
+  # A data directory and a warmed cache, which is what a node that forges has. The cache is
+  # named rather than node-local for the reason `Ouroboros.Wasm.ForgeFixture.cargo_home/0`
+  # gives: a fresh one per test is a download per test.
+  defp builder! do
+    data_dir =
+      Path.join(System.tmp_dir!(), "ouro-effects-wasm-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(data_dir)
+    previous_data = Application.get_env(:ouroboros, :data_dir)
+    Application.put_env(:ouroboros, :data_dir, data_dir)
+
+    previous_home = Application.get_env(:ouroboros, :wasm_forge_cargo_home)
+    Application.put_env(:ouroboros, :wasm_forge_cargo_home, ForgeFixture.cargo_home())
+
+    on_exit(fn ->
+      File.rm_rf(data_dir)
+      restore_ouroboros(:data_dir, previous_data)
+      restore_ouroboros(:wasm_forge_cargo_home, previous_home)
+    end)
+
+    data_dir
   end
 
   # A signing service under the name `Ouroboros.Wasm.Deploy` looks for on a node that was

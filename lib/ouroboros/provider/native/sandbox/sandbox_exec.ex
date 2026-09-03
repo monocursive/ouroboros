@@ -50,6 +50,35 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
   paths are parameters.
   """
   @spec profile(Ouroboros.Provider.Native.Sandbox.policy()) :: String.t()
+  def profile(%{mode: :builder} = policy) do
+    [
+      "(version 1)",
+      "; Ouroboros forge builder (docs/WASM.md D18). Closed by default on reads as well as",
+      "; on writes: a build may read the toolchain roots it was given and nothing else, so",
+      "; what a compiler can carry into its output is bounded. Paths arrive as -D parameters.",
+      "(deny default)",
+      "(allow process-exec)",
+      "(allow process-fork)",
+      "(allow signal (target self))",
+      "(allow sysctl-read)",
+      "(allow mach-lookup)",
+      # Metadata everywhere and the root directory itself: a compiler stats its way down a
+      # path before it opens anything, and a `stat` denial reads as a missing file rather
+      # than as a fence. The contents of `/` are still only what the allows below name.
+      "(allow file-read-metadata (subpath \"/\"))",
+      "(allow file-read* (literal \"/\"))",
+      "(allow file-write-data (require-all (path \"/dev/null\") (vnode-type CHARACTER-DEVICE)))"
+    ]
+    |> Enum.concat(rules(readable(policy), "allow file-read*", "OURO_READABLE"))
+    # Writable implies readable: a build that could write its object files and not read
+    # them back is not a build.
+    |> Enum.concat(rules(policy.writable, "allow file-read*", "OURO_WRITABLE"))
+    |> Enum.concat(rules(policy.writable, "allow file-write*", "OURO_WRITABLE"))
+    |> Enum.concat(network_rules(policy))
+    |> Enum.join("\n")
+    |> Kernel.<>("\n")
+  end
+
   def profile(policy) do
     [
       "(version 1)",
@@ -81,9 +110,14 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
   so a reader can see that the only place a path appears is an argv entry.
   """
   @spec parameters(Ouroboros.Provider.Native.Sandbox.policy()) :: [String.t()]
+  def parameters(%{mode: :builder} = policy),
+    do: named(policy.writable, "OURO_WRITABLE") ++ named(readable(policy), "OURO_READABLE")
+
   def parameters(policy) do
     named(policy.writable, "OURO_WRITABLE") ++ named(policy.protected, "OURO_PROTECTED")
   end
+
+  defp readable(policy), do: Map.get(policy, :readable, [])
 
   @doc """
   The executable and argv that run `command` under this policy.
@@ -139,11 +173,20 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
 
   defp nested?(path, root), do: path == root or String.starts_with?(path, root <> "/")
 
-  defp rules(paths, verb, prefix) do
+  defp rules(paths, verb, prefix) when verb in ["allow", "deny"] do
     paths
     |> Enum.with_index()
     |> Enum.map(fn {_path, index} ->
       "(#{verb} file-write* (subpath (param \"#{prefix}_#{index}\")))"
+    end)
+  end
+
+  # The builder's form: the operation is part of the rule rather than always `file-write*`.
+  defp rules(paths, operation, prefix) do
+    paths
+    |> Enum.with_index()
+    |> Enum.map(fn {_path, index} ->
+      "(#{operation} (subpath (param \"#{prefix}_#{index}\")))"
     end)
   end
 
