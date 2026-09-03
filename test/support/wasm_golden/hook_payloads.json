@@ -1,0 +1,197 @@
+{
+  "about": "The exact JSON object a component hook receives on stdin-equivalent, per event, as lib/ouroboros/provider/native/hooks.ex builds it. Read by test/provider/native/hooks_payload_golden_test.exs, which drives every case through the public seam and asserts the frame the helper was handed. docs/WASM_GUIDE.md quotes this file rather than restating it.",
+  "base_keys": [
+    "cwd",
+    "provider_session_id",
+    "session_id",
+    "turn_id",
+    "workspace_trusted"
+  ],
+  "base_source": "hook_base/1 in lib/ouroboros/provider/native/loop.ex (a turn) and in lib/ouroboros/provider/native/session.ex (the three lifecycle events, whose turn_id is null). Every event's payload is that map plus the keys hooks.ex merges over it.",
+  "not_dispatched_untrusted": ["Notification", "FileChanged", "SessionEnd"],
+  "cases": [
+    {
+      "name": "SessionStart carries the source, and no turn",
+      "event": "SessionStart",
+      "lane": "trusted",
+      "payload": {
+        "cwd": "/w",
+        "hook_event_name": "SessionStart",
+        "provider_session_id": "prov-01HQ",
+        "session_id": "sess-01HQ",
+        "source": "startup",
+        "turn_id": null,
+        "workspace_trusted": true
+      }
+    },
+    {
+      "name": "SessionEnd carries the reason, and no turn",
+      "event": "SessionEnd",
+      "lane": "trusted",
+      "payload": {
+        "cwd": "/w",
+        "hook_event_name": "SessionEnd",
+        "provider_session_id": "prov-01HQ",
+        "reason": "closed",
+        "session_id": "sess-01HQ",
+        "turn_id": null,
+        "workspace_trusted": true
+      }
+    },
+    {
+      "name": "UserPromptSubmit carries the base and nothing else — never the prompt",
+      "event": "UserPromptSubmit",
+      "lane": "trusted",
+      "payload": {
+        "cwd": "/w",
+        "hook_event_name": "UserPromptSubmit",
+        "provider_session_id": "prov-01HQ",
+        "session_id": "sess-01HQ",
+        "turn_id": "turn-3",
+        "workspace_trusted": true
+      }
+    },
+    {
+      "name": "PreToolUse carries the whole tool_input, path and content both",
+      "event": "PreToolUse",
+      "lane": "trusted",
+      "payload": {
+        "cwd": "/w",
+        "hook_event_name": "PreToolUse",
+        "provider_session_id": "prov-01HQ",
+        "session_id": "sess-01HQ",
+        "tool_input": { "content": "x", "path": "src/a.ex" },
+        "tool_name": "write",
+        "turn_id": "turn-3",
+        "workspace_trusted": true
+      }
+    },
+    {
+      "name": "PostToolUse hands a trusted hook the response itself",
+      "event": "PostToolUse",
+      "lane": "trusted",
+      "payload": {
+        "cwd": "/w",
+        "hook_event_name": "PostToolUse",
+        "provider_session_id": "prov-01HQ",
+        "session_id": "sess-01HQ",
+        "tool_input": { "path": "src/a.ex" },
+        "tool_name": "read",
+        "tool_response": { "is_error": false, "output": "defmodule A do\nend\n" },
+        "turn_id": "turn-3",
+        "workspace_trusted": true
+      }
+    },
+    {
+      "name": "PostToolUse hands an untrusted hook the shape of the answer and never the body",
+      "event": "PostToolUse",
+      "lane": "untrusted",
+      "payload": {
+        "cwd": "/w",
+        "hook_event_name": "PostToolUse",
+        "provider_session_id": "prov-01HQ",
+        "session_id": "sess-01HQ",
+        "tool_input": { "path": "src/a.ex" },
+        "tool_name": "read",
+        "tool_response": { "bytes": 19, "is_error": false },
+        "turn_id": "turn-3",
+        "workspace_trusted": false
+      }
+    },
+    {
+      "name": "PostToolUseFailure is the same payload under the failure event name",
+      "event": "PostToolUseFailure",
+      "lane": "trusted",
+      "payload": {
+        "cwd": "/w",
+        "hook_event_name": "PostToolUseFailure",
+        "provider_session_id": "prov-01HQ",
+        "session_id": "sess-01HQ",
+        "tool_input": { "command": "mix test" },
+        "tool_name": "bash",
+        "tool_response": { "is_error": true, "output": "1 failure\n" },
+        "turn_id": "turn-3",
+        "workspace_trusted": true
+      }
+    },
+    {
+      "name": "PostToolUseFailure narrows for an untrusted hook exactly as PostToolUse does",
+      "event": "PostToolUseFailure",
+      "lane": "untrusted",
+      "payload": {
+        "cwd": "/w",
+        "hook_event_name": "PostToolUseFailure",
+        "provider_session_id": "prov-01HQ",
+        "session_id": "sess-01HQ",
+        "tool_input": { "command": "mix test" },
+        "tool_name": "bash",
+        "tool_response": { "bytes": 10, "is_error": true },
+        "turn_id": "turn-3",
+        "workspace_trusted": false
+      }
+    },
+    {
+      "name": "Stop carries the base and nothing else",
+      "event": "Stop",
+      "lane": "trusted",
+      "payload": {
+        "cwd": "/w",
+        "hook_event_name": "Stop",
+        "provider_session_id": "prov-01HQ",
+        "session_id": "sess-01HQ",
+        "turn_id": "turn-3",
+        "workspace_trusted": true
+      }
+    },
+    {
+      "name": "PreCompact carries the trigger, the operator's instructions and the message count",
+      "event": "PreCompact",
+      "lane": "trusted",
+      "payload": {
+        "custom_instructions": "keep the migration notes",
+        "cwd": "/w",
+        "hook_event_name": "PreCompact",
+        "messages": 128,
+        "provider_session_id": "prov-01HQ",
+        "session_id": "sess-01HQ",
+        "trigger": "automatic",
+        "turn_id": "turn-3",
+        "workspace_trusted": true
+      }
+    },
+    {
+      "name": "Notification names the tool an approval is being asked about",
+      "event": "Notification",
+      "lane": "trusted",
+      "payload": {
+        "cwd": "/w",
+        "hook_event_name": "Notification",
+        "provider_session_id": "prov-01HQ",
+        "session_id": "sess-01HQ",
+        "tool_name": "bash",
+        "turn_id": "turn-3",
+        "workspace_trusted": true
+      }
+    },
+    {
+      "name": "FileChanged carries the paths a turn changed and never their contents",
+      "event": "FileChanged",
+      "lane": "trusted",
+      "payload": {
+        "cwd": "/w",
+        "hook_event_name": "FileChanged",
+        "paths": ["lib/a.ex", "lib/b.ex"],
+        "provider_session_id": "prov-01HQ",
+        "session_id": "sess-01HQ",
+        "turn_id": "turn-3",
+        "workspace_trusted": true
+      }
+    },
+    {
+      "name": "a [checks] component is told its own name and nothing about the session",
+      "event": "check",
+      "lane": "trusted",
+      "payload": { "event": "check", "name": "vet" }
+    }
+  ]
+}

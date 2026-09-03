@@ -1,0 +1,34 @@
+// Lane H's policy world, as the artifact a guest binds against (docs/WASM.md §8.2, D21).
+//
+// The second world this helper speaks, and the shape of the difference is the whole point.
+// A capability answers a *message*; a policy answers a *permission request* — the JSON form
+// of the request `Ouroboros.Control.Permissions` already builds — with a verdict:
+//
+//     {"decision": "allow" | "deny" | "ask", "rule": "<why, <= 200 chars>"}
+//
+// Anything else the engine reads as `ask`. `evaluate` returns a bare string rather than a
+// `result<string, string>` because a policy has no failure mode the engine treats differently
+// from an unreadable verdict: both are `ask`, and a world that offered two ways to say the same
+// thing would be inviting an author to think one of them meant something.
+//
+// The import list is identical, byte for byte, to `capability.wit`'s, and that is the claim:
+// one linker, one host function, two worlds. A policy component decides permissions, so it must
+// be *deterministic* — and it is by construction, because there is no clock and no randomness
+// here to be nondeterministic with (D20).
+//
+// `tui/wasm/src/world.rs` hard-codes this same shape, because the helper must be able to refuse
+// bytes without a WIT parser on the loading path.
+
+package ouroboros:policy@0.1.0;
+
+world policy {
+  /// JSON metadata: name, version. Pure.
+  export describe: func() -> string;
+  /// Called once per instance with host-supplied JSON config.
+  export init: func(config: string) -> result<_, string>;
+  /// One permission request in, one verdict out. JSON both ways. A verdict this host cannot
+  /// read is `ask`, which is the direction every failure in this lane takes.
+  export evaluate: func(request: string) -> string;
+  /// Log line into the daemon's logger. The only import, in both worlds.
+  import log: func(level: string, message: string);
+}

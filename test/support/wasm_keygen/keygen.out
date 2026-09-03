@@ -1,0 +1,10 @@
+wrote /private/tmp/ouro-w12b-keygen/signer.key (mode 0600)
+
+On the signer node — and nowhere else — the private half:
+  OUROBOROS_SIGNER_KEY_PATH=/private/tmp/ouro-w12b-keygen/signer.key
+  OUROBOROS_SIGNER_ID=w12-keygen-fixture
+
+On every core node that must accept what it signs — the public half:
+  OUROBOROS_UPGRADE_TRUSTED_SIGNERS=w12-keygen-fixture:6kWLUmltrxnGIJr+x3wNUoDgNIOqMwgNVj34ywGHcrs=
+
+The seed never leaves the signer. A core node needs only the line above it; anyone holding the file can sign as this identity.

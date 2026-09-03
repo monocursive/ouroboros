@@ -1,6 +1,6 @@
 defmodule Ouroboros.Upgrade.Signing.Journal do
   @moduledoc """
-  The durable record of every decision a signer node made, issued and refused alike.
+  The durable record of every decision a signer node made — admitted, issued and refused alike.
 
   A signature is evidence that a key was applied to some bytes. It is not evidence of
   *why*, of who asked, or of what the signer was shown when it agreed. This journal is
@@ -24,6 +24,11 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
   log. History is trimmed oldest-first like `Ouroboros.Release.Journal`; an operator who
   needs unbounded retention ships these entries somewhere that has it.
 
+  A findings map is bounded **field by field** when it does not fit as a whole. One
+  requester-chosen value inside a verdict — a guest toolchain's `test_report`, which a
+  legal manifest carries — must not be able to erase the identity fields beside it, which
+  are the ones a refusal is read for. See `findings/1`.
+
   Module names, struct modules, policy reasons, and node names all cross the checkpoint
   boundary through `Ouroboros.Upgrade.Wire`: `[:safe]` decode must not need this module
   (or any other) already loaded in the reading VM.
@@ -32,27 +37,66 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
   alias Ouroboros.Upgrade.{Beam, ModuleName, Wire}
 
   @version 1
-  @decisions [:issued, :refused]
+  # W8. `:admitted` is the first half of a two-phase lane-W signing: the rate limit was
+  # charged and the policy accepted the *source* manifest, and only then did the signing node
+  # spend a compile on it (docs/WASM.md D15, D23). It is journaled as its own decision because
+  # an admission is a real thing this signer did — it committed a rate-limit slot and a policy
+  # verdict — and folding it into `:issued` would claim a signature that does not exist yet,
+  # while folding it into `:refused` would claim a refusal that never happened.
+  @decisions [:issued, :admitted, :refused]
+  @lanes [:beam, :wasm]
   @default_limit 500
   @max_detail_bytes 4_096
   @max_journaled_modules 25
 
+  # The share of an entry's budget one value inside an oversized findings map may take.
+  # Small enough that every top-level key survives beside every other one.
+  @max_finding_bytes 256
+
+  # What a decision was *about*, kept even when the shape of the verdict is hostile. Lane
+  # W's identity is the sha, the world, the imports and the start id; lane B's epoch and
+  # namespace are the same question asked of the other lane.
+  @identity_findings [
+    :lane,
+    :epoch,
+    :namespace,
+    :name,
+    :world,
+    :component_sha256,
+    :size,
+    :imports,
+    :start,
+    :recomputed
+  ]
+
   @enforce_keys [:version, :next_sequence, :decisions]
   defstruct @enforce_keys
 
-  @type decision :: :issued | :refused
+  @type decision :: :issued | :admitted | :refused
 
+  @typedoc """
+  Which signing lane a decision was about.
+
+  `:beam` is `Ouroboros.Upgrade.Artifact`, `:wasm` is `Ouroboros.Wasm.Artifact`, and
+  `:unknown` is anything this build did not recognize as either — which is a decision
+  worth recording rather than one worth dropping.
+  """
+  @type lane :: :beam | :wasm | :unknown
+
+  # `:lane` is optional because entries written before lanes existed do not carry it, and
+  # `valid?/1` still accepts them — see `record/3`. Everything else has always been there.
   @type entry :: %{
-          sequence: pos_integer(),
-          artifact_id: String.t(),
-          epoch: term(),
-          modules: [map()],
-          requester: node(),
-          signer_id: String.t(),
-          decision: decision(),
-          reason: term(),
-          findings: map(),
-          at: String.t()
+          required(:sequence) => pos_integer(),
+          required(:artifact_id) => String.t(),
+          required(:epoch) => term(),
+          required(:modules) => [map()],
+          required(:requester) => node(),
+          required(:signer_id) => String.t(),
+          required(:decision) => decision(),
+          required(:reason) => term(),
+          required(:findings) => map(),
+          required(:at) => String.t(),
+          optional(:lane) => lane()
         }
 
   @type t :: %__MODULE__{
@@ -76,6 +120,10 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
   a term the checkpoint could not hold: module lists are capped, reasons and findings
   that are unportable or oversized are replaced by a marker naming why, and anything
   unrecognized becomes a rendered string.
+
+  `:lane` is additive and needs no checkpoint version: `valid?/1` never required a fixed
+  key set, so a journal written before lanes existed still loads, and its entries are
+  simply entries with no lane recorded — which is the truth about them.
   """
   @spec record(t(), map(), pos_integer()) :: t()
   def record(%__MODULE__{} = journal, attrs, limit \\ @default_limit)
@@ -84,6 +132,7 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
       sequence: journal.next_sequence,
       artifact_id: text(Map.get(attrs, :artifact_id)),
       epoch: scalar(Map.get(attrs, :epoch)),
+      lane: lane(Map.get(attrs, :lane)),
       modules: modules(Map.get(attrs, :modules, [])),
       requester: requester(Map.get(attrs, :requester)),
       signer_id: text(Map.get(attrs, :signer_id)),
@@ -145,9 +194,13 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
   def public(%__MODULE__{} = journal), do: journal.decisions
 
   @doc "Counts by decision, for a status surface that must not page through history."
-  @spec tally(t()) :: %{issued: non_neg_integer(), refused: non_neg_integer()}
+  @spec tally(t()) :: %{
+          issued: non_neg_integer(),
+          admitted: non_neg_integer(),
+          refused: non_neg_integer()
+        }
   def tally(%__MODULE__{} = journal) do
-    Enum.reduce(journal.decisions, %{issued: 0, refused: 0}, fn entry, acc ->
+    Enum.reduce(journal.decisions, %{issued: 0, admitted: 0, refused: 0}, fn entry, acc ->
       Map.update(acc, entry.decision, 1, &(&1 + 1))
     end)
   end
@@ -193,14 +246,64 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
 
   defp modules(_other), do: []
 
+  # Bounding the verdict as one term let a single requester-chosen value inside it take the
+  # rest down with it. `metadata.test_report` is provenance a guest toolchain writes and a
+  # manifest carries, so six kilobytes of it — perfectly legal, `failures: 0`, signed — put
+  # the whole findings map over the ceiling and collapsed it to `%{too_large: "..."}`. What
+  # was lost is exactly what a refusal is read for: `component_sha256`, `world`, `imports`,
+  # `start`. Those are tens of bytes each and were never the problem.
+  #
+  # So an oversized verdict is bounded value by value instead, one level deeper for a value
+  # that is itself a map — which is where a `test_report` sits beside the `author` that has
+  # to survive it. The result is still held to the entry's own budget, and if even that does
+  # not fit, the identity keys are kept and everything else becomes a marker.
   defp findings(findings) when is_map(findings) and not is_struct(findings) do
-    case bound(findings) do
-      bounded when is_map(bounded) -> bounded
-      other -> %{findings: other}
-    end
+    if Beam.portable_term?(findings) and fits?(findings),
+      do: findings,
+      else: per_field(findings)
   end
 
   defp findings(_other), do: %{}
+
+  defp per_field(findings) do
+    shrunk = Map.new(findings, fn {key, value} -> {scalar(key), finding(value, 1)} end)
+
+    if fits?(shrunk), do: shrunk, else: identity(shrunk)
+  end
+
+  defp finding(value, depth) do
+    cond do
+      Beam.portable_term?(value) and
+          byte_size(:erlang.term_to_binary(value)) <= @max_finding_bytes ->
+        value
+
+      # A map is opened up before it is given up on, whichever of the two bounds it failed:
+      # one unportable pid in a provenance map must not cost the author beside it any more
+      # than one oversized report does.
+      depth > 0 and is_map(value) and not is_struct(value) ->
+        Map.new(value, fn {key, inner} -> {scalar(key), finding(inner, depth - 1)} end)
+
+      not Beam.portable_term?(value) ->
+        %{unportable: render(value)}
+
+      true ->
+        %{too_large: render(value)}
+    end
+  end
+
+  # The floor: a verdict whose *shape* is hostile — thousands of small keys, so bounding
+  # each one bounds nothing — still records what the decision was about.
+  defp identity(shrunk) do
+    kept =
+      shrunk
+      |> Map.take(@identity_findings)
+      |> Map.new(fn {key, value} -> {key, finding(value, 0)} end)
+      |> Map.put(:findings, :too_large)
+
+    if fits?(kept), do: kept, else: %{too_large: :findings}
+  end
+
+  defp fits?(term), do: byte_size(:erlang.term_to_binary(term)) <= @max_detail_bytes
 
   # Everything below arrives from a requester's artifact or a policy's verdict, and lands
   # in a durable file. Portable and small, or a marker saying it was neither.
@@ -216,6 +319,9 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
 
   defp decision(decision) when decision in @decisions, do: decision
   defp decision(_other), do: :refused
+
+  defp lane(lane) when lane in @lanes, do: lane
+  defp lane(_other), do: :unknown
 
   defp requester(node) when is_atom(node) and not is_nil(node), do: node
   defp requester(_other), do: :unknown

@@ -167,6 +167,8 @@ defmodule Ouroboros.Provider.Native.Loop do
   alias Ouroboros.Provider.Native.Tools.Agent, as: AgentTool
   alias Ouroboros.Provider.Native.Tools.AgentResult
   alias Ouroboros.Provider.Native.Tools.AskUser
+  alias Ouroboros.Provider.Native.Tools.Capability, as: CapabilityTool
+  alias Ouroboros.Wasm.Pool, as: WasmPool
 
   @default_max_iterations 100
   @default_tool_timeout_ms 120_000
@@ -339,25 +341,55 @@ defmodule Ouroboros.Provider.Native.Loop do
     iterate(state, 1)
   end
 
-  # A repository whose `ouroboros.toml` does not parse, or one whose hooks were declined
-  # for want of trust, says so once per turn. Silence there would be the worst of both:
-  # the operator believes their hooks ran and nothing did.
-  defp report_hook_errors(%{hooks: %{errors: [], declined: 0}}), do: :ok
-
+  # A repository whose `ouroboros.toml` does not parse, one whose hooks were declined for
+  # want of trust, and a node whose helper can admit no further hook components each say so
+  # once per turn. Silence there would be the worst of both: the operator believes their
+  # hooks ran and nothing did.
   defp report_hook_errors(state) do
-    declined =
-      if state.hooks.declined > 0,
-        do: [
-          "#{state.hooks.declined} hook(s)/check(s) in #{Path.join(state.scope.root, "ouroboros.toml")} " <>
-            "were not loaded: this workspace is not trusted. An operator can trust it by " <>
-            "adding its canonical root to `config :ouroboros, :trusted_workspaces`."
-        ],
-        else: []
+    case declined_hooks(state) ++ state.hooks.errors ++ spent_hook_budget(state) do
+      [] ->
+        :ok
 
-    emit(state, :provider_event, %{
-      "kind" => "status",
-      "message" => Enum.join(declined ++ state.hooks.errors, "\n")
-    })
+      lines ->
+        emit(state, :provider_event, %{"kind" => "status", "message" => Enum.join(lines, "\n")})
+    end
+  end
+
+  defp declined_hooks(%{hooks: %{declined: 0}}), do: []
+
+  defp declined_hooks(state) do
+    [
+      "#{state.hooks.declined} hook(s)/check(s) in #{Path.join(state.scope.root, "ouroboros.toml")} " <>
+        "were not loaded: this workspace is not trusted. An operator can trust it by " <>
+        "adding its canonical root to `config :ouroboros, :trusted_workspaces`."
+    ]
+  end
+
+  # W-F3. The helper's untrusted-hook budget is a fact about the *node*, not about this
+  # session, and a spent one is silent everywhere else: `load` refuses, the seam ignores the
+  # refusal loudly in a log nobody is reading, and the operator sees a hook that simply
+  # stopped having an opinion. Once per turn is where that gets said.
+  #
+  # What the budget counts is the untrusted lane: an operator's own component hook, and a
+  # workspace they trusted, are never budgeted — they can already run shell, so a count limit
+  # on them would be theatre that eventually silences the operator's own `deny`. So this is
+  # read only when this session has an *untrusted* component hook to lose, which keeps a
+  # workspace with none — the overwhelming majority — off the pool entirely. `Pool.status/1`
+  # is a read of state a running pool already holds: it spawns no helper, and a node with no
+  # pool answers `hook_components: 0`, which is not a spent budget and says nothing here.
+  defp spent_hook_budget(%{hooks: %{hooks: hooks, pool: pool}}) do
+    budget = WasmPool.hook_component_budget()
+
+    if Enum.any?(hooks, &(&1.kind == :component and not &1.trusted)) and
+         WasmPool.status(pool).hook_components >= budget do
+      [
+        "this workspace's component hooks can no longer load on this node: the helper's " <>
+          "budget for untrusted hook components (#{budget}) is spent; restart the wasm pool " <>
+          "to clear it"
+      ]
+    else
+      []
+    end
   end
 
   defp iterate(state, iteration) when iteration > state.max_iterations do
@@ -1018,6 +1050,14 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   defp execute_timeout(state, %{tool: "desktop_act"}),
     do: max(state.tool_timeout_ms, Desktop.config(:act_timeout_ms))
+
+  # W13. A capability's own deadline plus the pool's call margin can exceed the ordinary
+  # tool timeout, and a loop that killed the task first would report a timeout for a
+  # capability that was still inside the bound it was deployed under. The tool derives the
+  # exact deadline from the target; this is the ceiling, so the tool's own error is the one
+  # that fires.
+  defp execute_timeout(state, %{tool: "capability"}),
+    do: max(state.tool_timeout_ms, CapabilityTool.max_timeout_ms())
 
   defp execute_timeout(state, _classified), do: state.tool_timeout_ms
 
@@ -2715,6 +2755,12 @@ defmodule Ouroboros.Provider.Native.Loop do
     |> put_subject(:app, context[:app])
     |> put_subject(:desktop_action, context[:desktop_action])
     |> put_subject(:window_id, context[:window_id])
+    # W13. Which capability, and which bytes. The name is the register's, and the sha256 is
+    # what a signature bound to them: D11 says a mesh message is not itself ledgered, so
+    # this tool entry is the only place the fact that a model reached a component is
+    # written down, and a name without the digest would not say *which* component it was.
+    |> put_subject(:capability, context[:capability])
+    |> put_subject(:component_sha256, context[:component_sha256])
     |> Map.merge(mcp_subject(classified.tool))
   end
 

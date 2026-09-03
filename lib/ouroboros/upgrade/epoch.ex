@@ -7,8 +7,9 @@ defmodule Ouroboros.Upgrade.Epoch do
   The epoch is therefore the cluster's replay defence: an old artifact re-presented later
   is refused for its number, whatever its bytes say.
 
-  `next/2` reads `last_epoch` from every target node's executor, takes the maximum, and
-  allocates one above it. Two things make that safe against this process dying:
+  `next/2` reads `last_epoch` from every target node's executor and the lane-W epoch from
+  every target node's rollout registry, takes the maximum, and allocates one above it. Two
+  things make that safe against this process dying:
 
     * the allocation is written to durable storage *before* it is returned, and the next
       allocation starts above that watermark even when the nodes report something lower.
@@ -36,8 +37,8 @@ defmodule Ouroboros.Upgrade.Epoch do
   @doc """
   Allocates the next epoch for a deployment to `nodes`.
 
-  Options: `:storage` (an explicit `{adapter, opts}` pair), `:status_timeout`, and
-  `:lock_retries`.
+  Options: `:storage` (an explicit `{adapter, opts}` pair), `:status_timeout`,
+  `:wasm_epoch_registry` (for a local isolated test registry), and `:lock_retries`.
   """
   @spec next([node()], keyword()) :: {:ok, pos_integer()} | {:error, term()}
   def next(nodes, opts \\ [])
@@ -92,22 +93,75 @@ defmodule Ouroboros.Upgrade.Epoch do
       end
 
     case Coordinator.status(nodes, status_opts) do
-      {:ok, statuses} -> highest_epoch(statuses)
-      {:error, statuses} -> {:error, {:epoch_status_unavailable, unreadable(statuses)}}
+      {:ok, statuses} ->
+        case wasm_epochs(nodes, opts) do
+          {:ok, wasm_epochs} -> highest_epoch(statuses, wasm_epochs)
+          {:error, epochs} -> {:error, {:epoch_status_unavailable, unreadable_wasm(epochs)}}
+        end
+
+      {:error, statuses} ->
+        {:error, {:epoch_status_unavailable, unreadable(statuses)}}
     end
   end
 
-  defp highest_epoch(statuses) do
+  defp highest_epoch(statuses, wasm_epochs) do
     Enum.reduce_while(statuses, {:ok, 0}, fn {target, status}, {:ok, highest} ->
-      case Map.get(status, :last_epoch) do
-        epoch when is_integer(epoch) and epoch >= 0 -> {:cont, {:ok, max(highest, epoch)}}
+      with epoch when is_integer(epoch) and epoch >= 0 <- Map.get(status, :last_epoch),
+           wasm_epoch when is_integer(wasm_epoch) and wasm_epoch >= 0 <-
+             Map.get(wasm_epochs, target) do
+        {:cont, {:ok, max(highest, max(epoch, wasm_epoch))}}
+      else
         other -> {:halt, {:error, {:invalid_node_epoch, target, other}}}
       end
     end)
   end
 
+  defp wasm_epochs(nodes, opts) do
+    timeout = Keyword.get(opts, :status_timeout, 5_000)
+
+    values =
+      nodes
+      |> Task.async_stream(&{&1, wasm_epoch(&1, opts, timeout)},
+        ordered: true,
+        max_concurrency: max(1, length(nodes)),
+        timeout: :infinity
+      )
+      |> Map.new(fn
+        {:ok, pair} -> pair
+        {:exit, reason} -> {:registry, {:error, {:task_exit, reason}}}
+      end)
+
+    if Enum.all?(nodes, &(is_integer(Map.get(values, &1)) and Map.get(values, &1) >= 0)) do
+      {:ok, values}
+    else
+      {:error, values}
+    end
+  end
+
+  defp wasm_epoch(target, opts, timeout) do
+    registry =
+      if target == node(),
+        do: Keyword.get(opts, :wasm_epoch_registry, Ouroboros.Upgrade.Rollout.Registry),
+        else: Ouroboros.Upgrade.Rollout.Registry
+
+    if target == node() do
+      Ouroboros.Upgrade.Rollout.Registry.wasm_epoch(registry)
+    else
+      :erpc.call(target, Ouroboros.Upgrade.Rollout.Registry, :wasm_epoch, [], timeout)
+    end
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
   defp unreadable(statuses) do
     for {target, value} <- statuses, not is_map(value), into: %{}, do: {target, value}
+  end
+
+  defp unreadable_wasm(epochs) do
+    for {target, value} <- epochs,
+        not (is_integer(value) and value >= 0),
+        into: %{},
+        do: {target, value}
   end
 
   defp read_watermark(%{adapter: adapter, opts: opts}) do

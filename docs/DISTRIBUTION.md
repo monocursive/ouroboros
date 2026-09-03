@@ -343,7 +343,7 @@ targeting one from arm64. Everything downstream of that, including the `c_src` N
 ### Pinning, and why it is exact
 
 `dist/docker/Dockerfile.linux-x86_64` pins
-`hexpm/elixir:1.20.2-erlang-29.0.5-ubuntu-noble-20260730.1` and rustup 1.88 by exact tag,
+`hexpm/elixir:1.20.2-erlang-29.0.5-ubuntu-noble-20260730.1` and rustup 1.95 by exact tag,
 because the fleet does not treat a runtime as interchangeable:
 
 - **Placement** compares `{fleet_protocol_revision, ouroboros_version, otp_release}`
@@ -354,7 +354,7 @@ because the fleet does not treat a runtime as interchangeable:
   match, which is why one image builds one triple and says so out loud.
 
 So the image tracks `.github/workflows/ci.yml`'s `ELIXIR_VERSION: "1.20"`,
-`OTP_VERSION: "29"`, `RUST_VERSION: "1.88"` and `release.yml`'s `ubuntu-24.04` runner.
+`OTP_VERSION: "29"`, `RUST_VERSION: "1.95"` and `release.yml`'s `ubuntu-24.04` runner.
 When those move, this moves with them; a floating tag would let them drift apart silently.
 
 Ubuntu 24.04 (glibc 2.39) is also the ABI floor. glibc symbol versioning is

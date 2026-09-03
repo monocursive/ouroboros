@@ -1,0 +1,29 @@
+# {{name}} — an ouroboros capability component.
+#
+# Its own workspace: this is a `wasm32-wasip2` cdylib with its own release profile, and it
+# must not join whatever cargo graph it happens to be checked out inside.
+[workspace]
+
+[package]
+name = "{{name}}"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ouroboros-guest = { path = "{{sdk_path}}" }
+
+# The defaults, and they are not incidental: `panic = "abort"` keeps the unwinder out of the
+# component, and LTO with a size-shaped opt level let the linker drop what is unreachable —
+# which is what keeps the import list at exactly `log`, the one thing a reviewer of this
+# component reads. Cargo reads a profile only from a workspace root, and this is one.
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = "s"
+strip = true
+codegen-units = 1

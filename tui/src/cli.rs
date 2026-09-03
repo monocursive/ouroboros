@@ -246,6 +246,12 @@ pub enum Command {
         command: DesktopCommand,
     },
 
+    /// WebAssembly containment operator surface. `ouro wasm doctor` reports node readiness.
+    Wasm {
+        #[command(subcommand)]
+        command: WasmCommand,
+    },
+
     /// Create, join, and diagnose a secure group of Ouroboros machines.
     Fleet {
         #[command(subcommand)]
@@ -493,6 +499,509 @@ pub struct DesktopArgs {
     /// start-nothing `computer_use.status`.
     #[arg(long)]
     pub probe: bool,
+}
+
+/// `ouro wasm`'s subcommands: one that asks a node, and five that ask a local helper.
+///
+/// `doctor` is the operator's readiness surface and starts nothing at all. The other five are
+/// the component author's loop (W10): each starts a local `ouro-wasm` and speaks its protocol,
+/// which is the deliberate difference — a readiness surface that spawned to answer whether
+/// spawning works would be answering a different question, and a development loop that needed
+/// a running node would not be a loop.
+#[derive(Debug, Subcommand)]
+pub enum WasmCommand {
+    /// Report WebAssembly containment readiness on the node — helper presence and phase,
+    /// the world and bounds it runs under, the hook-component budget, the component store,
+    /// and lane-W rollouts. Asks `wasm.status`, which starts nothing.
+    ///
+    /// There is deliberately no `--probe`: starting the helper to see whether it starts is
+    /// the one thing a read-scope readiness surface must not do.
+    Doctor(WasmArgs),
+
+    /// Scaffold a component project that builds, in the world this runtime speaks.
+    ///
+    /// Written from a template embedded in this binary, never fetched: a scaffold a command
+    /// downloads is a command that runs somebody else's code the first time it is used.
+    New(WasmNewArgs),
+
+    /// What a component declares, how its shape sits against the bounds that decide whether
+    /// it compiles at all, and whether the node would admit it — as a capability, as a hook
+    /// component, or as neither, naming the refusal.
+    ///
+    /// It loads the component into a local helper, which compiles it under the same
+    /// structural bound the node uses. It never instantiates it, so nothing runs.
+    Inspect(WasmInspectArgs),
+
+    /// Stand one instance up and send it messages, under the node's own default bounds.
+    ///
+    /// Every message goes to the *same* instance, because state in this world is
+    /// instance-held: a fresh instance per message would quietly exercise a different
+    /// component from the one that gets deployed.
+    Run(WasmRunArgs),
+
+    /// Run a component the way the node's hook seam would, and print both verdicts — what the
+    /// component said, and what the node would keep of it after the untrusted narrowing.
+    ///
+    /// The second is the only one that ever reaches a turn, so an author who tests a hook by
+    /// reading its own output is testing a verdict the runtime may already have dropped.
+    Hook(WasmHookArgs),
+
+    /// Validate a workspace's `ouroboros.toml` component entries the way the node would judge
+    /// them for a workspace nobody trusts, and exit non-zero on any refusal.
+    ///
+    /// It never instantiates anything: admission is a question about a path, a size, a world
+    /// and the count of an entry's siblings, and running a component answers none of it.
+    Check(WasmCheckArgs),
+
+    // W15
+    /// Ask a policy component what it would decide about one permission request, and print the
+    /// verdict and the rule it stated. Exits non-zero on a `deny`.
+    ///
+    /// The component is loaded into a local helper as a **policy** — the second world — so a
+    /// capability handed to this command is refused rather than run, which is the same refusal
+    /// the node makes when a manifest's `kind` disagrees with the bytes.
+    Policy(WasmPolicyArgs),
+    // W12 adds its variants below
+    // W12
+    /// Write an Ed25519 signer seed and print the two configuration lines that put it to
+    /// work: the private half's path on the signer node, and the public half's entry in
+    /// every core node's trusted signers. Contacts no runtime; the key never travels.
+    Keygen(WasmKeygenArgs),
+
+    /// Sign a component into a `.ouro-wasm` bundle. Uploads the bytes to the node, which
+    /// hands them to its signing service — the whole policy runs there, on the host that
+    /// holds the key, and the decision is journalled. This end never signs anything.
+    Sign(WasmSignArgs),
+
+    /// Deploy a `.ouro-wasm` bundle. The node verifies it against its own trust policy
+    /// before the store, the helper or the rollout register hears about it; a bundle read
+    /// off this disk is untrusted input all the way to the far side. Exits non-zero unless
+    /// the rollout settled live.
+    Deploy(WasmDeployArgs),
+
+    /// Retire a live capability: stop its wrapper agent and mark the rollout. The component
+    /// bytes stay in the store, so redeploying needs a new epoch and a new signature but no
+    /// new build.
+    Rollback(WasmRollbackArgs),
+
+    /// List what a node holds: every lane-W rollout the register knows and every component
+    /// in the store.
+    Ls(WasmArgs),
+}
+
+/// `ouro wasm keygen`'s flags.
+#[derive(Debug, Args)]
+pub struct WasmKeygenArgs {
+    /// Where to write the seed. Refuses to overwrite an existing file, because a key file
+    /// that is already there may be the one a fleet trusts.
+    #[arg(long, value_name = "PATH")]
+    pub out: Option<PathBuf>,
+
+    /// The identity this key signs as. It must match `OUROBOROS_SIGNER_ID` on the signer
+    /// node and the id every core node trusts the public half under.
+    #[arg(long, value_name = "SIGNER_ID", default_value = "release-key")]
+    pub id: String,
+}
+
+/// `ouro wasm sign`'s flags.
+#[derive(Debug, Args)]
+pub struct WasmSignArgs {
+    /// The component to sign.
+    pub component: PathBuf,
+
+    /// The capability's name: lower case, starting with a letter or digit, then letters,
+    /// digits, `.`, `_` or `-`. It is the rollout register's module and the durable id a
+    /// start block claims cluster-wide, so it is not decoration.
+    #[arg(long, value_name = "NAME")]
+    pub name: String,
+
+    /// Who built this. The signing policy requires provenance and will not sign without it.
+    #[arg(long, value_name = "AUTHOR")]
+    pub author: String,
+
+    // W15
+    /// What this component is: a `capability` the mesh and the `capability` tool can reach, or
+    /// a `policy` the permission engine consults. It is part of the **signed** manifest, so it
+    /// is what decides which of the helper's two worlds these bytes are ever admitted to — a
+    /// policy deployed as a capability is refused at stage, and so is the reverse.
+    #[arg(long, value_name = "KIND", default_value = "capability")]
+    pub kind: WasmKind,
+
+    /// An import the component declares. Repeat it once per import, or pass none at all for
+    /// a component that imports nothing.
+    ///
+    /// The node does not read the component to find out: those are unsigned bytes from a
+    /// socket, and handing them to a helper to be parsed is what the containment lane
+    /// exists to avoid (docs/WASM.md D15). Compute the list with the *operator's* own
+    /// helper — `ouro wasm inspect --json` — and pass it here, or pipe it in with
+    /// `--imports-from`. A list that does not match what the component actually imports is
+    /// refused at stage by the cross-check.
+    #[arg(long = "import", value_name = "NAME")]
+    pub import: Vec<String>,
+
+    /// Read the imports from `ouro wasm inspect --json` output — a file, or `-` for stdin.
+    /// The explicit form of what this command otherwise does for itself: `ouro wasm inspect
+    /// g.wasm --json | ouro wasm sign g.wasm --name g --author me --imports-from -`.
+    #[arg(long, value_name = "PATH", conflicts_with = "import")]
+    pub imports_from: Option<PathBuf>,
+
+    // W8
+    /// Do not ask the node to compile the component into wasmtime's serialized form at sign
+    /// time (docs/WASM.md D22–D24).
+    ///
+    /// By default the signing node compiles once, records the artifact's digest in the signed
+    /// manifest, and puts the artifact in the bundle beside the source — so a node running the
+    /// same wasmtime on the same target triple maps it instead of compiling it, and every other
+    /// node compiles the source exactly as before. Pass this to sign the source form alone: for
+    /// a bundle you would rather keep small, or when the signing node's build is not the one
+    /// your fleet runs. Nothing is lost but speed.
+    #[arg(long)]
+    pub no_precompile: bool,
+
+    /// Do not start a local `ouro-wasm` to read the component's imports; require `--import`
+    /// or `--imports-from` instead.
+    ///
+    /// For a machine that has no helper. The node will not read the component either — it
+    /// never parses bytes it has not verified (docs/WASM.md D15) — so on such a machine the
+    /// import list has to arrive from somewhere a person named.
+    #[arg(long)]
+    pub no_local_helper: bool,
+
+    /// Print the `wasm.sign` parameters this command would send and stop. Opens no socket
+    /// and uploads nothing; `upload` is null because nothing was uploaded.
+    ///
+    /// It still reads the imports the way the real run would, so it is the way to see what
+    /// your helper says about a component before a node is asked to sign it.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// The guest toolchain, recorded as provenance.
+    #[arg(long, value_name = "LANGUAGE")]
+    pub language: Option<String>,
+
+    /// The source tree's digest, recorded as provenance. 64 lower-case hex.
+    #[arg(long, value_name = "SHA256")]
+    pub source_sha256: Option<String>,
+
+    /// The JSON config the durable wrapper starts with. Naming it is what makes this
+    /// capability run continuously and survive a reboot. The wrapper's *id* is derived
+    /// from `--name` and is deliberately not a flag.
+    #[arg(long, value_name = "JSON")]
+    pub start_config: Option<String>,
+
+    /// A JSON file holding the evaluation spec. Required by default: lane W has no build
+    /// peer behind it, so the signed spec is the test story (D12).
+    #[arg(long, value_name = "PATH")]
+    pub eval: Option<PathBuf>,
+
+    /// Where to write the bundle. Defaults to `<name>.ouro-wasm` in the working directory.
+    #[arg(long, value_name = "PATH")]
+    pub out: Option<PathBuf>,
+
+    /// Emit the raw result JSON instead of a readable summary.
+    #[arg(long)]
+    pub json: bool,
+
+    /// The machine that signs and stages. This one by default.
+    #[arg(long, value_name = "MACHINE")]
+    pub node: Option<String>,
+
+    /// The helper that reads this component's imports, when neither `--import` nor
+    /// `--imports-from` declared them. Resolved by the same three-place rule as
+    /// `ouro wasm inspect`, and it never reaches the node.
+    #[command(flatten)]
+    pub helper: WasmHelperArgs,
+
+    /// Where the gateway listens. Omitted, the local gateway.json is read instead.
+    #[arg(long, value_name = "HOST:PORT")]
+    pub addr: Option<String>,
+
+    /// A file holding the gateway token. Omitted, the token beside gateway.json is used.
+    #[arg(long, value_name = "PATH")]
+    pub token_file: Option<PathBuf>,
+}
+
+/// W15. The two things a signed component can be. `capability` is the default and is what
+/// every manifest written before there were two kinds means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum WasmKind {
+    Capability,
+    Policy,
+}
+
+impl WasmKind {
+    /// The wire spelling, which is also the helper's `kind` and the manifest's.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WasmKind::Capability => "capability",
+            WasmKind::Policy => "policy",
+        }
+    }
+}
+
+/// `ouro wasm deploy`'s flags.
+#[derive(Debug, Args)]
+pub struct WasmDeployArgs {
+    /// The `.ouro-wasm` bundle to deploy.
+    pub bundle: PathBuf,
+
+    /// The machines to deploy to, comma separated. The driving node alone by default.
+    /// Deploying to machines you are not driving from costs reboot survival, and the answer
+    /// says so rather than refusing.
+    #[arg(long, value_name = "LIST")]
+    pub nodes: Option<String>,
+
+    /// Emit the raw result JSON instead of a readable summary.
+    #[arg(long)]
+    pub json: bool,
+
+    /// The machine that drives the rollout and holds its register entry. This one by
+    /// default.
+    #[arg(long, value_name = "MACHINE")]
+    pub node: Option<String>,
+
+    /// Where the gateway listens. Omitted, the local gateway.json is read instead.
+    #[arg(long, value_name = "HOST:PORT")]
+    pub addr: Option<String>,
+
+    /// A file holding the gateway token. Omitted, the token beside gateway.json is used.
+    #[arg(long, value_name = "PATH")]
+    pub token_file: Option<PathBuf>,
+}
+
+/// `ouro wasm rollback`'s flags.
+#[derive(Debug, Args)]
+pub struct WasmRollbackArgs {
+    /// The live capability to retire.
+    pub name: String,
+
+    /// Emit the raw result JSON instead of a readable summary.
+    #[arg(long)]
+    pub json: bool,
+
+    /// The machine holding the rollout's register entry. This one by default.
+    #[arg(long, value_name = "MACHINE")]
+    pub node: Option<String>,
+
+    /// Where the gateway listens. Omitted, the local gateway.json is read instead.
+    #[arg(long, value_name = "HOST:PORT")]
+    pub addr: Option<String>,
+
+    /// A file holding the gateway token. Omitted, the token beside gateway.json is used.
+    #[arg(long, value_name = "PATH")]
+    pub token_file: Option<PathBuf>,
+}
+
+/// `ouro wasm doctor`'s flags.
+#[derive(Debug, Args)]
+pub struct WasmArgs {
+    /// Emit the raw status JSON instead of a readable summary.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Where the gateway listens. Omitted, the local gateway.json is read instead.
+    #[arg(long, value_name = "HOST:PORT")]
+    pub addr: Option<String>,
+
+    /// A file holding the gateway token. Omitted, the token beside gateway.json is used.
+    #[arg(long, value_name = "PATH")]
+    pub token_file: Option<PathBuf>,
+}
+
+/// The one flag every local `ouro wasm` command takes, and the only way to name a helper
+/// besides the environment.
+///
+/// `ouro wasm` derives no candidate from the working directory. It looks in exactly three
+/// places — this flag, an absolute `OUROBOROS_WASM_HELPER`, and the `ouro-wasm` beside the
+/// *resolved* `ouro` — because the helper *is* the containment boundary, and a cloned
+/// repository that could drop a `priv/wasm/ouro-wasm` into the directory an author works in
+/// would be choosing the binary this command spawns to contain untrusted code.
+///
+/// Naming a path inside a checkout is fine, and CI does exactly that: a person choosing is the
+/// only thing that may choose. Every candidate is then canonicalised and must be an executable
+/// regular file, owned by this account or root, that nobody else can rewrite — and the
+/// canonical path is what is spawned, so the file checked is the file run (docs/WASM.md D14).
+#[derive(Debug, Args)]
+pub struct WasmHelperArgs {
+    /// The `ouro-wasm` binary to use. Omitted, an absolute `$OUROBOROS_WASM_HELPER` is read,
+    /// and failing that the `ouro-wasm` installed beside the resolved `ouro`. Nothing is
+    /// derived from the working directory; a path you name is honoured wherever it points.
+    #[arg(long, value_name = "PATH")]
+    pub helper: Option<PathBuf>,
+}
+
+/// `ouro wasm new`'s flags.
+#[derive(Debug, Args)]
+pub struct WasmNewArgs {
+    /// The project's name, which is also its crate name. Letters, digits, `-` and `_`.
+    pub name: String,
+
+    /// Scaffold a hook component — one that reads a hook payload and answers the verdict
+    /// contract — instead of a plain capability.
+    #[arg(long)]
+    pub hook: bool,
+
+    /// The directory to create the project in. Omitted, the current one.
+    #[arg(long, value_name = "DIR")]
+    pub into: Option<PathBuf>,
+
+    /// The one line `describe` reports about this component. At most 200 characters, and
+    /// untrusted wherever it is read. Omitted, a placeholder saying which shape this is.
+    #[arg(long, value_name = "TEXT")]
+    pub summary: Option<String>,
+
+    /// Where `ouroboros-guest` lives, as the `path =` the generated `Cargo.toml` carries.
+    ///
+    /// The crate is not published yet, so a scaffolded project reaches the SDK by path.
+    /// Omitted, this command walks up from `--into` looking for a checkout's
+    /// `tui/wasm/guest`, and refuses rather than guessing when there is none above it.
+    #[arg(long, value_name = "PATH")]
+    pub sdk_path: Option<PathBuf>,
+}
+
+/// `ouro wasm inspect`'s flags.
+#[derive(Debug, Args)]
+pub struct WasmInspectArgs {
+    /// The component to look at.
+    pub file: PathBuf,
+
+    /// Emit the helper's own report as JSON instead of a readable summary.
+    #[arg(long)]
+    pub json: bool,
+
+    #[command(flatten)]
+    pub helper: WasmHelperArgs,
+}
+
+/// `ouro wasm run`'s flags.
+#[derive(Debug, Args)]
+pub struct WasmRunArgs {
+    /// The component to run.
+    pub file: PathBuf,
+
+    /// The JSON string handed to `init`, verbatim.
+    #[arg(long, value_name = "JSON", default_value = "{}")]
+    pub config: String,
+
+    /// One message, as JSON. Repeatable; every message goes to the same instance.
+    #[arg(long, value_name = "JSON")]
+    pub message: Vec<String>,
+
+    /// A file of JSON lines, one message per line. Read in order, after any `--message`.
+    #[arg(long, value_name = "PATH")]
+    pub messages: Option<PathBuf>,
+
+    /// Also call `describe`, which is metadata and reads nothing.
+    #[arg(long)]
+    pub describe: bool,
+
+    /// Instruction budget for one message. Defaults to the node's `capability_limits`; a
+    /// value above what the helper accepts is clamped down to it and said out loud.
+    #[arg(long, value_name = "N")]
+    pub fuel: Option<u64>,
+
+    /// Memory ceiling, summed across every memory the instance holds.
+    #[arg(long, value_name = "N")]
+    pub memory_bytes: Option<u64>,
+
+    /// Wall-clock deadline for one message.
+    #[arg(long, value_name = "MS")]
+    pub deadline_ms: Option<u64>,
+
+    /// Emit the whole run as JSON.
+    #[arg(long)]
+    pub json: bool,
+
+    #[command(flatten)]
+    pub helper: WasmHelperArgs,
+}
+
+/// `ouro wasm hook`'s flags.
+///
+/// There is no `--fuel` and no `--memory-bytes`, and that is the node's shape rather than an
+/// omission: a hook declares one bound for itself, `timeout_ms`, and fuel and memory are
+/// `config :ouroboros, :wasm`'s, where an operator can already see and move them.
+#[derive(Debug, Args)]
+pub struct WasmHookArgs {
+    /// The component to run.
+    pub file: PathBuf,
+
+    /// The hook event, spelled as a hook declares it: `PreToolUse`, `PostToolUse`,
+    /// `SessionStart`, and the rest.
+    #[arg(long, value_name = "EVENT")]
+    pub event: String,
+
+    /// A file holding the hook payload as JSON, or `-` for standard input. Omitted, an empty
+    /// object. The runtime's own `hook_event_name` is set over whatever this carries.
+    #[arg(long, value_name = "PATH")]
+    pub payload: Option<String>,
+
+    /// The JSON string handed to `init`, verbatim — a hook's declared `config`.
+    #[arg(long, value_name = "JSON", default_value = "{}")]
+    pub config: String,
+
+    /// Show the trusted lane: an operator's own hook, or a workspace they named. The default
+    /// is the untrusted lane, because that is the one a cloned repository gets and the one
+    /// whose narrowing an author needs to see.
+    #[arg(long)]
+    pub trusted: bool,
+
+    /// The hook's declared `timeout_ms`, which becomes its deadline. Clamped to the component
+    /// deadline ceiling exactly as the node clamps it.
+    #[arg(long, value_name = "MS")]
+    pub timeout_ms: Option<u64>,
+
+    /// Emit both verdicts and what was dropped as JSON.
+    #[arg(long)]
+    pub json: bool,
+
+    #[command(flatten)]
+    pub helper: WasmHelperArgs,
+}
+
+/// W15. `ouro wasm policy`'s flags.
+///
+/// There is no `--fuel` and no `--memory-bytes`, for `ouro wasm hook`'s reason: the engine gives
+/// a policy component the node's own `capability_limits`, where an operator can already see and
+/// move them, and a bound this command invented would be a bound nothing else uses.
+#[derive(Debug, Args)]
+pub struct WasmPolicyArgs {
+    /// The policy component to ask.
+    pub file: PathBuf,
+
+    /// The permission request, as JSON: the string itself, a path to a file holding it, or `-`
+    /// for standard input. It is the document `Ouroboros.Wasm.PolicyEngine` builds — `tool`,
+    /// `mode`, `input`, `principal`, `workspace`, `context` — and this command sends it
+    /// verbatim rather than filling anything in, because a request this end invented would be
+    /// one the node never sends.
+    #[arg(long, value_name = "JSON|PATH|-")]
+    pub request: String,
+
+    /// The JSON string handed to `init`, verbatim — a policy's declared config.
+    #[arg(long, value_name = "JSON", default_value = "{}")]
+    pub config: String,
+
+    /// Emit the verdict, the rule and the guest's log as JSON.
+    #[arg(long)]
+    pub json: bool,
+
+    #[command(flatten)]
+    pub helper: WasmHelperArgs,
+}
+
+/// `ouro wasm check`'s flags.
+#[derive(Debug, Args)]
+pub struct WasmCheckArgs {
+    /// The workspace holding the `ouroboros.toml`. Omitted, the current directory.
+    #[arg(long, value_name = "DIR")]
+    pub workspace: Option<PathBuf>,
+
+    /// Emit the table as JSON.
+    #[arg(long)]
+    pub json: bool,
+
+    #[command(flatten)]
+    pub helper: WasmHelperArgs,
 }
 
 /// `ouro update`'s flags.
@@ -1200,6 +1709,430 @@ mod tests {
                 "a secret on a command line is readable by every process on the host: {args:?}"
             );
         }
+    }
+
+    /// W5. `ouro wasm doctor` reports and never starts, so it takes the three flags every
+    /// remote operator surface takes and deliberately not a fourth.
+    #[test]
+    fn ouro_wasm_doctor_reports_and_offers_no_way_to_start_the_helper() {
+        let Some(Command::Wasm {
+            command: WasmCommand::Doctor(args),
+        }) = parse(&["wasm", "doctor", "--json"]).command
+        else {
+            panic!("`ouro wasm doctor --json` must parse");
+        };
+
+        assert!(args.json);
+        assert_eq!(args.addr, None);
+        assert_eq!(args.token_file, None);
+
+        // Starting the helper to see whether it starts is the one thing this must not do,
+        // so there is no flag that would.
+        assert!(
+            Cli::try_parse_from(["ouro", "wasm", "doctor", "--probe"]).is_err(),
+            "a readiness surface with a --probe is a readiness surface that spawns"
+        );
+
+        // W10 gave `ouro wasm` five subcommands that *do* start a helper, locally and by
+        // design. `doctor` did not inherit a way to: it still takes the three remote flags and
+        // takes neither `--helper` nor anything else that names a binary to run.
+        assert!(
+            Cli::try_parse_from(["ouro", "wasm", "doctor", "--helper", "/bin/true"]).is_err(),
+            "the readiness surface must not be able to name a helper, let alone start one"
+        );
+    }
+
+    /// W10. The five local subcommands take `--helper` and nothing that reads the working
+    /// directory: the helper is the containment boundary, so the set of paths that may supply
+    /// it is what was typed, an absolute environment override, and this binary's own sibling.
+    #[test]
+    fn the_local_wasm_commands_name_a_helper_and_never_a_directory_to_search() {
+        let Some(Command::Wasm {
+            command: WasmCommand::Inspect(args),
+        }) = parse(&[
+            "wasm",
+            "inspect",
+            "guest.wasm",
+            "--helper",
+            "/opt/ouro-wasm",
+        ])
+        .command
+        else {
+            panic!("`ouro wasm inspect` must parse");
+        };
+        assert_eq!(args.file, PathBuf::from("guest.wasm"));
+        assert_eq!(args.helper.helper, Some(PathBuf::from("/opt/ouro-wasm")));
+        assert!(!args.json);
+
+        // There is no flag that says "look for a helper under here": the only way to widen the
+        // candidate set is to type a path, and that is one path rather than a directory to walk.
+        for rejected in [
+            vec!["wasm", "inspect", "g.wasm", "--helper-dir", "/tmp"],
+            vec!["wasm", "inspect", "g.wasm", "--search-cwd"],
+            vec!["wasm", "run", "g.wasm", "--helper-dir", "/tmp"],
+        ] {
+            assert!(
+                Cli::try_parse_from(std::iter::once("ouro").chain(rejected.iter().copied()))
+                    .is_err(),
+                "a way to search for a helper is a way for a clone to supply one: {rejected:?}"
+            );
+        }
+    }
+
+    /// `run` sends every message to one instance, so the messages are a list and there is no
+    /// flag that would make them each their own instance.
+    #[test]
+    fn ouro_wasm_run_takes_repeatable_messages_and_optional_bounds() {
+        let Some(Command::Wasm {
+            command: WasmCommand::Run(args),
+        }) = parse(&[
+            "wasm",
+            "run",
+            "guest.wasm",
+            "--config",
+            r#"{"a":1}"#,
+            "--message",
+            r#"{"one":1}"#,
+            "--message",
+            r#"{"two":2}"#,
+            "--deadline-ms",
+            "250",
+            "--describe",
+        ])
+        .command
+        else {
+            panic!("`ouro wasm run` must parse");
+        };
+
+        assert_eq!(args.config, r#"{"a":1}"#);
+        assert_eq!(args.message, vec![r#"{"one":1}"#, r#"{"two":2}"#]);
+        assert_eq!(args.deadline_ms, Some(250));
+        assert!(args.describe);
+        // Absent bounds are the node's defaults, resolved at dispatch rather than defaulted to
+        // a number this file invents.
+        assert_eq!(args.fuel, None);
+        assert_eq!(args.memory_bytes, None);
+    }
+
+    /// `hook` defaults to the **untrusted** lane, because that is the lane a cloned repository
+    /// gets and the one whose narrowing an author needs to see. `--trusted` is the opt-in, and
+    /// there is deliberately no `--untrusted` to be the default nobody typed.
+    #[test]
+    fn ouro_wasm_hook_shows_the_untrusted_lane_unless_told_otherwise() {
+        let Some(Command::Wasm {
+            command: WasmCommand::Hook(args),
+        }) = parse(&["wasm", "hook", "vet.wasm", "--event", "PreToolUse"]).command
+        else {
+            panic!("`ouro wasm hook` must parse");
+        };
+
+        assert!(!args.trusted, "the default lane is the strict one");
+        assert_eq!(args.event, "PreToolUse");
+        assert_eq!(args.payload, None);
+        assert_eq!(args.config, "{}");
+        assert_eq!(args.timeout_ms, None);
+
+        // A hook declares one bound for itself and fuel and memory are the operator's, so there
+        // is no flag here that would let a hook ask for either.
+        for rejected in [
+            vec!["wasm", "hook", "v.wasm", "--event", "Stop", "--fuel", "1"],
+            vec![
+                "wasm",
+                "hook",
+                "v.wasm",
+                "--event",
+                "Stop",
+                "--memory-bytes",
+                "1",
+            ],
+        ] {
+            assert!(
+                Cli::try_parse_from(std::iter::once("ouro").chain(rejected.iter().copied()))
+                    .is_err(),
+                "a hook does not choose fuel or memory on a node either: {rejected:?}"
+            );
+        }
+
+        // The event is not optional: there is no default event, because every event narrows
+        // differently and guessing one would print the wrong narrowing convincingly.
+        assert!(Cli::try_parse_from(["ouro", "wasm", "hook", "v.wasm"]).is_err());
+    }
+
+    #[test]
+    fn ouro_wasm_check_and_new_take_their_one_argument_each() {
+        let Some(Command::Wasm {
+            command: WasmCommand::Check(args),
+        }) = parse(&["wasm", "check", "--workspace", "/repo"]).command
+        else {
+            panic!("`ouro wasm check` must parse");
+        };
+        assert_eq!(args.workspace, Some(PathBuf::from("/repo")));
+
+        let Some(Command::Wasm {
+            command: WasmCommand::New(args),
+        }) = parse(&["wasm", "new", "my-guard", "--hook"]).command
+        else {
+            panic!("`ouro wasm new` must parse");
+        };
+        assert_eq!(args.name, "my-guard");
+        assert!(args.hook);
+        assert_eq!(args.into, None);
+    }
+
+    /// W15. `--kind policy` parses, and a kind this build does not implement does not.
+    ///
+    /// A closed value set rather than a free string: the kind is signed into the manifest and
+    /// decides which of the helper's two worlds these bytes are ever admitted to, so a typo
+    /// has to be a parse error here rather than a refusal three round trips later.
+    #[test]
+    fn ouro_wasm_sign_takes_a_kind_and_refuses_one_this_build_does_not_have() {
+        let Some(Command::Wasm {
+            command: WasmCommand::Sign(args),
+        }) = parse(&[
+            "wasm",
+            "sign",
+            "guard.wasm",
+            "--name",
+            "guard",
+            "--author",
+            "ops",
+            "--kind",
+            "policy",
+        ])
+        .command
+        else {
+            panic!("`ouro wasm sign --kind policy` must parse");
+        };
+
+        assert_eq!(args.kind, WasmKind::Policy);
+        assert_eq!(args.kind.as_str(), "policy");
+        assert_eq!(WasmKind::Capability.as_str(), "capability");
+
+        assert!(
+            Cli::try_parse_from([
+                "ouro",
+                "wasm",
+                "sign",
+                "guard.wasm",
+                "--name",
+                "guard",
+                "--author",
+                "ops",
+                "--kind",
+                "hook",
+            ])
+            .is_err(),
+            "a kind this build does not implement is a parse error"
+        );
+    }
+
+    /// W12. Signing takes the two facts a policy requires and nothing a policy decides.
+    #[test]
+    fn ouro_wasm_sign_names_what_is_signed_and_never_the_durable_id() {
+        let Some(Command::Wasm {
+            command: WasmCommand::Sign(args),
+        }) = parse(&[
+            "wasm",
+            "sign",
+            "greeter.wasm",
+            "--name",
+            "greeter",
+            "--author",
+            "ops",
+            "--import",
+            "log",
+            "--start-config",
+            r#"{"greeting":"hi"}"#,
+            "--eval",
+            "spec.json",
+            "--out",
+            "greeter.ouro-wasm",
+        ])
+        .command
+        else {
+            panic!("`ouro wasm sign` must parse");
+        };
+
+        assert_eq!(args.component, PathBuf::from("greeter.wasm"));
+        assert_eq!(args.name, "greeter");
+        assert_eq!(args.author, "ops");
+        assert_eq!(args.start_config.as_deref(), Some(r#"{"greeting":"hi"}"#));
+        assert_eq!(args.eval, Some(PathBuf::from("spec.json")));
+        assert_eq!(args.out, Some(PathBuf::from("greeter.ouro-wasm")));
+        // W15. An omitted `--kind` is a capability, which is what every command written
+        // before there were two kinds meant.
+        assert_eq!(args.kind, WasmKind::Capability);
+        // Imports are declared by the operator, one flag per import, and never inferred by
+        // the node from bytes nobody signed.
+        assert_eq!(args.import, vec!["log".to_string()]);
+        assert_eq!(args.imports_from, None);
+
+        // The durable wrapper's id is derived from the name by the runtime and by the
+        // signing policy alike. A flag for it would be a way to sign a manifest claiming a
+        // capability it does not describe.
+        assert!(
+            Cli::try_parse_from(["ouro", "wasm", "sign", "g.wasm", "--start-id", "wasm/other"])
+                .is_err(),
+            "a start id a caller may name is a start id a caller may lie about"
+        );
+
+        // And the two facts the policy requires are not optional.
+        assert!(Cli::try_parse_from(["ouro", "wasm", "sign", "g.wasm"]).is_err());
+        assert!(
+            Cli::try_parse_from(["ouro", "wasm", "sign", "g.wasm", "--name", "greeter"]).is_err()
+        );
+
+        // There is no `--epoch`. A number a client chose could be placed at the rollout
+        // register's plausibility ceiling, which leaves no epoch that is both fresh and
+        // plausible: one call, and lane W on that node is wedged durably. The node
+        // allocates it over the connected cluster instead.
+        assert!(
+            Cli::try_parse_from(["ouro", "wasm", "sign", "g.wasm", "--epoch", "7"]).is_err(),
+            "an epoch a client may name is an epoch a client may wedge a register with"
+        );
+
+        // `--import` repeats, and `--imports-from` is the piped form of the same thing.
+        // They are mutually exclusive, because two sources for one signed field is two
+        // answers to what was signed.
+        let Some(Command::Wasm {
+            command: WasmCommand::Sign(repeated),
+        }) = parse(&[
+            "wasm", "sign", "g.wasm", "--name", "g", "--author", "o", "--import", "log",
+            "--import", "clock",
+        ])
+        .command
+        else {
+            panic!("repeated --import must parse");
+        };
+
+        assert_eq!(
+            repeated.import,
+            vec!["log".to_string(), "clock".to_string()]
+        );
+
+        assert!(Cli::try_parse_from([
+            "ouro",
+            "wasm",
+            "sign",
+            "g.wasm",
+            "--name",
+            "g",
+            "--author",
+            "o",
+            "--import",
+            "log",
+            "--imports-from",
+            "-",
+        ])
+        .is_err());
+    }
+
+    /// W12. Deploy takes a file and the machines to put it on, and nothing that would let a
+    /// client tell a node which signers to trust.
+    #[test]
+    fn ouro_wasm_deploy_names_a_bundle_and_its_targets_and_no_trust() {
+        let Some(Command::Wasm {
+            command: WasmCommand::Deploy(args),
+        }) = parse(&["wasm", "deploy", "greeter.ouro-wasm", "--nodes", "a@h,b@h"]).command
+        else {
+            panic!("`ouro wasm deploy` must parse");
+        };
+
+        assert_eq!(args.bundle, PathBuf::from("greeter.ouro-wasm"));
+        assert_eq!(args.nodes.as_deref(), Some("a@h,b@h"));
+        assert_eq!(args.node, None);
+
+        // A loading node reads its own trust policy. A flag that named one would make this
+        // client the authority over what that node will run.
+        for flag in ["--trusted-signers", "--allow-unsigned", "--signer"] {
+            assert!(
+                Cli::try_parse_from(["ouro", "wasm", "deploy", "b.ouro-wasm", flag, "x"]).is_err(),
+                "{flag} would move a trust decision to the client"
+            );
+        }
+    }
+
+    /// W12. Rollback names one capability. There is no `--force` and no `--purge`: the
+    /// bytes are durable by design (D6), and stopping a wrapper is the whole verb.
+    #[test]
+    fn ouro_wasm_rollback_names_one_capability_and_nothing_destructive() {
+        let Some(Command::Wasm {
+            command: WasmCommand::Rollback(args),
+        }) = parse(&["wasm", "rollback", "greeter", "--json"]).command
+        else {
+            panic!("`ouro wasm rollback` must parse");
+        };
+
+        assert_eq!(args.name, "greeter");
+        assert!(args.json);
+
+        for flag in ["--force", "--purge", "--delete-bytes"] {
+            assert!(
+                Cli::try_parse_from(["ouro", "wasm", "rollback", "greeter", flag]).is_err(),
+                "{flag} would make rollback something other than stop-and-mark"
+            );
+        }
+    }
+
+    /// W12. Keygen contacts nothing, so it takes no endpoint flags at all — the key is set
+    /// up on the operator's machine and must never travel.
+    #[test]
+    fn ouro_wasm_keygen_writes_a_key_and_talks_to_no_runtime() {
+        let Some(Command::Wasm {
+            command: WasmCommand::Keygen(args),
+        }) = parse(&[
+            "wasm",
+            "keygen",
+            "--out",
+            "release.key",
+            "--id",
+            "release-key",
+        ])
+        .command
+        else {
+            panic!("`ouro wasm keygen` must parse");
+        };
+
+        assert_eq!(args.out, Some(PathBuf::from("release.key")));
+        assert_eq!(args.id, "release-key");
+
+        for flag in ["--addr", "--token-file"] {
+            assert!(
+                Cli::try_parse_from(["ouro", "wasm", "keygen", flag, "x"]).is_err(),
+                "{flag} on keygen would imply a key that travels"
+            );
+        }
+
+        // The default writes beside the operator rather than into a runtime's data
+        // directory, which is a place a key does not belong.
+        let Some(Command::Wasm {
+            command: WasmCommand::Keygen(bare),
+        }) = parse(&["wasm", "keygen"]).command
+        else {
+            panic!("`ouro wasm keygen` must parse with no flags");
+        };
+
+        assert_eq!(bare.out, None);
+        assert_eq!(bare.id, "release-key");
+    }
+
+    /// W12. `ls` is the listing surface, and it takes the same three flags every remote
+    /// operator surface takes.
+    #[test]
+    fn ouro_wasm_ls_renders_a_listing_and_takes_no_filters() {
+        let Some(Command::Wasm {
+            command: WasmCommand::Ls(args),
+        }) = parse(&["wasm", "ls", "--json"]).command
+        else {
+            panic!("`ouro wasm ls` must parse");
+        };
+
+        assert!(args.json);
+        assert_eq!(args.addr, None);
+
+        // The runtime bounds and sorts both lists itself; a filter here would be a second,
+        // laxer definition of what a node holds.
+        assert!(Cli::try_parse_from(["ouro", "wasm", "ls", "--state", "live"]).is_err());
     }
 
     #[test]

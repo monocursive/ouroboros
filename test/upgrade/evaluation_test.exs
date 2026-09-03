@@ -253,6 +253,29 @@ defmodule Ouroboros.Upgrade.EvaluationTest do
       refute Evaluation.passed?(report)
     end
 
+    test "no evaluation agent outlives an evaluation its caller killed at a deadline" do
+      # An evaluation runs under somebody else's deadline — `Ouroboros.Wasm.Rollout`'s
+      # local gate kills the task that holds it — and `after` does not run for an exit
+      # signal from outside. So the throwaway agent kept its cluster-wide mesh id, and the
+      # helper instance a lane-W capability would be holding, with nothing linked to it
+      # that would ever notice.
+      compile!(@slow, slow_source())
+      before = eval_agent_ids()
+
+      spec = %{
+        probes: List.duplicate(%{input: "x", expect: :any_reply}, 20),
+        budget_ms: 30_000
+      }
+
+      task = Task.async(fn -> Evaluation.run(@slow, spec) end)
+
+      assert nil == Task.yield(task, 400)
+      refute match?({:ok, _result}, Task.shutdown(task, :brutal_kill))
+
+      assert await_eval_agents(before, 200) == before,
+             "a killed evaluation left an agent behind: #{inspect(eval_agent_ids() -- before)}"
+    end
+
     test "a spec can seed the state its expectations are about" do
       compile!(@echo, echo_source())
 
@@ -313,6 +336,103 @@ defmodule Ouroboros.Upgrade.EvaluationTest do
     end
   end
 
+  describe "the {module, initial_state} start spec (D7)" do
+    test "a bare module and an empty seed are the same thing, which is lane B unchanged" do
+      compile!(@echo, echo_source())
+
+      spec = %{probes: [%{input: "x", expect: :any_reply}], budget_ms: 5_000}
+
+      assert {:ok, bare} = Evaluation.run(@echo, spec)
+      assert {:ok, seeded} = Evaluation.run({@echo, %{}}, spec)
+
+      assert bare.module == @echo
+      assert seeded.module == @echo
+      assert Evaluation.passed?(bare)
+      assert Evaluation.passed?(seeded)
+    end
+
+    test "the start spec seeds state the spec never mentioned" do
+      # This is what lane W needs: `Ouroboros.Wasm.Capability` is one module standing in for
+      # every component, so which capability is under evaluation is a fact about its state.
+      compile!(@echo, echo_source())
+
+      spec = %{
+        probes: [%{input: "x", expect: {:state_matches, :role, "named-by-the-start-spec"}}],
+        budget_ms: 5_000
+      }
+
+      assert {:ok, report} = Evaluation.run({@echo, %{role: "named-by-the-start-spec"}}, spec)
+      assert Evaluation.passed?(report)
+
+      # Without the start spec the same expectation fails, which is the only way to know the
+      # start spec is what satisfied it.
+      assert {:ok, unseeded} = Evaluation.run(@echo, spec)
+      refute Evaluation.passed?(unseeded)
+    end
+
+    test "both seeds are merged, and the start spec wins the keys they share" do
+      compile!(@echo, echo_source())
+
+      # The spec is signed and travels with the bytes it judges; the start spec is the
+      # deployment's own statement of *what* is being judged. A signed spec that could
+      # overwrite the start spec would be a test able to redirect the thing it is testing, so
+      # the start spec wins — and everything it does not name, the spec still seeds.
+      base = %{
+        initial_state: %{role: "named-by-the-spec", from_spec: "kept"},
+        budget_ms: 5_000
+      }
+
+      contested =
+        Map.put(base, :probes, [
+          %{input: "x", expect: {:state_matches, :role, "named-by-the-start-spec"}}
+        ])
+
+      assert {:ok, report} =
+               Evaluation.run(
+                 {@echo, %{role: "named-by-the-start-spec", from_start: "kept"}},
+                 contested
+               )
+
+      assert Evaluation.passed?(report)
+
+      # And the key only the spec named survived the merge rather than being replaced by it.
+      uncontested =
+        Map.put(base, :probes, [
+          %{input: "x", expect: {:state_matches, :from_spec, "kept"}},
+          %{input: "y", expect: {:state_matches, :from_start, "kept"}}
+        ])
+
+      assert {:ok, merged} =
+               Evaluation.run(
+                 {@echo, %{role: "named-by-the-start-spec", from_start: "kept"}},
+                 uncontested
+               )
+
+      assert Evaluation.passed?(merged)
+
+      # The spec alone still seeds what it always did: nothing about lane B changed.
+      assert {:ok, spec_only} =
+               Evaluation.run(
+                 @echo,
+                 Map.put(base, :probes, [
+                   %{input: "x", expect: {:state_matches, :role, "named-by-the-spec"}}
+                 ])
+               )
+
+      assert Evaluation.passed?(spec_only)
+    end
+
+    test "a start spec that is not one is refused before anything is started" do
+      spec = %{probes: [%{input: "x", expect: :any_reply}], budget_ms: 5_000}
+
+      assert {:error, {:invalid_eval_module, _rendered}} =
+               Evaluation.run({@echo, :not_a_map}, spec)
+
+      assert {:error, {:invalid_eval_module, _rendered}} = Evaluation.run({nil, %{}}, spec)
+      assert {:error, {:invalid_eval_module, _rendered}} = Evaluation.run({@echo, %{}, %{}}, spec)
+    end
+  end
+
   describe "signed criteria" do
     test "a spec rewritten after signing invalidates the artifact it came in" do
       {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
@@ -356,6 +476,25 @@ defmodule Ouroboros.Upgrade.EvaluationTest do
 
       assert Signer.Deny.sign(Artifact.signing_payload(artifact, @signer), @signer) ==
                {:error, :signing_denied}
+    end
+  end
+
+  defp eval_agent_ids do
+    Ouroboros.Mesh.list_agents()
+    |> Enum.map(& &1.id)
+    |> Enum.filter(&String.starts_with?(&1, "ouroboros-eval-"))
+    |> Enum.sort()
+  end
+
+  # The janitor stops the id after the killed process goes down, which is asynchronous.
+  defp await_eval_agents(expected, 0), do: eval_agent_ids() || expected
+
+  defp await_eval_agents(expected, attempts) do
+    if eval_agent_ids() == expected do
+      expected
+    else
+      Process.sleep(20)
+      await_eval_agents(expected, attempts - 1)
     end
   end
 

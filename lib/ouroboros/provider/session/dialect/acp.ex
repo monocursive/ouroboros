@@ -250,8 +250,8 @@ defmodule Ouroboros.Provider.Session.Dialect.ACP do
   def answer(:set_mode, _result, _runtime), do: :ok
   def answer(_verb, result, _runtime), do: result
 
-  # The one pre-tool seam ACP gives. `Ouroboros.Control.Permissions` answers first; only
-  # what it leaves as `:ask` becomes an approval the human sees.
+  # The one pre-tool seam ACP gives. The engine `:permissions_engine` names answers first
+  # (W18, D27); only what it leaves as `:ask` becomes an approval the human sees.
   @impl true
   def approval_request("session/request_permission" = method, params) do
     case Seam.decide(:acp, method, params, permission_payload(params)) do

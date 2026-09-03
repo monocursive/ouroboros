@@ -26,6 +26,8 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
   | external network denied | `unshare(CLONE_NEWNET)` (`ENETUNREACH`) |
   | loopback still usable | loopback brought up inside the namespace |
   | **creating a `.git` that did not exist when the command started** | **`LD_PRELOAD` only — unchanged, and still leaky** |
+  | reads fenced to an allow-set, in `builder` mode only | Landlock alone (`EACCES`) — there is no mount that can express it |
+  | a build's `/dev` and `/proc`, in `builder` mode only | `/dev/null` by name, `/proc` read-only, a sealed tmpfs over `/dev/shm` |
   | remounting out of the policy | capabilities dropped, seccomp denial, **and** Landlock, which survives both |
   | narrowing the syscall surface | seccomp (the bwrap backend has none) |
 
@@ -69,6 +71,21 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
   precisely so that every denial a command can actually provoke is decided by the mount
   check, which the kernel consults first. A Landlock denial would arrive as `EACCES`, which
   this runtime correctly refuses to treat as a sandbox signal.
+
+  The one exception is `builder` (docs/WASM.md D26), where a **read** denial has no mount
+  layer to arrive through — this helper stays in the host's own path namespace, and a mount
+  can make a path read-only but not unreadable. So a builder read denial *is* `EACCES`, and
+  it is legible there for a reason that does not generalise: a build is one program this
+  node spawned with a policy it wrote, not an opaque shell line, so the string is read as a
+  fence in `Ouroboros.Wasm.Forge`'s own suite and nowhere else.
+
+  ## What the helper says it can do
+
+  `doctor` carries `"features": {"read_allow_set": true}`, and `probe/1` turns that into
+  `read_fence: true` in the detection map. It is asked rather than assumed because a helper
+  binary installed before W17 speaks the same protocol version and applies the same
+  policies, and silently has no read allow-set: a node that inferred the fence from the
+  backend's name would run a build under one that helper does not have.
   """
 
   @helper_name "ouro-sandbox"
@@ -77,53 +94,59 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
   @doc """
   The absolute path the helper would be spawned from, or `nil` when nothing is installed.
 
-  `OUROBOROS_SANDBOX_HELPER` wins, then a configured absolute path, then the first existing
-  candidate — the same precedence the Computer Use helper uses, for the same reason: an
-  operator testing a build needs a way to point the runtime at it without a release.
+  An absolute `OUROBOROS_SANDBOX_HELPER` wins, then a configured absolute path, then the first existing
+  candidate — the application's own `priv/`, or a sibling of `ouro`. The same precedence the
+  Computer Use helper uses, for the same reason: an operator testing a build needs a way to
+  point the runtime at it without a release.
+
+  No candidate is derived from the working directory (F1). This helper applies namespaces,
+  Landlock and seccomp and then `execve`s the command, so what supplies it decides what
+  contains an untrusted command; a `Path.expand("priv/sandbox/…")` and a walk up the cwd's
+  ancestors were both here, and either let a cloned repository supply that binary.
   """
   @spec executable() :: String.t() | nil
   def executable do
     case System.get_env("OUROBOROS_SANDBOX_HELPER") do
       path when is_binary(path) and path != "" ->
-        if File.regular?(path), do: path, else: nil
+        if absolute_path?(path), do: regular(path), else: configured_executable()
 
       _unset ->
-        case Application.get_env(:ouroboros, :native_sandbox_helper) do
-          path when is_binary(path) and path != "" ->
-            if File.regular?(path), do: path, else: nil
-
-          _bundled ->
-            Enum.find(candidates(), &File.regular?/1)
-        end
+        configured_executable()
     end
   end
 
+  defp configured_executable do
+    case Application.get_env(:ouroboros, :native_sandbox_helper) do
+      path when is_binary(path) and path != "" ->
+        if absolute_path?(path),
+          do: regular(path),
+          else: Enum.find(candidates(), &File.regular?/1)
+
+      _bundled ->
+        Enum.find(candidates(), &File.regular?/1)
+    end
+  end
+
+  defp regular(path), do: if(File.regular?(path), do: path, else: nil)
+  defp absolute_path?(path), do: Path.type(path) == :absolute
+
   defp candidates do
-    [priv_helper(), Path.expand(Path.join(["priv", "sandbox", @helper_name])), walk_helper()]
+    # No cwd-derived candidate, in either of the two shapes this used to carry (F1): see
+    # `executable/0`.
+    [priv_helper(), sibling_helper(:os.find_executable(~c"ouro"))]
     |> Enum.reject(&is_nil/1)
     |> Enum.uniq()
   end
+
+  defp sibling_helper(false), do: nil
+
+  defp sibling_helper(path) when is_list(path),
+    do: Path.join(Path.dirname(List.to_string(path)), @helper_name)
 
   defp priv_helper do
     case :code.priv_dir(:ouroboros) do
       priv when is_list(priv) -> Path.join([List.to_string(priv), "sandbox", @helper_name])
       _bad_name -> nil
-    end
-  end
-
-  defp walk_helper do
-    case File.cwd() do
-      {:ok, cwd} ->
-        cwd
-        |> Stream.iterate(&Path.dirname/1)
-        |> Enum.take(6)
-        |> Enum.find_value(fn dir ->
-          path = Path.join([dir, "priv", "sandbox", @helper_name])
-          if File.regular?(path), do: path
-        end)
-
-      {:error, _reason} ->
-        nil
     end
   end
 
@@ -135,15 +158,23 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
   `"usable": false`, this returns `nil`, and detection falls through to bubblewrap rather
   than selecting a backend that would refuse every command. A binary that cannot be run at
   all is treated the same way.
+
+  `read_fence` is the second thing this asks, and it is a question about the *binary*
+  rather than about the kernel: only a helper whose report carries
+  `"features": {"read_allow_set": true}` gets it, so a node still running a pre-W17
+  `ouro-sandbox` answers `false` and `Sandbox.fences_reads?/1` refuses the forge that
+  backend rather than fencing a build with a field the helper would refuse to parse.
   """
-  @spec probe(String.t()) :: %{version: String.t() | nil, notes: String.t()} | nil
+  @spec probe(String.t()) ::
+          %{version: String.t() | nil, notes: String.t(), read_fence: boolean()} | nil
   def probe(path) when is_binary(path) do
     with {output, 0} <- System.cmd(path, ["doctor"], stderr_to_stdout: true),
          {:ok, report} <- JSON.decode(output),
          true <- Map.get(report, "usable") == true do
       %{
         version: report |> Map.get("version") |> version_string(report),
-        notes: Map.get(report, "notes", "")
+        notes: Map.get(report, "notes", ""),
+        read_fence: read_fence?(report)
       }
     else
       _unusable -> nil
@@ -160,6 +191,12 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
   end
 
   defp version_string(_absent, _report), do: nil
+
+  # Pattern-matched rather than `get_in`, so a report whose `features` is a string — a
+  # helper from some other lineage, or a truncated read — is a helper that does not claim
+  # the fence rather than an exception on the detection path.
+  defp read_fence?(%{"features" => %{"read_allow_set" => true}}), do: true
+  defp read_fence?(_no_claim), do: false
 
   @doc """
   The executable and argv that run `command` under this policy.
@@ -195,6 +232,11 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
   `.git` directories exist is deliberately left to the helper, because the sandbox should
   read the filesystem at the moment it locks it rather than trusting a list assembled a few
   milliseconds earlier.
+
+  A `builder` policy is the one shape that carries `readable`, and it is the only change
+  this function makes for it: the read allow-set is a field the helper fences with Landlock
+  and refuses under any other mode, so emitting it for a shell would be a request the helper
+  rejects rather than a shell with a narrower fence.
   """
   @spec request(Ouroboros.Provider.Native.Sandbox.policy(), map()) :: map()
   def request(policy, scope) do
@@ -209,8 +251,34 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
     }
 
     base
+    |> readable(policy)
     |> maybe_put("cwd", chdir(scope))
-    |> maybe_put("fs_filter_library", filter_library())
+    |> maybe_put("fs_filter_library", filter_library(policy))
+  end
+
+  # The policy carries every root as it was named *and* as the kernel resolves it
+  # (`Sandbox.builder_policy/1`): bubblewrap needs the name to bind, Landlock attaches a rule
+  # to the inode either spelling reaches. A name that is itself a symlink is dropped here,
+  # because the helper refuses one by design (`plan::symlinked_read_roots` — a rule opened
+  # through a link grants its target under a name that does not say so) and the target it
+  # points at is already in the list under its own name.
+  defp readable(request, %{mode: :builder} = policy) do
+    roots =
+      policy
+      |> Map.get(:readable, [])
+      |> List.wrap()
+      |> Enum.reject(&symlink?/1)
+
+    Map.put(request, "readable", roots)
+  end
+
+  defp readable(request, _shell), do: request
+
+  defp symlink?(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :symlink}} -> true
+      _other -> false
+    end
   end
 
   defp maybe_put(map, _key, nil), do: map
@@ -223,7 +291,14 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
   # `compile.ouroboros_fs_filter` task puts it. Absent on a node where no C compiler was
   # available at build time, and absent on macOS, in which case the helper simply has no
   # name-based create filter — which is the documented gap, not a silent one.
-  defp filter_library do
+  #
+  # Never for a builder. The shim fences the *creation* of a `.git`, a build has no
+  # workspace and no such fence, and the builder plan carries no preload — so sending the
+  # library was a layer this side named and the helper dropped. The helper refuses the field
+  # under `builder` now, which makes this omission a rule rather than a courtesy.
+  defp filter_library(%{mode: :builder}), do: nil
+
+  defp filter_library(_shell) do
     path = Application.app_dir(:ouroboros, "priv/native/libouro_fs_filter.so")
     if File.regular?(path), do: path, else: nil
   rescue

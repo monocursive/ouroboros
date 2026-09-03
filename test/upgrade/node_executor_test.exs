@@ -218,6 +218,48 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
              Verifier.verify(replacement, allow_unsigned: true)
   end
 
+  test "refuses to patch the WebAssembly container, loaded or not" do
+    # `Ouroboros.Wasm.` is the machinery that contains lane-W capabilities: the helper pool
+    # that owns the wasmtime process, the store that decides which bytes a sha names, and the
+    # wrapper agent a component answers messages inside. The container must not be
+    # hot-patchable by the thing it contains (docs/WASM.md D10) — and the namespace is
+    # protected here even though `Ouroboros.Mesh` will now *start* an agent in it, which is
+    # the order those two lines have to land in.
+    module = Ouroboros.Wasm.Sneak
+    binary = compile_capability!(module)
+    on_exit(fn -> unload_capability(module) end)
+
+    assert {:ok, introduction} = introduce_artifact!(module, binary)
+
+    assert {:error, {:immutable_control_module, ^module}} =
+             Verifier.verify(introduction, allow_unsigned: true)
+
+    assert {:module, ^module} = :code.load_binary(module, ~c"wasm_sneak.beam", binary)
+
+    assert {:ok, replacement} =
+             Artifact.build(
+               [{module, binary, old_binary: binary}],
+               epoch: System.unique_integer([:positive, :monotonic])
+             )
+
+    assert {:error, {:immutable_control_module, ^module}} =
+             Verifier.verify(replacement, allow_unsigned: true)
+
+    # And the modules that are actually there, not only a name shaped like one.
+    for shipped <- [Ouroboros.Wasm.Capability, Ouroboros.Wasm.Pool, Ouroboros.Wasm.Store] do
+      shipped_binary = object_code!(shipped)
+
+      assert {:ok, artifact} =
+               Artifact.build(
+                 [{shipped, shipped_binary, old_binary: shipped_binary}],
+                 epoch: System.unique_integer([:positive, :monotonic])
+               )
+
+      assert {:error, {:immutable_control_module, ^shipped}} =
+               Verifier.verify(artifact, allow_unsigned: true)
+    end
+  end
+
   test "rejects on-load code in the new binary and in the rollback preimage" do
     probe = Ouroboros.Test.OnLoadProbe
     plain_binary = compile_probe!(probe, "")
@@ -1448,6 +1490,99 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
     assert %{mode: :ready} = NodeExecutor.status(server: server)
 
     stop_isolated_executor(executor)
+  end
+
+  test "a signed eval spec with string keys survives the journal, signature intact" do
+    # The eval spec is signed inside the manifest, and a probe's input is a JSON-shaped
+    # map with string keys. Every receipt keeps the whole artifact, so the checkpoint
+    # boundary has to hand back the exact term the signer saw: a key that came back as
+    # the atom it spells would change the bytes under the signature, and a reader that
+    # re-verified a journaled artifact would refuse a signature that was never wrong.
+    module = Ouroboros.Capability.JournaledEvalSpec
+    binary = compile_capability!(module)
+
+    on_exit(fn ->
+      :code.delete(module)
+      :code.soft_purge(module)
+      :ok
+    end)
+
+    assert {:ok, spec} =
+             Ouroboros.Upgrade.Rollout.Evaluation.validate(%{
+               probes: [
+                 %{
+                   input: %{"greet" => "hello", "nil" => nil, "error" => "none"},
+                   expect: {:equals, %{"reply" => "hello"}}
+                 },
+                 %{input: "plain", expect: {:state_matches, :last_message, %{"ok" => true}}}
+               ],
+               initial_state: %{"count" => 0}
+             })
+
+    assert {:ok, artifact} =
+             Artifact.build([{module, binary, disposition: :introduce}],
+               epoch: System.unique_integer([:positive, :monotonic]),
+               metadata: %{forge: %{eval: spec}}
+             )
+
+    {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
+    signed = Artifact.sign(artifact, "journal-signer", private_key)
+    trust_policy = [trusted_signers: %{"journal-signer" => public_key}]
+
+    directory =
+      Path.join(
+        System.tmp_dir!(),
+        "ouroboros-journaled-eval-spec-#{:os.getpid()}-#{System.unique_integer([:positive])}"
+      )
+
+    File.rm_rf!(directory)
+    File.mkdir_p!(directory)
+    on_exit(fn -> File.rm_rf(directory) end)
+    storage = {Ouroboros.Storage.DurableFile, path: directory}
+    server = String.to_atom("journaled_eval_spec_#{System.unique_integer([:positive])}")
+
+    {:ok, executor} =
+      NodeExecutor.start_link(name: server, storage: storage, trust_policy: trust_policy)
+
+    Process.unlink(executor)
+    assert {:ok, token} = NodeExecutor.prepare(signed, server: server)
+    assert {:ok, receipt} = NodeExecutor.commit(token, server: server)
+    assert receipt.artifact == signed
+    GenServer.stop(executor)
+
+    # The file itself carries the probe input with its string keys, not as bare names
+    # that read back as whatever atoms this VM happens to hold.
+    assert {:ok, wire} =
+             Ouroboros.Storage.DurableFile.get_checkpoint(
+               {:ouroboros, :upgrade_node_executor, node()},
+               path: directory
+             )
+
+    assert [stored] = wire |> Wire.load() |> Map.fetch!(:receipts) |> Map.values()
+
+    assert %{forge: %{eval: %{probes: [%{input: %{"greet" => "hello", "nil" => nil}} | _]}}} =
+             stored.artifact.metadata
+
+    {:ok, executor} =
+      NodeExecutor.start_link(name: server, storage: storage, trust_policy: trust_policy)
+
+    Process.unlink(executor)
+    assert %{mode: :ready} = NodeExecutor.status(server: server)
+    assert {:ok, restored} = NodeExecutor.receipt(receipt.id, server: server)
+    assert restored.artifact == signed
+
+    assert Artifact.signing_payload(restored.artifact, "journal-signer") ==
+             Artifact.signing_payload(signed, "journal-signer")
+
+    assert :crypto.verify(
+             :eddsa,
+             :none,
+             Artifact.signing_payload(restored.artifact, "journal-signer"),
+             restored.artifact.signature.value,
+             [public_key, :ed25519]
+           )
+
+    GenServer.stop(executor)
   end
 
   defp object_code!(module) do

@@ -75,6 +75,87 @@ defmodule Ouroboros.ClusterTest do
     end
   end
 
+  describe "the wasm fleet fact (W5)" do
+    test "the local posture says whether this machine could contain a component" do
+      posture = Cluster.local_fleet_posture()
+
+      assert %{available: available, world: world} = posture.wasm
+      assert available == Ouroboros.Wasm.available?()
+
+      # The world is stated only where a helper could speak it. `nil` is "no helper here",
+      # not "an unknown world".
+      if available do
+        assert world == Ouroboros.Wasm.world()
+      else
+        assert world == nil
+      end
+    end
+
+    test "reading it starts nothing: it is a stat on the helper path" do
+      before = Process.whereis(Ouroboros.Wasm.Pool)
+      phase = if before, do: Ouroboros.Wasm.Pool.status(before).phase, else: :absent
+
+      _posture = Cluster.local_fleet_posture()
+
+      assert Process.whereis(Ouroboros.Wasm.Pool) == before
+
+      if before do
+        assert Ouroboros.Wasm.Pool.status(before).phase == phase
+      end
+    end
+
+    test "an older peer's posture, with no `wasm` key at all, is still valid" do
+      # Exactly what a machine running the previous release answers. Requiring the key would
+      # make every one of them an invalid posture mid-upgrade, which is the rolling-safety
+      # rule docs/WASM.md §4.4 states and this is the assertion behind it.
+      old_peer =
+        Cluster.local_fleet_posture()
+        |> Map.delete(:wasm)
+
+      assert Cluster.valid_fleet_posture?(node(), old_peer)
+      refute Map.has_key?(old_peer, :wasm)
+    end
+
+    test "a newer peer's posture carrying the key is valid too, and it rides along untouched" do
+      posture = Cluster.local_fleet_posture()
+
+      assert Cluster.valid_fleet_posture?(node(), posture)
+
+      # A key this build has never heard of is not a reason to reject a machine either: the
+      # five facts placement needs are checked and the rest travels.
+      assert Cluster.valid_fleet_posture?(
+               node(),
+               Map.put(posture, :a_fact_from_2027, %{nested: true})
+             )
+    end
+
+    test "the five facts placement needs are still required, one at a time" do
+      posture = Cluster.local_fleet_posture()
+
+      for key <- [:node, :role, :running, :machine, :runtime] do
+        refute Cluster.valid_fleet_posture?(node(), Map.delete(posture, key)),
+               "#{key} is load-bearing and must not have become optional"
+      end
+
+      refute Cluster.valid_fleet_posture?(:"ouroboros@somebody-else", posture)
+      refute Cluster.valid_fleet_posture?(node(), %{})
+      refute Cluster.valid_fleet_posture?(node(), :not_a_map)
+    end
+
+    test "a fleet directory record carries the fact, and `nil` where a peer never said" do
+      status = Cluster.fleet_status()
+
+      assert [_ | _] = status.machines
+
+      local = Enum.find(status.machines, &(&1.node == node()))
+      assert local.wasm == Cluster.local_fleet_posture().wasm
+
+      # Every record has the key, so a client never has to tell "this build does not report
+      # it" from "this machine has no helper" by the key's absence.
+      assert Enum.all?(status.machines, &Map.has_key?(&1, :wasm))
+    end
+  end
+
   describe "roles across real nodes" do
     @tag timeout: 180_000
     test "reads a peer's role and groups connected nodes by it" do

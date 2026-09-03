@@ -82,8 +82,15 @@ defmodule Ouroboros.Application do
   end
 
   # D7's recoverable half runs as a supervised one-shot task after the workspace manager
-  # starts. Boot never waits on Git or on a slow filesystem; a manager restart reruns the
-  # task through the `rest_for_one` chain.
+  # starts, so boot never waits on Git or on a slow filesystem.
+  #
+  # It runs **once per VM**, not once per manager restart: the child spec below is
+  # `restart: :temporary`, and a supervisor drops temporary children from the list it
+  # restarts after a sibling's crash rather than starting them again. Reconciliation is a
+  # boot-time sweep of worktrees that outlived a previous run, and a manager restart does not
+  # create more of those, so once is the right number — but the `rest_for_one` chain is not
+  # what makes it happen, and this comment used to claim it was (F6). The lane-W boot task
+  # beside it needs the opposite and is `:transient` for that reason.
   defp reconcile_worktrees do
     if Application.get_env(:ouroboros, :workspace_allowed_roots, []) != [] do
       report = Ouroboros.Workspace.Worktree.reconcile()
@@ -226,12 +233,20 @@ defmodule Ouroboros.Application do
     # still carries a generous restart intensity, because language-server failures are
     # states inside the pool, never crashes of it.
     #
-    # D4's MCP subtree and Computer Use's helper pool are last for the same reasons:
-    # somebody else's program, or a host-privileged helper, on the end of a pipe, spawned
-    # lazily, owning nothing any plane rebuilds from. Both run only on `:core`. Computer
-    # Use precedes MCP because its pool holds the live per-session last-state map: an MCP
-    # subtree crash must not restart it and discard those snapshots. A Desktop supervisor
-    # crash may reconnect disposable MCP ports without losing durable session state.
+    # D4's MCP subtree, Computer Use's helper pool, and lane W's wasm pool are last for the
+    # same reasons: somebody else's program, or a host-privileged helper, on the end of a
+    # pipe, spawned lazily, owning nothing any plane rebuilds from. All three run only on
+    # `:core`. Computer Use precedes MCP because its pool holds the live per-session
+    # last-state map: an MCP subtree crash must not restart it and discard those snapshots.
+    # A Desktop supervisor crash may reconnect disposable MCP ports without losing durable
+    # session state.
+    #
+    # The wasm pool leads both of them by the same rule taken one step further. What its
+    # restart discards is live component instances — guest state that only `init` and every
+    # message since could approximate, and that no snapshot anywhere rebuilds. The desktop
+    # pool's map is rebuilt by the next capture and MCP's ports are disposable, so an
+    # improbable wasm crash paying for those two is the cheaper trade than an improbable MCP
+    # crash paying for a running guest.
     #
     # The web surface is last of all, and it is the second child here a stranger can
     # reach. Everything the gateway's paragraph above says applies to it unchanged — it
@@ -244,11 +259,51 @@ defmodule Ouroboros.Application do
     children ++
       [Ouroboros.Cluster, Ouroboros.Provider.OpenAIAuth, Ouroboros.Provider.GrokAuth] ++
       gateway_children() ++
+      [Ouroboros.CodeIntel.Supervisor, Ouroboros.Wasm.Supervisor] ++
+      wasm_restart_children() ++
       [
-        Ouroboros.CodeIntel.Supervisor,
         Ouroboros.Provider.Native.Desktop.Supervisor,
         Ouroboros.Provider.Native.Mcp.Supervisor
       ] ++ web_children()
+  end
+
+  # The lane-W half of the same idea as `reconcile_worktrees`: a supervised one-shot task,
+  # started after the thing it needs — here the helper pool and, far upstream, the rollout
+  # registry — so boot never waits on it.
+  #
+  # `restart: :transient` and not `:temporary`, which is what makes the sentence above about
+  # the `rest_for_one` chain true (F6). A supervisor drops every *temporary* child from the
+  # list it restarts after a sibling's crash — `supervisor:terminate_children/2` terminates
+  # them and does not return them — so a temporary task here was started exactly once per VM
+  # and a pool restart reran nothing, however the comment read. Transient is the shape this
+  # needs: not restarted on its own normal exit (`Wasm.Boot.run/0` returns `:ok` and never
+  # raises, so that is every ordinary run), and restarted when the chain takes it down.
+  #
+  # It is safe to rerun because it is idempotent by construction: a mesh id already claimed
+  # by this component counts as started (`Ouroboros.Wasm.Boot`'s "Idempotent, by
+  # construction"), and an id held by a *different* component is reported as failed rather
+  # than fought over.
+  #
+  # Skipped entirely on a node with no durable data directory: no store means no manifests
+  # and nothing that could have survived a reboot, which is every library start and every
+  # test run.
+  #
+  # Public (undocumented) so `test/wasm/pool_test.exs` can read the restart type off the spec
+  # this tree actually starts, rather than restating it.
+  @doc false
+  @spec wasm_restart_children() :: [Supervisor.child_spec()]
+  def wasm_restart_children do
+    if Ouroboros.Wasm.Boot.enabled?() do
+      [
+        %{
+          id: Ouroboros.Wasm.Boot,
+          start: {Task, :start_link, [&Ouroboros.Wasm.Boot.run/0]},
+          restart: :transient
+        }
+      ]
+    else
+      []
+    end
   end
 
   # A discovery publication is not runtime ownership. When this node has a durable data

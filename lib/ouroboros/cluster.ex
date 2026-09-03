@@ -179,6 +179,10 @@ defmodule Ouroboros.Cluster.Monitor do
             role: posture.role,
             runtime_running?: posture.running,
             runtime: posture.runtime,
+            # W5. Read tolerantly and never matched: a peer running a build from before
+            # lane W answers a posture with no such key, and that machine is a machine with
+            # no helper, not a probe failure.
+            wasm: Map.get(posture, :wasm),
             probe_error: nil
           })
 
@@ -452,6 +456,9 @@ defmodule Ouroboros.Cluster.Monitor do
       last_down_at: nil,
       down_reason: nil,
       runtime: nil,
+      # Nobody has probed this machine yet, or it is offline. Unknown, which is what `nil`
+      # means everywhere in this record — never "it has no helper".
+      wasm: nil,
       probe_error: nil
     }
   end
@@ -1410,8 +1417,27 @@ defmodule Ouroboros.Cluster do
 
     Map.merge(posture, %{
       machine: machine_name(),
-      runtime: runtime_identity()
+      runtime: runtime_identity(),
+      wasm: wasm_posture()
     })
+  end
+
+  # W5. Whether this machine could contain a WebAssembly component, as a fleet fact.
+  #
+  # `available?/0` is a `File.regular?` on the helper path: presence on disk is the operator
+  # opt-in (docs/WASM.md §7.3), so this starts no helper, spawns no pool and reads no
+  # register. It is one stat on a path this node already computed.
+  #
+  # Adding it is rolling-safe by construction (§4.4): `fleet_posture/1`'s pattern must never
+  # *require* this key, because an older peer answers a posture without it and a strict
+  # match would report that machine as invalid rather than as a machine with no helper.
+  # Every consumer reads it with `Map.get/2` for the same reason.
+  defp wasm_posture do
+    if Ouroboros.Wasm.available?() do
+      %{available: true, world: Ouroboros.Wasm.world()}
+    else
+      %{available: false, world: nil}
+    end
   end
 
   @doc false
@@ -1425,19 +1451,42 @@ defmodule Ouroboros.Cluster do
         {:error, :node_not_connected}
 
       true ->
-        case :erpc.call(target, __MODULE__, :local_fleet_posture, [], @probe_timeout) do
-          %{node: ^target, role: role, running: running, machine: machine, runtime: runtime} =
-              posture
-          when role in @roles and is_boolean(running) and is_binary(machine) and is_map(runtime) ->
-            {:ok, posture}
+        posture = :erpc.call(target, __MODULE__, :local_fleet_posture, [], @probe_timeout)
 
-          other ->
-            {:error, {:invalid_fleet_posture, inspect(other)}}
-        end
+        if valid_fleet_posture?(target, posture),
+          do: {:ok, posture},
+          else: {:error, {:invalid_fleet_posture, inspect(posture)}}
     end
   catch
     kind, reason -> {:error, {:fleet_probe_failed, {kind, inspect(reason)}}}
   end
+
+  @doc """
+  Whether a probed peer's answer is a fleet posture this node will accept.
+
+  **Five keys, and never a sixth.** This is the rolling-upgrade seam: a peer answers with
+  whatever `local_fleet_posture/0` returned on *its* build, and every fact this runtime adds
+  later — `wasm` is the first (docs/WASM.md §4.4) — arrives on new peers and is absent on
+  old ones. Requiring a key here would turn every machine running the previous release into
+  an invalid posture mid-upgrade, which is the one failure a fleet cannot absorb.
+
+  So the rule is: the five facts placement has always needed are checked, everything else
+  rides along untouched, and every consumer reads the rest with `Map.get/2`.
+
+  Named rather than left inline so that rule is a thing a test can hold this to.
+  """
+  @spec valid_fleet_posture?(node(), term()) :: boolean()
+  def valid_fleet_posture?(target, posture)
+
+  def valid_fleet_posture?(
+        target,
+        %{node: reported, role: role, running: running, machine: machine, runtime: runtime}
+      )
+      when reported == target and role in @roles and is_boolean(running) and is_binary(machine) and
+             is_map(runtime),
+      do: true
+
+  def valid_fleet_posture?(_target, _other), do: false
 
   @doc false
   @spec runtime_compatible?(map(), map()) :: boolean()
@@ -1806,6 +1855,9 @@ defmodule Ouroboros.Cluster do
           last_down_at: nil,
           down_reason: if(MapSet.member?(connected, target), do: nil, else: "not_observed"),
           runtime: if(posture, do: posture.runtime, else: nil),
+          # W5, read the same tolerant way the monitor reads it: a peer with no lane W
+          # answers a posture with no key, and `nil` is "not known", not "no helper".
+          wasm: posture && Map.get(posture, :wasm),
           compatibility:
             cond do
               target == node() ->

@@ -1,0 +1,4 @@
+# The build directory, and the component itself: a checked-in `.wasm` is an opaque blob nobody
+# reviews, and the source beside it is the artifact of record.
+/target
+*.wasm

@@ -1,0 +1,30 @@
+# A worked capability. Its own workspace, like every project built on this SDK: it is a
+# `wasm32-wasip2` cdylib with its own profile, and it must not join anything.
+[workspace]
+
+[package]
+name = "counter"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "An ouroboros capability that counts, with a describe worth reading"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# One dependency. The bindings, the allocator, the panic handler, `cabi_realloc` and JSON all
+# arrive through it.
+ouroboros-guest = { path = "../.." }
+
+# The defaults, verbatim from the SDK's own manifest. `panic = "abort"` keeps the unwinder out
+# of the component; LTO and a size-shaped opt level let the linker drop what is unreachable,
+# which is what keeps the import list at exactly `log`. Cargo reads a profile only from a
+# workspace root, and this is one — so it is repeated here rather than inherited.
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = "s"
+strip = true
+codegen-units = 1

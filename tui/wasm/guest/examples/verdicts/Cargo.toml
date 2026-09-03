@@ -1,0 +1,25 @@
+# The complete `Verdict` vocabulary in one component, so the narrowing can be observed rather
+# than described. Its own workspace, like every project built on this SDK.
+[workspace]
+
+[package]
+name = "verdicts"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Every verdict an ouroboros hook can say, selected by config"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ouroboros-guest = { path = "../.." }
+
+# The defaults, verbatim from the SDK's own manifest — see the note in `examples/counter`.
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = "s"
+strip = true
+codegen-units = 1

@@ -82,6 +82,25 @@ impl Workspace {
         self.root.parent().unwrap().join("outside.txt")
     }
 
+    /// A `builder` policy over this workspace: the workspace is writable, `readable` is
+    /// the platform roots a compiler needs plus whatever the caller names, and nothing
+    /// else in the filesystem is readable at all.
+    fn builder_request(&self, extra_readable: &[&Path]) -> String {
+        let readable: Vec<String> = platform_readable()
+            .into_iter()
+            .chain(extra_readable.iter().map(|p| p.display().to_string()))
+            .map(|path| format!("\"{path}\""))
+            .collect();
+
+        format!(
+            r#"{{"mode":"builder","scratch":"{}","cwd":"{}","network":false,"writable":["{}"],"readable":[{}]}}"#,
+            self.scratch.display(),
+            self.root.display(),
+            self.root.display(),
+            readable.join(","),
+        )
+    }
+
     fn request(&self, mode: &str, network: bool) -> String {
         let writable = if mode == "read_only" {
             String::new()
@@ -101,6 +120,21 @@ impl Drop for Workspace {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(self.root.parent().unwrap());
     }
+}
+
+/// The roots `Ouroboros.Provider.Native.Sandbox.platform_readable/0` gives a Linux build
+/// before its caller names one, minus the ones this image does not have. A build that
+/// could not read these could not run `/bin/sh`, let alone a compiler, so a builder test
+/// that omitted them would prove that the fence breaks everything rather than that it
+/// fences anything.
+fn platform_readable() -> Vec<String> {
+    [
+        "/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32", "/etc", "/opt",
+    ]
+    .iter()
+    .filter(|path| Path::new(path).exists())
+    .map(|path| (*path).to_string())
+    .collect()
 }
 
 fn run_shell(request: &str, script: &str) -> Output {
@@ -323,6 +357,393 @@ fn an_escalated_policy_lifts_the_git_fence_and_keeps_the_ouroboros_one() {
 
     let ouro = run_shell(&request, "echo x > .ouroboros/state");
     assert_reads_as_read_only_denial(&ouro, "the .ouroboros fence survives an escalation");
+}
+
+// ------------------------------------------------------------------ the builder fence
+
+#[test]
+fn a_builder_reads_the_roots_it_was_given() {
+    require_enforcement!();
+    // The half that has to pass for the other half to mean anything: a fence that broke
+    // the toolchain would deny the secret too, and prove nothing about the policy.
+    let workspace = Workspace::new("builder-allowed");
+    let toolchain = workspace.root.parent().unwrap().join("toolchain");
+    std::fs::create_dir_all(&toolchain).unwrap();
+    std::fs::write(toolchain.join("libc.txt"), "a compiler's own world\n").unwrap();
+
+    let request = workspace.builder_request(&[toolchain.as_path()]);
+
+    let named = run_shell(&request, &format!("cat {}/libc.txt", toolchain.display()));
+    assert!(named.status.success(), "{}", combined(&named));
+    assert_eq!(
+        String::from_utf8_lossy(&named.stdout).trim(),
+        "a compiler's own world"
+    );
+
+    // And its own build directory, which is writable and therefore readable.
+    let own = run_shell(&request, "cat existing.txt && echo x > built.txt");
+    assert!(own.status.success(), "{}", combined(&own));
+    assert!(workspace.root.join("built.txt").exists());
+}
+
+#[test]
+fn a_builder_cannot_read_a_file_outside_the_allow_set() {
+    require_enforcement!();
+    // W17, on a kernel. The secret sits beside the roots the policy named and is not one
+    // of them, so Landlock refuses the open — and the errno is `EACCES`, because this
+    // backend has no fresh root to leave a path out of and a mount cannot express a read.
+    let workspace = Workspace::new("builder-denied");
+    let toolchain = workspace.root.parent().unwrap().join("toolchain");
+    std::fs::create_dir_all(&toolchain).unwrap();
+    let secret = workspace.root.parent().unwrap().join("secret.txt");
+    std::fs::write(&secret, "CANARY\n").unwrap();
+
+    let output = run_shell(
+        &workspace.builder_request(&[toolchain.as_path()]),
+        &format!("cat {}", secret.display()),
+    );
+
+    let text = combined(&output);
+    assert!(!output.status.success(), "the read succeeded: {text}");
+    assert!(
+        !text.contains("CANARY"),
+        "the fence let the file's contents out: {text}"
+    );
+    assert!(
+        text.contains("Permission denied"),
+        "a Landlock read denial is EACCES, and the forge matches that string for this \
+         backend; got: {text}"
+    );
+}
+
+#[test]
+fn a_builder_with_an_empty_allow_set_reads_nothing_it_does_not_own() {
+    require_enforcement!();
+    // No fallback to `/`: an empty `readable` is not "unspecified, so everything". Under
+    // this policy not even `/bin/sh` is executable, so what fails is the helper's own
+    // `execvp` — which is the strongest form the rule takes: it applied the policy it was
+    // given rather than widening one it thought too narrow to be meant.
+    let workspace = Workspace::new("builder-empty");
+
+    let request = format!(
+        r#"{{"mode":"builder","scratch":"{}","cwd":"{}","network":false,"writable":["{}"]}}"#,
+        workspace.scratch.display(),
+        workspace.root.display(),
+        workspace.root.display(),
+    );
+
+    let output = run_shell(&request, "cat /etc/hostname");
+    let text = combined(&output);
+    assert!(
+        !output.status.success(),
+        "an empty allow-set read /etc: {text}"
+    );
+    assert!(
+        text.contains("Permission denied"),
+        "expected an EACCES from the read fence, got: {text}"
+    );
+}
+
+#[test]
+fn a_builder_still_cannot_write_outside_its_writable_roots() {
+    require_enforcement!();
+    // The read fence is additional, not a substitute: the mount plan under `builder` is
+    // the one every other mode gets, so writes are still fenced twice.
+    let workspace = Workspace::new("builder-writes");
+    let toolchain = workspace.root.parent().unwrap().join("toolchain");
+    std::fs::create_dir_all(&toolchain).unwrap();
+    std::fs::write(toolchain.join("keep.txt"), "before\n").unwrap();
+
+    let request = workspace.builder_request(&[toolchain.as_path()]);
+
+    let outside = run_shell(
+        &request,
+        &format!("echo x > {}", workspace.outside().display()),
+    );
+    assert!(
+        !outside.status.success(),
+        "a write outside the build tree succeeded: {}",
+        combined(&outside)
+    );
+    assert!(!workspace.outside().exists());
+
+    // A root the build may *read* is not a root it may write.
+    let readable_root = run_shell(
+        &request,
+        &format!("echo x > {}/keep.txt", toolchain.display()),
+    );
+    assert!(
+        !readable_root.status.success(),
+        "a readable root was writable: {}",
+        combined(&readable_root)
+    );
+    assert_eq!(
+        std::fs::read_to_string(toolchain.join("keep.txt")).unwrap(),
+        "before\n"
+    );
+}
+
+#[test]
+fn a_builder_cannot_reach_off_the_machine() {
+    require_enforcement!();
+    if doctor()["namespaces"]["net"] != serde_json::Value::Bool(true) {
+        eprintln!("SKIPPED: no network namespace available in this environment");
+        return;
+    }
+    let workspace = Workspace::new("builder-net");
+    let toolchain = workspace.root.parent().unwrap().join("toolchain");
+    std::fs::create_dir_all(&toolchain).unwrap();
+
+    let Some(output) = run_bash(
+        &workspace.builder_request(&[toolchain.as_path()]),
+        "exec 3<>/dev/tcp/1.1.1.1/80",
+    ) else {
+        eprintln!("SKIPPED: no /bin/bash, so the network posture cannot be observed here");
+        return;
+    };
+
+    let text = combined(&output);
+    assert!(!output.status.success(), "the connect succeeded: {text}");
+    assert!(
+        text.contains("Network is unreachable"),
+        "expected ENETUNREACH from an empty network namespace, got: {text}"
+    );
+}
+
+/// A file another process of the same uid left in a shared-memory filesystem, and a
+/// cleanup that runs whether the assertions pass or not.
+struct ShmCanary(PathBuf);
+
+impl ShmCanary {
+    fn new(tag: &str) -> Option<ShmCanary> {
+        let path = Path::new("/dev/shm").join(format!(
+            "ouro-shm-canary-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "SHM-CANARY\n").ok()?;
+        Some(ShmCanary(path))
+    }
+}
+
+impl Drop for ShmCanary {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[test]
+fn a_builder_cannot_read_or_write_the_shared_memory_every_process_shares() {
+    require_enforcement!();
+    // H1, and it was proved the other way first: W17's first cut kept the host's `/dev` and
+    // `/proc` writable in builder mode, exactly as a shell policy does, so a build wrote
+    // `/dev/shm/pwned` and read a canary another process of the same uid had left there —
+    // a bidirectional channel to every process on the node, out of the one policy whose
+    // claim is that what a compiler carries into its output is bounded.
+    let workspace = Workspace::new("builder-shm");
+    let toolchain = workspace.root.parent().unwrap().join("toolchain");
+    std::fs::create_dir_all(&toolchain).unwrap();
+
+    let Some(canary) = ShmCanary::new("builder") else {
+        eprintln!("SKIPPED: /dev/shm is not writable here, so the channel cannot be observed");
+        return;
+    };
+
+    let request = workspace.builder_request(&[toolchain.as_path()]);
+
+    let read = run_shell(&request, &format!("cat {}", canary.0.display()));
+    let text = combined(&read);
+    assert!(
+        !text.contains("SHM-CANARY"),
+        "a builder read another process's shared memory: {text}"
+    );
+
+    let write = run_shell(&request, "echo pwned > /dev/shm/ouro-pwned");
+    assert!(
+        !write.status.success(),
+        "a builder wrote into shared memory: {}",
+        combined(&write)
+    );
+    assert!(
+        !Path::new("/dev/shm/ouro-pwned").exists(),
+        "the write landed on the host"
+    );
+
+    // And the listing itself is gone: the fresh tmpfs is what takes the *names* out of the
+    // namespace, which is what bubblewrap gets from mounting its own `/dev`.
+    let list = run_shell(&request, "ls /dev/shm");
+    assert!(
+        !combined(&list).contains("ouro-shm-canary"),
+        "the canary's name was still visible: {}",
+        combined(&list)
+    );
+}
+
+#[test]
+fn a_builder_writes_dev_null_and_nothing_else_under_dev() {
+    require_enforcement!();
+    // The other half: the fence has to leave a build able to build. `/dev/null` is granted
+    // by name — the same single node `Sandbox.SandboxExec`'s builder profile grants — and
+    // `/dev` itself is neither a read root nor a write root, so a listing is refused.
+    let workspace = Workspace::new("builder-dev");
+    let toolchain = workspace.root.parent().unwrap().join("toolchain");
+    std::fs::create_dir_all(&toolchain).unwrap();
+    let request = workspace.builder_request(&[toolchain.as_path()]);
+
+    let null = run_shell(&request, "echo discarded > /dev/null && echo wrote-null");
+    assert!(
+        null.status.success(),
+        "a build that cannot write /dev/null cannot run a configure script: {}",
+        combined(&null)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&null.stdout).trim(),
+        "wrote-null",
+        "{}",
+        combined(&null)
+    );
+
+    // Read grants too: a `getrandom` that falls back to the device still works.
+    let random = run_shell(
+        &request,
+        "head -c 4 /dev/urandom > /dev/null && echo read-random",
+    );
+    assert!(random.status.success(), "{}", combined(&random));
+
+    let listing = run_shell(&request, "ls /dev");
+    assert!(
+        !listing.status.success(),
+        "a builder listed /dev: {}",
+        combined(&listing)
+    );
+
+    // `/dev/pts` is the same class as `/dev/shm` — another process's terminal is another
+    // channel — and it is closed by the same absence of a rule rather than by a second one.
+    let pts = run_shell(&request, "ls /dev/pts");
+    assert!(
+        !pts.status.success(),
+        "a builder listed /dev/pts: {}",
+        combined(&pts)
+    );
+}
+
+#[test]
+fn a_builder_reads_proc_and_cannot_write_it() {
+    require_enforcement!();
+    // `/proc` is what a compiler reads to size itself; it is not a place to leave anything.
+    let workspace = Workspace::new("builder-proc");
+    let toolchain = workspace.root.parent().unwrap().join("toolchain");
+    std::fs::create_dir_all(&toolchain).unwrap();
+    let request = workspace.builder_request(&[toolchain.as_path()]);
+
+    let read = run_shell(&request, "head -1 /proc/self/status");
+    assert!(read.status.success(), "{}", combined(&read));
+
+    let write = run_shell(&request, "echo 0 > /proc/self/oom_score_adj");
+    assert!(
+        !write.status.success(),
+        "a builder wrote its own /proc knobs: {}",
+        combined(&write)
+    );
+}
+
+#[test]
+fn a_readable_root_that_is_a_symlink_is_refused_rather_than_followed() {
+    require_enforcement!();
+    // L4, proved the other way first: a review pointed a `readable` at a link and the build
+    // read the link's target, because Landlock opens a rule's path with `O_PATH` and follows
+    // it. The daemon canonicalises what it sends; this is the half that holds when it could
+    // not — a link is a refusal naming the path, not a fence around somewhere else.
+    let workspace = Workspace::new("builder-symlink");
+    let secrets = workspace.root.parent().unwrap().join("secrets");
+    std::fs::create_dir_all(&secrets).unwrap();
+    std::fs::write(secrets.join("creds.txt"), "CANARY\n").unwrap();
+
+    let link = workspace.root.parent().unwrap().join("toolchain-link");
+    std::os::unix::fs::symlink(&secrets, &link).unwrap();
+
+    let output = Command::new(HELPER)
+        .args([
+            "exec",
+            "--request",
+            &workspace.builder_request(&[link.as_path()]),
+            "--",
+            "/bin/sh",
+            "-c",
+            &format!("cat {}/creds.txt", link.display()),
+        ])
+        .output()
+        .expect("helper runs");
+
+    let text = combined(&output);
+    assert_eq!(output.status.code(), Some(125), "{text}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).starts_with("ouro-sandbox: "),
+        "{text}"
+    );
+    assert!(
+        !text.contains("CANARY"),
+        "the link's target was read: {text}"
+    );
+}
+
+#[test]
+fn a_builder_request_carrying_the_preload_library_is_refused() {
+    // The helper's half of M3. The daemon no longer sends it for a builder, and a request
+    // that does is refused rather than quietly stripped: a caller that named a layer must
+    // not be left believing it was applied.
+    let output = Command::new(HELPER)
+        .args([
+            "exec",
+            "--request",
+            r#"{"mode":"builder","scratch":"/tmp","fs_filter_library":"/priv/f.so"}"#,
+            "--",
+            "/bin/sh",
+            "-c",
+            "echo ran",
+        ])
+        .output()
+        .expect("helper runs");
+
+    assert_eq!(output.status.code(), Some(125));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.starts_with("ouro-sandbox: "), "{stderr}");
+    assert!(stderr.contains("fs_filter_library"), "{stderr}");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("ran"));
+}
+
+#[test]
+fn a_relative_readable_entry_is_a_backend_failure_and_the_build_does_not_run() {
+    // Not gated on enforcement: a policy this helper cannot apply must be refused on every
+    // kernel, and the daemon tells that apart from a build's own failure by these two
+    // things and nothing else.
+    let output = Command::new(HELPER)
+        .args([
+            "exec",
+            "--request",
+            r#"{"mode":"builder","scratch":"/tmp","readable":["relative/toolchain"]}"#,
+            "--",
+            "/bin/sh",
+            "-c",
+            "echo ran",
+        ])
+        .output()
+        .expect("helper runs");
+
+    assert_eq!(output.status.code(), Some(125));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.starts_with("ouro-sandbox: "),
+        "Sandbox.backend_failure/3 matches on this exact prefix, got: {stderr}"
+    );
+    assert!(stderr.contains("readable"), "{stderr}");
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("ran"),
+        "the command must not run when its policy could not be applied"
+    );
 }
 
 // -------------------------------------------------------------------- name-based creates

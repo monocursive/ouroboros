@@ -527,10 +527,8 @@ impl App {
 
     fn activate(&mut self) {
         match self.tab {
-            Tab::Sessions => {
-                if self.sessions.open.is_some() {
-                    self.compose(ComposerVerb::Message);
-                }
+            Tab::Sessions if self.sessions.open.is_some() => {
+                self.compose(ComposerVerb::Message);
             }
             Tab::Agents => Self::explorer_activate(&mut self.agents),
             Tab::Teams => Self::explorer_activate(&mut self.teams),

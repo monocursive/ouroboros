@@ -46,7 +46,9 @@ jobs:
           elixir-version: "1.20"
           otp-version: "29"
 
-      - run: rustup toolchain install 1.88 --profile minimal --component rustfmt,clippy && rustup default 1.88
+      # 1.95 is wasmtime 48's MSRV, and `make dist` builds `ouro-wasm` through
+      # `release-tarball`. Kept in step with `RUST_VERSION` in ci.yml.
+      - run: rustup toolchain install 1.95 --profile minimal --component rustfmt,clippy && rustup default 1.95
 
       - run: mix deps.get
 

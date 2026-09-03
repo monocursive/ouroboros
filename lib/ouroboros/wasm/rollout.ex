@@ -1,0 +1,1379 @@
+defmodule Ouroboros.Wasm.Rollout do
+  @moduledoc """
+  Deploys one signed component to explicit nodes behind the same gates lane B uses, with
+  the code-loading half deleted.
+
+  `Ouroboros.Upgrade.Rollout` is the sentence this module is a variation on, and every
+  discipline in it survives verbatim (docs/WASM.md §7.6, D7):
+
+  1. validate the targets and verify the signature and the digest against the bytes in
+     hand — all of it before anything is written;
+  2. **checkpoint `:deploying` in `Ouroboros.Upgrade.Rollout.Registry` before any effect**,
+     carrying the component sha. The register refuses a stale epoch in the same serialized
+     call that writes the entry, so the epoch gate and the record are one decision. If that
+     write is refused for any reason, the rollout does not start;
+  3. stage on every node: publish the bytes and the manifest into that node's
+     `Ouroboros.Wasm.Store`, `load` the component into that node's helper, and cross-check
+     the helper's own reading against the signed manifest;
+  4. probe every node with `Ouroboros.Upgrade.Rollout.Probe`, unchanged;
+  5. evaluate every node with `Ouroboros.Upgrade.Rollout.Evaluation` against the **signed**
+     spec, unchanged;
+  6. settle: `:live`, `:rolled_back`, or `:quarantined`, by the same rules.
+
+  What is gone is `Coordinator` and `NodeExecutor` — the prepare/commit/promote machinery
+  that exists because loading BEAM code is a mutation with a pre-image. Nothing here loads
+  code, so there is no pre-image, nothing to purge, and no `{:introduced_code_in_use, _}`
+  to answer. "Rollback to absence" is literally that: stop the wrapper agent if one is
+  running, and mark the entry.
+
+  ## The settle table
+
+  Every node contributes three outcomes — stage, probe, eval — and the worst one wins, in
+  the order `Ouroboros.Upgrade.Rollout` uses:
+
+  | any node's outcome            | rollout state                                |
+  |-------------------------------|----------------------------------------------|
+  | ambiguous anywhere            | `:quarantined`, however cleanly it compensated |
+  | otherwise, any clean failure  | `:rolled_back` if every node proved it, else `:quarantined` |
+  | every node passes             | `:live`                                      |
+
+  Ambiguity is anything nobody answered for: an `:erpc` transport fault, a deadline, a
+  reply this build cannot read — and one more that is specific to this lane, a
+  **cross-check mismatch**. A node whose helper reads a different sha, world, size, or
+  import set than the manifest claims is a node holding something nobody described. It
+  never "just links less": that is `Ouroboros.Wasm.Verifier`'s sentence, and here it is
+  quarantine.
+
+  A deadline is ambiguity in the strong sense on a peer: `:erpc.call/5` stops waiting, it
+  does not stop the peer, so a stage or an evaluation that missed its deadline may still be
+  running there and may finish after this module has already settled the rollout. That is
+  the honest reading of `:quarantined` — "somebody may be running this and nobody said so".
+
+  ## The epoch, where it is minted, and what a retry means
+
+  An epoch is inside the signed manifest, so this module cannot mint one — allocating a
+  number here would invalidate the signature it was allocated for. Whoever builds a
+  manifest allocates it first with `Ouroboros.Upgrade.Epoch.next/2`, exactly as
+  `Ouroboros.Upgrade.Forge` does before `Artifact.build/2`. `Ouroboros.Wasm.Artifact.build/2`
+  has no default for it, deliberately: a VM-local counter would eventually mint a number
+  far above anything `Epoch.next/2` allocates, and one such entry in the register would
+  refuse every properly minted epoch after it, forever.
+
+  The other half is enforced by `Ouroboros.Upgrade.Rollout.Registry` itself, atomically:
+  the driver spends the epoch in the call that writes `:deploying`, and every target spends
+  it again before staging bytes. Lane B's monotonicity is enforced per node by
+  `Ouroboros.Upgrade.NodeExecutor.prepare/2`; lane W has no node executor, so its node-local
+  register is the durable target-side replay boundary.
+
+  **A retry is always a new manifest.** The register refuses a duplicate artifact id
+  (`{:already_recorded, _}`) and refuses an epoch it has already seen in any state
+  (`{:stale_epoch, n, n}`), so re-presenting a manifest that reached `:rolled_back` — or
+  one still stuck at `:deploying` — is refused twice over. Retrying means minting a higher
+  epoch, building a new manifest with a new id, and signing it again. That is parity with
+  lane B, whose register refuses `{:already_recorded, _}` for the same reason and whose
+  retry is likewise a re-forge, and it is what keeps "this exact artifact was deployed
+  once" a fact rather than a hope.
+
+  ## Starting, and reboot survival
+
+  A rollout that reaches `:live` and whose manifest carries a `start` block starts the
+  durable wrapper agent, which is the `Ouroboros.Runtime.Capabilities.maybe_start/2` rule
+  applied to a lane that can honour it across reboots. Two facts shape how:
+
+    * a mesh id is unique across the cluster (`Ouroboros.Mesh.start_agent/2` refuses an id
+      already claimed anywhere), so `start.id` names **one** process, not one per node.
+      Every target holds the bytes and could host it; this places it on the first target
+      that accepts. `{:already_started, _}` counts as accepted **only** when the process
+      holding the id is running this artifact's component — the same ownership question
+      `withdraw/2` asks before it stops anything. A wrapper holding the id for some other
+      component is a claim on the name, not a start of this capability.
+    * the start is attempted only after the entry is `:live`, and a start that fails does
+      not un-live it. The component is admitted on every node either way; what failed is
+      one process, which an operator can start again. The report says which.
+
+  `Ouroboros.Wasm.Boot` restarts those wrappers at boot from a node's **own** registry and
+  a node's **own** store — both node-local durable state, which is the only kind a boot
+  can rely on. **Boot restart therefore requires the driver to be one of the targets.** A
+  driver that left itself out holds the record of a deployment whose bytes and manifest it
+  does not have, and no node in the cluster holds both halves: the targets have the store
+  and no entry, the driver has the entry and no store. Such a deployment runs until
+  something restarts it and then stops existing. That is a durability limit, not an
+  invalid topology — deploying to nodes you do not drive from is a legitimate thing to
+  want — so it is reported rather than refused: the outcome carries
+  `warnings: [{:driver_not_a_target, node()}]` and one `Logger.warning` says the same.
+
+  A start id is claimed once cluster-wide, so a rollout can find its `start.id` already
+  held by a wrapper running a **different** component. When the registry proves that holder
+  is the overlapping live entry this rollout just superseded, it is stopped and replaced.
+  Any other holder is not a start, and reporting it as one would put a component nobody
+  described behind an id somebody trusts, so it is `{:start_id_claimed_by, other_sha}` and
+  the entry is marked `:quarantined`.
+
+  ## Not here
+
+  `compare:` — champion/challenger — is deferred. `Ouroboros.Upgrade.Rollout` accepts a
+  `:replace` artifact only against a measured baseline, and the same argument applies to
+  replacing a live component. It needs a rule for what "the version this displaces" means
+  when identity is a digest rather than a module name, and inventing half of one here
+  would be worse than not having it. Until then a new component is a new rollout, and the
+  register's own supersede rule retires the entry it displaces.
+  """
+
+  require Logger
+
+  alias Ouroboros.Cluster
+  alias Ouroboros.Mesh
+  alias Ouroboros.Upgrade.Beam
+  alias Ouroboros.Upgrade.Rollout.{Evaluation, Probe, Registry}
+  alias Ouroboros.Wasm
+  alias Ouroboros.Wasm.{Artifact, Capability, PolicyEngine, Pool, Store, Verifier}
+
+  @module_prefix "wasm/"
+  @proven_recoveries [:rolled_back, :not_needed, :unchanged]
+
+  # What an **operator's** rollback accepts as proof, and it is a strictly shorter list.
+  #
+  # `:unchanged` means a wrapper is alive under this capability's durable id running some
+  # other component's sha. On the *compensation* path that is proof enough of what matters
+  # there — this rollout started nothing and the process belongs to somebody else — so
+  # `@proven_recoveries` keeps it. On the rollback path it is not proof of anything the
+  # verb claims: an operator asking to retire `greeter` and being told `rolled_back` while
+  # a process still holds `wasm/greeter` has been told the capability is gone when its name
+  # is still answering. Whose component that is, this node cannot say; that it is not this
+  # entry's is exactly why nothing here may stop it. So the honest state is `:quarantined`,
+  # and the per-node evidence says which node and why.
+  @withdrawn [:rolled_back, :not_needed]
+
+  # Staging publishes bytes and compiles a component. The helper's own `load` bound is
+  # `Ouroboros.Wasm.config(:request_timeout_ms)`; this is the transport around it, plus
+  # room for the file write.
+  @default_stage_timeout_ms 60_000
+  @default_eval_timeout_ms 30_000
+  @default_start_timeout_ms 15_000
+
+  @type node_evidence :: %{
+          stage: :ok | {:mismatch, term()} | {:error, term()} | {:ambiguous, term()},
+          probe: :ok | :skipped | {:error, term()} | {:ambiguous, term()},
+          eval: map() | :absent | :skipped | {:error, term()} | {:ambiguous, term()},
+          recovery: :not_needed | :rolled_back | :unchanged | :quarantined | nil
+        }
+
+  @type warning :: {:driver_not_a_target, node()}
+
+  @type rollback_outcome :: %{
+          artifact_id: String.t(),
+          module: String.t(),
+          name: String.t(),
+          component_sha256: String.t(),
+          epoch: pos_integer(),
+          start_id: String.t(),
+          state: Registry.Entry.state(),
+          nodes: [node() | String.t()],
+          recovery: %{optional(node() | String.t()) => atom()}
+        }
+
+  @type outcome :: %{
+          artifact_id: String.t(),
+          module: String.t(),
+          component_sha256: String.t(),
+          epoch: pos_integer(),
+          name: String.t(),
+          nodes: [node()],
+          state: Registry.Entry.state(),
+          stage: :stage | :probe | :evaluate | :settle | :start,
+          eval_report: map() | nil,
+          started: map() | nil,
+          warnings: [warning()],
+          deployment: %{optional(node()) => node_evidence()}
+        }
+
+  @doc """
+  Deploys `artifact` — whose bytes are `bytes` — to `nodes`.
+
+  Options:
+
+    * `:registry` — the registry process holding the checkpoint. Defaults to
+      `Ouroboros.Upgrade.Rollout.Registry`.
+    * `:trust_policy` — this node's trust policy for the pre-flight verification,
+      defaulting to `config :ouroboros, :upgrade_trust_policy`. Each **target** reads its
+      own rather than being told one; a loading node that took the caller's word for which
+      signers it trusts would not be verifying anything.
+    * `:pool` — the helper pool name on every target. Defaults to `Ouroboros.Wasm.Pool`.
+    * `:store_root` — an explicit component-store directory on every target, for tests
+      that must not touch a real data directory. Defaults to `nil`, which means each
+      node's own `:data_dir`.
+    * `:limits` — the instance bounds the capability is probed, evaluated, and started
+      under. Defaults to `Ouroboros.Wasm.capability_limits/0` **read here**, so one
+      deployment means one set of bounds everywhere rather than whatever each node happens
+      to be configured with.
+    * `:start?` — whether a `:live` rollout starts the durable wrapper its manifest
+      declares. Defaults to `true`.
+    * `:precompiled` — the serialized form the bundle carried, or `nil` (W8). It is staged
+      beside the component on every target and loaded there **only** where that node's own
+      helper reports exactly the wasmtime and the triple the signed manifest names; every
+      other node compiles the source form under §7.3's bounds and logs which half disagreed.
+      Absent is the whole of lane W before W8, unchanged.
+    * `:stage_timeout`, `:probe_timeout`, `:eval_timeout`, `:start_timeout` — per-node
+      transport deadlines. Every one of them is bounded; a deadline that fires is
+      ambiguity, not failure.
+  """
+  @spec deploy(Artifact.t(), binary(), [node()], keyword()) ::
+          {:ok, outcome()} | {:error, term()}
+  def deploy(artifact, bytes, nodes, opts \\ [])
+
+  def deploy(%Artifact{} = artifact, bytes, nodes, opts)
+      when is_binary(bytes) and is_list(nodes) and is_list(opts) do
+    registry = Keyword.get(opts, :registry, Registry)
+
+    with {:ok, nodes} <- validate_nodes(nodes),
+         :ok <- Verifier.verify(artifact, bytes, trust_policy(opts)),
+         # W8. Each form against its own digest, here as well as on every target: this node is
+         # about to hand a peer machine code the peer will `Component::deserialize`, and the
+         # driving node checking it first is what makes a corrupt section a refusal instead of
+         # a per-node quarantine.
+         :ok <- Verifier.verify_precompiled(artifact, Keyword.get(opts, :precompiled)),
+         {:ok, spec} <- eval_spec(artifact),
+         {:ok, _entry} <- checkpoint(artifact, nodes, registry) do
+      run(artifact, bytes, nodes, opts, registry, spec, warnings(artifact, nodes))
+    end
+  end
+
+  def deploy(artifact, bytes, nodes, _opts),
+    do: {:error, {:invalid_rollout_request, inspect({artifact, byte_size_of(bytes), nodes})}}
+
+  @doc """
+  The registry entries this plane believes are live lane-W rollouts of one kind.
+
+  `kind:` is `:capability` (the default) or `:policy` (W15, contract C7). A capability is what
+  the `capability` tool lists and what a model may message; a policy is what
+  `Ouroboros.Wasm.PolicyEngine` consults and is reachable from neither.
+
+  **The kind is the register's, recorded at deploy from the manifest this rollout verified.**
+  It is a checkpoint field and therefore a *claim* — a file on disk says it — so it is what this
+  listing filters on and nothing more: a row saying `:policy` is a row the engine will look at,
+  not a row it will trust. `Ouroboros.Wasm.PolicyEngine` re-verifies the manifest against this
+  node's trust policy, and holds its sha to the row's, before it loads a byte.
+
+  An earlier cut read the kind out of the store's manifest here instead. That was worse in both
+  directions: it opened a file per entry on the `capability` tool's path, and it read the kind
+  from one document while the sha that actually got loaded came from another — so a planted row
+  naming a genuine policy manifest and somebody else's bytes was a policy engine made of those
+  bytes. One reader, one row, and the verification where the loading happens.
+
+  An entry with no kind at all — every entry written before there were two — is a capability,
+  which is exactly where it has always been listed.
+  """
+  @spec live(keyword()) :: [Registry.Entry.t()]
+  def live(opts \\ []) do
+    kind = Keyword.get(opts, :kind, :capability)
+
+    opts
+    |> Keyword.get(:registry, Registry)
+    |> Registry.live()
+    |> Enum.filter(&lane_w?/1)
+    |> Enum.filter(&(PolicyEngine.kind_of(&1) == kind))
+  end
+
+  @doc """
+  Retires the live rollout of `name`: stop the wrapper, mark the entry, keep the bytes.
+
+  This is not a second rollback path. It is the *same* one the eval-failure branch takes —
+  `withdraw/2` on every node the entry names, and `:rolled_back` only where every one of
+  them proved absence — reached by an operator instead of by a failed gate. Writing a
+  second one would mean two answers to "what does rollback prove", and the whole reason
+  `withdraw/2` asks `holder_component/1` before it stops anything is that there is exactly
+  one.
+
+  Three things it will not do:
+
+    * **Stop anything that is not this capability's wrapper.** The id is derived
+      (`"wasm/" <> name`), never read from anywhere, and `withdraw/2` stops the process
+      holding it only when that process is running the sha the registry entry records. A
+      wrapper holding the name for some other component is `:unchanged` and is left alone —
+      and because something is still alive under the id this verb was asked to retire, the
+      rollout is marked `:quarantined` rather than `:rolled_back`. "Rolled back" must never
+      be the word for a capability whose name is still answering.
+    * **Touch a rollout the register does not hold as live lane-W.** A name with no live
+      entry is `{:no_live_rollout, name}`; a lane-B entry is not a lane-W entry and is
+      never found here.
+    * **Remove bytes.** D6: the store is content-addressed and durable, rollback is stop
+      and mark, and the material to redeploy from stays exactly where it was.
+
+  Options are `Rollout.deploy/4`'s: `:registry` and `:start_timeout`.
+  """
+  @spec rollback(String.t(), keyword()) :: {:ok, rollback_outcome()} | {:error, term()}
+  def rollback(name, opts \\ [])
+
+  def rollback(name, opts) when is_binary(name) and is_list(opts) do
+    registry = Keyword.get(opts, :registry, Registry)
+
+    with :ok <- validate_name(name),
+         {:ok, entry} <- live_entry(name, registry) do
+      retire(entry, name, registry, opts)
+    end
+  end
+
+  def rollback(name, _opts), do: {:error, {:invalid_component_name, bound(name)}}
+
+  @doc """
+  The `initial_state` a lane-W capability is stood up with, naming all six deciding keys.
+
+  `Ouroboros.Upgrade.Rollout.Evaluation` merges a signed spec's `initial_state` *under*
+  the start spec's, so a key the start spec omits is a key the signed spec may choose.
+  For `Ouroboros.Wasm.Capability` the six that decide what is being evaluated are
+  `:component`, `:config`, `:name`, `:limits`, `:pool` and `:store_root` — leaving
+  `:limits` out lets a spec pick the bounds it is judged under, and leaving `:pool` or
+  `:store_root` out lets it pick which helper and which bytes. This is the one place that
+  list is built, so probe, evaluation, deploy-time start and boot-time restart cannot
+  drift apart.
+  """
+  @spec start_state(Artifact.t(), keyword()) :: map()
+  def start_state(%Artifact{} = artifact, opts \\ []) do
+    %{
+      component: artifact.component_sha256,
+      config: start_config(artifact),
+      name: artifact.name,
+      limits: Keyword.get_lazy(opts, :limits, &Wasm.capability_limits/0),
+      pool: Keyword.get(opts, :pool, Pool),
+      store_root: Keyword.get(opts, :store_root),
+      # W8. Carried from the **verified** manifest so the wrapper — the one thing that loads a
+      # component outside a stage, at boot and on its first message — takes the same fast path a
+      # deploy did. It is not authority: it names a digest, and the helper refuses a container
+      # that was not compiled from `component`, so a state seeded with somebody else's artifact
+      # digest is `precompiled_mismatch` rather than a load of the wrong bytes.
+      precompiled: artifact.precompiled
+    }
+  end
+
+  @doc """
+  The `start` block a manifest declares, or `nil`.
+
+  Read through a validator rather than by pattern match, because it arrives from a
+  manifest: an id that is not a binary under the lane's prefix, or a config that is not a
+  binary, is `nil` here — the signer refuses both, and a reader that would rather trust
+  the signer than check is a reader one bad manifest away from `Mesh.start_agent/2` with
+  whatever the manifest said.
+
+  The id is **derived, not read**: it is `"wasm/" <> artifact.name` or it is nothing. A
+  manifest naming any other id is a manifest claiming a durable id for a component it does
+  not describe, which is what a signature must not be able to authorize (docs/WASM.md
+  §7.5). `Ouroboros.Wasm.Boot` reaches the same rule through this function, so the deploy
+  path and the reboot path cannot disagree about which process a component owns.
+  """
+  @spec start_block(Artifact.t()) :: %{id: String.t(), config: String.t()} | nil
+  def start_block(%Artifact{metadata: metadata, name: name}) when is_map(metadata) do
+    if Artifact.name?(name) do
+      expected = @module_prefix <> name
+
+      case Map.get(metadata, :start) do
+        %{id: ^expected, config: config} when is_binary(config) -> %{id: expected, config: config}
+        _absent_or_invalid -> nil
+      end
+    end
+  end
+
+  def start_block(_artifact), do: nil
+
+  @doc false
+  @spec stage(Artifact.t(), binary(), keyword()) ::
+          {:ok, map()} | {:mismatch, term()} | {:error, term()}
+  def stage(%Artifact{} = artifact, bytes, opts) when is_binary(bytes) and is_list(opts) do
+    store_opts = store_opts(opts)
+    pool = Keyword.get(opts, :pool, Pool)
+    epoch_registry = Keyword.get(opts, :epoch_registry, Registry)
+
+    # This node's own trust policy, never the caller's. A loading node that was told which
+    # signers to trust would be verifying the sender rather than the artifact.
+    with :ok <- verified(artifact, bytes),
+         :ok <- verified_precompiled(artifact, Keyword.get(opts, :precompiled)),
+         :ok <- admitted_epoch(artifact, epoch_registry),
+         {:ok, put} <- published(artifact, bytes, store_opts),
+         :ok <- publish_precompiled(artifact, Keyword.get(opts, :precompiled), store_opts),
+         {:ok, manifest} <- published_manifest(artifact, store_opts),
+         {:ok, report} <- loaded(artifact, pool, store_opts),
+         :ok <- cross_checked(artifact, report) do
+      {:ok,
+       %{
+         published: put.published,
+         manifest_published: manifest.published,
+         cached: Map.get(report, "cached", false),
+         precompiled: Map.get(report, "precompiled", false),
+         size: put.size
+       }}
+    end
+  rescue
+    error -> {:error, {:stage_exception, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {:stage_failure, kind, inspect(reason, limit: 10)}}
+  end
+
+  def stage(artifact, _bytes, _opts), do: {:error, {:invalid_artifact, inspect(artifact)}}
+
+  @doc false
+  @spec withdraw(String.t(), String.t()) :: :not_needed | :rolled_back | :unchanged | :quarantined
+  def withdraw(id, component_sha256) when is_binary(id) and is_binary(component_sha256) do
+    case Mesh.whereis(id) do
+      nil ->
+        :not_needed
+
+      _pid ->
+        if holder_component(id) == component_sha256, do: stop(id), else: :unchanged
+    end
+  rescue
+    _error -> :quarantined
+  catch
+    _kind, _reason -> :quarantined
+  end
+
+  @doc false
+  @spec claim(String.t(), keyword(), String.t()) ::
+          {:ok, node()}
+          | {:already_started, node()}
+          | {:claimed, String.t() | :unknown}
+          | {:error, term()}
+  def claim(id, opts, component_sha256)
+      when is_binary(id) and is_list(opts) and is_binary(component_sha256) do
+    case Mesh.start_agent(id, opts) do
+      {:ok, pid} ->
+        {:ok, node(pid)}
+
+      # The id is taken. Whether that is *this* capability already running — the idempotent
+      # case a boot restart and a redeploy both rely on — or somebody else holding the name
+      # is the same question `withdraw/2` asks before it stops anything, so it is asked the
+      # same way.
+      {:error, {:already_started, pid}} ->
+        case holder_component(id) do
+          ^component_sha256 -> {:already_started, node(pid)}
+          other -> {:claimed, other}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  rescue
+    error -> {:error, {:start_exception, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {:start_failure, kind, inspect(reason, limit: 10)}}
+  end
+
+  @doc """
+  The component sha the wrapper holding `id` is running, or `:unknown`.
+
+  The one question that distinguishes "this capability is already running" from "something
+  else has taken this name". `Ouroboros.Wasm.Boot` asks it for the same reason a deploy
+  does: an id is a claim, and a claim is not evidence of what is behind it.
+  """
+  @spec holder_component(String.t()) :: String.t() | :unknown
+  def holder_component(id) when is_binary(id) do
+    case Mesh.state(id) do
+      {:ok, %{agent: %{state: %{component: sha}}}} when is_binary(sha) and sha != "" -> sha
+      _other -> :unknown
+    end
+  rescue
+    _error -> :unknown
+  catch
+    _kind, _reason -> :unknown
+  end
+
+  ## Pre-flight
+
+  defp validate_nodes(nodes) do
+    cond do
+      nodes == [] ->
+        {:error, :empty_node_list}
+
+      not Enum.all?(nodes, &is_atom/1) ->
+        {:error, {:invalid_nodes, nodes}}
+
+      Enum.uniq(nodes) != nodes ->
+        {:error, {:duplicate_nodes, nodes}}
+
+      true ->
+        ensure_placeable(nodes)
+    end
+  end
+
+  # Connectivity first, so a node that is simply not there is named that way rather than
+  # as a probe failure; then the `:core` role, through the same gate that admits any other
+  # placement onto a node.
+  defp ensure_placeable(nodes) do
+    case Enum.reject(nodes, &connected?/1) do
+      [] -> check_roles(nodes)
+      disconnected -> {:error, {:disconnected_nodes, disconnected}}
+    end
+  end
+
+  defp check_roles(nodes) do
+    Enum.reduce_while(nodes, {:ok, nodes}, fn target, acc ->
+      case Cluster.ensure_placeable(target) do
+        :ok -> {:cont, acc}
+        {:error, reason} -> {:halt, {:error, {:node_not_deployable, target, reason}}}
+      end
+    end)
+  end
+
+  defp connected?(target), do: target == node() or target in Node.list(:connected)
+
+  # The signed spec, validated here so a manifest carrying one this build cannot run is
+  # refused before a checkpoint exists rather than after every node has staged it.
+  defp eval_spec(%Artifact{metadata: metadata, kind: kind}) when is_map(metadata) do
+    case Map.get(metadata, :eval) do
+      nil -> {:ok, nil}
+      spec when kind == :policy -> PolicyEngine.validate_eval(spec)
+      spec -> Evaluation.validate(spec)
+    end
+  end
+
+  defp eval_spec(_artifact), do: {:ok, nil}
+
+  # Checkpoint before effect: nothing below this line runs unless the intent is durable.
+  #
+  # The epoch gate is inside this call rather than in front of it. Reading the register's
+  # watermark here and checkpointing after would be a read-then-write across two messages,
+  # and two concurrent deploys at epochs 70 and 60 would both pass their reads and both
+  # record. `Ouroboros.Upgrade.Rollout.Registry` decides it in the same serialized message
+  # that writes the entry, the way `NodeExecutor.prepare/2` does for lane B; the refusal is
+  # lifted out of the recording error here so callers see the reason and not the wrapper.
+  defp checkpoint(artifact, nodes, registry) do
+    attrs = %{
+      artifact_id: artifact.id,
+      module: @module_prefix <> artifact.name,
+      epoch: artifact.epoch,
+      nodes: nodes,
+      component_sha256: artifact.component_sha256,
+      # W15. From the manifest this rollout has already verified, so every later reader has the
+      # kind without opening a file. It is an index, not a proof — see `live/1`.
+      kind: artifact.kind,
+      source_sha256: Map.get(artifact.metadata, :source_sha256),
+      test_report: Map.get(artifact.metadata, :test_report) || %{}
+    }
+
+    case Registry.deploying(attrs, registry) do
+      {:ok, entry} -> {:ok, entry}
+      {:error, {:stale_epoch, _epoch, _highest} = reason} -> {:error, reason}
+      {:error, reason} -> {:error, {:rollout_not_recorded, reason}}
+    end
+  end
+
+  ## The three gates
+
+  defp run(artifact, bytes, nodes, opts, registry, spec, warnings) do
+    evidence =
+      Map.new(
+        nodes,
+        &{&1, %{stage: nil, probe: :skipped, eval: :skipped, describe: :skipped, recovery: nil}}
+      )
+
+    evidence = gate(evidence, nodes, :stage, &stage_node(&1, artifact, bytes, opts, registry))
+
+    evidence =
+      if all_passed?(evidence, :stage),
+        do: gate(evidence, nodes, :probe, &probe_node(&1, artifact, opts)),
+        else: evidence
+
+    evidence =
+      if all_passed?(evidence, :probe) and not is_nil(spec),
+        do: gate(evidence, nodes, :eval, &eval_node(&1, artifact, spec, opts)),
+        else: eval_absent(evidence, spec)
+
+    # W13. The last gate, and the only one that keeps something: every target reads the
+    # component's own `describe` on a throwaway instance and the driver stores the answer
+    # on the registry entry. It is a *gate* and not a courtesy — a component that cannot
+    # describe itself inside the budget its own deploy gave it does not go live — because
+    # the alternative was reading it on the message path, where it cost a healthy component
+    # its rollout probe (docs/WASM.md D17).
+    evidence =
+      if passed_through_eval?(evidence, spec),
+        do: gate(evidence, nodes, :describe, &describe_node(&1, artifact, opts)),
+        else: evidence
+
+    settle(evidence, artifact, nodes, opts, registry, spec, warnings)
+  end
+
+  # The description gate runs only when everything that decides whether this component runs
+  # at all has already passed, so a failing deploy is never delayed by metadata.
+  defp passed_through_eval?(evidence, nil), do: all_passed?(evidence, :probe)
+
+  defp passed_through_eval?(evidence, _spec) do
+    all_passed?(evidence, :probe) and
+      Enum.all?(evidence, fn {_target, e} -> not failed?(e.eval) and not ambiguous?(e.eval) end)
+  end
+
+  # Reported, not refused. Deploying to nodes you do not drive from is a legitimate thing
+  # to want; what it costs is reboot survival, because no node then holds both halves of
+  # what a restart reads. See the moduledoc.
+  defp warnings(artifact, nodes) do
+    if not is_nil(start_block(artifact)) and node() not in nodes do
+      Logger.warning(
+        "wasm rollout #{artifact.id} starts #{inspect(start_block(artifact).id)} but " <>
+          "#{inspect(node())} is not one of #{inspect(nodes)}: this node holds the registry " <>
+          "entry and none of the targets does, so no node can restart the wrapper at boot"
+      )
+
+      [{:driver_not_a_target, node()}]
+    else
+      []
+    end
+  end
+
+  defp gate(evidence, nodes, key, fun) do
+    nodes
+    |> Task.async_stream(fn target -> {target, fun.(target)} end,
+      ordered: true,
+      max_concurrency: max(1, length(nodes)),
+      timeout: :infinity
+    )
+    |> Enum.reduce(evidence, fn
+      {:ok, {target, result}}, acc -> put_in(acc[target][key], result)
+      {:exit, reason}, acc -> mark_all_ambiguous(acc, key, reason)
+    end)
+  end
+
+  # An `Task.async_stream` exit loses which target it belonged to, so nothing is recorded
+  # as having passed on the strength of it. Over-reporting ambiguity is the safe direction.
+  defp mark_all_ambiguous(evidence, key, reason) do
+    Map.new(evidence, fn {target, node_evidence} ->
+      {target,
+       Map.put(node_evidence, key, {:ambiguous, {:task_exit, inspect(reason, limit: 10)}})}
+    end)
+  end
+
+  defp stage_node(target, artifact, bytes, opts, registry) do
+    epoch_registry =
+      if target == node(), do: Keyword.get(opts, :epoch_registry, registry), else: Registry
+
+    remote_opts = [
+      pool: Keyword.get(opts, :pool, Pool),
+      store_root: Keyword.get(opts, :store_root),
+      epoch_registry: epoch_registry,
+      precompiled: Keyword.get(opts, :precompiled)
+    ]
+
+    case remote(target, __MODULE__, :stage, [artifact, bytes, remote_opts], stage_timeout(opts)) do
+      {:returned, {:ok, _evidence}} -> :ok
+      {:returned, {:mismatch, reason}} -> {:mismatch, reason}
+      {:returned, {:error, reason}} -> {:error, reason}
+      {:returned, other} -> {:ambiguous, {:unexpected_result, inspect(other, limit: 10)}}
+      {:ambiguous, reason} -> {:ambiguous, reason}
+    end
+  end
+
+  # W15. A policy component is not a mesh agent: there is no wrapper to start, no signal to
+  # send and no `:last_answer` to read, so `Probe.ready?/1`'s question has to be asked in the
+  # shape this world has. `PolicyEngine.probe/2` asks the same thing — does it stand up and
+  # answer? — by loading it as a policy, instantiating it under the deploy's own bounds, and
+  # requiring a readable verdict for one well-formed request.
+  defp probe_node(target, %Artifact{kind: :policy} = artifact, opts) do
+    state = start_state(artifact, opts)
+
+    case remote(target, PolicyEngine, :probe, [state, []], probe_timeout(opts)) do
+      {:returned, :ok} -> :ok
+      {:returned, {:error, reason}} -> {:error, reason}
+      {:returned, other} -> {:ambiguous, {:unexpected_result, inspect(other, limit: 10)}}
+      {:ambiguous, reason} -> {:ambiguous, reason}
+    end
+  end
+
+  defp probe_node(target, artifact, opts) do
+    spec = {Capability, start_state(artifact, opts)}
+
+    case remote(target, Probe, :ready?, [spec], probe_timeout(opts)) do
+      {:returned, :ok} -> :ok
+      {:returned, {:error, reason}} -> {:error, reason}
+      {:returned, other} -> {:ambiguous, {:unexpected_result, inspect(other, limit: 10)}}
+      {:ambiguous, reason} -> {:ambiguous, reason}
+    end
+  end
+
+  # W15. A policy's signed spec is a list of permission requests and the decision this
+  # component must reach about each; `run_eval/3` answers the same summarized shape
+  # `Evaluation.summarize/1` produces, so everything downstream of this function is one code
+  # path for both kinds.
+  defp eval_node(target, %Artifact{kind: :policy} = artifact, spec, opts) do
+    state = start_state(artifact, opts)
+
+    case remote(target, PolicyEngine, :run_eval, [state, spec, []], eval_timeout(opts)) do
+      {:returned, {:ok, report}} when is_map(report) -> report
+      {:returned, {:error, reason}} -> {:error, reason}
+      {:returned, other} -> {:ambiguous, {:unexpected_result, inspect(other, limit: 10)}}
+      {:ambiguous, reason} -> {:ambiguous, reason}
+    end
+  end
+
+  defp eval_node(target, artifact, spec, opts) do
+    start = {Capability, start_state(artifact, opts)}
+
+    case remote(target, Evaluation, :run, [start, spec, []], eval_timeout(opts)) do
+      {:returned, {:ok, report}} when is_map(report) -> Evaluation.summarize(report)
+      {:returned, {:error, reason}} -> {:error, reason}
+      {:returned, other} -> {:ambiguous, {:unexpected_result, inspect(other, limit: 10)}}
+      {:ambiguous, reason} -> {:ambiguous, reason}
+    end
+  end
+
+  # Every target is asked, because a description is a property of the bytes and a fleet
+  # where two nodes answer differently is a fleet holding two different components under
+  # one sha — which is worth failing the deploy over rather than papering over by asking
+  # one machine. `capture_describe/2` never raises and never returns anything but these
+  # three shapes.
+  # W15. There is no description gate for a policy component, and that is a statement about
+  # what a description is *for* rather than an omission: contract C1's document exists so the
+  # `capability` tool can put a component's own claim about itself in front of a model, and a
+  # policy component is in no listing a model reads. The world still exports `describe` — `ouro
+  # wasm policy` and `inspect` read it — but nothing on the node does, so a gate here would be
+  # a deploy failing over prose nobody will ever be shown.
+  defp describe_node(_target, %Artifact{kind: :policy}, _opts), do: :absent
+
+  defp describe_node(target, artifact, opts) do
+    state = %{start_state(artifact, opts) | limits: describe_limits(opts)}
+
+    case remote(target, Capability, :capture_describe, [state, []], describe_timeout(opts)) do
+      {:returned, {:ok, document}} -> {:ok, document}
+      {:returned, {:invalid, reason}} -> {:error, {:describe_invalid, reason}}
+      {:returned, {:error, reason}} -> {:error, {:describe_failed, reason}}
+      {:returned, other} -> {:ambiguous, {:unexpected_result, inspect(other, limit: 10)}}
+      {:ambiguous, reason} -> {:ambiguous, reason}
+    end
+  end
+
+  # The one description this rollout recorded, or `nil`. Every target answered the same
+  # question about the same bytes; disagreement is a failed gate above, so by the time this
+  # runs the answers are equal and the first is the answer.
+  defp captured_describe(evidence) do
+    Enum.find_value(evidence, fn {_target, e} ->
+      case Map.get(e, :describe) do
+        {:ok, document} -> {:ok, document}
+        _absent_or_failed -> nil
+      end
+    end)
+  end
+
+  defp eval_absent(evidence, nil),
+    do:
+      Map.new(evidence, fn {target, node_evidence} ->
+        {target, %{node_evidence | eval: :absent}}
+      end)
+
+  defp eval_absent(evidence, _spec), do: evidence
+
+  ## Settlement
+
+  # The `:live` mark comes first and the durable start comes after it, in that order for
+  # the reason `Ouroboros.Runtime.Capabilities.maybe_start/2` exists: the register is the
+  # authority for "this rollout is live", and a wrapper is only ever started for a rollout
+  # that already is. Like `maybe_start/2`, the register does not record *where* the wrapper
+  # landed — that is in the returned outcome, because it is a fact about one process rather
+  # than about the deployment.
+  defp settle(evidence, artifact, nodes, opts, registry, spec, warnings) do
+    case verdict(evidence) do
+      :pass ->
+        with {:ok, outcome} <- record(:live, evidence, artifact, nodes, registry, spec, warnings) do
+          started(outcome, artifact, nodes, opts, registry)
+        end
+
+      verdict ->
+        compensated = compensate(evidence, artifact, nodes, opts)
+        state = if verdict == :ambiguous, do: :quarantined, else: proven_state(compensated)
+        record(state, compensated, artifact, nodes, registry, spec, warnings)
+    end
+  end
+
+  # The id is claimed cluster-wide by something running a different component. Trying the
+  # next target would get the same answer, and calling it a start would put a component
+  # nobody described behind an id somebody trusts.
+  defp started(outcome, artifact, nodes, opts, registry) do
+    case start_capability(artifact, nodes, opts) do
+      {:claimed, id, other_sha} ->
+        if replaceable_predecessor?(artifact, registry, other_sha) do
+          replace_predecessor(outcome, artifact, nodes, opts, registry, id, other_sha)
+        else
+          quarantine_claim(outcome, artifact, registry, id, other_sha)
+        end
+
+      started ->
+        {:ok, %{outcome | started: started}}
+    end
+  end
+
+  # Marking the challenger live atomically supersedes an overlapping live entry of the same
+  # capability. Its still-running wrapper is therefore not a squatter: it is the predecessor
+  # this rollout just displaced. Only that exact recorded relationship authorizes stopping
+  # it; a process whose sha is not in the superseded entry remains somebody else's claim.
+  defp replaceable_predecessor?(artifact, registry, component_sha256) do
+    Registry.history(@module_prefix <> artifact.name, registry)
+    |> Enum.any?(fn entry ->
+      entry.state == :superseded and entry.component_sha256 == component_sha256 and
+        get_in(entry.detail, [:replaced_by]) == artifact.id
+    end)
+  rescue
+    _error -> false
+  catch
+    _kind, _reason -> false
+  end
+
+  defp replace_predecessor(outcome, artifact, nodes, opts, registry, id, component_sha256) do
+    case withdraw(id, component_sha256) do
+      stopped when stopped in [:rolled_back, :not_needed] ->
+        case start_capability(artifact, nodes, opts) do
+          {:claimed, ^id, other_sha} ->
+            quarantine_claim(outcome, artifact, registry, id, other_sha)
+
+          started ->
+            {:ok, %{outcome | started: started}}
+        end
+
+      _unproven_stop ->
+        quarantine_claim(outcome, artifact, registry, id, component_sha256)
+    end
+  end
+
+  defp quarantine_claim(outcome, artifact, registry, id, other_sha) do
+    detail = %{stage: :start, start_id_claimed_by: bound(other_sha), start_id: id}
+
+    quarantined = %{
+      outcome
+      | state: :quarantined,
+        stage: :start,
+        started: %{id: id, node: nil, claimed_by: other_sha}
+    }
+
+    case Registry.mark(artifact.id, :quarantined, [detail: detail], registry) do
+      {:ok, _entry} -> {:error, {:quarantined, quarantined}}
+      {:error, reason} -> {:error, {:rollout_record_failed, :quarantined, reason, quarantined}}
+    end
+  end
+
+  # Exactly the order `Ouroboros.Upgrade.Rollout` settles in: ambiguity outranks failure,
+  # failure outranks success, and "nobody answered" is never success.
+  defp verdict(evidence) do
+    outcomes =
+      Enum.flat_map(evidence, fn {_target, e} ->
+        [e.stage, e.probe, e.eval, describe_outcome(e)]
+      end)
+
+    cond do
+      Enum.any?(outcomes, &ambiguous?/1) -> :ambiguous
+      Enum.any?(outcomes, &failed?/1) -> :fail
+      true -> :pass
+    end
+  end
+
+  # A captured description is a pass; so is `:absent`, which is what a policy component's
+  # deploy records because there is no description to capture. `:skipped` is what an earlier
+  # gate's failure leaves behind and says nothing on its own.
+  defp describe_outcome(%{describe: {:ok, _document}}), do: :ok
+  defp describe_outcome(%{describe: :absent}), do: :ok
+  defp describe_outcome(%{describe: outcome}), do: outcome
+
+  defp ambiguous?({:ambiguous, _reason}), do: true
+  # A helper reading something other than the signed manifest is a node holding what
+  # nobody described. It never "just links less".
+  defp ambiguous?({:mismatch, _reason}), do: true
+  defp ambiguous?(_outcome), do: false
+
+  defp failed?({:error, _reason}), do: true
+  defp failed?(%{satisfied?: satisfied?}), do: satisfied? != true
+  defp failed?(_outcome), do: false
+
+  defp all_passed?(evidence, key) do
+    Enum.all?(evidence, fn {_target, e} -> Map.get(e, key) == :ok end)
+  end
+
+  # W13's gate answers `{:ok, document}` rather than `:ok`, because it is the one gate that
+  # brings something back. Once the document has been taken for the register, every node's
+  # evidence keeps only the fact that there was one: a description belongs in exactly one
+  # place, and repeating it per node in the returned outcome and in the durable detail is
+  # three copies of untrusted text where one will do.
+  defp bound_describe({:ok, _document} = _outcome), do: :described
+
+  defp bound_describe(node_evidence) when is_map(node_evidence),
+    do: %{node_evidence | describe: bound_describe(node_evidence.describe)}
+
+  defp bound_describe(outcome), do: outcome
+
+  # Nothing durable was started before the verdict, so withdrawing is proving absence: on
+  # every target, either no wrapper holds this start id, or the one that does is this
+  # component's and is stopped. A wrapper holding some *other* component's sha is left
+  # alone and reported `:unchanged` — it belongs to a rollout this one did not displace.
+  defp compensate(evidence, artifact, nodes, opts) do
+    case start_block(artifact) do
+      nil ->
+        Map.new(evidence, fn {target, e} -> {target, %{e | recovery: :not_needed}} end)
+
+      start ->
+        nodes
+        |> Enum.reduce(evidence, fn target, acc ->
+          put_in(
+            acc[target][:recovery],
+            withdraw_node(target, start.id, artifact.component_sha256, opts)
+          )
+        end)
+    end
+  end
+
+  # A node name a checkpoint carried as a binary is a rollout of something this VM never
+  # interned (the register's read is looser than its write, deliberately). It is not a
+  # target `:erpc` can reach and it is not a node this module gets to invent an atom for,
+  # so it is unproven — which is the same answer a peer that never replied gives.
+  defp withdraw_node(target, _id, _sha, _opts) when not is_atom(target), do: :quarantined
+
+  defp withdraw_node(target, id, component_sha256, opts) do
+    args = [id, component_sha256]
+
+    case remote(target, __MODULE__, :withdraw, args, start_timeout(opts)) do
+      {:returned, recovery} when recovery in [:not_needed, :rolled_back, :unchanged] -> recovery
+      _unproven -> :quarantined
+    end
+  end
+
+  ## Operator rollback
+
+  defp validate_name(name) do
+    if Artifact.name?(name), do: :ok, else: {:error, {:invalid_component_name, bound(name)}}
+  end
+
+  # One live entry per capability is the register's own rule — marking a challenger live
+  # supersedes the entry it displaces in the same call — so more than one is a register
+  # this build did not write and a set of wrappers nobody can name. Refusing is the honest
+  # answer; picking one would be guessing which of two components an operator meant.
+  defp live_entry(name, registry) do
+    entries =
+      @module_prefix
+      |> Kernel.<>(name)
+      |> Registry.history(registry)
+      |> Enum.filter(&(&1.state == :live and lane_w?(&1)))
+
+    case entries do
+      [entry] -> {:ok, entry}
+      [] -> {:error, {:no_live_rollout, name}}
+      many -> {:error, {:ambiguous_live_rollouts, Enum.map(many, & &1.artifact_id)}}
+    end
+  rescue
+    _unreadable -> {:error, :rollout_registry_unavailable}
+  catch
+    :exit, reason -> {:error, {:rollout_registry_unavailable, bound(reason)}}
+  end
+
+  defp retire(entry, name, registry, opts) do
+    id = @module_prefix <> name
+    nodes = if is_list(entry.nodes), do: entry.nodes, else: []
+
+    recovery =
+      Map.new(nodes, fn target ->
+        {target, withdraw_node(target, id, entry.component_sha256, opts)}
+      end)
+
+    state =
+      if Enum.all?(recovery, fn {_t, r} -> r in @withdrawn end),
+        do: :rolled_back,
+        else: :quarantined
+
+    outcome = %{
+      artifact_id: entry.artifact_id,
+      module: entry.module,
+      name: name,
+      component_sha256: entry.component_sha256,
+      epoch: entry.epoch,
+      start_id: id,
+      state: state,
+      nodes: nodes,
+      recovery: recovery
+    }
+
+    detail = %{stage: :rollback, requested: :operator, nodes: bound(recovery)}
+
+    case Registry.mark(entry.artifact_id, state, [detail: detail], registry) do
+      {:ok, _entry} -> {:ok, outcome}
+      {:error, reason} -> {:error, {:rollout_record_failed, state, reason, outcome}}
+    end
+  end
+
+  # Only proof on every node earns `:rolled_back`, which is the invariant the whole
+  # module exists to preserve.
+  defp proven_state(evidence) do
+    if Enum.all?(evidence, fn {_target, e} -> e.recovery in @proven_recoveries end),
+      do: :rolled_back,
+      else: :quarantined
+  end
+
+  ## Starting the durable wrapper
+
+  defp start_capability(artifact, nodes, opts) do
+    with true <- Keyword.get(opts, :start?, true) != false,
+         %{id: id} = start <- start_block(artifact) do
+      place(nodes, id, start, artifact, opts, %{})
+    else
+      _no_start -> nil
+    end
+  end
+
+  # One id, one process, cluster-wide. The first target that accepts hosts it; a target
+  # answering `{:already_started, _}` has accepted **only** if the process holding the id is
+  # running this artifact's component. Anything else is a claim on the name by somebody
+  # else's capability, and no other target can answer differently, so it halts here.
+  defp place([], id, _start, _artifact, _opts, errors),
+    do: %{id: id, node: nil, errors: errors}
+
+  defp place([target | rest], id, start, artifact, opts, errors) do
+    state = start_state(artifact, opts) |> Map.put(:config, start.config)
+    args = [id, [agent: Capability, initial_state: state], artifact.component_sha256]
+
+    case remote(target, __MODULE__, :claim, args, start_timeout(opts)) do
+      {:returned, {:ok, host}} ->
+        %{id: id, node: host, errors: errors}
+
+      {:returned, {:already_started, host}} ->
+        %{id: id, node: host, errors: errors, already_started: true}
+
+      {:returned, {:claimed, other_sha}} ->
+        {:claimed, id, other_sha}
+
+      {:returned, {:error, reason}} ->
+        place(rest, id, start, artifact, opts, Map.put(errors, target, bound(reason)))
+
+      {:returned, other} ->
+        place(rest, id, start, artifact, opts, Map.put(errors, target, bound(other)))
+
+      {:ambiguous, reason} ->
+        place(rest, id, start, artifact, opts, Map.put(errors, target, bound(reason)))
+    end
+  end
+
+  ## Recording
+
+  defp record(state, evidence, artifact, nodes, registry, spec, warnings) do
+    report = eval_report(evidence, spec)
+
+    captured = captured_describe(evidence)
+    evidence = Map.new(evidence, fn {target, e} -> {target, bound_describe(e)} end)
+
+    outcome = %{
+      artifact_id: artifact.id,
+      module: @module_prefix <> artifact.name,
+      component_sha256: artifact.component_sha256,
+      epoch: artifact.epoch,
+      name: artifact.name,
+      nodes: nodes,
+      state: state,
+      stage: stage_reached(evidence, spec),
+      eval_report: report,
+      started: nil,
+      warnings: warnings,
+      deployment: evidence
+    }
+
+    detail = %{
+      stage: outcome.stage,
+      nodes: Map.new(evidence, fn {target, e} -> {target, bound(e)} end)
+    }
+
+    mark_opts = [detail: detail, eval_report: report, describe: captured]
+
+    case Registry.mark(artifact.id, state, mark_opts, registry) do
+      {:ok, _entry} -> reply(state, outcome)
+      {:error, reason} -> {:error, {:rollout_record_failed, state, reason, outcome}}
+    end
+  end
+
+  defp reply(:live, outcome), do: {:ok, outcome}
+  defp reply(state, outcome), do: {:error, {state, outcome}}
+
+  # The gate this rollout got as far as, in the order they run: stage, probe, eval, describe.
+  # W13's gate is last, so an evaluation that failed still reports `:evaluate` — the deploy
+  # never reached the description, and naming a gate it never ran would be a lie about why
+  # it stopped.
+  defp stage_reached(evidence, spec) do
+    cond do
+      not all_passed?(evidence, :stage) -> :stage
+      not all_passed?(evidence, :probe) -> :probe
+      not is_nil(spec) and not passed_through_eval?(evidence, spec) -> :evaluate
+      not described?(evidence) -> :describe
+      is_nil(spec) -> :settle
+      true -> :evaluate
+    end
+  end
+
+  # Both spellings, because `record/7` reduces the document to `:described` before it asks:
+  # the register holds the document, and the evidence holds only that there was one.
+  defp described?(evidence) do
+    Enum.all?(evidence, fn {_target, e} ->
+      match?({:ok, _document}, Map.get(e, :describe)) or
+        Map.get(e, :describe) in [:described, :absent]
+    end)
+  end
+
+  defp eval_report(_evidence, nil), do: nil
+
+  # W15. A policy's spec has cases where a capability's has probes, so the report says what it
+  # ran rather than reaching for a key the other grammar has. Both shapes carry `budget_ms` and
+  # a per-node summary, which is what every reader downstream actually uses.
+  defp eval_report(evidence, %{cases: cases} = spec) do
+    %{
+      spec: %{cases: length(cases), budget_ms: spec.budget_ms},
+      compare: false,
+      nodes: Map.new(evidence, fn {target, e} -> {target, bound(e.eval)} end)
+    }
+  end
+
+  defp eval_report(evidence, spec) do
+    %{
+      spec: %{
+        probes: length(spec.probes),
+        required: spec.required,
+        budget_ms: spec.budget_ms,
+        max_latency_ms: spec.max_latency_ms
+      },
+      compare: false,
+      nodes: Map.new(evidence, fn {target, e} -> {target, bound(e.eval)} end)
+    }
+  end
+
+  ## Node-local work
+
+  defp verified(artifact, bytes) do
+    case Verifier.verify(
+           artifact,
+           bytes,
+           Application.get_env(:ouroboros, :upgrade_trust_policy, [])
+         ) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:component_rejected, reason}}
+    end
+  end
+
+  defp admitted_epoch(artifact, registry) do
+    Registry.admit_wasm_epoch(
+      %{
+        artifact_id: artifact.id,
+        epoch: artifact.epoch,
+        component_sha256: artifact.component_sha256
+      },
+      registry
+    )
+  catch
+    :exit, reason -> {:error, {:epoch_registry_unavailable, bound(reason)}}
+  end
+
+  # Content-addressed and idempotent: a node already holding this sha writes nothing and
+  # reports `published: false`.
+  defp published(artifact, bytes, store_opts) do
+    case Store.put(bytes, artifact.component_sha256, store_opts) do
+      {:ok, put} -> {:ok, put}
+      {:error, reason} -> {:error, {:component_not_stored, reason}}
+    end
+  end
+
+  defp published_manifest(artifact, store_opts) do
+    case Store.put_manifest(artifact, store_opts) do
+      {:ok, manifest} -> {:ok, manifest}
+      {:error, reason} -> {:error, {:manifest_not_stored, reason}}
+    end
+  end
+
+  # W15. The kind travels from the **signed manifest** to the helper's `load`, which is where a
+  # manifest that says one thing and bytes that are another meet. A `:policy` manifest over a
+  # capability component is refused `unsupported_world` here, at stage, before the register is
+  # marked and before anything is instantiated — and so is the reverse. This is the enforcement
+  # point contract C7 names: the manifest is the claim, the helper's world check is the check.
+  # W8. Which form this node loads is `Store.form/4`'s answer, and its inputs are exactly the
+  # three things D22 names: a `precompiled` block in a manifest **this node has already
+  # verified** against its own trust policy (the `verified/2` above, so a signer this node does
+  # not trust never reaches a deserialize), this node's own helper reading, and the file being
+  # on disk. Anything short of all three is the source form under §7.3's bounds, with one line
+  # saying which half disagreed — a fallback is not a fault, it is the path every node had.
+  # W8, H3. One function decides the form and one function falls back when the helper refuses
+  # it, and both of them live in the pool now — a stage that chose once and quarantined on a
+  # rotted artifact was a rollout the source form on the same disk would have carried.
+  defp loaded(artifact, pool, store_opts) do
+    case Pool.load_component(artifact.component_sha256, artifact.precompiled, pool,
+           kind: artifact.kind,
+           store: store_opts
+         ) do
+      {:ok, report} when is_map(report) -> {:ok, report}
+      {:error, reason} -> {:error, {:component_not_loaded, bound(reason)}}
+      other -> {:error, {:component_not_loaded, bound(other)}}
+    end
+  end
+
+  defp verified_precompiled(artifact, precompiled) do
+    case Verifier.verify_precompiled(artifact, precompiled) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:precompiled_rejected, reason}}
+    end
+  end
+
+  # Content-addressed and idempotent, exactly like the component. Absent is not a failure: a
+  # manifest with no block is a rollout with one form, which is every rollout before W8.
+  defp publish_precompiled(%Artifact{precompiled: nil}, _bytes, _store_opts), do: :ok
+
+  defp publish_precompiled(%Artifact{precompiled: %{sha256: sha}}, bytes, store_opts)
+       when is_binary(bytes) do
+    case Store.put_precompiled(bytes, sha, store_opts) do
+      {:ok, _put} -> :ok
+      {:error, reason} -> {:error, {:precompiled_not_stored, reason}}
+    end
+  end
+
+  defp publish_precompiled(_artifact, _bytes, _store_opts), do: {:error, :missing_precompiled}
+
+  defp cross_checked(artifact, report) do
+    case Verifier.cross_check(artifact, report) do
+      :ok -> :ok
+      {:error, reason} -> {:mismatch, reason}
+    end
+  end
+
+  defp stop(id) do
+    case Mesh.stop_agent(id) do
+      :ok -> :rolled_back
+      _unproven -> :quarantined
+    end
+  end
+
+  ## Plumbing
+
+  # Runs one gate on `target` under a deadline, converting anything unanswered into
+  # ambiguity. The house rule, stated once: a transport fault is ambiguity, never failure
+  # (`Ouroboros.Mesh`, `Ouroboros.Provider.Native.Subagent`).
+  #
+  # The local branch is bounded too, and that is the point of it being a branch rather than
+  # a bare `apply/3`. A gate on this node does the same work a gate on a peer does —
+  # filesystem writes in `stage/3`, `:global.trans/2` inside `Mesh.start_agent/2` — and an
+  # unbounded local call would mean a rollout that hangs forever on the one node whose
+  # deadline nobody set, while every peer's is enforced. So it runs in a task and is killed
+  # at the deadline.
+  #
+  # The two branches are *not* symmetric, and saying otherwise was wrong. `:erpc.call/5`
+  # with a timeout does not kill the process it spawned on the peer: it stops waiting and
+  # demonitors, and the peer's process runs to completion. So a timed-out **local** gate is
+  # killed mid-flight, while a timed-out **peer** gate keeps going and may publish bytes,
+  # start a wrapper, or finish an evaluation after this coordinator has already settled the
+  # rollout. Both outcomes are `{:ambiguous, _}` here and ambiguity quarantines, which is
+  # exactly the state that says "a node may be running something nobody has accounted for".
+  #
+  # What each branch leaves behind is bounded rather than hoped for. The peer's own `after`
+  # blocks run, because it was never killed; the local branch's do not, so
+  # `Ouroboros.Upgrade.Rollout.Probe` and `Ouroboros.Upgrade.Rollout.Evaluation` each keep
+  # their throwaway agent's cleanup in a process the kill does not reach.
+  #
+  # Public because it is this module's transport primitive: it carries no authority of its
+  # own, and it is the unit whose contract is worth testing directly.
+  @doc false
+  @spec bounded_call(node(), module(), atom(), [term()], timeout()) ::
+          {:returned, term()} | {:ambiguous, term()}
+  def bounded_call(target, module, function, args, timeout) do
+    if target == node() do
+      local_call(module, function, args, timeout)
+    else
+      {:returned, :erpc.call(target, module, function, args, timeout)}
+    end
+  catch
+    kind, reason -> {:ambiguous, {kind, inspect(reason, limit: 10)}}
+  end
+
+  # The inner `try` means the task never exits abnormally, so `Task.async`'s link cannot
+  # take this process down with it — every outcome comes back as a value.
+  defp local_call(module, function, args, timeout) do
+    task =
+      Task.async(fn ->
+        try do
+          {:returned, apply(module, function, args)}
+        catch
+          kind, reason -> {:ambiguous, {kind, inspect(reason, limit: 10)}}
+        end
+      end)
+
+    case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> result
+      {:exit, reason} -> {:ambiguous, {:exit, inspect(reason, limit: 10)}}
+      nil -> {:ambiguous, :timeout}
+    end
+  end
+
+  defp remote(target, module, function, args, timeout),
+    do: bounded_call(target, module, function, args, timeout)
+
+  defp trust_policy(opts) do
+    Keyword.get_lazy(opts, :trust_policy, fn ->
+      Application.get_env(:ouroboros, :upgrade_trust_policy, [])
+    end)
+  end
+
+  defp store_opts(opts) do
+    case Keyword.get(opts, :store_root) do
+      root when is_binary(root) and root != "" -> [root: root]
+      _unset -> []
+    end
+  end
+
+  defp start_config(%Artifact{} = artifact) do
+    case start_block(artifact) do
+      %{config: config} -> config
+      nil -> "{}"
+    end
+  end
+
+  defp lane_w?(entry), do: is_binary(Map.get(entry, :component_sha256))
+
+  defp stage_timeout(opts), do: positive(opts, :stage_timeout, @default_stage_timeout_ms)
+  defp probe_timeout(opts), do: positive(opts, :probe_timeout, Probe.budget_ms())
+  defp start_timeout(opts), do: positive(opts, :start_timeout, @default_start_timeout_ms)
+
+  defp eval_timeout(opts) do
+    positive(opts, :eval_timeout, fn ->
+      Application.get_env(:ouroboros, :capability_eval_timeout, @default_eval_timeout_ms)
+    end)
+  end
+
+  # W13. The bounds the description read runs under, which are the capability's own by
+  # default and are separately nameable because the two are different work: a message runs
+  # whatever the component decided to do with a caller's body, while `describe` is declared
+  # pure and reads nothing. An operator (or a test) that wants a metadata read held to a
+  # tighter bound than the capability's runtime can say so without changing what the
+  # capability runs under afterwards.
+  defp describe_limits(opts) do
+    case Keyword.get(opts, :describe_limits) do
+      %{fuel: fuel, memory_bytes: memory, deadline_ms: deadline} = limits
+      when is_integer(fuel) and is_integer(memory) and is_integer(deadline) ->
+        limits
+
+      _absent_or_partial ->
+        Keyword.get_lazy(opts, :limits, &Wasm.capability_limits/0)
+    end
+  end
+
+  # W13. One `describe` on one throwaway instance: a load (already cached by `stage`), an
+  # instantiate, one guest call and a drop. Sized like the probe's budget rather than the
+  # evaluation's, because it is one call and not a spec's worth of them — and deliberately
+  # generous relative to what a `describe` should cost, so that what fails here is a
+  # component that genuinely cannot answer rather than one on a busy machine.
+  defp describe_timeout(opts), do: positive(opts, :describe_timeout, &Probe.budget_ms/0)
+
+  defp positive(opts, key, default) do
+    case Keyword.get(opts, key) do
+      value when is_integer(value) and value > 0 -> value
+      _absent -> resolve(default)
+    end
+  end
+
+  defp resolve(default) when is_function(default, 0) do
+    case default.() do
+      value when is_integer(value) and value > 0 -> value
+      _invalid -> @default_eval_timeout_ms
+    end
+  end
+
+  defp resolve(default), do: default
+
+  defp byte_size_of(bytes) when is_binary(bytes), do: byte_size(bytes)
+  defp byte_size_of(other), do: other
+
+  # Everything recorded here lands in a durable registry entry and crosses `:erpc` on the
+  # way. Small terms keep their shape because a named tuple is worth matching on; anything
+  # unportable or oversized becomes bounded text.
+  defp bound(term) do
+    if Beam.portable_term?(term) and :erlang.external_size(term) <= 2_048,
+      do: term,
+      else: inspect(term, limit: 10, printable_limit: 200)
+  end
+end

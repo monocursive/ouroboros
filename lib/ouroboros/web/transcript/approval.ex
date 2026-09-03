@@ -467,7 +467,12 @@ defmodule Ouroboros.Web.Transcript.Approval do
       "permissions.add" not in methods ->
         {nil, "This Ouroboros node cannot save approval rules."}
 
-      String.starts_with?(pattern, "ComputerUse(") ->
+      # Both of these are facts about a *node*, not about a directory. A Computer Use grant
+      # is "this app, from this operator"; a `Capability(…)` grant is "this component, which
+      # the rollout plane deployed to this machine" (docs/WASM.md §7.7). Requiring a
+      # workspace for either meant a session that had not chosen a project folder could
+      # never remember the answer it had just given.
+      String.starts_with?(pattern, "ComputerUse(") or String.starts_with?(pattern, "Capability(") ->
         {%Rule{pattern: pattern, workspace: workspace || ""}, nil}
 
       is_binary(workspace) ->

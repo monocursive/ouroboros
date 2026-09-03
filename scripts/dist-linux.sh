@@ -25,7 +25,7 @@ set -eu
 DOCKER=${DOCKER:-docker}
 PLATFORM=linux/amd64
 IMAGE=${OURO_DIST_LINUX_IMAGE:-ouroboros-dist-linux-x86_64:otp29-elixir1.20.2}
-RUST_VERSION=${OURO_DIST_LINUX_RUST_VERSION:-1.88}
+RUST_VERSION=${OURO_DIST_LINUX_RUST_VERSION:-1.95}
 
 VOLUME_WORK=ouro-dist-linux-x86_64-work
 VOLUME_CARGO=ouro-dist-linux-x86_64-cargo

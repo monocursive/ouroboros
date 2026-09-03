@@ -85,6 +85,17 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
     }
   end
 
+  # `/bin` is a symlink to `usr/bin` on Debian-family Linux, and `builder_policy/1`
+  # canonicalises every root it names (a root that is a link is the thing it points at, to
+  # Landlock and to Seatbelt alike). So the assertion is that each platform root is covered,
+  # in whichever spelling names that directory.
+  defp canonical_root(path) do
+    case Ouroboros.Workspace.Path.canonicalize(path) do
+      {:ok, canonical} -> canonical
+      {:error, _absent} -> path
+    end
+  end
+
   defp run(module, input, context, timeout \\ 30_000),
     do: Ouroboros.Provider.Native.Tools.execute(module, input, context, timeout)
 
@@ -436,6 +447,70 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
                )
     end
 
+    test "a shell request is exactly these keys and no others" do
+      # L5, and the reason it is a whole-map comparison rather than a field-by-field one:
+      # W17 added a key to this request and the pinned tests all still passed, because every
+      # one of them asserted on the keys it knew about. A future field that leaks into a
+      # shell policy has to redden something, and this is the something.
+      expected = %{
+        "version" => 1,
+        "mode" => "workspace_write",
+        "cwd" => "/ws",
+        "scratch" => "/scratch",
+        "writable" => ["/ws", "/ws-extra"],
+        "protected" => ["/srv/ouroboros/data", "/home/agent/.config/ouroboros"],
+        "denied_names" => [".git", ".ouroboros"],
+        "network" => false
+      }
+
+      # The one conditional key: present exactly when this build has the `.so` on disk.
+      library = Application.app_dir(:ouroboros, "priv/native/libouro_fs_filter.so")
+
+      expected =
+        if File.regular?(library),
+          do: Map.put(expected, "fs_filter_library", library),
+          else: expected
+
+      assert Helper.request(fixed_policy(:workspace_write), %{root: "/ws"}) == expected
+    end
+
+    test "a builder policy carries its read allow-set, and no other mode carries one" do
+      # C10 on the wire. Red without `Helper.request/2`'s `readable` clause: a builder
+      # request with no allow-set is one the helper fences to its writable roots alone, so
+      # the omission would not be a wider build — it would be a build that cannot read its
+      # own toolchain, which is a failure nobody would read as a policy bug.
+      policy =
+        Sandbox.builder_policy(writable: ["/build"], readable: ["/toolchain"])
+        |> Sandbox.with_scratch("/scratch")
+
+      request = Helper.request(policy, %{root: "/build"})
+
+      assert request["mode"] == "builder"
+      assert request["writable"] == ["/build"]
+      assert "/toolchain" in request["readable"]
+      # Every platform root the builder policy starts from travels too.
+      for root <- Sandbox.platform_readable(),
+          do: assert(canonical_root(root) in request["readable"])
+
+      # A builder has no name fence and no protected roots: the read allow-set is the
+      # fence, and the helper refuses a builder request that carries `denied_names`.
+      assert request["denied_names"] == []
+      assert request["network"] == false
+
+      # And no preload library. It rode along on every builder request until a review
+      # noticed the helper was silently discarding it while §14 said it was refused; the
+      # helper refuses the field under `builder` now, so sending it would be a backend
+      # failure rather than a courtesy. Red without `filter_library/1`'s builder clause.
+      refute Map.has_key?(request, "fs_filter_library")
+
+      # And the field belongs to that mode alone. A shell's read set is `/`, so a
+      # `readable` in one of these would be a fence the helper refuses outright.
+      for mode <- [:read_only, :workspace_write, :workspace_write_escalated] do
+        refute Map.has_key?(Helper.request(fixed_policy(mode), %{root: "/ws"}), "readable"),
+               "mode #{mode} must not carry a read allow-set"
+      end
+    end
+
     test "carries the fs_filter library when this build has one, because Landlock cannot" do
       # The documented gap: denying the *creation* of a `.git` that does not exist yet is
       # not expressible in Landlock, so the helper is handed the same LD_PRELOAD shim the
@@ -454,8 +529,19 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
 
   describe "detecting the ouro-sandbox helper" do
     test "an override pointing at nothing is not a helper" do
+      # Restored, not deleted: the variable is how a host that has an `ouro-sandbox` on disk
+      # says "not this one" (the bubblewrap proof in a container sets it), and a test that
+      # deleted it handed every later detection in the run the helper it had been told to
+      # ignore.
+      previous = System.get_env("OUROBOROS_SANDBOX_HELPER")
       System.put_env("OUROBOROS_SANDBOX_HELPER", Path.join(System.tmp_dir!(), "absent-helper"))
-      on_exit(fn -> System.delete_env("OUROBOROS_SANDBOX_HELPER") end)
+
+      on_exit(fn ->
+        case previous do
+          nil -> System.delete_env("OUROBOROS_SANDBOX_HELPER")
+          value -> System.put_env("OUROBOROS_SANDBOX_HELPER", value)
+        end
+      end)
 
       assert Helper.executable() == nil
     end
@@ -492,6 +578,80 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       File.chmod!(fake, 0o755)
 
       assert %{version: "0.1.0 (landlock abi 8)", notes: "ok"} = Helper.probe(fake)
+    end
+
+    test "a readable root that is a symlink is the thing it points at, by name", %{root: root} do
+      # L4. Landlock opens a rule's path with `O_PATH` and Seatbelt's `subpath` resolves the
+      # same way, so a policy naming a link grants its target under a name that does not say
+      # so — a `readable` of `/opt/toolchain` that happens to point at `/home/me/secrets`
+      # would have been a fence with the secret inside it. Red without `canonical_root/1`.
+      # Built under the *canonical* temp root, because `Workspace.Path.canonicalize/1` has a
+      # defect of its own on this platform (see the report): its symlink-cycle guard is one
+      # set for the whole resolution, so an absolute link target that re-traverses macOS's
+      # `/var` link is reported as a cycle. That is why the helper refuses a symlinked
+      # `readable` as well — this half is the daemon naming what it grants, and it is not
+      # the only half.
+      {:ok, base} = Ouroboros.Workspace.Path.canonicalize(root)
+      target = Path.join(base, "real-toolchain")
+      link = Path.join(base, "toolchain-link")
+      File.mkdir_p!(target)
+      File.ln_s!(target, link)
+
+      policy = Sandbox.builder_policy(writable: [], readable: [link])
+
+      # The policy names both: the target under its own name, and the link because bubblewrap
+      # binds by name and a namespace with no `/bin` in it runs no `#!/bin/sh` (the hosted CI
+      # job found exactly that on a merged-`/usr` Ubuntu). What reaches *this* helper is the
+      # target alone — it refuses a symlinked root by design, and Landlock's rule attaches to
+      # the inode the target already names.
+      assert target in policy.readable
+      assert link in policy.readable
+
+      request = Helper.request(Sandbox.with_scratch(policy, Path.join(base, "scratch")), %{})
+      assert target in request["readable"]
+      refute link in request["readable"]
+
+      # A root that does not exist yet cannot be canonicalised and is carried through
+      # unchanged, because dropping it would narrow the policy without saying so — and the
+      # helper is what refuses it, out loud, if it turns out to be a link.
+      absent = Path.join(base, "not-created-yet")
+      assert absent in Sandbox.builder_policy(writable: [], readable: [absent]).readable
+    end
+
+    test "the read fence is claimed by the helper's own report, never by its name", %{root: root} do
+      # C11. Delete the `read_fence:` key from `probe/1` and the second half goes red; make
+      # it a constant `true` and the first half does. A helper installed before the read
+      # allow-set existed reports no feature, and a node that inferred the fence from the
+      # backend's name would run a build under one it does not have.
+      stale = Path.join(root, "stale-helper")
+      File.write!(stale, ~s(#!/bin/sh\necho '{"usable":true,"version":"0.1.0","notes":"ok"}'\n))
+      File.chmod!(stale, 0o755)
+
+      assert %{read_fence: false} = Helper.probe(stale)
+
+      current = Path.join(root, "current-helper")
+
+      File.write!(
+        current,
+        ~s(#!/bin/sh\necho '{"usable":true,"version":"0.1.0","notes":"ok","features":{"read_allow_set":true}}'\n)
+      )
+
+      File.chmod!(current, 0o755)
+
+      assert %{read_fence: true} = Helper.probe(current)
+
+      # A `features` that is not an object is a helper that claims nothing, not an
+      # exception on the detection path every `bash` call crosses.
+      odd = Path.join(root, "odd-helper")
+
+      File.write!(
+        odd,
+        ~s(#!/bin/sh\necho '{"usable":true,"version":"0.1.0","notes":"ok","features":"yes"}'\n)
+      )
+
+      File.chmod!(odd, 0o755)
+
+      assert %{read_fence: false} = Helper.probe(odd)
     end
   end
 

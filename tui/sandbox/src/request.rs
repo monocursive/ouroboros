@@ -45,6 +45,16 @@ pub enum Mode {
     /// The `.git` fence is what the operator just lifted, so re-imposing it here would
     /// make the approval a no-op.
     WorkspaceWriteEscalated,
+    /// Closed on **reads** as well as on writes: a build, not a shell.
+    ///
+    /// Every other mode here is a shell's, and a shell that cannot read is not a shell —
+    /// so their read set is `/`. A build is the case where that is wrong, because the
+    /// thing being contained is a compiler running code an author wrote and what it can
+    /// carry into its output is the whole point of the fence. So `readable` is the allow
+    /// set and there is nothing else: no fallback to `/` when it is empty, and no root
+    /// this helper adds of its own beyond `/dev` and `/proc`, which the plan keeps
+    /// writable for every mode and which a compiler needs to open at all.
+    Builder,
 }
 
 impl Mode {
@@ -53,12 +63,18 @@ impl Mode {
             Mode::ReadOnly => "read_only",
             Mode::WorkspaceWrite => "workspace_write",
             Mode::WorkspaceWriteEscalated => "workspace_write_escalated",
+            Mode::Builder => "builder",
         }
     }
 
     /// Whether the policy grants any writable root at all beyond scratch.
     pub fn grants_roots(self) -> bool {
         !matches!(self, Mode::ReadOnly)
+    }
+
+    /// Whether reads are an allow-set rather than the whole filesystem.
+    pub fn fences_reads(self) -> bool {
+        matches!(self, Mode::Builder)
     }
 }
 
@@ -101,6 +117,14 @@ pub struct Request {
     /// Roots the command may write under, in `workspace_write`.
     #[serde(default)]
     pub writable: Vec<String>,
+    /// Roots the command may *read* under, in `builder` mode only.
+    ///
+    /// A list the daemon widens and this helper never does: an entry must be absolute, an
+    /// empty list means the writable roots and nothing else, and no mode outside `builder`
+    /// may carry one — a `readable` under a mode whose read set is `/` would be a policy
+    /// the daemon believes it wrote and the kernel never applied.
+    #[serde(default)]
+    pub readable: Vec<String>,
     /// Absolute locations that stay read-only even when they fall inside a writable root
     /// — the node's data directory, the operator's config.
     #[serde(default)]
@@ -141,6 +165,9 @@ pub enum RequestError {
     EmptyScratch,
     DeniedNameNotAComponent(String),
     WritableWithoutRoots,
+    ReadableWithoutBuilder(Mode),
+    DeniedNamesInBuilder,
+    FsFilterInBuilder,
 }
 
 impl fmt::Display for RequestError {
@@ -168,6 +195,26 @@ impl fmt::Display for RequestError {
                 "mode read_only was given writable roots; refusing rather than silently \
                  honouring one of the two"
             ),
+            RequestError::ReadableWithoutBuilder(mode) => write!(
+                f,
+                "mode {} was given a readable allow-set, which only mode builder fences; \
+                 a caller that named its read roots and got the whole filesystem would \
+                 believe in a fence this helper never applied",
+                mode.as_str()
+            ),
+            RequestError::DeniedNamesInBuilder => write!(
+                f,
+                "mode builder was given denied_names; the name filter is an LD_PRELOAD \
+                 shim for a shell's `.git`, a build's fence is the read allow-set, and \
+                 carrying the field would be a rule nothing enforces"
+            ),
+            RequestError::FsFilterInBuilder => write!(
+                f,
+                "mode builder was given fs_filter_library; the same rule as denied_names \
+                 and for the same reason — a builder plan carries no preload filter, so \
+                 accepting the library would be a layer the caller believes in and this \
+                 helper never loads"
+            ),
         }
     }
 }
@@ -182,6 +229,9 @@ pub struct Policy {
     pub cwd: Option<String>,
     pub scratch: String,
     pub writable: Vec<String>,
+    /// Empty for every mode but `builder`, where it is the whole read set beside the
+    /// writable roots.
+    pub readable: Vec<String>,
     pub protected: Vec<String>,
     pub denied_names: Vec<String>,
     pub network: bool,
@@ -210,6 +260,9 @@ impl Policy {
         for path in &request.writable {
             absolute("writable", path)?;
         }
+        for path in &request.readable {
+            absolute("readable", path)?;
+        }
         for path in &request.protected {
             absolute("protected", path)?;
         }
@@ -230,6 +283,32 @@ impl Policy {
             return Err(RequestError::WritableWithoutRoots);
         }
 
+        // The same reasoning in the read direction, and it matters more: a daemon that
+        // sends `readable` under a shell mode has written a read fence the plan turns into
+        // a read set of `/`. Refusing is the only answer that cannot be mistaken for one.
+        if !request.mode.fences_reads() && !request.readable.is_empty() {
+            return Err(RequestError::ReadableWithoutBuilder(request.mode));
+        }
+
+        // A build has no `.git` fence, because it has no workspace: the read allow-set is
+        // what bounds it, and a `denied_names` here would ride an LD_PRELOAD the builder
+        // plan deliberately does not carry.
+        if request.mode.fences_reads() && !request.denied_names.is_empty() {
+            return Err(RequestError::DeniedNamesInBuilder);
+        }
+
+        // And the library that shim lives in, for the same reason. A refusal rather than a
+        // silent discard: the daemon that sent it thinks a layer is being applied, and the
+        // one thing this helper must never do is let a caller believe that.
+        if request.mode.fences_reads()
+            && request
+                .fs_filter_library
+                .as_deref()
+                .is_some_and(|library| !library.is_empty())
+        {
+            return Err(RequestError::FsFilterInBuilder);
+        }
+
         Ok(Policy {
             mode: request.mode,
             cwd: request.cwd,
@@ -242,6 +321,7 @@ impl Policy {
                     .into_iter()
                     .filter(|p| *p != request.scratch),
             ),
+            readable: dedup_sorted(request.readable.into_iter()),
             protected: dedup_sorted(request.protected.into_iter()),
             denied_names: dedup_sorted(request.denied_names.into_iter()),
             scratch: request.scratch,
@@ -323,6 +403,10 @@ mod tests {
                 "cwd",
                 r#"{"mode":"read_only","scratch":"/tmp/s","cwd":"ws"}"#,
             ),
+            (
+                "readable",
+                r#"{"mode":"builder","scratch":"/tmp/s","readable":["toolchain"]}"#,
+            ),
         ] {
             match Policy::from_json(json) {
                 Err(RequestError::NotAbsolute { field: got, .. }) => assert_eq!(got, field),
@@ -379,11 +463,80 @@ mod tests {
     }
 
     #[test]
+    fn a_read_allow_set_belongs_to_the_builder_and_to_no_other_mode() {
+        let builder = Policy::from_json(
+            r#"{"mode":"builder","scratch":"/tmp/s","writable":["/build"],
+                "readable":["/toolchain","/sdk","/toolchain"]}"#,
+        )
+        .unwrap();
+        assert_eq!(builder.mode, Mode::Builder);
+        assert_eq!(
+            builder.readable,
+            vec!["/sdk".to_string(), "/toolchain".to_string()]
+        );
+
+        // Every other mode reads `/`, so a `readable` under one is a fence the caller
+        // believes in and the kernel never sees.
+        for mode in ["read_only", "workspace_write", "workspace_write_escalated"] {
+            let json =
+                format!(r#"{{"mode":"{mode}","scratch":"/tmp/s","readable":["/toolchain"]}}"#);
+            assert!(
+                matches!(
+                    Policy::from_json(&json),
+                    Err(RequestError::ReadableWithoutBuilder(_))
+                ),
+                "expected a refusal for mode {mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_builder_request_with_no_readable_entries_is_accepted_and_names_none() {
+        // Emphatically not "and therefore reads everything": the plan is what turns this
+        // into a read set, and `builder_reads_only_what_it_was_given` pins that half.
+        let policy =
+            Policy::from_json(r#"{"mode":"builder","scratch":"/tmp/s","writable":["/build"]}"#)
+                .unwrap();
+        assert!(policy.readable.is_empty());
+    }
+
+    #[test]
+    fn a_builder_request_carrying_a_preload_library_is_refused() {
+        // §14 said the preload filter was "refused under builder" while the daemon sent the
+        // library on every request and this helper quietly dropped it. Now it is refused,
+        // in both places: delete this check and the request is accepted again.
+        assert_eq!(
+            Policy::from_json(
+                r#"{"mode":"builder","scratch":"/tmp/s","fs_filter_library":"/priv/f.so"}"#
+            ),
+            Err(RequestError::FsFilterInBuilder)
+        );
+
+        // An empty string is how the daemon says "no library"; refusing that would be
+        // refusing a no-op.
+        assert!(Policy::from_json(
+            r#"{"mode":"builder","scratch":"/tmp/s","fs_filter_library":""}"#
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_builder_request_carrying_a_name_fence_is_refused() {
+        // The name filter is the shell's `.git` rule and rides an LD_PRELOAD the builder
+        // plan does not carry, so honouring the field would be inventing an enforcement.
+        assert_eq!(
+            Policy::from_json(r#"{"mode":"builder","scratch":"/tmp/s","denied_names":[".git"]}"#),
+            Err(RequestError::DeniedNamesInBuilder)
+        );
+    }
+
+    #[test]
     fn every_mode_in_the_elixir_vocabulary_round_trips() {
         for (json, mode) in [
             ("read_only", Mode::ReadOnly),
             ("workspace_write", Mode::WorkspaceWrite),
             ("workspace_write_escalated", Mode::WorkspaceWriteEscalated),
+            ("builder", Mode::Builder),
         ] {
             let policy =
                 Policy::from_json(&format!(r#"{{"mode":"{json}","scratch":"/tmp/s"}}"#)).unwrap();

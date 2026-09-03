@@ -35,6 +35,8 @@ defmodule Ouroboros.Control.Permissions.Matcher do
   | `ComputerUse(act)` | the `desktop_act` tool |
   | `ComputerUse(app:<id>)` | either desktop tool when `context.app` equals `<id>` |
   | `ComputerUse(app:*)` | either desktop tool when `context.app` is a nonempty binary |
+  | `Capability(<name>)` | the `capability` tool when `context.capability` is that name |
+  | `Capability(*)` | the `capability` tool when `context.capability` is a nonempty binary |
 
   `Edit` and `Write` overlap on purpose. A provider that reports a tool this runtime does
   not recognise is judged by both, because the alternative — judging it by neither —
@@ -139,6 +141,24 @@ defmodule Ouroboros.Control.Permissions.Matcher do
 
   defp do_matches?(%Pattern{kind: :computer_use, spec: %{app: app}}, request, _quantifier),
     do: context_value(request.context, "app") == app
+
+  # ── Capability (W13) ─────────────────────────────────────────────────────────────────
+
+  # `context.capability` is set by `Ouroboros.Provider.Native.Tools.classify/3` only for a
+  # name that resolved to a `:live` lane-W rollout on this node, so an unresolved name has
+  # no key and matches nothing — an allow on `*` must not cover "we could not tell which
+  # capability this was". The `:any` clause precedes the exact one for the same reason it
+  # does above: `%{name: :any}` would otherwise compare against the atom.
+  defp do_matches?(%Pattern{kind: :capability, spec: %{name: :any}}, request, _quantifier) do
+    request.tool == "capability" and
+      case context_value(request.context, "capability") do
+        name when is_binary(name) -> name != ""
+        _other -> false
+      end
+  end
+
+  defp do_matches?(%Pattern{kind: :capability, spec: %{name: name}}, request, _quantifier),
+    do: request.tool == "capability" and context_value(request.context, "capability") == name
 
   # ── helpers ────────────────────────────────────────────────────────────────────────
 

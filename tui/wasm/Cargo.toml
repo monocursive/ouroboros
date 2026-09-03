@@ -1,0 +1,87 @@
+[package]
+name = "ouro-wasm"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+description = "Ouroboros WebAssembly containment helper: the private JSON-RPC helper the runtime spawns to load, instantiate, and call capability components."
+publish = false
+
+# An isolated workspace member, for the same reason `computer-use` and `sandbox` are ones,
+# and with the strongest case any of the three has had: `wasmtime` is a JIT compiler and a
+# runtime for untrusted bytes, roughly a hundred transitive crates, and none of it belongs in
+# the `ouro` terminal client's build graph. `ouro` never depends on this member. A wasmtime
+# panic — or a wasmtime escape — costs a Port, not the node (docs/WASM.md D3).
+#
+# `rust-version` is 1.95 here where the rest of the workspace is 1.88: that is wasmtime 48's
+# own MSRV, not a preference. 48 is also wasmtime's current LTS — the project ships a major
+# every month with two months of support, and every twelfth release (24, 36, 48, …) gets 24
+# months of backported security fixes. The alternative was 38, the last major that builds on
+# 1.88, which is neither an LTS nor still supported. WASM.md §12 says "pin it, watch its
+# advisories", and advisories are only backported to supported releases. The toolchain floor
+# for a *release build* moved with this; see `RUST_VERSION` in .github/workflows/ci.yml.
+
+[[bin]]
+name = "ouro-wasm"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+# The line loop and stdio, exactly as `computer-use` uses it. The `current_thread` runtime
+# plus `spawn_blocking`: every wasmtime call is blocking work that must not sit on the
+# reactor, and compiling a component can take hundreds of milliseconds.
+tokio = { version = "1", features = ["rt", "macros", "io-util", "io-std"] }
+# Component identity is the sha256 of the bytes, recomputed here from what was actually read
+# rather than trusted from the request (§7.5). Pure Rust, already in this workspace's lock
+# behind `ouro` and `computer-use`; no C, no OpenSSL.
+sha2 = "0.10"
+# The structural pre-compile pass (`src/shape.rs`). This is not a new crate in the graph:
+# wasmtime 48.0.1 already resolves exactly this version behind `wasmtime-environ`, so naming it
+# here adds a direct edge and nothing else — and naming it is the point, because the bound in
+# front of the compiler is load-bearing containment, not an implementation detail of wasmtime's.
+# `default-features = false` drops `validate` (wasmtime validates; this pass only walks section
+# headers), `serde`, `simd` and the hash collections. Pinned to the same minor wasmtime uses:
+# a wasmparser that disagreed with the one inside the engine would be a checker that walks
+# different bytes from the compiler it protects.
+wasmparser = { version = "=0.254.0", default-features = false, features = [
+  "std",
+  "features",
+  "component-model",
+] }
+# The one heavy dependency, and the reason this member exists. `default-features = false`
+# drops most of what the default set pulls in; what is left is what the helper's six methods
+# need and nothing more:
+#   * `cranelift` + `runtime` + `std` — compile and run components on this host.
+#   * `component-model` — the only module format this helper speaks. Core modules are not
+#     loadable through any of the six methods.
+#   * `anyhow` — wasmtime's public error type, needed to downcast a failure to `Trap` and tell
+#     fuel exhaustion from an epoch deadline from a guest's own trap.
+# Deliberately absent: `gc` and every collector (the v1 world is strings and nothing else, and
+# an engine built with `gc` refuses to start without a collector anyway), `async` and
+# `component-model-async` (D4 — v1 is a sync, step-shaped world), `cache` (a compile cache is a
+# filesystem the helper does not need), `wat` (the helper accepts component *binaries* only;
+# the test guests are assembled by the `wat` dev-dependency below, so no text parser sits in
+# the production path), `pooling-allocator`, `profiling`, `coredump`, `debug*`, `threads`,
+# `stack-switching`, `parallel-compilation`. There is no `wasmtime-wasi` at any version: the
+# linker defines exactly one function and WASI is not it (D5).
+#
+# An absent cargo feature is only half of it, because wasmtime 48 enables every *proposal* it
+# considers stable regardless — relaxed SIMD, tail calls, function references, extended const,
+# multi-memory, memory64 and the rest of "WASM 3". Those are turned off by name in
+# `host::config`, which is where the enumeration and the reasons live; four of them (threads,
+# exceptions, GC types, component-model async) are off both ways. Turning a proposal off in a
+# `Config` is the enforcement; leaving its cargo feature out is what keeps the code that
+# implements it out of the binary at all.
+wasmtime = { version = "48", default-features = false, features = [
+  "runtime",
+  "cranelift",
+  "component-model",
+  "anyhow",
+  "std",
+] }
+
+[dev-dependencies]
+# The test guests are WebAssembly *components* written as text and assembled at test time, so
+# no wasm toolchain has to be installed and no opaque binary is checked in. This is the same
+# crate wasmtime's own `wat` feature would pull, kept on the test side of the wall on purpose:
+# the helper itself must never accept text, only the signed binary bytes it is handed.
+wat = "1"

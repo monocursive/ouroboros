@@ -132,6 +132,15 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       {"coding_event_detail_result", coding_event_detail_result()},
       {"code_intel_diagnostics_result", code_intel_diagnostics_result()},
       {"mcp_list_result", mcp_list_result()},
+      {"wasm_status_result", wasm_status_result()},
+      {"wasm_list_result", wasm_list_result()},
+      {"agents_message_result", agents_message_result()},
+      {"wasm_upload_result", wasm_upload_result()},
+      {"wasm_download_result", wasm_download_result()},
+      {"wasm_sign_result", wasm_sign_result()},
+      {"wasm_deploy_result", wasm_deploy_result()},
+      {"wasm_rollback_result", wasm_rollback_result()},
+      {"agents_message_truncated_result", agents_message_truncated_result()},
       {"workspace_browse_result", workspace_browse_result()},
       {"ledger_list_result", ledger_list_result()},
       {"ledger_export_result", ledger_export_result()},
@@ -1232,6 +1241,393 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         "detail" => nil,
         "seq" => 12
       }
+    })
+  end
+
+  # W5. A hand-written term in the shape `Ouroboros.Wasm.Surface.status/1` returns, not a
+  # capture of a live pool: a fixture that started a helper would need one on the machine
+  # regenerating it, and what a second implementation has to agree about is the shape.
+  #
+  # Fully populated on purpose — a ready helper with an accepted `doctor` report, two of
+  # sixteen hook-component slots spent, a store holding bytes a rollout protects, rollouts
+  # in three of the five states, boot on — so a client's decode is exercised on every field
+  # rather than on the two a quiet node happens to fill.
+  #
+  # **Every nested map here is an open projection.** `helper`, `store`, `rollouts` and
+  # `boot` gain keys as the lane grows, and `helper.limits` is the *helper's own* bounds
+  # table, forwarded under the names it reported with no list of them restated on this
+  # side. A client keys on what it knows and ignores the rest.
+  #
+  # A field this node cannot answer is `null`, never a missing key and never `false`: an
+  # unreadable store and an empty one are different facts, and `held: null` is how a client
+  # tells them apart.
+  #
+  # `helper.path` and `store.root` are **basenames, not paths**, and the fixture pins them
+  # that way because that is what `Ouroboros.Wasm.Surface` answers: both verbs are `:read`,
+  # the lowest scope this gateway has, and an absolute path names an install prefix and
+  # often an account to anyone who may merely look. A client that renders either as a path
+  # is rendering something this protocol does not send.
+  defp wasm_status_result do
+    Conn.result_frame(16, %{
+      node: :ouroboros@golden,
+      helper: %{
+        present: true,
+        path: "ouro-wasm",
+        world: "ouroboros:capability@0.1.0",
+        phase: :ready,
+        os_pid: 4242,
+        instances: 2,
+        owned: 1,
+        pending_drops: 0,
+        hook_components: 2,
+        hook_component_budget: 16,
+        usable: true,
+        worlds: ["ouroboros:capability@0.1.0"],
+        wasmtime: "43.0.1",
+        limits: %{
+          "max_component_bytes" => 67_108_864,
+          "max_components" => 64,
+          "max_deadline_ms" => 60_000,
+          "max_instances" => 256,
+          "max_memory_bytes" => 268_435_456,
+          "max_result_bytes" => 1_048_576
+        },
+        broken_reason: nil
+      },
+      # W16, D25. The OS sandbox the helper runs under, as its own half of the answer: an
+      # operator asking whether this node contains its helper is asking about the node, and
+      # `:refused` is an answer a node gives *while there is no helper at all*. The fixture is
+      # the ordinary posture — wrapped, on a node whose backend fences reads and network —
+      # because that is what a working node reports and a decode proved against a refusal
+      # would ship blind to it. `reason` is prose, not a code: a client renders it and
+      # branches on `posture`.
+      #
+      # `readable` is the effective read set as **basenames**, for `helper.path`'s reason: an
+      # absolute path names an install prefix and often an account, and both wasm verbs are
+      # `:read`. Two roots here — the helper's own directory and this node's component store —
+      # which is what a node with nothing configured has.
+      sandbox: %{
+        posture: :sandboxed,
+        backend: "sandbox-exec",
+        reason: nil,
+        readable: ["wasm", "components"]
+      },
+      store: %{
+        root: "components",
+        budget_bytes: 536_870_912,
+        held: 2,
+        bytes: 3_145_728,
+        protected: 1
+      },
+      rollouts: %{
+        total: 3,
+        by_state: %{deploying: 0, live: 1, quarantined: 1, rolled_back: 0, superseded: 1}
+      },
+      boot: %{enabled: true}
+    })
+  end
+
+  # W5. The listing half, in the shape `Ouroboros.Wasm.Surface.list/1` returns.
+  #
+  # Both lists are sorted by their own identity — `artifact_id` and `sha256` — because two
+  # reads of an unchanged node must produce the same bytes, and neither a directory listing
+  # nor a map traversal promises that. The count beside each list is the total the node
+  # holds, which is how a client sees a list that was cut at the ceiling.
+  #
+  # A rollout row carries no `detail` and no `eval_report`: those are arbitrary terms a
+  # deployment put there, and this is a listing. `name` is the lane-W module's `"wasm/"`
+  # prefix removed, because that prefix is how the register keeps a component out of the
+  # atom table and is not part of what anybody deployed. `nodes` are strings for the same
+  # reason: a node name a client turned back into an atom is an atom this build minted from
+  # the wire.
+  defp wasm_list_result do
+    Conn.result_frame(17, %{
+      node: :ouroboros@golden,
+      rollouts: [
+        %{
+          artifact_id: "wasm-0000000000000000000001",
+          name: "vet",
+          component_sha256: String.duplicate("a", 64),
+          epoch: 7,
+          state: :live,
+          # W8. Which form each node loads. All three values are pinned across these rows:
+          # `precompiled` where the signed manifest names an artifact this node's helper
+          # matches, `source` where it does not or where the manifest names none, and `null`
+          # where the node could not say — no readable manifest, or no helper that has
+          # reported its build yet.
+          form: :precompiled,
+          nodes: ["ouroboros@golden", "ouroboros@peer"],
+          created_at: @timestamp,
+          updated_at: @timestamp
+        },
+        %{
+          artifact_id: "wasm-0000000000000000000002",
+          name: "vet",
+          component_sha256: String.duplicate("b", 64),
+          epoch: 6,
+          state: :superseded,
+          form: :source,
+          nodes: ["ouroboros@golden"],
+          created_at: @timestamp,
+          updated_at: @turn_end_timestamp
+        },
+        %{
+          artifact_id: "wasm-0000000000000000000003",
+          name: "lint",
+          component_sha256: String.duplicate("c", 64),
+          epoch: 5,
+          state: :quarantined,
+          form: nil,
+          nodes: ["ouroboros@peer"],
+          created_at: @timestamp,
+          updated_at: @turn_end_timestamp
+        }
+      ],
+      rollout_count: 3,
+      components: [
+        %{sha256: String.duplicate("a", 64), size: 2_097_152, mtime: 1_767_225_600},
+        %{sha256: String.duplicate("b", 64), size: 1_048_576, mtime: 1_767_225_600}
+      ],
+      component_count: 2
+    })
+  end
+
+  # W13. One message into a lane-W capability and the reply back out.
+  #
+  # The fixture is a capability on purpose. `agents.message` reaches any mesh agent, but the
+  # capability case is the one where the reply is a *component's* words, and pinning it here
+  # is what pins the two facts a client has to carry with it: `untrusted` beside the reply,
+  # and `truncated` saying whether what it is holding is the reply or a prefix of one. The
+  # reply keeps string keys because that is what the wrapper decodes a guest's JSON into and
+  # nothing on this path ever mints an atom from the wire.
+  defp agents_message_result do
+    Conn.result_frame(18, %{
+      to: "wasm/vet",
+      from: "gateway",
+      untrusted: true,
+      truncated: false,
+      reply: %{"findings" => [], "checked" => 12}
+    })
+  end
+
+  # W12. The four operator verbs, in the shapes `Ouroboros.Wasm.Upload`,
+  # `Ouroboros.Wasm.Deploy` and `Ouroboros.Wasm.Surface` produce.
+  #
+  # A chunk's receipt, mid-transfer. `sha256` is `null` until the frame that closes the
+  # upload, because a digest over half a file is a number that means nothing and would
+  # invite a client to check it. `chunk_bytes` is the node's own ceiling, stated so a
+  # client sizes its next frame from the answer rather than from a constant of its own.
+  defp wasm_upload_result do
+    Conn.result_frame(18, %{
+      upload: "9f2c1d4e8a7b6053f1e2d3c4b5a69780",
+      received: 524_288,
+      complete: false,
+      sha256: nil,
+      chunk_bytes: 524_288
+    })
+  end
+
+  # W19. One chunk of an artifact on the way back out, mid-transfer. `final` is `false` here,
+  # which is the only shape worth pinning: it is the frame a client asks for another after,
+  # and `data` is base64 for the same reason `wasm.upload`'s is — a JSON frame is text. The
+  # `sha256` is the whole artifact's, repeated in every chunk, because it is what the client
+  # checks the reassembled file against and it is the number the signed manifest carries.
+  defp wasm_download_result do
+    Conn.result_frame(22, %{
+      download: "3c7a5b19e04d6f28a1b3c5d7e9f02468",
+      offset: 524_288,
+      data: Base.encode64("OUROCWASM" <> String.duplicate("\0", 55)),
+      size: 1_310_720,
+      sha256: String.duplicate("d", 64),
+      final: false
+    })
+  end
+
+  # What a signature buys, and what comes back for it. Not the bundle: the **prefix** —
+  # the header and the envelope — which the client writes followed by the component it
+  # already holds. `bundle_bytes` is what that file will weigh, so a client can say so
+  # before it writes one.
+  # The stub artifact's length in the `wasm.sign` fixture. Deliberately small — see
+  # `wasm_bundle_prefix/0`.
+  @wasm_precompiled_bytes 4_096
+
+  defp wasm_sign_result do
+    Conn.result_frame(19, %{
+      artifact_id: "wasm-0000000000000000000001",
+      name: "vet",
+      epoch: 7,
+      component_sha256: String.duplicate("a", 64),
+      size: 2_097_152,
+      # W15. What the manifest says these bytes are, and therefore which of the helper's two
+      # worlds they will ever be admitted to on any node that reads this bundle.
+      kind: :capability,
+      world: "ouroboros:capability@0.1.0",
+      imports: ["log"],
+      created_at: @timestamp,
+      signer: "release-key",
+      start_id: "wasm/vet",
+      extension: ".ouro-wasm",
+      # W8. Which form the client is holding, said by the node rather than deduced from an
+      # absent key, and then the form itself.
+      form: :precompiled,
+      # The serialized form the signing node compiled, named by the exact pair of readings
+      # a node has to match before it may map it, and by its own digest — which is what the
+      # signature covers beside the component's (D22, D24). `precompile_skipped` is `null` here
+      # because there was an artifact; a receipt without one says why in that field instead.
+      precompiled: %{
+        wasmtime: "48.0.1",
+        target: "aarch64-apple-darwin",
+        sha256: String.duplicate("d", 64),
+        size: @wasm_precompiled_bytes
+      },
+      precompile_skipped: nil,
+      # W19. `null` is the ordinary case and every case there was before W19: the artifact fits
+      # this reply, so it is already in the prefix and there is nothing to fetch. Where it does
+      # not fit, this is `{"download", "size", "sha256", "chunk_bytes"}` and the prefix is the
+      # header and the envelope alone. It is on the wire as an explicit null rather than as an
+      # absent key so a client reads which case it is rather than deducing it.
+      artifact: nil,
+      bundle_prefix: Base.encode64(wasm_bundle_prefix()),
+      bundle_bytes: byte_size(wasm_bundle_prefix()) + 2_097_152
+    })
+  end
+
+  # A real bundle prefix, of a realistic length, built from a literal envelope rather than
+  # from `Ouroboros.Wasm.Bundle.prefix/1`: a manifest's `term_to_binary` is a fact about
+  # this OTP and a fixture must be the same bytes on every machine. The framing is exact —
+  # magic, version, the two lengths — so the Rust client's decode is held to the real
+  # header rather than to a plausible-looking blob.
+  defp wasm_bundle_prefix do
+    envelope =
+      ~s({"bundle":2,) <>
+        ~s("manifest":"#{String.duplicate("QUJDRA", 40)}",) <>
+        ~s("signature":"#{String.duplicate("A", 86)}==",) <>
+        ~s("signer":"release-key"})
+
+    # W8's format 2: three lengths, and the artifact sits between the envelope and the
+    # component so the *prefix* is everything the client did not produce. The fixture's
+    # artifact is a stub of the declared length — what is pinned here is the framing, not
+    # machine code, and a fixture the size of a real one would be five mebibytes of base64
+    # in a file people read.
+    artifact = "OUROCWASM" <> String.duplicate("\0", @wasm_precompiled_bytes - 9)
+
+    "OUROWASM" <>
+      <<2::8, byte_size(envelope)::32, byte_size(artifact)::32, 2_097_152::32>> <>
+      envelope <> artifact
+  end
+
+  # A rollout that reached `:live`, with every gate's evidence per node. Each gate is
+  # `%{outcome:, detail:}` rather than the term the rollout actually held, because a stage
+  # failure can carry an exception and an ambiguity an exit reason, and neither is a term a
+  # socket hands out. Node names are map *keys* here and they are strings, for the reason
+  # `wasm.list`'s `nodes` are: an atom a client minted from the wire is an atom nothing
+  # collects.
+  defp wasm_deploy_result do
+    Conn.result_frame(20, %{
+      artifact_id: "wasm-0000000000000000000001",
+      name: "vet",
+      module: "wasm/vet",
+      component_sha256: String.duplicate("a", 64),
+      epoch: 7,
+      state: :live,
+      stage: :evaluate,
+      nodes: ["ouroboros@golden", "ouroboros@peer"],
+      started: %{
+        id: "wasm/vet",
+        node: "ouroboros@golden",
+        already_started: false,
+        claimed_by: nil,
+        errors: %{}
+      },
+      warnings: [],
+      eval: %{
+        probes: 2,
+        required: "all",
+        budget_ms: 10_000,
+        nodes: %{
+          "ouroboros@golden" => %{
+            outcome: :passed,
+            detail: nil,
+            probes: 2,
+            passed: 2,
+            failed: 0,
+            total_ms: 41
+          },
+          "ouroboros@peer" => %{
+            outcome: :passed,
+            detail: nil,
+            probes: 2,
+            passed: 2,
+            failed: 0,
+            total_ms: 63
+          }
+        }
+      },
+      deployment: %{
+        "ouroboros@golden" => %{
+          stage: %{outcome: :ok, detail: nil},
+          probe: %{outcome: :ok, detail: nil},
+          eval: %{
+            outcome: :passed,
+            detail: nil,
+            probes: 2,
+            passed: 2,
+            failed: 0,
+            total_ms: 41
+          },
+          recovery: nil
+        },
+        "ouroboros@peer" => %{
+          stage: %{outcome: :ok, detail: nil},
+          probe: %{outcome: :ok, detail: nil},
+          eval: %{
+            outcome: :passed,
+            detail: nil,
+            probes: 2,
+            passed: 2,
+            failed: 0,
+            total_ms: 63
+          },
+          recovery: nil
+        }
+      }
+    })
+  end
+
+  # Rollback to absence. `:rolled_back` is earned only where every node proved it, and the
+  # per-node recovery says which proof each one gave: `:rolled_back` stopped a wrapper,
+  # `:not_needed` found none, `:unchanged` found somebody else's, and `:quarantined` is a
+  # node that could not be shown either way.
+  defp wasm_rollback_result do
+    Conn.result_frame(21, %{
+      artifact_id: "wasm-0000000000000000000001",
+      name: "vet",
+      module: "wasm/vet",
+      component_sha256: String.duplicate("a", 64),
+      epoch: 7,
+      start_id: "wasm/vet",
+      state: :rolled_back,
+      nodes: ["ouroboros@golden", "ouroboros@peer"],
+      recovery: %{
+        "ouroboros@golden" => :rolled_back,
+        "ouroboros@peer" => :not_needed
+      }
+    })
+  end
+
+  # W13. The same verb when the reply did not fit, which is a different shape and not a
+  # smaller one: `reply` is a **string** rather than the structure the agent answered with,
+  # and the marker inside it is the only thing that says so. A client that read `reply` as
+  # JSON whenever it was a string, or that trusted `truncated` without looking at the value,
+  # would parse a prefix and report a syntax error the user cannot act on. The fixture keeps
+  # a short body because what is pinned is the envelope, not the ceiling.
+  defp agents_message_truncated_result do
+    Conn.result_frame(19, %{
+      to: "wasm/vet",
+      from: "gateway",
+      untrusted: true,
+      truncated: true,
+      reply: "{\"findings\":[{\"file\":\"lib/a.ex\"… truncated at 65536 bytes."
     })
   end
 

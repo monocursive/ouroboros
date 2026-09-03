@@ -2,6 +2,7 @@ defmodule Ouroboros.Upgrade.EpochTest do
   use ExUnit.Case, async: false
 
   alias Ouroboros.Upgrade.{Artifact, Epoch, NodeExecutor}
+  alias Ouroboros.Upgrade.Rollout.Registry
 
   @module Ouroboros.Capability.EpochProbe
 
@@ -56,6 +57,31 @@ defmodule Ouroboros.Upgrade.EpochTest do
     # not pushed forward by an attempt that never produced a number.
     assert {:ok, 0} = Epoch.watermark(storage: storage)
     assert {:error, {:invalid_nodes, []}} = Epoch.next([], storage: storage)
+  end
+
+  test "allocates above a target's lane-W watermark when the driver changes" do
+    name = String.to_atom("epoch_target_registry_#{System.unique_integer([:positive])}")
+
+    {:ok, registry} =
+      Registry.start_link(
+        name: name,
+        storage:
+          {Jido.Storage.ETS,
+           table: String.to_atom("epoch_target_claims_#{System.unique_integer([:positive])}")}
+      )
+
+    on_exit(fn -> if Process.alive?(registry), do: GenServer.stop(registry) end)
+
+    claim = %{
+      artifact_id: "previous-driver",
+      epoch: 50_000,
+      component_sha256: String.duplicate("a", 64)
+    }
+
+    assert :ok = Registry.admit_wasm_epoch(claim, name)
+
+    assert {:ok, 50_001} =
+             Epoch.next([node()], storage: ets_storage(), wasm_epoch_registry: name)
   end
 
   test "a watermark that survives the store's restart is not reissued" do
