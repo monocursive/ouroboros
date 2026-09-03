@@ -335,20 +335,37 @@ defmodule Ouroboros.Wasm.Deploy do
   # `:undefined` rather than failing to find a function. The local branch does not go through
   # `:erpc` at all: a node cannot be unreachable from itself, and rendering it as such would
   # make the one case a lone signer needs — "I have no register either" — a hard failure.
+  # A partial plane on the local node still fails closed, for the reason `classify_plane/1`
+  # gives.
   defp rollout_plane(target, _timeout) when target == node() do
-    if Enum.all?(@rollout_plane, &is_pid(Process.whereis(&1))), do: :holds, else: :absent
+    classify_plane(Enum.map(@rollout_plane, &{&1, is_pid(Process.whereis(&1))}))
   end
 
   defp rollout_plane(target, timeout) do
-    Enum.reduce_while(@rollout_plane, :holds, fn name, _acc ->
+    @rollout_plane
+    |> Enum.map(fn name ->
       case :erpc.call(target, :erlang, :whereis, [name], timeout) do
-        pid when is_pid(pid) -> {:cont, :holds}
-        :undefined -> {:halt, :absent}
-        other -> {:halt, {:unreachable, {:unexpected, describe(other)}}}
+        pid when is_pid(pid) -> {name, true}
+        :undefined -> {name, false}
+        other -> throw({:unexpected, describe(other)})
       end
     end)
+    |> classify_plane()
   catch
+    :throw, why -> {:unreachable, why}
     kind, reason -> {:unreachable, {kind, describe(reason)}}
+  end
+
+  # The whole plane is a holder; none of it is a node that admits nothing. Part of it — a
+  # register with no executor, or an executor mid-restart — is neither: its register may hold
+  # a watermark above the number about to be minted, and the executor `Epoch.next/2` would
+  # ask is not there to say so. That is the unreachable answer, whatever node gave it.
+  defp classify_plane(presence) do
+    case Enum.split_with(presence, fn {_name, present?} -> present? end) do
+      {_held, []} -> :holds
+      {[], _missing} -> :absent
+      {_held, missing} -> {:unreachable, {:partial_plane, Enum.map(missing, &elem(&1, 0))}}
+    end
   end
 
   defp build(bytes, attrs, imports, epoch) do
