@@ -42,6 +42,23 @@ defmodule Ouroboros.Wasm.PoolAcceptanceTest do
     end
 
     @tag @needs_helper
+    test "the real helper runs sealed where the backend can seal, and the status says which (W21)" do
+      pool = start_pool()
+      assert {:ok, %{"usable" => true}} = Pool.doctor(pool)
+
+      # Default options, the real binary: on Seatbelt the child may exec only itself, may not
+      # fork and has no `mach-lookup`, and `doctor` answering under that is the proof the
+      # helper needs none of them. A Linux backend cannot express the seal and the status says
+      # `open` rather than claiming one; either way the posture is `sandboxed`.
+      detection = Ouroboros.Provider.Native.Sandbox.detect()
+
+      expected =
+        if Ouroboros.Provider.Native.Sandbox.seals_process?(detection), do: :sealed, else: :open
+
+      assert %{sandbox: %{posture: :sandboxed, process: ^expected}} = Pool.status(pool)
+    end
+
+    @tag @needs_helper
     test "the pair a precompiled artifact is bound to, and the ceiling both sides hold (W8)" do
       pool = start_pool()
 

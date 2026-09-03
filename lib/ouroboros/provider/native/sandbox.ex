@@ -154,10 +154,20 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   without ever reaching another machine. `loopback: false` takes that exception away — the
   helper speaks stdio and has no use for a socket, and a loopback it could open is every
   service on this machine, this node's own gateway included (W16, D25).
+
+  `process` is the process posture, and it defaults to **`:open`** where it is absent: the
+  child may fork, may exec anything it can read, and may look up mach services — what a shell
+  needs to exist and what a forge needs, because cargo forks and execs rustc. `:sealed` (W21)
+  is what `helper_policy/1` asks for: the child may exec only the executable it was spawned
+  as, may not fork, has no `mach-lookup`, reads `sysctl` only under the `hw.` prefix, and can
+  `stat` only the root directory itself and what it may already read. Only Seatbelt can
+  express it (`seals_process?/1`); the two Linux backends render a sealed policy exactly as
+  they render an open one, and the pool's status says which of the two actually applied.
   """
   @type policy :: %{
           optional(:readable) => [String.t()],
           optional(:loopback) => boolean(),
+          optional(:process) => :sealed | :open,
           mode: :read_only | :workspace_write | :workspace_write_escalated | :builder,
           writable: [String.t()],
           protected: [String.t()],
@@ -402,7 +412,10 @@ defmodule Ouroboros.Provider.Native.Sandbox do
       # compilers over `localhost` sockets, and a build that cannot open one fails `:eperm`
       # without ever having reached another machine. `helper_policy/1` is the caller that
       # does not want it.
-      loopback: Keyword.get(opts, :loopback, true) == true
+      loopback: Keyword.get(opts, :loopback, true) == true,
+      # A forge is a process tree: cargo forks and execs rustc, rustc forks and execs the
+      # linker. `helper_policy/1` is the caller that is one process and says so.
+      process: :open
     }
   end
 
@@ -410,18 +423,19 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   The policy the `ouro-wasm` helper runs under (docs/WASM.md §7.3a, D25).
 
   `builder_policy/1`'s shape with the scratch already attached: closed by default on reads,
-  a named read allow-set, writable only where the caller says, and no network. The mode is
-  **`:builder`** and that is deliberate — `:builder` is this module's vocabulary for
-  "closed on reads", every backend already implements it (`SandboxExec.profile/1`,
-  `Bwrap.options/3`, and W17's `ouro-sandbox` request), and a helper that needed its own
-  backend arm would be a fourth profile to keep in step with three others for no rule that
-  is actually different. What differs between a build and the helper is the *lists*, and
-  lists are arguments.
+  a named read allow-set, writable only where the caller says, no network, and — since W21
+  — **sealed as a process**. The mode is **`:builder`** and that is deliberate — `:builder`
+  is this module's vocabulary for "closed on reads", every backend already implements it
+  (`SandboxExec.profile/1`, `Bwrap.options/3`, and W17's `ouro-sandbox` request). What
+  differs between a build and the helper is the *lists* and the *process posture*, and both
+  are fields of the policy rather than a profile of their own: `loopback` was added that way
+  in W16 and `process` the same way here, so the Seatbelt profile is a function of the
+  policy's fields and there is no fourth profile to keep in step.
 
-  `opts` takes `:readable`, `:writable` and `:scratch`. The scratch is required in practice
-  — `wrap/4` refuses a policy without one — and it is passed here rather than applied by the
-  caller so that "the policy the helper runs under" is one function with one answer, which
-  is what `Ouroboros.Wasm.Pool`'s load-path fence compares a path against.
+  `opts` takes `:readable`, `:writable`, `:scratch` and `:process`. The scratch is required
+  in practice — `wrap/4` refuses a policy without one — and it is passed here rather than
+  applied by the caller so that "the policy the helper runs under" is one function with one
+  answer, which is what `Ouroboros.Wasm.Pool`'s load-path fence compares a path against.
 
   What the helper actually needs, and the fence is that there is no more: the platform's own
   toolchain roots (`platform_readable/0`, for the dynamic loader and the C library it links),
@@ -429,6 +443,23 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   before it can `execve` it), and the roots the caller names — this node's component store,
   and at signing time the one directory that signature's files live in. It writes into the
   scratch and nowhere else.
+
+  **And it is one process, so the policy says so.** `process: :sealed` is the default: on
+  Seatbelt the child may exec only the executable it was spawned as (`SandboxExec.wrap/4`
+  names it as a `-D` parameter, resolved, because the kernel matches the resolved path), may
+  not fork, has no `mach-lookup` — no launchd domain, no pasteboard — reads `sysctl` only
+  under `hw.` (`hw.pagesize_compat` is what the Rust runtime needs to map a guard page, and
+  `hw.optional.*` is what cranelift's feature detection reads: a helper denied those
+  compiles for a different CPU than the same helper unsealed, which was measured as a
+  different artifact from the same component), and can `stat` only `/` itself and what it
+  may already read. The `ouro-wasm` helper is a stdio Rust binary running wasmtime: it never
+  forks, never execs and never talks to launchd, so every one of those is a right it did not
+  use and a compromised one could — `osascript`'s `do shell script` runs its command outside
+  the sandbox, `pbpaste` is the pasteboard over mach, and `stat` over `/` is an existence
+  oracle over the whole filesystem. `process: :open` is the opt-out, and it exists for one
+  reason: a **scripted** fake helper in this repository's own suites is a `#!/bin/sh` line
+  that needs its interpreter exec'd and `awk` forked, which a sealed profile cannot name. A
+  sealed policy refuses a `{:shell, _}` command in `wrap/4` for the same reason.
 
   **And it opens no socket at all, loopback included.** Every other policy this module makes
   keeps a `localhost` exception on macOS, because `mix` and `cargo` coordinate concurrent
@@ -441,13 +472,21 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   @spec helper_policy(keyword()) :: policy()
   def helper_policy(opts) do
     policy =
-      builder_policy(Keyword.take(opts, [:readable, :writable]) ++ [loopback: false])
+      Keyword.take(opts, [:readable, :writable])
+      |> Kernel.++(loopback: false)
+      |> builder_policy()
+      |> Map.put(:process, process_option(Keyword.get(opts, :process)))
 
     case Keyword.get(opts, :scratch) do
       dir when is_binary(dir) and dir != "" -> with_scratch(policy, dir)
       _none -> policy
     end
   end
+
+  # Sealed unless the caller spells `:open`. Anything else — a typo, a boolean — is sealed,
+  # because the wider posture is the one that has to be asked for by name.
+  defp process_option(:open), do: :open
+  defp process_option(_sealed), do: :sealed
 
   @doc "The read roots a build gets before its caller names any, for this operating system."
   @spec platform_readable() :: [String.t()]
@@ -487,6 +526,39 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   # A backend with no detection map to read `unshare_net` from is not one this can vouch for.
   def fences_network?(:bwrap), do: false
   def fences_network?(:none), do: false
+
+  @doc """
+  Whether this backend can seal a policy's **process** (W21, D25): exec only the executable
+  the child was spawned as, no fork, no `mach-lookup`, `sysctl` under `hw.` only, and
+  metadata reads only where reads are already allowed.
+
+  The third question beside `fences_reads?/1` and `fences_network?/1`, and unlike those two
+  it is **not** one `Ouroboros.Wasm.Pool` refuses on: `:required` keeps meaning what D25 says
+  — reads and network fenced — and a Linux node runs its helper with an open process posture
+  and says so in its status. Seatbelt is the one backend whose policy language names
+  `process-exec`, `process-fork`, `mach-lookup` and `sysctl-read` as operations, so it is the
+  one that seals. Bubblewrap binds the readable roots into a namespace in which `/usr/bin` is
+  readable and executable, and `ouro-sandbox`'s Landlock domain fences reads by inode and does
+  not fence `stat` or `execve` at all; both render a sealed policy exactly as they render an
+  open one, and `Bwrap.options/3` and `Helper.request/2` are pinned to that.
+  """
+  @spec seals_process?(detection() | backend()) :: boolean()
+  def seals_process?(%{backend: backend}), do: seals_process?(backend)
+  def seals_process?(:sandbox_exec), do: true
+  def seals_process?(:ouro_sandbox), do: false
+  def seals_process?(:bwrap), do: false
+  def seals_process?(:none), do: false
+
+  @doc """
+  The process posture a policy **actually** gets on this backend: `:sealed` only where the
+  policy asks for it and the backend can express it, `:open` otherwise.
+  """
+  @spec process_posture(policy(), detection() | backend()) :: :sealed | :open
+  def process_posture(%{process: :sealed}, detection) do
+    if seals_process?(detection), do: :sealed, else: :open
+  end
+
+  def process_posture(_open, _detection), do: :open
 
   @doc """
   Whether this backend can enforce a builder policy's read fence.
@@ -641,12 +713,27 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   Returns the executable to spawn and its argv. `{:error, :no_backend}` when the node
   has nothing to wrap with — the caller decides whether that is a refusal or a
   documented weaker posture, because only the caller knows the mode.
+
+  A **sealed** policy (W21) wraps only an `{:argv, [absolute | _]}` command, on every
+  backend: a `{:shell, _}` is `{:error, :shell_under_sealed_policy}`, because a shell is
+  exec and fork and wrapping one sealed would be a child that fails for reasons the profile
+  cannot name; a relative argv[0] is `{:error, {:relative_exec_under_sealed_policy, name}}`,
+  because the one exec the profile allows is a literal path and a name resolved through
+  `$PATH` is not one.
   """
   @spec wrap(command(), map(), policy(), detection()) ::
           {:ok, {String.t(), [String.t()]}} | {:error, term()}
   def wrap(command, scope, policy, detection \\ detect())
 
   def wrap(_command, _scope, %{scratch: nil}, _detection), do: {:error, :no_scratch_directory}
+
+  def wrap({:shell, _line}, _scope, %{process: :sealed}, _detection),
+    do: {:error, :shell_under_sealed_policy}
+
+  def wrap({:argv, [target | _rest]}, _scope, %{process: :sealed}, _detection)
+      when not (is_binary(target) and byte_size(target) > 0 and
+                  binary_part(target, 0, 1) == "/"),
+      do: {:error, {:relative_exec_under_sealed_policy, target}}
 
   def wrap(command, scope, policy, %{backend: :sandbox_exec, executable: executable}),
     do: SandboxExec.wrap(command, scope, policy, executable)

@@ -1308,6 +1308,9 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       # which is what a node with nothing configured has.
       sandbox: %{
         posture: :sandboxed,
+        # W21: sealed is what Seatbelt applies to the real helper by default; a Linux node
+        # says `open` here and a `helper_sandbox: :off` node says `off`.
+        process: :sealed,
         backend: "sandbox-exec",
         reason: nil,
         readable: ["wasm", "components"]

@@ -897,7 +897,13 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
       helper = probing_helper!(context, secret)
       bytes = File.read!(@guest)
 
-      assert {:ok, fenced} = sign(context, bytes, [], helper_path: helper)
+      # W21: the shim is a `#!/bin/sh` line, which a sealed process cannot exec, so the sign
+      # says `scripted_helper: true` and the process posture is open. The read fence — the
+      # thing under test — is exactly the sealed signer's; the real `precompile` above ran
+      # under the seal.
+      assert {:ok, fenced} =
+               sign(context, bytes, [], [helper_path: helper] ++ SandboxFixture.scripted_helper())
+
       assert fenced.form == :source
       assert fenced.precompile_skipped =~ "precompile_refused, 4"
 
@@ -944,7 +950,11 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
 
       bytes = File.read!(@guest)
 
-      assert {:ok, listed} = sign(context, bytes, [], helper_path: helper)
+      # W21: both shims are shell scripts, so both signs say so and run with the process
+      # posture open; the roots they are measured against are the sealed signer's own.
+      scripted = SandboxFixture.scripted_helper()
+
+      assert {:ok, listed} = sign(context, bytes, [], [helper_path: helper] ++ scripted)
       assert listed.precompile_skipped =~ "precompile_refused, 4", "the sibling's upload was read"
 
       writer =
@@ -954,7 +964,7 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
           dir: shim
         )
 
-      assert {:ok, written} = sign(context, bytes, [], helper_path: writer)
+      assert {:ok, written} = sign(context, bytes, [], [helper_path: writer] ++ scripted)
       assert written.precompile_skipped =~ "precompile_refused, 4"
       assert File.read!(Path.join(victim, "component.wasm")) == "another client's upload"
 
@@ -1028,13 +1038,23 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
         {"a scratch root somebody else planted", "not_a_directory", [scratch_root: planted]},
         {"a helper that will not answer in time", ":precompile_timeout",
          [scratch_root: scratch, precompile_timeout: 0]},
+        # The three below stand a `#!/bin/sh` script where the helper stands, and a sealed
+        # process cannot exec a script's interpreter (W21) — so each says `scripted_helper:
+        # true`, which is the process posture and nothing about the reads. Without it the
+        # reason would be the seal's (`sandbox-exec` exits 71 on a denied `execvp`) and not
+        # the one each case is about.
         {"a helper that refuses", "precompile_refused",
-         [scratch_root: scratch, helper_path: script!(context, "exit 3")]},
+         [scratch_root: scratch, helper_path: script!(context, "exit 3"), scripted_helper: true]},
         {"a helper that answers with something else", ":precompile_unreadable",
-         [scratch_root: scratch, helper_path: script!(context, ~s(echo 'not json'))]},
+         [
+           scratch_root: scratch,
+           helper_path: script!(context, ~s(echo 'not json')),
+           scripted_helper: true
+         ]},
         {"a helper whose report does not describe what it wrote", "precompile_digest",
          [
            scratch_root: scratch,
+           scripted_helper: true,
            helper_path:
              script!(
                context,
@@ -1284,9 +1304,10 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
   # the planted file, 4 if the kernel refused. Either way it produces no artifact, so the
   # signature falls back to the source form and the reason carries the status.
   #
-  # The shim's own directory is `context.tmp`, which the sign-time policy makes readable
-  # because `process-exec` has to read the binary — so the planted file sits *outside* that
-  # tree, which is where the fence's edge actually is.
+  # The shim's own directory is `context.tmp`, which the sign-time policy makes readable —
+  # the helper's own directory is a root because bubblewrap must bind the binary into its
+  # namespace — so the planted file sits *outside* that tree, which is where the fence's
+  # edge actually is.
   defp probing_helper!(context, secret) do
     script!(context, ~s[if cat "#{secret}" > /dev/null 2>&1; then exit 3; else exit 4; fi])
   end

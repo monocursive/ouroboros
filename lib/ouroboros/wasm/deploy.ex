@@ -206,7 +206,10 @@ defmodule Ouroboros.Wasm.Deploy do
 
   Options are test seams and nothing else: `:upload_root`, `:download_root`,
   `:signing_service`, `:signing_node`, `:epoch_nodes`, `:epoch_opts`, `:helper_path`,
-  `:precompile_timeout`, `:scratch_root`.
+  `:precompile_timeout`, `:scratch_root`, `:helper_sandbox`, and `:scripted_helper` (W21 —
+  `true` says the helper at `:helper_path` is a shell script that must exec, so the sandbox
+  policy leaves the process posture open; the real helper runs sealed, and no operator key
+  widens it).
   """
   @spec sign(sign_attrs(), keyword()) :: {:ok, map()} | {:error, term()}
   def sign(attrs, opts \\ [])
@@ -630,7 +633,13 @@ defmodule Ouroboros.Wasm.Deploy do
       :required ->
         # `Path.dirname(source)` is **this signature's own** directory, not the shared sign
         # root: it is what `compile_in/5` made for this one compile and what it removes after.
-        wrapped_precompile(argv, Path.dirname(helper), Path.dirname(source), Sandbox.detect())
+        wrapped_precompile(
+          argv,
+          Path.dirname(helper),
+          Path.dirname(source),
+          process_setting(opts),
+          Sandbox.detect()
+        )
     end
   end
 
@@ -641,7 +650,15 @@ defmodule Ouroboros.Wasm.Deploy do
     end
   end
 
-  defp wrapped_precompile(argv, helper_dir, scratch_root, detection) do
+  # W21. Sealed unless the caller says the helper is a script: `scripted_helper: true` is a
+  # test seam for a `#!/bin/sh` shim standing where `ouro-wasm precompile` stands, which needs
+  # its interpreter exec'd. There is no configuration key behind it on purpose — the real
+  # helper is one binary and runs sealed, and a wider posture is a fixture's to ask for.
+  defp process_setting(opts) do
+    if Keyword.get(opts, :scripted_helper) == true, do: :open, else: :sealed
+  end
+
+  defp wrapped_precompile(argv, helper_dir, scratch_root, process, detection) do
     cond do
       detection.backend == :none ->
         {:error, {:helper_sandbox_unavailable, :no_backend}}
@@ -650,7 +667,7 @@ defmodule Ouroboros.Wasm.Deploy do
         {:error, {:helper_sandbox_unavailable, {:cannot_fence_reads, detection.backend}}}
 
       true ->
-        wrap_precompile(argv, helper_dir, scratch_root, detection)
+        wrap_precompile(argv, helper_dir, scratch_root, process, detection)
     end
   end
 
@@ -658,7 +675,7 @@ defmodule Ouroboros.Wasm.Deploy do
   # `compile_in/5`, holding the source, the output and nothing else — and it is the **only**
   # writable root. `$TMPDIR` is a directory below it, because bubblewrap mounts a `--tmpfs` at
   # the scratch and a tmpfs over `run` itself would hide the source this node just wrote.
-  defp wrap_precompile(argv, helper_dir, run, detection) do
+  defp wrap_precompile(argv, helper_dir, run, process, detection) do
     scratch = Path.join(run, "tmp")
 
     with :ok <- File.mkdir_p(scratch),
@@ -668,12 +685,15 @@ defmodule Ouroboros.Wasm.Deploy do
       # canonical one for a backend that matches the path the kernel resolves (`/var/folders`
       # is `/private/var/folders` on macOS by the time `open` sees it) and the named one for
       # bubblewrap, which binds only what it is told and is about to `execvp` the helper by
-      # the path in `argv` — through `_build/…/priv` where that is a symlink.
+      # the path in `argv` — through `_build/…/priv` where that is a symlink. Seatbelt's
+      # sealed form resolves argv[0] itself, because its one exec literal matches the
+      # resolved path (`SandboxExec`).
       policy =
         Sandbox.helper_policy(
           readable: [helper_dir],
           writable: [run],
-          scratch: canonical(scratch)
+          scratch: canonical(scratch),
+          process: process
         )
 
       case Sandbox.wrap({:argv, argv}, %{}, policy, detection) do

@@ -294,7 +294,7 @@ defmodule Ouroboros.Provider.Native.HooksNarrowingGoldenTest do
     {:ok, pid} =
       Ouroboros.Wasm.Pool.start(
         [name: name, helper_path: fake.path, handshake_timeout_ms: 15_000] ++
-          Ouroboros.Wasm.SandboxFixture.pool_opts(context.root)
+          Ouroboros.Wasm.SandboxFixture.scripted_pool_opts(context.root)
       )
 
     on_exit(fn ->

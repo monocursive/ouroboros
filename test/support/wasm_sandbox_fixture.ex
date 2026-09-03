@@ -22,6 +22,21 @@ defmodule Ouroboros.Wasm.SandboxFixture do
   same shape as a node's — a directory the node itself put components in — and the pool-side
   load fence measures a path against exactly this list, so a test that widened it too far
   would be a test whose fence proves nothing.
+
+  **`scripted_pool_opts/1` is wider in a second way, and only a scripted helper may use it
+  (W21).** Since W21 the helper's policy is **sealed** as a process by default: on Seatbelt
+  the child may exec only the binary it was spawned as, may not fork, and has no
+  `mach-lookup`. A real `ouro-wasm` needs nothing more. A *scripted* fake helper — the
+  `#!/bin/sh` + `awk` stand-ins most of this repository's wasm suites drive — is exactly what
+  that seals out: its interpreter has to be exec'd, macOS `/bin/sh` re-execs `/bin/bash` as
+  its variant, and `awk` is a fork. So a suite that spawns a script says so with
+  `scripted_pool_opts/1`, which is `pool_opts/1` plus `scripted_helper: true`, and the pool
+  leaves the process posture open (its status says `process: :open`) while the read and
+  network fences stay exactly what they are. Every suite that spawns the **real** helper —
+  the acceptance suites, the forge, the signer, the two-node tests — uses `pool_opts/1` and
+  runs sealed, because a real helper that only passed open would be a seal nobody had proved.
+  This is a test-fixture widening like `pool_opts/1`'s writable root: there is no operator
+  key behind it, on purpose.
   """
 
   @doc """
@@ -30,10 +45,32 @@ defmodule Ouroboros.Wasm.SandboxFixture do
   `readable` is where its components are, `writable` is where a fake helper's journal goes
   (a real helper writes nothing, and the node's own pool names no writable root at all), and
   `scratch_root` stands in for `<data_dir>/wasm/scratch/` — created and verified by the pool
-  exactly as it would be on a node.
+  exactly as it would be on a node. The process posture is the default — sealed — so this is
+  what a suite spawning the real helper uses.
   """
   @spec pool_opts(Path.t()) :: keyword()
   def pool_opts(dir) when is_binary(dir) do
     [readable: [dir], writable: [dir], scratch_root: Path.join(dir, "scratch")]
   end
+
+  @doc """
+  `pool_opts/1` for a suite whose helper is a **shell script** (W21).
+
+  Adds `scripted_helper: true`, which leaves the process posture open so the script's
+  interpreter can be exec'd and its `awk` forked. Never for the real helper: a suite that
+  drives `ouro-wasm` itself uses `pool_opts/1` and proves the seal by passing under it.
+  """
+  @spec scripted_pool_opts(Path.t()) :: keyword()
+  def scripted_pool_opts(dir) when is_binary(dir),
+    do: pool_opts(dir) ++ scripted_helper()
+
+  @doc """
+  The one option that says a helper is a script, for `Ouroboros.Wasm.Deploy.sign/2` and any
+  other caller that takes the helper policy's options directly (W21).
+
+  A `#!/bin/sh` shim standing where `ouro-wasm precompile` stands needs it for the same
+  reason a scripted pool does; the real signer's helper runs sealed.
+  """
+  @spec scripted_helper() :: keyword()
+  def scripted_helper, do: [scripted_helper: true]
 end

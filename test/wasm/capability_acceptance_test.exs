@@ -84,8 +84,10 @@ defmodule Ouroboros.Wasm.CapabilityAcceptanceTest do
     test "the guest's one import reaches the daemon" do
       # `log` is the only thing this component may do besides compute, and the helper writes
       # it to its own stderr. The pool deliberately inherits that stream rather than piping
-      # it, so the wrapper script this pool spawns is what makes the line observable here.
-      %{id: id, stderr: stderr} = capability()
+      # it, so the wrapper script this pool spawns is what makes the line observable here —
+      # and a wrapper is a shell script, which is why this one pool in the file runs with the
+      # process posture open (W21). Every other pool here spawns the real helper sealed.
+      %{id: id, stderr: stderr} = capability(env: staged_through_tee())
 
       assert {:ok, _agent} = Mesh.send_message("acceptance", id, %{"hello" => "world"})
       assert state(id).error == nil
@@ -329,9 +331,27 @@ defmodule Ouroboros.Wasm.CapabilityAcceptanceTest do
 
   ## Fixtures
 
-  # A pool speaking to the real helper, and the real guest published in a store of its own.
+  # A pool speaking to the real helper — spawned **sealed**, the default since W21: exec only
+  # itself, no fork, no mach — and the real guest published in a store of its own. That every
+  # test in this file passes through this pool is the proof that `hw.`-only sysctl and no
+  # fork are enough for wasmtime and tokio: a real `load`, `call`, epoch deadline and memory
+  # limit, under the sealed profile.
   defp staged do
     dir = tmp_dir()
+    %{root: root, sha: sha, path: path} = published(dir)
+    %{pool: start_pool(dir), root: root, sha: sha, path: path}
+  end
+
+  # The same, through a one-line `#!/bin/sh` wrapper that `exec`s the real helper with its
+  # stderr redirected to a file, for the one test that reads the helper's diagnostics.
+  defp staged_through_tee do
+    dir = tmp_dir()
+    %{root: root, sha: sha, path: path} = published(dir)
+    stderr = Path.join(dir, "helper.stderr")
+    %{pool: start_tee_pool(stderr), root: root, sha: sha, path: path, stderr: stderr}
+  end
+
+  defp published(dir) do
     root = Path.join(dir, "store")
     File.mkdir_p!(root)
 
@@ -339,8 +359,7 @@ defmodule Ouroboros.Wasm.CapabilityAcceptanceTest do
     assert {:ok, %{sha256: sha, path: path}} = Store.put(bytes, nil, root: root)
     assert {:ok, ^path} = Store.path(sha, root: root)
 
-    stderr = Path.join(dir, "helper.stderr")
-    %{pool: start_pool(stderr), root: root, sha: sha, path: path, stderr: stderr}
+    %{root: root, sha: sha, path: path}
   end
 
   # The same, plus the start spec `Probe`/`Evaluation` take. It names all six keys that
@@ -417,11 +436,32 @@ defmodule Ouroboros.Wasm.CapabilityAcceptanceTest do
     server_state.agent.state
   end
 
+  # The real helper, sealed. W16: spawned under the OS sandbox, so the pool is told this
+  # test's roots — its store and its scratch — through the fixture every real-helper suite
+  # uses; the helper's own directory is in the set by the pool's own rule.
+  defp start_pool(dir) do
+    name = :"wasm_acceptance_pool_#{System.unique_integer([:positive])}"
+
+    {:ok, pid} =
+      Pool.start(
+        [name: name, handshake_timeout_ms: 15_000]
+        |> Keyword.merge(SandboxFixture.pool_opts(dir))
+      )
+
+    stop_at_exit(pid)
+  end
+
   # The helper writes its diagnostics to stderr, which the pool inherits from this VM by
   # design (`Ouroboros.Wasm.Pool.open_port/1` explains why it is not a pipe). A one-line
   # wrapper that `exec`s the real binary with its stderr redirected is how a test reads it
   # without changing that: `exec` means the os pid the pool kills is still the helper's.
-  defp start_pool(stderr) do
+  #
+  # W21: the wrapper is a `#!/bin/sh` line, and a sealed process may exec only itself — so
+  # this one pool says `scripted_pool_opts/1` and runs with the process posture open. The
+  # read and network fences are the same as the sealed pool's, and the **real** helper's
+  # directory is named because the wrapper `exec`s a binary outside this test's tree, which
+  # bubblewrap has to bind into the namespace.
+  defp start_tee_pool(stderr) do
     wrapper = Path.join(Path.dirname(stderr), "ouro-wasm-tee")
 
     File.write!(wrapper, """
@@ -431,19 +471,19 @@ defmodule Ouroboros.Wasm.CapabilityAcceptanceTest do
 
     File.chmod!(wrapper, 0o755)
 
-    name = :"wasm_acceptance_pool_#{System.unique_integer([:positive])}"
+    name = :"wasm_acceptance_tee_pool_#{System.unique_integer([:positive])}"
 
-    # W16. The helper is spawned under the OS sandbox, so the pool is told this test's roots:
-    # its store and the wrapper's own directory come for free, and the **real** helper's
-    # directory is named explicitly because the wrapper `exec`s a binary that lives outside
-    # this test's tree and `process-exec` still has to read it.
     {:ok, pid} =
       Pool.start(
         [name: name, helper_path: wrapper, handshake_timeout_ms: 15_000]
-        |> Keyword.merge(SandboxFixture.pool_opts(Path.dirname(stderr)))
+        |> Keyword.merge(SandboxFixture.scripted_pool_opts(Path.dirname(stderr)))
         |> Keyword.update!(:readable, &[Path.dirname(Wasm.helper_path()) | &1])
       )
 
+    stop_at_exit(pid)
+  end
+
+  defp stop_at_exit(pid) do
     on_exit(fn ->
       if Process.alive?(pid) do
         try do

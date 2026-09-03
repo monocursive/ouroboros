@@ -10,6 +10,39 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
   that shape are this runtime's own, and every one of them was verified against
   `/usr/bin/sandbox-exec` on macOS 26 rather than copied on faith.
 
+  ## The sealed profile (W21)
+
+  A `process: :sealed` policy — `Ouroboros.Provider.Native.Sandbox.helper_policy/1`'s
+  default — drops the "operations any `/bin/sh` needs" half of that shape, because the
+  `ouro-wasm` helper is not a shell: `process-exec` is allowed for **one literal**, the
+  executable the child was spawned as; there is no `process-fork` and no `mach-lookup`;
+  `sysctl-read` is allowed under the `hw.` prefix only; and `file-read-metadata` is allowed
+  on `/` itself and nowhere the `file-read*` grants do not already reach. Every line was
+  measured rather than reasoned: a profile with no `process-exec` at all cannot start the
+  child, because `sandbox-exec` applies the profile and then `execvp`s the target inside it;
+  with no `sysctl-read` the Rust runtime aborts before `main` (`failed to allocate a guard
+  page`), and with `hw.pagesize_compat` alone it runs but `precompile` produces a
+  **different artifact** from the same component than the unsealed helper does, because
+  cranelift reads `hw.optional.*` to detect the CPU — so the prefix is the narrowest set
+  that keeps a sealed signer and an unsealed loader agreeing about the machine.
+
+  **The exec literal is the resolved path.** Seatbelt matches `process-exec (literal …)`
+  against the path the kernel resolves, not the spelling `execvp` was given: a literal naming
+  `_build/test/lib/ouroboros/priv/wasm/ouro-wasm` (a path through a symlinked `priv/`) never
+  matches, and one naming the canonical path matches either spelling — *provided* the
+  kernel may read the symlink on the way, which needs `file-read-metadata` on that link and a
+  sealed profile does not grant it outside the readable roots. So `wrap/4` resolves argv[0]
+  (`Ouroboros.Workspace.Path.canonicalize_file/1`) and spawns the child by that path, and
+  the one `-D OURO_EXEC` parameter is that same path. A target that does not resolve is
+  passed as spelled, and its exec fails as it would have anyway.
+
+  The same mechanism reaches the roots. A root spelled `/var/folders/…` is
+  `/private/var/folders/…` to the kernel, and following `/var` is a metadata read on that
+  link; the builder's `(allow file-read-metadata (subpath "/"))` granted it everywhere, and the
+  sealed profile grants it on each symlink along a root's spelled path and nowhere else
+  (`links/1`, one `-D OURO_LINK_n` each) — measured to be the link alone, with `/var/root`
+  still absent beside it.
+
   ## Paths are parameters, never text
 
   Every path reaches the profile as a `sandbox-exec -D NAME=VALUE` parameter and is
@@ -50,6 +83,42 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
   paths are parameters.
   """
   @spec profile(Ouroboros.Provider.Native.Sandbox.policy()) :: String.t()
+  def profile(%{mode: :builder, process: :sealed} = policy) do
+    [
+      "(version 1)",
+      "; Ouroboros wasm helper (docs/WASM.md 7.3a, D25). Closed by default on reads as well",
+      "; as on writes, and sealed as a process: it may exec only the binary it was spawned",
+      "; as, may not fork, and reaches no mach service. Paths arrive as -D parameters.",
+      "(deny default)",
+      # The one exec: the child's own executable, by the path the kernel resolves. Not a
+      # removal — `sandbox-exec` applies the profile and then `execvp`s the target inside it,
+      # so a profile with no `process-exec` at all starts nothing.
+      "(allow process-exec (literal (param \"OURO_EXEC\")))",
+      "(allow signal (target self))",
+      # `hw.pagesize_compat` is what the Rust runtime needs to map a thread's guard page, and
+      # `hw.optional.*` is what cranelift reads to detect the CPU; `kern.` and the rest are not
+      # needed and not granted. A hardware fact is not a secret.
+      "(allow sysctl-read (sysctl-name-prefix \"hw.\"))",
+      # The root directory itself, and nothing beyond what `file-read*` below already implies:
+      # metadata over `/` would be an existence oracle over the whole filesystem, and a process
+      # that is not a compiler does not stat its way down paths it may not read.
+      "(allow file-read-metadata (literal \"/\"))",
+      "(allow file-read* (literal \"/\"))",
+      "(allow file-write-data (require-all (path \"/dev/null\") (vnode-type CHARACTER-DEVICE)))"
+    ]
+    # Each symlink on the way to a root, by name (`links/1`): the kernel reads a link to
+    # resolve a path through it, that read is `file-read-metadata` on the link itself, and a
+    # root spelled `/var/folders/…` is unreadable without it while `/private/var/folders/…` —
+    # the same directory — is fine. Measured: the link alone, and `/var/root` stays absent.
+    |> Enum.concat(literal_rules(links(policy), "allow file-read-metadata", "OURO_LINK"))
+    |> Enum.concat(rules(readable(policy), "allow file-read*", "OURO_READABLE"))
+    |> Enum.concat(rules(policy.writable, "allow file-read*", "OURO_WRITABLE"))
+    |> Enum.concat(rules(policy.writable, "allow file-write*", "OURO_WRITABLE"))
+    |> Enum.concat(network_rules(policy))
+    |> Enum.join("\n")
+    |> Kernel.<>("\n")
+  end
+
   def profile(%{mode: :builder} = policy) do
     [
       "(version 1)",
@@ -110,6 +179,11 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
   so a reader can see that the only place a path appears is an argv entry.
   """
   @spec parameters(Ouroboros.Provider.Native.Sandbox.policy()) :: [String.t()]
+  def parameters(%{mode: :builder, process: :sealed} = policy) do
+    named(policy.writable, "OURO_WRITABLE") ++
+      named(readable(policy), "OURO_READABLE") ++ named(links(policy), "OURO_LINK")
+  end
+
   def parameters(%{mode: :builder} = policy),
     do: named(policy.writable, "OURO_WRITABLE") ++ named(readable(policy), "OURO_READABLE")
 
@@ -120,11 +194,50 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
   defp readable(policy), do: Map.get(policy, :readable, [])
 
   @doc """
+  The symlinks a sealed child has to be able to read to reach its roots by the spellings the
+  policy names them under (W21).
+
+  A sealed profile grants `file-read-metadata` on `/` and inside the roots only, and the kernel
+  resolves a path one component at a time: reaching `/var/folders/…` reads the `/var` link,
+  and that read is a metadata read on the link. So every ancestor of every readable and
+  writable root that is itself a symlink — `/var`, a `_build/…/priv`, a temporary directory's
+  `/tmp` — is named as one `literal`, which is exactly the set the kernel needs and no oracle:
+  a link's own existence is the node's own fact, and a `stat` beside it stays denied. Read off
+  the disk at profile time, the way `Bwrap.options/3` filters its binds to what exists.
+  """
+  @spec links(Ouroboros.Provider.Native.Sandbox.policy()) :: [String.t()]
+  def links(policy) do
+    (readable(policy) ++ policy.writable)
+    |> Enum.flat_map(&ancestors/1)
+    |> Enum.uniq()
+    |> Enum.filter(&symlink?/1)
+    |> Enum.sort()
+  end
+
+  # `/a/b/c` → `/`, `/a`, `/a/b`, `/a/b/c`. The root itself is included: a root that *is* a
+  # link has to be read to be followed too.
+  defp ancestors(path) do
+    path
+    |> Path.split()
+    |> Enum.scan(&Path.join(&2, &1))
+  end
+
+  defp symlink?(path) do
+    match?({:ok, %File.Stat{type: :symlink}}, File.lstat(path))
+  end
+
+  @doc """
   The executable and argv that run `command` under this policy.
 
   `sandbox-exec` `execve`s the target in place rather than forking it, so the pid the
   caller holds is the pid of the shell — which is what keeps
   `Ouroboros.Provider.Native.Tools.Bash`'s TERM-then-close reaping working unchanged.
+
+  Under a sealed policy the target's argv[0] is **resolved** and the child is spawned by
+  that path, which is also the `-D OURO_EXEC` parameter the profile's one `process-exec`
+  literal reads (see the moduledoc for why the resolved spelling is the only one that
+  matches). `Ouroboros.Provider.Native.Sandbox.wrap/4` has already refused a `{:shell, _}`
+  and a relative argv[0] by the time a sealed policy reaches here.
   """
   @spec wrap(
           Ouroboros.Provider.Native.Sandbox.command(),
@@ -132,6 +245,22 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
           Ouroboros.Provider.Native.Sandbox.policy(),
           String.t()
         ) :: {:ok, {String.t(), [String.t()]}} | {:error, term()}
+  def wrap(command, _scope, %{process: :sealed} = policy, executable)
+      when is_binary(executable) do
+    case argv(command) do
+      {:ok, [target | rest]} ->
+        exec = resolved(target)
+
+        {:ok,
+         {executable,
+          ["-p", profile(policy), "-D", "OURO_EXEC=" <> exec] ++
+            parameters(policy) ++ [exec | rest]}}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
   def wrap(command, _scope, policy, executable) when is_binary(executable) do
     case argv(command) do
       {:ok, target} ->
@@ -150,6 +279,16 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
     do: {:ok, Enum.map(list, &to_string/1)}
 
   defp argv(other), do: {:error, {:uninterpretable_command, other}}
+
+  # The path the kernel will match the exec literal against. A target that cannot be resolved
+  # — absent, or not a regular file — is kept as spelled: its exec fails as it would have, and
+  # a fence with a hole is not the alternative.
+  defp resolved(target) do
+    case Ouroboros.Workspace.Path.canonicalize_file(target) do
+      {:ok, canonical} -> canonical
+      {:error, _unresolved} -> target
+    end
+  end
 
   defp writable_rules(policy),
     do: rules(policy.writable, "allow", "OURO_WRITABLE")
@@ -187,6 +326,15 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
     |> Enum.with_index()
     |> Enum.map(fn {_path, index} ->
       "(#{operation} (subpath (param \"#{prefix}_#{index}\")))"
+    end)
+  end
+
+  # The same, on the path itself rather than the tree beneath it.
+  defp literal_rules(paths, operation, prefix) do
+    paths
+    |> Enum.with_index()
+    |> Enum.map(fn {_path, index} ->
+      "(#{operation} (literal (param \"#{prefix}_#{index}\")))"
     end)
   end
 

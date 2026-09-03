@@ -312,11 +312,17 @@ defmodule Ouroboros.Wasm.Surface do
   # A node with no pool process has decided nothing, and says so with nulls rather than with a
   # posture nobody has taken. `reason` is rendered and cut like every other term here: it
   # carries a backend's own prose on the `no_backend` path.
-  defp sandbox(nil), do: %{posture: nil, backend: nil, reason: nil, readable: []}
+  defp sandbox(nil),
+    do: %{posture: nil, process: nil, backend: nil, reason: nil, readable: []}
 
   defp sandbox(%{sandbox: %{posture: posture, backend: backend, reason: why} = report}) do
     %{
       posture: posture,
+      # W21. The process posture the child **actually** got — `:sealed` on Seatbelt, `:open`
+      # on the Linux backends and for a scripted helper, `:off` under `helper_sandbox: :off`,
+      # `nil` where nothing was spawned — as the pool reported it, not as this node's
+      # backend would suggest.
+      process: Map.get(report, :process),
       backend: text(backend),
       reason: reason(why),
       # **Basenames**, for `helper.path`'s and `store.root`'s reason: both wasm verbs are

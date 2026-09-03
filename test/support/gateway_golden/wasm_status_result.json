@@ -45,6 +45,7 @@
     "sandbox": {
       "backend": "sandbox-exec",
       "posture": "sandboxed",
+      "process": "sealed",
       "readable": [
         "wasm",
         "components"

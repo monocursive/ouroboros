@@ -1100,11 +1100,16 @@ directory that exists, must not be `/`, and must not be your data directory or a
 it. One bad entry rejects the entire list with a warning naming it, and `wasm.status` then shows
 the node's own roots alone — which is how you tell "configured" from "in force".
 
-What the macOS wall does **not** close is written down in docs/WASM.md D25: `process-exec` over
-the readable `/usr/bin` and `/bin`, `mach-lookup`, `sysctl-read`, and metadata reads over the
-whole filesystem. A compromised artifact inside the fence can still run `curl` or `osascript`,
-and `osascript`'s `do shell script` leaves the sandbox. The fence bounds what it can *read and
-write* and takes its network away; it is not a syscall policy.
+On macOS the helper's **process** is sealed as well (W21): it may exec only its own binary, may
+not fork, cannot look up a mach service — no launchd, no pasteboard — reads `sysctl` under
+`hw.` only, and cannot `stat` a path it may not read. So a compromised artifact inside the
+fence cannot run `curl` or `osascript`, and `osascript`'s `do shell script` no longer leaves the
+sandbox. `wasm.status` reports it as `sandbox.process: "sealed"`. On Linux neither backend can
+express that seal: inside bubblewrap's namespace `/usr/bin` is readable and executable, and
+Landlock does not fence `stat`, so a Linux node reports `sandbox.process: "open"` — the read
+and network fences are the same, and the node is not refused for it. `off` is what
+`helper_sandbox: :off` reports. docs/WASM.md D25 names what remains on each platform. There is
+no key that widens the seal; the one opt-out is a test fixture for scripted fake helpers.
 
 Two more keys govern the lane from outside `:wasm`:
 

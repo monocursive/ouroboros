@@ -101,6 +101,18 @@ defmodule Ouroboros.Wasm.Pool do
   per-child scratch this node creates 0700 under `<data_dir>/wasm/scratch/` and nowhere else.
   `$TMPDIR` points at that scratch, and the scratch is removed when the child is.
 
+  **And sealed as a process (W21).** The helper is one stdio Rust binary running wasmtime: it
+  never forks, never execs and never talks to launchd, so `Sandbox.helper_policy/1` says
+  `process: :sealed` and on Seatbelt the child may exec only the binary it was spawned as (by
+  its resolved path, as one `-D` parameter), may not fork, has no `mach-lookup`, reads
+  `sysctl` under `hw.` only and can `stat` nothing it may not read. The two Linux backends
+  cannot express that and render the policy as they render a build's; the pool does not
+  refuse on it — `:required` still means reads and network fenced — and `status/1`'s
+  `sandbox.process` says which posture the child actually got: `:sealed`, `:open`, `:off`.
+  The one way to an open process posture on Seatbelt is `scripted_helper: true`, a pool start
+  option for this repository's own scripted fake helpers, which are shell scripts and must
+  exec; there is no configuration key behind it.
+
   **No network, and that now includes loopback.** Every other policy this runtime makes keeps
   a `localhost` exception on macOS, because `mix` and `cargo` coordinate concurrent compilers
   over loopback sockets. The helper speaks stdio, so `Sandbox.helper_policy/1` sets
@@ -296,9 +308,18 @@ defmodule Ouroboros.Wasm.Pool do
   configuration key is a fence an operator cannot otherwise read back off the node, and
   because `helper_readable` rejects a whole list on one bad entry: the difference between
   "configured" and "in force" has to be visible somewhere.
+
+  `process` (W21) is the process posture the child **actually** got, answered by the backend
+  and not by the policy: `:sealed` — exec only itself, no fork, no `mach-lookup`, `sysctl`
+  under `hw.` only — where the policy asked for it and the backend is Seatbelt; `:open` on
+  the two Linux backends, which cannot express it, and for a pool started with
+  `scripted_helper: true`; `:off` under `helper_sandbox: :off`; `nil` where the pool refused
+  to spawn. A node that cannot seal is **not** refused — `:required` means reads and network
+  fenced (D25) — it is a node whose status says `open`.
   """
   @type sandbox :: %{
           posture: :sandboxed | :off | :refused,
+          process: :sealed | :open | :off | nil,
           backend: String.t(),
           reason: term() | nil,
           readable: [String.t()]
@@ -827,6 +848,13 @@ defmodule Ouroboros.Wasm.Pool do
        # A test pins it; a node states it once, in configuration, and may change it without
        # restarting the pool because it is read at every connect.
        helper_sandbox: sandbox_option(opts),
+       # W21. `true` says the helper at `helper_path` is a shell script — a `#!/bin/sh` fake
+       # in this repository's own suites — which needs its interpreter exec'd and `awk`
+       # forked, so the policy leaves the process posture open. A test-fixture widening
+       # (`Ouroboros.Wasm.SandboxFixture.scripted_pool_opts/1`) and not a setting: the real
+       # helper is one binary and runs sealed, and there is no configuration key that widens
+       # it.
+       scripted_helper: Keyword.get(opts, :scripted_helper) == true,
        # Roots this pool names to the policy on top of the node's own. A test's component
        # directory and a test's fake helper's journal, and nothing else in this repository:
        # the node supervisor starts this pool with neither, so what production reads and
@@ -1595,6 +1623,7 @@ defmodule Ouroboros.Wasm.Pool do
       fenced: readable_roots(state),
       sandbox: %{
         posture: :off,
+        process: :off,
         backend: Sandbox.label(Sandbox.detect()),
         reason: nil,
         # What the pool *would* have fenced to, so `:off` and `:sandboxed` are read the same
@@ -1645,7 +1674,8 @@ defmodule Ouroboros.Wasm.Pool do
         Sandbox.helper_policy(
           readable: roots,
           writable: Enum.map(List.wrap(state.writable), &canonical/1),
-          scratch: scratch
+          scratch: scratch,
+          process: process_setting(state)
         )
 
       case Sandbox.wrap({:argv, [state.helper_path, "serve"]}, %{}, policy, detection) do
@@ -1659,6 +1689,9 @@ defmodule Ouroboros.Wasm.Pool do
              fenced: roots,
              sandbox: %{
                posture: :sandboxed,
+               # What the backend applied, not what the policy asked: a Linux node's helper
+               # runs with an open process posture and its status says so (W21).
+               process: Sandbox.process_posture(policy, detection),
                backend: Sandbox.label(detection),
                reason: nil,
                readable: policy.readable
@@ -1749,6 +1782,11 @@ defmodule Ouroboros.Wasm.Pool do
 
   defp sandbox_setting(_state), do: Wasm.helper_sandbox()
 
+  # W21. Sealed unless this pool was told its helper is a script; nothing in the node's
+  # configuration can say otherwise.
+  defp process_setting(%{scripted_helper: true}), do: :open
+  defp process_setting(_binary), do: :sealed
+
   defp sandbox_option(opts) do
     case Keyword.get(opts, :helper_sandbox) do
       posture when posture in [:required, :off] -> posture
@@ -1763,10 +1801,13 @@ defmodule Ouroboros.Wasm.Pool do
   #     without which the process does not start at all;
   #   * the **helper binary's own directory**, because bubblewrap has to `--ro-bind` the
   #     executable into the namespace before it can `execve` it. Seatbelt does not need it —
-  #     a mutation that dropped this root stayed green on macOS, and the sentence that used to
-  #     stand here ("`process-exec` still has to read the executable") was simply false there.
-  #     It is a Linux requirement, pinned as one in
-  #     `test/provider/native/sandbox_helper_policy_test.exs`;
+  #     a mutation that dropped this root stayed green on macOS under W16's open
+  #     `(allow process-exec)`, and the sentence that used to stand here ("`process-exec`
+  #     still has to read the executable") was simply false there. It is a Linux requirement,
+  #     pinned as one in `test/provider/native/sandbox_helper_policy_test.exs`. Since W21 the
+  #     Seatbelt profile's one exec is a literal on the helper's **resolved** path, which
+  #     `SandboxExec.wrap/4` computes from argv[0] itself; this root is still not what makes
+  #     that exec work;
   #   * this node's **component store**, `Ouroboros.Wasm.Store.root/1` — the one directory
   #     every `load` in this repository resolves a path in, the hook lane included since W16's
   #     fix wave staged its bytes there. Not `<data_dir>/wasm`: that subtree also holds the
@@ -1983,9 +2024,19 @@ defmodule Ouroboros.Wasm.Pool do
     Sandbox.helper_policy(readable: readable_roots(state), writable: []).readable
   end
 
+  # The process posture the next spawn would get, computed the same way `wrapped_plan/2`
+  # computes the one a spawn did get: the policy's ask against what the backend can express.
+  defp intended_process(state, detection) do
+    Sandbox.process_posture(
+      Sandbox.helper_policy(readable: [], writable: [], process: process_setting(state)),
+      detection
+    )
+  end
+
   defp refused_sandbox(state, why),
     do: %{
       posture: :refused,
+      process: nil,
       backend: Sandbox.label(Sandbox.detect()),
       reason: why,
       readable: effective_readable(state)
@@ -2002,6 +2053,7 @@ defmodule Ouroboros.Wasm.Pool do
       :off ->
         %{
           posture: :off,
+          process: :off,
           backend: Sandbox.label(Sandbox.detect()),
           reason: nil,
           readable: effective_readable(state)
@@ -2020,6 +2072,7 @@ defmodule Ouroboros.Wasm.Pool do
       detection.backend == :none ->
         %{
           posture: :refused,
+          process: nil,
           backend: label,
           reason: {:no_backend, bounded(detection.notes)},
           readable: roots
@@ -2028,6 +2081,7 @@ defmodule Ouroboros.Wasm.Pool do
       not Sandbox.fences_reads?(detection) ->
         %{
           posture: :refused,
+          process: nil,
           backend: label,
           reason: {:cannot_fence_reads, detection.backend},
           readable: roots
@@ -2036,6 +2090,7 @@ defmodule Ouroboros.Wasm.Pool do
       not Sandbox.fences_network?(detection) ->
         %{
           posture: :refused,
+          process: nil,
           backend: label,
           reason: {:cannot_fence_network, detection.backend},
           readable: roots
@@ -2044,10 +2099,16 @@ defmodule Ouroboros.Wasm.Pool do
       true ->
         case scratch_root(state) do
           {:ok, _root} ->
-            %{posture: :sandboxed, backend: label, reason: nil, readable: roots}
+            %{
+              posture: :sandboxed,
+              process: intended_process(state, detection),
+              backend: label,
+              reason: nil,
+              readable: roots
+            }
 
           {:error, {:helper_sandbox_unavailable, why}} ->
-            %{posture: :refused, backend: label, reason: why, readable: roots}
+            %{posture: :refused, process: nil, backend: label, reason: why, readable: roots}
         end
     end
   end

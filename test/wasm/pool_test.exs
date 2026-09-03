@@ -415,7 +415,33 @@ defmodule Ouroboros.Wasm.PoolTest do
       # And the fence is not a broken child: the one directory it *may* write in works.
       assert probe["scratch"] == "allowed"
       refute File.exists?(outside)
-      assert %{sandbox: %{posture: :sandboxed}} = Pool.status(pool)
+
+      # W21. A scripted helper is spawned with the process posture **open** — it is a shell
+      # script and must exec — and the status says that rather than `sealed`, on every
+      # backend: the fixture asked for open, so no backend can have applied a seal.
+      assert %{sandbox: %{posture: :sandboxed, process: :open}} = Pool.status(pool)
+    end
+
+    @tag :capture_log
+    test "the status names the process posture it was refused, told off, or would take (W21)" do
+      # `:off`: no sandbox at all, and the process posture says the same word.
+      assert %{sandbox: %{posture: :off, process: :off}} =
+               Pool.status(start_pool(responding_helper(), helper_sandbox: :off))
+
+      # Idle and sandboxed: what the next spawn would get — open, because this pool's helper
+      # is a script — computed the way a spawn computes it and not assumed.
+      assert %{phase: :idle, sandbox: %{posture: :sandboxed, process: :open}} =
+               Pool.status(start_pool(responding_helper()))
+
+      # Refused: nothing was spawned, so no process posture was taken either.
+      pool =
+        start_pool(responding_helper(),
+          scratch_root: nil,
+          readable: [tmp_dir()],
+          writable: [tmp_dir()]
+        )
+
+      assert %{sandbox: %{posture: :refused, process: nil}} = Pool.status(pool)
     end
 
     @tag :capture_log
@@ -1573,6 +1599,13 @@ defmodule Ouroboros.Wasm.PoolTest do
   # default now, so each is told where its own roots are exactly as a node is told where the
   # node's are (`Ouroboros.Wasm.SandboxFixture`). A test that wants the other posture says
   # `helper_sandbox: :off` in its own options, and one test does.
+  #
+  # W21. Every helper in this file is a `#!/bin/sh` + `awk` script, which a **sealed** process
+  # — exec only itself, no fork — cannot run, so each pool says so with
+  # `scripted_pool_opts/1` and runs with the process posture open. The read and network
+  # fences are exactly the sealed pool's; what the real helper gets under the seal is
+  # `Ouroboros.Wasm.PoolAcceptanceTest`'s and `Ouroboros.Wasm.CapabilityAcceptanceTest`'s to
+  # prove.
   defp start_pool(helper_path, opts \\ []) do
     name = :"wasm_pool_#{System.unique_integer([:positive])}"
 
@@ -1582,7 +1615,7 @@ defmodule Ouroboros.Wasm.PoolTest do
     {:ok, pid} =
       Pool.start(
         [name: name, helper_path: helper_path, handshake_timeout_ms: 15_000]
-        |> Keyword.merge(SandboxFixture.pool_opts(tmp_dir()))
+        |> Keyword.merge(SandboxFixture.scripted_pool_opts(tmp_dir()))
         |> Keyword.merge(opts)
       )
 

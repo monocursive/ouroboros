@@ -1455,7 +1455,7 @@ defmodule Ouroboros.Provider.Native.HooksComponentTest do
     {:ok, pid} =
       Pool.start(
         [name: name, helper_path: path, handshake_timeout_ms: 15_000] ++
-          SandboxFixture.pool_opts(context.root)
+          SandboxFixture.scripted_pool_opts(context.root)
       )
 
     on_exit(fn ->

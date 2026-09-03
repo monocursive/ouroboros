@@ -571,6 +571,36 @@ writes no temp files leaves its scratch's mtime at creation, and age alone had a
 deleting a live child's only writable directory. The marker sits beside the scratch rather than
 inside it, so the child cannot rewrite it. Nothing else is writable, anywhere.
 
+**What it may do (W21).** Exec itself, and nothing else. On Seatbelt the profile's one
+`process-exec` is a literal naming the executable the child was spawned as — by its
+**resolved** path, as a `-D` parameter, because Seatbelt matches the literal against the path
+the kernel resolves and never against the spelling `execvp` was given, and resolving a
+spelling that runs through a symlinked `priv/` needs metadata rights on the link that a sealed
+profile does not grant; so `SandboxExec.wrap/4` resolves argv[0] and spawns by that path. A
+compromised helper therefore cannot run a `/usr/bin` binary even though `/usr/bin` is a
+readable platform root. There is no `process-fork`, so it cannot become two processes; there is
+no `mach-lookup`, so launchd and the pasteboard are out of reach; `sysctl-read` is allowed
+under the `hw.` prefix only — `hw.pagesize_compat` is what the Rust runtime reads to map a
+thread's guard page and aborts without, and `hw.optional.*` is what cranelift reads to detect
+the CPU: a helper allowed `hw.pagesize_compat` alone runs, and `precompile`s a **different
+artifact** from the same component than the unsealed helper does, which would be a sealed
+signer and its loader disagreeing about the machine, so the prefix is the narrowest set that
+was measured to keep them agreeing — and `file-read-metadata` is granted on `/` itself and
+nowhere the `file-read*` grants do not already reach — plus one literal per **symlink on the
+way to a root** (`/var` for a root spelled `/var/folders/…`, `SandboxExec.links/1`), because
+the kernel reads a link to follow it and that read is a metadata read on the link; a root
+reached through `/var` was unreadable without it and `/var/root` stays absent beside it — so
+a `stat` outside the roots answers "absent" and is no longer an existence oracle over the
+filesystem. `signal (target self)` stays. The helper is one stdio Rust binary running wasmtime — it never forks, never execs and
+never looks up a service — so each of those was a right it did not use and a compromised one
+could. The two Linux backends run the helper with the process posture **open**, because
+neither can express the seal (D25 names what each leaves), and `wasm.status`'s
+`sandbox.process` says which posture the child actually got: `sealed`, `open`, or `off`. The
+one way to an open posture on Seatbelt is a pool started with `scripted_helper: true`, which
+exists for this repository's own `#!/bin/sh` fake helpers — a script needs its interpreter
+exec'd and its `awk` forked — and has no configuration key behind it, on purpose. A sealed
+policy also refuses to wrap a `{:shell, _}` command at all, by name.
+
 **And no network at all, loopback included.** Every other policy this runtime makes keeps a
 `localhost` exception on macOS, because `mix` and `cargo` coordinate concurrent compilers over
 loopback sockets and a build without it fails `:eperm` having reached no other machine. The
@@ -2144,9 +2174,15 @@ machinery — it is a backend, not a lane (D9).
 
   The policy is `Sandbox.helper_policy/1`, which is `builder_policy/1`'s shape with a scratch
   attached, and its mode is **`:builder`** on purpose: `:builder` is the backend vocabulary for
-  "closed by default on reads", all three backends already implement it, and a helper arm would
-  be a fourth profile to keep in step with three others for a rule that is the same rule. What
-  differs between a build and a helper is the lists, and lists are arguments (contract C10).
+  "closed by default on reads", all three backends already implement it, and there is still no
+  helper arm. What differs between a build and a helper is the lists and — since W21 — the
+  **process posture**, and both are arguments (contract C10): `loopback` is a field of the
+  policy since W16 and `process` is one since W21, and the Seatbelt profile is a function of
+  the policy's fields. The sentence that stood here until W21, that a helper-specific profile
+  would be "a fourth profile to keep in step with three others", was wrong for exactly that
+  reason: there never was a fourth profile to write, because the profile was already computed
+  from the fields the moment `loopback` joined them, and sealing the process cost a fourth
+  field and a handful of measured lines, not a fourth text.
 
   The lists are the whole of it, so they are narrow and they are stated. Readable: the platform
   roots, the helper's own directory, this node's **component store**, the forge's build
@@ -2166,22 +2202,37 @@ machinery — it is a backend, not a lane (D9).
   outside the readable roots is `{:refused, :path_outside_roots}` before a frame is built. One
   of the two walls is this node's own and holds wherever it runs.
 
-  **What the wall does not close, on macOS, named.** Seatbelt is a filesystem and network
-  policy, and the `:builder` profile keeps four things open that a helper-specific profile could
-  narrow. `process-exec` is unrestricted, and `/usr/bin` and `/bin` are readable platform
-  roots — so a compromised artifact can run `curl`, `ssh`, `python3` or `osascript`, and
-  `osascript`'s `do shell script` runs its command **outside** this sandbox. `mach-lookup` is
-  unrestricted, which reaches the launchd domain and the pasteboard. `sysctl-read` is
-  unrestricted. And `file-read-metadata` is allowed on all of `/`, which is an existence oracle
-  over the whole filesystem — it is there because a compiler stats its way down a path and a
-  `stat` denial reads as a missing file, and it is a real residual for a process that is not a
-  compiler. None of these was narrowed here because C10's argument is that `:builder` is the
-  backend vocabulary for closed-on-reads and a fourth profile is a fourth thing to keep in step
-  with three others; whether that argument survives a helper that wants none of `process-exec`,
-  `mach-lookup` or `sysctl-read` is a decision, not an omission, and it is the integrator's.
-  What the wall does close is the filesystem — the operator's home, `/etc/ssh`, the node's own
-  data directory outside the store, every repository it serves — and the network, and those are
-  the reaches D24's residual was about.
+  **What the wall closes on macOS since W21, and what it still does not, named.** Until W21
+  the `:builder` profile left four things open that D25 listed as residuals: `process-exec`
+  over the readable `/usr/bin` and `/bin`, `mach-lookup`, `sysctl-read`, and
+  `file-read-metadata` over all of `/`. The helper's policy is now **sealed** as a process
+  (`process: :sealed`, §7.3a), and each of the four was measured shut under the real
+  `helper_policy/1` with the builder policy as the other half of every pair: `bash -c 'exec
+  /usr/bin/id'` is `Operation not permitted` sealed and prints a uid open; a `$(…)` is `fork:
+  Operation not permitted`; `osascript -e 'do shell script "id"'` — the exact escape the old
+  paragraph named — fails sealed even as the target itself, because the scripting addition
+  behind `do shell script` is a mach service and a fork away, and prints the uid open;
+  `pbpaste` exits 1 sealed and 0 open; and `test -e` on a planted file outside the roots is
+  absent sealed and present open, while `stat` inside a readable root still works. What
+  remains, named. The helper may exec **itself** — its own resolved path is the one literal —
+  so a compromised helper can re-exec `ouro-wasm`, which buys it the same process it already
+  is. It may read every `sysctl` under `hw.`: a hardware fact — page size, CPU count, the
+  optional ISA features cranelift detects — and not a secret, and the prefix rather than a
+  name because `hw.pagesize_compat` alone was measured to change the artifact `precompile`
+  emits. It may `stat` the root directory itself. And the two Linux backends do not seal at
+  all: inside a bubblewrap namespace `/usr/bin` is readable and executable, so a compromised
+  helper there can exec within the namespace (no network, read-only roots, nothing but the
+  roots bound, `ENOENT` elsewhere), and Landlock does not fence `stat`, so `ouro-sandbox`
+  keeps the existence oracle that bubblewrap — nothing bound, nothing to stat — does not.
+  `LANDLOCK_ACCESS_FS_EXECUTE` is the follow-on that would close the exec half on
+  `ouro-sandbox`; it is not in this slice, which changes no Rust. A node on either backend
+  reports `sandbox.process: "open"` rather than claiming a seal it did not apply, and is
+  **not** refused: `:required` means what this decision says — reads and network fenced — and
+  the process posture is a third question, `Sandbox.seals_process?/1`, that the status
+  answers and the pool does not gate on. What the wall closes is therefore the filesystem —
+  the operator's home, `/etc/ssh`, the node's own data directory outside the store, every
+  repository it serves — the network, and on macOS the process: those are the reaches D24's
+  residual was about, and the machine code still runs.
 
 - **D26 — a read allow-set is a list the daemon widens, and a read denial is Landlock's
   alone.** D18 fenced a build's reads on two backends and refused the third by name, because
@@ -2711,19 +2762,22 @@ Stated once, so nobody reads more into the lane than is there:
   of them. `messages_received` still counts every one; the bodies of the old ones are gone.
   Nothing in this runtime reads the inbox as an audit trail — the effect ledger is that —
   but a caller that assumed otherwise would now be wrong.
-- **The helper's fence is a wall, not a validator, and on macOS it is a filesystem-and-network
-  wall only.** W16 puts `ouro-wasm` behind `Sandbox.helper_policy/1` (§7.3a, D25), which bounds
-  what a compromised artifact or an escaped guest *reaches*: the platform's toolchain roots, the
-  helper's own directory, this node's component store, the forge's build directory, a scratch
-  the node created `0700`, and no network at all. Three honesties. The machine code still runs —
-  the wall is around the process, not in front of the bytes, and D24's residual is unchanged in
-  kind. The Seatbelt profile leaves `process-exec`, `mach-lookup` and `sysctl-read`
-  unrestricted and `file-read-metadata` open on `/`, so within the fence a compromised artifact
-  can still run `/usr/bin` binaries — `osascript`'s `do shell script` escapes the sandbox
-  outright — talk to launchd and the pasteboard, and probe for the existence of any path; D25
-  names each one and why no helper-specific profile was written. And `helper_readable` is a
-  widening knob, though a vetted one: `/`, a non-directory, and any ancestor of the data
-  directory are refused, and one bad entry rejects the list.
+- **The helper's fence is a wall, not a validator; on macOS it is a wall around the process,
+  and on Linux a filesystem-and-network wall only.** W16 puts `ouro-wasm` behind
+  `Sandbox.helper_policy/1` (§7.3a, D25), which bounds what a compromised artifact or an
+  escaped guest *reaches*: the platform's toolchain roots, the helper's own directory, this
+  node's component store, the forge's build directory, a scratch the node created `0700`, and
+  no network at all. W21 seals the process on Seatbelt: exec only itself, no fork, no
+  `mach-lookup`, `sysctl` under `hw.` only, no `stat` outside the roots — so `osascript`'s `do
+  shell script` no longer escapes, the pasteboard and launchd are out of reach, and a path
+  outside the roots is absent rather than probable. Three honesties. The machine code still
+  runs — the wall is around the process, not in front of the bytes, and D24's residual is
+  unchanged in kind. The two Linux backends cannot express the seal: a compromised helper under
+  bubblewrap can exec what is bound into its namespace, and under `ouro-sandbox` can `stat`
+  anything, because Landlock does not fence `stat`; such a node says `sandbox.process: "open"`
+  in `wasm.status` and is not refused, since `:required` means reads and network. And
+  `helper_readable` is a widening knob, though a vetted one: `/`, a non-directory, and any
+  ancestor of the data directory are refused, and one bad entry rejects the list.
 
 - **The workspace.** §10 is the axis for `bash`/git/LSP; nothing in lanes W/H/T
   touches it.
@@ -3550,10 +3604,11 @@ Each slice is PR-sized, lands green, and is useful alone.
   `Wasm.Surface` that made dialyzer's skip count 91 is gone.
 
   What W16 does **not** do is in §12 and named in D25: the wall is around a process that maps
-  unvalidated machine code and is not validation, and on macOS it is a filesystem-and-network
-  wall only — `process-exec`, `mach-lookup` and `sysctl-read` stay unrestricted and
-  `file-read-metadata` stays open on `/`, so `osascript`'s `do shell script` escapes it
-  outright. Whether C10's no-fourth-profile argument survives that is the integrator's decision.
+  unvalidated machine code and is not validation, and — until W21 — on macOS it was a
+  filesystem-and-network wall only: `process-exec`, `mach-lookup` and `sysctl-read` stayed
+  unrestricted and `file-read-metadata` stayed open on `/`, so `osascript`'s `do shell script`
+  escaped it outright. C10's no-fourth-profile argument did not survive that; W21 is where it
+  was answered, with a field rather than a profile.
   The Linux half is CI's: this Mac has Seatbelt, the bubblewrap arm is `Bwrap.options/3`'s
   existing `:builder` branch with different lists, and what proves it is the ubuntu-24.04 job
   running these suites.
@@ -3864,6 +3919,83 @@ Each slice is PR-sized, lands green, and is useful alone.
   the fleet's signer signs under the origin's principal. D29 says what the origin can still
   check when the bundle comes back, and what it cannot. And a precompiled artifact is still bound to one wasmtime and one triple; W20 proves
   what §12 says about that with two real toolchains instead of asserting it from one.
+- **W21 — the helper's process is sealed.** D25 and §12 had written down, by name, four things
+  the macOS wall left open around a process that maps a signer's machine code: `process-exec`
+  over the readable `/usr/bin`, so a compromised `ouro-wasm` could run `osascript` and `do
+  shell script` its way **out** of the sandbox; `mach-lookup`, which is launchd and the
+  pasteboard; `sysctl-read`; and `file-read-metadata` over all of `/`, an existence oracle over
+  the whole filesystem. The reason given for leaving them was C10's "a fourth profile to keep in
+  step with three others", and that reason was wrong: the Seatbelt profile was already a
+  function of the policy's fields the moment W16 added `loopback` to them. So W21 adds a field.
+  `Sandbox.helper_policy/1` says `process: :sealed` by default, `builder_policy/1` says `:open`
+  (a forge is cargo forking rustc), and the sealed Seatbelt profile allows `process-exec` for
+  **one literal** — the executable the child was spawned as, resolved, as `-D OURO_EXEC` — no
+  `process-fork`, no `mach-lookup`, `sysctl-read` under `hw.` only, `file-read-metadata` on `/`
+  itself plus one literal per symlink on the way to a root, `signal (target self)`, and `(deny
+  network*)` with nothing after it. The builder's profile text is unchanged and pinned whole
+  beside the sealed one. A sealed policy refuses a `{:shell, _}` and a relative argv[0] in
+  `Sandbox.wrap/4`, by name. `Sandbox.seals_process?/1` is the third question beside
+  `fences_reads?/1` and `fences_network?/1`, answered by backend — Seatbelt yes, bubblewrap
+  and `ouro-sandbox` no — and the pool does **not** gate on it: `:required` still means reads
+  and network. `Pool.status/1` and `wasm.status` carry `sandbox.process` — `sealed`, `open`,
+  `off`, or `null` where nothing spawned — as the posture the child actually got, with the
+  fixture, the protocol row and the golden regenerated. The signer's `precompile` runs under
+  the same sealed policy.
+
+  Three things were measured before any of it was designed, and two of them corrected the
+  brief. `sandbox-exec` applies the profile and then `execvp`s the target inside it, so a
+  profile with no `process-exec` starts nothing: the seal is a literal, not a removal. Seatbelt
+  matches that literal against the path the kernel **resolves**, not the spelling `execvp` was
+  given — a literal naming `_build/test/lib/ouroboros/priv/wasm/ouro-wasm` never matches, a
+  literal naming `priv/wasm/ouro-wasm` matches either spelling, and the spelled one only if the
+  kernel may read the `priv` link on the way, which is a metadata read on the link; so the
+  "both spellings as parameters" of the first cut is one resolved parameter, `SandboxExec.wrap/4`
+  spawns by the resolved path, and the same rule is what makes a store spelled `/var/folders/…`
+  readable: `SandboxExec.links/1` names each symlink on the way to a root, and nothing beside
+  it — `/var/root` stays absent. And the `sysctl` surface: with none the Rust runtime aborts
+  mapping a guard page; with `hw.pagesize_compat` alone it runs `doctor`, `precompile` and
+  `serve` — and `precompile` emits a **different artifact** from the same component than the
+  unsealed helper, because cranelift reads `hw.optional.*` to detect the CPU, which would be a
+  sealed signer and its loader disagreeing about the machine. The prefix is the narrowest set
+  that keeps them agreeing, and a hardware fact is not a secret.
+
+  Proofs, each a pair under the real `helper_policy/1` and the real `builder_policy/1` with the
+  same roots and scratch, so a denial is a fence and not a broken `bash`: `bash -c 'exec
+  /usr/bin/id'` is `Operation not permitted` sealed and a uid open, and a `$(…)` is `fork:
+  Operation not permitted`; `osascript -e 'do shell script "id"'` as the target itself fails
+  sealed and prints the uid open; `pbpaste` exits 1 sealed and 0 open (chosen over `launchctl
+  list`, which exits 1 under both on this macOS and proves nothing); `test -e` on a planted file
+  outside the roots is absent sealed and present open, while `stat` inside a root still works;
+  a root through a link this test made is readable by both spellings sealed, and a file beside
+  the link is absent; the real helper answers `doctor` sealed by its canonical path and through
+  a symlinked directory, and dropping the resolution turns the second red; `{:shell, _}` and a
+  relative argv[0] are the named refusals sealed and wrap under the builder; the W16 loopback
+  probe runs `nc` as the target so it still proves the network denial and not an exec one; the
+  sealed profile and the builder's are pinned whole, and a builder policy with no `process`
+  field renders the same text; `Bwrap.options/3` and `Helper.request/2` render a sealed policy
+  byte-for-byte as an open one. `test/wasm/pool_acceptance_test.exs` and
+  `capability_acceptance_test.exs` run the real helper **sealed** with default options — a real
+  `load`, `call`, epoch deadline and memory limit under the profile is the proof that `hw.`-only
+  sysctl and no fork are enough for wasmtime and tokio — and the status says `sealed` where the
+  backend seals and `open` where it cannot. The scripted fake helpers of this repository's own
+  suites are `#!/bin/sh` and `awk`, which the seal cannot run — macOS `/bin/sh` re-execs
+  `/bin/bash` as its variant, and `awk` is a fork — so they say so:
+  `SandboxFixture.scripted_pool_opts/1` and `scripted_helper/0` set `scripted_helper: true`,
+  the one opt-out, on the pool and on `Deploy.sign/2`, and it is a fixture with no configuration
+  key behind it. Every real-helper suite — the acceptance suites, the forge's `live!`, the
+  signer's real `precompile`, the two-node tests — runs sealed; `capability_acceptance_test`'s
+  one stderr-reading test keeps its `#!/bin/sh` tee wrapper and is the one pool there that says
+  it is scripted.
+
+  What W21 does **not** close, named in D25: the helper may re-exec itself; it reads every
+  `sysctl` under `hw.`; it may `stat` `/` and the links on the way to its roots; and neither
+  Linux backend seals — bubblewrap's namespace has `/usr/bin` executable, so a compromised
+  helper there can exec within it, and Landlock does not fence `stat`, so `ouro-sandbox` keeps
+  the existence oracle bubblewrap does not. `LANDLOCK_ACCESS_FS_EXECUTE` is the follow-on for
+  the exec half on `ouro-sandbox`; this slice changes no Rust. The Linux half is CI's, as W16's
+  was. And the wall is still around the process and not in front of the bytes: D24's residual
+  is unchanged in kind, a patched artifact still runs with the helper's authority — an authority
+  that is now the roots, the scratch, no network, and one process that can only be itself.
 
 ## 15. Prior art and references
 

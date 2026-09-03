@@ -465,6 +465,7 @@ defmodule Ouroboros.Wasm.SurfaceTest do
 
       assert live.sandbox == %{
                posture: :sandboxed,
+               process: :sealed,
                backend: "sandbox-exec",
                reason: nil,
                readable: ["components"]
@@ -487,6 +488,7 @@ defmodule Ouroboros.Wasm.SurfaceTest do
           hook_components: 0,
           sandbox: %{
             posture: :refused,
+            process: nil,
             backend: "ouro-sandbox",
             reason: {:cannot_fence_reads, :ouro_sandbox},
             readable: []
@@ -499,6 +501,8 @@ defmodule Ouroboros.Wasm.SurfaceTest do
       live = Surface.status([pool: pid] ++ opts(context))
 
       assert live.sandbox.posture == :refused
+      # W21: nothing was spawned, so no process posture was taken either.
+      assert live.sandbox.process == nil
       assert live.sandbox.backend == "ouro-sandbox"
       assert is_binary(live.sandbox.reason)
       assert live.sandbox.reason =~ "cannot_fence_reads"
@@ -516,7 +520,14 @@ defmodule Ouroboros.Wasm.SurfaceTest do
       # not "off", the same rule `usable` follows. `phase: :absent` is the other half of it.
       live = Surface.status([pool: :ouro_wasm_pool_that_was_never_started] ++ opts(context))
 
-      assert live.sandbox == %{posture: nil, backend: nil, reason: nil, readable: []}
+      assert live.sandbox == %{
+               posture: nil,
+               process: nil,
+               backend: nil,
+               reason: nil,
+               readable: []
+             }
+
       assert live.helper.phase == :absent
     end
   end
@@ -647,6 +658,8 @@ defmodule Ouroboros.Wasm.SurfaceTest do
         # and **basenames** on the wire, for `helper.path`'s reason.
         sandbox: %{
           posture: :sandboxed,
+          # W21: what Seatbelt applies to the real helper by default.
+          process: :sealed,
           backend: "sandbox-exec",
           reason: nil,
           readable: ["/opt/ouroboros/data/wasm/components"]

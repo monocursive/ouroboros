@@ -592,7 +592,7 @@ defmodule Ouroboros.Wasm.PolicyEngineTest do
     {:ok, pid} =
       Pool.start(
         [name: name, helper_path: helper_path, handshake_timeout_ms: 15_000] ++
-          SandboxFixture.pool_opts(dir)
+          SandboxFixture.scripted_pool_opts(dir)
       )
 
     on_exit(fn ->
