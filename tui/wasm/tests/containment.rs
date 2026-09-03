@@ -2442,9 +2442,17 @@ fn an_artifact_for_another_wasmtime_or_another_target_is_refused_by_name() {
         "the refusal names the wasmtime the artifact claims: {message}"
     );
 
+    // A triple that is not this host's, whatever this host is: the first version named
+    // `x86_64-unknown-linux-gnu`, which is the hosted runner's own target, and the runner
+    // admitted the artifact — correctly.
+    let other_target = if cfg!(target_arch = "x86_64") {
+        "aarch64-unknown-linux-gnu"
+    } else {
+        "x86_64-unknown-linux-gnu"
+    };
     let elsewhere = with_header(
         &artifact,
-        |header| header["target"] = json!("x86_64-unknown-linux-gnu"),
+        |header| header["target"] = json!(other_target),
         "w8-other-target",
     );
     let (refusal, message) = helper.refusal(
@@ -2458,7 +2466,7 @@ fn an_artifact_for_another_wasmtime_or_another_target_is_refused_by_name() {
     );
     assert_eq!(refusal, "precompiled_mismatch");
     assert!(
-        message.contains("x86_64-unknown-linux-gnu"),
+        message.contains(other_target),
         "the refusal names the target the artifact claims: {message}"
     );
 
