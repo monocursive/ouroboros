@@ -525,10 +525,18 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   # A path that cannot be canonicalised — it does not exist yet — is kept exactly as it was
   # written. Dropping it would narrow the policy silently, and a relative one left in is a
   # refusal the helper makes out loud (exit 125) rather than a fence with a hole.
+  # Each root as it was named **and** as the kernel resolves it, when the two differ. Seatbelt
+  # matches the resolved form (`/var/folders/…` is `/private/var/folders/…` by the time `open`
+  # sees it), so the canonical spelling is the one that carries the rule there. Bubblewrap
+  # binds nothing it was not told about: on a merged-`/usr` Linux `/bin`, `/lib` and `/lib64`
+  # are symlinks into `/usr`, and a list that had resolved them away left a namespace with no
+  # `/bin/sh` for a script and no `/lib64/ld-linux-*.so` for a binary — every `execvp` failed
+  # with `ENOENT` while the fence looked correct. So the name a process will use is bound too,
+  # with bwrap resolving the source; a rule on a spelling the kernel never sees is harmless.
   defp roots(paths) do
     paths
     |> Enum.filter(&(is_binary(&1) and &1 != ""))
-    |> Enum.map(&canonical_root/1)
+    |> Enum.flat_map(&[&1, canonical_root(&1)])
     |> Enum.uniq()
     |> Enum.sort()
   end

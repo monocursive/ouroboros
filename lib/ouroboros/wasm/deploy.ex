@@ -664,13 +664,15 @@ defmodule Ouroboros.Wasm.Deploy do
     with :ok <- File.mkdir_p(scratch),
          :ok <- File.chmod(scratch, 0o700),
          {:ok, %File.Stat{type: :directory}} <- File.lstat(scratch) do
-      # Canonical: a backend's rules are evaluated against the path the kernel resolves, and
-      # `<data_dir>` under `/var/folders` on macOS is `/private/var/folders` by then. A rule
-      # written on the un-resolved form matches nothing.
+      # As named: `Sandbox.helper_policy/1` keeps every root under both its spellings, the
+      # canonical one for a backend that matches the path the kernel resolves (`/var/folders`
+      # is `/private/var/folders` on macOS by the time `open` sees it) and the named one for
+      # bubblewrap, which binds only what it is told and is about to `execvp` the helper by
+      # the path in `argv` — through `_build/…/priv` where that is a symlink.
       policy =
         Sandbox.helper_policy(
-          readable: [canonical(helper_dir)],
-          writable: [canonical(run)],
+          readable: [helper_dir],
+          writable: [run],
           scratch: canonical(scratch)
         )
 

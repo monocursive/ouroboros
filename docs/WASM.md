@@ -3558,6 +3558,26 @@ Each slice is PR-sized, lands green, and is useful alone.
   existing `:builder` branch with different lists, and what proves it is the ubuntu-24.04 job
   running these suites.
 
+  **What the hosted runner found, and no Mac could.** The first push refused every wasm suite
+  on Linux: 251 failures, all `bwrap: execvp …: No such file or directory` — the real helper
+  and every scripted one. Not the fence refusing; the namespace. W17's `roots/1` resolved every
+  root to its canonical spelling, and on a merged-`/usr` Ubuntu `/bin`, `/lib` and `/lib64`
+  *are* symlinks into `/usr`, so a list that had resolved them away asked bubblewrap to bind
+  `/usr/bin` and `/usr/lib` and nothing else: no `/bin/sh` for a script, no
+  `/lib64/ld-linux-*.so` for a binary, and `execvp` says `ENOENT` for a missing interpreter
+  exactly as it does for a missing file. Seatbelt never showed it because Seatbelt evaluates
+  the host's filesystem, links included. The read set now carries every root under both its
+  spellings — the name a process uses and the inode the kernel resolves — and each backend
+  takes what it needs: bubblewrap binds the name, Seatbelt matches the canonical form, and the
+  `ouro-sandbox` request drops a name that is itself a symlink because that helper refuses one
+  by design and the target is already in the list. Two things fell out of stating it that way:
+  the pool's load fence had been failing closed by *spelling* (an unresolvable parent compared
+  as written never matched a canonical root), and with the named root present it admitted the
+  link it exists to refuse, so an unresolvable parent is now a refusal outright; and the Linux
+  half of this slice has a proof of its own, `make wasm-linux-test`, which runs the wasm suites
+  under bubblewrap in the container with `ouro-sandbox` disabled by name — reproduced the 219
+  failures first, then the fix.
+
 - **W17 — the preferred Linux backend fences reads, and the forge builds under it.** D18 left
   one residual with a name in it: `ouro-sandbox` had writable roots, protected roots and denied
   names and no way to say what a build may *read*, so a node whose only sandbox was the helper

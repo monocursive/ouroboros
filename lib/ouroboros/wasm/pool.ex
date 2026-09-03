@@ -931,13 +931,22 @@ defmodule Ouroboros.Wasm.Pool do
 
   # The leaf is not resolved, the directory is: a path whose parent is a symlink out of the
   # store is refused here, and a symlinked *file* inside the store is left to the kernel,
-  # which evaluates what it resolves to. A directory that cannot be resolved is compared as
-  # written, which is a refusal rather than an admission (`canonical/1`). Stated in the
-  # moduledoc, because a fence with a documented asymmetry is a fence and an undocumented one
-  # is a hole.
+  # which evaluates what it resolves to. A directory that cannot be resolved is **refused**,
+  # not compared as written: the roots carry both spellings of every directory, so a path
+  # measured in its unresolved spelling would match the named root it sits under and admit
+  # exactly the link out of the store this exists to refuse (`Workspace.Path.canonicalize/1`
+  # answers `{:symbolic_link_cycle, "/var"}` for a link into `/var/folders` on macOS). Stated
+  # in the moduledoc, because a fence with a documented asymmetry is a fence and an
+  # undocumented one is a hole.
   defp under_readable?(state, path) do
-    resolved = Path.join(canonical(Path.dirname(path)), Path.basename(path))
-    Enum.any?(readable_roots(state), &WorkspacePath.within?(resolved, &1))
+    case WorkspacePath.canonicalize(Path.dirname(path)) do
+      {:ok, dir} ->
+        resolved = Path.join(dir, Path.basename(path))
+        Enum.any?(readable_roots(state), &WorkspacePath.within?(resolved, &1))
+
+      {:error, _unresolvable} ->
+        false
+    end
   end
 
   # The untrusted-hook budget. Only `lane: :untrusted_hook` is budgeted (F7): a repository's
@@ -1612,6 +1621,7 @@ defmodule Ouroboros.Wasm.Pool do
 
   defp wrapped_plan(state, detection) do
     with {:ok, scratch} <- open_scratch(state) do
+      ensure_own_roots()
       roots = readable_roots(state)
 
       # Canonical, all of it. A backend evaluates the path the kernel resolves, and on macOS
@@ -1771,8 +1781,23 @@ defmodule Ouroboros.Wasm.Pool do
        List.wrap(Wasm.builds_root()) ++
        Wasm.helper_readable() ++ List.wrap(state.readable))
     |> Enum.filter(&(is_binary(&1) and &1 != ""))
-    |> Enum.map(&canonical_root/1)
+    # Both spellings, as `Sandbox.builder_policy/1` keeps them: the canonical one is what a
+    # backend that matches resolved paths needs, and the named one is what bubblewrap has to
+    # bind for that name to exist in the namespace at all — the helper is executed by the path
+    # this pool was configured with, through `_build/…/priv` where that is a symlink.
+    |> Enum.flat_map(&[&1, canonical_root(&1)])
     |> Enum.uniq()
+  end
+
+  # The node's own roots exist before the child does. Bubblewrap binds only what is on disk
+  # when it starts — a root that is not there yet is skipped, not deferred — and the store's
+  # directory is created lazily by `Ouroboros.Wasm.Store` on the first publish, so a child
+  # spawned on a node that has never held a component would have no store in its namespace
+  # and every later load would be `unreadable_component` from inside a fence that looked
+  # right from outside (the container proof found it: a forge's first deploy). Creating the
+  # directory is what the store does on that publish anyway; a failure here is left to it.
+  defp ensure_own_roots do
+    Enum.each(store_root() ++ List.wrap(Wasm.builds_root()), fn dir -> _ = File.mkdir_p(dir) end)
   end
 
   defp store_root do
@@ -1783,7 +1808,9 @@ defmodule Ouroboros.Wasm.Pool do
   end
 
   # The path the kernel would resolve, or — when this side cannot resolve it — the path as
-  # written, which **fails closed** in both places this is used.
+  # written. Used for the writable roots of the policy, where an unresolved spelling names a
+  # directory the kernel never matches (the load fence, `under_readable?/2`, refuses an
+  # unresolvable parent outright rather than relying on that).
   #
   # A backend evaluates the path an `open` resolves to, so a rule has to be written on the
   # resolved form: on macOS `System.tmp_dir!()` is `/var/folders/…`, which is

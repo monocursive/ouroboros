@@ -320,14 +320,28 @@ defmodule Ouroboros.Wasm.ForgeTest do
       # Mac the temp directory reaches the test through a symlink (`/var` -> `/private/var`).
       # The forge already canonicalises its build directory for the same reason — a root in
       # the other spelling is a rule the kernel matches nothing against.
-      assert Enum.sort(policy.writable) ==
-               Enum.sort(Enum.map([context.builds, context.tmp], &canonical_root/1))
+      # Both spellings of each root (`Sandbox.builder_policy/1`): the canonical one is what a
+      # backend matching resolved paths needs, the named one is what bubblewrap binds.
+      for root <- [context.builds, context.tmp] do
+        assert canonical_root(root) in policy.writable
+        assert root in policy.writable
+      end
+
+      assert Enum.all?(
+               policy.writable,
+               &(&1 in Enum.flat_map([context.builds, context.tmp], fn r ->
+                   [r, canonical_root(r)]
+                 end))
+             )
 
       # And the request that reaches the helper carries the allow-set — for this mode and
       # for no other. Red without `Helper.request/2`'s `readable` clause.
       request = Helper.request(Sandbox.with_scratch(policy, "/scratch"), %{root: context.builds})
       assert request["mode"] == "builder"
-      assert request["readable"] == policy.readable
+      # The policy carries every root under both its spellings; the request carries the ones
+      # that are not themselves symlinks (the helper refuses a symlinked root by design).
+      assert Enum.all?(request["readable"], &(&1 in policy.readable))
+      assert request["readable"] != []
     end
 
     test "the builder policy denies the network, names its writable roots, and fences reads",
@@ -346,8 +360,19 @@ defmodule Ouroboros.Wasm.ForgeTest do
       # Mac the temp directory reaches the test through a symlink (`/var` -> `/private/var`).
       # The forge already canonicalises its build directory for the same reason — a root in
       # the other spelling is a rule the kernel matches nothing against.
-      assert Enum.sort(policy.writable) ==
-               Enum.sort(Enum.map([context.builds, context.tmp], &canonical_root/1))
+      # Both spellings of each root (`Sandbox.builder_policy/1`): the canonical one is what a
+      # backend matching resolved paths needs, the named one is what bubblewrap binds.
+      for root <- [context.builds, context.tmp] do
+        assert canonical_root(root) in policy.writable
+        assert root in policy.writable
+      end
+
+      assert Enum.all?(
+               policy.writable,
+               &(&1 in Enum.flat_map([context.builds, context.tmp], fn r ->
+                   [r, canonical_root(r)]
+                 end))
+             )
 
       assert "/a-toolchain-root" in policy.readable
 

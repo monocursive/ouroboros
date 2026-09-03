@@ -232,6 +232,13 @@ forge-linux-test:
 	@echo "==> forge-linux-test: the builder namespace on a Linux kernel"
 	scripts/forge-linux-test.sh
 
+# Lane W under bubblewrap: the backend the hosted CI job runs every wasm suite under, and
+# the one no Mac exercises. `ouro-sandbox` is disabled by name inside the container so
+# detection falls through to `bwrap`, which is what found W16's merged-`/usr` namespace hole.
+wasm-linux-test:
+	@echo "==> wasm-linux-test: the wasm suites under bubblewrap on a Linux kernel"
+	scripts/wasm-linux-test.sh
+
 # W8's precompiled-artifact skew, with two real toolchains instead of a crafted header. Builds
 # `ouro-wasm` on a Linux kernel and again at one other wasmtime, precompiles the acceptance
 # guest with each, and offers both to this machine's own helper: each must be refused

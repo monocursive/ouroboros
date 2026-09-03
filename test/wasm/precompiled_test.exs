@@ -931,15 +931,21 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
       shim = Path.join(context.tmp, "shim")
       File.mkdir_p!(shim)
 
+      # The sibling's *bytes*, not the root's listing: a Seatbelt denial and a bubblewrap
+      # namespace both refuse the read, but bubblewrap synthesises the parent directories of
+      # every bind it makes, so the shared root lists — empty — inside the namespace and a
+      # listing proves nothing either way.
       helper =
-        script!(context, ~s[if ls #{scratch} > /dev/null 2>&1; then exit 3; else exit 4; fi],
+        script!(
+          context,
+          ~s[if cat #{victim}/component.wasm > /dev/null 2>&1; then exit 3; else exit 4; fi],
           dir: shim
         )
 
       bytes = File.read!(@guest)
 
       assert {:ok, listed} = sign(context, bytes, [], helper_path: helper)
-      assert listed.precompile_skipped =~ "precompile_refused, 4", "the shared root was listed"
+      assert listed.precompile_skipped =~ "precompile_refused, 4", "the sibling's upload was read"
 
       writer =
         script!(

@@ -256,10 +256,30 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
     |> maybe_put("fs_filter_library", filter_library(policy))
   end
 
-  defp readable(request, %{mode: :builder} = policy),
-    do: Map.put(request, "readable", List.wrap(Map.get(policy, :readable, [])))
+  # The policy carries every root as it was named *and* as the kernel resolves it
+  # (`Sandbox.builder_policy/1`): bubblewrap needs the name to bind, Landlock attaches a rule
+  # to the inode either spelling reaches. A name that is itself a symlink is dropped here,
+  # because the helper refuses one by design (`plan::symlinked_read_roots` — a rule opened
+  # through a link grants its target under a name that does not say so) and the target it
+  # points at is already in the list under its own name.
+  defp readable(request, %{mode: :builder} = policy) do
+    roots =
+      policy
+      |> Map.get(:readable, [])
+      |> List.wrap()
+      |> Enum.reject(&symlink?/1)
+
+    Map.put(request, "readable", roots)
+  end
 
   defp readable(request, _shell), do: request
+
+  defp symlink?(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :symlink}} -> true
+      _other -> false
+    end
+  end
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)

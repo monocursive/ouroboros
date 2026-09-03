@@ -529,8 +529,19 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
 
   describe "detecting the ouro-sandbox helper" do
     test "an override pointing at nothing is not a helper" do
+      # Restored, not deleted: the variable is how a host that has an `ouro-sandbox` on disk
+      # says "not this one" (the bubblewrap proof in a container sets it), and a test that
+      # deleted it handed every later detection in the run the helper it had been told to
+      # ignore.
+      previous = System.get_env("OUROBOROS_SANDBOX_HELPER")
       System.put_env("OUROBOROS_SANDBOX_HELPER", Path.join(System.tmp_dir!(), "absent-helper"))
-      on_exit(fn -> System.delete_env("OUROBOROS_SANDBOX_HELPER") end)
+
+      on_exit(fn ->
+        case previous do
+          nil -> System.delete_env("OUROBOROS_SANDBOX_HELPER")
+          value -> System.put_env("OUROBOROS_SANDBOX_HELPER", value)
+        end
+      end)
 
       assert Helper.executable() == nil
     end
@@ -588,8 +599,17 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
 
       policy = Sandbox.builder_policy(writable: [], readable: [link])
 
+      # The policy names both: the target under its own name, and the link because bubblewrap
+      # binds by name and a namespace with no `/bin` in it runs no `#!/bin/sh` (the hosted CI
+      # job found exactly that on a merged-`/usr` Ubuntu). What reaches *this* helper is the
+      # target alone — it refuses a symlinked root by design, and Landlock's rule attaches to
+      # the inode the target already names.
       assert target in policy.readable
-      refute link in policy.readable
+      assert link in policy.readable
+
+      request = Helper.request(Sandbox.with_scratch(policy, Path.join(base, "scratch")), %{})
+      assert target in request["readable"]
+      refute link in request["readable"]
 
       # A root that does not exist yet cannot be canonicalised and is carried through
       # unchanged, because dropping it would narrow the policy without saying so — and the
