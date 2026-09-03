@@ -2156,3 +2156,478 @@ fn the_policy_world_declares_the_same_single_import() {
     let report = helper.ok("doctor", Value::Null);
     assert_eq!(report["imports"], json!(["log"]), "one import, both worlds");
 }
+
+// ------------------------------------------------------------------- W8: compiled elsewhere
+
+/// A precompiled artifact written by `ouro-wasm precompile`, with everything a `load` of it has
+/// to name: the digest of the container, and the digest of the source component it is for.
+#[derive(Debug)]
+struct Precompiled {
+    path: String,
+    sha256: String,
+    component_sha256: String,
+    size: usize,
+}
+
+/// Runs the real `precompile` subcommand over `bytes` and returns what it wrote.
+fn precompile(tag: &str, bytes: &[u8], kind: &str) -> Result<Precompiled, (String, String)> {
+    let source = fixture(tag, bytes);
+    let out = format!("{}.cwasm", source.path);
+
+    let produced = Command::new(HELPER)
+        .args(["precompile", &source.path, &out, "--kind", kind])
+        .output()
+        .expect("ouro-wasm precompile runs");
+
+    if !produced.status.success() {
+        let refusal: Value = serde_json::from_slice(&produced.stderr).unwrap_or_else(
+            |_| json!({ "refusal": "", "message": String::from_utf8_lossy(&produced.stderr) }),
+        );
+        return Err((
+            refusal["refusal"].as_str().unwrap_or_default().to_string(),
+            refusal["message"].as_str().unwrap_or_default().to_string(),
+        ));
+    }
+
+    let report: Value = serde_json::from_slice(&produced.stdout).expect("the report is JSON");
+    let container = std::fs::read(&out).expect("the artifact was written");
+
+    let mut sha256 = String::new();
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    for byte in Sha256::digest(&container) {
+        sha256.push(DIGITS[(byte >> 4) as usize] as char);
+        sha256.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    assert_eq!(
+        report["precompiled"]["sha256"], sha256,
+        "the report names the digest of the file it wrote"
+    );
+    assert_eq!(
+        report["sha256"], source.sha256,
+        "and the source it came from"
+    );
+
+    Ok(Precompiled {
+        path: out,
+        sha256,
+        component_sha256: source.sha256,
+        size: container.len(),
+    })
+}
+
+fn load_precompiled(helper: &mut Helper, artifact: &Precompiled, kind: &str) -> Value {
+    helper.ok(
+        "load",
+        json!({
+            "precompiled": true,
+            "sha256": artifact.sha256,
+            "component": artifact.component_sha256,
+            "path": artifact.path,
+            "kind": kind,
+        }),
+    )
+}
+
+/// Rewrites a container's JSON header, keeping the framing exact, so a test can put a header in
+/// front of a payload it does not describe. This is the *attacker's* move — a signer never
+/// writes one of these — and every check the loading node makes is written against it.
+fn with_header(artifact: &Precompiled, edit: impl Fn(&mut Value), tag: &str) -> Precompiled {
+    let bytes = std::fs::read(&artifact.path).expect("the artifact is readable");
+    let header_len = u32::from_be_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]) as usize;
+    let payload = &bytes[18 + header_len..];
+
+    let mut header: Value =
+        serde_json::from_slice(&bytes[18..18 + header_len]).expect("the header is JSON");
+    edit(&mut header);
+    let block = serde_json::to_vec(&header).expect("the header re-encodes");
+
+    let mut out = Vec::with_capacity(18 + block.len() + payload.len());
+    out.extend_from_slice(&bytes[..9]);
+    out.push(1);
+    out.extend_from_slice(&(block.len() as u32).to_be_bytes());
+    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    out.extend_from_slice(&block);
+    out.extend_from_slice(payload);
+
+    let rewritten = fixture(tag, &out);
+    Precompiled {
+        path: rewritten.path,
+        sha256: rewritten.sha256,
+        component_sha256: header["component_sha256"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        size: out.len(),
+    }
+}
+
+/// The whole of W8 in one round trip: the signer compiles, the node maps, and the guest answers.
+///
+/// `load` reports the **source** sha and the **source** size, not the container's, because lane
+/// W's identity is the component's bytes (D2) — so `instantiate` names the same sha it always
+/// did, `Ouroboros.Wasm.Verifier.cross_check/2` compares the same four fields against the same
+/// signed manifest, and nothing downstream of the pool has to know which form ran. What is new
+/// in the answer is one boolean saying which form it was.
+#[test]
+fn a_precompiled_component_loads_and_answers() {
+    let artifact = precompile("w8-echo", &support::echo(), "capability").expect("it compiles");
+    let mut helper = Helper::spawn(&[]);
+
+    let loaded = load_precompiled(&mut helper, &artifact, "capability");
+    assert_eq!(loaded["precompiled"], true);
+    assert_eq!(loaded["sha256"], artifact.component_sha256);
+    assert_eq!(loaded["world"], "ouroboros:capability@0.1.0");
+    assert_eq!(loaded["imports"], json!(["log"]));
+    assert_eq!(loaded["size"], support::echo().len());
+
+    helper.ok(
+        "instantiate",
+        json!({
+            "instance": "w8-echo",
+            "sha256": artifact.component_sha256,
+            "config": "CFG",
+            "limits": limits(FUEL, MIN_MEMORY_BYTES, DEADLINE_MS),
+        }),
+    );
+    let answered = helper.ok(
+        "call",
+        json!({ "instance": "w8-echo", "export": "handle-message", "payload": "hello" }),
+    );
+    assert_eq!(answered["payload"], "CFG|hello");
+
+    // A second load is the cache answering, and it still says which form it holds.
+    let again = load_precompiled(&mut helper, &artifact, "capability");
+    assert_eq!(again["cached"], true);
+    assert_eq!(again["precompiled"], true);
+}
+
+/// The measurement W8 exists for: the node's cost stops being a function of the component's
+/// shape and becomes a function of its size.
+///
+/// The worst component §7.3 admits — 20 000 functions at just under 4 MiB of code — is compiled
+/// by the signer and mapped by the node. The two paths are timed against each other in the same
+/// process, on the same bytes, and the assertion is the *ordering*: deserializing an artifact
+/// somebody else compiled is faster than compiling it here. It is a weak assertion on purpose —
+/// a loaded machine can make any wall-clock claim flap, and this suite runs against a debug
+/// wasmtime whose compile is an order of magnitude slower than the release helper's — but the
+/// direction is the claim, and the numbers this prints are what §14 records.
+#[test]
+fn the_worst_admissible_component_maps_in_time_its_shape_does_not_choose() {
+    let bytes = support::dense(MAX_FUNCTIONS - GUEST_FUNCTIONS, 18);
+    let artifact = precompile("w8-worst", &bytes, "capability").expect("it compiles");
+    let source = fixture("w8-worst-src", &bytes);
+
+    let mut helper = Helper::spawn(&[]);
+
+    let compiled_at = Instant::now();
+    let compiled = helper.ok(
+        "load",
+        json!({ "sha256": source.sha256, "path": source.path }),
+    );
+    let compiling = compiled_at.elapsed();
+    assert_eq!(compiled["precompiled"], false);
+
+    // A different helper, so the cache cannot answer the second measurement out of the first.
+    let mut fresh = Helper::spawn(&[]);
+    let mapped_at = Instant::now();
+    let mapped = load_precompiled(&mut fresh, &artifact, "capability");
+    let mapping = mapped_at.elapsed();
+    assert_eq!(mapped["precompiled"], true);
+    assert_eq!(mapped["sha256"], source.sha256);
+
+    println!(
+        "W8: worst admissible component ({} source bytes, {} precompiled bytes): \
+         load+compile {compiling:?}, load precompiled {mapping:?}",
+        bytes.len(),
+        artifact.size,
+    );
+    assert!(
+        mapping < compiling,
+        "mapping a precompiled artifact ({mapping:?}) must cost less than compiling the same \
+         component here ({compiling:?})"
+    );
+
+    // And it is a usable component, not merely a fast one.
+    fresh.ok(
+        "instantiate",
+        json!({
+            "instance": "w8-worst",
+            "sha256": source.sha256,
+            "config": "",
+            "limits": limits(FUEL, MIN_MEMORY_BYTES, DEADLINE_MS),
+        }),
+    );
+    let answered = fresh.ok(
+        "call",
+        json!({ "instance": "w8-worst", "export": "handle-message", "payload": "{}" }),
+    );
+    assert_eq!(answered["payload"], "ok");
+}
+
+/// One byte, and the artifact is refused *before* `Component::deserialize` sees it.
+///
+/// This is the check D24 rests on. `deserialize` is unsafe because wasmtime does not validate a
+/// serialized artifact against a malicious producer, so what makes mapping one sound is that its
+/// digest is the digest a trusted signer signed. A tampered artifact never reaches the unsafe
+/// block: the helper recomputes the sha from what it read and refuses `sha_mismatch`, which is
+/// the same refusal a tampered *component* gets and for the same reason.
+#[test]
+fn a_tampered_artifact_is_refused_by_its_digest() {
+    let artifact = precompile("w8-tamper", &support::echo(), "capability").expect("it compiles");
+    let mut bytes = std::fs::read(&artifact.path).expect("readable");
+
+    // Deep in the machine code, past every header this build reads: the digest is the only
+    // thing standing here.
+    let victim = bytes.len() - 64;
+    bytes[victim] ^= 0xff;
+    let tampered = fixture("w8-tampered", &bytes);
+
+    let mut helper = Helper::spawn(&[]);
+    let (refusal, message) = helper.refusal(
+        "load",
+        json!({
+            "precompiled": true,
+            // The sha the manifest named, which is the sha of the file before it was edited.
+            "sha256": artifact.sha256,
+            "component": artifact.component_sha256,
+            "path": tampered.path,
+        }),
+    );
+    assert_eq!(refusal, "sha_mismatch");
+    assert!(
+        message.contains(&artifact.sha256),
+        "the refusal names the digest that was expected: {message}"
+    );
+
+    let report = helper.ok("doctor", Value::Null);
+    assert_eq!(
+        report["held"]["components"], 0,
+        "nothing was admitted by a load that was refused"
+    );
+}
+
+/// An artifact built by another wasmtime, or for another target, is refused **by name** and the
+/// node is left able to compile the source form for itself.
+///
+/// Two toolchains were not available here, so the mismatch is crafted rather than built: the
+/// container's header is this build's own format, so a test can rewrite it exactly as a signer
+/// running a different wasmtime would have written it. That is the honest way to prove the
+/// comparison, because what the node reads is the header — it never asks wasmtime what produced
+/// the payload. (wasmtime would refuse the deserialize too, on its own embedded metadata; this
+/// refusal is the earlier and legible one, and it is the one that names which half disagreed.)
+#[test]
+fn an_artifact_for_another_wasmtime_or_another_target_is_refused_by_name() {
+    let artifact = precompile("w8-skew", &support::echo(), "capability").expect("it compiles");
+    let mut helper = Helper::spawn(&[]);
+
+    let older = with_header(
+        &artifact,
+        |header| header["wasmtime"] = json!("47.0.0"),
+        "w8-old-wasmtime",
+    );
+    let (refusal, message) = helper.refusal(
+        "load",
+        json!({
+            "precompiled": true,
+            "sha256": older.sha256,
+            "component": older.component_sha256,
+            "path": older.path,
+        }),
+    );
+    assert_eq!(refusal, "precompiled_mismatch");
+    assert!(
+        message.contains("47.0.0"),
+        "the refusal names the wasmtime the artifact claims: {message}"
+    );
+
+    let elsewhere = with_header(
+        &artifact,
+        |header| header["target"] = json!("x86_64-unknown-linux-gnu"),
+        "w8-other-target",
+    );
+    let (refusal, message) = helper.refusal(
+        "load",
+        json!({
+            "precompiled": true,
+            "sha256": elsewhere.sha256,
+            "component": elsewhere.component_sha256,
+            "path": elsewhere.path,
+        }),
+    );
+    assert_eq!(refusal, "precompiled_mismatch");
+    assert!(
+        message.contains("x86_64-unknown-linux-gnu"),
+        "the refusal names the target the artifact claims: {message}"
+    );
+
+    // And the source form still loads on this node, which is the whole point of the refusal
+    // being a refusal rather than a failure: a node that cannot use the fast form uses the
+    // slow one (D22).
+    let source = fixture("w8-skew-src", &support::echo());
+    let loaded = load(&mut helper, &source);
+    assert_eq!(loaded["precompiled"], false);
+    assert_eq!(loaded["world"], "ouroboros:capability@0.1.0");
+}
+
+/// `precompiled: true` is an assertion about bytes the owner staged under a signed manifest, and
+/// every way of making it without one is refused.
+///
+/// Three of them: source component bytes offered as precompiled, an artifact offered for a
+/// component other than the one the request names, and a precompiled artifact offered as source.
+/// The middle one is the one that matters — it is what a planted register row or a seeded
+/// `initial_state` would look like — and it is refused because the container names the component
+/// it was compiled from and the request names the one the manifest is about.
+#[test]
+fn precompiled_bytes_no_manifest_named_are_refused() {
+    let artifact = precompile("w8-claim", &support::echo(), "capability").expect("it compiles");
+    let source = fixture("w8-claim-src", &support::echo());
+    let mut helper = Helper::spawn(&[]);
+
+    // Source bytes, offered as an artifact.
+    let (refusal, _) = helper.refusal(
+        "load",
+        json!({
+            "precompiled": true,
+            "sha256": source.sha256,
+            "component": source.sha256,
+            "path": source.path,
+        }),
+    );
+    assert_eq!(refusal, "precompiled_mismatch");
+
+    // A real artifact, offered for a component it was not compiled from.
+    let other = "0".repeat(64);
+    let (refusal, message) = helper.refusal(
+        "load",
+        json!({
+            "precompiled": true,
+            "sha256": artifact.sha256,
+            "component": other,
+            "path": artifact.path,
+        }),
+    );
+    assert_eq!(refusal, "precompiled_mismatch");
+    assert!(
+        message.contains(&artifact.component_sha256),
+        "the refusal names the component the artifact really is for: {message}"
+    );
+
+    // An artifact, offered as source bytes.
+    let (refusal, _) = helper.refusal(
+        "load",
+        json!({ "sha256": artifact.sha256, "path": artifact.path }),
+    );
+    assert_eq!(refusal, "precompiled_mismatch");
+
+    // And `precompiled` is not a string, an integer, or anything but a boolean: which form a
+    // set of bytes is is not something to be lenient about. That one is a statement about the
+    // *request*, so it is the transport's `invalid_params` rather than a refusal about a
+    // component, and it is read off the raw reply for that reason.
+    let reply = helper.request(
+        "load",
+        json!({ "precompiled": "yes", "sha256": source.sha256, "path": source.path }),
+    );
+    assert_eq!(reply["error"]["code"], -32602);
+    assert_eq!(reply["error"]["data"]["refusal"], "invalid_params");
+
+    let report = helper.ok("doctor", Value::Null);
+    assert_eq!(report["held"]["components"], 0);
+}
+
+/// The world check runs on the *deserialized* component, so a form of the bytes is not an
+/// exemption from the linker's contract (D21 under D24).
+///
+/// The header is rewritten to claim the policy world over a payload that is a capability, which
+/// is exactly the case the early header comparison cannot catch: the request and the header
+/// agree, and the only thing that knows better is the component itself. It deserializes, and
+/// then `world::check` refuses it `unsupported_world`. The reverse — a policy artifact offered
+/// as a capability — is refused the same way.
+#[test]
+fn a_precompiled_component_is_still_held_to_its_world() {
+    let capability = precompile("w8-cap", &support::echo(), "capability").expect("it compiles");
+    let policy = precompile("w8-pol", &support::policy("allow"), "policy").expect("it compiles");
+    let mut helper = Helper::spawn(&[]);
+
+    // Header rewritten to say `policy`; payload is a capability. Nothing before the deserialize
+    // can tell, and the world check does.
+    let lying = with_header(
+        &capability,
+        |header| {
+            header["kind"] = json!("policy");
+            header["world"] = json!("ouroboros:policy@0.1.0");
+        },
+        "w8-cap-as-policy",
+    );
+    let (refusal, message) = helper.refusal(
+        "load",
+        json!({
+            "precompiled": true,
+            "sha256": lying.sha256,
+            "component": lying.component_sha256,
+            "path": lying.path,
+            "kind": "policy",
+        }),
+    );
+    assert_eq!(refusal, "unsupported_world");
+    assert!(
+        message.contains("evaluate"),
+        "the refusal names the export the policy world wants: {message}"
+    );
+
+    // And the reverse, with an honest header: a policy artifact offered as a capability is
+    // refused before the deserialize, because the header and the request disagree.
+    let (refusal, message) = helper.refusal(
+        "load",
+        json!({
+            "precompiled": true,
+            "sha256": policy.sha256,
+            "component": policy.component_sha256,
+            "path": policy.path,
+            "kind": "capability",
+        }),
+    );
+    assert_eq!(refusal, "precompiled_mismatch");
+    assert!(
+        message.contains("ouroboros:policy@0.1.0"),
+        "the refusal names the world it was compiled as: {message}"
+    );
+
+    // The policy artifact loads as what it is.
+    let loaded = load_precompiled(&mut helper, &policy, "policy");
+    assert_eq!(loaded["world"], "ouroboros:policy@0.1.0");
+    assert_eq!(loaded["precompiled"], true);
+}
+
+/// The signer applies §7.3 in full before it compiles, with the same refusal name a node's
+/// `load` would have used (D23).
+///
+/// This is what makes moving cranelift off the node safe rather than merely fast: the bound did
+/// not go anywhere, it moved to the machine that now pays for the compile. A component one
+/// function past the ceiling is refused by `precompile` without anything being compiled, and a
+/// component that is not in a world is refused by `precompile` too — so an artifact that exists
+/// at all is one a node would have admitted.
+#[test]
+fn the_signer_applies_the_structural_bound_before_it_compiles() {
+    let (refusal, message) = precompile(
+        "w8-over",
+        &support::dense(MAX_FUNCTIONS - GUEST_FUNCTIONS + 1, 18),
+        "capability",
+    )
+    .expect_err("one function past the bound is not compiled");
+    assert_eq!(refusal, "component_too_complex");
+    assert!(
+        message.contains("20001") && message.contains("functions"),
+        "the signer's refusal names the bound and by how much, exactly as a node's does: {message}"
+    );
+
+    let (refusal, message) = precompile("w8-clock", &support::undeclared_import(), "capability")
+        .expect_err("a component wanting a clock is not compiled into an artifact");
+    assert_eq!(refusal, "undefined_import");
+    assert!(message.contains("now"), "{message}");
+
+    // A capability offered to the signer as a policy is refused at sign time as well, so the
+    // world a manifest declares and the world its artifact was built for cannot disagree.
+    let (refusal, _) = precompile("w8-wrongworld", &support::echo(), "policy")
+        .expect_err("a capability is not a policy");
+    assert_eq!(refusal, "unsupported_world");
+}

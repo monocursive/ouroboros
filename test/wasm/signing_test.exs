@@ -36,6 +36,45 @@ defmodule Ouroboros.Wasm.SigningTest do
       assert findings.provenance.author == "test-agent"
       assert findings.eval == :required_and_valid
       assert findings.start == %{id: "wasm/greeter", config_bytes: 2}
+      # W8. Absent is the ordinary manifest and is said out loud rather than left out of the
+      # findings: a signer that is silent about a block is one whose journal cannot later be
+      # read for whether it saw one.
+      assert findings.precompiled == :absent
+    end
+
+    # W8, D22. What this block authorizes is a loading node deserializing machine code it did
+    # not produce, so the signer decides its shape rather than believing it. Delete
+    # `check_precompiled/1` from the `with` and every case below is signed.
+    test "the precompiled block is validated, and is journalled when it is there" do
+      block = %{
+        wasmtime: "48.0.1",
+        target: "aarch64-apple-darwin",
+        sha256: String.duplicate("a", 64),
+        size: 258_093
+      }
+
+      assert {:ok, findings} = evaluate(artifact!(precompiled: block), context())
+      assert findings.precompiled == block
+
+      # The serialized form of a component is never the component: one is a wasm binary and
+      # the other an object file. Equal digests are a manifest built out of one set of bytes
+      # twice, which would have a node deserializing a component as if it were machine code.
+      itself = %{block | sha256: sha256(@bytes)}
+
+      assert {:refused, {:precompiled_is_the_component, _}} =
+               evaluate(%{artifact!() | precompiled: itself}, context())
+
+      # And the same ceiling the component is held to, times the multiple a bundle admits.
+      oversize = %{block | size: 8 * 16 * 1024 * 1024 + 1}
+
+      assert {:refused, {:precompiled_too_large, _, _}} =
+               evaluate(%{artifact!() | precompiled: oversize}, context())
+
+      # A block a manifest carried from a file, past `Artifact.build/2` entirely: the signer
+      # is handed structs by `Ouroboros.Upgrade.Signing.Service`, so its own shape check is
+      # the one that has to hold.
+      assert {:refused, {:invalid_precompiled, _}} =
+               evaluate(%{artifact!() | precompiled: Map.delete(block, :target)}, context())
     end
 
     test "1. shape and size come first" do

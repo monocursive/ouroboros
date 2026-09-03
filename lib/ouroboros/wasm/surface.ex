@@ -103,10 +103,14 @@ defmodule Ouroboros.Wasm.Surface do
   def list(opts \\ []) do
     entries = lane_w_entries(opts)
     components = components(opts)
+    # W8. Asked once for the whole listing rather than per row: it is two constants off the
+    # `doctor` report the pool already accepted, and a listing that started a helper would be a
+    # `:read` verb with an effect.
+    build = helper_build(opts)
 
     %{
       node: node(),
-      rollouts: rows(entries, &rollout_row/1, & &1.artifact_id),
+      rollouts: rows(entries, &rollout_row(&1, build, opts), & &1.artifact_id),
       rollout_count: count(entries),
       components: rows(components, &component_row/1, & &1.sha256),
       component_count: count(components)
@@ -556,17 +560,62 @@ defmodule Ouroboros.Wasm.Surface do
     :exit, _not_running -> nil
   end
 
-  defp rollout_row(entry) do
+  defp rollout_row(entry, build, opts) do
     %{
       artifact_id: entry.artifact_id,
       name: name_of(entry.module),
       component_sha256: entry.component_sha256,
       epoch: entry.epoch,
       state: entry.state,
+      # W8. Which of the two forms this node loads this entry's component from — `precompiled`
+      # when the signed manifest declares an artifact for exactly this node's wasmtime and
+      # triple and the store holds it, `source` otherwise, and `nil` where this node cannot
+      # say: no manifest it can read, or no helper that has reported its build yet. `nil` means
+      # "this node does not know", as every other field here does.
+      form: form_of(entry, build, opts),
       nodes: entry.nodes |> Enum.take(@max_rows) |> Enum.map(&node_name/1),
       created_at: entry.created_at,
       updated_at: entry.updated_at
     }
+  end
+
+  # Read out of the store's own manifest for the row, which is the only durable place a
+  # `precompiled` block lives on a loading node: the register keeps the component sha and
+  # nothing else (D2, D6). One small file per row, bounded by `@max_rows`.
+  #
+  # This says which form a load *would* take. It is not a record of one that happened — the
+  # register keeps none — and it is deliberately computed the same way `Ouroboros.Wasm.Store.form/4`
+  # computes it, so an operator reading this and a node deciding are reading one rule.
+  defp form_of(entry, build, opts) do
+    with id when is_binary(id) <- Map.get(entry, :artifact_id),
+         sha when is_binary(sha) <- Map.get(entry, :component_sha256),
+         {:ok, %{precompiled: precompiled}} <- Store.fetch_manifest(id, opts) do
+      case Store.form(sha, precompiled, build, opts) do
+        {:precompiled, _path, _sha} -> :precompiled
+        {:source, _path, _why} -> :source
+        {:error, _unreadable} -> nil
+      end
+    else
+      _unknown -> nil
+    end
+  rescue
+    _unreadable -> nil
+  end
+
+  # `connect: false`: this verb is `:read`, and a listing that spawned a helper to answer whether
+  # a helper is there would be exactly the effect W5 kept out of it. A node with no accepted
+  # report says `nil` rather than starting one to find out.
+  #
+  # `running?/1` — the same one `helper/1` uses — rather than `Process.whereis/1` alone, because
+  # a pool may be named by a pid and `whereis` takes an atom: asking about one would raise
+  # inside a `:read` verb.
+  defp helper_build(opts) do
+    server = Keyword.get(opts, :pool, Pool)
+    if running?(server), do: Pool.helper_build(server, connect: false)
+  rescue
+    _unavailable -> nil
+  catch
+    :exit, _not_running -> nil
   end
 
   # One node name out of a register entry. An atom is the ordinary case and a binary is a

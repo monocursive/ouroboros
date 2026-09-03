@@ -978,7 +978,8 @@ defmodule Ouroboros.Gateway.Methods do
       {:closed,
        [
          @authority_node
-       ], "`components[].sha256` names a component; nothing here is a filesystem path"},
+       ],
+       "`components[].sha256` names a component; nothing here is a filesystem path. `rollouts[].form` is which of the two forms this node loads that component from — `precompiled` when the signed manifest names an artifact for exactly this node's wasmtime and target triple and the store holds it, `source` otherwise, `null` where this node cannot say (no readable manifest, or no helper that has reported its build)"},
     "computer_use.artifact" =>
       {:closed,
        [
@@ -1222,6 +1223,9 @@ defmodule Ouroboros.Gateway.Methods do
          {"author", :required, :string, "provenance the signing policy requires"},
          {"imports", :required, {:list, :string, 8},
           "the imports the component declares, computed by the client with the operator's own helper (`ouro wasm inspect`). This node never parses unsigned bytes to find out; a list that does not match what the component imports is refused at stage by the cross-check, which is where a manifest that describes something else has always been caught"},
+         # W8
+         {"precompile", {:optional, true}, :boolean,
+          "whether this node compiles the component into wasmtime's serialized form at sign time and records its digest in the signed manifest (docs/WASM.md D22–D24). Default true, and honoured only where this node has an `ouro-wasm` on disk; the artifact travels in the bundle beside the source and is loaded on a target **only** where that node's own helper reports exactly this node's wasmtime version and target triple, which turns that node's `load` from a compile into a mapping. Every node that does not match compiles the source form under §7.3's bounds, so a precompiled bundle deploys everywhere an ordinary one does. `false` — `ouro wasm sign --no-precompile` — signs the source form alone, which is also what a node with no helper does and what happens when the artifact is too large to travel in this verb's reply"},
          # W15
          {"kind", {:optional, "capability"},
           {:either, [{:const, "capability"}, {:const, "policy"}]},
@@ -1877,6 +1881,8 @@ defmodule Ouroboros.Gateway.Methods do
              "name",
              "author",
              "imports",
+             # W8
+             "precompile",
              # W15
              "kind",
              "language",
@@ -1890,13 +1896,21 @@ defmodule Ouroboros.Gateway.Methods do
          {:ok, author} <- fetch_string(params, "author"),
          {:ok, imports} <- wasm_imports(params),
          {:ok, kind} <- wasm_kind(params),
+         {:ok, precompile} <- wasm_precompile(params),
          {:ok, language} <- fetch_optional_string(params, "language"),
          {:ok, source_sha256} <- wasm_optional_sha256(params),
          {:ok, start_config} <- wasm_start_config(params),
          {:ok, eval} <- wasm_eval(params, kind),
          {:ok, target} <- permissions_node(params) do
       attrs =
-        %{upload: upload, name: name, author: author, imports: imports, kind: kind}
+        %{
+          upload: upload,
+          name: name,
+          author: author,
+          imports: imports,
+          kind: kind,
+          precompile: precompile
+        }
         |> wasm_put(:language, language)
         |> wasm_put(:source_sha256, source_sha256)
         |> wasm_put(:start_config, start_config)
@@ -3387,6 +3401,17 @@ defmodule Ouroboros.Gateway.Methods do
   # do something.
   # W15. A closed set of two, and an absent one means `capability` — which is what every
   # `wasm.sign` written before there were two kinds meant.
+  # W8. Absent means true, which is what an operator asking a node with a helper to sign
+  # something means. A present value that is not a boolean is refused rather than coerced: a
+  # client that wrote `"false"` and got a precompile has been told the opposite of what happened.
+  defp wasm_precompile(params) do
+    case Map.get(params, "precompile") do
+      nil -> {:ok, true}
+      value when is_boolean(value) -> {:ok, value}
+      other -> {:invalid, "params.precompile must be a boolean, got #{inspect(other)}"}
+    end
+  end
+
   defp wasm_kind(params) do
     case Map.get(params, "kind") do
       nil ->

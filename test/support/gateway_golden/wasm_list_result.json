@@ -23,6 +23,7 @@
         "component_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "created_at": "2026-01-01T00:00:00.000000Z",
         "epoch": 7,
+        "form": "precompiled",
         "name": "vet",
         "nodes": [
           "ouroboros@golden",
@@ -36,6 +37,7 @@
         "component_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "created_at": "2026-01-01T00:00:00.000000Z",
         "epoch": 6,
+        "form": "source",
         "name": "vet",
         "nodes": [
           "ouroboros@golden"
@@ -48,6 +50,7 @@
         "component_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         "created_at": "2026-01-01T00:00:00.000000Z",
         "epoch": 5,
+        "form": null,
         "name": "lint",
         "nodes": [
           "ouroboros@peer"

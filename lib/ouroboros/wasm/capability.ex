@@ -136,6 +136,7 @@ defmodule Ouroboros.Wasm.Capability do
   """
 
   alias Ouroboros.Wasm
+  alias Ouroboros.Wasm.Artifact
 
   use Jido.Agent,
     name: "ouroboros_wasm_capability",
@@ -167,7 +168,14 @@ defmodule Ouroboros.Wasm.Capability do
       # live local `Ouroboros.Wasm.Pool` process, and `:store_root` is honoured only on a node
       # whose config says `allow_store_root_override: true`.
       pool: [type: :any, default: Ouroboros.Wasm.Pool],
-      store_root: [type: :any, default: nil]
+      store_root: [type: :any, default: nil],
+      # W8. The signed manifest's `precompiled` block, carried here by
+      # `Ouroboros.Wasm.Rollout.start_state/2` so a wrapper's first load — and a reboot's —
+      # takes the same fast path the deploy took. It is a hint, not authority: it names a
+      # digest, the store resolves the file, and the helper refuses a container that was not
+      # compiled from `component`, so a seeded block naming somebody else's artifact is a
+      # `precompiled_mismatch` and never a load of the wrong bytes.
+      precompiled: [type: :any, default: nil]
     ],
     signal_routes: [
       {"ouroboros.agent.message", __MODULE__.HandleMessage}
@@ -263,8 +271,8 @@ defmodule Ouroboros.Wasm.Capability do
     instance = "wasm/d/" <> Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
 
     try do
-      with {:ok, path} <- component_path(state),
-           {:ok, _loaded} <- Wasm.Pool.load(Map.get(state, :component), path, pool),
+      with {:ok, path, load_opts} <- component_form(state, pool),
+           {:ok, _loaded} <- Wasm.Pool.load(Map.get(state, :component), path, pool, load_opts),
            {:ok, _stood} <- stand(state, pool, instance, opts),
            {:ok, payload} <- ask(pool, instance) do
         __MODULE__.Describe.parse(payload)
@@ -281,7 +289,23 @@ defmodule Ouroboros.Wasm.Capability do
     end
   end
 
-  defp component_path(state) do
+  @doc """
+  Which file this capability's component is read from, and how the helper should be told to
+  read it (W8).
+
+  Answers `{:ok, path, load_opts}` where `load_opts` is what `Ouroboros.Wasm.Pool.load/4` takes:
+  empty for the source form, `[precompiled: <artifact sha>]` for the form the signer compiled.
+  `Ouroboros.Wasm.Store.form/4` makes the choice out of the state's `:precompiled` block — which
+  `Ouroboros.Wasm.Rollout.start_state/2` copied from the **verified** manifest — and this node's
+  own helper reading; a node that does not match reads the source form, which is what every node
+  did before W8 and what every node can always do.
+
+  Public because both callers are in this module's own nested action and because the seam is
+  worth naming: this is the one place a wrapper decides which bytes it runs.
+  """
+  @spec component_form(map(), GenServer.server()) ::
+          {:ok, String.t(), keyword()} | {:error, term()}
+  def component_form(state, pool) do
     root = Map.get(state, :store_root)
 
     opts =
@@ -290,8 +314,21 @@ defmodule Ouroboros.Wasm.Capability do
         else: []
 
     case Map.get(state, :component) do
-      sha when is_binary(sha) -> Wasm.Store.path(sha, opts)
-      other -> {:error, {:invalid_component, inspect(other, limit: 5)}}
+      sha when is_binary(sha) ->
+        precompiled =
+          case Map.get(state, :precompiled) do
+            block when is_map(block) -> if Artifact.precompiled?(block), do: block
+            _absent -> nil
+          end
+
+        case Wasm.Store.form(sha, precompiled, fn -> Wasm.Pool.helper_build(pool) end, opts) do
+          {:precompiled, path, artifact} -> {:ok, path, [precompiled: artifact]}
+          {:source, path, _why} -> {:ok, path, []}
+          {:error, reason} -> {:error, reason}
+        end
+
+      other ->
+        {:error, {:invalid_component, inspect(other, limit: 5)}}
     end
   end
 
@@ -565,7 +602,6 @@ defmodule Ouroboros.Wasm.Capability do
     alias Ouroboros.Wasm
     alias Ouroboros.Wasm.Capability
     alias Ouroboros.Wasm.Pool
-    alias Ouroboros.Wasm.Store
 
     use Jido.Action,
       name: "wasm_capability_handle_message",
@@ -735,36 +771,24 @@ defmodule Ouroboros.Wasm.Capability do
       do: {:ok, name}
 
     defp stand_up(state, pool, name, owner) do
-      with {:ok, path} <- store_path(state),
-           :ok <- load(state, pool, path),
+      with {:ok, path, load_opts} <- store_path(state, pool),
+           :ok <- load(state, pool, path, load_opts),
            :ok <- instantiate(state, pool, name, owner) do
         {:ok, name}
       end
     end
 
-    defp store_path(state) do
-      case Store.path(state.component, store_opts(state)) do
-        {:ok, path} -> {:ok, path}
+    defp store_path(state, pool) do
+      case Capability.component_form(state, pool) do
+        {:ok, path, load_opts} -> {:ok, path, load_opts}
         {:error, reason} -> {:refused, :store, reason}
       end
     end
 
-    # A seeded `:store_root` names which bytes this capability runs, and it arrives on a
-    # remote-reachable start surface, so it is honoured only where the node's own config says
-    # so — this repository's test environment, and nowhere else by default (F3). Everywhere
-    # else the node's own store root is used and the seeded value is simply not read: it is
-    # not a refusal, because the agent is perfectly runnable from the store it is supposed to
-    # read from.
-    defp store_opts(%{store_root: root}) when is_binary(root) and root != "" do
-      if Wasm.allow_store_root_override?(), do: [root: root], else: []
-    end
-
-    defp store_opts(_state), do: []
-
     # `load` is idempotent helper-side: a component already in its cache is reported as
     # cached rather than compiled again.
-    defp load(state, pool, path) do
-      case Pool.load(state.component, path, pool) do
+    defp load(state, pool, path, load_opts) do
+      case Pool.load(state.component, path, pool, load_opts) do
         {:ok, _report} -> :ok
         {:error, reason} -> {:refused, :load, reason}
       end

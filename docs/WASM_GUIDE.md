@@ -1121,10 +1121,27 @@ It asks the gateway verb `wasm.status`, which is `:read` and **starts nothing**:
 deliberately no `--probe`, because starting the helper to see whether it starts would answer a
 different question. Before the first component needs it the pool reports `idle`, and that is
 the healthy answer. `ouro wasm ls` (`wasm.list`, also `:read`) is the inventory: every lane-W
-rollout the register knows, and every component in the store.
+rollout the register knows, which of the two forms this node loads each one from, and every
+component in the store.
 
 Neither surface reports absolute paths: `wasm.status` and `wasm.list` are `:read`, and a
 readiness surface is not a directory listing.
+
+### When the fast form is not yours
+
+Signing compiles the component once, on the node that signs, and puts wasmtime's serialized
+form in the bundle beside the source (docs/WASM.md D22–D24). A node loads that form only when
+its own helper reports **exactly** the wasmtime version and **exactly** the target triple the
+signer recorded — `ouro-wasm doctor` prints both, and `ouro wasm inspect <file>.cwasm` prints
+what an artifact claims, with one line saying whether this machine could map it. Where the two
+disagree the node compiles the component itself, exactly as it did before, and logs one line
+naming which half differed (`{:wasmtime_mismatch, "48.0.1", "47.0.2"}`); `ouro wasm ls`'s
+`FORM` column then reads `source` on those nodes and `precompiled` on the rest, and `?` where a
+node cannot say — no manifest it can read, or a helper it has not yet spoken to. Nothing is
+broken in that state and nothing needs fixing: the slow path is the path every node has always
+had. What it costs is the compile, on each node, for that capability. If you want the fast form
+across a mixed fleet, sign once per build — or sign with `ouro wasm sign --no-precompile` and
+keep the bundle small, which is also what a signing node with no helper does by itself.
 
 ### Reboot
 

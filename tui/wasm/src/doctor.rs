@@ -18,8 +18,13 @@ use crate::shape;
 use crate::world;
 
 /// The version of wasmtime resolved into this binary, or `"unknown"` if the lock could not be
-/// read when it was built.
-pub const WASMTIME_VERSION: &str = env!("OURO_WASMTIME_VERSION");
+/// read when it was built. Named in one place — [`host`] — because a precompiled artifact is
+/// bound to it and the header a node compares against must be the string `doctor` prints.
+pub const WASMTIME_VERSION: &str = host::WASMTIME_VERSION;
+
+/// The target triple this binary was compiled for. The second half of what binds a precompiled
+/// artifact to a machine (W8, D22): a node admits one only when both readings match exactly.
+pub const TARGET: &str = host::TARGET;
 
 /// The proposals [`host::config`] turns off, named for an operator reading this report. Prose,
 /// not a contract: the enforcement is the `Config` in [`crate::host`], and the tests that put a
@@ -36,7 +41,7 @@ const DISABLED_PROPOSALS: &str = "relaxed-simd (nondeterministic, and D4 says no
 /// is, and what the component cache has let go — when a serve loop is answering, and `None`
 /// for the one-shot subcommand.
 pub fn report(census: Option<host::Census>) -> Value {
-    let engine = wasmtime::Engine::new(&host::config());
+    let engine = host::engine();
     let mut notes = vec![
         format!(
             "the linker defines exactly one host function, `{}`, for both worlds; there is no \
@@ -71,6 +76,11 @@ pub fn report(census: Option<host::Census>) -> Value {
             shape::MAX_DEPTH,
             shape::MAX_CORE_MODULES
         ),
+        format!(
+            "a component precompiled by `ouro-wasm precompile` is admitted only by a helper \
+             reporting wasmtime {WASMTIME_VERSION} and target {TARGET}; anything else is \
+             refused precompiled_mismatch and the source form is compiled here instead"
+        ),
         format!("the engine has these proposals disabled: {DISABLED_PROPOSALS}"),
         "a JSON-RPC notification — an object with no id — is refused for every method but \
          doctor: a method with effects must have somewhere to send its answer"
@@ -83,6 +93,10 @@ pub fn report(census: Option<host::Census>) -> Value {
     let mut report = json!({
         "usable": engine.is_ok(),
         "wasmtime": WASMTIME_VERSION,
+        // W8. The pair a precompiled artifact is bound to, reported exactly as the container's
+        // header spells them, so a node comparing the two is comparing strings and not
+        // interpretations. A signer records what its own helper printed here.
+        "target": TARGET,
         // Both worlds this build implements, in `world::KINDS` order. A `load` says which of
         // them it is offering bytes as, and a component admitted to one is not admitted to the
         // other (docs/WASM.md D21).
@@ -96,6 +110,9 @@ pub fn report(census: Option<host::Census>) -> Value {
             "max_result_bytes": host::MAX_RESULT_BYTES,
             "max_hostcall_bytes": host::MAX_HOSTCALL_BYTES,
             "max_component_bytes": host::MAX_COMPONENT_BYTES,
+            // W8. What bounds a *precompiled* load, in place of the structural pass: nothing is
+            // compiled, the work is linear in the input, and this is the input's ceiling.
+            "max_precompiled_bytes": crate::precompiled::MAX_PAYLOAD_BYTES,
             "max_wasm_stack_bytes": host::MAX_WASM_STACK_BYTES,
             "memory_reservation_bytes": host::MEMORY_RESERVATION_BYTES,
             "memory_guard_bytes": host::MEMORY_GUARD_BYTES,
@@ -229,6 +246,37 @@ mod tests {
         assert!(
             WASMTIME_VERSION.starts_with("48."),
             "doctor reports wasmtime {WASMTIME_VERSION}, which is not the pinned major"
+        );
+    }
+
+    /// The pair a precompiled artifact is bound to has to be readable out of `doctor`, because
+    /// that is how a signing node records what it compiled with and how an operator sees why a
+    /// node fell back to the source form (W8, D22).
+    #[test]
+    fn the_target_triple_is_reported_beside_the_wasmtime() {
+        let report = report(None);
+        assert_eq!(report["wasmtime"], WASMTIME_VERSION);
+        assert_eq!(report["target"], TARGET);
+        assert_ne!(TARGET, "unknown", "cargo always sets TARGET");
+        assert!(
+            TARGET.contains('-'),
+            "a target triple has hyphens in it: {TARGET}"
+        );
+        assert_eq!(
+            report["limits"]["max_precompiled_bytes"],
+            crate::precompiled::MAX_PAYLOAD_BYTES
+        );
+
+        let joined: String = report["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .filter_map(|note| note.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            joined.contains("precompiled_mismatch"),
+            "doctor must say what a precompiled artifact is bound to: {joined}"
         );
     }
 }

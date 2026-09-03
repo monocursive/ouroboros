@@ -239,6 +239,10 @@ defmodule Ouroboros.Wasm.SurfaceTest do
                :component_sha256,
                :created_at,
                :epoch,
+               # W8. Which of the two forms this node loads that component from. It is a
+               # listing field, not a record: the register keeps no memory of a load, so this
+               # is what a load *would* take, computed the same way a load computes it.
+               :form,
                :name,
                :nodes,
                :state,
@@ -371,13 +375,20 @@ defmodule Ouroboros.Wasm.SurfaceTest do
              "a read-only surface must never send the pool a request"
     end
 
-    test "list/1 never touches the pool at all", context do
+    # W8 gave `list/1` one reason to look at the pool: which of the two forms a node loads a
+    # component from depends on the helper's own wasmtime and triple, and the accepted `doctor`
+    # report is the only place they are. So the claim is `status/1`'s claim now — the pool is
+    # read once, for state it already holds — and the part that matters is unchanged: this verb
+    # sends the helper nothing and starts nothing (`connect: false`).
+    test "list/1 reads the pool once and asks it to do nothing", context do
       pool = counting_pool(doctor_report())
 
       _list = Surface.list([pool: pool] ++ opts(context))
 
-      assert GenServer.call(pool, :calls) == 0
-      assert GenServer.call(pool, :requests) == 0
+      assert GenServer.call(pool, :calls) == 1
+
+      assert GenServer.call(pool, :requests) == 0,
+             "a read-only surface must never send the pool a request"
     end
 
     test "a server this side cannot verify is absent, never broken with an empty path",

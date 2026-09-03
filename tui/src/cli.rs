@@ -645,6 +645,19 @@ pub struct WasmSignArgs {
     #[arg(long, value_name = "PATH", conflicts_with = "import")]
     pub imports_from: Option<PathBuf>,
 
+    // W8
+    /// Do not ask the node to compile the component into wasmtime's serialized form at sign
+    /// time (docs/WASM.md D22–D24).
+    ///
+    /// By default the signing node compiles once, records the artifact's digest in the signed
+    /// manifest, and puts the artifact in the bundle beside the source — so a node running the
+    /// same wasmtime on the same target triple maps it instead of compiling it, and every other
+    /// node compiles the source exactly as before. Pass this to sign the source form alone: for
+    /// a bundle you would rather keep small, or when the signing node's build is not the one
+    /// your fleet runs. Nothing is lost but speed.
+    #[arg(long)]
+    pub no_precompile: bool,
+
     /// Do not start a local `ouro-wasm` to read the component's imports; require `--import`
     /// or `--imports-from` instead.
     ///

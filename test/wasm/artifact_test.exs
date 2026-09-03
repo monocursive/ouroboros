@@ -272,6 +272,66 @@ defmodule Ouroboros.Wasm.ArtifactTest do
     refute Artifact.sha256?(nil)
   end
 
+  # W8, D22. The block that authorizes a loading node to `Component::deserialize` machine code
+  # it did not produce, so its shape is decided where the manifest is built rather than
+  # rediscovered by every reader — and it is inside `manifest/1`, which is what the signature
+  # covers. Delete `:precompiled` from `manifest/1` and the last assertion here goes red: a
+  # deploy could then swap the artifact digest a node maps without disturbing the signature.
+  describe "precompiled (W8)" do
+    test "all four keys or none, and each held to its own shape" do
+      block = %{
+        wasmtime: "48.0.1",
+        target: "aarch64-apple-darwin",
+        sha256: String.duplicate("a", 64),
+        size: 258_093
+      }
+
+      assert Artifact.precompiled?(nil)
+      assert Artifact.precompiled?(block)
+      assert build!(precompiled: block).precompiled == block
+
+      for {label, bad} <- [
+            {"a missing key", Map.delete(block, :target)},
+            {"a key this build has no home for", Map.put(block, :extra, 1)},
+            {"a digest that is not one", %{block | sha256: "not-a-digest"}},
+            {"an upper-case digest", %{block | sha256: String.duplicate("A", 64)}},
+            {"a size that is not positive", %{block | size: 0}},
+            {"an empty version", %{block | wasmtime: ""}},
+            {"a version that can forge a log line", %{block | wasmtime: "48.0.1\nfake"}},
+            {"a triple with leading whitespace", %{block | target: " aarch64"}},
+            {"string keys", %{"wasmtime" => "48.0.1"}},
+            {"not a map at all", "48.0.1"}
+          ] do
+        refute Artifact.precompiled?(bad), label
+
+        assert {:error, {:invalid_precompiled, _}} =
+                 Artifact.build(@bytes,
+                   name: "greeter",
+                   author: "test-agent",
+                   epoch: 7,
+                   precompiled: bad
+                 ),
+               label
+      end
+    end
+
+    test "it is inside the signed half, so a swapped artifact digest breaks the signature" do
+      block = %{
+        wasmtime: "48.0.1",
+        target: "aarch64-apple-darwin",
+        sha256: String.duplicate("a", 64),
+        size: 258_093
+      }
+
+      artifact = build!(precompiled: block)
+      assert artifact |> Artifact.manifest() |> Map.fetch!(:precompiled) == block
+
+      swapped = %{artifact | precompiled: %{block | sha256: String.duplicate("b", 64)}}
+
+      refute Artifact.signing_payload(artifact, "s") == Artifact.signing_payload(swapped, "s")
+    end
+  end
+
   defp build!(attrs \\ []) do
     {:ok, artifact} =
       Artifact.build(

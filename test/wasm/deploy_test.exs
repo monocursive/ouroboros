@@ -667,14 +667,14 @@ defmodule Ouroboros.Wasm.DeployTest do
 
     envelope =
       JSON.encode!(%{
-        "bundle" => 1,
+        "bundle" => 2,
         "manifest" => Base.encode64(:erlang.term_to_binary(Artifact.manifest(artifact))),
         "signer" => "nobody",
         "signature" => Base.encode64(:binary.copy("\0", 64))
       })
 
     "OUROWASM" <>
-      <<1::8, byte_size(envelope)::32, byte_size(bytes)::32>> <> envelope <> bytes
+      <<2::8, byte_size(envelope)::32, 0::32, byte_size(bytes)::32>> <> envelope <> bytes
   end
 
   # The rollout register's durable record, exactly as it sits in storage. Compared before

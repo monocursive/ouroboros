@@ -567,6 +567,23 @@ pub fn inspect<O: Write>(
         }
     };
 
+    // W8. A `.cwasm` is answered out of its own header and nothing else — the helper reads no
+    // machine code to say what one claims to be, and neither does this command. There is no
+    // admission question to ask either: whether a node will map it is that node's own wasmtime
+    // and triple against the two strings printed here, and this machine's helper answering
+    // "yes, I could" would say nothing about the fleet.
+    if inspected["precompiled"] == json!(true) {
+        let text = if json {
+            serde_json::to_string_pretty(&precompiled_json(&inspected, &report))?
+        } else {
+            render_precompiled(file, &inspected, &report)
+        };
+
+        writeln!(out, "{text}")?;
+        out.flush()?;
+        return Ok(true);
+    }
+
     let sha = inspected["sha256"].as_str().unwrap_or_default().to_string();
 
     // Both worlds, because "would this node admit these bytes" has two answers now and a
@@ -639,6 +656,72 @@ fn render_refused(file: &Path, error: &anyhow::Error, json: bool) -> String {
 
 /// The readable report: what it declares, how its shape sits against the bounds that decide
 /// whether it compiles at all, and one verdict line.
+/// W8. What a precompiled artifact says about itself, and whether *this* machine could map it.
+///
+/// Only the header is read, so everything here is the producer's claim rather than a fact about
+/// the machine code: what it was compiled from, by which wasmtime, for which triple, and as
+/// which world. The one line this command adds is the comparison against the local helper,
+/// which is the question an operator holding a `.cwasm` actually has.
+fn render_precompiled(file: &Path, inspected: &Value, report: &Value) -> String {
+    let claimed_wasmtime = clean(inspected["wasmtime"].as_str().unwrap_or("(unknown)"));
+    let claimed_target = clean(inspected["target"].as_str().unwrap_or("(unknown)"));
+    let local_wasmtime = report["wasmtime"].as_str().unwrap_or("(unknown)");
+    let local_target = report["target"].as_str().unwrap_or("(unknown)");
+
+    let mut lines = vec![
+        format!("{}", file.display()),
+        "  precompiled component (wasmtime's serialized form; read from its header only)".into(),
+        format!(
+            "  world:      {}",
+            clean(inspected["world"].as_str().unwrap_or("(unknown)"))
+        ),
+        format!("  wasmtime:   {claimed_wasmtime}"),
+        format!("  target:     {claimed_target}"),
+        format!(
+            "  sha256:     {}",
+            clean(inspected["sha256"].as_str().unwrap_or("(unknown)"))
+        ),
+        format!(
+            "  size:       {} byte(s)",
+            inspected["size"].as_u64().unwrap_or(0)
+        ),
+        format!(
+            "  component:  {} ({} byte(s))",
+            clean(
+                inspected["component_sha256"]
+                    .as_str()
+                    .unwrap_or("(unknown)")
+            ),
+            inspected["component_size"].as_u64().unwrap_or(0)
+        ),
+    ];
+
+    if claimed_wasmtime == local_wasmtime && claimed_target == local_target {
+        lines.push(format!(
+            "  this helper is wasmtime {local_wasmtime} on {local_target}: it would map this \
+             artifact rather than compile the component"
+        ));
+    } else {
+        lines.push(format!(
+            "  this helper is wasmtime {local_wasmtime} on {local_target}: it would refuse this \
+             artifact precompiled_mismatch and compile the component instead"
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn precompiled_json(inspected: &Value, report: &Value) -> Value {
+    let usable =
+        inspected["wasmtime"] == report["wasmtime"] && inspected["target"] == report["target"];
+
+    json!({
+        "file": inspected,
+        "helper": { "wasmtime": report["wasmtime"], "target": report["target"] },
+        "usable_here": usable,
+    })
+}
+
 fn render_inspect(file: &Path, inspected: &Value, report: &Value, admission: &Admission) -> String {
     let mut lines = vec![format!("{}", file.display())];
 

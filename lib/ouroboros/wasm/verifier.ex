@@ -18,6 +18,11 @@ defmodule Ouroboros.Wasm.Verifier do
       manifest: sha, world, imports, size. This is the one that closes the loop, because
       the signer's import list is provenance (D5) and the helper's is what the linker will
       actually be asked for.
+    * `verify_precompiled/2` — the *second* form's bytes against the digest the manifest
+      names for them (W8, D24). It is separate from `verify/3` because the two forms are
+      separate bytes with separate digests: a signature over the component says nothing
+      about machine code travelling beside it, and mapping unsigned machine code is the one
+      thing `Component::deserialize` being `unsafe` is about.
 
   ## Why a cross-check mismatch is quarantine and not rollback
 
@@ -128,6 +133,55 @@ defmodule Ouroboros.Wasm.Verifier do
   def cross_check(%Artifact{}, report), do: {:error, {:invalid_inspect_report, describe(report)}}
   def cross_check(other, _report), do: {:error, {:invalid_artifact, describe(other)}}
 
+  @doc """
+  Holds a bundle's precompiled section to the digest and the size the manifest names (W8).
+
+  `nil` is the ordinary case and passes when the manifest declares no block: a bundle carrying
+  the source form alone is deployable everywhere, and W8 removes nothing from that path. What
+  this refuses is the pair that matters — bytes beside a block that does not describe them, and
+  either half present without the other.
+
+  Nothing here says the node *may* map them. That is `Ouroboros.Wasm.Store.form/4`'s question
+  and the helper's `precompiled_mismatch`: this says only that the artifact in the file is the
+  artifact the signature covers.
+  """
+  @spec verify_precompiled(Artifact.t(), binary() | nil) :: :ok | {:error, term()}
+  def verify_precompiled(artifact, precompiled \\ nil)
+
+  def verify_precompiled(%Artifact{precompiled: nil}, nil), do: :ok
+
+  def verify_precompiled(%Artifact{precompiled: nil}, bytes) when is_binary(bytes),
+    do: {:error, {:unexpected_precompiled, byte_size(bytes)}}
+
+  def verify_precompiled(%Artifact{precompiled: %{}}, nil), do: {:error, :missing_precompiled}
+
+  def verify_precompiled(%Artifact{precompiled: block} = artifact, bytes) when is_binary(bytes) do
+    cond do
+      not Artifact.precompiled?(block) ->
+        {:error, {:invalid_precompiled, describe(block)}}
+
+      byte_size(bytes) != block.size ->
+        {:error, {:precompiled_size_mismatch, block.size, byte_size(bytes)}}
+
+      Artifact.digest(bytes) != block.sha256 ->
+        {:error, {:precompiled_sha256_mismatch, block.sha256}}
+
+      # The block describes a form of *this* component, and the container the helper reads
+      # names the component it was compiled from. They meet at the helper; what is checkable
+      # here is that the manifest has not been assembled out of two different artifacts.
+      not Artifact.sha256?(artifact.component_sha256) ->
+        {:error, {:invalid_component_sha256, describe(artifact.component_sha256)}}
+
+      true ->
+        :ok
+    end
+  end
+
+  def verify_precompiled(%Artifact{}, bytes),
+    do: {:error, {:invalid_precompiled, describe(bytes)}}
+
+  def verify_precompiled(other, _bytes), do: {:error, {:invalid_artifact, describe(other)}}
+
   defp verify_policy(policy) do
     if Keyword.keyword?(policy),
       do: :ok,
@@ -159,6 +213,11 @@ defmodule Ouroboros.Wasm.Verifier do
 
       not is_list(artifact.imports) or not list_of_binaries?(artifact.imports) ->
         {:error, {:invalid_component_imports, describe(artifact.imports)}}
+
+      # W8. Held to its shape here, before `Ouroboros.Wasm.Store.form/4` reads a version string
+      # out of it to decide whether this node will deserialize somebody's machine code.
+      not Artifact.precompiled?(artifact.precompiled) ->
+        {:error, {:invalid_precompiled, describe(artifact.precompiled)}}
 
       not is_map(artifact.metadata) or is_struct(artifact.metadata) ->
         {:error, :invalid_artifact_metadata}

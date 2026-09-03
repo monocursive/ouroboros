@@ -30,6 +30,7 @@
 //! | -32018 | `too_many_components` | the component cache is full and every entry has a live instance, so nothing can be evicted |
 //! | -32019 | `too_many_instances` | the instance table is full; drop one first |
 //! | -32020 | `component_too_complex` | the bytes are shaped to be expensive to compile, and were refused before the compiler saw them |
+//! | -32021 | `precompiled_mismatch` | a precompiled artifact this build cannot map: not one of these containers, or one built by another wasmtime, for another target, or from another component |
 //!
 //! One standard code travels in the same shape, because it is raised in the same places: a
 //! request whose parameters are missing or mistyped is `-32602` / `invalid_params`, and it is a
@@ -71,6 +72,14 @@ pub const TOO_MANY_INSTANCES: Kind = (-32019, "too_many_instances");
 /// [`crate::shape::check`] *before* `Component::new` runs, because cranelift cannot be
 /// interrupted once it starts and the helper is sequential behind it.
 pub const COMPONENT_TOO_COMPLEX: Kind = (-32020, "component_too_complex");
+/// A `load` was offered a precompiled artifact this helper will not map (W8, D22–D24). Raised
+/// for a container this build cannot frame or whose header it cannot read, for one built by a
+/// different wasmtime or for a different target triple, for one whose header names a component
+/// other than the one the request named, and for source bytes offered as precompiled or the
+/// reverse. Every one of them is the same fact — *these are not bytes this node may deserialize
+/// under this manifest* — and the answer to all of them is the same: fall back to the source
+/// form, which every node can always compile for itself.
+pub const PRECOMPILED_MISMATCH: Kind = (-32021, "precompiled_mismatch");
 
 /// One refusal, ready to become a JSON-RPC error object.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,6 +125,7 @@ mod tests {
         TOO_MANY_COMPONENTS,
         TOO_MANY_INSTANCES,
         COMPONENT_TOO_COMPLEX,
+        PRECOMPILED_MISMATCH,
     ];
 
     #[test]

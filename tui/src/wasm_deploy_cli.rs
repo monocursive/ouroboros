@@ -593,6 +593,12 @@ pub fn sign_params(args: &WasmSignArgs, upload: &str, bytes: &[u8]) -> Result<Ma
     // parameter the client omits is a claim the node fills in — which is the one thing a
     // manifest field deciding which world these bytes may ever enter must not be.
     params.insert("kind".into(), Value::String(args.kind.as_str().to_string()));
+    // W8. Only when the operator turned it off. The default is the node's — it is the machine
+    // that would do the compiling and the one that knows whether it has a helper — and a client
+    // that sent `true` would be asserting something about a machine it cannot see.
+    if args.no_precompile {
+        params.insert("precompile".into(), Value::Bool(false));
+    }
 
     if let Some(language) = &args.language {
         params.insert("language".into(), Value::String(language.clone()));
@@ -967,6 +973,32 @@ pub fn render_sign(answer: &Value, bundle: &Path) -> String {
         signed.kind.as_deref().unwrap_or("capability")
     ));
 
+    // W8. What the second form in this bundle is, and the exact pair of readings a node has to
+    // match to use it — because "why is this deploy still slow on that box" is answered by
+    // comparing two strings, and an operator should be able to read both of them here.
+    match &signed.precompiled {
+        Some(precompiled) => {
+            lines.push(format!(
+                "  precompiled: {} ({} bytes) for wasmtime {} on {}",
+                short(precompiled.sha256.as_deref()),
+                precompiled
+                    .size
+                    .map(|size| size.to_string())
+                    .unwrap_or_else(|| "?".into()),
+                precompiled.wasmtime.as_deref().unwrap_or("(unknown)"),
+                precompiled.target.as_deref().unwrap_or("(unknown)")
+            ));
+        }
+        None => lines.push(format!(
+            "  precompiled: none{}",
+            signed
+                .precompile_skipped
+                .as_deref()
+                .map(|why| format!(" ({why})"))
+                .unwrap_or_default()
+        )),
+    }
+
     lines.push(format!(
         "  imports: {}",
         if signed.imports.is_empty() {
@@ -1171,11 +1203,18 @@ pub fn render_list(answer: &Value) -> String {
         lines.push("rollouts: none".into());
     } else {
         lines.push("rollouts:".into());
-        lines.push("  STATE        NAME                 EPOCH  COMPONENT         NODES".into());
+        // W8. `FORM` is which of the two forms the answering node loads that component from,
+        // which is the difference between a `load` that compiles and one that maps. `?` is that
+        // node saying it cannot tell — no manifest it can read, or no helper that has reported
+        // its build — and is deliberately not drawn as `source`.
+        lines.push(
+            "  STATE        NAME                 EPOCH  COMPONENT         FORM         NODES"
+                .into(),
+        );
 
         for rollout in &list.rollouts {
             lines.push(format!(
-                "  {:<12} {:<20} {:>5}  {:<16}  {}",
+                "  {:<12} {:<20} {:>5}  {:<16}  {:<11}  {}",
                 rollout.state.as_deref().unwrap_or("?"),
                 rollout.name.as_deref().unwrap_or("(unnamed)"),
                 rollout
@@ -1183,6 +1222,7 @@ pub fn render_list(answer: &Value) -> String {
                     .map(|epoch| epoch.to_string())
                     .unwrap_or_else(|| "?".into()),
                 short(rollout.component_sha256.as_deref()),
+                rollout.form.as_deref().unwrap_or("?"),
                 rollout.nodes.join(", ")
             ));
         }
@@ -1259,6 +1299,7 @@ mod tests {
             kind: crate::cli::WasmKind::Capability,
             import,
             imports_from,
+            no_precompile: false,
             no_local_helper: true,
             dry_run: false,
             language: None,
@@ -1611,6 +1652,22 @@ mod tests {
 
         let params = sign_params(&args, "9f2c1d4e8a7b6053f1e2d3c4b5a69780", b"").expect("params");
         assert_eq!(params["kind"], "policy");
+    }
+
+    /// W8. `precompile` is sent only when the operator turned it off. The default belongs to
+    /// the node — it is the machine that would do the compiling and the one that knows whether
+    /// it has a helper — so a client that sent `true` would be asserting something about a
+    /// machine it cannot see.
+    #[test]
+    fn sign_params_ask_to_skip_the_precompile_only_when_told_to() {
+        let mut args = signing_args(vec!["log".into()], None);
+
+        let params = sign_params(&args, "9f2c1d4e8a7b6053f1e2d3c4b5a69780", b"").expect("params");
+        assert!(params.get("precompile").is_none());
+
+        args.no_precompile = true;
+        let params = sign_params(&args, "9f2c1d4e8a7b6053f1e2d3c4b5a69780", b"").expect("params");
+        assert_eq!(params["precompile"], serde_json::Value::Bool(false));
     }
 
     #[test]

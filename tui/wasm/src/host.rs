@@ -123,6 +123,7 @@ use wasmtime::{
     Config, Engine, OptLevel, ResourceLimiter, Store, StoreContextMut, Trap, WasmFeatures,
 };
 
+use crate::precompiled;
 use crate::refusal::{self, Refusal};
 use crate::shape;
 use crate::world;
@@ -362,6 +363,11 @@ struct Loaded {
     size: usize,
     imports: Vec<String>,
     exports: Vec<String>,
+    /// Which form these bytes reached the engine in: `true` for a `Component::deserialize` of an
+    /// artifact somebody else compiled (W8), `false` for a `Component::new` of the source. The
+    /// compiled code is the same either way — this is reported, never acted on, because an owner
+    /// asking why a load was fast or slow should not have to guess.
+    precompiled: bool,
     /// The cache clock's reading the last time a `load` or `instantiate` named this sha. The
     /// smallest reading among the components no instance holds is the one eviction takes.
     last_used: u64,
@@ -591,6 +597,28 @@ pub fn config() -> Config {
     config
 }
 
+/// The one engine constructor, shared by `serve` and `precompile` (W8, D23).
+///
+/// A precompiled artifact is only usable by an engine whose configuration matches the one that
+/// produced it — wasmtime records a hash of its own settings in the serialized bytes and refuses
+/// a mismatch — so a second `Config` anywhere in this binary would be a second world: a
+/// `precompile` that produced artifacts `serve` could not map, discovered at the far end of a
+/// deploy rather than here. There is one [`config`], and this is the one place it is turned into
+/// an [`Engine`]; both subcommands go through it.
+pub fn engine() -> wasmtime::Result<Engine> {
+    Engine::new(&config())
+}
+
+/// The wasmtime a precompiled artifact must have been produced by, exactly as `doctor` prints it.
+pub const WASMTIME_VERSION: &str = env!("OURO_WASMTIME_VERSION");
+
+/// The target triple it must have been produced for, exactly as `doctor` prints it.
+///
+/// Read from cargo's own `TARGET` at build time rather than from `std::env::consts`, which would
+/// answer for the host this process happens to run on — a different question on a cross-build,
+/// and the wrong one: what a serialized artifact is bound to is what it was *compiled* for.
+pub const TARGET: &str = env!("OURO_TARGET");
+
 impl Host {
     /// Builds the engine, defines the world's one import, and starts the epoch ticker.
     ///
@@ -599,7 +627,7 @@ impl Host {
     /// helper with no ticker is a helper whose deadlines do not fire, which would be worse than
     /// a helper that will not start.
     pub fn new() -> wasmtime::Result<Host> {
-        let engine = Engine::new(&config())?;
+        let engine = engine()?;
 
         let ticker = engine.clone();
         std::thread::Builder::new()
@@ -662,14 +690,26 @@ impl Host {
     /// the two beside each other instead of leaving a refusal to be discovered. Reporting a
     /// measurement decides nothing — the same `check` in the same place still refuses the same
     /// components, and `inspect` still admits nothing to either table.
+    /// A `.cwasm` is answered out of its header alone — see [`crate::precompiled`]. Reporting
+    /// what a precompiled artifact *claims* costs no `deserialize`, which is the whole point:
+    /// `inspect` admits nothing, and mapping somebody's machine code to describe it would be
+    /// admitting it (D24).
     pub fn inspect(&self, params: &Value) -> Result<Value, Refusal> {
         let path = required_str(params, "path")?;
-        let bytes = read_component(path)?;
+        let bytes = read_offered(path)?;
         let sha256 = sha256_hex(&bytes);
+
+        if precompiled::is_container(&bytes) {
+            let framing = precompiled::read(&bytes)?;
+            return Ok(precompiled::report(&framing, &sha256, bytes.len()));
+        }
+
+        source_sized(path, bytes.len())?;
         let (component, census) = self.compile_measured(&bytes)?;
         let (imports, exports) = self.declared_names(&component);
 
         Ok(json!({
+            "precompiled": false,
             "sha256": sha256,
             "world": world::identify(&component, &self.engine),
             "imports": imports,
@@ -677,6 +717,75 @@ impl Host {
             "size": bytes.len(),
             "shape": shape_report(&census),
         }))
+    }
+
+    /// `precompile`: compile once, here, and write what a matching node may deserialize (D23).
+    ///
+    /// The order is the whole of it. [`crate::shape::check`] runs **first**, exactly as it does
+    /// in front of `Component::new` on a node, so the machine that signs applies §7.3 in full
+    /// and a component past a structural bound is refused here with the name a node's `load`
+    /// would have used. Then the compile. Then the world check — on the artifact that was
+    /// actually produced, deserialized in this process, because checking the source and shipping
+    /// the output would leave the two joined by nothing but hope.
+    ///
+    /// Answers the same census `inspect` reports plus what the container now says about itself,
+    /// so a signer records the wasmtime and the triple it really used rather than the ones it
+    /// believes it has.
+    pub fn precompile(&self, bytes: &[u8], kind: world::Kind) -> Result<(Vec<u8>, Value), Refusal> {
+        let census = shape::check(bytes)?;
+
+        let serialized = self.engine.precompile_component(bytes).map_err(|error| {
+            refusal::refuse(
+                refusal::COMPILE_FAILED,
+                bounded(&format!("{error:#}"), MAX_ERROR_BYTES),
+            )
+        })?;
+
+        // SAFETY: these are the bytes this process produced from `precompile_component` one
+        // statement ago, on this engine, and they have not left this function. `deserialize` is
+        // unsafe because wasmtime does not validate a serialized artifact against a malicious
+        // producer (D24); here the producer is us.
+        let component =
+            unsafe { Component::deserialize(&self.engine, &serialized) }.map_err(|error| {
+                refusal::refuse(
+                    refusal::COMPILE_FAILED,
+                    bounded(
+                        &format!("this build could not read back its own artifact: {error:#}"),
+                        MAX_ERROR_BYTES,
+                    ),
+                )
+            })?;
+
+        world::check(&component, &self.engine, kind)?;
+        let (imports, exports) = self.declared_names(&component);
+
+        let header = precompiled::Header {
+            wasmtime: WASMTIME_VERSION.to_string(),
+            target: TARGET.to_string(),
+            world: kind.id().to_string(),
+            kind,
+            component_sha256: sha256_hex(bytes),
+            component_size: bytes.len() as u64,
+        };
+        let container = precompiled::wrap(&header, &serialized)?;
+
+        let report = json!({
+            "sha256": header.component_sha256,
+            "world": kind.id(),
+            "kind": kind.name(),
+            "imports": imports,
+            "exports": exports,
+            "size": bytes.len(),
+            "shape": shape_report(&census),
+            "precompiled": {
+                "sha256": sha256_hex(&container),
+                "size": container.len(),
+                "wasmtime": WASMTIME_VERSION,
+                "target": TARGET,
+            },
+        });
+
+        Ok((container, report))
     }
 
     /// `load`: admit bytes to the component cache under the sha they actually hash to.
@@ -690,33 +799,34 @@ impl Host {
     /// eviction actually happens, so the bound is enforced where it matters rather than trusted
     /// from a check a few hundred milliseconds earlier.
     pub fn load(&self, params: &Value) -> Result<Value, Refusal> {
+        if precompiled_requested(params)? {
+            self.load_precompiled(params)
+        } else {
+            self.load_source(params)
+        }
+    }
+
+    fn load_source(&self, params: &Value) -> Result<Value, Refusal> {
         let expected = required_str(params, "sha256")?.to_ascii_lowercase();
         let path = required_str(params, "path")?;
         let kind = requested_kind(params)?;
 
-        {
-            let mut components = self.components.lock().expect("components lock");
-            // A cache hit is a hit for *this* world only. The same bytes offered as the other
-            // world are read and checked again rather than answered out of the table: the
-            // cached record names one world, and handing it back for the other would be this
-            // helper agreeing to an assertion it never checked.
-            if let Some(loaded) = components.touch(&expected).filter(|held| held.kind == kind) {
-                return Ok(json!({
-                    "sha256": echo(&expected),
-                    "world": loaded.world,
-                    "imports": loaded.imports,
-                    "exports": loaded.exports,
-                    "size": loaded.size,
-                    "cached": true,
-                    "evicted": [],
-                }));
-            }
-            if components.full() && components.victim(&self.pinned()).is_none() {
-                return Err(nothing_evictable());
-            }
+        if let Some(cached) = self.cache_hit(&expected, kind)? {
+            return Ok(cached);
         }
 
-        let bytes = read_component(path)?;
+        let bytes = read_offered(path)?;
+        if precompiled::is_container(&bytes) {
+            return Err(refusal::refuse(
+                refusal::PRECOMPILED_MISMATCH,
+                format!(
+                    "{} holds a precompiled artifact; source bytes were asked for",
+                    echo(path)
+                ),
+            ));
+        }
+        source_sized(path, bytes.len())?;
+
         let actual = sha256_hex(&bytes);
         if actual != expected {
             return Err(refusal::refuse(
@@ -733,24 +843,196 @@ impl Host {
         world::check(&component, &self.engine, kind)?;
         let (imports, exports) = self.declared_names(&component);
 
-        let loaded = Loaded {
-            component,
-            kind,
-            world: kind.id(),
-            size: bytes.len(),
-            imports,
-            exports,
-            last_used: 0,
-        };
+        self.admit(
+            actual.clone(),
+            Loaded {
+                component,
+                kind,
+                world: kind.id(),
+                size: bytes.len(),
+                imports,
+                exports,
+                precompiled: false,
+                last_used: 0,
+            },
+            actual,
+        )
+    }
+
+    /// `load` with `precompiled: true`: map an artifact somebody else compiled (W8, D24).
+    ///
+    /// # What this trusts, and what it checks
+    ///
+    /// `Component::deserialize` is `unsafe` because wasmtime does not validate a serialized
+    /// artifact against a malicious producer: the bytes are machine code and a relocation
+    /// table, and mapping hostile ones is mapping hostile code. **The trust is the signature.**
+    /// A node deserializes only bytes whose sha is in a manifest a trusted signer signed, read
+    /// from its own content-addressed store, and never bytes that arrived any other way — which
+    /// is why `precompiled: true` is a parameter the owner has to assert and why every check
+    /// below runs before the `unsafe` block: the digest the manifest named, the container the
+    /// signer wrote, the wasmtime and the triple this build reads, and the source component the
+    /// manifest is about. `world::check` then runs on the deserialized component exactly as it
+    /// does on a compiled one, because the world is the linker's contract and no form of the
+    /// bytes is exempt from it.
+    ///
+    /// [`crate::shape::check`] deliberately does **not** run. There is nothing to bound: these
+    /// bytes are not going to a compiler, the work is linear in their length, and the length is
+    /// bounded by [`crate::precompiled::MAX_PAYLOAD_BYTES`] before anything is read. The signer
+    /// applied §7.3 in full when it compiled (D23), which is where that bound belongs once
+    /// cranelift is no longer on this node's hot path.
+    fn load_precompiled(&self, params: &Value) -> Result<Value, Refusal> {
+        let expected = required_str(params, "sha256")?.to_ascii_lowercase();
+        // The *source* component this artifact is for, from the signed manifest. It is the
+        // cache key, because lane W's identity is the component's bytes and not the machine
+        // code somebody made of them (D2) — so a `load` of either form and an `instantiate`
+        // afterwards name the same sha, and nothing downstream has to know which form ran.
+        let component_sha = required_str(params, "component")?.to_ascii_lowercase();
+        let path = required_str(params, "path")?;
+        let kind = requested_kind(params)?;
+
+        if let Some(cached) = self.cache_hit(&component_sha, kind)? {
+            return Ok(cached);
+        }
+
+        let bytes = read_offered(path)?;
+        let actual = sha256_hex(&bytes);
+        if actual != expected {
+            return Err(refusal::refuse(
+                refusal::SHA_MISMATCH,
+                format!(
+                    "{} hashes to {actual}, not the requested {}",
+                    echo(path),
+                    echo(&expected)
+                ),
+            ));
+        }
+
+        let framing = precompiled::read(&bytes)?;
+        let header = &framing.header;
+
+        if header.wasmtime != WASMTIME_VERSION || header.target != TARGET {
+            return Err(refusal::refuse(
+                refusal::PRECOMPILED_MISMATCH,
+                format!(
+                    "the artifact was produced by wasmtime {} for {}; this helper is wasmtime \
+                     {WASMTIME_VERSION} for {TARGET}",
+                    echo(&header.wasmtime),
+                    echo(&header.target)
+                ),
+            ));
+        }
+
+        if header.component_sha256 != component_sha {
+            return Err(refusal::refuse(
+                refusal::PRECOMPILED_MISMATCH,
+                format!(
+                    "the artifact was compiled from {}, not from the requested {}",
+                    echo(&header.component_sha256),
+                    echo(&component_sha)
+                ),
+            ));
+        }
+
+        if header.kind != kind {
+            return Err(refusal::refuse(
+                refusal::PRECOMPILED_MISMATCH,
+                format!(
+                    "the artifact was compiled as world {}; it is offered as {}",
+                    header.kind.id(),
+                    kind.id()
+                ),
+            ));
+        }
+
+        let payload = &bytes[framing.payload_offset()..];
+
+        // SAFETY: wasmtime does not validate a serialized artifact against a malicious producer,
+        // so what makes this sound is not the bytes but where they came from: a manifest a
+        // trusted signer signed named this digest, the owner read the file out of its own
+        // content-addressed store, and this helper has just recomputed that digest from what it
+        // read. Bytes that arrived any other way never reach this line.
+        let component =
+            unsafe { Component::deserialize(&self.engine, payload) }.map_err(|error| {
+                refusal::refuse(
+                    refusal::PRECOMPILED_MISMATCH,
+                    bounded(
+                        &format!("this engine cannot map the artifact: {error:#}"),
+                        MAX_ERROR_BYTES,
+                    ),
+                )
+            })?;
+
+        // The world is the linker's contract, and a form of the bytes is not an exemption from
+        // it: a policy component offered as a capability is refused here whether it arrived
+        // compiled or precompiled, and so is the reverse.
+        world::check(&component, &self.engine, kind)?;
+        let (imports, exports) = self.declared_names(&component);
+
+        self.admit(
+            component_sha.clone(),
+            Loaded {
+                component,
+                kind,
+                world: kind.id(),
+                // The **source** size, from the header, so a cross-check against the signed
+                // manifest reads the same number whichever form this node loaded.
+                size: header.component_size as usize,
+                imports,
+                exports,
+                precompiled: true,
+                last_used: 0,
+            },
+            component_sha,
+        )
+    }
+
+    /// The cache read both `load` paths take: a hit for *this* world only.
+    ///
+    /// The same bytes offered as the other world are read and checked again rather than answered
+    /// out of the table — the cached record names one world, and handing it back for the other
+    /// would be this helper agreeing to an assertion it never checked. A hit does not care which
+    /// *form* the entry was loaded in: the compiled code is the same, and re-reading a component
+    /// this helper already holds to answer in the other form would spend a load to change a
+    /// label. The form the entry does hold is reported, so an owner sees which one it got.
+    ///
+    /// A full cache is looked at here too, before the file is read, so a cache with nothing
+    /// evictable refuses without spending a compile.
+    fn cache_hit(&self, sha: &str, kind: world::Kind) -> Result<Option<Value>, Refusal> {
+        let mut components = self.components.lock().expect("components lock");
+        if let Some(loaded) = components.touch(sha).filter(|held| held.kind == kind) {
+            return Ok(Some(json!({
+                "sha256": echo(sha),
+                "world": loaded.world,
+                "imports": loaded.imports,
+                "exports": loaded.exports,
+                "size": loaded.size,
+                "precompiled": loaded.precompiled,
+                "cached": true,
+                "evicted": [],
+            })));
+        }
+        if components.full() && components.victim(&self.pinned()).is_none() {
+            return Err(nothing_evictable());
+        }
+        Ok(None)
+    }
+
+    /// Admits one freshly-read component to the cache under `sha`, evicting to make room.
+    ///
+    /// A full cache is looked at twice — once in [`Host::cache_hit`], before the file is read,
+    /// and again here where the eviction actually happens — so the bound is enforced where it
+    /// matters rather than trusted from a check a few hundred milliseconds earlier.
+    fn admit(&self, sha: String, loaded: Loaded, reported_sha: String) -> Result<Value, Refusal> {
         // The same shape `inspect` reports, so the owner can cross-check a load against the
         // signed manifest without a second round trip (docs/WASM.md §7.5) — plus what this
         // load cost somebody else, so a reclaim is never a fault the owner cannot explain.
         let mut answer = json!({
-            "sha256": actual,
+            "sha256": reported_sha,
             "world": loaded.world,
             "imports": loaded.imports,
             "exports": loaded.exports,
             "size": loaded.size,
+            "precompiled": loaded.precompiled,
             "cached": false,
         });
 
@@ -758,14 +1040,14 @@ impl Host {
         let mut evicted = Vec::new();
         while components.full() {
             match components.victim(&self.pinned()) {
-                Some(sha) => {
-                    components.evict(&sha);
-                    evicted.push(echo(&sha));
+                Some(victim) => {
+                    components.evict(&victim);
+                    evicted.push(echo(&victim));
                 }
                 None => return Err(nothing_evictable()),
             }
         }
-        components.insert(actual, loaded);
+        components.insert(sha, loaded);
         answer["evicted"] = json!(evicted);
         Ok(answer)
     }
@@ -1165,7 +1447,57 @@ fn world_gap(kind: world::Kind, export: &str, error: &wasmtime::Error) -> Refusa
     )
 }
 
-fn read_component(path: &str) -> Result<Vec<u8>, Refusal> {
+/// The largest file `inspect` or `load` will read off disk before it knows which form it is.
+///
+/// Neither method can tell a component from a precompiled artifact without looking at the first
+/// nine bytes, so the read is bounded by the larger of the two ceilings and the *applicable* one
+/// is enforced the moment the form is known ([`source_sized`], and
+/// [`crate::precompiled::read`]'s own framing check). One read, both bounds.
+const MAX_OFFERED_BYTES: u64 = MAX_COMPONENT_BYTES
+    + precompiled::MAX_PAYLOAD_BYTES
+    + precompiled::MAX_HEADER_BYTES as u64
+    + precompiled::HEADER_BYTES as u64;
+
+/// Reads whatever the peer pointed at, bounded by [`MAX_OFFERED_BYTES`].
+fn read_offered(path: &str) -> Result<Vec<u8>, Refusal> {
+    read_component(path, MAX_OFFERED_BYTES)
+}
+
+/// Reads source component bytes under the same ceiling `load` holds them to.
+///
+/// Public because `precompile` is a subcommand rather than a method: the signer reads its input
+/// through the node's own reader — a regular file, no fifo, under
+/// [`MAX_COMPONENT_BYTES`] — so what it refuses to compile is exactly what a node would have
+/// refused to read.
+pub fn read_source(path: &str) -> Result<Vec<u8>, Refusal> {
+    let bytes = read_component(path, MAX_COMPONENT_BYTES)?;
+    if precompiled::is_container(&bytes) {
+        return Err(refusal::refuse(
+            refusal::PRECOMPILED_MISMATCH,
+            format!(
+                "{} already holds a precompiled artifact; source component bytes were expected",
+                echo(path)
+            ),
+        ));
+    }
+    Ok(bytes)
+}
+
+/// The source-component ceiling, applied once the bytes are known not to be a container.
+fn source_sized(path: &str, len: usize) -> Result<(), Refusal> {
+    if len as u64 > MAX_COMPONENT_BYTES {
+        return Err(refusal::refuse(
+            refusal::UNREADABLE_COMPONENT,
+            format!(
+                "{}: larger than the {MAX_COMPONENT_BYTES} byte cap",
+                echo(path)
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn read_component(path: &str, cap: u64) -> Result<Vec<u8>, Refusal> {
     let unreadable = |detail: String| {
         refusal::refuse(
             refusal::UNREADABLE_COMPONENT,
@@ -1185,14 +1517,12 @@ fn read_component(path: &str) -> Result<Vec<u8>, Refusal> {
 
     let mut bytes = Vec::new();
     // One byte past the cap, so an over-cap file is detected without being read whole.
-    file.take(MAX_COMPONENT_BYTES + 1)
+    file.take(cap + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| unreadable(error.to_string()))?;
 
-    if bytes.len() as u64 > MAX_COMPONENT_BYTES {
-        return Err(unreadable(format!(
-            "larger than the {MAX_COMPONENT_BYTES} byte cap"
-        )));
+    if bytes.len() as u64 > cap {
+        return Err(unreadable(format!("larger than the {cap} byte cap")));
     }
     Ok(bytes)
 }
@@ -1275,6 +1605,19 @@ fn requested_kind(params: &Value) -> Result<world::Kind, Refusal> {
             ))
         }),
         Some(_other) => Err(invalid_params("kind must be a string")),
+    }
+}
+
+/// Whether this `load` is offering a precompiled artifact (W8).
+///
+/// Absent means source bytes, which is what every caller written before W8 meant and is the form
+/// every node can always take. A present value that is not a boolean is `invalid_params` rather
+/// than a guess: which form a set of bytes is is not something to be lenient about.
+fn precompiled_requested(params: &Value) -> Result<bool, Refusal> {
+    match params.get("precompiled") {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(flag)) => Ok(*flag),
+        Some(_other) => Err(invalid_params("precompiled must be a boolean")),
     }
 }
 
@@ -1414,6 +1757,7 @@ mod tests {
                 size: bytes.len(),
                 imports: vec!["now".to_string()],
                 exports: Vec::new(),
+                precompiled: false,
                 last_used: 0,
             },
         );
@@ -1459,6 +1803,7 @@ mod tests {
                     size: bytes.len(),
                     imports: Vec::new(),
                     exports: Vec::new(),
+                    precompiled: false,
                     last_used: 0,
                 },
             );

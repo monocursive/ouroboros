@@ -106,6 +106,53 @@ defmodule Ouroboros.Wasm.PoolTest do
       assert summary.worlds == ["ouroboros:capability@0.2.0"]
     end
 
+    # W8. The two strings a precompiled artifact is bound to, read off the report the handshake
+    # already accepted rather than asked for again. `Ouroboros.Wasm.Store.form/4` calls this on
+    # the way to every load, so what it says decides whether this node will
+    # `Component::deserialize` machine code somebody else produced (D22, D24).
+    test "helper_build reports the wasmtime and the target a doctor named" do
+      pool =
+        start_pool(
+          doctor_helper(
+            ~S(\"usable\":true,\"worlds\":[\"ouroboros:capability@0.1.0\"],) <>
+              ~S(\"wasmtime\":\"47.0.0\",\"target\":\"x86_64-unknown-linux-gnu\")
+          )
+        )
+
+      assert {:ok, _report} = Pool.doctor(pool)
+
+      assert Pool.helper_build(pool) == %{
+               "wasmtime" => "47.0.0",
+               "target" => "x86_64-unknown-linux-gnu"
+             }
+    end
+
+    # A helper too old to report a triple cannot be matched against one, and guessing this
+    # node's own would be exactly the guess D22 forbids: the answer is "I do not know", and
+    # `form/4` reads that as the source form, which every node can always compile.
+    test "a helper that names no target is a build this node cannot claim to know" do
+      pool =
+        start_pool(
+          doctor_helper(
+            ~S(\"usable\":true,\"worlds\":[\"ouroboros:capability@0.1.0\"],\"wasmtime\":\"48.0.1\")
+          )
+        )
+
+      assert {:ok, _report} = Pool.doctor(pool)
+      assert Pool.helper_build(pool) == nil
+    end
+
+    # `wasm.list` is `:read` and W5's rule is that it never starts a helper to answer. A pool
+    # that has not connected has no report, and asking with `connect: false` says so rather
+    # than spawning one to find out.
+    test "a reader asks without connecting, and an idle pool answers that it does not know" do
+      pool = start_pool(responding_helper())
+
+      assert %{phase: :idle} = Pool.status(pool)
+      assert Pool.helper_build(pool, connect: false) == nil
+      assert %{phase: :idle} = Pool.status(pool)
+    end
+
     test "a helper that never answers its handshake is broken, not waited on" do
       pool = start_pool(silent_helper(), handshake_timeout_ms: 150)
 

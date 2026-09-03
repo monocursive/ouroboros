@@ -7,11 +7,16 @@
 //! runtime whose own forge bans `load_nif` at three layers has no business hosting untrusted
 //! code in its own address space.
 //!
-//! Two entry points, like every helper in this house:
+//! Three entry points, two of them like every helper in this house:
 //!   * `serve` — read requests from stdin, write responses to stdout. The mode
 //!     `Ouroboros.Wasm.Pool` spawns.
 //!   * `doctor` — report what this build can contain, print the JSON, exit. No side effects and
 //!     no engine left running.
+//!   * `precompile` — compile one component into the serialized form a matching node may map,
+//!     and exit (W8, docs/WASM.md D23). It is the *signing* side of the lane: the machine that
+//!     signs is now the machine that pays for compilation, and it applies §7.3's structural
+//!     bounds in full before it does, so a component past a bound is refused here with the name
+//!     a node's `load` would have used.
 //!
 //! # What contains what
 //!
@@ -23,6 +28,8 @@
 //! * [`host`] is the boundary itself — a linker that defines `log` and nothing else, and three
 //!   mandatory bounds (fuel, an epoch deadline, a memory ceiling) that no request can opt out
 //!   of. Enforcement: an import this helper does not define has nothing to bind to.
+//! * [`precompiled`] is the container a compiled artifact travels in, and the header a node
+//!   reads — the wasmtime, the triple, the world and the source component — before it maps one.
 //! * [`refusal`] is every way this helper says no, one private code and one stable name each.
 //! * [`codec`] and [`server`] are the pipe: 8 MiB frames capped as they are read, a noise
 //!   budget, six methods and no seventh.
@@ -34,6 +41,7 @@ mod args;
 mod codec;
 mod doctor;
 mod host;
+mod precompiled;
 mod refusal;
 mod server;
 mod shape;
@@ -64,6 +72,12 @@ async fn run(args: args::Args) -> ExitCode {
             println!("{}", doctor::report_pretty());
             ExitCode::SUCCESS
         }
+        args::Command::Precompile {
+            input,
+            output,
+            kind,
+        } => precompile(&input, &output, &kind),
+
         args::Command::Serve => {
             // A helper that cannot build an engine cannot contain anything, so it refuses to
             // pretend it is serving. The pool sees the process die on its handshake and enters
@@ -88,4 +102,59 @@ async fn run(args: args::Args) -> ExitCode {
             }
         }
     }
+}
+
+/// `precompile <in.wasm> <out.cwasm> [--kind]`.
+///
+/// Refusals print as the same JSON object the wire carries — `{"refusal": …, "message": …}` — so
+/// a signer scripting this reads one shape whether it drove the helper over a pipe or over argv,
+/// and exits 1. Success prints the census and what was produced, and exits 0.
+fn precompile(input: &str, output: &str, kind: &str) -> ExitCode {
+    let Some(kind) = world::Kind::parse(kind) else {
+        let known: Vec<&str> = world::KINDS.iter().map(|world| world.name()).collect();
+        eprintln!(
+            "ouro-wasm: --kind must be one of {}; got `{kind}`",
+            known.join(", ")
+        );
+        return ExitCode::from(2);
+    };
+
+    let host = match host::Host::new() {
+        Ok(host) => host,
+        Err(error) => {
+            eprintln!("ouro-wasm: no wasmtime engine on this host: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Read through the same bounded reader `load` uses, so the signer refuses an over-cap or
+    // not-a-file input exactly as a node would.
+    let bytes = match host::read_source(input) {
+        Ok(bytes) => bytes,
+        Err(refusal) => return refused(refusal),
+    };
+
+    let (container, report) = match host.precompile(&bytes, kind) {
+        Ok(produced) => produced,
+        Err(refusal) => return refused(refusal),
+    };
+
+    if let Err(error) = std::fs::write(output, &container) {
+        eprintln!("ouro-wasm: {output}: {error}");
+        return ExitCode::FAILURE;
+    }
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string())
+    );
+    ExitCode::SUCCESS
+}
+
+fn refused(refusal: refusal::Refusal) -> ExitCode {
+    eprintln!(
+        "{}",
+        serde_json::json!({ "refusal": refusal.refusal, "code": refusal.code, "message": refusal.message })
+    );
+    ExitCode::FAILURE
 }

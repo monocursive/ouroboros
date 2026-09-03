@@ -95,7 +95,7 @@ defmodule Ouroboros.Wasm.RolloutTest do
   end
 
   describe "the start spec" do
-    test "names all six keys that decide what is being evaluated", context do
+    test "names all seven keys that decide what is being evaluated", context do
       artifact = artifact!(context, start: %{id: "wasm/greeter", config: ~s({"a":1})})
 
       state = Rollout.start_state(artifact, pool: :my_pool, store_root: "/tmp/x", limits: %{f: 1})
@@ -108,6 +108,9 @@ defmodule Ouroboros.Wasm.RolloutTest do
                :limits,
                :name,
                :pool,
+               # W8. The manifest's precompiled block, so an evaluation runs the form the
+               # deploy will and a signed spec cannot choose the other one.
+               :precompiled,
                :store_root
              ]
 

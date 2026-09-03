@@ -462,7 +462,7 @@ defmodule Ouroboros.Wasm.PolicyKindTest do
   defp decode_manifest(manifest) do
     envelope =
       JSON.encode!(%{
-        "bundle" => 1,
+        "bundle" => 2,
         "manifest" => Base.encode64(:erlang.term_to_binary(manifest, [:deterministic])),
         "signer" => "s",
         "signature" => Base.encode64(:binary.copy("\0", 64))
@@ -470,7 +470,7 @@ defmodule Ouroboros.Wasm.PolicyKindTest do
 
     bundle =
       "OUROWASM" <>
-        <<1::8, byte_size(envelope)::32, byte_size(@bytes)::32>> <> envelope <> @bytes
+        <<2::8, byte_size(envelope)::32, 0::32, byte_size(@bytes)::32>> <> envelope <> @bytes
 
     Bundle.decode(bundle)
   end

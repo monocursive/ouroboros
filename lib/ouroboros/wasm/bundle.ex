@@ -27,15 +27,36 @@ defmodule Ouroboros.Wasm.Bundle do
 
   ## The framing, and why the big half is not base64
 
-  A fixed 17-byte header, a bounded JSON envelope, and then the component bytes raw:
+  A fixed 21-byte header, a bounded JSON envelope, an optional precompiled artifact, and then
+  the component bytes raw:
 
       offset  0   "OUROWASM"                  magic
-      offset  8   0x01                        format version, exactly
+      offset  8   0x02                        format version, exactly
       offset  9   envelope length             uint32, big-endian, <= #{64 * 1024}
-      offset 13   component length            uint32, big-endian, <= the component cap
-      offset 17   envelope                    JSON, UTF-8
+      offset 13   precompiled length          uint32, big-endian, 0 or <= the precompiled cap
+      offset 17   component length            uint32, big-endian, <= the component cap
+      offset 21   envelope                    JSON, UTF-8
+              …   precompiled                 exactly `precompiled length` bytes (may be none)
               …   component                   exactly `component length` bytes
               …   nothing. Trailing data is a refusal.
+
+  ## Two forms, one file (W8, D22)
+
+  Format 2 carries a second length-prefixed section: wasmtime's serialized form of the same
+  component, produced at sign time by `ouro-wasm precompile` (D23). It is present exactly when
+  the signed manifest declares a `precompiled` block, and `verify/2` binds **each form to its
+  own sha** — the manifest's `component_sha256` to the component bytes, its `precompiled.sha256`
+  to the artifact bytes — because a signature over one digest says nothing about bytes beside it.
+  A bundle carrying a section the manifest does not declare, or declaring one it does not carry,
+  is refused: those are two statements about one file that disagree.
+
+  The precompiled section sits **before** the component rather than after it, which is not a
+  taste. `wasm.sign` answers with the bundle's *prefix* and the client appends the exact bytes
+  it uploaded (§7.6): the client holds the component and has never seen the artifact, so the
+  only ordering in which the client still composes nothing is the one where everything it did
+  not produce comes first. Format 1 files are refused by version — the manifest's signed half
+  gained a field, so a format-1 bundle could not have reconstructed anyway, and "your file is
+  from a build before W8" is a better answer than a fixed point that fails for no stated reason.
 
   The envelope is JSON because it is a few hundred bytes that a person may want to read
   with `head`, and the two fields in it that are not text — the manifest term and the
@@ -75,8 +96,8 @@ defmodule Ouroboros.Wasm.Bundle do
   @extension ".ouro-wasm"
 
   @magic "OUROWASM"
-  @format_version 1
-  @header_bytes 17
+  @format_version 2
+  @header_bytes 21
 
   # A few hundred bytes in practice: a manifest term, a signer id, and 88 characters of
   # base64. Sixty-four kibibytes is far above every legitimate value — the signer's own
@@ -106,6 +127,14 @@ defmodule Ouroboros.Wasm.Bundle do
   # component cap would be a second place for the two to disagree.
   @default_max_component_bytes 16 * 1024 * 1024
 
+  # What a *precompiled* section may be, as a multiple of the component ceiling. Machine code is
+  # bigger than the wasm it came from and the ratio is not constant: measured on this build the
+  # 48 KiB reference guest serializes to 258 093 bytes (5.3×, fixed overhead dominating) and the
+  # worst shape §7.3 admits — 4 035 787 bytes, 20 000 functions — to 11 092 495 (2.75×). Eight
+  # times the component ceiling is generous against both and is still a number, which is the
+  # requirement: a section a file sizes is a section this node allocates.
+  @precompiled_multiple 8
+
   @signature_bytes 64
   @max_signer_bytes 256
 
@@ -124,10 +153,12 @@ defmodule Ouroboros.Wasm.Bundle do
     :imports,
     :size,
     :created_at,
+    # W8
+    :precompiled,
     :metadata
   ]
 
-  @type decoded :: %{artifact: Artifact.t(), bytes: binary()}
+  @type decoded :: %{artifact: Artifact.t(), bytes: binary(), precompiled: binary() | nil}
 
   @doc "The extension one of these files is written under."
   @spec extension() :: String.t()
@@ -144,9 +175,19 @@ defmodule Ouroboros.Wasm.Bundle do
     end
   end
 
-  @doc "The largest legal bundle: the component ceiling plus the header and envelope."
+  @doc """
+  The largest precompiled artifact a bundle may carry (W8).
+
+  Derived from the component ceiling rather than configured beside it, so an operator who raises
+  what a signer will look at raises what its output may be in one place.
+  """
+  @spec max_precompiled_bytes() :: pos_integer()
+  def max_precompiled_bytes, do: max_component_bytes() * @precompiled_multiple
+
+  @doc "The largest legal bundle: both ceilings plus the header and envelope."
   @spec max_bytes() :: pos_integer()
-  def max_bytes, do: max_component_bytes() + @max_envelope_bytes + @header_bytes
+  def max_bytes,
+    do: max_component_bytes() + max_precompiled_bytes() + @max_envelope_bytes + @header_bytes
 
   @doc """
   Encodes one signed artifact and the bytes it describes.
@@ -155,41 +196,59 @@ defmodule Ouroboros.Wasm.Bundle do
   bundle that could not be verified is a file whose only future is a refusal somewhere
   less convenient than here.
   """
-  @spec encode(Artifact.t(), binary()) :: {:ok, binary()} | {:error, term()}
-  def encode(%Artifact{} = artifact, bytes) when is_binary(bytes) do
+  @spec encode(Artifact.t(), binary(), binary() | nil) :: {:ok, binary()} | {:error, term()}
+  def encode(artifact, bytes, precompiled \\ nil)
+
+  def encode(%Artifact{} = artifact, bytes, precompiled)
+      when is_binary(bytes) and (is_binary(precompiled) or is_nil(precompiled)) do
     with :ok <- describes?(artifact, bytes),
-         {:ok, prefix} <- prefix(artifact) do
+         {:ok, prefix} <- prefix(artifact, precompiled) do
       {:ok, prefix <> bytes}
     end
   end
 
-  def encode(%Artifact{}, bytes), do: {:error, {:invalid_component, describe(bytes)}}
-  def encode(artifact, _bytes), do: {:error, {:invalid_artifact, describe(artifact)}}
+  def encode(%Artifact{}, bytes, precompiled) when is_binary(bytes),
+    do: {:error, {:invalid_precompiled, describe(precompiled)}}
+
+  def encode(%Artifact{}, bytes, _precompiled),
+    do: {:error, {:invalid_component, describe(bytes)}}
+
+  def encode(artifact, _bytes, _precompiled),
+    do: {:error, {:invalid_artifact, describe(artifact)}}
 
   @doc """
   Everything in a bundle except the component: the header and the envelope.
 
   This exists because of where the two halves are. `wasm.sign` runs on a node that has
   the key and the policy; the operator running `ouro wasm sign` already holds the exact
-  bytes they submitted. So the node answers with this — a few hundred bytes, one frame,
-  no chunked download — and the client writes it followed by the file it read. The header
-  states the component length, so the concatenation the client performs is the whole of
-  its knowledge of this format: it appends bytes and never composes a manifest.
+  bytes they submitted. So the node answers with this — the header, the envelope, and, when
+  the signer compiled one, the precompiled artifact the client has never seen — and the
+  client writes it followed by the file it read. The header states the component length, so
+  the concatenation the client performs is the whole of its knowledge of this format: it
+  appends bytes and never composes a manifest.
+
+  `precompiled` must be present exactly when the manifest declares a block, and must be the
+  bytes that block's sha names. Both are checked here rather than at the reader: a prefix that
+  could only ever be refused is one worth refusing where it is built.
   """
-  @spec prefix(Artifact.t()) :: {:ok, binary()} | {:error, term()}
-  def prefix(%Artifact{signature: %{signer: signer, value: value}} = artifact)
+  @spec prefix(Artifact.t(), binary() | nil) :: {:ok, binary()} | {:error, term()}
+  def prefix(artifact, precompiled \\ nil)
+
+  def prefix(%Artifact{signature: %{signer: signer, value: value}} = artifact, precompiled)
       when is_binary(signer) and is_binary(value) do
     with :ok <- signed?(artifact),
+         :ok <- carries_precompiled?(artifact, precompiled),
          {:ok, envelope} <- envelope(artifact, signer, value) do
       {:ok,
        @magic <>
-         <<@format_version::8, byte_size(envelope)::32, artifact.size::32>> <>
-         envelope}
+         <<@format_version::8, byte_size(envelope)::32, precompiled_size(precompiled)::32,
+           artifact.size::32>> <>
+         envelope <> (precompiled || "")}
     end
   end
 
-  def prefix(%Artifact{}), do: {:error, :signature_required}
-  def prefix(artifact), do: {:error, {:invalid_artifact, describe(artifact)}}
+  def prefix(%Artifact{}, _precompiled), do: {:error, :signature_required}
+  def prefix(artifact, _precompiled), do: {:error, {:invalid_artifact, describe(artifact)}}
 
   @doc """
   Parses one bundle into the manifest it carries and the bytes beside it.
@@ -199,13 +258,16 @@ defmodule Ouroboros.Wasm.Bundle do
   """
   @spec decode(binary()) :: {:ok, decoded()} | {:error, term()}
   def decode(binary) when is_binary(binary) do
-    with {:ok, envelope_len, component_len} <- header(binary),
-         :ok <- exact_length(binary, envelope_len, component_len),
+    with {:ok, envelope_len, precompiled_len, component_len} <- header(binary),
+         :ok <- exact_length(binary, envelope_len, precompiled_len, component_len),
          envelope = binary_part(binary, @header_bytes, envelope_len),
-         bytes = binary_part(binary, @header_bytes + envelope_len, component_len),
+         precompiled = section(binary, @header_bytes + envelope_len, precompiled_len),
+         bytes =
+           binary_part(binary, @header_bytes + envelope_len + precompiled_len, component_len),
          {:ok, fields} <- envelope_fields(envelope),
-         {:ok, artifact} <- artifact(fields) do
-      {:ok, %{artifact: artifact, bytes: bytes}}
+         {:ok, artifact} <- artifact(fields),
+         :ok <- carries_precompiled?(artifact, precompiled) do
+      {:ok, %{artifact: artifact, bytes: bytes, precompiled: precompiled}}
     end
   end
 
@@ -222,8 +284,14 @@ defmodule Ouroboros.Wasm.Bundle do
   def verify(binary, trust_policy \\ [])
 
   def verify(binary, trust_policy) when is_binary(binary) and is_list(trust_policy) do
-    with {:ok, %{artifact: artifact, bytes: bytes} = decoded} <- decode(binary),
-         :ok <- Verifier.verify(artifact, bytes, trust_policy) do
+    with {:ok, %{artifact: artifact, bytes: bytes, precompiled: precompiled} = decoded} <-
+           decode(binary),
+         :ok <- Verifier.verify(artifact, bytes, trust_policy),
+         # W8. Each form is bound to its own sha. `Verifier.verify/3` binds the component; this
+         # binds the artifact beside it, because a signature over one digest says nothing about
+         # bytes that merely travelled next to it. A node that skipped this would deserialize
+         # machine code nobody signed out of a file that was otherwise perfectly verified.
+         :ok <- Verifier.verify_precompiled(artifact, precompiled) do
       {:ok, decoded}
     end
   end
@@ -286,7 +354,10 @@ defmodule Ouroboros.Wasm.Bundle do
 
   # The header is read out of a prefix and both lengths are checked against their ceilings
   # before either slice is taken, so nothing here allocates on a number the file chose.
-  defp header(<<@magic, @format_version::8, envelope_len::32, component_len::32, _rest::binary>>) do
+  defp header(
+         <<@magic, @format_version::8, envelope_len::32, precompiled_len::32, component_len::32,
+           _rest::binary>>
+       ) do
     cond do
       envelope_len == 0 ->
         {:error, :empty_envelope}
@@ -300,8 +371,13 @@ defmodule Ouroboros.Wasm.Bundle do
       component_len > max_component_bytes() ->
         {:error, {:component_too_large, component_len, max_component_bytes()}}
 
+      # Zero means "this bundle carries the source form only", which is every bundle a node
+      # without a helper produced and every bundle written with `--no-precompile`.
+      precompiled_len > max_precompiled_bytes() ->
+        {:error, {:precompiled_too_large, precompiled_len, max_precompiled_bytes()}}
+
       true ->
-        {:ok, envelope_len, component_len}
+        {:ok, envelope_len, precompiled_len, component_len}
     end
   end
 
@@ -318,8 +394,8 @@ defmodule Ouroboros.Wasm.Bundle do
 
   # Exactly, not at least. A file that carries more than it declares is a file with a
   # region nobody described, and "the rest of it" is not a field this format has.
-  defp exact_length(binary, envelope_len, component_len) do
-    expected = @header_bytes + envelope_len + component_len
+  defp exact_length(binary, envelope_len, precompiled_len, component_len) do
+    expected = @header_bytes + envelope_len + precompiled_len + component_len
 
     case byte_size(binary) do
       ^expected -> :ok
@@ -327,6 +403,39 @@ defmodule Ouroboros.Wasm.Bundle do
       actual -> {:error, {:trailing_data, actual - expected}}
     end
   end
+
+  defp section(_binary, _offset, 0), do: nil
+  defp section(binary, offset, length), do: binary_part(binary, offset, length)
+
+  defp precompiled_size(nil), do: 0
+  defp precompiled_size(bytes) when is_binary(bytes), do: byte_size(bytes)
+
+  # The manifest declares a precompiled form or it does not, and the file carries one or it does
+  # not; the two have to be the same statement. A section nobody signed for is bytes a reader
+  # would have to decide what to do with, and a declaration with no section is a manifest whose
+  # fast path does not exist in the file that carries it.
+  defp carries_precompiled?(%Artifact{precompiled: nil}, nil), do: :ok
+
+  defp carries_precompiled?(%Artifact{precompiled: nil}, bytes) when is_binary(bytes),
+    do: {:error, {:unexpected_precompiled, byte_size(bytes)}}
+
+  defp carries_precompiled?(%Artifact{precompiled: %{}}, nil), do: {:error, :missing_precompiled}
+
+  defp carries_precompiled?(%Artifact{precompiled: %{} = block}, bytes) when is_binary(bytes) do
+    cond do
+      not Artifact.precompiled?(block) ->
+        {:error, {:invalid_precompiled, describe(block)}}
+
+      byte_size(bytes) > max_precompiled_bytes() ->
+        {:error, {:precompiled_too_large, byte_size(bytes), max_precompiled_bytes()}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp carries_precompiled?(%Artifact{precompiled: other}, _bytes),
+    do: {:error, {:invalid_precompiled, describe(other)}}
 
   defp envelope_fields(envelope) do
     case JSON.decode(envelope) do
@@ -458,6 +567,7 @@ defmodule Ouroboros.Wasm.Bundle do
       imports: Map.get(manifest, :imports),
       size: Map.get(manifest, :size),
       created_at: Map.get(manifest, :created_at),
+      precompiled: Map.get(manifest, :precompiled),
       metadata: Map.get(manifest, :metadata, %{})
     }
 
@@ -471,6 +581,12 @@ defmodule Ouroboros.Wasm.Bundle do
       # are offered as, so it is held to the closed set here, before anything reads it.
       not Artifact.kind?(Map.get(manifest, :kind)) ->
         {:error, {:invalid_component_kind, describe(Map.get(manifest, :kind))}}
+
+      # W8, for the same reason. The block decides whether this node will `Component::deserialize`
+      # somebody else's machine code, and it arrives from a file: held to its shape here, before
+      # anything downstream reads a version string out of it.
+      not Artifact.precompiled?(Map.get(manifest, :precompiled)) ->
+        {:error, {:invalid_precompiled, describe(Map.get(manifest, :precompiled))}}
 
       Artifact.manifest(artifact) != manifest ->
         {:error, :manifest_not_reconstructible}

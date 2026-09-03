@@ -208,6 +208,11 @@ defmodule Ouroboros.Wasm.Rollout do
       to be configured with.
     * `:start?` — whether a `:live` rollout starts the durable wrapper its manifest
       declares. Defaults to `true`.
+    * `:precompiled` — the serialized form the bundle carried, or `nil` (W8). It is staged
+      beside the component on every target and loaded there **only** where that node's own
+      helper reports exactly the wasmtime and the triple the signed manifest names; every
+      other node compiles the source form under §7.3's bounds and logs which half disagreed.
+      Absent is the whole of lane W before W8, unchanged.
     * `:stage_timeout`, `:probe_timeout`, `:eval_timeout`, `:start_timeout` — per-node
       transport deadlines. Every one of them is bounded; a deadline that fires is
       ambiguity, not failure.
@@ -222,6 +227,11 @@ defmodule Ouroboros.Wasm.Rollout do
 
     with {:ok, nodes} <- validate_nodes(nodes),
          :ok <- Verifier.verify(artifact, bytes, trust_policy(opts)),
+         # W8. Each form against its own digest, here as well as on every target: this node is
+         # about to hand a peer machine code the peer will `Component::deserialize`, and the
+         # driving node checking it first is what makes a corrupt section a refusal instead of
+         # a per-node quarantine.
+         :ok <- Verifier.verify_precompiled(artifact, Keyword.get(opts, :precompiled)),
          {:ok, spec} <- eval_spec(artifact),
          {:ok, _entry} <- checkpoint(artifact, nodes, registry) do
       run(artifact, bytes, nodes, opts, registry, spec, warnings(artifact, nodes))
@@ -325,7 +335,13 @@ defmodule Ouroboros.Wasm.Rollout do
       name: artifact.name,
       limits: Keyword.get_lazy(opts, :limits, &Wasm.capability_limits/0),
       pool: Keyword.get(opts, :pool, Pool),
-      store_root: Keyword.get(opts, :store_root)
+      store_root: Keyword.get(opts, :store_root),
+      # W8. Carried from the **verified** manifest so the wrapper — the one thing that loads a
+      # component outside a stage, at boot and on its first message — takes the same fast path a
+      # deploy did. It is not authority: it names a digest, and the helper refuses a container
+      # that was not compiled from `component`, so a state seeded with somebody else's artifact
+      # digest is `precompiled_mismatch` rather than a load of the wrong bytes.
+      precompiled: artifact.precompiled
     }
   end
 
@@ -369,16 +385,19 @@ defmodule Ouroboros.Wasm.Rollout do
     # This node's own trust policy, never the caller's. A loading node that was told which
     # signers to trust would be verifying the sender rather than the artifact.
     with :ok <- verified(artifact, bytes),
+         :ok <- verified_precompiled(artifact, Keyword.get(opts, :precompiled)),
          :ok <- admitted_epoch(artifact, epoch_registry),
          {:ok, put} <- published(artifact, bytes, store_opts),
+         :ok <- publish_precompiled(artifact, Keyword.get(opts, :precompiled), store_opts),
          {:ok, manifest} <- published_manifest(artifact, store_opts),
-         {:ok, report} <- loaded(artifact, put.path, pool),
+         {:ok, report} <- loaded(artifact, put.path, pool, store_opts),
          :ok <- cross_checked(artifact, report) do
       {:ok,
        %{
          published: put.published,
          manifest_published: manifest.published,
          cached: Map.get(report, "cached", false),
+         precompiled: Map.get(report, "precompiled", false),
          size: put.size
        }}
     end
@@ -626,7 +645,8 @@ defmodule Ouroboros.Wasm.Rollout do
     remote_opts = [
       pool: Keyword.get(opts, :pool, Pool),
       store_root: Keyword.get(opts, :store_root),
-      epoch_registry: epoch_registry
+      epoch_registry: epoch_registry,
+      precompiled: Keyword.get(opts, :precompiled)
     ]
 
     case remote(target, __MODULE__, :stage, [artifact, bytes, remote_opts], stage_timeout(opts)) do
@@ -1155,13 +1175,71 @@ defmodule Ouroboros.Wasm.Rollout do
   # capability component is refused `unsupported_world` here, at stage, before the register is
   # marked and before anything is instantiated — and so is the reverse. This is the enforcement
   # point contract C7 names: the manifest is the claim, the helper's world check is the check.
-  defp loaded(artifact, path, pool) do
-    case Pool.load(artifact.component_sha256, path, pool, kind: artifact.kind) do
+  # W8. Which form this node loads is `Store.form/4`'s answer, and its inputs are exactly the
+  # three things D22 names: a `precompiled` block in a manifest **this node has already
+  # verified** against its own trust policy (the `verified/2` above, so a signer this node does
+  # not trust never reaches a deserialize), this node's own helper reading, and the file being
+  # on disk. Anything short of all three is the source form under §7.3's bounds, with one line
+  # saying which half disagreed — a fallback is not a fault, it is the path every node had.
+  defp loaded(artifact, path, pool, store_opts) do
+    load_opts =
+      case Store.form(
+             artifact.component_sha256,
+             artifact.precompiled,
+             fn -> Pool.helper_build(pool) end,
+             store_opts
+           ) do
+        {:precompiled, artifact_path, sha} ->
+          [path: artifact_path, precompiled: sha]
+
+        {:source, source_path, reason} ->
+          if reason != :not_precompiled do
+            Logger.info(
+              "wasm stage #{String.slice(artifact.component_sha256, 0, 12)}: loading the " <>
+                "source form (#{inspect(reason)})"
+            )
+          end
+
+          [path: source_path]
+
+        {:error, _unknown} ->
+          [path: path]
+      end
+
+    {load_path, opts} = Keyword.pop!(load_opts, :path)
+
+    case Pool.load(
+           artifact.component_sha256,
+           load_path,
+           pool,
+           Keyword.put(opts, :kind, artifact.kind)
+         ) do
       {:ok, report} when is_map(report) -> {:ok, report}
       {:error, reason} -> {:error, {:component_not_loaded, bound(reason)}}
       other -> {:error, {:component_not_loaded, bound(other)}}
     end
   end
+
+  defp verified_precompiled(artifact, precompiled) do
+    case Verifier.verify_precompiled(artifact, precompiled) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:precompiled_rejected, reason}}
+    end
+  end
+
+  # Content-addressed and idempotent, exactly like the component. Absent is not a failure: a
+  # manifest with no block is a rollout with one form, which is every rollout before W8.
+  defp publish_precompiled(%Artifact{precompiled: nil}, _bytes, _store_opts), do: :ok
+
+  defp publish_precompiled(%Artifact{precompiled: %{sha256: sha}}, bytes, store_opts)
+       when is_binary(bytes) do
+    case Store.put_precompiled(bytes, sha, store_opts) do
+      {:ok, _put} -> :ok
+      {:error, reason} -> {:error, {:precompiled_not_stored, reason}}
+    end
+  end
+
+  defp publish_precompiled(_artifact, _bytes, _store_opts), do: {:error, :missing_precompiled}
 
   defp cross_checked(artifact, report) do
     case Verifier.cross_check(artifact, report) do

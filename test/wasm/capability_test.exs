@@ -408,16 +408,22 @@ defmodule Ouroboros.Wasm.CapabilityTest do
       # that is not a server reaches `GenServer.whereis/1`'s — which the pool's own
       # `catch :exit` does not catch. Both used to lose the entire state write while
       # `Mesh.send_message/4` still answered `{:ok, agent}`.
-      for {label, opts} <- [
-            {"a component that is not a sha", [component: 123]}
+      # W8 moved the component lookup behind `Ouroboros.Wasm.Capability.component_form/2`,
+      # which names a non-sha rather than letting `Store.path/2`'s guard raise — so that case
+      # is now a refusal at `:store`, and the exception path is exercised by a config that
+      # reaches `Ouroboros.Wasm.Pool.instantiate/6`'s own `is_binary` guard instead. Both are
+      # here because the claim is about the *bookkeeping*, which has to survive either.
+      for {label, stage, opts} <- [
+            {"a component that is not a sha", :store, [component: 123]},
+            {"a config the helper's own guard refuses", :exception, [config: 123]}
           ] do
         %{id: id} = capability([], opts)
 
         assert {:ok, _agent} = Mesh.send_message("tester", id, %{seq: 1})
         state = state(id)
 
-        assert %{stage: :exception, reason: reason} = state.error, label
-        assert is_binary(reason), label
+        assert %{stage: ^stage, reason: reason} = state.error, label
+        assert reason != nil, label
 
         # The point of the fix: the bookkeeping happens whatever the exchange did.
         assert state.messages_received == 1, label

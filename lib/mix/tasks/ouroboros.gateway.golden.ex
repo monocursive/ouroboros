@@ -1331,6 +1331,12 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
           component_sha256: String.duplicate("a", 64),
           epoch: 7,
           state: :live,
+          # W8. Which form each node loads. All three values are pinned across these rows:
+          # `precompiled` where the signed manifest names an artifact this node's helper
+          # matches, `source` where it does not or where the manifest names none, and `null`
+          # where the node could not say — no readable manifest, or no helper that has
+          # reported its build yet.
+          form: :precompiled,
           nodes: ["ouroboros@golden", "ouroboros@peer"],
           created_at: @timestamp,
           updated_at: @timestamp
@@ -1341,6 +1347,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
           component_sha256: String.duplicate("b", 64),
           epoch: 6,
           state: :superseded,
+          form: :source,
           nodes: ["ouroboros@golden"],
           created_at: @timestamp,
           updated_at: @turn_end_timestamp
@@ -1351,6 +1358,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
           component_sha256: String.duplicate("c", 64),
           epoch: 5,
           state: :quarantined,
+          form: nil,
           nodes: ["ouroboros@peer"],
           created_at: @timestamp,
           updated_at: @turn_end_timestamp
@@ -1404,6 +1412,10 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
   # the header and the envelope — which the client writes followed by the component it
   # already holds. `bundle_bytes` is what that file will weigh, so a client can say so
   # before it writes one.
+  # The stub artifact's length in the `wasm.sign` fixture. Deliberately small — see
+  # `wasm_bundle_prefix/0`.
+  @wasm_precompiled_bytes 4_096
+
   defp wasm_sign_result do
     Conn.result_frame(19, %{
       artifact_id: "wasm-0000000000000000000001",
@@ -1420,6 +1432,17 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       signer: "release-key",
       start_id: "wasm/vet",
       extension: ".ouro-wasm",
+      # W8. The serialized form the signing node compiled, named by the exact pair of readings
+      # a node has to match before it may map it, and by its own digest — which is what the
+      # signature covers beside the component's (D22, D24). `precompile_skipped` is `null` here
+      # because there was an artifact; a receipt without one says why in that field instead.
+      precompiled: %{
+        wasmtime: "48.0.1",
+        target: "aarch64-apple-darwin",
+        sha256: String.duplicate("d", 64),
+        size: @wasm_precompiled_bytes
+      },
+      precompile_skipped: nil,
       bundle_prefix: Base.encode64(wasm_bundle_prefix()),
       bundle_bytes: byte_size(wasm_bundle_prefix()) + 2_097_152
     })
@@ -1432,12 +1455,21 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
   # header rather than to a plausible-looking blob.
   defp wasm_bundle_prefix do
     envelope =
-      ~s({"bundle":1,) <>
+      ~s({"bundle":2,) <>
         ~s("manifest":"#{String.duplicate("QUJDRA", 40)}",) <>
         ~s("signature":"#{String.duplicate("A", 86)}==",) <>
         ~s("signer":"release-key"})
 
-    "OUROWASM" <> <<1::8, byte_size(envelope)::32, 2_097_152::32>> <> envelope
+    # W8's format 2: three lengths, and the artifact sits between the envelope and the
+    # component so the *prefix* is everything the client did not produce. The fixture's
+    # artifact is a stub of the declared length — what is pinned here is the framing, not
+    # machine code, and a fixture the size of a real one would be five mebibytes of base64
+    # in a file people read.
+    artifact = "OUROCWASM" <> String.duplicate("\0", @wasm_precompiled_bytes - 9)
+
+    "OUROWASM" <>
+      <<2::8, byte_size(envelope)::32, byte_size(artifact)::32, 2_097_152::32>> <>
+      envelope <> artifact
   end
 
   # A rollout that reached `:live`, with every gate's evidence per node. Each gate is

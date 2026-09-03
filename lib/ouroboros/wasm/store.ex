@@ -62,6 +62,22 @@ defmodule Ouroboros.Wasm.Store do
   under: publishing one this store would later refuse to read is publishing a durable,
   unprunable file that no reboot can use.
 
+  ## Two forms, both content-addressed (W8)
+
+  `put_precompiled/3` publishes wasmtime's serialized form of a component under the digest of
+  the artifact itself, `cwasm-<hex>.cwasm`. It is the same discipline as the bytes — digest
+  validated before the write, synced, linked into place, never overwritten — because it is the
+  same problem: the helper is about to `Component::deserialize` this file, which is `unsafe`,
+  and what makes that sound is that the file's name is its content and its content is what a
+  trusted signer signed (D24).
+
+  `form/4` is where a node decides which of the two to hand the helper. It answers
+  `{:precompiled, path, sha}` only when the manifest declares a block, this node's helper
+  reports **exactly** that wasmtime and that target triple, and the file is on disk; anything
+  else is `{:source, path}` with a reason naming which half disagreed. Falling back is not a
+  failure — every node can always compile the source form under §7.3's bounds — so the reason
+  is for a log line, never for a refusal.
+
   ## Pruning fails closed
 
   The store is bounded by a byte budget (`:store_budget_bytes`, see `Ouroboros.Wasm`) and
@@ -86,6 +102,12 @@ defmodule Ouroboros.Wasm.Store do
   @suffix ".wasm"
   @manifest_prefix "manifest-"
   @manifest_suffix ".manifest"
+  # W8. The precompiled form of a component, content-addressed by **its own** digest and not by
+  # the component's: one component can have several, one per wasmtime-and-triple pair a signer
+  # ever compiled it for, and naming them after the component would make two honest artifacts a
+  # conflict. Publish-once, verified on read, exactly like the bytes beside them.
+  @precompiled_prefix "cwasm-"
+  @precompiled_suffix ".cwasm"
   @temp_infix ".tmp-"
 
   # A manifest is roughly a kilobyte: an id, an epoch, a digest, and a bounded eval spec
@@ -106,12 +128,14 @@ defmodule Ouroboros.Wasm.Store do
   One file the store holds.
 
   `kind` says which: `:component` for bytes, whose `sha256` is the digest of the content;
-  `:manifest` for a signed manifest, whose `sha256` is the digest of the artifact id the
-  file is named for. Both are "the name this file is published under", which is what a
-  listing is about; only a component is ever a prune candidate.
+  `:precompiled` for wasmtime's serialized form of one, whose `sha256` is likewise the digest
+  of the content; `:manifest` for a signed manifest, whose `sha256` is the digest of the
+  artifact id the file is named for. All three are "the name this file is published under",
+  which is what a listing is about; a manifest is never a prune candidate and the other two
+  always are.
   """
   @type entry :: %{
-          kind: :component | :manifest,
+          kind: :component | :manifest | :precompiled,
           sha256: String.t(),
           path: String.t(),
           size: non_neg_integer(),
@@ -157,6 +181,32 @@ defmodule Ouroboros.Wasm.Store do
          :ok <- ensure_directory(dir),
          path = component_path(dir, actual),
          {:ok, published} <- publish_once(path, bytes, actual, :component, actual) do
+      {:ok, %{sha256: actual, path: path, size: byte_size(bytes), published: published}}
+    end
+  end
+
+  @doc """
+  Publishes one precompiled artifact under the digest it actually hashes to (W8).
+
+  `expected_sha256` is the digest the signed manifest names for this form, checked against the
+  recomputed one and refused on mismatch — the same posture `put/3` takes, and for a stronger
+  reason: these bytes are machine code a helper will map without validating them, so the one
+  moment to find out they are not the signed ones is before they are on disk under a name that
+  says they are.
+  """
+  @spec put_precompiled(binary(), String.t(), keyword()) ::
+          {:ok,
+           %{sha256: String.t(), path: String.t(), size: non_neg_integer(), published: boolean()}}
+          | {:error, term()}
+  def put_precompiled(bytes, expected_sha256, opts \\ [])
+      when is_binary(bytes) and is_binary(expected_sha256) do
+    actual = digest(bytes)
+
+    with :ok <- check_expected(expected_sha256, actual),
+         {:ok, dir} <- root(opts),
+         :ok <- ensure_directory(dir),
+         path = precompiled_path_at(dir, actual),
+         {:ok, published} <- publish_once(path, bytes, actual, :precompiled, actual) do
       {:ok, %{sha256: actual, path: path, size: byte_size(bytes), published: published}}
     end
   end
@@ -231,13 +281,92 @@ defmodule Ouroboros.Wasm.Store do
     end
   end
 
+  @doc "Where the precompiled artifact `sha256` is on disk, if it is there at all (W8)."
+  @spec precompiled_path(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def precompiled_path(sha256, opts \\ []) when is_binary(sha256) do
+    with {:ok, sha} <- normalize(sha256),
+         {:ok, dir} <- root(opts) do
+      path = precompiled_path_at(dir, sha)
+      if regular_file?(path), do: {:ok, path}, else: {:error, {:unknown_precompiled, sha}}
+    end
+  end
+
+  @doc """
+  Which form of `component_sha256` this node should hand the helper, and why (W8, D22/D24).
+
+  `precompiled` is the signed manifest's block or `nil`; `helper` is what this node's own helper
+  reported — `%{"wasmtime" => version, "target" => triple}` out of its `doctor` — or `nil` when
+  no helper has answered yet, or a **zero-arity function** answering one of those.
+
+  The function form is the one every caller uses, and it is not a style: asking the pool is a
+  `GenServer.call` that connects a lazy helper, and a manifest with no `precompiled` block has
+  no comparison to make. So the question is asked only when there is something to compare,
+  which keeps "a component the store does not hold never reaches the helper" true — it is what
+  a wrapper does on the message path, and spawning a helper to discover a missing file would be
+  the opposite of that. The precompiled form is chosen only when **every** one of those
+  agrees: a block exists, the version matches exactly, the triple matches exactly, and the file
+  is on disk. Otherwise the source form, with a reason.
+
+  The comparison is string equality on both halves and nothing cleverer. A version ordering
+  would be a policy about which wasmtime can read which artifact, and wasmtime does not make
+  that promise: its serialized form is checked against an exact build and an exact configuration
+  hash, so "close enough" is a decision nobody here is entitled to make.
+
+  This function decides *which bytes*, never *whether to trust them*: by the time it is called
+  the manifest has been verified against this node's own trust policy, which is where the signer
+  is bound (D24). It is a private seam of lane W rather than a general lookup for that reason.
+  """
+  @spec form(String.t(), map() | nil, map() | nil | (-> map() | nil), keyword()) ::
+          {:precompiled, String.t(), String.t()}
+          | {:source, String.t(), atom() | tuple()}
+          | {:error, term()}
+  def form(component_sha256, precompiled, helper, opts \\ []) when is_binary(component_sha256) do
+    case path(component_sha256, opts) do
+      {:ok, source} -> {:source, source, why(precompiled, helper)} |> upgrade(precompiled, opts)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # The precompiled branch, taken only when nothing disagreed and the file is there. Written as
+  # an upgrade of the source answer rather than as a branch in front of it so the source path is
+  # resolved either way: a node whose store lost the component has a problem the fast form does
+  # not fix, and it should hear about that one.
+  defp upgrade({:source, source, :usable}, %{sha256: sha}, opts) do
+    case precompiled_path(sha, opts) do
+      {:ok, path} -> {:precompiled, path, sha}
+      {:error, _absent} -> {:source, source, :precompiled_not_stored}
+    end
+  end
+
+  defp upgrade(answer, _precompiled, _opts), do: answer
+
+  # The block first, so a manifest that declares none never asks the pool anything.
+  defp why(nil, _helper), do: :not_precompiled
+  defp why(precompiled, helper) when is_function(helper, 0), do: why(precompiled, helper.())
+  defp why(_precompiled, nil), do: :helper_build_unknown
+
+  defp why(%{wasmtime: wasmtime, target: target}, helper) when is_map(helper) do
+    cond do
+      Map.get(helper, "wasmtime") != wasmtime ->
+        {:wasmtime_mismatch, wasmtime, Map.get(helper, "wasmtime")}
+
+      Map.get(helper, "target") != target ->
+        {:target_mismatch, target, Map.get(helper, "target")}
+
+      true ->
+        :usable
+    end
+  end
+
+  defp why(_precompiled, _helper), do: :helper_build_unknown
+
   @doc """
   Every file held, oldest first, with sizes and a `:kind`.
 
-  Manifests are listed beside components. They are never evicted, but they are bytes on
-  the disk this store's budget is about, and a listing that did not show them was a
-  listing an operator could not reconcile against `du`. Filter on `:kind` for one or the
-  other; `components/1` is the shorthand.
+  Manifests are listed beside components and precompiled artifacts. They are never evicted,
+  but they are bytes on the disk this store's budget is about, and a listing that did not
+  show them was a listing an operator could not reconcile against `du`. Filter on `:kind`
+  for one of the three; `components/1` is the shorthand for the source form.
   """
   @spec list(keyword()) :: {:ok, [entry()]} | {:error, term()}
   def list(opts \\ []) do
@@ -250,7 +379,7 @@ defmodule Ouroboros.Wasm.Store do
     end
   end
 
-  @doc "The component half of `list/1`: the files a prune may consider."
+  @doc "The evictable half of `list/1`: the files a prune may consider."
   @spec components(keyword()) :: {:ok, [entry()]} | {:error, term()}
   def components(opts \\ []) do
     with {:ok, entries} <- list(opts) do
@@ -260,19 +389,40 @@ defmodule Ouroboros.Wasm.Store do
 
   @doc "Forgets one component. Idempotent: a sha that is not held is already forgotten."
   @spec delete(String.t(), keyword()) :: :ok | {:error, term()}
-  def delete(sha256, opts \\ []) when is_binary(sha256) do
+  def delete(sha256, opts \\ []) when is_binary(sha256),
+    do: delete(sha256, :component, opts)
+
+  @doc """
+  Forgets one file of either evictable kind. Idempotent, for `delete/2`'s reason.
+
+  `kind` is `:component` or `:precompiled` (W8). Both are content-addressed, both are prune
+  candidates, and both therefore need a way to be let go by name.
+  """
+  @spec delete(String.t(), :component | :precompiled, keyword()) :: :ok | {:error, term()}
+  def delete(sha256, kind, opts)
+      when is_binary(sha256) and kind in [:component, :precompiled] and is_list(opts) do
     with {:ok, sha} <- normalize(sha256),
          {:ok, dir} <- root(opts) do
-      case File.rm(component_path(dir, sha)) do
+      path =
+        case kind do
+          :component -> component_path(dir, sha)
+          :precompiled -> precompiled_path_at(dir, sha)
+        end
+
+      case File.rm(path) do
         :ok -> :ok
         {:error, :enoent} -> :ok
-        {:error, reason} -> {:error, {:component_undeletable, sha, reason}}
+        {:error, reason} -> {:error, {undeletable(kind), sha, reason}}
       end
     end
   end
 
+  defp undeletable(:component), do: :component_undeletable
+  defp undeletable(:precompiled), do: :precompiled_undeletable
+
   @doc """
-  Evicts unreferenced components, oldest first, until the store is under its byte budget.
+  Evicts unreferenced bytes — components and precompiled artifacts alike — oldest first,
+  until the store is under its byte budget.
 
   Also sweeps stale `.tmp-*` files, because a crash mid-`put` leaves one behind:
   `sha256-<hex>.wasm.tmp-<rand>`, which `list/1` does not see (it does not end in `.wasm`)
@@ -301,18 +451,21 @@ defmodule Ouroboros.Wasm.Store do
 
       # Every file counts against the budget, manifests included: they are not evictable,
       # but they are on the disk, and a budget that ignored them was a budget the store
-      # exceeded quietly. What is *evictable* is still components only.
+      # exceeded quietly. What is *evictable* is the two content-addressed kinds.
       held = Enum.reduce(entries, 0, &(&1.size + &2))
 
       {evicted, reclaimed} =
         entries
-        |> Enum.filter(&(&1.kind == :component))
+        # W8. Both content-addressed kinds are candidates. A precompiled artifact is several
+        # times the component it came from, so a budget that could not evict one was a budget
+        # the fast path would quietly walk through.
+        |> Enum.filter(&(&1.kind in [:component, :precompiled]))
         |> Enum.reject(&MapSet.member?(protected, &1.sha256))
         |> Enum.reduce_while({[], 0}, fn entry, {shas, freed} ->
           if held - freed <= budget do
             {:halt, {shas, freed}}
           else
-            case delete(entry.sha256, opts) do
+            case delete(entry.sha256, entry.kind, opts) do
               :ok -> {:cont, {[entry.sha256 | shas], freed + entry.size}}
               {:error, _reason} -> {:cont, {shas, freed}}
             end
@@ -336,6 +489,12 @@ defmodule Ouroboros.Wasm.Store do
   `:live`, `:deploying`, or `:quarantined` lane-W rollout protects the bytes it names. The
   field is still read tolerantly: a lane-B entry carries `nil` and protects nothing, which
   is correct — it deployed modules, not components.
+
+  W8 adds the second form. The register does not name it — identity is the component (D2) —
+  so the protected artifact digest is read out of the **manifest** the entry's `artifact_id`
+  points at, which is one small file per protected row. An entry whose manifest cannot be read
+  protects its component and nothing else, which is the fail-open direction for a *prune* and
+  costs a recompile rather than a capability.
   """
   @spec protected_shas(keyword()) :: {:ok, MapSet.t(String.t())} | {:error, :registry_unavailable}
   def protected_shas(opts \\ []) do
@@ -346,7 +505,7 @@ defmodule Ouroboros.Wasm.Store do
     protected =
       entries
       |> Enum.filter(&(Map.get(&1, :state) in @protected_states))
-      |> Enum.flat_map(&component_shas/1)
+      |> Enum.flat_map(&(component_shas(&1) ++ precompiled_shas(&1, opts)))
       |> MapSet.new()
 
     {:ok, protected}
@@ -363,6 +522,16 @@ defmodule Ouroboros.Wasm.Store do
     case normalize(Map.get(entry, :component_sha256)) do
       {:ok, sha} -> [sha]
       _absent_or_malformed -> []
+    end
+  end
+
+  defp precompiled_shas(entry, opts) do
+    with id when is_binary(id) <- Map.get(entry, :artifact_id),
+         {:ok, %Artifact{precompiled: %{sha256: sha}}} <- fetch_manifest(id, opts),
+         {:ok, normalized} <- normalize(sha) do
+      [normalized]
+    else
+      _absent_or_unreadable -> []
     end
   end
 
@@ -395,6 +564,8 @@ defmodule Ouroboros.Wasm.Store do
   # leaves one, `list/1` does not see it, and nothing else would ever remove it.
   defp temp_name?(name) do
     (String.starts_with?(name, @prefix) and String.contains?(name, @suffix <> @temp_infix)) or
+      (String.starts_with?(name, @precompiled_prefix) and
+         String.contains?(name, @precompiled_suffix <> @temp_infix)) or
       (String.starts_with?(name, @manifest_prefix) and
          String.contains?(name, @manifest_suffix <> @temp_infix))
   end
@@ -436,6 +607,9 @@ defmodule Ouroboros.Wasm.Store do
   defp normalize(other), do: {:error, {:invalid_sha256, other}}
 
   defp component_path(dir, sha), do: Path.join(dir, @prefix <> sha <> @suffix)
+
+  defp precompiled_path_at(dir, sha),
+    do: Path.join(dir, @precompiled_prefix <> sha <> @precompiled_suffix)
 
   # Derived, never interpolated: an artifact id is a caller-supplied string, and the one
   # safe thing to build a filename out of is its digest. It is injective, it is 64 hex
@@ -533,6 +707,16 @@ defmodule Ouroboros.Wasm.Store do
     end
   end
 
+  defp published_name(@precompiled_prefix <> rest = _precompiled) do
+    with true <- String.ends_with?(rest, @precompiled_suffix),
+         hex = binary_part(rest, 0, byte_size(rest) - byte_size(@precompiled_suffix)),
+         {:ok, sha} <- normalize(hex) do
+      {:ok, :precompiled, sha}
+    else
+      _not_a_precompiled_artifact -> :error
+    end
+  end
+
   defp published_name(@manifest_prefix <> rest = _manifest) do
     with true <- String.ends_with?(rest, @manifest_suffix),
          hex = binary_part(rest, 0, byte_size(rest) - byte_size(@manifest_suffix)),
@@ -602,6 +786,7 @@ defmodule Ouroboros.Wasm.Store do
   end
 
   defp write_failed(:component), do: :component_write_failed
+  defp write_failed(:precompiled), do: :precompiled_write_failed
   defp write_failed(:manifest), do: :manifest_write_failed
 
   defp open_exclusive(path) do
@@ -644,6 +829,7 @@ defmodule Ouroboros.Wasm.Store do
   end
 
   defp publish_failed(:component), do: :component_publish_failed
+  defp publish_failed(:precompiled), do: :precompiled_publish_failed
   defp publish_failed(:manifest), do: :manifest_publish_failed
 
   defp verify_existing(path, expected, kind, label) do
@@ -661,15 +847,18 @@ defmodule Ouroboros.Wasm.Store do
   end
 
   defp invalid_file(:component), do: :invalid_component_file
+  defp invalid_file(:precompiled), do: :invalid_precompiled_file
   defp invalid_file(:manifest), do: :invalid_manifest_file
 
   # A component whose published bytes do not hash to its own name is corrupt; a manifest
   # under an id that already names a *different* manifest is a conflict, not corruption —
   # publish-once refuses to choose between two honest records of two different rollouts.
   defp mismatch(:component), do: :corrupt_component
+  defp mismatch(:precompiled), do: :corrupt_precompiled
   defp mismatch(:manifest), do: :manifest_conflict
 
   defp unreadable(:component), do: :component_unreadable
+  defp unreadable(:precompiled), do: :precompiled_unreadable
   defp unreadable(:manifest), do: :manifest_unreadable
 
   defp sync_directory(directory) do

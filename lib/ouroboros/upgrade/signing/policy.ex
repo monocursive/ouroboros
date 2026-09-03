@@ -208,7 +208,7 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
 
   ## The lane-W arm
 
-  An `Ouroboros.Wasm.Artifact` is checked by six families, in the order docs/WASM.md §7.5
+  An `Ouroboros.Wasm.Artifact` is checked by seven families, in the order docs/WASM.md §7.5
   states them:
 
   1. **Shape and size.** Non-empty id and name, positive epoch, 64-hex lower-case
@@ -228,6 +228,16 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
      (`:missing_component_bytes`), never a pass: a manifest nobody checked against bytes
      is a set of claims, and this is the one process whose whole job is not to believe
      them.
+  5. **The precompiled block** (W8, D22). `precompiled` is absent, or it is exactly
+     `%{wasmtime, target, sha256, size}` — a 64-hex digest that is *not* the component's own,
+     a positive size within the same multiple of the artifact ceiling `Ouroboros.Wasm.Bundle`
+     admits, and two printable bounded strings that are what a helper's `doctor` would have
+     printed. What this block authorizes is a loading node calling `Component::deserialize` on
+     machine code it did not produce, which is `unsafe` for a reason (D24), so the digest that
+     makes that sound has to be inside what the signature covers. What is deliberately *not*
+     checked is whether this signer recognises the version or the triple: that is a fact about
+     a loading node, and a node that does not match falls back to the source form by itself.
+     Nothing here maps the artifact, for family 4's reason.
   4. **Imports.** The declared list must be a subset of the world's, which in v1 is
      `["log"]`. This is a *policy* check and is documented as one (D5): the security
      boundary is the helper's linker, which defines exactly the world's imports and fails
@@ -235,7 +245,7 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
      nothing here needs the `ouro-wasm` helper to be present on the signer node — a
      signer that cannot parse components is still not a hole, because the list it is
      reading is provenance and review surface rather than the enforcement mechanism.
-  5. **Provenance.** `metadata.author` must be present. `metadata.eval` is validated by
+  6. **Provenance.** `metadata.author` must be present. `metadata.eval` is validated by
      `Ouroboros.Upgrade.Rollout.Evaluation.validate/1` whenever it is there, and is
      **required by default** (D12, `:signing_require_wasm_eval`). `source_sha256`,
      `language`, and `test_report` are optional and are checked for shape when present:
@@ -249,7 +259,7 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
   this durable mesh id", and a policy component has no wrapper agent, is reached only by the
   permission engine, and would be claiming a cluster-wide id nothing starts.
 
-  6. **Start block.** `metadata.start`, when present, must be exactly
+  7. **Start block.** `metadata.start`, when present, must be exactly
      `%{id: binary, config: binary}` and the id must be exactly `"wasm/" <> name` for the
      name in *this* manifest. It is the claim "this capability runs continuously under this
      id", which a signature should cover — and binding it to the prefix alone was not
@@ -302,6 +312,13 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
   # register, but it is not a statement about the cluster's real watermark.
   @max_epoch_distance 1_000_000
 
+  # W8. What a precompiled artifact may weigh, as a multiple of the component ceiling
+  # (`:signing_max_artifact_bytes`). The same number `Ouroboros.Wasm.Bundle` derives its own
+  # section cap from, for the same reason: machine code is several times the wasm it came from —
+  # measured, 2.75× at the worst shape §7.3 admits and 5.3× for the small reference guest — and
+  # one multiple stated in both places beats two ceilings that can disagree.
+  @precompiled_multiple 8
+
   # The same default the service applies, so a policy invoked directly — by a test, or by
   # an operator rehearsing a decision — is held to the bound a service would have applied.
   @default_max_artifact_bytes 16 * 1024 * 1024
@@ -341,6 +358,7 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
          :ok <- check_world(artifact),
          {:ok, recomputed} <- check_component_bytes(artifact, context),
          :ok <- check_imports(artifact),
+         :ok <- check_precompiled(artifact),
          {:ok, provenance} <- check_wasm_provenance(artifact.metadata),
          {:ok, eval} <- check_wasm_eval(artifact, context),
          {:ok, start} <- check_start(artifact) do
@@ -354,6 +372,7 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
          component_sha256: artifact.component_sha256,
          size: artifact.size,
          imports: artifact.imports,
+         precompiled: precompiled_verdict(artifact.precompiled),
          recomputed: recomputed,
          provenance: provenance,
          eval: eval,
@@ -792,6 +811,46 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
         end
     end
   end
+
+  # W8, D22. The signer decides whether a manifest may authorize a node to `Component::deserialize`
+  # machine code it did not produce, so the block that authorizes it is checked here rather than
+  # believed: all four keys or none, a 64-hex digest, a positive size within the same ceiling the
+  # component is held to, and two strings that are what a helper's `doctor` would have printed —
+  # non-empty, printable, bounded. What is *not* checked is whether this signer recognises the
+  # version or the triple: that is a fact about a loading node, not about the manifest, and a
+  # signer refusing an artifact for a machine it is not is a signer deciding somebody else's
+  # question.
+  #
+  # Nothing here parses the artifact, for D5's reason: the bytes travel with the bundle, the
+  # loading node's helper reads the container's header, and a signer that had to map machine code
+  # to sign a manifest would be running the thing this lane exists to contain.
+  defp check_precompiled(%Wasm.Artifact{precompiled: nil}), do: :ok
+
+  defp check_precompiled(%Wasm.Artifact{precompiled: block} = artifact) do
+    max = @precompiled_multiple * max_artifact_bytes(%{})
+
+    cond do
+      not Wasm.Artifact.precompiled?(block) ->
+        {:refused, {:invalid_precompiled, describe(block)}}
+
+      block.sha256 == artifact.component_sha256 ->
+        # The serialized form of a component is never the component: one is a wasm binary and
+        # the other an object file. Equal digests mean a manifest built out of one set of bytes
+        # twice, which would have a node deserializing a component as if it were machine code.
+        {:refused, {:precompiled_is_the_component, block.sha256}}
+
+      block.size > max ->
+        {:refused, {:precompiled_too_large, block.size, max}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp precompiled_verdict(nil), do: :absent
+
+  defp precompiled_verdict(%{wasmtime: wasmtime, target: target, sha256: sha256, size: size}),
+    do: %{wasmtime: wasmtime, target: target, sha256: sha256, size: size}
 
   defp duplicates(imports) do
     imports

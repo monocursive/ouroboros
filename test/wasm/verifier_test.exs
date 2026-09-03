@@ -151,6 +151,17 @@ defmodule Ouroboros.Wasm.VerifierTest do
       assert {:error, {:invalid_signature, @signer}} =
                Verifier.verify_manifest(moved, context.policy)
     end
+
+    # W8. The block decides whether this node will `Component::deserialize` machine code, and
+    # it arrives from a manifest in a file. Held to its shape here, before `Store.form/4` reads
+    # a version string out of it — delete the `Artifact.precompiled?` clause from
+    # `verify_shape/1` and a manifest whose block is a bare string reaches the comparison.
+    test "a malformed precompiled block is refused before anything reads it", context do
+      artifact = %{signed!(context) | precompiled: "48.0.1"}
+
+      assert {:error, {:invalid_precompiled, _}} =
+               Verifier.verify_manifest(artifact, context.policy)
+    end
   end
 
   describe "cross_check/2" do

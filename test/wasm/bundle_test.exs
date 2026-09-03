@@ -57,12 +57,17 @@ defmodule Ouroboros.Wasm.BundleTest do
       assert prefix <> @bytes == bundle
     end
 
-    test "the file is self-describing: magic, version, and two lengths", context do
+    test "the file is self-describing: magic, version, and three lengths", context do
       {:ok, bundle} = Bundle.encode(signed!(context), @bytes)
 
-      assert <<"OUROWASM", 1::8, envelope_len::32, component_len::32, rest::binary>> = bundle
+      assert <<"OUROWASM", 2::8, envelope_len::32, precompiled_len::32, component_len::32,
+               rest::binary>> = bundle
+
       assert component_len == byte_size(@bytes)
-      assert byte_size(rest) == envelope_len + component_len
+      # W8. Zero is "the source form only", which is what a manifest with no `precompiled`
+      # block means and what every node could always run.
+      assert precompiled_len == 0
+      assert byte_size(rest) == envelope_len + precompiled_len + component_len
 
       envelope = binary_part(rest, 0, envelope_len)
       assert {:ok, fields} = JSON.decode(envelope)
@@ -71,7 +76,7 @@ defmodule Ouroboros.Wasm.BundleTest do
 
       # The big half is raw. A bundle whose component were base64 inside the envelope
       # would be a third larger and would hand a JSON parser sixteen mebibytes.
-      assert binary_part(rest, envelope_len, component_len) == @bytes
+      assert binary_part(rest, envelope_len + precompiled_len, component_len) == @bytes
     end
   end
 
@@ -171,21 +176,29 @@ defmodule Ouroboros.Wasm.BundleTest do
       # No envelope and no component exist here at all — the file is seventeen bytes and a
       # claim. Delete the `envelope_len > @max_envelope_bytes` clause and `binary_part/3`
       # is asked for 64 MiB of a 17-byte binary.
-      header = <<"OUROWASM", 1::8, 64 * 1024 * 1024::32, 1::32>>
+      header = <<"OUROWASM", 2::8, 64 * 1024 * 1024::32, 0::32, 1::32>>
 
       assert {:error, {:envelope_too_large, 67_108_864, 65_536}} = Bundle.decode(header)
     end
 
     test "a component length above the component cap is refused before the slice is taken" do
       over = Bundle.max_component_bytes() + 1
-      header = <<"OUROWASM", 1::8, 32::32, over::32>>
+      header = <<"OUROWASM", 2::8, 32::32, 0::32, over::32>>
 
       assert {:error, {:component_too_large, ^over, _cap}} = Bundle.decode(header)
     end
 
     test "an empty envelope or an empty component is refused" do
-      assert {:error, :empty_envelope} = Bundle.decode(<<"OUROWASM", 1::8, 0::32, 1::32>>)
-      assert {:error, :empty_component} = Bundle.decode(<<"OUROWASM", 1::8, 1::32, 0::32>>)
+      assert {:error, :empty_envelope} = Bundle.decode(<<"OUROWASM", 2::8, 0::32, 0::32, 1::32>>)
+      assert {:error, :empty_component} = Bundle.decode(<<"OUROWASM", 2::8, 1::32, 0::32, 0::32>>)
+
+      # W8. A precompiled section past its own ceiling is refused before its slice is taken
+      # too, and the ceiling is the component's times a stated multiple rather than a second
+      # number that could drift from it.
+      over = Bundle.max_precompiled_bytes() + 1
+
+      assert {:error, {:precompiled_too_large, ^over, _cap}} =
+               Bundle.decode(<<"OUROWASM", 2::8, 32::32, over::32, 1::32>>)
     end
 
     # M32. The version byte is matched as a literal in the clause that reads the two
@@ -194,28 +207,36 @@ defmodule Ouroboros.Wasm.BundleTest do
     test "a fully framed file from a future version is refused, not read", context do
       {:ok, bundle} = Bundle.encode(signed!(context), @bytes)
 
-      <<"OUROWASM", 1::8, rest::binary>> = bundle
-      future = "OUROWASM" <> <<2::8>> <> rest
+      <<"OUROWASM", 2::8, rest::binary>> = bundle
+      future = "OUROWASM" <> <<3::8>> <> rest
 
       assert byte_size(future) == byte_size(bundle)
 
-      assert {:error, {:unsupported_bundle_version, 2}} = Bundle.decode(future)
-      assert {:error, {:unsupported_bundle_version, 2}} = Bundle.verify(future, [])
+      assert {:error, {:unsupported_bundle_version, 3}} = Bundle.decode(future)
+      assert {:error, {:unsupported_bundle_version, 3}} = Bundle.verify(future, [])
     end
 
     test "something that is not one of these files is refused by its first eight bytes" do
-      assert {:error, :not_a_bundle} = Bundle.decode(<<"NOTAWASM", 1::8, 1::32, 1::32>>)
+      assert {:error, :not_a_bundle} = Bundle.decode(<<"NOTAWASM", 2::8, 1::32, 0::32, 1::32>>)
 
-      assert {:error, {:unsupported_bundle_version, 2}} =
-               Bundle.decode(<<"OUROWASM", 2::8, 0::32>>)
+      assert {:error, {:unsupported_bundle_version, 3}} =
+               Bundle.decode(<<"OUROWASM", 3::8, 0::32>>)
+
+      # W8 bumped the format. A file written by a build before it is refused by version and
+      # not read: format 1 has a shorter header and a manifest missing the field the signed
+      # half now carries, so reconstructing one could only ever fail — and "your file is from
+      # a build before W8" sends an operator somewhere useful, where a fixed point that failed
+      # for no stated reason would not.
+      assert {:error, {:unsupported_bundle_version, 1}} =
+               Bundle.decode(<<"OUROWASM", 1::8, 32::32, 1::32>>)
 
       assert {:error, {:invalid_bundle, _}} = Bundle.decode(:not_even_a_binary)
 
-      # A truncated *v1* file is short, not futuristic. Remove the `version !=` guard from
-      # the version clause and this reads as `{:unsupported_bundle_version, 1}`, which
-      # sends an operator to look for a newer build instead of at a broken copy.
+      # A truncated *current-version* file is short, not futuristic. Remove the `version !=`
+      # guard from the version clause and this reads as `{:unsupported_bundle_version, 2}`,
+      # which sends an operator to look for a newer build instead of at a broken copy.
       assert {:error, {:truncated_bundle, 12}} =
-               Bundle.decode(<<"OUROWASM", 1::8, 0::8, 0::8, 0::8>>)
+               Bundle.decode(<<"OUROWASM", 2::8, 0::8, 0::8, 0::8>>)
     end
 
     test "the envelope is closed, and its two encoded fields are bounded", context do
@@ -277,7 +298,7 @@ defmodule Ouroboros.Wasm.BundleTest do
          context do
       {:ok, bundle} = Bundle.encode(signed!(context), @bytes)
 
-      <<"OUROWASM", 1::8, len::32, _::32, rest::binary>> = bundle
+      <<"OUROWASM", 2::8, len::32, _::32, _::32, rest::binary>> = bundle
       {:ok, %{"manifest" => manifest}} = JSON.decode(binary_part(rest, 0, len))
 
       assert <<131, tag, _::binary>> = Base.decode64!(manifest)
@@ -443,38 +464,35 @@ defmodule Ouroboros.Wasm.BundleTest do
   # Re-frames a bundle with a mutated envelope, keeping both lengths honest so that what
   # the test is exercising is the envelope's own checks rather than the framing's.
   defp rebuild(bundle, mutate) do
-    <<"OUROWASM", 1::8, envelope_len::32, component_len::32, rest::binary>> = bundle
-    envelope = binary_part(rest, 0, envelope_len)
-    component = binary_part(rest, envelope_len, component_len)
-
-    {:ok, fields} = JSON.decode(envelope)
-    replaced = fields |> mutate.() |> JSON.encode!()
-
-    Bundle.decode(
-      "OUROWASM" <> <<1::8, byte_size(replaced)::32, component_len::32>> <> replaced <> component
-    )
+    Bundle.decode(reframe(bundle, mutate))
   end
 
   defp swap_component(bundle, replacement) do
-    <<"OUROWASM", 1::8, envelope_len::32, component_len::32, rest::binary>> = bundle
-    ^component_len = byte_size(replacement)
-    envelope = binary_part(rest, 0, envelope_len)
+    <<"OUROWASM", 2::8, envelope_len::32, precompiled_len::32, component_len::32, rest::binary>> =
+      bundle
 
-    "OUROWASM" <> <<1::8, envelope_len::32, component_len::32>> <> envelope <> replacement
+    ^component_len = byte_size(replacement)
+    head = binary_part(rest, 0, envelope_len + precompiled_len)
+
+    "OUROWASM" <>
+      <<2::8, envelope_len::32, precompiled_len::32, component_len::32>> <> head <> replacement
   end
 
   # Re-frames a bundle with a mutated envelope and hands back the *file*, where `rebuild/2`
   # hands back the decode. Same arithmetic, different question.
   defp reframe(bundle, mutate) do
-    <<"OUROWASM", 1::8, envelope_len::32, component_len::32, rest::binary>> = bundle
+    <<"OUROWASM", 2::8, envelope_len::32, precompiled_len::32, component_len::32, rest::binary>> =
+      bundle
+
     envelope = binary_part(rest, 0, envelope_len)
-    component = binary_part(rest, envelope_len, component_len)
+    tail = binary_part(rest, envelope_len, precompiled_len + component_len)
 
     {:ok, fields} = JSON.decode(envelope)
     replaced = fields |> mutate.() |> JSON.encode!()
 
     "OUROWASM" <>
-      <<1::8, byte_size(replaced)::32, component_len::32>> <> replaced <> component
+      <<2::8, byte_size(replaced)::32, precompiled_len::32, component_len::32>> <>
+      replaced <> tail
   end
 
   # How much heap one call grew, measured in a process of its own so nothing this test

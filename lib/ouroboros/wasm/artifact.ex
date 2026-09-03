@@ -65,6 +65,26 @@ defmodule Ouroboros.Wasm.Artifact do
   manifest cannot claim one kind and the other kind's world, and the loading node hands the
   helper the kind at `load`, where a component that is not in that world is refused.
 
+  ## `precompiled`: the same component, compiled once, elsewhere (W8, D22)
+
+  `precompiled` is `nil` or `%{wasmtime: binary, target: binary, sha256: binary, size: pos_integer}`
+  and it describes a *second artifact*: wasmtime's serialized form of this same component,
+  produced by `ouro-wasm precompile` on the node that built this manifest, for one exact
+  wasmtime version and one exact target triple. `component_sha256` is still the identity
+  (D2) — the precompiled sha is provenance about a form, not a second name for the thing.
+
+  It is in the **signed** manifest because deserializing a compiled artifact is trusting a
+  compiler's output the loading node did not produce: `Component::deserialize` is `unsafe`
+  precisely because wasmtime does not validate a serialized artifact against a malicious
+  producer. What makes it safe to map is the signature over this digest, so the digest has to
+  be inside what the signature covers, beside the source component's own (D24).
+
+  A node admits the precompiled form only when its own helper reports **exactly** this
+  wasmtime and this triple; otherwise it compiles the source form under §7.3's bounds, which
+  is what every node could always do. So this field is an optimisation a signer offers, never
+  a requirement it imposes: a manifest carrying one is deployable everywhere a manifest
+  without one is.
+
   ## The name is narrow, and `imports` holds no duplicates
 
   `name?/1` is the charset, and it is small because the name is load-bearing: it is the
@@ -86,7 +106,8 @@ defmodule Ouroboros.Wasm.Artifact do
     :size,
     :created_at
   ]
-  defstruct @enforce_keys ++ [kind: :capability, metadata: %{}, signature: nil]
+  defstruct @enforce_keys ++
+              [kind: :capability, precompiled: nil, metadata: %{}, signature: nil]
 
   @metadata_keys [:author, :source_sha256, :language, :test_report, :eval, :start]
   @sha256_hex 64
@@ -122,8 +143,27 @@ defmodule Ouroboros.Wasm.Artifact do
   @name_pattern ~r/\A[a-z0-9][a-z0-9._\-]{0,63}\z/
   @max_name_bytes 64
 
+  # How long a wasmtime version or a target triple may be in a `precompiled` block. Both are
+  # short strings a helper's `doctor` printed — `48.0.1`, `aarch64-apple-darwin` — and both are
+  # compared for equality and never parsed, so what needs bounding is only how much of somebody
+  # else's text a manifest may carry into a log line or a refusal.
+  @max_build_string_bytes 128
+
   @type kind :: :capability | :policy
   @type signature :: %{signer: String.t(), value: binary()}
+  @typedoc """
+  The serialized form of this component, and the exact pair of readings that may map it.
+
+  `wasmtime` and `target` are the strings the producing helper's `doctor` printed — a version
+  and a target triple, compared for equality and never parsed. `sha256` is the digest of the
+  whole container `ouro-wasm precompile` wrote, and `size` its length.
+  """
+  @type precompiled :: %{
+          wasmtime: String.t(),
+          target: String.t(),
+          sha256: String.t(),
+          size: pos_integer()
+        }
   @type t :: %__MODULE__{
           id: String.t(),
           epoch: pos_integer(),
@@ -134,6 +174,7 @@ defmodule Ouroboros.Wasm.Artifact do
           imports: [String.t()],
           size: pos_integer(),
           created_at: String.t(),
+          precompiled: precompiled() | nil,
           metadata: map(),
           signature: signature() | nil
         }
@@ -182,6 +223,7 @@ defmodule Ouroboros.Wasm.Artifact do
     world = Map.get_lazy(attrs, :world, fn -> Wasm.world_for(kind) end)
     imports = Map.get(attrs, :imports, [])
     name = Map.get(attrs, :name)
+    precompiled = Map.get(attrs, :precompiled)
 
     with :ok <- validate_bytes(bytes),
          :ok <- validate_preamble(bytes),
@@ -191,6 +233,7 @@ defmodule Ouroboros.Wasm.Artifact do
          :ok <- validate_kind(kind),
          :ok <- validate_world(world),
          :ok <- validate_imports(imports),
+         :ok <- validate_precompiled(precompiled),
          :ok <- validate_metadata(metadata) do
       {:ok,
        %__MODULE__{
@@ -206,6 +249,7 @@ defmodule Ouroboros.Wasm.Artifact do
          imports: imports,
          size: byte_size(bytes),
          created_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+         precompiled: precompiled,
          metadata: metadata
        }}
     end
@@ -227,6 +271,10 @@ defmodule Ouroboros.Wasm.Artifact do
       imports: artifact.imports,
       size: artifact.size,
       created_at: artifact.created_at,
+      # W8. Inside the signed half, because the whole of what makes mapping a compiled
+      # artifact sound is a signature over its digest (D24). A manifest whose `precompiled`
+      # block a deploy could edit is a manifest that authorizes deserializing anything.
+      precompiled: artifact.precompiled,
       metadata: artifact.metadata
     }
   end
@@ -311,12 +359,44 @@ defmodule Ouroboros.Wasm.Artifact do
   @spec kind?(term()) :: boolean()
   def kind?(value), do: value in Wasm.kinds()
 
+  @doc """
+  Whether `value` is a well-formed `precompiled` block, or its absence (W8, D22).
+
+  All four keys or none: a block naming a digest without the wasmtime and the triple that may
+  map it is a block no node can act on, and one naming a version without a digest is a claim
+  about nothing. The two strings are compared for equality by the loading node against what its
+  own helper's `doctor` printed, so what is checked here is that they are non-empty, bounded
+  text — never that this build recognises them, which is a fact about the *node*, not the
+  manifest.
+  """
+  @spec precompiled?(term()) :: boolean()
+  def precompiled?(nil), do: true
+
+  def precompiled?(%{wasmtime: wasmtime, target: target, sha256: sha256, size: size} = block)
+      when is_map(block) and not is_struct(block) do
+    map_size(block) == 4 and build_string?(wasmtime) and build_string?(target) and
+      sha256?(sha256) and is_integer(size) and size > 0
+  end
+
+  def precompiled?(_value), do: false
+
   @doc "Whether `value` is the 64-character lower-case hex a component sha is written as."
   @spec sha256?(term()) :: boolean()
   def sha256?(value) when is_binary(value),
     do: byte_size(value) == @sha256_hex and value =~ ~r/\A[0-9a-f]{#{@sha256_hex}}\z/
 
   def sha256?(_value), do: false
+
+  # Printable, bounded, and not empty. The same posture the name has and for a weaker reason:
+  # these two are never an identifier, but they are rendered to operators explaining why a node
+  # fell back to the source form, and a string that can hold a line break is one that can forge
+  # one there.
+  defp build_string?(value) when is_binary(value) do
+    value != "" and byte_size(value) <= @max_build_string_bytes and
+      Regex.match?(~r/\A[\x21-\x7e][\x20-\x7e]*\z/, value)
+  end
+
+  defp build_string?(_value), do: false
 
   defp normalize(attrs) when is_map(attrs), do: attrs
   defp normalize(attrs) when is_list(attrs), do: Map.new(attrs)
@@ -380,6 +460,12 @@ defmodule Ouroboros.Wasm.Artifact do
   end
 
   defp validate_imports(imports), do: {:error, {:invalid_imports, describe(imports)}}
+
+  defp validate_precompiled(precompiled) do
+    if precompiled?(precompiled),
+      do: :ok,
+      else: {:error, {:invalid_precompiled, describe(precompiled)}}
+  end
 
   defp validate_metadata(metadata) when is_map(metadata) and not is_struct(metadata) do
     case Map.get(metadata, :author) do

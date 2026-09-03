@@ -140,6 +140,11 @@ jobs:
       # Without it a runner that failed to build any of them would skip the acceptance suites
       # and pass, which is exactly the silence this job is being fixed for; with it, a missing
       # helper, guest or example fails the suites that needed it and names the `make` target.
+      #
+      # W8's end-to-end proof rides on all three: `test/wasm/precompiled_test.exs` signs the
+      # acceptance guest with this runner's own helper, deploys the bundle both forms travel
+      # in, and asserts the helper answered `precompiled: true` — and stands the policy example
+      # up the same way.
       - run: mix test
         env:
           OUROBOROS_REQUIRE_WASM: "1"
@@ -285,8 +290,10 @@ jobs:
           OUROBOROS_WASM_HELPER: ${{ github.workspace }}/priv/wasm/ouro-wasm
 
       # `ouro-wasm` explicitly: this job's cwd selects the root package, so the helper's
-      # containment suite — the tests that prove the linker refuses undeclared imports and
-      # the fuel/deadline/memory bounds hold — would otherwise never run on a PR.
+      # containment suite — the tests that prove the linker refuses undeclared imports, that
+      # the fuel/deadline/memory bounds hold, and (W8) that `precompile` applies §7.3 before it
+      # compiles while a precompiled `load` refuses another wasmtime, another triple, a tampered
+      # artifact and a component it was not compiled from — would otherwise never run on a PR.
       #
       # `OUROBOROS_REQUIRE_WASM` is what makes `tests/sdk.rs` load-bearing: without it a runner
       # missing the wasm32 target would print its skip and pass, which is the same silence the

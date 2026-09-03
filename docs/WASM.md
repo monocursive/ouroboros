@@ -386,9 +386,9 @@ Methods:
 
 | method | params | returns |
 |---|---|---|
-| `doctor` | — | `{usable, wasmtime, worlds: [supported world ids], imports, limits, held: {components, instances, evictions, evicted}, notes}` |
-| `inspect` | `{path}` | `{sha256, world, imports, exports, size}` — parsed from bytes / refusal (`unreadable_component`, `component_too_complex`, `compile_failed`) |
-| `load` | `{sha256, path, kind?}` | `{…as inspect, cached, evicted: [sha]}` / refusal (`sha_mismatch`, `unsupported_world`, `undefined_import`, `component_too_complex`, `too_many_components`) |
+| `doctor` | — | `{usable, wasmtime, target, worlds: [supported world ids], imports, limits, held: {components, instances, evictions, evicted}, notes}` |
+| `inspect` | `{path}` | `{precompiled: false, sha256, world, imports, exports, size, shape}` — parsed from bytes; for a `.cwasm`, `{precompiled: true, wasmtime, target, world, kind, component_sha256, component_size, …}` read from its header alone / refusal (`unreadable_component`, `component_too_complex`, `compile_failed`, `precompiled_mismatch`) |
+| `load` | `{sha256, path, kind?}`, or `{precompiled: true, sha256: <artifact>, component: <source sha>, path, kind?}` (W8) | `{…as inspect, precompiled, cached, evicted: [sha]}` / refusal (`sha_mismatch`, `unsupported_world`, `undefined_import`, `component_too_complex`, `too_many_components`, `precompiled_mismatch`) |
 | `instantiate` | `{instance, sha256, config, kind?, limits: {fuel, memory_bytes, deadline_ms}}` | `{instance, fuel_used, log_lines}` / init error |
 | `call` | `{instance, export, payload}` | `{payload, fuel_used, log_lines}` / trap / deadline |
 | `drop` | `{instance}` | ok (idempotent) |
@@ -405,6 +405,17 @@ import fails instantiation — authority cannot be smuggled past a lying manifes
 runs under a fuel budget, an epoch deadline, and a store memory cap; exhaustion is a
 typed refusal, not a hang. A wasmtime panic or segfault kills a Port, not the node —
 which is the point of the helper (D3).
+
+Since W8 the *usual* answer is that compilation does not happen here at all. `ouro-wasm
+precompile` compiles a component once, on the machine that signs it, and a node's `load`
+becomes `Component::deserialize` of an artifact bounded by a byte cap — a bound on work,
+which is exactly what a byte cap was not while `Component::new` was on this path. The
+structural pass below did not go anywhere: it is the *signer* that now applies it, in full,
+before it compiles, so an artifact that exists at all is one a node would have admitted
+(D23). What follows is therefore two things at once — what a signer applies before it
+compiles, and what a node still applies to every component it is handed in source form,
+which is every component whose manifest names no artifact and every component on a node
+whose wasmtime or target triple is not the signer's.
 
 Compilation is bounded *before* it starts, and it has to be: `Component::new` runs under
 no fuel, no deadline and no memory cap, because there is no store yet, and cranelift
@@ -429,6 +440,24 @@ that measure compile cost. `doctor` reports all eleven under `limits`, and the s
 pins them by value so moving one is a deliberate act with a fresh measurement behind it.
 Custom-section *bytes* are not weighed, only counted — wasmtime skips them, so sixty
 mebibytes of custom section costs the read and the digest, not the compile.
+
+For a **precompiled** load none of that runs, and the reason is that there is nothing left
+to bound: nothing is compiled, the work is linear in the input, and the input's length is
+checked before a byte of it is read. The cap is 128 MiB of serialized artifact (twice the
+component read cap), which is an order of magnitude above anything a signer applying the
+table above can produce — measured on this build, the worst admissible shape (20 000
+functions, 4 035 787 source bytes) serializes to 11 092 495 bytes, 2.75×, and the 48 KiB
+reference guest to 258 093, 5.3×, fixed overhead dominating the small one. `doctor` reports
+it as `max_precompiled_bytes` beside the eleven structural ceilings.
+
+The methods gained one parameter each and one subcommand. `load` takes `precompiled: true`
+with the artifact's digest as `sha256` and the **source** component's as `component`; the
+cache stays keyed on the source sha, because lane W's identity is the component's bytes (D2)
+and nothing above the pool has to know which form ran. `inspect` on one of these artifacts
+answers out of its container header alone — the wasmtime, the triple, the world, and the
+component it was compiled from — and maps nothing. `precompile <in.wasm> <out.cwasm>
+[--kind]` is the signer's side. `doctor` reports `target` beside `wasmtime`, because those
+are the two strings a node compares.
 
 Two honesties about those figures, both from re-measurement. The largest rows of
 `shape.rs`'s table do not reproduce — 4.36 s and 28.9 s came back as 2.73 s and 16.29 s —
@@ -519,8 +548,9 @@ publishing a durable, unprunable file no reboot can use.
 New artifact struct `Ouroboros.Wasm.Artifact`:
 
 ```
-id, epoch, name, component_sha256, world, imports, size, created_at,
-metadata (author, source_sha256?, language?, test_report?, eval?, start?), signature
+id, epoch, name, component_sha256, kind, world, imports, size, created_at,
+precompiled?, metadata (author, source_sha256?, language?, test_report?, eval?, start?),
+signature
 ```
 
 Signing payload mirrors the BEAM lane's deterministic form (`artifact.ex:75-77`):
@@ -549,7 +579,16 @@ The `Signer` behaviour is reused unchanged — `sign_artifact/2` already takes
    default for lane W (D12) — there is no BuildPeer/ExUnit analogue here, so the
    signed eval spec *is* the test story; `:signing_require_eval` semantics extend
    rather than fork;
-6. **start block.** `metadata.start`, when present, must be exactly
+6. **precompiled block** (W8, D22). `precompiled` is absent, or exactly
+   `%{wasmtime, target, sha256, size}`: a 64-hex digest that is *not* the component's own,
+   a positive size within the same multiple of the artifact ceiling a bundle admits, and two
+   printable bounded strings that are what a helper's `doctor` would have printed. What this
+   block authorizes is a loading node calling `Component::deserialize` on machine code it did
+   not produce, which is `unsafe` for a reason, so the digest that makes it sound is inside
+   what the signature covers. What is deliberately *not* checked is whether the signer
+   recognises the version or the triple: that is a fact about a loading node, and a node that
+   does not match falls back by itself;
+7. **start block.** `metadata.start`, when present, must be exactly
    `%{id: binary, config: binary}` and the id must be exactly `"wasm/" <> name` for the
    name in *this* manifest. Binding it to the `wasm/` prefix alone was not binding it at
    all: a component named `evil` could declare `wasm/greeter`, be signed, be recorded in
@@ -564,7 +603,19 @@ Loading-node verification mirrors the BEAM verifier's split: signature verified
 against `OUROBOROS_UPGRADE_TRUSTED_SIGNERS` (same key format, `verifier.ex:355-382`
 posture), sha recomputed from bytes before staging, and the helper's `inspect` result
 cross-checked against the signed manifest at `load` — a mismatch quarantines, it
-never "just links less."
+never "just links less." Since W8 each **form** is bound to its own digest:
+`Wasm.Verifier.verify_precompiled/2` holds the bundle's artifact section to
+`precompiled.sha256`, because a signature over one digest says nothing about bytes that
+merely travelled beside it, and a section the manifest does not declare — or a declaration
+with no section — is two statements about one file that disagree.
+
+Compilation happens at signing time now, on the node that builds the manifest, with the same
+`ouro-wasm` binary and the same engine configuration a node's `serve` uses (D23). It is
+skippable in three ways, and every one of them leaves the source-only path lane W already
+had: a node with no helper on disk, `precompile: false` (`ouro wasm sign
+--no-precompile`), and an artifact too large to travel in the receipt this verb answers
+with. In all three the manifest carries no block, the bundle carries no second section, and
+every node compiles the component for itself.
 
 The signer's own admission order is part of the posture. The per-requester rate limit
 runs **first**, before the `term_to_binary` over an artifact whose size the requester
@@ -598,7 +649,13 @@ discipline of `Rollout` (§4.1) with the code-loading machinery deleted:
    store an attacker sizes is not one;
 3. per node: atomically admit the epoch in that target's own `Rollout.Registry`, then
    `Wasm.Store.stage` over `:erpc` (content-addressed, idempotent — a node that already
-   holds the sha does nothing). The claim stored beside the target's high-water mark makes
+   holds the sha does nothing). Both forms are published, both content-addressed; the
+   target then loads the **precompiled** one when — and only when — the verified manifest
+   declares a block, its own helper reports exactly that wasmtime *and* that target triple,
+   and the artifact is on its disk. Anything short of all four is the source form under
+   §7.3's bounds with one logged line naming which half disagreed, which is a fallback and
+   not a fault (D22). `Wasm.Boot` and `Ouroboros.Wasm.PolicyEngine` reach the same rule
+   through the same function, `Wasm.Store.form/4`. The claim stored beside the target's high-water mark makes
    a retry of the same artifact idempotent, while a different driver cannot replay an older
    signed manifest to nodes whose local executor never sees lane W;
 4. probe: the generalized `Rollout.Probe` starts
@@ -648,9 +705,16 @@ through the service, call `Wasm.Rollout.deploy/4`. W12 puts that on the wire wit
 moving any of the authority.
 
 `Ouroboros.Wasm.Bundle` is the one file an operator moves around, extension
-`.ouro-wasm`: a 17-byte header (magic, format version, and the envelope and component
-lengths), a bounded JSON envelope carrying the manifest as its own `term_to_binary` plus
-the signer id and the 64-byte signature, and then the component bytes **raw**. The big
+`.ouro-wasm`: a 21-byte header (magic, format version, and the envelope, precompiled and
+component lengths), a bounded JSON envelope carrying the manifest as its own
+`term_to_binary` plus the signer id and the 64-byte signature, then — since W8 (format 2) —
+the precompiled artifact if the manifest declares one, and then the component bytes **raw**.
+The artifact sits before the component rather than after it, and that is not a taste:
+`wasm.sign` answers with the bundle's *prefix* and the client appends the exact bytes it
+uploaded, so the only ordering in which the client still composes nothing is the one where
+everything it did not produce comes first. A format-1 file is refused by version — the signed
+half gained a field, so one could not have reconstructed anyway, and "your file is from a
+build before W8" sends an operator somewhere useful. The big
 half is not base64 — that would be twenty-one mebibytes of decoding handed to a parser by
 whoever wrote the file, to save nobody anything — and only the KiB-scale envelope is.
 Every field is bounded before it is parsed, the total size must equal the header plus the
@@ -670,7 +734,9 @@ project back through `Wasm.Artifact.manifest/1` to exactly the map that was deco
 is one comparison instead of nine and cannot be satisfied by a manifest carrying a key
 this build has no home for. `Bundle.verify/2` adds nothing of its own: the sha binds the
 bytes, the signature binds the manifest, and the **reading node's** trust policy binds the
-signer.
+signer — and since W8 there are two shas, one per form, because a node that checked only the
+component's would deserialize machine code nobody signed out of a file that was otherwise
+perfectly verified.
 
 The verbs are `wasm.sign`, `wasm.deploy` and `wasm.rollback`, all `:operate` and
 node-routed like `wasm.status`, plus `wasm.upload` underneath them (D16). `wasm.sign`
@@ -1772,6 +1838,46 @@ machinery — it is a backend, not a lane (D9).
   so the macro an author calls, `export_capability!` or `export_policy!`, is what decides which
   world the finished component implements, and a crate cannot claim both by linking the SDK.
 
+- **D22 — what is signed is both forms.** The manifest gains
+  `precompiled: %{wasmtime: "<exact version>", target: "<triple>", sha256: "<of the serialized
+  artifact>", size: <bytes>}` beside the source component's own sha256, and the bundle carries
+  both sets of bytes in two length-prefixed sections. A node admits the precompiled form only
+  when its **own** helper's `doctor` reports exactly that version and exactly that triple and
+  its own store holds the artifact; otherwise it compiles the source form under §7.3's bounds,
+  so there is no regression for a node that cannot use it. The comparison is string equality on
+  both halves and nothing cleverer: wasmtime's serialized form is checked against an exact
+  build and an exact configuration hash, so "close enough" is not a judgment anybody here is
+  entitled to make. `component_sha256` remains the identity — the register, the ledger, the
+  labels and the helper's cache key are all unchanged (D2) — and the artifact's digest is
+  provenance about a *form*, not a second name for the thing.
+
+- **D23 — compilation runs where the signature is made.** `Wasm.Deploy.sign/2` compiles on the
+  node that builds the manifest, with `ouro-wasm precompile`: the same binary, the same
+  `Engine` (there is one `host::engine()`, shared by `serve` and `precompile`, because a second
+  configuration would be a second world — an artifact `precompile` produced that `serve` could
+  not map, discovered at the far end of a deploy), and the same structural bounds. The signer
+  is now the machine that pays for compilation, and it applies §7.3 in full before it does: a
+  component past a bound is refused at sign time with the same name a node's `load` would have
+  used, and so is one that is not in the world it was offered as. Skipping is an answer, never
+  an error — no helper on disk, `--no-precompile`, or an artifact too large to travel in the
+  receipt — and each one leaves exactly the source-only path lane W already had.
+
+- **D24 — what `deserialize` trusts is the signature, and nothing in the file.**
+  `Component::deserialize` is `unsafe` because wasmtime does not validate a serialized artifact
+  against a malicious producer: the bytes are machine code and a relocation table, and mapping
+  hostile ones is mapping hostile code. So a node deserializes only bytes whose digest is in a
+  manifest a trusted signer signed, read from its own content-addressed store, and never bytes
+  that arrived any other way. `load` says so structurally: `precompiled: true` is a parameter
+  the owner has to assert, it carries both digests, and every check runs in front of the
+  `unsafe` block — the digest the manifest named, the container this build wrote, the wasmtime
+  and the triple, and the source component the manifest is about. The container is this repo's
+  own eighteen-byte framing around wasmtime's output, for one reason: wasmtime checks its own
+  compatibility *inside* the unsafe call, and "deserialize it and see what the error says" is
+  the order W8 exists to avoid. `world::check` then runs on the deserialized component exactly
+  as it does on a compiled one — a form of the bytes is not an exemption from the linker's
+  contract — and the refusal for everything else is one name, `precompiled_mismatch`, because
+  the answer to all of them is the same: use the source form, which every node can compile.
+
 ## 12. What this does not solve
 
 Stated once, so nobody reads more into the lane than is there:
@@ -1790,10 +1896,33 @@ Stated once, so nobody reads more into the lane than is there:
   backend this runtime prefers on Linux when it is installed, cannot express a read
   allow-set, so the forge refuses it by name: a node whose only sandbox is that helper does
   not forge. That is the honest state of it, not a fence.
+- **Engine-embedding guests are still out, and W8 removed only the first precondition.**
+  A JavaScript or Python guest carries an engine, which is millions of code bytes and far past
+  §7.3's 4 MiB — a bound that now applies at the *signer* rather than at every node, which is
+  what made it a precondition. The second is a world broad enough for `wasi:io`, which those
+  runtimes want at instantiation, and that one is a signing-policy decision rather than an
+  engineering one: every import added to a world is boundary code, and this lane's answer has
+  been austerity. W8 does not admit them and does not bring them closer than one decision away.
 - **wasmtime is a dependency, not a proof.** It has had escape CVEs; they are rare and
   patched fast, and the helper process (which can itself be OS-sandboxed later) is the
   second wall. Pin it, watch its advisories, and keep its dialect small — §7.3's disabled
   proposal list is surface removed from cranelift, not just from the spec.
+- **A precompiled artifact is bound to one wasmtime and one triple, and that is the
+  lane-B triple problem arriving by another road.** W8 removes the compile from a node's hot
+  path only for nodes whose build is the signer's, byte for byte in two strings. A fleet
+  running two wasmtime versions gets the fast path on the half that matches and the old path
+  on the rest, and a fleet on two architectures needs two signings or accepts the source form
+  on one of them. That is stated rather than solved: the alternative — admitting an artifact
+  a node's own engine did not vouch for — is the one thing D24 exists to refuse. What the
+  design does buy is that the failure is a *fallback*, named in a log line and in
+  `wasm.list`'s `form`, rather than a refusal an operator has to diagnose.
+- **The artifact only reaches an operator when it fits one reply.** `wasm.sign` answers with
+  the bundle's prefix, which since W8 carries the artifact the client has never seen — a few
+  hundred kibibytes for a real capability, and eleven mebibytes for the worst shape §7.3
+  admits. One gateway reply is not a file transfer, so past 4 MiB the signer signs the source
+  form alone and says so in `precompile_skipped`. The capability still deploys and still runs;
+  it compiles on each node, as it always did. Building a chunked *download* would lift that,
+  and it is not this slice.
 - **The compile bound is a bound on admission, not a theorem about compile time.**
   §7.3's structural pass bounds what the helper will hand to cranelift, and the worst case
   it admits was measured at 1.19 s on this Mac. Cranelift's cost is not a function of
@@ -2027,21 +2156,70 @@ Each slice is PR-sized, lands green, and is useful alone.
   journal, orders the signer's rate limit first, and keeps probe/eval cleanup in a process
   a deadline kill cannot reach. Every fix landed with a regression test that was red first
   and a mutation that turns it red again.
-- **W8 — ahead-of-time compilation (proposed, not promised).** `Component::new` on the
-  node's hot path is what makes §7.3's bounds necessary in the shape they have.
-  `Engine::precompile_component` at sign or deploy time and `Component::deserialize` at
-  `load` would move cranelift off the node entirely: a `load` becomes an mmap of an
-  artifact somebody else already compiled, and the admission question stops being "how
-  expensive is this to compile" and becomes "how large is this artifact" — a question a
-  byte cap answers exactly. It is also the first of two preconditions for admitting
-  engine-embedding guests (§1); the second is a world broad enough for `wasi:io`, or a
-  runtime build that does not want it, and that one is a signing-policy decision rather
-  than an engineering one (§12). Unbuilt, and carrying its own questions — a precompiled
-  artifact is bound to a wasmtime version *and* a target triple, which is the lane-B
-  triple problem arriving by another road, and deserializing bytes is trusting a compiler
-  output the node did not produce, so what gets signed would have to be the precompiled
-  form. Written down because the bounds above are the shape of a host that compiles, and
-  a reader should know which constraint is essential and which is a consequence.
+- **W8 — compiled once, where the signature is made.** `Component::new` on the node's hot
+  path was what made §7.3's bounds necessary in the shape they have. The helper grew
+  `ouro-wasm precompile <in.wasm> <out.cwasm> [--kind]`, which applies `shape::check` and then
+  `Engine::precompile_component` under the **same** engine — one `host::engine()`, shared with
+  `serve`, because a second configuration is a second world — reads its own output back to run
+  `world::check` on the artifact rather than on the source, and writes it inside an eighteen-byte
+  container naming the wasmtime, the triple, the world and the source component. `load` gained
+  `precompiled: true`: sha, then header, then the two build strings, then the source component
+  the request named, then `Component::deserialize`, then `world::check` on what came out —
+  every check in front of the `unsafe` block, whose comment is D24's sentence. `shape::check`
+  deliberately does not run there; the bound is the byte cap, 128 MiB, reported as
+  `max_precompiled_bytes`. One new refusal, `precompiled_mismatch` (-32021), covers every way
+  an artifact is not this node's to map. `doctor` reports `target`.
+
+  **The measurement, on the release helper (aarch64-apple-darwin, wasmtime 48.0.1).** The worst
+  component §7.3 admits — 20 000 functions, 4 035 787 bytes, the shape the whole structural pass
+  exists to bound — serializes to 11 092 495 bytes (2.75×) and:
+
+  | | `inspect` | `load` | total |
+  |---|---|---|---|
+  | today, source | 1.416 s | 1.525 s | **2.942 s** |
+  | W8, precompiled | 0.040 s | 0.037 s | **0.077 s** |
+
+  Thirty-eight times less, and the remaining cost is linear in the artifact's length rather
+  than a function of its shape — which is the claim: the admission question stops being "how
+  expensive is this to compile" and becomes "how large is this artifact", which a byte cap
+  answers exactly. The signer pays 1.459 s once. The reference guest, for scale: 48 333 bytes
+  of wasm to 258 093 of artifact, 5.3×, fixed overhead dominating a small one.
+
+  On the Elixir side `Wasm.Artifact` carries `precompiled: nil | %{wasmtime, target, sha256,
+  size}` inside `manifest/1` and therefore inside the signature; the bundle went to format 2
+  with a third length and the artifact between the envelope and the component (so the client
+  still only appends); `Bundle.verify/2` binds each form to its own sha through
+  `Verifier.verify_precompiled/2`; the signing policy's wasm arm validates the block and
+  journals it; `Wasm.Store` publishes artifacts content-addressed as `cwasm-<hex>.cwasm`,
+  prunes them, protects them through the manifests of protected rows, and owns `form/4` — the
+  one place a node decides which bytes to hand the helper; `Wasm.Deploy.sign/2` precompiles
+  with this node's helper and records what that helper printed; `Rollout.stage/3`, the wrapper
+  agent, `Wasm.Boot` and `PolicyEngine` all reach `form/4`; `wasm.list` reports `form`;
+  `ouro wasm sign --no-precompile`, `ouro wasm inspect` on a `.cwasm` (header only, plus one
+  line saying whether this helper could map it), and `ouro wasm ls`'s `FORM` column.
+
+  Proofs. Rust: precompile-and-map of the echo guest answers a message; the worst admissible
+  component maps faster than it compiles and then works; one flipped byte deep in the machine
+  code is `sha_mismatch` before the deserialize; a header rewritten to another wasmtime and to
+  another triple is `precompiled_mismatch` **by name** and the source form still loads; source
+  bytes offered as an artifact, an artifact offered for another component, an artifact offered
+  as source, and a non-boolean `precompiled` are each refused; a header rewritten to claim the
+  policy world over a capability payload deserializes and is then refused `unsupported_world`
+  by the world check, which is the one case the header comparison cannot catch; and
+  `precompile` refuses a component one function past the bound, one that wants a clock, and one
+  offered as the wrong world. Elixir: `Store.form/4`'s whole table, including every fallback and
+  its reason; sign → bundle → deploy → `precompiled: true` from the helper's own answer; the
+  same bundle with another wasmtime recorded falls back on a cold node; an untrusted signature
+  never reaches a deserialize and leaves the store empty; a tampered artifact section is refused
+  by `Bundle.verify/2`; `wasm.list` says `precompiled`; a reboot restarts a precompiled `:live`
+  entry, carries the block into the wrapper's state, and it answers; the policy engine stands a
+  precompiled policy up. The two skew tests craft the mismatch rather than building with two
+  toolchains — the container's header is this build's own format, and what a node reads *is*
+  the header — and the scripted-`doctor` half is proved separately, on `Pool.helper_build/2`.
+
+  What W8 does **not** remove is in §12: the artifact is bound to one wasmtime and one triple,
+  it only reaches an operator when it fits one gateway reply, and engine-embedding guests still
+  need `wasi:io`, which is a signing-policy decision and not this slice.
 - **W9 — the guest SDK.** `tui/wasm/guest` (`ouroboros-guest`): its own cargo workspace, the
   `no_std` ceremony behind one macro call, and four seams over the one world — `Capability`
   for a mesh capability, `Hook` and `Check` for lane H's two contracts, `Raw` underneath them

@@ -273,10 +273,14 @@ defmodule Ouroboros.Wasm.PolicyEngine do
 
     with {:ok, name} <- policy_name(),
          {:ok, entry} <- live_policy(name, opts),
-         :ok <- provenance(name, entry, opts),
+         # W8. The block comes back with the verdict on provenance rather than being fetched
+         # again, so what decides whether this node will `Component::deserialize` machine code
+         # is a manifest it has *just* verified against its own trust policy (D24). Reading it
+         # anywhere else would be reading it from something less than that.
+         {:ok, precompiled} <- provenance(name, entry, opts),
          normalized = Request.new(request),
          {:ok, document} <- document(normalized),
-         {:ok, verdict, rule} <- ask_component(name, entry, document, opts) do
+         {:ok, verdict, rule} <- ask_component(name, entry, document, precompiled, opts) do
       settle(verdict, rule, name, entry, normalized, asked)
     else
       _no_policy_or_no_answer -> asked
@@ -362,7 +366,7 @@ defmodule Ouroboros.Wasm.PolicyEngine do
     with {:ok, manifest} <- signed_manifest(entry, opts),
          :ok <- Verifier.verify_manifest(manifest, trust_policy(opts)),
          :ok <- matches_entry(manifest, entry) do
-      :ok
+      {:ok, manifest.precompiled}
     else
       reason ->
         warn_once(
@@ -425,7 +429,7 @@ defmodule Ouroboros.Wasm.PolicyEngine do
   # transport margin, twice over for the retry, while every other pool user queued behind it.
   # The decision has one deadline, the work runs in a process this one can kill, and a re-try is
   # spent only on the refusal that means "the instance I remember is gone".
-  defp ask_component(name, entry, document, opts) do
+  defp ask_component(name, entry, document, precompiled, opts) do
     sha = entry.component_sha256
     pool = Keyword.get(opts, :pool, Pool)
     instance = @instance_prefix <> sha
@@ -440,7 +444,7 @@ defmodule Ouroboros.Wasm.PolicyEngine do
       # restarted, a component the cache evicted. Every other refusal has already spent the
       # round trip and a retry would only spend another.
       {:ok, {:error, %{refusal: "unknown_instance"}}} ->
-        with :ok <- stand_up(sha, instance, opts, deadline),
+        with :ok <- stand_up(sha, instance, precompiled, opts, deadline),
              {:ok, {:ok, %{"payload" => payload}}} when is_binary(payload) <-
                bounded(deadline, fn -> Pool.call(instance, "evaluate", document, pool) end) do
           verdict_or_ask(payload)
@@ -506,12 +510,15 @@ defmodule Ouroboros.Wasm.PolicyEngine do
   # Load and instantiate, as the policy world. The kind travels to the helper so a component
   # that is not in that world is refused at `load` — the manifest said `policy`, and this is
   # where that claim is checked against the bytes rather than believed.
-  defp stand_up(sha, instance, opts, deadline) do
+  defp stand_up(sha, instance, precompiled, opts, deadline) do
     pool = Keyword.get(opts, :pool, Pool)
 
-    with {:ok, path} <- store_path(sha, Keyword.get(opts, :store_root)),
+    with {:ok, path, load_opts} <-
+           store_form(sha, precompiled, pool, Keyword.get(opts, :store_root)),
          {:ok, {:ok, _loaded}} <-
-           bounded(deadline, fn -> Pool.load(sha, path, pool, kind: :policy) end),
+           bounded(deadline, fn ->
+             Pool.load(sha, path, pool, Keyword.put(load_opts, :kind, :policy))
+           end),
          {:ok, {:ok, _stood}} <-
            bounded(deadline, fn ->
              Pool.instantiate(instance, sha, "{}", Wasm.capability_limits(), pool, kind: :policy)
@@ -1090,8 +1097,13 @@ defmodule Ouroboros.Wasm.PolicyEngine do
 
     try do
       with {:ok, sha} <- component_sha(sha),
-           {:ok, path} <- component_path(state, sha),
-           {:ok, _loaded} <- Pool.load(sha, path, pool, kind: :policy),
+           # W8. The deploy gates take the same form the live engine will: the state carries the
+           # verified manifest's block (`Ouroboros.Wasm.Rollout.start_state/2`), so a probe or an
+           # evaluation exercises the artifact this node would actually load rather than a form
+           # nothing will run.
+           {:ok, path, load_opts} <-
+             component_form(state, sha, pool),
+           {:ok, _loaded} <- Pool.load(sha, path, pool, Keyword.put(load_opts, :kind, :policy)),
            {:ok, _stood} <-
              Pool.instantiate(instance, sha, config(state), limits(state), pool,
                kind: :policy,
@@ -1141,19 +1153,36 @@ defmodule Ouroboros.Wasm.PolicyEngine do
   defp component_sha(sha) when is_binary(sha) and sha != "", do: {:ok, sha}
   defp component_sha(other), do: {:error, {:invalid_component, describe(other)}}
 
-  defp component_path(state, sha), do: store_path(sha, Map.get(state, :store_root))
+  defp component_form(state, sha, pool) do
+    precompiled =
+      case Map.get(state, :precompiled) do
+        block when is_map(block) -> if Artifact.precompiled?(block), do: block
+        _absent -> nil
+      end
+
+    store_form(sha, precompiled, pool, Map.get(state, :store_root))
+  end
+
+  # W8. Which form the engine hands the helper, from a manifest it has just verified and this
+  # node's own helper reading. A node whose wasmtime or triple does not match the one that
+  # compiled the artifact loads the source form under §7.3's bounds, which is the path the
+  # policy engine has always taken.
+  defp store_form(sha, precompiled, pool, root) do
+    case Store.form(sha, precompiled, fn -> Pool.helper_build(pool) end, store_opts(root)) do
+      {:precompiled, path, artifact} -> {:ok, path, [precompiled: artifact]}
+      {:source, path, _why} -> {:ok, path, []}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   # The node's own store root unless a caller named one *and* this build honours the override,
   # which is this repository's test environment and nowhere else — `Ouroboros.Wasm.Capability`'s
   # rule, verbatim, because a directory name that decides which unsigned bytes get instantiated
   # is not a setting.
-  defp store_path(sha, root) do
-    opts =
-      if is_binary(root) and root != "" and Wasm.allow_store_root_override?(),
-        do: [root: root],
-        else: []
-
-    Store.path(sha, opts)
+  defp store_opts(root) do
+    if is_binary(root) and root != "" and Wasm.allow_store_root_override?(),
+      do: [root: root],
+      else: []
   end
 
   defp config(state) do

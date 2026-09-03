@@ -3582,6 +3582,12 @@ pub struct WasmRollout {
     /// `deploying`, `live`, `superseded`, `rolled_back`, or `quarantined` — the runtime's
     /// own string, because an unknown sixth state is still worth showing.
     pub state: Option<String>,
+    /// W8. Which form the answering node loads this component from: `precompiled` when the
+    /// signed manifest names an artifact for exactly that node's wasmtime and target triple
+    /// and its store holds it, `source` otherwise. `None` where that node could not say —
+    /// no readable manifest, or no helper that has reported its build — and kept as the
+    /// runtime's own string for the reason `state` is.
+    pub form: Option<String>,
     /// Node names as strings. They stay strings: a node name this client turned back into
     /// anything else would be a value minted from the wire.
     pub nodes: Vec<String>,
@@ -3724,6 +3730,7 @@ impl WasmRollout {
             component_sha256: nonempty(value.get("component_sha256")),
             epoch: value.get("epoch").and_then(Value::as_u64),
             state: nonempty(value.get("state")),
+            form: nonempty(value.get("form")),
             nodes: strings(value.get("nodes")),
             created_at: nonempty(value.get("created_at")),
             updated_at: nonempty(value.get("updated_at")),
@@ -3782,10 +3789,40 @@ pub struct WasmSignature {
     /// `None` when the manifest declares no start block.
     pub start_id: Option<String>,
     pub extension: Option<String>,
+    /// W8. The serialized form the signing node compiled, as the signed manifest names it:
+    /// the wasmtime and the target triple only a matching node may map it on, and its own
+    /// digest and size. `None` when the manifest carries none, which is what a node with no
+    /// helper, `--no-precompile`, and an artifact too large to travel all produce.
+    pub precompiled: Option<WasmPrecompiled>,
+    /// Why there is no artifact, when the node had a reason worth naming. Kept as the
+    /// runtime's own rendering: it is a diagnostic line, not a value to branch on.
+    pub precompile_skipped: Option<String>,
     /// Base64 of the bytes to write before the component. Kept encoded: this client
-    /// decodes it once, at the moment it writes the file, and never inspects it.
+    /// decodes it once, at the moment it writes the file, and never inspects it. Since W8
+    /// it carries the precompiled artifact too, which is the half the client never had.
     pub bundle_prefix: Option<String>,
     pub bundle_bytes: Option<u64>,
+}
+
+/// W8. The precompiled form a signed manifest names, and the exact pair of readings that may
+/// map it. Rendered, never acted on: this client compiles nothing and deserializes nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmPrecompiled {
+    pub wasmtime: Option<String>,
+    pub target: Option<String>,
+    pub sha256: Option<String>,
+    pub size: Option<u64>,
+}
+
+impl WasmPrecompiled {
+    fn decode(value: &Value) -> Self {
+        Self {
+            wasmtime: nonempty(value.get("wasmtime")),
+            target: nonempty(value.get("target")),
+            sha256: nonempty(value.get("sha256")),
+            size: value.get("size").and_then(Value::as_u64),
+        }
+    }
 }
 
 /// W12. What `wasm.deploy` answers with: a rollout that ran, and what each node did.
@@ -3946,6 +3983,11 @@ impl WasmSignature {
             signer: nonempty(value.get("signer")),
             start_id: nonempty(value.get("start_id")),
             extension: nonempty(value.get("extension")),
+            precompiled: value
+                .get("precompiled")
+                .filter(|v| v.is_object())
+                .map(WasmPrecompiled::decode),
+            precompile_skipped: nonempty(value.get("precompile_skipped")),
             bundle_prefix: nonempty(value.get("bundle_prefix")),
             bundle_bytes: value.get("bundle_bytes").and_then(Value::as_u64),
         }
@@ -4673,6 +4715,26 @@ mod tests {
         assert_eq!(signed.extension.as_deref(), Some(".ouro-wasm"));
         assert_eq!(signed.size, Some(2_097_152));
 
+        // W8. The serialized form the signing node compiled, named by the pair of readings a
+        // node has to match before it may map it. It is on the wire because it is in the
+        // signed manifest: what makes `Component::deserialize` sound is a signature over this
+        // digest, so a receipt that did not carry it would be a bundle whose reader cannot say
+        // which half of it a node will run.
+        let precompiled = signed.precompiled.as_ref().expect("a precompiled block");
+        assert_eq!(precompiled.wasmtime.as_deref(), Some("48.0.1"));
+        assert_eq!(precompiled.target.as_deref(), Some("aarch64-apple-darwin"));
+        assert_eq!(precompiled.sha256.as_deref(), Some(&"d".repeat(64)[..]));
+        assert_eq!(precompiled.size, Some(4_096));
+        assert_eq!(signed.precompile_skipped, None);
+
+        // A receipt from a node with no helper, or from `--no-precompile`, carries neither the
+        // block nor a reason it could branch on — only a line to print.
+        let source_only = WasmSignature::decode(
+            &serde_json::json!({ "name": "vet", "precompile_skipped": "no_helper" }),
+        );
+        assert_eq!(source_only.precompiled, None);
+        assert_eq!(source_only.precompile_skipped.as_deref(), Some("no_helper"));
+
         // The prefix stays base64 until the moment the file is written. Its length plus the
         // component's is what the bundle weighs, which is the whole of this client's
         // knowledge of the format.
@@ -4919,6 +4981,11 @@ mod tests {
         assert_eq!(live.name.as_deref(), Some("vet"));
         assert_eq!(live.epoch, Some(7));
         assert_eq!(live.component_sha256.as_deref(), Some(&"a".repeat(64)[..]));
+        // W8. Which of the two forms the answering node loads that component from — the
+        // difference between a `load` that compiles and one that maps. All three values are
+        // pinned across these rows, `null` included: a node that cannot say is not a node
+        // saying `source`.
+        assert_eq!(live.form.as_deref(), Some("precompiled"));
         assert_eq!(
             live.nodes,
             vec!["ouroboros@golden".to_string(), "ouroboros@peer".to_string()]
@@ -4928,7 +4995,9 @@ mod tests {
         // The three states in the fixture are three an operator has to tell apart: what is
         // running, what it replaced, and what was held back as evidence.
         assert_eq!(list.rollouts[1].state.as_deref(), Some("superseded"));
+        assert_eq!(list.rollouts[1].form.as_deref(), Some("source"));
         assert_eq!(list.rollouts[2].state.as_deref(), Some("quarantined"));
+        assert_eq!(list.rollouts[2].form, None);
         assert_eq!(list.rollouts[2].name.as_deref(), Some("lint"));
 
         // A listing, not a record: no arbitrary deployment term rides along.

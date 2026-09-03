@@ -339,6 +339,26 @@ defmodule Ouroboros.Wasm.Pool do
   `{:error, {:invalid_kind, _}}` here, before a frame is built, for `lane:`'s reason — a caller
   whose kind this build does not know has said something this build cannot honour either way.
 
+  ## `precompiled:` — which form of the bytes is at `path` (W8)
+
+  `precompiled: <sha of the artifact>` says that `path` holds wasmtime's serialized form of the
+  component `sha256` names, and that this is its digest. The helper then recomputes that digest,
+  reads the container's header, refuses `precompiled_mismatch` unless its own wasmtime version
+  and target triple are exactly the ones the artifact was built for, checks that the artifact
+  names *this* component, and only then `Component::deserialize`s it — under `world::check`
+  exactly as a compiled component is (D24).
+
+  It is not a preference either. `Ouroboros.Wasm.Store.form/4` decides it, out of a **verified**
+  manifest's `precompiled` block and this node's own `doctor` reading, and a node whose readings
+  do not match loads the source form instead. Passing the option for bytes no manifest named is
+  refused by the helper, which is the point of the artifact's digest being a parameter rather
+  than something read off the file.
+
+  The cache key is still the **component**'s sha, whichever form was loaded: identity in lane W
+  is the component's bytes (D2), so `instantiate/6` names what it always named and nothing above
+  this function has to know which form ran. The answer says which one it was, under
+  `"precompiled"`.
+
   `opts` follows the server, as `instantiate/6`'s does and for the same reason.
   """
   @spec load(String.t(), String.t(), GenServer.server(), keyword()) ::
@@ -346,15 +366,33 @@ defmodule Ouroboros.Wasm.Pool do
   def load(sha256, path, server \\ __MODULE__, opts \\ [])
       when is_binary(sha256) and is_binary(path) and is_list(opts) do
     with {:ok, lane} <- lane(opts),
-         {:ok, kind} <- kind(opts) do
-      request(
-        server,
-        "load",
-        %{"sha256" => sha256, "path" => path, "kind" => kind},
-        :fixed,
-        nil,
-        lane
-      )
+         {:ok, kind} <- kind(opts),
+         {:ok, params} <- load_params(sha256, path, kind, opts) do
+      request(server, "load", params, :fixed, nil, lane)
+    end
+  end
+
+  # The two shapes of a `load` frame. The source form names the component and the file; the
+  # precompiled form names the artifact's digest as `sha256` — that is what the helper will
+  # recompute from the file it reads — and the component's separately, because that is the
+  # identity the cache is keyed under and the fact the container's header is held to.
+  defp load_params(sha256, path, kind, opts) do
+    case Keyword.get(opts, :precompiled) do
+      nil ->
+        {:ok, %{"sha256" => sha256, "path" => path, "kind" => kind}}
+
+      artifact when is_binary(artifact) and artifact != "" ->
+        {:ok,
+         %{
+           "precompiled" => true,
+           "sha256" => artifact,
+           "component" => sha256,
+           "path" => path,
+           "kind" => kind
+         }}
+
+      other ->
+        {:error, {:invalid_precompiled, other}}
     end
   end
 
@@ -510,6 +548,56 @@ defmodule Ouroboros.Wasm.Pool do
   """
   @spec hook_component_budget() :: pos_integer()
   def hook_component_budget, do: @hook_component_budget
+
+  @doc """
+  The wasmtime and the target triple this node's helper reports, or `nil` (W8).
+
+  The pair a precompiled artifact is bound to, read off the `doctor` report the pool already
+  accepted at handshake rather than by asking again: `Ouroboros.Wasm.Store.form/4` calls this
+  on the way to every load, and a round trip per load to learn two constants would be a
+  round trip per load.
+
+  `nil` means this node does not know — no pool process, a helper this node has no binary for,
+  a helper too old to report a target — and `form/4` reads that as "use the source form", which
+  is the answer that always works. Never an exception and never a guess: a node that guessed
+  its own build would be a node deserializing machine code on a hunch.
+
+  ## `connect:` — whether asking may start the helper
+
+  Default `true`, because the caller on the load path is about to issue a `load` anyway and a
+  pool that has not connected yet has no report to read: without this the *first* load on every
+  node would fall back to the source form for no reason but ordering. The handshake keeps the
+  report, so at most one extra `doctor` is spent per helper lifetime.
+
+  `connect: false` is for a reader. `wasm.list` is a `:read` verb and W5's rule is that it never
+  starts a helper to answer, so it asks with `false` and renders `nil` — "this node does not
+  know" — where a load would have connected and found out.
+  """
+  @spec helper_build(GenServer.server(), keyword()) :: %{String.t() => String.t()} | nil
+  def helper_build(server \\ __MODULE__, opts \\ []) do
+    case status(server) do
+      # A handshake has happened, so *this* is the report — whether or not it names a target.
+      # A helper too old to report one is asked once and never again: re-asking would spend a
+      # round trip per load to be told the same thing, on the sequential wire every capability
+      # and every hook on this node shares.
+      %{doctor: report} when is_map(report) ->
+        build_of(report)
+
+      _no_report ->
+        if Keyword.get(opts, :connect, true) do
+          case doctor(server) do
+            {:ok, report} -> build_of(report)
+            {:error, _unavailable} -> nil
+          end
+        end
+    end
+  end
+
+  defp build_of(%{"wasmtime" => wasmtime, "target" => target})
+       when is_binary(wasmtime) and wasmtime != "" and is_binary(target) and target != "",
+       do: %{"wasmtime" => wasmtime, "target" => target}
+
+  defp build_of(_absent), do: nil
 
   @doc "Describes the helper this node owns: phase, os pid, the accepted doctor report."
   @spec status(GenServer.server()) :: status()
