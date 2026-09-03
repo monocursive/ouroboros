@@ -2064,6 +2064,16 @@ fn sign_asks_the_helper_before_it_dials_anything() {
     let component = scratch.write("thing.wasm", "\0asm\u{d}\0\u{1}\0");
     let helper = scratch.path().join("ouro-wasm");
 
+    // A token of this test's own, so the dial does not depend on whatever token the machine
+    // running the suite happens to hold: without one, `sign` refuses before it connects and
+    // the order log shows only the helper — which is what a token-less runner showed.
+    let token = scratch.write("token", "test-token-for-the-order-log\n");
+    std::fs::set_permissions(
+        &token,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+    )
+    .expect("a private token file");
+
     // --- a component the helper admits: helper first, gateway second.
     let order = scratch.path().join("admitted.log");
     spy_helper(&helper, &order, &sha256_of(&component), r#"["log"]"#);
@@ -2084,6 +2094,8 @@ fn sign_asks_the_helper_before_it_dials_anything() {
             &helper.to_string_lossy(),
             "--addr",
             &recorder.addr(),
+            "--token-file",
+            &token.to_string_lossy(),
         ],
         |command| {
             command.env_remove(HELPER_ENV);
@@ -2124,6 +2136,8 @@ fn sign_asks_the_helper_before_it_dials_anything() {
             "ops",
             "--addr",
             &refuser.addr(),
+            "--token-file",
+            &token.to_string_lossy(),
         ],
         |command| {
             command.env(HELPER_ENV, &live.helper);
@@ -2575,8 +2589,14 @@ fn policy_refuses_a_request_the_engine_would_not_send() {
         return;
     };
 
+    // From a file, not the command line: Linux caps one argument at 128 KiB, and a request
+    // that has to be larger than the engine's 64 KiB bound cannot be typed there.
+    let scratch = Scratch::new("policy-oversize");
     let padding = "x".repeat(200 * 1024);
-    let request = format!(r#"{{"tool":"bash","input":{{"command":"curl {padding}"}}}}"#);
+    let request = scratch.write(
+        "request.json",
+        &format!(r#"{{"tool":"bash","input":{{"command":"curl {padding}"}}}}"#),
+    );
 
     ouro(
         &live,
@@ -2586,7 +2606,7 @@ fn policy_refuses_a_request_the_engine_would_not_send() {
             "policy",
             &component.to_string_lossy(),
             "--request",
-            &request,
+            &request.to_string_lossy(),
         ],
     )
     .refused()
