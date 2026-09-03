@@ -18,7 +18,9 @@ Two facts shape everything below, and they are worth carrying into the first par
   before a node does.
 
 Everything here was run against a build of this repository. Where a command prints something,
-what is shown is what it printed, trimmed.
+what is shown is what it printed — trimmed where a listing is long, rewrapped where a line was
+too wide for a page, and with the absolute paths of the machine it ran on rewritten as a plain
+`/Users/you/code/ouroboros` checkout. Nothing else is edited: no output here was composed.
 
 ---
 
@@ -34,98 +36,159 @@ ouro wasm new my-guard --hook
 
 ```
 ./my-guard
-  a hook component in ouroboros:capability@0.1.0
+  a hook component in ouroboros:capability@0.1.0, on ouroboros-guest at
+  /Users/you/code/ouroboros/tui/wasm/guest
 
   cargo build --release --target wasm32-wasip2
   ouro wasm inspect target/wasm32-wasip2/release/my_guard.wasm
 ```
 
-You get `Cargo.toml`, `src/lib.rs`, `wit/capability.wit`, a `README.md` and a `.gitignore`.
-The template is embedded in the `ouro` binary and never fetched, and the `wit/` file is the
-helper's own world byte for byte — a test in `tui/src/wasm_cli.rs` compares the two, because a
-scaffold whose world had drifted would produce components the runtime refuses.
+Four files: `Cargo.toml`, `src/lib.rs`, `README.md` and `.gitignore`. There is no `wit/`
+directory, because the bindings are the SDK's — `ouroboros-guest` generates them once and
+re-exports them, and `export_hook!` is the whole of the ceremony an author would otherwise
+copy. The template is `tui/wasm/guest/template/`, embedded in the `ouro` binary with
+`include_str!` and never fetched; `tui/src/wasm_cli.rs` reads those files at run time and
+compares them to what it embedded, so the command cannot drift onto a copy of its own.
 
-The scaffolded project depends on nothing in this repository: `wit-bindgen`, `serde_json` and
-an allocator, and it builds on a machine that has never seen Ouroboros. It carries the
-`no_std` ceremony in the file — an allocator, a panic handler, `cabi_realloc` — with each part
-commented where it stands.
+`--hook` writes the `Hook` shape; without it you get a `Capability`. `--summary <TEXT>` fills
+in what `describe` reports (at most 200 characters, and untrusted wherever it is read);
+`--into <DIR>` puts the project somewhere other than here. The name is
+`Wasm.Artifact.name?/1`'s charset — lower-case alphanumerics, `-` and `_` — because it is the
+name the manifest will carry.
 
-**`#![no_std]` is the claim, not the ceremony.** The same source built against `std` imports
-thirteen `wasi:io`/`wasi:cli` interfaces beside `log`; the helper's linker defines none of
-them, so that build does not instantiate at all and `inspect` reports `world: "unknown"`.
+#### Where the SDK comes from, and why the command is fussy about it
+
+`ouroboros-guest` is not published, so the generated `Cargo.toml` reaches it by path:
+
+```toml
+[dependencies]
+ouroboros-guest = { path = "/Users/you/code/ouroboros/tui/wasm/guest" }
+```
+
+That path is **executed**. A cargo path dependency's `build.rs` and its proc-macros run during
+`cargo build`, so where the value comes from is the same question WASM.md D14 asks about the
+helper, and it gets the same answer: it comes from exactly two places, and the working
+directory is not among them.
+
+1. `--sdk-path <PATH>` — a person naming one, absolute.
+2. The checkout the running `ouro` binary lives in, found by walking the ancestors of a
+   canonicalised `current_exe` — `tui/target/{debug,release}/ouro` in a checkout.
+
+Whichever it is, it is vetted before it is written — no symlink at `guest` or the two levels
+above it, a regular bounded `Cargo.toml`, and a `[package] name` of exactly `ouroboros-guest`
+— and the path written in is **canonical and absolute**, which is why the command prints it:
+the line an author reads names the directory that was checked.
+
+An installed `ouro` outside a checkout has neither source, and that case refuses rather than
+guesses:
+
+```
+$ ouro wasm new elsewhere --hook            # an ouro installed outside any checkout
+ouro: no `ouroboros-guest` to depend on. It is not published to crates.io, so a scaffolded
+project reaches the SDK by path — and this command will not go looking for one near the
+directory it was typed in, because a path dependency's `build.rs` and proc-macros run at
+build time and a checkout that supplied one would be choosing what your `cargo build`
+executes (docs/WASM.md D14). It comes from `--sdk-path <PATH>`, or from the checkout the
+running `ouro` binary lives in. Neither is available here: pass `--sdk-path` naming a
+checkout's `tui/wasm/guest`.
+
+$ ouro wasm new elsewhere --hook --sdk-path /Users/you/code/ouroboros/tui/wasm/guest
+./elsewhere
+  a hook component in ouroboros:capability@0.1.0, on ouroboros-guest at
+  /Users/you/code/ouroboros/tui/wasm/guest
+```
+
+A directory merely *laid out* like the SDK is not the SDK:
+
+```
+$ ouro wasm new impostor --sdk-path /tmp/fake-sdk
+ouro: --sdk-path: /tmp/fake-sdk/Cargo.toml declares the package `not-the-sdk`, not
+`ouroboros-guest`. A directory laid out like the SDK is not the SDK, and this build would
+have run its build script.
+```
+
+Give `--sdk-path` an **absolute** path. A relative one is not resolved against the working
+directory — that is the whole point of the rule — and is refused with
+`could not be inspected`.
 
 ### 2. The code you change
 
-The scaffold's `handle_message` is the whole hook. It is handed the payload as JSON and
-returns the reply contract as JSON:
-
-```rust
-let event = payload["hook_event_name"].as_str().unwrap_or("");
-let tool = payload["tool_name"].as_str().unwrap_or("");
-let ask_about = session.config["ask_about"].as_str().unwrap_or("bash");
-
-if event == "PreToolUse" && tool == ask_about {
-    return Ok(json!({
-        "hookSpecificOutput": {
-            "permissionDecision": "ask",
-            "permissionDecisionReason": format!("my-guard asks about `{ask_about}`"),
-        }
-    })
-    .to_string());
-}
-```
-
-`config` is the `config = "…"` string beside `component =` in `ouroboros.toml`, handed to
-`init` verbatim. It is repository text like any other: read it defensively.
-
-#### The typed route: the `ouroboros-guest` SDK
-
-Inside this repository there is a second, shorter way to write the same hook. `tui/wasm/guest`
-is the `ouroboros-guest` crate: it owns the ceremony behind one macro and offers four typed
-seams over the one world — `Capability`, `Hook`, `Check`, and `Raw` underneath them. A hook
-becomes a `HookInput` in and a `Verdict` out:
+The scaffold is a `Hook`, which is the typed seam over the world: a `HookInput` in, a
+`Verdict` out, and `&mut self` for the arguments of this call. `src/lib.rs`, trimmed to the
+part that is yours:
 
 ```rust
 #![no_std]
-use ouroboros_guest::{export_hook, format, log, Hook, HookInput, String, Value, Verdict};
 
-struct DenyWrites { root: String }
+use ouroboros_guest::{
+    export_hook, format, log, Describe, Hook, HookInput, String, ToString, Value, Verdict,
+};
 
-impl Hook for DenyWrites {
-    fn init(config: Value) -> Result<Self, String> { /* … */ }
+struct MyGuard { ask_about: String }
+
+impl Hook for MyGuard {
+    fn describe(name: &str, version: &str) -> Describe {
+        Describe::new(name, version).summary("A hook component.")
+    }
+
+    /// The `config = "…"` string beside `component =` in the `ouroboros.toml` that declared
+    /// this hook, parsed. It is repository text like any other, so it is read defensively
+    /// and never trusted to be there.
+    fn init(config: Value) -> Result<Self, String> {
+        let ask_about = config
+            .get("ask_about")
+            .and_then(Value::as_str)
+            .unwrap_or("bash")
+            .to_string();
+
+        log("info", "my-guard ready");
+        Ok(MyGuard { ask_about })
+    }
 
     fn on(&mut self, input: HookInput) -> Result<Verdict, String> {
-        if !input.is("PreToolUse") { return Ok(Verdict::Silent); }
-        let Some(path) = input.tool_input_str("path") else { return Ok(Verdict::Silent) };
-
-        if !confined(path, &self.root) {
-            log("warn", "deny-writes: refused a write outside the root");
-            return Ok(Verdict::deny(format!("`{path}` is outside {}", self.root)));
+        // A hook is invoked for what its `matcher` matched and nothing else — but a
+        // component that assumed so would be one whose behaviour depends on somebody
+        // else's TOML.
+        if !input.is("PreToolUse") {
+            return Ok(Verdict::Silent);
         }
-        Ok(Verdict::context(format!("deny-writes let `{path}` through")))
+
+        let Some(tool) = input.tool_name.as_deref() else {
+            return Ok(Verdict::Silent);
+        };
+
+        if tool.eq_ignore_ascii_case(&self.ask_about) {
+            return Ok(Verdict::ask(format!("my-guard asks about `{tool}`")));
+        }
+
+        Ok(Verdict::Silent)
     }
 }
 
-export_hook!(DenyWrites);
+export_hook!(MyGuard);
 ```
 
-That is `tui/wasm/guest/examples/deny-writes`, trimmed; read the file for the whole of it, and
-`tui/wasm/guest/src/hook.rs` for the trait and the `Verdict` vocabulary — the enum's own
-documentation states which variants survive an untrusted workspace, and
-`test/wasm/sdk_acceptance_test.exs` proves each claim against `hooks.ex` rather than against
-the SDK's own reply.
+As written it denies nothing and asks about one tool, which is the safe shape to start from: a
+hook that denies by accident is a repository that cannot run its own tools.
 
-The SDK is **not published**: its `Cargo.toml` says `publish = false`, and a project that uses
-it depends on it by path (`ouroboros-guest = { path = "…/tui/wasm/guest" }`), which is what
-`tui/wasm/guest/template/` does. So the two routes are for two situations, and the difference
-is not style: **inside a checkout, take the SDK; outside one, take `ouro wasm new`.** Nothing
-the SDK generates changes what the linker defines or what the helper refuses — a `describe` it
-produced is exactly as untrusted as one written by hand (WASM.md D13).
+**`#![no_std]` is the claim, not the ceremony**, and it is the one line the SDK cannot own.
+`std` on `wasm32-wasip2` imports thirteen `wasi:io`/`wasi:cli` interfaces beside `log`; the
+helper's linker defines none of them, so a `std` build does not instantiate at all and
+`inspect` reports `world: "unknown"`. Everything else — the allocator, the panic handler, the
+canonical ABI's `cabi_realloc`, the bindings, the instance's state cell — is behind
+`export_hook!`.
 
-> `ouro wasm new` embeds the pre-SDK template, not `tui/wasm/guest/template/`. A
-> `TODO(W9)` at `tui/src/wasm_cli.rs` records the swap as unfinished; WASM.md's W9 entry reads
-> as if it had happened. Until it does, a scaffolded project is standalone and has no `Hook`
-> trait in it.
+`Verdict::Silent` is the answer to every event this hook has no opinion about, and it is not
+`Verdict::Allow`: silence is not consent, and an `allow` from an untrusted workspace is read
+as silence anyway. The enum's own documentation in `tui/wasm/guest/src/hook.rs` states which
+variants survive which lane, and `test/wasm/sdk_acceptance_test.exs` proves each of those
+claims against `hooks.ex` rather than against the SDK's own reply.
+
+The four worked components in `tui/wasm/guest/examples/` are the next thing to read —
+`deny-writes` is a real `PreToolUse` rule, `lintcheck` a `[checks]` component, `verdicts` the
+fixture that says every verdict there is, and `counter` a capability. The SDK's other two
+seams are `Check` (a `[checks]` entry) and `Raw` (a reply stated verbatim), both in
+`tui/wasm/guest/src/`.
 
 ### 3. Build
 
@@ -147,13 +210,13 @@ ouro wasm inspect target/wasm32-wasip2/release/my_guard.wasm
 ```
 target/wasm32-wasip2/release/my_guard.wasm
   world:   ouroboros:capability@0.1.0
-  sha256:  f5f6c4cfaa5416f3606067920368b88adbf4c6a061aed1d9ae45b510f79b39e7
-  size:    49671 byte(s)
+  sha256:  df693567c522c27f16b87696d1203f9ce410fc9dcce898e53ed55d2cc7ebff86
+  size:    55914 byte(s)
   imports: log
   exports: describe, init, handle-message
   shape (the bound in front of the compiler; reading / ceiling):
-    code_bytes                  41863 / 4194304      100×
-    functions                     104 / 20000        192×
+    code_bytes                  48007 / 4194304      87×
+    functions                     108 / 20000        185×
     …
   verdict: admitted — as a capability and as a hook component
 ```
@@ -161,8 +224,8 @@ target/wasm32-wasip2/release/my_guard.wasm
 `imports: log` is the line a reviewer of your component reads: it is the whole authority
 claim. The `shape` block is the structural census the helper took on its way to the compiler,
 beside the ceiling each reading was judged against — the same numbers the admission gate used,
-so a refusal is never a surprise. `--json` prints the helper's own report, which is also what
-`ouro wasm sign --imports-from -` consumes.
+so a refusal is never a surprise. `--json` prints the helper's own report, which is also the
+document `ouro wasm sign --imports-from -` reads when you want to hand it one explicitly.
 
 `inspect` compiles the component inside a local helper and never instantiates it: nothing you
 inspect runs.
@@ -180,7 +243,6 @@ the file says.
 
 ```
 PreToolUse on the untrusted lane
-  log: ouro-wasm: guest hook/ouro-wasm-hook [info] PreToolUse
 
 raw verdict (what the component said):
   decision:      ask
@@ -301,7 +363,18 @@ It is deployed by an operator under a signature, and it survives a reboot.
 ### 1. Scaffold, and the `Capability` trait
 
 ```sh
-ouro wasm new my-capability
+ouro wasm new my-capability --summary 'Counts things and says how many.'
+```
+
+Without `--hook` the same command writes the `Capability` shape instead — the same four files,
+the same `ouroboros-guest` path dependency, the same rule about where that path may come from
+(above). `--summary` is what the generated `describe` reports about the component:
+
+```rust
+fn describe() -> Describe {
+    Describe::new("my-capability", env!("CARGO_PKG_VERSION"))
+        .summary("Counts things and says how many.")
+        .input_schema(json!({ "type": "object" }))
 ```
 
 The typed seam, from `tui/wasm/guest/src/capability.rs`, is three functions:
@@ -383,9 +456,8 @@ printed.
 
 ### 4. The operator's half
 
-Everything from here needs a node. The transcripts below are from one dev daemon on this Mac,
-end to end — a `:core` node running its own signing service, for the reason under
-[Signing](#signing) below.
+Everything from here needs a node. The transcripts below are from a dev daemon on this Mac,
+end to end.
 
 #### Mint a signing identity
 
@@ -409,16 +481,15 @@ the file can sign as this identity.
 
 It contacts no runtime, refuses to overwrite an existing file, and its derived public half is
 pinned against the RFC 8032 test vector — a keygen that derived a different public key would
-print a trust line that verifies nothing and no local round trip would catch it. Give `--out`
-an **absolute** path: `OUROBOROS_SIGNER_KEY_PATH` must be absolute on the signer node, and
-this command prints back whatever you typed.
+print a trust line that verifies nothing and no local round trip would catch it. A relative
+`--out` is made absolute before anything is written and canonical before it is printed, so the
+`OUROBOROS_SIGNER_KEY_PATH` line above is always one a `:signer` node will boot with.
 
 #### Sign
 
 ```sh
-ouro wasm inspect counter.wasm --json \
-  | ouro wasm sign counter.wasm --name counter --author ops@example \
-      --eval eval.json --imports-from - --start-config '{}' --out counter.ouro-wasm
+ouro wasm sign counter.wasm --name counter --author ops@example \
+  --eval eval.json --start-config '{}' --out counter.ouro-wasm
 ```
 
 ```
@@ -432,18 +503,36 @@ wrote counter.ouro-wasm
 deploy it with: ouro wasm deploy counter.ouro-wasm
 ```
 
-Four things about that pipe:
+Four things about that command:
 
-* **The imports are yours to declare.** The node does not read the component to find out:
-  those are unsigned bytes from a socket, and handing them to the one process whose job is
-  running other people's code is what this lane exists to avoid (WASM.md D15). You compute the
-  list with your own helper — that is what `inspect --json | … --imports-from -` is — and a
-  list that does not match what the component actually imports is refused at stage by the
-  cross-check.
+* **The imports are the client's to declare, and this end reads them.** The node does not read
+  the component to find out: those are unsigned bytes from a socket, and handing them to the
+  one process whose job is running other people's code is what this lane exists to avoid
+  (WASM.md D15). So `sign` starts *your* helper, reads the import list, and binds it to the sha
+  of the bytes in hand — before it opens a socket or uploads anything, so a component your own
+  helper refuses never reaches a gateway. A declared list that does not match what the
+  component imports is refused again at stage by the node's cross-check.
+
+  `--imports-from <PATH>` (or repeated `--import <NAME>`) is the explicit form of the same
+  thing, for a machine with no local helper — pair it with `--no-local-helper`, which makes
+  the absence a rule rather than a fallback:
+
+  ```sh
+  ouro wasm inspect counter.wasm --json > imports.json     # on a machine that has a helper
+  ouro wasm sign counter.wasm --name counter --author ops@example \
+    --eval eval.json --imports-from imports.json --no-local-helper
+  ```
+
+  `--dry-run` prints the parameters this command would send, having read the imports exactly
+  as the real run does, and opens no socket at all — which is how to see what your helper says
+  about a component before a node is asked to sign it.
 * **This end never signs anything.** The bytes are uploaded in frames and handed to the node's
   signing service, which applies the whole policy on the host that holds the key and journals
-  the decision.
-* **The epoch is not yours to name.** It is allocated over the connected cluster.
+  the decision. The key lives on a `:signer`-role node; that node signs, and the driving node
+  never sees it.
+* **The epoch is not yours to name.** It is allocated over the connected nodes that actually
+  hold a rollout register — the only nodes that can ever call an epoch stale — so a `:signer`
+  or `:builder` in the cluster is not asked and cannot block the allocation.
 * **`--eval` is required by default.** Lane W has no build peer behind it, so the signed
   evaluation spec *is* the test story (WASM.md D12). A minimal one:
 
@@ -613,10 +702,10 @@ world capability {
 
 There is one world, and a hook is a strict subset of a capability: the hook payload goes in
 through `handle-message`, the verdict comes back as its reply, `init` receives the hook's
-declared `config` (or `"{}"`), and `describe` is unused. `tui/src/wasm_cli.rs` embeds a copy
-of this file for the scaffold and a test compares the two byte for byte; `tui/wasm/src/world.rs`
-hard-codes the same shape, because the helper must be able to refuse bytes without a WIT
-parser on the loading path.
+declared `config` (or `"{}"`), and `describe` is unused. A scaffolded project carries no copy
+of this file — `ouroboros-guest` generates the bindings once and re-exports them, which is one
+fewer thing to drift. `tui/wasm/src/world.rs` hard-codes the same shape, because the helper
+must be able to refuse bytes without a WIT parser on the loading path.
 
 Growth of a world's import set is a signing-policy event, not a convenience (WASM.md §12).
 
@@ -969,11 +1058,19 @@ Two more keys govern the lane from outside `:wasm`:
 
 ### Signing
 
-Keys live on `:signer`-role nodes and never travel. `ouro wasm keygen` writes a seed in exactly
-the format `Ouroboros.Upgrade.Signing.Service` reads; the signer node sets
-`OUROBOROS_SIGNER_KEY_PATH` (absolute) and `OUROBOROS_SIGNER_ID`, and every core node that must
-accept what it signs sets `OUROBOROS_UPGRADE_TRUSTED_SIGNERS=<id>:<base64 public key>`. Core
-nodes reach the signer through `config :ouroboros, :signing_node` (`OUROBOROS_SIGNING_NODE`).
+Keys live on `:signer`-role nodes and never travel — a `:signer`'s whole supervision tree is
+cluster formation and the signing service, so it holds a key and runs nothing that could be
+asked for anything else. `ouro wasm keygen` writes a seed in exactly the format
+`Ouroboros.Upgrade.Signing.Service` reads, and prints the path it wrote **absolute and
+canonical**, because `config/runtime.exs` refuses a relative `OUROBOROS_SIGNER_KEY_PATH`
+outright and a line an operator pastes has to be one a signer node will accept. The signer node
+sets `OUROBOROS_SIGNER_KEY_PATH` and `OUROBOROS_SIGNER_ID`; every core node that must accept
+what it signs sets `OUROBOROS_UPGRADE_TRUSTED_SIGNERS=<id>:<base64 public key>`; and core nodes
+reach the signer through `config :ouroboros, :signing_node` (`OUROBOROS_SIGNING_NODE`).
+
+Epoch allocation is over the connected nodes that hold a rollout register, so a `:signer` in
+the cluster is not asked for a plane it does not run and signing works on exactly this
+topology.
 
 A node that can reach no signing service refuses by name rather than generically:
 
@@ -985,15 +1082,6 @@ one itself. A component is signed where the key is, never here
 
 A signature this node does not trust is refused at deploy, before the store, the helper or the
 register hears about it — `upstream_error` carrying `["untrusted_signer", "<id>"]`.
-
-> **Known defect, found while writing this guide.** `wasm.sign` allocates the epoch over
-> `[node() | Node.list()]`, and epoch allocation asks *every* node in that list for
-> `Upgrade.NodeExecutor.status` and the lane-W register. A `:signer` (or `:builder`) node runs
-> neither — its supervision tree is cluster formation plus the signing service — so on exactly
-> the topology the design prescribes, `wasm.sign` fails with
-> `["epoch_not_allocated", ["epoch_status_unavailable", {…"noproc"…}]]`. Reproduced on a
-> two-node dev cluster. Until it is fixed, signing works where the signing service runs on a
-> node that is also `:core`.
 
 ### The store, and what survives
 

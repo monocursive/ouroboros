@@ -2106,18 +2106,17 @@ Each slice is PR-sized, lands green, and is useful alone.
   out of their own source — the drift this guide could otherwise have suffered silently, since
   the base half of every payload belongs to the caller and not to `hooks.ex`.
 
-  Three things the verification found, all reported rather than papered over. **`ouro wasm new`
-  still embeds the pre-SDK template**, not `tui/wasm/guest/template/`: the `TODO(W9)` at
-  `tui/src/wasm_cli.rs` was never closed, so a scaffolded project is standalone hand-rolled
-  ceremony with no `Hook` trait in it, and W9's entry above reads as though the swap had
-  happened. The guide documents both routes and says which is which. **`wasm.sign` cannot
-  allocate an epoch on a cluster that has a `:signer` node** — the allocation asks every node in
-  `[node() | Node.list()]` for `Upgrade.NodeExecutor.status` and the lane-W register, and a
-  `:signer` runs neither, so the topology C4 prescribes refuses with `epoch_not_allocated`
-  carrying a `noproc`; reproduced on a two-node dev cluster, and the sign→deploy→ls→rollback
-  transcript in the guide is therefore from a node running its own signing service. And
-  `ouro wasm keygen` **prints back the `--out` path it was given**, so a relative one produces
-  an `OUROBOROS_SIGNER_KEY_PATH` line the signer node then refuses as non-absolute.
+  Three things the verification found, all reported rather than papered over, and all three
+  closed by the slices that followed in the same wave. **`ouro wasm new` still embedded the
+  pre-SDK template** — a scaffolded project was hand-rolled ceremony with no `Hook` trait in
+  it — until W10b made the SDK template the one source the command embeds. **`wasm.sign`
+  could not allocate an epoch on a cluster with a `:signer` node**, because the allocation
+  asked every connected node for `Upgrade.NodeExecutor.status` and a signer runs no rollout
+  plane; reproduced on a two-node dev cluster, and fixed by W12's follow-up, which allocates
+  over the nodes that hold a register and fails closed on the ones that hold half of one. And
+  `ouro wasm keygen` **printed back the `--out` path it was given**, so a relative one produced
+  an `OUROBOROS_SIGNER_KEY_PATH` line the signer node refused; it now writes and prints the
+  absolute path. The guide's transcripts were re-run against the fixed commands.
 
 - **W12 — signing and deploy from the operator's chair.** `Ouroboros.Wasm.Bundle` (the
   `.ouro-wasm` file: framed header, bounded JSON envelope, raw component, `:safe` term
