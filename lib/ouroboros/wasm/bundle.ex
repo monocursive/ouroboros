@@ -251,9 +251,14 @@ defmodule Ouroboros.Wasm.Bundle do
   the concatenation the client performs is the whole of its knowledge of this format: it
   appends bytes and never composes a manifest.
 
-  `precompiled` must be present exactly when the manifest declares a block, and must be the
-  bytes that block's sha names. Both are checked here rather than at the reader: a prefix that
-  could only ever be refused is one worth refusing where it is built.
+  `precompiled` must be present exactly when the manifest declares a block, and this is where
+  that is checked — a prefix that could only ever be refused is one worth refusing where it is
+  built. What is **not** checked here is the digest: `carries_precompiled?/2` holds the section
+  to the block's presence, its shape and the artifact ceiling, and nothing more. The bytes are
+  bound to the block's sha by `Ouroboros.Wasm.Verifier.verify_precompiled/2` at the reader,
+  which is the node entitled to make that judgment and the only place it is load-bearing. An
+  earlier version of this sentence claimed both were checked here; they were not (W19 review,
+  L2).
 
   W19. An artifact past `Ouroboros.Wasm.Deploy.max_receipt_precompiled_bytes/0` does not fit
   one gateway reply, and then what the receipt carries is

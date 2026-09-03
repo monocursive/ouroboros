@@ -15,6 +15,7 @@ defmodule Ouroboros.Wasm.DownloadTest do
   """
 
   alias Ouroboros.Gateway.Methods
+  alias Ouroboros.Gateway.Wire
   alias Ouroboros.Wasm.Bundle
   alias Ouroboros.Wasm.Download
   alias Ouroboros.Wasm.Upload
@@ -94,6 +95,19 @@ defmodule Ouroboros.Wasm.DownloadTest do
 
       id = slot.download
       assert {:error, {:unknown_download, ^id}} = Download.read(id, 0, opts)
+    end
+
+    # W19 review, L4. The moduledoc says every entry point sweeps, including the ones that
+    # only read; `release/2` did not. Swap `swept(opts)` back to `root(opts)` in `release/2`
+    # and this is red — a node whose only remaining traffic is releases never reclaims.
+    test "release sweeps like every other entry point", %{opts: opts, root: root} do
+      {:ok, stale} = Download.put("machine code", opts)
+      {:ok, live} = Download.put("more machine code", opts)
+
+      age(Path.join(root, stale.download <> ".bin"), div(Download.idle_ms(), 1_000) + 60)
+
+      assert :ok = Download.release(live.download, opts)
+      refute File.exists?(Path.join(root, stale.download <> ".bin"))
     end
 
     test "a caller that abandons a transfer releases it, and the ceiling comes back",
@@ -223,6 +237,89 @@ defmodule Ouroboros.Wasm.DownloadTest do
     end
   end
 
+  # ---------------------------------------------------------------------------------------
+  # W19 review, H1 — a reply this node writes is a reply its own client can read
+  # ---------------------------------------------------------------------------------------
+
+  describe "the chunk is the node's own frame" do
+    # The finding, as a test. Nothing on the outbound path is held to `max_frame` —
+    # `Gateway.Conn` sets `packet_size` on the socket it *receives* on — so a chunk sized
+    # without reference to the frame is a line this node writes and its own client refuses
+    # with `FrameTooLarge`. Revert `max_chunk_bytes/0` to `Upload.max_chunk_bytes()` and this
+    # is red at 699 260 bytes against a 64 KiB frame.
+    test "every reply frame fits the frame the node advertises", %{opts: opts} do
+      for frame <- [64 * 1024, 256 * 1024, 1_048_576] do
+        with_frame(frame, fn ->
+          chunk = Download.max_chunk_bytes()
+          assert chunk > 0
+
+          {:ok, slot} = Download.put(artifact(chunk * 2 + 11), opts)
+          assert slot.chunk_bytes == chunk
+
+          # Every frame of a whole transfer, not just the first: the last one is short and
+          # the middle ones are maximal, and it is the maximal one that has to fit.
+          walk(slot, opts, fn answer ->
+            line =
+              %{"jsonrpc" => "2.0", "id" => 1, "result" => Wire.to_json(answer)}
+              |> Wire.frame!()
+              |> IO.iodata_to_binary()
+
+            assert byte_size(line) <= frame,
+                   "a #{byte_size(line)}-byte reply on a node whose frame is #{frame}"
+          end)
+        end)
+      end
+    end
+
+    test "the chunk shrinks with the frame and never exceeds the upload's", %{opts: opts} do
+      # At the default mebibyte the upload's own number is the smaller of the two, so nothing
+      # about the ordinary case moved.
+      with_frame(1_048_576, fn ->
+        assert Download.max_chunk_bytes() == Upload.max_chunk_bytes()
+      end)
+
+      with_frame(64 * 1024, fn ->
+        assert Download.max_chunk_bytes() == div((64 * 1024 - 1_024) * 3, 4)
+        {:ok, slot} = Download.put(artifact(100_000), opts)
+        assert slot.chunk_bytes == Download.max_chunk_bytes()
+      end)
+    end
+
+    # Delete `framed/1` and a node with a 4 KiB frame mints a slot whose chunk is 2 304 bytes,
+    # which is nearly three thousand round trips for the worst artifact §7.3 admits.
+    test "a frame too small for a usable chunk refuses the slot rather than shrinking",
+         %{opts: opts, root: root} do
+      with_frame(4 * 1024, fn ->
+        assert Download.max_chunk_bytes() < Download.min_chunk_bytes()
+
+        assert {:error, {:frame_too_small, 4096, _chunk, _min}} =
+                 Download.put(artifact(100_000), opts)
+
+        # Nothing was claimed: the refusal is in front of the directory, so a signature falls
+        # back to the source form with no slot spent.
+        refute File.dir?(root)
+      end)
+    end
+
+    # The boundaries a client walks are the ones its transfer was minted with. An operator who
+    # lowers the frame mid-transfer would otherwise move them out from under it.
+    test "a slot keeps the chunk it was minted with", %{opts: opts} do
+      {:ok, slot} = with_frame(1_048_576, fn -> Download.put(artifact(700_000), opts) end)
+      assert slot.chunk_bytes == Upload.max_chunk_bytes()
+
+      with_frame(64 * 1024, fn ->
+        assert {:ok, first} = Download.read(slot.download, 0, opts)
+        assert byte_size(Base.decode64!(first.data)) == slot.chunk_bytes
+
+        # And the *new* number is not a boundary for this slot.
+        assert {:error, {:offset_not_a_chunk_boundary, _offset, chunk}} =
+                 Download.read(slot.download, Download.max_chunk_bytes(), opts)
+
+        assert chunk == slot.chunk_bytes
+      end)
+    end
+  end
+
   describe "the two clocks, and the sweep that reads them" do
     # Delete the `expire/1` call from `swept/1` and a download past its clocks is still
     # readable, which is this module handing out bytes it had already promised were gone —
@@ -235,6 +332,60 @@ defmodule Ouroboros.Wasm.DownloadTest do
       id = slot.download
       assert {:error, {:unknown_download, ^id}} = Download.read(id, 0, opts)
       refute File.exists?(Path.join(root, id <> ".bin"))
+    end
+
+    # W19 review, M3. Nothing writes to a download after it is minted, so an idle clock left
+    # to the file's own mtime measures *time since minting* under another name: a client
+    # walking a large artifact was reclaimed mid-transfer at ten minutes, and the lifetime
+    # below could not be reached by any sequence of calls. Delete the `File.touch(path)` in
+    # `read/3` and this is red on its second half.
+    test "a read moves the idle clock, so a transfer in progress is not reclaimed under it",
+         %{opts: opts, root: root} do
+      bytes = artifact(Download.max_chunk_bytes() * 3)
+      {:ok, slot} = Download.put(bytes, opts)
+      path = Path.join(root, slot.download <> ".bin")
+
+      # Nine minutes of not being read, then a chunk: the clock starts again from the read.
+      age_by(path, div(Download.idle_ms(), 1_000) - 60)
+      assert {:ok, %{final: false}} = Download.read(slot.download, 0, opts)
+
+      # Nine more, measured from wherever the file's clock now stands. With the touch that is
+      # nine minutes since the last read; without it, it is eighteen since minting and the
+      # slot is gone half way through a transfer that never stopped.
+      age_by(path, div(Download.idle_ms(), 1_000) - 60)
+
+      assert {:ok, %{final: false}} =
+               Download.read(slot.download, Download.max_chunk_bytes(), opts)
+
+      # And the last one still completes.
+      assert {:ok, %{final: true}} =
+               Download.read(slot.download, Download.max_chunk_bytes() * 2, opts)
+    end
+
+    # And the other end of the same fix: with the idle clock moving, the total lifetime is
+    # what stops a client that reads one chunk every nine minutes forever. Before the touch
+    # this branch was unreachable by any sequence of calls, which made it a number in a
+    # comment (W19 review, M3).
+    test "a client that keeps reading is still ended by the total lifetime",
+         %{opts: opts, root: root} do
+      bytes = artifact(Download.max_chunk_bytes() * 3)
+      {:ok, slot} = Download.put(bytes, opts)
+      path = Path.join(root, slot.download <> ".bin")
+
+      # Freshly read — the idle clock says nothing at all — and claimed thirty-one minutes ago.
+      assert {:ok, %{final: false}} = Download.read(slot.download, 0, opts)
+      assert File.exists?(path)
+
+      rewrite_slot!(
+        root,
+        slot.download,
+        System.system_time(:millisecond) - (Download.max_lifetime_ms() + 60_000)
+      )
+
+      id = slot.download
+
+      assert {:error, {:unknown_download, ^id}} =
+               Download.read(id, Download.max_chunk_bytes(), opts)
     end
 
     # Delete the lifetime branch from `expired?/4` and a client that reads one chunk every
@@ -283,7 +434,7 @@ defmodule Ouroboros.Wasm.DownloadTest do
   end
 
   describe "whose bytes these are" do
-    # Delete the `File.chmod(path, 0o600)` in `written/4` and every artifact this node
+    # Delete the `File.chmod(path, 0o600)` in `opened/3` and every artifact this node
     # compiles is readable by every account on the machine — machine code a signer produced,
     # which is exactly what D24 says a node must be careful with.
     test "the file and the directory are the owner's alone", %{opts: opts, root: root} do
@@ -334,7 +485,8 @@ defmodule Ouroboros.Wasm.DownloadTest do
       # rather than the cleanup.
       File.write!(
         Path.join(root, "slot-0"),
-        "#{id} #{System.system_time(:millisecond)} #{String.duplicate("f", 64)}\n"
+        "#{id} #{System.system_time(:millisecond)} #{Download.max_chunk_bytes()} " <>
+          String.duplicate("f", 64) <> "\n"
       )
 
       assert {:error, {:download_not_a_file, :symlink}} = Download.read(id, 0, opts)
@@ -358,6 +510,45 @@ defmodule Ouroboros.Wasm.DownloadTest do
       # download area a client could fill, which is a node storing other people's bytes on
       # request — the one thing this module must not become.
       assert Enum.map(params, & &1.name) |> Enum.sort() == ["download", "node", "offset"]
+    end
+
+    # W19 review, L1. The id becomes a filename on the far side, so it is validated at the
+    # edge as well as in the module that minted it. Nothing exercised the wire-side regex:
+    # loosen it to `~r/.*/` in `wasm_download/1` and every one of these reaches the plane.
+    test "the wire refuses an id this node could not have minted, before it is routed" do
+      for hostile <- [
+            "../../../etc/passwd",
+            "..",
+            "",
+            String.duplicate("a", 33),
+            String.duplicate("a", 31),
+            "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+            "9f2c1d4e8a7b6053f1e2d3c4b5a69780\n",
+            "9F2C1D4E8A7B6053F1E2D3C4B5A69780"
+          ] do
+        assert {:error, code, message} =
+                 Methods.invoke("wasm.download", %{"download" => hostile, "offset" => 0})
+
+        assert code == Methods.code(:invalid_params), hostile
+        assert message =~ "params.download", hostile
+      end
+
+      # A non-string is the same refusal, and so is an absent one.
+      for shape <- [7, %{}, nil, ["a"]] do
+        assert {:error, code, _message} =
+                 Methods.invoke("wasm.download", %{"download" => shape, "offset" => 0})
+
+        assert code == Methods.code(:invalid_params)
+      end
+
+      # A well-formed id reaches the plane instead, which answers that it minted no such slot.
+      assert {:error, code, _message} =
+               Methods.invoke("wasm.download", %{
+                 "download" => String.duplicate("a", 32),
+                 "offset" => 0
+               })
+
+      assert code in [Methods.code(:not_found), Methods.code(:unavailable)]
     end
 
     test "no lane-W verb creates a slot, whatever it is handed", %{root: root} do
@@ -396,6 +587,28 @@ defmodule Ouroboros.Wasm.DownloadTest do
 
   ## Helpers
 
+  # A node whose operator set a particular frame, for the length of one function.
+  defp with_frame(bytes, fun) do
+    previous = Application.get_env(:ouroboros, :gateway)
+    Application.put_env(:ouroboros, :gateway, Keyword.put(previous || [], :max_frame, bytes))
+
+    try do
+      fun.()
+    after
+      restore(:gateway, previous)
+    end
+  end
+
+  # Every answer of a whole transfer, in order, handed to `fun`.
+  defp walk(slot, opts, fun) do
+    Enum.reduce_while(Stream.iterate(0, & &1), 0, fn _step, offset ->
+      {:ok, answer} = Download.read(slot.download, offset, opts)
+      fun.(answer)
+      next = offset + byte_size(Base.decode64!(answer.data))
+      if answer.final, do: {:halt, next}, else: {:cont, next}
+    end)
+  end
+
   # Reads a slot the way `ouro wasm sign` does: sequentially, from the offsets the answers
   # hand back, until one says it was the last.
   defp fetch!(slot, opts) do
@@ -428,13 +641,21 @@ defmodule Ouroboros.Wasm.DownloadTest do
       contents = File.read!(path)
 
       if String.starts_with?(contents, id) do
-        [^id, _opened, sha] = contents |> String.trim() |> String.split(" ", parts: 3)
-        File.write!(path, "#{id} #{opened_ms} #{sha}\n")
+        [^id, _opened, chunk, sha] = contents |> String.trim() |> String.split(" ", parts: 4)
+        File.write!(path, "#{id} #{opened_ms} #{chunk} #{sha}\n")
       end
     end)
   end
 
   defp age(path, seconds), do: File.touch!(path, System.os_time(:second) - seconds)
+
+  # Ages a file relative to the clock it already carries, rather than to now. `age/2` sets an
+  # absolute time, which cannot express "nine more minutes than wherever this now stands" — and
+  # that is exactly the question a read-refreshed idle clock has to be asked.
+  defp age_by(path, seconds) do
+    {:ok, %File.Stat{mtime: mtime}} = File.lstat(path, time: :posix)
+    File.touch!(path, mtime - seconds)
+  end
 
   defp restore(key, nil), do: Application.delete_env(:ouroboros, key)
   defp restore(key, value), do: Application.put_env(:ouroboros, key, value)

@@ -5,6 +5,7 @@ defmodule Ouroboros.Wasm.DeployTest do
   use ExUnit.Case, async: false
 
   alias Ouroboros.Gateway.Methods
+  alias Ouroboros.Gateway.Wire
   alias Ouroboros.Mesh
   alias Ouroboros.Upgrade.Rollout.Registry
   alias Ouroboros.Upgrade.Signing.Service
@@ -12,6 +13,7 @@ defmodule Ouroboros.Wasm.DeployTest do
   alias Ouroboros.Wasm.Artifact
   alias Ouroboros.Wasm.Bundle
   alias Ouroboros.Wasm.Deploy
+  alias Ouroboros.Wasm.Download
   alias Ouroboros.Wasm.Pool
   alias Ouroboros.Wasm.Rollout
   alias Ouroboros.Wasm.Store
@@ -628,14 +630,21 @@ defmodule Ouroboros.Wasm.DeployTest do
 
       assert download =~ ~r/\A[0-9a-f]{32}\z/
       assert size > Deploy.max_receipt_precompiled_bytes()
+      # W19 review, H1. The chunk is the node's own frame, so this transfer is genuinely
+      # several frames rather than one oversized reply: 258 KiB at 48 384 is six of them.
+      assert chunk_bytes == Download.max_chunk_bytes()
+      assert chunk_bytes == div((64 * 1024 - 1_024) * 3, 4)
       # The digest a client checks against is the one in the signed manifest, not a second
       # number this node computed for the transfer.
       assert sha256 == receipt.precompiled.sha256
       assert size == receipt.precompiled.size
-      assert chunk_bytes == Upload.max_chunk_bytes()
 
-      # 3. Back in frames, walked from the offsets the answers give.
-      artifact = gateway_download!(download)
+      # 3. Back in frames, walked from the offsets the answers give — and every one of those
+      #    frames is a line this node's own client can read, which is H1's whole point.
+      {artifact, frames} = gateway_download!(download, 64 * 1024)
+
+      assert frames == ceil(size / chunk_bytes)
+      assert frames > 1, "a transfer worth calling chunked"
 
       assert byte_size(artifact) == size
       assert Artifact.digest(artifact) == sha256
@@ -850,15 +859,25 @@ defmodule Ouroboros.Wasm.DeployTest do
   # And the artifact back out of the slot the signature named, walked exactly as
   # `ouro wasm sign` walks it: sequentially, from the offsets the node's own answers give,
   # until one of them says it was the last.
-  defp gateway_download!(download) do
-    Enum.reduce_while(Stream.iterate(0, & &1), <<>>, fn _step, acc ->
+  defp gateway_download!(download, frame) do
+    Enum.reduce_while(Stream.iterate(0, & &1), {<<>>, 0}, fn _step, {acc, frames} ->
       {:ok, chunk} =
         Methods.invoke("wasm.download", %{"download" => download, "offset" => byte_size(acc)})
 
       assert chunk.offset == byte_size(acc)
       assert chunk.download == download
 
-      acc = acc <> Base.decode64!(chunk.data)
+      # W19 review, H1. The reply as it actually goes out, against the frame this node
+      # advertises: nothing on the outbound path enforces it, so the chunk has to.
+      line =
+        %{"jsonrpc" => "2.0", "id" => 1, "result" => Wire.to_json(chunk)}
+        |> Wire.frame!()
+        |> IO.iodata_to_binary()
+
+      assert byte_size(line) <= frame,
+             "a #{byte_size(line)}-byte reply on a node whose frame is #{frame}"
+
+      acc = {acc <> Base.decode64!(chunk.data), frames + 1}
 
       if chunk.final, do: {:halt, acc}, else: {:cont, acc}
     end)

@@ -42,11 +42,14 @@
 //! Since W8 the prefix also carries the precompiled artifact, which is the one part of the
 //! file this side did **not** produce — the node compiled it, from the bytes it then signed.
 //! Where that fits one reply it arrives inside the prefix. Where it does not, W19 sends it
-//! back through `wasm.download` in the same 512 KiB frames the component went up in, and
-//! `sign` fetches it chunk by chunk before it writes anything: the offsets come from the
-//! node's own answers, the reassembled bytes are held to the size and the sha256 the receipt
-//! named, and a file is written only once both agree. A mismatch is refused by name and
-//! nothing lands on disk, because a bundle whose artifact is not the artifact the manifest
+//! back through `wasm.download` in frames the node sizes from its own gateway ceiling, and
+//! `sign` fetches it chunk by chunk before it writes anything. Four things are checked and
+//! none of them is decorative: the receipt's `artifact` block and its **signed** `precompiled`
+//! block have to name one digest and one size before a frame is asked for; the offsets are the
+//! ones this client asked for; every chunk repeats the whole artifact's digest and it has to
+//! be the one this transfer is walking; and the reassembled bytes are held to the receipt's
+//! size and sha256. A file is written only once all four agree. A mismatch is refused by name
+//! and nothing lands on disk, because a bundle whose artifact is not the artifact the manifest
 //! signs for is a file whose only future is a refusal on somebody else's machine.
 
 use std::io::Write;
@@ -230,7 +233,12 @@ pub async fn sign<O: Write>(
     // chunk by chunk, checked against the size and the digest the receipt named before any of
     // it is used for anything.
     let artifact = match signed.artifact.as_ref() {
-        Some(slot) => fetch_artifact(client, slot, args.node.as_deref()).await?,
+        Some(slot) => {
+            // And the receipt's own two halves have to be one statement first. See `names_the
+            // _signed_artifact`: the digest that makes this bundle sound is the manifest's.
+            names_the_signed_artifact(&signed)?;
+            fetch_artifact(client, slot, args.node.as_deref()).await?
+        }
         None => Vec::new(),
     };
 
@@ -490,6 +498,40 @@ async fn fetch_artifact(
     slot: &WasmArtifactSlot,
     node: Option<&str>,
 ) -> Result<Vec<u8>> {
+    let node = node.map(str::to_string);
+
+    fetch_with(slot, |id, offset| {
+        let node = node.clone();
+
+        async move {
+            let mut params = Map::new();
+            params.insert("download".into(), Value::String(id));
+            params.insert("offset".into(), Value::from(offset));
+
+            if let Some(node) = node {
+                params.insert("node".into(), Value::String(node));
+            }
+
+            client
+                .call(DOWNLOAD_METHOD, Value::Object(params))
+                .await
+                .map_err(|error| anyhow!("the runtime refused {DOWNLOAD_METHOD}: {error}"))
+        }
+    })
+    .await
+}
+
+/// The loop itself, over any answerer at all (W19 review, M2).
+///
+/// The transport is a parameter so the rules in here — the size ceiling before an allocation,
+/// the frame budget, an answer about the wrong offset, a `final` that arrives early — are
+/// reachable from a unit test with a scripted answerer instead of only from a socket. They
+/// were not, and a review's mutations of two of them survived the whole suite.
+async fn fetch_with<A, F>(slot: &WasmArtifactSlot, mut ask: A) -> Result<Vec<u8>>
+where
+    A: FnMut(String, u64) -> F,
+    F: std::future::Future<Output = Result<Value>>,
+{
     let id = slot
         .download
         .as_deref()
@@ -499,7 +541,8 @@ async fn fetch_artifact(
         .size
         .ok_or_else(|| anyhow!("the runtime named an artifact download with no size"))?;
 
-    // Bounded before a byte is allocated: the size is a number the far side chose.
+    // Bounded before a byte is allocated: the size is a number the far side chose, and
+    // `with_capacity` on it is this client believing it.
     if size == 0 || size > MAX_ARTIFACT_BYTES {
         bail!(
             "the runtime says its artifact is {size} bytes; this client will not fetch more \
@@ -521,20 +564,8 @@ async fn fetch_artifact(
             );
         }
 
-        let mut params = Map::new();
-        params.insert("download".into(), Value::String(id.to_string()));
-        params.insert("offset".into(), Value::from(offset));
-
-        if let Some(node) = node {
-            params.insert("node".into(), Value::String(node.to_string()));
-        }
-
-        let answer = client
-            .call(DOWNLOAD_METHOD, Value::Object(params))
-            .await
-            .map_err(|error| anyhow!("the runtime refused {DOWNLOAD_METHOD}: {error}"))?;
-
-        let (data, last) = artifact_chunk(&answer, offset, size)?;
+        let answer = ask(id.to_string(), offset).await?;
+        let (data, last) = artifact_chunk(&answer, offset, size, slot)?;
 
         offset += data.len() as u64;
         artifact.extend_from_slice(&data);
@@ -563,7 +594,17 @@ async fn fetch_artifact(
 /// appended at the position this client happened to be at, producing a file that hashes to
 /// nothing and a refusal with no cause in it. Delete the `chunk.offset` comparison and a
 /// replayed frame silently corrupts the artifact.
-fn artifact_chunk(answer: &Value, expected: u64, size: u64) -> Result<(Vec<u8>, bool)> {
+///
+/// Every answer also repeats the *whole* artifact's `sha256`, and it is checked here rather
+/// than rendered: a frame from a different slot than the one this transfer is walking would
+/// otherwise be caught only by the digest over the reassembled file, several megabytes later,
+/// with nothing saying which frame was wrong (W19 review, M4).
+fn artifact_chunk(
+    answer: &Value,
+    expected: u64,
+    size: u64,
+    slot: &WasmArtifactSlot,
+) -> Result<(Vec<u8>, bool)> {
     let chunk = WasmDownloadChunk::decode(answer);
 
     match chunk.offset {
@@ -581,6 +622,17 @@ fn artifact_chunk(answer: &Value, expected: u64, size: u64) -> Result<(Vec<u8>, 
             bail!(
                 "the runtime said its artifact was {size} bytes and now says {reported}; \
                  nothing is written from a transfer that changed size under it"
+            );
+        }
+    }
+
+    // The digest a chunk names is the whole artifact's, so it is the same in every frame and
+    // a disagreement means this frame is about something else.
+    if let (Some(named), Some(expected_sha)) = (chunk.sha256.as_deref(), slot.sha256.as_deref()) {
+        if !named.eq_ignore_ascii_case(expected_sha) {
+            bail!(
+                "a {DOWNLOAD_METHOD} chunk at {expected} names artifact {named}, and this \
+                 transfer is walking {expected_sha}"
             );
         }
     }
@@ -650,6 +702,50 @@ fn compose(prefix: &[u8], artifact: &[u8], component: &[u8]) -> Vec<u8> {
     file.extend_from_slice(artifact);
     file.extend_from_slice(component);
     file
+}
+
+/// Refuses a receipt whose download does not describe the artifact its own manifest signs for
+/// (W19 review, M4).
+///
+/// The `precompiled` block is inside the **signed manifest**; the `artifact` block is a
+/// statement about a transfer. If they disagree, then whatever comes out of that slot cannot
+/// be the artifact this bundle is about, and every later check would catch it — the
+/// reassembled digest, or `Bundle.verify/2` on another machine — with nothing saying that the
+/// node contradicted itself in the reply this client already held. So the two are held to each
+/// other before a frame is asked for, and the sentence in the moduledoc that said this
+/// happened is now true.
+pub fn names_the_signed_artifact(signed: &WasmSignature) -> Result<()> {
+    let Some(slot) = signed.artifact.as_ref() else {
+        return Ok(());
+    };
+
+    let Some(block) = signed.precompiled.as_ref() else {
+        bail!(
+            "the runtime named an artifact to download and signed a manifest that declares no \
+             precompiled form; those are two statements about one bundle that disagree"
+        );
+    };
+
+    match (slot.sha256.as_deref(), block.sha256.as_deref()) {
+        (Some(named), Some(manifest)) if named.eq_ignore_ascii_case(manifest) => {}
+        (Some(named), Some(manifest)) => bail!(
+            "the runtime offers artifact {named} to download and its signed manifest names \
+             {manifest}; no bundle is written from a receipt that contradicts itself"
+        ),
+        _missing => bail!(
+            "the runtime named an artifact download without a digest on both sides; the one \
+             that makes a bundle sound is the manifest's"
+        ),
+    }
+
+    match (slot.size, block.size) {
+        (Some(named), Some(manifest)) if named == manifest => Ok(()),
+        (Some(named), Some(manifest)) => bail!(
+            "the runtime offers {named} bytes to download and its signed manifest names \
+             {manifest}"
+        ),
+        _missing => Ok(()),
+    }
 }
 
 /// Refuses a signature whose manifest is not about the bytes this client uploaded.
@@ -2162,47 +2258,99 @@ mod tests {
         assert_eq!(compose(b"HEAD", b"", b"WASM"), b"HEADWASM".to_vec());
     }
 
+    /// A slot as a receipt names one, for the tests below.
+    fn slot_of(bytes: &[u8], chunk: u64) -> WasmArtifactSlot {
+        WasmArtifactSlot {
+            download: Some("a".repeat(32)),
+            size: Some(bytes.len() as u64),
+            sha256: Some(sha256_hex(bytes)),
+            chunk_bytes: Some(chunk),
+        }
+    }
+
+    /// One `wasm.download` answer as a node writes it.
+    fn answer_of(slot: &WasmArtifactSlot, offset: u64, data: &[u8], last: bool) -> Value {
+        json!({
+            "download": slot.download.clone().unwrap_or_default(),
+            "offset": offset,
+            "data": base64::engine::general_purpose::STANDARD.encode(data),
+            "size": slot.size.unwrap_or(0),
+            "sha256": slot.sha256.clone().unwrap_or_default(),
+            "final": last
+        })
+    }
+
+    /// An answerer that hands back a scripted list, one per call, in order.
+    fn scripted(
+        answers: Vec<Value>,
+    ) -> impl FnMut(String, u64) -> std::future::Ready<Result<Value>> {
+        let mut answers = answers.into_iter();
+
+        move |_id, offset| {
+            std::future::ready(
+                answers
+                    .next()
+                    .ok_or_else(|| anyhow!("the test's answerer ran out at offset {offset}")),
+            )
+        }
+    }
+
     /// W19. A `wasm.download` answer is checked, never believed. The offset is the one this
     /// client asked for; delete the comparison in `artifact_chunk` and a replayed or reordered
     /// frame is appended wherever the loop happens to be, producing a file that hashes to
     /// nothing and a refusal with no cause in it.
     #[test]
     fn a_download_chunk_about_somewhere_else_is_refused_rather_than_appended() {
-        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let bytes = b"01234567".to_vec();
+        let slot = slot_of(&bytes, 4);
+        let answer = answer_of(&slot, 4, b"4567", true);
 
-        let answer = json!({
-            "download": "a".repeat(32),
-            "offset": 4,
-            "data": encode(b"cdef"),
-            "size": 8,
-            "final": true
-        });
-
-        let (data, last) = artifact_chunk(&answer, 4, 8).expect("the chunk asked for");
-        assert_eq!(data, b"cdef".to_vec());
+        let (data, last) = artifact_chunk(&answer, 4, 8, &slot).expect("the chunk asked for");
+        assert_eq!(data, b"4567".to_vec());
         assert!(last);
 
-        let error = artifact_chunk(&answer, 0, 8).expect_err("a frame about somewhere else");
+        let error = artifact_chunk(&answer, 0, 8, &slot).expect_err("a frame about somewhere else");
         assert!(
             error.to_string().contains("answered about 4"),
             "the refusal names both places: {error}"
         );
 
         // A node that stopped naming a place at all is not one to append bytes from.
-        let placeless = json!({"data": encode(b"cdef"), "size": 8});
-        assert!(artifact_chunk(&placeless, 0, 8).is_err());
+        let mut placeless = answer.clone();
+        placeless.as_object_mut().unwrap().remove("offset");
+        assert!(artifact_chunk(&placeless, 0, 8, &slot).is_err());
 
         // Nor one that answered with nothing, which would be a loop rather than a transfer.
-        let empty = json!({"offset": 0, "data": encode(b""), "size": 8});
-        assert!(artifact_chunk(&empty, 0, 8).is_err());
+        let empty = answer_of(&slot, 0, b"", false);
+        assert!(artifact_chunk(&empty, 0, 8, &slot).is_err());
 
         // Nor one whose chunk runs past the size it declared.
-        let over = json!({"offset": 4, "data": encode(b"cdefgh"), "size": 8});
-        assert!(artifact_chunk(&over, 4, 8).is_err());
+        let over = answer_of(&slot, 4, b"456789", false);
+        assert!(artifact_chunk(&over, 4, 8, &slot).is_err());
 
         // Nor one whose size changed under the transfer, which is what the loop terminates on.
-        let shifting = json!({"offset": 4, "data": encode(b"cd"), "size": 12});
-        assert!(artifact_chunk(&shifting, 4, 8).is_err());
+        let mut shifting = answer_of(&slot, 4, b"45", false);
+        shifting["size"] = json!(12);
+        assert!(artifact_chunk(&shifting, 4, 8, &slot).is_err());
+    }
+
+    /// W19 review, M4. Every chunk repeats the whole artifact's digest, and it is checked
+    /// rather than rendered: a frame from a different slot would otherwise be caught only by
+    /// the digest over the reassembled file, megabytes later, with nothing naming the frame.
+    /// Delete the `named.eq_ignore_ascii_case(expected_sha)` guard and this is green.
+    #[test]
+    fn a_chunk_that_names_a_different_artifact_is_refused_at_the_frame() {
+        let bytes = b"01234567".to_vec();
+        let slot = slot_of(&bytes, 4);
+
+        let mut foreign = answer_of(&slot, 0, b"0123", false);
+        foreign["sha256"] = json!("f".repeat(64));
+
+        let error = artifact_chunk(&foreign, 0, 8, &slot).expect_err("a frame from another slot");
+        assert!(
+            error.to_string().contains("this transfer is walking"),
+            "the refusal names both digests: {error}"
+        );
     }
 
     /// W19. The reassembled artifact is held to the digest the **signed manifest** names, and
@@ -2253,6 +2401,169 @@ mod tests {
         };
 
         assert!(artifact_whole(&artifact, &uncheckable).is_err());
+    }
+
+    /// W19 review, M2. The loop itself, driven by a scripted answerer rather than a socket.
+    ///
+    /// The happy path first: three frames, offsets from the answers, the artifact back to the
+    /// byte. Everything below it is a rule that a mutation survived before this test existed.
+    #[tokio::test]
+    async fn the_download_loop_walks_a_multi_chunk_artifact_from_the_offsets_it_is_given() {
+        let bytes = b"OUROCWASM-aaaabbbbccccddddeeee".to_vec();
+        let slot = slot_of(&bytes, 12);
+
+        let answers = vec![
+            answer_of(&slot, 0, &bytes[0..12], false),
+            answer_of(&slot, 12, &bytes[12..24], false),
+            answer_of(&slot, 24, &bytes[24..], true),
+        ];
+
+        let fetched = fetch_with(&slot, scripted(answers))
+            .await
+            .expect("three frames and a whole artifact");
+
+        assert_eq!(fetched, bytes);
+    }
+
+    /// R4. A node that marks a chunk `final` before the size it declared is a node whose two
+    /// statements disagree, and the one that would silently win is the short file. Delete the
+    /// `last && offset < size` guard and this is green with a truncated artifact — which the
+    /// digest would then catch, in a refusal about hashes rather than about a short transfer.
+    #[tokio::test]
+    async fn a_final_that_arrives_before_the_end_is_refused_rather_than_believed() {
+        let bytes = b"0123456789ab".to_vec();
+        let slot = slot_of(&bytes, 4);
+
+        let answers = vec![
+            answer_of(&slot, 0, &bytes[0..4], false),
+            answer_of(&slot, 4, &bytes[4..8], true),
+        ];
+
+        let error = fetch_with(&slot, scripted(answers))
+            .await
+            .expect_err("a transfer that ended early");
+
+        assert!(
+            error
+                .to_string()
+                .contains("marked a wasm.download chunk final"),
+            "the refusal is about the early final: {error}"
+        );
+    }
+
+    /// R5. The size is a number the far side chose and `Vec::with_capacity` on it is this
+    /// client believing it. Delete the ceiling and a receipt claiming a terabyte is an
+    /// allocation this process makes before it asks a single question.
+    #[tokio::test]
+    async fn a_receipt_claiming_more_than_any_bundle_could_carry_allocates_nothing() {
+        let slot = WasmArtifactSlot {
+            download: Some("a".repeat(32)),
+            size: Some(MAX_ARTIFACT_BYTES + 1),
+            sha256: Some("d".repeat(64)),
+            chunk_bytes: Some(524_288),
+        };
+
+        // The answerer is empty on purpose: a ceiling that is checked before the first frame
+        // never reaches it, and one that is not would run out of answers instead.
+        let error = fetch_with(&slot, scripted(vec![]))
+            .await
+            .expect_err("a size past what any bundle could carry");
+
+        assert!(
+            error.to_string().contains("will not fetch more than"),
+            "the refusal is about the ceiling, not about a missing answer: {error}"
+        );
+
+        // Zero is refused by the same clause: a slot that holds nothing is not a transfer.
+        let empty = WasmArtifactSlot {
+            size: Some(0),
+            ..slot
+        };
+        assert!(fetch_with(&empty, scripted(vec![])).await.is_err());
+    }
+
+    /// R5. And a node that answers forever without advancing is a loop rather than a
+    /// transfer. The offset check catches the shape a *confused* node has; this catches the
+    /// shape a hostile one has, where every frame is one byte and correctly placed.
+    #[tokio::test]
+    async fn a_node_that_never_finishes_is_bounded_by_the_frame_budget() {
+        let bytes: Vec<u8> = std::iter::repeat_n(b'z', MAX_ARTIFACT_CHUNKS + 8).collect();
+        let slot = slot_of(&bytes, 1);
+
+        let answers = (0..MAX_ARTIFACT_CHUNKS + 4)
+            .map(|n| answer_of(&slot, n as u64, b"z", false))
+            .collect::<Vec<_>>();
+
+        let error = fetch_with(&slot, scripted(answers))
+            .await
+            .expect_err("a transfer that never finishes");
+
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("answered {MAX_ARTIFACT_CHUNKS}")),
+            "the refusal names the budget: {error}"
+        );
+    }
+
+    /// W19 review, M4. The receipt's own two halves have to be one statement, and they are
+    /// checked before a frame is asked for. Delete `names_the_signed_artifact`'s call in
+    /// `sign` — or either comparison in it — and a node that offers one artifact and signs for
+    /// another is only caught by the reassembled digest, in a refusal that blames the transfer.
+    #[test]
+    fn a_receipt_whose_download_is_not_the_artifact_it_signed_for_is_refused() {
+        let sound = WasmSignature::decode(&json!({
+            "precompiled": {"sha256": "d".repeat(64), "size": 1_310_720},
+            "artifact": {
+                "download": "a".repeat(32),
+                "size": 1_310_720,
+                "sha256": "d".repeat(64),
+                "chunk_bytes": 524_288
+            }
+        }));
+
+        assert!(names_the_signed_artifact(&sound).is_ok());
+
+        // No download at all is the ordinary case and has nothing to disagree with.
+        assert!(names_the_signed_artifact(&WasmSignature::decode(&json!({}))).is_ok());
+
+        let other_digest = WasmSignature::decode(&json!({
+            "precompiled": {"sha256": "d".repeat(64), "size": 1_310_720},
+            "artifact": {
+                "download": "a".repeat(32),
+                "size": 1_310_720,
+                "sha256": "e".repeat(64),
+                "chunk_bytes": 524_288
+            }
+        }));
+
+        assert!(names_the_signed_artifact(&other_digest)
+            .expect_err("a receipt that contradicts itself")
+            .to_string()
+            .contains("contradicts itself"));
+
+        let other_size = WasmSignature::decode(&json!({
+            "precompiled": {"sha256": "d".repeat(64), "size": 999},
+            "artifact": {
+                "download": "a".repeat(32),
+                "size": 1_310_720,
+                "sha256": "d".repeat(64),
+                "chunk_bytes": 524_288
+            }
+        }));
+
+        assert!(names_the_signed_artifact(&other_size).is_err());
+
+        // A download named beside a manifest that declares no precompiled form at all is the
+        // same disagreement, said the other way round.
+        let unsigned = WasmSignature::decode(&json!({
+            "artifact": {"download": "a".repeat(32), "size": 8, "sha256": "d".repeat(64)}
+        }));
+
+        assert!(names_the_signed_artifact(&unsigned)
+            .expect_err("an artifact nothing signed for")
+            .to_string()
+            .contains("declares no precompiled form"));
     }
 
     /// W19. What an operator reads: which of the two ways the artifact got here, and how many

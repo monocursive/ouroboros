@@ -2057,12 +2057,44 @@ machinery — it is a backend, not a lane (D9).
   `Ouroboros.Wasm.Download` is `Ouroboros.Wasm.Upload` read backwards, and deliberately not a
   second design: `<data_dir>/wasm/download/` created 0700 and held to `lstat`, a slot claimed
   `O_CREAT|O_EXCL` whose file *is* the claim, an id minted here as sixteen random bytes and
-  re-validated as `[0-9a-f]{32}` on the way back in, 0600 files, and the chunk, the slot count
-  and both clocks read from `Upload` rather than restated. `wasm.download {download, offset}` is
-  `:operate` and node-routed, like the upload it mirrors. A slot line carries the digest, so
-  every chunk repeats the *whole* artifact's sha256 without re-hashing eleven mebibytes per
-  frame, and the slot rather than the file is the authority: bytes whose slot the clocks took
-  are not a download, whatever is still lying under their name.
+  re-validated as `[0-9a-f]{32}` on the way back in, 0600 files, and the slot count and both
+  clocks read from `Upload` rather than restated. `wasm.download {download, offset}` is
+  `:operate` and node-routed, like the upload it mirrors. A slot line carries the digest and the
+  chunk, so every answer repeats the *whole* artifact's sha256 without re-hashing eleven
+  mebibytes per frame and a transfer's boundaries are fixed when it is minted, and the slot
+  rather than the file is the authority: bytes whose slot the clocks took are not a download,
+  whatever is still lying under their name.
+
+  **The chunk is the one number that could not be inherited, and the review is why.** The first
+  cut took the upload's 512 KiB as well, and said a node whose frame could not carry one
+  "refuses the frame before this module sees it". Both halves were wrong. `Gateway.Conn` sets
+  `packet_size` on the socket it *receives* on and nothing holds an outbound reply to
+  `max_frame` at all; and an upload's chunk is the **client's** to size, while a download's is
+  the **node's** and is always maximal. A node with a 64 KiB frame answered `wasm.download`
+  with a 699 260-byte line — measured, not reasoned about — which a client mirroring its
+  advertised frame reads as `FrameTooLarge`. That is not a corner: lowering `max_frame` is
+  exactly what pushes an artifact onto this path in the first place. So the chunk is
+  `min(Upload.max_chunk_bytes(), (max_frame − 1 KiB) × 3/4)` — three quarters for base64, a
+  kibibyte held back for the JSON object around it, which measures 208 bytes on this build —
+  fixed in the slot at mint time so a setting changed mid-transfer cannot move a boundary out
+  from under a client. Below four kibibytes `put/2` refuses by name and the signature falls back
+  to the source form. At the default mebibyte frame the upload's number is the smaller of the
+  two and nothing changes.
+
+  **A read moves the idle clock, and that is not the upload's rule.** An upload's mtime moves
+  because bytes arrive; a download is written once and then only read, so leaving the idle clock
+  to the file measured *time since minting* under another name — a client walking a large
+  artifact was reclaimed mid-transfer at ten minutes, and the thirty-minute lifetime could not
+  be reached by any sequence of calls. `read/3` touches the file. Idle now means ten minutes
+  with nobody reading, and the lifetime is what bounds a client that reads one chunk every nine
+  minutes forever.
+
+  **What a sign costs this node's heap.** `read_artifact/1`'s cap rose from three quarters of a
+  frame to `Bundle.max_precompiled_bytes/0`, because the reply's number is no longer what an
+  artifact has to fit inside. So a `wasm.sign` of a worst-shape component holds its artifact in
+  the BEAM's heap while it is written to a slot — up to 64 MiB per concurrent signature, and the
+  eight slots bound the concurrent case at eight times that. That is a real number and it is
+  stated rather than implied; §12 counts the disk beside it.
 
   **What makes it safe is what it will not do.** There is no verb that *puts*. The only caller
   of `put/2` is `Wasm.Deploy.sign/2`, handing over an artifact this node's own helper compiled
@@ -2078,8 +2110,9 @@ machinery — it is a backend, not a lane (D9).
   **Reading the final chunk releases the slot**, and the alternative was reasonable enough to
   say why. The verb's parameters are closed at `download`, `offset` and `node`, so there is no
   frame in which a client says "done" other than the one where it asks for the last chunk; a
-  slot held to its clocks after a finished transfer is thirty minutes of a ceiling of eight, and
-  eight of those make the ninth signature fall back to the source form for half an hour. The
+  slot held to its clocks after a finished transfer is ten idle minutes of a ceiling of eight
+  (thirty for a client that keeps reading and never finishes), and eight of those make the
+  ninth signature fall back to the source form until one of them expires. The
   cost is the other end of it and is not hidden: a client that loses that last answer cannot ask
   again and signs again instead, paying a compile and a rate-limit slot. Everything else is what
   the clocks are for.
@@ -2145,6 +2178,17 @@ Stated once, so nobody reads more into the lane than is there:
   frame released the slot, so the client signs again. And the 512 KiB chunk is `wasm.upload`'s,
   which means a node whose operator set `OUROBOROS_GATEWAY_MAX_FRAME` below what one chunk
   needs can no more download than it can upload.
+
+  And the eight slots are a **shared** ceiling with no per-requester share. An `:operate` client
+  may sign eight large capabilities and simply not fetch them, and for the ten idle minutes that
+  follow, every other signer on that node — including a different operator — gets the source
+  form with `artifact_not_staged`. Nothing here rations: the signing service's rate limit is
+  thirty a minute *per requester node*, which bounds how fast the slots can be taken and not who
+  holds them, and `:operate` is a scope this lane already trusts to deploy signed bytes and stop
+  live capabilities (D15), so a client that wanted to degrade a node has cheaper ways. What
+  bounds it is the two clocks and nothing else, the cost is a fallback rather than a refusal —
+  the capability still deploys and still runs, compiling on each node as it always did — and
+  saying so is better than implying a fairness this has none of.
 - **Two forms are two ceilings, and both are staging.** A bundle now carries a component and an
   artifact, so `Wasm.Upload` sizes a slot at `Bundle.max_bytes/0` — 16 MiB of component plus
   64 MiB of artifact plus the envelope, and eight slots in flight. That is 640 MiB one
@@ -2154,6 +2198,13 @@ Stated once, so nobody reads more into the lane than is there:
   ratio (2.75× at the shape §7.3 admits) with half again to spare, and is capped by what
   `ouro-wasm` will read. It was eight times, which put a slot at 144 MiB and the eight of them
   at 1152 MiB, and nobody had chosen that number.
+
+  W19 added a **second** staging area on the same node and this number has to count it: the
+  download area holds up to eight artifacts at `Bundle.max_precompiled_bytes/0` each, which is
+  another 512 MiB at the default ceilings, for 1152 MiB of staging in total. It is reclaimed by
+  the same two clocks and, like the upload area, **by no timer** — every sweep happens inside
+  somebody else's call, so eight abandoned artifacts sit there until the next `wasm.sign` or
+  `wasm.download` on that node, which on a quiet one may be a long time.
 - **And `store_budget_bytes` now has to hold both forms of anything live.** The component store
   keeps the artifact beside the component for every rollout that carried one, and a prune may
   not evict either while the rollout is `:live`, `:deploying` or `:quarantined`. So the

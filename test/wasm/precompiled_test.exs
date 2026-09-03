@@ -945,13 +945,20 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
       # The ceiling is three quarters of the gateway's own configured frame, because the
       # artifact travels base64 at four bytes to three (M9). An operator who raises the frame
       # raises this, in one place — so a frame small enough makes the reference guest's 258 KiB
-      # artifact too large for one reply, which is the branch this exercises.
+      # artifact too large for one reply, which is the branch this exercises. 64 KiB rather
+      # than something smaller because W19's review made the *chunk* a function of the frame
+      # too: below four kibibytes of chunk a node refuses to stage at all (H1).
       previous = Application.get_env(:ouroboros, :gateway)
 
-      Application.put_env(:ouroboros, :gateway, Keyword.put(previous || [], :max_frame, 4_096))
+      Application.put_env(
+        :ouroboros,
+        :gateway,
+        Keyword.put(previous || [], :max_frame, 64 * 1024)
+      )
+
       on_exit(fn -> restore(:gateway, previous) end)
 
-      assert Deploy.max_receipt_precompiled_bytes() == 3_072
+      assert Deploy.max_receipt_precompiled_bytes() == 49_152
 
       downloads = Path.join(context.tmp, "downloads")
       assert {:ok, receipt} = sign(context, bytes, [], download_root: downloads)
@@ -963,13 +970,16 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
       assert receipt.precompile_skipped == nil
 
       # And the prefix is the header and the envelope alone — the artifact is not in it.
-      assert %{download: id, size: size, sha256: sha256} = receipt.artifact
+      assert %{download: id, size: size, sha256: sha256, chunk_bytes: chunk_bytes} =
+               receipt.artifact
+
       assert sha256 == receipt.precompiled.sha256
       assert byte_size(Base.decode64!(receipt.bundle_prefix)) < size
 
       assert receipt.bundle_bytes ==
                byte_size(Base.decode64!(receipt.bundle_prefix)) + size + receipt.size
 
+      assert chunk_bytes == Download.max_chunk_bytes()
       assert {:ok, %{download: ^id, size: ^size}} = Download.read(id, 0, root: downloads)
     end
 
@@ -982,27 +992,47 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
       bytes = File.read!(@guest)
 
       previous = Application.get_env(:ouroboros, :gateway)
-      Application.put_env(:ouroboros, :gateway, Keyword.put(previous || [], :max_frame, 4_096))
       on_exit(fn -> restore(:gateway, previous) end)
 
       previous_data_dir = Application.get_env(:ouroboros, :data_dir)
-      Application.delete_env(:ouroboros, :data_dir)
       on_exit(fn -> restore(:data_dir, previous_data_dir) end)
 
-      # No `download_root`, and no data directory to derive one from: this node has nowhere to
-      # put an artifact it cannot fit in a reply.
-      assert {:ok, receipt} = sign(context, bytes)
+      downloads = Path.join(context.tmp, "unstageable")
 
-      assert receipt.form == :source
-      assert receipt.precompiled == nil
-      assert receipt.artifact == nil
-      assert receipt.precompile_skipped =~ "artifact_not_staged"
+      cases = [
+        # No data directory to derive a download root from, and no `download_root` either:
+        # nowhere at all to put an artifact that will not fit a reply.
+        {"no data directory", "no_data_dir", 64 * 1024, fn -> nil end, []},
+        # And W19's review added a second way to be unstageable: a frame too small to carry
+        # a usable chunk. Shrinking the chunk further would be a transfer nobody could finish,
+        # so the node refuses to mint the slot and falls back exactly as above (H1).
+        {"a frame too small for a chunk", "frame_too_small", 4_096, fn -> context.tmp end,
+         [download_root: downloads]}
+      ]
 
-      # And the bundle it produced is a whole, verifiable, deployable one.
-      assert {:ok, %{artifact: artifact, precompiled: nil}} =
-               Bundle.verify(bundle(receipt, bytes), context.trust_policy)
+      for {label, marker, frame, data_dir, extra} <- cases do
+        Application.put_env(:ouroboros, :gateway, Keyword.put(previous || [], :max_frame, frame))
 
-      assert artifact.precompiled == nil
+        case data_dir.() do
+          nil -> Application.delete_env(:ouroboros, :data_dir)
+          dir -> Application.put_env(:ouroboros, :data_dir, dir)
+        end
+
+        assert {:ok, receipt} = sign(context, bytes, [], extra), label
+
+        assert receipt.form == :source, label
+        assert receipt.precompiled == nil, label
+        assert receipt.artifact == nil, label
+        assert receipt.precompile_skipped =~ "artifact_not_staged", label
+        assert receipt.precompile_skipped =~ marker, label
+
+        # And the bundle it produced is a whole, verifiable, deployable one.
+        assert {:ok, %{artifact: artifact, precompiled: nil}} =
+                 Bundle.verify(bundle(receipt, bytes), context.trust_policy),
+               label
+
+        assert artifact.precompiled == nil, label
+      end
     end
 
     test "the receipt ceiling follows the gateway's own frame" do

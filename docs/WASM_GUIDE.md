@@ -562,16 +562,20 @@ One line of that output is worth reading when a capability is large. Signing com
 component on the signing node and the bundle carries that artifact beside the source, so the
 artifact is the one part of the file you did not supply — and past three quarters of
 `OUROBOROS_GATEWAY_MAX_FRAME` it does not fit the reply `wasm.sign` answers with. `sign` then
-fetches it over `wasm.download` in the same frames the component went up in, and says so:
+fetches it over `wasm.download` in frames the node sizes from that same setting — 48 384 bytes
+of artifact at a 64 KiB frame, 512 KiB at the default mebibyte — and says so:
 `artifact form: fetched in 6 frame(s) — too large for one reply`, against `artifact form:
 carried in the signature's own reply` for everything smaller. Nothing about the bundle differs
 between the two — it is byte for byte the same file either way, and `deploy` cannot tell them
 apart. What you may notice is a few extra seconds and, if the transfer is interrupted, a
 refusal naming the digest that did not match: the node released the slot with the last chunk it
 sent, so the fix is to run `sign` again rather than to retry a download. A node with nowhere to
-stage the artifact — no data directory, or eight signatures already mid-transfer — signs the
-source form instead and says `artifact_not_staged`, which deploys and runs exactly as it always
-did (docs/WASM.md D28).
+stage the artifact signs the source form instead and says `artifact_not_staged`, which deploys
+and runs exactly as it always did (docs/WASM.md D28). There are three ways to be in that state
+and all three are an operator's to recognise: no data directory; a frame too small to carry a
+four-kibibyte chunk, which is roughly `OUROBOROS_GATEWAY_MAX_FRAME` under 6.5 KiB; or all eight
+of the node's download slots already held by signatures nobody fetched, which clears itself ten
+minutes after the last of them was read.
 
 #### Deploy
 

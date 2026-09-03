@@ -243,7 +243,7 @@ defmodule Ouroboros.Wasm.Deploy do
 
   # The half of `sign/2` that runs with a download slot possibly held. It is a separate
   # function for exactly that reason: from here on every refusal has to release the slot, and
-  # a slot nobody will ever ask for is ten minutes of this node's ceiling spent on bytes no
+  # a slot nobody will ever ask for is ten idle minutes of this node's ceiling spent on bytes no
   # receipt names. The `else` is the whole of it, and it is why the claim happens before the
   # signature rather than after — a node that cannot hand an artifact over must be able to
   # fall back to the source form, which is a decision that has to be made before the manifest

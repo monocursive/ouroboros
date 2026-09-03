@@ -19,36 +19,83 @@ defmodule Ouroboros.Wasm.Download do
 
   ## It is `Ouroboros.Wasm.Upload`, in the other direction
 
-  Deliberately, and not by accident of style. Every bound that module states is stated
-  here for the same reason and with the same number, read from that module rather than
-  copied: `max_chunk_bytes/0` is its chunk, `max_in_flight/0` its slot count,
-  `idle_ms/0` and `max_lifetime_ms/0` its two clocks. A second set of numbers here would
-  be a second place for the two to disagree, and there is nothing about the direction of
-  travel that makes 512 KiB the wrong chunk.
+  Deliberately, and not by accident of style. Most of what that module bounds is bounded
+  here with the *same number*, read from it rather than copied: `max_in_flight/0` is its
+  slot count and `idle_ms/0` and `max_lifetime_ms/0` are its two clocks. A second set of
+  numbers would be a second place for the two to disagree.
 
-  That inherits the upload's honest limit too, and it is worth saying rather than leaving
-  to be discovered: a chunk is 512 KiB of decoded bytes, which is about 683 KiB of base64
-  on the wire, and a node whose operator set `OUROBOROS_GATEWAY_MAX_FRAME` below that
-  refuses the frame before this module sees it (D16). Such a node cannot run `wasm.upload`
-  either, so it could not have got a component to this one in the first place. What the
-  frame *does* decide is which side of `Ouroboros.Wasm.Deploy.max_receipt_precompiled_bytes/0`
-  an artifact falls on, and therefore whether a slot is minted at all.
+  ## The chunk is the one number that could not be inherited (W19 review, H1)
 
-  So: `<data_dir>/wasm/download/`, created 0700 and held to `File.lstat/1`; a slot is a
-  file created `O_CREAT|O_EXCL` and the slot file *is* the claim; the id is sixteen bytes
-  of `:crypto.strong_rand_bytes/1` as hex and is validated as `[0-9a-f]{32}` on the way
-  back in, because a value that made a round trip through a client is a value that arrived
-  from a client; files are 0600; two clocks — idle by mtime and total from the moment the
-  slot was claimed — and every entry point sweeps, including the ones that only read.
-  Nothing here follows a symlink.
+  The first cut of this module took the upload's 512 KiB chunk as well, and wrote down that
+  a node whose `OUROBOROS_GATEWAY_MAX_FRAME` could not carry one "refuses the frame before
+  this module sees it". Both halves of that were wrong, and the direction of travel is
+  exactly why.
+
+  `Ouroboros.Gateway.Conn` sets `packet_size` on the socket it **receives** on; nothing
+  holds an outbound reply to `max_frame` at all. And an upload's chunk is the *client's*
+  to size — it sends what it likes up to the ceiling, and the node's own reply states that
+  ceiling so a client can shrink — whereas a download's chunk is the *node's*, and it is
+  always maximal. So a node configured with a 64 KiB frame answered `wasm.download` with a
+  699 260-byte line: measured, not reasoned about. A client that mirrors the frame it was
+  advertised — which is what `tui/src/transport.rs` documents itself as doing — reads that
+  as `FrameTooLarge` and the transfer dies. And this is not a corner: lowering `max_frame`
+  is precisely what pushes an artifact onto this path in the first place.
+
+  So the chunk is derived from the node's own frame:
+
+      chunk = min(Upload.max_chunk_bytes(), (max_frame - #{1024}) * 3 / 4)
+
+  Three quarters because base64 is four bytes to three, and #{1024} bytes held back for the
+  JSON object around it — an id, an offset, a size, a 64-character digest, a flag and the
+  JSON-RPC envelope, measured at 208 bytes on this build, with the rest as room for a field
+  a later build adds. At the default mebibyte frame the upload's 512 KiB is the smaller of
+  the two and nothing changes; below it, the chunk shrinks with the frame, and the number is
+  fixed in the slot at mint time so an operator who changes the setting mid-transfer cannot
+  move a boundary out from under a client walking one.
+
+  Below `#{4 * 1024}` decoded bytes `put/2` refuses by name rather than shrinking further:
+  a node whose frame cannot carry four kibibytes of artifact at a time would need nearly
+  three thousand round trips for the worst artifact §7.3 admits, and that is not a transfer,
+  it is a refusal wearing a progress bar. The signature then falls back to the source form
+  with `artifact_not_staged`, which is the same answer every other unstageable node gets.
+
+  ## Everything else is the upload's, verbatim
+
+  `<data_dir>/wasm/download/`, created 0700 and held to `File.lstat/1`; a slot is a file
+  created `O_CREAT|O_EXCL` and the slot file *is* the claim; the id is sixteen bytes of
+  `:crypto.strong_rand_bytes/1` as hex and is validated as `[0-9a-f]{32}` on the way back
+  in, because a value that made a round trip through a client is a value that arrived from a
+  client; files are 0600; two clocks; and every entry point sweeps, including the ones that
+  only read. Nothing here follows a symlink.
+
+  ## Two clocks, and why a read moves one of them
+
+  Idle is ten minutes and the total lifetime is thirty, both `Upload`'s. The difference is
+  what moves the idle one. An upload's mtime moves because bytes arrive and nothing has to
+  move it artificially; a download is written once and then only read, so if the idle clock
+  were left to the file it would measure *time since minting* under a different name — and
+  the first cut did exactly that: a client walking a large artifact was reclaimed at ten
+  minutes mid-transfer, and the thirty-minute lifetime could not be reached by any sequence
+  of calls (W19 review, M3). So `read/3` touches the file. The idle clock now means what it
+  says — ten minutes with nobody reading — and the lifetime is what bounds a client that
+  reads one chunk every nine minutes forever.
 
   ## What a slot holds, and why the digest lives in it
 
-  A slot line is `<id> <claimed_ms> <sha256>`. The digest is computed once, at `put/2`,
-  over the bytes in hand, and every chunk's answer repeats it out of the slot rather than
-  re-hashing an eleven-mebibyte file twenty-two times. That also makes the slot the
+  A slot line is `<id> <claimed_ms> <chunk_bytes> <sha256>`. The digest is computed once, at
+  `put/2`, over the bytes in hand, and every chunk's answer repeats it out of the slot rather
+  than re-hashing an eleven-mebibyte file twenty-two times. The chunk is fixed there for the
+  reason above: a transfer's boundaries are decided when it is minted, not re-derived on each
+  read from a setting an operator may have changed since. That also makes the slot the
   authority rather than the file: a download with no live slot is not readable at all,
   whatever is lying in the directory under its name.
+
+  The line is trusted as read, and that is a statement about the directory rather than about
+  the line: it lives 0700 under this node's own data directory, written by this process, and
+  anybody who could rewrite it could equally replace the artifact beside it. What that trust
+  does **not** extend to is the client — the digest a client checks against is the one in the
+  *signed manifest*, and `ouro wasm sign` holds the two to each other before it writes a file
+  (W19 review, M4).
 
   ## Whose bytes these are
 
@@ -64,16 +111,27 @@ defmodule Ouroboros.Wasm.Download do
   Stated because the alternative was reasonable too. `wasm.download`'s parameters are
   closed at `download`, `offset` and `node` (C12), so there is no frame in which a client
   says "I am done" other than the one in which it asks for the last chunk — and a slot
-  held until its clock runs out is thirty minutes of ceiling a finished transfer is still
-  spending. Eight of those and the ninth `sign` mints no slot at all and falls back to the
-  source form, which is a node denying itself the feature for half an hour because
-  somebody signed nine large capabilities in a row.
+  held until its clocks run out is ten minutes of ceiling a finished transfer is still
+  spending — thirty for a client that keeps reading and never finishes. Eight of those and
+  the ninth `sign` mints no slot at all and falls back to the source form, which is a node
+  denying itself the feature for ten minutes because somebody signed nine large capabilities
+  in a row.
 
   So the read that returns `final: true` releases the slot on the way out, and `release/2`
   is public for a caller that abandons one. The honest cost is the other end of it: a
   client that never receives that last answer cannot ask again, and re-signing is what it
-  does instead — a compile and a rate-limit slot. That is one lost frame against a
-  half-hour of held ceiling, and the clocks are still the backstop for everything else.
+  does instead — a compile and a rate-limit slot. That is one lost frame against ten minutes
+  of held ceiling, and the clocks are still the backstop for everything else.
+
+  Two residuals about those clocks, stated rather than left to be found. **There is no
+  timer**: every reclamation happens inside somebody's `put/2`, `read/3` or `release/2`, so
+  eight abandoned artifacts sit on disk — up to eight times
+  `Ouroboros.Wasm.Bundle.max_precompiled_bytes/0` — until the next call to this module, which
+  on a quiet node may be never. That is `Ouroboros.Wasm.Upload`'s posture and the reason
+  neither module needs a process; what it costs is disk on an idle node, and §12 counts it.
+  And **the id is the whole of what a reclamation logs** — one debug line naming a slot that
+  is already gone, never the bytes and never the digest, because that is all an operator
+  needs and anything more would be this module writing out somebody's machine code.
   """
 
   require Logger
@@ -85,6 +143,20 @@ defmodule Ouroboros.Wasm.Download do
 
   @bin ".bin"
   @slot "slot-"
+
+  # What the JSON object around one chunk costs on the wire: an id, an offset, a size, a
+  # 64-character digest, a flag, and the JSON-RPC envelope. Measured at 208 bytes on this
+  # build; a kibibyte is that with room for a field a later build adds.
+  @envelope_slack 1_024
+
+  # The smallest chunk worth answering with. A node whose frame cannot carry four kibibytes
+  # of artifact at a time would need nearly three thousand round trips for the worst artifact
+  # §7.3 admits; that is not a transfer, and `put/2` says so rather than shrinking further.
+  @min_chunk_bytes 4 * 1_024
+
+  # The frame this node falls back to, mirroring `Ouroboros.Gateway.Config`'s own default
+  # rather than inventing a second one — the same mirror `Ouroboros.Wasm.Deploy` keeps.
+  @default_gateway_max_frame 1_048_576
 
   # See `Upload`'s own note: a claim is two writes and a sweep in a concurrent call can land
   # between them. Nothing regular and younger than this is reclaimed on the strength of what
@@ -107,9 +179,37 @@ defmodule Ouroboros.Wasm.Download do
           final: boolean()
         }
 
-  @doc "The most decoded bytes one `wasm.download` frame carries, which is the upload's."
-  @spec max_chunk_bytes() :: pos_integer()
-  def max_chunk_bytes, do: Upload.max_chunk_bytes()
+  @doc """
+  The most decoded bytes one `wasm.download` reply carries on this node (W19 review, H1).
+
+  The upload's chunk, or what this node's own frame will hold — whichever is smaller.
+  Nothing on the outbound path is held to `OUROBOROS_GATEWAY_MAX_FRAME`, so a chunk larger
+  than the frame is a line this node writes and its own client refuses; see the moduledoc for
+  the measurement. At the default mebibyte frame the upload's 512 KiB is the smaller of the
+  two and this is exactly `Ouroboros.Wasm.Upload.max_chunk_bytes/0`.
+
+  This is what a *new* slot is minted with. A slot already in flight keeps the number it was
+  minted with, so an operator who changes the setting cannot move a boundary out from under a
+  client walking one.
+  """
+  @spec max_chunk_bytes() :: non_neg_integer()
+  def max_chunk_bytes do
+    frame = max(gateway_max_frame() - @envelope_slack, 0)
+    min(Upload.max_chunk_bytes(), div(frame * 3, 4))
+  end
+
+  @doc "The smallest chunk this node will mint a slot for; below it `put/2` refuses."
+  @spec min_chunk_bytes() :: pos_integer()
+  def min_chunk_bytes, do: @min_chunk_bytes
+
+  defp gateway_max_frame do
+    with settings when is_list(settings) <- Application.get_env(:ouroboros, :gateway, []),
+         bytes when is_integer(bytes) and bytes > 0 <- Keyword.get(settings, :max_frame) do
+      bytes
+    else
+      _unset_or_invalid -> @default_gateway_max_frame
+    end
+  end
 
   @doc """
   The most bytes one download may hold: the largest artifact a bundle may carry.
@@ -167,17 +267,19 @@ defmodule Ouroboros.Wasm.Download do
 
   def put(bytes, opts) when is_binary(bytes) and is_list(opts) do
     sha = :sha256 |> :crypto.hash(bytes) |> Base.encode16(case: :lower)
+    chunk = max_chunk_bytes()
 
     with :ok <- bound(bytes),
+         :ok <- framed(chunk),
          {:ok, dir} <- prepared(opts),
-         {:ok, id, path} <- opened(dir, sha),
+         {:ok, id, path} <- opened(dir, sha, chunk),
          :ok <- written(dir, id, path, bytes) do
       {:ok,
        %{
          download: id,
          size: byte_size(bytes),
          sha256: sha,
-         chunk_bytes: max_chunk_bytes()
+         chunk_bytes: chunk
        }}
     end
   end
@@ -187,12 +289,15 @@ defmodule Ouroboros.Wasm.Download do
   @doc """
   Answers one chunk of a download, and releases the slot when that chunk is the last.
 
-  `offset` is a **chunk boundary** — a multiple of `max_chunk_bytes/0`, strictly below the
-  size — and not a seek. A client walks the file with the offsets this module's own answers
+  `offset` is a **chunk boundary** — a multiple of the `chunk_bytes` this slot was minted
+  with, strictly below the size — and not a seek. A client walks the file with the offsets this module's own answers
   hand it, so an offset that is not one of them is a client that has lost its place or a
   frame that arrived out of order, and either is refused rather than answered with bytes
   from the middle of something. `data` is base64, because that is what the frame carries;
-  it decodes to at most `max_chunk_bytes/0`.
+  it decodes to at most the slot's own `chunk_bytes`.
+
+  A read that is not the last one **moves the idle clock**: see the moduledoc for why a
+  download's is not the file's own mtime the way an upload's is.
   """
   @spec read(String.t(), non_neg_integer(), keyword()) :: {:ok, chunk()} | {:error, term()}
   def read(id, offset, opts \\ [])
@@ -202,14 +307,22 @@ defmodule Ouroboros.Wasm.Download do
              is_list(opts) do
     with {:ok, dir} <- swept(opts),
          {:ok, id} <- valid_id(id),
-         {:ok, sha} <- claimed(dir, id),
+         {:ok, chunk_bytes, sha} <- claimed(dir, id),
          {:ok, path, size} <- staged(dir, id),
-         :ok <- positioned(offset, size),
-         {:ok, chunk} <- chunk_at(path, offset, size) do
+         :ok <- positioned(offset, size, chunk_bytes),
+         {:ok, chunk} <- chunk_at(path, offset, size, chunk_bytes) do
       final? = offset + byte_size(chunk) >= size
 
-      # The last chunk is the only "I am done" this verb's closed parameters can express.
-      if final?, do: discard(dir, id)
+      if final? do
+        # The last chunk is the only "I am done" this verb's closed parameters can express.
+        discard(dir, id)
+      else
+        # W19 review, M3. Nothing writes to a download after it is minted, so the idle clock
+        # has to be moved by the only progress there is. Without this a client walking a large
+        # artifact is reclaimed mid-transfer at ten minutes and the lifetime below is
+        # unreachable by any sequence of calls.
+        _touched = File.touch(path)
+      end
 
       {:ok,
        %{
@@ -235,7 +348,7 @@ defmodule Ouroboros.Wasm.Download do
   """
   @spec release(String.t(), keyword()) :: :ok | {:error, term()}
   def release(id, opts \\ []) when is_binary(id) do
-    with {:ok, dir} <- root(opts),
+    with {:ok, dir} <- swept(opts),
          {:ok, id} <- valid_id(id) do
       if File.exists?(Path.join(dir, id <> @bin)) or holder?(dir, id) do
         discard(dir, id)
@@ -308,6 +421,14 @@ defmodule Ouroboros.Wasm.Download do
     end
   end
 
+  # A frame too small to carry a usable chunk is refused where the slot would be claimed,
+  # so the signature falls back to the source form rather than minting a transfer nobody
+  # could finish (W19 review, H1).
+  defp framed(chunk) when chunk >= @min_chunk_bytes, do: :ok
+
+  defp framed(chunk),
+    do: {:error, {:frame_too_small, gateway_max_frame(), chunk, @min_chunk_bytes}}
+
   defp bound(bytes) do
     cond do
       bytes == "" -> {:error, :empty_download}
@@ -318,10 +439,10 @@ defmodule Ouroboros.Wasm.Download do
 
   # The slot is claimed before a byte is written, with `O_CREAT|O_EXCL`, so the ceiling is
   # enforced by the filesystem rather than by a count somebody took.
-  defp opened(dir, sha) do
+  defp opened(dir, sha, chunk) do
     id = @id_bytes |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
 
-    case claim_slot(dir, id, sha, 0) do
+    case claim_slot(dir, id, sha, chunk, 0) do
       :ok ->
         path = Path.join(dir, id <> @bin)
 
@@ -342,15 +463,15 @@ defmodule Ouroboros.Wasm.Download do
     end
   end
 
-  defp claim_slot(dir, id, sha, n) do
+  defp claim_slot(dir, id, sha, chunk, n) do
     if n >= max_in_flight() do
       {:error, {:too_many_downloads, max_in_flight(), max_in_flight()}}
     else
-      contents = "#{id} #{now_ms()} #{sha}\n"
+      contents = "#{id} #{now_ms()} #{chunk} #{sha}\n"
 
       case File.write(Path.join(dir, @slot <> Integer.to_string(n)), contents, [:exclusive]) do
         :ok -> :ok
-        {:error, :eexist} -> claim_slot(dir, id, sha, n + 1)
+        {:error, :eexist} -> claim_slot(dir, id, sha, chunk, n + 1)
         {:error, reason} -> {:error, {:download_not_created, reason}}
       end
     end
@@ -384,16 +505,16 @@ defmodule Ouroboros.Wasm.Download do
   defp claimed(dir, id) do
     case Enum.find_value(slots(dir), fn path ->
            case slot_holder(path) do
-             {^id, _opened_ms, sha} -> sha
+             {^id, _opened_ms, chunk, sha} -> {chunk, sha}
              _other -> nil
            end
          end) do
       nil -> {:error, {:unknown_download, id}}
-      sha -> {:ok, sha}
+      {chunk, sha} -> {:ok, chunk, sha}
     end
   end
 
-  defp holder?(dir, id), do: match?({:ok, _sha}, claimed(dir, id))
+  defp holder?(dir, id), do: match?({:ok, _chunk, _sha}, claimed(dir, id))
 
   # A staged file must be a regular file. A symlink under this name was put there by whoever
   # could write in this directory, and reading through it reads their target.
@@ -412,9 +533,7 @@ defmodule Ouroboros.Wasm.Download do
   # Two refusals, and they are different mistakes. An offset off a boundary is a client that
   # has lost its place; an offset at or past the size is a client asking for bytes that are
   # not there. Neither is answered with a slice.
-  defp positioned(offset, size) do
-    chunk = max_chunk_bytes()
-
+  defp positioned(offset, size, chunk) do
     cond do
       rem(offset, chunk) != 0 -> {:error, {:offset_not_a_chunk_boundary, offset, chunk}}
       offset >= size -> {:error, {:offset_past_size, offset, size}}
@@ -424,8 +543,8 @@ defmodule Ouroboros.Wasm.Download do
 
   # `pread` and not `File.read/1`: the whole point of this module is that the file does not
   # fit in a reply, so nothing here reads more of it than one frame carries.
-  defp chunk_at(path, offset, size) do
-    length = min(max_chunk_bytes(), size - offset)
+  defp chunk_at(path, offset, size, chunk_bytes) do
+    length = min(chunk_bytes, size - offset)
 
     case :file.open(path, [:read, :binary, :raw]) do
       {:ok, fd} ->
@@ -447,9 +566,10 @@ defmodule Ouroboros.Wasm.Download do
 
   defp slot_holder(path) do
     with {:ok, contents} <- File.read(path),
-         [id, opened, sha] <- contents |> String.trim() |> String.split(" ", parts: 3),
-         {opened_ms, ""} <- Integer.parse(opened) do
-      {id, opened_ms, sha}
+         [id, opened, chunk, sha] <- contents |> String.trim() |> String.split(" ", parts: 4),
+         {opened_ms, ""} <- Integer.parse(opened),
+         {chunk_bytes, ""} <- Integer.parse(chunk) do
+      {id, opened_ms, chunk_bytes, sha}
     else
       _unreadable -> nil
     end
@@ -460,7 +580,7 @@ defmodule Ouroboros.Wasm.Download do
 
     Enum.each(slots(dir), fn path ->
       case slot_holder(path) do
-        {^id, _opened_ms, _sha} -> File.rm(path)
+        {^id, _opened_ms, _chunk, _sha} -> File.rm(path)
         _other -> :ok
       end
     end)
@@ -495,7 +615,7 @@ defmodule Ouroboros.Wasm.Download do
           {held, expired, unattributed?}
         end
 
-      {id, opened_ms, _sha} ->
+      {id, opened_ms, _chunk, _sha} ->
         if expired?(dir, id, opened_ms, now) do
           _ignored = File.rm(path)
           {held, MapSet.put(expired, id), unattributed?}
