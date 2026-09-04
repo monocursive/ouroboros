@@ -1,7 +1,9 @@
 defmodule Ouroboros.Wasm.StoreTest do
-  # Async: every test writes into a directory of its own and hands `prune/1` a registry of
-  # its own. Nothing here touches application environment or a globally named process.
-  use ExUnit.Case, async: true
+  # Not async: every test passes an explicit `:root`, and `Store.root/1` honours that only
+  # where `allow_store_root_override?` is true. Suites that flip that flag are themselves
+  # `async: false`, but they share the VM with this file; a parallel case here would see a
+  # denied override as `:store_root_override_denied` rather than its own directory.
+  use ExUnit.Case, async: false
 
   alias Ouroboros.Upgrade.Rollout.Registry
   alias Ouroboros.Wasm.Artifact
@@ -687,11 +689,11 @@ defmodule Ouroboros.Wasm.StoreTest do
 end
 
 defmodule Ouroboros.Wasm.StoreNoDataDirTest do
-  # Not async: this reads the global `:ouroboros, :data_dir` application key. Every other
-  # store test passes an explicit `:root` and touches nothing global, so those stay async;
-  # this one is separated out rather than making the whole file serial (F8).
+  # Not async: this reads the global `:ouroboros, :data_dir` application key and, in the
+  # override case, `:wasm`. Every other store test passes an explicit `:root`.
   use ExUnit.Case, async: false
 
+  alias Ouroboros.Wasm
   alias Ouroboros.Wasm.Store
 
   test "a node with no data directory says so rather than inventing a store" do
@@ -702,5 +704,29 @@ defmodule Ouroboros.Wasm.StoreNoDataDirTest do
     assert {:error, :no_data_dir} = Store.put("bytes")
     assert {:error, :no_data_dir} = Store.list()
     assert {:error, :no_data_dir} = Store.prune()
+  end
+
+  test "a seeded root is refused where the node has not allowed the override" do
+    previous = Application.get_env(:ouroboros, :wasm, [])
+    on_exit(fn -> Application.put_env(:ouroboros, :wasm, previous) end)
+
+    Application.put_env(
+      :ouroboros,
+      :wasm,
+      Keyword.put(previous, :allow_store_root_override, false)
+    )
+
+    refute Wasm.allow_store_root_override?()
+
+    other =
+      Path.join(System.tmp_dir!(), "ouro-wasm-store-denied-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(other)
+    on_exit(fn -> File.rm_rf(other) end)
+
+    assert {:error, :store_root_override_denied} = Store.root(root: other)
+    assert {:error, :store_root_override_denied} = Store.put("bytes", nil, root: other)
+    assert {:error, :store_root_override_denied} = Store.list(root: other)
+    assert {:ok, []} = File.ls(other)
   end
 end

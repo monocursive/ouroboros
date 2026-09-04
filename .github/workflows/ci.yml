@@ -47,10 +47,11 @@ jobs:
     runs-on: ubuntu-24.04
     # See the `on:` note: a push to a long-lived branch already ran this.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork || (github.head_ref != 'main' && github.head_ref != 'dev') }}
-    # 45, not 20: this job now builds `ouro-wasm` before `mix test`, and a cold cargo build
-    # of wasmtime is 10+ minutes on a hosted runner (361 s for build plus suite locally). A
-    # run that hits the cargo cache is far shorter; the ceiling is for the run that does not.
-    timeout-minutes: 45
+    # 70, not 45: this job builds `ouro-wasm` before `mix test` (a cold cargo build of
+    # wasmtime is 10+ minutes on a hosted runner) and then the version-skew proof, which
+    # compiles a second wasmtime. A run that hits the cargo cache is far shorter; the
+    # ceiling is for the run that does not.
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@v7
 
@@ -152,6 +153,12 @@ jobs:
       # acceptance guest with this runner's own helper, deploys the bundle both forms travel
       # in, and asserts the helper answered `precompiled: true` — and stands the policy example
       # up the same way.
+      #
+      # The version half of `make wasm-skew-test`: a second wasmtime, on this runner, producing
+      # a real `.cwasm` that this helper must refuse by name. The triple half is not here — it
+      # needs a host whose target string is not the Linux container's, which this runner is
+      # not. `test/wasm/skew_test.exs` skips a missing record and runs the one this produces.
+      - run: scripts/wasm-skew-test.sh version
       - run: mix test
         env:
           OUROBOROS_REQUIRE_WASM: "1"
@@ -376,3 +383,43 @@ jobs:
       - run: mix deps.get
 
       - run: make fleet-e2e
+
+  # The container proofs a Mac cannot run: `wasm-linux-test` is the wasm suites under
+  # bubblewrap with `ouro-sandbox` disabled by name (the backend the Elixir job already
+  # uses, in the privileged namespace the scripts exist to provide), and `forge-linux-test`
+  # is the forge under the preferred Linux backend (Landlock) inside that same namespace.
+  # The Elixir job on this runner already exercises bwrap; these jobs prove the *scripts*
+  # and the Landlock forge path, which that job never builds (`make sandbox` is not a
+  # step there). Each rebuilds wasmtime inside Docker, so the ceiling is for a cold volume.
+  linux-container-proofs:
+    name: Linux container proofs (${{ matrix.proof }})
+    runs-on: ubuntu-24.04
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork || (github.head_ref != 'main' && github.head_ref != 'dev') }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        proof: [wasm-linux-test, forge-linux-test]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      # The scripts bind-mount `deps/` as `/host-deps` and seed a volume from it, because
+      # a checkout `.git` is a file pointing at a worktree the container cannot see, so
+      # `mix deps.get` inside cannot fetch the one git dependency. The host has to have
+      # fetched it first. `_build` stays out of this cache: the container uses its own
+      # volume for that, and an ELF object from the runner is what a linker in there
+      # would refuse.
+      - uses: actions/cache@v6
+        with:
+          path: deps
+          key: ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
+
+      - run: mix deps.get
+
+      - run: make ${{ matrix.proof }}

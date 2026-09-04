@@ -1,11 +1,11 @@
 # WASM: containment lanes for forged capabilities, hooks, and policy
 
-Status: **W0–W7 are built**, on branch `wasm`. The spec was written 2026-09-01
-against main `c677fe0` and has been kept current with the code since; W7 (2026-09-02)
-is the review wave that fixed what W0–W6 shipped wrong. §14 records what each slice
-built and what it proved, §13 what the reviews found. Every file:line claim below was
-verified against the tree at the time it was written; if you are reading this much
-later, re-verify before building.
+Status: **W0–W22 are built**, on branch `dev`. The spec was written 2026-09-01
+against main `c677fe0` and has been kept current with the code since. §4 is the
+pre-implementation survey and is frozen as of that date; §7–§8, §11 and §14 are
+the as-built record. Every file:line claim below was verified against the tree at
+the time it was written; if you are reading this much later, re-verify before
+building.
 
 ## 1. Purpose
 
@@ -103,6 +103,10 @@ survival for its lane (§7.4).
 
 ## 4. Verified current state — the seams this spec plugs into
 
+This section is the **2026-09-01 pre-implementation survey**. It describes the BEAM
+lane, helpers, hooks, and sandbox as they stood when lane W was designed. W0–W22 have
+since landed; treat §7, §8, §11 and §14 as current.
+
 ### 4.1 Forge / sign / deploy (the BEAM lane as-built)
 
 - Pipeline: `Forge.forge/2` = validate → eval-spec validate → build in a
@@ -188,9 +192,9 @@ Two variants exist; `ouro-wasm` copies the **server-shaped** one.
 - Tests: pool tests use throwaway shell scripts as fake helpers; enforcement tests
   skip loudly when the real binary is absent; Rust integration tests use
   `env!("CARGO_BIN_EXE_...")`.
-- **No wasm anything exists in the repo today** — zero matches in `mix.exs`,
-  `mix.lock`, all `Cargo.toml`s (only unreachable `wasm-bindgen` transitive entries in
-  `Cargo.lock`).
+- **No wasm anything existed in the repo when this survey was written (2026-09-01)** —
+  zero matches in `mix.exs`, `mix.lock`, all `Cargo.toml`s (only unreachable `wasm-bindgen`
+  transitive entries in `Cargo.lock`). That is no longer true: see §7 and §14.
 
 ### 4.3 Hooks, permissions, MCP (the policy seams)
 
@@ -803,7 +807,10 @@ can answer `{:introduced_code_in_use, …}`. Boot restart: at `:core` boot, a
 supervised one-shot task (the `Worktree` reconcile pattern,
 `application.ex:86-100`) restarts wrapper agents for `:live` lane-W entries whose
 manifest declares a `start` block — the `Runtime.Capabilities.maybe_start/2` rule
-applied to a lane that can actually honor it across reboots.
+applied to a lane that can actually honor it across reboots. When the staged bytes
+are on disk and a helper is available, boot also runs `Verifier.cross_check/2`, so a
+helper that has started reading a world or import list differently does not start
+what a deploy would have quarantined.
 
 A later live rollout of the same named capability replaces the wrapper held by the entry it
 just superseded. The registry relationship is the authority to stop it: an unrelated holder
@@ -1712,6 +1719,12 @@ machinery — it is a backend, not a lane (D9).
   cannot describe itself inside the budget its own deploy gave it does not go live — the
   gate fails like any other, and the deploy is rolled back or quarantined.
 
+  Every target is asked, because a description is a property of the bytes. Two nodes
+  returning different documents for one sha is a failed gate: `agree_describe/1` rewrites
+  those answers as `{:mismatch, {:describe_disagreement, n}}`, which quarantines like any
+  other cross-check mismatch. The count is the reason, never the prose — the document is
+  untrusted (this decision's own residual). Pinned in `test/wasm/rollout_test.exs`.
+
   Since W15 that gate is capability-only, and the reason is what a description is *for*:
   contract C1's document exists so the `capability` tool can put a component's own claim
   about itself in front of a model, and a policy component is in no listing a model reads.
@@ -1744,9 +1757,9 @@ machinery — it is a backend, not a lane (D9).
 
   Proved in `test/wasm/capability_test.exs` (the scripted helper, including a six-second
   `describe` that does not cost a five-second message), `test/wasm/capability_acceptance_test.exs`
-  (the real guest), `test/wasm/rollout_test.exs` (the gate, and a deploy stopped by a
-  description it could not read), and `test/upgrade/rollout_registry_test.exs` (stored,
-  re-validated, refused on read).
+  (the real guest), `test/wasm/rollout_test.exs` (the gate, a deploy stopped by a
+  description it could not read, and two nodes answering different documents), and
+  `test/upgrade/rollout_registry_test.exs` (stored, re-validated, refused on read).
 
     * **The budget is spent the way the node spends it.** `hooks_from/4` runs `build/4` over
       every entry and puts the failures in `errors`; only what survived reaches
@@ -2807,6 +2820,13 @@ Stated once, so nobody reads more into the lane than is there:
   is re-digested on every load so post-signing tampering is refused, and
   `config :ouroboros, :wasm, accept_precompiled: false` takes the form away fleet-wide without
   a redeploy. The trade is real and it is an operator's to make.
+
+  **Operator incident (signing key).** If signing-key custody is in doubt, set
+  `config :ouroboros, :wasm, accept_precompiled: false` on every node and restart the helper
+  pool (or the node). That takes the mapped-artifact form away without a redeploy or a
+  resign; every load falls back to the source component under §7.3. Confirm with
+  `wasm.status`: `sandbox.process` still names the wall around the helper. Re-enable
+  precompiled only after the key is rotated and every artifact re-signed.
 - **A forwarded forge is proved across two VMs on one host, and not across two machines.**
   W22's `test/wasm/forge_two_node_test.exs` watched a `:builder`-placed forge cross real
   distribution: the origin is the test VM in the `:core` role, the builder and the signer are
@@ -3503,7 +3523,8 @@ Each slice is PR-sized, lands green, and is useful alone.
   on the way out, invisible on a developer machine and stone cold in a container.
   `scripts/forge-linux-test.sh` (`make forge-linux-test`) runs all of it in a privileged
   Ubuntu 24.04 container from a Mac: **127 passed** on kernel 7.0.14 with bubblewrap 0.9.0,
-  beside **131 passed** on macOS.
+  beside **131 passed** on macOS. CI runs it, and `make wasm-linux-test`, as
+  `linux-container-proofs`.
 - **W15 — a policy is a component, and it can only narrow.** The helper grew a **second closed
   world**, `ouroboros:policy@0.1.0`: the same single import, `evaluate: func(string) -> string`
   in place of `handle-message`, and a `load` that is told which of the two a set of bytes is
@@ -3705,8 +3726,9 @@ Each slice is PR-sized, lands green, and is useful alone.
   link it exists to refuse, so an unresolvable parent is now a refusal outright; and the Linux
   half of this slice has a proof of its own, `make wasm-linux-test`, which runs the wasm suites
   under bubblewrap in the container with `ouro-sandbox` disabled by name — reproduced the 219
-  failures first, then the fix. The second push left one: a forge's product unreadable to the
-  helper on Linux and nowhere else. Bubblewrap binds a directory, not a name, and the node's
+  failures first, then the fix. CI runs that target as `linux-container-proofs`. The second
+  push left one: a forge's product unreadable to the helper on Linux and nowhere else.
+  Bubblewrap binds a directory, not a name, and the node's
   store and builds directories are created lazily — so they are created before the child
   spawns now — and a ready, idle pool issued a request without asking whether the roots it
   was fenced to were still the roots the node had, so a data directory that moved between
@@ -3971,10 +3993,14 @@ Each slice is PR-sized, lands green, and is useful alone.
       precompiled_mismatch (-32021): the artifact was produced by wasmtime 48.0.0 for
       aarch64-apple-darwin; this helper is wasmtime 48.0.1 for aarch64-apple-darwin
 
-  Neither half runs in CI and neither is a `mix test` away: only `make wasm-skew-test` produces
-  the artifacts, and `test/wasm/skew_test.exs` skips with that target in its reason when they
-  are absent — including under `OUROBOROS_REQUIRE_WASM`, because a machine without Docker and a
-  spare wasmtime cannot make them and a failure there would say nothing.
+  Neither half is a `mix test` away: only `make wasm-skew-test` produces the artifacts, and
+  `test/wasm/skew_test.exs` skips *that record* with the target in its reason when it is
+  absent — including under `OUROBOROS_REQUIRE_WASM`, because a machine without Docker and a
+  spare wasmtime cannot make them and a failure there would say nothing. The **version**
+  half runs in CI (`scripts/wasm-skew-test.sh version` on the Elixir job): two wasmtimes on
+  the same runner, then the Elixir fallback tests for that record. The **triple** half does
+  not: it needs a host whose target string is not the Linux container's, which an Ubuntu
+  runner is not.
 
   Both artifacts are then put to the Elixir half in `test/wasm/skew_test.exs`, twice each,
   because a deploy is only honest if both fallbacks hold. A manifest recording the *producing*

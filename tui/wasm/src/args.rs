@@ -19,7 +19,7 @@ COMMANDS:
     precompile  Compile <in.wasm> into <out.cwasm> for this wasmtime and this target.
 
 OPTIONS:
-    --max-frame-bytes <N>      Cap on one JSON-RPC line, in bytes (default 8388608).
+    --max-frame-bytes <N>      Cap on one JSON-RPC line, in bytes (default 8388608, max 33554432).
     --kind <capability|policy> Which world to compile and check against (default capability).
     -h, --help                 Print this message.
 
@@ -105,6 +105,12 @@ pub fn parse<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, ParseError
                     .map_err(|error| message(format!("--max-frame-bytes: {error}")))?;
                 if value == 0 {
                     return Err(message("--max-frame-bytes must be greater than zero"));
+                }
+                if value > crate::codec::MAX_MAX_FRAME_BYTES {
+                    return Err(message(format!(
+                        "--max-frame-bytes is at most {}",
+                        crate::codec::MAX_MAX_FRAME_BYTES
+                    )));
                 }
                 max_frame_bytes = value;
             }
@@ -243,6 +249,10 @@ mod tests {
         ));
         assert!(matches!(
             parse_str(&["serve", "--max-frame-bytes", "lots"]),
+            Err(ParseError::Message(_))
+        ));
+        assert!(matches!(
+            parse_str(&["serve", "--max-frame-bytes", "33554433"]),
             Err(ParseError::Message(_))
         ));
         assert!(matches!(

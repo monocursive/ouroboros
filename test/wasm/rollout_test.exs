@@ -774,6 +774,140 @@ defmodule Ouroboros.Wasm.RolloutTest do
     end
   end
 
+  describe "describe consensus" do
+    test "nodes that answer the same document are left alone" do
+      doc = %{
+        name: "greeter",
+        version: "1.0.0",
+        world: "ouroboros:capability@0.1.0",
+        summary: "hello",
+        input_schema: nil,
+        examples: []
+      }
+
+      evidence = %{
+        :"a@127.0.0.1" => %{describe: {:ok, doc}, stage: :ok},
+        :"b@127.0.0.1" => %{describe: {:ok, doc}, stage: :ok}
+      }
+
+      assert Rollout.agree_describe(evidence) == evidence
+    end
+
+    test "nodes that answer different documents are a mismatch on both" do
+      a = %{
+        name: "greeter",
+        version: "1.0.0",
+        world: "ouroboros:capability@0.1.0",
+        summary: "one",
+        input_schema: nil,
+        examples: []
+      }
+
+      b = %{a | summary: "two"}
+
+      evidence = %{
+        :"a@127.0.0.1" => %{describe: {:ok, a}, stage: :ok},
+        :"b@127.0.0.1" => %{describe: {:ok, b}, stage: :ok}
+      }
+
+      agreed = Rollout.agree_describe(evidence)
+      assert {:mismatch, {:describe_disagreement, 2}} = agreed[:"a@127.0.0.1"].describe
+      assert {:mismatch, {:describe_disagreement, 2}} = agreed[:"b@127.0.0.1"].describe
+
+      # The documents never travel in the reason: they are untrusted prose (D17).
+      refute inspect(agreed) =~ "one"
+      refute inspect(agreed) =~ "two"
+    end
+
+    test "a policy's absent description is not a disagreement" do
+      evidence = %{
+        :"a@127.0.0.1" => %{describe: :absent},
+        :"b@127.0.0.1" => %{describe: :absent}
+      }
+
+      assert Rollout.agree_describe(evidence) == evidence
+    end
+
+    test "one captured document and one absence is not a disagreement" do
+      doc = %{
+        name: "greeter",
+        version: "1.0.0",
+        world: "ouroboros:capability@0.1.0",
+        summary: "hello",
+        input_schema: nil,
+        examples: []
+      }
+
+      evidence = %{
+        :"a@127.0.0.1" => %{describe: {:ok, doc}},
+        :"b@127.0.0.1" => %{describe: :absent}
+      }
+
+      assert Rollout.agree_describe(evidence) == evidence
+    end
+  end
+
+  describe "a start nobody confirmed" do
+    test "classify_claim/1 does not treat a timeout as a reason to ask the next node" do
+      host = node()
+
+      assert {:started, ^host} = Rollout.classify_claim({:returned, {:ok, host}})
+
+      assert {:already_started, ^host} =
+               Rollout.classify_claim({:returned, {:already_started, host}})
+
+      assert {:claimed, "abc"} = Rollout.classify_claim({:returned, {:claimed, "abc"}})
+      assert {:retry, :noproc} = Rollout.classify_claim({:returned, {:error, :noproc}})
+      assert {:ambiguous, :timeout} = Rollout.classify_claim({:ambiguous, :timeout})
+
+      assert {:ambiguous, {:unexpected_result, _inspected}} =
+               Rollout.classify_claim({:returned, :weird})
+    end
+
+    test "place/6 does not walk the next target after an unanswered claim", context do
+      name = unique_name()
+      id = start_id(name)
+      artifact = artifact!(context, name: name, start: %{id: id, config: "{}"})
+      start = %{id: id, config: "{}"}
+      missing = :"missing-wasm-peer@nohost"
+      on_exit(fn -> Mesh.stop_agent(id) end)
+
+      assert {:ambiguous_start, ^id, ^missing, _reason} =
+               Rollout.place([missing, node()], id, start, artifact, [start_timeout: 2_000], %{})
+
+      refute Mesh.whereis(id)
+    end
+  end
+
+  describe "store_root is honoured only where the node says so" do
+    test "a seeded store_root is ignored where config does not allow the override", context do
+      put_wasm_config(allow_store_root_override: false)
+      previous = Application.get_env(:ouroboros, :data_dir)
+      Application.delete_env(:ouroboros, :data_dir)
+      on_exit(fn -> restore(:data_dir, previous) end)
+
+      other =
+        Path.join(System.tmp_dir!(), "ouro-wasm-override-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(other)
+      on_exit(fn -> File.rm_rf(other) end)
+
+      artifact = artifact!(context)
+      bytes = bytes_for(artifact)
+
+      assert {:error, {:component_not_stored, :no_data_dir}} =
+               Rollout.stage(artifact, bytes,
+                 store_root: other,
+                 epoch_registry: context.registry
+               )
+
+      # `Store.list(root:)` itself is now the same gate: a caller that forgot it cannot
+      # inspect the seeded directory either. The directory stays empty on disk.
+      assert {:error, :store_root_override_denied} = Store.list(root: other)
+      assert {:ok, []} = File.ls(other)
+    end
+  end
+
   ## Fixtures
 
   defp deploy(artifact, nodes, context, extra \\ []) do
@@ -959,6 +1093,14 @@ defmodule Ouroboros.Wasm.RolloutTest do
 
   defp restore(key, nil), do: Application.delete_env(:ouroboros, key)
   defp restore(key, value), do: Application.put_env(:ouroboros, key, value)
+
+  # Replaces a few keys of the node's shipped `:wasm` config for one test and restores the
+  # whole keyword at teardown. This module is `async: false` because that is global.
+  defp put_wasm_config(overrides) do
+    previous = Application.get_env(:ouroboros, :wasm, [])
+    on_exit(fn -> Application.put_env(:ouroboros, :wasm, previous) end)
+    Application.put_env(:ouroboros, :wasm, Keyword.merge(previous, overrides))
+  end
 
   defp start_registry! do
     name = String.to_atom("wasm_rollout_registry_#{System.unique_integer([:positive])}")

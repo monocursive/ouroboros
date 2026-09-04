@@ -1709,6 +1709,7 @@ dependencies = [
 name = "ouro-wasm"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "serde_json",
  "sha2",
  "tokio",

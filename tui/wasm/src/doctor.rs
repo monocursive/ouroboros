@@ -62,7 +62,9 @@ pub fn report(census: Option<host::Census>) -> Value {
         ),
         format!(
             "a call may write {} lines to this helper's stderr; past that one marker line is \
-             emitted and the rest are dropped. Draining that pipe is the owner's job",
+             emitted and the rest are dropped. Stderr is non-blocking: a full or closed pipe \
+             drops the line rather than stalling the helper inside a hostcall. An owner that \
+             drains the pipe still sees every in-budget line",
             host::MAX_LOG_LINES_PER_CALL
         ),
         format!(
@@ -224,6 +226,10 @@ mod tests {
         assert!(
             joined.contains("notification"),
             "doctor must say notifications are refused: {joined}"
+        );
+        assert!(
+            joined.contains("non-blocking"),
+            "doctor must say stderr cannot wedge the helper: {joined}"
         );
     }
 

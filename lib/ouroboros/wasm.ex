@@ -62,8 +62,11 @@ defmodule Ouroboros.Wasm do
     # headroom for the work around it — compiling, linking, lifting the reply out of guest
     # memory, and the trip back up the pipe.
     call_margin_ms: 10_000,
-    # The helper's own read-bounded frame cap (`tui/wasm/src/main.rs`), matched here so a
-    # frame this node would refuse is one the helper would never have sent.
+    # The helper's own read-bounded frame cap (`tui/wasm/src/codec.rs`), matched here so a
+    # frame this node would refuse is one the helper would never have sent. The pool forwards
+    # the effective value as `--max-frame-bytes` so the two sides cannot be pulled apart.
+    # Values above `max_frame_bytes_max/0` (32 MiB, the helper's own ceiling) fall back to
+    # this default rather than widening the helper's read bound.
     max_frame_bytes: 8 * 1024 * 1024,
     # How long a broken helper is left alone before a request may reconnect it. The same
     # window `Ouroboros.Provider.Native.Desktop.Pool` uses, for the same reason.
@@ -163,6 +166,11 @@ defmodule Ouroboros.Wasm do
 
   @timeout_keys [:handshake_timeout_ms, :request_timeout_ms, :call_margin_ms, :broken_ms]
   @byte_keys [:max_frame_bytes, :store_budget_bytes]
+  # Matches `ouro-wasm`'s `--max-frame-bytes` ceiling (`MAX_MAX_FRAME_BYTES` in
+  # `tui/wasm/src/codec.rs`). The pool speaks 8 MiB by default; four times that is room for a
+  # test or a local loop, and not a way to defeat "frames are capped as they are read" by
+  # naming a terabyte.
+  @max_max_frame_bytes 32 * 1024 * 1024
   @limit_keys [:fuel, :memory_bytes, :deadline_ms]
   @limits_keys [:capability_limits, :capability_limits_max]
 
@@ -424,6 +432,16 @@ defmodule Ouroboros.Wasm do
   @spec available?() :: boolean()
   def available?, do: File.regular?(helper_path())
 
+  @doc """
+  The most `:max_frame_bytes` may be raised to.
+
+  Matches `ouro-wasm`'s `--max-frame-bytes` ceiling. A configured value above this falls
+  back to the 8 MiB default rather than widening the helper's read bound, and the pool
+  forwards the effective value on the child's argv so the two sides share one number.
+  """
+  @spec max_frame_bytes_max() :: pos_integer()
+  def max_frame_bytes_max, do: @max_max_frame_bytes
+
   @doc "One setting, falling back to the default when the configured value is unusable."
   @spec config(atom()) :: term()
   def config(key) when is_atom(key) do
@@ -466,6 +484,9 @@ defmodule Ouroboros.Wasm do
   # Shape only. What makes an entry *usable* is `helper_readable/0`'s four rules, which need
   # the filesystem and the data directory and so cannot live in a pure validator.
   defp valid?(:helper_readable, value), do: is_list(value)
+
+  defp valid?(:max_frame_bytes, value),
+    do: is_integer(value) and value > 0 and value <= @max_max_frame_bytes
 
   defp valid?(key, value) when key in @timeout_keys, do: is_integer(value) and value > 0
   defp valid?(key, value) when key in @byte_keys, do: is_integer(value) and value > 0

@@ -1,7 +1,7 @@
 defmodule Ouroboros.Wasm.SurfaceTest do
-  # Async: every test is handed a store directory, a register and a pool of its own. The
-  # only global this reads is `:store_budget_bytes`, which nothing here writes.
-  use ExUnit.Case, async: true
+  # Not async: every test passes an explicit store `:root`, and `Store.root/1` honours that
+  # only where `allow_store_root_override?` is true. Suites that flip that flag share this VM.
+  use ExUnit.Case, async: false
 
   alias Mix.Tasks.Ouroboros.Gateway.Golden
   alias Ouroboros.Gateway.Wire

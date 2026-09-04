@@ -87,9 +87,12 @@ defmodule Ouroboros.Wasm.Rollout do
       holding the id is running this artifact's component — the same ownership question
       `withdraw/2` asks before it stops anything. A wrapper holding the id for some other
       component is a claim on the name, not a start of this capability.
-    * the start is attempted only after the entry is `:live`, and a start that fails does
-      not un-live it. The component is admitted on every node either way; what failed is
-      one process, which an operator can start again. The report says which.
+    * the start is attempted only after the entry is `:live`. A clean `{:error, _}` on
+      every target leaves it live: the component is admitted on every node, what failed is
+      one process, and an operator can start it again. The report says which. A claim
+      conflict (`{:start_id_claimed_by, _}`) or an unanswered claim (deadline, transport
+      fault, unread reply) marks the entry `:quarantined` instead — a process may exist,
+      and quarantine is the state that says so.
 
   `Ouroboros.Wasm.Boot` restarts those wrappers at boot from a node's **own** registry and
   a node's **own** store — both node-local durable state, which is the only kind a boot
@@ -108,6 +111,13 @@ defmodule Ouroboros.Wasm.Rollout do
   Any other holder is not a start, and reporting it as one would put a component nobody
   described behind an id somebody trusts, so it is `{:start_id_claimed_by, other_sha}` and
   the entry is marked `:quarantined`.
+
+  A start whose claim is **unanswered** — a deadline, a transport fault, a reply this build
+  cannot read — is the same kind of ambiguity a stage timeout is: `:erpc` stopped waiting,
+  it did not stop the peer, so that node may still be starting. It is not a reason to ask
+  the next target. The entry is marked `:quarantined`. A clean `{:error, _}` is different:
+  the start did not happen, and the next target may still host it. A start that fails on
+  every target that way does not un-live the rollout; the report says which.
 
   ## Not here
 
@@ -199,9 +209,10 @@ defmodule Ouroboros.Wasm.Rollout do
       own rather than being told one; a loading node that took the caller's word for which
       signers it trusts would not be verifying anything.
     * `:pool` — the helper pool name on every target. Defaults to `Ouroboros.Wasm.Pool`.
-    * `:store_root` — an explicit component-store directory on every target, for tests
-      that must not touch a real data directory. Defaults to `nil`, which means each
-      node's own `:data_dir`.
+    * `:store_root` — an explicit component-store directory on every target, honoured
+      only where `Ouroboros.Wasm.allow_store_root_override?/0` is true (this
+      repository's test environment). Everywhere else each node's own `:data_dir` is
+      used, whatever the caller wrote. Defaults to `nil`.
     * `:limits` — the instance bounds the capability is probed, evaluated, and started
       under. Defaults to `Ouroboros.Wasm.capability_limits/0` **read here**, so one
       deployment means one set of bounds everywhere rather than whatever each node happens
@@ -587,6 +598,13 @@ defmodule Ouroboros.Wasm.Rollout do
         do: gate(evidence, nodes, :describe, &describe_node(&1, artifact, opts)),
         else: evidence
 
+    # Disagreement is a failed describe gate. `describe_node/3` looks at one target; two
+    # `{:ok, document}` values that are not equal are a fleet holding two components under
+    # one sha, and that is a cross-check mismatch. The count is the reason, never the prose:
+    # the document is untrusted (D17). Called here, unconditionally, so a deploy that never
+    # reached describe is a no-op of the same function a two-node disagreement goes through.
+    evidence = agree_describe(evidence)
+
     settle(evidence, artifact, nodes, opts, registry, spec, warnings)
   end
 
@@ -714,8 +732,9 @@ defmodule Ouroboros.Wasm.Rollout do
   # Every target is asked, because a description is a property of the bytes and a fleet
   # where two nodes answer differently is a fleet holding two different components under
   # one sha — which is worth failing the deploy over rather than papering over by asking
-  # one machine. `capture_describe/2` never raises and never returns anything but these
-  # three shapes.
+  # one machine. `describe_node/3` cannot see that: it looks at one target. `agree_describe/1`
+  # is the comparison, and `{:mismatch, {:describe_disagreement, n}}` is the gate failure.
+  # `capture_describe/2` never raises and never returns anything but these three shapes.
   # W15. There is no description gate for a policy component, and that is a statement about
   # what a description is *for* rather than an omission: contract C1's document exists so the
   # `capability` tool can put a component's own claim about itself in front of a model, and a
@@ -733,6 +752,48 @@ defmodule Ouroboros.Wasm.Rollout do
       {:returned, {:error, reason}} -> {:error, {:describe_failed, reason}}
       {:returned, other} -> {:ambiguous, {:unexpected_result, inspect(other, limit: 10)}}
       {:ambiguous, reason} -> {:ambiguous, reason}
+    end
+  end
+
+  # Two successful descriptions of the same sha must be the same document. Anything else is
+  # a node holding bytes this rollout did not describe. `:absent`, `:skipped`, and errors
+  # are not answers and are left alone; the count of distinct documents is the reason, and
+  # the documents themselves never travel in it.
+  #
+  # Public because it is this gate's comparison, and it is the unit whose contract is worth
+  # testing without standing two live helpers up. `run/7` calls it after the describe gate.
+  @doc false
+  @spec agree_describe(%{node() => map()}) :: %{node() => map()}
+  def agree_describe(evidence) when is_map(evidence) do
+    distinct =
+      evidence
+      |> Enum.flat_map(fn {_target, e} ->
+        case Map.get(e, :describe) do
+          {:ok, document} -> [document]
+          _other -> []
+        end
+      end)
+      |> Enum.uniq()
+
+    case distinct do
+      [] ->
+        evidence
+
+      [_agreed] ->
+        evidence
+
+      disagreed ->
+        n = length(disagreed)
+
+        Map.new(evidence, fn {target, e} ->
+          describe =
+            case Map.get(e, :describe) do
+              {:ok, _document} -> {:mismatch, {:describe_disagreement, n}}
+              other -> other
+            end
+
+          {target, Map.put(e, :describe, describe)}
+        end)
     end
   end
 
@@ -781,6 +842,10 @@ defmodule Ouroboros.Wasm.Rollout do
   # The id is claimed cluster-wide by something running a different component. Trying the
   # next target would get the same answer, and calling it a start would put a component
   # nobody described behind an id somebody trusts.
+  #
+  # An unanswered claim is the other halt: the peer may still be starting, so asking the
+  # next target would be two processes racing one id. Quarantine, do not withdraw — a
+  # process may exist, and quarantine is the state that says so.
   defp started(outcome, artifact, nodes, opts, registry) do
     case start_capability(artifact, nodes, opts) do
       {:claimed, id, other_sha} ->
@@ -789,6 +854,9 @@ defmodule Ouroboros.Wasm.Rollout do
         else
           quarantine_claim(outcome, artifact, registry, id, other_sha)
         end
+
+      {:ambiguous_start, id, target, reason} ->
+        quarantine_start(outcome, artifact, registry, id, target, reason)
 
       started ->
         {:ok, %{outcome | started: started}}
@@ -818,6 +886,9 @@ defmodule Ouroboros.Wasm.Rollout do
           {:claimed, ^id, other_sha} ->
             quarantine_claim(outcome, artifact, registry, id, other_sha)
 
+          {:ambiguous_start, ^id, target, reason} ->
+            quarantine_start(outcome, artifact, registry, id, target, reason)
+
           started ->
             {:ok, %{outcome | started: started}}
         end
@@ -840,6 +911,30 @@ defmodule Ouroboros.Wasm.Rollout do
     case Registry.mark(artifact.id, :quarantined, [detail: detail], registry) do
       {:ok, _entry} -> {:error, {:quarantined, quarantined}}
       {:error, reason} -> {:error, {:rollout_record_failed, :quarantined, reason, quarantined}}
+    end
+  end
+
+  defp quarantine_start(outcome, artifact, registry, id, target, reason) do
+    detail = %{
+      stage: :start,
+      start_ambiguous_on: target,
+      start_id: id,
+      reason: bound(reason)
+    }
+
+    quarantined = %{
+      outcome
+      | state: :quarantined,
+        stage: :start,
+        started: %{id: id, node: nil, ambiguous_on: target, reason: reason}
+    }
+
+    case Registry.mark(artifact.id, :quarantined, [detail: detail], registry) do
+      {:ok, _entry} ->
+        {:error, {:quarantined, quarantined}}
+
+      {:error, mark_reason} ->
+        {:error, {:rollout_record_failed, :quarantined, mark_reason, quarantined}}
     end
   end
 
@@ -1011,33 +1106,70 @@ defmodule Ouroboros.Wasm.Rollout do
   # answering `{:already_started, _}` has accepted **only** if the process holding the id is
   # running this artifact's component. Anything else is a claim on the name by somebody
   # else's capability, and no other target can answer differently, so it halts here.
-  defp place([], id, _start, _artifact, _opts, errors),
+  #
+  # A timeout or an unread reply is not "this target said no". The peer may still be inside
+  # `Mesh.start_agent/2`, so the next target would be a second claim on the same id. Halt
+  # and quarantine. A clean `{:error, _}` is the one outcome that may try the next target:
+  # the start did not happen.
+  #
+  # Public because it is the start gate's walk, and it is the unit whose contract is worth
+  # testing without standing a second live node up: an unanswered first target must not
+  # walk to the second.
+  @doc false
+  @spec place(
+          [node()],
+          String.t(),
+          %{id: String.t(), config: String.t()},
+          Artifact.t(),
+          keyword(),
+          map()
+        ) ::
+          %{id: String.t(), node: node() | nil, errors: map()}
+          | {:claimed, String.t(), String.t() | :unknown}
+          | {:ambiguous_start, String.t(), node(), term()}
+  def place([], id, _start, _artifact, _opts, errors),
     do: %{id: id, node: nil, errors: errors}
 
-  defp place([target | rest], id, start, artifact, opts, errors) do
+  def place([target | rest], id, start, artifact, opts, errors) do
     state = start_state(artifact, opts) |> Map.put(:config, start.config)
     args = [id, [agent: Capability, initial_state: state], artifact.component_sha256]
 
-    case remote(target, __MODULE__, :claim, args, start_timeout(opts)) do
-      {:returned, {:ok, host}} ->
+    case classify_claim(remote(target, __MODULE__, :claim, args, start_timeout(opts))) do
+      {:started, host} ->
         %{id: id, node: host, errors: errors}
 
-      {:returned, {:already_started, host}} ->
+      {:already_started, host} ->
         %{id: id, node: host, errors: errors, already_started: true}
 
-      {:returned, {:claimed, other_sha}} ->
+      {:claimed, other_sha} ->
         {:claimed, id, other_sha}
 
-      {:returned, {:error, reason}} ->
+      {:retry, reason} ->
         place(rest, id, start, artifact, opts, Map.put(errors, target, bound(reason)))
-
-      {:returned, other} ->
-        place(rest, id, start, artifact, opts, Map.put(errors, target, bound(other)))
 
       {:ambiguous, reason} ->
-        place(rest, id, start, artifact, opts, Map.put(errors, target, bound(reason)))
+        {:ambiguous_start, id, target, reason}
     end
   end
+
+  # Public because it is the start gate's decision table, and it is the unit whose contract
+  # is worth testing without standing a second node up. `place/6` is the only caller.
+  @doc false
+  @spec classify_claim({:returned, term()} | {:ambiguous, term()}) ::
+          {:started, node()}
+          | {:already_started, node()}
+          | {:claimed, String.t() | :unknown}
+          | {:retry, term()}
+          | {:ambiguous, term()}
+  def classify_claim({:returned, {:ok, host}}), do: {:started, host}
+  def classify_claim({:returned, {:already_started, host}}), do: {:already_started, host}
+  def classify_claim({:returned, {:claimed, other}}), do: {:claimed, other}
+  def classify_claim({:returned, {:error, reason}}), do: {:retry, reason}
+
+  def classify_claim({:returned, other}),
+    do: {:ambiguous, {:unexpected_result, inspect(other, limit: 10)}}
+
+  def classify_claim({:ambiguous, reason}), do: {:ambiguous, reason}
 
   ## Recording
 
@@ -1301,8 +1433,11 @@ defmodule Ouroboros.Wasm.Rollout do
 
   defp store_opts(opts) do
     case Keyword.get(opts, :store_root) do
-      root when is_binary(root) and root != "" -> [root: root]
-      _unset -> []
+      root when is_binary(root) and root != "" ->
+        if Wasm.allow_store_root_override?(), do: [root: root], else: []
+
+      _unset ->
+        []
     end
   end
 

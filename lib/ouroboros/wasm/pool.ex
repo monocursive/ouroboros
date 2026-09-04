@@ -988,6 +988,11 @@ defmodule Ouroboros.Wasm.Pool do
   # `load` the helper *refuses* — a sha mismatch, bytes that are not a component, an
   # undeclared import — admitted nothing to the cache this budget bounds, so counting it let
   # sixteen refusals spend a budget that had cost the node nothing.
+  #
+  # Admission is **re-run** when a queued load is issued (`drain/1`). Concurrent callers all
+  # pass this check while `hook_shas` is still short of the ceiling, then queue; without a
+  # second look the budget would be `16 + inflight + queue`. The count still happens on
+  # success, so a refused load still spends nothing.
   defp check_lane(state, "load", params, :untrusted_hook) do
     case Map.get(params, "sha256") do
       sha when is_binary(sha) ->
@@ -1606,6 +1611,13 @@ defmodule Ouroboros.Wasm.Pool do
     end
   end
 
+  # The same bound this pool encodes and decodes under, named on the child so a raised
+  # Elixir cap cannot send a frame the helper will drop unread. Always passed, including
+  # at the 8 MiB default: one number, both sides.
+  defp helper_argv(state) do
+    ["serve", "--max-frame-bytes", Integer.to_string(state.settings.max_frame_bytes)]
+  end
+
   # One line per spawn, at warning level, and not one per request: an operator who turned the
   # fence off should see it in the log of a node that restarts its helper, and should not have
   # it drown the log of a node that is working.
@@ -1617,7 +1629,7 @@ defmodule Ouroboros.Wasm.Pool do
 
     %{
       executable: state.helper_path,
-      args: ["serve"],
+      args: helper_argv(state),
       env: filtered_env(),
       scratch: nil,
       fenced: readable_roots(state),
@@ -1678,7 +1690,7 @@ defmodule Ouroboros.Wasm.Pool do
           process: process_setting(state)
         )
 
-      case Sandbox.wrap({:argv, [state.helper_path, "serve"]}, %{}, policy, detection) do
+      case Sandbox.wrap({:argv, [state.helper_path | helper_argv(state)]}, %{}, policy, detection) do
         {:ok, {executable, args}} ->
           {:ok,
            %{
@@ -2368,7 +2380,23 @@ defmodule Ouroboros.Wasm.Pool do
 
       {{:value, item}, rest} ->
         state = %{state | queue: rest}
+        drain_item(state, item)
+    end
+  end
 
+  defp drain(state), do: state
+
+  # Re-admit before spending the wire. `handle_call` already ran `admit/4`, but that was
+  # against the set as it stood on arrival; a load that waited behind another may now be
+  # past the untrusted-hook budget, and a reconnect may have changed the readable roots.
+  defp drain_item(state, item) do
+    case admit(state, item.method, item.params, item.lane) do
+      {:error, reason} ->
+        if Process.alive?(item.caller), do: GenServer.reply(item.from, {:error, reason})
+        cleanup_item(item)
+        drain(state)
+
+      :ok ->
         case issue_item(state, item) do
           {:ok, state} ->
             state
@@ -2396,8 +2424,6 @@ defmodule Ouroboros.Wasm.Pool do
         end
     end
   end
-
-  defp drain(state), do: state
 
   defp drain_pending_drops(%{pending_drops: []} = state), do: state
 
@@ -2442,6 +2468,15 @@ defmodule Ouroboros.Wasm.Pool do
 
   # `broken_ms` is settable so a test can prove the cooldown window is honored without
   # sitting through the node's; every other value is a bound an operator may already move.
+  defp setting(opts, :max_frame_bytes) do
+    max = Wasm.max_frame_bytes_max()
+
+    case Keyword.get(opts, :max_frame_bytes) do
+      value when is_integer(value) and value > 0 and value <= max -> value
+      _absent -> Wasm.config(:max_frame_bytes)
+    end
+  end
+
   defp setting(opts, key) do
     case Keyword.get(opts, key) do
       value when is_integer(value) and value > 0 -> value

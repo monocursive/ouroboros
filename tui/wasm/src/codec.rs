@@ -28,6 +28,11 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 /// never ends is a peer growing this process's memory on its say-so.
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
+/// The most `--max-frame-bytes` may be raised to. The pool speaks 8 MiB; four times that is
+/// room for a test or a local loop, and not a way to defeat "frames are capped as they are
+/// read" by naming a terabyte.
+pub const MAX_MAX_FRAME_BYTES: usize = 32 * 1024 * 1024;
+
 /// What one read produced. On [`Frame::Line`] the bytes are in the caller's `buf` (newline
 /// stripped); on [`Frame::Oversize`] the line exceeded the cap and its content was dropped;
 /// [`Frame::Eof`] is the clean end of the stream.
