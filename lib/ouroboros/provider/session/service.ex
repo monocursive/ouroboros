@@ -1042,7 +1042,6 @@ defmodule Ouroboros.Provider.Session.Service do
   defp method_of(:terminal_wait), do: "terminal/wait_for_exit"
   defp method_of(:terminal_kill), do: "terminal/kill"
   defp method_of(:terminal_release), do: "terminal/release"
-  defp method_of(other), do: to_string(other)
 
   defp digest_of(%{command: command}) when is_binary(command),
     do: [digest: digest(command), command: display(command)]

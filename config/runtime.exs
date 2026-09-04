@@ -328,9 +328,11 @@ if config_env() == :prod do
     # Acknowledged session, team, and plan transitions must survive the crash that
     # follows them — the same synced write the effect ledger uses.
     coding_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "coding")},
-    interactive_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "interactive")},
+    interactive_storage:
+      {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "interactive")},
     team_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "teams")},
-    orchestration_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "orchestration")},
+    orchestration_storage:
+      {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "orchestration")},
     control_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "control")},
     # The effect authority decides what agents may do to the cluster, so it is held to
     # the same synced write the mutation journals use: a grant that was acknowledged

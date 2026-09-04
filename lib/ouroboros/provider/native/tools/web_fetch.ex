@@ -429,8 +429,6 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch do
     if byte_size(body) > max_bytes, do: binary_part(body, 0, max_bytes), else: body
   end
 
-  defp clamp(body, _max_bytes), do: to_string(body)
-
   # ---------------------------------------------------------------- present
 
   defp present(response) do
@@ -566,8 +564,6 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch do
 
   defp describe({:unresolvable, host}),
     do: "#{host} did not resolve to an address this tool will connect to."
-
-  defp describe(reason), do: inspect(reason)
 
   defp phrase_note(phrase) do
     case String.trim(to_string(phrase)) do

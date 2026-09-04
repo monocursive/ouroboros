@@ -667,8 +667,6 @@ defmodule Ouroboros.Provider.Native.Replay do
   defp text_digest(text) when is_binary(text),
     do: :sha256 |> :crypto.hash(text) |> Base.encode16(case: :lower)
 
-  defp text_digest(_text), do: nil
-
   defp atom(nil, default), do: default
   defp atom(value, _default) when is_atom(value), do: value
 
