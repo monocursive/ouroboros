@@ -13,6 +13,9 @@
 # `unshare(CLONE_NEWUSER)`; Docker's default seccomp profile denies it, which is a fact
 # about the container and not about bubblewrap needing privilege — see
 # `scripts/sandbox-linux-test.sh`, which says the same thing for the same reason.
+# On Ubuntu 24.04 that is not enough: AppArmor still denies unprivileged writes to
+# `/proc/self/setgroups` unless `kernel.apparmor_restrict_unprivileged_userns=0`.
+# The script writes that sysctl when it can; the hosted job also sets it on the host.
 #
 # Since W17 it runs under the *preferred* Linux backend rather than the fallback. `make
 # sandbox` builds `ouro-sandbox` here, so `Sandbox.detect/0` finds a helper whose `doctor`
@@ -102,6 +105,16 @@ exec docker run --rm --privileged \
     fi
     echo "==> bwrap: $(bwrap --version)"
 
+    # Ubuntu 24.04 (the hosted runner) runs unprivileged user namespaces under an
+    # AppArmor profile that denies /proc/self/setgroups. bwrap and ouro-sandbox both
+    # write that file to enter a user namespace. --privileged does not change a host
+    # sysctl. The Elixir job already writes 0 on this kernel; do it here too so the
+    # script works when run by hand on the same kind of host.
+    if [ -w /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+      echo 0 > /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+      echo "==> apparmor unprivileged userns: allowed"
+    fi
+
     # Not root. erlexec refuses to start as root without being told which user to drop to,
     # and every native tool in this runtime goes through it — so the container runs the
     # build and the suite as an ordinary user, which is also what CI does.
@@ -135,6 +148,16 @@ export CARGO_HOME=/cargo
 export RUSTUP_HOME=/rustup
 export MIX_ENV=test
 export OUROBOROS_REQUIRE_WASM=1
+
+echo "==> userns probe (this uid must be able to enter one; bwrap and ouro-sandbox both do)"
+if ! bwrap --ro-bind / / --dev /dev --proc /proc -- /bin/true; then
+  echo "forge-linux-test: bwrap could not apply a read-only mount as uid $(id -u)." >&2
+  echo "  ouro-sandbox fails the same way: open /proc/self/setgroups: Permission denied." >&2
+  echo "  Cause: Ubuntu 24.04 kernel.apparmor_restrict_unprivileged_userns. The outer" >&2
+  echo "  script writes 0 when that sysctl is writable. On GitHub Actions the workflow" >&2
+  echo "  also sets it on the host before docker runs." >&2
+  exit 1
+fi
 
 if ! command -v cargo >/dev/null 2>&1; then
   curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path \

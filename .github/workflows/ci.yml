@@ -422,4 +422,12 @@ jobs:
 
       - run: mix deps.get
 
+      # Same lift as the Elixir job. These scripts drop to an unprivileged uid inside
+      # `--privileged` docker; Ubuntu 24.04's AppArmor profile for unprivileged user
+      # namespaces denies `/proc/self/setgroups`, which is how both bwrap and
+      # ouro-sandbox enter a namespace. `--privileged` does not change that host sysctl.
+      # Without this, wasm-linux-test reports no bwrap backend and forge-linux-test
+      # fails every wrap with `open /proc/self/setgroups: Permission denied`.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - run: make ${{ matrix.proof }}
