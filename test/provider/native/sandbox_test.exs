@@ -99,6 +99,12 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
   defp run(module, input, context, timeout \\ 30_000),
     do: Ouroboros.Provider.Native.Tools.execute(module, input, context, timeout)
 
+  defp restore_app_env(key, nil), do: Application.delete_env(:ouroboros, key)
+  defp restore_app_env(key, value), do: Application.put_env(:ouroboros, key, value)
+
+  defp restore_sys_env(name, nil), do: System.delete_env(name)
+  defp restore_sys_env(name, value), do: System.put_env(name, value)
+
   defp env_value(["--setenv", key, value | _rest], key), do: value
   defp env_value([_head | rest], key), do: env_value(rest, key)
   defp env_value([], _key), do: nil
@@ -736,6 +742,23 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
   end
 
   describe "the decision" do
+    # An operator who exported OUROBOROS_ALLOW_UNSANDBOXED_BASH=1 in the environment
+    # that launched mix test would otherwise turn the fail-closed assertions green in
+    # the wrong direction. These cases observe the default: both gates shut.
+    setup do
+      previous_app = Application.get_env(:ouroboros, :allow_unsandboxed_bash)
+      previous_env = System.get_env("OUROBOROS_ALLOW_UNSANDBOXED_BASH")
+      Application.put_env(:ouroboros, :allow_unsandboxed_bash, false)
+      System.delete_env("OUROBOROS_ALLOW_UNSANDBOXED_BASH")
+
+      on_exit(fn ->
+        restore_app_env(:allow_unsandboxed_bash, previous_app)
+        restore_sys_env("OUROBOROS_ALLOW_UNSANDBOXED_BASH", previous_env)
+      end)
+
+      :ok
+    end
+
     test "refuses a read_only shell on a node with no backend, rather than weakening it", %{
       read_only: read_only
     } do
@@ -743,10 +766,41 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
                Sandbox.decide(read_only, @none)
     end
 
-    test "runs a workspace_write shell unsandboxed on a node with no backend, and says which", %{
+    test "refuses a workspace_write shell on a node with no backend, rather than weakening it", %{
       scope: scope
     } do
+      assert {:refused, {:workspace_write_without_backend, detection}} =
+               Sandbox.decide(scope, @none)
+
+      assert detection.backend == :none
+
+      message = Sandbox.workspace_write_without_backend_refusal(detection)
+      assert message =~ "OUROBOROS_ALLOW_UNSANDBOXED_BASH=1"
+      assert message =~ "ouro-sandbox"
+      assert message =~ "sandbox-exec"
+      assert message =~ "bwrap"
+    end
+
+    test "runs a workspace_write shell unsandboxed when the operator opts in", %{scope: scope} do
+      Application.put_env(:ouroboros, :allow_unsandboxed_bash, true)
+      System.delete_env("OUROBOROS_ALLOW_UNSANDBOXED_BASH")
+
       assert {:unsandboxed, {:no_backend, _detection}} = Sandbox.decide(scope, @none)
+
+      Application.put_env(:ouroboros, :allow_unsandboxed_bash, false)
+      System.put_env("OUROBOROS_ALLOW_UNSANDBOXED_BASH", "1")
+
+      assert {:unsandboxed, {:no_backend, _detection}} = Sandbox.decide(scope, @none)
+    end
+
+    test "the unsandboxed opt-in does not lift a read_only session without a backend", %{
+      read_only: read_only
+    } do
+      Application.put_env(:ouroboros, :allow_unsandboxed_bash, true)
+      System.put_env("OUROBOROS_ALLOW_UNSANDBOXED_BASH", "1")
+
+      assert {:refused, {:read_only_without_backend, _detection}} =
+               Sandbox.decide(read_only, @none)
     end
 
     test "refuses a sandbox_mode it has no policy for instead of rounding it to a near one", %{
@@ -763,7 +817,9 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
     } do
       for mode <- [:default, nil] do
         {:ok, scope} = Paths.scope(workspace, [], mode)
-        assert {:unsandboxed, {:no_backend, _}} = Sandbox.decide(scope, @none)
+
+        assert {:refused, {:workspace_write_without_backend, _}} =
+                 Sandbox.decide(scope, @none)
       end
     end
 
@@ -1161,8 +1217,18 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
 
   describe "bash on a node with no backend" do
     setup do
+      previous_app = Application.get_env(:ouroboros, :allow_unsandboxed_bash)
+      previous_env = System.get_env("OUROBOROS_ALLOW_UNSANDBOXED_BASH")
       Application.put_env(:ouroboros, :native_sandbox, :none)
-      on_exit(fn -> Application.delete_env(:ouroboros, :native_sandbox) end)
+      Application.put_env(:ouroboros, :allow_unsandboxed_bash, false)
+      System.delete_env("OUROBOROS_ALLOW_UNSANDBOXED_BASH")
+
+      on_exit(fn ->
+        Application.delete_env(:ouroboros, :native_sandbox)
+        restore_app_env(:allow_unsandboxed_bash, previous_app)
+        restore_sys_env("OUROBOROS_ALLOW_UNSANDBOXED_BASH", previous_env)
+      end)
+
       :ok
     end
 
@@ -1175,13 +1241,32 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       assert result.output =~ "read_only"
       assert result.output =~ "no OS sandbox backend"
       assert result.output =~ "disabled by"
-      assert result.output =~ "sandbox_mode: workspace_write"
+      assert result.output =~ "workspace_write"
+      assert result.output =~ "OUROBOROS_ALLOW_UNSANDBOXED_BASH=1"
     end
 
-    test "still runs a workspace_write command, unsandboxed, exactly as it did before C5", %{
+    test "refuses a workspace_write command, and names the allow flag", %{
       context: context,
       workspace: workspace
     } do
+      result = run(Bash, %{"command" => "echo out > unsandboxed.txt && echo ok"}, context)
+
+      assert result.is_error
+      assert result.output =~ "workspace_write"
+      assert result.output =~ "no OS sandbox backend"
+      assert result.output =~ "OUROBOROS_ALLOW_UNSANDBOXED_BASH=1"
+      assert result.output =~ "ouro-sandbox"
+      assert result.output =~ "sandbox-exec"
+      assert result.output =~ "bwrap"
+      refute File.exists?(Path.join(workspace, "unsandboxed.txt"))
+    end
+
+    test "runs a workspace_write command unsandboxed when the operator opts in", %{
+      context: context,
+      workspace: workspace
+    } do
+      Application.put_env(:ouroboros, :allow_unsandboxed_bash, true)
+
       result = run(Bash, %{"command" => "echo out > unsandboxed.txt && echo ok"}, context)
 
       refute result.is_error

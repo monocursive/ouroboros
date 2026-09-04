@@ -19,12 +19,14 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
     * **`workspace_write`** — runs sandboxed where a backend exists (workspace and
       declared roots writable, `.git` and `.ouroboros` beneath them read-only, the
       node's data directory and the user's ouroboros config read-only, no external
-      network, with loopback retained for local IPC), and
-      runs unsandboxed where none does. The second case is what this provider did
-      before C5; it is reported rather than hidden, through `sandbox: "none"` on the
-      tool call and through the provider's status.
+      network, with loopback retained for local IPC). Where none does, the command is
+      refused — the same fail-closed shape as `read_only` without a backend — unless
+      the operator typed `OUROBOROS_ALLOW_UNSANDBOXED_BASH=1` (or set
+      `config :ouroboros, allow_unsandboxed_bash: true`), which restores the old
+      unsandboxed path and reports it through `sandbox: "none"` on the tool call.
     * **`unrestricted`** — runs with no OS sandbox on any node, because that is what the
-      session asked for by name. `Sandbox.decide/2` logs it every time.
+      session asked for by name. `Sandbox.decide/2` logs it every time. Nothing about
+      the missing-backend refusal above quietly turns into this.
 
   When the sandbox stops a command, the result says which constraint was hit and what
   to ask a human for, so the model escalates instead of retrying (Cursor's rule, R3
@@ -60,9 +62,10 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
     name: "bash",
     description:
       "Run a shell command in the workspace root. Under read_only and workspace_write " <>
-        "it runs inside this node's OS sandbox where one is available; a sandbox denial " <>
-        "reports the constraint that was hit. Output is truncated to 30 KiB; the full " <>
-        "output is saved to a file whose path is returned.",
+        "it runs inside this node's OS sandbox; without a backend those modes refuse " <>
+        "rather than running unsandboxed. A sandbox denial reports the constraint that " <>
+        "was hit. Output is truncated to 30 KiB; the full output is saved to a file " <>
+        "whose path is returned.",
     schema: [
       command: [type: :string, required: true, doc: "The command line to run with `sh -c`."],
       timeout_ms: [
@@ -290,8 +293,10 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
     end
   end
 
-  defp describe({:read_only_without_backend, detection}),
-    do: Sandbox.no_backend_refusal(detection)
+  defp describe({:read_only_without_backend, _} = reason), do: Sandbox.refusal_text(reason)
+
+  defp describe({:workspace_write_without_backend, _} = reason),
+    do: Sandbox.refusal_text(reason)
 
   defp describe({:unknown_sandbox_mode, mode}),
     do:

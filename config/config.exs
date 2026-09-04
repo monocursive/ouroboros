@@ -173,6 +173,13 @@ config :ouroboros,
   native_model_max_concurrency: 8,
   native_model_queue_limit: 32,
   native_model_queue_timeout_ms: 120_000,
+  # Fail closed: `workspace_write` on a node with no OS sandbox backend refuses
+  # `bash` rather than running it unsandboxed. `OUROBOROS_ALLOW_UNSANDBOXED_BASH=1`
+  # (read in `Ouroboros.Provider.Native.Sandbox`, the same way
+  # `OUROBOROS_ALLOW_INSECURE_DIST` is read) or this key set true restores the old
+  # posture. `:unrestricted` is unchanged: that mode is the operator asking for no
+  # sandbox, not this node failing to find one.
+  allow_unsandboxed_bash: false,
   # The packaged direct default uses ChatGPT subscription OAuth. API-key deployments may
   # set `OUROBOROS_NATIVE_MODEL=openai:<model>` with `OPENAI_API_KEY`, or select
   # `anthropic:<model>` or `xai:<model>` with the vendor API key or the private credential

@@ -5,8 +5,8 @@ defmodule Ouroboros.Provider.Native.CodingApprovalTest do
   alias Ouroboros.Provider.Native.Sandbox
   alias Ouroboros.Test.NativeModelScript
 
-  # A node with no OS sandbox has no denial to escalate: `workspace_write` there is
-  # already unsandboxed and the command simply succeeds.
+  # A node with no OS sandbox has no denial to escalate: `workspace_write` there
+  # refuses `bash` rather than wrapping it.
   @needs_sandbox (case Sandbox.detect().backend do
                     :none ->
                       [skip: "no OS sandbox on this node, so there is no denial to escalate"]

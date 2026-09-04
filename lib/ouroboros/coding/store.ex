@@ -3,8 +3,9 @@ defmodule Ouroboros.Coding.Store do
   Serialized persistence boundary for coding-task checkpoints.
 
   Development and tests use ETS. Production is configured in `runtime.exs` to use
-  `Jido.Storage.File` beneath `OUROBOROS_DATA_DIR`. The task map and its index are one
-  checkpoint, so every accepted transition is atomically discoverable after restart.
+  `Ouroboros.Storage.DurableFile` beneath `OUROBOROS_DATA_DIR`. The task map and
+  its index are one checkpoint, so every accepted transition is atomically
+  discoverable after restart.
   A transactional shared storage adapter can replace it for clustered recovery.
 
   Every storage adapter call is guarded. A file-backed adapter raises rather than

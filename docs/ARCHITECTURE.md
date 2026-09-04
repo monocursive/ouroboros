@@ -58,13 +58,16 @@ and how it finds the others.
 
 Role (`:core`, `:builder`, `:signer`) is resolved once, at application start, before any
 child is supervised — an unrecognized role raises rather than booting the privileged
-tree. `:core` starts the full runtime. `:builder` starts formation and nothing else,
-because a forge build is `:peer.start/1` plus a call. `:signer` starts formation and one
-process: `Upgrade.Signing.Service`, which holds the key, applies the signing policy, and
-journals every decision. That process leads the `rest_for_one` chain on a signer, so the
-node is not askable before its key is loaded, and it refuses to boot — key missing,
-malformed, unidentified, or journal unusable — rather than starting into a state where
-denial and misconfiguration look identical.
+tree. `:core` starts the full runtime. `:builder` starts formation and
+`Ouroboros.Wasm.Supervisor` — the helper pool a forwarded lane-W forge needs in order to
+read imports (W22) — and nothing that holds durable work: no teams, stores, sessions,
+schedulers, or control plane. A BEAM forge build is still `:peer.start/1` plus a call.
+`:signer` starts the durable-directory owner when a data directory is configured, then
+one process: `Upgrade.Signing.Service`, which holds the key, applies the signing policy,
+and journals every decision, then formation. That process leads the role-specific
+`rest_for_one` chain on a signer, so the node is not askable before its key is loaded,
+and it refuses to boot — key missing, malformed, unidentified, or journal unusable —
+rather than starting into a state where denial and misconfiguration look identical.
 
 Formation is libcluster, off by default, selected by `OUROBOROS_CLUSTER_STRATEGY`. It
 sits at the *tail* of the application's `rest_for_one` chain on purpose: it connects and
@@ -106,11 +109,14 @@ state that retries cancellation and terminal delivery before cleanup.
 
 Above teams, `Ouroboros.Orchestration.Scheduler` owns a durable dependency graph.
 It persists claims before invoking an executor, caps cluster-local concurrency,
-unlocks fan-out/fan-in, and propagates failure and cancellation. A stable execution
-token survives owner or scheduler restart; `TeamExecutor` reuses that token as the
-team delegation ID, from which Team derives the namespaced CodingSession identity.
-This closes the local checkpoint/start retry window while the same Harness journal is
-queryable; it is not provider-side exactly-once billing across a full VM or host loss.
+unlocks fan-out/fan-in, and propagates failure and cancellation. An execution token
+identifies one attempt: it survives the *owner* process dying so a waiter can reattach,
+and a scheduler restart *clears* it so a stale owner cannot complete the new attempt.
+`TeamExecutor` therefore names the team delegation from `{plan_id, step_id}`, not from
+the token — a second offer of the same step reattaches to the same coding task instead
+of launching a duplicate provider run. This closes the local checkpoint/start retry
+window while the same Harness journal is queryable; it is not provider-side exactly-once
+billing across a full VM or host loss.
 
 A plan is heterogeneous. Each step declares a kind — `:coding`, or `:forge` for one
 compile-and-deploy of a capability module — and the scheduler resolves one executor per
@@ -296,7 +302,13 @@ held outside workspace contents; neither a native file tool nor an unsandboxed s
 make the repository authorize itself.
 
 An entry declares **exactly one** of `command` and `component`; both, or neither, is an error
-line and no hook. `command` is a shell command line and is what workspace trust gates.
+line and no hook. `command` is a shell command line and is what workspace trust gates. When
+this node has an OS sandbox backend, a command hook runs inside it — PreToolUse/PostToolUse
+as `:read_only` (scratch `$TMPDIR` writes only); `[checks]` and the other lifecycle events
+as `:workspace_write` (workspace writable, `.git` and `.ouroboros` fenced as `bash` is).
+Without a backend the hook is logged and ignored rather than run with ambient filesystem
+and network.
+
 `component` names a WebAssembly component — a path, resolved relative to the workspace root
 and confined to it — and is admitted from an untrusted workspace, because its authority is
 the world's single `log` import and a verdict this runtime then narrows. A component entry may
@@ -310,8 +322,8 @@ hook therefore cannot allow what a rule denied — not by convention but by cons
 because on a denial no hook is invoked at all. It may deny what a rule allowed, may
 resolve a rule's `ask`, and its `ask` outranks `approval_mode` so `auto_approve` cannot
 swallow it. `updatedInput` is re-evaluated by the engine before the rewritten call runs.
-A hook that times out, crashes, or prints nonsense is logged and ignored; only `deny`
-stops anything.
+A hook that times out, crashes, prints nonsense, or cannot be sandboxed is logged and
+ignored; only `deny` stops anything.
 
 ##### Checkpoints, and what rewind will not claim
 
@@ -347,15 +359,20 @@ system prompt reports, both derived from `Sandbox.decision/2`. With macOS
 `sandbox-exec` or Linux `bwrap`, `:workspace_write` makes the workspace and declared
 roots writable while keeping `.git`, `.ouroboros`, runtime data and user configuration
 read-only; `:read_only` permits a shell with writes confined to per-call scratch. The
-network is denied by default in both modes. Without a backend, `:read_only` refuses
-`bash` and `:workspace_write` reports that the command is unsandboxed;
+network is denied by default in both modes. Without a backend, `:read_only` and
+`:workspace_write` both refuse `bash` rather than running it unsandboxed —
+`OUROBOROS_ALLOW_UNSANDBOXED_BASH=1` restores the old `workspace_write` posture;
 `:unrestricted` is explicitly unsandboxed. An approved filesystem escalation re-runs
 that one command under `:workspace_write_escalated`: the same writable roots, protected
 data/config, `.ouroboros` fence, and network policy, with only the `.git` segment
 fence lifted. `web_fetch` reaches the network and is bounded by the permission engine's
 `WebFetch(domain:)` rules *and* by an address gate that refuses loopback, link-local,
-private, and metadata destinations; it also refuses to follow a redirect off the host
-that was evaluated. The README states the same limits where an operator will read them.
+private, and metadata destinations; Mint then connects to an admitted address tuple
+(TLS SNI, certificate checks, and the HTTP `Host` header still use the original hostname),
+so a rebind between lookup and connect cannot retarget the socket. It also refuses to follow
+a redirect off the host that was evaluated. A later same-host redirect looks up and pins
+again; a hop that rebinds to a non-public address is refused. The README states the same
+limits where an operator will read them.
 
 The `capability` tool reaches a deployed WebAssembly capability — the `:live` lane-W
 rollouts that name this node, and nothing else on the mesh. It is gated by `Capability(<name>)`
@@ -916,11 +933,12 @@ patch lane refuses an artifact that would replace the module deciding what code 
   above that fact, in exactly the same sense as the `Ouroboros.Capability.` namespace
   policy. A hostile connected node never calls those functions at all.
 - Node role narrows blast radius rather than containing a compromise. A `:builder` node
-  boots cluster formation and nothing else; a `:signer` node adds only the signing
-  service. Neither holds teams, sessions, journals, grants, or a control plane, and both
-  remain fully authorized members of the cluster. Containment requires the build and
-  signing hosts outside the cluster's trust domain, reached through something narrower
-  than Erlang distribution.
+  boots cluster formation and the WASM helper pool, and nothing that holds teams,
+  sessions, journals, grants, or a control plane; a `:signer` node adds the signing
+  service (and `RuntimeOwner` when a data directory is configured). Both remain fully
+  authorized members of the cluster. Containment requires the build and signing hosts
+  outside the cluster's trust domain, reached through something narrower than Erlang
+  distribution.
 - The OTP releases directory is deployment-owned infrastructure. Content addressing,
   exclusive links, and fsync do not defend against another OS principal that can replace
   files in that directory.
@@ -993,13 +1011,14 @@ Implemented:
   binaries. An agent driven only by signals can forge a capability, deploy it, start it,
   and message it — and can be refused at any of those steps without dying;
 - least-privileged builder and signer nodes (`Ouroboros.Cluster`): one release, one
-  runtime, three roles. A `:builder`/`:signer` node boots cluster formation and nothing
-  else — no teams, sessions, stores, scheduler, or control plane — and
-  `:forge_builder_node` relocates the build peer onto one without changing anything
-  about the build. The builder must be runtime-identical to its targets, because the
-  verifier checks the artifact's OTP/Elixir/architecture triple on every loading node;
-  that constraint is *why* a builder is a role of the same release rather than a
-  separate service;
+  runtime, three roles. A `:builder` node boots cluster formation and the WASM helper
+  pool, and nothing that holds teams, sessions, stores, scheduler, or control plane; a
+  `:signer` node adds the signing service (and `RuntimeOwner` when a data directory is
+  configured). `:forge_builder_node` relocates the build peer onto a builder without
+  changing anything about the build. The builder must be runtime-identical to its targets,
+  because the verifier checks the artifact's OTP/Elixir/architecture triple on every
+  loading node; that constraint is *why* a builder is a role of the same release rather
+  than a separate service;
 - formation itself (libcluster: static epmd, gossip, DNS polling), off by default, plus
   a release whose distribution posture is explicit: long names, a refused blank
   node/cookie, optional TLS distribution baked into `vm.args`, and a boot that fails

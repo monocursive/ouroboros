@@ -81,10 +81,12 @@ defmodule Ouroboros.Provider.Native.Hooks do
   therefore read only when `config :ouroboros, :trusted_workspaces` names the canonical
   workspace root.
 
-  Trust cannot come from a file inside the workspace. The native shell may run without an
-  OS sandbox on a node that has no backend, and repository contents are writable by
-  definition under `workspace_write`; either fact makes an in-repository trust marker
-  self-authorizing. Operator configuration lives outside both authorities.
+  Trust cannot come from a file inside the workspace. The native `bash` tool may still
+  run unsandboxed under `:unrestricted` or `OUROBOROS_ALLOW_UNSANDBOXED_BASH=1`, and
+  repository contents are writable by definition under `workspace_write`; either fact
+  makes an in-repository trust marker self-authorizing. A command hook on a node with no
+  backend does not run at all — it is logged and ignored — so it is not a second ambient
+  path. Operator configuration lives outside both authorities.
 
   Untrusted is not silent: `load/2` reports `trusted?: false` together with how many
   hooks it declined to load, so a session can say why the repository's hooks did nothing.
@@ -94,13 +96,19 @@ defmodule Ouroboros.Provider.Native.Hooks do
   A **component** hook is admitted from an untrusted workspace; a **command** hook from one
   is declined exactly as before, counted in `declined`, and `trusted?/2` remains the single
   chokepoint deciding it. The difference is what the two can reach. A shell hook is `sh -c`
-  with `HOME`, `PATH`, the filesystem and the network. A component hook reaches nothing on
-  its own: the world's one import is a log line, so everything it learns arrives in the
-  payload this seam hands it and everything it can do arrives in the verdict this seam reads
-  back. Both are bounded here, and both bounds are written down below — what it may do under
-  "The narrowing", what it may see under "What an untrusted hook can read". The verdict
-  vocabulary was designed for an adversarial author: a hook can deny what a rule allowed and
-  can never allow what a rule denied, because on a denial no hook is invoked at all.
+  inside the same OS sandbox the native `bash` tool uses, when this node has a backend:
+  PreToolUse/PostToolUse are `:read_only` (writes only to a per-call scratch `$TMPDIR`);
+  `[checks]` and the other lifecycle events are `:workspace_write` (workspace writable,
+  `.git` and `.ouroboros` fenced), so a SessionStart script can write ordinary files
+  under the workspace.
+  Without a backend the command is not run ambient — it is ignored, the same posture a
+  crashed hook already had. A component hook reaches nothing on its own: the world's one
+  import is a log line, so everything it learns arrives in the payload this seam hands it
+  and everything it can do arrives in the verdict this seam reads back. Both are bounded
+  here, and both bounds are written down below — what it may do under "The narrowing", what
+  it may see under "What an untrusted hook can read". The verdict vocabulary was designed
+  for an adversarial author: a hook can deny what a rule allowed and can never allow what a
+  rule denied, because on a denial no hook is invoked at all.
 
   ### The narrowing, which is what makes that sentence true
 
@@ -270,6 +278,8 @@ defmodule Ouroboros.Provider.Native.Hooks do
   require Logger
 
   alias Ouroboros.Provider.Native.Exec
+  alias Ouroboros.Provider.Native.Paths
+  alias Ouroboros.Provider.Native.Sandbox
   alias Ouroboros.Wasm
 
   @project_file "ouroboros.toml"
@@ -385,6 +395,8 @@ defmodule Ouroboros.Provider.Native.Hooks do
     notification: "Notification",
     file_changed: "FileChanged"
   }
+
+  @read_only_command_events [:pre_tool_use, :post_tool_use, :post_tool_use_failure]
 
   defstruct hooks: [],
             checks: [],
@@ -806,7 +818,7 @@ defmodule Ouroboros.Provider.Native.Hooks do
   end
 
   defp run_command_check(check, %__MODULE__{workspace: workspace}, tail_lines) do
-    case Exec.run_shell(check.command,
+    case sandboxed_shell(check.command, workspace, :workspace_write,
            cd: workspace,
            timeout_ms: check.timeout_ms,
            max_bytes: @max_output_bytes
@@ -824,6 +836,9 @@ defmodule Ouroboros.Provider.Native.Hooks do
         ]
 
       {:error, reason} ->
+        ["#{subject(check)} could not run: #{inspect(reason)}"]
+
+      {:ignored, reason} ->
         ["#{subject(check)} could not run: #{inspect(reason)}"]
     end
   end
@@ -908,7 +923,7 @@ defmodule Ouroboros.Provider.Native.Hooks do
   defp invoke(hook, payload, ceiling) do
     stdin = encode(payload)
 
-    case Exec.run_shell(hook.command,
+    case sandboxed_shell(hook.command, hook.cwd, hook_sandbox_mode(hook),
            cd: hook.cwd,
            stdin: stdin,
            timeout_ms: bounded(hook.timeout_ms, ceiling),
@@ -941,8 +956,90 @@ defmodule Ouroboros.Provider.Native.Hooks do
       {:error, reason} ->
         Logger.warning("native hook could not run: #{hook.command}: #{inspect(reason)}")
         {:ok, empty()}
+
+      {:ignored, reason} ->
+        Logger.warning(
+          "native hook could not be sandboxed and was ignored: #{hook.command}: " <>
+            inspect(reason)
+        )
+
+        {:ok, empty()}
     end
   end
+
+  # PreToolUse/PostToolUse are read_only (scratch `$TMPDIR` writes only). `[checks]` pass
+  # `:workspace_write` at their own call site so typecheck/lint can write ordinary build
+  # artifacts under the workspace. Other lifecycle events (SessionStart/End, FileChanged,
+  # PreCompact, …) default to `:workspace_write` for the same reason: they routinely write
+  # a sidecar next to the script. Session `sandbox_mode` is not on the hook today (`scope`
+  # is node/user/workspace); if a caller puts it on the struct, it wins.
+  defp hook_sandbox_mode(%{sandbox_mode: mode})
+       when mode in [:read_only, :workspace_write, :unrestricted],
+       do: mode
+
+  defp hook_sandbox_mode(%{event: event}) when event in @read_only_command_events, do: :read_only
+
+  defp hook_sandbox_mode(_hook), do: :workspace_write
+
+  # Same wrap call site as `Tools.Bash`: detect, `policy/2`, scratch, `wrap/4`. Wrap only
+  # when a backend exists — `decide/2` is not consulted, because a hook with no backend
+  # is ignored rather than run ambient, including under `:workspace_write`.
+  defp sandboxed_shell(command, _cwd, :unrestricted, opts) do
+    Logger.warning(
+      "native hook running with no OS sandbox: sandbox_mode: :unrestricted was requested"
+    )
+
+    Exec.run_shell(command, opts)
+  end
+
+  defp sandboxed_shell(command, cwd, mode, opts) do
+    detection = Sandbox.detect()
+
+    case detection.backend do
+      :none ->
+        {:ignored, :no_backend}
+
+      _backend ->
+        case command_scope(cwd, mode) do
+          {:ok, scope} -> wrap_shell(command, scope, detection, opts)
+          {:error, reason} -> {:ignored, reason}
+        end
+    end
+  end
+
+  defp command_scope(cwd, mode) when is_binary(cwd), do: Paths.scope(cwd, [], mode)
+  defp command_scope(_other, _mode), do: {:error, :no_workspace}
+
+  defp wrap_shell(command, scope, detection, opts) do
+    with {:ok, scratch} <- Sandbox.scratch() do
+      policy = Sandbox.with_scratch(Sandbox.policy(scope, scope.sandbox_mode), scratch)
+
+      case Sandbox.wrap({:shell, command}, scope, policy, detection) do
+        {:ok, {executable, args}} ->
+          try do
+            # `wrap/4` answers argv; `run_shell/2` keeps stdin and separate stderr, which
+            # is the exit-2 contract. The extra `sh -c` only launches the wrapped argv.
+            Exec.run_shell(
+              shell_join(executable, args),
+              Keyword.put(opts, :env, Sandbox.env(policy))
+            )
+          after
+            Sandbox.release(scratch)
+          end
+
+        {:error, reason} ->
+          Sandbox.release(scratch)
+          {:ignored, reason}
+      end
+    else
+      {:error, reason} -> {:ignored, reason}
+    end
+  end
+
+  defp shell_join(executable, args),
+    do: Enum.map_join([executable | args], " ", &shell_quote/1)
+
+  defp shell_quote(value), do: "'" <> String.replace(to_string(value), "'", "'\\''") <> "'"
 
   # ------------------------------------------------------- the untrusted narrowing (D8)
 

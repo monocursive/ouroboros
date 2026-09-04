@@ -23,6 +23,12 @@ defmodule Ouroboros.Web.Live.DeckLive do
   contiguous high-water mark `Ouroboros.Web.Watch` maintains. `resubscribe/1` is that
   function and there is no second path.
 
+  A mailbox the plane outran is a fourth cause of the same hole. In-process there is no
+  `stream.lagged` frame: this view measures `Process.info(self(), :message_queue_len)`
+  against `Watch.window/0` on live events and the coalesced flush, drops what is already
+  queued, and resubscribes from the cursor. Crash-and-remount would also empty the
+  mailbox; resubscribe keeps the page.
+
   A terminal session is checked for **immediately** after the backlog arrives, because it
   answers a backlog and silently declines the registration — without the check this view
   would sit forever waiting for live events from a conversation that ended an hour ago.
@@ -423,14 +429,25 @@ defmodule Ouroboros.Web.Live.DeckLive do
     {:noreply, socket |> refresh() |> recover_subscription() |> announce_needs_you()}
   end
 
-  def handle_info({:ouroboros_interactive_event, id, event}, socket),
-    do: {:noreply, live_event(socket, :interactive, id, event)}
+  def handle_info({:ouroboros_interactive_event, id, event}, socket) do
+    case resync_if_mailbox_lagged(socket) do
+      {:lagged, socket} -> {:noreply, socket}
+      :ok -> {:noreply, live_event(socket, :interactive, id, event)}
+    end
+  end
 
-  def handle_info({:ouroboros_coding_event, id, event}, socket),
-    do: {:noreply, live_event(socket, :coding, id, event)}
+  def handle_info({:ouroboros_coding_event, id, event}, socket) do
+    case resync_if_mailbox_lagged(socket) do
+      {:lagged, socket} -> {:noreply, socket}
+      :ok -> {:noreply, live_event(socket, :coding, id, event)}
+    end
+  end
 
   def handle_info(:flush, socket) do
-    {:noreply, socket |> assign(:flush_scheduled?, false) |> redraw(:delta)}
+    case resync_if_mailbox_lagged(socket) do
+      {:lagged, socket} -> {:noreply, socket}
+      :ok -> {:noreply, socket |> assign(:flush_scheduled?, false) |> redraw(:delta)}
+    end
   end
 
   # A coordinator can retire because the session ended or disappear because its
@@ -724,6 +741,44 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # ------------------------------------------------------------------------------------
   # Live events
   # ------------------------------------------------------------------------------------
+
+  # In-process the plane sends unconditionally. A mailbox at `Watch.window/0` is already
+  # more work than this view will hold, so the rest of the queue is a hole — the same
+  # hole a `stream.lagged` frame names on the wire. Drop what is queued and resubscribe
+  # from the cursor rather than dying: that is the `:DOWN` repair, and it keeps the page.
+  defp resync_if_mailbox_lagged(socket) do
+    case Process.info(self(), :message_queue_len) do
+      {:message_queue_len, len} ->
+        if Watch.mailbox_lagged?(len), do: {:lagged, recover_from_mailbox_lag(socket)}, else: :ok
+
+      _gone ->
+        :ok
+    end
+  end
+
+  defp recover_from_mailbox_lag(%{assigns: %{watch: nil}} = socket) do
+    drop_queued_plane_events()
+    assign(socket, :flush_scheduled?, false)
+  end
+
+  defp recover_from_mailbox_lag(socket) do
+    drop_queued_plane_events()
+
+    socket
+    |> assign(:flush_scheduled?, false)
+    |> demonitor()
+    |> update(:watch, &Watch.note(&1, :client_dropped))
+    |> resubscribe()
+  end
+
+  defp drop_queued_plane_events do
+    receive do
+      {:ouroboros_interactive_event, _id, _event} -> drop_queued_plane_events()
+      {:ouroboros_coding_event, _id, _event} -> drop_queued_plane_events()
+    after
+      0 -> :ok
+    end
+  end
 
   # Absorbed now, drawn later. A streaming turn is one message per delta, and the whole
   # cost of this surface under load is whether that message re-projects the ledger.

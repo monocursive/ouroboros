@@ -362,6 +362,36 @@ jobs:
           mix ouroboros.gateway.golden
           git diff --exit-code test/support/gateway_golden
 
+      # docs/PROTOCOL.md is generated from the method table, the parameter contract, and
+      # the fixtures above — so it is regenerated after them, and in that order. A diff
+      # here is a protocol change and is committed as one, exactly like a fixture diff.
+      # Makefile `protocol-docs` also regenerates goldens first; this job already did that.
+      - name: Protocol docs drift
+        run: |
+          mix ouroboros.protocol.docs
+          git diff --exit-code docs/PROTOCOL.md
+
+  # install.sh against a local fixture, then the structural checks on release.yml.
+  # Deliberately not a mix release: the install half needs only sh and a sha256 tool;
+  # the workflow half needs a YAML parser. PyYAML is what makes the 54 structural checks
+  # run rather than falling back to ruby's parse-only path. See docs/DISTRIBUTION.md §7.
+  dist-check:
+    name: Dist check
+    runs-on: ubuntu-24.04
+    # See the `on:` note: a push to a long-lived branch already ran this.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork || (github.head_ref != 'main' && github.head_ref != 'dev') }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install pyyaml
+
+      - run: make dist-check
+
   # One representative packaged Linux build is required because unit suites cannot prove
   # three released BEAM nodes negotiate TLS, learn late peers, and recover their mesh.
   fleet-e2e:
@@ -386,11 +416,13 @@ jobs:
 
   # The container proofs a Mac cannot run: `wasm-linux-test` is the wasm suites under
   # bubblewrap with `ouro-sandbox` disabled by name (the backend the Elixir job already
-  # uses, in the privileged namespace the scripts exist to provide), and `forge-linux-test`
-  # is the forge under the preferred Linux backend (Landlock) inside that same namespace.
-  # The Elixir job on this runner already exercises bwrap; these jobs prove the *scripts*
-  # and the Landlock forge path, which that job never builds (`make sandbox` is not a
-  # step there). Each rebuilds wasmtime inside Docker, so the ceiling is for a cold volume.
+  # uses, in the privileged namespace the scripts exist to provide), `forge-linux-test`
+  # is the forge under the preferred Linux backend (Landlock) inside that same namespace,
+  # and `sandbox-linux-test` is the helper's own kernel enforcement suite (Landlock plus
+  # the `fs_filter.c` LD_PRELOAD). The Elixir job on this runner already exercises bwrap;
+  # these jobs prove the *scripts* and the Landlock paths, which that job never builds
+  # (`make sandbox` is not a step there). Each rebuilds inside Docker, so the ceiling is
+  # for a cold volume.
   linux-container-proofs:
     name: Linux container proofs (${{ matrix.proof }})
     runs-on: ubuntu-24.04
@@ -399,7 +431,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        proof: [wasm-linux-test, forge-linux-test]
+        proof: [wasm-linux-test, forge-linux-test, sandbox-linux-test]
     steps:
       - uses: actions/checkout@v7
 
@@ -427,7 +459,8 @@ jobs:
       # namespaces denies `/proc/self/setgroups`, which is how both bwrap and
       # ouro-sandbox enter a namespace. `--privileged` does not change that host sysctl.
       # Without this, wasm-linux-test reports no bwrap backend and forge-linux-test
-      # fails every wrap with `open /proc/self/setgroups: Permission denied`.
+      # and sandbox-linux-test fail every wrap with `open /proc/self/setgroups:
+      # Permission denied`.
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - run: make ${{ matrix.proof }}

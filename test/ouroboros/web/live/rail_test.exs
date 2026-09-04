@@ -79,10 +79,8 @@ defmodule Ouroboros.Web.Live.RailTest do
     end
 
     test "an idle session settles, on either plane, and is never NEEDS YOU" do
-      # A deliberate divergence from `tui/src/model.rs:249-254`, which routes
-      # interactive+idle to NeedsInput. On a rail a person scans for work that rule fills
-      # the top group with every conversation anyone has ever finished reading. See the
-      # `triage_of/2` docs; the green eye is for a real ask and nothing else.
+      # Same rule as `SessionInfo::triage` in `tui/src/model.rs`: idle is between turns,
+      # not blocked on a human. The green eye is for a real ask and nothing else.
       assert Rail.triage_of(interactive("a", status: :idle), 0) == :settled
       assert Rail.triage_of(coding("t", status: :idle), 0) == :settled
     end

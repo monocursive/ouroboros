@@ -983,11 +983,14 @@ defmodule Ouroboros.Cluster do
 
   Every node boots as exactly one of `:core`, `:builder`, or `:signer`, from
   `config :ouroboros, :node_role` (default `:core`). The role shapes the supervision
-  tree (`Ouroboros.Application`): a `:core` node runs the full runtime, while `:builder`
-  and `:signer` run this supervisor and nothing else. That is not a sandbox — see
-  "Limits" below — it is a least-privilege posture: a builder host has no team store, no
-  scheduler, no control plane, and no coding sessions to lose, so compromising it yields
-  a compiler, not a fleet.
+  tree (`Ouroboros.Application`): a `:core` node runs the full runtime; a `:builder` runs
+  this supervisor plus `Ouroboros.Wasm.Supervisor` (a forwarded lane-W forge reads
+  imports through this node's helper pool) and nothing that holds durable work; a
+  `:signer` runs the durable-directory owner when configured, `Upgrade.Signing.Service`,
+  and this supervisor. That is not a sandbox — see "Limits" below — it is a
+  least-privilege posture: a builder host has no team store, no scheduler, no control
+  plane, and no coding sessions to lose, so compromising it yields a compiler, not a
+  fleet.
 
   An unrecognized `:node_role` refuses the boot rather than defaulting to the most
   privileged role.

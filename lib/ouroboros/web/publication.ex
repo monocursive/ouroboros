@@ -18,14 +18,22 @@ defmodule Ouroboros.Web.Publication do
   that did not spawn this daemon can be pointed at the credential it must present instead
   of guessing a path by convention.
 
+  The OS pid is the same claim `gateway.json` publishes, and so is `birth` when
+  `Ouroboros.RuntimeOwner` has one: a recycled pid must not make a dead endpoint look
+  live. The write asks the owner rather than inventing either fact. An owner that is
+  registered but cannot answer is a refused boot, not a publication that names a pid
+  nobody claimed. Absent an owner — a test, a surface started without a durable
+  directory — the file carries this VM's pid and omits `birth`, which is the legacy
+  shape a reader already treats as PID-only liveness.
+
   A failure to publish stops this process, and therefore the boot. An endpoint nobody can
   find is not a degraded operator surface, it is an absent one.
 
   Removal is best effort and conditional on the inode still being the one this process
   wrote: a second daemon that republished over it owns the file now, and deleting another
   daemon's publication on the way out would be worse than leaving a stale one. A killed
-  node removes nothing at all, which is why the file carries the OS pid — a stale
-  publication is detectable rather than misleading.
+  node removes nothing at all, which is why the file carries the OS pid and, when present,
+  the kernel birth identity — a stale publication is detectable rather than misleading.
   """
 
   use GenServer
@@ -33,6 +41,7 @@ defmodule Ouroboros.Web.Publication do
   require Logger
 
   alias Ouroboros.DataDir
+  alias Ouroboros.RuntimeOwner
   alias Ouroboros.Web.Config
   alias Ouroboros.Web.Endpoint
 
@@ -56,16 +65,34 @@ defmodule Ouroboros.Web.Publication do
   Public so the publication's shape is testable without a filesystem, and so the one
   place that decides what a browser-facing publication may contain is a function rather
   than a literal buried in a write.
+
+  Two-arity asks `RuntimeOwner` the way `Ouroboros.Gateway.Listener` does, and fails
+  closed: a registered owner that cannot answer raises rather than publishing a pid
+  this VM invented. Three-arity takes an owner map so a test can pin `pid` and `birth`
+  without standing up the owner process. `birth` is written only when it is a binary.
   """
-  @spec document(Config.t(), :inet.port_number(), pos_integer()) :: map()
-  def document(%Config{} = config, port, os_pid) do
+  @spec document(Config.t(), :inet.port_number()) :: map()
+  def document(%Config{} = config, port), do: document(config, port, runtime_owner())
+
+  @spec document(Config.t(), :inet.port_number(), %{
+          optional(:birth) => String.t() | nil,
+          pid: pos_integer()
+        }) :: map()
+  def document(%Config{} = config, port, %{pid: pid} = owner)
+      when is_integer(pid) and pid > 0 do
     published = %{
       "port" => port,
       "protocol" => @protocol,
       "node" => Atom.to_string(node()),
-      "pid" => os_pid,
+      "pid" => pid,
       "scope" => Atom.to_string(config.scope)
     }
+
+    published =
+      case Map.get(owner, :birth) do
+        birth when is_binary(birth) -> Map.put(published, "birth", birth)
+        _absent -> published
+      end
 
     # The path to the credential, never the credential. The key is present exactly when
     # there is a file to name — a surface whose token came from the environment has none,
@@ -121,14 +148,14 @@ defmodule Ouroboros.Web.Publication do
     DataDir.ensure_private!(config.data_dir)
 
     path = Endpoint.publication_path(config.data_dir)
-    os_pid = os_pid()
+    published = document(config, port)
 
     tmp =
       path <>
-        ".tmp-#{os_pid}-#{System.unique_integer([:positive, :monotonic])}-" <>
+        ".tmp-#{published["pid"]}-#{System.unique_integer([:positive, :monotonic])}-" <>
         Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
 
-    contents = JSON.encode_to_iodata!(document(config, port, os_pid))
+    contents = JSON.encode_to_iodata!(published)
 
     stat =
       try do
@@ -177,6 +204,15 @@ defmodule Ouroboros.Web.Publication do
   defp same_file?(left, right) do
     left.uid == right.uid and left.major_device == right.major_device and
       left.inode == right.inode
+  end
+
+  # The gateway listener's claim, copied rather than imported: a registered owner is
+  # authoritative, and a missing one is a pid with no birth, never a guessed incarnation.
+  defp runtime_owner do
+    case Process.whereis(RuntimeOwner) do
+      nil -> %{pid: os_pid(), birth: nil}
+      _pid -> RuntimeOwner.claim()
+    end
   end
 
   defp os_pid do

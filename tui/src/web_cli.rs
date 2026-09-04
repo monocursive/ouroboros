@@ -323,6 +323,7 @@ mod tests {
             protocol: 1,
             node: "nonode@nohost".into(),
             pid: 42,
+            birth: None,
             scope: "operate".into(),
             token_file: token_file.map(str::to_string),
         }

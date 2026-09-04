@@ -214,12 +214,12 @@ defmodule Ouroboros.Application do
     # would mean a discovery strategy's crash restarts every durable owner above, which
     # is a far worse trade than losing topology logging for a moment.
     #
-    # The gateway sits after even that, at the absolute end. It is an operator surface:
-    # it projects what the planes already know and holds nothing they rebuild from, so
-    # its crash must restart nothing, and it must be the first thing to stop when the
-    # node comes down. It is also the only child here that a stranger can reach, which is
-    # one more reason for it to be downstream of everything rather than upstream of
-    # anything.
+    # The gateway sits after even that, still an operator surface at the tail: it
+    # projects what the planes already know and holds nothing they rebuild from, so its
+    # crash must restart nothing durable. CodeIntel, Wasm, Desktop, MCP, and Web follow
+    # it for the same reason; Web is last of all. Gateway and Web are the two children a
+    # stranger can reach, which is one more reason for both to be downstream of
+    # everything rather than upstream of anything.
     #
     # Direct OAuth state is in the same tail category, immediately before the gateway
     # because the gateway is its only caller. It owns a private credential file and

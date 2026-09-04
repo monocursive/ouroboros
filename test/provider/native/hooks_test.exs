@@ -12,13 +12,29 @@ defmodule Ouroboros.Provider.Native.HooksTest do
 
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Jido.Harness.ApprovalResponse
   alias Ouroboros.Provider.Native.Hooks
   alias Ouroboros.Provider.Native.Loop
   alias Ouroboros.Provider.Native.Paths
+  alias Ouroboros.Provider.Native.Sandbox
   alias Ouroboros.Test.NativeModelScript
 
   @moduletag :capture_log
+
+  @backend Sandbox.detect().backend
+
+  @needs_sandbox (case @backend do
+                    :none ->
+                      [
+                        skip:
+                          "no OS sandbox backend on this node (detected: #{inspect(@backend)})"
+                      ]
+
+                    _present ->
+                      []
+                  end)
 
   setup do
     root = Path.join(System.tmp_dir!(), "native-hooks-#{System.unique_integer([:positive])}")
@@ -625,12 +641,18 @@ defmodule Ouroboros.Provider.Native.HooksTest do
 
     test "a no-op desktop hook sees redaction without replacing the real typed text", context do
       trust(context.workspace)
-      captured = Path.join(context.root, "desktop-hook-input.json")
 
       observer =
         script(context.root, "observe-desktop.sh", """
-        cat > #{captured}
-        echo '{}'
+        python3 -c 'import json,sys
+        p=json.load(sys.stdin)
+        ti=p.get("tool_input") or {}
+        secret="sk-live-secret"
+        ok=("text" not in ti and ti.get("text_bytes")==len(secret) and secret not in json.dumps(p))
+        if not ok:
+            sys.stderr.write("hook saw the secret or lost text_bytes\\n")
+            sys.exit(2)
+        print("{}")'
         """)
 
       project_toml(context.workspace, """
@@ -685,13 +707,11 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       assert sensitive.payload["reason"] =~ "password field or looks like a secret"
       refute Map.has_key?(sensitive.payload, "suggested_rule")
 
-      hook_payload = JSON.decode!(File.read!(captured))
-      assert hook_payload["tool_input"]["text_bytes"] == byte_size("sk-live-secret")
-      refute Map.has_key?(hook_payload["tool_input"], "text")
-      refute File.read!(captured) =~ "sk-live-secret"
-
       send(pid, {:native_approval, sensitive.request_id, ApprovalResponse.new!(:deny)})
-      [_result] = tool_results(collect())
+      [result] = tool_results(collect())
+      assert result["output"] =~ "the operator denied this desktop_act call"
+      refute result["output"] =~ "hook saw the secret"
+      refute result["output"] =~ "sk-live-secret"
     end
 
     test "`additionalContext` is appended to the tool result", context do
@@ -720,9 +740,13 @@ defmodule Ouroboros.Provider.Native.HooksTest do
 
     test "the hook is handed the Claude-compatible JSON on stdin", context do
       trust(context.workspace)
-      capture = Path.join(context.root, "stdin.json")
 
-      recorder = script(context.root, "record.sh", "cat > #{capture}\n")
+      recorder =
+        script(context.root, "record.sh", """
+        python3 -c 'import json,sys
+        p=json.load(sys.stdin)
+        print(json.dumps({"hookSpecificOutput":{"additionalContext": json.dumps(p)}}))'
+        """)
 
       project_toml(context.workspace, """
       [[hooks]]
@@ -731,11 +755,17 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       matcher = "bash"
       """)
 
-      {loop, _agent} = start_loop(context, @bash_script)
-      run(loop)
-      collect()
+      config = Hooks.load(context.workspace)
 
-      payload = capture |> File.read!() |> JSON.decode!()
+      assert {:none, _input, [context_line], false} =
+               Hooks.pre_tool_use(config, "bash", %{"command" => "echo ran"}, %{
+                 "session_id" => "sess-1",
+                 "cwd" => context.workspace,
+                 "provider_session_id" => "native-x-y",
+                 "turn_id" => "turn-1"
+               })
+
+      payload = JSON.decode!(context_line)
 
       assert payload["hook_event_name"] == "PreToolUse"
       assert payload["tool_name"] == "bash"
@@ -891,12 +921,14 @@ defmodule Ouroboros.Provider.Native.HooksTest do
   describe "PostToolUse" do
     test "its additionalContext lands on the result and it sees the response", context do
       trust(context.workspace)
-      capture = Path.join(context.root, "post.json")
 
       recorder =
         script(context.root, "post.sh", """
-        cat > #{capture}
-        echo '{"hookSpecificOutput":{"additionalContext":"post ran"}}'
+        python3 -c 'import json,sys
+        p=json.load(sys.stdin)
+        tr=p.get("tool_response") or {}
+        ok=(p.get("hook_event_name")=="PostToolUse" and tr.get("is_error")==False and "ran" in (tr.get("output") or ""))
+        print(json.dumps({"hookSpecificOutput":{"additionalContext": "post ran" if ok else "post missing"}}))'
         """)
 
       project_toml(context.workspace, """
@@ -911,21 +943,20 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       [result] = tool_results(collect())
 
       assert result["output"] =~ "post ran"
-
-      payload = capture |> File.read!() |> JSON.decode!()
-      assert payload["hook_event_name"] == "PostToolUse"
-      assert payload["tool_response"]["is_error"] == false
-      assert payload["tool_response"]["output"] =~ "ran"
+      refute result["output"] =~ "post missing"
     end
 
     test "desktop_act typed text is redacted on PostToolUseFailure", context do
       trust(context.workspace)
-      capture = Path.join(context.root, "post-desktop.json")
 
       recorder =
         script(context.root, "post-desktop.sh", """
-        cat > #{capture}
-        echo '{"hookSpecificOutput":{"additionalContext":"post desktop"}}'
+        python3 -c 'import json,sys
+        p=json.load(sys.stdin)
+        ti=p.get("tool_input") or {}
+        secret="hello from the hook"
+        ok=("text" not in ti and ti.get("text_bytes")==len(secret) and secret not in json.dumps(p))
+        print(json.dumps({"hookSpecificOutput":{"additionalContext": "post desktop" if ok else "post desktop leaked"}}))'
         """)
 
       project_toml(context.workspace, """
@@ -987,11 +1018,8 @@ defmodule Ouroboros.Provider.Native.HooksTest do
 
       [result] = tool_results(collect())
       assert result["output"] =~ "post desktop"
-
-      payload = capture |> File.read!() |> JSON.decode!()
-      assert payload["tool_input"]["text_bytes"] == byte_size("hello from the hook")
-      refute Map.has_key?(payload["tool_input"], "text")
-      refute File.read!(capture) =~ "hello from the hook"
+      refute result["output"] =~ "post desktop leaked"
+      refute result["output"] =~ "hello from the hook"
     end
 
     test "a failing tool fires PostToolUseFailure instead", context do
@@ -1084,7 +1112,7 @@ defmodule Ouroboros.Provider.Native.HooksTest do
 
     test "FileChanged fires with the paths that changed", context do
       trust(context.workspace)
-      capture = Path.join(context.root, "changed.json")
+      capture = Path.join(context.workspace, "changed.json")
 
       project_toml(context.workspace, """
       [[hooks]]
@@ -1198,7 +1226,7 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       # own `trusted`, the field that also chooses the pool lane and the label. Either one
       # saying "repository-authored" is enough to refuse, and an entry that carries no answer
       # at all is read as untrusted.
-      marker = Path.join(context.root, "belt-and-braces-check-ran")
+      marker = Path.join(context.workspace, "belt-and-braces-check-ran")
 
       check = %{
         name: "typecheck",
@@ -1248,6 +1276,120 @@ defmodule Ouroboros.Provider.Native.HooksTest do
 
       assert [failure] = Hooks.run_checks(%{config | checks: slow})
       assert failure =~ "did not finish within 300 ms"
+    end
+  end
+
+  # ================================================================ command sandbox
+
+  describe "command-hook OS sandbox" do
+    test "without a backend a command hook is ignored rather than run ambient", context do
+      previous = Application.get_env(:ouroboros, :native_sandbox)
+      Application.put_env(:ouroboros, :native_sandbox, :none)
+      on_exit(fn -> restore(:native_sandbox, previous) end)
+
+      trust(context.workspace)
+      marker = Path.join(context.workspace, "ambient-hook-ran")
+      blocker = script(context.root, "ambient.sh", "touch #{marker}\necho blocked >&2\nexit 2\n")
+
+      project_toml(context.workspace, """
+      [[hooks]]
+      event = "PreToolUse"
+      command = "#{blocker}"
+      """)
+
+      config = Hooks.load(context.workspace)
+
+      {result, log} =
+        with_log(fn ->
+          Hooks.pre_tool_use(config, "bash", %{"command" => "echo ran"}, %{
+            "session_id" => "sess-1",
+            "cwd" => context.workspace
+          })
+        end)
+
+      assert {:none, %{"command" => "echo ran"}, [], false} = result
+      refute File.exists?(marker)
+      assert log =~ "could not be sandboxed and was ignored"
+      assert log =~ "no_backend"
+    end
+
+    test "without a backend a command check is a failure, not a pass", context do
+      previous = Application.get_env(:ouroboros, :native_sandbox)
+      Application.put_env(:ouroboros, :native_sandbox, :none)
+      on_exit(fn -> restore(:native_sandbox, previous) end)
+
+      trust(context.workspace)
+      marker = Path.join(context.workspace, "ambient-check-ran")
+      project_toml(context.workspace, "[checks]\ntypecheck = \"touch #{marker}\"\n")
+
+      config = Hooks.load(context.workspace)
+      assert [failure] = Hooks.run_checks(config)
+      assert failure =~ "typecheck"
+      assert failure =~ "could not run"
+      refute File.exists?(marker)
+    end
+
+    @tag @needs_sandbox
+    test "a PreToolUse command hook is wrapped read_only: workspace writes do not land",
+         context do
+      trust(context.workspace)
+      escaped = Path.join(context.workspace, "hook-escape.txt")
+
+      writer =
+        script(context.root, "escape.sh", """
+        echo pwned > #{escaped}
+        echo '{"hookSpecificOutput":{"additionalContext":"sandboxed-hook-ran"}}'
+        """)
+
+      project_toml(context.workspace, """
+      [[hooks]]
+      event = "PreToolUse"
+      command = "#{writer}"
+      """)
+
+      config = Hooks.load(context.workspace)
+
+      assert {:none, _input, ["sandboxed-hook-ran"], false} =
+               Hooks.pre_tool_use(config, "bash", %{"command" => "echo ran"}, %{
+                 "session_id" => "sess-1",
+                 "cwd" => context.workspace
+               })
+
+      refute File.exists?(escaped)
+    end
+
+    @tag @needs_sandbox
+    test "a command check may write ordinary artifacts under the workspace", context do
+      trust(context.workspace)
+      artifact = Path.join(context.workspace, "check-artifact")
+      project_toml(context.workspace, "[checks]\ntypecheck = \"touch #{artifact}\"\n")
+
+      config = Hooks.load(context.workspace)
+      assert Hooks.run_checks(config) == []
+      assert File.exists?(artifact)
+    end
+
+    @tag @needs_sandbox
+    test "exit 2 still denies when the command hook is wrapped", context do
+      trust(context.workspace)
+      blocker = script(context.root, "block-sandboxed.sh", "echo 'no shell here' >&2\nexit 2\n")
+
+      project_toml(context.workspace, """
+      [[hooks]]
+      event = "PreToolUse"
+      matcher = "bash"
+      command = "#{blocker}"
+      """)
+
+      config = Hooks.load(context.workspace)
+
+      assert {:deny, reason} =
+               Hooks.pre_tool_use(config, "bash", %{"command" => "echo ran"}, %{
+                 "session_id" => "sess-1",
+                 "cwd" => context.workspace
+               })
+
+      assert reason =~ "no shell here"
     end
   end
 

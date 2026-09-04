@@ -3,22 +3,17 @@ defmodule Ouroboros.Provider.Native.Replay.Seam do
   Whether the loop this build ships actually honours the replay seams, asked rather than
   assumed.
 
-  R1 defined `tool_source` on the `Loop` struct and documented it as "anything but `:live`
-  means the recorded `tool_result` content is authoritative", but wired it only into the
-  *inference* ledger gate. The tool dispatch path — `dispatch/2`, `open_tool_effect/5`,
-  `settle_tool_effect/4` — does not read the field, so a replay that ran a tool-calling
-  turn through the shipped loop would dispatch the tool for real and write a `:tool_call`
-  ledger entry for it. Both are precisely what verified replay must never do.
-
-  The engine therefore asks the loop, once per VM, instead of carrying a constant somebody
-  has to remember to flip: it runs one throwaway turn whose only tool call names a tool
-  that does not exist, with a recorded result staged for it under the `tool_source` field.
-  If the recorded content comes back, the seam is live. If the loop's "unknown tool"
-  message comes back, it is not — and nothing ran either way, which is what makes this
-  probe safe to run against a loop that ignores the field.
+  `Loop.dispatch/2` consults `tool_source` first: anything but `:live` answers from the
+  recorded `tool_result` map and never looks up, gates, or executes a tool. This module
+  still asks, once per VM, instead of carrying a constant somebody has to remember to
+  flip: it runs one throwaway turn whose only tool call names a tool that does not exist,
+  with a recorded result staged for it under the `tool_source` field. If the recorded
+  content comes back, the seam is live. If the loop's "unknown tool" message comes back,
+  it is not — and nothing ran either way, which is what makes this probe safe to run
+  against a loop that ignores the field.
 
   The probe writes nothing: no journal (`journal: nil`), no checkpoint (`checkpoint: nil`),
-  no session directory, and no ledger entry — the inference half of `tool_source` *is*
+  no session directory, and no ledger entry — the inference half of `tool_source` is also
   wired, so the model call is not gated, and an unknown tool never opens a tool effect.
   """
 

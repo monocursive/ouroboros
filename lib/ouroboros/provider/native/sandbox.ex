@@ -16,12 +16,16 @@ defmodule Ouroboros.Provider.Native.Sandbox do
 
     * `{:sandboxed, label, policy}` — the command runs wrapped.
     * `{:unsandboxed, reason}` — the command runs plain, and the reason is reported
-      rather than hidden. `workspace_write` on a node with no backend is this: it is
-      what this provider did before C5 and calling it a regression to keep doing it
-      would be worse than saying so.
+      rather than hidden. `:unrestricted` is this, because that is what the session
+      asked for by name. `workspace_write` on a node with no backend is this only when
+      the operator typed `OUROBOROS_ALLOW_UNSANDBOXED_BASH=1` (or set
+      `config :ouroboros, allow_unsandboxed_bash: true`); without that it is a refusal.
     * `{:refused, reason}` — the command does not run. `read_only` without a backend is
       this, because a shell that cannot be made read-only under a read-only label is a
-      lie about the label, not a convenience.
+      lie about the label, not a convenience. `workspace_write` without a backend is
+      the same shape: a workspace-write label a shell can step out of is a lie about
+      the label. The old unsandboxed path is one typed decision away — the allow flag
+      above — not the default.
 
   Nothing degrades quietly. A mode this module does not recognise is refused rather
   than treated as the nearest thing it does recognise, and a backend that fails to
@@ -35,6 +39,10 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   | `:read_only` | reads anywhere the process could already read; writes **only** into a per-call scratch directory that `$TMPDIR` points at | external network denied; loopback available for local IPC |
   | `:workspace_write` | the above, plus writes under `scope.root` and every `scope.roots` entry — with any `.git` or `.ouroboros` segment beneath them, the node's data directory, and `$XDG_CONFIG_HOME/ouroboros` (or `~/.config/ouroboros`) kept read-only | external network denied unless the node opts in; loopback available for local IPC |
   | `:unrestricted` | no sandbox, logged | no sandbox |
+
+  Without a backend, `:read_only` and `:workspace_write` both refuse rather than wrapping
+  nothing. `:unrestricted` stays unsandboxed: that mode is the operator asking for no
+  sandbox, not this node failing to find one.
 
   An approved one-command filesystem escalation uses a fourth, internal policy:
   `:workspace_write_escalated`. It keeps the same writable roots, protected data/config
@@ -325,7 +333,7 @@ defmodule Ouroboros.Provider.Native.Sandbox do
       mode when mode in [:read_only, :workspace_write] ->
         case detection.backend do
           :none when mode == :read_only -> {:refused, {:read_only_without_backend, detection}}
-          :none -> {:unsandboxed, {:no_backend, detection}}
+          :none -> workspace_write_without_backend(detection)
           _present -> {:sandboxed, label(detection), policy(scope, mode)}
         end
 
@@ -897,15 +905,43 @@ defmodule Ouroboros.Provider.Native.Sandbox do
       String.starts_with?(text, ".ouroboros/")
   end
 
+  @doc "Operator-facing text for a `decide/2` refusal reason."
+  @spec refusal_text(term()) :: String.t()
+  def refusal_text({:read_only_without_backend, detection}), do: no_backend_refusal(detection)
+
+  def refusal_text({:workspace_write_without_backend, detection}),
+    do: workspace_write_without_backend_refusal(detection)
+
+  def refusal_text({:escalation_without_backend, detection}) do
+    "this session asked to re-run a command under a fenced workspace_write escalation, " <>
+      "but this node has no OS sandbox backend — #{detection.notes}. Without one the " <>
+      "escalation cannot be contained, so it is refused rather than run unsandboxed."
+  end
+
+  def refusal_text(reason),
+    do: "this session's shell is refused: #{inspect(reason)}"
+
   @doc "The refusal text for a `read_only` session on a node with no backend."
   @spec no_backend_refusal(detection()) :: String.t()
   def no_backend_refusal(detection) do
     "this session runs with sandbox_mode: read_only and this node has no OS sandbox " <>
       "backend — #{detection.notes}. Without one a shell cannot be made read-only, so " <>
       "read_only refuses `bash` entirely rather than pretending. Install the " <>
-      "`ouro-sandbox` helper or bubblewrap (Linux), run on macOS where `sandbox-exec` " <>
-      "is present, or ask the human to reconfigure this session with " <>
-      "sandbox_mode: workspace_write."
+      "`ouro-sandbox` helper or bubblewrap (Linux), or run on macOS where `sandbox-exec` " <>
+      "is present. `workspace_write` on this node also refuses `bash` unless " <>
+      "OUROBOROS_ALLOW_UNSANDBOXED_BASH=1; `unrestricted` is an unsandboxed shell asked " <>
+      "for by name."
+  end
+
+  @doc "The refusal text for a `workspace_write` session on a node with no backend."
+  @spec workspace_write_without_backend_refusal(detection()) :: String.t()
+  def workspace_write_without_backend_refusal(detection) do
+    "this session runs with sandbox_mode: workspace_write and this node has no OS sandbox " <>
+      "backend — #{detection.notes}. Without one a shell cannot be contained, so " <>
+      "workspace_write refuses `bash` rather than running it unsandboxed. Install the " <>
+      "`ouro-sandbox` helper or `bwrap` (bubblewrap) on Linux, run on macOS where " <>
+      "`sandbox-exec` is present, or set OUROBOROS_ALLOW_UNSANDBOXED_BASH=1 to accept an " <>
+      "unsandboxed shell on this node."
   end
 
   # ---------------------------------------------------------------- internals
@@ -1046,6 +1082,29 @@ defmodule Ouroboros.Provider.Native.Sandbox do
       _absent ->
         nil
     end
+  end
+
+  # `workspace_write` without a backend used to run the shell plain and name the hole
+  # (`{:unsandboxed, {:no_backend, detection}}`). That is still what `:unrestricted`
+  # means, because the session asked for it. It is no longer the default for a mode that
+  # promised a sandbox: a workspace-write label a shell can step out of is a lie about
+  # the label, the same shape as `read_only` without a backend. The old posture is one
+  # typed decision away — `OUROBOROS_ALLOW_UNSANDBOXED_BASH=1`, or
+  # `config :ouroboros, allow_unsandboxed_bash: true` — matching
+  # `OUROBOROS_ALLOW_INSECURE_DIST` and `OUROBOROS_GATEWAY_ALLOW_REMOTE`. Read here rather
+  # than only in `config/runtime.exs`, the same way `OUROBOROS_ALLOW_INSECURE_DIST` is
+  # consulted where the refusal is made.
+  defp workspace_write_without_backend(detection) do
+    if allow_unsandboxed_bash?() do
+      {:unsandboxed, {:no_backend, detection}}
+    else
+      {:refused, {:workspace_write_without_backend, detection}}
+    end
+  end
+
+  defp allow_unsandboxed_bash? do
+    Application.get_env(:ouroboros, :allow_unsandboxed_bash, false) == true or
+      System.get_env("OUROBOROS_ALLOW_UNSANDBOXED_BASH") == "1"
   end
 
   # `Ouroboros.Provider.Native.Loop.sandbox_mode/1`'s vocabulary, plus Codex's own name

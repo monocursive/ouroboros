@@ -47,11 +47,15 @@ defmodule Ouroboros.Provider.Native do
           remembers what it displaced, `:unrestricted` included, and leaving restores it.
     * **The OS sandbox is what the node has.** `Ouroboros.Provider.Native.Sandbox`
       detects macOS `sandbox-exec` or Linux `bwrap`; `ProviderStatus.details["sandbox"]`
-      names which, or `none`. On `none`, `workspace_write` is still only the tools' own
-      path checks: a `bash` command can reach the network and write outside the
-      workspace through a program this runtime does not inspect, and approvals, rules
-      and the ledger are the containment. There is no seccomp filter and no domain
-      allowlist on any backend.
+      names which, or `none`. On `none`, `read_only` and `workspace_write` both refuse
+      `bash` rather than running it unsandboxed — a label this node cannot keep is a lie
+      about the label, not a convenience. `OUROBOROS_ALLOW_UNSANDBOXED_BASH=1` (or
+      `config :ouroboros, allow_unsandboxed_bash: true`) restores the old
+      `workspace_write` posture: the tools' own path checks, a shell that can reach the
+      network and write outside the workspace, and approvals, rules and the ledger as
+      the containment. `:unrestricted` is that weaker posture asked for by name, and is
+      not what a missing backend quietly becomes. There is no seccomp filter and no
+      domain allowlist on any backend.
     * **LSP, MCP, hooks, compaction, and checkpoints live in this adapter.** They are
       the reason this provider exists in-process rather than as another CLI: the loop
       can ask before a tool runs, append a diagnostic to an edit, fold a conversation it
@@ -248,8 +252,9 @@ defmodule Ouroboros.Provider.Native do
   defp enforced(%{backend: :none}),
     do:
       "workspace path containment; read_only refuses write/edit/bash; no OS sandbox on " <>
-        "this node, so a bash command is bounded by approvals and rules alone; " <>
-        "unrestricted is the same posture, asked for by name"
+        "this node, so workspace_write refuses bash too unless " <>
+        "OUROBOROS_ALLOW_UNSANDBOXED_BASH=1; unrestricted is an unsandboxed shell, " <>
+        "asked for by name"
 
   defp enforced(sandbox),
     do:

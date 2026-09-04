@@ -6,13 +6,17 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch.Target do
   that name resolves to, so a permitted `example.com` that rebinds to `169.254.169.254`
   — or a literal `http://127.0.0.1/` — would otherwise reach loopback, RFC1918, and
   cloud metadata. This module refuses those destinations after a DNS lookup and
-  before Mint connects.
+  returns the public address tuples so Mint can connect to one of them directly.
 
-  The residual window is DNS rebinding between this lookup and the connect
-  Mint does itself. Pinning the connect to the admitted address is not done
-  here: it would require a custom transport that still presents the original
-  hostname for TLS verification. The lookup is still the difference between
-  "we never checked" and "we checked once".
+  Connect is pinned to an admitted address. TLS SNI, certificate hostname checks,
+  and the HTTP `Host` header still use the original hostname (`Mint.HTTP.connect/4`'s
+  `hostname:` option), so verification is not weakened to make pinning possible.
+
+  A same-host redirect looks up and pins again; a cross-host redirect is refused
+  before that. The remaining TOCTOU is not a second resolution on connect — Mint
+  is given the IP tuple — but that a later hop can observe a different public
+  address if DNS changed between hops. A hop that rebinds to a non-public address
+  is refused.
   """
 
   @blocked_hosts MapSet.new([
@@ -25,8 +29,11 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch.Target do
   @doc """
   Refuses a URI whose host is blocked by name or whose any resolved address is
   loopback, link-local, private, metadata, or otherwise non-public.
+
+  On success, returns the resolved public address tuples so the caller can pin
+  the socket to one of them instead of asking Mint to resolve the name again.
   """
-  @spec admit(URI.t(), map()) :: :ok | {:error, term()}
+  @spec admit(URI.t(), map()) :: {:ok, [:inet.ip_address()]} | {:error, term()}
   def admit(uri, context \\ %{})
 
   def admit(%URI{host: host}, context) when is_binary(host) and host != "" do
@@ -41,9 +48,8 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch.Target do
         {:error, {:blocked_host, host}}
 
       true ->
-        with {:ok, addresses} <- lookup(normalized),
-             :ok <- admit_addresses(host, addresses, context) do
-          :ok
+        with {:ok, addresses} <- lookup(normalized) do
+          admit_addresses(host, addresses, context)
         end
     end
   end
@@ -86,7 +92,7 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch.Target do
 
   defp admit_addresses(host, addresses, context) do
     case Enum.filter(addresses, &blocked_address?(&1, context)) do
-      [] -> :ok
+      [] -> {:ok, addresses}
       blocked -> {:error, {:blocked_address, host, format_address(hd(blocked))}}
     end
   end

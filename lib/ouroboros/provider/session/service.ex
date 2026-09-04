@@ -37,11 +37,11 @@ defmodule Ouroboros.Provider.Session.Service do
 
   `terminal/create` gets exactly what `Ouroboros.Provider.Native.Tools.Bash` gets, from
   the same `Ouroboros.Provider.Native.Sandbox`: wrapped where the node has a backend,
-  plain with the reason reported where `workspace_write` meets a node with none, and
-  **refused** where `read_only` meets a node with none — because a terminal that cannot
-  be made read-only under a read-only label is a lie about the label. There is no seccomp
-  filter on Linux and no domain allowlist anywhere; see that module for the full list of
-  what an OS sandbox here does not do.
+  **refused** where `read_only` or `workspace_write` meets a node with none — a label
+  this node cannot keep is a lie about the label — and plain only where the operator
+  typed `OUROBOROS_ALLOW_UNSANDBOXED_BASH=1` (or `:unrestricted` by name). There is no
+  seccomp filter on Linux and no domain allowlist anywhere; see that module for the
+  full list of what an OS sandbox here does not do.
 
   ## Bounds
 
@@ -584,8 +584,7 @@ defmodule Ouroboros.Provider.Session.Service do
       {:refused, reason} ->
         reply(
           state,
-          {:error, @refused, Sandbox.no_backend_refusal(detection),
-           %{"reason" => inspect(reason)}},
+          {:error, @refused, Sandbox.refusal_text(reason), %{"reason" => inspect(reason)}},
           event(context, :terminal_create, "refused",
             digest: digest(command),
             command: display(command)
@@ -1043,7 +1042,6 @@ defmodule Ouroboros.Provider.Session.Service do
   defp method_of(:terminal_wait), do: "terminal/wait_for_exit"
   defp method_of(:terminal_kill), do: "terminal/kill"
   defp method_of(:terminal_release), do: "terminal/release"
-  defp method_of(other), do: to_string(other)
 
   defp digest_of(%{command: command}) when is_binary(command),
     do: [digest: digest(command), command: display(command)]

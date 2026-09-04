@@ -123,18 +123,27 @@ impl Drop for Workspace {
 }
 
 /// The roots `Ouroboros.Provider.Native.Sandbox.platform_readable/0` gives a Linux build
-/// before its caller names one, minus the ones this image does not have. A build that
-/// could not read these could not run `/bin/sh`, let alone a compiler, so a builder test
-/// that omitted them would prove that the fence breaks everything rather than that it
-/// fences anything.
+/// before its caller names one, minus the ones this image does not have, resolved the
+/// way `builder_policy/1` does. Landlock attaches a rule to the target of a symlink
+/// under the name that was sent, so a merged-`/usr` image (`/bin` → `/usr/bin`) is
+/// refused unless the canonical path is what we send. A build that could not read these
+/// could not run `/bin/sh`, let alone a compiler, so a builder test that omitted them
+/// would prove that the fence breaks everything rather than that it fences anything.
 fn platform_readable() -> Vec<String> {
     [
         "/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32", "/etc", "/opt",
     ]
     .iter()
-    .filter(|path| Path::new(path).exists())
-    .map(|path| (*path).to_string())
+    .filter_map(|path| canonicalize_readable(Path::new(path)))
+    .collect::<std::collections::BTreeSet<_>>()
+    .into_iter()
     .collect()
+}
+
+fn canonicalize_readable(path: &Path) -> Option<String> {
+    std::fs::canonicalize(path)
+        .ok()
+        .map(|resolved| resolved.to_string_lossy().into_owned())
 }
 
 fn run_shell(request: &str, script: &str) -> Output {

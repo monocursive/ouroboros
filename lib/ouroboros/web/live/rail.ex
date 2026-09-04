@@ -119,22 +119,17 @@ defmodule Ouroboros.Web.Live.Rail do
   has answered yet**. An approval a keypress or an automation has already answered is not
   a reason to triage the row as waiting on a person.
 
-  ## One deliberate divergence from the TUI
+  ## Idle is settled, on both surfaces
 
   `NEEDS YOU` is entered by exactly two doors — an unanswered approval, or a status of
   `awaiting_approval`. Nothing else, and in particular **not** an idle conversation.
+  Idle is between turns, waiting on nobody in particular; the group meant to hold "a
+  machine is blocked on you right now" must not fill with every conversation anyone has
+  finished reading.
 
-  The terminal client disagrees: `SessionInfo::triage` (`tui/src/model.rs:249-254`) routes
-  interactive+idle to `Triage::NeedsInput`, with a comment arguing that a conversation
-  waiting for its next prompt is a human's turn. On a rail that a person scans for work,
-  that reasoning does not survive contact: every conversation anyone has ever finished
-  reading is idle, so the group meant to hold "a machine is blocked on you right now"
-  fills up with sessions nobody owes anything. A first live pass found the top of the
-  deck full of them.
-
-  So an idle row settles here, and the green eye stays spent only on a real ask. This is a
-  **known, intentional difference from the Rust**, not a port of it — if the TUI adopts
-  the same rule the comment above and this paragraph should go together.
+  The terminal client's `SessionInfo::triage` (`tui/src/model.rs`) uses the same rule:
+  idle on either plane is `Triage::Done`. Approvals still promote the row. If one
+  surface ever changes this, change the other in the same pass.
   """
   @spec triage_of(Row.t(), non_neg_integer()) :: group()
   def triage_of(%Row{} = row, pending \\ 0) when is_integer(pending) do

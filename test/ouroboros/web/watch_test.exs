@@ -295,4 +295,14 @@ defmodule Ouroboros.Web.WatchTest do
       assert Watch.floor(watch) == 120
     end
   end
+
+  describe "mailbox lag" do
+    test "is the watch window, because a longer queue is already a hole" do
+      refute Watch.mailbox_lagged?(0)
+      refute Watch.mailbox_lagged?(Watch.window() - 1)
+      assert Watch.mailbox_lagged?(Watch.window())
+      assert Watch.mailbox_lagged?(Watch.window() + 1)
+      assert Watch.window() == 2_000
+    end
+  end
 end

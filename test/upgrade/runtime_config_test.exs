@@ -101,7 +101,7 @@ defmodule Ouroboros.Upgrade.RuntimeConfigTest do
 
     assert get_in(config, [:ouroboros, :data_dir]) == data_dir
 
-    assert {Jido.Storage.File, path: Path.join(data_dir, "coding")} ==
+    assert {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "coding")} ==
              get_in(config, [:ouroboros, :coding_storage])
 
     assert {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "upgrades")} ==
@@ -118,7 +118,7 @@ defmodule Ouroboros.Upgrade.RuntimeConfigTest do
 
     assert get_in(config, [:ouroboros, :data_dir]) == expected
 
-    assert {Jido.Storage.File, path: Path.join(expected, "interactive")} ==
+    assert {Ouroboros.Storage.DurableFile, path: Path.join(expected, "interactive")} ==
              get_in(config, [:ouroboros, :interactive_storage])
   end
 

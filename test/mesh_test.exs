@@ -215,6 +215,28 @@ defmodule Ouroboros.MeshTest do
     end
   end
 
+  describe "split-brain routing" do
+    test "send_message refuses an id claimed by two members" do
+      id = unique_id("split")
+      pid = spawn(fn -> Process.sleep(:infinity) end)
+      extra = spawn(fn -> Process.sleep(:infinity) end)
+
+      on_exit(fn ->
+        Process.exit(pid, :kill)
+        Process.exit(extra, :kill)
+      end)
+
+      assert :ok = Directory.register(id, pid)
+      :ok = :pg.join(Ouroboros.Mesh.Scope, Directory.group(id), extra)
+
+      assert length(Mesh.members(id)) == 2
+      assert is_pid(Mesh.whereis(id))
+
+      assert {:error, {:ambiguous_replicas, ^id, 2}} =
+               Mesh.send_message("root", id, %{text: "hello"})
+    end
+  end
+
   # Borrow the local node's host so the name stays legal under whichever naming mode
   # an earlier test left :net_kernel in.
   defp unreachable_node do

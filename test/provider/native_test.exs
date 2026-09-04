@@ -283,6 +283,7 @@ defmodule Ouroboros.Provider.NativeTest do
         :none ->
           assert status.details["enforced"] =~ "read_only refuses write/edit/bash"
           assert status.details["enforced"] =~ "no OS sandbox on this node"
+          assert status.details["enforced"] =~ "workspace_write refuses bash too"
 
         _present ->
           assert status.details["enforced"] =~ "runs bash under #{status.details["sandbox"]}"
