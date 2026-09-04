@@ -106,8 +106,21 @@ exec docker run --rm --privileged \
     # build and the suite as an ordinary user, which is also what CI does.
     # A bare uid rather than a passwd entry: noble already has a user at 1000, the name
     # differs between images, and nothing here reads a passwd entry — HOME is passed in.
-    builder_uid=1000
-    builder_gid=1000
+    #
+    # uid 1000 is that image user, and is the right drop on Docker Desktop (the bind mount
+    # is writable as 1000). On a Linux host the checkout is owned by the host user — GitHub
+    # Actions is 1001 — and `make wasm-guest` copies echo.wasm onto that bind mount. Follow
+    # /src so the copy, and mix compile writing priv/static, are allowed. A Desktop mount
+    # that looks like root still wants 1000: erlexec will not start as uid 0.
+    src_uid=$(stat -c %u /src)
+    src_gid=$(stat -c %g /src)
+    if [ "$src_uid" = 0 ]; then
+      builder_uid=1000
+      builder_gid=1000
+    else
+      builder_uid=$src_uid
+      builder_gid=$src_gid
+    fi
     mkdir -p /home/builder
     chown -R "$builder_uid:$builder_gid" /home/builder /cargo /rustup /src/_build /src/deps \
       /src/priv/wasm /src/priv/sandbox /src/priv/native /src/tui/target \
