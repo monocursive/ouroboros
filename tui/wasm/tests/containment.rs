@@ -12,7 +12,7 @@
 mod support;
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -48,10 +48,24 @@ struct Helper {
     replies: Receiver<String>,
     stderr: Arc<Mutex<String>>,
     next_id: i64,
+    /// When `Some`, the helper's stderr is held open and never read. Dropping the pipe is
+    /// `EPIPE`, which is not a full pipe; the unread-pipe test keeps this so the write end
+    /// can fill.
+    _held_stderr: Option<ChildStderr>,
 }
 
 impl Helper {
     fn spawn(extra: &[&str]) -> Helper {
+        Self::spawn_with_stderr(extra, true)
+    }
+
+    /// The helper's stderr is a pipe whose read end we keep and never drain. A full pipe used
+    /// to stall `log` inside the host function; this is the setup that proved it.
+    fn spawn_unread_stderr(extra: &[&str]) -> Helper {
+        Self::spawn_with_stderr(extra, false)
+    }
+
+    fn spawn_with_stderr(extra: &[&str], drain: bool) -> Helper {
         let mut child = Command::new(HELPER)
             .arg("serve")
             .args(extra)
@@ -75,13 +89,18 @@ impl Helper {
         });
 
         let log = Arc::new(Mutex::new(String::new()));
-        let sink = Arc::clone(&log);
-        std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                sink.lock().expect("stderr lock").push_str(&line);
-                sink.lock().expect("stderr lock").push('\n');
-            }
-        });
+        let held = if drain {
+            let sink = Arc::clone(&log);
+            std::thread::spawn(move || {
+                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    sink.lock().expect("stderr lock").push_str(&line);
+                    sink.lock().expect("stderr lock").push('\n');
+                }
+            });
+            None
+        } else {
+            Some(stderr)
+        };
 
         Helper {
             child,
@@ -89,6 +108,7 @@ impl Helper {
             replies,
             stderr: log,
             next_id: 1,
+            _held_stderr: held,
         }
     }
 
@@ -571,6 +591,32 @@ fn the_log_budget_bounds_one_call() {
     assert_eq!(again["payload"], "ouroboros:capability@0.1.0 echo");
 }
 
+/// An unread stderr pipe used to wedge the helper after enough `log` calls filled it.
+/// Dropping the read end is `EPIPE`, which is not a full pipe — this holds the read end
+/// open and never drains it. A hundred calls is past the ~87 that blocked on a 16 KiB
+/// buffer; every one must answer inside [`REPLY_TIMEOUT`].
+#[test]
+fn an_unread_stderr_pipe_does_not_wedge_the_helper() {
+    let mut helper = Helper::spawn_unread_stderr(&[]);
+    stand_up(
+        &mut helper,
+        "unread",
+        &support::chatty(),
+        limits(FUEL, MEMORY_BYTES, DEADLINE_MS),
+    );
+
+    for i in 0..100 {
+        let answered = helper.ok(
+            "call",
+            json!({ "instance": "unread", "export": "handle-message", "payload": "x" }),
+        );
+        assert_eq!(
+            answered["payload"], "ouroboros:capability@0.1.0 echo",
+            "call {i} did not answer; the helper is wedged on an unread stderr pipe"
+        );
+    }
+}
+
 /// Content addressing is recomputed, never taken on trust. A `load` whose bytes do not hash to
 /// the sha it named is refused before anything is compiled.
 #[test]
@@ -826,8 +872,8 @@ fn an_unreadable_component_is_refused() {
 }
 
 /// A path is a peer-supplied string, and a named pipe is a path. Opening one with no writer
-/// blocks in the kernel — no deadline reaches that — so the check is on the metadata, before
-/// the open.
+/// blocks in the kernel — no deadline reaches that — so the helper opens `O_NONBLOCK` and
+/// `fstat`s the fd it got. A fifo swapped in after a `stat` is the object that is refused.
 #[cfg(unix)]
 #[test]
 fn a_named_pipe_is_refused_rather_than_waited_on() {
@@ -856,6 +902,28 @@ fn a_named_pipe_is_refused_rather_than_waited_on() {
     );
 }
 
+/// The pool refuses instance names longer than 256 bytes. The helper must too: echoing
+/// truncated a longer name into the live-instance map as a DoS against a peer that is not
+/// the pool.
+#[test]
+fn an_instance_name_past_the_echo_bound_is_refused() {
+    let mut helper = Helper::spawn(&[]);
+    let reply = helper.request("drop", json!({ "instance": "i".repeat(257) }));
+    assert_eq!(reply["error"]["code"], -32602);
+    assert_eq!(reply["error"]["data"]["refusal"], "invalid_params");
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("at most 256"),
+        "the refusal should name the bound: {}",
+        reply["error"]["message"]
+    );
+
+    let dropped = helper.ok("drop", json!({ "instance": "i".repeat(256) }));
+    assert_eq!(dropped["dropped"], false);
+}
+
 /// A refusal quotes back what the peer sent, and a peer can send a great deal. Without a bound
 /// on that quoting a seven-megabyte path becomes a refusal too large for the frame that has to
 /// carry it — a peer breaking its own pipe through this helper's politeness.
@@ -872,11 +940,16 @@ fn a_huge_peer_string_comes_back_small() {
         message.len()
     );
 
-    // Same for a result rather than a refusal: `drop` echoes the name it was given.
-    let dropped = helper.ok("drop", json!({ "instance": "i".repeat(7 * 1024 * 1024) }));
+    // Same for a result rather than a refusal: a huge instance name is refused at parse,
+    // not stored as a HashMap key and echoed truncated. `invalid_params` is JSON-RPC
+    // `-32602`, outside the private band `refusal()` checks.
+    let reply = helper.request("drop", json!({ "instance": "i".repeat(7 * 1024 * 1024) }));
+    assert_eq!(reply["error"]["code"], -32602);
+    assert_eq!(reply["error"]["data"]["refusal"], "invalid_params");
     assert!(
-        dropped["instance"].as_str().expect("a name").len() < 4096,
-        "drop echoed the whole name back"
+        reply["error"]["message"].as_str().unwrap_or_default().len() < 4096,
+        "a 7 MiB instance name came back as a {} byte message",
+        reply["error"]["message"].as_str().unwrap_or_default().len()
     );
 }
 

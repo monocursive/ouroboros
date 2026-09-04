@@ -74,10 +74,12 @@ defmodule Ouroboros.Wasm.Verifier do
   @doc """
   Verifies shape, world, and signature without touching the component.
 
-  This is the whole check a boot-time restart can afford and the whole check it needs: the
-  bytes are verified again anyway, by the helper, which recomputes the digest at `load`
-  and refuses `sha_mismatch` before compiling anything. A node that starts a wrapper agent
-  from a manifest this accepts cannot reach bytes that are not the signed ones.
+  This is the check a boot-time restart runs before it starts anything, and the check it
+  can afford from the manifest alone. When the staged bytes are also on disk, boot then
+  `load`s and `cross_check/2`s them against this node's helper, so a rebuilt `ouro-wasm`
+  that reads a world or import list differently does not start what a deploy would have
+  quarantined. Absent bytes or an absent helper skip that step: the first message still
+  recomputes the digest at `load` and refuses `sha_mismatch` before compiling.
   """
   @spec verify_manifest(Artifact.t(), keyword()) :: :ok | {:error, term()}
   def verify_manifest(artifact, trust_policy \\ [])

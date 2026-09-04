@@ -81,10 +81,17 @@ defmodule Ouroboros.Wasm.RolloutTwoNodeTest do
     refute node() in context.nodes
     assert outcome.warnings == [{:driver_not_a_target, node()}]
 
-    # Both nodes staged it, probed it, and satisfied the signed spec. One artifact.
+    # Both nodes staged it, probed it, evaluated it, and described it — the same document,
+    # because a description is a property of the bytes (D17). Disagreement is a unit of
+    # `agree_describe/1`; two live helpers of one sha cannot honestly disagree, and this is
+    # the proof they agree.
     for target <- context.nodes do
-      assert %{stage: :ok, probe: :ok, eval: %{satisfied?: true, passed: 2, failed: 0}} =
-               outcome.deployment[target]
+      assert %{
+               stage: :ok,
+               probe: :ok,
+               eval: %{satisfied?: true, passed: 2, failed: 0},
+               describe: :described
+             } = outcome.deployment[target]
     end
 
     assert outcome.eval_report.spec.probes == 2
@@ -97,6 +104,9 @@ defmodule Ouroboros.Wasm.RolloutTwoNodeTest do
     assert entry.component_sha256 == artifact.component_sha256
     assert entry.epoch == artifact.epoch
     assert entry.nodes == context.nodes
+    assert {:ok, document} = entry.describe
+    assert document.name == "ouroboros-echo-guest"
+    assert document.world == Wasm.world()
 
     # Both stores hold the bytes, under the sha, at the path each node derives from its own
     # data directory. Nothing was configured per node except the directory itself.

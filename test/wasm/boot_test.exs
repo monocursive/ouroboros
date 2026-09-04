@@ -6,6 +6,8 @@ defmodule Ouroboros.Wasm.BootTest do
   alias Ouroboros.Upgrade.Rollout.Registry
   alias Ouroboros.Wasm.Artifact
   alias Ouroboros.Wasm.Boot
+  alias Ouroboros.Wasm.Pool
+  alias Ouroboros.Wasm.SandboxFixture
   alias Ouroboros.Wasm.Store
 
   # No helper and no component compilation anywhere in this file: the wrapper agent is
@@ -108,6 +110,46 @@ defmodule Ouroboros.Wasm.BootTest do
 
     assert {:manifest_rejected, {:untrusted_signer, @signer}} = skipped.reason
     assert Mesh.whereis(id) == nil
+  end
+
+  test "a helper that reads a different world does not start", context do
+    # Boot used to skip `Verifier.cross_check/2` entirely: a rebuilt helper that had started
+    # reading a world or import list differently would start at boot what a deploy would
+    # have quarantined. The bytes have to be on disk and a helper has to be speaking — the
+    # rest of this file is the lazy path, on purpose.
+    name = unique_name()
+    id = start_id(name)
+    artifact = seed!(context, name: name, start: %{id: id, config: "{}"})
+    {:ok, _put} = Store.put(@bytes, artifact.component_sha256, root: context.root)
+    pool = start_pool(mismatch_helper(artifact, context.root), context.root)
+
+    assert %{started: [], failed: [], skipped: [skipped]} =
+             Boot.restart_live(context.opts ++ [registry: context.registry, pool: pool])
+
+    assert {:cross_check, {:component_mismatch, :world, expected, "ouroboros:policy@0.1.0"}} =
+             skipped.reason
+
+    assert expected == artifact.world
+    refute Mesh.whereis(id)
+  end
+
+  test "a seeded store_root is ignored where config does not allow the override", context do
+    # Seed while the test env still allows `:root` — that is how this file writes fixtures.
+    # Then drop the override and the data directory, so boot's `store_root:` is the only
+    # remaining way to find the bytes. If that option is honoured, the wrapper starts; if
+    # it is ignored, there is no store and the entry is skipped.
+    name = unique_name()
+    id = start_id(name)
+    seed!(context, name: name, start: %{id: id, config: "{}"})
+
+    put_wasm_config(allow_store_root_override: false)
+    previous = Application.get_env(:ouroboros, :data_dir)
+    Application.delete_env(:ouroboros, :data_dir)
+    on_exit(fn -> restore(:data_dir, previous) end)
+
+    assert %{started: [], failed: [], skipped: [skipped]} = restart(context)
+    assert skipped.reason == :no_data_dir
+    refute Mesh.whereis(id)
   end
 
   test "a manifest describing a different component than the entry is refused", context do
@@ -328,4 +370,73 @@ defmodule Ouroboros.Wasm.BootTest do
 
   defp restore(key, nil), do: Application.delete_env(:ouroboros, key)
   defp restore(key, value), do: Application.put_env(:ouroboros, key, value)
+
+  defp put_wasm_config(overrides) do
+    previous = Application.get_env(:ouroboros, :wasm, [])
+    on_exit(fn -> Application.put_env(:ouroboros, :wasm, previous) end)
+    Application.put_env(:ouroboros, :wasm, Keyword.merge(previous, overrides))
+  end
+
+  # A scripted helper that answers `load` with this artifact's digest and size, and a world
+  # the signed manifest does not declare. That is the mismatch `Verifier.cross_check/2` is
+  # for, and the one boot must now refuse.
+  defp mismatch_helper(artifact, root) do
+    doctor =
+      ~S(\"usable\":true,\"worlds\":[\"ouroboros:capability@0.1.0\"],) <>
+        ~S(\"wasmtime\":\"48.0.1\",\"limits\":{\"max_deadline_ms\":60000})
+
+    write_helper(
+      root,
+      """
+      #!/bin/sh
+      exec awk '
+      {
+        id = $0
+        sub(/.*"id":/, "", id)
+        sub(/[^0-9].*/, "", id)
+        if ($0 ~ /"method":"doctor"/) {
+          printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"result\\":{#{doctor}}}\\n", id)
+        } else if ($0 ~ /"method":"load"/) {
+          printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"result\\":{\\"sha256\\":\\"#{artifact.component_sha256}\\",\\"world\\":\\"ouroboros:policy@0.1.0\\",\\"size\\":#{artifact.size},\\"imports\\":[\\"log\\"]}}\\n", id)
+        } else {
+          method = $0
+          sub(/.*"method":"/, "", method)
+          sub(/".*/, "", method)
+          printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"result\\":{\\"method\\":\\"%s\\"}}\\n", id, method)
+        }
+        fflush()
+      }
+      '
+      """
+    )
+  end
+
+  defp start_pool(helper_path, root) do
+    name = :"wasm_boot_pool_#{System.unique_integer([:positive])}"
+
+    {:ok, pid} =
+      Pool.start(
+        [name: name, helper_path: helper_path, handshake_timeout_ms: 15_000] ++
+          SandboxFixture.scripted_pool_opts(root)
+      )
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        try do
+          GenServer.stop(pid, :normal, 1_000)
+        catch
+          :exit, _reason -> :ok
+        end
+      end
+    end)
+
+    pid
+  end
+
+  defp write_helper(dir, body) do
+    path = Path.join(dir, "ouro-wasm-helper-#{System.unique_integer([:positive])}.sh")
+    File.write!(path, body)
+    File.chmod!(path, 0o755)
+    path
+  end
 end

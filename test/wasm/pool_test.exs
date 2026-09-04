@@ -3,6 +3,7 @@ defmodule Ouroboros.Wasm.PoolTest do
   # node's environment, which every other spawn on it reads.
   use ExUnit.Case, async: false
 
+  alias Ouroboros.Wasm
   alias Ouroboros.Wasm.Codec
   alias Ouroboros.Wasm.Pool
   alias Ouroboros.Wasm.SandboxFixture
@@ -801,6 +802,10 @@ defmodule Ouroboros.Wasm.PoolTest do
                  "lib/ouroboros/wasm/policy_engine.ex",
                  # Staging a deploy, and the boot restart that goes through it: `Store.form/4`.
                  "lib/ouroboros/wasm/rollout.ex",
+                 # Boot restart: `Store.form/4` via `Pool.load_component/4` when the bytes are
+                 # already on disk, so a helper that has started reading a world differently
+                 # does not start what a deploy would have quarantined.
+                 "lib/ouroboros/wasm/boot.ex",
                  # The odd one out, and the reason `readable_roots/1` names the workspace roots:
                  # a `component =` hook is read out of the repository it is configured in,
                  # confined to that workspace, and never staged into the store (docs/WASM.md
@@ -938,6 +943,28 @@ defmodule Ouroboros.Wasm.PoolTest do
 
       GenServer.stop(pool, :normal, 5_000)
       refute File.exists?(scratch)
+    end
+  end
+
+  describe "the helper's frame cap is this pool's frame cap" do
+    test "the child is spawned with --max-frame-bytes matching the pool setting" do
+      journal = Path.join(tmp_dir(), "argv")
+      helper = argv_helper(journal)
+      pool = start_pool(helper, max_frame_bytes: 4_096)
+
+      assert {:ok, _report} = Pool.doctor(pool)
+      argv = File.read!(journal)
+      assert argv =~ "--max-frame-bytes 4096"
+      assert argv =~ ~r/\bserve\b/
+    end
+
+    test "a pool opt above the helper's ceiling falls back to the node's setting" do
+      journal = Path.join(tmp_dir(), "argv-ceiling")
+      helper = argv_helper(journal)
+      pool = start_pool(helper, max_frame_bytes: Wasm.max_frame_bytes_max() + 1)
+
+      assert {:ok, _report} = Pool.doctor(pool)
+      assert File.read!(journal) =~ "--max-frame-bytes #{Wasm.config(:max_frame_bytes)}"
     end
   end
 
@@ -1453,6 +1480,43 @@ defmodule Ouroboros.Wasm.PoolTest do
       assert %{phase: :broken, hook_components: 0} = Pool.status(pool)
     end
 
+    test "queued untrusted loads are re-checked against the budget" do
+      # `admit/4` runs in `handle_call` against the set as it stands on arrival. Counting
+      # happens on the helper's `{:ok, _}`. Without a second look at drain, N concurrent
+      # loads all pass while `hook_shas` is still 15, queue, then all succeed — the budget
+      # becomes 16 + inflight + queue. `slow_helper` makes them queue.
+      pool = start_pool(slow_helper())
+
+      for n <- 1..15 do
+        assert {:ok, _result} =
+                 Pool.load(sha(n), component("hook-#{n}.wasm"), pool, lane: :untrusted_hook)
+      end
+
+      assert Pool.status(pool).hook_components == 15
+
+      paths = Map.new(16..24, fn n -> {n, component("hook-#{n}.wasm")} end)
+
+      waiting =
+        for n <- 16..24 do
+          path = Map.fetch!(paths, n)
+          sha = sha(n)
+
+          Task.async(fn ->
+            Pool.load(sha, path, pool, lane: :untrusted_hook)
+          end)
+        end
+
+      Process.sleep(120)
+
+      results = Enum.map(waiting, &Task.await(&1, 15_000))
+      oks = Enum.count(results, &match?({:ok, _}, &1))
+      budgeted = Enum.count(results, &match?({:error, :hook_component_budget}, &1))
+
+      assert oks == 1
+      assert budgeted == 8
+      assert Pool.status(pool).hook_components == 16
+    end
+
     test "an unrecognized lane is refused, so a typo cannot buy an exemption" do
       pool = start_pool(responding_helper())
 
@@ -1945,6 +2009,14 @@ defmodule Ouroboros.Wasm.PoolTest do
     if [ "$(wc -l < "#{spawns}")" -le 1 ]; then
       exit 3
     fi
+    #{awk_program(@doctor_ok, "", "")}
+    """)
+  end
+
+  defp argv_helper(journal) do
+    write_helper("""
+    #!/bin/sh
+    printf '%s\\n' "$*" > "#{journal}"
     #{awk_program(@doctor_ok, "", "")}
     """)
   end

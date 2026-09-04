@@ -24,26 +24,18 @@ defmodule Ouroboros.Wasm.Boot do
   ## What is re-checked, and what is not
 
   The manifest's signature is verified again, against this node's trust policy, before
-  anything starts. The component bytes are *not* read here — that would make boot cost
-  scale with the size of every capability, and it would prove nothing extra: the agent is
-  lazy, and the first message loads the component through the helper, which recomputes the
-  digest from the file and refuses `sha_mismatch` before compiling. A wrapper started from
-  a manifest this accepts cannot reach bytes that are not the signed ones.
+  anything starts. When this node holds the staged component bytes and a helper is
+  available, `Verifier.cross_check/2` holds that helper's own reading to the signed
+  manifest. A helper that has since started reading a component's world or imports
+  differently would otherwise start at boot what a deploy would have quarantined. Missing
+  bytes, an absent helper, or a broken pool skip the cross-check and start lazily — the
+  first message still `load`s, recomputes the digest, and refuses `sha_mismatch`, and the
+  linker refuses an undeclared import (docs/WASM.md D5). A mismatch, or a load that is not
+  "the helper is missing", is skipped with a named reason rather than started.
 
   A manifest that no longer verifies, names a different component than the entry, or
   declares no `start` block is skipped with a named reason. Nothing here repairs a record;
   a `:live` entry whose manifest is unusable is an operator's question.
-
-  What is **not** re-checked is `Ouroboros.Wasm.Verifier.cross_check/2` — the helper's own
-  reading of the staged file against the manifest — because that needs the helper to
-  compile the component, which is the boot cost this deliberately does not pay. Say plainly
-  what that leaves open: a helper that has since started reading a component's world or
-  imports differently (a rebuilt `ouro-wasm`, a different wasmtime) would start at boot what
-  a deploy would have quarantined. The bytes are still the signed bytes — the helper
-  recomputes the digest at `load` and refuses `sha_mismatch`, and the linker refuses an
-  undeclared import at instantiation, which is the boundary that actually contains it
-  (docs/WASM.md D5). What is lost is the *manifest disagreement* signal, and recovering it
-  is a redeploy.
 
   ## Idempotent, by construction
 
@@ -61,7 +53,7 @@ defmodule Ouroboros.Wasm.Boot do
   require Logger
 
   alias Ouroboros.Upgrade.Rollout.Registry
-  alias Ouroboros.Wasm.{Artifact, Capability, Rollout, Store, Verifier}
+  alias Ouroboros.Wasm.{Artifact, Capability, Pool, Rollout, Store, Verifier}
 
   @type report :: %{
           started: [map()],
@@ -121,6 +113,7 @@ defmodule Ouroboros.Wasm.Boot do
     with {:ok, manifest} <- manifest(entry, opts),
          :ok <- verified(manifest, opts),
          :ok <- matches_entry(manifest, entry),
+         :ok <- agreed(manifest, opts),
          %{id: _id} = start <- Rollout.start_block(manifest) do
       place(entry, manifest, start, report, opts)
     else
@@ -151,6 +144,37 @@ defmodule Ouroboros.Wasm.Boot do
 
   defp matches_entry(%Artifact{component_sha256: manifest}, entry),
     do: {:error, {:component_mismatch, entry.component_sha256, manifest}}
+
+  # When the bytes are on disk and a helper can speak, hold that helper's reading to the
+  # signed manifest before starting anything. Absent bytes or an absent helper is the lazy
+  # path this module has always had; a mismatch is not.
+  defp agreed(manifest, opts) do
+    pool = Keyword.get(opts, :pool, Pool)
+    store = store_opts(opts)
+
+    case Store.path(manifest.component_sha256, store) do
+      {:error, _absent} ->
+        :ok
+
+      {:ok, _path} ->
+        case Pool.load_component(manifest.component_sha256, manifest.precompiled, pool,
+               kind: manifest.kind,
+               store: store
+             ) do
+          {:error, :unavailable} -> :ok
+          {:error, :broken} -> :ok
+          {:ok, report} when is_map(report) -> cross_checked(manifest, report)
+          {:error, reason} -> {:error, {:component_not_loaded, inspect(reason, limit: 10)}}
+        end
+    end
+  end
+
+  defp cross_checked(manifest, report) do
+    case Verifier.cross_check(manifest, report) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:cross_check, reason}}
+    end
+  end
 
   defp place(entry, manifest, start, report, opts) do
     state = manifest |> Rollout.start_state(opts) |> Map.put(:config, start.config)
@@ -219,8 +243,11 @@ defmodule Ouroboros.Wasm.Boot do
 
   defp store_opts(opts) do
     case Keyword.get(opts, :store_root) do
-      root when is_binary(root) and root != "" -> [root: root]
-      _unset -> []
+      root when is_binary(root) and root != "" ->
+        if Ouroboros.Wasm.allow_store_root_override?(), do: [root: root], else: []
+
+      _unset ->
+        []
     end
   end
 

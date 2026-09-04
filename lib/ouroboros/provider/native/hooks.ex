@@ -48,14 +48,15 @@ defmodule Ouroboros.Provider.Native.Hooks do
   deny-is-final, ask-outranks-auto-approve, silence-is-not-consent and the `updatedInput`
   re-evaluation all live above this seam and are untouched by it (docs/WASM.md §8.1).
 
-  **v1 hook components are capability-world components.** The helper implements exactly one
-  world, `ouroboros:capability@0.1.0`; a hook is a strict subset of a capability — one
-  string in, one string out, log-only — so the hook payload goes in through
-  `handle-message`, the stdout contract comes back as its reply, `init` receives the hook's
-  declared `config` (or `"{}"`), and `describe` is unused. Containment is identical, because
-  containment is the linker: it defines `log` and nothing else. The dedicated
-  `ouroboros:hook` world §8.1 sketches is deferred until the helper grows a second world,
-  which §12 calls a signing-policy event rather than a convenience.
+  **v1 hook components are capability-world components.** The helper speaks two worlds —
+  `ouroboros:capability@0.1.0` and `ouroboros:policy@0.1.0` (W15, D21) — and a hook is
+  admitted to the capability one: a strict subset of a capability — one string in, one
+  string out, log-only — so the hook payload goes in through `handle-message`, the stdout
+  contract comes back as its reply, `init` receives the hook's declared `config` (or
+  `"{}"`), and `describe` is unused. Containment is identical, because containment is the
+  linker: it defines `log` and nothing else. The dedicated `ouroboros:hook` world §8.1
+  sketches is deferred until a third world is a signing-policy event rather than a
+  convenience; policy already took the second.
 
   Each invocation stands up its **own instance and always drops it**. Nothing carries
   between hook runs: no guest state, and therefore no earlier payload able to influence a

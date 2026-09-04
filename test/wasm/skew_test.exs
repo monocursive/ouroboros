@@ -10,9 +10,10 @@ defmodule Ouroboros.Wasm.SkewTest do
   W8's skew tests craft the mismatch: a `.cwasm` this build wrote, its header rewritten to name
   another wasmtime or another triple. That is an honest test of the *comparison* — what a node
   reads is the header — and §12 said what it is not: a test that two toolchains disagree, because
-  one toolchain wrote both sides. `scripts/wasm-skew-test.sh` builds the other side for real, on
-  a Linux kernel and at a pinned-back wasmtime, and this file is what the node does with what it
-  brings back.
+  one toolchain wrote both sides. `scripts/wasm-skew-test.sh` builds the other side for real:
+  the version half on this machine at a pinned-back wasmtime, and the triple half inside a
+  Linux container. On a host whose rustc triple is already the container's, the script writes
+  no `triple-skew.json` and this file skips that record by name.
 
   Two fallbacks, and a deploy is only honest if both hold:
 
@@ -27,10 +28,12 @@ defmodule Ouroboros.Wasm.SkewTest do
   The artifacts are built, not checked in. A `.cwasm` is a built binary and this repository
   keeps none of those in git (see `.gitignore` on `test/support/wasm/echo.wasm`) — the
   triple-skew one is 405 546 bytes and the version-skew one 258 093, which is not the deciding
-  reason but is worth saying. So this suite skips with the script's name in the reason when the
-  artifacts are not there, including under `OUROBOROS_REQUIRE_WASM`: a machine without Docker
-  and a spare wasmtime cannot produce them, and a skip that says how to is better than a failure
-  that does not.
+  reason but is worth saying. So each test skips with the script's name in the reason when
+  *its* record is not there, including under `OUROBOROS_REQUIRE_WASM`: a machine without
+  Docker cannot produce the other triple, and a machine without a spare wasmtime cannot
+  produce the other version. CI runs the version half (`scripts/wasm-skew-test.sh version`)
+  and this file then exercises that record; the triple half stays a skip on an Ubuntu
+  runner, whose target string is the Linux container's.
   """
 
   alias Ouroboros.Upgrade.Epoch
@@ -56,29 +59,20 @@ defmodule Ouroboros.Wasm.SkewTest do
 
   @records ["triple-skew.json", "version-skew.json"]
 
-  @needs_skew (cond do
-                 not Wasm.available?() ->
-                   [
-                     skip:
-                       "no ouro-wasm at #{Wasm.helper_path()}; run `make wasm` — this suite is " <>
-                         "about what a real helper refuses"
-                   ]
+  @needs_runtime (cond do
+                    not Wasm.available?() ->
+                      [
+                        skip:
+                          "no ouro-wasm at #{Wasm.helper_path()}; run `make wasm` — this suite is " <>
+                            "about what a real helper refuses"
+                      ]
 
-                 not File.regular?(@guest) ->
-                   [skip: "no acceptance guest at #{@guest}; run `make wasm-guest`"]
+                    not File.regular?(@guest) ->
+                      [skip: "no acceptance guest at #{@guest}; run `make wasm-guest`"]
 
-                 not Enum.all?(@records, &File.regular?(Path.join(@skew_dir, &1))) ->
-                   [
-                     skip:
-                       "no real skewed artifacts in #{@skew_dir}; run `make wasm-skew-test` " <>
-                         "(it needs Docker for the other triple and builds one other wasmtime " <>
-                         "for the other version). A `.cwasm` is a built binary and is not " <>
-                         "checked in, so there is nothing to fall back to here"
-                   ]
-
-                 true ->
-                   []
-               end)
+                    true ->
+                      []
+                  end)
 
   @eval %{
     probes: [%{input: %{"greet" => "world"}, expect: {:contains, "greet"}}],
@@ -111,7 +105,15 @@ defmodule Ouroboros.Wasm.SkewTest do
   for record <- @records do
     @record record
 
-    @tag @needs_skew
+    @tag @needs_runtime
+    unless File.regular?(Path.join(@skew_dir, record)) do
+      @tag skip:
+             "no #{record} in #{@skew_dir}; run `make wasm-skew-test` " <>
+               "(it needs Docker for the other triple and builds one other wasmtime " <>
+               "for the other version). A `.cwasm` is a built binary and is not " <>
+               "checked in, so there is nothing to fall back to here"
+    end
+
     test "#{record}: a real artifact from another toolchain deploys as the source form",
          context do
       skew = read_record!(@record)

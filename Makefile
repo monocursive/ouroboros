@@ -13,7 +13,7 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test forge-linux-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-skew-test test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
+.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test forge-linux-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -42,6 +42,7 @@ help:
 	@echo "make sandbox          build ouro-sandbox into priv/sandbox/ (Linux sandbox helper)"
 	@echo "make sandbox-linux-test  prove the sandbox helper enforces, in a Linux container"
 	@echo "make forge-linux-test    prove the forge's builder namespace, in a Linux container"
+	@echo "make wasm-linux-test     prove the wasm suites under bubblewrap, in a Linux container"
 	@echo "make wasm             build ouro-wasm into priv/wasm/ (WebAssembly containment helper)"
 	@echo "make wasm-guest       build the lane-W acceptance guest into test/support/wasm/echo.wasm"
 	@echo "make wasm-examples    build the guest SDK's worked components (counter, deny-writes, …)"

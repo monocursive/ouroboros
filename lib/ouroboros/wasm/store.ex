@@ -145,13 +145,21 @@ defmodule Ouroboros.Wasm.Store do
   @doc """
   The directory this node's components live in, without creating it.
 
-  `:root` in `opts` overrides it, which is how tests get a directory of their own.
+  `:root` in `opts` names a different directory, which is how tests get one of their own.
+  It is honoured only where `Ouroboros.Wasm.allow_store_root_override?/0` is true — the
+  same gate `Capability`, `PolicyEngine`, `Rollout` and `Boot` already applied — so a
+  caller that forgets the gate cannot point this store at an arbitrary directory. A
+  seeded root on a node that has not said so is `{:error, :store_root_override_denied}`,
+  not a silent fall-through to `:data_dir`.
   """
-  @spec root(keyword()) :: {:ok, String.t()} | {:error, :no_data_dir}
+  @spec root(keyword()) ::
+          {:ok, String.t()} | {:error, :no_data_dir | :store_root_override_denied}
   def root(opts \\ []) do
     case Keyword.get(opts, :root) do
       dir when is_binary(dir) and dir != "" ->
-        {:ok, dir}
+        if Wasm.allow_store_root_override?(),
+          do: {:ok, dir},
+          else: {:error, :store_root_override_denied}
 
       _unset ->
         case Application.get_env(:ouroboros, :data_dir) do

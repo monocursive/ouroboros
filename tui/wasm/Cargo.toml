@@ -79,6 +79,12 @@ wasmtime = { version = "48", default-features = false, features = [
   "std",
 ] }
 
+# `log` sets `O_NONBLOCK` on stderr so a full pipe drops a line instead of stalling inside
+# a host function. Already in this workspace's lock behind wasmtime; named here because the
+# fcntl is ours, not an implementation detail of the engine.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # The test guests are WebAssembly *components* written as text and assembled at test time, so
 # no wasm toolchain has to be installed and no opaque binary is checked in. This is the same

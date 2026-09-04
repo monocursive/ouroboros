@@ -69,13 +69,14 @@
 //! this helper runs on gives us — so **no one call can fill the pipe**, and an owner that
 //! drains stderr between requests never sees this at all.
 //!
-//! The residual is stated rather than solved: **stderr is the owner's to drain.** A pool that
-//! spawns this helper and never reads its stderr will eventually wedge it whatever the budget
-//! is, exactly as it would wedge any program on the end of a pipe. Measured against a guest
-//! that asks for a thousand log lines a message, with stderr piped and never once read: the
-//! helper answers 87 consecutive calls and then blocks on a full pipe. Unbudgeted, the same
-//! guest wedged it on the first one. The budget does not make an unread pipe safe; it makes
-//! the unread pipe the only way to get there.
+//! The residual used to be: an owner that never reads stderr wedges the helper after enough
+//! calls to fill the pipe. Stderr is now **non-blocking** on Unix: a full or closed pipe drops
+//! the line rather than stalling the guest inside the host function, which neither fuel nor
+//! the epoch can interrupt. The budget still exists so a drained owner is not flooded;
+//! non-blocking is what makes an undrained owner not a deadlock. Measured: a hundred log-heavy
+//! calls against a piped stderr nobody reads all return; before this, the helper blocked on
+//! the pipe after about eighty. Dropped lines are dropped — that is the trade, and it is
+//! better than a wedged helper.
 //!
 //! # A trap poisons its instance
 //!
@@ -619,6 +620,30 @@ pub const WASMTIME_VERSION: &str = env!("OURO_WASMTIME_VERSION");
 /// and the wrong one: what a serialized artifact is bound to is what it was *compiled* for.
 pub const TARGET: &str = env!("OURO_TARGET");
 
+/// Make stderr writes return rather than stall.
+///
+/// `log` runs inside a host function, so neither fuel nor the epoch deadline can interrupt it.
+/// A blocking write into a full pipe would hold the helper forever. `O_NONBLOCK` on fd 2 makes
+/// a full or closed pipe `EAGAIN`/`EPIPE`; the caller drops the line. Process-global for this
+/// fd, which is what we want: every write to this helper's stderr — guest `log` and the
+/// server's own refusals — is then a write that cannot wedge the process.
+fn unblock_stderr() {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let fd = std::io::stderr().as_raw_fd();
+        // SAFETY: fd 2 is this process's stderr for its whole lifetime. Setting `O_NONBLOCK`
+        // is the containment choice documented above; a concurrent write on the same fd then
+        // sees `EAGAIN` instead of blocking inside a wasm host call.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL, 0);
+            if flags >= 0 {
+                let _ = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+        }
+    }
+}
+
 impl Host {
     /// Builds the engine, defines the world's one import, and starts the epoch ticker.
     ///
@@ -627,6 +652,7 @@ impl Host {
     /// helper with no ticker is a helper whose deadlines do not fire, which would be worse than
     /// a helper that will not start.
     pub fn new() -> wasmtime::Result<Host> {
+        unblock_stderr();
         let engine = engine()?;
 
         let ticker = engine.clone();
@@ -668,8 +694,13 @@ impl Host {
 
                 // Deliberately not `eprintln!`, which panics when the write fails. An owner
                 // that closed this pipe is not a reason to unwind through a wasm frame.
-                let _ = writeln!(std::io::stderr(), "{line}");
-                state.log_lines_written = state.log_lines_written.saturating_add(1);
+                // Stderr is non-blocking (see [`unblock_stderr`]); a full pipe is `WouldBlock`,
+                // the line is dropped, and the guest is not stalled inside this host function.
+                // Count only what actually left: the reply's `log_lines` is what an owner
+                // draining the pipe waits for.
+                if writeln!(std::io::stderr(), "{line}").is_ok() {
+                    state.log_lines_written = state.log_lines_written.saturating_add(1);
+                }
                 Ok(())
             },
         )?;
@@ -1052,7 +1083,7 @@ impl Host {
     /// `instantiate`: a fresh store under the requested bounds, linked, and `init` run inside
     /// it. Nothing is retained unless all of that succeeded.
     pub fn instantiate(&self, params: &Value) -> Result<Value, Refusal> {
-        let name = required_str(params, "instance")?.to_string();
+        let name = instance_name(params)?;
         let sha256 = required_str(params, "sha256")?.to_ascii_lowercase();
         let config = required_str(params, "config")?.to_string();
         let kind = requested_kind(params)?;
@@ -1189,7 +1220,7 @@ impl Host {
     /// trustworthy: a trap leaves it out, which is the poisoning described in the module
     /// header, and the next `call` on that name gets `unknown_instance`.
     pub fn call(&self, params: &Value) -> Result<Value, Refusal> {
-        let name = required_str(params, "instance")?.to_string();
+        let name = instance_name(params)?;
         let export = required_str(params, "export")?.to_string();
         let payload = required_str(params, "payload")?.to_string();
 
@@ -1281,14 +1312,14 @@ impl Host {
     /// `drop`: idempotent, because the peer may be recovering from a refusal that already
     /// dropped this instance and must not have to care which.
     pub fn drop_instance(&self, params: &Value) -> Result<Value, Refusal> {
-        let name = required_str(params, "instance")?;
+        let name = instance_name(params)?;
         let dropped = self
             .instances
             .lock()
             .expect("instances lock")
-            .remove(name)
+            .remove(&name)
             .is_some();
-        Ok(json!({ "instance": echo(name), "dropped": dropped }))
+        Ok(json!({ "instance": echo(&name), "dropped": dropped }))
     }
 
     /// How full each table is and what the cache has let go, for `doctor`.
@@ -1523,9 +1554,12 @@ fn read_component(path: &str, cap: u64) -> Result<Vec<u8>, Refusal> {
 
 /// Opens a path that must be a regular file.
 ///
-/// The `metadata` check comes *before* the open, not after: opening a named pipe with no writer
-/// blocks in the kernel, and a path is a peer-supplied string. `metadata` follows symlinks, so a
-/// link to a fifo is caught here too. A component is a file; anything else is not a component.
+/// The object that is checked is the object that is opened: `open` then `fstat` on that
+/// fd, never `stat` then `open`. A `stat` first would miss a fifo swapped in between the
+/// two calls, and `open` on a fifo with no writer blocks in the kernel — no epoch covers
+/// that. On Unix the open is `O_NONBLOCK` so a fifo returns immediately; after `fstat`
+/// confirms a regular file the flag is cleared so a large read is not a short `EAGAIN`.
+/// Symlinks at the leaf are followed, matching the pool's leaf-is-the-kernel rule.
 fn open_regular(path: &str) -> Result<std::fs::File, Refusal> {
     let unreadable = |detail: String| {
         refusal::refuse(
@@ -1534,12 +1568,51 @@ fn open_regular(path: &str) -> Result<std::fs::File, Refusal> {
         )
     };
 
-    let metadata = std::fs::metadata(path).map_err(|error| unreadable(error.to_string()))?;
+    let file = open_nonblocking(path).map_err(|error| unreadable(error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| unreadable(error.to_string()))?;
     if !metadata.is_file() {
         return Err(unreadable("not a regular file".to_string()));
     }
+    blocking_reads(&file);
+    Ok(file)
+}
 
-    std::fs::File::open(path).map_err(|error| unreadable(error.to_string()))
+fn open_nonblocking(path: &str) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::File::open(path)
+    }
+}
+
+fn blocking_reads(file: &std::fs::File) {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let fd = file.as_raw_fd();
+        // SAFETY: `fd` is this `File`'s descriptor for the rest of the read. Clearing
+        // `O_NONBLOCK` after `fstat` confirmed a regular file makes a large `read` wait
+        // for disk rather than return `EAGAIN`.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL, 0);
+            if flags >= 0 {
+                let _ = libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+    }
 }
 
 /// The census as `inspect` reports it. Every key here is the `doctor` limit key of the same
@@ -1641,6 +1714,20 @@ fn required_str<'a>(params: &'a Value, key: &str) -> Result<&'a str, Refusal> {
         .get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| invalid_params(format!("{key} is required and must be a string")))
+}
+
+/// An instance name this helper will store, not merely echo. The pool already refuses
+/// names longer than [`MAX_ECHO_BYTES`]; without the same bound here a peer on the line
+/// protocol could hold [`MAX_INSTANCES`] keys of frame size.
+fn instance_name(params: &Value) -> Result<String, Refusal> {
+    let name = required_str(params, "instance")?;
+    if name.len() > MAX_ECHO_BYTES {
+        return Err(invalid_params(format!(
+            "instance is {} bytes; at most {MAX_ECHO_BYTES}",
+            name.len()
+        )));
+    }
+    Ok(name.to_string())
 }
 
 fn required_u64(params: &Value, key: &str) -> Result<u64, Refusal> {

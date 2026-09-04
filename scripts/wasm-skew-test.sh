@@ -173,6 +173,15 @@ triple_skew() {
   linux_wasmtime=$(sed -n 's/.*"wasmtime": "\([^"]*\)".*/\1/p' "$out/linux-doctor.json")
   linux_target=$(sed -n 's/.*"target": "\([^"]*\)".*/\1/p' "$out/linux-doctor.json")
 
+  if [ "$linux_target" = "$this_target" ]; then
+    echo
+    echo "==> triple skew: this helper's target is already $this_target, which is what the"
+    echo "    Linux container produces. Two distinct target strings need a Mac (or any host"
+    echo "    whose rustc triple is not the container's). No triple-skew.json written; the"
+    echo "    Elixir suite skips that record by name."
+    return 0
+  fi
+
   echo
   echo "--- what the Linux artifact claims (header only, nothing mapped) ---"
   claims "$out/echo.triple-skew.cwasm"

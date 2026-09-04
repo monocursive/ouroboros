@@ -13,6 +13,9 @@
 # `unshare(CLONE_NEWUSER)`; Docker's default seccomp profile denies it, which is a fact
 # about the container and not about bubblewrap needing privilege — see
 # `scripts/sandbox-linux-test.sh`, which says the same thing for the same reason.
+# On Ubuntu 24.04 that is not enough: AppArmor still denies unprivileged writes to
+# `/proc/self/setgroups` unless `kernel.apparmor_restrict_unprivileged_userns=0`.
+# The script writes that sysctl when it can; the hosted job also sets it on the host.
 #
 # Since W17 it runs under the *preferred* Linux backend rather than the fallback. `make
 # sandbox` builds `ouro-sandbox` here, so `Sandbox.detect/0` finds a helper whose `doctor`
@@ -95,17 +98,43 @@ exec docker run --rm --privileged \
     export DEBIAN_FRONTEND=noninteractive
     if ! command -v bwrap >/dev/null 2>&1; then
       apt-get update -qq
-      apt-get install -y -qq bubblewrap build-essential curl git pkg-config libssl-dev >/dev/null
+      # libsctp1: OTP 29 prints a missing-sctp warning on stdout. erlexecs Makefile
+      # captures erl -eval into TARGET, and a timestamp with colons is multiple
+      # target patterns at the all: rule.
+      apt-get install -y -qq bubblewrap build-essential curl git pkg-config libssl-dev libsctp1 >/dev/null
     fi
     echo "==> bwrap: $(bwrap --version)"
+
+    # Ubuntu 24.04 (the hosted runner) runs unprivileged user namespaces under an
+    # AppArmor profile that denies /proc/self/setgroups. bwrap and ouro-sandbox both
+    # write that file to enter a user namespace. --privileged does not change a host
+    # sysctl. The Elixir job already writes 0 on this kernel; do it here too so the
+    # script works when run by hand on the same kind of host.
+    if [ -w /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+      echo 0 > /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+      echo "==> apparmor unprivileged userns: allowed"
+    fi
 
     # Not root. erlexec refuses to start as root without being told which user to drop to,
     # and every native tool in this runtime goes through it — so the container runs the
     # build and the suite as an ordinary user, which is also what CI does.
     # A bare uid rather than a passwd entry: noble already has a user at 1000, the name
     # differs between images, and nothing here reads a passwd entry — HOME is passed in.
-    builder_uid=1000
-    builder_gid=1000
+    #
+    # uid 1000 is that image user, and is the right drop on Docker Desktop (the bind mount
+    # is writable as 1000). On a Linux host the checkout is owned by the host user — GitHub
+    # Actions is 1001 — and `make wasm-guest` copies echo.wasm onto that bind mount. Follow
+    # /src so the copy, and mix compile writing priv/static, are allowed. A Desktop mount
+    # that looks like root still wants 1000: erlexec will not start as uid 0.
+    src_uid=$(stat -c %u /src)
+    src_gid=$(stat -c %g /src)
+    if [ "$src_uid" = 0 ]; then
+      builder_uid=1000
+      builder_gid=1000
+    else
+      builder_uid=$src_uid
+      builder_gid=$src_gid
+    fi
     mkdir -p /home/builder
     chown -R "$builder_uid:$builder_gid" /home/builder /cargo /rustup /src/_build /src/deps \
       /src/priv/wasm /src/priv/sandbox /src/priv/native /src/tui/target \
@@ -119,6 +148,16 @@ export CARGO_HOME=/cargo
 export RUSTUP_HOME=/rustup
 export MIX_ENV=test
 export OUROBOROS_REQUIRE_WASM=1
+
+echo "==> userns probe (this uid must be able to enter one; bwrap and ouro-sandbox both do)"
+if ! bwrap --ro-bind / / --dev /dev --proc /proc -- /bin/true; then
+  echo "forge-linux-test: bwrap could not apply a read-only mount as uid $(id -u)." >&2
+  echo "  ouro-sandbox fails the same way: open /proc/self/setgroups: Permission denied." >&2
+  echo "  Cause: Ubuntu 24.04 kernel.apparmor_restrict_unprivileged_userns. The outer" >&2
+  echo "  script writes 0 when that sysctl is writable. On GitHub Actions the workflow" >&2
+  echo "  also sets it on the host before docker runs." >&2
+  exit 1
+fi
 
 if ! command -v cargo >/dev/null 2>&1; then
   curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path \
@@ -139,6 +178,7 @@ if [ ! -f /src/deps/.seeded-from-host ]; then
   rm -rf /src/deps/* 2>/dev/null || true
   cp -a /host-deps/. /src/deps/
   find /src/deps -name "*.o" -delete
+  find /src/deps -name "*.d" -delete
   rm -rf /src/deps/erlexec/priv
   touch /src/deps/.seeded-from-host
 fi

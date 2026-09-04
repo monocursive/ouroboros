@@ -66,6 +66,18 @@ defmodule Ouroboros.Wasm.ResolutionTest do
       assert Wasm.helper_path() == "/opt/ouro/ouro-wasm"
     end
 
+    test "max_frame_bytes above the helper's ceiling falls back rather than widening" do
+      defaults = Wasm.all()
+      ceiling = Wasm.max_frame_bytes_max()
+
+      assert ceiling == 32 * 1024 * 1024
+      put_wasm_config(max_frame_bytes: ceiling)
+      assert Wasm.config(:max_frame_bytes) == ceiling
+
+      put_wasm_config(max_frame_bytes: ceiling + 1)
+      assert Wasm.config(:max_frame_bytes) == Keyword.fetch!(defaults, :max_frame_bytes)
+    end
+
     test "a `:wasm` key that is not a keyword list is every default, not a crash" do
       put_wasm_config([])
       Application.put_env(:ouroboros, :wasm, %{request_timeout_ms: 1})
