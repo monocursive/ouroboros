@@ -95,7 +95,10 @@ exec docker run --rm --privileged \
     export DEBIAN_FRONTEND=noninteractive
     if ! command -v bwrap >/dev/null 2>&1; then
       apt-get update -qq
-      apt-get install -y -qq bubblewrap build-essential curl git pkg-config libssl-dev >/dev/null
+      # libsctp1: OTP 29 prints a missing-sctp warning on stdout. erlexecs Makefile
+      # captures erl -eval into TARGET, and a timestamp with colons is multiple
+      # target patterns at the all: rule.
+      apt-get install -y -qq bubblewrap build-essential curl git pkg-config libssl-dev libsctp1 >/dev/null
     fi
     echo "==> bwrap: $(bwrap --version)"
 
@@ -152,6 +155,7 @@ if [ ! -f /src/deps/.seeded-from-host ]; then
   rm -rf /src/deps/* 2>/dev/null || true
   cp -a /host-deps/. /src/deps/
   find /src/deps -name "*.o" -delete
+  find /src/deps -name "*.d" -delete
   rm -rf /src/deps/erlexec/priv
   touch /src/deps/.seeded-from-host
 fi

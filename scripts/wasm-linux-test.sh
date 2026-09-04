@@ -97,7 +97,10 @@ exec docker run --rm --privileged \
       # suites sits silent under it until the handshake times out. The hosted runner image
       # has gawk, and so must the proof that stands in for it. (No quotes in this comment: the
       # whole block is one single-quoted bash -c program.)
-      apt-get install -y -qq bubblewrap gawk build-essential curl git pkg-config libssl-dev >/dev/null
+      # libsctp1: OTP 29 prints a missing-sctp warning on stdout. erlexecs Makefile
+      # captures erl -eval into TARGET, and a timestamp with colons is multiple
+      # target patterns at the all: rule.
+      apt-get install -y -qq bubblewrap gawk build-essential curl git pkg-config libssl-dev libsctp1 >/dev/null
     fi
     echo "==> bwrap: $(bwrap --version)"
 
@@ -157,6 +160,7 @@ if [ ! -f /src/deps/.seeded-from-host ]; then
   rm -rf /src/deps/* 2>/dev/null || true
   cp -a /host-deps/. /src/deps/
   find /src/deps -name "*.o" -delete
+  find /src/deps -name "*.d" -delete
   rm -rf /src/deps/erlexec/priv
   touch /src/deps/.seeded-from-host
 fi
