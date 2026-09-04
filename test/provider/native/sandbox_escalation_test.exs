@@ -10,9 +10,9 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
   `config :ouroboros, :permissions_engine` is the seam
   `Ouroboros.Provider.Native.Permissions` already reads.
 
-  A node with no OS sandbox has no denial to escalate — `workspace_write` there is already
-  unsandboxed — so these skip with the reason printed rather than passing green having
-  checked nothing.
+  A node with no OS sandbox has no denial to escalate — `workspace_write` there refuses
+  `bash` rather than wrapping it — so these skip with the reason printed rather than
+  passing green having checked nothing.
 
   Not `async`: the permission engine and the native data directory are node configuration.
   """
@@ -33,8 +33,8 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
                     :none ->
                       [
                         skip:
-                          "no OS sandbox on this node, so `workspace_write` is already " <>
-                            "unsandboxed and there is no denial to escalate"
+                          "no OS sandbox on this node, so `workspace_write` refuses `bash` " <>
+                            "and there is no denial to escalate"
                       ]
 
                     _present ->

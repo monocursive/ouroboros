@@ -12,8 +12,10 @@ defmodule Ouroboros.Mesh do
   entry by node connectivity, never by remote process liveness, because probing the
   owner would turn every lookup into a network call. A returned pid is an observation,
   not a guarantee: a remote agent can already be dead while `:pg` propagates its leave.
-  The mitigation is that every call here converts a failed or unanswered target into an
-  error tuple instead of exiting the caller, so callers must handle
+  `whereis/1` may return one of several replicas; mutating and routing functions refuse
+  that ambiguity instead of picking a winner. `list_agents/0` already exposes
+  `replicas`. The mitigation for a failed or unanswered target is an error tuple
+  instead of exiting the caller, so callers must handle
   `{:error, {:agent_call_failed, kind, reason}}`.
 
   `start_agent/2` is a remote-reachable start surface: `:erpc` from any connected node
@@ -105,7 +107,14 @@ defmodule Ouroboros.Mesh do
     kind, reason -> {:error, {:remote_start_failed, target_node, {kind, reason}}}
   end
 
-  @doc "Returns the deterministic live owner for a logical agent ID."
+  @doc """
+  Returns one visible process for a logical agent ID, if any.
+
+  Observation-only: when `:pg` reports several members, this returns the sorted-first
+  replica. Callers that send or mutate must use `whereis_unique/1` or the routing
+  functions in this module, so split-brain is an error instead of silent mis-delivery.
+  `list_agents/0` already exposes `replicas`.
+  """
   @spec whereis(agent_id()) :: pid() | nil
   def whereis(id) when is_binary(id) do
     id
@@ -113,6 +122,15 @@ defmodule Ouroboros.Mesh do
     |> Enum.sort_by(fn pid -> {Atom.to_string(node(pid)), inspect(pid)} end)
     |> List.first()
   end
+
+  @doc """
+  Returns the unique visible owner for a logical agent ID.
+
+  Unlike `whereis/1`, two or more members is `{:error, {:ambiguous_replicas, id, count}}`
+  rather than an arbitrary pid.
+  """
+  @spec whereis_unique(agent_id()) :: {:ok, pid()} | {:error, term()}
+  def whereis_unique(id) when is_binary(id), do: locate(id)
 
   @doc "Returns every visible process claiming a logical agent ID."
   @spec members(agent_id()) :: [pid()]
@@ -155,7 +173,7 @@ defmodule Ouroboros.Mesh do
       when is_binary(from) and is_binary(to) and is_list(opts) do
     correlation_id = Keyword.get_lazy(opts, :correlation_id, &Jido.Signal.ID.generate!/0)
 
-    with pid when is_pid(pid) <- whereis(to),
+    with {:ok, pid} <- locate(to),
          {:ok, signal} <-
            AgentMessage.new(
              %{
@@ -169,7 +187,6 @@ defmodule Ouroboros.Mesh do
            ) do
       call_agent(pid, signal, Keyword.get(opts, :timeout, 5_000))
     else
-      nil -> {:error, {:agent_not_found, to}}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -182,7 +199,7 @@ defmodule Ouroboros.Mesh do
     task_id = Keyword.get_lazy(opts, :task_id, &Jido.Signal.ID.generate!/0)
     correlation_id = Keyword.get_lazy(opts, :correlation_id, &Jido.Signal.ID.generate!/0)
 
-    with pid when is_pid(pid) <- whereis(to),
+    with {:ok, pid} <- locate(to),
          {:ok, signal} <-
            TaskAssigned.new(
              %{
@@ -197,7 +214,6 @@ defmodule Ouroboros.Mesh do
          {:ok, agent} <- call_agent(pid, signal, Keyword.get(opts, :timeout, 5_000)) do
       {:ok, task_id, agent}
     else
-      nil -> {:error, {:agent_not_found, to}}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -207,11 +223,10 @@ defmodule Ouroboros.Mesh do
           {:ok, Jido.Agent.t()} | {:error, term()}
   def complete_task(id, task_id, result, opts \\ [])
       when is_binary(id) and is_binary(task_id) and is_list(opts) do
-    with pid when is_pid(pid) <- whereis(id),
+    with {:ok, pid} <- locate(id),
          {:ok, signal} <- TaskCompleted.new(%{task_id: task_id, result: result}, subject: id) do
       call_agent(pid, signal, Keyword.get(opts, :timeout, 5_000))
     else
-      nil -> {:error, {:agent_not_found, id}}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -219,23 +234,23 @@ defmodule Ouroboros.Mesh do
   @doc "Returns the full inspectable Jido process state for an agent."
   @spec state(agent_id()) :: {:ok, Jido.AgentServer.State.t()} | {:error, term()}
   def state(id) when is_binary(id) do
-    case whereis(id) do
-      nil -> {:error, {:agent_not_found, id}}
-      pid -> agent_state(pid)
+    case locate(id) do
+      {:ok, pid} -> agent_state(pid)
+      {:error, reason} -> {:error, reason}
     end
   end
 
   @doc "Stops an agent on the node that owns it."
   @spec stop_agent(agent_id()) :: :ok | {:error, term()}
   def stop_agent(id) when is_binary(id) do
-    case whereis(id) do
-      nil ->
-        {:error, {:agent_not_found, id}}
+    case locate(id) do
+      {:error, reason} ->
+        {:error, reason}
 
-      pid when node(pid) == node() ->
+      {:ok, pid} when node(pid) == node() ->
         Ouroboros.Jido.stop_agent(pid)
 
-      pid ->
+      {:ok, pid} ->
         :erpc.call(node(pid), Ouroboros.Jido, :stop_agent, [pid], @remote_call_timeout_ms)
     end
   catch
@@ -245,6 +260,14 @@ defmodule Ouroboros.Mesh do
   @doc "Connects this runtime to another distributed Erlang node."
   @spec connect(node()) :: true | false | :ignored
   def connect(other_node) when is_atom(other_node), do: Node.connect(other_node)
+
+  defp locate(id) do
+    case members(id) do
+      [] -> {:error, {:agent_not_found, id}}
+      [pid] -> {:ok, pid}
+      pids -> {:error, {:ambiguous_replicas, id, length(pids)}}
+    end
+  end
 
   defp do_start_agent(id, agent_module, start_opts) do
     case whereis(id) do

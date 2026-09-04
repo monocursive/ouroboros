@@ -923,6 +923,10 @@ ouro --continue [--or-new] [--workspace PATH]
                       starting one, and --or-new lands on the composer instead
 ouro daemon           spawn only; print port/token-file path; exit
 ouro attach [--addr HOST:PORT] [--token-file PATH]   connect only
+ouro web [--print]    open this daemon's browser surface; starts or adopts a
+                      local runtime, prints the URL that carries the operator
+                      token, and opens a browser unless --print. No --addr:
+                      the endpoint binds loopback on this machine
 ouro new [--provider NAME] [--workspace PATH] [--approval-mode MODE]
          [--message TEXT] [--machine NAME] [--worktree] [--plan] [--print]
                       start an interactive session, then attach focused on it;
@@ -944,6 +948,10 @@ ouro run "PROMPT" [--provider NAME] [--workspace PATH] [--approval-mode MODE]
                       --plan (B2) starts it planning and reports the plan in
                       the result object as `plan`; the plan-exit question is
                       answered keep_planning, including under --approve-all
+ouro agents [--json] [--addr HOST:PORT] [--token-file PATH]
+                      every session this runtime can see, grouped as the
+                      Sessions rail groups them (needs input, working, done);
+                      reads a runtime that is already up and never starts one
 ouro mcp list [--node NODE] [--workspace PATH] [--json]
          [--addr HOST:PORT] [--token-file PATH]
                       every MCP server this runtime runs for the native agent
@@ -963,6 +971,17 @@ ouro ledger [--fleet] [--since N] [--json] [--limit N]
          [--addr HOST:PORT] [--token-file PATH]
                       print the durable effect ledger as a table or NDJSON;
                       reads a runtime that is already up and never starts one
+ouro replay SESSION [--node NAME] [--verify] [--json] [--width N]
+         [--addr HOST:PORT] [--token-file PATH]
+                      re-read a recorded native session against its journal and
+                      print it; executes nothing, spends nothing, writes no
+                      ledger. Two runs at the same width are the same bytes.
+                      --verify also asks the runtime to re-derive the session
+ouro fork SESSION [--node NAME] [--at TURN] [--model SPEC]
+         [--addr HOST:PORT] [--token-file PATH]
+                      branch a recorded session into a new one. The child id
+                      is minted here so a lost reply can only adopt the same
+                      child. --at / --model make it an experiment, not a copy
 ouro fleet create     create private CA/cookie/profile for the first machine
 ouro fleet list       Tailscale peers and SSH config hosts this Mac already knows
 ouro fleet add TARGET --machine NAME --host HOST [--via ssh|tailscale] [--binary FILE]
@@ -1044,6 +1063,16 @@ ouro wasm check [--workspace DIR] [--json] [--helper PATH]
                       workspace — path confinement, byte ceiling, world, the
                       eight-component budget shared across both tables — and exit
                       non-zero on any refusal. Instantiates nothing
+ouro wasm policy FILE --request JSON|PATH|- [--config JSON]
+         [--json] [--helper PATH]
+                      ask a policy component what it would decide about one
+                      permission request and print the verdict and the rule
+                      it stated. Exits non-zero on a deny. Loaded as a policy —
+                      a capability handed here is refused rather than run
+ouro wasm keygen [--out PATH] [--id SIGNER_ID]
+                      write an Ed25519 signer seed and print the two
+                      configuration lines that put it to work. Contacts no
+                      runtime; the key never travels. Refuses to overwrite
 ouro wasm sign FILE --name NAME --author WHO [--import NAME]...
          [--imports-from PATH|-] [--no-local-helper] [--dry-run]
          [--eval PATH] [--start-config JSON] [--out PATH] [--json]
@@ -1076,6 +1105,19 @@ ouro wasm sign FILE --name NAME --author WHO [--import NAME]...
                       be an executable regular file, owned by you or root, that
                       nobody else can rewrite — and the canonical path is the one
                       spawned, so the file checked is the file run (docs/WASM.md D14)
+ouro wasm deploy BUNDLE [--nodes LIST] [--json] [--node MACHINE]
+         [--addr HOST:PORT] [--token-file PATH]
+                      deploy a .ouro-wasm bundle. The node verifies it against
+                      its own trust policy before the store, the helper or the
+                      rollout register hears about it. Exits non-zero unless
+                      the rollout settled live
+ouro wasm rollback NAME [--json] [--node MACHINE]
+         [--addr HOST:PORT] [--token-file PATH]
+                      retire a live capability: stop its wrapper and mark the
+                      rollout. Bytes stay in the store
+ouro wasm ls [--json] [--addr HOST:PORT] [--token-file PATH]
+                      list what a node holds: every lane-W rollout and every
+                      component in the store
 ouro desktop doctor [--probe] [--json] [--addr HOST:PORT] [--token-file PATH]
                       Computer Use readiness on a node. --probe is the operator
                       surface that starts the helper; the default starts nothing
@@ -1093,6 +1135,12 @@ ouro hook post-tool-use
                       hidden. Answers Claude Code's PostToolUse hook with the
                       diagnostics one edit added. Reads JSON on stdin, writes JSON
                       on stdout, exits 0 whatever happened
+ouro update [--check] [--from URL] [--allow-downgrade]
+                      replace this binary with a signed release, or refuse and
+                      say why. Needs the release public key compiled in; a build
+                      without it refuses rather than installing something it cannot
+                      check. --check prints versions and exits 10 if an update
+                      exists; --from names a mirror
 ouro version          client version, embedded release version+sha, protocol
 ouro --dev            spawn `mix run --no-halt` in cwd with gateway env (no embed);
                       defaults to an isolated ouroboros-dev data directory
@@ -2256,9 +2304,9 @@ running when its child finished holds a stale one.
 
 | Group | What lands in it |
 |---|---|
-| **needs input** | a pending approval this client is holding, `awaiting_approval`, or an idle *conversation* — which is waiting for its next prompt, and that prompt is a person's |
-| **working** | `running`, `starting`, `closing`, and an idle coding task, which has nobody to prompt it |
-| **done** | every terminal status |
+| **needs input** | a pending approval this client is holding, or `awaiting_approval` |
+| **working** | `running`, `starting`, `closing` |
+| **done** | every terminal status, and idle on either plane — between turns, waiting on nobody |
 
 The group comes from **declared state and nothing else**. A row whose owner went offline
 keeps whichever group its last complete observation put it in, and keeps the `last-known`

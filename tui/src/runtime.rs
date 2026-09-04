@@ -77,8 +77,8 @@ pub mod embed;
 pub const PUBLICATION_FILE: &str = "gateway.json";
 
 /// What the browser surface publishes after *its* endpoint binds (docs/WEB.md D5). Same
-/// directory, same 0600 write discipline, deliberately the same shape as `gateway.json` —
-/// minus the one field this client would most like it to carry; see [`WebPublication`].
+/// directory, same 0600 write discipline, deliberately the same shape as `gateway.json`
+/// — including `birth` when the daemon wrote one. See [`WebPublication`].
 pub const WEB_PUBLICATION_FILE: &str = "web.json";
 
 /// Where a spawner leaves the token it generated. The gateway is told the path through
@@ -479,23 +479,21 @@ pub struct Publication {
 /// `web.json`, decoded tolerantly for the reason `gateway.json` is: a newer endpoint may
 /// publish more.
 ///
-/// ## Staleness here is weaker than the gateway's, knowingly
+/// ## Staleness matches the gateway when `birth` is present
 ///
 /// [`Publication`] carries `birth`, the exact kernel incarnation, so a recycled PID cannot
-/// make a dead runtime look live. This document carries no such field —
-/// `Ouroboros.Web.Publication.document/3` writes `port`, `protocol`, `node`, `pid`, and
-/// `scope`, plus `token_file` when a file supplied the token, and nothing else — so
-/// [`web_publication_is_live`] can ask only whether *some* process holds that PID today.
-/// Between a killed daemon and its PID being reused, this client would read a stale
-/// publication as live and name a port nobody is listening on.
+/// make a dead runtime look live. `Ouroboros.Web.Publication` now writes the same field
+/// when `RuntimeOwner` has one, so [`web_publication_is_live`] uses the same incarnation
+/// check as [`publication_is_live`].
 ///
-/// That is survivable because of what this record is used for and nothing more: `ouro web`
-/// builds a link and hands it to a browser, which either loads a page or does not. Nothing
-/// reached through here signals a process, removes a file, or authorizes anything. The
-/// checks that do — `ouro stop`, spawn-lock recovery, runtime ownership — read
-/// `gateway.json` or `runtime.owner`, both of which carry `birth`. Closing the gap means
-/// adding `birth` to the document the daemon writes; until that happens this paragraph is
-/// the honest statement of it, not a claim that PID liveness is enough in general.
+/// A file that omits `birth` is a legacy publication from before that write. Liveness
+/// for those is PID-only: this client can ask only whether *some* process holds that PID
+/// today. Between a killed daemon and its PID being reused, a legacy file would read as
+/// live and name a port nobody is listening on. That is still survivable for the same
+/// reason it was: `ouro web` builds a link and hands it to a browser, which either loads
+/// a page or does not. Nothing reached through here signals a process, removes a file, or
+/// authorizes anything. The checks that do — `ouro stop`, spawn-lock recovery, runtime
+/// ownership — read `gateway.json` or `runtime.owner`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct WebPublication {
     pub port: u16,
@@ -505,6 +503,9 @@ pub struct WebPublication {
     pub node: String,
     #[serde(default)]
     pub pid: i32,
+    /// Exact OS process incarnation. Absent on a legacy `web.json` that predates the field.
+    #[serde(default)]
+    pub birth: Option<String>,
     #[serde(default)]
     pub scope: String,
     /// The 0600 file holding the operator token, named rather than embedded. Absent
@@ -549,6 +550,15 @@ impl ProcessIdentity {
 }
 
 impl Publication {
+    pub fn identity(&self) -> Result<Option<ProcessIdentity>> {
+        self.birth
+            .as_deref()
+            .map(|birth| ProcessIdentity::of(self.pid, birth))
+            .transpose()
+    }
+}
+
+impl WebPublication {
     pub fn identity(&self) -> Result<Option<ProcessIdentity>> {
         self.birth
             .as_deref()
@@ -768,12 +778,17 @@ pub fn read_live_publication(data_dir: &Path) -> Result<Option<Publication>> {
     }
 }
 
-/// PID liveness alone. There is no incarnation in `web.json` to check it against, which is
-/// the whole of what [`WebPublication`] documents and why this returns a plain `bool`
-/// where [`publication_is_live`] returns a `Result`: nothing here can fail, because
-/// nothing here is proved.
-pub fn web_publication_is_live(publication: &WebPublication) -> bool {
-    pid_alive(publication.pid)
+/// Incarnation liveness when `web.json` carries `birth`, and PID-only when it does not.
+///
+/// A current daemon writes `birth` the way `gateway.json` does, so the check is
+/// [`publication_is_live`]. A legacy file that omitted the field keeps the weaker
+/// PID-only answer this function used to be, documented rather than silently upgraded:
+/// a recycled PID would read as live, and nothing here is allowed to pretend otherwise.
+pub fn web_publication_is_live(publication: &WebPublication) -> Result<bool> {
+    match publication.identity()? {
+        Some(identity) => process_identity_is_live(&identity),
+        None => Ok(pid_alive(publication.pid)),
+    }
 }
 
 /// Reads `web.json`, or `None` when no endpoint has written one.
@@ -797,6 +812,9 @@ pub fn read_web_publication(data_dir: &Path) -> Result<Option<WebPublication>> {
     if publication.pid <= 0 {
         bail!("{} must contain a positive pid", path.display());
     }
+    if let Some(birth) = publication.birth.as_deref() {
+        validate_birth(birth).with_context(|| format!("invalid birth in {}", path.display()))?;
+    }
     Ok(Some(publication))
 }
 
@@ -805,7 +823,7 @@ pub fn read_web_publication(data_dir: &Path) -> Result<Option<WebPublication>> {
 /// reason to report the surface as missing.
 pub fn read_live_web_publication(data_dir: &Path) -> Result<Option<WebPublication>> {
     match read_web_publication(data_dir)? {
-        Some(publication) if web_publication_is_live(&publication) => Ok(Some(publication)),
+        Some(publication) if web_publication_is_live(&publication)? => Ok(Some(publication)),
         Some(_) | None => Ok(None),
     }
 }
@@ -3678,6 +3696,7 @@ mod tests {
         assert_eq!(publication.port, 4321);
         assert_eq!(publication.protocol, 1);
         assert_eq!(publication.pid, 42);
+        assert_eq!(publication.birth, None);
         assert_eq!(publication.scope, "operate");
         assert_eq!(
             publication.token_file.as_deref(),
@@ -3698,6 +3717,7 @@ mod tests {
         assert_eq!(publication.port, 4321);
         assert_eq!(publication.protocol, 0);
         assert_eq!(publication.scope, "");
+        assert_eq!(publication.birth, None);
         assert_eq!(publication.token_file, None);
 
         assert!(read_web_publication(&scratch("web-publication-absent"))
@@ -3750,7 +3770,17 @@ mod tests {
             format!("{:#}", read_web_publication(&oversized).unwrap_err()).contains("byte limit")
         );
 
-        for dir in [garbage, pidless, broad, linked, oversized] {
+        let malformed_birth = scratch("web-publication-birth");
+        write_private(
+            &malformed_birth.join(WEB_PUBLICATION_FILE),
+            br#"{"port":4321,"pid":42,"birth":"../../reused"}"#,
+        );
+        assert!(
+            format!("{:#}", read_web_publication(&malformed_birth).unwrap_err())
+                .contains("process birth identity is malformed")
+        );
+
+        for dir in [garbage, pidless, broad, linked, oversized, malformed_birth] {
             fs::remove_dir_all(dir).ok();
         }
     }
@@ -3778,6 +3808,54 @@ mod tests {
                 .expect("present")
                 .pid,
             2_147_483_646
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_web_publication_with_birth_uses_the_incarnation_not_just_the_pid() {
+        let dir = scratch("web-publication-incarnation");
+        let path = dir.join(WEB_PUBLICATION_FILE);
+        let live = std::process::id() as i32;
+        let birth = process_birth(live)
+            .expect("a readable process incarnation")
+            .expect("this test process is live");
+
+        write_private(
+            &path,
+            format!(r#"{{"port":4321,"pid":{live},"birth":"{birth}"}}"#).as_bytes(),
+        );
+        assert!(web_publication_is_live(
+            &read_web_publication(&dir)
+                .expect("readable")
+                .expect("present")
+        )
+        .expect("a well-formed birth"));
+        assert!(read_live_web_publication(&dir).expect("readable").is_some());
+
+        fs::remove_file(&path).expect("the matching publication");
+        write_private(
+            &path,
+            format!(r#"{{"port":4321,"pid":{live},"birth":"test:other-incarnation"}}"#).as_bytes(),
+        );
+
+        // Same PID, different birth: a recycled PID, not this process. PID-only
+        // liveness would call this live; incarnation liveness must not.
+        assert!(!web_publication_is_live(
+            &read_web_publication(&dir)
+                .expect("readable")
+                .expect("present")
+        )
+        .expect("a well-formed birth"));
+        assert!(read_live_web_publication(&dir).expect("readable").is_none());
+        assert_eq!(
+            read_web_publication(&dir)
+                .expect("readable")
+                .expect("present")
+                .birth
+                .as_deref(),
+            Some("test:other-incarnation")
         );
 
         fs::remove_dir_all(&dir).ok();

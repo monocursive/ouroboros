@@ -247,13 +247,15 @@ impl SessionInfo {
             return Triage::Working;
         }
 
-        // `idle` on the interactive plane is a conversation waiting for its next prompt —
-        // a human's turn, which is exactly what this grouping is for. On the coding plane
-        // there is nobody to prompt it, so an idle task is simply between turns.
-        match (self.plane, &self.status) {
-            (Plane::Interactive, SessionStatus::Idle) => Triage::NeedsInput,
-            _otherwise => Triage::Working,
+        // Idle is between turns, not blocked on a human. NeedsInput is reserved for an
+        // unanswered approval (the checks above). The web rail uses the same grouping —
+        // SETTLED — so that bucket stays a real ask rather than filling with conversations
+        // waiting for their next prompt.
+        if self.status == SessionStatus::Idle {
+            return Triage::Done;
         }
+
+        Triage::Working
     }
 }
 
@@ -4394,6 +4396,11 @@ mod tests {
         assert_eq!(sessions[0].id, "session-0000000000000000000001");
         assert_eq!(sessions[0].status, SessionStatus::Idle);
         assert_eq!(sessions[0].provider.as_deref(), Some("claude_code"));
+        assert_eq!(
+            sessions[0].triage(0),
+            Triage::Done,
+            "idle interactive is settled, not needs-input"
+        );
 
         let tasks = status
             .coding_tasks
@@ -4430,6 +4437,36 @@ mod tests {
         )
         .expect("a forward-compatible session row");
         assert_eq!(future.reasoning_effort, None);
+    }
+
+    fn session_row(plane: Plane, status: &str) -> SessionInfo {
+        SessionInfo::decode(plane, &serde_json::json!({ "id": "s", "status": status }))
+            .expect("a session row")
+    }
+
+    #[test]
+    fn idle_is_settled_and_needs_input_is_reserved_for_approvals() {
+        assert_eq!(
+            session_row(Plane::Interactive, "idle").triage(0),
+            Triage::Done
+        );
+        assert_eq!(session_row(Plane::Coding, "idle").triage(0), Triage::Done);
+        assert_eq!(
+            session_row(Plane::Interactive, "awaiting_approval").triage(0),
+            Triage::NeedsInput
+        );
+        assert_eq!(
+            session_row(Plane::Interactive, "running").triage(1),
+            Triage::NeedsInput
+        );
+        assert_eq!(
+            session_row(Plane::Interactive, "running").triage(0),
+            Triage::Working
+        );
+        assert_eq!(
+            session_row(Plane::Interactive, "completed").triage(0),
+            Triage::Done
+        );
     }
 
     #[test]

@@ -325,11 +325,13 @@ if config_env() == :prod do
   config :ouroboros,
     node_role: node_role,
     forge_builder_node: forge_builder_node,
-    coding_storage: {Jido.Storage.File, path: Path.join(data_dir, "coding")},
-    interactive_storage: {Jido.Storage.File, path: Path.join(data_dir, "interactive")},
-    team_storage: {Jido.Storage.File, path: Path.join(data_dir, "teams")},
-    orchestration_storage: {Jido.Storage.File, path: Path.join(data_dir, "orchestration")},
-    control_storage: {Jido.Storage.File, path: Path.join(data_dir, "control")},
+    # Acknowledged session, team, and plan transitions must survive the crash that
+    # follows them — the same synced write the effect ledger uses.
+    coding_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "coding")},
+    interactive_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "interactive")},
+    team_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "teams")},
+    orchestration_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "orchestration")},
+    control_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "control")},
     # The effect authority decides what agents may do to the cluster, so it is held to
     # the same synced write the mutation journals use: a grant that was acknowledged
     # must survive the crash that follows it, and a revocation must too.

@@ -277,13 +277,13 @@ mod tests {
         let rows = group(&interactive, &coding);
         let value = render_json(&rows);
 
-        assert_eq!(value["counts"]["needs_input"], 1);
+        assert_eq!(value["counts"]["needs_input"], 0);
         assert_eq!(value["counts"]["working"], 0);
-        assert_eq!(value["counts"]["done"], 1);
-        assert_eq!(value["groups"]["needs_input"][0]["id"], "s1");
-        assert_eq!(value["groups"]["done"][0]["plane"], "coding");
+        assert_eq!(value["counts"]["done"], 2);
+        assert_eq!(value["groups"]["done"][0]["id"], "s1");
+        assert_eq!(value["groups"]["done"][1]["plane"], "coding");
         assert_eq!(
-            value["groups"]["done"][0]["session"]["node"], "ouroboros@beta",
+            value["groups"]["done"][1]["session"]["node"], "ouroboros@beta",
             "the runtime's own row travels whole"
         );
     }

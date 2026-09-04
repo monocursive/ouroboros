@@ -21,6 +21,7 @@ defmodule Ouroboros.Provider.Session.ServiceTest do
     on_exit(fn ->
       Application.delete_env(:ouroboros, :permissions)
       Application.delete_env(:ouroboros, :native_sandbox)
+      Application.delete_env(:ouroboros, :allow_unsandboxed_bash)
     end)
 
     workspace =
@@ -328,7 +329,7 @@ defmodule Ouroboros.Provider.Session.ServiceTest do
     test "a terminal event carries a digest and a bounded command, never more", %{
       workspace: workspace
     } do
-      Application.put_env(:ouroboros, :native_sandbox, :none)
+      allow_unsandboxed_terminals!()
       Application.put_env(:ouroboros, :permissions, [{"Bash(echo *)", :allow}])
 
       executable = fake_acp(terminal_cases("echo", args: [String.duplicate("z", 400)]))
@@ -351,7 +352,7 @@ defmodule Ouroboros.Provider.Session.ServiceTest do
     test "create, wait, output and release carry one command's whole life", %{
       workspace: workspace
     } do
-      Application.put_env(:ouroboros, :native_sandbox, :none)
+      allow_unsandboxed_terminals!()
       Application.put_env(:ouroboros, :permissions, [{"Bash(printf *)", :allow}])
 
       # `command` plus `args` is ACP's own shape, and the argument has spaces in it, so
@@ -380,7 +381,7 @@ defmodule Ouroboros.Provider.Session.ServiceTest do
     end
 
     test "output is bounded to the tail with truncated set", %{workspace: workspace} do
-      Application.put_env(:ouroboros, :native_sandbox, :none)
+      allow_unsandboxed_terminals!()
       Application.put_env(:ouroboros, :permissions, [{"Bash(printf *)", :allow}])
 
       # 64 bytes asked for; the command writes 400, so only the newest bytes survive.
@@ -421,7 +422,7 @@ defmodule Ouroboros.Provider.Session.ServiceTest do
     test "with no rule a terminal becomes an approval, and a yes starts it", %{
       workspace: workspace
     } do
-      Application.put_env(:ouroboros, :native_sandbox, :none)
+      allow_unsandboxed_terminals!()
 
       executable = fake_acp(terminal_cases("printf", args: ["ok"]))
       handle = open!(executable, workspace)
@@ -461,6 +462,25 @@ defmodule Ouroboros.Provider.Session.ServiceTest do
       assert :ok = ACP.close(handle)
     end
 
+    test "workspace_write on a node with no OS sandbox refuses the terminal", %{
+      workspace: workspace
+    } do
+      Application.put_env(:ouroboros, :native_sandbox, :none)
+      Application.put_env(:ouroboros, :allow_unsandboxed_bash, false)
+      Application.put_env(:ouroboros, :permissions, [{"Bash(printf *)", :allow}])
+
+      executable = fake_acp(terminal_cases("printf", args: ["ok"]))
+      handle = open!(executable, workspace)
+      assert :ok = ACP.send(handle, TurnRequest.new!("run it"), "turn-1")
+      assert %{turn_id: "turn-1"} = await_event(:turn_completed)
+
+      assert %{"error" => %{"code" => -32_001, "message" => message}} = reply_to(executable, 60)
+      assert message =~ "workspace_write"
+      assert message =~ "no OS sandbox"
+      assert message =~ "OUROBOROS_ALLOW_UNSANDBOXED_BASH=1"
+      assert :ok = ACP.close(handle)
+    end
+
     test "a session holds at most the declared number of terminals", %{workspace: workspace} do
       state = %{Service.new() | live: Service.limits().max_terminals}
 
@@ -486,7 +506,7 @@ defmodule Ouroboros.Provider.Session.ServiceTest do
     end
 
     test "closing the session kills every terminal it started", %{workspace: workspace} do
-      Application.put_env(:ouroboros, :native_sandbox, :none)
+      allow_unsandboxed_terminals!()
       Application.put_env(:ouroboros, :permissions, [{"Bash(sleep *)", :allow}])
 
       executable = fake_acp(terminal_cases("sleep", args: ["120"], stop_after: :create))
@@ -705,6 +725,14 @@ defmodule Ouroboros.Provider.Session.ServiceTest do
         ;;
     #{follow_on}
     """
+  end
+
+  # ACP terminal tests that exercise spawn, approval, and kill — not the fail-closed
+  # sandbox decision — opt into the old unsandboxed path explicitly. The default
+  # `workspace_write` + `:none` refusal is asserted on its own cases.
+  defp allow_unsandboxed_terminals! do
+    Application.put_env(:ouroboros, :native_sandbox, :none)
+    Application.put_env(:ouroboros, :allow_unsandboxed_bash, true)
   end
 
   defp open!(executable, workspace, options \\ []) do

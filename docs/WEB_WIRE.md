@@ -538,8 +538,8 @@ posture is `tailscale serve` or an operator's reverse proxy, and the refusal tex
 
 Publication: extend `gateway.json` with the WebSocket port rather than minting a second
 file. A client that already reads the publication to find the gateway should not need to
-learn a second discovery mechanism, and `web.json`'s missing `birth` field is a known gap
-this document should not duplicate (`WEB.md:246-250`).
+learn a second discovery mechanism. `web.json` carries `birth` the same way
+`gateway.json` does (`WEB.md` D14); a legacy file that omitted it stays PID-only.
 
 ### What the transport deliberately does not do
 
@@ -798,6 +798,6 @@ terms.
   maintenance cost here, which is worth weighing when counting what each option leaves
   behind to keep in sync.
 - **Unchanged and still open from `WEB.md`:** the removal checklist has not been walked
-  end to end (`WEB.md:601-608`); `web.json` carries no `birth` (`WEB.md:246-250`); and
-  `app.js` remains unexecuted by any test (`WEB.md:673-690`) — which W1 leaves exactly as
-  it is and W2 would make substantially worse.
+  end to end (`WEB.md:601-608`); and `app.js` remains unexecuted by any test
+  (`WEB.md:673-690`) — which W1 leaves exactly as it is and W2 would make substantially
+  worse. `web.json` now carries `birth` (`WEB.md` D14).

@@ -21,7 +21,9 @@ defmodule Ouroboros.Web.Watch do
   different things going wrong and one thing to do about them: `subscribe(cursor)`. The
   LiveView owns that call; this module owns the number it is called with. In-process
   removes the gateway's lag protocol but not the algorithm — a subscriber whose mailbox
-  the plane outran loses events exactly the way a lagging socket did.
+  the plane outran loses events exactly the way a lagging socket did. `mailbox_lagged?/1`
+  is that detection, measured against `window/0`; the LiveView's repair is still
+  `subscribe(cursor)`.
 
   ## A silent prune is inferred, never waited for
 
@@ -84,6 +86,23 @@ defmodule Ouroboros.Web.Watch do
   @doc "How many events one watch holds before trimming starts costing the floor."
   @spec window() :: pos_integer()
   def window, do: @window
+
+  @doc """
+  Whether a LiveView mailbox has fallen behind the plane by a full watch of work.
+
+  The cap is `window/0`, not a second number. A queue that long is already a hole: even
+  absorbing every message would trim the oldest on the way in, and the repair is the
+  same as the coordinator's `:DOWN` — `subscribe(cursor)`. In-process subscribers have
+  no `stream.lagged` protocol; this is that protocol's local equivalent, measured in
+  mailbox depth rather than outbound frames.
+
+  Pure: it is a predicate on a length so the LiveView can ask
+  `Process.info(self(), :message_queue_len)` after the current message is already
+  dequeued and this module stays free of processes. At the window, that remaining
+  length means at least one more than the window was queued.
+  """
+  @spec mailbox_lagged?(non_neg_integer()) :: boolean()
+  def mailbox_lagged?(len) when is_integer(len) and len >= 0, do: len >= @window
 
   @doc """
   A watch of a session nothing has been read from yet.

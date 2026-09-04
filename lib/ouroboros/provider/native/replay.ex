@@ -55,14 +55,13 @@ defmodule Ouroboros.Provider.Native.Replay do
   evicted. Each is `{:replay_boundary, reason, seq}`: the turns before it are verified and
   reported as verified, and everything after it is refused rather than guessed at.
 
-  ## The seam this engine cannot supply for itself
+  ## The seam this engine asks rather than assumes
 
-  R1 defined `tool_source` and wired it into the *inference* ledger gate, but the tool
-  dispatch path in `Loop` does not consult it. Until it does, replaying a turn that called
-  a tool would *run* the tool and account for it — the two things replay must never do. So
-  the engine asks the loop (`Ouroboros.Provider.Native.Replay.Seam`) and, where the seam is
-  absent, bounds a tool-calling turn by name instead of running it. Asking rather than
-  assuming is what lets this file need no edit on the day the seam lands.
+  `Loop.dispatch/2` consults `tool_source` first: anything but `:live` answers from the
+  recorded `tool_result` map and never looks up, gates, or executes a tool. Replay still
+  asks `Ouroboros.Provider.Native.Replay.Seam` once per VM instead of carrying a constant
+  somebody has to remember to flip. If a future loop drops the field, the probe bounds a
+  tool-calling turn by name rather than running it.
   """
 
   alias Ouroboros.Provider.Native.Checkpoint

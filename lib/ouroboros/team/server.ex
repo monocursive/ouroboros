@@ -151,11 +151,10 @@ defmodule Ouroboros.Team.Server do
 
   def handle_call(:coordinator_state, _from, state) do
     reply =
-      with pid when is_pid(pid) <- Ouroboros.Mesh.whereis(state.coordinator_id),
+      with {:ok, pid} <- unique_coordinator(state),
            :ok <- verify_coordinator_owner(pid, state.id, state.coordinator_id) do
         safe_agent_state(pid)
       else
-        nil -> {:error, {:coordinator_not_found, state.coordinator_id}}
         {:error, reason} -> {:error, reason}
       end
 
@@ -365,7 +364,7 @@ defmodule Ouroboros.Team.Server do
       _ = stop_exact(worker.pid)
     end)
 
-    with pid when is_pid(pid) <- Ouroboros.Mesh.whereis(state.coordinator_id),
+    with {:ok, pid} <- unique_coordinator(state),
          :ok <- verify_coordinator_owner(pid, state.id, state.coordinator_id) do
       _ = stop_exact(pid)
     end
@@ -929,14 +928,14 @@ defmodule Ouroboros.Team.Server do
   end
 
   defp start_or_adopt_worker(%Worker{} = worker, coordinator_id) do
-    case Ouroboros.Mesh.whereis(worker.id) do
-      pid when is_pid(pid) and node(pid) == worker.node ->
+    case Ouroboros.Mesh.whereis_unique(worker.id) do
+      {:ok, pid} when node(pid) == worker.node ->
         {:ok, pid}
 
-      pid when is_pid(pid) ->
+      {:ok, pid} ->
         {:error, {:worker_owner_conflict, worker.id, worker.node, node(pid)}}
 
-      nil ->
+      {:error, {:agent_not_found, _}} ->
         case Ouroboros.Mesh.start_agent_on(worker.node, worker.id,
                role: worker.role,
                parent_id: coordinator_id
@@ -945,6 +944,9 @@ defmodule Ouroboros.Team.Server do
           {:error, {:already_started, pid}} when is_pid(pid) -> {:ok, pid}
           {:error, reason} -> {:error, {:worker_restore_failed, worker.id, reason}}
         end
+
+      {:error, reason} ->
+        {:error, {:worker_restore_failed, worker.id, reason}}
     end
   end
 
@@ -1260,6 +1262,14 @@ defmodule Ouroboros.Team.Server do
       {:error, {:coordinator_owner_verification_failed, coordinator_id, kind, reason}}
   end
 
+  defp unique_coordinator(state) do
+    case Ouroboros.Mesh.whereis_unique(state.coordinator_id) do
+      {:ok, pid} -> {:ok, pid}
+      {:error, {:agent_not_found, _}} -> {:error, {:coordinator_not_found, state.coordinator_id}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp verify_coordinator_owner(pid, team_id, coordinator_id) do
     case Jido.AgentServer.state(pid) do
       {:ok,
@@ -1337,14 +1347,14 @@ defmodule Ouroboros.Team.Server do
   end
 
   defp signal_coordinator(state, signal) do
-    case Ouroboros.Mesh.whereis(state.coordinator_id) do
-      pid when is_pid(pid) ->
+    case unique_coordinator(state) do
+      {:ok, pid} ->
         with :ok <- verify_coordinator_owner(pid, state.id, state.coordinator_id) do
           Jido.AgentServer.call(pid, signal)
         end
 
-      nil ->
-        {:error, {:coordinator_not_found, state.coordinator_id}}
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -1381,41 +1391,39 @@ defmodule Ouroboros.Team.Server do
   end
 
   defp attach_worker(state, pid, worker_id, worker_node, role) do
-    coordinator_pid = Ouroboros.Mesh.whereis(state.coordinator_id)
+    case unique_coordinator(state) do
+      {:error, reason} ->
+        {:error, reason}
 
-    ownership =
-      if is_pid(coordinator_pid),
-        do: verify_coordinator_owner(coordinator_pid, state.id, state.coordinator_id),
-        else: {:error, {:coordinator_not_found, state.coordinator_id}}
+      {:ok, coordinator_pid} ->
+        ownership = verify_coordinator_owner(coordinator_pid, state.id, state.coordinator_id)
 
-    cond do
-      not is_pid(coordinator_pid) ->
-        {:error, {:coordinator_not_found, state.coordinator_id}}
+        cond do
+          ownership != :ok ->
+            ownership
 
-      ownership != :ok ->
-        ownership
+          node(pid) != node(coordinator_pid) ->
+            # Jido 2.3.3's adopt_child/4 calls Process.alive?/1, which rejects a
+            # remote PID. Keep this relationship explicit rather than pretending it
+            # is represented in Jido's local child table.
+            {:ok, :mesh_remote}
 
-      node(pid) != node(coordinator_pid) ->
-        # Jido 2.3.3's adopt_child/4 calls Process.alive?/1, which rejects a
-        # remote PID. Keep this relationship explicit rather than pretending it
-        # is represented in Jido's local child table.
-        {:ok, :mesh_remote}
+          true ->
+            case Jido.AgentServer.adopt_child(
+                   coordinator_pid,
+                   pid,
+                   {:worker, worker_id},
+                   %{team_id: state.id, role: role, node: worker_node}
+                 ) do
+              {:ok, ^pid} ->
+                {:ok, :jido_child}
 
-      true ->
-        case Jido.AgentServer.adopt_child(
-               coordinator_pid,
-               pid,
-               {:worker, worker_id},
-               %{team_id: state.id, role: role, node: worker_node}
-             ) do
-          {:ok, ^pid} ->
-            {:ok, :jido_child}
+              {:error, {:tag_in_use, {:worker, ^worker_id}}} ->
+                existing_child?(coordinator_pid, worker_id, pid)
 
-          {:error, {:tag_in_use, {:worker, ^worker_id}}} ->
-            existing_child?(coordinator_pid, worker_id, pid)
-
-          {:error, reason} ->
-            {:error, reason}
+              {:error, reason} ->
+                {:error, reason}
+            end
         end
     end
   end

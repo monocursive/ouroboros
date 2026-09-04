@@ -10,8 +10,9 @@ defmodule Ouroboros.Upgrade.Signing.Key do
   This is containment of accidents, not of the VM. Anything running on this node can
   read this struct's fields directly — `:sys.get_state/1` alone is enough. The boundary
   that matters is the one around the host: a signer node runs
-  `Ouroboros.Upgrade.Signing.Service` and cluster formation and nothing else, and the
-  key never leaves it. See the service's moduledoc for what that does and does not buy.
+  `Ouroboros.Upgrade.Signing.Service` and cluster formation (plus `RuntimeOwner` when a
+  data directory is configured), and the key never leaves it. See the service's
+  moduledoc for what that does and does not buy.
   """
 
   @enforce_keys [:signer_id, :public, :secret]
@@ -35,7 +36,9 @@ end
 defmodule Ouroboros.Upgrade.Signing.Service do
   @moduledoc """
   The signing authority: a key, an independent policy, and a durable record, on a node
-  whose supervision tree contains nothing else.
+  whose supervision tree contains this service, cluster formation, and — when a data
+  directory is configured — the durable-directory owner, and nothing that holds sessions
+  or teams.
 
   `Ouroboros.Upgrade.Forge.Signer` describes the seam. This is the thing on the other
   side of it. The forge asks; this process decides, and it decides *before* a signature

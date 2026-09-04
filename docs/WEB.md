@@ -243,11 +243,17 @@ imprecise or silent:
   the window where a fresh spawn has one publication and not the other is real. The
   timeout names `OUROBOROS_WEB=0` as the likeliest cause; a `web.json` left behind by a
   dead pid gets its own sentence, because that is a different situation.
-- **Known gap:** `web.json` carries no `birth`, so staleness here is PID liveness alone —
-  weaker than `gateway.json`'s incarnation check, and a recycled PID would read as live.
-  It is survivable only because nothing reached through this record signals a process or
-  authorizes anything: it produces a link a browser either loads or does not. Adding
-  `birth` to `Ouroboros.Web.Publication.document/3` closes it.
+- **Closed:** `web.json` now carries `birth` when `RuntimeOwner` has one, so staleness
+  here is the same incarnation check as `gateway.json`. A recycled PID cannot make a
+  dead endpoint look live. A file that omits the field is a legacy publication: liveness
+  for those is still PID-only, and `ouro web` documents that rather than silently
+  upgrading it. Adding `birth` to `Ouroboros.Web.Publication.document/2` closed the gap.
+
+  **As built:** `document/2` claims `RuntimeOwner` the way the gateway listener
+  does and writes `birth` when the claim has one. A registered owner that cannot answer
+  refuses the boot rather than publishing a pid this VM invented. `ouro web` uses the
+  same incarnation check as `gateway.json` when the field is present, and PID-only
+  liveness only for a legacy file that omitted it.
 
 ## 3. Dependencies and assets (D6)
 
@@ -465,6 +471,13 @@ under load is cleaned up by the plane's monitor and recovers on remount via
 mailbox growth on a wedged view, the remedy is a `Process.info(:message_queue_len)`
 self-check that kills the view, not a new protocol.
 
+**As built:** DeckLive now self-checks mailbox depth against `Watch.window/0` (2,000)
+on plane events and the 80 ms flush. A lagged view drops queued plane events, notes
+`:client_dropped`, and resubscribes from the contiguous cursor — the same repair as
+`:DOWN` — so the operator keeps the page. Crash-and-remount would also empty the
+mailbox; resubscribe is preferred. `Watch.mailbox_lagged?/1` is the predicate. No new
+wire protocol, no Wire byte caps.
+
 Session lists, status, providers, models: polled with the TUI's cadences and its
 visibility rule ("Only the visible tab" — `ui/app/mod.rs:2310`), which for LiveView means
 "only mounted views poll, each for what it shows." Models are fetched where a picker will
@@ -500,9 +513,9 @@ PR-sized, each green before the next; W1–W2 are deliberately before any transc
   - **Scope had to be stated by the client.** D5 says `spawn_env` adds `OUROBOROS_WEB=1`;
     that alone would have served every `ouro`-spawned daemon a `read`-scope browser beside
     an `operate` terminal. The full reasoning is in D14's as-built notes.
-  - **`web.json` carries no `birth`**, so staleness is PID liveness alone — weaker than
-    `gateway.json`'s incarnation check. Survivable because nothing reached through this
-    record signals a process or authorizes anything; see D14, "Known gap".
+  - **`web.json` carries `birth`** when `RuntimeOwner` has one, so staleness is the
+    same incarnation check as `gateway.json`. A legacy file that omitted the field
+    stays PID-only; see D14.
 - **W1 — golden transcript corpus.** ✅ **Landed.** Fixtures + Elixir drift tests + Rust
   accounting + Rust presentation/projection snapshot tests. No web code.
 - **W2 — `Web.Presentation` + `Web.Transcript`** ✅ **Landed**, against the corpus; parity
@@ -522,16 +535,12 @@ PR-sized, each green before the next; W1–W2 are deliberately before any transc
     Everything else is unchanged: contiguous high-water cursor, one repair function, floors
     that render as dividers and never discard. `Watch.has_gap?/1` is kept as the question to
     ask if that stops being true.
-  - **`NEEDS YOU` deliberately diverges from the TUI's triage.** §4 says the rules are
-    "ported from `tui/src/ui/app/session.rs:380`", and they are, with one door closed:
-    an **idle** interactive session settles here, where `SessionInfo::triage`
-    (`tui/src/model.rs:249-254`) routes it to `NeedsInput` on the argument that a
-    conversation waiting for its next prompt is a human's turn. On a rail a person scans
-    for work that argument does not survive contact — every conversation anyone has
-    finished reading is idle, so the group meant to hold "a machine is blocked on you right
-    now" fills with sessions nobody owes anything, and a first live pass found exactly
-    that. Intentional, and stated in `Ouroboros.Web.Live.Rail`'s own docs so the two
-    surfaces can be reconciled deliberately rather than by accident.
+  - **`NEEDS YOU` matches the TUI's triage.** An idle session settles on either plane;
+    `SessionInfo::triage` (`tui/src/model.rs`) maps idle to `Triage::Done` for the same
+    reason: the group meant to hold "a machine is blocked on you right now" must not fill
+    with every conversation anyone has finished reading. Approvals and `awaiting_approval`
+    still promote the row. Stated in `Ouroboros.Web.Live.Rail` so the two surfaces stay
+    one rule.
   - **Markdown is Earmark *plus* an allowlist renderer**, not §3's "Earmark" alone.
     `escape: true` covers less than its name suggests, and this was measured rather than
     assumed: inline raw HTML is escaped, **block-level** raw HTML is parsed into a real AST
@@ -663,13 +672,11 @@ packages and gained nothing; no surviving crate moved versions.
 - **Mailbox growth on wedged views** (§8) — mitigation stated; measure in W3 with the
   streaming-test load recipe before inventing anything.
 
-  **As built: still unmeasured, and therefore still open.** W3 built the mitigations —
-  O(delta) stream rendering inside a bounded window with floors on trim, deltas coalesced
-  to one projection per 80 ms flush, and crash-and-resync as the lag path — but no test in
-  this tree drives a view hard enough to observe a mailbox growing, and there is no
-  `Process.info(:message_queue_len)` self-check anywhere. §8's instruction not to invent
-  anything before measuring still stands; nobody has measured. This is the one risk in this
-  list that a slice was supposed to close and did not.
+  **As built: the self-check is in; the load recipe is still unmeasured.** DeckLive
+  now asks `Watch.mailbox_lagged?/1` on live events and the coalesced flush, then
+  resubscribes from the cursor after dropping the queued plane events (see §8). No test
+  in this tree drives a view hard enough to observe a mailbox growing under a real
+  stream; that measurement is still open. The missing guard is not.
 - **Two operate surfaces**: gateway + web double the credentialed perimeter. Same
   credential, same postures, but the security-review pass in W0 should walk the Phoenix
   endpoint with the same eyes that reviewed the listener (frame limits → body limits,

@@ -423,11 +423,14 @@ defmodule Ouroboros.Wasm.Rollout do
   @doc false
   @spec withdraw(String.t(), String.t()) :: :not_needed | :rolled_back | :unchanged | :quarantined
   def withdraw(id, component_sha256) when is_binary(id) and is_binary(component_sha256) do
-    case Mesh.whereis(id) do
-      nil ->
+    case Mesh.whereis_unique(id) do
+      {:error, {:agent_not_found, _}} ->
         :not_needed
 
-      _pid ->
+      {:error, _reason} ->
+        :quarantined
+
+      {:ok, _pid} ->
         if holder_component(id) == component_sha256, do: stop(id), else: :unchanged
     end
   rescue

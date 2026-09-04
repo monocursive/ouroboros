@@ -234,9 +234,22 @@ defmodule Ouroboros.Provider.Native.Prompt do
     |> String.trim()
   end
 
+  defp posture({:refused, {:workspace_write_without_backend, _detection}}, approval_mode) do
+    """
+    This node has **no OS sandbox available**. File tools remain bounded by the workspace
+    path checks above, but `bash` is refused rather than run unsandboxed — a workspace-write
+    label a shell can step out of would be a lie about the label. Ask the human to install
+    `ouro-sandbox`, `bwrap`, or `sandbox-exec`, or to set
+    `OUROBOROS_ALLOW_UNSANDBOXED_BASH=1` if they accept an unsandboxed shell on this
+    node.#{approvals(approval_mode)}
+    """
+    |> String.trim()
+  end
+
   defp posture({:unsandboxed, {:no_backend, _detection}}, approval_mode) do
     """
-    This node has **no OS sandbox available**. `bash` runs with the operator's own
+    This node has **no OS sandbox available**. The operator opted into an unsandboxed
+    shell (`OUROBOROS_ALLOW_UNSANDBOXED_BASH=1`). `bash` runs with the operator's own
     privileges and can write outside the workspace or reach the network. Path checks
     still contain the file tools, and permission rules and approvals still gate the
     command. Treat destructive commands accordingly.#{approvals(approval_mode)}

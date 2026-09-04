@@ -103,11 +103,13 @@ defmodule Ouroboros.Provider.Native.PromptTest do
     assert refused =~ "no OS sandbox that can make a shell read-only"
   end
 
-  test "states when writable execution is unsandboxed" do
+  test "refuses bash when writable execution has no OS sandbox" do
     prompt = Prompt.base(Keyword.put(@opts, :sandbox, @none))
 
     assert prompt =~ "no OS sandbox available"
-    assert prompt =~ "can write outside the workspace or reach the network"
+    assert prompt =~ "`bash` is refused rather than run unsandboxed"
+    assert prompt =~ "OUROBOROS_ALLOW_UNSANDBOXED_BASH=1"
+    refute prompt =~ "runs with the operator's own"
   end
 
   test "describes the approval posture the session actually runs under" do

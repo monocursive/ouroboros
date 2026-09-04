@@ -71,6 +71,15 @@ defmodule Ouroboros.Web.EndpointTest do
       assert published["token_file"] == token_path
       assert is_integer(published["pid"]) and published["pid"] > 0
 
+      # Birth is the same claim `gateway.json` publishes, present exactly when
+      # `RuntimeOwner` is claiming this VM. A test that starts only the web tree has
+      # none; the document tests below pin both shapes without standing that process up.
+      if Process.whereis(Ouroboros.RuntimeOwner) do
+        assert is_binary(published["birth"]) and published["birth"] != ""
+      else
+        refute Map.has_key?(published, "birth")
+      end
+
       # The whole point of naming the file rather than the value.
       refute raw =~ @token
     end
@@ -114,15 +123,55 @@ defmodule Ouroboros.Web.EndpointTest do
       config = Config.new!(data_dir: dir, token: @token <> "-from-the-environment")
 
       assert config.token_file == nil
-      refute Map.has_key?(Publication.document(config, 4560, 99), "token_file")
+      refute Map.has_key?(Publication.document(config, 4560, %{pid: 99}), "token_file")
 
-      assert Publication.document(config, 4560, 99) == %{
+      assert Publication.document(config, 4560, %{pid: 99}) == %{
                "port" => 4560,
                "protocol" => 1,
                "node" => Atom.to_string(node()),
                "pid" => 99,
                "scope" => "read"
              }
+    end
+
+    test "names birth when the owner has one, and omits it when it does not", %{data_dir: dir} do
+      config = Config.new!(data_dir: dir, token: @token <> "-from-the-environment")
+
+      with_birth = Publication.document(config, 4560, %{pid: 99, birth: "test:web:99"})
+      without_birth = Publication.document(config, 4560, %{pid: 99, birth: nil})
+
+      assert with_birth["birth"] == "test:web:99"
+      refute Map.has_key?(without_birth, "birth")
+    end
+
+    test "claims pid and birth from RuntimeOwner rather than inventing them", %{
+      config: config,
+      data_dir: dir
+    } do
+      # Fail-closed: a registered owner is the only source of either fact. The named
+      # process is how `document/2` finds it, the same `whereis` the gateway listener uses.
+      refute Process.whereis(Ouroboros.RuntimeOwner)
+
+      start_supervised!(
+        {Ouroboros.RuntimeOwner,
+         data_dir: dir,
+         os_pid: 4242,
+         identity: "web-publication-vm",
+         birth: "test:web:4242",
+         pid_state: fn _pid -> :alive end,
+         birth_state: fn _pid, _birth -> :alive end}
+      )
+
+      published = Publication.document(config, 4560)
+
+      assert published["pid"] == 4242
+      assert published["birth"] == "test:web:4242"
+
+      start_supervised!({Ouroboros.Web, config: config})
+      written = Endpoint.publication_path(dir) |> File.read!() |> JSON.decode!()
+
+      assert written["pid"] == 4242
+      assert written["birth"] == "test:web:4242"
     end
   end
 
@@ -199,7 +248,7 @@ defmodule Ouroboros.Web.EndpointTest do
 
   defp republish(config, port) do
     path = Endpoint.publication_path(config.data_dir)
-    File.write!(path, JSON.encode_to_iodata!(Publication.document(config, port, 1)))
+    File.write!(path, JSON.encode_to_iodata!(Publication.document(config, port, %{pid: 1})))
     File.chmod!(path, 0o600)
     on_exit(fn -> File.rm(path) end)
   end

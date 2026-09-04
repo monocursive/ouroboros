@@ -147,6 +147,24 @@ defmodule Ouroboros.Provider.Native.WebFetchTest do
       assert result.output =~ "hello from the listener"
     end
 
+    test "the Host header is the original host, not a substitute for the pinned address", %{
+      context: context
+    } do
+      caller = self()
+
+      port =
+        listen(fn request ->
+          send(caller, {:request, request})
+          response(200, [{"Content-Type", "text/plain"}], "ok")
+        end)
+
+      result = fetch(port, "/", context)
+
+      refute result.is_error
+      assert_receive {:request, request}, 5_000
+      assert request =~ ~r/^Host:\s*127\.0\.0\.1:#{port}\r\n/im
+    end
+
     test "converts HTML to text and says it did", %{context: context} do
       html = """
       <!doctype html><html><head><style>body{color:red}</style>
@@ -394,14 +412,21 @@ defmodule Ouroboros.Provider.Native.WebFetchTest do
       end
     end
 
-    test "ordinary public IPv4 and IPv6 literals remain admissible" do
-      for url <- [
-            "http://8.8.8.8/",
-            "http://192.0.0.9/",
-            "http://[2606:4700:4700::1111]/"
-          ] do
-        assert :ok = url |> URI.parse() |> Target.admit(), url
-      end
+    test "ordinary public IPv4 and IPv6 literals remain admissible and return the pinned address" do
+      assert {:ok, [{8, 8, 8, 8}]} = "http://8.8.8.8/" |> URI.parse() |> Target.admit()
+      assert {:ok, [{192, 0, 0, 9}]} = "http://192.0.0.9/" |> URI.parse() |> Target.admit()
+
+      assert {:ok, [{0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111}]} =
+               "http://[2606:4700:4700::1111]/" |> URI.parse() |> Target.admit()
+    end
+
+    test "loopback is admissible only when the test context allows it, and then is pinned" do
+      uri = URI.parse("http://127.0.0.1/")
+
+      assert {:error, {:blocked_address, "127.0.0.1", "127.0.0.1"}} = Target.admit(uri)
+
+      assert {:ok, [{127, 0, 0, 1}]} =
+               Target.admit(uri, %{web_fetch_allow_loopback: true})
     end
   end
 

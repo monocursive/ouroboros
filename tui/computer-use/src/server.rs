@@ -149,6 +149,52 @@ fn encode(value: Value) -> String {
     })
 }
 
+/// What a line that arrived while `windows`/`state`/`act` is running means.
+///
+/// `cancel` aborts the work. A request with an `id` is refused: one in-flight method is
+/// the protocol (doc §7.5), and dropping the frame would leave the caller waiting on an
+/// answer that never comes. A notification (no `id`) is silent, which is JSON-RPC; blank
+/// and noise stay silent for the same reason they are in the outer loop.
+#[derive(Debug, PartialEq)]
+enum Inflight {
+    Cancel { reply: Option<String> },
+    Busy { frame: String },
+    Ignore,
+}
+
+fn inflight(incoming: Incoming) -> Inflight {
+    match incoming {
+        Incoming::Message(value)
+            if value.get("method").and_then(Value::as_str) == Some("cancel") =>
+        {
+            Inflight::Cancel {
+                reply: value.get("id").cloned().map(|id| {
+                    encode(json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": Value::Null
+                    }))
+                }),
+            }
+        }
+        Incoming::Message(value) => match value.get("id").cloned() {
+            Some(id) => Inflight::Busy {
+                frame: busy_error(id, value.get("method").and_then(Value::as_str)),
+            },
+            None => Inflight::Ignore,
+        },
+        Incoming::Blank | Incoming::Noise => Inflight::Ignore,
+    }
+}
+
+fn busy_error(id: Value, method: Option<&str>) -> String {
+    let message = match method.filter(|name| !name.is_empty()) {
+        Some(method) => format!("a request is already in flight; cannot handle {method}"),
+        None => "a request is already in flight".into(),
+    };
+    encode(error_frame(id, INVALID_REQUEST, &message))
+}
+
 async fn write_line<W: AsyncWrite + Unpin>(writer: &mut W, frame: &str) -> std::io::Result<()> {
     writer.write_all(frame.as_bytes()).await?;
     writer.write_all(b"\n").await?;
@@ -218,21 +264,17 @@ where
                         ));
                         write_line(writer, &frame).await?;
                     }
-                    Frame::Line => match codec::classify(buf) {
-                        Incoming::Message(value)
-                            if value.get("method").and_then(Value::as_str) == Some("cancel") =>
-                        {
+                    Frame::Line => match inflight(codec::classify(buf)) {
+                        Inflight::Cancel { reply } => {
                             cancel.store(true, Ordering::SeqCst);
-                            if let Some(cid) = value.get("id").cloned() {
-                                let frame = encode(json!({
-                                    "jsonrpc": "2.0",
-                                    "id": cid,
-                                    "result": Value::Null
-                                }));
+                            if let Some(frame) = reply {
                                 write_line(writer, &frame).await?;
                             }
                         }
-                        _other => {}
+                        Inflight::Busy { frame } => {
+                            write_line(writer, &frame).await?;
+                        }
+                        Inflight::Ignore => {}
                     },
                 }
             }
@@ -370,5 +412,75 @@ mod tests {
         assert_eq!(oversize["error"]["code"], INVALID_REQUEST);
         let answered: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
         assert_eq!(answered["id"], 9);
+    }
+
+    fn inflight_of(line: &[u8]) -> Inflight {
+        inflight(codec::classify(line))
+    }
+
+    fn busy_frame(incoming: Inflight) -> Value {
+        match incoming {
+            Inflight::Busy { frame } => serde_json::from_str(&frame).unwrap(),
+            other => panic!("expected a busy error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_request_while_in_flight_is_refused_not_dropped() {
+        let value = busy_frame(inflight_of(br#"{"jsonrpc":"2.0","id":2,"method":"act"}"#));
+        assert_eq!(value["id"], 2);
+        assert_eq!(value["error"]["code"], INVALID_REQUEST);
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("already in flight"),
+            "busy message must say a request is in flight: {message}"
+        );
+        assert!(
+            message.contains("act"),
+            "busy message must name the refused method: {message}"
+        );
+    }
+
+    #[test]
+    fn a_request_without_a_method_while_in_flight_is_still_answered() {
+        let value = busy_frame(inflight_of(br#"{"jsonrpc":"2.0","id":3}"#));
+        assert_eq!(value["id"], 3);
+        assert_eq!(value["error"]["code"], INVALID_REQUEST);
+        assert!(value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("already in flight"));
+    }
+
+    #[test]
+    fn a_notification_while_in_flight_is_not_answered() {
+        assert_eq!(
+            inflight_of(br#"{"jsonrpc":"2.0","method":"doctor"}"#),
+            Inflight::Ignore
+        );
+    }
+
+    #[test]
+    fn cancel_while_in_flight_still_aborts() {
+        assert_eq!(
+            inflight_of(br#"{"jsonrpc":"2.0","method":"cancel"}"#),
+            Inflight::Cancel { reply: None }
+        );
+
+        let Inflight::Cancel { reply: Some(frame) } =
+            inflight_of(br#"{"jsonrpc":"2.0","id":9,"method":"cancel"}"#)
+        else {
+            panic!("a cancel with an id must be answered");
+        };
+        let value: Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(value["id"], 9);
+        assert_eq!(value["result"], Value::Null);
+    }
+
+    #[test]
+    fn noise_and_blank_while_in_flight_are_ignored() {
+        assert_eq!(inflight_of(b""), Inflight::Ignore);
+        assert_eq!(inflight_of(b"not json"), Inflight::Ignore);
+        assert_eq!(inflight_of(b"[1,2,3]"), Inflight::Ignore);
     }
 }

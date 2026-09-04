@@ -806,7 +806,10 @@ short queue. A gateway interrupt or act timeout sends `{"method":"cancel"}`
 must not abort session A's click. In-flight act aborts between events (a
 drag may end mid-way; say so in the error). Do not leave a button held.
 `windows` and `state` also run in `spawn_blocking` so an AX walk cannot
-stall the tokio `current_thread` runtime.
+stall the tokio `current_thread` runtime. A second request arriving
+while that work is in flight is refused with a JSON-RPC error (`-32600`)
+naming the method; it is not dropped. A notification with no `id` stays
+silent (JSON-RPC); `cancel` is the only frame that aborts the work.
 
 ### 7.6 macOS implementation notes
 

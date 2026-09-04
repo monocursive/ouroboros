@@ -19,8 +19,10 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch do
       is loopback, link-local, RFC1918, CGNAT, multicast, documentation space, or
       IPv6 unique-local; `localhost`, `*.local`, and cloud metadata names are refused
       before lookup. Domain rules still match the hostname; this is the address gate
-      those rules cannot see. Residual DNS-rebinding between this lookup and
-      Mint's own connect is documented on `WebFetch.Target`.
+      those rules cannot see. Mint then connects to an admitted address tuple, not
+      the name, so a rebind between lookup and connect cannot retarget the socket.
+      TLS SNI, certificate hostname checks, and the HTTP `Host` header still use the
+      original hostname. See `WebFetch.Target`.
     * **One mebibyte, fifteen seconds.** The body is *streamed* — including redirects
       and error responses — and the transfer is cancelled at the cap, so the bound is
       on this node's memory and not only on what the model is shown; the request
@@ -117,8 +119,8 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch do
   defp fetch(_uri, _max_bytes, 0, _context), do: {:error, :too_many_redirects}
 
   defp fetch(%URI{} = uri, max_bytes, remaining, context) do
-    with :ok <- Target.admit(uri, context) do
-      request_uri(uri, max_bytes, remaining, context)
+    with {:ok, addresses} <- Target.admit(uri, context) do
+      request_uri(uri, pin_address(addresses), max_bytes, remaining, context)
     end
   end
 
@@ -127,8 +129,8 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch do
   # node the operator loses — fifteen seconds is a bound on time and says nothing about
   # volume. Mint streams every status the same way: 2xx up to `max_bytes`, 4xx/5xx up to
   # two kilobytes, 3xx stop at the headers so a redirect is not a vehicle for a body.
-  defp request_uri(%URI{} = uri, max_bytes, remaining, context) do
-    case connect(uri) do
+  defp request_uri(%URI{} = uri, address, max_bytes, remaining, context) do
+    case connect(uri, address) do
       {:ok, conn} ->
         case Mint.HTTP.request(conn, "GET", request_path(uri), request_headers(), nil) do
           {:ok, conn, ref} ->
@@ -148,16 +150,45 @@ defmodule Ouroboros.Provider.Native.Tools.WebFetch do
     :exit, reason -> {:error, {:request_failed, reason}}
   end
 
-  defp connect(%URI{} = uri) do
+  # Connect to the tuple Target already classified, not to `uri.host`. Mint still
+  # takes the original hostname for the Host header, SNI, and certificate checks;
+  # that is the whole of the pinning. Passing the name as the address would let
+  # Mint resolve again, which is the rebinding window this exists to close.
+  defp connect(%URI{} = uri, address) do
     {scheme, port} = scheme_port(uri)
-    Mint.HTTP.connect(scheme, uri.host, port, connect_opts(scheme, uri.host))
+    Mint.HTTP.connect(scheme, address, port, connect_opts(scheme, uri.host, address))
+  end
+
+  defp pin_address(addresses) do
+    case Enum.find(addresses, &match?({_, _, _, _}, &1)) do
+      nil -> hd(addresses)
+      address -> address
+    end
   end
 
   defp scheme_port(%URI{scheme: "https", port: port}), do: {:https, port || 443}
   defp scheme_port(%URI{scheme: "http", port: port}), do: {:http, port || 80}
 
-  defp connect_opts(:https, host), do: [timeout: @timeout_ms, transport_opts: ssl_options(host)]
-  defp connect_opts(:http, _host), do: [timeout: @timeout_ms]
+  defp connect_opts(:https, host, address) do
+    [
+      hostname: host,
+      timeout: @timeout_ms,
+      transport_opts: maybe_inet6([timeout: @timeout_ms], address) ++ ssl_options(host)
+    ]
+  end
+
+  defp connect_opts(:http, host, address) do
+    [
+      hostname: host,
+      timeout: @timeout_ms,
+      transport_opts: maybe_inet6([timeout: @timeout_ms], address)
+    ]
+  end
+
+  defp maybe_inet6(opts, address) when tuple_size(address) == 8,
+    do: Keyword.put(opts, :inet6, true)
+
+  defp maybe_inet6(opts, _address), do: opts
 
   defp request_headers, do: [{"user-agent", "ouroboros-native"}]
 
