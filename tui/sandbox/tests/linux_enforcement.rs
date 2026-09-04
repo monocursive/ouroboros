@@ -88,7 +88,7 @@ impl Workspace {
     fn builder_request(&self, extra_readable: &[&Path]) -> String {
         let readable: Vec<String> = platform_readable()
             .into_iter()
-            .chain(extra_readable.iter().filter_map(|p| canonicalize_readable(p)))
+            .chain(extra_readable.iter().map(|p| p.display().to_string()))
             .map(|path| format!("\"{path}\""))
             .collect();
 
