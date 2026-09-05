@@ -103,13 +103,8 @@ fn answer(app: &mut App, tag: Tag, value: serde_json::Value) {
     });
 }
 
-/// An App whose `account.read` has already been answered — as "no ChatGPT subscription, and
-/// this install wants one".
-///
-/// Every real client has that answer within the first frames, and until it arrives the home
-/// composer owns the keyboard rather than letting a keystroke fall through to a global
-/// binding. These tests are about the surfaces past the home, so they start from the
-/// resolved state instead of the in-flight one.
+/// Operator-surface tests start on the dashboard, where printable navigation keys
+/// belong to the shell. The home composer owns typing regardless of authentication.
 fn shell(hello: ouro::proto::Hello) -> App {
     let mut app = app(hello);
     resolve_account(&mut app);
@@ -117,6 +112,7 @@ fn shell(hello: ouro::proto::Hello) -> App {
 }
 
 fn resolve_account(app: &mut App) {
+    app.tab = Tab::Dashboard;
     answer(
         app,
         Tag::Account,
@@ -224,11 +220,10 @@ fn coding_workspace_progressively_discloses_context_without_sacrificing_the_comp
     }
     for visible in [
         "SESSIONS / 01",
-        "CONTEXT CHANNEL",
         "ACTIVE CONTEXT",
         "EXECUTION TRACE",
         "BOUNDARIES",
-        "HERMETIC CORE",
+        "/details  Inspect events",
         "YOU",
         "AGENT",
         "✓ Bash",
@@ -1362,6 +1357,7 @@ fn a_refused_method_names_itself_in_the_pane_it_would_have_filled() {
 #[test]
 fn the_coding_home_carries_the_terminal_logo() {
     let mut app = shell(full_hello());
+    app.open_home();
     let screen = render(&mut app, 100, 24);
 
     assert!(screen.contains("▄█▄ ▄▄▄▄"), "{}", screen.text());
@@ -2672,11 +2668,12 @@ fn the_composer_advertises_shift_enter_only_where_the_terminal_reports_it() {
 
     // The same rule on the home composer, whose Enter starts rather than sends.
     let mut home = shell(full_hello());
+    home.open_home();
     home.config.defaults.provider = Some("claude".into());
 
     let plain = render(&mut home, 120, 30);
     assert!(
-        plain.contains("Ctrl+J newline · Enter starts"),
+        plain.contains("Ctrl+J newline") && plain.contains("Enter starts"),
         "{}",
         plain.text()
     );
@@ -2685,7 +2682,7 @@ fn the_composer_advertises_shift_enter_only_where_the_terminal_reports_it() {
     home.keyboard_enhanced = true;
     let enhanced = render(&mut home, 120, 30);
     assert!(
-        enhanced.contains("Shift+Enter/Ctrl+J newline · Enter starts"),
+        enhanced.contains("Shift+Enter / Ctrl+J newline") && enhanced.contains("Enter starts"),
         "{}",
         enhanced.text()
     );
@@ -4391,7 +4388,7 @@ fn focus(app: &mut App, target: NewField) {
     panic!("the form never reached {target:?}");
 }
 
-/// The Sessions tab with both lists answered and a provider list the modal can draw.
+/// The operator dashboard with session/provider lists loaded for advanced setup.
 fn ready_to_start() -> App {
     let mut app = shell(full_hello());
     app.launch_dir = Some("/home/operator/project".into());
@@ -4419,6 +4416,7 @@ fn ready_to_start() -> App {
         ]),
     );
 
+    app.tab = Tab::Dashboard;
     let _ = app.drain();
     app
 }
@@ -4930,6 +4928,7 @@ fn a_generic_runtime_start_failure_reconciles_instead_of_minting_a_duplicate() {
 #[test]
 fn a_durable_failed_home_start_opens_the_session_without_dispatching_the_draft() {
     let mut app = shell(full_hello());
+    app.open_home();
     app.config.defaults.provider = Some("claude_code".into());
     let input = "keep this prompt until the provider is repaired";
 
@@ -5088,7 +5087,8 @@ fn a_read_listener_is_told_why_it_cannot_start_a_session() {
     app.apply(key(KeyCode::Char('2')));
     let _ = app.drain();
 
-    app.apply(key(KeyCode::Char('n')));
+    type_text(&mut app, "/options");
+    app.apply(key(KeyCode::Enter));
 
     assert!(
         app.overlay.is_none(),
@@ -5102,7 +5102,8 @@ fn a_read_listener_is_told_why_it_cannot_start_a_session() {
     let mut older = app_without_start();
     older.apply(key(KeyCode::Char('2')));
     let _ = older.drain();
-    older.apply(key(KeyCode::Char('n')));
+    type_text(&mut older, "/options");
+    older.apply(key(KeyCode::Enter));
 
     let screen = render(&mut older, 130, 30);
     assert!(
@@ -5131,7 +5132,8 @@ fn opening_the_form_asks_for_the_providers_the_sessions_tab_never_polls() {
         "the Sessions tab does not poll a list that shells out per provider"
     );
 
-    app.apply(key(KeyCode::Char('n')));
+    type_text(&mut app, "/options");
+    app.apply(key(KeyCode::Enter));
 
     let asked: Vec<String> = app.drain().into_iter().map(|call| call.method).collect();
     assert!(
@@ -5365,8 +5367,7 @@ fn every_tab_draws_without_any_data_at_all() {
 
         assert!(
             screen.contains("OUROBOROS")
-                && (screen.contains("Runtime & distribution")
-                    || screen.contains("New coding session")),
+                && (screen.contains("Runtime & distribution") || screen.contains("YOUR TASK")),
             "surface {digit} lost its shell:\n{}",
             screen.text()
         );
@@ -5436,7 +5437,8 @@ fn the_help_overlay_states_the_honest_limits() {
     assert!(screen.contains("scope `read`"));
 
     app.apply(key(KeyCode::Esc));
-    assert!(render(&mut app, 130, 30).contains("Connect ChatGPT to start coding"));
+    assert!(app.overlay.is_none());
+    assert_eq!(app.tab, Tab::Dashboard);
 }
 
 #[test]
@@ -5605,6 +5607,7 @@ fn attached_runtime_footer_preserves_the_complete_endpoint_at_standard_width() {
 #[test]
 fn the_visible_tab_is_the_only_one_polled() {
     let mut app = shell(full_hello());
+    app.open_home();
     app.apply(Msg::Tick);
 
     let methods: Vec<String> = app.drain().into_iter().map(|call| call.method).collect();
@@ -5613,7 +5616,7 @@ fn the_visible_tab_is_the_only_one_polled() {
     assert!(methods.contains(&"coding.list".to_string()));
     assert!(!methods.contains(&"runtime.status".to_string()));
 
-    app.apply(key(KeyCode::Char('1')));
+    app.apply(key(KeyCode::BackTab));
 
     let methods: Vec<String> = app.drain().into_iter().map(|call| call.method).collect();
     assert!(methods.contains(&"runtime.status".to_string()));
@@ -5666,6 +5669,7 @@ fn one_question_is_outstanding_at_a_time() {
 #[test]
 fn tabs_wrap_in_both_directions() {
     let mut app = shell(full_hello());
+    app.open_home();
 
     assert_eq!(app.tab, Tab::Sessions);
 

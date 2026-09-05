@@ -785,6 +785,9 @@ impl App {
     }
 
     pub(super) fn open_quit(&mut self) {
+        if matches!(self.overlay, Some(Overlay::Account(_))) {
+            self.cancel_account();
+        }
         let options = match self.mode {
             Mode::Spawned { pid } => vec![
                 (
@@ -1485,23 +1488,18 @@ impl App {
         let connected = self.chatgpt_connected();
 
         match key.code {
-            KeyCode::Esc => {
-                let login_id = match self.overlay.as_ref() {
-                    Some(Overlay::Account(dialog)) if dialog.pending => dialog.login_id.clone(),
-                    _ => None,
-                };
-
-                self.overlay = None;
-
-                if let Some(login_id) = login_id {
-                    self.issue(Call::new(
-                        Tag::AccountCancel,
-                        "account.login.cancel",
-                        json!({ "login_id": login_id }),
-                    ));
+            KeyCode::Esc => self.cancel_account(),
+            KeyCode::Char('r')
+                if !connected
+                    && matches!(&self.overlay, Some(Overlay::Account(dialog)) if !dialog.pending) =>
+            {
+                let intent = self.home_login_start.take();
+                self.open_account();
+                if matches!(self.overlay, Some(Overlay::Account(_))) {
+                    self.home_login_start = intent;
                 }
             }
-            KeyCode::Enter if connected => self.overlay = None,
+            KeyCode::Enter if connected => self.cancel_account(),
             // The URL is opened once when it arrives, and a browser that was not running,
             // or a window that swallowed it, leaves nothing on screen to act on. This is
             // the affordance the dialog advertises beside the link.

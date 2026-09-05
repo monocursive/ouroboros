@@ -1231,10 +1231,9 @@ fn the_footer_says_new_here_until_three_prompts_have_been_sent() {
     );
 }
 
-/// The coding home names the five keys a first-time operator has no way to guess, and
-/// stops once they have been used.
+/// Home teaches the immediate task and leaves advanced controls in discoverable help.
 #[test]
-fn the_coding_home_carries_three_first_run_tips_until_the_operator_is_no_longer_new() {
+fn the_coding_home_prioritises_composition_and_keeps_help_discoverable() {
     let mut app = app(full_hello());
     answer(
         &mut app,
@@ -1244,13 +1243,13 @@ fn the_coding_home_carries_three_first_run_tips_until_the_operator_is_no_longer_
     app.config.defaults.provider = Some("codex".into());
 
     let text = screen(&mut app).text();
-    assert!(text.contains("@ attaches a file"), "{text}");
-    assert!(text.contains("ctrl+o expands every cell"), "{text}");
-    assert!(text.contains("esc interrupts the turn"), "{text}");
+    assert!(text.contains("Understand this project"), "{text}");
+    assert!(text.contains("/help  A quick guide"), "{text}");
+    assert!(!text.contains("esc interrupts the turn"), "{text}");
 
     app.config.onboarding.prompts_sent = 3;
     let text = screen(&mut app).text();
-    assert!(!text.contains("@ attaches a file"), "{text}");
+    assert!(text.contains("/options to change"), "{text}");
 }
 
 /// `/fork` is the same call the menu makes, without the menu, and it is gated the same

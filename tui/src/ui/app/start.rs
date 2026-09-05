@@ -921,8 +921,8 @@ impl App {
                     pending.start_outcome_unknown = true;
                 }
                 self.home_error = Some(format!(
-                    "{message}. Session {id} may already exist; press Enter to reconcile the \
-                     same id before changing this prompt."
+                    "Your task may already exist. Press Enter to check and retry safely \
+                     before editing this prompt.\nSession: {id}\nDetails: {message}"
                 ));
             } else {
                 // A definite refusal means this id cannot become a session. Keep the

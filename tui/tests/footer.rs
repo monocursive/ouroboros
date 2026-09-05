@@ -1197,6 +1197,8 @@ fn the_new_session_dialog_greys_a_mode_the_provider_cannot_take() {
     app.apply(key(KeyCode::Char('2')));
     answer(&mut app, Tag::Providers, providers());
 
+    // Printable shortcuts belong to the operator dashboard; home is a task composer.
+    app.tab = ouro::ui::app::Tab::Dashboard;
     app.apply(key(KeyCode::Char('n')));
 
     // `claude`. Its spec normalizes `approval_mode`, so the schema would accept `prompt` —

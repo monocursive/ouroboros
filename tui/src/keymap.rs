@@ -99,6 +99,9 @@ pub enum Action {
     LeaderDetails,
     LeaderQuit,
     LeaderHelp,
+    StarterExplore,
+    StarterReview,
+    StarterPlan,
     // ----- composer motions --------------------------------------------------------
     EditorWordBack,
     EditorWordForward,
@@ -113,7 +116,10 @@ pub enum Action {
 
 impl Action {
     /// Every action, in listing order.
-    pub const ALL: [Action; 43] = [
+    pub const ALL: [Action; 46] = [
+        Self::StarterExplore,
+        Self::StarterReview,
+        Self::StarterPlan,
         Self::Send,
         Self::Steer,
         Self::Newline,
@@ -162,6 +168,9 @@ impl Action {
     /// The name this action answers to in `[keys]`.
     pub fn name(self) -> &'static str {
         match self {
+            Self::StarterExplore => "starter_explore",
+            Self::StarterReview => "starter_review",
+            Self::StarterPlan => "starter_plan",
             Self::Send => "send",
             Self::Steer => "steer",
             Self::Newline => "newline",
@@ -251,6 +260,9 @@ impl Action {
     /// test: a default that did not would be a map with a hole in it.
     pub fn default_spec(self) -> &'static str {
         match self {
+            Self::StarterExplore => "f2",
+            Self::StarterReview => "f3",
+            Self::StarterPlan => "f4",
             Self::Send => "enter",
             Self::Steer => "alt+enter",
             Self::Newline => "ctrl+j",
@@ -300,6 +312,9 @@ impl Action {
     /// One line, for `/keys` and for the `?` panel.
     pub fn describe(self) -> &'static str {
         match self {
+            Self::StarterExplore => "draft a project walkthrough, on an empty home",
+            Self::StarterReview => "draft a review of local changes, on an empty home",
+            Self::StarterPlan => "draft a small improvement plan, on an empty home",
             Self::Send => "send, or queue a follow-up while the agent is busy",
             Self::Steer => "steer the running turn, where the transport can be steered",
             Self::Newline => "newline (shift+enter where the terminal reports it)",
@@ -352,6 +367,7 @@ impl Action {
             Scope::Leader => "leader",
             Scope::Editor => "composing",
             Scope::Global => match self {
+                Self::StarterExplore | Self::StarterReview | Self::StarterPlan => "getting started",
                 Self::Send
                 | Self::Steer
                 | Self::Newline

@@ -45,7 +45,11 @@ make ouro
 ```
 
 The first command builds the runtime and embeds it in the `ouro` terminal
-client. From the client, press `n` to start a session.
+client. Open it from the project you want to work on, describe a task, and press
+Enter. If needed, connect ChatGPT; your submitted task starts after sign-in.
+For a guided first task, press F2 to explore the project, edit the prompt, then
+press Enter. The selected folder and file permissions are visible before you start;
+`/options` opens advanced setup.
 
 To use the browser interface:
 

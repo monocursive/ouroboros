@@ -76,14 +76,10 @@ fn ouro_opens_on_the_coding_harness_without_an_onboarding_modal() {
     assert_eq!(app.tab, Tab::Sessions);
     assert!(app.sessions.open.is_none());
     assert!(app.overlay.is_none());
-    assert!(screen.contains("New coding session"), "{}", screen.text());
-    assert!(screen.contains("Connect ChatGPT to start coding"));
-    assert!(screen.contains("Type / for commands"), "{}", screen.text());
-    assert!(
-        screen.contains("/machines adds your laptop and servers"),
-        "{}",
-        screen.text()
-    );
+    assert!(screen.contains("YOUR TASK"), "{}", screen.text());
+    assert!(screen.contains("What would you like to work on?"));
+    assert!(screen.contains("Enter connects"), "{}", screen.text());
+    assert!(screen.contains("/options to change"), "{}", screen.text());
     assert!(screen.contains("ctrl+p commands"));
     assert!(!screen.contains("Dashboard│"));
 }
@@ -96,13 +92,9 @@ fn an_existing_chatgpt_subscription_goes_straight_to_the_workspace_composer() {
     assert!(screen.contains("ChatGPT Pro"), "{}", screen.text());
     assert!(screen.contains("Ready in this workspace"));
     assert!(screen.contains("Ask the agent to build, fix, explain, or review"));
-    assert!(
-        screen.contains("/machines adds your laptop and servers"),
-        "{}",
-        screen.text()
-    );
+    assert!(screen.contains("/options to change"), "{}", screen.text());
     assert!(screen.contains("/work/ouroboros"));
-    assert!(screen.contains("FILES can edit"), "{}", screen.text());
+    assert!(screen.contains("Files: can edit"), "{}", screen.text());
 }
 
 #[test]
@@ -117,7 +109,7 @@ fn a_configured_non_codex_provider_is_not_blocked_by_chatgpt_auth() {
         "{}",
         screen.text()
     );
-    assert!(screen.contains("PROVIDER claude"), "{}", screen.text());
+    assert!(screen.contains("Using claude"), "{}", screen.text());
     assert!(screen.contains("Provider claude"), "{}", screen.text());
     assert!(
         !screen.contains("ChatGPT not connected") && !screen.contains("ChatGPT unavailable"),
@@ -125,11 +117,11 @@ fn a_configured_non_codex_provider_is_not_blocked_by_chatgpt_auth() {
         screen.text()
     );
     assert!(
-        screen.contains("requested /srv/agent-work"),
+        screen.contains("Folder: /srv/agent-work"),
         "{}",
         screen.text()
     );
-    assert!(screen.contains("Requested workspace: /srv/agent-work"));
+    assert!(screen.contains("Folder: /srv/agent-work"));
 
     type_text(&mut app, "review the current diff");
     app.apply(key(KeyCode::Enter));
@@ -176,17 +168,66 @@ fn the_first_keystrokes_land_in_the_draft_while_the_account_answer_is_in_flight(
     );
 }
 
-/// Once the runtime has answered, an unauthenticated home is a surface whose printable keys
-/// belong to the shell, and it says so on screen. That half is deliberate and stays.
+/// Readiness never changes the meaning of typing or pasting into the visible composer.
 #[test]
-fn a_resolved_unauthenticated_home_still_gives_printable_keys_to_the_shell() {
+fn an_unauthenticated_home_keeps_the_task_through_typing_paste_and_sign_in() {
     let mut app = harness(false);
-    assert!(app.home_draft.is_empty());
+    type_text(&mut app, "quick fix 123, please");
+    app.apply(Msg::Paste("\nand explain the change".into()));
+    let task = "quick fix 123, please\nand explain the change";
+    assert_eq!(app.home_draft.text(), task);
+    assert!(app.overlay.is_none());
 
-    app.apply(key(KeyCode::Char('q')));
+    app.apply(key(KeyCode::Enter));
+    assert!(matches!(app.overlay, Some(Overlay::Account(_))));
+    assert_eq!(app.home_draft.text(), task);
+    assert!(app
+        .drain()
+        .iter()
+        .any(|call| call.method == "account.login.start"));
+    app.apply(key(KeyCode::Esc));
+    assert_eq!(app.home_draft.text(), task);
+    answer(&mut app, Tag::Account, account(true));
+    app.apply(key(KeyCode::Enter));
+    assert!(app
+        .drain()
+        .iter()
+        .any(|call| call.method == "interactive.start"));
+}
 
+#[test]
+fn the_start_action_and_file_policy_survive_compact_terminals() {
+    for connected in [false, true] {
+        for (width, height) in [(60, 18), (80, 24), (120, 34), (180, 44)] {
+            let mut app = harness(connected);
+            let screen = render(&mut app, width, height);
+            assert!(
+                screen.contains(if connected {
+                    "Enter starts"
+                } else {
+                    "Enter connects"
+                }),
+                "{}",
+                screen.text()
+            );
+            assert!(screen.contains("Files: can edit"), "{}", screen.text());
+            assert!(screen.contains("YOUR TASK"), "{}", screen.text());
+            assert!(screen.contains("/work/ouroboros"), "{}", screen.text());
+        }
+    }
+}
+
+#[test]
+fn advanced_setup_is_reachable_from_the_visible_home_command() {
+    let mut app = harness(false);
+    type_text(&mut app, "/options");
+    app.apply(key(KeyCode::Enter));
+    assert!(matches!(app.overlay, Some(Overlay::New(_))));
     assert!(app.home_draft.is_empty());
-    assert!(matches!(app.overlay, Some(Overlay::Quit { .. })));
+    assert!(app
+        .drain()
+        .iter()
+        .all(|call| call.method != "account.login.start"));
 }
 
 /// An official OpenAI API-key model needs no ChatGPT subscription. The account surface
@@ -219,7 +260,7 @@ fn an_openai_api_key_model_is_ready_without_a_chatgpt_sign_in() {
         "{}",
         screen.text()
     );
-    assert!(screen.contains("PROVIDER native"), "{}", screen.text());
+    assert!(screen.contains("Using gpt-5.6"), "{}", screen.text());
     assert!(
         !screen.contains("ChatGPT not connected"),
         "{}",
@@ -975,6 +1016,7 @@ fn account_completion_closes_the_gate_without_restarting_the_client() {
     app.apply(key(KeyCode::Enter));
     let _ = app.drain();
 
+    login_reply(&mut app, "complete-login");
     answer(&mut app, Tag::Account, account(true));
 
     assert!(app.chatgpt_connected());
@@ -1114,4 +1156,285 @@ fn a_terminal_control_run_refuses_cancellation_with_a_said_so_notice() {
         text.contains("run-9") && text.contains("completed"),
         "the refusal names the run and its state: {text}"
     );
+}
+
+fn login_reply(app: &mut App, id: &str) {
+    answer(
+        app,
+        Tag::AccountLogin,
+        json!({"loginId":id, "authUrl":"https://auth.openai.com/test-sign-in"}),
+    );
+    let _ = app.take_open_url();
+}
+
+#[test]
+fn connect_and_start_dispatches_the_captured_task_once_after_sign_in() {
+    let mut app = harness(false);
+    app.config.defaults.model = Some("openai_codex:gpt-5.6-sol".into());
+    app.config.defaults.sandbox_mode = Some("read_only".into());
+    type_text(&mut app, "Explain the project without changing files");
+    let screen = render(&mut app, 80, 24);
+    assert!(screen.contains("connect & start"), "{}", screen.text());
+    app.apply(key(KeyCode::Enter));
+    assert!(app.home_connect_and_start_pending());
+    assert!(!app
+        .drain()
+        .iter()
+        .any(|call| call.method == "interactive.start"));
+    login_reply(&mut app, "login-captured");
+    let _ = app.drain();
+
+    // A refresh or preferences change during OAuth cannot alter what was submitted.
+    app.config.defaults.model = Some("openai_codex:changed-after-submission".into());
+    app.config.defaults.workspace = Some("/different/folder".into());
+    app.config.defaults.sandbox_mode = Some("unrestricted".into());
+    answer(&mut app, Tag::Account, account(true));
+    assert!(app.overlay.is_none());
+    assert!(!app.home_connect_and_start_pending());
+    let starts: Vec<_> = app
+        .drain()
+        .into_iter()
+        .filter(|call| call.method == "interactive.start")
+        .collect();
+    assert_eq!(starts.len(), 1);
+    let start = starts.into_iter().next().unwrap();
+    assert_eq!(start.params["model"], "openai_codex:gpt-5.6-sol");
+    assert_eq!(start.params["workspace"], "/work/ouroboros");
+    assert_eq!(start.params["sandbox_mode"], "read_only");
+    answer(&mut app, Tag::Account, account(true));
+    app.apply(key(KeyCode::Enter));
+    assert!(!app
+        .drain()
+        .iter()
+        .any(|call| call.method == "interactive.start"));
+    let id = start.params["id"].clone();
+    answer(
+        &mut app,
+        start.tag,
+        json!({"_struct":"Ouroboros.Interactive.Ref", "id":id}),
+    );
+    let messages: Vec<_> = app
+        .drain()
+        .into_iter()
+        .filter(|call| call.method == "interactive.send_message")
+        .collect();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        messages[0].params["input"],
+        "Explain the project without changing files"
+    );
+}
+
+#[test]
+fn every_way_out_of_sign_in_revokes_automatic_start() {
+    for cancel in [key(KeyCode::Esc), ctrl('c'), ctrl('q')] {
+        let mut app = harness(false);
+        type_text(&mut app, "keep this task");
+        app.apply(key(KeyCode::Enter));
+        login_reply(&mut app, "cancel-me");
+        let _ = app.drain();
+        app.apply(cancel);
+        assert!(!app.home_connect_and_start_pending());
+        assert!(app.take_open_url().is_none());
+        assert_eq!(app.home_draft.text(), "keep this task");
+        let calls = app.drain();
+        assert!(calls
+            .iter()
+            .any(|call| call.method == "account.login.cancel"));
+        answer(&mut app, Tag::Account, account(true));
+        assert!(!app
+            .drain()
+            .iter()
+            .any(|call| call.method == "interactive.start"));
+    }
+}
+
+#[test]
+fn a_cancelled_login_cannot_be_adopted_by_an_immediate_retry() {
+    let mut app = harness(false);
+    type_text(&mut app, "keep the new task separate");
+    app.apply(key(KeyCode::Enter));
+    let _ = app.drain();
+    app.apply(key(KeyCode::Esc));
+    app.apply(key(KeyCode::Enter));
+    assert!(app.overlay.is_none());
+    assert!(!app.home_connect_and_start_pending());
+    assert!(app.drain().is_empty());
+    login_reply(&mut app, "late-cancelled-login");
+    let calls = app.drain();
+    assert!(calls
+        .iter()
+        .any(|call| call.method == "account.login.cancel"
+            && call.params["login_id"] == "late-cancelled-login"));
+    answer(&mut app, Tag::AccountCancel, json!({}));
+    let _ = app.drain();
+    app.apply(key(KeyCode::Enter));
+    assert!(app.home_connect_and_start_pending());
+    assert!(app
+        .drain()
+        .iter()
+        .any(|call| call.method == "account.login.start"));
+}
+
+#[test]
+fn expired_sign_in_has_a_visible_retry_and_preserves_the_original_request() {
+    let mut app = harness(false);
+    type_text(&mut app, "review these changes");
+    app.apply(key(KeyCode::Enter));
+    login_reply(&mut app, "expired-login");
+    answer(
+        &mut app,
+        Tag::Account,
+        json!({"requiresOpenaiAuth":true, "login":{"status":"expired", "loginId":"expired-login", "error":"Your sign-in code expired."}}),
+    );
+    let screen = render(&mut app, 80, 24);
+    assert!(
+        screen.contains("Retry connection & start"),
+        "{}",
+        screen.text()
+    );
+    app.config.defaults.workspace = Some("/not-the-original-workspace".into());
+    let _ = app.drain();
+    app.apply(key(KeyCode::Char('r')));
+    assert!(app
+        .drain()
+        .iter()
+        .any(|call| call.method == "account.login.start"));
+    login_reply(&mut app, "replacement-login");
+    // A late poll about the old login cannot fail the replacement.
+    answer(
+        &mut app,
+        Tag::Account,
+        json!({"requiresOpenaiAuth":true, "login":{"status":"failed", "loginId":"expired-login"}}),
+    );
+    assert!(matches!(&app.overlay, Some(Overlay::Account(dialog)) if dialog.error.is_none()));
+    let _ = app.drain();
+    answer(&mut app, Tag::Account, account(true));
+    let start = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.start")
+        .unwrap();
+    assert_eq!(start.params["workspace"], "/work/ouroboros");
+}
+
+#[test]
+fn connecting_without_a_task_never_starts_one_implicitly() {
+    let mut app = harness(false);
+    app.apply(key(KeyCode::Enter));
+    login_reply(&mut app, "connect-only");
+    let _ = app.drain();
+    answer(&mut app, Tag::Account, account(true));
+    answer(&mut app, Tag::Account, account(true));
+    assert!(app.overlay.is_none());
+    assert!(!app.home_connect_and_start_pending());
+    assert!(!app
+        .drain()
+        .iter()
+        .any(|call| call.method == "interactive.start"));
+}
+
+#[test]
+fn unusable_connections_do_not_send_a_new_user_through_sign_in() {
+    for read_only in [false, true] {
+        let mut app = harness(false);
+        if read_only {
+            app.hello.scope = "read".into();
+        } else {
+            app.connection = ouro::ui::app::Connection::Lost {
+                reason: "offline".into(),
+            };
+        }
+        type_text(&mut app, "help me start");
+        app.apply(key(KeyCode::Enter));
+        assert!(app.overlay.is_none());
+        assert!(app.home_error.is_some());
+        assert!(
+            app.drain()
+                .iter()
+                .all(|call| call.method != "account.login.start"
+                    && call.method != "interactive.start")
+        );
+    }
+}
+
+#[test]
+fn starter_examples_fill_an_editable_draft_without_sending_or_overwriting_it() {
+    for (number, expected) in [
+        (2, "Explore this project"),
+        (3, "Review the uncommitted changes"),
+        (4, "suggest one small"),
+    ] {
+        let mut app = harness(false);
+        app.apply(key(KeyCode::F(number)));
+        assert!(app.home_draft.text().contains(expected));
+        assert!(app.drain().is_empty());
+        let before = app.home_draft.text().to_string();
+        app.apply(key(KeyCode::F(3)));
+        assert_eq!(app.home_draft.text(), before);
+        app.apply(key(KeyCode::Char('!')));
+        assert!(app.home_draft.text().ends_with('!'));
+    }
+}
+
+#[test]
+fn sign_in_poll_failure_keeps_the_task_and_recovers_without_a_second_submission() {
+    let mut app = harness(false);
+    type_text(&mut app, "explain this project");
+    app.apply(key(KeyCode::Enter));
+    login_reply(&mut app, "recovering-login");
+    app.apply(Msg::Answer {
+        tag: Tag::Account,
+        result: Err(ClientError::Timeout),
+    });
+    let screen = render(&mut app, 80, 24);
+    assert!(
+        screen.contains("Checking your connection again"),
+        "{}",
+        screen.text()
+    );
+    assert!(app.home_connect_and_start_pending());
+    let _ = app.drain();
+    answer(&mut app, Tag::Account, account(true));
+    assert_eq!(
+        app.drain()
+            .iter()
+            .filter(|call| call.method == "interactive.start")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_long_sign_in_failure_keeps_retry_and_cancel_visible_on_a_small_terminal() {
+    let mut app = harness(false);
+    type_text(&mut app, "explain this project");
+    app.apply(key(KeyCode::Enter));
+    login_reply(&mut app, "expired-login");
+    answer(
+        &mut app,
+        Tag::Account,
+        json!({"requiresOpenaiAuth":true, "login":{"status":"expired", "loginId":"expired-login", "error":"The sign-in service is unavailable. ".repeat(30)}}),
+    );
+    for (width, height) in [(60, 18), (80, 24)] {
+        let screen = render(&mut app, width, height);
+        assert!(
+            screen.contains("r  Retry connection & start"),
+            "{}",
+            screen.text()
+        );
+        assert!(screen.contains("Esc cancels sign-in"), "{}", screen.text());
+    }
+}
+
+#[test]
+fn closing_a_connected_account_does_not_claim_sign_in_was_cancelled() {
+    let mut app = harness(true);
+    type_text(&mut app, "/connect");
+    app.apply(key(KeyCode::Enter));
+    assert!(matches!(app.overlay, Some(Overlay::Account(_))));
+    app.apply(key(KeyCode::Esc));
+    assert!(app.overlay.is_none());
+    assert!(app.home_error.is_none());
+    assert!(!app.home_connect_and_start_pending());
 }

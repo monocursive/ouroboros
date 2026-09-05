@@ -393,6 +393,7 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
     };
     let fleet_block = Block::default()
         .borders(access::borders(Borders::ALL))
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(theme::muted()))
         .title(Span::styled(
             format!(
@@ -511,7 +512,7 @@ fn context_rail(frame: &mut Frame, area: Rect, app: &App) {
         } else if watch.ended.is_some() {
             ("ENDED", Style::default().fg(theme::muted()))
         } else if watch.follow {
-            ("STREAMING", Style::default().fg(theme::system()))
+            ("FOLLOWING", Style::default().fg(theme::system()))
         } else {
             ("SCROLLED", Style::default().fg(theme::warn()))
         }
@@ -537,17 +538,14 @@ fn context_rail(frame: &mut Frame, area: Rect, app: &App) {
     let worktree_row = worktree_line(session, inner.width.saturating_sub(2));
 
     let rows = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Length(1),
-        Constraint::Length(5),
-        Constraint::Length(1),
+        Constraint::Length(3),
         Constraint::Length(7 + u16::from(worktree_row.is_some())),
         Constraint::Length(1),
         Constraint::Length(7),
         Constraint::Length(1),
-        Constraint::Length(7),
+        Constraint::Length(5),
         Constraint::Min(0),
-        Constraint::Length(1),
+        Constraint::Length(2),
     ])
     .split(inner);
 
@@ -577,30 +575,7 @@ fn context_rail(frame: &mut Frame, area: Rect, app: &App) {
 
     render_context_panel(
         frame,
-        rows[2],
-        " SIGIL / CONTEXT CHANNEL ",
-        theme::system(),
-        vec![
-            Line::from(Span::styled(
-                format!(
-                    "◇──[ {} ]──◇",
-                    super::tree::truncate(
-                        &summary.machine,
-                        panel_width.saturating_sub(12) as usize
-                    )
-                ),
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(Span::styled(
-                format!("{event_count} events · {stream_label}"),
-                Style::default().fg(theme::muted()),
-            )),
-        ],
-    );
-
-    render_context_panel(
-        frame,
-        rows[4],
+        rows[1],
         " ACTIVE CONTEXT ",
         theme::muted(),
         vec![
@@ -628,7 +603,7 @@ fn context_rail(frame: &mut Frame, area: Rect, app: &App) {
 
     render_context_panel(
         frame,
-        rows[6],
+        rows[3],
         " EXECUTION TRACE ",
         theme::muted(),
         vec![
@@ -661,33 +636,22 @@ fn context_rail(frame: &mut Frame, area: Rect, app: &App) {
 
     render_context_panel(
         frame,
-        rows[8],
+        rows[5],
         " BOUNDARIES ",
         theme::muted(),
         vec![
             context_panel_value("MODE", &summary.mode, panel_width, Style::default()),
             context_panel_value("MACHINE", &summary.machine, panel_width, Style::default()),
             context_panel_value("ENDPOINT", &app.address, panel_width, Style::default()),
-            context_panel_value("APPROVAL", &approval, panel_width, theme::action()),
-            context_panel_value(
-                "FILES",
-                &sandbox,
-                panel_width,
-                Style::default().fg(if writable {
-                    theme::good()
-                } else {
-                    theme::warn()
-                }),
-            ),
         ],
     );
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            " HERMETIC CORE · LEGIBLE EDGE",
+            " /details  Inspect events",
             Style::default().fg(theme::muted()),
         ))),
-        rows[10],
+        rows[7],
     );
 }
 
@@ -699,7 +663,8 @@ fn render_context_panel(
     lines: Vec<Line<'static>>,
 ) {
     let block = Block::default()
-        .borders(access::borders(Borders::ALL))
+        .borders(access::borders(Borders::TOP))
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(theme::muted()))
         .title(Span::styled(
             title,
@@ -1088,137 +1053,142 @@ fn plan_panel(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines[start..].to_vec()), inner);
 }
 
-/// The three lines a first-time operator needs, on the one screen they always see (B9).
-///
-/// Empty once three prompts have been sent. An undiscoverable power feature is R1 4d(8) —
-/// OpenCode's fork keybind defaulting to `none`, `/compact` that people found months in —
-/// and the fix everyone converged on is to say it where the eyes already are, once.
-fn first_run_tips(app: &App) -> Vec<Line<'static>> {
-    if !app.onboarding() {
-        return Vec::new();
-    }
-
-    // Every chord named here comes out of the resolved keymap (B8/D14): the one screen a
-    // first-time operator always sees must not teach a key their own config unbound.
-    let keys = &app.keymap;
-
-    [
-        "@ attaches a file from this workspace, / opens the command list".to_string(),
-        format!(
-            "{} expands every cell, {} shows the plan while it works",
-            keys.label(Action::Verbose),
-            keys.label(Action::PlanPanel)
-        ),
-        format!(
-            "{} interrupts the turn and keeps what is queued; {} lists every key",
-            keys.label(Action::Interrupt),
-            keys.label(Action::Help)
-        ),
-    ]
-    .into_iter()
-    .map(|tip| Line::from(Span::styled(tip, Style::default().fg(theme::accent()))))
-    .collect()
-}
-
+/// One composed start surface: identity, workspace, task, then optional discovery.
+/// The task keeps its space first; ornament yields on short terminals.
 fn home(frame: &mut Frame, area: Rect, app: &App) {
-    // The home composer has no session and therefore no chips: its height is the editor's.
+    let width = area
+        .width
+        .saturating_sub(if area.width >= 64 { 8 } else { 2 })
+        .min(88);
+    let lane = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y,
+        width,
+        area.height,
+    );
     let composer_height = COMPOSER_CHROME
-        + editor_rows(Some(&app.home_draft), area.width)
-        + completion_rows(Some(&app.home_draft));
-    let rows =
-        Layout::vertical([Constraint::Min(5), Constraint::Length(composer_height)]).split(area);
-    let ready = app.home_ready();
-    let requested_workspace = app.home_workspace();
-
-    let mut message: Vec<Line> = if ready {
-        vec![
-            Line::from(Span::styled(
-                "Ready in this workspace",
-                Style::default()
-                    .fg(theme::accent())
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from("Describe the change, bug, or question below."),
-            Line::from(Span::styled(
-                if requested_workspace.is_empty() {
-                    "Workspace is unstated; the runtime will choose its default. ctrl+p opens runtime details."
-                        .to_string()
-                } else if app.spawned() || app.config.defaults.workspace.is_some() {
-                    format!(
-                        "Requested workspace: {}. Runtime and distribution stay in ctrl+p.",
-                        super::tree::truncate(&requested_workspace, 46)
-                    )
-                } else {
-                    format!(
-                        "Local cwd suggestion: {}. The attached runtime resolves this path.",
-                        super::tree::truncate(&requested_workspace, 42)
-                    )
-                },
-                Style::default().fg(theme::muted()),
-            )),
-            Line::from(Span::styled(
-                app.machine_hint(),
-                Style::default().fg(theme::muted()),
-            )),
-        ]
+        + editor_rows(Some(&app.home_draft), width)
+        + completion_rows(Some(&app.home_draft))
+        + home_error_rows(app, width);
+    let examples = app.home_draft.is_empty() && !app.home_pending && app.home_error.is_none();
+    let example_rows = if examples && area.height >= composer_height + 12 {
+        4
+    } else if examples {
+        1
     } else {
-        vec![
-            Line::from(Span::styled(
-                "Connect ChatGPT to start coding",
-                Style::default()
-                    .fg(theme::accent())
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from("Use your existing ChatGPT subscription. No API key is required."),
-            Line::from(Span::styled(
-                "Press Enter to connect, or type / for commands without signing in.",
-                Style::default().fg(theme::muted()),
-            )),
-            Line::from(Span::styled(
-                app.machine_hint(),
-                Style::default().fg(theme::muted()),
-            )),
-        ]
+        0
     };
-
-    // B9's tips never cost the logo. On a terminal with room for both they are added; on
-    // one that could show the logo without them they are not; on one too short for the
-    // logo at all they are, because there is nothing left for them to displace.
-    let tips = first_run_tips(app);
-    let logo_without_tips = rows[0].height > logo::HEIGHT + message.len() as u16;
-    let logo_with_tips = rows[0].height > logo::HEIGHT + (message.len() + tips.len()) as u16;
-
-    if logo_with_tips || !logo_without_tips {
-        message.extend(tips);
-    }
-
-    if rows[0].height > logo::HEIGHT + message.len() as u16 {
-        let vertical = Layout::vertical([
-            Constraint::Length(logo::HEIGHT),
-            Constraint::Length(1),
-            Constraint::Length(message.len() as u16),
-        ])
-        .flex(ratatui::layout::Flex::Center)
-        .split(rows[0]);
-
-        logo::draw(frame, vertical[0], Treatment::Alive { tick: app.ticks });
-        frame.render_widget(
-            Paragraph::new(message).alignment(ratatui::layout::Alignment::Center),
-            vertical[2],
+    let show_logo = !access::screen_reader()
+        && width >= 68
+        && area.height >= composer_height + example_rows + 11;
+    let hero_height = if show_logo { logo::HEIGHT } else { 3 };
+    let rows = Layout::vertical([
+        Constraint::Length(hero_height),
+        Constraint::Length(1),
+        Constraint::Length(2),
+        Constraint::Length(composer_height),
+        Constraint::Length(1),
+        Constraint::Length(example_rows),
+        Constraint::Length(1),
+    ])
+    .flex(ratatui::layout::Flex::Center)
+    .split(lane);
+    let ready = app.home_ready();
+    let mut hero = rows[0];
+    if show_logo {
+        let columns = Layout::horizontal([Constraint::Length(20), Constraint::Min(1)]).split(hero);
+        logo::draw(frame, columns[0], Treatment::Alive { tick: app.ticks });
+        hero = Rect::new(
+            columns[1].x + 2,
+            columns[1].y + 1,
+            columns[1].width.saturating_sub(2),
+            5,
         );
+    }
+    let mut message = vec![
+        Line::from(Span::styled(
+            "What would you like to work on?",
+            theme::heading(),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            if ready {
+                "Ready in this workspace"
+            } else {
+                "Describe a task. We'll help you get started."
+            },
+            Style::default().fg(theme::accent()),
+        )),
+    ];
+    if show_logo {
+        message.push(Line::from(Span::styled(
+            if ready {
+                "Start with one useful thing."
+            } else {
+                "Connect with ChatGPT. No API key needed."
+            },
+            Style::default().fg(theme::muted()),
+        )));
+    }
+    frame.render_widget(Paragraph::new(message).wrap(Wrap { trim: false }), hero);
+
+    let workspace = app.home_workspace();
+    let folder = if workspace.is_empty() {
+        "Folder: chosen by the connected runtime".to_string()
+    } else if app.spawned() {
+        format!("Folder: {workspace}")
     } else {
-        let vertical = Layout::vertical([Constraint::Length(message.len() as u16)])
-            .flex(ratatui::layout::Flex::Center)
-            .split(rows[0]);
-        frame.render_widget(
-            Paragraph::new(message).alignment(ratatui::layout::Alignment::Center),
-            vertical[0],
-        );
-    }
+        format!("Folder on connected machine: {workspace}")
+    };
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                super::tree::truncate(&folder, width as usize),
+                Style::default().fg(theme::muted()),
+            )),
+            Line::from(Span::styled(
+                super::tree::truncate(
+                    &format!("Using {}  ·  /options to change", app.home_model_label()),
+                    width as usize,
+                ),
+                Style::default().fg(theme::muted()),
+            )),
+        ]),
+        rows[2],
+    );
+    home_composer(frame, rows[3], app, ready);
 
-    home_composer(frame, rows[1], app, ready);
+    if example_rows > 0 {
+        let examples = App::home_examples();
+        let mut lines = Vec::new();
+        if example_rows > 1 {
+            lines.push(Line::from(Span::styled(
+                "A useful first task — choose one, then edit it:",
+                theme::label(),
+            )));
+        }
+        for (action, label, _) in examples
+            .into_iter()
+            .take(if example_rows > 1 { 3 } else { 1 })
+        {
+            if app.bound(action) {
+                lines.push(Line::from(vec![
+                    Span::styled(format!(" {}  ", app.keymap.label(action)), theme::action()),
+                    Span::raw(label),
+                ]));
+            }
+        }
+        frame.render_widget(Paragraph::new(lines), rows[5]);
+    }
+    let discovery = if app.sessions.merged().is_empty() {
+        "/help  A quick guide"
+    } else {
+        "/sessions  Pick up earlier work"
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(discovery, Style::default().fg(theme::muted()))),
+        rows[6],
+    );
 }
 
 fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -1900,6 +1870,7 @@ fn composer(frame: &mut Frame, area: Rect, app: &App, inline_context: bool) {
     };
     let block = Block::default()
         .borders(access::borders(Borders::ALL))
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(if active.is_some() {
             theme::action_colour()
         } else {
@@ -2028,49 +1999,49 @@ fn session_policy(session: Option<&SessionInfo>, key: &str) -> String {
     }
 }
 
+fn home_error_rows(app: &App, width: u16) -> u16 {
+    app.home_error.as_ref().map_or(0, |error| {
+        transcript_cells::wrap_limited(error, width.saturating_sub(2) as usize, 6).len() as u16
+    })
+}
+
 fn home_composer(frame: &mut Frame, area: Rect, app: &App, ready: bool) {
-    let permission = app
-        .config
-        .defaults
-        .approval_mode()
-        .map(|mode| mode.as_str())
-        .unwrap_or("ask");
     let (sandbox, sandbox_writable) = app.home_sandbox();
-    let sandbox_style = if sandbox_writable {
-        Style::default().fg(theme::good())
-    } else {
-        Style::default().fg(theme::warn())
-    };
+    let policy = Line::from(vec![
+        Span::styled(
+            format!(" Files: {sandbox}"),
+            Style::default().fg(if sandbox_writable {
+                theme::good()
+            } else {
+                theme::warn()
+            }),
+        ),
+        Span::styled(
+            format!(" · {} ", app.home_permission_label()),
+            theme::label(),
+        ),
+    ]);
     let block = Block::default()
         .borders(access::borders(Borders::ALL))
-        .border_style(Style::default().fg(if ready {
-            theme::action_colour()
-        } else {
-            theme::muted()
-        }))
-        .title(Line::from(vec![
-            Span::styled(" PROVIDER ", theme::label()),
-            Span::raw(app.home_provider().to_string()),
-            Span::styled("  ·  REQUESTED APPROVAL ", theme::label()),
-            Span::styled(permission.to_string(), Style::default().fg(theme::warn())),
-            Span::styled("  ·  FILES ", theme::label()),
-            Span::styled(sandbox.to_string(), sandbox_style),
-        ]));
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(theme::action_colour()))
+        .title(Span::styled(" YOUR TASK ", theme::action()))
+        .title_bottom(policy);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let rows = Layout::vertical([
         Constraint::Min(2),
         Constraint::Length(completion_rows(Some(&app.home_draft))),
+        Constraint::Length(home_error_rows(app, area.width)),
         Constraint::Length(1),
     ])
     .split(inner);
-
     if app.home_pending {
         frame.render_widget(
-            Paragraph::new(theme::working(app.ticks, "Starting the agent…")),
+            Paragraph::new(theme::working(app.ticks, "Starting your task…")),
             rows[0],
         );
-    } else if ready || !app.home_draft.text().is_empty() {
+    } else {
         render_editor(
             frame,
             rows[0],
@@ -2078,46 +2049,56 @@ fn home_composer(frame: &mut Frame, area: Rect, app: &App, ready: bool) {
             "Ask the agent to build, fix, explain, or review…",
         );
         render_completions(frame, rows[1], &app.home_draft);
-    } else {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "Type / for commands or press Enter to connect ChatGPT",
-                Style::default().fg(theme::muted()),
-            ))),
-            rows[0],
-        );
     }
 
-    let footer = if let Some(error) = &app.home_error {
-        Line::from(Span::styled(
-            super::tree::truncate(error, inner.width.saturating_sub(1) as usize),
-            Style::default().fg(theme::bad()),
-        ))
-    } else if app.home_draft.completion().is_some() {
-        Line::from(Span::styled(
-            key_footer(
-                "↑↓ choose · Tab complete · Esc close",
-                app.keyboard_enhanced,
-                "starts",
-            ),
-            Style::default().fg(theme::muted()),
-        ))
+    if let Some(error) = &app.home_error {
+        frame.render_widget(
+            Paragraph::new(
+                transcript_cells::wrap_limited(error, inner.width as usize, 6)
+                    .into_iter()
+                    .map(Line::from)
+                    .collect::<Vec<_>>(),
+            )
+            .style(Style::default().fg(theme::bad())),
+            rows[2],
+        );
+    }
+    let action = if app.home_pending {
+        " Starting… "
+    } else if app.home_reconciling() {
+        " Enter retries safely "
     } else if ready {
-        Line::from(Span::styled(
-            key_footer(
-                "@ paths · / commands · ↑ history",
-                app.keyboard_enhanced,
-                "starts",
-            ),
-            Style::default().fg(theme::muted()),
-        ))
+        " Enter starts "
+    } else if !app.home_draft.is_empty() {
+        " Enter: connect & start "
     } else {
-        Line::from(Span::styled(
-            "/ commands                                               Enter connects",
-            Style::default().fg(theme::muted()),
-        ))
+        " Enter connects "
     };
-    frame.render_widget(Paragraph::new(footer), rows[2]);
+    let hint = if app.home_draft.completion().is_some() {
+        "↑↓ choose · Tab complete · Esc close"
+    } else if inner.width >= 64 && app.keyboard_enhanced {
+        "Shift+Enter / Ctrl+J newline"
+    } else {
+        "Ctrl+J newline"
+    };
+    // Reserve the primary action before fitting secondary shortcuts. It must survive
+    // compact terminals, long completion menus, and terminals without enhanced keys.
+    let columns = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(action.width() as u16),
+    ])
+    .split(rows[3]);
+    frame.render_widget(
+        Paragraph::new(Span::styled(hint, Style::default().fg(theme::muted()))),
+        columns[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            action,
+            theme::action().add_modifier(Modifier::REVERSED),
+        )),
+        columns[1],
+    );
 }
 
 /// A composer footer, naming only the newline bindings this terminal actually has.

@@ -205,8 +205,8 @@ async fn the_ui_draws_a_live_dev_runtime_and_stops_it() {
     assert_eq!(app.tab, Tab::Sessions);
     for (width, height) in [(80, 24), (120, 30), (160, 40)] {
         let screen = render(&mut app, width, height);
-        assert!(screen.contains("New coding session"), "{}", screen.text());
-        assert!(screen.contains("PROVIDER"), "{}", screen.text());
+        assert!(screen.contains("YOUR TASK"), "{}", screen.text());
+        assert!(screen.contains("Using"), "{}", screen.text());
         assert!(screen.contains("ctrl+p commands"), "{}", screen.text());
     }
 
@@ -299,10 +299,10 @@ async fn the_ui_draws_a_live_dev_runtime_and_stops_it() {
         let (message, action) = if app.home_ready() {
             ("Ready in this workspace", "Enter starts")
         } else {
-            ("Connect ChatGPT to start coding", "Enter connects")
+            ("Describe a task.", "Enter connects")
         };
         assert!(screen.contains(message), "{}", screen.text());
-        assert!(screen.contains("FILES"), "{}", screen.text());
+        assert!(screen.contains("Files:"), "{}", screen.text());
         assert!(screen.contains(action), "{}", screen.text());
     }
 
@@ -365,7 +365,7 @@ async fn the_ui_draws_a_live_dev_runtime_and_stops_it() {
     let screen = render(&mut app, 140, 34);
     eprintln!("--- coding composer ---\n{}", screen.text());
     assert_eq!(app.home_draft, "/");
-    assert!(screen.contains("New coding session"), "{}", screen.text());
+    assert!(screen.contains("YOUR TASK"), "{}", screen.text());
 
     // First dismiss slash completion, then clear the draft.
     for _ in 0..2 {
