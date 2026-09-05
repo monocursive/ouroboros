@@ -25,6 +25,27 @@
       "provider": "claude_code",
       "provider_session_id": "provider-0000000000000001",
       "request_id": null,
+      "semantic": {
+        "data": {
+          "artifacts": [
+            {
+              "height": 982,
+              "media_type": "image/png",
+              "sha256": "abababababababababababababababababababababababababababababababab",
+              "size": 184320,
+              "width": 1512
+            }
+          ],
+          "at": 1767225600000,
+          "call_id": "toolu_01Desktop00000000001",
+          "is_error": false,
+          "kind": null,
+          "name": "desktop_state",
+          "output": "Captured the frontmost window of Calculator."
+        },
+        "kind": "ToolResult",
+        "version": 1
+      },
       "sequence": 113,
       "session_id": "session-0000000000000000000001",
       "timestamp": "2026-01-01T00:00:00.000000Z",

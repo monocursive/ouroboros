@@ -12,16 +12,36 @@ defmodule Ouroboros.Gateway.Methods.Placement do
   alias Ouroboros.Gateway.Wire
   alias Ouroboros.InteractiveSession
 
-  def start_interactive(owner, opts) do
+  def start_interactive(owner, opts),
+    do:
+      start(
+        owner,
+        opts,
+        :interactive,
+        "interactive session",
+        &InteractiveSession.start_for_gateway_on(&1, opts)
+      )
+
+  def start_coding(owner, objective, opts),
+    do:
+      start(
+        owner,
+        opts,
+        :coding,
+        "coding task",
+        &CodingSession.start_for_gateway_on(&1, objective, opts)
+      )
+
+  defp start(owner, opts, plane, label, start) do
     case destination_workspace(owner, opts) do
       :ok ->
         case Cluster.ensure_placeable(owner) do
           :ok ->
-            case fence_possible_owner(:interactive, owner) do
+            case fence_possible_owner(plane, owner) do
               :ok ->
                 owner
-                |> InteractiveSession.start_for_gateway_on(opts)
-                |> remember_started_owner(:interactive, owner)
+                |> then(fn owner -> start.(owner) end)
+                |> remember_started_owner(plane, owner)
                 |> start_reply()
 
               {:error, _reason} ->
@@ -32,36 +52,7 @@ defmodule Ouroboros.Gateway.Methods.Placement do
 
           {:error, reason} ->
             Safe.unavailable_not_dispatched(
-              "machine #{owner} cannot run this interactive session: #{placement_reason(reason)}"
-            )
-        end
-
-      {:error, reason} ->
-        Safe.invalid_params(destination_workspace_message(owner, reason))
-    end
-  end
-
-  def start_coding(owner, objective, opts) do
-    case destination_workspace(owner, opts) do
-      :ok ->
-        case Cluster.ensure_placeable(owner) do
-          :ok ->
-            case fence_possible_owner(:coding, owner) do
-              :ok ->
-                owner
-                |> CodingSession.start_for_gateway_on(objective, opts)
-                |> remember_started_owner(:coding, owner)
-                |> start_reply()
-
-              {:error, _reason} ->
-                Safe.unavailable_not_dispatched(
-                  "machine #{owner} start was not dispatched because durable fleet owner evidence could not be checkpointed; repair the Ouroboros data directory and retry"
-                )
-            end
-
-          {:error, reason} ->
-            Safe.unavailable_not_dispatched(
-              "machine #{owner} cannot run this coding task: #{placement_reason(reason)}"
+              "machine #{owner} cannot run this #{label}: #{placement_reason(reason)}"
             )
         end
 

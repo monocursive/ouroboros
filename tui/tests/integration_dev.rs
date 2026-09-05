@@ -223,7 +223,8 @@ async fn a_dev_runtime_starts_publishes_answers_hello_and_stops() {
         runtime::read_publication(&data_dir)
             .expect("a readable data directory")
             .is_none(),
-        "a gracefully stopped gateway removes its publication"
+        "a gracefully stopped gateway removes its publication{}",
+        daemon.log_tail(80)
     );
 
     assert!(

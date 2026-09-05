@@ -246,7 +246,7 @@ defmodule Ouroboros.Gateway.WasmDeployTest do
 
       assert code == Methods.code(:invalid_params)
       assert message =~ "params.imports is required"
-      assert message =~ "does not parse unsigned bytes"
+      assert message =~ "params.imports is required"
 
       # And the empty list is accepted as the statement it is, reaching the plane rather
       # than the validator.

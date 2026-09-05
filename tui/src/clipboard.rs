@@ -666,13 +666,13 @@ mod tests {
     fn a_file_reader_is_stopped_before_an_oversized_file_is_read() {
         let scratch = scratch_path("test-file-limit");
         let _ = std::fs::remove_file(&scratch);
-        let reader = Reader::file(
-            "sh",
-            &[
-                "-c",
-                &format!("head -c {} /dev/zero > '{{}}'", IMAGE_LIMIT + 4_096),
-            ],
-        );
+        // Size enforcement is independent of how quickly a helper fills the file.
+        // A sparse fixture avoids writing 20 MiB on the shared test runner's deadline.
+        std::fs::File::create(&scratch)
+            .unwrap()
+            .set_len((IMAGE_LIMIT + 4_096) as u64)
+            .unwrap();
+        let reader = Reader::file("sh", &["-c", ":"]);
 
         let error = run_with_timeout(&reader, &scratch, TIMEOUT).expect_err("the size limit");
 

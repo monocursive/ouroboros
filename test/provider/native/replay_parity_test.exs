@@ -5,7 +5,7 @@ defmodule Ouroboros.Provider.Native.ReplayParityTest do
   A real turn runs through the real `Loop.run_turn/2` against a scripted model; its events
   are captured as they were emitted. The session is then verify-replayed and the two event
   streams are compared twice — first as raw payloads, then through the same projection a
-  client renders with (`Ouroboros.Web.Presentation.from_event/1` →
+  client renders with (`Ouroboros.EventPresentation.from_event/1` →
   `Ouroboros.Web.Transcript.project/1`, the Elixir half of the drift lock in
   `corpus_parity_test.exs`). Equal cells mean equal words on every surface that reads them.
 

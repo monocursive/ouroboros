@@ -905,6 +905,23 @@ defmodule Ouroboros.Web.Live.NewSession do
 
   def https?(_url), do: false
 
+  @doc "Builds a credential update without retaining raw keys in form or socket state."
+  def credential_params(form) do
+    params =
+      case Map.get(form, "anthropic_api_key") do
+        value when is_binary(value) ->
+          case String.trim(value) do
+            "" -> %{}
+            key -> %{"api_key" => key}
+          end
+
+        _ ->
+          %{}
+      end
+
+    put_workspace_param(params, form)
+  end
+
   @doc """
   Adds a workspace id to a credential payload, or an empty string that the gateway
   treats as a clear.

@@ -229,6 +229,11 @@ defmodule Ouroboros.Gateway.Wire do
     {map, ctx} = walk_map(envelope, depth, tick(ctx))
     {encoded, ctx} = walk_payload(payload, depth + 1, tick(ctx))
 
+    # Interpret the bounded, redacted payload once at the runtime boundary. The raw
+    # payload remains available and older clients ignore this additive field.
+    semantic = Ouroboros.EventPresentation.semantic(%{event | payload: encoded})
+    {semantic, ctx} = walk(semantic, depth + 1, ctx)
+    map = if is_map(semantic), do: Map.put(map, "semantic", semantic), else: map
     {map |> Map.put("payload", encoded) |> Map.put("_struct", inspect(module)), ctx}
   end
 

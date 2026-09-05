@@ -145,21 +145,28 @@ defmodule Ouroboros.Provider.Native.Desktop.PoolTest do
   end
 
   describe "env is filtered (§7)" do
-    test "the helper is spawned without the gateway token but keeps a benign variable" do
-      System.put_env("OUROBOROS_GATEWAY_TOKEN", "supersecret")
-      System.put_env("OURO_CU_MARKER", "keepme")
+    test "the helper inherits only its capture environment" do
+      secrets =
+        ~w(OUROBOROS_GATEWAY_TOKEN DATABASE_URL AWS_ACCESS_KEY_ID DEPLOY_PRIVATE_KEY SSH_AUTH_SOCK OURO_CU_MARKER)
+
+      variables = ["LANG" | secrets]
+      before = Map.new(variables, &{&1, System.get_env(&1)})
+      Enum.each(secrets, &System.put_env(&1, "synthetic-sentinel"))
+      System.put_env("LANG", "C")
 
       on_exit(fn ->
-        System.delete_env("OUROBOROS_GATEWAY_TOKEN")
-        System.delete_env("OURO_CU_MARKER")
+        Enum.each(before, fn
+          {name, nil} -> System.delete_env(name)
+          {name, value} -> System.put_env(name, value)
+        end)
       end)
 
       pid = start_pool(env_echo_helper())
       wait_status(pid, &(&1.phase == :ready), 15_000)
 
       assert {:ok, %{"token" => token, "marker" => marker}} = Pool.doctor(pid, 2_000)
-      assert token == "", "the gateway token must not reach the helper's environment"
-      assert marker == "keepme", "a non-secret variable is inherited so the helper can run"
+      assert token == "", "no synthetic secret or arbitrary setting reaches the helper"
+      assert marker == "C", "an explicitly allowed execution variable survives"
     end
   end
 
@@ -250,8 +257,8 @@ defmodule Ouroboros.Provider.Native.Desktop.PoolTest do
     exec awk '
     {
       line = $0
-      print line >> ENVIRON["OURO_CU_REQUEST_LOG"]
-      close(ENVIRON["OURO_CU_REQUEST_LOG"])
+      print line >> "#{System.fetch_env!("OURO_CU_REQUEST_LOG")}"
+      close("#{System.fetch_env!("OURO_CU_REQUEST_LOG")}")
       if ($0 ~ /"method":"cancel"/) {
         fflush()
         next
@@ -285,8 +292,8 @@ defmodule Ouroboros.Provider.Native.Desktop.PoolTest do
       if ($0 ~ /"method":"doctor"/) {
         printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"result\\":{\\"readiness\\":{\\"screenshot\\":\\"ok\\",\\"ax\\":\\"ok\\",\\"input\\":\\"ok\\"}}}\\n", id)
       } else if ($0 ~ /"method":"state"/) {
-        print line >> ENVIRON["OURO_CU_REQUEST_LOG"]
-        close(ENVIRON["OURO_CU_REQUEST_LOG"])
+        print line >> "#{System.fetch_env!("OURO_CU_REQUEST_LOG")}"
+        close("#{System.fetch_env!("OURO_CU_REQUEST_LOG")}")
         system("sleep 0.6")
         printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"result\\":{\\"app\\":{\\"id\\":\\"com.apple.calculator\\"}}}\\n", id)
       }
@@ -336,8 +343,7 @@ defmodule Ouroboros.Provider.Native.Desktop.PoolTest do
     """
   end
 
-  # Echoes two environment variables back in every response, so a test can prove the
-  # gateway token was stripped while a benign variable survived.
+  # Only synthetic values are echoed; no host credentials are exposed by this test.
   defp env_echo_helper do
     write_helper("""
     #!/bin/sh
@@ -346,7 +352,7 @@ defmodule Ouroboros.Provider.Native.Desktop.PoolTest do
       id = $0
       sub(/.*"id":/, "", id)
       sub(/[^0-9].*/, "", id)
-      printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"result\\":{\\"token\\":\\"%s\\",\\"marker\\":\\"%s\\"}}\\n", id, ENVIRON["OUROBOROS_GATEWAY_TOKEN"], ENVIRON["OURO_CU_MARKER"])
+      printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"result\\":{\\"token\\":\\"%s\\",\\"marker\\":\\"%s\\"}}\\n", id, ENVIRON["OUROBOROS_GATEWAY_TOKEN"] ENVIRON["DATABASE_URL"] ENVIRON["AWS_ACCESS_KEY_ID"] ENVIRON["DEPLOY_PRIVATE_KEY"] ENVIRON["SSH_AUTH_SOCK"] ENVIRON["OURO_CU_MARKER"], ENVIRON["LANG"])
       fflush()
     }
     '

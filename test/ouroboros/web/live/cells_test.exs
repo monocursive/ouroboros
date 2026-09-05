@@ -24,7 +24,7 @@ defmodule Ouroboros.Web.Live.CellsTest do
   alias Mix.Tasks.Ouroboros.Gateway.Golden
   alias Ouroboros.Interactive.Event
   alias Ouroboros.Web.Live.Cells
-  alias Ouroboros.Web.Presentation
+  alias Ouroboros.EventPresentation, as: Presentation
   alias Ouroboros.Web.Transcript
   alias Ouroboros.Web.Transcript.Cell
   alias Ouroboros.Web.Transcript.Entry

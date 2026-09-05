@@ -16,11 +16,11 @@ defmodule Ouroboros.Gateway.IntegrationTest do
   @moduletag :tmp_dir
   @moduletag :capture_log
 
-  setup %{tmp_dir: tmp_dir} do
+  setup %{tmp_dir: tmp_dir} = context do
     File.chmod!(tmp_dir, 0o700)
     config = Config.new!(token: @token, data_dir: tmp_dir, port: 0)
 
-    start_supervised!({Gateway, config: config})
+    start_supervised!({Gateway, config: config, ready_application: context[:ready_application]})
 
     port = Listener.port()
     {:ok, client} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 1_000)
@@ -242,6 +242,33 @@ defmodule Ouroboros.Gateway.IntegrationTest do
     stop_supervised!(Gateway)
 
     refute File.exists?(path)
+  end
+
+  @tag ready_application: :ouroboros_gateway_readiness_test
+  test "requests wait for the owning application to finish starting", %{client: client} do
+    application = :ouroboros_gateway_readiness_test
+
+    :ok = :application.load({:application, application, vsn: ~c"1", modules: []})
+
+    on_exit(fn ->
+      Application.stop(application)
+      :application.unload(application)
+    end)
+
+    :ok =
+      :gen_tcp.send(client, [
+        JSON.encode_to_iodata!(%{
+          "jsonrpc" => "2.0",
+          "id" => "before-start",
+          "method" => "hello",
+          "params" => %{"token" => @token, "protocol" => 1}
+        }),
+        ?\n
+      ])
+
+    assert recv(client, 50) == {:error, :timeout}
+    :ok = Application.start(application)
+    assert %{"id" => "before-start", "result" => %{"protocol" => 1}} = recv(client)
   end
 
   test "hello then runtime.status returns a tree, not an opaque blob", %{client: client} do

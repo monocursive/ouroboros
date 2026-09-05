@@ -29,10 +29,9 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
 
   ## Env is filtered
 
-  The helper is spawned with the node's environment minus anything that reads like a
-  secret — the gateway token, provider API keys, OAuth material (§7). The helper owns pixels
-  and input; it has no business holding this runtime's credentials, and a child that cannot
-  read them cannot leak them.
+  The helper inherits only its explicit execution and locale allowlist, with credential
+  values removed (§7). The helper owns pixels and input; it has no business holding this
+  runtime's credentials, and a child that cannot read them cannot leak them.
   """
 
   use GenServer
@@ -42,9 +41,9 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
   alias Ouroboros.Provider.Native.Desktop
   alias Ouroboros.Provider.Native.Desktop.Codec
 
-  # Names of environment variables the helper is never given. It owns host I/O, not
-  # credentials; stripping generously is safe because it needs none of these to run.
-  @secret_env ~r/(API_?KEY|_TOKEN|SECRET|OAUTH|PASSWORD|CREDENTIAL|GATEWAY_TOKEN)/i
+  # The only ambient variables the helper may inherit. It owns host I/O, not credentials.
+  # macOS capture uses the caller's bootstrap namespace, not arbitrary daemon settings.
+  @inherited_env ~w(PATH HOME TMPDIR LANG LC_ALL __CF_USER_TEXT_ENCODING)
 
   # How long a broken helper is left alone before a call is allowed to reconnect it. Long
   # enough that a helper failing on every spawn is not respawned on every turn, short enough
@@ -542,14 +541,7 @@ defmodule Ouroboros.Provider.Native.Desktop.Pool do
       end)
   end
 
-  # Erlang's `env` option modifies the inherited environment rather than replacing it, so
-  # the helper keeps PATH, HOME, TMPDIR, and the windowserver session it needs for capture,
-  # and only the secret-shaped variables are unset (value `false` removes one).
-  defp filtered_env do
-    System.get_env()
-    |> Enum.filter(fn {name, _value} -> Regex.match?(@secret_env, name) end)
-    |> Enum.map(fn {name, _value} -> {String.to_charlist(name), false} end)
-  end
+  defp filtered_env, do: Ouroboros.ProcessEnvironment.port_unsets(@inherited_env)
 
   defp write(%{port: nil}, _frames), do: {:error, :closed}
 

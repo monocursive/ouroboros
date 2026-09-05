@@ -54,12 +54,6 @@ defmodule Ouroboros.Provider.Native.Exec do
     VOLTA_ XCODE_ YARN_
   )
 
-  @sensitive_env_name ~r/(^|_)(AUTH|AUTHORIZATION|COOKIE|CREDENTIALS?|DATABASE_URL|DB_URL|DSN|MONGODB_URI|MONGO_URL|AMQP_URL|BROKER_URL|PASSWORD|PASSWD|PASSPHRASE|PRIVATE_?KEY|ACCESS_?KEY|API_?KEY|SECRET|TOKEN)($|_)/i
-  @credential_uri ~r{[a-z][a-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@}i
-  @credential_assignment ~r/(^|[^a-zA-Z0-9])(?:authorization|credential|password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)\s*[:=]\s*[^\s;&]+/i
-  @erlang_cookie_flag ~r/(^|\s)-?setcookie(?:\s+|=)\S+/i
-  @private_key ~r/-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----/
-
   @type result :: %{
           status: integer(),
           output: binary(),
@@ -204,7 +198,7 @@ defmodule Ouroboros.Provider.Native.Exec do
         {name, value} when is_binary(name) and is_binary(value) -> [{name, value}]
         _other -> []
       end)
-      |> Enum.reject(fn {name, value} -> sensitive_environment?(name, value) end)
+      |> Enum.reject(fn {name, value} -> Ouroboros.ProcessEnvironment.sensitive?(name, value) end)
       |> Map.new()
 
     # Erlexec's manager was started with the VM and does not observe later
@@ -243,24 +237,11 @@ defmodule Ouroboros.Provider.Native.Exec do
   end
 
   defp execution_environment(environment) do
-    Map.filter(environment, fn {name, value} ->
-      inherited_environment?(name) and not sensitive_environment?(name, value)
-    end)
-  end
-
-  defp inherited_environment?(name) do
-    MapSet.member?(@inherited_env_names, name) or
-      Enum.any?(@inherited_env_prefixes, &String.starts_with?(name, &1))
-  end
-
-  defp sensitive_environment?(name, value) do
-    normalized_name = String.replace(name, ~r/[^a-zA-Z0-9]+/, "_")
-
-    Regex.match?(@sensitive_env_name, normalized_name) or
-      Regex.match?(@credential_uri, value) or
-      Regex.match?(@credential_assignment, value) or
-      Regex.match?(@erlang_cookie_flag, value) or
-      Regex.match?(@private_key, value)
+    Ouroboros.ProcessEnvironment.select(
+      environment,
+      @inherited_env_names,
+      @inherited_env_prefixes
+    )
   end
 
   defp release_bin(root) when is_binary(root) and root != "", do: Path.join(root, "bin")

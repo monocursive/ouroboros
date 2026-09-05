@@ -131,7 +131,7 @@ defmodule Ouroboros.Web.Live.Composer do
   end
 
   # The payload's own key, in the order the presentation reads them
-  # (`Ouroboros.Web.Presentation` `:queue_changed`). Nothing is inferred from a missing
+  # (`Ouroboros.EventPresentation` `:queue_changed`). Nothing is inferred from a missing
   # one: a `queue_changed` that named no number is a queue this view cannot report.
   defp queued_of(event) do
     payload = Map.get(event, :payload)

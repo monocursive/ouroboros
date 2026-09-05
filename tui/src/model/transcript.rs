@@ -15,6 +15,8 @@
 
 use serde_json::{Map, Value};
 
+mod semantic;
+
 use super::{compact, Event, EventType};
 
 // These ceilings apply only to the derived transcript projection. `Event::payload` and
@@ -125,7 +127,8 @@ pub enum PresentationEvent {
 
 /// Why a presentation drew nothing. Every value here is a payload that carried no content,
 /// never a *kind* this client declines to show.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Hidden {
     /// An output delta or final with no text: transports emit these as keep-alives.
     EmptyText,
@@ -169,7 +172,8 @@ impl Lifecycle {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TurnOutcome {
     Completed,
     Failed,
@@ -198,7 +202,7 @@ pub struct RunStart {
 
 /// One `usage` report exactly as the provider phrased it. Absent fields stay absent: a
 /// zero this client invented would be indistinguishable from a zero a provider measured.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct UsageReport {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
@@ -280,7 +284,7 @@ impl PlanStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolCall {
     pub call_id: Option<String>,
     pub name: String,
@@ -295,7 +299,7 @@ pub struct ToolCall {
     pub at: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolResult {
     pub call_id: Option<String>,
     pub name: Option<String>,
@@ -315,7 +319,7 @@ pub struct ToolResult {
 /// "no path on the wire. The path is a fact about this node", and the pixels are fetched by
 /// sha through `computer_use.artifact` by the one surface that can draw them. Decoded once,
 /// here, at absorb time, so nothing downstream parses the payload again.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ImageArtifact {
     /// The digest that both names the artifact and is the only key `computer_use.artifact`
     /// and [`crate::images::session_desktop`] accept. An artifact with no sha is dropped:
@@ -359,6 +363,14 @@ impl PresentationEvent {
     /// Every normalized kind, with no catch-all. Adding a type to [`EventType`] without a
     /// presentation is a compile error rather than a silent drop.
     pub fn from_event(event: &Event) -> Self {
+        if let Some(presentation) = semantic::decode(event) {
+            return presentation;
+        }
+        Self::from_legacy_event(event)
+    }
+
+    /// Compatibility for saved events and servers predating the semantic contract.
+    pub fn from_legacy_event(event: &Event) -> Self {
         match event.kind {
             EventType::InputAccepted => input_accepted(&event.payload),
             EventType::OutputTextDelta | EventType::OutputTextFinal => {

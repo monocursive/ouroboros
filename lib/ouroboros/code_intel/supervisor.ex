@@ -13,10 +13,9 @@ defmodule Ouroboros.CodeIntel.Supervisor do
   Tests start their own instance under a different name so they can shorten idle windows
   and inject a memory reader without touching the node's.
 
-  The restart intensity is deliberately generous. This subtree sits in the application's
-  `rest_for_one` tail, so escalating restarts the account boundary and the gateway — and a
-  language-server failure is a state inside the pool, never a crash of it. The pool has to
-  be genuinely, repeatedly broken before anything outside code intelligence notices.
+  The restart intensity is deliberately generous: language-server failures are states
+  inside the pool, never crashes of it. Exhausting this subtree's budget replaces only
+  this subtree under the independent surface supervisor.
   """
 
   use Supervisor

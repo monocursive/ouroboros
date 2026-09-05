@@ -19,6 +19,9 @@
 //! exactly the lines it always printed wherever there is no screen to draw on — a pipe,
 //! `ouro daemon`, or any `--print`.
 
+mod runtime_connection;
+use runtime_connection::{Ownership, RuntimeConnection};
+
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -325,8 +328,11 @@ async fn attach_local_with(
     let mut boot = Boot::begin();
     let progress = boot.progress();
 
-    let (publication, token, daemon) = match boot.drive(local_runtime(paths, dev, &progress)).await
-    {
+    let RuntimeConnection {
+        publication,
+        token,
+        ownership: daemon,
+    } = match boot.drive(local_runtime(paths, dev, &progress)).await {
         Ok(started) => started,
         Err(error) => return Err(boot.fail(error).await),
     };
@@ -350,7 +356,7 @@ async fn attach_local_with(
             paths.data_dir.clone(),
             paths.token_file(),
         ))),
-        supervision(&daemon),
+        daemon.mode(),
         daemon,
         None,
         local,
@@ -446,14 +452,17 @@ async fn new_session(
         }
     }
 
-    let (publication, token, mut daemon) =
-        match boot.drive(local_runtime(paths, dev, &progress)).await {
-            Ok(started) => started,
-            Err(error) => return Err(boot.fail(error).await),
-        };
+    let RuntimeConnection {
+        publication,
+        token,
+        ownership: mut daemon,
+    } = match boot.drive(local_runtime(paths, dev, &progress)).await {
+        Ok(started) => started,
+        Err(error) => return Err(boot.fail(error).await),
+    };
 
     let address = local_address(publication.port);
-    let mode = supervision(&daemon);
+    let mode = daemon.mode();
 
     let (hook, channel) = ui::hook();
     progress.report(BootEvent::Connecting {
@@ -730,7 +739,7 @@ async fn new_session(
         attached.client.stop().await;
 
         // The session outlives this process only if the runtime does.
-        if let Some(daemon) = daemon.as_mut() {
+        if let Some(daemon) = daemon.owned_mut() {
             let pid = daemon.pid();
             daemon.detach();
             println!("the runtime is still running (pid {pid}); `ouro` attaches to it");
@@ -876,10 +885,14 @@ async fn run_prompt(paths: &Paths, dev: bool, config: Loaded, args: RunArgs) -> 
 
     let (address, token, mut daemon) = if args.addr.is_some() || args.token_file.is_some() {
         let (address, token) = remote_endpoint(paths, args.addr, args.token_file).await?;
-        (address, token, None)
+        (address, token, Ownership::Attached)
     } else {
         paths.ensure_private_data_dir()?;
-        let (publication, token, daemon) = local_runtime(paths, dev, &progress).await?;
+        let RuntimeConnection {
+            publication,
+            token,
+            ownership: daemon,
+        } = local_runtime(paths, dev, &progress).await?;
         (local_address(publication.port), token, daemon)
     };
 
@@ -892,12 +905,9 @@ async fn run_prompt(paths: &Paths, dev: bool, config: Loaded, args: RunArgs) -> 
     let attached = match attach_with(address, token, false, None, hook).await {
         Ok(attached) => attached,
         Err(error) => {
-            return Err(clean_up_owned_daemon_after_error(
-                &mut daemon,
-                error,
-                "connecting to the newly started runtime failed",
-            )
-            .await)
+            return Err(daemon
+                .clean_up_after_error(error, "connecting to the newly started runtime failed")
+                .await)
         }
     };
 
@@ -947,7 +957,7 @@ async fn run_prompt(paths: &Paths, dev: bool, config: Loaded, args: RunArgs) -> 
                 Ok(plan) => plan,
                 Err(refusal) => {
                     client.stop().await;
-                    detach_owned_daemon(&mut daemon);
+                    daemon.detach_with_notice();
                     return Err(refuse_run(&options, &refusal));
                 }
             }
@@ -974,7 +984,7 @@ async fn run_prompt(paths: &Paths, dev: bool, config: Loaded, args: RunArgs) -> 
     };
 
     client.stop().await;
-    detach_owned_daemon(&mut daemon);
+    daemon.detach_with_notice();
 
     match report {
         Ok(report) if report.status == ouro::run::Status::Completed => Ok(()),
@@ -1043,10 +1053,14 @@ async fn acp_agent(paths: &Paths, dev: bool, config: Loaded, args: AcpArgs) -> R
 
     let (address, token, mut daemon) = if args.addr.is_some() || args.token_file.is_some() {
         let (address, token) = remote_endpoint(paths, args.addr, args.token_file).await?;
-        (address, token, None)
+        (address, token, Ownership::Attached)
     } else {
         paths.ensure_private_data_dir()?;
-        let (publication, token, daemon) = local_runtime(paths, dev, &progress).await?;
+        let RuntimeConnection {
+            publication,
+            token,
+            ownership: daemon,
+        } = local_runtime(paths, dev, &progress).await?;
         (local_address(publication.port), token, daemon)
     };
 
@@ -1062,12 +1076,9 @@ async fn acp_agent(paths: &Paths, dev: bool, config: Loaded, args: AcpArgs) -> R
     let attached = match attach_with(address, token, false, None, hook).await {
         Ok(attached) => attached,
         Err(error) => {
-            return Err(clean_up_owned_daemon_after_error(
-                &mut daemon,
-                error,
-                "connecting to the newly started runtime failed",
-            )
-            .await)
+            return Err(daemon
+                .clean_up_after_error(error, "connecting to the newly started runtime failed")
+                .await)
         }
     };
 
@@ -1091,20 +1102,9 @@ async fn acp_agent(paths: &Paths, dev: bool, config: Loaded, args: AcpArgs) -> R
     .await;
 
     client.stop().await;
-    detach_owned_daemon(&mut daemon);
+    daemon.detach_with_notice();
 
     outcome
-}
-
-/// The session outlives this process only if the runtime does, and `ouro run` is a command
-/// a script calls repeatedly: tearing the daemon down between prompts would make every one
-/// of them pay a cold start.
-fn detach_owned_daemon(daemon: &mut Option<Daemon>) {
-    if let Some(daemon) = daemon.as_mut() {
-        let pid = daemon.pid();
-        daemon.detach();
-        eprintln!("the runtime is still running (pid {pid}); `ouro` attaches to it");
-    }
 }
 
 /// The start options `--continue` would have had to ignore, named rather than dropped.
@@ -1984,7 +1984,11 @@ async fn service_run(paths: &Paths, dev: bool) -> Result<()> {
         }
     }
 
-    let (_publication, _token, child) = start(
+    let RuntimeConnection {
+        publication: _publication,
+        token: _token,
+        ownership: child,
+    } = start(
         paths,
         false,
         Output::File(paths.daemon_log()),
@@ -1992,7 +1996,7 @@ async fn service_run(paths: &Paths, dev: bool) -> Result<()> {
         StartRequirement::Fleet,
     )
     .await?;
-    let mut daemon = child.ok_or_else(|| {
+    let mut daemon = child.into_spawned().ok_or_else(|| {
         anyhow!("a runtime appeared while service-run was starting; refusing to supervise a process it did not create")
     })?;
 
@@ -2244,23 +2248,8 @@ fn start_workspace(machine: &str, workspace: Option<&str>) -> Result<String> {
     Ok(workspace.to_string())
 }
 
-/// Whether this client supervises the runtime it is about to draw.
-fn supervision(daemon: &Option<Daemon>) -> Mode {
-    match daemon {
-        Some(daemon) => Mode::Spawned { pid: daemon.pid() },
-        // An adopted daemon is not one this client has a `Child` for, so the quit dialog
-        // offers a disconnect rather than a shutdown it could not carry out. `ouro stop`
-        // is the verb that ends a daemon this process did not start.
-        None => Mode::Attached,
-    }
-}
-
 /// Adopts the runtime this data directory already has, or starts one.
-async fn local_runtime(
-    paths: &Paths,
-    dev: bool,
-    progress: &Progress,
-) -> Result<(Publication, Secret, Option<Daemon>)> {
+async fn local_runtime(paths: &Paths, dev: bool, progress: &Progress) -> Result<RuntimeConnection> {
     report_dev_data_dir_override(paths, dev, progress);
 
     match live_publication_to_adopt(paths)? {
@@ -2281,7 +2270,7 @@ async fn local_runtime(
                 data_dir: paths.data_dir.display().to_string(),
             });
 
-            Ok((publication, token, None))
+            Ok(RuntimeConnection::attached(publication, token))
         }
         None => start(paths, dev, Output::Ring, progress, StartRequirement::Any).await,
     }
@@ -2334,7 +2323,11 @@ async fn daemon(paths: &Paths, dev: bool) -> Result<()> {
 
     // Plain by construction: `ouro daemon` prints how to reach the runtime and exits, and
     // a screen it would tear down a second later helps nobody.
-    let (publication, _token, child) = start(
+    let RuntimeConnection {
+        publication,
+        token: _token,
+        ownership: child,
+    } = start(
         paths,
         dev,
         Output::File(paths.daemon_log()),
@@ -2343,9 +2336,9 @@ async fn daemon(paths: &Paths, dev: bool) -> Result<()> {
     )
     .await?;
 
-    // Detached: this process is about to exit and the runtime must not go with it. A
-    // `None` here is a runtime that appeared under the spawn lock, which nothing owns.
-    if let Some(mut child) = child {
+    // This process is about to exit; relinquish any child it spawned. A runtime that
+    // appeared under the spawn lock is already attached and needs no ownership change.
+    if let Ownership::Spawned(mut child) = child {
         child.detach();
     }
 
@@ -2388,9 +2381,13 @@ async fn web(paths: &Paths, dev: bool, print: bool) -> Result<()> {
     // are most of what makes the failure legible.
     ouro::web_cli::report_boot(&boot, &mut std::io::stderr().lock());
 
-    let (_publication, _token, daemon) = started.context(ouro::web_cli::NO_RUNTIME_REFUSAL)?;
+    let RuntimeConnection {
+        publication: _publication,
+        token: _token,
+        ownership: daemon,
+    } = started.context(ouro::web_cli::NO_RUNTIME_REFUSAL)?;
 
-    if let Some(mut daemon) = daemon {
+    if let Ownership::Spawned(mut daemon) = daemon {
         daemon.detach();
     }
 
@@ -2646,7 +2643,7 @@ async fn attach_remote(
         token,
         Some(refresh),
         Mode::Attached,
-        None,
+        Ownership::Attached,
         None,
         Local {
             // This client did not start it, so it does not know where that runtime keeps
@@ -3005,7 +3002,7 @@ async fn draw(
     token: Secret,
     refresh: Option<Arc<dyn EndpointSource>>,
     mode: Mode,
-    mut daemon: Option<Daemon>,
+    mut daemon: Ownership,
     open: Option<(Plane, String, Option<String>)>,
     mut local: Local,
     continue_from: Option<ContinueRequest>,
@@ -3105,7 +3102,7 @@ async fn draw(
 async fn run_ui(
     address: SocketAddr,
     mode: Mode,
-    daemon: Option<Daemon>,
+    daemon: Ownership,
     attached: Connected,
     channel: ui::UiChannel,
     open: Option<(Plane, String, Option<String>)>,
@@ -3121,7 +3118,7 @@ async fn run_ui(
         notifications,
     } = attached;
 
-    let logs = daemon.as_ref().map(Daemon::logs);
+    let logs = daemon.owned().map(Daemon::logs);
     let mut app = App::new(mode, address.to_string(), hello.clone(), logs);
 
     // The workspace the new-session dialog offers. A default, not a decision: it is
@@ -3237,7 +3234,7 @@ async fn run_ui(
         client.clone(),
         notifications,
         channel,
-        daemon.as_mut(),
+        daemon.owned_mut(),
     )
     .await
     {
@@ -3245,17 +3242,14 @@ async fn run_ui(
         Err(error) => {
             client.stop().await;
 
-            return Err(clean_up_owned_daemon_after_error(
-                &mut daemon,
-                error,
-                "the terminal UI stopped before runtime handoff",
-            )
-            .await);
+            return Err(daemon
+                .clean_up_after_error(error, "the terminal UI stopped before runtime handoff")
+                .await);
         }
     };
 
     if quit == Quit::ApplyFleetIntent {
-        finish(Quit::Shutdown, &client, &hello, daemon).await?;
+        daemon.finish(Quit::Shutdown, &client, &hello).await?;
         let data_dir = local.data_dir.ok_or_else(|| {
             anyhow!(
                 "cannot create a fleet from an attached client that has no local data directory"
@@ -3279,54 +3273,7 @@ async fn run_ui(
         .await;
     }
 
-    finish(quit, &client, &hello, daemon).await
-}
-
-/// The quit dialog's choice, executed through the same paths the CLI already used: an
-/// acknowledged `runtime.shutdown` where the gateway serves it, then SIGTERM, then
-/// SIGKILL, all of which `Daemon::terminate` already sequences.
-async fn finish(quit: Quit, client: &Client, hello: &Hello, daemon: Option<Daemon>) -> Result<()> {
-    let Some(mut daemon) = daemon else {
-        client.stop().await;
-        println!("disconnected; the runtime keeps running");
-
-        return Ok(());
-    };
-
-    match quit {
-        Quit::Detach | Quit::Disconnect => {
-            let pid = daemon.pid();
-            daemon.detach();
-            println!("detached; the runtime is still running (pid {pid})");
-        }
-        Quit::Shutdown | Quit::ApplyFleetIntent => {
-            if hello.serves("runtime.shutdown") && hello.operates() {
-                match client.call("runtime.shutdown", json!({})).await {
-                    Ok(_result) => println!("the runtime accepted runtime.shutdown"),
-                    // The runtime stopping is what was asked for, and it may stop before
-                    // it can answer.
-                    Err(ClientError::ConnectionClosed) => {
-                        println!("the runtime accepted runtime.shutdown and closed the connection")
-                    }
-                    Err(error) => println!("runtime.shutdown failed ({error}); signalling instead"),
-                }
-            } else {
-                println!(
-                    "this build does not serve runtime.shutdown at this scope; signalling pid {}",
-                    daemon.pid()
-                );
-            }
-
-            client.stop().await;
-
-            match daemon.terminate(SHUTDOWN_GRACE).await? {
-                Some(status) => println!("the runtime exited: {status}"),
-                None => println!("the runtime had already exited"),
-            }
-        }
-    }
-
-    Ok(())
+    daemon.finish(quit, &client, &hello).await
 }
 
 /// The one-shot page `ouro attach --print` renders, for a pipe or a terminal without a
@@ -3464,7 +3411,7 @@ where
 
 /// Starts a runtime and waits for it to publish a port, under the spawn lock.
 ///
-/// `None` for the daemon means another `ouro` published one while this call was taking
+/// `Ownership::Attached` means another `ouro` published one while this call was taking
 /// the lock: the check the caller made and the spawn it asked for are not one operation,
 /// and the lock is where that gap is closed. Adopting is the right answer there — a
 /// second runtime in the same data directory would overwrite the first one's token.
@@ -3489,7 +3436,7 @@ async fn start(
     output: Output,
     progress: &Progress,
     requirement: StartRequirement,
-) -> Result<(Publication, Secret, Option<Daemon>)> {
+) -> Result<RuntimeConnection> {
     // Held until this function returns, which is the whole spawn window: check, spawn,
     // and wait for the publication. Not longer — a client that held it while attached
     // would stop the next `ouro` from adopting the daemon it just started.
@@ -3517,7 +3464,7 @@ async fn start(
                 pid: publication.pid,
             });
 
-            return Ok((publication, token, None));
+            return Ok(RuntimeConnection::attached(publication, token));
         }
         runtime::LockedPublication::Absent | runtime::LockedPublication::RemovedStale(_) => {}
     }
@@ -3585,7 +3532,7 @@ async fn start(
         )));
     }
 
-    Ok((publication, token, Some(daemon)))
+    Ok(RuntimeConnection::spawned(publication, token, daemon))
 }
 
 /// A child is still this client's responsibility until all three identities agree: the
@@ -3623,29 +3570,12 @@ async fn clean_up_daemon_after_error(
     error.context(note)
 }
 
-/// Ends only a runtime this invocation spawned. `None` means the client adopted an
-/// existing daemon, so an error closes this connection but never changes that runtime's
-/// lifecycle.
-async fn clean_up_owned_daemon_after_error(
-    daemon: &mut Option<Daemon>,
-    error: anyhow::Error,
-    activity: &str,
-) -> anyhow::Error {
-    let Some(owned) = daemon.as_mut() else {
-        return error;
-    };
-
-    let error = clean_up_daemon_after_error(owned, error, activity).await;
-    *daemon = None;
-    error
-}
-
 /// Restores the boot surface only after the spawned child has been reaped. Keeping the
 /// boot screen until then preserves its log tail, while stopping the connection first
 /// lets the runtime perform an orderly shutdown without an attached reconnect loop.
 async fn fail_boot_with_owned_daemon(
     boot: Boot,
-    daemon: &mut Option<Daemon>,
+    daemon: &mut Ownership,
     client: Option<&Client>,
     error: anyhow::Error,
     activity: &str,
@@ -3654,7 +3584,7 @@ async fn fail_boot_with_owned_daemon(
         client.stop().await;
     }
 
-    let error = clean_up_owned_daemon_after_error(daemon, error, activity).await;
+    let error = daemon.clean_up_after_error(error, activity).await;
     boot.fail(error).await
 }
 
@@ -4476,15 +4406,15 @@ mod tests {
 
     #[tokio::test]
     async fn an_adopted_runtime_is_never_reclassified_as_owned_during_error_cleanup() {
-        let mut adopted = None;
-        let error = clean_up_owned_daemon_after_error(
-            &mut adopted,
-            anyhow!("the session request was refused"),
-            "this context is only for an owned child",
-        )
-        .await;
+        let mut adopted = Ownership::Attached;
+        let error = adopted
+            .clean_up_after_error(
+                anyhow!("the session request was refused"),
+                "this context is only for an owned child",
+            )
+            .await;
 
-        assert!(adopted.is_none());
+        assert!(matches!(adopted, Ownership::Attached));
         assert_eq!(error.to_string(), "the session request was refused");
     }
 
@@ -4507,12 +4437,15 @@ mod tests {
         };
         let boot = Boot::plain();
         let progress = boot.progress();
-        let (publication, _token, daemon) =
-            start(&paths, true, Output::Ring, &progress, StartRequirement::Any)
-                .await
-                .expect("a real dev runtime");
+        let RuntimeConnection {
+            publication,
+            token: _token,
+            ownership: daemon,
+        } = start(&paths, true, Output::Ring, &progress, StartRequirement::Any)
+            .await
+            .expect("a real dev runtime");
         let pid = publication.pid;
-        let mode = supervision(&daemon);
+        let mode = daemon.mode();
 
         let error = draw(
             boot,

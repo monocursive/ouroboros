@@ -31,7 +31,7 @@ defmodule Ouroboros.Interactive.Task.Approvals do
   # runtime without it must still ask a human rather than fail or invent a verdict. The
   # name is read from application environment rather than hard-called so that this module
   # compiles, and behaves, on a node where the engine does not exist yet.
-  @default_permissions_engine Ouroboros.Control.Permissions
+  alias Ouroboros.Control.Permissions.Engine
 
   def request(runtime, request_ref, request, from) do
     cond do
@@ -287,24 +287,8 @@ defmodule Ouroboros.Interactive.Task.Approvals do
   # `evaluate/1` is C1's contract: `{:allow, rule} | {:deny, rule} | {:ask, reason}`. With
   # no engine on the node every request is `:ask`, which is the honest default — the
   # runtime has no rules, so it has no basis to skip the human.
-  defp evaluate_permission(runtime, request) do
-    case permissions_engine(:evaluate, 1) do
-      nil ->
-        {:ask, :no_permission_engine}
-
-      engine ->
-        case apply(engine, :evaluate, [permission_subject(runtime, request)]) do
-          {:allow, rule} -> {:allow, rule}
-          {:deny, rule} -> {:deny, rule}
-          {:ask, reason} -> {:ask, reason}
-          _unrecognised -> {:ask, :engine_answer_unrecognised}
-        end
-    end
-  rescue
-    exception -> {:ask, {:engine_failed, Exception.message(exception)}}
-  catch
-    :exit, _reason -> {:ask, :engine_unavailable}
-  end
+  defp evaluate_permission(runtime, request),
+    do: Engine.evaluate(permission_subject(runtime, request))
 
   # `record/2` takes a caller-minted, stable decision id and the answer; the request map
   # `evaluate/1` took rides along so the entry is attributed to this session rather than
@@ -312,30 +296,17 @@ defmodule Ouroboros.Interactive.Task.Approvals do
   # the engine refuses as `:invalid_permission_record` — so no bridged decision ever
   # reached the ledger, and the test fixture mirrored the wrong shape.
   defp record_permission(runtime, request, request_id, decision, source, rule, scope \\ :once) do
-    case permissions_engine(:record, 2) do
-      nil ->
-        :ok
+    _ =
+      Engine.record(permission_decision_id(runtime, request_id), %{
+        decision: if(decision == :allow, do: :approve, else: :deny),
+        scope: scope,
+        actor: if(source == :engine, do: :rule, else: :human),
+        rule_ref: rule,
+        reason: nil,
+        request: permission_subject(runtime, request)
+      })
 
-      engine ->
-        _ =
-          apply(engine, :record, [
-            permission_decision_id(runtime, request_id),
-            %{
-              decision: if(decision == :allow, do: :approve, else: :deny),
-              scope: scope,
-              actor: if(source == :engine, do: :rule, else: :human),
-              rule_ref: rule,
-              reason: nil,
-              request: permission_subject(runtime, request)
-            }
-          ])
-
-        :ok
-    end
-  rescue
-    _exception -> :ok
-  catch
-    :exit, _reason -> :ok
+    :ok
   end
 
   # The engine's seams use `"<session id>:<provider request id>"`: stable across a retry
@@ -345,22 +316,7 @@ defmodule Ouroboros.Interactive.Task.Approvals do
   # The "don't ask again" line a modal can offer. It is the engine's to phrase — this
   # module has no rule language — so the key is present only when C1 is loaded and
   # answered with one, and absent rather than invented when it is not.
-  defp suggested_rule(subject, _verdict) do
-    case permissions_engine(:suggest, 1) do
-      nil ->
-        nil
-
-      engine ->
-        case apply(engine, :suggest, [subject]) do
-          rule when is_binary(rule) and rule != "" -> rule
-          _nothing_to_suggest -> nil
-        end
-    end
-  rescue
-    _exception -> nil
-  catch
-    :exit, _reason -> nil
-  end
+  defp suggested_rule(subject, _verdict), do: Engine.suggest(subject)
 
   # The engine's own request shape — the same one `shell_request/2` and the native agent
   # build — so a bridged Claude approval is judged by the rules an operator wrote, not
@@ -447,15 +403,6 @@ defmodule Ouroboros.Interactive.Task.Approvals do
         _other -> nil
       end
     end)
-  end
-
-  def permissions_engine(function, arity) do
-    engine =
-      Application.get_env(:ouroboros, :permissions_engine, @default_permissions_engine)
-
-    if is_atom(engine) and not is_nil(engine) and Code.ensure_loaded?(engine) and
-         function_exported?(engine, function, arity),
-       do: engine
   end
 
   # Best effort by construction: the pending table is memory, so the durable trace of an

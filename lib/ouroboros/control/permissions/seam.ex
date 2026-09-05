@@ -77,10 +77,8 @@ defmodule Ouroboros.Control.Permissions.Seam do
 
   @binding :ouroboros_permission_principal
 
-  # The engine an operator has not replaced. The same default `Provider.Native.Permissions`
-  # and `Interactive.Task.Approvals` hold, so an unconfigured node behaves exactly as this
-  # seam did before W18.
-  @default_engine Permissions
+  # All transports use the same configured-engine lookup and fail-closed verdicts.
+  alias Ouroboros.Control.Permissions.Engine
 
   @type verdict :: {:allow, map()} | {:deny, map()} | {:ask, map()}
 
@@ -129,6 +127,7 @@ defmodule Ouroboros.Control.Permissions.Seam do
     case evaluate(request) do
       {:allow, ref} -> {:allow, ref}
       {:deny, ref} -> {:deny, ref}
+      {:ask, {:engine_error, _reason}} -> {:ask, payload}
       {:ask, _reason} -> {:ask, suggested(payload, request)}
     end
   rescue
@@ -168,6 +167,7 @@ defmodule Ouroboros.Control.Permissions.Seam do
     case evaluate(request) do
       {:allow, ref} -> {:allow, ref}
       {:deny, ref} -> {:deny, ref}
+      {:ask, {:engine_error, _reason}} -> {:ask, payload}
       {:ask, _reason} -> {:ask, suggested(payload, request)}
     end
   rescue
@@ -338,49 +338,9 @@ defmodule Ouroboros.Control.Permissions.Seam do
   # have emitted is still in hand — the answer to an engine that failed is the approval
   # the human was always going to see, unannotated.
 
-  defp evaluate(request) do
-    case engine(:evaluate, 1) do
-      nil ->
-        {:ask, :no_permission_engine}
-
-      engine ->
-        case apply(engine, :evaluate, [request]) do
-          {:allow, ref} -> {:allow, ref}
-          {:deny, ref} -> {:deny, ref}
-          {:ask, reason} -> {:ask, reason}
-          _unrecognised -> {:ask, :engine_answer_unrecognised}
-        end
-    end
-  end
-
-  # Best effort, exactly as it was: the human's answer has already reached the provider,
-  # and a failed audit write must not turn a delivered approval into an error.
-  defp record(decision_id, answer) do
-    case engine(:record, 2) do
-      nil -> {:error, :no_permission_engine}
-      engine -> apply(engine, :record, [decision_id, answer])
-    end
-  end
-
-  # `nil` rather than a raise where the engine has nothing to say, so a caller omits the
-  # key instead of inventing a rule this node cannot parse.
-  defp suggest(request) do
-    case engine(:suggest, 1) do
-      nil -> nil
-      engine -> apply(engine, :suggest, [request])
-    end
-  end
-
-  # A module that is not loaded, or that does not export what C13 asks for, is no engine.
-  # Answering `nil` here rather than letting `apply/3` raise is what keeps a half-built or
-  # mistyped engine an ask rather than a crashed session.
-  defp engine(function, arity) do
-    engine = Application.get_env(:ouroboros, :permissions_engine, @default_engine)
-
-    if is_atom(engine) and not is_nil(engine) and Code.ensure_loaded?(engine) and
-         function_exported?(engine, function, arity),
-       do: engine
-  end
+  defp evaluate(request), do: Engine.evaluate(request)
+  defp record(decision_id, answer), do: Engine.record(decision_id, answer)
+  defp suggest(request), do: Engine.suggest(request)
 
   # ── provider → request ─────────────────────────────────────────────────────────────
 

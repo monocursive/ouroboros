@@ -15,9 +15,9 @@ defmodule Ouroboros.Provider.Native.Mcp.Supervisor do
   without touching the node's.
 
   The restart intensity is deliberately generous, for the same reason
-  `Ouroboros.CodeIntel.Supervisor`'s is: this subtree sits in the application's
-  `rest_for_one` tail, so escalating would restart the gateway — and an MCP server
-  failing is a state inside the pool, never a crash of it.
+  `Ouroboros.CodeIntel.Supervisor`'s is: server failures are states inside the pool,
+  never crashes of it. Exhausting this subtree's budget replaces only this subtree
+  under the independent surface supervisor.
   """
 
   use Supervisor

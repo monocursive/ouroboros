@@ -9,13 +9,8 @@ defmodule Ouroboros.Wasm.Supervisor do
   spawned lazily, downstream of the gateway. It is unconditional because it is lazy — no
   helper exists until a request needs one, and a node that never built one never spawns one.
 
-  It leads those two in the tail, which is the one thing about it that is not a copy. Under
-  `rest_for_one` the child that goes first is the one whose state the others' crashes must
-  not discard, and a wasm pool restart discards live instances: guest state that only `init`
-  and every message since can approximate, with no snapshot anywhere to rebuild it from. The
-  desktop pool's per-session map is rebuilt by the next capture and MCP's ports are
-  disposable, so paying for an improbable wasm crash with those is the cheaper trade than
-  paying for an improbable MCP crash with a running guest.
+  Its runtime parent restarts the boot recovery task after this supervisor is replaced.
+  Unrelated language-server, desktop, MCP, and web failures leave guest instances alive.
 
   Tests start their own named `Pool` and never touch this supervisor.
   """

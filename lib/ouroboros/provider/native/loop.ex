@@ -166,6 +166,7 @@ defmodule Ouroboros.Provider.Native.Loop do
   alias Ouroboros.Provider.Native.Tools
   alias Ouroboros.Provider.Native.Tools.Agent, as: AgentTool
   alias Ouroboros.Provider.Native.Tools.AgentResult
+  alias Ouroboros.Provider.Native.ToolAttempt
   alias Ouroboros.Provider.Native.Tools.AskUser
   alias Ouroboros.Provider.Native.Tools.Capability, as: CapabilityTool
   alias Ouroboros.Wasm.Pool, as: WasmPool
@@ -265,7 +266,8 @@ defmodule Ouroboros.Provider.Native.Loop do
     message_offset: 0,
     reads: %{},
     session_grants: MapSet.new(),
-    signatures: %{},
+    last_signature: nil,
+    signature_repeats: 0,
     interrupted?: false,
     steer: [],
     # The turn's file checkpoint, accumulated as tools run: `path => %{before:, after:}`
@@ -704,14 +706,14 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   defp run_tool(state, call) do
     signature = signature(call)
-    seen = Map.get(state.signatures, signature, 0)
+    seen = if state.last_signature == signature, do: state.signature_repeats, else: 0
 
     if seen + 1 >= @doom_loop_repeats do
       {:failed, state,
-       "doom loop: `#{call.name}` was called #{seen + 1} times with identical arguments. " <>
+       "doom loop: `#{call.name}` was called #{seen + 1} consecutive times with identical arguments. " <>
          "Stopping the turn rather than repeating it.", "doom_loop"}
     else
-      state = %{state | signatures: Map.put(state.signatures, signature, seen + 1)}
+      state = %{state | last_signature: signature, signature_repeats: seen + 1}
       dispatch(state, call)
     end
   end
@@ -778,14 +780,14 @@ defmodule Ouroboros.Provider.Native.Loop do
               effect_id = tool_effect_id(state, call)
               emit_tool_call(state, call, effect_id)
 
-              gated(state, call, module, classified, effect_id)
+              gated(state, ToolAttempt.new(call, module, classified, effect_id))
 
             {:error, message} ->
               # Invalid calls have no effect to admit or record. They remain paired tool
               # call/results so the model can repair its arguments on the next iteration.
               emit_tool_call(state, call, nil)
 
-              attempts = Map.get(state.signatures, signature(call), 1)
+              attempts = state.signature_repeats
               message = invalid_call_message(message, attempts)
               {:continue, tool_result(state, call, %{output: message, is_error: true})}
           end
@@ -825,12 +827,16 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   defp depth_capped?(_state, _module), do: false
 
-  defp gated(state, call, module, classified, effect_id) do
+  defp gated(
+         state,
+         %ToolAttempt{call: call, classified: classified, effect_id: effect_id} = attempt
+       ) do
     case gate(state, call, classified) do
       {:allow, state, call, classified, hook_context, authority} ->
         case confirm_desktop_act(state, call, classified, hook_context, authority) do
           {:allow, state, call, classified, hook_context, authority} ->
-            admit_and_run(state, call, module, classified, hook_context, authority, effect_id)
+            attempt = ToolAttempt.authorize(attempt, call, classified, hook_context, authority)
+            admit_and_run(state, attempt)
 
           {:deny, state, message, classified, authority} ->
             refuse_tool_effect(state, call, classified, effect_id, authority)
@@ -867,7 +873,17 @@ defmodule Ouroboros.Provider.Native.Loop do
     end
   end
 
-  defp admit_and_run(state, call, module, classified, hook_context, authority, effect_id) do
+  defp admit_and_run(
+         state,
+         %ToolAttempt{
+           call: call,
+           module: module,
+           classified: classified,
+           hook_context: hook_context,
+           authority: authority,
+           effect_id: effect_id
+         } = attempt
+       ) do
     case open_tool_effect(state, call, classified, effect_id, authority) do
       :ok ->
         cond do
@@ -878,7 +894,7 @@ defmodule Ouroboros.Provider.Native.Loop do
             ask_question(state, call, hook_context, effect_id)
 
           true ->
-            execute(state, call, module, classified, hook_context, effect_id)
+            execute(state, attempt)
         end
 
       {:error, reason} ->
@@ -949,7 +965,11 @@ defmodule Ouroboros.Provider.Native.Loop do
     end
   end
 
-  defp execute(state, call, module, classified, hook_context, effect_id) do
+  defp execute(
+         state,
+         %ToolAttempt{call: call, module: module, classified: classified, effect_id: effect_id} =
+           attempt
+       ) do
     context =
       %{
         scope: state.scope,
@@ -982,11 +1002,7 @@ defmodule Ouroboros.Provider.Native.Loop do
     else
       finish_execute(
         state,
-        call,
-        module,
-        classified,
-        hook_context,
-        effect_id,
+        attempt,
         result,
         elapsed,
         context,
@@ -997,11 +1013,13 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   defp finish_execute(
          state,
-         call,
-         module,
-         classified,
-         hook_context,
-         effect_id,
+         %ToolAttempt{
+           call: call,
+           module: module,
+           classified: classified,
+           hook_context: hook_context,
+           effect_id: effect_id
+         },
          result,
          elapsed,
          context,

@@ -99,6 +99,7 @@ defmodule Ouroboros.Gateway.Listener do
           port: port,
           publication: path,
           publication_stat: publication_stat,
+          ready_application: Keyword.get(opts, :ready_application),
           acceptor: nil
         }
 
@@ -332,10 +333,29 @@ defmodule Ouroboros.Gateway.Listener do
     conn_supervisor = state.conn_supervisor
     task_supervisor = state.task_supervisor
     config = state.config
+    ready_application = state.ready_application
 
     spawn_link(fn ->
+      await_application(ready_application)
       accept_loop(listen_socket, conn_supervisor, task_supervisor, config)
     end)
+  end
+
+  # Binding/publishing still fails synchronously, but requests must wait until OTP owns
+  # the fully started application. A shutdown accepted during application startup can
+  # bypass orderly teardown and leave gateway.json and runtime.owner behind. Waiting in
+  # the linked acceptor lets supervision finish; waiting in init would deadlock startup.
+  defp await_application(nil), do: :ok
+
+  defp await_application(application) do
+    if Enum.any?(Application.started_applications(:infinity), fn {name, _, _} ->
+         name == application
+       end) do
+      :ok
+    else
+      Process.sleep(10)
+      await_application(application)
+    end
   end
 
   defp accept_loop(listen_socket, conn_supervisor, task_supervisor, config) do

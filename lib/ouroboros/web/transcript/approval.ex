@@ -204,7 +204,7 @@ defmodule Ouroboros.Web.Transcript.Approval.PlanExit do
   approval render the ordinary way (`tui/src/ui/transcript.rs:147-259`).
   """
 
-  alias Ouroboros.Web.Presentation.PlanStep
+  alias Ouroboros.EventPresentation.PlanStep
   alias Ouroboros.Web.Transcript.Approval.PlanOption
 
   defstruct [
@@ -245,7 +245,7 @@ defmodule Ouroboros.Web.Transcript.Approval.Detail do
   (`tui/src/ui/transcript.rs:303-335`).
   """
 
-  alias Ouroboros.Web.Presentation
+  alias Ouroboros.EventPresentation, as: Presentation
   alias Ouroboros.Web.Transcript.Approval
 
   defstruct [
@@ -296,7 +296,7 @@ defmodule Ouroboros.Web.Transcript.Approval do
   suggested-rule gate (`tui/src/ui/app/streaming.rs:783`).
   """
 
-  alias Ouroboros.Web.Presentation
+  alias Ouroboros.EventPresentation, as: Presentation
 
   alias Ouroboros.Web.Transcript.Approval.{
     Detail,

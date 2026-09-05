@@ -1,5 +1,8 @@
 # Ouroboros architecture
 
+The current shared mechanisms, storage migration, and restart matrix are documented in
+[runtime simplification](SIMPLIFICATION.md).
+
 ## Definition of done for this slice
 
 This slice is complete when all of the following are executable and tested:
@@ -69,10 +72,10 @@ and journals every decision, then formation. That process leads the role-specifi
 and it refuses to boot — key missing, malformed, unidentified, or journal unusable —
 rather than starting into a state where denial and misconfiguration look identical.
 
-Formation is libcluster, off by default, selected by `OUROBOROS_CLUSTER_STRATEGY`. It
-sits at the *tail* of the application's `rest_for_one` chain on purpose: it connects and
-observes, and nothing downstream rebuilds state from it, so a discovery strategy's crash
-must not restart the durable owners above it.
+Formation is libcluster, off by default, selected by `OUROBOROS_CLUSTER_STRATEGY`. On a
+core node it sits in the final `one_for_one` surface subtree: it connects and observes,
+and nothing rebuilds state from it. A discovery strategy's crash restarts neither the
+durable owners above it nor unrelated helpers beside it.
 
 Invariant: role is a placement fact, not an authority boundary. Every check that reads a
 remote role also requires the target to be connected and running this runtime, and the
@@ -685,11 +688,11 @@ server, one document stream, and one diagnostics cache. Servers must run where t
 are, so a fleet has one pool per host and a session on machine B uses machine B's pool;
 every status entry names its `node()` for that reason.
 
-The subtree is the last child of the `:core` tree, downstream of cluster formation, of
-every plane, of the Codex account boundary, and of the gateway. It owns no durable state
-and nothing rebuilds from it, so under `rest_for_one` its crash restarts nothing, and a
-crash upstream restarts only a pool that rebuilds itself on the next request; the gateway
-stays the only child a stranger can reach. It is unconditional because it is lazy: no
+The subtree is an independent child of the core node's `Surface.Supervisor`, alongside
+cluster formation, account boundaries, the gateway, and the other helpers. It owns no
+durable state and nothing rebuilds from it, so its crash restarts no sibling. An upstream
+authority failure still restarts the surface tier, whose pool rebuilds itself on the next
+request; the gateway stays the only child a stranger can reach. It is unconditional because it is lazy: no
 language server exists until a caller asks for one. It still carries a generous restart
 intensity, because language-server failures are states inside the pool, never crashes
 of it.
@@ -954,7 +957,7 @@ patch lane refuses an artifact that would replace the module deciding what code 
 - deterministic provider-contract tests;
 - real CLI fixture tests for argv, JSONL, process ownership, cancellation, and
   timeout behavior;
-- append-oriented durable event store instead of rewriting an aggregate task map;
+- append-oriented event storage instead of rewriting the changed record's retained history;
 - ~~worktree provisioning and durable cleanup~~ (done: `Ouroboros.Workspace.Worktree`,
   above), explicit network policy, and the OS-level isolation a worktree does not give;
 - budgets, retries, idempotency keys, telemetry, and operator diagnostics.

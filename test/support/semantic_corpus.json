@@ -1,0 +1,383 @@
+[
+  {
+    "fixture": "event_approval_requested_permission",
+    "expected": {
+      "data": {
+        "detail": "{\"command\":\"git push --force origin main\",\"cwd\":\"/srv/repo\",\"name\":\"bash\"}",
+        "request_id": "req-permission-000000000001"
+      },
+      "kind": "ApprovalRequested",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_approval_requested_plan_exit",
+    "expected": {
+      "data": {
+        "detail": "{\"header\":\"Plan ready\",\"kind\":\"plan_exit\",\"options\":[{\"kind\":\"allow_always\",\"name\":\"Yes, auto-accept edits\",\"optionId\":\"auto_edit\"},{\"kind\":\"allow_once\",\"name\":\"Yes, manual approvals\",\"optionId\":\"prompt\"},{\"kind\":\"reject_once\",\"name\":\"No, keep planning\",\"optionId\":\"keep_planning\"}],\"plan\":{\"explanation\":\"Land the golden corpus before the renderer.\",\"plan\":[{\"status\":\"completed\",\"step\":\"Extend the fixture list\"},{\"status\":\"in_progress\",\"step\":\"Assert the rendered words in Rust\"},{\"status\":\"pending\",\"step\":\"Port the projection to Elixir\"}]},\"plan_source\":\"plan_tool\",\"question\":\"This session has been planning. Ready to build it?\\n· Yes, auto-accept edits — edits inside the workspace apply without asking; commands still ask.\\n· Yes, manual approvals — every write and command is put to you.\\n· No, keep planning — nothing changes and the session stays read-only.\"}",
+        "request_id": "req-plan-exit-000000000001"
+      },
+      "kind": "ApprovalRequested",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_approval_requested_question",
+    "expected": {
+      "data": {
+        "detail": "Need a decision — Which database should the staging environment point at?",
+        "request_id": "req-question-0000000000001"
+      },
+      "kind": "ApprovalRequested",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_approval_requested_sandbox_escalation",
+    "expected": {
+      "data": {
+        "detail": "{\"command\":\"cargo build --release\",\"cwd\":\"/srv/repo\",\"name\":\"bash\"}",
+        "request_id": "req-escalation-00000000001"
+      },
+      "kind": "ApprovalRequested",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_approval_requested_subagent",
+    "expected": {
+      "data": {
+        "detail": "{\"command\":\"rm -rf target\",\"cwd\":\"/srv/worker-repo\",\"name\":\"bash\"}",
+        "request_id": "req-subagent-0000000000001"
+      },
+      "kind": "ApprovalRequested",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_approval_resolved",
+    "expected": {
+      "data": {
+        "decision": "approve",
+        "detail": "approve · once",
+        "request_id": "req-permission-000000000001"
+      },
+      "kind": "ApprovalResolved",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_command_output_delta",
+    "expected": {
+      "data": {
+        "text": "Compiling ouroboros v0.1.0\n"
+      },
+      "kind": "CommandOutput",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_input_accepted",
+    "expected": {
+      "data": {
+        "text": "Check the workspace is clean, then run the suite."
+      },
+      "kind": "UserMessage",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_input_accepted_steer",
+    "expected": {
+      "data": {
+        "text": "actually, skip the slow tests"
+      },
+      "kind": "UserSteer",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_output_text_delta",
+    "expected": {
+      "data": {
+        "final_text": false,
+        "text": "Running the suite now.",
+        "turn_id": "turn-0000000000000000000001"
+      },
+      "kind": "AgentText",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_output_text_delta_partial",
+    "expected": {
+      "data": {
+        "final_text": false,
+        "text": "The suite passed: 412 ",
+        "turn_id": "turn-0000000000000000000001"
+      },
+      "kind": "AgentText",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_output_text_final",
+    "expected": {
+      "data": {
+        "final_text": true,
+        "text": "The suite passed: 412 tests, 0 failures.\n\nNothing else to change.",
+        "turn_id": "turn-0000000000000000000001"
+      },
+      "kind": "AgentText",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_run_cancelled",
+    "expected": {
+      "data": {
+        "detail": "cancelled"
+      },
+      "kind": "Interrupted",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_run_failed",
+    "expected": {
+      "data": {
+        "detail": "the CLI exited before the run completed"
+      },
+      "kind": "Failure",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_session_cancelled",
+    "expected": {
+      "data": {
+        "detail": "killed"
+      },
+      "kind": "Interrupted",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_session_failed",
+    "expected": {
+      "data": {
+        "detail": "the provider process exited with status 1"
+      },
+      "kind": "Failure",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_thinking_delta",
+    "expected": {
+      "data": {
+        "text": "The failure is in the diff parser, not the transport.",
+        "turn_id": "turn-0000000000000000000001"
+      },
+      "kind": "Thinking",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_tool_call_acp_edit",
+    "expected": {
+      "data": {
+        "at": 1767225600000,
+        "call_id": "acp-call-0000000000000001",
+        "input": {
+          "newText": "  def project(events, cursor) do\n    events\n    |> Enum.sort()\n  end\n",
+          "oldText": "  def project(events) do\n    events\n  end\n",
+          "path": "lib/ouroboros/web/transcript.ex"
+        },
+        "kind": "edit",
+        "name": "Edit lib/ouroboros/web/transcript.ex"
+      },
+      "kind": "ToolCall",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_tool_call_bash",
+    "expected": {
+      "data": {
+        "at": 1767225600000,
+        "call_id": "toolu_01Bash000000000000001",
+        "input": {
+          "command": "mix test --stale",
+          "description": "Run the stale suite"
+        },
+        "kind": null,
+        "name": "Bash"
+      },
+      "kind": "ToolCall",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_tool_call_read",
+    "expected": {
+      "data": {
+        "at": 1767225600000,
+        "call_id": "toolu_01Read000000000000001",
+        "input": {
+          "file_path": "lib/ouroboros/gateway/wire.ex",
+          "limit": 40,
+          "offset": 120
+        },
+        "kind": null,
+        "name": "Read"
+      },
+      "kind": "ToolCall",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_tool_result_acp_edit",
+    "expected": {
+      "data": {
+        "artifacts": [],
+        "at": 1767225600000,
+        "call_id": "acp-call-0000000000000001",
+        "is_error": false,
+        "kind": null,
+        "name": null,
+        "output": [
+          {
+            "content": {
+              "text": "Applied 1 edit to lib/ouroboros/web/transcript.ex",
+              "type": "text"
+            },
+            "type": "content"
+          }
+        ]
+      },
+      "kind": "ToolResult",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_tool_result_bash",
+    "expected": {
+      "data": {
+        "artifacts": [],
+        "at": 1767225600000,
+        "call_id": "toolu_01Bash000000000000001",
+        "is_error": false,
+        "kind": null,
+        "name": "Bash",
+        "output": "412 tests, 0 failures\n"
+      },
+      "kind": "ToolResult",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_tool_result_computer_use",
+    "expected": {
+      "data": {
+        "artifacts": [
+          {
+            "height": 982,
+            "media_type": "image/png",
+            "sha256": "abababababababababababababababababababababababababababababababab",
+            "size": 184320,
+            "width": 1512
+          }
+        ],
+        "at": 1767225600000,
+        "call_id": "toolu_01Desktop00000000001",
+        "is_error": false,
+        "kind": null,
+        "name": "desktop_state",
+        "output": "Captured the frontmost window of Calculator."
+      },
+      "kind": "ToolResult",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_tool_result_read",
+    "expected": {
+      "data": {
+        "artifacts": [],
+        "at": 1767225600000,
+        "call_id": "toolu_01Read000000000000001",
+        "is_error": false,
+        "kind": null,
+        "name": "Read",
+        "output": "  1→defmodule Ouroboros.Gateway.Wire do\n  2→  @moduledoc \"The encoder the socket is written from.\"\n  3→end\n"
+      },
+      "kind": "ToolResult",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_turn_completed",
+    "expected": {
+      "data": {
+        "at": 1767225690000,
+        "detail": "completed",
+        "outcome": "completed",
+        "turn_id": "turn-0000000000000000000001"
+      },
+      "kind": "TurnEnded",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_turn_failed",
+    "expected": {
+      "data": {
+        "at": 1767225600000,
+        "detail": "the model stream ended mid-tool-call",
+        "outcome": "failed",
+        "turn_id": "turn-0000000000000000000001"
+      },
+      "kind": "TurnEnded",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_turn_interrupted",
+    "expected": {
+      "data": {
+        "at": 1767225600000,
+        "detail": "interrupted",
+        "outcome": "interrupted",
+        "turn_id": "turn-0000000000000000000001"
+      },
+      "kind": "TurnEnded",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_turn_started",
+    "expected": {
+      "data": {
+        "at": 1767225600000,
+        "turn_id": "turn-0000000000000000000001"
+      },
+      "kind": "TurnStarted",
+      "version": 1
+    }
+  },
+  {
+    "fixture": "event_usage",
+    "expected": {
+      "data": {
+        "cached_tokens": 12000,
+        "cost_usd": 0.0731,
+        "input_tokens": 18400,
+        "output_tokens": 2100,
+        "total_tokens": 20500
+      },
+      "kind": "UsageReport",
+      "version": 1
+    }
+  }
+]

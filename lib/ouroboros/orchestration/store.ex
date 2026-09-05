@@ -1,15 +1,10 @@
 defmodule Ouroboros.Orchestration.Store do
-  @moduledoc """
-  Serialized aggregate persistence for orchestration plans.
-
-  Every plan and its discoverable index share one Jido.Storage checkpoint. A
-  scheduler transition therefore either publishes the whole new aggregate or
-  leaves the previous aggregate intact.
-  """
+  @moduledoc "Serialized per-record persistence for orchestration plans."
 
   use GenServer
 
   alias Ouroboros.Orchestration.Plan
+  alias Ouroboros.Storage.Records
 
   @default_key {:ouroboros, :orchestration_plans, 1}
 
@@ -59,7 +54,7 @@ defmodule Ouroboros.Orchestration.Store do
   def handle_call({:create, %Plan{} = plan}, _from, state) do
     with :ok <- Plan.validate(plan),
          :ok <- ensure_absent(state.plans, plan.id) do
-      persist(Map.put(state.plans, plan.id, plan), state)
+      persist(plan, state)
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
@@ -72,7 +67,7 @@ defmodule Ouroboros.Orchestration.Store do
       if current == plan do
         {:reply, :ok, state}
       else
-        persist(Map.put(state.plans, plan.id, plan), state)
+        persist(plan, state)
       end
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
@@ -96,55 +91,35 @@ defmodule Ouroboros.Orchestration.Store do
   end
 
   defp load(adapter, opts, key) do
-    case adapter.get_checkpoint(key, opts) do
-      :not_found -> {:ok, %{adapter: adapter, opts: opts, key: key, plans: %{}}}
-      {:ok, plans} when is_map(plans) -> validate_loaded(plans, adapter, opts, key)
-      {:ok, _invalid} -> {:stop, :invalid_orchestration_checkpoint}
-      {:error, reason} -> {:stop, {:orchestration_checkpoint_unreadable, reason}}
-      other -> {:stop, {:invalid_storage_response, other}}
+    repo =
+      Records.new(adapter, opts, key, %{
+        invalid: :invalid_orchestration_checkpoint,
+        unreadable: :orchestration_checkpoint_unreadable,
+        migration: :orchestration_checkpoint_migration_failed,
+        quarantine: :orchestration_quarantine_failed
+      })
+
+    case Records.load(repo, &decode_record/2) do
+      {:ok, records} -> {:ok, %{repo: repo, plans: records}}
+      {:error, reason} -> {:stop, reason}
     end
   end
 
-  # A checkpoint written by an earlier build is upgraded to this build's shape
-  # before it is validated, and only then. `Plan.upgrade/1` fills in defaults it
-  # can prove (a step with no kind has always been `:coding`) and refuses shapes
-  # it cannot interpret, so a checkpoint from a *newer* build still fails closed
-  # rather than being read as something it is not.
-  defp validate_loaded(plans, adapter, opts, key) do
-    upgraded =
-      Enum.reduce_while(plans, {:ok, %{}}, fn
-        {id, %Plan{id: id} = plan}, {:ok, acc} when is_binary(id) ->
-          with {:ok, upgraded} <- Plan.upgrade(plan),
-               :ok <- Plan.validate(upgraded) do
-            {:cont, {:ok, Map.put(acc, id, upgraded)}}
-          else
-            {:error, _reason} -> {:halt, :invalid}
-          end
-
-        _other, {:ok, _acc} ->
-          {:halt, :invalid}
-      end)
-
-    case upgraded do
-      {:ok, plans} -> {:ok, %{adapter: adapter, opts: opts, key: key, plans: plans}}
-      :invalid -> {:stop, :invalid_orchestration_checkpoint}
-    end
+  defp decode_record(id, %Plan{id: id} = record) when is_binary(id) do
+    with {:ok, upgraded} <- Plan.upgrade(record),
+         :ok <- Plan.validate(upgraded),
+         do: {:ok, upgraded}
   end
 
-  defp persist(plans, state) do
-    case state.adapter.put_checkpoint(state.key, plans, state.opts) do
-      :ok ->
-        {:reply, :ok, %{state | plans: plans}}
+  defp decode_record(_id, _record), do: :error
 
-      {:error, {:commit_outcome_unknown, _reason} = ambiguity} ->
-        {:stop, ambiguity, {:error, ambiguity}, state}
+  defp persist(record, state) do
+    updated = Map.put(state.plans, record.id, record)
 
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
-
-      other ->
-        {:reply, {:error, {:invalid_storage_response, other}}, state}
-    end
+    Records.reply(Records.put(state.repo, state.plans, record.id, record), :ok, state, %{
+      state
+      | plans: updated
+    })
   end
 
   defp validate_options(opts) do

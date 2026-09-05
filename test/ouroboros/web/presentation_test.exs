@@ -1,4 +1,4 @@
-defmodule Ouroboros.Web.PresentationTest do
+defmodule Ouroboros.EventPresentationTest do
   @moduledoc """
   Unit cover for the Elixir port of `PresentationEvent::from_event`.
 
@@ -10,9 +10,9 @@ defmodule Ouroboros.Web.PresentationTest do
   use ExUnit.Case, async: true
 
   alias Ouroboros.Interactive.Event
-  alias Ouroboros.Web.Presentation
+  alias Ouroboros.EventPresentation, as: Presentation
 
-  alias Ouroboros.Web.Presentation.{
+  alias Ouroboros.EventPresentation.{
     AgentText,
     ApprovalRequested,
     ApprovalResolved,
@@ -842,8 +842,8 @@ defmodule Ouroboros.Web.PresentationTest do
       assert Presentation.wire_shape(%{status: :completed, done: true, missing: nil}) ==
                %{"status" => "completed", "done" => true, "missing" => nil}
 
-      assert Presentation.wire_shape(%{mod: Ouroboros.Web.Presentation}) ==
-               %{"mod" => "Ouroboros.Web.Presentation"}
+      assert Presentation.wire_shape(%{mod: Ouroboros.EventPresentation}) ==
+               %{"mod" => "Ouroboros.EventPresentation"}
 
       assert Presentation.wire_shape([%{a: 1}, :two]) == [%{"a" => 1}, "two"]
     end

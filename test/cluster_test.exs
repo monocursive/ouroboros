@@ -1425,7 +1425,15 @@ defmodule Ouroboros.ClusterTest do
         assert {:error, -32_602, confirmation_message} =
                  Methods.invoke("fleet.forget_session_owner", %{"machine" => machine})
 
-        assert confirmation_message =~ "accept_state_loss must be true"
+        assert confirmation_message == "params.accept_state_loss is required"
+
+        assert {:error, -32_602, false_confirmation_message} =
+                 Methods.invoke("fleet.forget_session_owner", %{
+                   "machine" => machine,
+                   "accept_state_loss" => false
+                 })
+
+        assert false_confirmation_message =~ "accept_state_loss must be true"
 
         assert {:error, -32_004, connected_message,
                 %{

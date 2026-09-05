@@ -38,7 +38,7 @@ defmodule Ouroboros.Web.Transcript.Tools do
   inferred from the tool's name alone (`tui/src/ui/transcript_cells.rs:3858`).
   """
 
-  alias Ouroboros.Web.Presentation
+  alias Ouroboros.EventPresentation, as: Presentation
   alias Ouroboros.Web.Transcript.{Cell, Text, ToolSummary}
 
   @tool_value_bytes 32 * 1024

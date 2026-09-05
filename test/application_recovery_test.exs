@@ -74,6 +74,50 @@ defmodule Ouroboros.ApplicationRecoveryTest do
     assert Process.alive?(replacement_grants)
   end
 
+  test "exhausting CodeIntel's restart budget leaves unrelated helpers and session owners alive" do
+    code_intel = Process.whereis(Ouroboros.CodeIntel.Supervisor)
+
+    unaffected = [
+      Ouroboros.Wasm.Supervisor,
+      Ouroboros.Provider.Native.Desktop.Supervisor,
+      Ouroboros.Provider.Native.Mcp.Supervisor,
+      Ouroboros.Interactive.TaskSupervisor
+    ]
+
+    before = Map.new(unaffected, &{&1, Process.whereis(&1)})
+    assert Enum.all?(before, fn {_name, pid} -> is_pid(pid) end)
+
+    for _attempt <- 1..11 do
+      pool = Process.whereis(Ouroboros.CodeIntel.LspPool)
+      assert is_pid(pool)
+      Process.exit(pool, :kill)
+      assert_eventually(fn -> replacement(Ouroboros.CodeIntel.LspPool, pool) end)
+    end
+
+    assert_eventually(fn -> replacement(Ouroboros.CodeIntel.Supervisor, code_intel) end)
+    for {name, pid} <- before, do: assert(Process.whereis(name) == pid)
+  end
+
+  test "disabling automation retains coding and permission authorities" do
+    previous = Application.get_env(:ouroboros, :automation_enabled)
+
+    on_exit(fn ->
+      :ok = Application.stop(:ouroboros)
+      restore_env(:ouroboros, :automation_enabled, previous)
+      {:ok, _} = Application.ensure_all_started(:ouroboros)
+    end)
+
+    :ok = Application.stop(:ouroboros)
+    Application.put_env(:ouroboros, :automation_enabled, false)
+    {:ok, _} = Application.ensure_all_started(:ouroboros)
+    refute Process.whereis(Ouroboros.Orchestration.Scheduler)
+    refute Process.whereis(Ouroboros.Control.Store)
+    assert Process.whereis(Ouroboros.Coding.TaskSupervisor)
+    assert Process.whereis(Ouroboros.Control.Permissions)
+    assert Process.whereis(Ouroboros.Control.Grants)
+    assert Ouroboros.status().availability.orchestration == :disabled
+  end
+
   defmodule RefusingStorage do
     @moduledoc """
     A coding-task store that starts accepting writes and then refuses live ones.
@@ -93,15 +137,24 @@ defmodule Ouroboros.ApplicationRecoveryTest do
 
     def refuse, do: :persistent_term.put(@refuse, true)
 
-    def get_checkpoint(_key, _opts), do: {:ok, :persistent_term.get(@tasks, %{})}
+    def get_checkpoint(key, _opts),
+      do: Map.get(:persistent_term.get(@tasks, %{}), key, :not_found)
 
-    def put_checkpoint(_key, tasks, _opts) do
-      live? = Enum.any?(tasks, fn {_id, task} -> not TaskState.terminal?(task) end)
+    def put_checkpoint(key, tasks, _opts) do
+      live? =
+        Enum.any?(tasks, fn
+          {_id, %TaskState{} = task} -> not TaskState.terminal?(task)
+          _index -> false
+        end)
 
       if :persistent_term.get(@refuse, false) and live? do
         {:error, :invalid_task_state}
       else
-        :persistent_term.put(@tasks, tasks)
+        :persistent_term.put(
+          @tasks,
+          Map.put(:persistent_term.get(@tasks, %{}), key, {:ok, tasks})
+        )
+
         :ok
       end
     end
@@ -224,13 +277,13 @@ defmodule Ouroboros.ApplicationRecoveryTest do
     replacement_task_supervisor =
       assert_eventually(fn -> replacement(Ouroboros.Coding.TaskSupervisor, task_supervisor) end)
 
-    replacement_scheduler =
-      assert_eventually(fn -> replacement(Ouroboros.Orchestration.Scheduler, scheduler) end)
+    # A coding registry is authority for coding coordinators, not for automation.
+    assert Process.whereis(Ouroboros.Orchestration.Scheduler) == scheduler
 
     assert Process.alive?(root)
     assert Process.alive?(replacement_registry)
     assert Process.alive?(replacement_task_supervisor)
-    assert Process.alive?(replacement_scheduler)
+    assert Process.alive?(scheduler)
     assert Enum.any?(Application.started_applications(), &(elem(&1, 0) == :ouroboros))
 
     replacement_task = assert_eventually(fn -> safe_task_replacement(task_id, old_task) end)

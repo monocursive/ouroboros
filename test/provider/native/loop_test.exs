@@ -286,6 +286,32 @@ defmodule Ouroboros.Provider.Native.LoopTest do
       refute find(events, :turn_failed)
     end
 
+    test "read-edit-read progress resets the repetition guard", context do
+      script =
+        Enum.map(1..5, fn n ->
+          call =
+            if rem(n, 2) == 1 do
+              %{id: "progress-#{n}", name: "read", input: %{"path" => "lib/a.ex"}}
+            else
+              %{
+                id: "progress-#{n}",
+                name: "write",
+                input: %{"path" => "lib/a.ex", "content" => "version #{n}"}
+              }
+            end
+
+          [{:tool_call, call}]
+        end) ++ [[{:text, "done"}, {:finish, :stop}]]
+
+      {loop, _agent} = start_loop(context, script)
+      run(loop)
+      events = collect()
+      refute find(events, :turn_failed)
+      assert find(events, :turn_completed)
+      assert length(all(events, :tool_result)) == 5
+      assert File.read!(Path.join(context.workspace, "lib/a.ex")) == "version 4"
+    end
+
     test "stops on the third identical call and names the doom loop", context do
       repeat = {:tool_call, %{id: "c", name: "read", input: %{"path" => "lib/a.ex"}}}
       script = List.duplicate([repeat], 6)

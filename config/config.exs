@@ -135,6 +135,7 @@ config :ouroboros,
   # Deadline for one agent effect. Effects run off the agent's process, but they still
   # hold a supervised task and an in-flight audit entry, so every one of them ends.
   effect_timeout: 120_000,
+  automation_enabled: true,
   control_enabled: false,
   # A durable plan is heterogeneous: every step declares a kind and the scheduler
   # resolves one executor per kind. `:orchestration_executors` names them

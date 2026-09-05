@@ -20,6 +20,14 @@
       "provider": "claude_code",
       "provider_session_id": "provider-0000000000000001",
       "request_id": "req-permission-000000000001",
+      "semantic": {
+        "data": {
+          "detail": "{\"command\":\"git push --force origin main\",\"cwd\":\"/srv/repo\",\"name\":\"bash\"}",
+          "request_id": "req-permission-000000000001"
+        },
+        "kind": "ApprovalRequested",
+        "version": 1
+      },
       "sequence": 132,
       "session_id": "session-0000000000000000000001",
       "timestamp": "2026-01-01T00:00:00.000000Z",

@@ -1,20 +1,10 @@
 defmodule Ouroboros.Team.Store do
-  @moduledoc """
-  Serialized persistence boundary for team aggregate checkpoints.
-
-  All teams share one adapter checkpoint. Creating a logical team ID and updating
-  its membership/delegation state are therefore serialized through this process,
-  while the underlying Jido storage adapter remains replaceable.
-
-  Durability is reported as an explicit level rather than a boolean, because the
-  levels are not equivalent. `Jido.Storage.File` writes and renames without
-  `fsync`, so it survives a BEAM restart (`:durable_checkpoint`) but not power
-  loss. Only a synced adapter is reported as `:synced_checkpoint`.
-  """
+  @moduledoc "Serialized per-record checkpoints for durable team snapshots."
 
   use GenServer
 
   alias Ouroboros.Team.Snapshot
+  alias Ouroboros.Storage.Records
 
   @store_key {:ouroboros, :teams, 1}
 
@@ -51,11 +41,10 @@ defmodule Ouroboros.Team.Store do
   def init(opts) do
     with {:ok, storage} <- storage_config(opts),
          {:ok, adapter, adapter_opts} <- normalize_storage(storage),
-         {:ok, teams} <- load(adapter, adapter_opts) do
+         {:ok, teams} <- Records.load(repository(adapter, adapter_opts), &decode_snapshot/2) do
       {:ok,
        %{
-         adapter: adapter,
-         opts: adapter_opts,
+         repo: repository(adapter, adapter_opts),
          teams: teams,
          durability: durability_level(adapter)
        }}
@@ -134,57 +123,27 @@ defmodule Ouroboros.Team.Store do
     error -> {:error, {:invalid_team_storage, Exception.message(error)}}
   end
 
-  defp load(adapter, adapter_opts) do
-    case adapter_call(adapter, :get_checkpoint, [@store_key, adapter_opts]) do
-      :not_found ->
-        {:ok, %{}}
-
-      {:ok, teams} when is_map(teams) ->
-        if valid_teams?(teams),
-          do: {:ok, teams},
-          else: {:error, :invalid_team_checkpoint}
-
-      {:ok, _invalid} ->
-        {:error, :invalid_team_checkpoint}
-
-      {:error, reason} ->
-        {:error, {:team_checkpoint_unreadable, reason}}
-
-      other ->
-        {:error, {:invalid_team_storage_response, other}}
-    end
+  defp repository(adapter, opts) do
+    Records.new(adapter, opts, @store_key, %{
+      invalid: :invalid_team_checkpoint,
+      unreadable: :team_checkpoint_unreadable,
+      migration: :team_checkpoint_migration_failed,
+      quarantine: :team_quarantine_failed
+    })
   end
 
   defp persist(snapshot, state) do
     teams = Map.put(state.teams, snapshot.id, snapshot)
 
-    case adapter_call(state.adapter, :put_checkpoint, [@store_key, teams, state.opts]) do
-      :ok ->
-        {:reply, :ok, %{state | teams: teams}}
-
-      {:error, {:commit_outcome_unknown, _reason} = ambiguity} ->
-        {:stop, ambiguity, {:error, ambiguity}, state}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
-
-      other ->
-        {:reply, {:error, {:invalid_team_storage_response, other}}, state}
-    end
+    Records.reply(Records.put(state.repo, state.teams, snapshot.id, snapshot), :ok, state, %{
+      state
+      | teams: teams
+    })
   end
 
-  defp adapter_call(adapter, function, arguments) do
-    apply(adapter, function, arguments)
-  rescue
-    error -> {:error, {:adapter_exception, Exception.message(error)}}
-  catch
-    kind, reason -> {:error, {:adapter_failure, kind, reason}}
+  defp decode_snapshot(id, %Snapshot{id: id} = snapshot) when is_binary(id) do
+    if Snapshot.valid?(snapshot), do: {:ok, snapshot}, else: :error
   end
 
-  defp valid_teams?(teams) do
-    Enum.all?(teams, fn
-      {id, %Snapshot{id: id} = snapshot} when is_binary(id) -> Snapshot.valid?(snapshot)
-      _other -> false
-    end)
-  end
+  defp decode_snapshot(_id, _snapshot), do: :error
 end

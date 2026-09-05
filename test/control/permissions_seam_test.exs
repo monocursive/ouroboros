@@ -245,12 +245,9 @@ defmodule Ouroboros.Control.Permissions.SeamTest do
       :ok = engine!(%{evaluate: :absolutely_not_a_verdict, suggest: "Bash(curl *)"})
       :ok = Seam.bind(%{cwd: "/tmp/work"}, %{session_id: session, provider: :codex}, :stdio)
 
-      # An *ask*, and an ordinary one: the seam still asked what a "don't ask again" would
-      # look like and put it on the payload. Delete `evaluate/1`'s `_unrecognised` clause and
-      # the `CaseClauseError` reaches the rescue instead, which answers the bare payload —
-      # a real ask and a failed engine would then be indistinguishable to a client.
-      assert {:ask, asked} = decide("curl https://example.test")
-      assert asked["suggested_rule"] == "Bash(curl *)"
+      # An invalid verdict is an engine failure on every transport. Do not offer a
+      # persistent rule from an engine that could not evaluate this request.
+      assert decide("curl https://example.test") == {:ask, payload()}
     end
 
     test "an engine that raises is the approval the human was always going to see", %{

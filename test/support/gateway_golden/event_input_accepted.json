@@ -13,6 +13,13 @@
       "provider": "claude_code",
       "provider_session_id": "provider-0000000000000001",
       "request_id": null,
+      "semantic": {
+        "data": {
+          "text": "Check the workspace is clean, then run the suite."
+        },
+        "kind": "UserMessage",
+        "version": 1
+      },
       "sequence": 100,
       "session_id": "session-0000000000000000000001",
       "timestamp": "2026-01-01T00:00:00.000000Z",

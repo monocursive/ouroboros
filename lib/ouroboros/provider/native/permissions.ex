@@ -3,35 +3,8 @@ defmodule Ouroboros.Provider.Native.Permissions do
   The one call the native loop makes into the permission engine, and the only thing it
   knows about whether that engine exists.
 
-  `Ouroboros.Control.Permissions` (slice C1, D5) is being built in parallel. Rather than
-  couple the loop to a module that may or may not be compiled, the loop asks here and
-  gets one of three answers. When the engine is absent every request answers
-  `{:ask, :no_engine}` — the fail-closed direction: a missing rule engine turns into a
-  human question, never into a silent allow.
-
-  The engine's contract, checked at call time with `Code.ensure_loaded?/1` and
-  `function_exported?/3` so a partial or older module cannot crash a turn:
-
-      evaluate(%{
-        principal: %{session_id: String.t(), provider: :native, node: node()},
-        tool: String.t(),
-        command: String.t() | nil,
-        paths: [String.t()],
-        mode: :read | :write | :execute | :network,
-        domains: [String.t()],
-        context: map()
-      }) :: {:allow, rule_ref} | {:deny, rule_ref} | {:ask, reason}
-
-      record(decision_id, %{
-        decision: :approve | :deny,
-        scope: :once | :session | :always,
-        actor: :rule | :human,
-        rule_ref: term() | nil,
-        reason: String.t() | nil
-      }) :: :ok | {:error, term()}
-
-  A return this module does not recognise is treated as `{:ask, {:engine_error, …}}`.
-  An engine that returns nonsense must not be able to authorize anything.
+  The shared engine adapter maps unavailable engines and unknown answers to an ask.
+  This native policy adds plan-mode refusal before consulting that adapter.
 
   ## Plan mode (B2)
 
@@ -64,9 +37,7 @@ defmodule Ouroboros.Provider.Native.Permissions do
 
   # The same node-level key the interactive plane reads for external approvals, so one
   # setting names the engine for every seam; absent, the durable engine is the default.
-  @default_engine Ouroboros.Control.Permissions
-
-  defp engine, do: Application.get_env(:ouroboros, :permissions_engine, @default_engine)
+  alias Ouroboros.Control.Permissions.Engine
 
   @type decision :: {:allow, term()} | {:deny, term()} | {:ask, term()}
 
@@ -117,22 +88,7 @@ defmodule Ouroboros.Provider.Native.Permissions do
     end
   end
 
-  defp engine_decision(request) do
-    if exported?(:evaluate, 1) do
-      case apply(engine(), :evaluate, [request]) do
-        {:allow, _rule} = decision -> decision
-        {:deny, _rule} = decision -> decision
-        {:ask, _reason} = decision -> decision
-        other -> {:ask, {:engine_error, inspect(other)}}
-      end
-    else
-      {:ask, :no_engine}
-    end
-  rescue
-    error -> {:ask, {:engine_error, Exception.message(error)}}
-  catch
-    :exit, reason -> {:ask, {:engine_error, inspect(reason)}}
-  end
+  defp engine_decision(request), do: Engine.evaluate(request)
 
   @doc """
   Records a resolved decision in the engine's ledger.
@@ -143,25 +99,11 @@ defmodule Ouroboros.Provider.Native.Permissions do
   `approval_requested`/`approval_resolved`.
   """
   @spec record(String.t(), map()) :: :ok | {:error, term()}
-  def record(decision_id, attrs) when is_binary(decision_id) and is_map(attrs) do
-    if exported?(:record, 2) do
-      case apply(engine(), :record, [decision_id, attrs]) do
-        :ok -> :ok
-        {:error, _reason} = error -> error
-        other -> {:error, {:engine_error, inspect(other)}}
-      end
-    else
-      {:error, :no_engine}
-    end
-  rescue
-    error -> {:error, {:engine_error, Exception.message(error)}}
-  catch
-    :exit, reason -> {:error, {:engine_error, inspect(reason)}}
-  end
+  defdelegate record(decision_id, attrs), to: Engine
 
   @doc "Whether a rule engine is available on this node."
   @spec engine?() :: boolean()
-  def engine?, do: exported?(:evaluate, 1)
+  def engine?, do: Engine.exported?(:evaluate, 1)
 
   @doc """
   How a refusal reads in a tool result. Names the rule, never invents one.
@@ -213,25 +155,9 @@ defmodule Ouroboros.Provider.Native.Permissions do
   `ComputerUse(app:…)` comes from.
   """
   @spec suggested_rule(map()) :: String.t() | nil
-  def suggested_rule(request) when is_map(request) do
-    if exported?(:suggest, 1) do
-      case apply(engine(), :suggest, [request]) do
-        pattern when is_binary(pattern) and pattern != "" -> pattern
-        _nothing_to_suggest -> nil
-      end
-    end
-  rescue
-    _error -> nil
-  catch
-    :exit, _reason -> nil
-  end
+  def suggested_rule(request), do: Engine.suggest(request)
 
   defp format_rule(nil), do: "(unnamed)"
   defp format_rule(rule) when is_binary(rule), do: rule
   defp format_rule(rule), do: inspect(rule)
-
-  defp exported?(function, arity) do
-    engine = engine()
-    Code.ensure_loaded?(engine) and function_exported?(engine, function, arity)
-  end
 end
