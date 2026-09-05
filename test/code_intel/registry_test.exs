@@ -310,10 +310,13 @@ defmodule Ouroboros.CodeIntel.RegistryTest do
   defp restore(key, nil), do: Application.delete_env(:ouroboros, key)
   defp restore(key, value), do: Application.put_env(:ouroboros, key, value)
 
-  test "the default session source is the interactive store, which answers without a session" do
+  test "the default session sources are the interactive and coding stores" do
     Code.ensure_loaded!(Ouroboros.InteractiveSession)
+    Code.ensure_loaded!(Ouroboros.CodingSession)
     assert function_exported?(Ouroboros.InteractiveSession, :workspaces, 0)
+    assert function_exported?(Ouroboros.CodingSession, :workspaces, 0)
     assert is_list(Ouroboros.InteractiveSession.workspaces())
+    assert is_list(Ouroboros.CodingSession.workspaces())
   end
 
   test "a workspace a session on this node holds is admitted with no configured root",

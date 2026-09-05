@@ -90,6 +90,14 @@ defmodule Ouroboros.Orchestration.ForgeExecutor do
     end
   end
 
+  # The scheduler kills this step's owner on cancel (the process `start/3` spawned).
+  # Returning `:ok` means the request was accepted — not that a deploy already past
+  # the registry `:deploying` checkpoint has rolled back. That leftover is the same
+  # ambiguity a crashed owner leaves, and `admit/3` refuses to forge over it.
+  @impl true
+  def cancel(%Execution{kind: :forge}, _reason, _opts), do: :ok
+  def cancel(%Execution{kind: kind}, _reason, _opts), do: {:error, {:unsupported_step_kind, kind}}
+
   # An owner that dies is re-offered the same step, so an exception here would
   # become a dispatch loop rather than a failure anyone can read. Every outcome
   # is turned into a durable report instead.

@@ -2711,37 +2711,52 @@ defmodule Ouroboros.Interactive.Task do
   end
 
   defp admit_leased_workspace(session) do
-    if is_pid(Process.whereis(WorkspaceManager)) do
-      case acquire_workspace(session, @workspace_reacquire_attempts) do
-        {:ok, lease, capability} ->
-          leased =
-            session
-            |> Map.put(:workspace, lease.root)
-            |> Map.put(:workspace_mode, lease.mode)
-            |> Map.put(:workspace_lease_id, lease.id)
-            |> State.touch()
+    cond do
+      is_pid(Process.whereis(WorkspaceManager)) ->
+        acquire_leased_workspace(session)
 
-          case Store.put(leased) do
-            :ok ->
-              {:ok, runtime(leased, lease, capability)}
+      workspace_admission_configured?() ->
+        # Same F7 posture as the coding plane: configured roots without a running
+        # manager is a crashed boundary, not permission to skip the lease.
+        checkpoint_admission_failure(session, :workspace_manager_unavailable)
 
-            # The store refuses a session it cannot run. Keep the lease rather than stop:
-            # this session is about to fail as itself, and that failure is what releases
-            # the workspace and clears the recovery reservation the lease just replaced.
-            {:error, :invalid_interactive_session} ->
-              {:ok, runtime(leased, lease, capability)}
-
-            {:error, reason} ->
-              _ = safe_workspace_release(lease.id, capability)
-              {:error, {:storage_error, reason}}
-          end
-
-        {:error, reason} ->
-          checkpoint_admission_failure(session, reason)
-      end
-    else
-      {:ok, runtime(session)}
+      true ->
+        {:ok, runtime(session)}
     end
+  end
+
+  defp acquire_leased_workspace(session) do
+    case acquire_workspace(session, @workspace_reacquire_attempts) do
+      {:ok, lease, capability} ->
+        leased =
+          session
+          |> Map.put(:workspace, lease.root)
+          |> Map.put(:workspace_mode, lease.mode)
+          |> Map.put(:workspace_lease_id, lease.id)
+          |> State.touch()
+
+        case Store.put(leased) do
+          :ok ->
+            {:ok, runtime(leased, lease, capability)}
+
+          # The store refuses a session it cannot run. Keep the lease rather than stop:
+          # this session is about to fail as itself, and that failure is what releases
+          # the workspace and clears the recovery reservation the lease just replaced.
+          {:error, :invalid_interactive_session} ->
+            {:ok, runtime(leased, lease, capability)}
+
+          {:error, reason} ->
+            _ = safe_workspace_release(lease.id, capability)
+            {:error, {:storage_error, reason}}
+        end
+
+      {:error, reason} ->
+        checkpoint_admission_failure(session, reason)
+    end
+  end
+
+  defp workspace_admission_configured? do
+    match?([_ | _], Application.get_env(:ouroboros, :workspace_allowed_roots, []))
   end
 
   defp acquire_workspace(session, attempts) do

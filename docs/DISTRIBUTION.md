@@ -21,7 +21,7 @@ ends up claiming security it does not have.
 
 | Check | Defends against | Where it runs |
 |---|---|---|
-| **Ed25519 signature over `SHA256SUMS`** (minisign) | A compromised release host, a hijacked mirror, a stolen publishing token, a malicious proxy — anyone who can hand you different bytes than the project published. The signing key is offline; the public half is compiled into `ouro` and committed here. | `ouro update` always; `scripts/install.sh` when `minisign` is installed; the release workflow, against its own output |
+| **Ed25519 signature over `SHA256SUMS`** (minisign) | A compromised release host, a hijacked mirror, a stolen publishing token, a malicious proxy — anyone who can hand you different bytes than the project published. The signing key is offline; the public half is compiled into `ouro` and committed here. | `ouro update` always; `scripts/install.sh` always (refuses without a verified signature); the release workflow, against its own output |
 | **SHA-256 of the asset against that signed manifest** | A truncated or corrupted download — *and*, because the manifest was signed first, a substituted binary. | `ouro update` always; `scripts/install.sh` always |
 | **TLS on the download** | Eavesdropping and a wrong host answering. Says nothing about who *built* the bytes. | Whenever the URL is `https://` |
 
@@ -32,10 +32,10 @@ lives in carries a signature made by a key that never touched the release host.
 
 `ouro update` therefore never runs check 2 without check 1, and a build with no public
 key refuses every path — including `--check`, because a version number this process
-cannot authenticate is not a fact it should report as one. `scripts/install.sh` cannot
-make that promise (it has to work on a machine with no `ouro` and possibly no
-`minisign`), so instead it prints exactly which prerequisite is missing and says in as
-many words that what remains is a corruption check.
+cannot authenticate is not a fact it should report as one. `scripts/install.sh` now
+makes the same promise: without a verified minisign signature it names which
+prerequisite is missing (no `.minisig`, no key in `dist/release.pub`, or no `minisign`)
+and refuses. A checksum from the same place as the binary is not treated as a signature.
 
 ---
 
@@ -213,23 +213,23 @@ tool is installed, the command says so and tells you to download by hand and pas
 ## 5. `scripts/install.sh`
 
 POSIX `sh`. Detects the triple from `uname`, reads a release from `https://`, `http://`,
-`file:///`, or a plain directory path, always checks SHA-256, verifies the minisign
-signature when `minisign` is present, installs to `~/.local/bin` (`OURO_INSTALL_DIR` or
-`--dir`), never runs `sudo`, stages beside the target and renames over it, and prints the
-`PATH` line when the directory is not on `PATH`. `--dry-run` prints the plan, including
-what would *not* be verified. `OURO_VERSION` pins a version; without it the version comes
-from the manifest's own asset names.
+`file:///`, or a plain directory path, verifies the minisign signature, then checks
+SHA-256, installs to `~/.local/bin` (`OURO_INSTALL_DIR` or `--dir`), never runs `sudo`,
+stages beside the target and renames over it, and prints the `PATH` line when the
+directory is not on `PATH`. `--dry-run` prints the plan, including that the signature
+was verified. `OURO_VERSION` pins a version; without it the version comes from the
+manifest's own asset names.
 
 When it cannot verify a signature it prints which of the three prerequisites is missing
 (no `.minisig` published, no key in `dist/release.pub`, or no `minisign` installed) and
-states that the remaining check is a corruption check only. That is a weaker install, and
-it is weaker in a specific way rather than vaguely.
+refuses. Nothing is installed.
 
 `scripts/test-install.sh` drives it against a release directory it builds in a temp
-directory — no network, no server, nothing under `$HOME` — with 18 assertions covering
-the install, the checksum refusal, a release with no asset for this platform,
-`--dry-run`, an explicit `--version`, an unwritable directory, `file://host` rejection,
-and that the word `sudo` appears only in the sentences promising not to use it.
+directory — no network, no server, nothing under `$HOME` — covering unsigned refusal,
+the checksum refusal on a signed-but-corrupt asset, a signed release with no asset for
+this platform, signed `--dry-run`, an explicit `--version`, an unwritable directory,
+`file://host` rejection, and that the word `sudo` appears only in the sentences
+promising not to use it.
 
 ---
 

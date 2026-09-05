@@ -9,7 +9,7 @@ defmodule Ouroboros.Orchestration.Step do
   ## Kinds
 
   A step declares what plane executes it. `:coding` is the historical default and
-  keeps its free-form input. `:forge` names one compile-and-deploy of a single
+  may name an `objective`. `:forge` names one compile-and-deploy of a single
   capability module and carries a closed input schema: exactly `module` and
   `source_path`, both strings.
 
@@ -19,6 +19,12 @@ defmodule Ouroboros.Orchestration.Step do
   traversal, because it is resolved under a workspace root that trusted runtime
   configuration owns. Everything else a forge needs — which workspace, which
   nodes, which signer — never appears here.
+
+  `:coding` input is the same idea: a planner may name an `objective` and nothing
+  that chooses a provider, workspace, worker, or sandbox. Those belong to trusted
+  executor options. A nil or binary input is the historical scheduler shape and
+  stays valid so a manual graph with a test executor does not have to invent an
+  objective it will never send.
 
   Snapshots written before `:kind` existed have no such field. `upgrade/1` reads
   those as `:coding` and refuses any value that is not a kind this build knows,
@@ -126,10 +132,31 @@ defmodule Ouroboros.Orchestration.Step do
   @doc """
   Checks a step input against the schema its kind declares.
 
-  `:coding` inputs stay free-form; the executing plane owns their meaning.
+  `:coding` may carry an objective, or the historical nil/binary forms a manual
+  scheduler uses. Extra keys — `options`, `worker_id`, a workspace — are runtime
+  policy and are refused here so `Scheduler.submit/2` cannot smuggle them past
+  `Control.Server`.
   """
   @spec validate_input(kind(), term()) :: :ok | {:error, term()}
-  def validate_input(:coding, _input), do: :ok
+  def validate_input(:coding, nil), do: :ok
+  def validate_input(:coding, objective) when is_binary(objective), do: :ok
+
+  def validate_input(:coding, input) when is_map(input) and not is_struct(input) do
+    keys = MapSet.new(Map.keys(input))
+
+    cond do
+      keys == MapSet.new([]) ->
+        :ok
+
+      keys in [MapSet.new([:objective]), MapSet.new(["objective"])] ->
+        validate_coding_objective(input)
+
+      true ->
+        {:error, {:runtime_policy_not_allowed, Enum.sort(Map.keys(input))}}
+    end
+  end
+
+  def validate_input(:coding, _input), do: {:error, :invalid_coding_input}
 
   def validate_input(:forge, input) do
     case forge_request(input) do
@@ -170,6 +197,14 @@ defmodule Ouroboros.Orchestration.Step do
   end
 
   def valid?(_other), do: false
+
+  defp validate_coding_objective(input) do
+    objective = Map.get(input, :objective, Map.get(input, "objective"))
+
+    if is_binary(objective) and String.trim(objective) != "",
+      do: :ok,
+      else: {:error, {:objective_required, objective}}
+  end
 
   defp forge_fields(input) when is_map(input) and not is_struct(input) do
     keys = input |> Map.keys() |> MapSet.new()

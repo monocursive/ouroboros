@@ -763,10 +763,33 @@ defmodule Ouroboros.Orchestration.Scheduler do
     end
   end
 
+  # Demonitor *and* kill. `clear_owner/3` is also used when a step completes or
+  # fails — those owners are already exiting and must not be shot. A cancelled
+  # owner is the work itself (a forge build, a coding waiter): leaving it alive
+  # after the plan is `:cancelled` is how a forge kept compiling after Control
+  # asked it to stop.
   defp clear_cancelled_owners(state, executions) do
     Enum.reduce(executions, state, fn execution, acc ->
-      clear_owner(acc, execution.plan_id, execution.step_id)
+      stop_cancelled_owner(acc, execution.plan_id, execution.step_id)
     end)
+  end
+
+  defp stop_cancelled_owner(state, plan_id, step_id) do
+    key = {plan_id, step_id}
+
+    case Map.pop(state.owners, key) do
+      {nil, owners} ->
+        %{state | owners: owners}
+
+      {{ref, pid}, owners} ->
+        Process.demonitor(ref, [:flush])
+
+        if is_pid(pid) and Process.alive?(pid) do
+          Process.exit(pid, :kill)
+        end
+
+        %{state | owners: owners, owner_refs: Map.delete(state.owner_refs, ref)}
+    end
   end
 
   defp drop_owner_ref(state, ref, execution) do

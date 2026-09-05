@@ -104,16 +104,17 @@ defmodule Ouroboros.ClusterTest do
       end
     end
 
-    test "an older peer's posture, with no `wasm` key at all, is still valid" do
-      # Exactly what a machine running the previous release answers. Requiring the key would
-      # make every one of them an invalid posture mid-upgrade, which is the rolling-safety
-      # rule docs/WASM.md §4.4 states and this is the assertion behind it.
+    test "an older peer's posture, with no extra keys at all, is still valid" do
+      # Exactly what a machine running the previous release answers. Requiring `wasm` or
+      # `workspace` would make every one of them an invalid posture mid-upgrade.
       old_peer =
         Cluster.local_fleet_posture()
         |> Map.delete(:wasm)
+        |> Map.delete(:workspace)
 
       assert Cluster.valid_fleet_posture?(node(), old_peer)
       refute Map.has_key?(old_peer, :wasm)
+      refute Map.has_key?(old_peer, :workspace)
     end
 
     test "a newer peer's posture carrying the key is valid too, and it rides along untouched" do
@@ -149,10 +150,22 @@ defmodule Ouroboros.ClusterTest do
 
       local = Enum.find(status.machines, &(&1.node == node()))
       assert local.wasm == Cluster.local_fleet_posture().wasm
+      assert local.workspace == Cluster.local_fleet_posture().workspace
 
       # Every record has the key, so a client never has to tell "this build does not report
       # it" from "this machine has no helper" by the key's absence.
       assert Enum.all?(status.machines, &Map.has_key?(&1, :wasm))
+      assert Enum.all?(status.machines, &Map.has_key?(&1, :workspace))
+    end
+  end
+
+  describe "the workspace-admission fleet fact" do
+    test "the local posture names whether this node configured a lease boundary" do
+      posture = Cluster.local_fleet_posture()
+
+      assert posture.workspace.admission in [:disabled, :required]
+      assert is_boolean(posture.workspace.manager)
+      assert posture.workspace.manager == is_pid(Process.whereis(Ouroboros.Workspace.Manager))
     end
   end
 

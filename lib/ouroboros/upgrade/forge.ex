@@ -201,9 +201,10 @@ defmodule Ouroboros.Upgrade.Forge do
   # A signer that can decide on the whole artifact is asked for the whole artifact. That
   # is not a convenience: a payload is a hash of a manifest, and a signer holding only the
   # hash cannot check the manifest against the bytes it describes, which is precisely what
-  # an independent signer exists to do. Signers that implement only `sign/2` — `Deny`,
-  # `Local` — take the path they always took, and the bytes covered by the signature are
-  # identical either way.
+  # an independent signer exists to do. Signers that implement only `sign/2` — `Deny` —
+  # take the path they always took, and the bytes covered by the signature are identical
+  # either way. `Local` implements `sign_artifact/2` so a development forge still runs
+  # `Signing.Policy` before a signature exists.
   defp request_signature(module, artifact, signer_id) do
     result =
       if Signer.artifact_signer?(module) do

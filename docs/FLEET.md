@@ -434,12 +434,15 @@ and correct the `build_peer.ex` doc claim. §11 extends this to per-triple build
 selection; the assertion is prior and independent.
 
 **F7 — Workspace admission is silently absent when roots are unconfigured.**
-`Coding.Task.admit_workspace/1` skips leasing entirely when the manager is not
-running (`coding/task.ex:205-237`), and the manager only starts when roots are
-configured (`application.ex:171-176`). A fleet routes work onto nodes with silently
-different safety postures. Minimum fix: surface `workspace: :disabled` as a named
-fact in the posture/fleet directory (§7) so placement *can* see it; refusing is a
-policy choice left to a required tag (`workspace-admission`).
+*Addressed.* Coding and interactive admission skip the lease only when
+`:workspace_allowed_roots` is empty (the default unconstrained install). When roots
+are configured and `Workspace.Manager` is not running, start fails closed as
+`{:workspace_admission_failed, :workspace_manager_unavailable}` rather than running
+unconstrained. The fleet posture carries a rolling-safe extra key
+`workspace: %{admission: :disabled | :required, manager: boolean}` — same seam as
+`wasm`: `valid_fleet_posture?/2` does not require it. Placement that needs the fact
+reads with `Map.get/2`. A required tag (`workspace-admission`) remains a policy
+choice on top of the advertised fact.
 
 ---
 

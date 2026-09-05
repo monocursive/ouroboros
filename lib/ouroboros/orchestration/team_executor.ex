@@ -92,7 +92,6 @@ defmodule Ouroboros.Orchestration.TeamExecutor do
   defp worker_id(execution, opts) do
     value =
       get_in(execution.metadata, [:step, :worker_id]) ||
-        input_value(execution.input, :worker_id) ||
         Keyword.get(opts, :worker_id)
 
     if is_binary(value) and String.trim(value) != "",
@@ -105,11 +104,10 @@ defmodule Ouroboros.Orchestration.TeamExecutor do
       input_value(execution.input, :objective) ||
         if(is_binary(execution.input), do: execution.input)
 
-    coding_opts =
-      case input_value(execution.input, :options) do
-        nil -> Keyword.get(opts, :coding_options, [])
-        value -> value
-      end
+    # Provider, workspace, and sandbox belong to trusted executor options — never to
+    # the durable plan a model can write. `Step.validate_input/2` already refuses those
+    # keys on submit; this read does not offer a second smuggling path.
+    coding_opts = Keyword.get(opts, :coding_options, [])
 
     cond do
       not is_binary(objective) or String.trim(objective) == "" ->

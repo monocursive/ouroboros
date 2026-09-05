@@ -8,7 +8,7 @@ defmodule Ouroboros.Orchestration.PlanTest do
              Plan.new(
                "release-42",
                [
-                 %{id: "inspect", input: %{path: "."}},
+                 %{id: "inspect", input: %{objective: "inspect the repository"}},
                  %{id: "test", dependencies: ["inspect"]},
                  %{id: "review", dependencies: ["inspect"]},
                  %{id: "merge", dependencies: ["test", "review"]}
@@ -169,6 +169,22 @@ defmodule Ouroboros.Orchestration.PlanTest do
 
     assert {:error, {:unserializable_input, "a"}} =
              Plan.new("p", [%{id: "a", input: [safe: :value] ++ [self() | self()]}])
+  end
+
+  test "refuses coding-step runtime policy in the durable plan" do
+    assert {:error, {:invalid_step_input, "a", {:runtime_policy_not_allowed, keys}}} =
+             Plan.new("p", [
+               %{id: "a", input: %{objective: "write it", options: [provider: :claude]}}
+             ])
+
+    assert :options in keys
+    assert :objective in keys
+
+    assert {:error, {:invalid_step_input, "a", {:runtime_policy_not_allowed, [:worker_id]}}} =
+             Plan.new("p", [%{id: "a", input: %{worker_id: "w1"}}])
+
+    assert {:ok, _plan} = Plan.new("p", [%{id: "a", input: %{objective: "write it"}}])
+    assert {:ok, _plan} = Plan.new("p", [%{id: "a"}])
   end
 
   defp contains_runtime_handle?(term)

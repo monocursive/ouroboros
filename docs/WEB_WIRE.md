@@ -186,15 +186,15 @@ Sizes: `transcript_cells.rs` 7,052 lines, `model/transcript.rs` 2,031;
 `presentation.ex` 2,230, `transcript.ex` 1,356. The whole `lib/ouroboros/web/` tree is
 14,836 lines across 31 files.
 
-**The corpus is 69 fixtures, not 67** — verified by hand: `test/support/gateway_golden/`
-holds 69 `.json` files, 46 of them `event_*` (the transcript corpus) and 23 protocol
+**The corpus is 78 fixtures, not 69** — `test/support/gateway_golden/`
+holds 78 `.json` files, 46 of them `event_*` (the transcript corpus) and 32 protocol
 fixtures. The Elixir lister is `fixtures/0` at
 `lib/mix/tasks/ouroboros.gateway.golden.ex:120`, returning
 `protocol_fixtures() ++ transcript_fixtures()` (`:124` and `:603`, built from
 `transcript_corpus` at `:186`). The Rust accounting test is
-**`tui/src/model.rs:3894`**, `every_golden_fixture_is_accounted_for` — an inline
-`#[cfg(test)]` function, *not* a file under `tui/tests/`; it spells all 69 names in a
-literal `vec![]` (`:3915-3985`).
+**`tui/src/model.rs`**, `every_golden_fixture_is_accounted_for` — an inline
+`#[cfg(test)]` function, *not* a file under `tui/tests/`; it globs the directory
+and spells the expected names.
 
 **The parity lock, both halves.** `test/ouroboros/web/corpus_parity_test.exs` (1,025
 lines, 48 tests in 12 `describe` blocks) and `tui/tests/presentation_corpus.rs` (1,315
@@ -205,7 +205,7 @@ the same string literals; the Elixir side states the direction of the contract e
 same 46 transcript names and globs the directory to prove nothing was added silently
 (`corpus_parity_test.exs:932-988`; `presentation_corpus.rs:1231-1295`). The Elixir side
 has one test the Rust side cannot have: `wire_shape` as the identity over an
-already-encoded payload, iterating all 69 fixtures (`corpus_parity_test.exs:1009-1010`) —
+already-encoded payload, iterating all 78 fixtures (`corpus_parity_test.exs:1009-1010`) —
 which is the in-process/wire equivalence §6.3 depends on, asserted today.
 
 **The resync algorithm has four copies, not three**, and one of them is already in Elixir:
@@ -297,7 +297,7 @@ survive in reshaped form.
 
 **What it does not retire, contrary to the framing.** The projection does not go away; it
 moves — Rust keeps `transcript_cells.rs:846` and `model/transcript.rs:361`, and TypeScript
-gains a port of both, so the count of implementations is unchanged at two. The 69-fixture
+gains a port of both, so the count of implementations is unchanged at two. The 78-fixture
 corpus does not retire either: it has to be re-pointed at a TypeScript projection, which
 means adding a JavaScript projection test runner to CI. The repository now has Playwright
 for browser acceptance, but it does not compile or test a TypeScript projection. And the
@@ -772,8 +772,8 @@ terms.
 ## 9. Honest gaps in this document
 
 - **Two premises this document was handed turned out to be wrong, and §1.4 corrects them
-  rather than repeating them.** The corpus is **69** fixtures, not 67 (46 transcript + 23
-  protocol, counted by hand). And "four transcript-projection implementations" is two
+  rather than repeating them.** The corpus is **78** fixtures, not 67 (46 transcript + 32
+  protocol, counted from `test/support/gateway_golden/`). And "four transcript-projection implementations" is two
   implementations of a two-stage pipeline; what genuinely has four copies is the *resync*
   algorithm, and the fourth is `lib/ouroboros/web/watch.ex`, which is in Elixir and which
   Option A keeps and Option B replaces rather than removes. Any argument that leaned on

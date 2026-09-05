@@ -26,9 +26,9 @@ durable per-effect audit ledger — which is the thesis this runtime was built o
 
 **The map.** Against a 25-row scorecard, `ouro` on this branch scores 23/75. The
 table-stakes rows average 1.0; the open-slot rows average 1.5, two of them already at 2.
-Three structural facts dominate: Ouroboros runs no tool loop, so it cannot add
-diagnostics, veto a command, or offer a tool to any provider; the managed transports
-(including Claude) have no approvals channel, so a Claude session at the plane default
+Three structural facts dominate: Native now owns a tool loop (see §0b), so diagnostics,
+veto, and first-party tools exist for that provider; the managed transports
+(including Claude) historically had no approvals channel, so a Claude session at the plane default
 `approval_mode: :prompt` has its tools **silently denied**; and `steer` is unsupported on
 every provider but `pi`. A second class of gap is cheap: the structured turn envelope,
 `model`/`reasoning_effort`/`system_prompt` at start, per-turn effort, `teams.delegate`,
@@ -163,7 +163,7 @@ exposed that `ouro run` reported `files_changed: []` for that edit, fixed the sa
 | I1 | landed | `tool_call` entries for the native agent, checkpointed before the tool runs (a ledger that cannot record stops the tool) and settled with `completed\|failed\|refused\|timed_out`, content-minimised subjects (paths, a command digest, hosts, the MCP server and tool); `approval` entries for every human answer on every provider, written before the answer is forwarded, with `actor` (`human`, or `headless` — `ouro run` now names itself), `scope`, `rule_id`; `ledger_ref` `{node, id}` on `tool_call` and `approval_resolved` events; fair retention across kinds so a flood of tool calls cannot evict the only forge. Landing it exposed that the Claude bridge had been calling `Permissions.record/2` with the wrong shape since C2 — no bridged decision had ever reached the ledger; fixed the same day with a test against the real engine |
 | I2 | landed | `/cost`, `/usage`, `[budget] max_cost_usd` |
 | I3 | landed | `ledger.{list,get,export}` (`fleet: true` fans out over bounded `:erpc`, merges by `{node, sequence}`, names the nodes that did not answer); `ledger.export` is JSONL with `hash(n) = sha256(hash(n-1) ‖ line(n))` over a canonical encoding — client-verifiable, not tamper-evident storage; `ouro ledger [--fleet] [--since N] [--json]` |
-| J1–J3 | landed (unexercised in CI) | `release.yml` signs `SHA256SUMS` with a minisign-compatible Ed25519 key from a CI secret and verifies its own signature before publishing; `dist/release.pub` is committed **unprovisioned** on purpose (a key nobody can sign with is worse than no key) and every reader treats that as "no key"; `ouro update [--check] [--from] [--allow-downgrade]` verifies the signature (both minisign forms, the global signature over the trusted comment too), then the digest, then replaces the binary atomically (write beside, fsync, rename), refusing with a documented exit code for each failure — **a build without a release key refuses even `--check`**; no HTTP crate (`curl`/`wget` with bounds and proxy discipline); `scripts/install.sh` (sha256 always, minisign when present and says so when absent, `~/.local/bin`, no sudo); Homebrew template + filler; `docs/DISTRIBUTION.md`; 54 structural checks on the workflow. Nothing has run in CI; the minisign verifier is cross-checked against an independent test signer, not yet against `minisign` itself; no key rotation story; no Windows; no channels |
+| J1–J3 | landed (unexercised in CI) | `release.yml` signs `SHA256SUMS` with a minisign-compatible Ed25519 key from a CI secret and verifies its own signature before publishing; `dist/release.pub` is committed **unprovisioned** on purpose (a key nobody can sign with is worse than no key) and every reader treats that as "no key"; `ouro update [--check] [--from] [--allow-downgrade]` verifies the signature (both minisign forms, the global signature over the trusted comment too), then the digest, then replaces the binary atomically (write beside, fsync, rename), refusing with a documented exit code for each failure — **a build without a release key refuses even `--check`**; no HTTP crate (`curl`/`wget` with bounds and proxy discipline); `scripts/install.sh` (refuses without a verified minisign signature, then sha256, `~/.local/bin`, no sudo); Homebrew template + filler; `docs/DISTRIBUTION.md`; 54 structural checks on the workflow. Nothing has run in CI; the minisign verifier is cross-checked against an independent test signer, not yet against `minisign` itself; no key rotation story; no Windows; no channels |
 
 ### Scorecard now
 
@@ -216,10 +216,12 @@ what a user of `ouro` on `review-fixes` gets today.
   worktree shares the repository's object store.
 - Test peers in `cluster_test.exs` never receive this repo's provider overrides.
 - Code-intelligence admission follows sessions: a node admits its configured roots plus
-  the workspace of every interactive session it holds, nothing else. Until 2026-08-23 a
+  the workspace of every interactive **and coding** session it holds, nothing else. Until 2026-08-23 a
   default install (no configured roots) had no code intelligence at all, and every
   code-intel test configured roots, so the suites never saw it — the local corpus, which
-  runs a daemon with no roots, is where such defaults get caught now.
+  runs a daemon with no roots, is where such defaults get caught now. Coding-task
+  workspaces were added to the same admission set after a later review found they were
+  still missing.
 - The ledger export chain is computed over the answer and stored nowhere: it catches a
   copy altered after export, not a node that rewrote its own checkpoint first. The ledger
   is not replicated; `--fleet` asks every owner.
@@ -263,6 +265,20 @@ what a user of `ouro` on `review-fixes` gets today.
   that is not a git repository) is rendered through the ordinary error path and was not
   exercised live.
 
+## 0b. As-built: Native owns a tool loop (2026-09)
+
+§0 and §3.3 F1 below are the 2026-08-22 baseline: both planes handed a request to
+Harness and polled it, and Ouroboros could not add a diagnostic, veto a command, or
+offer a first-party tool. That is no longer true for `:native`.
+
+`Ouroboros.Provider.Native` is an in-process agent with its own tool loop — read, edit,
+bash, grep, code intel, MCP, computer-use, approvals, sandbox. Vendor sessions still
+run their tools inside the vendor CLI; Native does not wrap those CLIs in a second
+loop. See [docs/REPLAY.md](REPLAY.md) §11 and `lib/ouroboros/provider/native.ex`.
+ACP fs/terminal methods exist beside that loop. Historical F1 remains the constraint
+on **vendor** transports.
+
+---
 
 ## 1. Method and sources
 
@@ -519,7 +535,7 @@ implements, tests, and exposes on the wire that the client never calls.
 
 ### 3.3 Structural facts that constrain every choice below
 
-- **F1 — Ouroboros runs no tool loop.** Both planes hand a request to Harness and poll it; all tools execute inside the vendor CLI ([M3 §1.1](research/agent-ux-2026/M3-provider-tool-layer-map.md)). `Jido.AI` is used only for control-plane planning ([jido_ai.ex:35,51](../lib/ouroboros/control/jido_ai.ex)). Ouroboros cannot today append a diagnostic to an edit result, veto a tool call, or offer its own tool, because it is never in the loop where those happen.
+- **F1 — Ouroboros runs no tool loop (vendor transports; 2026-08-22 baseline).** Both planes handed a request to Harness and poll it; vendor tools execute inside the vendor CLI ([M3 §1.1](research/agent-ux-2026/M3-provider-tool-layer-map.md)). See **§0b**: Native now owns a first-party loop. `Jido.AI` is used only for control-plane planning ([jido_ai.ex:35,51](../lib/ouroboros/control/jido_ai.ex)). On a vendor session Ouroboros still cannot append a diagnostic to an edit result or veto a tool call inside that CLI's loop.
 - **F2 — Managed transports have no approvals channel.** `claude`, `gemini`, `amp`, `grok`, `zai`, and `codex exec` sessions run one process per turn with `interrupt: :process` and no `approvals` capability ([transport_spec.ex:56-83](../deps/jido_harness/lib/jido_harness/session/transport_spec.ex)). A pre-tool hook is structurally impossible there; only Codex app-server and ACP ask before acting.
 - **F3 — The only universal injection seam is prompt text.** `expose_turn_request/2` ([task.ex:811-817](../lib/ouroboros/interactive/task.ex)) already wraps every turn in a delimiter-checked `<ouroboros-runtime>` envelope whose captured bytes are durable and replay-exact. Anything that must reach every provider (diagnostics, instructions, context) rides there or in a `follow_up` turn.
 - **F4 — Three transports can carry MCP server definitions today** (claude/zai `--mcp-config`, amp `--mcp-config`, ACP `mcpServers`); Codex can only via `-c` pairs baked into the managed launcher ([provider.ex:458-470](../lib/ouroboros/provider.ex)); Gemini can only filter names. The block is Ouroboros's own refusal ([task_state.ex:28](../lib/ouroboros/coding/task_state.ex)), put there for a good reason — inline server commands in a durable checkpoint are an execution vector — that needs a durable-safety story, not deletion.

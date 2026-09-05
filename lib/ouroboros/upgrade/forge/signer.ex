@@ -30,8 +30,11 @@ defmodule Ouroboros.Upgrade.Forge.Signer do
   signer that can only see the hash has no way to check the claims against the bytes they
   describe. So this behaviour also declares an optional `sign_artifact/2`, which receives
   the whole artifact, and `Ouroboros.Upgrade.Forge` prefers it whenever a signer exports
-  it. A signer that implements only `sign/2` is unaffected — `Deny` and `Local` both
-  still work exactly as they did.
+  it. A signer that implements only `sign/2` is unaffected — `Deny` still
+  works exactly as it did. `Local` implements both: `sign/2` covers a payload for
+  tests that already have a trusted artifact, and `sign_artifact/2` runs the
+  configured signing policy before producing a signature, so a forge that prefers
+  the artifact callback cannot skip the independent check.
 
   Nothing about that choice changes what gets signed. The bytes covered by a signature
   are always `Artifact.signing_payload/2` of the artifact, and an artifact-aware signer
@@ -109,9 +112,17 @@ defmodule Ouroboros.Upgrade.Forge.Signer.Local do
 
   Configure as `{Ouroboros.Upgrade.Forge.Signer.Local, private_key: <<32 bytes>>}`, or
   call `sign/3` with explicit options.
+
+  `sign_artifact/2` is the forge's preferred callback. It runs the configured
+  `Ouroboros.Upgrade.Signing.Policy` against the whole artifact *before* any
+  signature exists, then signs `Artifact.signing_payload/2`. `sign/2` remains the
+  payload-only path for tests that already assembled a trusted artifact.
   """
 
   @behaviour Ouroboros.Upgrade.Forge.Signer
+
+  alias Ouroboros.Upgrade.Artifact
+  alias Ouroboros.Upgrade.Signing.Policy
 
   @impl true
   def sign(payload, signer_id), do: sign(payload, signer_id, configured_options())
@@ -130,6 +141,43 @@ defmodule Ouroboros.Upgrade.Forge.Signer.Local do
   end
 
   def sign(_payload, _signer_id, _opts), do: {:error, :invalid_signing_request}
+
+  @impl true
+  def sign_artifact(artifact, signer_id),
+    do: sign_artifact(artifact, signer_id, configured_options())
+
+  @doc "Signs an artifact after the configured signing policy admits it."
+  @spec sign_artifact(Artifact.t(), String.t(), keyword()) :: {:ok, binary()} | {:error, term()}
+  def sign_artifact(%Artifact{} = artifact, signer_id, opts)
+      when is_binary(signer_id) and signer_id != "" and is_list(opts) do
+    with :ok <- evaluate_policy(artifact, signer_id, opts),
+         {:ok, signature} <- sign(Artifact.signing_payload(artifact, signer_id), signer_id, opts) do
+      {:ok, signature}
+    end
+  end
+
+  def sign_artifact(_artifact, _signer_id, _opts), do: {:error, :invalid_signing_request}
+
+  defp evaluate_policy(artifact, signer_id, opts) do
+    context = %{
+      signer_id: signer_id,
+      requester: Keyword.get(opts, :requester, node()),
+      require_eval: policy_flag(opts, :require_eval, :signing_require_eval, false),
+      require_wasm_eval: policy_flag(opts, :require_wasm_eval, :signing_require_wasm_eval, true),
+      node: node()
+    }
+
+    case Policy.configured().evaluate(artifact, context) do
+      {:ok, _findings} -> :ok
+      {:refused, reason} -> {:error, {:signing_policy_refused, reason}}
+    end
+  end
+
+  defp policy_flag(opts, opt_key, env_key, default) do
+    Keyword.get_lazy(opts, opt_key, fn ->
+      Application.get_env(:ouroboros, env_key, default) == true
+    end) == true
+  end
 
   defp private_key(opts) do
     case Keyword.fetch(opts, :private_key) do

@@ -546,7 +546,7 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
     test "the forge prefers a whole-artifact signer and leaves the others untouched" do
       assert Signer.artifact_signer?(Signer.Remote)
       refute Signer.artifact_signer?(Signer.Deny)
-      refute Signer.artifact_signer?(Signer.Local)
+      assert Signer.artifact_signer?(Signer.Local)
       refute Signer.artifact_signer?(:not_a_module)
 
       # `Remote` cannot answer the payload-only callback at all: a signer whose whole
@@ -781,6 +781,19 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
       System.delete_env("OUROBOROS_SIGNER_KEY_PATH")
       System.delete_env("OUROBOROS_SIGNER_ID")
       assert prod_config()[:ouroboros][:node_role] == :core
+    end
+
+    test "production requires a signed eval spec unless the operator opts out" do
+      assert prod_config()[:ouroboros][:signing_require_eval] == true
+
+      System.put_env("OUROBOROS_SIGNING_REQUIRE_EVAL", "false")
+      assert prod_config()[:ouroboros][:signing_require_eval] == false
+
+      System.put_env("OUROBOROS_SIGNING_REQUIRE_EVAL", "maybe")
+
+      assert_raise RuntimeError, ~r/OUROBOROS_SIGNING_REQUIRE_EVAL/, fn ->
+        prod_config()
+      end
     end
 
     test "naming a signer node is what configures the remote signer, and nothing else does" do
