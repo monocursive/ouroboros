@@ -1277,12 +1277,17 @@ async fn fleet_add_command(
     };
     let mut notify = fleet_add::StderrNotify;
     let mut sink = fleet_add::NotifyEvents::new(&mut notify);
-    let outcome = fleet_add::add_with_events(
-        &params,
-        &fleet_add::SshRemote { via },
-        &fleet_add::Cancel::default(),
-        &mut sink,
-    )?;
+    let cancel = fleet_add::Cancel::default();
+    let on_interrupt = cancel.clone();
+    let interrupt = tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            on_interrupt.cancel();
+        }
+    });
+    let result =
+        fleet_add::add_with_events(&params, &fleet_add::SshRemote { via }, &cancel, &mut sink);
+    interrupt.abort();
+    let outcome = result?;
     print!("{}", fleet_add::render_outcome(&outcome));
     Ok(())
 }
@@ -1292,6 +1297,8 @@ async fn fleet_enroll_command(
     invitation: PathBuf,
     delete: bool,
     service: bool,
+    activate: bool,
+    peer: Option<String>,
     ports: fleet::Ports,
 ) -> Result<()> {
     fleet_add::enroll_preflight(&invitation)?;
@@ -1307,6 +1314,11 @@ async fn fleet_enroll_command(
                 invitation.display()
             )
         })?;
+    }
+    if activate {
+        fleet::service_install(&paths.data_dir)?;
+        fleet::service_activate(&paths.data_dir)?;
+        return fleet_ready(paths, peer.as_deref()).await;
     }
     if service {
         match fleet::service_install(&paths.data_dir) {
@@ -1327,10 +1339,79 @@ async fn fleet_enroll_command(
     daemon(paths, false).await
 }
 
+async fn fleet_rpc(paths: &Paths, method: &str, params: Value) -> Result<Value> {
+    let publication = runtime::read_live_publication(&paths.data_dir)?
+        .ok_or_else(|| anyhow!("fleet runtime is not running"))?;
+    let token = runtime::read_token(&paths.token_file())?;
+    let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
+    let attached = attach_with(local_address(publication.port), token, false, None, hook).await?;
+    let result = attached
+        .client
+        .call_with_timeout(method, params, Duration::from_secs(15))
+        .await;
+    attached.client.stop().await;
+    result.map_err(Into::into)
+}
+
+async fn fleet_distribute_revocation(paths: &Paths, artifact: &str, file: &Path) -> Result<()> {
+    if runtime::read_live_publication(&paths.data_dir)?.is_none() {
+        println!("Signed revocation saved locally at {}. This stopped machine will enforce it on startup. Import it on every other surviving machine before treating fleet-wide revocation as complete.", file.display());
+        return Ok(());
+    }
+    let result = fleet_rpc(paths, "fleet.revoke", json!({"artifact": artifact})).await?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    if result.get("complete").and_then(Value::as_bool) != Some(true) {
+        bail!("revocation is committed, but some machines have not acknowledged it. Import {} on each pending machine; keep that machine isolated from the revoked credential until it acknowledges", file.display());
+    }
+    Ok(())
+}
+
+async fn fleet_ready(paths: &Paths, peer: Option<&str>) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    loop {
+        let ready = async {
+            fleet::recovery_ready(&paths.data_dir)?;
+            let status = fleet_rpc(paths, "fleet.status", json!({})).await?;
+            fleet::validate_ready_status(&status, peer)?;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        match ready {
+            Ok(()) => {
+                println!("OURO_FLEET_READY");
+                return Ok(());
+            }
+            Err(error) if tokio::time::Instant::now() >= deadline => {
+                bail!("machine enrolled but fleet readiness was not verified: {error:#}. Inspect fleet doctor and fleet service status; retry fleet ready after repair");
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
+        }
+    }
+}
+
 async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Result<()> {
     paths.ensure_private_data_dir()?;
 
     match command {
+        FleetCommand::Protocol => {
+            println!("2");
+            Ok(())
+        }
+        FleetCommand::UpgradeTransport => {
+            fleet::upgrade_transport(&paths.data_dir)?;
+            println!("TLS revocation enforcement installed. Upgrade every fleet member to this build, then restart its recovery service.");
+            Ok(())
+        }
+        FleetCommand::Revoke { machine, out } => {
+            let artifact = fleet::revocation::issue(&paths.data_dir, &machine, &out)?;
+            fleet_distribute_revocation(paths, &artifact, &out).await
+        }
+        FleetCommand::ImportRevocation { artifact: input } => {
+            let artifact = fleet::revocation::import(&paths.data_dir, &input)?;
+            fleet_distribute_revocation(paths, &artifact, &input).await
+        }
+        FleetCommand::Ready { peer } => fleet_ready(paths, peer.as_deref()).await,
+
         FleetCommand::Create {
             name,
             machine,
@@ -1415,6 +1496,8 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
             invitation,
             delete,
             service,
+            activate,
+            peer,
             gateway_port,
             dist_port,
         } => {
@@ -1426,6 +1509,8 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                 invitation,
                 delete,
                 service,
+                activate,
+                peer,
                 fleet::Ports {
                     gateway: gateway_port,
                     dist: dist_port,
@@ -1468,7 +1553,7 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                     fleet::cancel_invite(&paths.data_dir, &cancel_machine, &roster_output)?;
                 let roster_arg = fleet::shell_quote_path(&roster_output)?;
                 println!(
-                    "Stopped expecting invitation for {} ({}).\n  roster       revision {} in {} (mode 0600)\n\nExisting fleet machines still have their older saved seed list. Copy this roster privately to each one. On every recipient:\n  1. `chmod 600 {}`\n  2. Run `ouro fleet service status`. If a recovery unit is installed, run the exact deactivation command it prints; otherwise run `ouro stop`.\n  3. `ouro fleet sync import {}`\n  4. If it had a recovery unit, run the exact activation command from service status; otherwise run `ouro daemon`.\n  5. `ouro fleet doctor`\n\nThis owner already saved the new roster, and a running owner runtime stops expecting and dialing the canceled machine within a few seconds; no owner restart or import is needed. This update does NOT revoke any copied invitation, certificate, or shared cookie. A leaked invitation compromises the fleet until whole-fleet credential rotation: deactivate/remove recovery on every machine, leave them, recreate the fleet, and issue fresh invitations.",
+                    "Stopped expecting invitation for {} ({}).\n  roster       revision {} in {} (mode 0600)\n\nExisting fleet machines still have their older saved seed list. Copy this roster privately to each one. On every recipient:\n  1. `chmod 600 {}`\n  2. Run `ouro fleet service status`. If a recovery unit is installed, run the exact deactivation command it prints; otherwise run `ouro stop`.\n  3. `ouro fleet sync import {}`\n  4. If it had a recovery unit, run the exact activation command from service status; otherwise run `ouro daemon`.\n  5. `ouro fleet doctor`\n\nThis owner already saved the new roster, and a running owner runtime stops expecting and dialing the canceled machine within a few seconds; no owner restart or import is needed. This update does NOT revoke copied credentials. To permanently revoke this machine identity, run `ouro fleet revoke --machine NAME --out revoked.json` and reconcile every pending acknowledgement. If a hostile machine already joined the BEAM trust domain, rotate the whole fleet from trusted machines; credential revocation cannot undo code execution or secrets already copied.",
                     removed.machine,
                     removed.node,
                     revision,
@@ -1777,6 +1862,10 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
             Ok(())
         }
         FleetCommand::Service { command } => match command {
+            ServiceCommand::Start => {
+                fleet::service_activate(&paths.data_dir)?;
+                fleet_ready(paths, None).await
+            }
             ServiceCommand::Install => {
                 if dev {
                     bail!("recovery services require the packaged ouro; omit --dev");

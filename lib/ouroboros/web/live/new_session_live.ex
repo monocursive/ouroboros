@@ -60,7 +60,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   @account_poll 1_000
 
   @impl true
-  def mount(_params, _session, socket) do
+  def mount(params, _session, socket) do
     config = Config.for_endpoint(socket.endpoint)
 
     socket =
@@ -90,7 +90,8 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       |> assign(:starting?, false)
       |> assign(:refusal, nil)
       |> assign(:provider_invalid?, false)
-      |> assign(:initial_message, "")
+      |> assign(:initial_message, starter(params["starter"]))
+      |> assign(:default_workspace, File.cwd!())
       |> assign(:started_id, nil)
 
     # The lists are read on the connected mount alone. The static first paint says it is
@@ -98,6 +99,16 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     # serves no providers.
     {:ok, if(connected?(socket), do: load(socket), else: socket)}
   end
+
+  defp starter("explain"),
+    do: "Help me understand this project. Explain how it works and where I should start."
+
+  defp starter("review"),
+    do:
+      "Review the current changes. Focus on correctness, usability, and anything I should fix before shipping."
+
+  defp starter("build"), do: "Help me build "
+  defp starter(_), do: ""
 
   # ------------------------------------------------------------------------------------
   # The form
@@ -821,6 +832,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       <form id="new-session" class="ouro-new-form" phx-change="change" phx-submit="start">
         <.workspace_field
           workspace={@form.workspace}
+          default_workspace={@default_workspace}
           can_browse={@can_browse?}
           open={@browse_open?}
           listing={@browse}
@@ -854,7 +866,11 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
           <summary>
             <span>Advanced settings</span>
             <span class="ouro-new-advanced-summary">
-              {@provider_label} · recommended model · {sandbox_title(@form.sandbox)}
+              {@provider_label} · {@intent.send ||
+                if(@field == :unsupported,
+                  do: "Provider chooses the model",
+                  else: "Recommended model"
+                )} · {sandbox_title(@form.sandbox)}
             </span>
           </summary>
 
@@ -1169,6 +1185,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   # ------------------------------------------------------------------------------------
 
   attr :workspace, :string, required: true
+  attr :default_workspace, :string, default: nil
   attr :can_browse, :boolean, required: true
   attr :open, :boolean, required: true
   attr :listing, :any, required: true
@@ -1202,7 +1219,14 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
           Browse…
         </button>
       </div>
-      <p class="ouro-new-hint">Leave blank to use the default project folder.</p>
+      <p class="ouro-new-hint">
+        {if String.trim(@workspace) == "",
+          do: "Default project on this machine: ",
+          else: "Project on this machine: "}
+        <span class="ouro-mono">{if String.trim(@workspace) == "",
+          do: @default_workspace,
+          else: Path.expand(String.trim(@workspace), @default_workspace || File.cwd!())}</span>
+      </p>
 
       <.browse_panel :if={@open} listing={@listing} refusal={@refusal} />
     </section>

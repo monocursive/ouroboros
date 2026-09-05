@@ -186,6 +186,7 @@ defmodule Ouroboros.Web.Live.Composer do
   absent rather than defaulted.
   """
   attr :draft, :string, required: true
+  attr :draft_key, :string, default: "standalone"
   attr :error, :any, required: true
   attr :turn, :map, required: true
   attr :status, :any, required: true
@@ -229,17 +230,19 @@ defmodule Ouroboros.Web.Live.Composer do
 
       <div :if={not @ended} class="ouro-composer-surface">
         <form :if={@can_send} id="composer" phx-submit="send" phx-change="draft">
+          <input type="hidden" name="session_key" value={@draft_key} />
           <div class="ouro-composer-box">
             <textarea
               id="ouro-composer-input"
               name="message"
               class="ouro-composer-input"
               phx-hook="Composer"
+              data-draft-key={@draft_key}
               required
               phx-debounce="400"
               rows="1"
               aria-label="message"
-              placeholder="Say something. Enter sends, Shift-Enter is a new line."
+              placeholder="Ask a question or describe the next step…"
             >{@draft}</textarea>
 
             <div class="ouro-composer-actions">
@@ -267,24 +270,30 @@ defmodule Ouroboros.Web.Live.Composer do
           </div>
         </form>
 
-        <div :if={@can_configure} class="ouro-composer-footer">
-          <.picker
-            :if={@sandbox}
-            label="File access"
-            current={@sandbox}
-            choices={sandbox_modes()}
-            field="sandbox_mode"
-            warn={to_string(@sandbox) == "unrestricted"}
-          />
+        <details :if={@can_configure} class="ouro-composer-settings" data-ouro-disclosure={@draft_key}>
+          <summary>
+            {if @sandbox, do: word(@sandbox), else: "File access not reported"} · {word(@effort)} thinking
+            <span>Change</span>
+          </summary>
+          <div class="ouro-composer-footer">
+            <.picker
+              :if={@sandbox}
+              label="File access"
+              current={@sandbox}
+              choices={sandbox_modes()}
+              field="sandbox_mode"
+              warn={to_string(@sandbox) == "unrestricted"}
+            />
 
-          <.picker
-            label="Thinking"
-            current={@effort}
-            choices={@efforts}
-            field="reasoning_effort"
-            warn={false}
-          />
-        </div>
+            <.picker
+              label="Thinking"
+              current={@effort}
+              choices={@efforts}
+              field="reasoning_effort"
+              warn={false}
+            />
+          </div>
+        </details>
       </div>
     </div>
     """

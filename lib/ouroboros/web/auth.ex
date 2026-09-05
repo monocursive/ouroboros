@@ -187,7 +187,7 @@ defmodule Ouroboros.Web.Auth do
               required
               autofocus
             />
-            <button type="submit">Continue</button>
+            <button class="ouro-button" type="submit">Continue</button>
           </form>
           <p class="ouro-gate-help">
             On the computer running Ouroboros, <code>ouro web</code> opens a fresh signed-in

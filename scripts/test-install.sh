@@ -124,13 +124,12 @@ else
     esac
 fi
 
-if output=$(OURO_BASE_URL= sh "$install_sh" --dir "$root/bin8" 2>&1); then
-    bad "refuses with no release location" "it did something"
+# Assert the default without making a network request: the release need not exist yet.
+# Every executable installer test supplies its own temporary release directory.
+if grep -Fq 'BASE_URL_DEFAULT="https://github.com/monocursive/ouroboros/releases/latest/download"' "$install_sh"; then
+    ok "defaults to the project's GitHub release directory"
 else
-    case $output in
-        *"no release location is configured"*) ok "refuses with no release location" ;;
-        *) bad "refuses with no release location" "$output" ;;
-    esac
+    bad "defaults to the project's GitHub release directory" "default URL missing"
 fi
 
 case $(grep -c 'sudo' "$install_sh") in

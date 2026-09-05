@@ -32,6 +32,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::runtime;
 
+pub mod revocation;
+
 pub const FLEET_DIR: &str = "fleet";
 pub const PROFILE_FILE: &str = "profile.json";
 pub const PENDING_DIR: &str = "pending";
@@ -432,6 +434,8 @@ struct Invitation {
     node_key_pem: String,
     cookie: String,
     attestation_pem: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    revocations: Vec<String>,
 }
 
 impl Drop for Invitation {
@@ -471,6 +475,8 @@ struct InvitationAttestedPayload<'a> {
     node_cert_pem: &'a str,
     node_key_pem: &'a str,
     cookie: &'a str,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    revocations: &'a [String],
 }
 
 #[derive(Serialize)]
@@ -730,7 +736,7 @@ pub fn create(
     ensure_runtime_ports_available(&profile)?;
 
     let materials = new_fleet_materials(&profile, &member)?;
-    install_new_profile(data_dir, &profile, &materials)?;
+    install_new_profile(data_dir, &profile, &materials, &[])?;
     Ok(profile)
 }
 
@@ -777,6 +783,12 @@ pub fn invite_with_replace(
     }
 
     let invited = member(machine, host);
+    if revocation::entries(data_dir, &profile)?
+        .iter()
+        .any(|(node, _)| node == &invited.node)
+    {
+        bail!("this machine identity is permanently revoked; enroll the replacement under a new machine name");
+    }
     let existing = profile
         .members
         .iter()
@@ -845,6 +857,10 @@ pub fn invite_with_replace(
         node_key_pem: node_key_pem.clone(),
         cookie: cookie.clone(),
         attestation_pem: String::new(),
+        revocations: revocation::entries(data_dir, &profile)?
+            .into_iter()
+            .map(|(_, artifact)| artifact)
+            .collect(),
     };
     let attested = invitation_attested_payload(&invitation)?;
     invitation.attestation_pem = signed_attestation(
@@ -1171,7 +1187,7 @@ pub fn join(data_dir: &Path, invitation_path: &Path, ports: Ports) -> Result<Pro
         node_key_pem: invitation.node_key_pem.clone(),
         cookie: invitation.cookie.clone(),
     };
-    install_new_profile(data_dir, &profile, &materials)?;
+    install_new_profile(data_dir, &profile, &materials, &invitation.revocations)?;
     Ok(profile)
 }
 
@@ -1190,6 +1206,12 @@ pub fn runtime_env(data_dir: &Path) -> Result<Option<Vec<(String, String)>>> {
     let Some(profile) = load(data_dir)? else {
         return Ok(None);
     };
+    if revocation::entries(data_dir, &profile)?
+        .iter()
+        .any(|(node, _)| node == &profile.node)
+    {
+        bail!("this machine's fleet credential has been revoked; leave and request a new machine identity");
+    }
     validate_materials(data_dir, false)?;
     let root = fleet_dir(data_dir);
     let bind_address = resolve_fleet_ipv4(&profile.host).with_context(|| {
@@ -1317,7 +1339,20 @@ pub fn render_status(data_dir: &Path) -> Result<String> {
 /// tolerant projection so an older/newer runtime can add fields without breaking this
 /// client; malformed essentials return `None` and the caller falls back to local state.
 pub fn render_live_status(data_dir: &Path, value: &Value) -> Option<String> {
-    let profile = load(data_dir).ok().flatten()?;
+    let mut profile = load(data_dir).ok().flatten()?;
+    let revoked = value
+        .get("revoked_nodes")
+        .and_then(Value::as_array)
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    profile
+        .members
+        .retain(|member| !revoked.contains(member.node.as_str()));
     let summary = value.get("summary")?;
     let reported_expected = summary.get("expected")?.as_u64()?;
     let connected = summary.get("connected")?.as_u64()?;
@@ -1409,13 +1444,18 @@ pub fn render_live_status(data_dir: &Path, value: &Value) -> Option<String> {
         text.push_str(&format!(
             "  {marker} {name:<18} {state:<10} {role:<8} {node}\n"
         ));
-        if state == "offline" {
-            if let Some(last) = machine.get("last_down_at").and_then(Value::as_str) {
-                text.push_str(&format!(
-                    "      last disconnected {last}; automatic retry is active\n"
-                ));
+        if machine.get("revoked?").and_then(Value::as_bool) == Some(true) {
+            text.push_str("      credential permanently revoked; TLS access refused\n");
+        } else if state == "offline" {
+            let retry = if machine.get("expected?").and_then(Value::as_bool) == Some(false) {
+                "not in the active roster"
             } else {
-                text.push_str("      not seen yet; automatic retry is active\n");
+                "automatic retry is active"
+            };
+            if let Some(last) = machine.get("last_down_at").and_then(Value::as_str) {
+                text.push_str(&format!("      last disconnected {last}; {retry}\n"));
+            } else {
+                text.push_str(&format!("      not seen yet; {retry}\n"));
             }
         }
     }
@@ -1803,10 +1843,9 @@ where
             };
             let enabled = match &enabled_result {
                 Ok(output) if !output.timed_out => match output.stdout.trim() {
-                    "enabled" | "enabled-runtime" | "linked" | "linked-runtime" | "alias" => {
-                        ServiceFact::Yes
-                    }
-                    "disabled" | "masked" | "masked-runtime" | "not-found" => ServiceFact::No,
+                    "enabled" => ServiceFact::Yes,
+                    "disabled" | "masked" | "masked-runtime" | "not-found" | "enabled-runtime"
+                    | "linked" | "linked-runtime" | "alias" => ServiceFact::No,
                     _ => ServiceFact::Unknown,
                 },
                 _ => ServiceFact::Unknown,
@@ -1856,55 +1895,15 @@ fn manager_query_note(results: &[(&str, Result<ManagerCommandOutput>)]) -> Optio
 }
 
 fn run_manager_command(program: &str, args: &[String]) -> Result<ManagerCommandOutput> {
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("starting {program}"))?;
-    let stdout = child.stdout.take().context("capturing manager stdout")?;
-    let stderr = child.stderr.take().context("capturing manager stderr")?;
-    let stdout_reader = thread::spawn(move || {
-        let mut output = Vec::new();
-        let mut stdout = stdout;
-        let _ = stdout.read_to_end(&mut output);
-        output
-    });
-    let stderr_reader = thread::spawn(move || {
-        let mut output = Vec::new();
-        let mut stderr = stderr;
-        let _ = stderr.read_to_end(&mut output);
-        output
-    });
-    let deadline = Instant::now() + MANAGER_QUERY_TIMEOUT;
-    let (status, timed_out) = loop {
-        if let Some(status) = child
-            .try_wait()
-            .context("waiting for the service manager query")?
-        {
-            break (status, false);
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let status = child
-                .wait()
-                .context("reaping a timed-out service manager query")?;
-            break (status, true);
-        }
-        thread::sleep(Duration::from_millis(20));
-    };
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_| anyhow!("service manager stdout reader panicked"))?;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_| anyhow!("service manager stderr reader panicked"))?;
+    let mut command = Command::new(program);
+    command.args(args).stdin(Stdio::null());
+    let output = crate::subprocess::output(command, MANAGER_QUERY_TIMEOUT, || false)
+        .with_context(|| format!("querying {program}"))?;
     Ok(ManagerCommandOutput {
-        code: status.code(),
-        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
-        timed_out,
+        code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        timed_out: false,
     })
 }
 
@@ -1952,6 +1951,122 @@ pub fn service_install(data_dir: &Path) -> Result<ServiceInstall> {
         deactivation,
         installed: true,
     })
+}
+
+/// Activate only a generated, identity-checked unit. Called by explicit `--activate`
+/// enrollment and `fleet service start`; no shell interprets the printed guidance.
+pub fn service_activate(data_dir: &Path) -> Result<()> {
+    let profile = load(data_dir)?.ok_or_else(|| anyhow!("no fleet profile"))?;
+    let (kind, path) = service_path(&profile)?;
+    let contents = read_private(&path, kind.label())?;
+    validate_service_unit_identity(kind, &profile, data_dir, &contents)?;
+    let state = service_manager_state(kind, &profile);
+    let uid = unsafe { libc::geteuid() }.to_string();
+    match kind {
+        ServiceKind::Launchd => {
+            let target = format!("gui/{uid}/dev.ouroboros.{}", profile.machine);
+            service_action("/bin/launchctl", &["enable", &target])?;
+            if state.active != ServiceFact::Yes {
+                // bootstrap refuses an already loaded unit. A loaded, idle unit is
+                // started with kickstart, which never kills an incumbent process.
+                let loaded =
+                    run_manager_command("/bin/launchctl", &["print".into(), target.clone()])?;
+                if loaded.code != Some(0) {
+                    service_action(
+                        "/bin/launchctl",
+                        &["bootstrap", &format!("gui/{uid}"), path_text(&path)?],
+                    )?;
+                } else {
+                    service_action("/bin/launchctl", &["kickstart", &target])?;
+                }
+            }
+        }
+        ServiceKind::SystemdUser => {
+            if state.linger != Some(ServiceFact::Yes) {
+                service_action("/usr/bin/loginctl", &["--no-ask-password", "enable-linger", &uid])
+                    .context("boot recovery requires user lingering; have the host administrator enable it, then retry fleet service start")?;
+            }
+            service_action("/usr/bin/systemctl", &["--user", "daemon-reload"])?;
+            service_action(
+                "/usr/bin/systemctl",
+                &[
+                    "--user",
+                    "enable",
+                    "--now",
+                    &format!("ouroboros-{}.service", profile.machine),
+                ],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn service_action(program: &str, args: &[&str]) -> Result<()> {
+    let mut command = Command::new(program);
+    command.args(args).stdin(Stdio::null());
+    let output = crate::subprocess::output(command, Duration::from_secs(30), || false)?;
+    if !output.status.success() {
+        bail!(
+            "{program} {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+pub fn recovery_ready(data_dir: &Path) -> Result<()> {
+    let profile = load(data_dir)?.ok_or_else(|| anyhow!("no fleet profile"))?;
+    let (kind, path) = service_path(&profile)?;
+    validate_service_unit_identity(
+        kind,
+        &profile,
+        data_dir,
+        &read_private(&path, kind.label())?,
+    )?;
+    let manager = service_manager_state(kind, &profile);
+    if manager.active != ServiceFact::Yes
+        || manager.enabled != ServiceFact::Yes
+        || (kind == ServiceKind::SystemdUser && manager.linger != Some(ServiceFact::Yes))
+    {
+        bail!("recovery service is not active and persistently enabled; run ouro fleet service status");
+    }
+    Ok(())
+}
+
+/// A gateway listener alone is not proof of a usable distributed fleet.
+pub fn validate_ready_status(status: &serde_json::Value, peer: Option<&str>) -> Result<()> {
+    if status
+        .pointer("/security/distributed")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+        || status
+            .pointer("/security/tls")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+    {
+        bail!("runtime has not established TLS distribution");
+    }
+    let machines = status
+        .get("machines")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow!("fleet status has no machine inventory"))?;
+    if !machines
+        .iter()
+        .any(|machine| machine["state"] == "local" && machine["compatibility"] == "local")
+    {
+        bail!("local machine is not healthy in fleet status");
+    }
+    if let Some(peer) = peer {
+        if !machines.iter().any(|machine| {
+            machine["node"] == peer
+                && machine["state"] == "connected"
+                && machine["compatibility"] == "compatible"
+        }) {
+            bail!("fleet peer {peer} is not connected with a compatible runtime");
+        }
+    }
+    Ok(())
 }
 
 pub fn render_service_status(data_dir: &Path) -> Result<String> {
@@ -3461,7 +3576,7 @@ fn remove_recognized_fleet_dir(dir: &Path) -> Result<()> {
         };
         if name == CLUSTER_DIRECTORY_DIR {
             cluster_directory = Some(entry.path());
-        } else if known.contains(name) {
+        } else if known.contains(name) || revocation::recognized_filename(name) {
             present.push(entry.path());
         } else {
             unknown.push(name.to_string());
@@ -3626,7 +3741,12 @@ fn ensure_service_removed_before_leave(
     Ok(())
 }
 
-fn install_new_profile(data_dir: &Path, profile: &Profile, materials: &Materials) -> Result<()> {
+fn install_new_profile(
+    data_dir: &Path,
+    profile: &Profile,
+    materials: &Materials,
+    revocations: &[String],
+) -> Result<()> {
     let final_dir = fleet_dir(data_dir);
     let staging = data_dir.join(format!(
         ".fleet.setup.{}.{}",
@@ -3655,6 +3775,19 @@ fn install_new_profile(data_dir: &Path, profile: &Profile, materials: &Materials
             &staging.join(NODE_KEY_FILE),
             materials.node_key_pem.as_bytes(),
         )?;
+        if revocations.len() > 4096 {
+            bail!("invitation has too many revocations");
+        }
+        for artifact in revocations {
+            let node = revocation::validate(artifact, &profile.fleet_id, &materials.ca_cert_pem)?;
+            if node == profile.node {
+                bail!("invitation carries a revoked local identity");
+            }
+            write_private_atomic(
+                &staging.join(revocation::filename(&node)),
+                artifact.as_bytes(),
+            )?;
+        }
         let (tls, vm_args) = generated_runtime_files(data_dir, profile)?;
         write_private_atomic(&staging.join(TLS_OPTFILE), tls.as_bytes())?;
         write_private_atomic(&staging.join(VM_ARGS_FILE), vm_args.as_bytes())?;
@@ -3860,6 +3993,7 @@ fn generated_runtime_files(data_dir: &Path, profile: &Profile) -> Result<(String
     let cert = erl_string(&root.join(NODE_CERT_FILE))?;
     let key = erl_string(&root.join(NODE_KEY_FILE))?;
     let ca = erl_string(&root.join(CA_CERT_FILE))?;
+    let policy = erl_string(&root)?;
     let optfile = erl_string(&root.join(TLS_OPTFILE))?;
     let bind_address = resolve_fleet_ipv4(&profile.host).with_context(|| {
         format!(
@@ -3869,7 +4003,7 @@ fn generated_runtime_files(data_dir: &Path, profile: &Profile) -> Result<(String
     })?;
     let [a, b, c, d] = bind_address.octets();
     let tls = format!(
-        "[\n  {{server, [{{certfile, \"{cert}\"}}, {{keyfile, \"{key}\"}}, {{cacertfile, \"{ca}\"}}, {{verify, verify_peer}}, {{fail_if_no_peer_cert, true}}, {{secure_renegotiate, true}}]}},\n  {{client, [{{certfile, \"{cert}\"}}, {{keyfile, \"{key}\"}}, {{cacertfile, \"{ca}\"}}, {{verify, verify_peer}}, {{secure_renegotiate, true}}]}}\n].\n"
+        "[\n  {{server, [{{certfile, \"{cert}\"}}, {{keyfile, \"{key}\"}}, {{cacertfile, \"{ca}\"}}, {{verify, verify_peer}}, {{fail_if_no_peer_cert, true}}, {{secure_renegotiate, true}}, {{reuse_sessions, false}}, {{session_tickets, disabled}}, {{verify_fun, {{fun 'Elixir.Ouroboros.Cluster.Revocations':verify/3, \"{policy}\"}}}}]}},\n  {{client, [{{certfile, \"{cert}\"}}, {{keyfile, \"{key}\"}}, {{cacertfile, \"{ca}\"}}, {{verify, verify_peer}}, {{secure_renegotiate, true}}, {{reuse_sessions, false}}, {{session_tickets, disabled}}, {{verify_fun, {{fun 'Elixir.Ouroboros.Cluster.Revocations':verify/3, \"{policy}\"}}}}]}}\n].\n"
     );
     let vm_args = format!(
         "## Generated by `ouro fleet`; safe to inspect (contains paths, never secrets).\n-proto_dist inet_tls\n-ssl_dist_optfile \"{optfile}\"\n-kernel inet_dist_use_interface {{{a},{b},{c},{d}}}\n-kernel inet_dist_listen_min {} inet_dist_listen_max {}\n",
@@ -3973,6 +4107,16 @@ fn verify_attestation(
     ca_cert_pem: &str,
     description: &str,
 ) -> Result<()> {
+    verify_attestation_with_expiry(payload, attestation_pem, ca_cert_pem, description, true)
+}
+
+fn verify_attestation_with_expiry(
+    payload: &[u8],
+    attestation_pem: &str,
+    ca_cert_pem: &str,
+    description: &str,
+    require_current: bool,
+) -> Result<()> {
     let (ca_remaining, ca_pem) = parse_x509_pem(ca_cert_pem.as_bytes())
         .map_err(|_| anyhow!("{description} CA certificate is not valid PEM"))?;
     if ca_pem.label != "CERTIFICATE" || !ca_remaining.iter().all(u8::is_ascii_whitespace) {
@@ -3989,7 +4133,7 @@ fn verify_attestation(
     let certificate = pem
         .parse_x509()
         .map_err(|_| anyhow!("{description} attestation is not valid X.509"))?;
-    if !certificate.validity().is_valid() {
+    if require_current && !certificate.validity().is_valid() {
         bail!("{description} attestation certificate is not currently valid");
     }
     if certificate.is_ca() {
@@ -4150,6 +4294,7 @@ fn invitation_attested_payload(invitation: &Invitation) -> Result<Vec<u8>> {
         node_cert_pem: &invitation.node_cert_pem,
         node_key_pem: &invitation.node_key_pem,
         cookie: &invitation.cookie,
+        revocations: &invitation.revocations,
     })
     .context("encoding the canonical invitation payload")
 }
@@ -4336,6 +4481,25 @@ fn validate_invitation(invitation: &Invitation) -> Result<()> {
 }
 
 fn validate_materials(data_dir: &Path, require_ca_key: bool) -> Result<()> {
+    validate_materials_policy(data_dir, require_ca_key, false)
+}
+
+/// Migrate only the previously generated TLS policy, with the runtime stopped.
+/// All identities, permissions, VM arguments and nonstandard policies still fail closed.
+pub fn upgrade_transport(data_dir: &Path) -> Result<()> {
+    let _lock = lock_stopped_fleet_mutation(data_dir, "ouro fleet upgrade-transport")?;
+    validate_materials_policy(data_dir, false, true)?;
+    let profile = load(data_dir)?.ok_or_else(|| anyhow!("create or join a fleet first"))?;
+    let (tls, _) = generated_runtime_files(data_dir, &profile)?;
+    write_private_atomic(&fleet_dir(data_dir).join(TLS_OPTFILE), tls.as_bytes())?;
+    validate_materials(data_dir, false)
+}
+
+fn validate_materials_policy(
+    data_dir: &Path,
+    require_ca_key: bool,
+    allow_legacy: bool,
+) -> Result<()> {
     let root = fleet_dir(data_dir);
     for (name, description) in [
         (PROFILE_FILE, "fleet profile"),
@@ -4378,9 +4542,11 @@ fn validate_materials(data_dir: &Path, require_ca_key: bool) -> Result<()> {
     let actual_tls = read_private(&root.join(TLS_OPTFILE), "TLS option file")?;
     let actual_vm_args = read_private(&root.join(VM_ARGS_FILE), "VM arguments")?;
     let (expected_tls, expected_vm_args) = generated_runtime_files(data_dir, &profile)?;
-    if actual_tls.as_bytes() != expected_tls.as_bytes() {
+    let policy = erl_string(&root)?;
+    let legacy_tls = expected_tls.replace(&format!(", {{reuse_sessions, false}}, {{session_tickets, disabled}}, {{verify_fun, {{fun 'Elixir.Ouroboros.Cluster.Revocations':verify/3, \"{policy}\"}}}}"), "");
+    if actual_tls != expected_tls && !(allow_legacy && actual_tls == legacy_tls) {
         bail!(
-            "{} does not match the strict generated mutual-TLS policy for this profile; startup is refused. Restore this file from a trusted backup or rebuild/rejoin this fleet profile",
+            "{} does not match the strict generated mutual-TLS policy for this profile; startup is refused. For an older generated policy, stop the runtime and run `ouro fleet upgrade-transport`; otherwise restore a trusted backup or rebuild/rejoin this profile",
             root.join(TLS_OPTFILE).display()
         );
     }
@@ -6050,7 +6216,7 @@ mod tests {
 
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-    fn scratch(label: &str) -> PathBuf {
+    pub(super) fn scratch(label: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "ouro-fleet-{label}-{}-{}",
             std::process::id(),
@@ -6066,6 +6232,44 @@ mod tests {
         builder.mode(0o700);
         builder.create(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn transport_upgrade_accepts_only_the_exact_legacy_policy() {
+        let data = scratch("transport-upgrade");
+        let profile = create(&data, None, "core", "localhost", ephemeral_ports()).unwrap();
+        let root = fleet_dir(&data);
+        let (current, _) = generated_runtime_files(&data, &profile).unwrap();
+        let policy = erl_string(&root).unwrap();
+        let legacy = current.replace(&format!(", {{reuse_sessions, false}}, {{session_tickets, disabled}}, {{verify_fun, {{fun 'Elixir.Ouroboros.Cluster.Revocations':verify/3, \"{policy}\"}}}}"), "");
+        assert_ne!(current, legacy);
+        write_private_atomic(&root.join(TLS_OPTFILE), legacy.as_bytes()).unwrap();
+        assert!(runtime_env(&data).is_err());
+        upgrade_transport(&data).unwrap();
+        assert!(runtime_env(&data).is_ok());
+        let unsafe_policy = current.replace("verify_peer", "verify_none");
+        write_private_atomic(&root.join(TLS_OPTFILE), unsafe_policy.as_bytes()).unwrap();
+        assert!(upgrade_transport(&data).is_err());
+        assert_eq!(
+            fs::read_to_string(root.join(TLS_OPTFILE)).unwrap(),
+            unsafe_policy
+        );
+        fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    fn managed_readiness_requires_tls_and_a_connected_compatible_peer() {
+        let mut status = serde_json::json!({"security": {"distributed": true, "tls": true},
+            "machines": [{"node":"ouro-core@localhost", "state":"local", "compatibility":"local"},
+                         {"node":"ouro-peer@localhost", "state":"connected", "compatibility":"compatible"}]});
+        assert!(validate_ready_status(&status, Some("ouro-peer@localhost")).is_ok());
+        status["machines"][1]["compatibility"] = "incompatible".into();
+        assert!(validate_ready_status(&status, Some("ouro-peer@localhost")).is_err());
+        status["machines"][1]["state"] = "offline".into();
+        assert!(validate_ready_status(&status, Some("ouro-peer@localhost")).is_err());
+        assert!(validate_ready_status(&status, None).is_ok());
+        status["security"]["tls"] = false.into();
+        assert!(validate_ready_status(&status, None).is_err());
     }
 
     fn sample_profile(machine: &str) -> Profile {

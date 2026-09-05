@@ -183,6 +183,13 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
+  def handle_call({:retry_turn, source_id}, _from, runtime) do
+    case Turns.retry_turn(runtime, source_id) do
+      {:ok, turn, runtime} -> {:reply, {:ok, State.public_turn(turn)}, runtime}
+      {:error, reason, runtime} -> {:reply, {:error, reason}, runtime}
+    end
+  end
+
   def handle_call({:await_turn, request_ref, turn_id}, from, runtime)
       when is_map_key(runtime.session.turns, turn_id) do
     turn = Map.fetch!(runtime.session.turns, turn_id)

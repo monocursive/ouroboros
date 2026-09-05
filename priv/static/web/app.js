@@ -342,6 +342,18 @@
     maxHeight: 200,
 
     mounted: function () {
+      this.loadDraft();
+      this.handleEvent("draft-sent", function (event) {
+        if (event.key !== this.key) return;
+        // A slow acknowledgement must not clear words typed after the submitted draft.
+        if (this.draft.trimEnd() === event.text) {
+          this.draft = "";
+          this.el.value = "";
+          this.saveDraft();
+          this.autosize();
+          this.syncSend();
+        }
+      }.bind(this));
       this.onKeyDown = function (event) {
         if (event.key !== "Enter" || event.shiftKey || event.altKey || event.metaKey) return;
         // An IME composing a character sends Enter to commit it; that Enter is not a send.
@@ -361,6 +373,8 @@
       }.bind(this);
 
       this.onInput = function () {
+        this.draft = this.el.value;
+        this.saveDraft();
         this.autosize();
         this.syncSend();
       }.bind(this);
@@ -370,9 +384,9 @@
       this.autosize();
       this.syncSend();
     },
-    // The server owns the draft, so a send that cleared it or a refusal that handed it
-    // back both land here and the box has to follow.
     updated: function () {
+      if (this.key !== this.el.dataset.draftKey) this.loadDraft();
+      else this.el.value = this.draft;
       this.autosize();
       this.syncSend();
     },
@@ -380,6 +394,25 @@
     destroyed: function () {
       this.el.removeEventListener("keydown", this.onKeyDown);
       this.el.removeEventListener("input", this.onInput);
+    },
+
+    loadDraft: function () {
+      this.key = this.el.dataset.draftKey;
+      this.draft = this.el.value;
+      try {
+        var saved = sessionStorage.getItem("ouroboros.draft." + this.key);
+        if (saved !== null) this.draft = saved;
+      } catch (_) { /* Private browsing can disable storage; server drafts still work. */ }
+      this.el.value = this.draft;
+      this.pushEvent("draft", { message: this.draft, session_key: this.key });
+    },
+
+    saveDraft: function () {
+      try {
+        var key = "ouroboros.draft." + this.key;
+        if (this.draft) sessionStorage.setItem(key, this.draft);
+        else sessionStorage.removeItem(key);
+      } catch (_) { /* Storage quota must never interrupt typing. */ }
     },
 
     autosize: function () {
@@ -465,6 +498,23 @@
 
   var liveSocket = new LiveSocket("/live", Socket, {
     params: { _csrf_token: csrfToken },
+    dom: {
+      onBeforeElUpdated: function (from, to) {
+        // Polls may reorder sessions or refresh permissions while a disclosure is open.
+        // Preserve the person's choice only while this is still the same item.
+        var disclosure = from.getAttribute("data-ouro-disclosure");
+        if (from.tagName === "DETAILS" && disclosure &&
+            disclosure === to.getAttribute("data-ouro-disclosure")) {
+          to.open = from.open;
+        }
+        // showModal() owns the open attribute. A routine patch must not dismiss a
+        // confirmation or rename dialog while someone is reading or editing it.
+        if (from.tagName === "DIALOG" && from.id === to.id &&
+            from.getAttribute("phx-hook") === "Modal") {
+          to.open = from.open;
+        }
+      }
+    },
     hooks: {
       ScrollPin: ScrollPin,
       Composer: Composer,
@@ -472,6 +522,22 @@
       FocusInvalid: FocusInvalid,
       Modal: Modal
     }
+  });
+
+  document.addEventListener("click", function (event) {
+    document.querySelectorAll(".ouro-row-actions[open]").forEach(function (menu) {
+      if (!menu.contains(event.target) || event.target.closest(".ouro-row-action")) {
+        menu.open = false;
+      }
+    });
+  });
+
+  document.addEventListener("keydown", function (event) {
+    if (event.key !== "Escape") return;
+    document.querySelectorAll(".ouro-row-actions[open]").forEach(function (menu) {
+      if (menu.contains(document.activeElement)) menu.querySelector("summary").focus();
+      menu.open = false;
+    });
   });
 
   // The socket is the only thing that can tell a viewer the daemon went away, so the

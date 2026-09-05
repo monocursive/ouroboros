@@ -131,6 +131,11 @@ defmodule Ouroboros.InteractiveSession do
   @doc "Returns a durable public session snapshot."
   def info(session), do: call(session, :info)
 
+  @doc "Retries the latest failed turn from its private checkpoint, once per source turn."
+  def retry_turn(session, source_id) do
+    with :ok <- validate_turn_id(source_id), do: call(session, {:retry_turn, source_id})
+  end
+
   @doc """
   Lists local durable interactive sessions as bounded rows.
 

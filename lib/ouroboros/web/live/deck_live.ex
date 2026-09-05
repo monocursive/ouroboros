@@ -141,6 +141,9 @@ defmodule Ouroboros.Web.Live.DeckLive do
       |> assign(:status, nil)
       |> assign(:polling?, false)
       |> assign(:open, nil)
+      |> assign(:drafts, %{})
+      |> assign(:draft_key, nil)
+      |> assign(:sessions_visible?, false)
       |> assign(:watch, nil)
       |> assign(:info, nil)
       |> assign(:monitor, nil)
@@ -236,19 +239,47 @@ defmodule Ouroboros.Web.Live.DeckLive do
   #
   # A change also forgets the last send, which is what makes a deliberate repeat of the
   # same words a second turn while a double-click stays one — see `turn_id_for/2`.
-  def handle_event("draft", %{"message" => text}, socket) when is_binary(text),
-    do: {:noreply, socket |> assign(:draft, text) |> assign(:last_send, nil)}
+  def handle_event("draft", %{"message" => text} = params, socket) when is_binary(text) do
+    socket = if current_composer?(socket, params), do: put_draft(socket, text), else: socket
+    {:noreply, socket}
+  end
 
   def handle_event("draft", _params, socket), do: {:noreply, socket}
 
-  def handle_event("send", %{"message" => text}, socket) when is_binary(text),
-    do: {:noreply, send_turn(socket, String.trim_trailing(text))}
+  def handle_event("send", %{"message" => text} = params, socket) when is_binary(text) do
+    socket =
+      if current_composer?(socket, params),
+        do: send_turn(socket, String.trim_trailing(text)),
+        else: socket
 
-  def handle_event("retry", _params, %{assigns: %{last_send: {text, _turn_id}}} = socket) do
-    {:noreply, socket |> assign(:last_send, nil) |> send_turn(text)}
+    {:noreply, socket}
+  end
+
+  def handle_event(
+        "retry",
+        _params,
+        %{
+          assigns: %{
+            open: {:interactive, id},
+            info: %{last_turn: %{id: source, status: :failed, retryable: true}}
+          }
+        } = socket
+      ) do
+    params = socket |> session_params(:interactive, id) |> Map.put("source_turn_id", source)
+
+    socket =
+      case call(socket, "interactive.retry_turn", params) do
+        {:ok, _turn} -> socket |> assign(:composer_error, nil) |> refresh_info()
+        refusal -> assign(socket, :composer_error, refusal_message(refusal))
+      end
+
+    {:noreply, socket}
   end
 
   def handle_event("retry", _params, socket), do: {:noreply, socket}
+
+  def handle_event("toggle-sessions", _params, socket),
+    do: {:noreply, update(socket, :sessions_visible?, &(!&1))}
 
   def handle_event("interrupt", _params, %{assigns: %{open: {:interactive, id}}} = socket) do
     params = session_params(socket, :interactive, id)
@@ -583,12 +614,15 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # Opening a session: subscribe, check terminality, monitor
   # ------------------------------------------------------------------------------------
 
-  defp open(%{assigns: %{open: {plane, id}}} = socket, plane, id), do: socket
+  defp open(%{assigns: %{open: {plane, id}}} = socket, plane, id),
+    do: assign(socket, :sessions_visible?, false)
 
   defp open(socket, plane, id) do
     socket
     |> close()
     |> assign(:open, {plane, id})
+    |> assign(:sessions_visible?, false)
+    |> restore_draft(plane, id)
     |> assign(:watch, Watch.new())
     |> resubscribe()
     |> refresh_info()
@@ -607,6 +641,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
     socket
     |> assign(:open, nil)
+    |> assign(:draft_key, nil)
     |> assign(:watch, nil)
     |> assign(:info, nil)
     |> assign(:subscribe_error, nil)
@@ -881,12 +916,46 @@ defmodule Ouroboros.Web.Live.DeckLive do
     )
   end
 
-  defp sent(socket), do: socket |> assign(:draft, "") |> assign(:composer_error, nil)
+  defp sent(socket) do
+    {text, _id} = socket.assigns.last_send
+
+    socket
+    |> put_draft("", false)
+    |> assign(:composer_error, nil)
+    |> push_event("draft-sent", %{key: socket.assigns.draft_key, text: text})
+  end
+
+  defp current_composer?(socket, params),
+    do: Map.get(params, "session_key", socket.assigns.draft_key) == socket.assigns.draft_key
+
+  defp put_draft(socket, text, forget_send \\ true) do
+    socket =
+      socket
+      |> assign(:draft, text)
+      |> update(:drafts, &Map.put(&1, socket.assigns.draft_key, text))
+
+    if forget_send, do: assign(socket, :last_send, nil), else: socket
+  end
+
+  defp restore_draft(socket, plane, id) do
+    # A digest isolates drafts by authenticated browser session, owner and conversation;
+    # the cookie's credential itself never reaches storage or the DOM.
+    key =
+      :crypto.hash(
+        :sha256,
+        :erlang.term_to_binary(
+          {socket.assigns[:web_session], owner(socket, plane, id), plane, id}
+        )
+      )
+      |> Base.url_encode64(padding: false)
+
+    socket |> assign(:draft_key, key) |> assign(:draft, Map.get(socket.assigns.drafts, key, ""))
+  end
 
   # The draft is handed back exactly as it was typed. A composer that cleared itself on a
   # refusal would lose the one thing the operator could not get back.
   defp refused(socket, text, message),
-    do: socket |> assign(:draft, text) |> assign(:composer_error, message)
+    do: socket |> put_draft(text, false) |> assign(:composer_error, message)
 
   # A second click of the same words with no typing in between is the same turn; anything
   # else is a new one. The runtime does the deduplicating — `{id, input, turn_id}` repeated
@@ -1327,8 +1396,23 @@ defmodule Ouroboros.Web.Live.DeckLive do
       |> assign(:ended?, ended?(assigns, open_row))
 
     ~H"""
-    <div class="ouro-deck">
+    <div class={[
+      "ouro-deck",
+      @open && "ouro-session-open",
+      @sessions_visible? && "ouro-sessions-visible"
+    ]}>
       <.top_bar machines={@machines} today={@today} />
+
+      <button
+        :if={@open}
+        type="button"
+        class="ouro-session-nav ouro-quiet-button"
+        phx-click="toggle-sessions"
+        aria-expanded={to_string(@sessions_visible?)}
+        aria-controls="session-rail"
+      >
+        {if @sessions_visible?, do: "← Back to conversation", else: "← Sessions"}
+      </button>
 
       <div class="ouro-columns">
         <.rail
@@ -1359,9 +1443,9 @@ defmodule Ouroboros.Web.Live.DeckLive do
             rule_refusal={@rule_refusal}
             auto_approve={@auto_approve?}
             draft={@draft}
+            draft_key={@draft_key}
             composer_error={@composer_error}
             turn={@turn}
-            last_send={@last_send}
             status={@row_status}
             sandbox={@sandbox}
             effort={@effort}
@@ -1371,8 +1455,6 @@ defmodule Ouroboros.Web.Live.DeckLive do
           />
           <.nothing_open :if={is_nil(@open)} counts={Rail.counts(@triaged)} />
         </main>
-
-        <.vitals :if={@open} info={@info} row={@open_row} />
       </div>
 
       <.session_action_dialog action={@session_action} error={@session_action_error} />
@@ -1448,7 +1530,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
     assigns = assign(assigns, :counts, Rail.counts(assigns.triaged))
 
     ~H"""
-    <nav class="ouro-rail" aria-label="sessions">
+    <nav id="session-rail" class="ouro-rail" aria-label="sessions">
       <div class="ouro-rail-head">
         <div>
           <span class="ouro-rail-kicker">Workspace</span>
@@ -1567,6 +1649,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
     <div class="ouro-row-wrap">
       <.link
         patch={@href}
+        aria-current={@selected? && "page"}
         class={[
           "ouro-row",
           "ouro-row-#{@entry.group}",
@@ -1582,44 +1665,51 @@ defmodule Ouroboros.Web.Live.DeckLive do
         </span>
         <span :if={not @age_in_line?} class="ouro-row-age ouro-mono">{age(@row.updated_at)}</span>
       </.link>
-      <div :if={@can_rename or @can_close or @can_delete} class="ouro-row-actions">
-        <button
-          :if={@can_rename}
-          type="button"
-          class="ouro-row-action"
-          phx-click="session-action"
-          phx-value-action="rename"
-          phx-value-plane={@row.plane}
-          phx-value-id={@row.id}
-          aria-label={"Rename #{Rail.title(@row)}"}
-        >
-          Rename
-        </button>
-        <button
-          :if={@can_close}
-          type="button"
-          class="ouro-row-action ouro-row-action-danger"
-          phx-click="session-action"
-          phx-value-action="close"
-          phx-value-plane={@row.plane}
-          phx-value-id={@row.id}
-          aria-label={"End #{Rail.title(@row)}"}
-        >
-          End
-        </button>
-        <button
-          :if={@can_delete}
-          type="button"
-          class="ouro-row-action ouro-row-action-danger"
-          phx-click="session-action"
-          phx-value-action="delete"
-          phx-value-plane={@row.plane}
-          phx-value-id={@row.id}
-          aria-label={"Delete #{Rail.title(@row)}"}
-        >
-          Delete
-        </button>
-      </div>
+      <details
+        :if={@can_rename or @can_close or @can_delete}
+        class="ouro-row-actions"
+        data-ouro-disclosure={"actions:#{@row.plane}:#{@row.id}"}
+      >
+        <summary aria-label={"Actions for #{Rail.title(@row)}"}>⋯</summary>
+        <div class="ouro-row-action-menu">
+          <button
+            :if={@can_rename}
+            type="button"
+            class="ouro-row-action"
+            phx-click="session-action"
+            phx-value-action="rename"
+            phx-value-plane={@row.plane}
+            phx-value-id={@row.id}
+            aria-label={"Rename #{Rail.title(@row)}"}
+          >
+            Rename
+          </button>
+          <button
+            :if={@can_close}
+            type="button"
+            class="ouro-row-action ouro-row-action-danger"
+            phx-click="session-action"
+            phx-value-action="close"
+            phx-value-plane={@row.plane}
+            phx-value-id={@row.id}
+            aria-label={"End #{Rail.title(@row)}"}
+          >
+            End
+          </button>
+          <button
+            :if={@can_delete}
+            type="button"
+            class="ouro-row-action ouro-row-action-danger"
+            phx-click="session-action"
+            phx-value-action="delete"
+            phx-value-plane={@row.plane}
+            phx-value-id={@row.id}
+            aria-label={"Delete #{Rail.title(@row)}"}
+          >
+            Delete
+          </button>
+        </div>
+      </details>
     </div>
     <ApprovalCard.inline :for={request <- @answers} request={request} />
     """
@@ -1814,13 +1904,13 @@ defmodule Ouroboros.Web.Live.DeckLive do
   attr :draft, :string, required: true
   attr :composer_error, :any, required: true
   attr :turn, :map, required: true
-  attr :last_send, :any, required: true
   attr :status, :any, required: true
   attr :sandbox, :any, required: true
   attr :effort, :any, required: true
   attr :efforts, :list, required: true
   attr :scope, :atom, required: true
   attr :ended, :boolean, required: true
+  attr :draft_key, :string, required: true
 
   def focused(assigns) do
     {plane, id} = assigns.open
@@ -1850,7 +1940,10 @@ defmodule Ouroboros.Web.Live.DeckLive do
         :can_configure,
         plane == :interactive and operate? and Call.available?(:operate, "interactive.configure")
       )
-      |> assign(:can_retry, operate? and assigns.turn.failed? and not is_nil(assigns.last_send))
+      |> assign(
+        :can_retry,
+        operate? and not assigns.ended and not assigns.turn.running? and retryable?(assigns.info)
+      )
       |> assign(:agent_loading?, agent_loading?)
       |> assign(:loading_id, loading_id(plane, id))
       |> assign(:node, node_of(assigns.row))
@@ -1907,13 +2000,12 @@ defmodule Ouroboros.Web.Live.DeckLive do
       can_remember={@can_remember}
     />
 
-    <.auto_approve_toggle :if={@can_answer} on={@auto_approve} />
-
     <Composer.composer
       :if={@plane == :interactive}
       draft={@draft}
+      draft_key={@draft_key}
       error={@composer_error}
-      turn={@turn}
+      turn={display_turn(@turn, @info)}
       status={@status}
       sandbox={@sandbox}
       effort={@effort}
@@ -1924,8 +2016,9 @@ defmodule Ouroboros.Web.Live.DeckLive do
       ended={@ended}
       can_retry={@can_retry}
     />
-    <details class="ouro-vitals-mobile">
-      <summary>Session details</summary>
+    <details class="ouro-vitals-mobile" data-ouro-disclosure={"details:#{@session_id}"}>
+      <summary>Session details{if @auto_approve, do: " · automatic approvals on", else: ""}</summary>
+      <.auto_approve_toggle :if={@can_answer} on={@auto_approve} />
       <.vitals info={@info} row={@row} />
     </details>
     """
@@ -1960,6 +2053,15 @@ defmodule Ouroboros.Web.Live.DeckLive do
   defp node_of(%Rail.Row{node: node}) when not is_nil(node), do: to_string(node)
   defp node_of(_absent), do: nil
 
+  defp retryable?(%{status: :idle, last_turn: %{status: :failed, retryable: true}}), do: true
+  defp retryable?(_), do: false
+
+  defp display_turn(turn, info) do
+    if not turn.running? and match?(%{status: :idle, last_turn: %{status: :failed}}, info),
+      do: %{turn | failed?: true},
+      else: turn
+  end
+
   # A running turn is work by the agent until it becomes a request for the operator. The
   # approval list is fresher than the three-second status poll, while the status exclusion
   # covers an opened session whose request event fell below the retained cursor.
@@ -1987,14 +2089,23 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
     ~H"""
     <div class="ouro-empty">
-      <h1 class="ouro-empty-head">Nothing open</h1>
+      <span class="ouro-empty-eyebrow">A little direction. A lot of possibility.</span>
+      <h1 class="ouro-empty-head">What would you like to make?</h1>
       <p :if={@counts[:needs_you] > 0}>
         {@counts[:needs_you]} {if @counts[:needs_you] == 1, do: "session needs", else: "sessions need"} you.
       </p>
-      <p :if={@total > 0 and @counts[:needs_you] == 0}>Pick a session from the rail to read it.</p>
-      <p :if={@total == 0}>
-        No sessions yet. <a href="/new">Start a new session</a>.
+      <p :if={@total > 0 and @counts[:needs_you] == 0}>
+        Continue a conversation, or give a new idea a place to start.
       </p>
+      <p :if={@total == 0}>
+        Choose a project, describe a result, and work through it together.
+      </p>
+      <a href="/new" class="ouro-button">Start a new session</a>
+      <div class="ouro-starters" aria-label="Ideas to get started">
+        <a href="/new?starter=explain">Understand a project <span>Find your way around the code</span></a>
+        <a href="/new?starter=review">Review a change <span>Catch issues before they ship</span></a>
+        <a href="/new?starter=build">Build something <span>Turn an idea into a first version</span></a>
+      </div>
     </div>
     """
   end
@@ -2019,7 +2130,12 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
     ~H"""
     <aside class="ouro-vitals" aria-label="session vitals">
-      <.vital label="Model" value={Map.get(@options, :model) || (@row && @row.model)} />
+      <.vital
+        label="Model"
+        value={
+          Map.get(@options, :model) || (@row && @row.model) || "Chosen by provider · not reported"
+        }
+      />
 
       <div class="ouro-vital">
         <dt>Context</dt>
@@ -2184,8 +2300,8 @@ defmodule Ouroboros.Web.Live.DeckLive do
   # printed twice; `age_in_line?/2` is the one place that decision is made.
   defp line(:settled, %Rail.Row{status: :idle} = row, _activity) do
     case age(row.updated_at) do
-      "" -> "idle"
-      age -> "idle · #{age}"
+      "" -> Rail.outcome(row)
+      age -> "#{Rail.outcome(row)} · #{age}"
     end
   end
 
@@ -2244,10 +2360,15 @@ defmodule Ouroboros.Web.Live.DeckLive do
   defp meta_line(nil), do: ""
 
   defp meta_line(row) do
-    [row.provider, row.node, row.workspace]
+    [provider_name(row.provider), row.workspace && Path.basename(row.workspace)]
     |> Enum.reject(&is_nil/1)
     |> Enum.map_join(" · ", &to_string/1)
   end
+
+  defp provider_name(:native), do: "Ouroboros AI"
+  defp provider_name(:claude_code), do: "Claude Code"
+  defp provider_name(:openai_codex), do: "Codex"
+  defp provider_name(provider), do: provider
 
   # `unrestricted` is the one sandbox posture worth a tag: it is the session that can do
   # anything, and a reader who did not notice would be reading a transcript without

@@ -1304,6 +1304,40 @@ defmodule Ouroboros.Web.TranscriptTest do
   end
 
   describe "turn boundaries" do
+    test "completion recaps only the current turn's reported activity" do
+      cells =
+        project([
+          event(
+            :tool_call,
+            %{"call_id" => "old", "name" => "bash", "input" => %{"cmd" => "old-command"}},
+            sequence: 1
+          ),
+          event(:tool_result, %{"call_id" => "old", "output" => "done"}, sequence: 2),
+          event(:turn_completed, %{}, sequence: 3),
+          event(
+            :tool_call,
+            %{"call_id" => "new", "name" => "bash", "input" => %{"cmd" => "check-project"}},
+            sequence: 4
+          ),
+          event(
+            :tool_result,
+            %{"call_id" => "new", "is_error" => true, "output" => "check failed"},
+            sequence: 5
+          ),
+          event(:output_text_final, %{"text" => "All checks passed; I changed ten files."},
+            sequence: 6
+          ),
+          event(:turn_completed, %{}, sequence: 7)
+        ])
+
+      assert %Cell.Divider{recap: recap} = List.last(cells)
+      assert [%{state: :failed, label: label}] = recap.tools
+      assert label =~ "check-project"
+      refute label =~ "old-command"
+      assert recap.files == []
+      assert is_integer(recap.reply)
+    end
+
     test "a_turn_boundary_divider_states_the_elapsed_time_it_measured" do
       cells =
         project([

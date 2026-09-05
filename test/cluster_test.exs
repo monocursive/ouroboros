@@ -59,7 +59,7 @@ defmodule Ouroboros.ClusterTest do
     test "fleet compatibility has an explicit manual protocol revision" do
       runtime = Cluster.local_fleet_posture().runtime
 
-      assert runtime.fleet_protocol_revision == 1
+      assert runtime.fleet_protocol_revision == 2
 
       assert Cluster.runtime_compatible?(
                runtime,
@@ -226,7 +226,7 @@ defmodule Ouroboros.ClusterTest do
       before = Enum.find(Cluster.fleet_status().machines, &(&1.node == peer))
       assert before.compatibility == :compatible
       assert before.last_up_at
-      assert before.runtime.fleet_protocol_revision == 1
+      assert before.runtime.fleet_protocol_revision == 2
       assert before.runtime.otp_release == to_string(:erlang.system_info(:otp_release))
 
       assert %{status: :warning, guidance: roster_guidance} =

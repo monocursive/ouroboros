@@ -76,6 +76,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
          # or absent. Empty by default, because the absent case is the one a defaulted
          # fixture would quietly stop testing.
          options: Keyword.get(opts, :options, %{}),
+         last_turn: Keyword.get(opts, :last_turn),
          provider: Keyword.get(opts, :provider, :claude_code),
          workspace: Keyword.get(opts, :workspace, "/tmp/w"),
          # A scripted answer per verb, popped one at a time: `[{:error, …}, {:ok, …}]` is
@@ -143,6 +144,13 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       answer(state, :turn, {:ok, %{turn_id: turn_id, status: :running}})
     end
 
+    def handle_call({:retry_turn, source}, _from, state) do
+      send(state.test, {:retried, source})
+
+      {:reply, {:ok, %{id: "retry-#{source}", status: :running}},
+       %{state | last_turn: %{id: "retry-#{source}", status: :running, retryable: false}}}
+    end
+
     def handle_call({:respond_approval, request_id, response}, _from, state) do
       send(state.test, {:responded, request_id, response})
       answer(state, :approval, {:ok, %{request_id: request_id}})
@@ -187,6 +195,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
         workspace_mode: :shared_read,
         status: state.status,
         options: state.options,
+        last_turn: state.last_turn,
         created_at: "2026-08-29T10:00:00Z",
         updated_at: "2026-08-29T12:00:00Z"
       }
@@ -393,14 +402,14 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       assert html =~ ~s(href="/machines")
 
       # And the composer names the slice that wires it.
-      assert html =~ "ouro-composer" or html =~ "Nothing open"
+      assert html =~ "ouro-composer" or html =~ "What would you like to make?"
     end
 
     test "with nothing open, says so rather than showing an empty transcript",
          %{conn: conn} do
       {:ok, _view, html} = live(conn, "/")
 
-      assert html =~ "Nothing open"
+      assert html =~ "What would you like to make?"
       refute html =~ "ouro-transcript"
       # No vitals column either: a panel with nothing in it is worse than no panel.
       refute html =~ "ouro-vitals"
@@ -957,7 +966,7 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       html = live_redirect_to_root(view)
 
       assert_receive {:unsubscribed, _pid}
-      assert html =~ "Nothing open"
+      assert html =~ "What would you like to make?"
     end
   end
 
@@ -1099,24 +1108,62 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       refute_receive {:sent, _mode, _turn, _input, _opts}, 100
     end
 
-    test "a failed turn offers a one-click retry with a fresh turn id", %{conn: conn} do
+    test "a failed first message offers a durable retry when opened later", %{conn: conn} do
       id = session_id()
-      pid = plane(id: id, status: :idle, backlogs: [{:ok, []}])
+
+      _pid =
+        plane(
+          id: id,
+          status: :idle,
+          last_turn: %{id: "first", status: :failed, retryable: true},
+          backlogs: [
+            {:ok,
+             [
+               event(1, :turn_started, %{}),
+               event(2, :turn_failed, %{"error" => "server_is_overloaded"})
+             ]}
+          ]
+        )
 
       {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
-      submit(view, "try the operation")
-      assert_receive {:sent, :message, first, "try the operation", []}
-
-      FakePlane.emit(pid, event(1, :turn_started, %{}))
-      FakePlane.emit(pid, event(2, :turn_failed, %{"error" => "server_is_overloaded"}))
       html = flush(view)
 
       assert html =~ "The agent stopped before completing the last message."
       assert html =~ "Retry last message"
 
       view |> element(~s(button[phx-click="retry"])) |> render_click()
-      assert_receive {:sent, :message, second, "try the operation", []}
-      assert first != second
+      assert_receive {:retried, "first"}
+      refute has_element?(view, ~s(button[phx-click="retry"]))
+    end
+
+    test "drafts belong to their session and stale form events cannot cross sessions", %{
+      conn: conn
+    } do
+      first = session_id()
+      second = session_id()
+      plane(id: first, status: :idle)
+      plane(id: second, status: :idle)
+      {:ok, view, _} = live(conn, "/s/interactive/#{first}")
+
+      key =
+        view
+        |> element(~s(input[name="session_key"]))
+        |> render()
+        |> then(&Regex.run(~r/value="([^"]+)"/, &1))
+        |> List.last()
+
+      view |> form("#composer", message: "Keep this draft") |> render_change()
+      render_patch(view, "/s/interactive/#{second}")
+      refute render(view) =~ "Keep this draft"
+      render_change(view, "draft", %{"message" => "Late draft", "session_key" => key})
+      render_submit(view, "send", %{"message" => "Wrong session", "session_key" => key})
+      refute_receive {:sent, _, _, _, _}, 50
+      refute render(view) =~ "Late draft"
+      view |> form("#composer", message: "Second draft") |> render_change()
+      render_patch(view, "/s/interactive/#{first}")
+      assert has_element?(view, "textarea", "Keep this draft")
+      render_patch(view, "/s/interactive/#{second}")
+      assert has_element?(view, "textarea", "Second draft")
     end
 
     test "an empty draft disables the visible send control", %{conn: conn} do

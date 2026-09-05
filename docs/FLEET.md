@@ -21,7 +21,7 @@ ouro fleet list
 ouro fleet add user@vps --machine vps --host vps.example-tailnet.ts.net
 ouro fleet add --print-script --machine laptop --host laptop.example-tailnet.ts.net
 
-# Mac → Linux, with a Linux artifact built first
+# Mac → Linux, with an artifact built and signed as described in DISTRIBUTION.md
 make dist-linux
 ouro fleet add user@vps --machine vps --host vps.example-tailnet.ts.net
 
@@ -38,11 +38,12 @@ ouro fleet create
 ouro fleet invite --machine laptop --host laptop.example-tailnet.ts.net --out laptop.ouro
 
 # Invited machine, after privately copying the mode-0600 file
-ouro fleet enroll laptop.ouro --delete
+ouro fleet enroll laptop.ouro --delete --activate
 # or: ouro fleet join laptop.ouro && ouro daemon
 
-# On both machines, for crash/login recovery. Review and run the activation command it prints.
+# On both machines, activate managed recovery. Linux also requires user lingering.
 ouro fleet service install
+ouro fleet service start
 
 # Either machine
 ouro fleet status
@@ -66,6 +67,49 @@ ouro fleet sessions forget --machine laptop --accept-state-loss
 `fleet status` is fleet-wide. `fleet doctor` merges live fleet facts with host-local
 certificate, interface, port, log, and recovery-service checks, so run doctor locally on
 each machine during setup.
+
+SSH enrollment runs `fleet enroll --delete --activate` and waits for an authenticated
+local readiness check: TLS distribution and a persistently enabled, active recovery
+service. When the owner's runtime is running, the remote must also report a compatible
+BEAM connection to it. During first-run setup, when the owner is still stopped, the
+result explicitly leaves peer connectivity pending. After the owner starts, inspect
+`fleet status` or run `fleet ready --peer ouro-OWNER@HOST` on the destination. A failure
+after joining preserves that fact; repair the service and run `fleet service start`
+instead of issuing a second credential.
+
+### Revoking a machine identity
+
+Upgrade every existing member to management protocol 2 before relying on revocation.
+Deactivate its recovery unit, stop the runtime, run `ouro fleet upgrade-transport`,
+and restart recovery. Migration accepts only the exact previous generated TLS policy;
+custom or weakened policy still fails closed.
+
+```sh
+# Invitation authority, preferably running so it can collect acknowledgements:
+ouro fleet revoke --machine laptop --out laptop.revocation.json
+# Any surviving machine that was offline; copy the artifact privately first:
+ouro fleet import-revocation laptop.revocation.json
+```
+
+Revocation is permanent and CA-signed. It rejects that certificate identity during TLS
+handshakes, closes existing sockets authenticated with it, persists across restarts,
+and accompanies new invitations. Resumed TLS sessions are disabled so reconnects must
+pass the verifier. Old rosters and reissued invitations cannot restore this identity;
+a replacement needs a new machine name. Revocation leaves session history and positive
+owner evidence intact.
+
+A successful local save is not fleet-wide completion. The signed artifact identifies
+the invitation authority; only that authority can confirm completion using its full
+issuance roster. Imports ask it to reconcile the change and report it as pending when
+it is offline. The command names every pending holder, including canceled invitations that could still hold credentials. Keep pending
+machines isolated from the revoked holder until they import and acknowledge the policy.
+A stopped issuer reports that distribution remains outstanding. Connected peers also
+exchange signed records when joining.
+
+All distributed BEAM nodes remain one trust domain: a hostile machine that already
+joined could execute code on peers or copy other credentials. Revocation prevents reuse
+of one identity; recovering from an actual compromise requires clean hosts and whole
+fleet credential rotation. Roles are placement controls, not isolation boundaries.
 
 Each machine's `OUROBOROS_DATA_DIR` leaf must be a real same-user directory at mode
 `0700`. The packaged launcher creates a missing leaf privately and can restrict its own
@@ -109,12 +153,12 @@ Implemented now:
   different OS/CPU, has no `ouro`, and no `--binary` was given, the add looks for
   `ouro-<this version>-<destination triple>` — the exact name `make dist` writes — in
   `$OUROBOROS_DIST_DIR`, then in every `dist` directory above this executable's real path,
-  then in `./dist`. The first hit is copied and the add log records which file it was. The
-  version in the name must equal this binary's: an artifact for the right CPU at a
-  different version is named and refused, never copied, because placement fences on an
-  exact version match. Nothing is built on demand — with no artifact present the add still
-  delivers the invitation and prints the recipe, now naming the filename it wanted, the
-  directories it looked in, and `make dist-linux`;
+  then in `./dist`. Every supplied/discovered artifact must have a matching signed
+  `SHA256SUMS` and `SHA256SUMS.minisig` beside it, trusted by the release key compiled
+  into the owner. A private verified snapshot is copied. If no local artifact matches,
+  a provisioned build downloads and verifies its exact release. Verification happens
+  before invitation creation. An existing destination `ouro` must report the exact
+  version and management protocol 2 before receiving an invitation;
 - `ouro fleet add --setup-tailscale`: consent-gated guided enrollment for a destination
   that cannot yet prove a private address. It runs the vendor's own installer
   (`curl -fsSL https://tailscale.com/install.sh | sudo -n sh`) and `sudo tailscale up`
@@ -131,7 +175,7 @@ Implemented now:
 - a connected-machine New Session picker, and retained cursor recovery when a remote
   owner temporarily disappears;
 - remote Team worker reconciliation after the worker's machine restarts;
-- generated launchd/systemd-user recovery units, with activation kept explicit;
+- generated launchd/systemd-user recovery units, activated by SSH enrollment; Linux requires persistent user lingering and macOS recovery runs in the user login session;
 - separate private service logs: OTP live-rotates `runtime.log` after 2 MiB with three
   archives while restart-rotated `daemon.log` retains bootstrap/VM/crash diagnostics,
   with no shared rotated inode between their writers; and
@@ -143,12 +187,13 @@ surface renders. The pipeline emits `Probed`, the `Network` plan it chose, the T
 `AuthUrl`, a `WaitingForAddress` per poll round, the `Install` decision, each `Copying`
 step, `Enrolling`, and exactly one terminal `Done` or `Failed`; a failure carries
 structured residue naming what it left behind — the pending invitation and the
-treat-as-issued rule, and after a refused enroll the possibility of a joined-but-stopped
-destination. `spawn_add` runs it on its own thread for a UI, `add_with_events` runs it on
+treat-as-issued rule, and after a refused enroll the possibility of an already joined
+or running destination. `spawn_add` runs it on its own thread for a UI, `add_with_events` runs it on
 the caller's; the CLI takes the second and renders the same stream back into the lines it
-has always printed, so terminal output is unchanged. A cancel is honored at the next
-pipeline boundary — before each remote command, each copy, and each poll round — and
-never inside a blocking SSH call already in flight.
+has always printed, so terminal output is unchanged. Cancellation is checked both between steps and during running SSH/copy operations.
+SSH has a three-minute command deadline, copy has fifteen minutes, and both have
+connection/liveness timeouts and bounded output. Cancellation closes the local process
+group; it cannot undo changes already made remotely.
 
 The checked-in packaged exercise builds a three-node TLS mesh with reverse/cold boot,
 late join, hub loss/rejoin, automatic service-run crash restart, and final cleanup. CI

@@ -1025,6 +1025,41 @@ done
 rm -f "$ECHO_INVITE"
 printf 'the running owner stopped expecting %s without a restart\n' "$ECHO_MACHINE"
 
+log "Revoke a live credential and report an offline credential holder honestly"
+ALPHA_REVOCATION="$LAB_ROOT/alpha.revocation.json"
+set +e
+node_cmd "$CORE_DATA" fleet revoke --machine "$ALPHA_MACHINE" --out "$ALPHA_REVOCATION" >"$LOG_DIR/revoke-alpha.log" 2>&1
+REVOKE_STATUS=$?
+set -e
+cat "$LOG_DIR/revoke-alpha.log"
+[[ "$REVOKE_STATUS" != 0 ]] || die "the offline canceled invitation holder was incorrectly acknowledged"
+grep -Fq "$ECHO_MACHINE" "$LOG_DIR/revoke-alpha.log" || die "offline credential holder was not named"
+assert_private_file "$ALPHA_REVOCATION"
+wait_status "$CORE_DATA" core-revoked-alpha 5 3 2
+
+# The canceled but never started identity is also explicitly revoked. Every surviving
+# credential holder must now durably acknowledge the policy.
+node_cmd "$CORE_DATA" fleet revoke --machine "$ECHO_MACHINE" --out "$LAB_ROOT/echo.revocation.json" | tee "$LOG_DIR/revoke-echo.log"
+grep -Fq '"complete": true' "$LOG_DIR/revoke-echo.log" || die "surviving machines did not acknowledge revocation"
+
+log "Restart the old credential holder; its original certificate must not reconnect"
+stop_node "$ALPHA_DATA" alpha-before-reconnect
+# This lab node has not received its own revocation: model a credential copied before
+# revocation, whose holder does not cooperate with the policy. Only the surviving
+# machines' TLS verifier can reject this connection.
+python3 - "$ALPHA_DATA/fleet" "$ALPHA_MACHINE" <<'PYREVOKE'
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+name = "revoke-" + hashlib.sha256(("ouro-" + sys.argv[2] + "@127.0.0.1").encode()).hexdigest() + ".json"
+(root / name).unlink(missing_ok=True)
+PYREVOKE
+start_node "$ALPHA_DATA" alpha-old-credential
+wait_status "$ALPHA_DATA" alpha-cannot-rejoin 3 1 2
+wait_status "$CORE_DATA" core-rejects-old-credential 5 3 2
+# Give formation multiple retry intervals; a momentary disconnect is not revocation.
+sleep 4
+wait_status "$CORE_DATA" core-still-rejects-old-credential 5 3 2
+
 stop_node "$DELTA_DATA" delta
 
 log "Deactivate the recovery unit, then stop the three remaining lab runtimes"
@@ -1094,4 +1129,5 @@ fi
 
 printf '\nPASS: packaged three-node fleet created, joined, formed in reverse order, survived hub loss, and automatically recovered a service-owned SIGKILL over TLS.\n'
 printf 'PASS: a live owner dialed a machine invited after boot and dropped a canceled one, with no restart.\n'
+printf 'PASS: signed revocation disconnected a live certificate, named offline holders, and rejected the original credential after restart.\n'
 printf 'PASS: stopped only lab runtimes; caller default pid/data stayed untouched.\n'

@@ -141,6 +141,116 @@ defmodule Ouroboros.InteractiveSessionTest do
     end)
   end
 
+  test "retry preserves the private request and deduplicates the source failure", %{id: id} do
+    alias Ouroboros.Gateway.Methods
+
+    assert {:ok, ref} =
+             InteractiveSession.start(
+               id: id,
+               provider: @provider,
+               workspace: File.cwd!(),
+               sandbox_mode: :read_only
+             )
+
+    input = %{prompt: "Inspect the project"}
+
+    assert {:ok, first} = InteractiveSession.send_message(ref, input)
+    assert_receive {:ouroboros_test_adapter_started, _, _, adapter}, 1_000
+    :ok = HarnessAdapter.emit(adapter, :run_failed, %{"error" => "temporary failure"})
+    :ok = HarnessAdapter.finish(adapter)
+    assert {:ok, %{status: :failed}} = InteractiveSession.await(ref, first.id, 2_000)
+    assert_eventually(fn -> match?({:ok, %{status: :idle}}, InteractiveSession.info(ref)) end)
+    assert {:ok, before} = Store.get(id)
+    summary = State.summary(before)
+
+    assert summary.last_turn == %{
+             id: first.id,
+             status: :failed,
+             updated_at: before.turns[first.id].updated_at,
+             retryable: true
+           }
+
+    assert summary.events == [] and summary.turns == %{}
+    refute Map.has_key?(summary.last_turn, :prompt)
+    assert State.public(State.public(before)) == State.public(before)
+
+    assert {:ok, retry} =
+             Methods.invoke("interactive.retry_turn", %{"id" => id, "source_turn_id" => first.id})
+
+    assert retry.id != first.id
+    assert_receive {:ouroboros_test_adapter_started, _, _, retry_adapter}, 1_000
+    assert {:ok, after_retry} = Store.get(id)
+    assert after_retry.turns[retry.id].request == before.turns[first.id].request
+    assert {:ok, same} = InteractiveSession.retry_turn(ref, first.id)
+    assert same.id == retry.id
+    refute_receive {:ouroboros_test_adapter_started, _, _, _}, 100
+    assert {:error, :turn_not_retryable} = InteractiveSession.retry_turn(ref, retry.id)
+    :ok = HarnessAdapter.finish(retry_adapter)
+    assert {:ok, %{status: :completed}} = InteractiveSession.await(ref, retry.id, 2_000)
+
+    assert {:error, -32_602, _} =
+             Methods.invoke("interactive.retry_turn", %{
+               "id" => id,
+               "source_turn_id" => first.id,
+               "input" => "replacement"
+             })
+
+    refute Methods.permits?(:read, Methods.table()["interactive.retry_turn"])
+  end
+
+  test "retry keeps attachments and effort and refuses an obsolete failure", %{id: id} do
+    harness_id = unique_id("retry-harness")
+
+    start_supervised!(
+      {StubSession,
+       session_id: harness_id,
+       provider: @provider,
+       state: :idle,
+       send_message: {:observe, self(), {:ok, "retried-harness-turn"}}}
+    )
+
+    {:ok, session} =
+      State.new(id, provider: @provider, workspace: File.cwd!(), runtime_exposure: false)
+
+    request =
+      TurnRequest.new!(%{
+        prompt: "Check this file",
+        attachments: [Path.join(File.cwd!(), "README.md")],
+        reasoning_effort: :high
+      })
+
+    source = %{State.new_turn("source", :message, request) | status: :failed}
+
+    session = %{
+      session
+      | status: :idle,
+        harness_session_id: harness_id,
+        turns: %{source.id => source},
+        options: Map.put(session.options, :runtime_exposure, false)
+    }
+
+    assert State.loadable?(session)
+    assert State.unrequestable_reason(session) == nil
+    :ok = Store.create(session)
+    ref = Ref.new(id)
+    assert {:ok, retry} = InteractiveSession.retry_turn(ref, source.id)
+    assert_receive {:stub_session_send_message, ^harness_id, sent}, 1_000
+    assert sent.prompt == request.prompt
+    assert sent.attachments == request.attachments
+    assert sent.reasoning_effort == request.reasoning_effort
+    assert {:ok, same} = InteractiveSession.retry_turn(ref, source.id)
+    assert same.id == retry.id
+    refute_receive {:stub_session_send_message, _, _}, 50
+
+    # A different newer turn makes an un-retried older failure ineligible.
+    older = %{source | id: "older", created_at: "2000-01-01T00:00:00Z"}
+    {:ok, current} = Store.get(id)
+    runtime = %{session: %{current | turns: Map.put(current.turns, older.id, older)}}
+
+    assert {:error, :turn_not_retryable, _} =
+             Ouroboros.Interactive.Task.Turns.retry_turn(runtime, older.id)
+  end
+
   test "coordinator crash reattaches to the same Harness session and active turn", %{id: id} do
     assert {:ok, ref} =
              InteractiveSession.start(id: id, provider: @provider, workspace: File.cwd!())

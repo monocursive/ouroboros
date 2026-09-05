@@ -126,6 +126,8 @@ pub struct AddOptions {
     /// roots from `OUROBOROS_DIST_DIR`, this executable's real path, and the CWD.
     pub dist_roots: Option<Vec<PathBuf>>,
     pub tailscale_poll: PollBudget,
+    #[cfg(test)]
+    pub release_key: Option<crate::update::PublicKey>,
 }
 
 /// What a successful add did, without repeating invitation bytes.
@@ -334,6 +336,20 @@ const TAILSCALE_IP_SCRIPT: &str = r#"printf 'ip=%s\n' "$(tailscale ip -4 2>/dev/
 pub trait Remote {
     fn run(&self, target: &str, script: &str) -> Result<String>;
     fn copy_to(&self, local: &Path, target: &str, remote_path: &str) -> Result<()>;
+    fn run_controlled(&self, target: &str, script: &str, cancel: &Cancel) -> Result<String> {
+        check_cancel(cancel)?;
+        self.run(target, script)
+    }
+    fn copy_controlled(
+        &self,
+        local: &Path,
+        target: &str,
+        path: &str,
+        cancel: &Cancel,
+    ) -> Result<()> {
+        check_cancel(cancel)?;
+        self.copy_to(local, target, path)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -343,80 +359,102 @@ pub struct SshRemote {
 
 impl Remote for SshRemote {
     fn run(&self, target: &str, script: &str) -> Result<String> {
-        let output = ssh_command(self.via, target)
-            .arg(script)
-            .output()
-            .with_context(|| format!("running {} against {target}", self.via.as_str()))?;
+        self.run_controlled(target, script, &Cancel::default())
+    }
+
+    fn copy_to(&self, local: &Path, target: &str, remote_path: &str) -> Result<()> {
+        self.copy_controlled(local, target, remote_path, &Cancel::default())
+    }
+
+    fn run_controlled(&self, target: &str, script: &str, cancel: &Cancel) -> Result<String> {
+        validate_target(target)?;
+        let mut command = ssh_command(self.via, target);
+        command.arg(script).stdin(Stdio::null());
+        let output =
+            crate::subprocess::output(command, Duration::from_secs(180), || cancel.is_cancelled())?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
             bail!(
-                "{} {target} failed ({status}): {stderr}",
+                "{} {target} failed ({}): {}",
                 self.via.as_str(),
-                status = output.status
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
             );
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    fn copy_to(&self, local: &Path, target: &str, remote_path: &str) -> Result<()> {
-        let spec = format!("{target}:{remote_path}");
-        let output = match self.via {
+    fn copy_controlled(
+        &self,
+        local: &Path,
+        target: &str,
+        remote_path: &str,
+        cancel: &Cancel,
+    ) -> Result<()> {
+        validate_target(target)?;
+        require_safe_unix_path(remote_path, "copy destination")?;
+        let command = match self.via {
             Via::Ssh => {
                 let mut command = Command::new("scp");
                 command
-                    .arg("-o")
-                    .arg("BatchMode=yes")
-                    .arg("-p")
+                    .args([
+                        "-o",
+                        "BatchMode=yes",
+                        "-o",
+                        "ConnectTimeout=15",
+                        "-o",
+                        "ServerAliveInterval=10",
+                        "-o",
+                        "ServerAliveCountMax=3",
+                        "-p",
+                        "--",
+                    ])
                     .arg(local)
-                    .arg(&spec);
+                    .arg(format!("{target}:{remote_path}"))
+                    .stdin(Stdio::null());
                 command
-                    .output()
-                    .with_context(|| format!("copying {} to {spec}", local.display()))?
             }
             Via::Tailscale => {
-                // `tailscale scp` is not universal; file copy over `tailscale ssh` cat
-                // keeps the invitation off argv and works with Tailscale SSH ACLs.
-                let bytes = fs::read(local).with_context(|| {
-                    format!("reading {} to copy over Tailscale SSH", local.display())
-                })?;
-                let mut child = ssh_command(Via::Tailscale, target)
-                    .arg(format!(
-                        "umask 077 && cat > {remote_path}.partial && mv {remote_path}.partial {remote_path} && chmod 600 {remote_path}"
-                    ))
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .with_context(|| format!("starting tailscale ssh to copy onto {target}"))?;
-                {
-                    let stdin = child.stdin.as_mut().ok_or_else(|| {
-                        anyhow!("tailscale ssh stdin was not available for the invitation copy")
-                    })?;
-                    stdin
-                        .write_all(&bytes)
-                        .context("writing the invitation over Tailscale SSH")?;
-                }
-                let output = child
-                    .wait_with_output()
-                    .context("waiting for the Tailscale SSH invitation copy")?;
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    bail!(
-                        "tailscale ssh copy to {target} failed ({status}): {stderr}",
-                        status = output.status
-                    );
-                }
-                return Ok(());
+                let mut command = ssh_command(Via::Tailscale, target);
+                command.arg(format!("umask 077 && cat > '{remote_path}.partial' && mv '{remote_path}.partial' '{remote_path}' && chmod 600 '{remote_path}'"))
+                    .stdin(Stdio::from(fs::File::open(local)?));
+                command
             }
         };
+        let output =
+            crate::subprocess::output(command, Duration::from_secs(900), || cancel.is_cancelled())?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
             bail!(
-                "scp to {spec} failed ({status}): {stderr}",
-                status = output.status
+                "copy to {target} failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
             );
         }
         Ok(())
+    }
+}
+
+fn validate_target(target: &str) -> Result<()> {
+    if target.is_empty()
+        || target.starts_with('-')
+        || target
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || "'\"`;|&$()\\".contains(c))
+    {
+        bail!("invalid SSH target; use a host or user@host");
+    }
+    Ok(())
+}
+
+struct ControlledRemote<'a> {
+    inner: &'a dyn Remote,
+    cancel: &'a Cancel,
+}
+impl Remote for ControlledRemote<'_> {
+    fn run(&self, target: &str, script: &str) -> Result<String> {
+        self.inner.run_controlled(target, script, self.cancel)
+    }
+    fn copy_to(&self, local: &Path, target: &str, path: &str) -> Result<()> {
+        self.inner.copy_controlled(local, target, path, self.cancel)
     }
 }
 
@@ -424,7 +462,19 @@ fn ssh_command(via: Via, target: &str) -> Command {
     match via {
         Via::Ssh => {
             let mut command = Command::new("ssh");
-            command.arg("-o").arg("BatchMode=yes").arg(target);
+            command
+                .args([
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ConnectTimeout=15",
+                    "-o",
+                    "ServerAliveInterval=10",
+                    "-o",
+                    "ServerAliveCountMax=3",
+                    "--",
+                ])
+                .arg(target);
             command
         }
         Via::Tailscale => {
@@ -1236,11 +1286,9 @@ impl EventSink for NotifyEvents<'_> {
 
 /// The stop request shared with a running add.
 ///
-/// It is checked at every pipeline boundary: before each remote command, before each
-/// copy, and once per poll round. The honest limit is that a boundary is between remote
-/// calls, not inside one — an SSH command already in flight is not interrupted, so a
-/// cancel raised during a `tailscale up` install or a slow `scp` takes effect when that
-/// call returns. Nothing kills the remote process.
+/// It is checked at every pipeline boundary and while SSH/scp runs. Cancellation
+/// interrupts the local operation and closes its process group.
+/// The remote command may already have changed the host, so failures report residue.
 #[derive(Clone, Debug, Default)]
 pub struct Cancel(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
@@ -1259,8 +1307,8 @@ impl Cancel {
 }
 
 /// A running add. Dropping the handle does not stop the pipeline; `cancel` requests a
-/// stop at the next pipeline boundary (a blocking remote call in flight completes
-/// first), and `join` waits for the thread.
+/// stop at the next boundary or during a running SSH/copy operation. `join` waits for
+/// cleanup and the final residue report.
 pub struct AddHandle {
     cancel: Cancel,
     join: std::thread::JoinHandle<()>,
@@ -1399,6 +1447,10 @@ fn add_pipeline(
     cancel: &Cancel,
 ) -> (Result<Outcome>, Vec<String>) {
     let mut residue = Residue::default();
+    let remote = ControlledRemote {
+        inner: remote,
+        cancel,
+    };
     let result = run_add(
         data_dir,
         target,
@@ -1407,7 +1459,7 @@ fn add_pipeline(
         via,
         binary,
         owner_host,
-        remote,
+        &remote,
         options,
         sink,
         cancel,
@@ -1513,6 +1565,86 @@ fn run_add(
         .ok_or_else(|| anyhow!("could not derive a machine name for {target}; pass --machine"))?;
     fleet::validate_machine(&machine)?;
 
+    if let Some(path) = &probe.ouro {
+        require_safe_unix_path(path, "ouro executable")?;
+        let expected = format!("ouro {}", local_version());
+        if binary.is_none() && probe.ouro_version.as_deref() != Some(expected.as_str()) {
+            bail!("destination runs {}; this fleet requires {expected}. Upgrade it with a verified matching release before enrollment", probe.ouro_version.as_deref().unwrap_or("an unknown ouro version"));
+        }
+    }
+    let dist_roots = options
+        .dist_roots
+        .clone()
+        .unwrap_or_else(discovered_dist_roots);
+    let mut install = install_plan(
+        &local,
+        &remote_triple,
+        binary,
+        probe.ouro.as_deref(),
+        local_version(),
+        &dist_roots,
+    )?;
+    let key = crate::update::release_public_key();
+    #[cfg(test)]
+    let key = options.release_key.clone().or(key);
+    let mut verified = match &install {
+        InstallPlan::Copy { path, .. } if binary.is_some() || local != remote_triple => {
+            let wanted = dist_artifact_name(local_version(), &remote_triple);
+            if path.file_name().and_then(|name| name.to_str()) != Some(wanted.as_str()) {
+                bail!("deployment artifact must be named {wanted} and accompanied by signed SHA256SUMS");
+            }
+            let source = crate::update::Source::Directory(
+                path.parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .to_path_buf(),
+            );
+            Some(
+                crate::update::fleet_artifact(
+                    &source,
+                    local_version(),
+                    &remote_triple,
+                    key.as_ref(),
+                )
+                .context("verifying deployment artifact before issuing an invitation")?,
+            )
+        }
+        _ => None,
+    };
+
+    if matches!(install, InstallPlan::RecipeOnly { .. }) && key.is_some() {
+        check_cancel(cancel)?;
+        verified = Some(
+            crate::update::fleet_artifact(
+                &crate::update::fleet_release_source(local_version())?,
+                local_version(),
+                &remote_triple,
+                key.as_ref(),
+            )
+            .context("fetching a verified matching release before issuing an invitation")?,
+        );
+        install = InstallPlan::Copy {
+            path: verified.as_ref().unwrap().path.clone(),
+            note: Some("downloaded and verified the matching signed release".into()),
+        };
+    }
+    if let InstallPlan::UseExisting(path) = &install {
+        let protocol = remote
+            .run(target, &format!("'{path}' fleet protocol"))
+            .context(
+            "destination must support secure fleet management protocol 2; upgrade its ouro first",
+        )?;
+        if protocol.trim() != "2" {
+            bail!("destination does not support secure fleet management protocol 2; upgrade its ouro first");
+        }
+    }
+    // When first-run setup has not started the owner yet, verify the remote service
+    // and TLS runtime now and explicitly leave peer connectivity pending.
+    let peer = if crate::runtime::read_live_publication(data_dir)?.is_some() {
+        fleet::load(data_dir)?.map(|profile| profile.node)
+    } else {
+        None
+    };
+
     // The last boundary before private material exists anywhere.
     check_cancel(cancel)?;
     let invite = write_pending_invite(data_dir, &machine, &host)?;
@@ -1535,19 +1667,6 @@ fn run_add(
     residue.delivered = Some(remote_invite.clone());
     log.push(format!("copied the invitation to {target}:{remote_invite}"));
 
-    let dist_roots = options
-        .dist_roots
-        .clone()
-        .unwrap_or_else(discovered_dist_roots);
-    let install = install_plan(
-        &local,
-        &remote_triple,
-        binary,
-        probe.ouro.as_deref(),
-        local_version(),
-        &dist_roots,
-    )
-    .map_err(|error| pending_invite_error(error, &invite))?;
     sink.emit(AddEvent::Install(install_decision(&install, binary)));
     match &install {
         InstallPlan::UseExisting(path) => {
@@ -1555,11 +1674,22 @@ fn run_add(
             check_cancel(cancel)?;
             residue.enrolling = Some(machine.clone());
             sink.emit(AddEvent::Enrolling);
-            enroll_remote(remote, target, path, &remote_invite)
+            enroll_remote(remote, target, path, &remote_invite, peer.as_deref())
                 .map_err(|error| pending_invite_error(error, &invite))?;
-            finish_enroll(&mut log, &invite, &machine, &host, OutcomeKind::Enrolled)
+            finish_enroll(
+                &mut log,
+                &invite,
+                &machine,
+                &host,
+                OutcomeKind::Enrolled,
+                peer.is_some(),
+            )
         }
         InstallPlan::Copy { path, note } => {
+            let path = verified
+                .as_ref()
+                .map(|artifact| artifact.path.as_path())
+                .unwrap_or(path.as_path());
             if let Some(note) = note {
                 log.push(note.clone());
             }
@@ -1592,9 +1722,16 @@ fn run_add(
             check_cancel(cancel)?;
             residue.enrolling = Some(machine.clone());
             sink.emit(AddEvent::Enrolling);
-            enroll_remote(remote, target, &remote_bin, &remote_invite)
+            enroll_remote(remote, target, &remote_bin, &remote_invite, peer.as_deref())
                 .map_err(|error| pending_invite_error(error, &invite))?;
-            finish_enroll(&mut log, &invite, &machine, &host, OutcomeKind::Enrolled)
+            finish_enroll(
+                &mut log,
+                &invite,
+                &machine,
+                &host,
+                OutcomeKind::Enrolled,
+                peer.is_some(),
+            )
         }
         InstallPlan::RecipeOnly { reason } => {
             log.push(reason.clone());
@@ -1661,7 +1798,7 @@ impl Residue {
         }
         if let Some(machine) = &self.enrolling {
             lines.push(format!(
-                "`ouro fleet enroll` had already started on the destination: if its join completed before this, {machine} is joined but stopped"
+                "`ouro fleet enroll` had already started on the destination: if its join completed before this, {machine} may be joined and running; inspect its fleet doctor and service status"
             ));
             lines.push(format!(
                 "`ouro daemon` on {machine} starts it, and rerunning this same add converges it once the invitation above is removed"
@@ -1731,6 +1868,7 @@ fn finish_enroll(
     machine: &str,
     host: &str,
     kind: OutcomeKind,
+    peer_verified: bool,
 ) -> Result<Outcome> {
     match fs::remove_file(invite) {
         Ok(()) => {}
@@ -1739,7 +1877,11 @@ fn finish_enroll(
             invite.display()
         )),
     }
-    log.push(format!("{machine} enrolled and its daemon is starting"));
+    log.push(format!(
+        "{machine} enrolled; recovery service and TLS runtime verified"
+    ));
+    log.push(if peer_verified { "compatible BEAM connection to the owner verified".into() }
+        else { "owner runtime is stopped; peer connectivity remains pending until it starts. Verify fleet status, or run fleet ready --peer OWNER_NODE on the destination".into() });
     Ok(Outcome {
         machine: machine.to_string(),
         host: host.to_string(),
@@ -2002,14 +2144,39 @@ fn human_duration(duration: Duration) -> String {
     }
 }
 
-fn enroll_remote(remote: &dyn Remote, target: &str, ouro: &str, invite: &str) -> Result<()> {
+fn enroll_remote(
+    remote: &dyn Remote,
+    target: &str,
+    ouro: &str,
+    invite: &str,
+    peer: Option<&str>,
+) -> Result<()> {
     // The invitation travels as a `.ouro` file. Refusing anything else keeps membership
     // material from ever being passed as inline text on a remote command line.
     if !invite.ends_with(".ouro") {
         bail!("refusing to enroll with a path that is not an .ouro invitation file");
     }
-    let script = format!("chmod 600 '{invite}' && '{ouro}' fleet enroll '{invite}' --delete");
-    remote.run(target, &script).map(|_| ())
+    require_safe_unix_path(ouro, "ouro executable")?;
+    require_safe_unix_path(invite, "invitation")?;
+    let peer_arg = match peer {
+        Some(node)
+            if node
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"@._-".contains(&byte)) =>
+        {
+            format!(" --peer '{node}'")
+        }
+        Some(_) => bail!("invalid owner node identity"),
+        None => String::new(),
+    };
+    let script = format!(
+        "chmod 600 '{invite}' && '{ouro}' fleet enroll '{invite}' --delete --activate{peer_arg}"
+    );
+    let output = remote.run(target, &script)?;
+    if !output.lines().any(|line| line == "OURO_FLEET_READY") {
+        bail!("destination did not acknowledge managed fleet readiness; inspect its fleet doctor and service status, then retry fleet service start");
+    }
+    Ok(())
 }
 
 fn write_pending_invite(data_dir: &Path, machine: &str, host: &str) -> Result<PathBuf> {
@@ -2177,7 +2344,7 @@ pub fn render_outcome(outcome: &Outcome) -> String {
     match outcome.kind {
         OutcomeKind::Enrolled => {
             text.push_str(&format!(
-                "{machine} is joining at {host}. This Mac's runtime dials it as it comes up — no restart here; watch `ouro fleet status`.\nProvider sign-in stays on that machine; start a session there after it is connected.\n",
+                "{machine} is enrolled at {host} with managed recovery. Connection verification is reported above; inspect `ouro fleet status`.\nProvider sign-in stays on that machine; start a session there after it is connected.\n",
                 machine = outcome.machine,
                 host = outcome.host
             ));
@@ -2297,6 +2464,12 @@ mod tests {
             if self.fail_enroll && script.contains("fleet enroll") {
                 bail!("remote enroll refused");
             }
+            if script.contains("fleet protocol") {
+                return Ok("2\n".into());
+            }
+            if script.contains("fleet enroll") {
+                return Ok("OURO_FLEET_READY\n".into());
+            }
             Ok(String::new())
         }
 
@@ -2375,7 +2548,21 @@ mod tests {
     fn dist_fixture(label: &str, version: &str, triple: &str) -> PathBuf {
         let root = scratch(label);
         let artifact = root.join(dist_artifact_name(version, triple));
-        fs::write(&artifact, b"#!/bin/sh\n# not a real ouro\n").unwrap();
+        fs::write(&artifact, b"\x7fELF signed test artifact").unwrap();
+        let bytes = fs::read(&artifact).unwrap();
+        let digest =
+            crate::update::hex(ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref());
+        let sums = format!(
+            "{digest}  {}\n",
+            artifact.file_name().unwrap().to_str().unwrap()
+        );
+        let key = crate::update::tests::TestKey::new(42);
+        fs::write(root.join("SHA256SUMS"), &sums).unwrap();
+        fs::write(
+            root.join("SHA256SUMS.minisig"),
+            key.sign(sums.as_bytes(), true, "fleet test"),
+        )
+        .unwrap();
         fs::set_permissions(&artifact, fs::Permissions::from_mode(0o755)).unwrap();
         root
     }
@@ -2425,6 +2612,12 @@ mod tests {
             }
             if self.fail_enroll && script.contains("fleet enroll") {
                 bail!("remote enroll refused");
+            }
+            if script.contains("fleet protocol") {
+                return Ok("2\n".into());
+            }
+            if script.contains("fleet enroll") {
+                return Ok("OURO_FLEET_READY\n".into());
             }
             Ok(String::new())
         }
@@ -2636,13 +2829,16 @@ mod tests {
         fleet::create(&data, None, "studio", "localhost", fleet::ephemeral_ports()).unwrap();
         let mut remote = FakeRemote::linux("/home/op");
         remote.fail_enroll = true;
+        remote
+            .probe
+            .push_str("ouro=/home/op/.local/bin/ouro\nversion=ouro 0.1.0\n");
         let error = add_with(
             &data,
             "op@vps",
             Some("vps"),
             Some("localhost"),
             Via::Ssh,
-            Some(std::env::current_exe().unwrap().as_path()),
+            None,
             Some("studio.tailnet.ts.net"),
             &remote,
         )
@@ -2655,7 +2851,7 @@ mod tests {
     #[test]
     fn enroll_remote_only_accepts_ouro_invitation_files() {
         let remote = FakeRemote::linux("/home/op");
-        let error = enroll_remote(&remote, "op@vps", "/usr/bin/ouro", "/tmp/invite.json")
+        let error = enroll_remote(&remote, "op@vps", "/usr/bin/ouro", "/tmp/invite.json", None)
             .unwrap_err()
             .to_string();
         assert!(error.contains(".ouro"), "{error}");
@@ -2921,6 +3117,12 @@ mod tests {
             Some("studio.tailnet.ts.net"),
             &remote,
             &AddOptions {
+                release_key: Some(
+                    crate::update::PublicKey::parse(
+                        &crate::update::tests::TestKey::new(42).public_key_file(),
+                    )
+                    .unwrap(),
+                ),
                 dist_roots: Some(vec![root.clone()]),
                 ..AddOptions::default()
             },
@@ -2929,10 +3131,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(outcome.kind, OutcomeKind::Enrolled);
+        assert!(remote.ran("--delete --activate"));
         let copies = remote.copies.lock().unwrap();
         assert_eq!(copies.len(), 2, "the invitation and the binary: {copies:?}");
         assert!(copies[0].1.ends_with("vps.ouro"));
-        assert_eq!(copies[1].0, artifact);
+        assert_ne!(copies[1].0, artifact, "copy a verified private snapshot");
+        assert!(!copies[1].0.exists(), "snapshot cleaned after transfer");
         assert_eq!(copies[1].1, "/home/op/.local/bin/ouro.partial");
         drop(copies);
         assert!(remote.ran("mv '/home/op/.local/bin/ouro.partial' '/home/op/.local/bin/ouro'"));
@@ -2953,6 +3157,186 @@ mod tests {
             "the add log must record where it was found: {:?}",
             outcome.log
         );
+    }
+
+    #[test]
+    fn unsigned_corrupt_and_wrong_key_artifacts_fail_before_credentials_exist() {
+        for failure in ["unsigned", "corrupt", "wrong-key", "unprovisioned"] {
+            let data = scratch(failure);
+            fleet::create(&data, None, "studio", "localhost", fleet::ephemeral_ports()).unwrap();
+            let root = dist_fixture(failure, local_version(), &foreign_triple());
+            let key =
+                crate::update::tests::TestKey::new(if failure == "wrong-key" { 43 } else { 42 });
+            if failure == "unsigned" {
+                fs::remove_file(root.join("SHA256SUMS.minisig")).unwrap();
+            }
+            if failure == "corrupt" {
+                fs::write(
+                    root.join(dist_artifact_name(local_version(), &foreign_triple())),
+                    b"replacement",
+                )
+                .unwrap();
+            }
+            let remote = ScriptedRemote {
+                probes: queue(&[&probe_text(true, false)]),
+                ..Default::default()
+            };
+            let result = add_with_options(
+                &data,
+                "op@vps",
+                Some("vps"),
+                Some("100.64.0.8"),
+                Via::Ssh,
+                None,
+                None,
+                &remote,
+                &AddOptions {
+                    dist_roots: Some(vec![root.clone()]),
+                    release_key: if failure == "unprovisioned" {
+                        None
+                    } else {
+                        Some(crate::update::PublicKey::parse(&key.public_key_file()).unwrap())
+                    },
+                    ..Default::default()
+                },
+                &mut SilentNotify,
+            );
+            assert!(result.is_err(), "{failure}");
+            assert!(
+                remote.copies.lock().unwrap().is_empty(),
+                "{failure} leaked an invitation"
+            );
+            assert_eq!(fleet::load(&data).unwrap().unwrap().members.len(), 1);
+            fs::remove_dir_all(data).unwrap();
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn existing_remote_version_must_match_before_issuing_an_invitation() {
+        let data = scratch("remote-version");
+        fleet::create(&data, None, "studio", "localhost", fleet::ephemeral_ports()).unwrap();
+        let remote = ScriptedRemote {
+            probes: queue(&[&probe_text(true, true).replace("ouro 0.1.0", "ouro 0.0.1")]),
+            ..Default::default()
+        };
+        let error = add_with(
+            &data,
+            "op@vps",
+            Some("vps"),
+            Some("100.64.0.8"),
+            Via::Ssh,
+            None,
+            None,
+            &remote,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("requires ouro"), "{error:#}");
+        assert!(remote.copies.lock().unwrap().is_empty());
+        assert_eq!(fleet::load(&data).unwrap().unwrap().members.len(), 1);
+        fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    fn matching_version_with_an_old_management_protocol_does_not_receive_credentials() {
+        let data = scratch("old-protocol");
+        fleet::create(&data, None, "studio", "localhost", fleet::ephemeral_ports()).unwrap();
+        let inner = ScriptedRemote {
+            probes: queue(&[&probe_text(true, true)]),
+            ..Default::default()
+        };
+        struct OldProtocol<'a>(&'a ScriptedRemote);
+        impl Remote for OldProtocol<'_> {
+            fn run(&self, target: &str, script: &str) -> Result<String> {
+                if script.contains("fleet protocol") {
+                    Ok("1\n".into())
+                } else {
+                    self.0.run(target, script)
+                }
+            }
+            fn copy_to(&self, local: &Path, target: &str, path: &str) -> Result<()> {
+                self.0.copy_to(local, target, path)
+            }
+        }
+        assert!(add_with(
+            &data,
+            "op@vps",
+            Some("vps"),
+            Some("100.64.0.8"),
+            Via::Ssh,
+            None,
+            None,
+            &OldProtocol(&inner)
+        )
+        .is_err());
+        assert!(inner.copies.lock().unwrap().is_empty());
+        assert_eq!(fleet::load(&data).unwrap().unwrap().members.len(), 1);
+        fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    fn replacing_the_source_after_verification_cannot_change_the_transfer() {
+        let root = dist_fixture("artifact-snapshot", local_version(), &foreign_triple());
+        let source_path = root.join(dist_artifact_name(local_version(), &foreign_triple()));
+        let original = fs::read(&source_path).unwrap();
+        let key = crate::update::PublicKey::parse(
+            &crate::update::tests::TestKey::new(42).public_key_file(),
+        )
+        .unwrap();
+        let verified = crate::update::fleet_artifact(
+            &crate::update::Source::Directory(root.clone()),
+            local_version(),
+            &foreign_triple(),
+            Some(&key),
+        )
+        .unwrap();
+        fs::write(source_path, b"substituted executable").unwrap();
+        assert_eq!(fs::read(&verified.path).unwrap(), original);
+        assert_eq!(
+            fs::metadata(verified.path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        let temporary = verified.path.clone();
+        drop(verified);
+        assert!(!temporary.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn successful_ssh_exit_without_managed_readiness_is_not_enrollment_success() {
+        let remote = FakeRemote::linux("/home/op");
+        // This remote only returns a readiness marker for enrollment commands. Wrap it
+        // to model an old binary that exits successfully without proving readiness.
+        struct OldRemote;
+        impl Remote for OldRemote {
+            fn run(&self, _: &str, _: &str) -> Result<String> {
+                Ok(String::new())
+            }
+            fn copy_to(&self, _: &Path, _: &str, _: &str) -> Result<()> {
+                unreachable!()
+            }
+        }
+        assert!(
+            enroll_remote(&OldRemote, "op@vps", "/usr/bin/ouro", "/tmp/vps.ouro", None).is_err()
+        );
+        assert!(enroll_remote(
+            &remote,
+            "op@vps",
+            "/usr/bin/ouro",
+            "/tmp/vps.ouro",
+            Some("ouro-core@127.0.0.1")
+        )
+        .is_ok());
+        assert!(remote
+            .runs
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|script| script.contains("--peer 'ouro-core@127.0.0.1'")));
     }
 
     // -------------------------------------------------------------------------------
@@ -3017,6 +3401,7 @@ mod tests {
             Some("studio.tailnet.ts.net"),
             &remote,
             &AddOptions {
+                release_key: None,
                 setup_tailscale: true,
                 dist_roots: Some(Vec::new()),
                 tailscale_poll: instant_budget(3, 3),
@@ -3071,6 +3456,7 @@ mod tests {
             Some("studio.tailnet.ts.net"),
             &remote,
             &AddOptions {
+                release_key: None,
                 setup_tailscale: true,
                 dist_roots: Some(Vec::new()),
                 tailscale_poll: instant_budget(3, 3),
@@ -3114,6 +3500,7 @@ mod tests {
             Some("studio.tailnet.ts.net"),
             &remote,
             &AddOptions {
+                release_key: None,
                 setup_tailscale: true,
                 dist_roots: Some(Vec::new()),
                 tailscale_poll: instant_budget(3, 3),
@@ -3161,6 +3548,7 @@ mod tests {
             Some("studio.tailnet.ts.net"),
             &remote,
             &AddOptions {
+                release_key: None,
                 setup_tailscale: true,
                 dist_roots: Some(Vec::new()),
                 tailscale_poll: instant_budget(2, 4),
@@ -3211,6 +3599,7 @@ mod tests {
             Some("studio.tailnet.ts.net"),
             &remote,
             &AddOptions {
+                release_key: None,
                 setup_tailscale: true,
                 dist_roots: Some(Vec::new()),
                 tailscale_poll: instant_budget(3, 3),
@@ -3262,6 +3651,7 @@ mod tests {
             Some("studio.tailnet.ts.net"),
             &remote,
             &AddOptions {
+                release_key: None,
                 setup_tailscale: true,
                 dist_roots: Some(Vec::new()),
                 tailscale_poll: instant_budget(3, 3),
@@ -3406,6 +3796,7 @@ mod tests {
             None,
             None,
             AddOptions {
+                release_key: None,
                 setup_tailscale: true,
                 dist_roots: Some(Vec::new()),
                 tailscale_poll: instant_budget(3, 3),
@@ -3483,6 +3874,12 @@ mod tests {
             Some("vps"),
             Some("100.64.0.8"),
             AddOptions {
+                release_key: Some(
+                    crate::update::PublicKey::parse(
+                        &crate::update::tests::TestKey::new(42).public_key_file(),
+                    )
+                    .unwrap(),
+                ),
                 dist_roots: Some(vec![root.clone()]),
                 ..AddOptions::default()
             },
@@ -3563,7 +3960,7 @@ mod tests {
                     format!("the invitation remains at {} (mode 0600)", invite.display()),
                     "if it may already have been copied, treat it as issued — otherwise delete it with rm before adding again".into(),
                     "a copy of it is on the destination at /home/op/.local/share/ouroboros/incoming/vps.ouro".into(),
-                    "`ouro fleet enroll` had already started on the destination: if its join completed before this, vps is joined but stopped".into(),
+                    "`ouro fleet enroll` had already started on the destination: if its join completed before this, vps may be joined and running; inspect its fleet doctor and service status".into(),
                     "`ouro daemon` on vps starts it, and rerunning this same add converges it once the invitation above is removed".into(),
                 ],
             }
