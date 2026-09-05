@@ -3,6 +3,7 @@ const { test, expect } = require("@playwright/test");
 const authToken = "ouroboros-browser-test-token-000000000000";
 
 async function expectMinimumTarget(locator) {
+  await expect(locator).toBeVisible();
   const box = await locator.boundingBox();
   expect(box).not.toBeNull();
   expect(box.width).toBeGreaterThanOrEqual(44);
@@ -28,6 +29,9 @@ async function signIn(page) {
 test("sign-in recovery and progressive session setup", async ({ page }) => {
   await signIn(page);
   await expect(page.getByRole("link", { name: /Machines/ })).toBeVisible();
+  await page.getByRole("link", { name: /Machines/ }).click();
+  await expect(page).toHaveTitle("Advanced · Machines · Ouroboros");
+  await page.getByRole("link", { name: "Sessions", exact: true }).click();
 
   await page.getByRole("link", { name: "New session", exact: true }).click();
   await expect(page).toHaveTitle("New session · Ouroboros");
@@ -76,7 +80,15 @@ test("session controls stay reachable and dialogs are modal", async ({ page }, t
     await expect(page.getByText("Session details", { exact: true })).toBeVisible();
   }
 
-  const end = page.getByRole("button", { name: /^End / }).first();
+  const sessions = page.getByRole("button", { name: "← Sessions", exact: true });
+  if (await sessions.isVisible()) await sessions.click();
+  const row = page.locator(".ouro-row-wrap").filter({
+    has: page.locator('a[aria-current="page"]')
+  });
+  const actions = row.locator(".ouro-row-actions > summary");
+  await expectMinimumTarget(actions);
+  await actions.click();
+  const end = row.getByRole("button", { name: /^End / });
   await expect(end).toBeVisible();
   await expectMinimumTarget(end);
   await end.click();
@@ -86,6 +98,17 @@ test("session controls stay reachable and dialogs are modal", async ({ page }, t
   expect(await dialog.evaluate((element) => element.matches(":modal"))).toBe(true);
   expect(await page.evaluate(() => document.activeElement.closest("dialog") !== null)).toBe(true);
 
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+
+  // A periodic deck refresh must not close a menu or a modal under its reader.
+  await actions.click();
+  await page.waitForTimeout(3500);
+  await expect(end).toBeVisible();
+  await end.click();
+  await page.waitForTimeout(3500);
+  await expect(dialog).toBeVisible();
+  expect(await dialog.evaluate((element) => element.matches(":modal"))).toBe(true);
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
 });

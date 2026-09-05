@@ -10,8 +10,9 @@ defmodule Ouroboros.Orchestration.Step do
 
   A step declares what plane executes it. `:coding` is the historical default and
   may name an `objective`. `:forge` names one compile-and-deploy of a single
-  capability module and carries a closed input schema: exactly `module` and
-  `source_path`, both strings.
+  capability module and carries a closed input schema: `module`, `source_path`,
+  and an optional `test_path`, all strings. The test path supplies the candidate's
+  ExUnit tests; omitting it does not bypass the signer's test requirements.
 
   The forge input is deliberately the smallest thing a planner can say. The
   module name must sit inside the `Ouroboros.Capability.` namespace, mirroring
@@ -61,7 +62,11 @@ defmodule Ouroboros.Orchestration.Step do
 
   @type state :: :pending | :ready | :running | :completed | :failed | :cancelled | :blocked
   @type kind :: :coding | :forge
-  @type forge_request :: %{module: String.t(), source_path: String.t()}
+  @type forge_request :: %{
+          module: String.t(),
+          source_path: String.t(),
+          test_path: String.t() | nil
+        }
 
   @type cancellation :: %{
           required(:status) => :pending | :completed | :not_required,
@@ -168,7 +173,7 @@ defmodule Ouroboros.Orchestration.Step do
   def validate_input(kind, _input), do: {:error, {:unknown_step_kind, kind}}
 
   @doc """
-  Reads a `:forge` step input as the pair a forge executor may act on.
+  Reads a `:forge` step input as the source and optional tests an executor may act on.
 
   Atom-keyed and string-keyed inputs are both accepted, because a plan may be
   built in Elixir or normalized from a model's JSON. Any other shape, an extra
@@ -177,10 +182,16 @@ defmodule Ouroboros.Orchestration.Step do
   """
   @spec forge_request(term()) :: {:ok, forge_request()} | {:error, term()}
   def forge_request(input) do
-    with {:ok, module, source_path} <- forge_fields(input),
+    with {:ok, module, source_path, test_path} <- forge_fields(input),
          :ok <- validate_capability_module(module),
-         :ok <- validate_source_path(source_path) do
-      {:ok, %{module: module, source_path: source_path}}
+         :ok <- validate_source_path(source_path),
+         :ok <- validate_test_path(test_path) do
+      {:ok,
+       %{
+         module: module,
+         source_path: source_path,
+         test_path: if(test_path == :error, do: nil, else: elem(test_path, 1))
+       }}
     end
   end
 
@@ -210,11 +221,15 @@ defmodule Ouroboros.Orchestration.Step do
     keys = input |> Map.keys() |> MapSet.new()
 
     cond do
-      keys == MapSet.new([:module, :source_path]) ->
-        {:ok, Map.fetch!(input, :module), Map.fetch!(input, :source_path)}
+      MapSet.subset?(MapSet.new([:module, :source_path]), keys) and
+          MapSet.subset?(keys, MapSet.new([:module, :source_path, :test_path])) ->
+        {:ok, Map.fetch!(input, :module), Map.fetch!(input, :source_path),
+         Map.fetch(input, :test_path)}
 
-      keys == MapSet.new(["module", "source_path"]) ->
-        {:ok, Map.fetch!(input, "module"), Map.fetch!(input, "source_path")}
+      MapSet.subset?(MapSet.new(["module", "source_path"]), keys) and
+          MapSet.subset?(keys, MapSet.new(["module", "source_path", "test_path"])) ->
+        {:ok, Map.fetch!(input, "module"), Map.fetch!(input, "source_path"),
+         Map.fetch(input, "test_path")}
 
       true ->
         {:error, {:invalid_forge_input, Enum.sort(keys)}}
@@ -222,6 +237,15 @@ defmodule Ouroboros.Orchestration.Step do
   end
 
   defp forge_fields(_input), do: {:error, :invalid_forge_input}
+
+  defp validate_test_path(:error), do: :ok
+
+  defp validate_test_path({:ok, path}) do
+    case validate_source_path(path) do
+      :ok -> :ok
+      {:error, _} -> {:error, {:invalid_test_path, path}}
+    end
+  end
 
   defp validate_capability_module(module) when is_binary(module) do
     if Regex.match?(@capability_module, module),

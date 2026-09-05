@@ -216,6 +216,7 @@ a:where(:hover) {
 
 .ouro-gate-form {
   display: flex;
+  flex-direction: column;
   align-items: stretch;
   gap: 0.6rem;
   margin: 1.25rem 0;
@@ -3653,6 +3654,9 @@ body .ouro-result p {
 .ouro-session-nav {
   display: none;
 }
+.ouro-rail-machines {
+  display: none;
+}
 body .ouro-row-actions summary {
   cursor: pointer;
   list-style: none;
@@ -3687,6 +3691,7 @@ body .ouro-row-action-menu {
 }
 body .ouro-row-action {
   text-align: left;
+  min-height: 2.75rem;
   background: none;
   border: 0;
   font-size: 0.85rem;
@@ -3846,6 +3851,13 @@ body .ouro-gate {
   background: var(--workspace);
 }
 @media (max-width: 520px) {
+  body .ouro-rail-machines {
+    display: inline-flex;
+    align-items: center;
+    min-height: 2.75rem;
+    margin: 0 0.75rem 0.75rem;
+    padding-inline: 0.75rem;
+  }
   body .ouro-empty {
     padding: 1.5rem 1rem;
   }

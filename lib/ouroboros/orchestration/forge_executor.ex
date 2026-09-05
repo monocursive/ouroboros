@@ -3,8 +3,8 @@ defmodule Ouroboros.Orchestration.ForgeExecutor do
   Executes `:forge` orchestration steps: one capability module, forged and deployed.
 
   The step says what to build. Trusted runtime configuration says everything
-  else. From the step input come exactly two strings — a module inside the
-  `Ouroboros.Capability.` namespace and a workspace-relative source path. From
+  else. From the step input come a module inside the `Ouroboros.Capability.`
+  namespace, a workspace-relative source path, and an optional test path. From
   this executor's options come the workspace root, the target nodes, the signer
   identity, the epoch storage, and the rollout registry. Nothing a planner can
   write chooses where code is read from, where it is deployed, or who signs it.
@@ -131,37 +131,37 @@ defmodule Ouroboros.Orchestration.ForgeExecutor do
   end
 
   defp forge_and_deploy(execution, config, request, module) do
-    with {:ok, source_code} <- read_source(execution, config, request),
-         sha256 = Beam.sha256(source_code),
+    with {:ok, sources} <- read_sources(execution, config, request),
+         sha256 = Beam.sha256(sources.source),
          {:ok, disposition} <- admit(config, module, sha256) do
       case disposition do
         {:completed, entry} -> {:ok, reattached_result(request, entry, sha256)}
-        :proceed -> forge(execution, config, request, module, source_code, sha256)
+        :proceed -> forge(execution, config, request, module, sources, sha256)
       end
     end
   end
 
-  defp forge(execution, config, request, module, source_code, sha256) do
+  defp forge(execution, config, request, module, sources, sha256) do
     with :ok <- ensure_signer_available(),
-         {:ok, source} <- build_source(execution, config, module, source_code),
+         {:ok, source} <- build_source(execution, config, module, sources),
          {:ok, artifact} <- forge_artifact(source, config),
          {:ok, outcome} <- deploy(artifact, module, config) do
       {:ok, forged_result(request, outcome, sha256)}
     end
   end
 
-  # The source is read inside the lease and nothing else happens there: a build
+  # Source and tests are read inside one lease: a build
   # peer boot and a cluster deployment must not hold a workspace lease.
-  defp read_source(execution, config, request) do
+  defp read_sources(execution, config, request) do
     case workspace_server(config) do
       nil ->
-        read_file(config.workspace, request.source_path)
+        read_files(config.workspace, request)
 
       server ->
         case acquire_lease(config.workspace, lease_id(execution), server) do
           {:ok, lease, capability} ->
             try do
-              read_file(lease.root, request.source_path)
+              read_files(lease.root, request)
             after
               release_lease(lease, capability, server)
             end
@@ -171,6 +171,16 @@ defmodule Ouroboros.Orchestration.ForgeExecutor do
         end
     end
   end
+
+  defp read_files(root, request) do
+    with {:ok, source} <- read_file(root, request.source_path),
+         {:ok, tests} <- read_tests(root, request.test_path) do
+      {:ok, %{source: source, tests: tests}}
+    end
+  end
+
+  defp read_tests(_root, nil), do: {:ok, nil}
+  defp read_tests(root, path), do: read_file(root, path)
 
   defp acquire_lease(workspace, task_id, server) do
     Workspace.acquire(workspace, task_id, mode: :shared_read, server: server)
@@ -291,10 +301,11 @@ defmodule Ouroboros.Orchestration.ForgeExecutor do
     end
   end
 
-  defp build_source(execution, config, module, source_code) do
+  defp build_source(execution, config, module, sources) do
     attrs = [
       module: module,
-      source: source_code,
+      source: sources.source,
+      test_source: sources.tests,
       author: config.author || default_author(execution)
     ]
 

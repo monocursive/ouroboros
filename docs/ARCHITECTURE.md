@@ -120,16 +120,20 @@ billing across a full VM or host loss.
 
 A plan is heterogeneous. Each step declares a kind — `:coding`, or `:forge` for one
 compile-and-deploy of a capability module — and the scheduler resolves one executor per
-kind. Per-kind input schemas are enforced in `Plan`, so a forge step carries exactly a
-capability-namespaced module name and a contained relative source path and nothing that
-could choose a workspace, a node, or a signer. `submit/2` refuses a plan naming a kind
+kind. Per-kind input schemas are enforced in `Plan`, so a forge step carries a
+capability-namespaced module name, a contained relative source path, and an optional
+`test_path` for candidate ExUnit tests. It cannot choose a workspace, a node, or a
+signer. Omitting tests does not bypass the signing policy's passing-test requirement.
+`submit/2` refuses a plan naming a kind
 this scheduler cannot execute before the plan is persisted; a scheduler with no
 executors is manual mode and accepts any kind because the caller drives every step.
 Snapshots written before kinds existed load as `:coding`, and a kind this build does not
 know is refused rather than coerced.
 
 `Ouroboros.Orchestration.ForgeExecutor` runs forge steps through `Upgrade.Forge` and
-`Upgrade.Rollout`, reading source under a shared-read workspace lease. Forging is not
+`Upgrade.Rollout`, reading source and tests under one shared-read workspace lease.
+Both paths use the same containment and regular-file checks; tests run inside the
+isolated build peer and must pass before signing and deployment. Forging is not
 naturally idempotent, so the durable rollout registry is the reattachment anchor: a
 module already `:live` with the same source digest on the same nodes completes the step
 without a second build or epoch, and a `:deploying` record — ambiguity — fails the

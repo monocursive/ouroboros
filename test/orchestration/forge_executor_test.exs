@@ -24,6 +24,7 @@ defmodule Ouroboros.Orchestration.ForgeExecutorTest do
     workspace = Path.join(System.tmp_dir!(), "ouroboros-forge-executor-#{suffix}")
     File.mkdir_p!(Path.join(workspace, "capabilities"))
     File.write!(Path.join(workspace, "capabilities/echo.ex"), capability_source(@capability))
+    File.write!(Path.join(workspace, "capabilities/echo_test.exs"), capability_test_source())
     File.write!(Path.join(workspace, "capabilities/pending.ex"), capability_source(@pending))
 
     store = String.to_atom("forge_executor_store_#{suffix}")
@@ -81,7 +82,11 @@ defmodule Ouroboros.Orchestration.ForgeExecutorTest do
           id: "build",
           kind: :forge,
           dependencies: ["author"],
-          input: %{module: inspect(@capability), source_path: "capabilities/echo.ex"}
+          input: %{
+            module: inspect(@capability),
+            source_path: "capabilities/echo.ex",
+            test_path: "capabilities/echo_test.exs"
+          }
         }
       ])
 
@@ -146,7 +151,11 @@ defmodule Ouroboros.Orchestration.ForgeExecutorTest do
         %{
           id: "build",
           kind: :forge,
-          input: %{module: inspect(@capability), source_path: "capabilities/echo.ex"}
+          input: %{
+            module: inspect(@capability),
+            source_path: "capabilities/echo.ex",
+            test_path: "capabilities/echo_test.exs"
+          }
         }
       ])
 
@@ -315,6 +324,50 @@ defmodule Ouroboros.Orchestration.ForgeExecutorTest do
     assert Registry.history(@pending, context.registry) == []
   end
 
+  test "a failing candidate test prevents signing and deployment", context do
+    File.write!(
+      Path.join(context.workspace, "capabilities/echo_test.exs"),
+      String.replace(capability_test_source(), "== 42", "== 43")
+    )
+
+    start_scheduler(context, nodes: [node()])
+    failed = submit_candidate(context, "failing-test", "capabilities/echo_test.exs")
+    assert failed.status == :failed
+    assert inspect(failed.steps["build"].error) =~ "capability_tests_failed"
+    assert Registry.history(@capability, context.registry) == []
+    assert :code.which(@capability) == :non_existing
+  end
+
+  test "omitting candidate tests still fails the signing policy", context do
+    start_scheduler(context, nodes: [node()])
+    failed = submit_candidate(context, "missing-tests", nil)
+    assert failed.status == :failed
+    assert inspect(failed.steps["build"].error) =~ "no_tests_passed"
+    assert Registry.history(@capability, context.registry) == []
+  end
+
+  test "candidate tests cannot be read through a link outside the workspace", context do
+    outside = context.workspace <> "-outside"
+    File.mkdir_p!(outside)
+    File.write!(Path.join(outside, "test.exs"), capability_test_source())
+    File.ln_s!(outside, Path.join(context.workspace, "linked-tests"))
+    on_exit(fn -> File.rm_rf!(outside) end)
+
+    start_scheduler(context, nodes: [node()])
+    failed = submit_candidate(context, "escaped-tests", "linked-tests/test.exs")
+    assert failed.status == :failed
+    assert failed.steps["build"].error == {:source_outside_workspace, "linked-tests/test.exs"}
+    assert Registry.history(@capability, context.registry) == []
+  end
+
+  defp submit_candidate(context, id, test_path) do
+    input = %{module: inspect(@capability), source_path: "capabilities/echo.ex"}
+    input = if test_path, do: Map.put(input, :test_path, test_path), else: input
+    plan = plan!(id, [%{id: "build", kind: :forge, input: input}])
+    assert {:ok, _} = Scheduler.submit(context.scheduler, plan)
+    await_plan(context.scheduler, id, &(&1.status in terminal_statuses()))
+  end
+
   defp start_scheduler(context, forge_opts, scheduler_opts \\ []) do
     start_supervised!(
       {Scheduler,
@@ -365,6 +418,20 @@ defmodule Ouroboros.Orchestration.ForgeExecutorTest do
         signal_routes: [
           {"ouroboros.agent.message", Ouroboros.Agent.Worker.ReceiveMessage}
         ]
+
+      def double(value), do: value * 2
+    end
+    """
+  end
+
+  defp capability_test_source do
+    """
+    defmodule Ouroboros.Capability.OrchestratedEchoTest do
+      use ExUnit.Case, async: false
+
+      test "runs the candidate implementation" do
+        assert Ouroboros.Capability.OrchestratedEcho.double(21) == 42
+      end
     end
     """
   end

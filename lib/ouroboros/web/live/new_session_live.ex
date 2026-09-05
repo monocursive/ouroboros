@@ -787,6 +787,9 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     grok_ready? = not grok_gated? or grok_account.usable? or (api_key && api_key.usable?)
     api_key_required? = match?(%{managed?: false, usable?: false}, api_key)
 
+    advanced_required? =
+      assigns.provider_invalid? or not chatgpt_ready? or not grok_ready? or api_key_required?
+
     can_start? = Call.available?(assigns.scope, "interactive.start")
 
     provider_ready? =
@@ -809,6 +812,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       |> assign(:grok_ready?, grok_ready?)
       |> assign(:api_key_card, api_key)
       |> assign(:api_key_required?, api_key_required?)
+      |> assign(:advanced_required?, advanced_required?)
       |> assign(
         :can_set_api_key?,
         Call.available?(assigns.scope, credential_method(api_key))
@@ -858,10 +862,8 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
         <details
           class="ouro-new-advanced"
-          open={
-            @provider_invalid? or not @chatgpt_ready? or not @grok_ready? or
-              @api_key_required?
-          }
+          data-ouro-disclosure={"setup:#{@advanced_required?}"}
+          open={@advanced_required?}
         >
           <summary>
             <span>Advanced settings</span>

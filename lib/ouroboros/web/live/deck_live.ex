@@ -1578,6 +1578,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
           scope={@scope}
         />
       </section>
+      <.link navigate="/machines" class="ouro-rail-machines">Machines</.link>
     </nav>
     """
   end
