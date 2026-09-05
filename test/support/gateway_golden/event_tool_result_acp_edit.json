@@ -23,6 +23,27 @@
       "provider": "claude_code",
       "provider_session_id": "provider-0000000000000001",
       "request_id": null,
+      "semantic": {
+        "data": {
+          "artifacts": [],
+          "at": 1767225600000,
+          "call_id": "acp-call-0000000000000001",
+          "is_error": false,
+          "kind": null,
+          "name": null,
+          "output": [
+            {
+              "content": {
+                "text": "Applied 1 edit to lib/ouroboros/web/transcript.ex",
+                "type": "text"
+              },
+              "type": "content"
+            }
+          ]
+        },
+        "kind": "ToolResult",
+        "version": 1
+      },
       "sequence": 112,
       "session_id": "session-0000000000000000000001",
       "timestamp": "2026-01-01T00:00:00.000000Z",

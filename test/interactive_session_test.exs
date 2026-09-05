@@ -529,8 +529,11 @@ defmodule Ouroboros.InteractiveSessionTest do
     :sys.replace_state(Store, fn state ->
       %{
         state
-        | adapter: RefuseFailedTurnStorage,
-          opts: [controller: controller, session_id: id, turn_id: turn_id]
+        | repo: %{
+            state.repo
+            | adapter: RefuseFailedTurnStorage,
+              opts: [controller: controller, session_id: id, turn_id: turn_id]
+          }
       }
     end)
 
@@ -615,14 +618,17 @@ defmodule Ouroboros.InteractiveSessionTest do
     :sys.replace_state(Store, fn state ->
       %{
         state
-        | adapter: FailAfterCreateStorage,
-          opts: [
-            controller: controller,
-            session_id: id,
-            store_key: state.key,
-            fallback: state.adapter,
-            fallback_opts: state.opts
-          ]
+        | repo: %{
+            state.repo
+            | adapter: FailAfterCreateStorage,
+              opts: [
+                controller: controller,
+                session_id: id,
+                store_key: state.repo.key,
+                fallback: state.repo.adapter,
+                fallback_opts: state.repo.opts
+              ]
+          }
       }
     end)
 
@@ -981,8 +987,11 @@ defmodule Ouroboros.InteractiveSessionTest do
     :sys.replace_state(Store, fn state ->
       %{
         state
-        | adapter: RefuseFailedTurnStorage,
-          opts: [controller: controller, session_id: id, turn_id: turn_id]
+        | repo: %{
+            state.repo
+            | adapter: RefuseFailedTurnStorage,
+              opts: [controller: controller, session_id: id, turn_id: turn_id]
+          }
       }
     end)
 
@@ -1386,7 +1395,7 @@ defmodule Ouroboros.InteractiveSessionTest do
 
     if Process.whereis(Store) do
       :sys.replace_state(Store, fn state ->
-        Map.merge(state, Map.take(original_store, [:adapter, :opts, :key]))
+        Map.merge(state, Map.take(original_store, [:repo]))
       end)
 
       case Store.get(id) do

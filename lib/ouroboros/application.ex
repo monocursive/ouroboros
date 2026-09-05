@@ -162,8 +162,6 @@ defmodule Ouroboros.Application do
           Ouroboros.Coding.Store,
           Ouroboros.Interactive.Store,
           Ouroboros.Team.Store,
-          Ouroboros.Orchestration.Store,
-          Ouroboros.Control.Store,
           Ouroboros.Control.Grants,
           # The permission engine sits with the other durable authority, above every
           # session that consults it. If its store restarts, rest_for_one takes the
@@ -185,91 +183,97 @@ defmodule Ouroboros.Application do
           # underneath it; ACP `session/set_mode` is a dialect verb the worker cannot carry.
           {Ouroboros.Application.RegistryOwner,
            keys: :unique, name: Ouroboros.Provider.Session.Registry},
-          {Ouroboros.Application.RegistryOwner, keys: :unique, name: Ouroboros.Coding.Registry},
-          {DynamicSupervisor, strategy: :one_for_one, name: Ouroboros.Coding.TaskSupervisor},
-          Ouroboros.Coding.Recovery,
-          {Ouroboros.Application.RegistryOwner,
-           keys: :unique, name: Ouroboros.Interactive.Registry},
-          {DynamicSupervisor, strategy: :one_for_one, name: Ouroboros.Interactive.TaskSupervisor},
-          Ouroboros.Interactive.Recovery,
-          {Ouroboros.Application.RegistryOwner, keys: :unique, name: Ouroboros.Team.Registry},
-          {DynamicSupervisor, strategy: :one_for_one, name: Ouroboros.Team.Supervisor},
-          Ouroboros.Team.Recovery,
-          orchestration_scheduler()
-        ] ++ control_children()
+          subtree(
+            Ouroboros.Session.Supervisor,
+            [
+              subtree(
+                Ouroboros.Coding.Supervisor,
+                [
+                  {Ouroboros.Application.RegistryOwner,
+                   keys: :unique, name: Ouroboros.Coding.Registry},
+                  {DynamicSupervisor,
+                   strategy: :one_for_one, name: Ouroboros.Coding.TaskSupervisor},
+                  Ouroboros.Coding.Recovery
+                ],
+                :rest_for_one
+              ),
+              subtree(
+                Ouroboros.Interactive.Supervisor,
+                [
+                  {Ouroboros.Application.RegistryOwner,
+                   keys: :unique, name: Ouroboros.Interactive.Registry},
+                  {DynamicSupervisor,
+                   strategy: :one_for_one, name: Ouroboros.Interactive.TaskSupervisor},
+                  Ouroboros.Interactive.Recovery
+                ],
+                :rest_for_one
+              ),
+              subtree(
+                Ouroboros.Team.RuntimeSupervisor,
+                [
+                  {Ouroboros.Application.RegistryOwner,
+                   keys: :unique, name: Ouroboros.Team.Registry},
+                  {DynamicSupervisor, strategy: :one_for_one, name: Ouroboros.Team.Supervisor},
+                  Ouroboros.Team.Recovery
+                ],
+                :rest_for_one
+              )
+            ] ++ automation_children(),
+            :one_for_one
+          )
+        ]
 
-    # Child order is a recovery boundary. If an in-memory authority such as the
-    # workspace lease manager or a registry/supervisor disappears, every
-    # downstream owner must restart and rebuild from its durable checkpoint.
-    # Letting those owners continue under a fresh empty authority would bypass
-    # leases or strand sessions.
-    #
-    # The capability rollout registry sits immediately after the node executor for the
-    # same reason: it is the deployment-level record of code the executor loaded, so it
-    # must not outlive the executor whose journal it describes.
-    #
-    # Cluster formation is deliberately at the tail. It connects and observes; it is not
-    # an authority anything downstream rebuilds from, because this node's role is
-    # resolved once at boot and held outside the process tree. Leading the chain with it
-    # would mean a discovery strategy's crash restarts every durable owner above, which
-    # is a far worse trade than losing topology logging for a moment.
-    #
-    # The gateway sits after even that, still an operator surface at the tail: it
-    # projects what the planes already know and holds nothing they rebuild from, so its
-    # crash must restart nothing durable. CodeIntel, Wasm, Desktop, MCP, and Web follow
-    # it for the same reason; Web is last of all. Gateway and Web are the two children a
-    # stranger can reach, which is one more reason for both to be downstream of
-    # everything rather than upstream of anything.
-    #
-    # Direct OAuth state is in the same tail category, immediately before the gateway
-    # because the gateway is its only caller. It owns a private credential file and
-    # short-lived browser/device login tasks; none of the planes rebuilds from its process
-    # state, and model calls resolve credentials from the durable file through ReqLLM.
-    #
-    # The language-server pool joins the same operator-surface tail, downstream of every
-    # plane and of cluster formation. It owns no durable state and nothing rebuilds from
-    # it, so no session may be restarted by a language server dying — and none is, because
-    # every plane starts above it. It is unconditional and lazy.
-    #
-    # It starts last, after the gateway: under `rest_for_one` a crash of this subtree then
-    # restarts nothing, and a crash of the account boundary or the gateway restarts only a
-    # pool that rebuilds itself on the next request. The gateway stays the only child a
-    # stranger can reach; what follows it owns nothing durable. `CodeIntel.Supervisor`
-    # still carries a generous restart intensity, because language-server failures are
-    # states inside the pool, never crashes of it.
-    #
-    # D4's MCP subtree, Computer Use's helper pool, and lane W's wasm pool are last for the
-    # same reasons: somebody else's program, or a host-privileged helper, on the end of a
-    # pipe, spawned lazily, owning nothing any plane rebuilds from. All three run only on
-    # `:core`. Computer Use precedes MCP because its pool holds the live per-session
-    # last-state map: an MCP subtree crash must not restart it and discard those snapshots.
-    # A Desktop supervisor crash may reconnect disposable MCP ports without losing durable
-    # session state.
-    #
-    # The wasm pool leads both of them by the same rule taken one step further. What its
-    # restart discards is live component instances — guest state that only `init` and every
-    # message since could approximate, and that no snapshot anywhere rebuilds. The desktop
-    # pool's map is rebuilt by the next capture and MCP's ports are disposable, so an
-    # improbable wasm crash paying for those two is the cheaper trade than an improbable MCP
-    # crash paying for a running guest.
-    #
-    # The web surface is last of all, and it is the second child here a stranger can
-    # reach. Everything the gateway's paragraph above says applies to it unchanged — it
-    # projects what the planes already know, holds nothing they rebuild from, and must be
-    # among the first things to stop — so it goes downstream of even the operator-surface
-    # tail rather than beside the gateway: under `rest_for_one` a crash of a browser
-    # endpoint then restarts nothing at all, which is the strongest form of the same
-    # argument. It reaches the runtime only through the gateway's own method table
-    # (`Ouroboros.Web.Call`), so two transports serve one authorization decision.
+    # Shared durable stores stay above Workspace: it rebuilds reservations from them.
+    # Ledger, admission, permissions, leases and provider registries still restart all
+    # consumers downstream. Independent helper/surface failures stay within their tier.
     children ++
-      [Ouroboros.Cluster, Ouroboros.Provider.OpenAIAuth, Ouroboros.Provider.GrokAuth] ++
-      gateway_children() ++
-      [Ouroboros.CodeIntel.Supervisor, Ouroboros.Wasm.Supervisor] ++
-      wasm_restart_children() ++
       [
-        Ouroboros.Provider.Native.Desktop.Supervisor,
-        Ouroboros.Provider.Native.Mcp.Supervisor
-      ] ++ web_children()
+        subtree(
+          Ouroboros.Surface.Supervisor,
+          [Ouroboros.Cluster, Ouroboros.Provider.OpenAIAuth, Ouroboros.Provider.GrokAuth] ++
+            gateway_children() ++
+            [
+              Ouroboros.CodeIntel.Supervisor,
+              subtree(
+                Ouroboros.Wasm.RuntimeSupervisor,
+                [Ouroboros.Wasm.Supervisor] ++ wasm_restart_children(),
+                :rest_for_one
+              ),
+              Ouroboros.Provider.Native.Desktop.Supervisor,
+              Ouroboros.Provider.Native.Mcp.Supervisor
+            ] ++ web_children(),
+          :one_for_one
+        )
+      ]
+  end
+
+  defp subtree(name, children, strategy) do
+    %{
+      id: name,
+      start: {Supervisor, :start_link, [children, [strategy: strategy, name: name]]},
+      type: :supervisor,
+      shutdown: :infinity
+    }
+  end
+
+  # Preserve existing behavior by default. Permission rules and grants remain core when
+  # objective automation is disabled; session and native subagent APIs remain available.
+  defp automation_children do
+    if Application.get_env(:ouroboros, :automation_enabled, true) do
+      [
+        subtree(
+          Ouroboros.Automation.Supervisor,
+          [
+            Ouroboros.Orchestration.Store,
+            Ouroboros.Control.Store,
+            orchestration_scheduler()
+          ] ++ control_children(),
+          :rest_for_one
+        )
+      ]
+    else
+      []
+    end
   end
 
   # The lane-W half of the same idea as `reconcile_worktrees`: a supervised one-shot task,
@@ -341,7 +345,7 @@ defmodule Ouroboros.Application do
   # `:builder`, and a `:signer` never acquire a listener by inheriting a default.
   defp gateway_children do
     if Ouroboros.Gateway.Config.enabled?() do
-      [Ouroboros.Gateway]
+      [{Ouroboros.Gateway, ready_application: :ouroboros}]
     else
       []
     end

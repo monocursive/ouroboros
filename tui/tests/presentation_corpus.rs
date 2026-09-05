@@ -1,23 +1,5 @@
-//! The words every golden transcript fixture renders, written out as literals.
-//!
-//! `test/support/gateway_golden/event_*.json` is one frame per event payload a client has
-//! to turn into a sentence. This file is the Rust half of what that corpus is for: each
-//! fixture goes through the real pipeline — JSON → [`Event::decode`] →
-//! [`PresentationEvent::from_event`] → [`project`] — and every claim below is the finished
-//! text, spelled out. No snapshot files and no golden-output library: a reviewer reading
-//! this file can see what the client says without running it, and a second implementation
-//! reading it knows exactly what it has to say.
-//!
-//! **These literals are the parity contract.** `Ouroboros.Web` reimplements both stages in
-//! Elixir (`docs/WEB.md` §5), and the two suites cannot call each other. The same fixture
-//! bytes and the same asserted words on both sides is the only mechanism that keeps them
-//! agreeing, so a change to any string here is a change to a contract with another
-//! toolchain rather than a test edit.
-//!
-//! What is deliberately *not* asserted here is layout: widths, colours, wrapping and the
-//! ratatui spans are the terminal's own and no browser will reproduce them. Cell kind,
-//! the tool summariser's verb/subject/outcome, the note and divider text, and the approval
-//! detail fields are the parts both surfaces owe the reader identically.
+//! Shared semantic expectations and platform-specific transcript cell behavior.
+//! Provider aliases are normalized by the runtime; legacy parsing stays covered here.
 
 use std::path::Path;
 
@@ -343,6 +325,7 @@ fn a_command_output_delta_is_its_own_cell() {
 #[test]
 fn only_an_empty_payload_is_drawn_as_nothing() {
     let mut empty = event("event_output_text_delta");
+    empty.raw.as_object_mut().unwrap().remove("semantic");
     empty.payload = serde_json::json!({"text": ""});
 
     assert_eq!(
@@ -1311,5 +1294,33 @@ fn every_transcript_fixture_renders_something_a_reader_can_see() {
                 "{name} projected to no cells at all"
             );
         }
+    }
+}
+
+#[test]
+fn shared_runtime_semantics_match_legacy_events_and_are_authoritative() {
+    let corpus: Value =
+        serde_json::from_str(include_str!("../../test/support/semantic_corpus.json")).unwrap();
+    let entries = corpus.as_array().unwrap();
+    assert!(entries.len() >= 25);
+    for entry in entries {
+        let name = entry["fixture"].as_str().unwrap();
+        let mut original = event(name);
+        let legacy = PresentationEvent::from_legacy_event(&original);
+        original.raw["semantic"] = entry["expected"].clone();
+        assert_eq!(PresentationEvent::from_event(&original), legacy, "{name}");
+        // A normalized event must not consult provider aliases a second time.
+        original.payload = serde_json::json!({});
+        assert_eq!(
+            PresentationEvent::from_event(&original),
+            legacy,
+            "{name}: ignored semantic record"
+        );
+        original.raw["semantic"]["version"] = serde_json::json!(999);
+        assert_eq!(
+            PresentationEvent::from_event(&original),
+            PresentationEvent::from_legacy_event(&original),
+            "{name}: future-version fallback"
+        );
     }
 }

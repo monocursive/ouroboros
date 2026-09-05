@@ -4,8 +4,8 @@ defmodule Ouroboros.Gateway.Methods do
 
   ## Dispatch never grows an atom
 
-  `table/0` is a literal map from a method *string* to its scope and ceiling, and
-  `invoke/2` is one literal clause per method. A client cannot name a function this
+  `Methods.Contract` maps each method *string* to its scope, ceiling, parameters and
+  literal handler atom. `invoke/2` validates that contract before dispatching. A client cannot name a function this
   module does not already contain, and no client byte reaches `String.to_atom/1`. The one
   parameter that is module-shaped — `upgrade.history`'s — is resolved through
   `String.to_existing_atom/1` inside a rescue, so an unknown name is `-32602` rather than
@@ -84,6 +84,7 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Control.Grants
   alias Ouroboros.Control.Permissions
   alias Ouroboros.Gateway.Methods.Browse
+  alias Ouroboros.Gateway.Methods.Contract
   alias Ouroboros.Gateway.Methods.Encode
   alias Ouroboros.Gateway.Methods.Placement
   alias Ouroboros.Gateway.Methods.Present
@@ -129,7 +130,7 @@ defmodule Ouroboros.Gateway.Methods do
       exit_result: 1
     ]
 
-  @default_timeout 15_000
+  @default_timeout Contract.default_timeout()
 
   # Permissions, MCP, and ledger get share this bound on owner-routed `:erpc`.
   @fleet_query_timeout 5_000
@@ -140,19 +141,19 @@ defmodule Ouroboros.Gateway.Methods do
   # the thing that gives up first: a client that asked for thirty seconds and got a
   # gateway timeout at fifteen would have no way to tell a slow capability from a wedged
   # one.
-  @agent_message_timeout 45_000
-  @default_agent_message_timeout_ms 5_000
-  @max_agent_message_timeout_ms 30_000
+
+  @default_agent_message_timeout_ms Contract.default_agent_message_timeout_ms()
+  @max_agent_message_timeout_ms Contract.max_agent_message_timeout_ms()
 
   # What may cross into an agent, and what may come back. Both are the same number because
   # both are a message body — one written by a gateway client, one written by whatever the
   # agent is. The reply is additionally *marked* when it is cut, because a JSON document
   # that was silently truncated is a JSON document a client will try to parse.
-  @max_agent_message_bytes 64 * 1024
+  @max_agent_message_bytes Contract.max_agent_message_bytes()
 
   # A mesh agent id. Long enough for the `"wasm/" <> name` a rollout mints and for the
   # opaque ids the forge does, short enough that a refused lookup costs nothing.
-  @max_agent_id_bytes 512
+  @max_agent_id_bytes Contract.max_agent_id_bytes()
 
   # The id prefix a lane-W capability runs under. `Ouroboros.Wasm.Rollout` mints it; it is
   # restated here rather than imported because this module must not depend on the wasm plane
@@ -167,7 +168,7 @@ defmodule Ouroboros.Gateway.Methods do
   # yet", which is an honest answer a caller can retry, rather than a killed task.
   @code_intel_wait_ready_ms 5_000
   @code_intel_request_timeout_ms 8_000
-  @code_intel_max_wait_ms 10_000
+  @code_intel_max_wait_ms Contract.code_intel_max_wait_ms()
   @code_intel_erpc_timeout 14_000
 
   # Kept below the method ceiling on purpose. An `:erpc` that outlives the gateway task
@@ -192,50 +193,44 @@ defmodule Ouroboros.Gateway.Methods do
   # detail about which node did not report.
   # W19. `wasm.download` reads at most half a mebibyte out of a node-local file: it is
   # `wasm.upload`'s own ceiling, in the other direction, for the same work.
-  @wasm_download_timeout 15_000
+  @wasm_download_timeout Contract.wasm_download_timeout()
 
-  @wasm_upload_timeout 15_000
-  @wasm_sign_timeout 60_000
-  @wasm_deploy_timeout 180_000
-  @wasm_rollback_timeout 30_000
+  @wasm_upload_timeout Contract.wasm_upload_timeout()
+  @wasm_sign_timeout Contract.wasm_sign_timeout()
+  @wasm_deploy_timeout Contract.wasm_deploy_timeout()
+  @wasm_rollback_timeout Contract.wasm_rollback_timeout()
 
   # Below each ceiling above, so the plane's own typed refusal wins the race against a
   # transport deadline that says nothing about why.
   @wasm_erpc_slack 5_000
 
-  @replay_limit 500
-  @default_replay_limit 100
+  @replay_limit Contract.replay_limit()
+  @default_replay_limit Contract.default_replay_limit()
 
   # `InteractiveSession.start/1` waits `:infinity` for provider readiness by design — a
   # provider that has to be installed, authenticated, or woken up legitimately takes
   # minutes on a first run. The gateway still refuses to hold a request open forever, so
   # this is the one ceiling measured in provider time rather than in control-plane time.
-  @start_timeout 120_000
 
   # `interactive.request_approval` waits for a person. Fifteen minutes is the stated
   # ceiling: long enough that stepping away from the terminal is not a denial, short
   # enough that a forgotten prompt does not hold a gateway task open for a shift.
-  @approval_prompt_timeout 15 * 60 * 1_000
 
   # G1. One `interactive.delegate` may make two team calls, each bounded at 60s by
   # `Team.control_call/2`, plus the parent's own checkpoint. Below the sum on purpose: a
   # delegation that has taken this long has a team that is not answering, and the caller
   # learns which from `teams.state` rather than by waiting out both bounds.
-  @delegate_timeout 90_000
 
   # B7. One operator command, and the same number `Ouroboros.Workspace.Exec` stops it at.
   # A ceiling below the runner's would kill the gateway task while the command kept
   # running, and the entry it started would be settled by nobody.
-  @shell_timeout 10 * 60 * 1_000
 
   # D9. A compaction that has to summarise makes one model call on the session's own
   # model with no tools. That is provider latency, not control-plane latency, so it gets
   # a ceiling of its own — well above the default and well below a start's.
-  @compaction_timeout 120_000
 
   # Preview and admit run the forge build peer (60s default) and, for admit, a rollout.
   # Keep the gateway ceiling above that so a named forge refusal wins over -32005.
-  @forge_timeout 120_000
 
   # R2. Verified replay re-derives a whole session: one `Loop.run_turn/2` per recorded turn,
   # each rebuilding the cached prefix from the workspace (instruction files, the tool
@@ -245,19 +240,16 @@ defmodule Ouroboros.Gateway.Methods do
   # above what any session an operator would ask about takes, and well below a ceiling that
   # would let one call hold a gateway task for a shift. A session too long to verify inside
   # it is a real answer — that session needs an offline verifier, not a longer socket.
-  @replay_verify_timeout 120_000
 
   # `Team.add_worker/3` and `delegate/4` bound themselves at 60s; `cancel/2` and `close/1`
   # call at `:infinity`. Both land here as 60s, and for the two `:infinity` verbs the
   # timeout answer says what it can honestly say: the gateway stopped waiting, the runtime
   # did not stop working, and `teams.state` is where the outcome shows up.
-  @team_timeout 60_000
 
   # `hello`'s entry does not describe a task ceiling — the handshake is answered by the
   # connection itself and never runs in a task. It describes the deadline by which the
   # handshake must have completed, and `Ouroboros.Gateway.Conn` reads it from here so
   # that the number a client is told about and the number enforced cannot drift apart.
-  @hello_deadline 10_000
 
   @codes %{
     parse_error: -32700,
@@ -273,399 +265,48 @@ defmodule Ouroboros.Gateway.Methods do
     not_found: -32007
   }
 
-  @table %{
-    # `hello` is in the table because the handshake is a method a client calls and has to
-    # find in `methods`. It is answered by the connection itself, which owns the socket
-    # lifecycle a failed handshake has to close, so its timeout is the handshake deadline.
-    "hello" => %{scope: :read, timeout: @hello_deadline},
-    "runtime.status" => %{scope: :read, timeout: @default_timeout},
-    "runtime.providers" => %{scope: :read, timeout: @default_timeout},
-    # A3/F3. What `llm_db` knows about the models each configured provider draws from —
-    # the window and the price a client needs to turn a session's `usage` into a context
-    # percentage and a cost. Read scope: it consults a packaged snapshot and the node's
-    # own provider configuration, and starts nothing.
-    "runtime.models" => %{scope: :read, timeout: @default_timeout},
-    "fleet.status" => %{scope: :read, timeout: @default_timeout},
-    "fleet.doctor" => %{scope: :read, timeout: @default_timeout},
-    "fleet.revoke" => %{scope: :operate, timeout: 15_000},
-    "account.read" => %{scope: :read, timeout: @default_timeout},
-    "grok.account.read" => %{scope: :read, timeout: @default_timeout},
-    "agents.list" => %{scope: :read, timeout: @default_timeout},
-    "agents.state" => %{scope: :read, timeout: @default_timeout},
-    "interactive.list" => %{scope: :read, timeout: @default_timeout},
-    "interactive.info" => %{scope: :read, timeout: @default_timeout},
-    "interactive.replay" => %{scope: :read, timeout: @default_timeout},
-    # One event, whole. It is `replay` with a window of one — same plane call, same
-    # routing, same ceiling — so the only thing that makes it a separate method is the
-    # larger per-leaf byte cap it encodes the answer under.
-    "interactive.event_detail" => %{scope: :read, timeout: @default_timeout},
-    # R1. The native session's turn journal — the replay substrate, and a different record
-    # from the event stream `replay` above serves: events are what a client renders, this
-    # is what the session *was*. Read scope by the same dividing line as everything else in
-    # this block: it reads one file and starts nothing.
-    "interactive.journal" => %{scope: :read, timeout: @default_timeout},
-    # D9. What a session can honestly say about its own context window. Read scope: it
-    # asks a live transport a question and starts nothing.
-    "interactive.context" => %{scope: :read, timeout: @default_timeout},
-    # G1. What this conversation delegated, with the status the team currently holds.
-    "interactive.delegations" => %{scope: :read, timeout: @default_timeout},
-    "interactive.subscribe" => %{scope: :read, timeout: @default_timeout},
-    "interactive.unsubscribe" => %{scope: :read, timeout: @default_timeout},
-    "coding.list" => %{scope: :read, timeout: @default_timeout},
-    "coding.info" => %{scope: :read, timeout: @default_timeout},
-    "coding.replay" => %{scope: :read, timeout: @default_timeout},
-    "coding.event_detail" => %{scope: :read, timeout: @default_timeout},
-    "coding.subscribe" => %{scope: :read, timeout: @default_timeout},
-    "coding.unsubscribe" => %{scope: :read, timeout: @default_timeout},
-    "teams.list" => %{scope: :read, timeout: @default_timeout},
-    "teams.state" => %{scope: :read, timeout: @default_timeout},
-    "plans.list" => %{scope: :read, timeout: @default_timeout},
-    "plans.get" => %{scope: :read, timeout: @default_timeout},
-    "control.list" => %{scope: :read, timeout: @default_timeout},
-    "control.get" => %{scope: :read, timeout: @default_timeout},
-    "upgrade.status" => %{scope: :read, timeout: @default_timeout},
-    "upgrade.rollouts" => %{scope: :read, timeout: @default_timeout},
-    "upgrade.history" => %{scope: :read, timeout: @default_timeout},
-    "signing.decisions" => %{scope: :read, timeout: @default_timeout},
-    "grants.list" => %{scope: :read, timeout: @default_timeout},
-    # The permission engine is node-local like every other authority here, so these three
-    # route to the machine whose rules they describe. Reading is `read`; writing a rule
-    # widens or narrows what a session may do without a human present, so it is `operate`.
-    "permissions.list" => %{scope: :read, timeout: @default_timeout},
-    # ---------------------------------------------------------------------------------
-    # E2/E3/I3. Code intelligence and the effect ledger, on the wire.
-    #
-    # Every one of these is `:read` except `code_intel.touch`, and the split is the same
-    # one the rest of this table makes: reading what a language server or the ledger
-    # already knows changes nothing, while telling a language server that a file moved
-    # spends this node's memory on a document a caller chose. Reads route to the node that
-    # owns the workspace or the entries, because both authorities are node-local — a pool
-    # runs where the files are (D7) and a ledger where the effect ran (I3) — and a remote
-    # answer is a bounded `:erpc` so an unreachable machine reads as unreachable rather
-    # than as a gateway ceiling with no detail.
-    # ---------------------------------------------------------------------------------
-    "runtime.lsp.status" => %{scope: :read, timeout: @default_timeout},
-    "code_intel.request" => %{scope: :read, timeout: @default_timeout},
-    "code_intel.diagnostics" => %{scope: :read, timeout: @default_timeout},
-    "ledger.list" => %{scope: :read, timeout: @default_timeout},
-    "ledger.get" => %{scope: :read, timeout: @default_timeout},
-    "ledger.export" => %{scope: :read, timeout: @default_timeout},
-    # ---------------------------------------------------------------------------------
-    # D4. MCP servers on the wire.
-    #
-    # `:read` for the same reason `runtime.lsp.status` is: this projects what a node's
-    # pool already holds and starts nothing. Node-routed, because an MCP server runs
-    # where its session runs — the pool is keyed by workspace and lives on the machine
-    # that owns it — so a fleet answer is one call per machine, not a merged view this
-    # node could invent. There is no `mcp.add`: a server definition is code that runs on
-    # somebody's machine, and it is declared in node configuration or in a file an
-    # operator wrote, never authored over a socket.
-    # ---------------------------------------------------------------------------------
-    "mcp.list" => %{scope: :read, timeout: @default_timeout},
-    "computer_use.status" => %{scope: :read, timeout: @default_timeout},
-    "computer_use.artifact" => %{scope: :read, timeout: @default_timeout},
-    # ---------------------------------------------------------------------------------
-    # W5. Lane W on the wire.
-    #
-    # `:read` on the same dividing line the rest of this table draws, and a stricter one
-    # than usual: these two do not merely avoid changing state, they avoid *starting* the
-    # containment helper. `Ouroboros.Wasm.Surface` reads a pool process that already
-    # exists, a directory, and a register. A node that has never built `ouro-wasm` answers
-    # both as readily as one that runs it hourly.
-    #
-    # These two were once the whole of lane W on the wire, and this comment used to say
-    # there would deliberately never be a `wasm.deploy`. W12 reversed that, and D15 says
-    # why: the authority in a deployment is the **signature**, which the target verifies
-    # against its own trust policy, so a socket that carries a signed bundle adds nothing
-    # a client did not already have — while a `:operate` client could always start any BEAM
-    # capability through the mesh. What is still true is the sentence underneath it: **no
-    # unsigned bytes reach the helper through any path**, and there is still no `wasm.drop`,
-    # `wasm.load`, `wasm.instantiate` or `wasm.call`, because those would be a socket
-    # deciding what this node runs rather than a signer deciding what may exist.
-    #
-    # That first claim was briefly false and is worth saying twice. `wasm.sign` once read a
-    # component's import list off the staged file with this node's own helper, which handed
-    # attacker-supplied bytes to the one process whose job is running other people's code,
-    # at `:operate`, before a signature existed and upstream of the signing service's rate
-    # limit. `imports` is required now, the client computes it with the *operator's* helper
-    # (`ouro wasm inspect`), and a wrong list is refused at stage by
-    # `Ouroboros.Wasm.Verifier.cross_check/2` — which is D5's posture and always was.
-    #
-    # Node-routed like `computer_use.status`, because a helper, a store and a register are
-    # node-local authorities: a fleet answer is one call per machine, not a merged view
-    # this node could invent.
-    # ---------------------------------------------------------------------------------
-    "wasm.status" => %{scope: :read, timeout: @default_timeout},
-    "wasm.list" => %{scope: :read, timeout: @default_timeout},
-    # Starts the helper so `ouro desktop doctor` can report TCC. Status stays start-nothing.
-    "computer_use.probe" => %{scope: :operate, timeout: @default_timeout},
-    "code_intel.touch" => %{scope: :operate, timeout: @default_timeout},
-    # This is intentionally not coupled to invitation cancellation. It is the explicit
-    # state-loss boundary that lets an operator retire durable session-owner evidence
-    # only after a roster tombstone is present and the machine is offline. The tombstone
-    # lives in the local fleet profile, which the client rebuilds only from a roster whose
-    # signature it verified at import; this node trusts that profile and does not verify.
-    "fleet.forget_session_owner" => %{scope: :operate, timeout: @default_timeout},
-    # Session ids are caller-owned and both planes reconcile the same immutable intent.
-    # A ceiling can fire after durable creation, so never imply that minting a second id
-    # is safe merely because the gateway stopped waiting.
-    "permissions.add" => %{scope: :operate, timeout: @default_timeout},
-    "permissions.remove" => %{scope: :operate, timeout: @default_timeout},
-    "interactive.start" => %{scope: :operate, timeout: @start_timeout, outcome: :unknown},
-    "account.login.start" => %{scope: :operate, timeout: @default_timeout},
-    "account.login.complete" => %{scope: :operate, timeout: @default_timeout},
-    "account.login.cancel" => %{scope: :operate, timeout: @default_timeout},
-    "account.logout" => %{scope: :operate, timeout: @default_timeout},
-    "grok.account.login.start" => %{scope: :operate, timeout: @default_timeout},
-    "grok.account.login.cancel" => %{scope: :operate, timeout: @default_timeout},
-    # A credential value crosses this boundary once and is never returned. Operate scope
-    # is the same authority that may start paid work; read links cannot re-key the node.
-    "credentials.anthropic.set" => %{scope: :operate, timeout: @default_timeout},
-    "credentials.xai.set" => %{scope: :operate, timeout: @default_timeout},
-    # Both calls checkpoint intent before dispatch. A gateway ceiling can therefore fire
-    # after the provider accepted the turn, so the client must reconcile the session
-    # rather than present the timeout as a refusal or blindly mint another turn id.
-    "interactive.send_message" => %{
-      scope: :operate,
-      timeout: @default_timeout,
-      outcome: :unknown
-    },
-    "interactive.follow_up" => %{
-      scope: :operate,
-      timeout: @default_timeout,
-      outcome: :unknown
-    },
-    "interactive.retry_turn" => %{scope: :operate, timeout: @default_timeout, outcome: :unknown},
-    # B1/B6. Session controls that change an open session rather than starting a new one.
-    # `configure` is bounded by what the transport declares it can still change and
-    # answers with when the change takes hold. `:operate` because it writes durable
-    # session state and moves a permission posture.
-    "interactive.configure" => %{scope: :operate, timeout: @default_timeout},
-    # A title is durable session state a person chose, so it is `:operate` for the same
-    # reason `configure` is, and bounded at the boundary because it lands on every list row.
-    "interactive.rename" => %{scope: :operate, timeout: @default_timeout},
-    # A fork starts a session, so it inherits `interactive.start`'s ceiling and the same
-    # admission: a gateway timeout here cannot prove the child was not created, and the
-    # caller-owned `id` is what makes reconciling it possible rather than guesswork.
-    "interactive.fork" => %{scope: :operate, timeout: @start_timeout, outcome: :unknown},
-    # D9. The three context verbs. `compact` and `handoff` move a session's conversation
-    # and are therefore `:operate`; `context` reads what the session already knows and
-    # starts nothing, so it sits with the other reads. `handoff` starts a session, so it
-    # inherits `interactive.start`'s ceiling and its outcome admission.
-    "interactive.compact" => %{scope: :operate, timeout: @compaction_timeout},
-    # D6. Rewind restores files byte-exact from the native session's own checkpoints and
-    # truncates its conversation; it is the native transport's verb and refused elsewhere.
-    "interactive.rewind" => %{scope: :operate, timeout: @compaction_timeout},
-    "interactive.rewind_points" => %{scope: :read, timeout: @default_timeout},
-    # R2. Verified replay. `:operate` rather than `:read` by the dividing line this table
-    # already draws at `computer_use.status`/`probe`: it starts a process — a real turn loop
-    # per recorded turn — even though it spends no tokens, executes no tool and writes
-    # nothing. Its own ceiling, because a long session re-derives many turns.
-    "interactive.replay_verify" => %{scope: :operate, timeout: @replay_verify_timeout},
-    # B7. The operator's own shell, in the session's admitted workspace, on its owner
-    # node. `:operate` and nothing less: it runs a command. The ceiling is the runner's
-    # own — ten minutes — because the gateway killing the task would leave a ledger entry
-    # nobody settles, and `Exec` already stops the command at the same number.
-    "workspace.exec" => %{scope: :operate, timeout: @shell_timeout, outcome: :unknown},
-    # D11. One directory listing, so a client that has to choose a workspace before it can
-    # start a session does not need a second channel to the disk. `:operate` even though it
-    # writes nothing and starts nothing: this exists to start sessions, and a listener held
-    # at `read` scope is one that was not trusted to. The ceiling is the default because the
-    # work is one `readdir` and one `lstat` per name on a local filesystem.
-    "workspace.browse" => %{scope: :operate, timeout: @default_timeout},
-    # G1. A delegation is a coding task with a parent, started through the workspace's
-    # default team. `:operate` because it starts work, and the ceiling is the team's own
-    # (`teams.add_worker` and `teams.delegate` each bound themselves at 60s, and this verb
-    # may make both calls). A ceiling that fires cannot prove the child was not created,
-    # which is why the delegation's id is caller-owned.
-    "interactive.delegate" => %{scope: :operate, timeout: @delegate_timeout, outcome: :unknown},
-    "interactive.handoff" => %{scope: :operate, timeout: @start_timeout, outcome: :unknown},
-    "interactive.steer" => %{scope: :operate, timeout: @default_timeout},
-    # C2. The one method whose latency is a person's: it asks the session's owner for a
-    # decision and holds the request open until a human answers, the permission engine
-    # answers for them, or the coordinator's own deadline passes. Fifteen minutes is the
-    # documented ceiling and the outermost of three — the coordinator denies at thirteen
-    # and the plane's transport stops waiting at fourteen — so a client that reaches this
-    # number has learned that its own runtime stopped answering, not that the tool ran.
-    "interactive.request_approval" => %{scope: :operate, timeout: @approval_prompt_timeout},
-    "interactive.respond_approval" => %{scope: :operate, timeout: @default_timeout},
-    "interactive.interrupt" => %{scope: :operate, timeout: @default_timeout},
-    "interactive.close" => %{scope: :operate, timeout: @default_timeout},
-    "interactive.kill" => %{scope: :operate, timeout: @default_timeout},
-    "interactive.delete" => %{scope: :operate, timeout: @default_timeout},
-    "coding.start" => %{scope: :operate, timeout: @start_timeout, outcome: :unknown},
-    "coding.respond_approval" => %{scope: :operate, timeout: @default_timeout},
-    "coding.cancel" => %{scope: :operate, timeout: @default_timeout},
-    "coding.delete" => %{scope: :operate, timeout: @default_timeout},
-    "teams.add_worker" => %{scope: :operate, timeout: @team_timeout},
-    "teams.delegate" => %{scope: :operate, timeout: @team_timeout},
-    # The two verbs whose upstream call is `:infinity`. A gateway timeout here does not
-    # cancel anything, so the answer carries `outcome: unknown` rather than implying the
-    # request was refused; `teams.state` is how a client learns which it was.
-    "teams.cancel" => %{scope: :operate, timeout: @team_timeout, outcome: :unknown},
-    "teams.close" => %{scope: :operate, timeout: @team_timeout, outcome: :unknown},
-    "control.submit" => %{scope: :operate, timeout: @default_timeout},
-    "control.cancel" => %{scope: :operate, timeout: @default_timeout},
-    "agents.stop" => %{scope: :operate, timeout: @default_timeout},
-    "capabilities.list" => %{scope: :operate, timeout: @default_timeout},
-    "capabilities.preview" => %{scope: :operate, timeout: @forge_timeout},
-    "capabilities.admit" => %{scope: :operate, timeout: @forge_timeout},
-    # Answered by the connection: it holds the listener configuration this verb needs a
-    # second permission from, and it owns the socket the acknowledgement has to reach
-    # before the node stops.
-    "runtime.shutdown" => %{scope: :operate, timeout: @default_timeout},
-    # ---------------------------------------------------------------------------------
-    # W13. One message into one mesh agent.
-    #
-    # `:operate` and not `:read`, twice over: it changes the agent's state by definition,
-    # and for a lane-W capability it *runs a component* — the containment helper starts if
-    # it is not already up, which is the exact thing `wasm.status` and `wasm.list` are
-    # `:read` because they never do.
-    #
-    # Not node-routed. `Ouroboros.Mesh.send_message/4` resolves the agent through the
-    # cluster-wide `:pg` directory and calls it wherever it lives, so this verb already
-    # reaches a peer's agent and a `node` parameter would be a second, weaker answer to a
-    # question the mesh has already answered. What that means for lane W is worth saying
-    # plainly: an `:operate` client on any node in the cluster can message a capability on
-    # any other, and the containment boundary that makes that safe is the helper's linker,
-    # not this table.
-    # ---------------------------------------------------------------------------------
-    "agents.message" => %{scope: :operate, timeout: @agent_message_timeout},
-    # W12. Lane W from the operator's chair, and why these are `:operate` and not more.
-    #
-    # A deployment's authority is the signature on it. Every one of these verbs hands the
-    # target node bytes that the target then verifies against its **own**
-    # `upgrade_trust_policy` before anything is written, so the socket is a courier and
-    # never a signer — which is the whole of D15. `:operate` is the same scope that already
-    # starts a BEAM capability through `capabilities.admit` and a session through
-    # `interactive.start`; a listener held at `:read` reaches none of them.
-    #
-    # Node-routed like `wasm.status`, because everything they touch — the upload directory,
-    # the component store, the helper, the rollout register — is node-local.
-    # ---------------------------------------------------------------------------------
-    "wasm.upload" => %{scope: :operate, timeout: @wasm_upload_timeout},
-    "wasm.sign" => %{scope: :operate, timeout: @wasm_sign_timeout},
-    "wasm.deploy" => %{scope: :operate, timeout: @wasm_deploy_timeout, outcome: :unknown},
-    "wasm.rollback" => %{scope: :operate, timeout: @wasm_rollback_timeout},
-    # W19. The reply direction of the same transport, and `:operate` for the same reason
-    # `wasm.upload` is: it is not a read of anything a node holds *about* itself, it is a node
-    # handing out bytes — and only the bytes its own `sign/2` compiled and signed, from a slot
-    # that verb minted, bound by a digest the signed manifest already names (D28).
-    "wasm.download" => %{scope: :operate, timeout: @wasm_download_timeout}
-  }
-
   # The exact terms the upstream schemas declare, spelled out here so that a client string
   # is matched against them rather than converted into one. `Jido.Harness.RunRequest`
   # names the first three; `Jido.Harness.ApprovalResponse` names the last two.
-  @approval_modes %{
-    "default" => :default,
-    "prompt" => :prompt,
-    "auto_edit" => :auto_edit,
-    "auto_approve" => :auto_approve
-  }
 
-  @sandbox_modes %{
-    "default" => :default,
-    "read_only" => :read_only,
-    "workspace_write" => :workspace_write,
-    "unrestricted" => :unrestricted
-  }
-
-  @reasoning_efforts %{
-    "none" => :none,
-    "low" => :low,
-    "medium" => :medium,
-    "high" => :high,
-    "xhigh" => :xhigh,
-    "max" => :max
-  }
+  @reasoning_efforts Contract.reasoning_efforts()
 
   # W12. The whole of a probe, named here so the refusal can list them rather than say only
   # which key was wrong.
   @probe_keys ["input", "expect"]
 
-  @approval_decisions %{"approve" => :approve, "deny" => :deny}
-  @approval_scopes %{"once" => :once, "session" => :session}
+  @approval_decisions Contract.approval_decisions()
+  @approval_scopes Contract.approval_scopes()
   # The one shape of `provider_options` an answer may carry: a plan-exit question's
   # explicit choice and the follow-up prompt that runs once the session is out of plan
   # mode (B2). Anything else under that key is still refused — an approval is a yes or a
   # no, and this is the narrowest door a plan-aware client needs.
-  @plan_exit_choices ["auto_edit", "prompt", "keep_planning"]
+  @plan_exit_choices Contract.plan_exit_choices()
   @max_follow_up_bytes 32 * 1024
-  @approval_response_param {"response", :required,
-                            {:either,
-                             [
-                               {:enum_of, @approval_decisions},
-                               {:object,
-                                [
-                                  {"decision", :required, {:enum_of, @approval_decisions}, nil},
-                                  {"scope", {:optional, "once"}, {:enum_of, @approval_scopes},
-                                   "`session` additionally writes a session-scoped rule from the pattern the request suggested"},
-                                  {"reason", :optional, :string, nil},
-                                  {"actor", {:optional, "human"},
-                                   {:enum, ["human", "headless", "automation"]},
-                                   "who answered; the durable approval record preserves it"},
-                                  {"provider_options", :optional,
-                                   {:object,
-                                    [
-                                      {"choice", :optional, {:enum, @plan_exit_choices},
-                                       "a plan-exit question's explicit answer"},
-                                      {"follow_up", :optional, :string,
-                                       "the bounded prompt to run after leaving plan mode"}
-                                    ]}, "accepted only for a plan-exit answer"}
-                                ]}
-                             ]}, "an approval is a yes or a no"}
 
   # The permission engine's own vocabulary, spelled out for the same reason as the rest:
   # a client string is matched against these terms, never converted into one.
-  @permission_scopes %{
-    "node" => :node,
-    "user" => :user,
-    "workspace" => :workspace,
-    "session" => :session
-  }
+  @permission_scopes Contract.permission_scopes()
 
   # What `permissions.add` may write. `:node` is operator configuration, read from
   # `config :ouroboros, :permissions` and never authored over the wire. `:session` is a
   # session's own "don't ask again" — it is written by answering an approval, and giving
   # an operator a verb to mint one for a session they are not in would be a different
   # thing wearing the same name.
-  @permission_rule_scopes %{"user" => :user, "workspace" => :workspace}
+  @permission_rule_scopes Contract.permission_rule_scopes()
 
   # Removal reaches one scope further, because cleaning up after a session that remembered
   # something is a real operator need.
-  @permission_removable_scopes Map.put(@permission_rule_scopes, "session", :session)
+  @permission_removable_scopes Contract.permission_removable_scopes()
 
-  @permission_decisions %{"allow" => :allow, "deny" => :deny, "ask" => :ask}
+  @permission_decisions Contract.permission_decisions()
 
   # What a client may set when it starts a session or a coding run. Everything here is
   # durable, provider-neutral execution intent. Deliberately absent: `env`, `mcp_config`,
   # and `provider_options` — the durable checkpoint refuses inline environment and MCP
   # configuration outright ([coding/task_state.ex]), and provider knobs are node
   # configuration rather than something a terminal hands over per run.
-  @start_options %{
-    "id" => :string,
-    "provider" => :provider,
-    "workspace" => :string,
-    "model" => :string,
-    "system_prompt" => :string,
-    "max_turns" => :positive_integer,
-    "event_limit" => :event_limit,
-    "approval_mode" => {:enum, @approval_modes},
-    "sandbox_mode" => {:enum, @sandbox_modes},
-    "reasoning_effort" => {:enum, @reasoning_efforts},
-    "runtime_exposure" => :boolean,
-    # D7. Both planes already carry `worktree_requested` durably and provision before the
-    # lease; this is the option that lets `ouro new --worktree` reach it. Deliberately not
-    # in `@configuration_options`: a session cannot be moved into a worktree after its
-    # workspace has been admitted and leased.
-    "worktree" => :boolean,
-    # B2. Start planning: a read-only posture with a plan-exit question at the end of the
-    # turn. Which transports can be told is `Ouroboros.Provider.plan_mode/2`'s answer.
-    "plan" => :boolean,
-    "machine" => :node,
-    "node" => :node
-  }
+  @start_options Contract.start_options()
 
   # What `interactive.configure` may name on an *open* session. A strict subset of
   # `@start_options`: everything else there is immutable start intent, and a session that
@@ -679,31 +320,19 @@ defmodule Ouroboros.Gateway.Methods do
   # sending `session/set_mode`. A `:string` here rather than an enum is the honest type —
   # the allowed values belong to the agent, not to this table — and every transport whose
   # dialect declares no modes refuses it by name.
-  @configuration_options %{
-    "approval_mode" => {:enum, @approval_modes},
-    "sandbox_mode" => {:enum, @sandbox_modes},
-    "model" => :string,
-    "reasoning_effort" => {:enum, @reasoning_efforts},
-    "plan" => :boolean,
-    "mode" => :string
-  }
+  @configuration_options Contract.configuration_options()
 
   # `Ouroboros.Team.Server` accepts exactly these two for a worker.
-  @worker_options %{"role" => :string, "node" => :node}
+  @worker_options Contract.worker_options()
 
-  @delegation_options %{
-    "id" => :string,
-    "coding_node" => :node,
-    "workspace" => :string,
-    "provider" => :provider
-  }
+  @delegation_options Contract.delegation_options()
 
   # What `interactive.delegate` may name. A strict subset of `@delegation_options`:
   # `coding_node` is absent because the child runs where the conversation does, and the
   # delegation's own `id` is a positional argument rather than an option.
-  @interactive_delegation_options %{"workspace" => :string, "provider" => :provider}
+  @interactive_delegation_options Contract.interactive_delegation_options()
 
-  @control_options %{"id" => :string, "max_revisions" => :non_negative_integer}
+  @control_options Contract.control_options()
 
   # ---------------------------------------------------------------------------------
   # H3. The parameter contract, as data.
@@ -735,573 +364,7 @@ defmodule Ouroboros.Gateway.Methods do
   # narrower vocabulary than the runtime accepts. `note` is `nil` or one sentence.
   # ---------------------------------------------------------------------------------
 
-  @start_option_notes %{
-    "id" =>
-      "caller-owned; a matching retry adopts the same immutable intent and a conflicting reuse is refused",
-    "machine" => "an alias of `node` — provide one or the other, never both",
-    "workspace" =>
-      "required, and absolute, when `machine`/`node` selects a machine other than this one",
-    "worktree" => "provisions a `git worktree` under the data directory before the lease is taken"
-  }
-
-  @start_params for {name, kind} <- Enum.sort(@start_options),
-                    do: {name, :optional, kind, Map.get(@start_option_notes, name)}
-
-  @configuration_option_notes %{
-    "mode" =>
-      "the *agent's* own mode id, validated against the `availableModes` it published; refused by name on a transport whose dialect declares none",
-    "plan" => "not a Harness configuration key — it takes its own per-transport path (B2)"
-  }
-
-  @configuration_params for {name, kind} <- Enum.sort(@configuration_options),
-                            do:
-                              {name, :optional, kind, Map.get(@configuration_option_notes, name)}
-
-  @worker_params for {name, kind} <- Enum.sort(@worker_options),
-                     do:
-                       {name, :optional, kind,
-                        if(name == "node", do: "the machine the worker runs on", else: nil)}
-
-  @delegation_params for {name, kind} <- Enum.sort(@delegation_options),
-                         do:
-                           {name, :optional, kind,
-                            if(name == "id", do: "caller-owned delegation id", else: nil)}
-
-  @interactive_delegation_params for {name, kind} <-
-                                       Enum.sort(@interactive_delegation_options),
-                                     do:
-                                       {name, :optional, kind,
-                                        "defaults to the conversation's own"}
-
-  @control_params for {name, kind} <- Enum.sort(@control_options),
-                      do: {name, :optional, kind, nil}
-
   # The routing pair every plane verb carries: which session, and which machine owns it.
-  @session_id {"id", :required, :string, "the interactive session id"}
-  @session_node {"node", :optional, :node,
-                 "the machine that owns the session; this one by default"}
-  @task_id {"id", :required, :string, "the coding task id"}
-  @task_node {"node", :optional, :node, "the machine that owns the task; this one by default"}
-  @authority_node {"node", :optional, :node,
-                   "the machine whose authority answers; this one by default"}
-
-  @cursor_param {"cursor", {:optional, 0}, :non_negative_integer,
-                 "exclusive — the window starts at the next sequence"}
-  @limit_param {"limit", {:optional, @default_replay_limit}, {:integer, 1, @replay_limit}, nil}
-  @sequence_param {"sequence", :required, :positive_integer,
-                   "the exact sequence; a gap answers `-32007` rather than the next event that exists"}
-  @ledger_limit_param {"limit", :optional, {:limits, {EffectLedger, :query_limits, []}},
-                       "the ledger's own bound, not this table's"}
-
-  @turn_input_param {"input", :required,
-                     {:either,
-                      [
-                        :string,
-                        {:object,
-                         [
-                           {"prompt", :required, :string, nil},
-                           {"attachments", :optional, {:list, :string, 32},
-                            "each must be an existing regular file the leased workspace contains"},
-                           {"reasoning_effort", :optional, {:enum_of, @reasoning_efforts}, nil}
-                         ]}
-                      ]}, nil}
-  @turn_id_param {"turn_id", :optional, :string,
-                  "caller-supplied; resending the same `{id, input, turn_id}` returns the same turn rather than starting a second"}
-
-  @params %{
-    "hello" =>
-      {:open,
-       [
-         {"token", :required, :string,
-          "compared against the listener's token by SHA-256 digest, so neither length nor content leaks"},
-         {"protocol", :required, {:const, 1},
-          "anything else is `-32002` carrying `{\"server_protocol\": 1}`, and the socket closes"},
-         {"client", :optional, :string,
-          "a display name for the audit line, cut to 120 characters"}
-       ]},
-    "runtime.status" => {:open, []},
-    "runtime.providers" => {:open, []},
-    "runtime.models" => {:open, []},
-    "runtime.lsp.status" => {:open, []},
-    "runtime.shutdown" =>
-      {:open, [],
-       "answered by the connection, which requires `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN=1` on top of operate scope"},
-    "fleet.status" => {:open, []},
-    "fleet.doctor" => {:open, []},
-    "fleet.revoke" =>
-      {:closed, [{"artifact", :required, :string, "CA-attested revocation, at most 16 KiB"}]},
-    "fleet.forget_session_owner" =>
-      {:closed,
-       [
-         {"machine", :required, :string,
-          "must appear in the validated local profile's roster tombstones, and must be offline"},
-         {"accept_state_loss", :required, {:const, true},
-          "anything else is refused: this retires durable session-owner evidence"}
-       ]},
-    "account.read" => {:closed, []},
-    "account.login.start" =>
-      {:closed, [{"flow", {:optional, "browser"}, {:enum, ["browser", "device_code"]}, nil}]},
-    "account.login.complete" =>
-      {:closed,
-       [
-         {"login_id", :required, :string, "the loginId returned by account.login.start"},
-         {"code", :required, :string, "the OAuth authorization code"},
-         {"state", :required, :string, "the OAuth state returned to the callback"}
-       ]},
-    "account.login.cancel" =>
-      {:closed,
-       [{"login_id", :required, :string, "correlates with the `loginId` the start reply carried"}]},
-    "account.logout" => {:closed, []},
-    "grok.account.read" => {:closed, []},
-    "grok.account.login.start" =>
-      {:closed, [],
-       "starts `grok login --device-auth`; the first-party CLI owns and refreshes every subscription token"},
-    "grok.account.login.cancel" =>
-      {:closed,
-       [{"login_id", :required, :string, "the loginId returned by grok.account.login.start"}]},
-    "credentials.anthropic.set" =>
-      {:closed,
-       [
-         {"api_key", {:optional, nil}, :string,
-          "replaces the privately stored key; may be omitted when updating an existing stored credential"},
-         {"workspace_id", {:optional, nil}, :string,
-          "`wrkspc_`-prefixed workspace for an identity-linked key; may be omitted for a single-workspace key"}
-       ],
-       "updates the node-owned Anthropic credential without returning it; `ANTHROPIC_API_KEY` and `ANTHROPIC_WORKSPACE_ID` still take precedence"},
-    "credentials.xai.set" =>
-      {:closed, [{"api_key", :required, :string, "replaces the privately stored xAI API key"}],
-       "updates the node-owned xAI API key without returning it; `XAI_API_KEY` still takes precedence"},
-    "agents.list" => {:open, []},
-    "agents.state" =>
-      {:open, [{"id", :required, :string, "the agent id"}],
-       "for a lane-W capability (`wasm/<name>`) the answer additionally carries `untrusted: true` and `truncated`, and `agent.state.last_answer`/`last_message` are bounded at 64 KiB with an in-band marker: both are written by a component, and this verb is `read`"},
-    "agents.stop" => {:open, [{"id", :required, :string, "the agent id"}]},
-    "interactive.list" => {:open, []},
-    "interactive.info" => {:closed, [@session_id, @session_node]},
-    "interactive.replay" => {:closed, [@session_id, @cursor_param, @limit_param, @session_node]},
-    "interactive.event_detail" => {:closed, [@session_id, @sequence_param, @session_node]},
-    "interactive.journal" =>
-      {:closed,
-       [
-         @session_id,
-         {"since_seq", {:optional, 0}, :non_negative_integer,
-          "exclusive — the window starts at the next journal sequence"},
-         @limit_param,
-         @session_node
-       ], "native sessions only; every other transport answers `-32006`"},
-    "interactive.replay_verify" =>
-      {:closed, [@session_id, @session_node],
-       "native sessions only; every other transport answers `-32006`. Re-runs the recorded " <>
-         "turns through the real turn loop and answers `{verified, turns, records, head, " <>
-         "divergence}`. `divergence` is `null`, a `diverged` object naming the record and " <>
-         "the field that stopped agreeing, or a `boundary` object naming why verification " <>
-         "stops there — `turns` counts what verified either way"},
-    "interactive.context" => {:closed, [@session_id, @session_node]},
-    "interactive.delegations" => {:closed, [@session_id, @session_node]},
-    "interactive.subscribe" =>
-      {:closed, [@session_id, @cursor_param, @session_node],
-       "answered by the connection itself, because the plane registers the calling process"},
-    "interactive.unsubscribe" => {:closed, [@session_id, @session_node]},
-    "coding.list" => {:open, []},
-    "coding.info" => {:closed, [@task_id, @task_node]},
-    "coding.replay" => {:closed, [@task_id, @cursor_param, @limit_param, @task_node]},
-    "coding.event_detail" => {:closed, [@task_id, @sequence_param, @task_node]},
-    "coding.subscribe" =>
-      {:closed, [@task_id, @cursor_param, @task_node],
-       "answered by the connection itself, because the plane registers the calling process"},
-    "coding.unsubscribe" => {:closed, [@task_id, @task_node]},
-    "teams.list" => {:open, []},
-    "teams.state" => {:open, [{"id", :required, :string, "the team id"}]},
-    "plans.list" => {:open, []},
-    "plans.get" => {:open, [{"id", :required, :string, "the plan id"}]},
-    "control.list" => {:open, []},
-    "control.get" => {:open, [{"id", :required, :string, "the control run id"}]},
-    "upgrade.status" => {:open, []},
-    "upgrade.rollouts" => {:open, []},
-    "upgrade.history" =>
-      {:open,
-       [
-         {"module", :required, :string,
-          "a module this node has loaded, with or without the `Elixir.` prefix; an unknown name is `-32602`, never a new atom"}
-       ]},
-    "signing.decisions" => {:open, []},
-    "grants.list" =>
-      {:open,
-       [{"principal", :required, :string, "per-principal by design; there is no list-all"}]},
-    "permissions.list" =>
-      {:closed,
-       [
-         {"scope", :optional, {:enum_of, @permission_scopes}, nil},
-         {"workspace", :optional, :string, nil},
-         @authority_node
-       ]},
-    "permissions.add" =>
-      {:closed,
-       [
-         {"scope", :required, {:enum_of, @permission_rule_scopes},
-          "`node` rules come from `config :ouroboros, :permissions` and are never written over the wire"},
-         {"pattern", :required, :string,
-          "validated by `Control.Permissions.Pattern` and by nothing else"},
-         {"decision", :required, {:enum_of, @permission_decisions}, nil},
-         {"workspace", :optional, :string, "required for a `workspace` rule"},
-         @authority_node
-       ]},
-    "permissions.remove" =>
-      {:closed,
-       [
-         {"scope", :required, {:enum_of, @permission_removable_scopes}, nil},
-         {"id", :required, :string, "an unknown id is `-32007`"},
-         @authority_node
-       ]},
-    "code_intel.request" =>
-      {:closed,
-       [
-         {"workspace", :required, :string,
-          "narrows the marker walk and can never widen it; `/` is refused rather than obeyed"},
-         {"operation", :required, {:enum_mfa, {CodeIntel, :operations, []}}, nil},
-         {"path", :required, :string, nil},
-         {"line", {:optional, 0}, :non_negative_integer, "0-based, as the protocol reports it"},
-         {"character", {:optional, 0}, :non_negative_integer, "0-based"},
-         {"query", :optional, :string, "for the two symbol searches"},
-         @authority_node
-       ]},
-    "mcp.list" =>
-      {:closed,
-       [
-         {"workspace", :optional, :string,
-          "narrow the answer to the servers claimed by sessions in this workspace; every workspace by default"},
-         @authority_node
-       ]},
-    "computer_use.status" =>
-      {:closed,
-       [
-         @authority_node
-       ]},
-    "computer_use.probe" =>
-      {:closed,
-       [
-         @authority_node
-       ]},
-    "wasm.status" =>
-      {:closed,
-       [
-         @authority_node
-       ],
-       "`helper.path` and `store.root` are basenames, not paths: both verbs are `read`, and an absolute path names an install prefix rather than anything about lane W"},
-    "wasm.list" =>
-      {:closed,
-       [
-         @authority_node
-       ],
-       "`components[].sha256` names a component; nothing here is a filesystem path. `rollouts[].form` is which of the two forms this node loads that component from — `precompiled` when the signed manifest names an artifact for exactly this node's wasmtime and target triple and the store holds it, `source` otherwise, `null` where this node cannot say (no readable manifest, or no helper that has reported its build)"},
-    "computer_use.artifact" =>
-      {:closed,
-       [
-         {"sha256", :required, :string,
-          "the content hash of a staged screenshot from a tool_result artifact; served as base64 from this node only"},
-         {"session_id", :optional, :string,
-          "native provider session id whose desktop/ dir to search; omitted, only the live helper pool's session dirs are searched"},
-         @authority_node
-       ]},
-    "code_intel.diagnostics" =>
-      {:closed,
-       [
-         {"workspace", :required, :string, nil},
-         {"path", :required, :string, nil},
-         {"wait_ms", :optional, {:integer, 0, @code_intel_max_wait_ms},
-          "how long to wait for the cache to describe the file's current content"},
-         @authority_node
-       ]},
-    "code_intel.touch" =>
-      {:closed,
-       [
-         {"workspace", :required, :string, nil},
-         {"path", :required, :string, nil},
-         {"action", :required, {:enum, ["changed", "closed", "ensure_open", "open"]},
-          "`ensure_open` is the one to reach for when asking about a file; `open` re-reads it and assigns a new version"},
-         @authority_node
-       ]},
-    "ledger.list" =>
-      {:closed,
-       [
-         {"principal", :optional, :string, nil},
-         {"effect", :optional, {:enum_mfa, {EffectLedger, :effects, []}}, nil},
-         {"status", :optional, {:enum_mfa, {EffectLedger, :statuses, []}}, nil},
-         {"since_sequence", {:optional, 0}, :non_negative_integer, nil},
-         {"order", {:optional, "desc"}, {:enum, ["asc", "desc"]}, nil},
-         @ledger_limit_param,
-         @authority_node,
-         {"fleet", {:optional, false}, :boolean,
-          "fans out to every connected core node over the same bounded `:erpc` the `fleet.*` verbs use"}
-       ]},
-    "ledger.get" =>
-      {:closed, [{"id", :required, :string, "an unknown id is `-32007`"}, @authority_node]},
-    "ledger.export" =>
-      {:closed,
-       [
-         {"since", {:optional, 0}, :non_negative_integer, "the first sequence to export"},
-         @authority_node
-       ]},
-    "interactive.start" => {:closed, @start_params},
-    "interactive.send_message" =>
-      {:closed, [@session_id, @turn_input_param, @turn_id_param, @session_node]},
-    "interactive.follow_up" =>
-      {:closed, [@session_id, @turn_input_param, @turn_id_param, @session_node]},
-    "interactive.retry_turn" =>
-      {:closed,
-       [
-         @session_id,
-         {"source_turn_id", :required, :string,
-          "the latest failed turn; retries are idempotent per source"},
-         @session_node
-       ]},
-    "interactive.steer" =>
-      {:closed, [@session_id, @turn_input_param, @session_node],
-       "no `turn_id`: the harness mints a steer's request id inside its own worker, so this verb has no caller-keyed idempotency"},
-    "interactive.request_approval" =>
-      {:closed,
-       [
-         @session_id,
-         {"request", :required,
-          {:object,
-           [
-             {"tool_name", :required, :string, nil},
-             {"input", :optional, :object, "the tool's own arguments"},
-             {"tool_use_id", :optional, :string, nil},
-             {"cwd", :optional, :string, "the directory the tool would run in"}
-           ]}, "a closed object; nothing else is accepted"},
-         @session_node
-       ]},
-    "interactive.respond_approval" =>
-      {:closed,
-       [
-         @session_id,
-         {"request_id", :required, :string, "the id the `approval_requested` event carried"},
-         @approval_response_param,
-         @session_node
-       ]},
-    "interactive.configure" =>
-      {:closed, [@session_id, @session_node | @configuration_params],
-       "a strict subset of `interactive.start`'s options; whether any one of them is changeable is the transport's answer, asked per session"},
-    "interactive.rename" =>
-      {:closed,
-       [
-         @session_id,
-         {"title", :required, :string,
-          "trimmed, at most 120 graphemes, and refused rather than stripped if it holds a control character"},
-         @session_node
-       ]},
-    "interactive.fork" =>
-      {:closed,
-       [
-         @session_id,
-         {"fork_id", :optional, :string, "caller-owned id for the child"},
-         {"to_turn", :optional, :turn_target,
-          "branch at the end of this turn rather than at the tail; native sessions only, and refused rather than silently widened when the parent no longer holds that boundary"},
-         {"model", :optional, :string,
-          "the child's model, replacing the parent's rather than inheriting it"},
-         @session_node
-       ]},
-    "interactive.rewind" =>
-      {:closed,
-       [
-         @session_id,
-         {"to_turn", :required, :turn_target, nil},
-         {"what", {:optional, "both"}, {:enum, ["both", "conversation", "files"]}, nil},
-         @session_node
-       ]},
-    "interactive.rewind_points" => {:closed, [@session_id, @session_node]},
-    "interactive.compact" =>
-      {:closed,
-       [
-         @session_id,
-         {"focus", :optional, :string, "what the fold should keep"},
-         @session_node
-       ]},
-    "interactive.handoff" =>
-      {:closed,
-       [
-         @session_id,
-         {"prompt", :optional, :string,
-          "a prompt forging the `<ouroboros-runtime>` delimiters is refused, not escaped"},
-         {"handoff_id", :optional, :string, "caller-owned id for the child"},
-         @session_node
-       ]},
-    "workspace.exec" =>
-      {:closed,
-       [
-         @session_id,
-         {"command", :required, :string,
-          "run through `/bin/sh -c` in the session's admitted workspace, on its owner node"},
-         @session_node
-       ]},
-    "workspace.browse" =>
-      {:closed,
-       [
-         {"path", :optional, :string,
-          "an absolute path inside one of `roots`; the first root by default, and a relative path is refused rather than resolved against the daemon's working directory"}
-       ],
-       "directories only, dotfiles excluded, name-sorted, and bounded at " <>
-         "#{Browse.limit()} entries with `truncated` saying whether the list was cut"},
-    "interactive.delegate" =>
-      {:closed,
-       [
-         @session_id,
-         {"objective", :required, :string, nil},
-         {"delegation_id", :optional, :string,
-          "caller-owned; a repeat under the same id answers with the same delegation rather than a second one"},
-         @session_node | @interactive_delegation_params
-       ]},
-    "interactive.interrupt" =>
-      {:closed,
-       [
-         @session_id,
-         {"turn_id", :optional, :string, "the running turn by default"},
-         @session_node
-       ]},
-    "interactive.close" => {:closed, [@session_id, @session_node]},
-    "interactive.kill" => {:closed, [@session_id, @session_node]},
-    "interactive.delete" => {:closed, [@session_id, @session_node], "terminal sessions only"},
-    "coding.start" => {:closed, [{"objective", :required, :string, nil} | @start_params]},
-    "coding.respond_approval" =>
-      {:closed,
-       [
-         @task_id,
-         {"request_id", :required, :string, "the id the approval_requested event carried"},
-         @approval_response_param,
-         @task_node
-       ]},
-    "coding.cancel" => {:closed, [@task_id, @task_node]},
-    "coding.delete" => {:closed, [@task_id, @task_node], "terminal tasks only"},
-    "teams.add_worker" =>
-      {:closed,
-       [
-         {"team_id", :required, :string, "must name a team running on this node"},
-         {"worker_id", :required, :string, nil} | @worker_params
-       ]},
-    "teams.delegate" =>
-      {:closed,
-       [
-         {"team_id", :required, :string, "must name a team running on this node"},
-         {"worker_id", :required, :string, nil},
-         {"objective", :required, :string, nil} | @delegation_params
-       ]},
-    "teams.cancel" =>
-      {:open,
-       [
-         {"team_id", :required, :string, "must name a team running on this node"},
-         {"delegation_id", :required, :string, nil}
-       ]},
-    "teams.close" =>
-      {:open, [{"team_id", :required, :string, "must name a team running on this node"}]},
-    "control.submit" => {:closed, [{"objective", :required, :string, nil} | @control_params]},
-    "control.cancel" => {:open, [{"id", :required, :string, "the control run id"}]},
-    "capabilities.list" => {:closed, [{"workspace", :required, :string, nil}]},
-    "capabilities.preview" =>
-      {:closed, [{"workspace", :required, :string, nil}, {"path", :required, :string, nil}]},
-    "capabilities.admit" =>
-      {:closed,
-       [
-         {"workspace", :required, :string, nil},
-         {"path", :required, :string, nil},
-         {"session_id", :optional, :string,
-          "recorded as `session:<id>` in the admission's authorship"}
-       ]},
-    # W13
-    "agents.message" =>
-      {:closed,
-       [
-         {"to", :required, :string,
-          "the agent id, at most #{@max_agent_id_bytes} bytes; a lane-W capability is `wasm/<name>`"},
-         {"body", :required, :json,
-          "the message body, any JSON value, at most #{@max_agent_message_bytes} bytes encoded"},
-         {"from", :optional, :string,
-          "who the message is from, at most #{@max_agent_id_bytes} bytes; defaults to `gateway`"},
-         {"timeout_ms", :optional, {:integer, 1, @max_agent_message_timeout_ms},
-          "how long to wait for the agent; defaults to #{@default_agent_message_timeout_ms}"}
-       ],
-       "`reply` is the agent's `last_answer` and is **untrusted**: for a lane-W capability it is prose and JSON the component wrote. It is returned whole when it encodes within #{@max_agent_message_bytes} bytes and as a marked, truncated string otherwise, which is what `truncated` distinguishes. A message an agent refused is still a delivered message: this verb says the agent answered nothing, and `agents.state` says why"},
-    # W12
-    "wasm.upload" =>
-      {:closed,
-       [
-         {"upload", :optional, :string,
-          "the id a previous frame returned; omitted, this frame opens a new upload and the reply names it"},
-         {"offset", :required, :non_negative_integer,
-          "must equal what the node already holds; a mismatch answers `-32602` naming the offset it has, which is where to resume"},
-         {"data", :required, :string,
-          "base64 of at most 512 KiB of the file, bounded before it is decoded"},
-         {"final", {:optional, false}, :boolean,
-          "closes the upload: the bytes become readable by `wasm.sign` and `wasm.deploy`, and the reply carries their sha256"},
-         @authority_node
-       ],
-       "the transport for bytes a JSON frame cannot carry (docs/WASM.md D16). An upload carries no authority: what comes out of it is verified by whichever verb consumes it, it is consumed once, and it is swept ten minutes after the last frame that touched it"},
-    "wasm.sign" =>
-      {:closed,
-       [
-         {"upload", :required, :string, "a committed `wasm.upload` holding the component bytes"},
-         {"name", :required, :string,
-          "lower case, starting with a letter or digit, then letters, digits, `.`, `_`, `-`, at most 64 bytes; it is the register's module and the durable wrapper's id"},
-         {"author", :required, :string, "provenance the signing policy requires"},
-         {"imports", :required, {:list, :string, 8},
-          "the imports the component declares, computed by the client with the operator's own helper (`ouro wasm inspect`). This node never parses unsigned bytes to find out; a list that does not match what the component imports is refused at stage by the cross-check, which is where a manifest that describes something else has always been caught"},
-         # W8
-         {"precompile", {:optional, true}, :boolean,
-          "whether this node compiles the component into wasmtime's serialized form at sign time and records its digest in the signed manifest (docs/WASM.md D22–D24). Default true, and honoured only where this node has an `ouro-wasm` on disk; the artifact travels in the bundle beside the source and is loaded on a target **only** where that node's own helper reports exactly this node's wasmtime version and target triple, which turns that node's `load` from a compile into a mapping. Every node that does not match compiles the source form under §7.3's bounds, so a precompiled bundle deploys everywhere an ordinary one does. `false` — `ouro wasm sign --no-precompile` — signs the source form alone, which is also what a node with no helper does and what happens when the artifact is too large to travel in this verb's reply"},
-         # W15
-         {"kind", {:optional, "capability"},
-          {:either, [{:const, "capability"}, {:const, "policy"}]},
-          "what this component is, and therefore which of the helper's two closed worlds its bytes are ever admitted to. A `capability` answers mesh messages and is reachable by the `capability` tool; a `policy` answers permission requests for `Ouroboros.Wasm.PolicyEngine` and is reachable by neither. It is part of the **signed** manifest, so a policy deployed as a capability is refused at stage by the helper's world check and so is the reverse; a policy's `eval` is a list of cases rather than a list of probes, and a policy may declare no `start_config`"},
-         {"language", :optional, :string, nil},
-         {"source_sha256", :optional, :string, "64 lower-case hex"},
-         {"start_config", :optional, :string,
-          "the config the durable wrapper is started with; the id is derived from `name` and is never a parameter"},
-         # W15. For `kind: "policy"` this is `{"cases": [{"request": <json object>, "expect":
-         # {"decision": "allow"|"deny"|"ask"}}], "budget_ms": <ms>}` instead: a policy is not a
-         # mesh agent, so a probe list over agent state says nothing about one.
-         {"eval", :optional,
-          {:object,
-           [
-             {"probes", :required, {:list, :object, 20},
-              "each `{\"input\": <json>, \"expect\": {\"kind\": ..., ...}}` — `input` is the message body handed to the capability, whatever the capability itself calls it. The kinds are `any_reply`, `contains` (takes `substring`), `equals` (takes `value`) and `state_matches` (takes `key`, a state field this build already knows, and `value`). What each one is held against differs: `contains` matches its substring against the answer *rendered* as text, so it reads a decoded JSON object the way `inspect/1` writes one (`%{\"echo\" => …}`), while `equals` and `state_matches` compare terms — a `state_matches` on `last_answer` must be the whole decoded reply as JSON (`{\"echo\": {\"greet\": \"world\"}}`), not a string of it, and `messages_received` is the counter to reach for when the shape of the answer is not the point"},
-             {"budget_ms", :optional, :positive_integer, "the deadline every probe runs under"},
-             {"max_latency_ms", :optional, :positive_integer,
-              "a gate on the latency observed, checked after the answer arrives"},
-             {"required", :optional, {:either, [{:const, "all"}, :object]},
-              "`\"all\"`, or `{\"at_least\": n}`"}
-           ]},
-          "the signed evaluation spec; required by default for lane W (D12) and refused by the signer when absent. There is no `initial_state`: what a capability is evaluated as is the deployment's statement, not the test's"},
-         @authority_node
-       ],
-       "answers the bundle's **prefix** rather than the bundle: the client already holds the bytes it uploaded, and a sixteen-mebibyte result would need a chunked download to hand somebody their own file back. There is no `epoch` parameter: it is allocated over the connected cluster with `Ouroboros.Upgrade.Epoch.next/2`, because an epoch a client chose could be placed at the rollout register's plausibility ceiling, which leaves no number that is both fresh and plausible and wedges lane W on that node durably"},
-    "wasm.deploy" =>
-      {:closed,
-       [
-         {"upload", :required, :string,
-          "a committed `wasm.upload` holding one `.ouro-wasm` bundle"},
-         {"nodes", :optional, {:list, :node, 32}, "the targets; this node alone by default"},
-         @authority_node
-       ],
-       "the bundle is parsed under its bounds and verified against the driving node's own trust policy before the store, the helper or the rollout register hears about it. A rollout that ran answers with its state — `live`, `rolled_back` or `quarantined` — rather than with an error"},
-    "wasm.rollback" =>
-      {:closed,
-       [
-         {"name", :required, :string, "the live lane-W capability to retire"},
-         @authority_node
-       ],
-       "stops the wrapper agent on every node the entry names and marks the entry; the component bytes stay in the store (D6), so redeploying needs a new epoch and a new signature but no new build"},
-    # W19
-    "wasm.download" =>
-      {:closed,
-       [
-         {"download", :required, :string,
-          "the id a `wasm.sign` receipt named under `artifact.download`; this node minted it and no client may choose one"},
-         {"offset", :required, :non_negative_integer,
-          "a chunk boundary — a multiple of the receipt's `chunk_bytes`, below `size`. It is not a seek: a client walks the file with the offsets these answers hand it, and anything else is refused rather than answered with bytes from the middle of something"},
-         @authority_node
-       ],
-       "the reply direction of `wasm.upload` (docs/WASM.md D28). A node hands out **only** bytes its own `wasm.sign` compiled and signed: there is no verb that puts one here, the slot is minted by `sign/2` alone, and what comes back is bound by the `sha256` the signed manifest already carries — repeated in every chunk, so a client checks each frame as well as the whole. `data` is base64 of at most the slot's `chunk_bytes` decoded bytes, and that number is **this node's own frame**: `min(512 KiB, (OUROBOROS_GATEWAY_MAX_FRAME - 1 KiB) * 3/4)`, because nothing on the outbound path is held to the frame and a reply larger than it is a line this node writes and its own client refuses. `final` marks the chunk that completes the artifact, and reading it **releases the slot** — a client that loses that answer signs again rather than asking twice. The slot count and the two clocks are `Ouroboros.Wasm.Upload`'s, read from that module rather than restated; the idle one is moved by a read, because nothing writes to a download after it is minted"}
-  }
 
   @type entry :: %{
           :scope => :read | :operate,
@@ -1323,7 +386,7 @@ defmodule Ouroboros.Gateway.Methods do
 
   @doc "The method table: name to the scope it requires and the ceiling it runs under."
   @spec table() :: %{String.t() => entry()}
-  def table, do: @table
+  def table, do: Contract.table()
 
   @doc """
   The state fields a signed eval spec's `state_matches` check may name.
@@ -1337,11 +400,11 @@ defmodule Ouroboros.Gateway.Methods do
 
   @doc "Every method name this build serves, as reported in the `hello` result."
   @spec names() :: [String.t()]
-  def names, do: @table |> Map.keys() |> Enum.sort()
+  def names, do: table() |> Map.keys() |> Enum.sort()
 
   @doc "Looks up one method without ever converting the name to an atom."
   @spec fetch(String.t()) :: {:ok, entry()} | :error
-  def fetch(name) when is_binary(name), do: Map.fetch(@table, name)
+  def fetch(name) when is_binary(name), do: Map.fetch(table(), name)
 
   @doc """
   Whether a listener running at `listener_scope` may run this method.
@@ -1377,29 +440,8 @@ defmodule Ouroboros.Gateway.Methods do
   wrong quietly; this is the seam that makes the drift loud.
   """
   @spec params() :: %{String.t() => map()}
-  def params do
-    Map.new(@params, fn {method, entry} -> {method, normalize_params(entry)} end)
-  end
-
-  @doc "One method's parameter contract, or `:error` if this build does not serve it."
-  @spec params(String.t()) :: {:ok, map()} | :error
-  def params(method) when is_binary(method) do
-    case Map.fetch(@params, method) do
-      {:ok, entry} -> {:ok, normalize_params(entry)}
-      :error -> :error
-    end
-  end
-
-  defp normalize_params({envelope, descriptors}),
-    do: normalize_params({envelope, descriptors, nil})
-
-  defp normalize_params({envelope, descriptors, note}) do
-    %{envelope: envelope, note: note, params: Enum.map(descriptors, &normalize_descriptor/1)}
-  end
-
-  defp normalize_descriptor({name, requirement, type, note}) do
-    %{name: name, requirement: requirement, type: type, note: note}
-  end
+  defdelegate params(), to: Contract
+  defdelegate params(method), to: Contract
 
   @doc """
   Validates the parameters of a subscribe call.
@@ -1410,7 +452,7 @@ defmodule Ouroboros.Gateway.Methods do
   @spec subscription_params(plane(), map()) ::
           {:ok, InteractiveRef.t() | TaskRef.t(), non_neg_integer()} | {:invalid, String.t()}
   def subscription_params(plane, params) do
-    with :ok <- only_keys(params, ["id", "cursor", "node"]),
+    with :ok <- Contract.validate("#{plane}.subscribe", params),
          {:ok, session} <- session_target(plane, params),
          {:ok, cursor} <- fetch_cursor(params) do
       {:ok, session, cursor}
@@ -1421,7 +463,8 @@ defmodule Ouroboros.Gateway.Methods do
   @spec session_param(plane(), map()) ::
           {:ok, InteractiveRef.t() | TaskRef.t()} | {:invalid, String.t()}
   def session_param(plane, params) do
-    with :ok <- only_keys(params, ["id", "node"]), do: session_target(plane, params)
+    with :ok <- Contract.validate("#{plane}.unsubscribe", params),
+         do: session_target(plane, params)
   end
 
   @doc """
@@ -1490,22 +533,48 @@ defmodule Ouroboros.Gateway.Methods do
   Runs one method's handler. Called inside a supervised task, never in the connection.
   """
   @spec invoke(String.t(), map()) :: result()
-  def invoke(method, params)
+  def invoke(method, params) do
+    case Contract.handler(method) do
+      {:ok, handler} when handler != :connection ->
+        case Contract.validate(method, params) do
+          :ok -> apply(__MODULE__, handler, [params])
+          {:invalid, message} -> invalid_params(message)
+        end
 
-  def invoke("runtime.status", _params), do: safe(fn -> {:ok, Ouroboros.status()} end)
+      _ ->
+        {:error, code(:method_not_found), "unknown method #{inspect(method)}"}
+    end
+  end
 
-  def invoke("runtime.providers", _params), do: safe(fn -> {:ok, Present.providers()} end)
+  @doc false
+  def handle_runtime_status(_params) do
+    safe(fn -> {:ok, Ouroboros.status()} end)
+  end
 
-  def invoke("runtime.models", _params), do: safe(fn -> {:ok, Ouroboros.Models.list()} end)
+  @doc false
+  def handle_runtime_providers(_params) do
+    safe(fn -> {:ok, Present.providers()} end)
+  end
 
-  def invoke("fleet.status", _params), do: safe(fn -> {:ok, Cluster.fleet_status()} end)
+  @doc false
+  def handle_runtime_models(_params) do
+    safe(fn -> {:ok, Ouroboros.Models.list()} end)
+  end
 
-  def invoke("fleet.doctor", _params), do: safe(fn -> {:ok, Cluster.fleet_doctor()} end)
+  @doc false
+  def handle_fleet_status(_params) do
+    safe(fn -> {:ok, Cluster.fleet_status()} end)
+  end
 
-  def invoke("fleet.revoke", params) do
-    with :ok <- only_keys(params, ["artifact"]),
-         {:ok, artifact} <- fetch_string(params, "artifact"),
-         true <- byte_size(artifact) <= 16_384 do
+  @doc false
+  def handle_fleet_doctor(_params) do
+    safe(fn -> {:ok, Cluster.fleet_doctor()} end)
+  end
+
+  @doc false
+  def handle_fleet_revoke(params) do
+    with {:ok, artifact} <- fetch_string(params, "artifact"),
+         true <- byte_size(artifact) <= 16384 do
       safe(fn -> Cluster.Revocations.distribute(artifact) end)
     else
       {:invalid, message} -> invalid_params(message)
@@ -1513,10 +582,10 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  def invoke("fleet.forget_session_owner", params) do
+  @doc false
+  def handle_fleet_forget_session_owner(params) do
     safe(fn ->
-      with :ok <- only_keys(params, ["machine", "accept_state_loss"]),
-           {:ok, machine} <- fetch_string(params, "machine"),
+      with {:ok, machine} <- fetch_string(params, "machine"),
            true <- Map.get(params, "accept_state_loss") == true do
         machine
         |> Cluster.forget_session_owner()
@@ -1533,26 +602,23 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
-  def invoke("account.read", params) do
-    with :ok <- only_keys(params, []) do
-      safe(fn -> account_reply(account_adapter().read()) end)
-    else
-      {:invalid, message} -> invalid_params(message)
-    end
+  @doc false
+  def handle_account_read(_params) do
+    safe(fn -> account_reply(account_adapter().read()) end)
   end
 
-  def invoke("account.login.start", params) do
-    with :ok <- only_keys(params, ["flow"]),
-         {:ok, flow} <- account_flow(Map.get(params, "flow", "browser")) do
+  @doc false
+  def handle_account_login_start(params) do
+    with {:ok, flow} <- account_flow(Map.get(params, "flow", "browser")) do
       safe(fn -> account_reply(account_adapter().login(flow)) end)
     else
       {:invalid, message} -> invalid_params(message)
     end
   end
 
-  def invoke("account.login.complete", params) do
-    with :ok <- only_keys(params, ["login_id", "code", "state"]),
-         {:ok, login_id} <- fetch_string(params, "login_id"),
+  @doc false
+  def handle_account_login_complete(params) do
+    with {:ok, login_id} <- fetch_string(params, "login_id"),
          {:ok, code} <- fetch_string(params, "code"),
          {:ok, state} <- fetch_string(params, "state") do
       safe(fn -> account_reply(account_adapter().complete(login_id, code, state)) end)
@@ -1561,51 +627,42 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  def invoke("account.login.cancel", params) do
-    with :ok <- only_keys(params, ["login_id"]),
-         {:ok, login_id} <- fetch_string(params, "login_id") do
+  @doc false
+  def handle_account_login_cancel(params) do
+    with {:ok, login_id} <- fetch_string(params, "login_id") do
       safe(fn -> account_reply(account_adapter().cancel(login_id)) end)
     else
       {:invalid, message} -> invalid_params(message)
     end
   end
 
-  def invoke("account.logout", params) do
-    with :ok <- only_keys(params, []) do
-      safe(fn -> account_reply(account_adapter().logout()) end)
-    else
-      {:invalid, message} -> invalid_params(message)
-    end
+  @doc false
+  def handle_account_logout(_params) do
+    safe(fn -> account_reply(account_adapter().logout()) end)
   end
 
-  def invoke("grok.account.read", params) do
-    with :ok <- only_keys(params, []) do
-      safe(fn -> grok_account_reply(grok_account_adapter().read()) end)
-    else
-      {:invalid, message} -> invalid_params(message)
-    end
+  @doc false
+  def handle_grok_account_read(_params) do
+    safe(fn -> grok_account_reply(grok_account_adapter().read()) end)
   end
 
-  def invoke("grok.account.login.start", params) do
-    with :ok <- only_keys(params, []) do
-      safe(fn -> grok_account_reply(grok_account_adapter().login()) end)
-    else
-      {:invalid, message} -> invalid_params(message)
-    end
+  @doc false
+  def handle_grok_account_login_start(_params) do
+    safe(fn -> grok_account_reply(grok_account_adapter().login()) end)
   end
 
-  def invoke("grok.account.login.cancel", params) do
-    with :ok <- only_keys(params, ["login_id"]),
-         {:ok, login_id} <- fetch_string(params, "login_id") do
+  @doc false
+  def handle_grok_account_login_cancel(params) do
+    with {:ok, login_id} <- fetch_string(params, "login_id") do
       safe(fn -> grok_account_reply(grok_account_adapter().cancel(login_id)) end)
     else
       {:invalid, message} -> invalid_params(message)
     end
   end
 
-  def invoke("credentials.anthropic.set", params) do
-    with :ok <- only_keys(params, ["api_key", "workspace_id"]),
-         {:ok, api_key} <- fetch_optional_api_key(params, "api_key"),
+  @doc false
+  def handle_credentials_anthropic_set(params) do
+    with {:ok, api_key} <- fetch_optional_api_key(params, "api_key"),
          {:ok, workspace_id} <- fetch_optional_workspace_id(params, "workspace_id"),
          :ok <- require_anthropic_update(api_key, workspace_id) do
       safe(fn -> reply(anthropic_key_adapter().configure(api_key, workspace_id)) end)
@@ -1614,16 +671,19 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  def invoke("credentials.xai.set", params) do
-    with :ok <- only_keys(params, ["api_key"]),
-         {:ok, api_key} <- fetch_api_key(params, "api_key") do
+  @doc false
+  def handle_credentials_xai_set(params) do
+    with {:ok, api_key} <- fetch_api_key(params, "api_key") do
       safe(fn -> reply(xai_key_adapter().put(api_key)) end)
     else
       {:invalid, message} -> invalid_params(message)
     end
   end
 
-  def invoke("agents.list", _params), do: safe(fn -> reply(Mesh.list_agents()) end)
+  @doc false
+  def handle_agents_list(_params) do
+    safe(fn -> reply(Mesh.list_agents()) end)
+  end
 
   # W13/F4. `agents.state` is `:read` and hands back an agent's whole state. For a lane-W
   # capability that state holds `last_answer` and `last_message` — a component's own prose,
@@ -1632,34 +692,40 @@ defmodule Ouroboros.Gateway.Methods do
   # `untrusted: true` beside them, which is the same label its sibling verb carries and for
   # the same reason. Every other agent is answered unchanged: this is a statement about who
   # wrote the content, not a general cap on introspection.
-  def invoke("agents.state", params) do
+  @doc false
+  def handle_agents_state(params) do
     with_id(params, fn id -> safe(fn -> reply(bounded_agent_state(id, Mesh.state(id))) end) end)
   end
 
-  def invoke("interactive.list", _params),
-    do: safe(fn -> Present.fleet_sessions(InteractiveSession) end)
+  @doc false
+  def handle_interactive_list(_params) do
+    safe(fn -> Present.fleet_sessions(InteractiveSession) end)
+  end
 
-  def invoke("interactive.info", params) do
-    with_session(params, :interactive, ["id", "node"], fn session ->
+  @doc false
+  def handle_interactive_info(params) do
+    with_session(params, :interactive, fn session ->
       safe(fn -> reply(InteractiveSession.info(session)) end)
     end)
   end
 
-  def invoke("interactive.replay", params) do
+  @doc false
+  def handle_interactive_replay(params) do
     with_replay(params, :interactive, fn session, opts ->
       InteractiveSession.replay(session, opts)
     end)
   end
 
-  def invoke("interactive.event_detail", params) do
+  @doc false
+  def handle_interactive_event_detail(params) do
     with_event_detail(params, :interactive, fn session, opts ->
       InteractiveSession.replay(session, opts)
     end)
   end
 
-  def invoke("interactive.journal", params) do
-    with :ok <- only_keys(params, ["id", "since_seq", "limit", "node"]),
-         {:ok, session} <- session_target(:interactive, params),
+  @doc false
+  def handle_interactive_journal(params) do
+    with {:ok, session} <- session_target(:interactive, params),
          {:ok, since} <- fetch_since_seq(params),
          {:ok, limit} <- fetch_limit(params) do
       safe(fn ->
@@ -1673,8 +739,9 @@ defmodule Ouroboros.Gateway.Methods do
   # R2. The verdict is shaped here rather than in the engine, because the engine's own
   # vocabulary is tuples — `{:replay_diverged, …}` and `{:replay_boundary, reason, seq}` —
   # and a wire that flattened both into a string would make a client guess which it had.
-  def invoke("interactive.replay_verify", params) do
-    with_session(params, :interactive, ["id", "node"], fn session ->
+  @doc false
+  def handle_interactive_replay_verify(params) do
+    with_session(params, :interactive, fn session ->
       safe(fn ->
         case InteractiveSession.replay_verify(session) do
           {:ok, verdict} -> {:ok, replay_verdict(verdict)}
@@ -1684,27 +751,37 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
-  def invoke("coding.list", _params), do: safe(fn -> Present.fleet_sessions(CodingSession) end)
+  @doc false
+  def handle_coding_list(_params) do
+    safe(fn -> Present.fleet_sessions(CodingSession) end)
+  end
 
-  def invoke("coding.info", params) do
-    with_session(params, :coding, ["id", "node"], fn session ->
+  @doc false
+  def handle_coding_info(params) do
+    with_session(params, :coding, fn session ->
       safe(fn -> reply(CodingSession.info(session)) end)
     end)
   end
 
-  def invoke("coding.replay", params) do
+  @doc false
+  def handle_coding_replay(params) do
     with_replay(params, :coding, fn session, opts -> CodingSession.replay(session, opts) end)
   end
 
-  def invoke("coding.event_detail", params) do
+  @doc false
+  def handle_coding_event_detail(params) do
     with_event_detail(params, :coding, fn session, opts ->
       CodingSession.replay(session, opts)
     end)
   end
 
-  def invoke("teams.list", _params), do: safe(fn -> {:ok, Present.teams()} end)
+  @doc false
+  def handle_teams_list(_params) do
+    safe(fn -> {:ok, Present.teams()} end)
+  end
 
-  def invoke("teams.state", params) do
+  @doc false
+  def handle_teams_state(params) do
     with_id(params, fn id ->
       case Team.whereis(id) do
         pid when is_pid(pid) -> safe(fn -> reply(Team.state(pid)) end)
@@ -1713,23 +790,38 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
-  def invoke("plans.list", _params), do: safe(fn -> reply(Scheduler.list(Scheduler)) end)
+  @doc false
+  def handle_plans_list(_params) do
+    safe(fn -> reply(Scheduler.list(Scheduler)) end)
+  end
 
-  def invoke("plans.get", params) do
+  @doc false
+  def handle_plans_get(params) do
     with_id(params, fn id -> safe(fn -> reply(Scheduler.get(Scheduler, id)) end) end)
   end
 
-  def invoke("control.list", _params), do: safe(fn -> reply(Control.list()) end)
+  @doc false
+  def handle_control_list(_params) do
+    safe(fn -> reply(Control.list()) end)
+  end
 
-  def invoke("control.get", params) do
+  @doc false
+  def handle_control_get(params) do
     with_id(params, fn id -> safe(fn -> reply(Control.get(id)) end) end)
   end
 
-  def invoke("upgrade.status", _params), do: safe(fn -> {:ok, NodeExecutor.status()} end)
+  @doc false
+  def handle_upgrade_status(_params) do
+    safe(fn -> {:ok, NodeExecutor.status()} end)
+  end
 
-  def invoke("upgrade.rollouts", _params), do: safe(fn -> reply(Rollouts.list()) end)
+  @doc false
+  def handle_upgrade_rollouts(_params) do
+    safe(fn -> reply(Rollouts.list()) end)
+  end
 
-  def invoke("upgrade.history", params) do
+  @doc false
+  def handle_upgrade_history(params) do
     with {:ok, name} <- fetch_string(params, "module"),
          {:ok, module} <- resolve_module(name) do
       safe(fn -> reply(Rollouts.history(module)) end)
@@ -1738,7 +830,8 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  def invoke("signing.decisions", _params) do
+  @doc false
+  def handle_signing_decisions(_params) do
     case Application.get_env(:ouroboros, :signing_node) do
       signing_node when is_atom(signing_node) and not is_nil(signing_node) ->
         signing_decisions(signing_node)
@@ -1751,10 +844,9 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  def invoke("grants.list", params) do
+  @doc false
+  def handle_grants_list(params) do
     with {:ok, principal} <- fetch_string(params, "principal") do
-      # `Grants.list/1` catches `:exit` and answers `[]`, which would render as "this
-      # principal holds nothing" on a node where the authority is simply not running.
       if is_pid(Process.whereis(Grants)) do
         safe(fn -> reply(Grants.list(principal)) end)
       else
@@ -1765,9 +857,9 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  def invoke("permissions.list", params) do
-    with :ok <- only_keys(params, ["scope", "workspace", "node"]),
-         {:ok, scope} <- permission_scope(params, "scope", @permission_scopes, :optional),
+  @doc false
+  def handle_permissions_list(params) do
+    with {:ok, scope} <- permission_scope(params, "scope", @permission_scopes, :optional),
          {:ok, workspace} <- fetch_optional_string(params, "workspace"),
          {:ok, target} <- permissions_node(params) do
       permissions_call(target, :list, [[scope: scope, workspace: workspace]])
@@ -1780,9 +872,9 @@ defmodule Ouroboros.Gateway.Methods do
   # is an `operate` verb and why the pattern is validated by the engine rather than here:
   # `Ouroboros.Control.Permissions.Pattern` is the only definition of the language, and a
   # second, laxer one at the edge would be a way past the first.
-  def invoke("permissions.add", params) do
-    with :ok <- only_keys(params, ["scope", "pattern", "decision", "workspace", "node"]),
-         {:ok, scope} <- permission_scope(params, "scope", @permission_rule_scopes, :required),
+  @doc false
+  def handle_permissions_add(params) do
+    with {:ok, scope} <- permission_scope(params, "scope", @permission_rule_scopes, :required),
          {:ok, decision} <- permission_scope(params, "decision", @permission_decisions, :required),
          {:ok, pattern} <- fetch_string(params, "pattern"),
          {:ok, workspace} <- fetch_optional_string(params, "workspace"),
@@ -1794,9 +886,9 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  def invoke("permissions.remove", params) do
-    with :ok <- only_keys(params, ["scope", "id", "node"]),
-         {:ok, scope} <-
+  @doc false
+  def handle_permissions_remove(params) do
+    with {:ok, scope} <-
            permission_scope(params, "scope", @permission_removable_scopes, :required),
          {:ok, id} <- fetch_string(params, "id"),
          {:ok, target} <- permissions_node(params) do
@@ -1814,9 +906,9 @@ defmodule Ouroboros.Gateway.Methods do
   # this node has *configured* for that workspace but has not started, together with the
   # entries it refused and why, which is the only way an operator can tell "my mcp.json
   # was ignored" from "my mcp.json was read and rejected".
-  def invoke("mcp.list", params) do
-    with :ok <- only_keys(params, ["workspace", "node"]),
-         {:ok, workspace} <- fetch_optional_string(params, "workspace"),
+  @doc false
+  def handle_mcp_list(params) do
+    with {:ok, workspace} <- fetch_optional_string(params, "workspace"),
          {:ok, target} <- permissions_node(params) do
       mcp_call(target, workspaces: List.wrap(workspace))
     else
@@ -1824,9 +916,9 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  def invoke("computer_use.status", params) do
-    with :ok <- only_keys(params, ["node"]),
-         {:ok, target} <- permissions_node(params) do
+  @doc false
+  def handle_computer_use_status(params) do
+    with {:ok, target} <- permissions_node(params) do
       safe(fn ->
         if target == node() do
           {:ok, Desktop.status()}
@@ -1839,9 +931,9 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  def invoke("computer_use.probe", params) do
-    with :ok <- only_keys(params, ["node"]),
-         {:ok, target} <- permissions_node(params) do
+  @doc false
+  def handle_computer_use_probe(params) do
+    with {:ok, target} <- permissions_node(params) do
       safe(fn ->
         if target == node() do
           {:ok, Desktop.probe()}
@@ -1854,9 +946,9 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  def invoke("computer_use.artifact", params) do
-    with :ok <- only_keys(params, ["sha256", "session_id", "node"]),
-         {:ok, sha} <- fetch_string(params, "sha256"),
+  @doc false
+  def handle_computer_use_artifact(params) do
+    with {:ok, sha} <- fetch_string(params, "sha256"),
          {:ok, session_id} <- fetch_optional_string(params, "session_id"),
          {:ok, target} <- permissions_node(params) do
       safe(fn ->
@@ -1881,8 +973,15 @@ defmodule Ouroboros.Gateway.Methods do
   # reads as unreachable instead of as a gateway ceiling with no detail.
   # ---------------------------------------------------------------------------
 
-  def invoke("wasm.status", params), do: wasm_call(params, :status)
-  def invoke("wasm.list", params), do: wasm_call(params, :list)
+  @doc false
+  def handle_wasm_status(params) do
+    wasm_call(params, :status)
+  end
+
+  @doc false
+  def handle_wasm_list(params) do
+    wasm_call(params, :list)
+  end
 
   # ---------------------------------------------------------------------------
   # W12 — signing and deploy on the wire
@@ -1899,9 +998,9 @@ defmodule Ouroboros.Gateway.Methods do
   # flight, how long an abandoned one lives — is in `Ouroboros.Wasm.Upload`.
   # ---------------------------------------------------------------------------
 
-  def invoke("wasm.upload", params) do
-    with :ok <- only_keys(params, ["upload", "offset", "data", "final", "node"]),
-         {:ok, upload} <- wasm_optional_upload(params),
+  @doc false
+  def handle_wasm_upload(params) do
+    with {:ok, upload} <- wasm_optional_upload(params),
          {:ok, offset} <- option_value("offset", :non_negative_integer, Map.get(params, "offset")),
          {:ok, chunk} <- wasm_chunk(params),
          {:ok, final?} <- wasm_flag(params, "final"),
@@ -1918,24 +1017,9 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  def invoke("wasm.sign", params) do
-    with :ok <-
-           only_keys(params, [
-             "upload",
-             "name",
-             "author",
-             "imports",
-             # W8
-             "precompile",
-             # W15
-             "kind",
-             "language",
-             "source_sha256",
-             "start_config",
-             "eval",
-             "node"
-           ]),
-         {:ok, upload} <- wasm_upload(params),
+  @doc false
+  def handle_wasm_sign(params) do
+    with {:ok, upload} <- wasm_upload(params),
          {:ok, name} <- wasm_name(params),
          {:ok, author} <- fetch_string(params, "author"),
          {:ok, imports} <- wasm_imports(params),
@@ -1972,9 +1056,9 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  def invoke("wasm.deploy", params) do
-    with :ok <- only_keys(params, ["upload", "nodes", "node"]),
-         {:ok, upload} <- wasm_upload(params),
+  @doc false
+  def handle_wasm_deploy(params) do
+    with {:ok, upload} <- wasm_upload(params),
          {:ok, target} <- permissions_node(params),
          {:ok, nodes} <- wasm_targets(params, target) do
       wasm_node_call(
@@ -1989,9 +1073,9 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  def invoke("wasm.rollback", params) do
-    with :ok <- only_keys(params, ["name", "node"]),
-         {:ok, name} <- wasm_name(params),
+  @doc false
+  def handle_wasm_rollback(params) do
+    with {:ok, name} <- wasm_name(params),
          {:ok, target} <- permissions_node(params) do
       wasm_node_call(
         target,
@@ -2017,9 +1101,9 @@ defmodule Ouroboros.Gateway.Methods do
   # storing other people's bytes on request.
   # ---------------------------------------------------------------------------
 
-  def invoke("wasm.download", params) do
-    with :ok <- only_keys(params, ["download", "offset", "node"]),
-         {:ok, download} <- wasm_download(params),
+  @doc false
+  def handle_wasm_download(params) do
+    with {:ok, download} <- wasm_download(params),
          {:ok, offset} <- option_value("offset", :non_negative_integer, Map.get(params, "offset")),
          {:ok, target} <- permissions_node(params) do
       wasm_node_call(
@@ -2038,20 +1122,14 @@ defmodule Ouroboros.Gateway.Methods do
   # E2/E3 — code intelligence on the wire
   # ---------------------------------------------------------------------------
 
-  def invoke("runtime.lsp.status", _params), do: safe(fn -> {:ok, CodeIntel.status()} end)
+  @doc false
+  def handle_runtime_lsp_status(_params) do
+    safe(fn -> {:ok, CodeIntel.status()} end)
+  end
 
-  def invoke("code_intel.request", params) do
-    with :ok <-
-           only_keys(params, [
-             "workspace",
-             "operation",
-             "path",
-             "line",
-             "character",
-             "query",
-             "node"
-           ]),
-         {:ok, workspace} <- code_intel_workspace(params),
+  @doc false
+  def handle_code_intel_request(params) do
+    with {:ok, workspace} <- code_intel_workspace(params),
          {:ok, operation} <- code_intel_operation(params),
          {:ok, path} <- fetch_string(params, "path"),
          {:ok, line} <- code_intel_position(params, "line"),
@@ -2070,9 +1148,9 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  def invoke("code_intel.diagnostics", params) do
-    with :ok <- only_keys(params, ["workspace", "path", "wait_ms", "node"]),
-         {:ok, workspace} <- code_intel_workspace(params),
+  @doc false
+  def handle_code_intel_diagnostics(params) do
+    with {:ok, workspace} <- code_intel_workspace(params),
          {:ok, path} <- fetch_string(params, "path"),
          {:ok, wait_ms} <- code_intel_wait_ms(params),
          {:ok, target} <- permissions_node(params) do
@@ -2086,9 +1164,9 @@ defmodule Ouroboros.Gateway.Methods do
   # written a file needs both halves of the new-only rule — what the server said about the
   # old text, and the version the new text was assigned — and reading the baseline in the
   # same gateway call is the only ordering in which nothing can arrive between them.
-  def invoke("code_intel.touch", params) do
-    with :ok <- only_keys(params, ["workspace", "path", "action", "node"]),
-         {:ok, workspace} <- code_intel_workspace(params),
+  @doc false
+  def handle_code_intel_touch(params) do
+    with {:ok, workspace} <- code_intel_workspace(params),
          {:ok, path} <- fetch_string(params, "path"),
          {:ok, action} <- code_intel_action(params),
          {:ok, target} <- permissions_node(params) do
@@ -2102,19 +1180,9 @@ defmodule Ouroboros.Gateway.Methods do
   # I1/I3 — the effect ledger on the wire, and across the fleet
   # ---------------------------------------------------------------------------
 
-  def invoke("ledger.list", params) do
-    with :ok <-
-           only_keys(params, [
-             "principal",
-             "effect",
-             "status",
-             "since_sequence",
-             "order",
-             "limit",
-             "node",
-             "fleet"
-           ]),
-         {:ok, filters} <- ledger_filters(params),
+  @doc false
+  def handle_ledger_list(params) do
+    with {:ok, filters} <- ledger_filters(params),
          {:ok, fleet?} <- ledger_fleet(params),
          {:ok, target} <- permissions_node(params) do
       if fleet? do
@@ -2127,9 +1195,9 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  def invoke("ledger.get", params) do
-    with :ok <- only_keys(params, ["id", "node"]),
-         {:ok, id} <- fetch_string(params, "id"),
+  @doc false
+  def handle_ledger_get(params) do
+    with {:ok, id} <- fetch_string(params, "id"),
          {:ok, target} <- permissions_node(params) do
       ledger_call(target, :get, [id])
     else
@@ -2137,9 +1205,9 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  def invoke("ledger.export", params) do
-    with :ok <- only_keys(params, ["since", "node"]),
-         {:ok, since} <- ledger_since(params),
+  @doc false
+  def handle_ledger_export(params) do
+    with {:ok, since} <- ledger_since(params),
          {:ok, target} <- permissions_node(params) do
       Present.ledger_export(target, since)
     else
@@ -2147,7 +1215,8 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  def invoke("interactive.start", params) do
+  @doc false
+  def handle_interactive_start(params) do
     safe(fn ->
       case options(params, @start_options) do
         {:ok, opts} ->
@@ -2160,12 +1229,14 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
-  def invoke("interactive.send_message", params) do
+  @doc false
+  def handle_interactive_send_message(params) do
     with_turn(params, :interactive, &InteractiveSession.send_message/3)
   end
 
-  def invoke("interactive.retry_turn", params) do
-    with_session(params, :interactive, ["id", "source_turn_id", "node"], fn session ->
+  @doc false
+  def handle_interactive_retry_turn(params) do
+    with_session(params, :interactive, fn session ->
       with {:ok, source} <- fetch_string(params, "source_turn_id") do
         safe(fn -> reply(InteractiveSession.retry_turn(session, source)) end)
       else
@@ -2174,20 +1245,16 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
-  def invoke("interactive.follow_up", params) do
+  @doc false
+  def handle_interactive_follow_up(params) do
     with_turn(params, :interactive, &InteractiveSession.follow_up/3)
   end
 
-  def invoke("interactive.steer", params) do
+  @doc false
+  def handle_interactive_steer(params) do
     safe(fn ->
-      with :ok <- only_keys(params, ["id", "input", "node"]),
-           {:ok, session} <- session_target(:interactive, params),
+      with {:ok, session} <- session_target(:interactive, params),
            {:ok, input} <- fetch_turn_input(params) do
-        # The interactive plane has no caller-keyed steer idempotency: Harness mints the
-        # request id inside its worker, so a lost acknowledgement cannot be replayed and
-        # re-sending injects the same text twice. What the plane *does* make durable is
-        # the text itself — the coordinator remembers the prompt and enriches the
-        # projected `input_accepted(kind=steer)` event, so replay quotes it.
         reply(InteractiveSession.steer(session, input))
       else
         {:invalid, message} -> invalid_params(message)
@@ -2199,10 +1266,10 @@ defmodule Ouroboros.Gateway.Methods do
   # otherwise have prompted about, and the answer it gets is the decision to relay back as
   # the permission-prompt tool's `allow`/`deny` object. Owner-routed like every other
   # session verb; the coordinator, not this module, decides.
-  def invoke("interactive.request_approval", params) do
+  @doc false
+  def handle_interactive_request_approval(params) do
     safe(fn ->
-      with :ok <- only_keys(params, ["id", "request", "node"]),
-           {:ok, session} <- session_target(:interactive, params),
+      with {:ok, session} <- session_target(:interactive, params),
            {:ok, request} <- approval_request(params) do
         case InteractiveSession.request_approval(session, request) do
           {:ok, answer} -> {:ok, Encode.approval_answer(answer)}
@@ -2219,10 +1286,10 @@ defmodule Ouroboros.Gateway.Methods do
   # runtime validates against the provider's own declarations, and hand back what came
   # out — including `applies`, which a client has to be able to render as "from the next
   # turn" rather than assume.
-  def invoke("interactive.configure", params) do
+  @doc false
+  def handle_interactive_configure(params) do
     safe(fn ->
-      with :ok <- only_keys(params, ["id", "node" | Map.keys(@configuration_options)]),
-           {:ok, session} <- session_target(:interactive, params),
+      with {:ok, session} <- session_target(:interactive, params),
            {:ok, changes} <- options(params, @configuration_options, ["id", "node"]) do
         reply(InteractiveSession.configure(session, Map.new(changes)))
       else
@@ -2234,10 +1301,10 @@ defmodule Ouroboros.Gateway.Methods do
   # B6. The bound and the sanitising live in `Interactive.State`, not here: the same rule
   # has to hold for a title a person typed and for one the runtime derived from a prompt,
   # and a check that lived at the gateway would only cover the first.
-  def invoke("interactive.rename", params) do
+  @doc false
+  def handle_interactive_rename(params) do
     safe(fn ->
-      with :ok <- only_keys(params, ["id", "title", "node"]),
-           {:ok, session} <- session_target(:interactive, params),
+      with {:ok, session} <- session_target(:interactive, params),
            {:ok, title} <- fetch_string(params, "title") do
         reply(InteractiveSession.rename(session, title))
       else
@@ -2254,10 +1321,10 @@ defmodule Ouroboros.Gateway.Methods do
   # are validated here and decided deeper: whether this provider can branch anywhere but
   # its tail is `Ouroboros.Provider.session_fork_options/3`'s answer, and whether the
   # parent still holds the named boundary is the native session's.
-  def invoke("interactive.fork", params) do
+  @doc false
+  def handle_interactive_fork(params) do
     safe(fn ->
-      with :ok <- only_keys(params, ["id", "fork_id", "to_turn", "model", "node"]),
-           {:ok, session} <- session_target(:interactive, params),
+      with {:ok, session} <- session_target(:interactive, params),
            {:ok, fork_id} <- fetch_optional_string(params, "fork_id"),
            {:ok, to_turn} <- fetch_optional_rewind_target(params, "to_turn"),
            {:ok, model} <- fetch_optional_option_string(params, "model") do
@@ -2274,10 +1341,10 @@ defmodule Ouroboros.Gateway.Methods do
   # D6. `to_turn` names the turn to return to; `what` is `files`, `conversation`, or
   # `both` (the default). The answer says which files were restored and which could not
   # be, because a bash command's effects are nobody's checkpoint.
-  def invoke("interactive.rewind", params) do
+  @doc false
+  def handle_interactive_rewind(params) do
     safe(fn ->
-      with :ok <- only_keys(params, ["id", "to_turn", "what", "node"]),
-           {:ok, session} <- session_target(:interactive, params),
+      with {:ok, session} <- session_target(:interactive, params),
            {:ok, to_turn} <- fetch_rewind_target(params, "to_turn"),
            {:ok, what} <-
              fetch_optional_enum(params, "what", %{
@@ -2292,10 +1359,10 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
-  def invoke("interactive.rewind_points", params) do
+  @doc false
+  def handle_interactive_rewind_points(params) do
     safe(fn ->
-      with :ok <- only_keys(params, ["id", "node"]),
-           {:ok, session} <- session_target(:interactive, params) do
+      with {:ok, session} <- session_target(:interactive, params) do
         reply(InteractiveSession.rewind_points(session))
       else
         {:invalid, message} -> invalid_params(message)
@@ -2303,10 +1370,10 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
-  def invoke("interactive.compact", params) do
+  @doc false
+  def handle_interactive_compact(params) do
     safe(fn ->
-      with :ok <- only_keys(params, ["id", "focus", "node"]),
-           {:ok, session} <- session_target(:interactive, params),
+      with {:ok, session} <- session_target(:interactive, params),
            {:ok, focus} <- fetch_optional_string(params, "focus") do
         reply(InteractiveSession.compact(session, focus))
       else
@@ -2318,10 +1385,10 @@ defmodule Ouroboros.Gateway.Methods do
   # A handoff starts a session, so it answers in `interactive.start`'s shape and carries
   # the same admission a ceiling forces: the caller-owned `handoff_id` is what makes a
   # timed-out handoff reconcilable rather than a second child.
-  def invoke("interactive.handoff", params) do
+  @doc false
+  def handle_interactive_handoff(params) do
     safe(fn ->
-      with :ok <- only_keys(params, ["id", "prompt", "handoff_id", "node"]),
-           {:ok, session} <- session_target(:interactive, params),
+      with {:ok, session} <- session_target(:interactive, params),
            {:ok, prompt} <- fetch_optional_string(params, "prompt"),
            {:ok, handoff_id} <- fetch_optional_string(params, "handoff_id") do
         fork_reply(InteractiveSession.handoff(session, prompt, handoff_id))
@@ -2334,8 +1401,9 @@ defmodule Ouroboros.Gateway.Methods do
   # Read scope, and it answers for every transport. `source` is the field that keeps it
   # honest: `"native"` means the session counted these figures itself, `"usage"` means
   # they are what the provider reported and nothing more was known.
-  def invoke("interactive.context", params) do
-    with_session(params, :interactive, ["id", "node"], fn session ->
+  @doc false
+  def handle_interactive_context(params) do
+    with_session(params, :interactive, fn session ->
       safe(fn -> reply(InteractiveSession.context(session)) end)
     end)
   end
@@ -2344,10 +1412,10 @@ defmodule Ouroboros.Gateway.Methods do
   # the session's approval mode, the permission engine, the ledger entry that has to
   # exist first — is the coordinator's, so this is only the parameter contract and the
   # routing. A refusal comes back as `["shell_refused", {reason, suggested_rule, …}]`.
-  def invoke("workspace.exec", params) do
+  @doc false
+  def handle_workspace_exec(params) do
     safe(fn ->
-      with :ok <- only_keys(params, ["id", "command", "node"]),
-           {:ok, session} <- session_target(:interactive, params),
+      with {:ok, session} <- session_target(:interactive, params),
            {:ok, command} <- fetch_string(params, "command") do
         reply(InteractiveSession.exec(session, command))
       else
@@ -2360,10 +1428,10 @@ defmodule Ouroboros.Gateway.Methods do
   # what it may read is `Ouroboros.Gateway.Methods.Browse` — the roots, the canonical
   # containment check, and the rule that a refusal outside them says only that — so this is
   # the parameter contract and the mapping from its typed refusals onto the wire.
-  def invoke("workspace.browse", params) do
+  @doc false
+  def handle_workspace_browse(params) do
     safe(fn ->
-      with :ok <- only_keys(params, ["path"]),
-           {:ok, path} <- fetch_optional_string(params, "path") do
+      with {:ok, path} <- fetch_optional_string(params, "path") do
         case Browse.browse(path) do
           {:ok, listing} -> {:ok, listing}
           {:error, refusal} -> browse_refusal(refusal)
@@ -2380,18 +1448,10 @@ defmodule Ouroboros.Gateway.Methods do
   # `delegation_id` is caller-owned for the reason `fork_id` is: this verb's ceiling
   # answers `outcome: unknown`, and a client that had to mint a second id to find out
   # would delegate the same objective twice.
-  def invoke("interactive.delegate", params) do
+  @doc false
+  def handle_interactive_delegate(params) do
     safe(fn ->
-      with :ok <-
-             only_keys(params, [
-               "id",
-               "objective",
-               "delegation_id",
-               "provider",
-               "workspace",
-               "node"
-             ]),
-           {:ok, session} <- session_target(:interactive, params),
+      with {:ok, session} <- session_target(:interactive, params),
            {:ok, objective} <- fetch_string(params, "objective"),
            {:ok, delegation_id} <- fetch_optional_string(params, "delegation_id"),
            {:ok, opts} <-
@@ -2401,7 +1461,13 @@ defmodule Ouroboros.Gateway.Methods do
                "delegation_id",
                "node"
              ]) do
-        opts = if delegation_id, do: Keyword.put(opts, :id, delegation_id), else: opts
+        opts =
+          if delegation_id do
+            Keyword.put(opts, :id, delegation_id)
+          else
+            opts
+          end
+
         reply(InteractiveSession.delegate(session, objective, opts))
       else
         {:invalid, message} -> invalid_params(message)
@@ -2412,16 +1478,17 @@ defmodule Ouroboros.Gateway.Methods do
   # Read scope: `source` on each row says whether the status came from the team that owns
   # the delegation or from the conversation's own copy of it, so a client can tell a live
   # answer from a remembered one.
-  def invoke("interactive.delegations", params) do
-    with_session(params, :interactive, ["id", "node"], fn session ->
+  @doc false
+  def handle_interactive_delegations(params) do
+    with_session(params, :interactive, fn session ->
       safe(fn -> reply(InteractiveSession.delegations(session)) end)
     end)
   end
 
-  def invoke("interactive.respond_approval", params) do
+  @doc false
+  def handle_interactive_respond_approval(params) do
     safe(fn ->
-      with :ok <- only_keys(params, ["id", "request_id", "response", "node"]),
-           {:ok, session} <- session_target(:interactive, params),
+      with {:ok, session} <- session_target(:interactive, params),
            {:ok, request_id} <- fetch_string(params, "request_id"),
            {:ok, response} <- approval_response(params) do
         reply(InteractiveSession.respond_approval(session, request_id, response))
@@ -2431,13 +1498,11 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
-  def invoke("interactive.interrupt", params) do
+  @doc false
+  def handle_interactive_interrupt(params) do
     safe(fn ->
-      with :ok <- only_keys(params, ["id", "turn_id", "node"]),
-           {:ok, session} <- session_target(:interactive, params),
+      with {:ok, session} <- session_target(:interactive, params),
            {:ok, turn_id} <- fetch_optional_string(params, "turn_id") do
-        # `:active` is what the plane calls "whichever turn is running now", and it is
-        # the only thing a terminal's Ctrl-C can mean.
         reply(InteractiveSession.interrupt(session, turn_id || :active))
       else
         {:invalid, message} -> invalid_params(message)
@@ -2445,25 +1510,29 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
-  def invoke("interactive.close", params) do
-    with_session(params, :interactive, ["id", "node"], fn session ->
+  @doc false
+  def handle_interactive_close(params) do
+    with_session(params, :interactive, fn session ->
       safe(fn -> reply(InteractiveSession.close(session)) end)
     end)
   end
 
-  def invoke("interactive.kill", params) do
-    with_session(params, :interactive, ["id", "node"], fn session ->
+  @doc false
+  def handle_interactive_kill(params) do
+    with_session(params, :interactive, fn session ->
       safe(fn -> reply(InteractiveSession.kill(session)) end)
     end)
   end
 
-  def invoke("interactive.delete", params) do
-    with_session(params, :interactive, ["id", "node"], fn session ->
+  @doc false
+  def handle_interactive_delete(params) do
+    with_session(params, :interactive, fn session ->
       safe(fn -> reply(InteractiveSession.delete(session)) end)
     end)
   end
 
-  def invoke("coding.start", params) do
+  @doc false
+  def handle_coding_start(params) do
     safe(fn ->
       with {:ok, objective} <- fetch_string(params, "objective"),
            {:ok, opts} <- options(params, @start_options, ["objective"]) do
@@ -2475,10 +1544,10 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
-  def invoke("coding.respond_approval", params) do
+  @doc false
+  def handle_coding_respond_approval(params) do
     safe(fn ->
-      with :ok <- only_keys(params, ["id", "request_id", "response", "node"]),
-           {:ok, task} <- session_target(:coding, params),
+      with {:ok, task} <- session_target(:coding, params),
            {:ok, request_id} <- fetch_string(params, "request_id"),
            {:ok, response} <- approval_response(params) do
         reply(CodingSession.respond_approval(task, request_id, response))
@@ -2488,19 +1557,22 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
-  def invoke("coding.cancel", params) do
-    with_session(params, :coding, ["id", "node"], fn session ->
+  @doc false
+  def handle_coding_cancel(params) do
+    with_session(params, :coding, fn session ->
       safe(fn -> reply(CodingSession.cancel(session)) end)
     end)
   end
 
-  def invoke("coding.delete", params) do
-    with_session(params, :coding, ["id", "node"], fn session ->
+  @doc false
+  def handle_coding_delete(params) do
+    with_session(params, :coding, fn session ->
       safe(fn -> reply(CodingSession.delete(session)) end)
     end)
   end
 
-  def invoke("teams.add_worker", params) do
+  @doc false
+  def handle_teams_add_worker(params) do
     safe(fn ->
       with {:ok, worker_id} <- fetch_string(params, "worker_id"),
            {:ok, opts} <- options(params, @worker_options, ["team_id", "worker_id"]),
@@ -2513,7 +1585,8 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
-  def invoke("teams.delegate", params) do
+  @doc false
+  def handle_teams_delegate(params) do
     safe(fn ->
       with {:ok, worker_id} <- fetch_string(params, "worker_id"),
            {:ok, objective} <- fetch_string(params, "objective"),
@@ -2528,7 +1601,8 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
-  def invoke("teams.cancel", params) do
+  @doc false
+  def handle_teams_cancel(params) do
     safe(fn ->
       with {:ok, delegation_id} <- fetch_string(params, "delegation_id"),
            {:ok, team} <- team(params) do
@@ -2540,7 +1614,8 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
-  def invoke("teams.close", params) do
+  @doc false
+  def handle_teams_close(params) do
     safe(fn ->
       case team(params) do
         {:ok, team} -> reply(Team.close(team))
@@ -2550,7 +1625,8 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
-  def invoke("control.submit", params) do
+  @doc false
+  def handle_control_submit(params) do
     safe(fn ->
       with {:ok, objective} <- fetch_string(params, "objective"),
            {:ok, opts} <- options(params, @control_options, ["objective"]) do
@@ -2561,11 +1637,13 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
-  def invoke("control.cancel", params) do
+  @doc false
+  def handle_control_cancel(params) do
     with_id(params, fn id -> safe(fn -> reply(Control.cancel(id)) end) end)
   end
 
-  def invoke("agents.stop", params) do
+  @doc false
+  def handle_agents_stop(params) do
     with_id(params, fn id -> safe(fn -> reply(Mesh.stop_agent(id)) end) end)
   end
 
@@ -2585,10 +1663,10 @@ defmodule Ouroboros.Gateway.Methods do
   # not, and `untrusted: true` rides beside it so a client rendering it has no excuse.
   # ---------------------------------------------------------------------------
 
-  def invoke("agents.message", params) do
+  @doc false
+  def handle_agents_message(params) do
     safe(fn ->
-      with :ok <- only_keys(params, ["to", "body", "from", "timeout_ms"]),
-           {:ok, to} <- agent_id(params, "to"),
+      with {:ok, to} <- agent_id(params, "to"),
            {:ok, from} <- agent_from(params),
            {:ok, body} <- agent_message_body(params),
            {:ok, timeout} <- agent_message_timeout(params) do
@@ -2599,10 +1677,10 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
-  def invoke("capabilities.list", params) do
+  @doc false
+  def handle_capabilities_list(params) do
     safe(fn ->
-      with :ok <- only_keys(params, ["workspace"]),
-           {:ok, workspace} <- fetch_string(params, "workspace") do
+      with {:ok, workspace} <- fetch_string(params, "workspace") do
         reply(Capabilities.list(workspace))
       else
         {:invalid, message} -> invalid_params(message)
@@ -2610,10 +1688,10 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
-  def invoke("capabilities.preview", params) do
+  @doc false
+  def handle_capabilities_preview(params) do
     safe(fn ->
-      with :ok <- only_keys(params, ["workspace", "path"]),
-           {:ok, workspace} <- fetch_string(params, "workspace"),
+      with {:ok, workspace} <- fetch_string(params, "workspace"),
            {:ok, path} <- fetch_string(params, "path") do
         reply(Capabilities.preview(workspace, path))
       else
@@ -2622,13 +1700,19 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
-  def invoke("capabilities.admit", params) do
+  @doc false
+  def handle_capabilities_admit(params) do
     safe(fn ->
-      with :ok <- only_keys(params, ["workspace", "path", "session_id"]),
-           {:ok, workspace} <- fetch_string(params, "workspace"),
+      with {:ok, workspace} <- fetch_string(params, "workspace"),
            {:ok, path} <- fetch_string(params, "path"),
            {:ok, session_id} <- fetch_optional_string(params, "session_id") do
-        opts = if session_id, do: [author: "session:" <> session_id], else: []
+        opts =
+          if session_id do
+            [author: "session:" <> session_id]
+          else
+            []
+          end
+
         reply(Capabilities.admit(workspace, path, opts))
       else
         {:invalid, message} -> invalid_params(message)
@@ -2640,9 +1724,6 @@ defmodule Ouroboros.Gateway.Methods do
   # than raising keeps that drift a client-visible error instead of a killed task.
   # `runtime.shutdown` and the four subscription verbs reach the connection instead of
   # this function and never arrive here.
-  def invoke(method, _params) when is_binary(method) do
-    {:error, code(:method_not_found), "this build does not serve #{method}"}
-  end
 
   # D11. Six refusals, each named in `data.reason` so a client branches on the reason
   # rather than on the sentence. The one that carries the rule rather than the mistake is
@@ -4025,9 +3106,8 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  defp with_session(params, plane, allowed, fun) do
-    with :ok <- only_keys(params, allowed),
-         {:ok, session} <- session_target(plane, params) do
+  defp with_session(params, plane, fun) do
+    with {:ok, session} <- session_target(plane, params) do
       fun.(session)
     else
       {:invalid, message} -> invalid_params(message)

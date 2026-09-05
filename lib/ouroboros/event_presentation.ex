@@ -1,4 +1,4 @@
-defmodule Ouroboros.Web.Presentation.Hidden do
+defmodule Ouroboros.EventPresentation.Hidden do
   @moduledoc """
   Why a presentation drew nothing.
 
@@ -19,7 +19,7 @@ defmodule Ouroboros.Web.Presentation.Hidden do
   def reason(:empty_command_output), do: "a command-output delta carrying no bytes"
 end
 
-defmodule Ouroboros.Web.Presentation.Lifecycle do
+defmodule Ouroboros.EventPresentation.Lifecycle do
   @moduledoc "A lifecycle fact that belongs in the reading path as one dim line."
 
   defstruct [:marker, detail: ""]
@@ -44,7 +44,7 @@ defmodule Ouroboros.Web.Presentation.Lifecycle do
   def label(:turn_queued), do: "turn queued"
 end
 
-defmodule Ouroboros.Web.Presentation.PlanStatus do
+defmodule Ouroboros.EventPresentation.PlanStatus do
   @moduledoc """
   One plan step's status, with an unrecognised word kept verbatim.
 
@@ -89,10 +89,10 @@ defmodule Ouroboros.Web.Presentation.PlanStatus do
   def label({:other, word}), do: word
 end
 
-defmodule Ouroboros.Web.Presentation.PlanStep do
+defmodule Ouroboros.EventPresentation.PlanStep do
   @moduledoc "One step of a model-authored plan."
 
-  alias Ouroboros.Web.Presentation.PlanStatus
+  alias Ouroboros.EventPresentation.PlanStatus
 
   defstruct [:text, :priority, status: :pending]
 
@@ -103,7 +103,7 @@ defmodule Ouroboros.Web.Presentation.PlanStep do
         }
 end
 
-defmodule Ouroboros.Web.Presentation.ImageArtifact do
+defmodule Ouroboros.EventPresentation.ImageArtifact do
   @moduledoc """
   One image a tool result staged, described but not carried.
 
@@ -123,7 +123,7 @@ defmodule Ouroboros.Web.Presentation.ImageArtifact do
         }
 end
 
-defmodule Ouroboros.Web.Presentation.Diff do
+defmodule Ouroboros.EventPresentation.Diff do
   @moduledoc """
   One unified diff as the presentation holds it.
 
@@ -144,10 +144,10 @@ defmodule Ouroboros.Web.Presentation.Diff do
         }
 end
 
-defmodule Ouroboros.Web.Presentation.FileChange do
+defmodule Ouroboros.EventPresentation.FileChange do
   @moduledoc "One file a `file_change` event named."
 
-  alias Ouroboros.Web.Presentation.Diff
+  alias Ouroboros.EventPresentation.Diff
 
   defstruct [:path, :kind, :diff]
 
@@ -158,7 +158,7 @@ defmodule Ouroboros.Web.Presentation.FileChange do
         }
 end
 
-defmodule Ouroboros.Web.Presentation.Worktree do
+defmodule Ouroboros.EventPresentation.Worktree do
   @moduledoc "The `git worktree` a session or a child agent was given."
 
   defstruct [:path, :root, :branch, :base_commit, :repository, :retired]
@@ -189,7 +189,7 @@ defmodule Ouroboros.Web.Presentation.Worktree do
   def live?(%__MODULE__{retired: retired}), do: is_nil(retired)
 end
 
-defmodule Ouroboros.Web.Presentation.ShellEvent do
+defmodule Ouroboros.EventPresentation.ShellEvent do
   @moduledoc "The `operator_shell` half of a `provider_event` payload (B7)."
 
   defstruct [
@@ -217,7 +217,7 @@ defmodule Ouroboros.Web.Presentation.ShellEvent do
         }
 end
 
-defmodule Ouroboros.Web.Presentation.Compaction do
+defmodule Ouroboros.EventPresentation.Compaction do
   @moduledoc "One fold of a conversation, automatic or asked for (D9)."
 
   defstruct [
@@ -282,7 +282,7 @@ defmodule Ouroboros.Web.Presentation.Compaction do
   defp archive(parts, _id), do: parts
 end
 
-defmodule Ouroboros.Web.Presentation.DelegationEvent do
+defmodule Ouroboros.EventPresentation.DelegationEvent do
   @moduledoc "A `delegation` event's payload, as the parent's transcript carries it (G1)."
 
   defstruct [
@@ -306,7 +306,7 @@ defmodule Ouroboros.Web.Presentation.DelegationEvent do
         }
 end
 
-defmodule Ouroboros.Web.Presentation.SubagentEvent do
+defmodule Ouroboros.EventPresentation.SubagentEvent do
   @moduledoc """
   One `provider_event` whose `kind` is `subagent`: a child agent spawning, reporting, or
   settling in the parent's own transcript.
@@ -316,7 +316,7 @@ defmodule Ouroboros.Web.Presentation.SubagentEvent do
   (`tui/src/model/native.rs:849-940`).
   """
 
-  alias Ouroboros.Web.Presentation.Worktree
+  alias Ouroboros.EventPresentation.Worktree
 
   defstruct [
     :phase,
@@ -386,13 +386,13 @@ defmodule Ouroboros.Web.Presentation.SubagentEvent do
   def settled?(_phase), do: false
 end
 
-defmodule Ouroboros.Web.Presentation.UserMessage do
+defmodule Ouroboros.EventPresentation.UserMessage do
   @moduledoc "An accepted input this ledger holds the words of."
   defstruct [:text]
   @type t :: %__MODULE__{text: String.t()}
 end
 
-defmodule Ouroboros.Web.Presentation.UserSteer do
+defmodule Ouroboros.EventPresentation.UserSteer do
   @moduledoc """
   A steer. The text is optional because a checkpointed event from before the runtime
   carried it, and every recovered turn, arrives without one.
@@ -401,7 +401,7 @@ defmodule Ouroboros.Web.Presentation.UserSteer do
   @type t :: %__MODULE__{text: String.t() | nil}
 end
 
-defmodule Ouroboros.Web.Presentation.UnrecordedInput do
+defmodule Ouroboros.EventPresentation.UnrecordedInput do
   @moduledoc """
   An accepted input whose words this ledger does not hold. Named rather than dropped: a
   chat that silently omits a turn the operator remembers typing is a chat that cannot be
@@ -411,7 +411,7 @@ defmodule Ouroboros.Web.Presentation.UnrecordedInput do
   @type t :: %__MODULE__{}
 end
 
-defmodule Ouroboros.Web.Presentation.AgentText do
+defmodule Ouroboros.EventPresentation.AgentText do
   @moduledoc "One output delta or final."
   defstruct [:turn_id, :text, final_text: false]
 
@@ -422,13 +422,13 @@ defmodule Ouroboros.Web.Presentation.AgentText do
         }
 end
 
-defmodule Ouroboros.Web.Presentation.Thinking do
+defmodule Ouroboros.EventPresentation.Thinking do
   @moduledoc "Reasoning the provider chose to publish. Never treated as the agent's answer."
   defstruct [:turn_id, :text]
   @type t :: %__MODULE__{turn_id: String.t() | nil, text: String.t()}
 end
 
-defmodule Ouroboros.Web.Presentation.ToolCall do
+defmodule Ouroboros.EventPresentation.ToolCall do
   @moduledoc "One normalized tool call."
 
   defstruct [:call_id, :kind, :at, name: "tool", input: %{}]
@@ -442,10 +442,10 @@ defmodule Ouroboros.Web.Presentation.ToolCall do
         }
 end
 
-defmodule Ouroboros.Web.Presentation.ToolResult do
+defmodule Ouroboros.EventPresentation.ToolResult do
   @moduledoc "One normalized tool result, with any image artifacts it staged."
 
-  alias Ouroboros.Web.Presentation.ImageArtifact
+  alias Ouroboros.EventPresentation.ImageArtifact
 
   defstruct [:call_id, :name, :kind, :output, :at, is_error: false, artifacts: []]
 
@@ -460,16 +460,16 @@ defmodule Ouroboros.Web.Presentation.ToolResult do
         }
 end
 
-defmodule Ouroboros.Web.Presentation.CommandOutput do
+defmodule Ouroboros.EventPresentation.CommandOutput do
   @moduledoc "One command-output delta carrying bytes."
   defstruct [:text]
   @type t :: %__MODULE__{text: String.t()}
 end
 
-defmodule Ouroboros.Web.Presentation.FileUpdate do
+defmodule Ouroboros.EventPresentation.FileUpdate do
   @moduledoc "One `file_change` event: the files it named and the patch it carried."
 
-  alias Ouroboros.Web.Presentation.{Diff, FileChange}
+  alias Ouroboros.EventPresentation.{Diff, FileChange}
 
   defstruct [:status, :diff, changes: []]
 
@@ -480,10 +480,10 @@ defmodule Ouroboros.Web.Presentation.FileUpdate do
         }
 end
 
-defmodule Ouroboros.Web.Presentation.PlanUpdate do
+defmodule Ouroboros.EventPresentation.PlanUpdate do
   @moduledoc "A model-authored task list, bounded."
 
-  alias Ouroboros.Web.Presentation.PlanStep
+  alias Ouroboros.EventPresentation.PlanStep
 
   defstruct [:explanation, steps: [], step_count: 0]
 
@@ -494,7 +494,7 @@ defmodule Ouroboros.Web.Presentation.PlanUpdate do
         }
 end
 
-defmodule Ouroboros.Web.Presentation.UsageReport do
+defmodule Ouroboros.EventPresentation.UsageReport do
   @moduledoc """
   One `usage` report exactly as the provider phrased it. Absent fields stay absent: a
   zero this surface invented would be indistinguishable from a zero a provider measured.
@@ -518,7 +518,7 @@ defmodule Ouroboros.Web.Presentation.UsageReport do
   end
 end
 
-defmodule Ouroboros.Web.Presentation.RunStart do
+defmodule Ouroboros.EventPresentation.RunStart do
   @moduledoc """
   A provider run began. Claude reports the model and the tool catalogue here; nothing
   else in the stream ever names the model.
@@ -534,13 +534,13 @@ defmodule Ouroboros.Web.Presentation.RunStart do
         }
 end
 
-defmodule Ouroboros.Web.Presentation.TurnStarted do
+defmodule Ouroboros.EventPresentation.TurnStarted do
   @moduledoc "A turn began, with the instant the ledger stamped on it."
   defstruct [:turn_id, :at]
   @type t :: %__MODULE__{turn_id: String.t() | nil, at: integer() | nil}
 end
 
-defmodule Ouroboros.Web.Presentation.TurnEnded do
+defmodule Ouroboros.EventPresentation.TurnEnded do
   @moduledoc "A turn ended, however it ended."
   defstruct [:turn_id, :at, :outcome, detail: ""]
 
@@ -560,19 +560,19 @@ defmodule Ouroboros.Web.Presentation.TurnEnded do
   def label(:interrupted), do: "turn interrupted"
 end
 
-defmodule Ouroboros.Web.Presentation.QueueChanged do
+defmodule Ouroboros.EventPresentation.QueueChanged do
   @moduledoc "How many turns the runtime is holding behind the running one."
   defstruct queued: 0
   @type t :: %__MODULE__{queued: non_neg_integer()}
 end
 
-defmodule Ouroboros.Web.Presentation.ApprovalRequested do
+defmodule Ouroboros.EventPresentation.ApprovalRequested do
   @moduledoc "The runtime asked for permission."
   defstruct [:request_id, detail: ""]
   @type t :: %__MODULE__{request_id: String.t() | nil, detail: String.t()}
 end
 
-defmodule Ouroboros.Web.Presentation.ApprovalResolved do
+defmodule Ouroboros.EventPresentation.ApprovalResolved do
   @moduledoc "An outstanding permission was answered."
   defstruct [:request_id, :decision, detail: ""]
 
@@ -583,19 +583,19 @@ defmodule Ouroboros.Web.Presentation.ApprovalResolved do
         }
 end
 
-defmodule Ouroboros.Web.Presentation.Failure do
+defmodule Ouroboros.EventPresentation.Failure do
   @moduledoc "A run or a session failed."
   defstruct detail: ""
   @type t :: %__MODULE__{detail: String.t()}
 end
 
-defmodule Ouroboros.Web.Presentation.Interrupted do
+defmodule Ouroboros.EventPresentation.Interrupted do
   @moduledoc "A run or a session was cancelled."
   defstruct detail: ""
   @type t :: %__MODULE__{detail: String.t()}
 end
 
-defmodule Ouroboros.Web.Presentation.ProviderNote do
+defmodule Ouroboros.EventPresentation.ProviderNote do
   @moduledoc """
   Something the provider said that this surface does not model. Named by its own kind so
   it is one dim line rather than an invisible event.
@@ -604,7 +604,7 @@ defmodule Ouroboros.Web.Presentation.ProviderNote do
   @type t :: %__MODULE__{kind: String.t(), detail: String.t()}
 end
 
-defmodule Ouroboros.Web.Presentation do
+defmodule Ouroboros.EventPresentation do
   @moduledoc """
   A tolerant, presentation-only reading of normalized Harness events.
 
@@ -616,15 +616,16 @@ defmodule Ouroboros.Web.Presentation do
 
   There is deliberately no catch-all "ignore" arm. Each normalized event type names a
   presentation struct, and the one that draws nothing —
-  `Ouroboros.Web.Presentation.Hidden` — carries the reason it drew nothing. A kind this
-  build did not recognise becomes `Ouroboros.Web.Presentation.ProviderNote` rather than
+  `Ouroboros.EventPresentation.Hidden` — carries the reason it drew nothing. A kind this
+  build did not recognise becomes `Ouroboros.EventPresentation.ProviderNote` rather than
   disappearing: a transcript that silently omits events is a transcript that cannot be
   trusted about the events it does show.
 
-  Port of `PresentationEvent::from_event` (`tui/src/model/transcript.rs:361`), with the
-  display ceilings of `tui/src/model/transcript.rs:22-33` applied here rather than at
-  render. The input is the runtime's own `%Ouroboros.Interactive.Event{}` — uncapped — so
-  these ceilings are load-bearing, not decorative.
+  This module owns the common semantic records emitted by the gateway and read directly
+  by the terminal. Its original parser came from the terminal, whose legacy fallback
+  remains for older servers and concepts outside that contract. Shared fixture expectations
+  pin both readers. Display ceilings apply before rendering; an in-process input can still
+  be an uncapped `%Ouroboros.Interactive.Event{}`.
 
   ## Payload key types, and the one transform this module does before reading
 
@@ -660,7 +661,7 @@ defmodule Ouroboros.Web.Presentation do
 
   import Bitwise, only: [band: 2]
 
-  alias Ouroboros.Web.Presentation.{
+  alias Ouroboros.EventPresentation.{
     AgentText,
     ApprovalRequested,
     ApprovalResolved,
@@ -755,6 +756,51 @@ defmodule Ouroboros.Web.Presentation do
           | SubagentEvent.t()
           | ProviderNote.t()
           | Hidden.t()
+
+  @wire_types [
+    AgentText,
+    Thinking,
+    ToolCall,
+    ToolResult,
+    UsageReport,
+    ApprovalRequested,
+    ApprovalResolved,
+    TurnStarted,
+    TurnEnded,
+    UserMessage,
+    UserSteer,
+    CommandOutput,
+    Failure,
+    Interrupted,
+    Hidden
+  ]
+
+  @doc "Versioned semantic data for clients; unknown concepts retain their raw-event fallback."
+  def semantic(event) do
+    case from_event(event) do
+      %module{} = value when module in @wire_types ->
+        %{
+          "version" => 1,
+          "kind" => module |> Module.split() |> List.last(),
+          "data" => semantic_value(value)
+        }
+
+      _other ->
+        nil
+    end
+  end
+
+  defp semantic_value(%_{} = value), do: value |> Map.from_struct() |> semantic_value()
+
+  defp semantic_value(value) when is_map(value),
+    do: Map.new(value, fn {key, v} -> {to_string(key), semantic_value(v)} end)
+
+  defp semantic_value(value) when is_list(value), do: Enum.map(value, &semantic_value/1)
+
+  defp semantic_value(value) when is_atom(value) and value not in [nil, true, false],
+    do: Atom.to_string(value)
+
+  defp semantic_value(value), do: value
 
   @doc "Every canonical event type, as the runtime spells them."
   @spec canonical_types() :: [atom()]

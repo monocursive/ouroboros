@@ -1,14 +1,10 @@
 defmodule Ouroboros.Control.Store do
-  @moduledoc """
-  Atomic checkpoint storage for autonomous control runs.
-
-  All runs and their index share one adapter checkpoint, matching the durable
-  aggregate pattern used by orchestration without reaching into its internals.
-  """
+  @moduledoc "Serialized per-record persistence for control runs."
 
   use GenServer
 
   alias Ouroboros.Control.Run
+  alias Ouroboros.Storage.Records
 
   @default_key {:ouroboros, :control_runs, 1}
 
@@ -58,7 +54,7 @@ defmodule Ouroboros.Control.Store do
   def handle_call({:create, %Run{} = run}, _from, state) do
     with :ok <- Run.validate(run),
          :ok <- ensure_absent(state.runs, run.id) do
-      persist(Map.put(state.runs, run.id, run), state)
+      persist(run, state)
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
@@ -71,7 +67,7 @@ defmodule Ouroboros.Control.Store do
       if current == run do
         {:reply, :ok, state}
       else
-        persist(Map.put(state.runs, run.id, run), state)
+        persist(run, state)
       end
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
@@ -95,41 +91,36 @@ defmodule Ouroboros.Control.Store do
   end
 
   defp load(adapter, opts, key) do
-    case adapter.get_checkpoint(key, opts) do
-      :not_found -> {:ok, %{adapter: adapter, opts: opts, key: key, runs: %{}}}
-      {:ok, runs} when is_map(runs) -> validate_loaded(runs, adapter, opts, key)
-      {:ok, _invalid} -> {:stop, :invalid_control_checkpoint}
-      {:error, reason} -> {:stop, {:control_checkpoint_unreadable, reason}}
-      other -> {:stop, {:invalid_storage_response, other}}
+    repo =
+      Records.new(adapter, opts, key, %{
+        invalid: :invalid_control_checkpoint,
+        unreadable: :control_checkpoint_unreadable,
+        migration: :control_checkpoint_migration_failed,
+        quarantine: :control_quarantine_failed
+      })
+
+    case Records.load(repo, &decode_record/2) do
+      {:ok, records} -> {:ok, %{repo: repo, runs: records}}
+      {:error, reason} -> {:stop, reason}
     end
   end
 
-  defp validate_loaded(runs, adapter, opts, key) do
-    valid? =
-      Enum.all?(runs, fn
-        {id, %Run{id: id} = run} when is_binary(id) -> Run.validate(run) == :ok
-        _other -> false
-      end)
-
-    if valid?,
-      do: {:ok, %{adapter: adapter, opts: opts, key: key, runs: runs}},
-      else: {:stop, :invalid_control_checkpoint}
+  defp decode_record(id, %Run{id: id} = record) when is_binary(id) do
+    case Run.validate(record) do
+      :ok -> {:ok, record}
+      error -> error
+    end
   end
 
-  defp persist(runs, state) do
-    case state.adapter.put_checkpoint(state.key, runs, state.opts) do
-      :ok ->
-        {:reply, :ok, %{state | runs: runs}}
+  defp decode_record(_id, _record), do: :error
 
-      {:error, {:commit_outcome_unknown, _reason} = ambiguity} ->
-        {:stop, ambiguity, {:error, ambiguity}, state}
+  defp persist(record, state) do
+    updated = Map.put(state.runs, record.id, record)
 
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
-
-      other ->
-        {:reply, {:error, {:invalid_storage_response, other}}, state}
-    end
+    Records.reply(Records.put(state.repo, state.runs, record.id, record), :ok, state, %{
+      state
+      | runs: updated
+    })
   end
 
   defp fetch(runs, id) do

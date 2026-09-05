@@ -295,40 +295,19 @@ defmodule Ouroboros.Coding.Task do
     end
   end
 
-  defp workspace_admission_configured? do
-    match?([_ | _], Application.get_env(:ouroboros, :workspace_allowed_roots, []))
-  end
+  defp workspace_admission_configured?, do: Ouroboros.Workspace.Admission.configured?()
 
   defp acquire_workspace(task, attempts) do
-    result =
-      try do
-        Workspace.acquire_managed(task.workspace, task.id, :coding,
-          mode: task.workspace_mode,
-          server: WorkspaceManager
-        )
-      catch
-        :exit, reason -> {:error, {:workspace_manager_unavailable, reason}}
-      end
-
-    case result do
-      {:error, {:workspace_conflict, conflicts}} = error when attempts > 0 ->
-        if stale_own_lease?(conflicts, task.id) do
-          Process.sleep(@workspace_reacquire_delay_ms)
-          acquire_workspace(task, attempts - 1)
-        else
-          error
-        end
-
-      other ->
-        other
-    end
+    Ouroboros.Workspace.Admission.acquire(
+      task.workspace,
+      task.id,
+      :coding,
+      task.workspace_mode,
+      WorkspaceManager,
+      attempts,
+      @workspace_reacquire_delay_ms
+    )
   end
-
-  defp stale_own_lease?([_ | _] = conflicts, task_id) do
-    Enum.all?(conflicts, &(Map.get(&1, :task_id) == task_id))
-  end
-
-  defp stale_own_lease?(_conflicts, _task_id), do: false
 
   defp checkpoint_admission_failure(task, reason) do
     redacted = Jido.Harness.Redaction.redact(reason)

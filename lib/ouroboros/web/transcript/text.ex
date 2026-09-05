@@ -7,7 +7,7 @@ defmodule Ouroboros.Web.Transcript.Text do
   lands on a UTF-8 character boundary, as it does there.
   """
 
-  alias Ouroboros.Web.Presentation
+  alias Ouroboros.EventPresentation, as: Presentation
 
   @doc "Cuts `text` to `limit` bytes on a character boundary, appending `marker`."
   @spec bounded_copy(String.t(), non_neg_integer(), String.t()) :: String.t()

@@ -23,7 +23,7 @@ end
 
 defmodule Ouroboros.Web.Transcript.Cell.Plan do
   @moduledoc "One plan update, as the provider sent it."
-  alias Ouroboros.Web.Presentation.PlanUpdate
+  alias Ouroboros.EventPresentation.PlanUpdate
 
   defstruct [:plan]
   @type t :: %__MODULE__{plan: PlanUpdate.t()}
@@ -31,7 +31,7 @@ end
 
 defmodule Ouroboros.Web.Transcript.Cell.Usage do
   @moduledoc "One provider token report."
-  alias Ouroboros.Web.Presentation.UsageReport
+  alias Ouroboros.EventPresentation.UsageReport
 
   defstruct [:usage]
   @type t :: %__MODULE__{usage: UsageReport.t()}
@@ -130,7 +130,7 @@ defmodule Ouroboros.Web.Transcript.Cell.Image do
   (`tui/src/ui/transcript_cells.rs:631-669`).
   """
 
-  alias Ouroboros.Web.Presentation.ImageArtifact
+  alias Ouroboros.EventPresentation.ImageArtifact
 
   defstruct [:pixels, :format, :note, :sha, :media_type, named: ""]
 
@@ -209,7 +209,7 @@ defmodule Ouroboros.Web.Transcript.Cell.Diff do
   cell prints (`tui/src/ui/transcript_cells.rs:611-623`).
   """
 
-  alias Ouroboros.Web.Presentation
+  alias Ouroboros.EventPresentation, as: Presentation
   alias Ouroboros.Web.Transcript
 
   defstruct [:diff, :parsed, pending_approval: false]
@@ -294,7 +294,7 @@ defmodule Ouroboros.Web.Transcript.Cell.Subagent do
   row to zero (`tui/src/ui/transcript_cells.rs:258-297`).
   """
 
-  alias Ouroboros.Web.Presentation.SubagentEvent
+  alias Ouroboros.EventPresentation.SubagentEvent
 
   @marker "↳"
 
@@ -398,7 +398,7 @@ defmodule Ouroboros.Web.Transcript.Cell.Subagent do
       %{retired: "kept"} = worktree ->
         %{
           cell
-          | worktree_kept: worktree.path || Ouroboros.Web.Presentation.Worktree.label(worktree)
+          | worktree_kept: worktree.path || Ouroboros.EventPresentation.Worktree.label(worktree)
         }
 
       _otherwise ->

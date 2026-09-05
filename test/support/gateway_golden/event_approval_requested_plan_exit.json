@@ -49,6 +49,14 @@
       "provider": "claude_code",
       "provider_session_id": "provider-0000000000000001",
       "request_id": "req-plan-exit-000000000001",
+      "semantic": {
+        "data": {
+          "detail": "{\"header\":\"Plan ready\",\"kind\":\"plan_exit\",\"options\":[{\"kind\":\"allow_always\",\"name\":\"Yes, auto-accept edits\",\"optionId\":\"auto_edit\"},{\"kind\":\"allow_once\",\"name\":\"Yes, manual approvals\",\"optionId\":\"prompt\"},{\"kind\":\"reject_once\",\"name\":\"No, keep planning\",\"optionId\":\"keep_planning\"}],\"plan\":{\"explanation\":\"Land the golden corpus before the renderer.\",\"plan\":[{\"status\":\"completed\",\"step\":\"Extend the fixture list\"},{\"status\":\"in_progress\",\"step\":\"Assert the rendered words in Rust\"},{\"status\":\"pending\",\"step\":\"Port the projection to Elixir\"}]},\"plan_source\":\"plan_tool\",\"question\":\"This session has been planning. Ready to build it?\\n· Yes, auto-accept edits — edits inside the workspace apply without asking; commands still ask.\\n· Yes, manual approvals — every write and command is put to you.\\n· No, keep planning — nothing changes and the session stays read-only.\"}",
+          "request_id": "req-plan-exit-000000000001"
+        },
+        "kind": "ApprovalRequested",
+        "version": 1
+      },
       "sequence": 134,
       "session_id": "session-0000000000000000000001",
       "timestamp": "2026-01-01T00:00:00.000000Z",

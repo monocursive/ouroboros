@@ -12,6 +12,7 @@ defmodule Ouroboros.CodingSessionEdgeTest do
     @moduledoc false
 
     def get_checkpoint(_key, opts), do: Keyword.fetch!(opts, :response)
+    def put_checkpoint(_key, _value, _opts), do: :ok
   end
 
   setup do

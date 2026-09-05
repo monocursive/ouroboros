@@ -1,39 +1,15 @@
 defmodule Ouroboros.Web.CorpusParityTest do
-  @moduledoc """
-  The drift lock between the two transcript implementations (`docs/WEB.md` §6).
-
-  `test/support/gateway_golden/event_*.json` is one frame per event payload a client has
-  to turn into a sentence. `tui/tests/presentation_corpus.rs` is the Rust half: it runs
-  each fixture through `Event::decode` → `PresentationEvent::from_event` → `project` and
-  writes the finished words out as plain literals. This file is the Elixir half, running
-  the same fixture bytes through `Ouroboros.Web.Presentation.from_event/1` →
-  `Ouroboros.Web.Transcript.project/1` and asserting **the same literals**.
-
-  Every expected string here was copied by hand from a named Rust test, and each block
-  says which one. The two suites cannot call each other and are compiled by different
-  toolchains, so the same bytes in and the same words asserted out is the only mechanism
-  that keeps them agreeing: **a change to any literal here is a change to a contract with
-  another toolchain**, not a test edit. The Rust literals are the contract and this side
-  conforms — a mismatch is a bug in `Ouroboros.Web.{Presentation,Transcript}`.
-
-  What is deliberately *not* asserted, on both sides, is layout: widths, colours, wrapping
-  and the ratatui spans are the terminal's own and no browser will reproduce them. Cell
-  kind, the tool summariser's verb/subject/outcome, the note and divider text, and the
-  approval detail fields are the parts both surfaces owe the reader identically.
-
-  The fixtures are read from the checkout rather than embedded, exactly as the Rust reader
-  does, so a regeneration is picked up by the next run of either suite with no copy step.
-  """
+  @moduledoc "Shared semantic expectations plus platform-specific cell behavior."
 
   use ExUnit.Case, async: true
 
   alias Mix.Tasks.Ouroboros.Gateway.Golden
   alias Ouroboros.Interactive.Event
-  alias Ouroboros.Web.Presentation
+  alias Ouroboros.EventPresentation, as: Presentation
   alias Ouroboros.Web.Transcript
   alias Ouroboros.Web.Transcript.{Approval, Cell, Entry, Tools}
 
-  alias Ouroboros.Web.Presentation.{
+  alias Ouroboros.EventPresentation.{
     Hidden,
     PlanStatus,
     ProviderNote,
@@ -153,6 +129,15 @@ defmodule Ouroboros.Web.CorpusParityTest do
     case Transcript.pending_approvals(%{event.sequence => event}) do
       [request] -> request
       other -> flunk("#{name} is not one outstanding approval: #{inspect(other)}")
+    end
+  end
+
+  test "runtime semantics agree with the shared client contract" do
+    corpus = "test/support/semantic_corpus.json" |> File.read!() |> JSON.decode!()
+    assert length(corpus) >= 25
+
+    for %{"fixture" => name, "expected" => expected} <- corpus do
+      assert Presentation.semantic(event(name)) == expected, name
     end
   end
 

@@ -13,6 +13,16 @@
       "provider": "claude_code",
       "provider_session_id": "provider-0000000000000001",
       "request_id": null,
+      "semantic": {
+        "data": {
+          "at": 1767225600000,
+          "detail": "the model stream ended mid-tool-call",
+          "outcome": "failed",
+          "turn_id": "turn-0000000000000000000001"
+        },
+        "kind": "TurnEnded",
+        "version": 1
+      },
       "sequence": 121,
       "session_id": "session-0000000000000000000001",
       "timestamp": "2026-01-01T00:00:00.000000Z",

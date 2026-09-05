@@ -3,9 +3,9 @@ defmodule Ouroboros.Coding.Store do
   Serialized persistence boundary for coding-task checkpoints.
 
   Development and tests use ETS. Production is configured in `runtime.exs` to use
-  `Ouroboros.Storage.DurableFile` beneath `OUROBOROS_DATA_DIR`. The task map and
-  its index are one checkpoint, so every accepted transition is atomically
-  discoverable after restart.
+  `Ouroboros.Storage.DurableFile` beneath `OUROBOROS_DATA_DIR`. Each task has its own
+  checkpoint; a versioned index publishes new tasks after their state is durable.
+  Legacy aggregate checkpoints migrate on load.
   A transactional shared storage adapter can replace it for clustered recovery.
 
   Every storage adapter call is guarded. A file-backed adapter raises rather than
@@ -16,6 +16,7 @@ defmodule Ouroboros.Coding.Store do
   use GenServer
 
   alias Ouroboros.Coding.TaskState
+  alias Ouroboros.Storage.Records
 
   @store_key {:ouroboros, :coding_tasks, 1}
 
@@ -93,25 +94,17 @@ defmodule Ouroboros.Coding.Store do
 
     {adapter, adapter_opts} = Jido.Storage.normalize_storage(storage)
 
-    case adapter_call(adapter, :get_checkpoint, [@store_key, adapter_opts]) do
-      :not_found ->
-        {:ok, %{adapter: adapter, opts: adapter_opts, tasks: %{}}}
+    repo =
+      Records.new(adapter, adapter_opts, @store_key, %{
+        invalid: :invalid_coding_task_checkpoint,
+        unreadable: :coding_task_checkpoint_unreadable,
+        migration: :coding_task_checkpoint_migration_failed,
+        quarantine: :coding_task_quarantine_failed
+      })
 
-      {:ok, tasks} when is_map(tasks) ->
-        if valid_tasks?(tasks) do
-          {:ok, %{adapter: adapter, opts: adapter_opts, tasks: tasks}}
-        else
-          {:stop, :invalid_coding_task_checkpoint}
-        end
-
-      {:ok, _invalid} ->
-        {:stop, :invalid_coding_task_checkpoint}
-
-      {:error, reason} ->
-        {:stop, {:coding_task_checkpoint_unreadable, reason}}
-
-      other ->
-        {:stop, {:invalid_storage_response, other}}
+    case Records.load(repo, &decode_task/2) do
+      {:ok, tasks} -> {:ok, %{repo: repo, tasks: tasks}}
+      {:error, reason} -> {:stop, reason}
     end
   end
 
@@ -191,31 +184,22 @@ defmodule Ouroboros.Coding.Store do
     end
   end
 
-  defp persist_task(task, state),
-    do: persist_tasks(Map.put(state.tasks, task.id, task), :ok, state)
+  defp persist_task(task, state) do
+    tasks = Map.put(state.tasks, task.id, task)
 
-  defp persist_tasks(tasks, reply, state) do
-    case adapter_call(state.adapter, :put_checkpoint, [@store_key, tasks, state.opts]) do
-      :ok ->
-        {:reply, reply, %{state | tasks: tasks}}
-
-      {:error, {:commit_outcome_unknown, _reason} = ambiguity} ->
-        {:stop, ambiguity, {:error, ambiguity}, state}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
-
-      other ->
-        {:reply, {:error, {:invalid_storage_response, other}}, state}
-    end
+    Records.reply(Records.put(state.repo, state.tasks, task.id, task), :ok, state, %{
+      state
+      | tasks: tasks
+    })
   end
 
-  defp adapter_call(adapter, function, arguments) do
-    apply(adapter, function, arguments)
-  rescue
-    error -> {:error, {:adapter_exception, Exception.message(error)}}
-  catch
-    kind, reason -> {:error, {:adapter_failure, kind, reason}}
+  defp persist_tasks(tasks, reply, state) do
+    removed = Map.keys(state.tasks) -- Map.keys(tasks)
+
+    Records.reply(Records.drop(state.repo, state.tasks, removed), reply, state, %{
+      state
+      | tasks: tasks
+    })
   end
 
   defp summary(%TaskState{} = task) do
@@ -258,12 +242,8 @@ defmodule Ouroboros.Coding.Store do
   # node with it, so a single task written by a newer build — or by a build that allowed
   # something this one does not — must not be able to decide that no task boots. A task
   # that cannot build a request is failed by name when it tries; see `Coding.Task`.
-  defp valid_tasks?(tasks) do
-    Enum.all?(tasks, fn
-      {id, %TaskState{id: id}} when is_binary(id) -> true
-      _other -> false
-    end)
-  end
+  defp decode_task(id, %TaskState{id: id} = task) when is_binary(id), do: {:ok, task}
+  defp decode_task(_id, _task), do: :error
 
   # Writes are gated: a checkpoint this build accepts must be one it can run.
   defp creatable_task?(%TaskState{id: id} = task),

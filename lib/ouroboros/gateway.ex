@@ -30,10 +30,9 @@ defmodule Ouroboros.Gateway do
 
   ## Placement
 
-  Started only on a `:core` node, at the absolute tail of `Ouroboros.Application`'s
-  `rest_for_one` chain, after cluster formation. Nothing downstream rebuilds from it,
-  nothing it holds is durable, and a crash here restarts nothing else. `:builder` and
-  `:signer` nodes never run it.
+  Started only on a `:core` node in the independent surface subtree. Nothing rebuilds
+  durable state from it, so replacing it after its restart budget is exhausted leaves
+  unrelated helpers alive. `:builder` and `:signer` nodes never run it.
 
   ## Honest limits
 
@@ -59,8 +58,9 @@ defmodule Ouroboros.Gateway do
   Starts the gateway.
 
   Options are for tests and for an operator supplying configuration another way:
-  `:name`, `:config`, `:listener`, `:conn_supervisor`, `:task_supervisor`. Everything
-  omitted comes from application environment, which `config/runtime.exs` writes.
+  `:name`, `:config`, `:listener`, `:conn_supervisor`, `:task_supervisor`. The application
+  passes `:ready_application` to defer handshakes until OTP completes startup. Configuration
+  omitted here comes from application environment, which `config/runtime.exs` writes.
   """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) do
@@ -79,6 +79,7 @@ defmodule Ouroboros.Gateway do
        strategy: :one_for_one, name: conn_supervisor, max_children: @max_connections},
       {Listener,
        name: Keyword.get(opts, :listener, Listener),
+       ready_application: Keyword.get(opts, :ready_application),
        config: config,
        conn_supervisor: conn_supervisor,
        task_supervisor: task_supervisor}

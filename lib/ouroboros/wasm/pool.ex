@@ -167,12 +167,7 @@ defmodule Ouroboros.Wasm.Pool do
   # `execve`s an absolute path — so this is the child's environment and not the spawn's.
   @inherited_env ~w(PATH HOME TMPDIR)
 
-  # An allowed *name* is not yet an allowed *value*. The three variables above are paths, and
-  # a path is not supposed to look like this; a node whose `PATH` somehow carries a
-  # credential URI hands the helper one anyway if only the name is checked. The same shape
-  # `Ouroboros.Provider.Native.Exec.sensitive_environment?/2` applies, narrowed to what a
-  # path can plausibly contain.
-  @credential_value ~r{([a-z][a-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@)|(-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----)}i
+  # ProcessEnvironment also rejects credential-shaped values under allowed names.
 
   # Lines of non-JSON stdout tolerated before the transport is treated as broken. The helper
   # writes its diagnostics to stderr and its answers to stdout; anything else on stdout is a
@@ -1765,14 +1760,7 @@ defmodule Ouroboros.Wasm.Pool do
   # expressed by naming every variable this node holds that is not on the allow-list and
   # removing it (value `false` unsets one). The list is built from this node's own
   # environment at spawn time, so nothing that is not there cannot be removed.
-  defp filtered_env do
-    System.get_env()
-    |> Enum.reject(fn {name, value} -> inherited?(name, value) end)
-    |> Enum.map(fn {name, _value} -> {String.to_charlist(name), false} end)
-  end
-
-  defp inherited?(name, value),
-    do: name in @inherited_env and not Regex.match?(@credential_value, value)
+  defp filtered_env, do: Ouroboros.ProcessEnvironment.port_unsets(@inherited_env)
 
   # `Sandbox.env/1`'s three names, as `Port.open/2` wants them. They come *after* the
   # allow-list's unsets, so `TMPDIR` ends up at the scratch whatever this node's own was: a

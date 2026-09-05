@@ -9,7 +9,7 @@ defmodule Ouroboros.Web.TranscriptTest do
   use ExUnit.Case, async: true
 
   alias Ouroboros.Interactive.Event
-  alias Ouroboros.Web.Presentation
+  alias Ouroboros.EventPresentation, as: Presentation
   alias Ouroboros.Web.Transcript
   alias Ouroboros.Web.Transcript.{Approval, Cell, Entry, Tools}
   alias Ouroboros.Web.Transcript.Diff, as: ParsedDiff

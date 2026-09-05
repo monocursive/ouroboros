@@ -12,6 +12,15 @@
       "provider": "claude_code",
       "provider_session_id": "provider-0000000000000001",
       "request_id": null,
+      "semantic": {
+        "data": {
+          "final_text": false,
+          "text": "The suite passed: 412 ",
+          "turn_id": "turn-0000000000000000000001"
+        },
+        "kind": "AgentText",
+        "version": 1
+      },
       "sequence": 105,
       "session_id": "session-0000000000000000000001",
       "timestamp": "2026-01-01T00:00:00.000000Z",

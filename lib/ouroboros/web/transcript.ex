@@ -18,9 +18,9 @@ defmodule Ouroboros.Web.Transcript do
   the events, the floor, the notes and the ended status it is given and interleaves them.
   """
 
-  alias Ouroboros.Web.Presentation
+  alias Ouroboros.EventPresentation, as: Presentation
 
-  alias Ouroboros.Web.Presentation.{
+  alias Ouroboros.EventPresentation.{
     AgentText,
     ApprovalRequested,
     ApprovalResolved,

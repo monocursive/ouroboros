@@ -2,10 +2,9 @@ defmodule Ouroboros.Provider.Native.Desktop.Supervisor do
   @moduledoc """
   Owns the one Computer Use helper pool on a `:core` node.
 
-  Same tail posture as `Ouroboros.Provider.Native.Mcp.Supervisor`: the pool is lazy (it
-  does not spawn the helper until a request or `probe` needs it), owns nothing any plane
-  rebuilds from, and sits downstream of the gateway so a helper crash restarts nothing
-  else. Tests start their own named `Pool` and never touch this supervisor.
+  The pool is lazy (it does not spawn the helper until a request or `probe` needs it)
+  and owns nothing any plane rebuilds from. Its parent keeps it independent of the
+  gateway and other helpers. Tests start their own named `Pool`.
   """
 
   use Supervisor

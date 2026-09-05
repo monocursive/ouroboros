@@ -157,12 +157,18 @@ defmodule Ouroboros do
           Ouroboros.Team.Recovery
         ]),
       orchestration:
-        process_group_state([
-          Ouroboros.Orchestration.Store,
-          Ouroboros.Orchestration.Scheduler
-        ]),
+        if(Application.get_env(:ouroboros, :automation_enabled, true),
+          do:
+            process_group_state([
+              Ouroboros.Orchestration.Store,
+              Ouroboros.Orchestration.Scheduler
+            ]),
+          else: :disabled
+        ),
       control:
-        if(Application.get_env(:ouroboros, :control_enabled, false),
+        if(
+          Application.get_env(:ouroboros, :automation_enabled, true) and
+            Application.get_env(:ouroboros, :control_enabled, false),
           do: process_group_state([Ouroboros.Control.Store, Ouroboros.Control.Server]),
           else: :disabled
         ),

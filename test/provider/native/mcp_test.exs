@@ -37,34 +37,46 @@ defmodule Ouroboros.Provider.Native.McpTest do
   end
 
   describe "supervision" do
-    # `rest_for_one` makes child order a blast radius. This subtree owns ports to
-    # programs a stranger wrote, and nothing downstream rebuilds from what it knows, so
-    # it belongs in the operator-surface tail beside the gateway rather than above the
-    # planes: a crash-looping MCP server must not restart a single live session.
-    test "the MCP subtree is supervised in the tail, after every plane and the gateway" do
-      start_order =
-        Ouroboros.Supervisor
-        |> Supervisor.which_children()
-        # A non-dynamic supervisor keeps its children in reverse start order.
-        |> Enum.reverse()
-        |> Enum.map(fn {id, _pid, _type, _modules} -> id end)
-
-      mcp = index!(start_order, Ouroboros.Provider.Native.Mcp.Supervisor)
-
-      for upstream <- [
+    test "exhausting the MCP restart budget preserves session owners and sibling helpers" do
+      survivors =
+        Map.new(
+          [
             Ouroboros.Cluster,
-            Ouroboros.Release.Runtime,
-            Ouroboros.Coding.Recovery,
-            Ouroboros.Interactive.Recovery,
-            Ouroboros.Team.Recovery,
-            Ouroboros.CodeIntel.Supervisor
-          ] do
-        assert mcp > index!(start_order, upstream),
-               "the MCP subtree starts before #{inspect(upstream)}, so its crash restarts it"
+            Ouroboros.Coding.TaskSupervisor,
+            Ouroboros.Interactive.TaskSupervisor,
+            Ouroboros.Team.Supervisor,
+            Ouroboros.CodeIntel.Supervisor,
+            Ouroboros.Wasm.Supervisor,
+            Ouroboros.Provider.Native.Desktop.Supervisor
+          ],
+          &{&1, Process.whereis(&1)}
+        )
+
+      mcp = Process.whereis(Ouroboros.Provider.Native.Mcp.Supervisor)
+      assert is_pid(mcp)
+
+      # Exhaust the subtree's ten permitted restarts. This exercises its actual
+      # escalation path, including orderly child teardown before its parent replaces it.
+      for _attempt <- 1..11 do
+        pool = Process.whereis(Pool)
+        assert is_pid(pool)
+        Process.exit(pool, :kill)
+
+        assert eventually(fn ->
+                 replacement_pool = Process.whereis(Pool)
+                 is_pid(replacement_pool) and replacement_pool != pool
+               end)
       end
 
-      # Nothing may start after it: it is the last child, so its crash restarts nothing.
-      assert Enum.drop(start_order, mcp + 1) == []
+      assert eventually(fn ->
+               replacement = Process.whereis(Ouroboros.Provider.Native.Mcp.Supervisor)
+               is_pid(replacement) and replacement != mcp
+             end)
+
+      for {name, pid} <- survivors do
+        assert is_pid(pid)
+        assert Process.whereis(name) == pid, "MCP replacement restarted #{inspect(name)}"
+      end
     end
 
     test "the pool and its dynamic supervisor are both running under it" do
@@ -643,13 +655,6 @@ defmodule Ouroboros.Provider.Native.McpTest do
       fun.() -> true
       System.monotonic_time(:millisecond) >= deadline -> false
       true -> Process.sleep(25) && poll(fun, deadline)
-    end
-  end
-
-  defp index!(order, id) do
-    case Enum.find_index(order, &(&1 == id)) do
-      nil -> flunk("#{inspect(id)} is not supervised by Ouroboros.Supervisor on this node")
-      index -> index
     end
   end
 

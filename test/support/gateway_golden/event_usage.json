@@ -21,6 +21,17 @@
       "provider": "claude_code",
       "provider_session_id": "provider-0000000000000001",
       "request_id": null,
+      "semantic": {
+        "data": {
+          "cached_tokens": 12000,
+          "cost_usd": 0.0731,
+          "input_tokens": 18400,
+          "output_tokens": 2100,
+          "total_tokens": 20500
+        },
+        "kind": "UsageReport",
+        "version": 1
+      },
       "sequence": 116,
       "session_id": "session-0000000000000000000001",
       "timestamp": "2026-01-01T00:00:00.000000Z",

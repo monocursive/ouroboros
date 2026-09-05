@@ -6,7 +6,6 @@ defmodule Ouroboros.Interactive.Task.Shell do
   alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.Interactive.State
   alias Ouroboros.Interactive.Task
-  alias Ouroboros.Interactive.Task.Approvals
   alias Ouroboros.Runtime.Exposure
   alias Ouroboros.Workspace.Exec
 
@@ -90,24 +89,8 @@ defmodule Ouroboros.Interactive.Task.Shell do
     }
   end
 
-  defp evaluate_shell_permission(runtime, command) do
-    case Approvals.permissions_engine(:evaluate, 1) do
-      nil ->
-        {:ask, :no_permission_engine}
-
-      engine ->
-        case apply(engine, :evaluate, [shell_request(runtime.session, command)]) do
-          {:allow, rule} -> {:allow, rule}
-          {:deny, rule} -> {:deny, rule}
-          {:ask, reason} -> {:ask, reason}
-          _unrecognised -> {:ask, :engine_answer_unrecognised}
-        end
-    end
-  rescue
-    exception -> {:ask, {:engine_failed, Exception.message(exception)}}
-  catch
-    :exit, _reason -> {:ask, :engine_unavailable}
-  end
+  defp evaluate_shell_permission(runtime, command),
+    do: Ouroboros.Control.Permissions.Engine.evaluate(shell_request(runtime.session, command))
 
   defp shell_refused(runtime, command, reason, rule) do
     session = runtime.session
@@ -133,22 +116,8 @@ defmodule Ouroboros.Interactive.Task.Shell do
 
   defp rule_reference(_rule), do: nil
 
-  defp shell_suggestion(session, command) do
-    case Approvals.permissions_engine(:suggest, 1) do
-      nil ->
-        nil
-
-      engine ->
-        case apply(engine, :suggest, [shell_request(session, command)]) do
-          rule when is_binary(rule) and rule != "" -> rule
-          _nothing_to_suggest -> nil
-        end
-    end
-  rescue
-    _exception -> nil
-  catch
-    :exit, _reason -> nil
-  end
+  defp shell_suggestion(session, command),
+    do: Ouroboros.Control.Permissions.Engine.suggest(shell_request(session, command))
 
   defp shell_refusal_message(:rule_denied),
     do:

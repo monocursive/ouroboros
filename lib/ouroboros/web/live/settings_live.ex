@@ -137,76 +137,24 @@ defmodule Ouroboros.Web.Live.SettingsLive do
   # ------------------------------------------------------------------------------------
 
   def handle_event("connect-chatgpt", _params, socket) do
-    case call(socket, "account.login.start", %{"flow" => "device_code"}) do
-      {:ok, reply} when is_map(reply) ->
-        login = %{
-          login_id: reply["loginId"],
-          url: reply["verificationUrl"] || reply["authUrl"],
-          code: reply["userCode"]
-        }
-
-        {:noreply,
-         socket
-         |> assign(:login, login)
-         |> clear_feedback()
-         |> maybe_poll_account()}
-
-      refused ->
-        {:noreply, assign(socket, :refusal, NewSession.refusal(refused))}
+    case Ouroboros.Web.Live.AccountConnection.connect(socket, :chatgpt, &call/3, @account_poll) do
+      {:ok, updated} -> {:noreply, clear_feedback(updated)}
+      {:error, updated} -> {:noreply, updated}
     end
   end
 
-  def handle_event("cancel-chatgpt", _params, socket) do
-    socket =
-      case socket.assigns.login do
-        %{login_id: id} when is_binary(id) ->
-          _ = call(socket, "account.login.cancel", %{"login_id" => id})
-          socket
-
-        _none ->
-          socket
-      end
-
-    {:noreply, socket |> assign(:login, nil) |> read_account()}
-  end
+  def handle_event("cancel-chatgpt", _params, socket),
+    do: {:noreply, Ouroboros.Web.Live.AccountConnection.cancel(socket, :chatgpt, &call/3)}
 
   def handle_event("connect-grok", _params, socket) do
-    case call(socket, "grok.account.login.start", %{}) do
-      {:ok, reply} when is_map(reply) ->
-        login = %{
-          login_id: reply["loginId"],
-          url: reply["verificationUrl"],
-          code: reply["userCode"]
-        }
-
-        {:noreply,
-         socket
-         |> assign(:grok_login, login)
-         |> clear_feedback()
-         |> maybe_poll_grok_account()}
-
-      refused ->
-        {:noreply, assign(socket, :refusal, NewSession.refusal(refused))}
+    case Ouroboros.Web.Live.AccountConnection.connect(socket, :grok, &call/3, @account_poll) do
+      {:ok, updated} -> {:noreply, clear_feedback(updated)}
+      {:error, updated} -> {:noreply, updated}
     end
   end
 
-  def handle_event("cancel-grok", _params, socket) do
-    socket =
-      case socket.assigns.grok_login do
-        %{login_id: id} when is_binary(id) ->
-          _ = call(socket, "grok.account.login.cancel", %{"login_id" => id})
-          socket
-
-        _none ->
-          socket
-      end
-
-    {:noreply, socket |> assign(:grok_login, nil) |> read_grok_account()}
-  end
-
-  # ------------------------------------------------------------------------------------
-  # Direct API credentials
-  # ------------------------------------------------------------------------------------
+  def handle_event("cancel-grok", _params, socket),
+    do: {:noreply, Ouroboros.Web.Live.AccountConnection.cancel(socket, :grok, &call/3)}
 
   def handle_event("open-anthropic-key", _params, socket),
     do: open_credential(socket, :anthropic, "credentials.anthropic.set")
@@ -216,9 +164,7 @@ defmodule Ouroboros.Web.Live.SettingsLive do
 
   def handle_event("save-anthropic-key", params, socket) when is_map(params) do
     credential_params =
-      %{}
-      |> put_credential_param("api_key", params["anthropic_api_key"])
-      |> NewSession.put_workspace_param(params)
+      NewSession.credential_params(params)
 
     if env_backed_credential?(socket, :anthropic) do
       {:noreply,
@@ -262,22 +208,14 @@ defmodule Ouroboros.Web.Live.SettingsLive do
   end
 
   @impl true
-  def handle_info(:poll_account, socket) do
-    socket = socket |> assign(:polling_account?, false) |> read_account()
-    socket = if settled?(socket.assigns.account), do: assign(socket, :login, nil), else: socket
-    {:noreply, maybe_poll_account(socket)}
-  end
+  def handle_info(:poll_account, socket),
+    do:
+      {:noreply,
+       Ouroboros.Web.Live.AccountConnection.poll(socket, :chatgpt, &call/3, @account_poll)}
 
-  def handle_info(:poll_grok_account, socket) do
-    socket = socket |> assign(:polling_grok_account?, false) |> read_grok_account()
-
-    socket =
-      if grok_settled?(socket.assigns.grok_account),
-        do: assign(socket, :grok_login, nil),
-        else: socket
-
-    {:noreply, maybe_poll_grok_account(socket)}
-  end
+  def handle_info(:poll_grok_account, socket),
+    do:
+      {:noreply, Ouroboros.Web.Live.AccountConnection.poll(socket, :grok, &call/3, @account_poll)}
 
   def handle_info(_message, socket), do: {:noreply, socket}
 
@@ -329,57 +267,17 @@ defmodule Ouroboros.Web.Live.SettingsLive do
   defp promote_seed(socket),
     do: assign(socket, :form, NewSession.promote(socket.assigns.form, field(socket)))
 
-  defp read_account(socket) do
-    case call(socket, "account.read", %{}) do
-      {:ok, read} when is_map(read) -> assign(socket, :account, read)
-      _refused -> socket
-    end
-  end
+  defp read_account(socket),
+    do: Ouroboros.Web.Live.AccountConnection.read(socket, :chatgpt, &call/3)
 
-  defp read_grok_account(socket) do
-    case call(socket, "grok.account.read", %{}) do
-      {:ok, read} when is_map(read) -> assign(socket, :grok_account, read)
-      _refused -> socket
-    end
-  end
+  defp read_grok_account(socket),
+    do: Ouroboros.Web.Live.AccountConnection.read(socket, :grok, &call/3)
 
-  defp maybe_poll_account(socket) do
-    if NewSession.account_card(socket.assigns.account, socket.assigns.login).state == :waiting,
-      do: poll_account(socket),
-      else: socket
-  end
+  defp maybe_poll_account(socket),
+    do: Ouroboros.Web.Live.AccountConnection.maybe_poll(socket, :chatgpt, @account_poll)
 
-  defp poll_account(%{assigns: %{polling_account?: true}} = socket), do: socket
-
-  defp poll_account(socket) do
-    Process.send_after(self(), :poll_account, @account_poll)
-    assign(socket, :polling_account?, true)
-  end
-
-  defp maybe_poll_grok_account(socket) do
-    if NewSession.grok_account_card(socket.assigns.grok_account, socket.assigns.grok_login).state ==
-         :waiting,
-       do: poll_grok_account(socket),
-       else: socket
-  end
-
-  defp poll_grok_account(%{assigns: %{polling_grok_account?: true}} = socket), do: socket
-
-  defp poll_grok_account(socket) do
-    Process.send_after(self(), :poll_grok_account, @account_poll)
-    assign(socket, :polling_grok_account?, true)
-  end
-
-  defp settled?(read) when is_map(read),
-    do: not match?(%{"login" => %{"status" => "pending"}}, read)
-
-  defp settled?(_read), do: false
-
-  defp grok_settled?(%{"login" => %{"status" => status}})
-       when status in ["starting", "pending"],
-       do: false
-
-  defp grok_settled?(read), do: is_map(read)
+  defp maybe_poll_grok_account(socket),
+    do: Ouroboros.Web.Live.AccountConnection.maybe_poll(socket, :grok, @account_poll)
 
   defp browse(socket, path) do
     params = if is_binary(path), do: %{"path" => path}, else: %{}
@@ -550,15 +448,6 @@ defmodule Ouroboros.Web.Live.SettingsLive do
         default: models && models[:default]
       }
     end)
-  end
-
-  defp put_credential_param(params, _key, value) when not is_binary(value), do: params
-
-  defp put_credential_param(params, key, value) do
-    case String.trim(value) do
-      "" -> params
-      value -> Map.put(params, key, value)
-    end
   end
 
   defp blank_to_nil(value) when is_binary(value), do: if(String.trim(value) != "", do: value)

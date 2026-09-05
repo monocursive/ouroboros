@@ -296,13 +296,14 @@ async fn the_ui_draws_a_live_dev_runtime_and_stops_it() {
     for (width, height) in [(80, 24), (120, 30), (160, 40)] {
         let screen = render(&mut app, width, height);
         eprintln!("--- Sessions {width}x{height} ---\n{}", screen.text());
-        assert!(
-            screen.contains("Ready in this workspace"),
-            "{}",
-            screen.text()
-        );
+        let (message, action) = if app.home_ready() {
+            ("Ready in this workspace", "Enter starts")
+        } else {
+            ("Connect ChatGPT to start coding", "Enter connects")
+        };
+        assert!(screen.contains(message), "{}", screen.text());
         assert!(screen.contains("FILES"), "{}", screen.text());
-        assert!(screen.contains("Enter starts"), "{}", screen.text());
+        assert!(screen.contains(action), "{}", screen.text());
     }
 
     // Subscribing to a session that does not exist is the closest this can get to the
@@ -342,32 +343,37 @@ async fn the_ui_draws_a_live_dev_runtime_and_stops_it() {
     // there.
     assert!(!app.has_outbound());
 
-    // Leave the deliberately invalid transcript and return to the harness home. One Esc
-    // moves from detail to list; the second closes the selected transcript.
+    // Return home through the new-session command. Esc Esc opens backtracking;
+    // it is no longer a two-step route out of the selected transcript.
+    app.apply(Msg::Key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('x'),
+        crossterm::event::KeyModifiers::CONTROL,
+    )));
+    app.apply(Msg::Key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('n'),
+        crossterm::event::KeyModifiers::NONE,
+    )));
+    assert!(app.sessions.open.is_none());
+
+    // ----- the command composer remains available before signing in ----------------
+
+    app.apply(Msg::Key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('/'),
+        crossterm::event::KeyModifiers::NONE,
+    )));
+
+    let screen = render(&mut app, 140, 34);
+    eprintln!("--- coding composer ---\n{}", screen.text());
+    assert_eq!(app.home_draft, "/");
+    assert!(screen.contains("New coding session"), "{}", screen.text());
+
+    // First dismiss slash completion, then clear the draft.
     for _ in 0..2 {
         app.apply(Msg::Key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Esc,
             crossterm::event::KeyModifiers::NONE,
         )));
     }
-    assert!(app.sessions.open.is_none());
-
-    // ----- the coding-first composer, with no provider form in the way ---------------
-
-    app.apply(Msg::Key(crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Char('n'),
-        crossterm::event::KeyModifiers::NONE,
-    )));
-
-    let screen = render(&mut app, 140, 34);
-    eprintln!("--- coding composer ---\n{}", screen.text());
-    assert_eq!(app.home_draft, "n");
-    assert!(screen.contains("New coding session"), "{}", screen.text());
-
-    app.apply(Msg::Key(crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Esc,
-        crossterm::event::KeyModifiers::NONE,
-    )));
     assert!(app.home_draft.is_empty());
 
     // ----- creating a session, only where nothing real would be invoked -------------

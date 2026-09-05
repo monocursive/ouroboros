@@ -16,8 +16,6 @@ defmodule Ouroboros.CodingSession do
   # one wedged coordinator cannot freeze every caller, cancellation included. `await/2`
   # is the deliberate exception: it threads the caller's own timeout, and the transport
   # is given that timeout plus a margin so the local waiter, not the transport, decides.
-  @default_call_timeout 30_000
-  @remote_margin_ms 5_000
   @immutable_request_fields [
     :id,
     :node,
@@ -329,31 +327,11 @@ defmodule Ouroboros.CodingSession do
 
   # Starting a task remotely keeps an unbounded transport: it has no caller-supplied
   # timeout to thread, and provider start-up latency is legitimately unbounded.
-  defp route(owner, module, function, arguments, timeout \\ :infinity) do
-    cond do
-      owner == node() -> apply(module, function, arguments)
-      owner not in Node.list() -> {:error, {:owner_unavailable, owner}}
-      true -> :erpc.call(owner, module, function, arguments, timeout)
-    end
-  catch
-    :error, {:erpc, reason} when reason in [:noconnection, :timeout] ->
-      {:error, {:owner_unavailable, owner, reason}}
+  defp route(owner, module, function, arguments, timeout \\ :infinity),
+    do: Ouroboros.Session.Routing.route(owner, module, function, arguments, timeout)
 
-    kind, reason ->
-      {:error, {:remote_call_failed, owner, kind, reason}}
-  end
-
-  defp call_timeout do
-    case Application.get_env(:ouroboros, :session_call_timeout, @default_call_timeout) do
-      :infinity -> :infinity
-      timeout when is_integer(timeout) and timeout > 0 -> timeout
-      _invalid -> @default_call_timeout
-    end
-  end
-
-  defp transport_timeout(:infinity), do: :infinity
-  defp transport_timeout(timeout) when is_integer(timeout), do: timeout + @remote_margin_ms
-  defp transport_timeout(_timeout), do: call_timeout()
+  defp call_timeout, do: Ouroboros.Session.Routing.call_timeout()
+  defp transport_timeout(timeout), do: Ouroboros.Session.Routing.transport_timeout(timeout)
 
   defp canonical_workspace(workspace) do
     case Ouroboros.Workspace.Path.canonicalize(workspace) do
