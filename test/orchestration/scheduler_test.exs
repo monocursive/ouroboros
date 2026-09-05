@@ -375,6 +375,18 @@ defmodule Ouroboros.Orchestration.SchedulerTest do
     end)
   end
 
+  test "cancel kills a running owner rather than leaving it to finish", context do
+    start_scheduler(context, executor: {BlockingExecutor, test_pid: self()})
+
+    assert {:ok, _} = Scheduler.submit(context.scheduler, plan!("stop", [%{id: "step"}]))
+    assert_receive {:owner_started, _execution, owner}
+    assert Process.alive?(owner)
+
+    assert {:ok, cancelled} = Scheduler.cancel(context.scheduler, "stop", :user_request)
+    assert cancelled.status == :cancelled
+    assert_eventually(fn -> not Process.alive?(owner) end)
+  end
+
   test "store restores the atomic plan aggregate after a process restart", context do
     plan = plan!("stored", [%{id: "one"}])
     assert :ok = Store.create(context.store, plan)

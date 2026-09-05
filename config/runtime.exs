@@ -190,9 +190,22 @@ if config_env() == :prod do
 
   # Requiring a signed evaluation spec is the recommended production posture: it makes
   # "this capability declared, inside the signature, how it would be judged" a
-  # precondition of getting a signature at all. It defaults to off so that naming a
-  # signer node never silently changes what an existing artifact means.
-  signing_require_eval = System.get_env("OUROBOROS_SIGNING_REQUIRE_EVAL") == "true"
+  # precondition of getting a signature at all. Production defaults to on; an operator
+  # who needs the historical behaviour sets OUROBOROS_SIGNING_REQUIRE_EVAL=false.
+  signing_require_eval =
+    case env_value.("OUROBOROS_SIGNING_REQUIRE_EVAL") do
+      nil ->
+        true
+
+      value when value in ["true", "1"] ->
+        true
+
+      value when value in ["false", "0"] ->
+        false
+
+      other ->
+        raise "OUROBOROS_SIGNING_REQUIRE_EVAL must be true or false, got: #{inspect(other)}"
+    end
 
   signing_node =
     case env_value.("OUROBOROS_SIGNING_NODE") do

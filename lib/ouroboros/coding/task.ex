@@ -250,37 +250,53 @@ defmodule Ouroboros.Coding.Task do
   end
 
   defp admit_leased_workspace(task) do
-    if is_pid(Process.whereis(WorkspaceManager)) do
-      case acquire_workspace(task, @workspace_reacquire_attempts) do
-        {:ok, lease, capability} ->
-          leased_task =
-            task
-            |> Map.put(:workspace, lease.root)
-            |> Map.put(:workspace_mode, lease.mode)
-            |> Map.put(:workspace_lease_id, lease.id)
-            |> touch()
+    cond do
+      is_pid(Process.whereis(WorkspaceManager)) ->
+        acquire_leased_workspace(task)
 
-          case Store.put(leased_task) do
-            :ok ->
-              {:ok, new_runtime(leased_task, lease, capability)}
+      workspace_admission_configured?() ->
+        # Roots are configured, so this node advertised a lease boundary. Skipping
+        # because the manager is down would run the agent unconstrained on a machine
+        # that claimed otherwise (F7).
+        checkpoint_admission_failure(task, :workspace_manager_unavailable)
 
-            # The store refuses a task it cannot run. Keep the lease rather than stop:
-            # this task is about to fail as itself, and that failure is what releases the
-            # workspace and clears the recovery reservation the lease just replaced.
-            {:error, :invalid_task_state} ->
-              {:ok, new_runtime(leased_task, lease, capability)}
-
-            {:error, reason} ->
-              _ = safe_workspace_release(lease.id, capability)
-              {:error, {:storage_error, reason}}
-          end
-
-        {:error, reason} ->
-          checkpoint_admission_failure(task, reason)
-      end
-    else
-      {:ok, new_runtime(task)}
+      true ->
+        {:ok, new_runtime(task)}
     end
+  end
+
+  defp acquire_leased_workspace(task) do
+    case acquire_workspace(task, @workspace_reacquire_attempts) do
+      {:ok, lease, capability} ->
+        leased_task =
+          task
+          |> Map.put(:workspace, lease.root)
+          |> Map.put(:workspace_mode, lease.mode)
+          |> Map.put(:workspace_lease_id, lease.id)
+          |> touch()
+
+        case Store.put(leased_task) do
+          :ok ->
+            {:ok, new_runtime(leased_task, lease, capability)}
+
+          # The store refuses a task it cannot run. Keep the lease rather than stop:
+          # this task is about to fail as itself, and that failure is what releases the
+          # workspace and clears the recovery reservation the lease just replaced.
+          {:error, :invalid_task_state} ->
+            {:ok, new_runtime(leased_task, lease, capability)}
+
+          {:error, reason} ->
+            _ = safe_workspace_release(lease.id, capability)
+            {:error, {:storage_error, reason}}
+        end
+
+      {:error, reason} ->
+        checkpoint_admission_failure(task, reason)
+    end
+  end
+
+  defp workspace_admission_configured? do
+    match?([_ | _], Application.get_env(:ouroboros, :workspace_allowed_roots, []))
   end
 
   defp acquire_workspace(task, attempts) do

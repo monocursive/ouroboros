@@ -25,11 +25,10 @@ defmodule Ouroboros.CodingWorkspaceTest do
     File.mkdir_p!(nested)
     File.mkdir_p!(outside)
 
+    manager_id = {:coding_workspace_manager, System.unique_integer([:positive, :monotonic])}
+
     start_supervised!(
-      {Workspace,
-       allowed_roots: [allowed],
-       name: WorkspaceManager,
-       id: {:coding_workspace_manager, System.unique_integer([:positive, :monotonic])}}
+      {Workspace, allowed_roots: [allowed], name: WorkspaceManager, id: manager_id}
     )
 
     previous_providers = Application.get_env(:jido_harness, :providers)
@@ -57,7 +56,7 @@ defmodule Ouroboros.CodingWorkspaceTest do
       File.rm_rf(base)
     end)
 
-    {:ok, allowed: allowed, nested: nested, outside: outside}
+    {:ok, allowed: allowed, nested: nested, outside: outside, manager_id: manager_id}
   end
 
   test "outside and symlink-escaped workspaces fail before Harness starts", context do
@@ -242,6 +241,30 @@ defmodule Ouroboros.CodingWorkspaceTest do
     end)
 
     {task_ref, run_id, adapter}
+  end
+
+  test "fails closed when roots are configured and the workspace manager is not running",
+       context do
+    stop_supervised!(context.manager_id)
+    refute is_pid(Process.whereis(WorkspaceManager))
+
+    previous_roots = Application.get_env(:ouroboros, :workspace_allowed_roots, [])
+    Application.put_env(:ouroboros, :workspace_allowed_roots, [context.allowed])
+
+    on_exit(fn ->
+      if is_nil(previous_roots) do
+        Application.delete_env(:ouroboros, :workspace_allowed_roots)
+      else
+        Application.put_env(:ouroboros, :workspace_allowed_roots, previous_roots)
+      end
+    end)
+
+    assert {:error, {:workspace_admission_failed, :workspace_manager_unavailable}} =
+             CodingSession.start("must not skip the lease",
+               id: unique_id("no-manager"),
+               provider: @provider,
+               workspace: context.allowed
+             )
   end
 
   defp cleanup_test_runs do

@@ -172,8 +172,7 @@ comparing a passing test suite to a benchmark result.
 
 ### Two things it found
 
-Neither is fixed here — this slice adds no code under `lib/` — and both are pinned in the
-corpus so they cannot regress silently.
+The corpus pins both behaviours so they cannot regress silently.
 
 - **`ouro run` names one changed file twice** in `files_changed`: the `file_change`
   payload's absolute `path`, and the relative path parsed out of the unified diff header
@@ -181,13 +180,14 @@ corpus so they cannot regress silently.
   count at 2 and says why; the Terminal-Bench adapter deduplicates before telling Harbor,
   because Harbor only ever sees a count and reporting two files would be reporting a file
   that does not exist.
-- **`code_intel` is unreachable for an ordinary session.**
-  `Ouroboros.CodeIntel.Registry.resolve/2` takes the workspace root from the node's
-  `:workspace_allowed_roots`, which is empty on a default runtime and is *not* populated
-  by admitting a session's workspace, so every path is judged `{:outside_workspace, …}`
-  before a language is considered — independently of whether any language server is
-  installed. `12-code-intel-no-server` therefore asserts the *contract* (in band, bounded,
-  non-fatal, the agent routes around it) and not the message.
+- **`code_intel` without a language server is a bounded in-band refusal.**
+  `Ouroboros.CodeIntel.Registry.resolve/2` admits a path under configured
+  `:workspace_allowed_roots` **or** the workspace of an interactive or coding session
+  this node holds. A default install with no roots and no live session still judges
+  every path `{:outside_workspace, …}` before a language is considered. With a
+  session (or configured roots) and no server installed, the answer is
+  `{:server_unavailable, …}` — in band, bounded, non-fatal. `12-code-intel-no-server`
+  asserts that contract, not the message.
 
 ### Where it runs
 

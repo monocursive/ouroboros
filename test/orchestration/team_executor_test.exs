@@ -73,6 +73,7 @@ defmodule Ouroboros.Orchestration.TeamExecutorTest do
          {TeamExecutor,
           team_id: context.team_id,
           worker_id: context.worker_id,
+          coding_options: [provider: @provider, workspace: File.cwd!()],
           team_cancel_timeout_ms: 300,
           team_retry_backoff_ms: 10,
           team_retry_max_backoff_ms: 50}},
@@ -89,16 +90,14 @@ defmodule Ouroboros.Orchestration.TeamExecutorTest do
                %{
                  id: "inspect",
                  input: %{
-                   objective: "inspect the repository",
-                   options: [provider: @provider, workspace: File.cwd!()]
+                   objective: "inspect the repository"
                  }
                },
                %{
                  id: "explain",
                  dependencies: ["inspect"],
                  input: %{
-                   objective: "explain the result",
-                   options: [provider: @provider, workspace: File.cwd!()]
+                   objective: "explain the result"
                  }
                }
              ])
@@ -149,8 +148,7 @@ defmodule Ouroboros.Orchestration.TeamExecutorTest do
                %{
                  id: "long",
                  input: %{
-                   objective: "keep running",
-                   options: [provider: @provider, workspace: File.cwd!()]
+                   objective: "keep running"
                  }
                }
              ])
@@ -178,8 +176,7 @@ defmodule Ouroboros.Orchestration.TeamExecutorTest do
                %{
                  id: "long",
                  input: %{
-                   objective: "cancel after the coordinator restarts",
-                   options: [provider: @provider, workspace: File.cwd!()]
+                   objective: "cancel after the coordinator restarts"
                  }
                }
              ])
@@ -231,8 +228,7 @@ defmodule Ouroboros.Orchestration.TeamExecutorTest do
                %{
                  id: "long",
                  input: %{
-                   objective: "remain active while cancellation is unconfirmed",
-                   options: [provider: @provider, workspace: File.cwd!()]
+                   objective: "remain active while cancellation is unconfirmed"
                  }
                }
              ])
@@ -282,8 +278,7 @@ defmodule Ouroboros.Orchestration.TeamExecutorTest do
                %{
                  id: "survive",
                  input: %{
-                   objective: "survive the coordinator restart",
-                   options: [provider: @provider, workspace: File.cwd!()]
+                   objective: "survive the coordinator restart"
                  }
                }
              ])
@@ -349,8 +344,7 @@ defmodule Ouroboros.Orchestration.TeamExecutorTest do
                %{
                  id: "survive",
                  input: %{
-                   objective: "survive the scheduler restart",
-                   options: [provider: @provider, workspace: File.cwd!()]
+                   objective: "survive the scheduler restart"
                  }
                }
              ])
@@ -409,10 +403,7 @@ defmodule Ouroboros.Orchestration.TeamExecutorTest do
       plan_id: unique_id("classification-plan"),
       step_id: "classify",
       token: unique_id("classification-token"),
-      input: %{
-        objective: "classify the team failure",
-        options: [provider: @provider, workspace: File.cwd!()]
-      },
+      input: %{objective: "classify the team failure"},
       attempt: 1,
       state: :running,
       metadata: %{}

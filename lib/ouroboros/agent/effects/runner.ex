@@ -41,6 +41,8 @@ defmodule Ouroboros.Agent.Effects.Runner do
   the authority decision happened before the effect ran.
   """
 
+  require Logger
+
   alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.Control.Grants
   alias Ouroboros.Mesh
@@ -231,29 +233,32 @@ defmodule Ouroboros.Agent.Effects.Runner do
 
   # Two processes, on purpose. The outer one owns the deadline and the settlement and
   # cannot be taken down by the effect; the inner one does the work and is killed if it
-  # runs past the budget. An in-flight entry that never settles is a lie the trail would
-  # keep telling, so every path out of the outer process delivers something.
+  # runs past the budget. Settlement is recorded in the ledger *before* the agent is
+  # told: delivering a success the ledger could not persist is how an effect that ran
+  # would look settled to the agent and `:started` (then `:ambiguous` at boot) to every
+  # later reader. If the ledger cannot take the row, the agent stays in-flight.
   defp start_runner(effect_id, effect, run, server) do
     supervisor = Ouroboros.Jido.task_supervisor_name()
 
     Task.Supervisor.start_child(supervisor, fn ->
       receive do
         {:execute_effect, ^effect_id} ->
-          outcome = bounded(supervisor, run, timeout())
-          attrs = settlement(effect_id, effect, outcome)
-          persist_settlement(effect_id, attrs)
-          deliver(server, attrs)
+          settle_and_deliver(
+            effect_id,
+            settlement(effect_id, effect, bounded(supervisor, run, timeout())),
+            server
+          )
       after
         @settle_timeout ->
-          attrs =
+          settle_and_deliver(
+            effect_id,
             settlement(
               effect_id,
               effect,
               {:error, {:effect_runner_not_released, @settle_timeout}}
-            )
-
-          persist_settlement(effect_id, attrs)
-          deliver(server, attrs)
+            ),
+            server
+          )
       end
     end)
   catch
@@ -301,8 +306,20 @@ defmodule Ouroboros.Agent.Effects.Runner do
         Process.sleep(@settle_retry_ms)
         persist_settlement(effect_id, attrs, attempts - 1)
 
-      {:error, _reason} ->
-        :ok
+      {:error, reason} ->
+        {:error, {:effect_settlement_unrecordable, reason}}
+    end
+  end
+
+  defp settle_and_deliver(effect_id, attrs, server) do
+    case persist_settlement(effect_id, attrs) do
+      :ok ->
+        deliver(server, attrs)
+
+      {:error, reason} ->
+        Logger.error(
+          "effect #{effect_id} ran but the ledger could not settle: #{inspect(reason)}"
+        )
     end
   end
 

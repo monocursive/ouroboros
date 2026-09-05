@@ -76,24 +76,9 @@ deps/jido_signal/lib/jido_signal/using.ex:168: Function validate_policy_extensio
 deps/jido_signal/lib/jido_signal/using.ex:336: The pattern 'false' can never match the type 'true'
 
 # ── held for work in flight ───────────────────────────────────────────────────────────
-# Files another agent is editing as this lands. `cluster.ex` still warns here; the
-# `sandbox.ex` and `bash.ex` entries below match nothing on this tree and are carried
-# verbatim from the old baseline so that whoever owns those files decides their fate
-# rather than having it decided by a merge. Drop them once that work settles.
-#
-# Worth their attention rather than mine: the `sandbox.ex`/`bash.ex` pair says
-# `Sandbox.policy/2` can never return `{:sandboxed, _, _}`, which is the same shape of
-# claim the `code_intel` cluster made — "this feature's live path is unreachable". It may
-# be nothing but a wrong spec. It should not be assumed to be.
-lib/ouroboros/cluster.ex:777:7: The variable __invalid@1 can never match since previous clauses completely covered the type {'error',atom() | {'no_translation','unicode','latin1'} | #{'__exception__':='true', '__struct__':='Elixir.Jason.DecodeError', 'data':=binary(), 'position':=integer(), 'token':=_}} | {'ok',#{'__struct__':='Elixir.File.Stat', 'access':='none' | 'read' | 'read_write' | 'undefined' | 'write', 'atime':='undefined' | integer() | {_,_}, 'ctime':='undefined' | integer() | {_,_}, 'gid':='undefined' | non_neg_integer(), 'inode':='undefined' | non_neg_integer(), 'links':='undefined' | non_neg_integer(), 'major_device':='undefined' | non_neg_integer(), 'minor_device':='undefined' | non_neg_integer(), 'mode':='undefined' | non_neg_integer(), 'mtime':='undefined' | integer() | {_,_}, 'size':='undefined' | non_neg_integer(), 'type':='device' | 'directory' | 'other' | 'regular' | 'symlink' | 'undefined', 'uid':='undefined' | non_neg_integer()}}
-lib/ouroboros/provider/native/sandbox.ex:251: Invalid type specification for function 'Elixir.Ouroboros.Provider.Native.Sandbox':policy/2.
-lib/ouroboros/provider/native/sandbox.ex:189:7: The pattern {'sandboxed', _label@1, __policy@1} can never match the type {'refused',{'read_only_without_backend',_} | {'unknown_sandbox_mode',_}} | {'unsandboxed','unrestricted' | {'no_backend',_}}
-lib/ouroboros/provider/native/tools/bash.ex:115:7: The pattern {'sandboxed', _label@1, _policy@1} can never match the type {'refused',{'read_only_without_backend',_} | {'unknown_sandbox_mode',_}} | {'unsandboxed','unrestricted' | {'no_backend',_}}
-lib/ouroboros/provider/native/tools/bash.ex:121:8: Function sandboxed/5 will never be called
-lib/ouroboros/provider/native/tools/bash.ex:141:8: Function wrap_or_release/5 will never be called
-lib/ouroboros/provider/native/tools/bash.ex:201:8: The pattern <_plan@1, _output@1, _status@1, __live@1> can never match since previous clauses completely covered the type <#{'args':=[binary(),...], 'command':=_, 'env':=[], 'executable':=<<_:56>>, 'label':=<<_:32>>, 'policy':='nil', 'scratch':='nil'},binary(),integer(),boolean()>
-lib/ouroboros/provider/native/tools/bash.ex:214:8: Function offer/2 will never be called
-lib/ouroboros/provider/native/tools/bash.ex:302:8: The pattern {'sandbox_unavailable', _label@1, _reason@1} can never match the type {'spawn_failed',_} | {'wrapper_unavailable','false' | {_,_}} | {'backend_failed',<<_:32>>,binary()} | {'spawn_failed',_,_}
+# `cluster.ex` still warns here. Drop the line once that function's error typing matches
+# the clause that is written to handle it.
+lib/ouroboros/cluster.ex:789:7: The variable __invalid@1 can never match since previous clauses completely covered the type {'error',atom() | {'no_translation','unicode','latin1'} | #{'__exception__':='true', '__struct__':='Elixir.Jason.DecodeError', 'data':=binary(), 'position':=integer(), 'token':=_}} | {'ok',#{'__struct__':='Elixir.File.Stat', 'access':='none' | 'read' | 'read_write' | 'undefined' | 'write', 'atime':='undefined' | integer() | {_,_}, 'ctime':='undefined' | integer() | {_,_}, 'gid':='undefined' | non_neg_integer(), 'inode':='undefined' | non_neg_integer(), 'links':='undefined' | non_neg_integer(), 'major_device':='undefined' | non_neg_integer(), 'minor_device':='undefined' | non_neg_integer(), 'mode':='undefined' | non_neg_integer(), 'mtime':='undefined' | integer() | {_,_}, 'size':='undefined' | non_neg_integer(), 'type':='device' | 'directory' | 'other' | 'regular' | 'symlink' | 'undefined', 'uid':='undefined' | non_neg_integer()}}
 
 # ── unreachable clauses that stay ─────────────────────────────────────────────────────
 # Every entry below is dialyzer proving a defensive clause cannot run: a final `_other ->`

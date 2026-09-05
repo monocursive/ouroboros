@@ -69,10 +69,10 @@ defmodule Ouroboros.Upgrade.Signing.Policy do
       defaulting to `Ouroboros.Upgrade.Signing.Policy.Default`.
     * `config :ouroboros, :signing_require_eval` — when true, a BEAM artifact must carry
       a valid `Ouroboros.Upgrade.Rollout.Evaluation` spec in `metadata.forge.eval`.
-      Defaults to false so the shipped behaviour is the behaviour that existed before
-      this module; production deployments should set it to true, because it is the one
-      switch that makes "this capability declared how it would be judged" a precondition
-      of a signature rather than a hope.
+      Mix/test defaults to false so existing unsigned-eval fixtures keep meaning.
+      Production (`config/runtime.exs`) defaults to true; `OUROBOROS_SIGNING_REQUIRE_EVAL=false`
+      is the opt-out. That is the switch that makes "this capability declared how it
+      would be judged" a precondition of a signature rather than a hope.
     * `config :ouroboros, :signing_require_wasm_eval` — the same switch for lane W, and
       it defaults to **true**. That asymmetry is deliberate and is D12: the BEAM lane has
       a build peer that ran ExUnit and a `test_report` to show for it, and lane W has no

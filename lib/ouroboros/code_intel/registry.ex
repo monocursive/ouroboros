@@ -413,13 +413,23 @@ defmodule Ouroboros.CodeIntel.Registry do
 
   # A session's workspace is where this node already runs an agent with a shell, so a
   # language server with that directory as its cwd adds no capability the session lacks.
-  # The source is a module with `workspaces/0` so a test can hold sessions without starting
-  # any; the default asks the interactive store for the sessions this node holds. A store
-  # that is not running (a bare registry test, a node booting) admits nothing extra.
+  # A test can replace the source with a module that has `workspaces/0` and hold sessions
+  # without starting any. The default unions interactive *and* coding sessions this node
+  # holds. A store that is not running (a bare registry test, a node booting) admits
+  # nothing extra from that plane.
   defp session_roots do
-    source =
-      Application.get_env(:ouroboros, :code_intel_session_source, Ouroboros.InteractiveSession)
+    case Application.get_env(:ouroboros, :code_intel_session_source) do
+      nil ->
+        source_workspaces(Ouroboros.InteractiveSession) ++
+          source_workspaces(Ouroboros.CodingSession)
 
+      source ->
+        source_workspaces(source)
+    end
+    |> Enum.uniq()
+  end
+
+  defp source_workspaces(source) do
     try do
       source.workspaces()
     catch

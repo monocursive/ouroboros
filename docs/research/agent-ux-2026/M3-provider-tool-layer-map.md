@@ -1,5 +1,12 @@
 # M3 — Provider / Tool / Execution Layer Map
 
+**Superseded in part (2026-09).** This map described a runtime that drove external
+agent CLIs and ran no tool loop of its own. `Ouroboros.Provider.Native` now owns an
+in-process tool loop; see [docs/REPLAY.md](../../REPLAY.md) §11 and
+`lib/ouroboros/provider/native.ex`. Vendor planes (Claude, Codex, …) still match
+§1: they hand a request to Harness and poll it. Read the sections below as the
+vendor/Harness map plus the historical constraint Native removed.
+
 Repo: `/Users/monocursive/code/ouroboros`, branch `review-fixes`. All paths absolute-relative
 to that root. Harness pinned at `mix.exs:59-60`
 (`{:jido_harness, github: "agentjido/jido_harness", ref: "8bf0d52f4fed0d8a9d2594000d8b3a775da16f8b"}`),
@@ -7,7 +14,7 @@ vendored under `deps/jido_harness`. `{:jido_ai, "~> 2.3"}` is at `mix.exs:47`.
 
 ---
 
-## 1. Provider architecture — Ouroboros drives external agent CLIs, it does not run a tool loop
+## 1. Provider architecture — Ouroboros drives external agent CLIs; Native is the exception
 
 ### 1.1 What Ouroboros calls
 

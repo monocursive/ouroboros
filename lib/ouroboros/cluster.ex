@@ -183,6 +183,10 @@ defmodule Ouroboros.Cluster.Monitor do
             # lane W answers a posture with no such key, and that machine is a machine with
             # no helper, not a probe failure.
             wasm: Map.get(posture, :wasm),
+            # Extra, rolling-safe: an older peer answers without this key and `nil` is
+            # "not known", never "admission is off". Placement that needs the fact reads
+            # with `Map.get/2`.
+            workspace: Map.get(posture, :workspace),
             probe_error: nil
           })
 
@@ -459,6 +463,7 @@ defmodule Ouroboros.Cluster.Monitor do
       # Nobody has probed this machine yet, or it is offline. Unknown, which is what `nil`
       # means everywhere in this record — never "it has no helper".
       wasm: nil,
+      workspace: nil,
       probe_error: nil
     }
   end
@@ -1421,7 +1426,8 @@ defmodule Ouroboros.Cluster do
     Map.merge(posture, %{
       machine: machine_name(),
       runtime: runtime_identity(),
-      wasm: wasm_posture()
+      wasm: wasm_posture(),
+      workspace: workspace_admission_posture()
     })
   end
 
@@ -1441,6 +1447,19 @@ defmodule Ouroboros.Cluster do
     else
       %{available: false, world: nil}
     end
+  end
+
+  # Extra, rolling-safe the same way as `wasm`. `:disabled` is the default install
+  # (empty roots, manager never starts). `:required` means this node configured a
+  # lease boundary; `manager: false` is then the crash window, not permission to skip.
+  defp workspace_admission_posture do
+    configured? =
+      match?([_ | _], Application.get_env(:ouroboros, :workspace_allowed_roots, []))
+
+    %{
+      admission: if(configured?, do: :required, else: :disabled),
+      manager: is_pid(Process.whereis(Ouroboros.Workspace.Manager))
+    }
   end
 
   @doc false
@@ -1469,7 +1488,7 @@ defmodule Ouroboros.Cluster do
 
   **Five keys, and never a sixth.** This is the rolling-upgrade seam: a peer answers with
   whatever `local_fleet_posture/0` returned on *its* build, and every fact this runtime adds
-  later — `wasm` is the first (docs/WASM.md §4.4) — arrives on new peers and is absent on
+  later — `wasm` is the first (docs/WASM.md §4.4), `workspace` the second — arrives on new peers and is absent on
   old ones. Requiring a key here would turn every machine running the previous release into
   an invalid posture mid-upgrade, which is the one failure a fleet cannot absorb.
 
@@ -1861,6 +1880,7 @@ defmodule Ouroboros.Cluster do
           # W5, read the same tolerant way the monitor reads it: a peer with no lane W
           # answers a posture with no key, and `nil` is "not known", not "no helper".
           wasm: posture && Map.get(posture, :wasm),
+          workspace: posture && Map.get(posture, :workspace),
           compatibility:
             cond do
               target == node() ->

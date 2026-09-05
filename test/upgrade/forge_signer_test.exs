@@ -119,6 +119,26 @@ defmodule Ouroboros.Upgrade.ForgeSignerTest do
     assert {Signer.Deny, []} = Signer.configured()
   end
 
+  test "sign_artifact runs signing policy before producing a signature", context do
+    Application.put_env(
+      :ouroboros,
+      :forge_signer,
+      {Signer.Local, private_key: context.private_key}
+    )
+
+    incomplete = artifact!()
+
+    assert {:error, {:signing_policy_refused, {:provenance_missing, :source_sha256}}} =
+             Signer.Local.sign_artifact(incomplete, @signer)
+
+    artifact = admitted_artifact!()
+    assert {:ok, signature} = Signer.Local.sign_artifact(artifact, @signer)
+    assert byte_size(signature) == 64
+
+    signed = %{artifact | signature: %{signer: @signer, value: signature}}
+    assert :ok = Verifier.verify(signed, trusted_signers: %{@signer => context.public_key})
+  end
+
   defp artifact! do
     binary = compile_capability!()
 
@@ -126,6 +146,25 @@ defmodule Ouroboros.Upgrade.ForgeSignerTest do
       Artifact.build([{@module, binary, disposition: :introduce}],
         epoch: System.unique_integer([:positive, :monotonic]),
         metadata: %{forge: %{author: "test-agent"}}
+      )
+
+    artifact
+  end
+
+  defp admitted_artifact! do
+    binary = compile_capability!()
+    source_sha256 = :crypto.hash(:sha256, "capability source") |> Base.encode16(case: :lower)
+
+    {:ok, artifact} =
+      Artifact.build([{@module, binary, disposition: :introduce}],
+        epoch: System.unique_integer([:positive, :monotonic]),
+        metadata: %{
+          forge: %{
+            source_sha256: source_sha256,
+            author: "test-agent",
+            test_report: %{total: 1, failures: 0, excluded: 0, skipped: 0, ran: true}
+          }
+        }
       )
 
     artifact

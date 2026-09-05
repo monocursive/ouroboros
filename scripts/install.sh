@@ -4,25 +4,23 @@
 #
 # WHAT THIS CHECKS, AND WHAT EACH CHECK IS WORTH
 #
-#   1. SHA-256 of the downloaded asset against a SHA256SUMS file. On its own this is
-#      worth very little: both files come from the same place, so whoever can replace
-#      one can replace the other. It catches a truncated or corrupted download and
-#      nothing an attacker would be stopped by. It always runs, and a mismatch is fatal.
-#
-#   2. A minisign Ed25519 signature over that SHA256SUMS file, against the public key in
+#   1. A minisign Ed25519 signature over SHA256SUMS, against the public key in
 #      dist/release.pub. This is the check that is worth something: it says the project's
-#      offline signing key produced this manifest, so check 1 inherits its authority.
-#      It runs only when `minisign` is installed, because this is POSIX sh and Ed25519 is
-#      not something to hand-roll here. When minisign is missing, the script says so in
-#      as many words, and what you are left with is check 1 — which is a corruption
-#      check, not a security one.
+#      offline signing key produced this manifest. Without a verified signature this
+#      script refuses. `minisign` must be installed (`brew install minisign` /
+#      `apt install minisign`); the script names what is missing rather than installing
+#      anyway.
+#
+#   2. SHA-256 of the downloaded asset against that signed SHA256SUMS. Because the
+#      manifest was signed first, a substituted binary fails this check. On its own
+#      (unsigned) it would be worth very little; this installer will not run it that way.
 #
 #   3. TLS, when the download is over https. That authenticates the host and hides the
 #      bytes in flight. It is not a statement about who built them.
 #
-# The strong version of this is `ouro update`, which has the release public key compiled
-# into it and refuses outright when it cannot verify a signature. This script exists for
-# the machine that does not have `ouro` yet.
+# Same posture as `ouro update`, which has the release public key compiled into it and
+# refuses outright when it cannot verify a signature. This script exists for the machine
+# that does not have `ouro` yet, and it still requires `minisign` and a provisioned key.
 #
 # Never runs sudo. Installs under $HOME by default. `--dry-run` prints the plan.
 
@@ -323,10 +321,7 @@ else
     command -v minisign >/dev/null 2>&1 || \
         note "  - minisign is not installed  (brew install minisign / apt install minisign)"
     note ""
-    note "$self: the SHA-256 check below still runs, and it is a corruption check only:"
-    note "$self: the manifest came from the same place as the binary, so anyone able to"
-    note "$self: replace one could replace the other. This is a weaker install than the"
-    note "$self: signed one, and it is weaker in a specific way, not vaguely."
+    die "no verified minisign signature. The SHA-256 check is a corruption check only, and this installer will not run it as if it were a signature. Nothing was installed."
 fi
 
 # ---------------------------------------------------------------------------------

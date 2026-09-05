@@ -97,6 +97,22 @@ defmodule Ouroboros.CodingSession do
     |> Enum.map(&TaskState.public/1)
   end
 
+  @doc """
+  The workspaces of the coding tasks this node holds, for the code-intelligence admission.
+
+  Same contract as `Ouroboros.InteractiveSession.workspaces/0`: a task's workspace is
+  already where this node runs an agent with a shell, so a language server rooted there
+  adds no capability the task lacks. Deleting the task withdraws the admission.
+  """
+  @spec workspaces() :: [Path.t()]
+  def workspaces do
+    Store.list()
+    |> Enum.filter(&(&1.node == node()))
+    |> Enum.map(& &1.workspace)
+    |> Enum.filter(&is_binary/1)
+    |> Enum.uniq()
+  end
+
   @doc "Returns retained events whose sequence is greater than `:cursor`."
   @spec replay(task(), keyword()) :: {:ok, [Ouroboros.Coding.Event.t()]} | {:error, term()}
   def replay(task, opts \\ []) do
