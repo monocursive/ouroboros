@@ -2625,6 +2625,9 @@ different leader verbs, and `shift+s` and `s` do not.
 | | `editor.yank` | `ctrl+y` |
 | | `editor.line_start` | `ctrl+a` |
 | | `editor.line_end` | `ctrl+e` |
+| empty home composer | `starter_explore` | `f2` |
+| | `starter_review` | `f3` |
+| | `starter_plan` | `f4` |
 
 A **leader verb** is the single key pressed *after* `leader`, so rebinding `leader` moves
 all fourteen with it. Its spec is normally one bare chord (`"o"`); the long form
@@ -2952,8 +2955,8 @@ rediscovered:
   escalations (`git commit` writing `.git`, extra writable dirs, network) use this same
   modal over app-server. Deny-for-session is still `decline` — Codex has no persistent
   deny-for-session. Coding `exec --json` never opens it.
-- **Session creation states its choices rather than defaulting them.** `n` on the
-  Sessions tab opens a form carrying plane, provider, workspace and approval mode;
+- **Advanced session creation states its choices.** `/options` on the coding home
+  opens a form carrying plane, provider, workspace and approval mode;
   `ouro new` is the same request from a shell. Both build their parameters through one
   `model::StartRequest`, which emits a strict subset of `Gateway.Methods`
   `@start_options` — `provider`, `workspace`, `approval_mode`, `sandbox_mode`, and
@@ -2969,9 +2972,16 @@ rediscovered:
   operator made once, explicitly, and the form it prefills stays editable; and
   `objective` is required on the coding plane and refused on the interactive one.
 - **The transcript-first coding home is the front door.** `ouro` lands on the Sessions
-  tab instead of an onboarding/provider-picker modal. A ready provider focuses the composer
-  immediately. Codex is gated by the managed ChatGPT account flow; Enter connects while
-  `/` commands remain available without sign-in. An explicitly configured non-Codex provider
+  tab instead of an onboarding/provider-picker modal. The composer accepts typing and paste
+  immediately, before sign-in. F2/F3/F4 insert editable project exploration, change review,
+  or improvement prompts without sending them. The folder, model, file access, and approval
+  policy sit beside the task; `/options` exposes advanced setup.
+  The OAuth-backed native path uses managed ChatGPT sign-in. Enter on a nonempty task
+  captures that exact request, connects, and starts it once after sign-in succeeds. Empty
+  Enter connects only. Esc, Ctrl-C, or opening quit revokes automatic start and keeps the
+  draft; a late login result cannot resurrect it. Failed or expired sign-in offers `r` to
+  retry, retaining the submitted folder and options. `/` commands remain available without
+  sign-in. An explicitly configured non-Codex provider
   owns its own authentication and is not blocked by OpenAI account state. Enter then runs the
   same `StartRequest` path as `ouro new`, waits for the new session ID, then sends the
   retained first message with a stable logical turn ID. The draft is cleared only after
@@ -3253,12 +3263,15 @@ corrupt-file fallback, atomic save, and XDG resolution; the boot phase
 machine (`BootProgress`) and its pinned plain-line equivalents; the
 onboarding suite (the transcript-first account gate, configured non-Codex path,
 Enter's full path including stable first-turn ID and prompt recovery, settings prefill,
-and `ouro new` resolution order).
-Honest gaps: the automated suite neither allocates a pty nor starts a real provider —
-every bundled development provider invokes a real CLI and may bill an account.
-`Boot::begin/drive/fail/
-finish` and `Screen::enter` are exercised only by manual pty runs; a real
-successful spawn's phase sequence needs the integration gate, while provider-backed file
+and `ouro new` resolution order). After building the debug binary,
+`python3 scripts/qa-tui-onboarding.py /tmp/ouro-onboarding-qa` drives it in isolated
+80×24 PTYs against a scripted local gateway: starter selection, Connect & start,
+cancel with late authentication, expired-login retry, refused-start retry, first response,
+and terminal restoration. Each scenario saves its terminal bytes and RPC requests.
+`cargo run --manifest-path tui/Cargo.toml --example visual_preview -- /tmp/ouro-preview`
+exports the real renderer's cells for visual inspection at several terminal sizes.
+Honest gaps: those PTY scenarios use simulated authentication and provider responses.
+A real successful spawn's phase sequence needs the integration gate, while provider-backed file
 editing, commands, and rendered progress need an explicit manual end-to-end run; `ouro new`
 `persist`'s unwritable-path branch is untested. The
 refusal-rendering suite pins the humanised `[tag, map]` shape, the

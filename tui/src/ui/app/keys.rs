@@ -133,7 +133,11 @@ impl App {
             return;
         }
 
-        if self.tab == Tab::Sessions && self.sessions.open.is_none() && self.home_owns_key(key.code)
+        // The start composer owns typing before and after account resolution.
+        // Sign-in is a submit-time gate; it must never change where a letter goes.
+        if self.tab == Tab::Sessions
+            && self.sessions.open.is_none()
+            && (!self.home_draft.is_empty() || !matches!(key.code, KeyCode::Tab | KeyCode::BackTab))
         {
             self.home_key(key);
             return;

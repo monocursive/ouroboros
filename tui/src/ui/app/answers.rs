@@ -20,53 +20,57 @@ impl App {
         let ticks = self.ticks;
 
         match tag {
-            Tag::Account => match result {
-                Ok(value) => match AccountState::decode(&value) {
-                    Ok(account) => {
-                        let connected = account.connected();
-                        let cadence = if account.login.status == "pending" {
-                            ACCOUNT_LOGIN_TICKS
-                        } else {
-                            ACCOUNT_TICKS
-                        };
+            Tag::Account => {
+                match result {
+                    Ok(value) => match AccountState::decode(&value) {
+                        Ok(account) => {
+                            let connected = account.connected();
+                            let cadence = if account.login.status == "pending" {
+                                ACCOUNT_LOGIN_TICKS
+                            } else {
+                                ACCOUNT_TICKS
+                            };
 
-                        self.account.ok(account, ticks, cadence);
+                            self.account.ok(account, ticks, cadence);
 
-                        if connected {
-                            if self.config.defaults.provider.is_none() {
-                                self.config.defaults.provider = Some("native".to_string());
-                                self.config.defaults.model =
-                                    Some("openai_codex:gpt-5.6-sol".to_string());
-                                self.save_pending = true;
-                            }
-
-                            if matches!(self.overlay, Some(Overlay::Account(_))) {
-                                self.overlay = None;
-                                self.inform(
-                                    "ChatGPT is connected. Type a request to start coding.",
-                                    NoticeKind::Info,
-                                );
-                            }
-                        } else if let Some(Overlay::Account(dialog)) = self.overlay.as_mut() {
-                            if let Some(account) = self.account.value.as_ref() {
-                                dialog.login_id = account.login.login_id.clone();
-                                if account.login.status == "failed" {
-                                    dialog.pending = false;
-                                    dialog.error = account.login.error.clone().or_else(|| {
-                                        Some("ChatGPT sign-in did not complete".to_string())
+                            if connected {
+                                if self.config.defaults.provider.is_none() {
+                                    self.config.defaults.provider = Some("native".to_string());
+                                    self.config.defaults.model.get_or_insert_with(|| {
+                                        "openai_codex:gpt-5.6-sol".to_string()
                                     });
+                                    self.save_pending = true;
+                                }
+
+                                self.finish_home_login();
+                            } else if !self.in_flight.contains(&Tag::AccountLogin) {
+                                if let (Some(Overlay::Account(dialog)), Some(account)) =
+                                    (self.overlay.as_mut(), self.account.value.as_ref())
+                                {
+                                    // An older poll cannot replace the current login identity.
+                                    let same_login = account.login.login_id.is_none()
+                                        || dialog.login_id == account.login.login_id;
+                                    if same_login
+                                        && matches!(
+                                            account.login.status.as_str(),
+                                            "failed" | "cancelled" | "canceled" | "expired"
+                                        )
+                                    {
+                                        dialog.pending = false;
+                                        dialog.error = Some(account.login.error.clone().unwrap_or_else(|| "Sign-in did not complete. Press r to try again.".into()));
+                                    }
                                 }
                             }
                         }
-                    }
-                    Err(error) => self.account.failed(
-                        format!("account.read did not decode: {error}"),
-                        ticks,
-                        ACCOUNT_TICKS,
-                    ),
-                },
-                Err(error) => self.account.failed(error.to_string(), ticks, ACCOUNT_TICKS),
-            },
+                        Err(error) => self.account.failed(
+                            format!("account.read did not decode: {error}"),
+                            ticks,
+                            ACCOUNT_TICKS,
+                        ),
+                    },
+                    Err(error) => self.account.failed(error.to_string(), ticks, ACCOUNT_TICKS),
+                }
+            }
             Tag::AccountLogin => self.account_login_answered(result),
             Tag::AccountCancel => {
                 self.account.invalidate();

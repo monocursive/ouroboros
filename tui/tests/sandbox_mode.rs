@@ -499,6 +499,8 @@ fn the_new_session_dialog_offers_full_access_and_says_what_it_costs() {
     app.apply(key(KeyCode::Char('2')));
     answer(&mut app, Tag::Sessions(Plane::Interactive), json!([]));
     answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
+    // Printable shortcuts belong to the operator dashboard; home is a task composer.
+    app.tab = ouro::ui::app::Tab::Dashboard;
     app.apply(key(KeyCode::Char('n')));
 
     let Some(ouro::ui::app::Overlay::New(dialog)) = app.overlay.as_mut() else {

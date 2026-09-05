@@ -81,12 +81,22 @@ impl App {
                 self.submit_home();
             } else {
                 self.home_error = Some(
-                    "this start may already exist; press Enter to reconcile its same session id \
-                     before changing the prompt"
+                    "Your task may already exist. Press Enter to check and retry safely \
+                     before editing this prompt."
                         .to_string(),
                 );
             }
             return;
+        }
+
+        if self.home_draft.is_empty() {
+            for (action, _, prompt) in Self::home_examples() {
+                if self.keymap.hits(action, key) {
+                    self.home_draft.paste(prompt, &self.completion_catalog);
+                    self.home_error = None;
+                    return;
+                }
+            }
         }
 
         match self
@@ -112,6 +122,42 @@ impl App {
         }
     }
 
+    /// Examples ask the agent to inspect this workspace; selecting one only fills the
+    /// editable draft. No request is sent until the operator presses Enter.
+    pub fn home_examples() -> [(Action, &'static str, &'static str); 3] {
+        [
+            (Action::StarterExplore, "Understand this project", "Explore this project and explain what it does, where the main code lives, and how to run it. Read the available documentation first. Don't change any files."),
+            (Action::StarterReview, "Review my local changes", "Review the uncommitted changes in this workspace for bugs and missing tests. Explain the most important findings with file references. Don't change any files."),
+            (Action::StarterPlan, "Find a small first improvement", "Explore this project and suggest one small, useful improvement. Explain why it matters and give me a short plan. Don't change any files yet."),
+        ]
+    }
+
+    pub fn home_model_label(&self) -> String {
+        if self.home_provider() == "native" {
+            self.home_model()
+                .split_once(':')
+                .map(|(_, model)| model)
+                .unwrap_or(self.home_model())
+                .to_string()
+        } else {
+            self.home_provider().to_string()
+        }
+    }
+
+    /// Requested policy, in plain language. An omitted value is the provider's decision,
+    /// never a promise that this client can make on its behalf.
+    pub fn home_permission_label(&self) -> &'static str {
+        match self.config.defaults.approval_mode() {
+            Some(ApprovalMode::Prompt) => "Ask before actions",
+            Some(ApprovalMode::AutoEdit) => "Ask except for file edits",
+            Some(ApprovalMode::AutoApprove) => "Approvals off",
+            Some(ApprovalMode::Default) | None if self.home_provider() == "native" => {
+                "Ask before actions"
+            }
+            Some(ApprovalMode::Default) | None => "Default approvals",
+        }
+    }
+
     fn submit_home(&mut self) {
         let provider = self.home_provider().to_string();
         let prompt = self.home_draft.submission();
@@ -126,33 +172,109 @@ impl App {
             return;
         }
 
-        // Only the OAuth-backed direct model needs ChatGPT sign-in. API-key and unrelated
-        // providers must never be blocked by this account surface.
+        // Check the ability to start before sending someone through authentication.
+        if let Some(reason) = self.home_start_blocker() {
+            self.home_error = Some(reason);
+            return;
+        }
+
         if self.home_requires_chatgpt() && !self.codex_usable() {
+            let captured = prompt.map(|input| (self.quick_start_request(&provider, &input), input));
             self.open_account();
+            if matches!(self.overlay, Some(Overlay::Account(_))) {
+                self.home_login_start = captured;
+            }
             return;
         }
 
         let Some(prompt) = prompt else {
-            self.home_error = Some("Type what you want the agent to do.".to_string());
+            self.home_error = Some("Describe a task, or choose an example below.".to_string());
             return;
         };
-
-        if !self.hello.serves("interactive.start") {
-            self.home_error = Some("this gateway does not serve interactive.start".to_string());
-            return;
-        }
-
-        if !self.hello.operates() {
-            self.home_error = Some(format!(
-                "starting a session mutates the runtime, and this listener runs at scope `{}`",
-                self.hello.scope
-            ));
-            return;
-        }
-
         if let Err(refusal) = self.issue_quick_start(provider, prompt) {
             self.home_error = Some(refusal);
+        }
+    }
+
+    pub fn home_start_blocker(&self) -> Option<String> {
+        if !matches!(self.connection, Connection::Live) {
+            Some(
+                "Connection lost. Your draft is here; wait for reconnection, then press Enter."
+                    .into(),
+            )
+        } else if !self.hello.serves("interactive.start") {
+            Some("This runtime does not serve interactive.start. Update it to start a task; /runtime has connection details.".into())
+        } else if !self.hello.operates() {
+            Some(format!("This connection has scope `{}` and cannot start tasks. Reconnect with operate access; /runtime has connection details.", self.hello.scope))
+        } else {
+            None
+        }
+    }
+
+    pub fn home_connect_and_start_pending(&self) -> bool {
+        self.home_login_start.is_some()
+    }
+
+    pub fn home_reconciling(&self) -> bool {
+        self.first_message
+            .as_ref()
+            .is_some_and(|pending| pending.start_outcome_unknown)
+    }
+
+    /// Sign-in grants account access, not permission to dispatch a different task. The
+    /// original intent must still own the visible home before it is consumed.
+    pub(super) fn finish_home_login(&mut self) {
+        let active =
+            matches!(&self.overlay, Some(Overlay::Account(dialog)) if dialog.error.is_none());
+        if !active || self.in_flight.contains(&Tag::AccountLogin) {
+            return;
+        }
+        self.overlay = None;
+        self.open_url_pending = None;
+        if let Some((request, input)) = self.home_login_start.take() {
+            if self.tab == Tab::Sessions
+                && self.sessions.open.is_none()
+                && self.home_draft.submission().as_deref() == Some(input.as_str())
+            {
+                if let Some(reason) = self.home_start_blocker() {
+                    self.home_error = Some(reason);
+                } else if let Err(reason) = self.issue_quick_start_request(request, input) {
+                    self.home_error = Some(reason);
+                }
+                return;
+            }
+        }
+        self.inform(
+            if self.home_draft.is_empty() {
+                "Connected. Describe a task or choose an example to begin."
+            } else {
+                "Connected. Your draft is ready; press Enter to start."
+            },
+            NoticeKind::Info,
+        );
+    }
+
+    pub(super) fn cancel_account(&mut self) {
+        let connected = self.chatgpt_connected();
+        let login_id = match &self.overlay {
+            Some(Overlay::Account(dialog)) if dialog.pending => dialog.login_id.clone(),
+            _ => None,
+        };
+        self.home_login_start = None;
+        self.open_url_pending = None;
+        self.overlay = None;
+        if let Some(login_id) = login_id {
+            self.issue(Call::new(
+                Tag::AccountCancel,
+                "account.login.cancel",
+                json!({"login_id": login_id}),
+            ));
+        }
+        if !connected {
+            self.home_error = Some(
+                "Sign-in cancelled. Your draft is here; press Enter when you're ready to connect."
+                    .into(),
+            );
         }
     }
 
@@ -176,15 +298,19 @@ impl App {
         provider: String,
         prompt: String,
     ) -> Result<(), String> {
-        let request = self
-            .first_message
+        let request = self.quick_start_request(&provider, &prompt);
+        self.issue_quick_start_request(request, prompt)
+    }
+
+    fn quick_start_request(&self, provider: &str, prompt: &str) -> StartRequest {
+        self.first_message
             .as_ref()
             .filter(|pending| pending.start_outcome_unknown && pending.input == prompt)
             .map(|pending| pending.start.clone())
             .unwrap_or_else(|| StartRequest {
                 id: new_session_id(),
                 plane: Plane::Interactive,
-                provider: provider.clone(),
+                provider: provider.to_string(),
                 model: Some(self.home_model().to_string()),
                 machine: String::new(),
                 workspace: self.default_workspace(),
@@ -196,8 +322,14 @@ impl App {
                 // are choices, and they are made in the `n` dialog or on the command line.
                 worktree: false,
                 plan: false,
-            });
+            })
+    }
 
+    fn issue_quick_start_request(
+        &mut self,
+        request: StartRequest,
+        prompt: String,
+    ) -> Result<(), String> {
         let params = request.params().map_err(|refusal| refusal.message())?;
 
         self.home_pending = true;
@@ -219,7 +351,7 @@ impl App {
                 });
             }
         }
-        self.config.defaults.provider = Some(provider);
+        self.config.defaults.provider = Some(request.provider.clone());
         self.mark_welcomed();
         self.save_pending = true;
 
@@ -382,6 +514,16 @@ impl App {
     }
 
     pub(super) fn open_account(&mut self) {
+        // A cancelled attempt still owns its response until it arrives. Never adopt its
+        // late login id into a replacement dialog (or silently deduplicate the new call).
+        if self.in_flight.contains(&Tag::AccountLogin)
+            || self.in_flight.contains(&Tag::AccountCancel)
+        {
+            self.home_error = Some("Finishing the previous sign-in attempt. Your draft is here; try again in a moment.".into());
+            return;
+        }
+        self.home_login_start = None;
+        self.home_error = None;
         if self.chatgpt_connected() {
             let flow = if self.spawned() {
                 AccountFlow::Browser
@@ -437,6 +579,7 @@ impl App {
     }
 
     pub(super) fn new_home(&mut self) {
+        self.home_login_start = None;
         self.overlay = None;
         self.tab = Tab::Sessions;
         self.remember_composer_history();
@@ -464,7 +607,6 @@ impl App {
             }
 
             if self.sessions.open.is_none()
-                && self.home_ready()
                 && !self.home_pending
                 && !self
                     .first_message

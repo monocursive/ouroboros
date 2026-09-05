@@ -60,6 +60,20 @@ fn overrides(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         .collect()
 }
 
+#[test]
+fn home_starter_hints_and_actions_follow_remapping_and_unbinding() {
+    let mut app = configured(&[("starter_explore", "f6"), ("starter_review", "off")]);
+    app.open_home();
+    let text = render(&mut app, 80, 24).text();
+    assert!(text.contains("f6  Understand this project"), "{text}");
+    assert!(!text.contains("Review my local changes"), "{text}");
+    app.apply(key(KeyCode::F(2)));
+    app.apply(key(KeyCode::F(3)));
+    assert!(app.home_draft.is_empty());
+    app.apply(key(KeyCode::F(6)));
+    assert!(app.home_draft.text().contains("Explore this project"));
+}
+
 /// An App with the given `[keys]` table already resolved.
 fn configured(pairs: &[(&str, &str)]) -> App {
     let mut app = app(full_hello());
@@ -392,6 +406,9 @@ fn the_backtrack_setting_that_predates_the_map_still_means_what_it_meant() {
 #[test]
 fn the_default_map_is_exactly_what_this_client_bound_before_it_had_one() {
     let expected: &[(Action, &str)] = &[
+        (Action::StarterExplore, "f2"),
+        (Action::StarterReview, "f3"),
+        (Action::StarterPlan, "f4"),
         (Action::Send, "enter"),
         (Action::Steer, "alt+enter"),
         (Action::Newline, "ctrl+j"),

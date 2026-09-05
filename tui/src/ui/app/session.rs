@@ -2573,18 +2573,10 @@ impl App {
     /// Ctrl-C / Esc: the active turn, never this process.
     fn interrupt(&mut self) {
         if self.overlay.is_some() {
-            let login_id = match self.overlay.as_ref() {
-                Some(Overlay::Account(dialog)) if dialog.pending => dialog.login_id.clone(),
-                _ => None,
-            };
-            self.overlay = None;
-
-            if let Some(login_id) = login_id {
-                self.issue(Call::new(
-                    Tag::AccountCancel,
-                    "account.login.cancel",
-                    json!({ "login_id": login_id }),
-                ));
+            if matches!(self.overlay, Some(Overlay::Account(_))) {
+                self.cancel_account();
+            } else {
+                self.overlay = None;
             }
 
             return;

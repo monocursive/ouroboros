@@ -35,7 +35,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(if app.tab == Tab::Sessions && app.sessions.open.is_none() {
+                2
+            } else {
+                3
+            }),
             Constraint::Min(1),
             Constraint::Length(u16::from(scripted.is_some())),
             Constraint::Length(1),
@@ -183,8 +187,8 @@ fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
             ])
         } else {
             Line::from(Span::styled(
-                "ChatGPT not connected",
-                Style::default().fg(theme::warn()),
+                "ChatGPT · connect when ready",
+                Style::default().fg(theme::muted()),
             ))
         }
     } else if app.account.pending {
@@ -199,25 +203,36 @@ fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
         ))
     };
 
+    if app.tab == Tab::Sessions && app.sessions.open.is_none() {
+        let columns = Layout::horizontal([
+            Constraint::Min(12),
+            Constraint::Length((account.width() as u16).min(inner.width.saturating_sub(14))),
+        ])
+        .split(inner);
+        frame.render_widget(Paragraph::new(brand), columns[0]);
+        frame.render_widget(
+            Paragraph::new(account).alignment(Alignment::Right),
+            columns[1],
+        );
+        return;
+    }
+
     let (ready_label, ready_style) = match &app.connection {
-        Connection::Live => ("LOCAL READY", Style::default().fg(theme::good())),
+        Connection::Live => ("CONNECTED", Style::default().fg(theme::good())),
         Connection::Lost { .. } => ("LINK LOST", Style::default().fg(theme::bad())),
     };
-    let mode_label = if app.tab == Tab::Sessions {
-        "CODE".to_string()
-    } else {
-        app.tab.title().to_uppercase()
-    };
-    let badges = Line::from(vec![
-        Span::styled("[", theme::label()),
-        Span::styled("ctrl+p", theme::action()),
-        Span::styled(" COMMANDS]  [", theme::label()),
+    let mut badges = vec![
         Span::styled("● ", ready_style),
-        Span::styled(ready_label, ready_style.add_modifier(Modifier::BOLD)),
-        Span::styled("]  [", theme::label()),
-        Span::styled(mode_label, theme::action()),
-        Span::styled("]", theme::label()),
-    ]);
+        Span::styled(ready_label, ready_style),
+    ];
+    if app.bound(Action::Palette) {
+        badges.extend([
+            Span::styled("    ", theme::label()),
+            Span::styled(app.keymap.label(Action::Palette), theme::action()),
+            Span::styled(" commands", theme::label()),
+        ]);
+    }
+    let badges = Line::from(badges);
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(inner);
     if inner.width >= 96 {
         let top = Layout::horizontal([Constraint::Min(30), Constraint::Length(46)]).split(rows[0]);
@@ -250,7 +265,7 @@ fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
 fn shell_subtitle(context: &str, workspace: &str, budget: usize, app: &App) -> Line<'static> {
     use unicode_width::UnicodeWidthStr;
 
-    let lead = "COMMAND WORKSPACE / LOCAL";
+    let lead = if app.spawned() { "LOCAL" } else { "REMOTE" };
     let separator = "  ·  ";
     let context_style = if app.sessions.open.is_some() {
         theme::heading()
@@ -299,6 +314,25 @@ fn status_line(frame: &mut Frame, area: Rect, app: &App) {
             area,
         );
 
+        return;
+    }
+
+    if app.tab == Tab::Sessions
+        && app.sessions.open.is_none()
+        && matches!(app.connection, Connection::Live)
+    {
+        let mut keys = Vec::new();
+        if app.bound(Action::Palette) {
+            keys.push(format!("{} commands", app.keymap.label(Action::Palette)));
+        }
+        if app.bound(Action::Quit) {
+            keys.push(format!("{} quit", app.keymap.label(Action::Quit)));
+        }
+        frame.render_widget(
+            Paragraph::new(Span::styled(keys.join("  ·  "), theme::label()))
+                .alignment(Alignment::Right),
+            area,
+        );
         return;
     }
 
@@ -1011,6 +1045,7 @@ fn changed_files(frame: &mut Frame, area: Rect, state: &super::diff::DiffOverlay
     let rows = state.rows();
     let block = Block::default()
         .borders(access::borders(Borders::ALL))
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(theme::muted()))
         .title(Line::from(vec![
             Span::styled(" /diff ", theme::heading()),
@@ -1158,6 +1193,7 @@ fn command_palette(frame: &mut Frame, area: Rect, app: &App, palette: &CommandPa
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .borders(access::borders(Borders::ALL))
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(theme::muted()))
         .title(Line::from(vec![
             Span::styled(" ctrl+p commands", Style::default().fg(theme::muted())),
@@ -1195,7 +1231,11 @@ fn command_palette(frame: &mut Frame, area: Rect, app: &App, palette: &CommandPa
             }),
             Span::styled("_", Style::default().add_modifier(Modifier::SLOW_BLINK)),
         ]))
-        .block(Block::default().borders(access::borders(Borders::ALL))),
+        .block(
+            Block::default()
+                .borders(access::borders(Borders::ALL))
+                .border_type(ratatui::widgets::BorderType::Rounded),
+        ),
         rows[1],
     );
 
@@ -1262,8 +1302,11 @@ fn command_palette(frame: &mut Frame, area: Rect, app: &App, palette: &CommandPa
 /// The URL is cut to one line instead, `o` reopens it in a browser, and the popup is sized
 /// to what it holds.
 fn account_dialog(frame: &mut Frame, area: Rect, app: &App, dialog: &AccountDialog) {
+    let popup_width = area.width.saturating_sub(4).min(72);
+    let content_width = popup_width.saturating_sub(2) as usize;
     let connected = app.chatgpt_connected();
     let mut lines = Vec::new();
+    let mut controls = Vec::new();
 
     if connected {
         let account = app
@@ -1309,6 +1352,25 @@ fn account_dialog(frame: &mut Frame, area: Rect, app: &App, dialog: &AccountDial
             Style::default().add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            if app.home_connect_and_start_pending() {
+                "1  Connect ChatGPT   →   2  Your task starts automatically"
+            } else {
+                "Connect once, then choose your first task."
+            },
+            theme::action(),
+        )));
+        if !app.home_draft.is_empty() {
+            lines.push(Line::from(Span::styled(
+                if app.home_connect_and_start_pending() {
+                    "Keep this open. Your submitted task will start after sign-in."
+                } else {
+                    "Your draft is still here. Return to it after sign-in."
+                },
+                Style::default().fg(theme::muted()),
+            )));
+        }
+        lines.push(Line::from(""));
 
         // First, and unabbreviated: this is the string a person has to carry to another
         // device, and it is short enough to always fit.
@@ -1331,7 +1393,7 @@ fn account_dialog(frame: &mut Frame, area: Rect, app: &App, dialog: &AccountDial
             lines.push(Line::from(vec![
                 Span::styled("Open  ", theme::label()),
                 Span::styled(
-                    super::tree::truncate(url, ACCOUNT_INNER.saturating_sub(6)),
+                    super::tree::truncate(url, content_width.saturating_sub(6)),
                     Style::default().fg(theme::accent()),
                 ),
             ]));
@@ -1341,7 +1403,12 @@ fn account_dialog(frame: &mut Frame, area: Rect, app: &App, dialog: &AccountDial
             )));
         }
 
-        if dialog.url.is_none() && dialog.pending {
+        if dialog.pending && app.account.error.is_some() {
+            lines.push(Line::from(Span::styled(
+                "Checking your connection again… Your draft stays here.",
+                Style::default().fg(theme::warn()),
+            )));
+        } else if dialog.url.is_none() && dialog.pending {
             lines.push(Line::from(Span::styled(
                 format!("{} preparing a secure sign-in", theme::spinner(app.ticks)),
                 Style::default().fg(theme::accent()),
@@ -1356,12 +1423,27 @@ fn account_dialog(frame: &mut Frame, area: Rect, app: &App, dialog: &AccountDial
 
         if let Some(error) = &dialog.error {
             lines.push(Line::from(""));
-            lines.extend(refusal_lines(error));
+            lines.extend(
+                wrap_limited(error, content_width, 3)
+                    .into_iter()
+                    .map(|line| Line::from(Span::styled(line, Style::default().fg(theme::bad())))),
+            );
+            controls.push(Line::from(Span::styled(
+                if app.home_connect_and_start_pending() {
+                    "r  Retry connection & start your task"
+                } else {
+                    "r  Retry sign-in"
+                },
+                theme::action(),
+            )));
         }
 
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Esc cancels. Ouroboros never receives or stores your token.",
+        controls.push(Line::from(Span::styled(
+            if app.home_connect_and_start_pending() {
+                "Esc cancels sign-in and automatic start. Your draft stays here."
+            } else {
+                "Esc returns to your draft. No task will be started."
+            },
             Style::default().fg(theme::muted()),
         )));
     }
@@ -1369,24 +1451,28 @@ fn account_dialog(frame: &mut Frame, area: Rect, app: &App, dialog: &AccountDial
     // Sized to what it holds, and clamped to the frame: a fixed height clipped the last
     // rows of this dialog on a short terminal, and those rows are the ones that say what to
     // press.
-    let height = (wrapped(&lines, inner_width(area, ACCOUNT_WIDTH)) + 2).min(area.height);
-    let popup = centered(area, ACCOUNT_WIDTH, height);
+    let controls_height = wrapped(&controls, content_width);
+    let height = (wrapped(&lines, content_width) + controls_height + 3).min(area.height);
+    let popup = Rect::new(
+        area.x + (area.width - popup_width) / 2,
+        area.y + (area.height - height) / 2,
+        popup_width,
+        height,
+    );
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
         .borders(access::borders(Borders::ALL))
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .title(Span::styled(" ChatGPT account ", theme::heading()));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    let rows =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(controls_height)]).split(inner);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), rows[0]);
+    frame.render_widget(Paragraph::new(controls).wrap(Wrap { trim: false }), rows[1]);
 }
-
-/// How wide the account dialog is, as a percentage of the frame.
-const ACCOUNT_WIDTH: u16 = 58;
-
-/// The narrowest that percentage can be: 58% of an 80-column terminal, less the border.
-const ACCOUNT_INNER: usize = 80 * 58 / 100 - 2;
 
 fn session_picker(frame: &mut Frame, area: Rect, app: &App, selected: Option<&(Plane, String)>) {
     let rows = app.sessions.triaged();
@@ -1405,6 +1491,7 @@ fn session_picker(frame: &mut Frame, area: Rect, app: &App, selected: Option<&(P
     // and dropping the keys would leave a list whose two new verbs nobody ever finds.
     let block = Block::default()
         .borders(access::borders(Borders::ALL))
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .title(Span::styled(
             format!(" sessions · {needs} need input · {working} working · {done} done "),
             theme::heading(),
@@ -1593,6 +1680,7 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
 
     let block = Block::default()
         .borders(access::borders(Borders::ALL))
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .title(Span::styled(" settings ", theme::heading()));
 
     let inner = block.inner(popup);
@@ -1730,6 +1818,7 @@ fn machines(frame: &mut Frame, area: Rect, app: &App, machines: &Machines) {
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .borders(access::borders(Borders::ALL))
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .title(Span::styled(" machines ", theme::heading()));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
@@ -2580,6 +2669,7 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
 
     let block = Block::default()
         .borders(access::borders(Borders::ALL))
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .title(Span::styled(" new session ", theme::heading()));
 
     let inner = block.inner(popup);
@@ -3114,6 +3204,7 @@ fn approval(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
 
     let block = Block::default()
         .borders(access::borders(Borders::ALL))
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(theme::warn()))
         .title(Span::styled(heading, theme::heading()));
     let inner_area = block.inner(popup);
@@ -3361,6 +3452,7 @@ fn plan_exit(frame: &mut Frame, area: Rect, modal: ApprovalModal<'_>) {
 
     let block = Block::default()
         .borders(access::borders(Borders::ALL))
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(theme::accent()))
         .title(Span::styled(heading, theme::heading()));
     let inner_area = block.inner(popup);
@@ -3676,6 +3768,7 @@ fn chooser(
 
     let block = Block::default()
         .borders(access::borders(Borders::ALL))
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .title(Span::styled(format!(" {title} "), theme::heading()));
 
     let inner = block.inner(popup);
@@ -3715,6 +3808,7 @@ fn prompt(frame: &mut Frame, area: Rect, label: &str, buffer: &str) {
 
     let block = Block::default()
         .borders(access::borders(Borders::ALL))
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .title(Span::styled(format!(" {label} "), theme::heading()));
 
     let inner = block.inner(popup);
@@ -3816,6 +3910,7 @@ fn backtrack(
 
     let block = Block::default()
         .borders(access::borders(Borders::ALL))
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(theme::accent()))
         .title(Span::styled(" go back to a message ", theme::heading()));
 
@@ -4011,6 +4106,7 @@ fn help(frame: &mut Frame, area: Rect, app: &App) {
 
     let block = Block::default()
         .borders(access::borders(Borders::ALL))
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .title(Span::styled(" hotkeys ", theme::heading()));
 
     let inner = block.inner(popup);
@@ -4163,6 +4259,7 @@ pub fn panel_title(name: &str, pending: bool, error: Option<&String>, tick: u64)
 pub fn pane(title: Line<'static>, focused: bool) -> Block<'static> {
     Block::default()
         .borders(access::borders(Borders::ALL))
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(if focused {
             Style::default().fg(theme::accent())
         } else {
