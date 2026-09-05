@@ -78,6 +78,31 @@ defmodule Ouroboros.Orchestration.PlanTest do
     assert from_json.steps["build"].kind == :forge
   end
 
+  test "forge test paths are optional but contained and consistently keyed" do
+    for input <- [
+          %{
+            module: "Ouroboros.Capability.Echo",
+            source_path: "echo.ex",
+            test_path: "echo_test.exs"
+          },
+          %{
+            "module" => "Ouroboros.Capability.Echo",
+            "source_path" => "echo.ex",
+            "test_path" => "echo_test.exs"
+          }
+        ] do
+      assert {:ok, plan} = Plan.new("p", [%{id: "a", kind: :forge, input: input}])
+      assert Plan.validate(plan) == :ok
+    end
+
+    for path <- [nil, "", "/tmp/test.exs", "../test.exs", "tests/../test.exs", "tests//a.exs"] do
+      input = %{module: "Ouroboros.Capability.Echo", source_path: "echo.ex", test_path: path}
+
+      assert {:error, {:invalid_step_input, "a", {:invalid_test_path, ^path}}} =
+               Plan.new("p", [%{id: "a", kind: :forge, input: input}])
+    end
+  end
+
   test "rejects unknown step kinds" do
     assert {:error, {:invalid_step_kind, "a", {:unknown_step_kind, :deploy}}} =
              Plan.new("p", [%{id: "a", kind: :deploy}])

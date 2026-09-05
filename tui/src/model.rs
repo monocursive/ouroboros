@@ -226,6 +226,25 @@ impl Triage {
 }
 
 impl SessionInfo {
+    /// A failed turn remains visible while its session is ready for another message.
+    /// Older runtimes omit last_turn, so lifecycle status remains the fallback.
+    pub fn last_turn_failed(&self) -> bool {
+        self.status == SessionStatus::Idle
+            && self
+                .raw
+                .pointer("/last_turn/status")
+                .and_then(Value::as_str)
+                == Some("failed")
+    }
+
+    pub fn activity_label(&self) -> &str {
+        if self.last_turn_failed() {
+            "last turn failed"
+        } else {
+            self.status.as_str()
+        }
+    }
+
     /// Which group this row belongs to, from *declared* state and nothing else.
     ///
     /// The three inputs are the plane's own `status`, the pending approvals this client
@@ -4467,6 +4486,21 @@ mod tests {
             session_row(Plane::Interactive, "completed").triage(0),
             Triage::Done
         );
+    }
+
+    #[test]
+    fn failed_turn_remains_visible_without_changing_session_lifecycle() {
+        let mut row = session_row(Plane::Interactive, "idle");
+        row.raw["last_turn"] = serde_json::json!({"status": "failed"});
+        assert_eq!(row.activity_label(), "last turn failed");
+        assert!(row.last_turn_failed());
+        assert_eq!(row.triage(0), Triage::Done);
+        assert!(!row.status.terminal());
+        row.status = SessionStatus::Running;
+        assert_eq!(row.activity_label(), "running");
+        row.status = SessionStatus::Idle;
+        row.raw["last_turn"] = serde_json::json!({"status": "completed"});
+        assert!(!row.last_turn_failed());
     }
 
     #[test]

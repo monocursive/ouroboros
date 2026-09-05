@@ -287,6 +287,7 @@ defmodule Ouroboros.Gateway.Methods do
     "runtime.models" => %{scope: :read, timeout: @default_timeout},
     "fleet.status" => %{scope: :read, timeout: @default_timeout},
     "fleet.doctor" => %{scope: :read, timeout: @default_timeout},
+    "fleet.revoke" => %{scope: :operate, timeout: 15_000},
     "account.read" => %{scope: :read, timeout: @default_timeout},
     "grok.account.read" => %{scope: :read, timeout: @default_timeout},
     "agents.list" => %{scope: :read, timeout: @default_timeout},
@@ -434,6 +435,7 @@ defmodule Ouroboros.Gateway.Methods do
       timeout: @default_timeout,
       outcome: :unknown
     },
+    "interactive.retry_turn" => %{scope: :operate, timeout: @default_timeout, outcome: :unknown},
     # B1/B6. Session controls that change an open session rather than starting a new one.
     # `configure` is bounded by what the transport declares it can still change and
     # answers with when the change takes hold. `:operate` because it writes durable
@@ -826,6 +828,8 @@ defmodule Ouroboros.Gateway.Methods do
        "answered by the connection, which requires `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN=1` on top of operate scope"},
     "fleet.status" => {:open, []},
     "fleet.doctor" => {:open, []},
+    "fleet.revoke" =>
+      {:closed, [{"artifact", :required, :string, "CA-attested revocation, at most 16 KiB"}]},
     "fleet.forget_session_owner" =>
       {:closed,
        [
@@ -1043,6 +1047,14 @@ defmodule Ouroboros.Gateway.Methods do
       {:closed, [@session_id, @turn_input_param, @turn_id_param, @session_node]},
     "interactive.follow_up" =>
       {:closed, [@session_id, @turn_input_param, @turn_id_param, @session_node]},
+    "interactive.retry_turn" =>
+      {:closed,
+       [
+         @session_id,
+         {"source_turn_id", :required, :string,
+          "the latest failed turn; retries are idempotent per source"},
+         @session_node
+       ]},
     "interactive.steer" =>
       {:closed, [@session_id, @turn_input_param, @session_node],
        "no `turn_id`: the harness mints a steer's request id inside its own worker, so this verb has no caller-keyed idempotency"},
@@ -1489,6 +1501,17 @@ defmodule Ouroboros.Gateway.Methods do
   def invoke("fleet.status", _params), do: safe(fn -> {:ok, Cluster.fleet_status()} end)
 
   def invoke("fleet.doctor", _params), do: safe(fn -> {:ok, Cluster.fleet_doctor()} end)
+
+  def invoke("fleet.revoke", params) do
+    with :ok <- only_keys(params, ["artifact"]),
+         {:ok, artifact} <- fetch_string(params, "artifact"),
+         true <- byte_size(artifact) <= 16_384 do
+      safe(fn -> Cluster.Revocations.distribute(artifact) end)
+    else
+      {:invalid, message} -> invalid_params(message)
+      _ -> invalid_params("artifact must be a signed revocation of at most 16 KiB")
+    end
+  end
 
   def invoke("fleet.forget_session_owner", params) do
     safe(fn ->
@@ -2139,6 +2162,16 @@ defmodule Ouroboros.Gateway.Methods do
 
   def invoke("interactive.send_message", params) do
     with_turn(params, :interactive, &InteractiveSession.send_message/3)
+  end
+
+  def invoke("interactive.retry_turn", params) do
+    with_session(params, :interactive, ["id", "source_turn_id", "node"], fn session ->
+      with {:ok, source} <- fetch_string(params, "source_turn_id") do
+        safe(fn -> reply(InteractiveSession.retry_turn(session, source)) end)
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
   end
 
   def invoke("interactive.follow_up", params) do

@@ -56,6 +56,21 @@ To use the browser interface:
 Model access requires credentials or a supported provider subscription. The
 exact setup depends on the provider you choose.
 
+To manage other trusted machines, install the built `ouro` on your `PATH`, then:
+
+```sh
+ouro fleet create --machine studio --host STUDIO_PRIVATE_ADDRESS
+ouro fleet service install
+ouro fleet service start
+ouro fleet add user@server --machine server --host SERVER_PRIVATE_ADDRESS
+ouro fleet status
+```
+
+SSH enrollment activates recovery on the destination and checks its connection to the
+running owner. Different operating systems or CPUs require a matching signed release;
+release signing still needs provisioning. See [fleet setup](docs/FLEET.md) for private
+networking, revocation, recovery requirements, and the shared BEAM trust boundary.
+
 ## Development
 
 ```sh

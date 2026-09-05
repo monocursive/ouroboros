@@ -1155,6 +1155,8 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
       html = change(view, %{"model_choice" => NewSession.choice_value(first.choice)})
 
       assert html =~ "Using #{id}"
+      assert has_element?(view, ".ouro-new-advanced-summary", id)
+      refute has_element?(view, ".ouro-new-advanced-summary", "Recommended model")
 
       assert {:ok, params} = start_params(view)
       assert params["model"] == id
@@ -1704,10 +1706,10 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
 
     test "an unreadable ?open opens nothing rather than guessing", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/?open=not-a-plane:abc")
-      assert html =~ "Nothing open"
+      assert html =~ "What would you like to make?"
 
       {:ok, _view, bare} = live(conn, "/?open=abc")
-      assert bare =~ "Nothing open"
+      assert bare =~ "What would you like to make?"
     end
 
     test "the deck path percent-encodes a caller-owned id as one segment" do

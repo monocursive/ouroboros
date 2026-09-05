@@ -234,7 +234,11 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
                 )
             });
         let provider = session.provider.as_deref().unwrap_or(session.plane.tag());
-        let (signal, status) = session_signal(&session.status);
+        let (signal, status) = if session.last_turn_failed() {
+            ("×", Style::default().fg(theme::bad()))
+        } else {
+            session_signal(&session.status)
+        };
         let border_style = if selected {
             Style::default().fg(theme::action_colour())
         } else {
@@ -287,7 +291,7 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
                     spans
                 }),
                 Line::from({
-                    let head = session.status.as_str().to_uppercase();
+                    let head = session.activity_label().to_uppercase();
                     let named = format!(" · {}", super::tree::truncate(provider, 9));
                     let mut spans = vec![
                         Span::styled(head.clone(), status),

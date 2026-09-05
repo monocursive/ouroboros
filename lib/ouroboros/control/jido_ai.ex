@@ -132,7 +132,8 @@ defmodule Ouroboros.Control.JidoAI do
           Zoi.object(
             %{
               module: Zoi.string() |> Zoi.min(1),
-              source_path: Zoi.string() |> Zoi.min(1)
+              source_path: Zoi.string() |> Zoi.min(1),
+              test_path: Zoi.string() |> Zoi.min(1) |> Zoi.optional()
             },
             unrecognized_keys: :error
           )
@@ -146,10 +147,12 @@ defmodule Ouroboros.Control.JidoAI do
       """
 
       A step may instead be a build step. A build step sets "kind" to "forge",
-      has no objective, and its input contains exactly `module`, an
+      has no objective, and its input contains `module`, an
       `Ouroboros.Capability.`-prefixed module name that does not exist yet, and
       `source_path`, a workspace-relative path to the Elixir source that defines
-      exactly that module. Do not choose nodes, signers, or workspaces; runtime
+      exactly that module. Include `test_path`, a workspace-relative path to its
+      ExUnit tests: signing requires actual passing tests. Both paths must stay
+      inside the workspace. Do not choose nodes, signers, or workspaces; runtime
       policy owns them. Use a build step only when new code must be compiled and
       deployed, and depend on it from any step that needs the capability.
       """

@@ -264,7 +264,8 @@ defmodule Ouroboros.ControlTest do
           "dependencies" => ["author"],
           "input" => %{
             "module" => "Ouroboros.Capability.Planned",
-            "source_path" => "capabilities/planned.ex"
+            "source_path" => "capabilities/planned.ex",
+            "test_path" => "capabilities/planned_test.exs"
           }
         }
       ]
@@ -324,7 +325,8 @@ defmodule Ouroboros.ControlTest do
 
     assert plan.steps["build"].input == %{
              "module" => "Ouroboros.Capability.Planned",
-             "source_path" => "capabilities/planned.ex"
+             "source_path" => "capabilities/planned.ex",
+             "test_path" => "capabilities/planned_test.exs"
            }
 
     assert_receive {:execution_started, authoring}

@@ -400,6 +400,7 @@ defmodule Ouroboros.Cluster.Monitor do
         machine
         |> Map.delete(:probe_error)
         |> Map.put(:compatibility, compatibility)
+        |> Map.put(:revoked?, Ouroboros.Cluster.Revocations.revoked?(machine.node))
       end)
       |> Enum.sort_by(fn machine ->
         {state_order(machine.state), Atom.to_string(machine.node)}
@@ -428,6 +429,7 @@ defmodule Ouroboros.Cluster.Monitor do
         incompatible: incompatible
       },
       machines: machines,
+      revoked_nodes: Ouroboros.Cluster.Revocations.nodes(),
       formation: Ouroboros.Cluster.formation(),
       security: Ouroboros.Cluster.dist_security()
     }
@@ -769,7 +771,17 @@ defmodule Ouroboros.Cluster.Monitor do
          {:ok, encoded} <- read_bounded_fleet_profile(profile),
          {:ok, decoded} <- Jason.decode(encoded),
          {:ok, roster} <- decode_fleet_roster(decoded, fleet_id) do
-      {:ok, roster}
+      revoked = Ouroboros.Cluster.Revocations.revoked_nodes(Path.dirname(profile))
+
+      {removed, active} =
+        Enum.split_with(roster.members, fn {_machine, node} -> MapSet.member?(revoked, node) end)
+
+      {:ok,
+       %{
+         roster
+         | members: Map.new(active),
+           tombstones: Map.merge(roster.tombstones, Map.new(removed))
+       }}
     else
       {:error, :enoent} ->
         {:error, :enoent}
@@ -1049,7 +1061,7 @@ defmodule Ouroboros.Cluster do
   # unsafe even if the application version was accidentally left unchanged. Never derive
   # it from a build path, source hash, or host: operators need one stable, reviewable
   # protocol revision shared by every artifact in a compatible fleet.
-  @fleet_protocol_revision 1
+  @fleet_protocol_revision 2
   @runtime_contract_keys [:fleet_protocol_revision, :ouroboros_version, :otp_release]
 
   @type role :: :core | :builder | :signer
@@ -1061,7 +1073,10 @@ defmodule Ouroboros.Cluster do
 
   @impl true
   def init(_opts) do
-    Supervisor.init(formation_children() ++ [__MODULE__.Monitor], strategy: :one_for_one)
+    Supervisor.init(
+      [Ouroboros.Cluster.Revocations] ++ formation_children() ++ [__MODULE__.Monitor],
+      strategy: :one_for_one
+    )
   end
 
   @doc """
@@ -1870,6 +1885,7 @@ defmodule Ouroboros.Cluster do
               true -> :offline
             end,
           expected?: MapSet.member?(expected, target),
+          revoked?: Ouroboros.Cluster.Revocations.revoked?(target),
           runtime_running?: if(posture, do: posture.running, else: nil),
           first_seen_at: if(MapSet.member?(connected, target), do: now, else: nil),
           last_seen_at: if(MapSet.member?(connected, target), do: now, else: nil),
@@ -1912,6 +1928,7 @@ defmodule Ouroboros.Cluster do
         incompatible: Enum.count(machines, &(&1.compatibility == :incompatible))
       },
       machines: machines,
+      revoked_nodes: Ouroboros.Cluster.Revocations.nodes(),
       formation: formation(),
       security: dist_security()
     }
@@ -1982,6 +1999,8 @@ defmodule Ouroboros.Cluster do
           doctor_check(
             {:machine_connectivity, machine.node},
             cond do
+              machine.revoked? and machine.state == :offline -> :ok
+              machine.revoked? -> :error
               machine.state == :local -> :ok
               machine.state == :connected and machine.expected? -> :ok
               machine.state == :connected -> :warning
@@ -1989,6 +2008,9 @@ defmodule Ouroboros.Cluster do
               true -> :warning
             end,
             cond do
+              machine.revoked? ->
+                "#{machine.machine} has a permanently revoked credential; TLS access is refused"
+
               machine.state == :local ->
                 "#{machine.machine} is this machine"
 
@@ -2005,6 +2027,9 @@ defmodule Ouroboros.Cluster do
                 "#{machine.machine} is offline; it was learned from another machine"
             end,
             cond do
+              machine.revoked? ->
+                "For a replacement machine, issue a new identity under a new machine name"
+
               machine.state == :connected and not machine.expected? ->
                 "If this is a newly invited member, import the owner's latest signed roster and restart this machine; if it is unexpected, treat the credential as exposed and rotate the fleet"
 

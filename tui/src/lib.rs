@@ -27,6 +27,7 @@ pub mod replay_cli;
 pub mod run;
 pub mod runtime;
 pub mod status;
+pub mod subprocess;
 pub mod transport;
 pub mod ui;
 pub mod update;

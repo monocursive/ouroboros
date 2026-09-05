@@ -9,6 +9,31 @@ defmodule Ouroboros.Interactive.Task.Turns do
   alias Ouroboros.Runtime.Exposure
   alias Ouroboros.Workspace.Path, as: WorkspacePath
 
+  # Reuse the private checkpoint, including attachments and effort. Sending the public
+  # prompt back would silently replace redacted text and lose the request's other fields.
+  def retry_turn(runtime, source_id) do
+    id = "retry-" <> Base.encode16(:crypto.hash(:sha256, source_id), case: :lower)
+    source = Map.get(runtime.session.turns, source_id)
+    latest = State.latest_turn(runtime.session)
+
+    cond do
+      not is_map(source) or source.status != :failed ->
+        {:error, :turn_not_retryable, runtime}
+
+      not is_binary(get_in(source, [:request, :prompt])) ->
+        {:error, :turn_request_unavailable, runtime}
+
+      Map.has_key?(runtime.session.turns, id) ->
+        dispatch_turn(runtime, :message, id, source.request, [])
+
+      runtime.session.status != :idle or latest.id != source_id ->
+        {:error, :turn_not_retryable, runtime}
+
+      true ->
+        dispatch_turn(runtime, :message, id, source.request, [])
+    end
+  end
+
   def dispatch_turn(runtime, mode, id, input, opts)
       when mode in [:message, :follow_up] and is_binary(id) and is_list(opts) do
     with :ok <- validate_turn_id(id),

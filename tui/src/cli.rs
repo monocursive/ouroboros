@@ -1243,6 +1243,24 @@ pub struct RunArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum FleetCommand {
+    /// Print the machine-management protocol revision, without starting a runtime.
+    Protocol,
+    /// Install the current TLS revocation policy on a stopped, previously created fleet.
+    UpgradeTransport,
+    /// Permanently revoke a machine identity and distribute its signed revocation.
+    Revoke {
+        #[arg(long)]
+        machine: String,
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+    },
+    /// Import and distribute a signed revocation (also works on a stopped machine).
+    ImportRevocation { artifact: PathBuf },
+    /// Wait for an authenticated compatible peer and an active recovery service.
+    Ready {
+        #[arg(long)]
+        peer: Option<String>,
+    },
     /// Create a new secure fleet on this first machine.
     Create {
         /// A friendly label shown in Settings. Defaults to "MACHINE's fleet".
@@ -1369,6 +1387,14 @@ pub enum FleetCommand {
         #[arg(long)]
         service: bool,
 
+        /// Install and activate recovery, then require fleet readiness before success.
+        #[arg(long)]
+        activate: bool,
+
+        /// The expected owner node to verify after managed enrollment.
+        #[arg(long, requires = "activate")]
+        peer: Option<String>,
+
         /// Override this machine's stable local gateway port.
         #[arg(long, value_name = "PORT")]
         gateway_port: Option<u16>,
@@ -1482,6 +1508,8 @@ pub enum SessionsCommand {
 pub enum ServiceCommand {
     /// Write a launchd (macOS) or systemd user unit and show the exact activation command.
     Install,
+    /// Activate the generated recovery unit, including Linux pre-login recovery.
+    Start,
     /// Show the generated unit, activation guidance, and local runtime state.
     Status,
     /// Remove an inactive generated unit. Running services are refused.

@@ -26,6 +26,7 @@ defmodule Ouroboros.Web.Live.Rail.Row do
     :parent_id,
     :parent_plane,
     :error,
+    :last_turn,
     children: []
   ]
 
@@ -195,6 +196,12 @@ defmodule Ouroboros.Web.Live.Rail do
   @spec outcome(Row.t()) :: String.t()
   # Not an outcome so much as the absence of one — this group holds "nothing is happening
   # here", and for an idle conversation that is the whole truth.
+  def outcome(%Row{status: :idle, last_turn: %{status: :failed}}), do: "Last turn failed"
+
+  def outcome(%Row{status: :idle, last_turn: %{status: :completed}}),
+    do: "Ready · last turn complete"
+
+  def outcome(%Row{status: :idle, last_turn: %{status: :interrupted}}), do: "Stopped"
   def outcome(%Row{status: :idle}), do: "idle"
   def outcome(%Row{status: :completed}), do: "completed"
   def outcome(%Row{status: :closed}), do: "closed"
@@ -205,6 +212,7 @@ defmodule Ouroboros.Web.Live.Rail do
 
   @doc "Whether a settled row settled badly, which is the one thing that takes the danger tone."
   @spec failed?(Row.t()) :: boolean()
+  def failed?(%Row{status: :idle, last_turn: %{status: :failed}}), do: true
   def failed?(%Row{status: status}), do: status in [:failed, :lost]
 
   # ------------------------------------------------------------------------------------
@@ -225,6 +233,7 @@ defmodule Ouroboros.Web.Live.Rail do
 
     %Row{
       plane: :interactive,
+      last_turn: Map.get(session, :last_turn),
       id: to_string(Map.get(session, :id, "")),
       node: Map.get(session, :node),
       status: Map.get(session, :status, :unknown),

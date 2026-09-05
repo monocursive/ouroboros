@@ -61,6 +61,16 @@ defmodule Ouroboros.Web.Live.RailTest do
   # ------------------------------------------------------------------------------------
 
   describe "triage" do
+    test "a durable failed turn is visible while the session stays idle" do
+      row = interactive("failed-first-message", last_turn: %{status: :failed})
+      assert Rail.failed?(row)
+      assert Rail.outcome(row) == "Last turn failed"
+      assert Rail.triage_of(row) == :settled
+      refute Rail.terminal?(row.status)
+      refute Rail.failed?(%{row | status: :running})
+      refute Rail.failed?(%{row | last_turn: %{status: :completed}})
+    end
+
     test "an unanswered approval outranks everything, including a terminal status" do
       row = interactive("a", status: :completed)
 

@@ -28,11 +28,9 @@ set -eu
 
 VERSION_DEFAULT="latest"
 
-# The release location. Empty on purpose: this repository does not publish to a public
-# host yet, and a default that 404s would be worse than a refusal that explains itself.
-# Set OURO_BASE_URL, pass --from, or edit this line to
-# https://github.com/<owner>/<repo>/releases/latest/download once one exists.
-BASE_URL_DEFAULT=""
+# The public release location. Signature verification still requires an independently
+# provisioned trust root; a reachable host is never enough to authorize installation.
+BASE_URL_DEFAULT="https://github.com/monocursive/ouroboros/releases/latest/download"
 
 SUMS_NAME="SHA256SUMS"
 SIG_NAME="SHA256SUMS.minisig"
@@ -54,7 +52,7 @@ usage() {
 Usage: $self [options]
 
   --from URL       Release directory: https://, http://, file:///, or a path.
-                   Also OURO_BASE_URL. Required while this build has no default.
+                   Also OURO_BASE_URL. Defaults to this project's GitHub releases.
   --version V      Install this version instead of the latest. Also OURO_VERSION.
                    Only meaningful with a --from that is not a "latest" alias.
   --dir PATH       Install into PATH instead of \$HOME/.local/bin.

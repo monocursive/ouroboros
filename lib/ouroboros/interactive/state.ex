@@ -50,6 +50,8 @@ defmodule Ouroboros.Interactive.State do
                 :harness_session_id,
                 :provider_session_id,
                 :title,
+                # Derived in public/1; a bounded outcome survives event-window pruning.
+                :last_turn,
                 :forked_from,
                 # D9. The durable half of a handoff, held apart from `forked_from`
                 # because they are different claims: a fork carries the parent's
@@ -659,6 +661,7 @@ defmodule Ouroboros.Interactive.State do
     |> Map.put(:runtime_snapshot, nil)
     |> Map.put(:options, options)
     |> Map.put(:turns, turns)
+    |> Map.put(:last_turn, last_turn_summary(state))
     # Written explicitly rather than left to the struct, so a checkpoint from a build
     # before titles existed projects as an unnamed session instead of a missing key.
     |> Map.put(:title, title(state))
@@ -724,6 +727,33 @@ defmodule Ouroboros.Interactive.State do
 
       :error ->
         Jido.Harness.Redaction.redact(turn)
+    end
+  end
+
+  @doc "The newest admitted turn, independent of the session's between-turn idle status."
+  def latest_turn(state) do
+    state
+    |> Map.get(:turns, %{})
+    |> Map.values()
+    |> Enum.max_by(&{Map.get(&1, :created_at, ""), Map.get(&1, :id, "")}, fn -> nil end)
+  end
+
+  defp last_turn_summary(state) do
+    case latest_turn(state) do
+      nil ->
+        nil
+
+      turn ->
+        turn
+        |> Map.take([:id, :status, :updated_at])
+        |> Map.put(
+          :retryable,
+          turn.status == :failed and
+            if(Map.has_key?(turn, :request),
+              do: is_binary(get_in(turn, [:request, :prompt])),
+              else: get_in(Map.get(state, :last_turn) || %{}, [:retryable]) == true
+            )
+        )
     end
   end
 

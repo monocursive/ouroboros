@@ -214,16 +214,23 @@ defmodule Ouroboros.Web.Live.ApprovalCard do
       |> assign(:parsed, parsed_diff(detail))
       |> assign(:escalation?, detail.kind == "sandbox escalation")
       |> assign(:kind, kind(detail.kind))
+      |> assign(
+        :headline,
+        if(detail.command,
+          do: "Run command",
+          else: detail.title || Approval.subject(assigns.request)
+        )
+      )
 
     ~H"""
     <section
       class={["ouro-approval", @escalation? && "ouro-approval-warn"]}
-      aria-label={"Approval requested: #{@detail.title || @subject}"}
+      aria-label={"Approval requested: #{@headline}"}
       aria-live="polite"
     >
       <header class="ouro-approval-head">
         <span :if={@kind} class="ouro-approval-kind">{@kind}</span>
-        <span class="ouro-approval-subject">{@detail.title || @subject}</span>
+        <span class="ouro-approval-subject">{@headline}</span>
         <span :if={@also_waiting > 0} class="ouro-quiet">
           {@also_waiting} more waiting
         </span>
@@ -237,7 +244,7 @@ defmodule Ouroboros.Web.Live.ApprovalCard do
 
       <p :if={@detail.cwd} class="ouro-approval-cwd ouro-mono">in {@detail.cwd}</p>
 
-      <p :if={@detail.reason} class="ouro-approval-reason">{@detail.reason}</p>
+      <p :if={@detail.reason} class="ouro-approval-reason">{reason(@detail.reason)}</p>
 
       <p :if={@detail.subagent} class="ouro-approval-subagent">
         {Approval.Subagent.line(@detail.subagent, @node)}
@@ -268,7 +275,12 @@ defmodule Ouroboros.Web.Live.ApprovalCard do
 
       <.answers request={@request} detail={@detail} />
 
-      <div :if={@rule && @can_remember} class="ouro-approval-rule">
+      <details
+        :if={@rule && @can_remember}
+        class="ouro-approval-rule"
+        data-ouro-disclosure={"rule:#{@request.request_id}"}
+      >
+        <summary>Remember this permission…</summary>
         <code class="ouro-mono">{@rule.pattern}</code>
         <button
           type="button"
@@ -278,7 +290,7 @@ defmodule Ouroboros.Web.Live.ApprovalCard do
         >
           Remember for this workspace
         </button>
-      </div>
+      </details>
 
       <p :if={@rule_refusal} class="ouro-quiet" role="status">{@rule_refusal}</p>
 
@@ -295,6 +307,11 @@ defmodule Ouroboros.Web.Live.ApprovalCard do
 
   defp kind("sandbox escalation"), do: "File access request"
   defp kind(value), do: value
+
+  defp reason(value) when value in [":no_rule", "no_rule"],
+    do: "This action needs your permission before it can run."
+
+  defp reason(value), do: value
 
   attr :plan, :any, required: true
 
@@ -365,12 +382,15 @@ defmodule Ouroboros.Web.Live.ApprovalCard do
   end
 
   defp answers(assigns) do
-    assigns = assign(assigns, :standard, @standard)
+    assigns =
+      assigns
+      |> assign(:once, Enum.filter(@standard, &(elem(&1, 2) == "once")))
+      |> assign(:session, Enum.filter(@standard, &(elem(&1, 2) == "session")))
 
     ~H"""
     <div class="ouro-approval-answers">
       <button
-        :for={{label, decision, scope} <- @standard}
+        :for={{label, decision, scope} <- @once}
         type="button"
         class="ouro-button ouro-approval-answer"
         phx-click="respond"
@@ -381,6 +401,20 @@ defmodule Ouroboros.Web.Live.ApprovalCard do
         {label}
       </button>
     </div>
+    <details class="ouro-approval-more" data-ouro-disclosure={"answers:#{@request.request_id}"}>
+      <summary>Options for this session</summary>
+      <div class="ouro-approval-answers">
+        <button
+          :for={{label, decision, scope} <- @session}
+          type="button"
+          class="ouro-quiet-button ouro-approval-answer"
+          phx-click="respond"
+          phx-value-request={@request.request_id}
+          phx-value-decision={decision}
+          phx-value-scope={scope}
+        >{label}</button>
+      </div>
+    </details>
     """
   end
 

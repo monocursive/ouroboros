@@ -15,7 +15,7 @@ defmodule Ouroboros.Control.Server do
 
   `config :ouroboros, :control_allow_forge_steps` (default `false`) widens it by
   exactly one shape. When it is on, a step may declare `kind: "forge"` and carry
-  an input of exactly `module` and `source_path`, validated against the same
+  an input of `module`, `source_path`, and optional `test_path`, validated against the same
   rules `Ouroboros.Orchestration.Plan` applies. The coding-step shape is
   untouched either way, and with the flag off a `kind` field is an unknown field
   like any other.

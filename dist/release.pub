@@ -3,7 +3,7 @@ untrusted comment: Ouroboros release signing key — NOT PROVISIONED
 # carrying a key nobody holds the private half of. `ouro update` reads this file at
 # compile time (tui/src/update.rs, include_str!) and every path through the command
 # refuses while it is in this state; scripts/install.sh says the same thing out loud
-# before it falls back to the checksum-only check.
+# and also refuses unsigned installation.
 #
 # To provision one — see docs/DISTRIBUTION.md for the whole procedure:
 #

@@ -4,12 +4,12 @@ How an Ouroboros release is built, signed, published, installed, and updated —
 because the difference matters more than the mechanism, what each check in that chain
 actually defends against.
 
-**Status.** Every piece described here exists in the tree and is exercised by tests. Two
-things do not exist: a release signing key (`dist/release.pub` is committed
-*unprovisioned*) and a public release host (the configured git remote is not GitHub).
-Until both are provisioned, `ouro update` refuses on every path, `scripts/install.sh`
-refuses without a `--from`, and no tag has ever run `.github/workflows/release.yml`.
-That is the honest state, and every component says so out loud rather than half-working.
+**Status.** The public repository is `monocursive/ouroboros` on GitHub. The installer
+and updater default to its release assets; fleet deployment selects the exact running
+version's tag. A release signing key is still unprovisioned in `dist/release.pub`, and
+no signed release has been published. Provision the key and the Actions secret below,
+then publish a tested tag before advertising download-based installation. Unprovisioned
+builds refuse unsigned artifacts; a repository URL does not establish a trust root.
 
 ---
 
@@ -68,6 +68,28 @@ with `#` and no key. Every reader (the Rust `PublicKey::parse`, `install.sh`, th
 workflow) skips `#` lines and minisign's `untrusted comment:` header, takes the first
 remaining line as the key, and treats *no such line* as "there is no key" rather than as
 an error to route around.
+
+### Deploying a locally built cross-platform artifact
+
+`fleet add` verifies every supplied or discovered artifact before issuing an invitation.
+Keep the standard filename `ouro-VERSION-TRIPLE`, `SHA256SUMS`, and
+`SHA256SUMS.minisig` together. Sign the manifest with the key whose public half was
+compiled into the owner binary:
+
+```sh
+# Run in a staging directory containing only the release artifacts.
+shasum -a 256 ouro-* > SHA256SUMS
+minisign -S -s /secure/path/ouro-release.key -m SHA256SUMS
+ouro fleet add user@host --binary /absolute/staging/ouro-VERSION-TRIPLE
+```
+
+A checksum without a valid signature is refused. The owner copies a private verified
+snapshot, so replacing the original file during deployment cannot replace the bytes
+being sent. With no local matching artifact, a provisioned build fetches and verifies
+its exact version from the configured release host. An unavailable or invalid release
+fails before any new machine credential is issued. An unprovisioned source build can
+still copy its own running executable to the same platform, or prepare an explicit
+manual enrollment recipe; it cannot trust an arbitrary cross-platform binary.
 
 ### Building with a different key
 

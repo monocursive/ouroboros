@@ -544,7 +544,7 @@ defmodule Ouroboros.Web.Transcript.Cell.Divider do
   history is gone", which their wording alone cannot
   (`tui/src/ui/transcript_cells.rs:743-749`).
   """
-  defstruct text: "", tone: :muted, kind: :other
+  defstruct text: "", tone: :muted, kind: :other, recap: nil
 
   @type kind :: :turn_end | :other
   @type t :: %__MODULE__{

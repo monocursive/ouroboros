@@ -399,7 +399,14 @@ defmodule Ouroboros.Web.Live.Cells do
 
   defp status(assigns) do
     raw = assigns.cell.detail
-    detail = if assigns.cell.tone == :error, do: friendly_error(raw), else: raw
+
+    detail =
+      cond do
+        assigns.cell.tone == :error -> friendly_error(raw)
+        assigns.cell.label == "Approval needed" -> "Waiting for your decision."
+        is_binary(raw) and (String.starts_with?(raw, "{") or String.starts_with?(raw, "[")) -> ""
+        true -> raw
+      end
 
     assigns =
       assigns
@@ -407,7 +414,7 @@ defmodule Ouroboros.Web.Live.Cells do
       |> assign(:detail, detail)
       |> assign(
         :technical?,
-        assigns.cell.tone == :error and is_binary(raw) and raw != "" and raw != detail
+        is_binary(raw) and raw != "" and raw != detail
       )
 
     ~H"""
@@ -440,10 +447,31 @@ defmodule Ouroboros.Web.Live.Cells do
   defp friendly_error(_detail), do: "The agent stopped unexpectedly."
 
   defp chat_note(assigns) do
+    diagnostic? =
+      String.starts_with?(assigns.cell.text, [
+        "session started",
+        "session ready",
+        "session idle",
+        "provider event",
+        "run started"
+      ])
+
+    assigns = assign(assigns, :diagnostic?, diagnostic?)
+
     ~H"""
-    <div class="ouro-cell ouro-chat-note">{@cell.text}</div>
+    <details :if={@diagnostic?} class="ouro-cell ouro-chat-note ouro-diagnostic">
+      <summary>{diagnostic_label(@cell.text)}</summary>
+      <span>{@cell.text}</span>
+    </details>
+    <div :if={not @diagnostic?} class="ouro-cell ouro-chat-note">{@cell.text}</div>
     """
   end
+
+  defp diagnostic_label("session started" <> _), do: "Session opened"
+  defp diagnostic_label("session ready" <> _), do: "Agent connected"
+  defp diagnostic_label("session idle" <> _), do: "Ready for a message"
+  defp diagnostic_label("run started" <> _), do: "Agent started"
+  defp diagnostic_label(_), do: "Provider details"
 
   defp runtime(assigns) do
     ~H"""
@@ -525,6 +553,36 @@ defmodule Ouroboros.Web.Live.Cells do
     <div class={["ouro-cell", "ouro-divider", tone(@cell.tone), "ouro-divider-#{@cell.kind}"]}>
       <span :if={@cell.text != ""}>{@cell.text}</span>
     </div>
+    <details :if={@cell.recap} class="ouro-result">
+      <summary>
+        Review result
+        <span>{length(@cell.recap.tools)} recorded tool {plural(length(@cell.recap.tools), "call")}</span>
+      </summary>
+      <a :if={not is_nil(@cell.recap.reply)} href={"#cells-cell-#{@cell.recap.reply}"}>Read the agent’s reply</a>
+      <p class="ouro-quiet">
+        Activity recorded in this view. Open a call to inspect its output.
+      </p>
+      <ul :if={@cell.recap.tools != []}>
+        <li :for={tool <- Enum.take(@cell.recap.tools, 8)}>
+          <a href={"#cells-cell-#{tool.index}"}>{tool.label}</a> · {tool.state}
+        </li>
+      </ul>
+      <p :if={length(@cell.recap.tools) > 8} class="ouro-quiet">
+        {length(@cell.recap.tools) - 8} more calls in the transcript.
+      </p>
+      <p :if={@cell.recap.files == []} class="ouro-quiet">
+        No file changes were reported in this view.
+      </p>
+      <ul :if={@cell.recap.files != []} aria-label="Files in the recorded activity">
+        <li :for={file <- @cell.recap.files}>
+          <a href={"#cells-cell-#{file.index}"}>{file.path}</a>
+        </li>
+      </ul>
+      <p :if={@cell.recap.unfinished_steps > 0}>
+        {@cell.recap.unfinished_steps} plan {plural(@cell.recap.unfinished_steps, "step")} not marked complete.
+      </p>
+      <p>Review the reply and activity, then add your next instruction below.</p>
+    </details>
     """
   end
 

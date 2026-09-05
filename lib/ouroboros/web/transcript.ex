@@ -313,6 +313,7 @@ defmodule Ouroboros.Web.Transcript do
       # Turn start instants, so a turn-end divider can state elapsed time instead of
       # implying one. A turn whose start this window no longer holds gets no duration.
       turn_starts: %{},
+      last_turn_end: -1,
       # The last queue depth projected, so an unchanged count is not restated.
       queued: :unset,
       drawn_locally: drawn_locally
@@ -1175,16 +1176,71 @@ defmodule Ouroboros.Web.Transcript do
         _unknown -> ""
       end
 
-    push!(state, %Cell.Divider{
-      text: TurnEnded.label(ended.outcome) <> elapsed,
-      tone:
-        case ended.outcome do
-          :completed -> :muted
-          :failed -> :error
-          :interrupted -> :warning
-        end,
-      kind: :turn_end
-    })
+    state =
+      push!(state, %Cell.Divider{
+        text: TurnEnded.label(ended.outcome) <> elapsed,
+        tone:
+          case ended.outcome do
+            :completed -> :muted
+            :failed -> :error
+            :interrupted -> :warning
+          end,
+        kind: :turn_end,
+        recap: if(ended.outcome == :completed, do: turn_recap(state))
+      })
+
+    %{state | last_turn_end: state.count - 1}
+  end
+
+  # Only facts in this retained turn's activity, never conclusions drawn from the
+  # assistant's prose. A completed tool call is not evidence that a test passed.
+  defp turn_recap(state) do
+    cells =
+      state.cells
+      |> Enum.filter(fn {index, _} -> index > state.last_turn_end end)
+      |> Enum.sort_by(&elem(&1, 0))
+
+    tools =
+      Enum.flat_map(cells, fn
+        {index, %Cell.Tool{} = tool} -> [{index, tool}]
+        {index, %Cell.Exploration{calls: calls}} -> Enum.map(calls, &{index, &1})
+        _ -> []
+      end)
+
+    files =
+      for {index, %Cell.File{path: path}} <- cells,
+          is_binary(path),
+          do: %{index: index, path: path}
+
+    reply =
+      cells
+      |> Enum.reverse()
+      |> Enum.find_value(fn
+        {index, %Cell.Message{speaker: :agent, streaming: false}} -> index
+        _ -> nil
+      end)
+
+    plan =
+      cells
+      |> Enum.reverse()
+      |> Enum.find_value(fn
+        {_, %Cell.Plan{plan: plan}} -> plan
+        _ -> nil
+      end)
+
+    %{
+      tools:
+        Enum.map(tools, fn {index, tool} ->
+          %{
+            index: index,
+            label: tool |> Tools.summarise() |> Ouroboros.Web.Transcript.ToolSummary.line(),
+            state: tool.state
+          }
+        end),
+      files: Enum.uniq_by(files, & &1.path),
+      reply: reply,
+      unfinished_steps: if(plan, do: Enum.count(plan.steps, &(&1.status != :completed)), else: 0)
+    }
   end
 
   @doc "Codex's elapsed-time phrasing: `4m 07s`, `1h 02m`, `840ms`."

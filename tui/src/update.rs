@@ -77,20 +77,89 @@ const RELEASE_PUBLIC_KEY_SOURCE: &str = match option_env!("OURO_RELEASE_PUBKEY")
 
 /// Where a release is fetched from when `--from` is not given.
 ///
-/// `None` in this tree, and that is a fact rather than an oversight: the configured git
-/// remote is not a public release host, so there is no URL to put here that would be
-/// true. `ouro update` therefore requires `--from` until one exists, instead of shipping
-/// a default that 404s. Set `OURO_RELEASE_BASE_URL` at build time to the directory
-/// holding `ouro-<version>-<triple>`, `SHA256SUMS`, and `SHA256SUMS.minisig` — for a
-/// GitHub project that is
-/// `https://github.com/<owner>/<repo>/releases/latest/download`.
-const DEFAULT_BASE_URL: Option<&str> = option_env!("OURO_RELEASE_BASE_URL");
+/// Forks may override this at build time. Fleet provisioning resolves the exact
+/// version tag rather than silently mixing a newer release into an existing fleet.
+pub const DEFAULT_BASE_URL: Option<&str> = match option_env!("OURO_RELEASE_BASE_URL") {
+    Some(base) => Some(base),
+    None => Some("https://github.com/monocursive/ouroboros/releases/latest/download"),
+};
 
 /// The signed manifest of asset digests.
 pub const SUMS_NAME: &str = "SHA256SUMS";
 
 /// The detached minisign signature over [`SUMS_NAME`].
 pub const SIGNATURE_NAME: &str = "SHA256SUMS.minisig";
+
+/// A private, verified snapshot. Keep it alive until SSH finishes copying the file;
+/// replacing the original artifact after verification cannot change the copied bytes.
+#[derive(Debug)]
+pub struct FleetArtifact {
+    pub path: PathBuf,
+    scratch: PathBuf,
+}
+
+impl Drop for FleetArtifact {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.scratch);
+    }
+}
+
+pub fn fleet_artifact(
+    source: &Source,
+    version: &str,
+    triple: &str,
+    key: Option<&PublicKey>,
+) -> Result<FleetArtifact> {
+    let key = key.ok_or_else(|| {
+        anyhow!(
+            "this build has no release signing key; fleet deployment refuses unverified artifacts"
+        )
+    })?;
+    let version = Version::parse(version).ok_or_else(|| anyhow!("invalid fleet version"))?;
+    if !TRIPLES.contains(&triple) {
+        return Err(anyhow!("unsupported fleet platform {triple}"));
+    }
+    let scratch = scratch_directory()?;
+    let path = scratch.join(asset_name(&version, triple));
+    let artifact = FleetArtifact { path, scratch };
+    let sums = source.fetch_bytes(SUMS_NAME, SUMS_CAP, &artifact.scratch)?;
+    let signature = source.fetch_bytes(SIGNATURE_NAME, SIGNATURE_CAP, &artifact.scratch)?;
+    let signature = Signature::parse(std::str::from_utf8(&signature)?)?;
+    verify(key, &signature, &sums).context("verifying fleet release signature")?;
+    let entries = parse_sums(std::str::from_utf8(&sums)?)?;
+    if release_version(&entries)? != version {
+        return Err(anyhow!(
+            "signed artifact version does not match this fleet ({version})"
+        ));
+    }
+    let name = asset_name(&version, triple);
+    let entry = entries
+        .iter()
+        .find(|entry| entry.name == name)
+        .ok_or_else(|| anyhow!("signed release has no {name}"))?;
+    source.fetch_to(&name, &artifact.path, ASSET_CAP, ASSET_TIMEOUT)?;
+    if sha256_of_file(&artifact.path)? != entry.digest {
+        return Err(anyhow!(
+            "fleet artifact does not match its signed SHA-256 digest"
+        ));
+    }
+    let mut head = [0; 4];
+    File::open(&artifact.path)?.read_exact(&mut head)?;
+    if !looks_executable(&head) {
+        return Err(anyhow!("signed fleet artifact is not a native executable"));
+    }
+    Ok(artifact)
+}
+
+pub fn fleet_release_source(version: &str) -> Result<Source> {
+    // A fleet needs its own exact release, even after a newer version becomes latest.
+    let base = DEFAULT_BASE_URL.ok_or_else(|| anyhow!("no release source configured"))?;
+    let base = base.replace(
+        "/releases/latest/download",
+        &format!("/releases/download/v{version}"),
+    );
+    Source::parse(&base)
+}
 
 /// Caps. A download is bounded before it is read, not after, because "we ran out of disk
 /// deciding whether to trust you" is a denial of service with extra steps.
@@ -877,9 +946,21 @@ impl Source {
             Source::Directory(directory) => {
                 let source = directory.join(name);
 
-                let length = fs::metadata(&source)
-                    .with_context(|| format!("reading {}", source.display()))?
-                    .len();
+                // Check the opened inode, not a path that can be replaced between
+                // metadata and open. Nonblocking open also makes FIFOs refuse promptly.
+                let reader = OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                    .open(&source)
+                    .with_context(|| format!("opening {}", source.display()))?;
+                let metadata = reader.metadata()?;
+                if !metadata.is_file() {
+                    return Err(anyhow!(
+                        "{} is not a regular release file",
+                        source.display()
+                    ));
+                }
+                let length = metadata.len();
 
                 if length > cap {
                     return Err(anyhow!(
@@ -887,9 +968,6 @@ impl Source {
                         source.display()
                     ));
                 }
-
-                let mut reader =
-                    File::open(&source).with_context(|| format!("opening {}", source.display()))?;
 
                 // `create_new` rather than `fs::copy`, so a symlink planted at the
                 // destination is an error instead of a write somewhere else.
@@ -900,15 +978,22 @@ impl Source {
                     .open(destination)
                     .with_context(|| format!("creating {}", destination.display()))?;
 
-                io::copy(&mut reader, &mut writer).with_context(|| {
-                    format!("copying {} to {}", source.display(), destination.display())
-                })?;
+                let copied =
+                    io::copy(&mut reader.take(cap + 1), &mut writer).with_context(|| {
+                        format!("copying {} to {}", source.display(), destination.display())
+                    })?;
+                if copied > cap {
+                    return Err(anyhow!(
+                        "{} grew beyond its {cap} byte cap",
+                        source.display()
+                    ));
+                }
 
                 writer
                     .sync_all()
                     .with_context(|| format!("flushing {}", destination.display()))?;
 
-                Ok(length)
+                Ok(copied)
             }
             Source::Url(base) => {
                 let url = format!("{base}/{name}");
@@ -956,7 +1041,8 @@ fn download(url: &str, destination: &Path, cap: u64, timeout: u64) -> Result<()>
     let agent = format!("ouro/{}", env!("CARGO_PKG_VERSION"));
 
     if let Some(curl) = which("curl") {
-        let output = Command::new(curl)
+        let mut command = Command::new(curl);
+        command
             .arg("--fail")
             .arg("--silent")
             .arg("--show-error")
@@ -977,7 +1063,8 @@ fn download(url: &str, destination: &Path, cap: u64, timeout: u64) -> Result<()>
             .arg(destination)
             .arg("--")
             .arg(url)
-            .output()
+            .stdin(std::process::Stdio::null());
+        let output = download_output(command, destination, cap, timeout)
             .with_context(|| format!("running curl for {url}"))?;
 
         if !output.status.success() {
@@ -997,7 +1084,8 @@ fn download(url: &str, destination: &Path, cap: u64, timeout: u64) -> Result<()>
     }
 
     if let Some(wget) = which("wget") {
-        let output = Command::new(wget)
+        let mut command = Command::new(wget);
+        command
             .arg("--quiet")
             .arg("--tries=1")
             .arg(format!("--timeout={timeout}"))
@@ -1007,7 +1095,8 @@ fn download(url: &str, destination: &Path, cap: u64, timeout: u64) -> Result<()>
             .arg(destination)
             .arg("--")
             .arg(url)
-            .output()
+            .stdin(std::process::Stdio::null());
+        let output = download_output(command, destination, cap, timeout)
             .with_context(|| format!("running wget for {url}"))?;
 
         if !output.status.success() {
@@ -1025,6 +1114,22 @@ fn download(url: &str, destination: &Path, cap: u64, timeout: u64) -> Result<()>
          (see the module note in tui/src/update.rs). Install one, or download the release \
          by hand and pass the directory to --from"
     ))
+}
+
+fn download_output(
+    command: Command,
+    destination: &Path,
+    cap: u64,
+    timeout: u64,
+) -> Result<std::process::Output> {
+    let too_large = || fs::metadata(destination).is_ok_and(|metadata| metadata.len() > cap);
+    let result =
+        crate::subprocess::output(command, std::time::Duration::from_secs(timeout), too_large);
+    if too_large() {
+        let _ = fs::remove_file(destination);
+        return Err(anyhow!("download exceeded its {cap} byte cap"));
+    }
+    result
 }
 
 fn which(program: &str) -> Option<PathBuf> {
@@ -1590,7 +1695,7 @@ pub fn main(options: &Options) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
