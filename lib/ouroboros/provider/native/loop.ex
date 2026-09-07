@@ -973,6 +973,7 @@ defmodule Ouroboros.Provider.Native.Loop do
     context =
       %{
         scope: state.scope,
+        provider_options: Map.new(state.session_request.provider_options || %{}),
         session_dir: state.session_dir,
         reads: state.reads,
         # G3. `agent_result` collects a child the *session* holds, not one this turn owns,
@@ -990,7 +991,10 @@ defmodule Ouroboros.Provider.Native.Loop do
     baselines = CodeIntel.baseline(classified.write_paths, root: state.scope.root)
 
     started = System.monotonic_time(:millisecond)
-    result = Tools.execute(module, call.input, context, execute_timeout(state, classified))
+
+    result =
+      Tools.execute(module, call.input, context, execute_timeout(state, classified, call.input))
+
     elapsed = System.monotonic_time(:millisecond) - started
 
     state =
@@ -1066,7 +1070,7 @@ defmodule Ouroboros.Provider.Native.Loop do
     {:continue, state}
   end
 
-  defp execute_timeout(state, %{tool: "desktop_act"}),
+  defp execute_timeout(state, %{tool: "desktop_act"}, _input),
     do: max(state.tool_timeout_ms, Desktop.config(:act_timeout_ms))
 
   # W13. A capability's own deadline plus the pool's call margin can exceed the ordinary
@@ -1074,10 +1078,18 @@ defmodule Ouroboros.Provider.Native.Loop do
   # capability that was still inside the bound it was deployed under. The tool derives the
   # exact deadline from the target; this is the ceiling, so the tool's own error is the one
   # that fires.
-  defp execute_timeout(state, %{tool: "capability"}),
+  defp execute_timeout(state, %{tool: "capability"}, _input),
     do: max(state.tool_timeout_ms, CapabilityTool.max_timeout_ms())
 
-  defp execute_timeout(state, _classified), do: state.tool_timeout_ms
+  defp execute_timeout(state, %{tool: "bash"}, input) do
+    options = Map.new(state.session_request.provider_options || %{})
+    requested = Map.get(input, "timeout_ms", 120_000)
+    timeout = if is_integer(requested) and requested > 0, do: requested, else: 120_000
+    # Let bash reap its process and return its own timeout result before the tool task dies.
+    min(timeout, Ouroboros.Provider.Native.Tools.Bash.max_timeout_ms(options)) + 5_000
+  end
+
+  defp execute_timeout(state, _classified, _input), do: state.tool_timeout_ms
 
   defp maybe_desktop_runner(context, %{desktop_runner: fun}) when is_function(fun, 3),
     do: Map.put(context, :desktop_runner, fun)
@@ -2001,7 +2013,15 @@ defmodule Ouroboros.Provider.Native.Loop do
     emit_escalation(state, pending, "approved", granted_by, request_id)
 
     started = System.monotonic_time(:millisecond)
-    result = Tools.execute(pending.module, pending.call.input, context, state.tool_timeout_ms)
+
+    result =
+      Tools.execute(
+        pending.module,
+        pending.call.input,
+        context,
+        execute_timeout(state, pending.classified, pending.call.input)
+      )
+
     elapsed = System.monotonic_time(:millisecond) - started
 
     output =
@@ -2274,7 +2294,7 @@ defmodule Ouroboros.Provider.Native.Loop do
             hook_context,
             effect_id,
             started_at,
-            deadline(spec.deadline_ms + 5_000),
+            deadline(min(spec.deadline_ms + 5_000, state.tool_timeout_ms)),
             %{}
           )
         end

@@ -498,6 +498,7 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
                :workspace,
                :sync,
                :background,
+               :deadline_ms,
                :max_turns
              ]
 
@@ -543,6 +544,85 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       assert {:ok, clamped} = AgentTool.plan(%{"prompt" => "x"}, bounded)
       assert clamped.deadline_ms == 900_000
     end
+  end
+
+  test "a per-call deadline is clamped to the configured ceiling and absolute maximum" do
+    parent = %{bare_parent("deadline") | options: %{"subagent_max_deadline_ms" => 1_800_000}}
+
+    assert {:ok, spec} =
+             AgentTool.plan(%{"prompt" => "build", "deadline_ms" => 2_700_000}, parent)
+
+    assert spec.deadline_ms == 1_800_000
+    assert spec.request_attrs.provider_options["subagent_max_deadline_ms"] == 1_800_000
+    parent = %{parent | options: %{"subagent_max_deadline_ms" => 99_000_000}}
+
+    assert {:ok, spec} =
+             AgentTool.plan(%{"prompt" => "build", "deadline_ms" => 99_000_000}, parent)
+
+    assert spec.deadline_ms == 14_400_000
+  end
+
+  test "500 tool calls coalesce and the last progress carries the latest activity", context do
+    calls =
+      for n <- 1..500 do
+        File.write!(Path.join(context.workspace, "lib/a#{n}.ex"), "hello")
+        {:tool_call, %{id: "r#{n}", name: "read", input: %{"path" => "lib/a#{n}.ex"}}}
+      end
+
+    %{handle: handle} =
+      open(context, [[agent_call(%{"prompt" => "read files"})], finish()], [calls, finish()])
+
+    send_turn(handle)
+    events = collect_until(:turn_completed, [], 60_000)
+    progress = subagent_events(events, "progress")
+    assert length(progress) <= 20
+    last = List.last(progress).payload
+    assert last["tool_calls"] == 500
+    assert last["last_tool"] == "read"
+    assert last["last_activity"] == "lib/a500.ex"
+    assert last["elapsed_ms"] >= 0
+    assert last["deadline_ms"] == 300_000
+  end
+
+  test "a long bash call publishes activity immediately and keeps reporting elapsed time",
+       context do
+    %{handle: handle} =
+      open(
+        context,
+        [[agent_call(%{"prompt" => "wait", "background" => true})], finish()],
+        [
+          [
+            {:tool_call,
+             %{
+               id: "b-long",
+               name: "bash",
+               input: %{"command" => "sleep 7\necho ok", "timeout_ms" => 12_000}
+             }}
+          ],
+          finish()
+        ],
+        %{sandbox_mode: :unrestricted, provider_options: %{"tool_timeout_ms" => 50}}
+      )
+
+    send_turn(handle)
+    spawned = await_subagent("spawned")
+    first = await_subagent("progress").payload
+    assert first["last_activity"] == "sleep 7"
+    assert first["last_tool"] == "bash"
+    second = await_subagent("progress", 10_000).payload
+    assert second["elapsed_ms"] >= 5_000
+    handles = collector(handle)
+
+    assert {:ok, %{output: output, is_error: false}} =
+             AgentResult.run(
+               %{task_id: spawned.payload["task_id"], wait_ms: 0},
+               %{subagents: handles}
+             )
+
+    assert output =~ "running"
+    assert output =~ "sleep 7"
+    assert output =~ "deadline"
+    assert await_subagent("settled").payload["status"] == "completed"
   end
 
   # ---------------------------------------------------------------- placement
@@ -878,8 +958,8 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       assert again =~ "No subagent"
     end
 
-    test "is refused when its tools could ask a person nobody can reach", context do
-      %{handle: handle} =
+    test "asks between turns and the approved child write reaches the effect ledger", context do
+      %{handle: handle, child_agent: child_agent, session_id: session_id} =
         open(
           context,
           [
@@ -887,29 +967,49 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
               agent_call(%{
                 "prompt" => "write something",
                 "background" => true,
-                "tools" => ["read", "write"]
+                "tools" => ["write"]
               })
             ],
             finish()
           ],
-          [[{:text, "unused"}, {:finish, :stop}]],
+          [
+            [
+              {:tool_call,
+               %{
+                 id: "w-bg",
+                 name: "write",
+                 input: %{"path" => "lib/bg.ex", "content" => "approved"}
+               }}
+            ],
+            finish()
+          ],
           %{approval_mode: :prompt}
         )
 
+      :sys.suspend(child_agent)
       send_turn(handle)
-
-      # `agent` is an effect, so under `:prompt` the spawn itself is put to a person. The
-      # refusal under test is the one *after* that: a person said yes, and the child still
-      # cannot be run in the background with tools that could ask them again.
       approve(handle, await_approval().request_id)
       events = collect_until(:turn_completed)
+      [spawned] = subagent_events(events, "spawned")
+      :sys.resume(child_agent)
+      requested = await_approval()
+      assert requested.turn_id == nil
+      assert requested.payload["subagent"]["task_id"] == spawned.payload["task_id"]
+      refute File.exists?(Path.join(context.workspace, "lib/bg.ex"))
+      approve(handle, requested.request_id)
+      assert await_subagent("settled").payload["status"] == "completed"
+      assert File.read!(Path.join(context.workspace, "lib/bg.ex")) == "approved"
+      {:ok, entries} = EffectLedger.list(principal: "session:" <> session_id, effect: :tool_call)
+      assert Enum.any?(entries, &(&1.attempt.tool == "write" and &1.authority.decision == :allow))
+    end
 
-      result = tool_result(events, "agent")
-      assert result.payload["is_error"] == true
-      assert result.payload["output"] =~ "has nobody to reach"
-      assert result.payload["output"] =~ "write"
-      assert result.payload["output"] =~ "background: false"
-      assert subagent_events(events, "spawned") == []
+    test "one-shot runs refuse a background child" do
+      parent = %{bare_parent("oneshot") | session_pid: nil}
+
+      assert {:error, reason} =
+               AgentTool.plan(%{"prompt" => "write", "background" => true}, parent)
+
+      assert reason =~ "no session process"
     end
 
     test "is stopped when the parent session closes, not when the turn ends", context do

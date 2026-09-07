@@ -38,11 +38,8 @@ defmodule Ouroboros.Provider.Native.Subagent do
   foreground child whose parent turn died has nobody to report to, and is stopped rather
   than left running against a workspace nobody is watching.
 
-  A background child therefore has no way to reach a human, which is why
-  `Ouroboros.Provider.Native.Tools.Agent` refuses to spawn one whose tools could ask.
-  If one asks anyway — a rule engine that changed under it, an MCP tool that classifies
-  as `:execute` — the request is **denied immediately with a legible reason** and counted
-  in the digest, rather than left to hang until the child's approval deadline.
+  Interactive background children relay approvals through the session process, including
+  between turns. One-shot runs refuse background work because they have no session owner.
 
   ## Lifecycle, precisely
 
@@ -134,7 +131,8 @@ defmodule Ouroboros.Provider.Native.Subagent do
   @max_summary_bytes 16 * 1024
   @max_text_bytes 12 * 1024
   @max_files 50
-  @max_progress 64
+  @max_progress 2000
+  @progress_interval_ms 5_000
   @max_description_bytes 200
 
   @typedoc "What a caller asks for when it spawns a child."
@@ -347,6 +345,8 @@ defmodule Ouroboros.Provider.Native.Subagent do
       clip(summary.text, @max_text_bytes),
       "",
       digest,
+      "Elapsed: #{Map.get(summary, :elapsed_ms, 0)} ms / deadline #{Map.get(summary, :deadline_ms, 0)} ms",
+      Map.get(summary, :last_activity),
       files_line(summary.files_changed, summary.files_changed_count),
       worktree_line(summary.worktree),
       approvals_line(summary.approvals_denied),
@@ -415,6 +415,12 @@ defmodule Ouroboros.Provider.Native.Subagent do
        approvals_denied: 0,
        open_approvals: MapSet.new(),
        progress_sent: 0,
+       started_at: System.monotonic_time(:millisecond),
+       elapsed_ms: nil,
+       last_progress_at: nil,
+       progress_timer: nil,
+       last_tool: nil,
+       last_activity: nil,
        # `cost` starts as `nil` rather than `0.0`, and stays `nil` until some `usage`
        # payload actually carried a price. `Ouroboros.Provider.Native.Cost` omits
        # `cost_usd` for a model it cannot price, and a zero folded in on its behalf would
@@ -482,6 +488,13 @@ defmodule Ouroboros.Provider.Native.Subagent do
 
   @impl GenServer
   def handle_info({:session_adapter_event, event}, state), do: {:noreply, absorb(state, event)}
+
+  def handle_info(:progress_tick, %{status: :running} = state) do
+    state = progress(%{state | progress_timer: nil})
+    {:noreply, schedule_progress(state)}
+  end
+
+  def handle_info(:progress_tick, state), do: {:noreply, state}
 
   def handle_info({:subagent_deadline, task_id}, %{task_id: task_id} = state),
     do: {:noreply, settle(state, :timed_out, "the child's wall-clock deadline expired")}
@@ -616,7 +629,7 @@ defmodule Ouroboros.Provider.Native.Subagent do
         }
 
         case Session.send(state.handle, TurnRequest.new!(state.prompt), turn_id) do
-          :ok -> {:ok, state}
+          :ok -> {:ok, schedule_progress(state)}
           other -> {:error, {:subagent_turn_refused, other}}
         end
 
@@ -644,8 +657,18 @@ defmodule Ouroboros.Provider.Native.Subagent do
 
   defp absorb(state, %{type: :approval_requested} = event), do: relay_approval(state, event)
 
-  defp absorb(state, %{type: :tool_call}),
-    do: progress(%{state | tool_calls: state.tool_calls + 1})
+  defp absorb(state, %{type: :tool_call, payload: payload}) do
+    tool = Map.get(payload, "name")
+
+    state = %{
+      state
+      | tool_calls: state.tool_calls + 1,
+        last_tool: tool,
+        last_activity: activity(payload)
+    }
+
+    progress(state, tool == "bash")
+  end
 
   defp absorb(state, %{type: :tool_result}), do: progress(state)
 
@@ -706,12 +729,6 @@ defmodule Ouroboros.Provider.Native.Subagent do
   # translation: the loop mints a parent request id, puts it on the parent's own
   # approval channel, and hands the answer back to `respond/3`, which addresses the
   # child by the id the child minted. Two id spaces, one person.
-  defp relay_approval(%{background?: true} = state, %{request_id: request_id})
-       when is_binary(request_id) do
-    _ = deny_unreachable(state, request_id)
-    %{state | approvals_denied: state.approvals_denied + 1}
-  end
-
   defp relay_approval(state, %{request_id: request_id, payload: payload})
        when is_binary(request_id) do
     notify(state, {:approval, request_id, payload})
@@ -720,34 +737,57 @@ defmodule Ouroboros.Provider.Native.Subagent do
 
   defp relay_approval(state, _event), do: state
 
-  defp deny_unreachable(%{handle: nil}, _request_id), do: :ok
+  defp progress(state, force? \\ false)
+  defp progress(%{progress_sent: sent} = state, _force?) when sent >= @max_progress, do: state
 
-  defp deny_unreachable(%{handle: handle}, request_id) do
-    Session.respond_approval(
-      handle,
-      request_id,
-      ApprovalResponse.new!(%{
-        decision: :deny,
-        scope: :once,
-        reason:
-          "this subagent runs in the background, where an approval has nobody to reach. " <>
-            "Do the part that needs permission in the foreground, or ask the parent for it."
-      })
-    )
-  catch
-    :exit, _reason -> :ok
+  defp progress(state, force?) do
+    now = System.monotonic_time(:millisecond)
+
+    if force? or is_nil(state.last_progress_at) or
+         now - state.last_progress_at >= @progress_interval_ms do
+      notify(state, {:progress, progress_payload(state)})
+      %{state | progress_sent: state.progress_sent + 1, last_progress_at: now}
+    else
+      state
+    end
   end
 
-  defp progress(%{progress_sent: sent} = state) when sent >= @max_progress, do: state
+  defp schedule_progress(%{progress_sent: sent} = state) when sent >= @max_progress, do: state
 
-  defp progress(state) do
-    notify(state, {:progress, progress_payload(state)})
-    %{state | progress_sent: state.progress_sent + 1}
+  defp schedule_progress(state),
+    do: %{
+      state
+      | progress_timer: Process.send_after(self(), :progress_tick, @progress_interval_ms)
+    }
+
+  # Only the command's first line or a path is useful in the folded row. Never copy
+  # write content, patches, tool results or a whole arbitrary tool argument map.
+  defp activity(payload) do
+    input = Map.get(payload, "input", %{})
+    value = if is_map(input), do: Map.get(input, "command") || Map.get(input, "path"), else: nil
+
+    if is_binary(value) do
+      value
+      |> String.split("\n", parts: 2)
+      |> hd()
+      |> String.trim()
+      |> String.graphemes()
+      |> Enum.reduce_while("", fn char, acc ->
+        if byte_size(acc) + byte_size(char) <= 160, do: {:cont, acc <> char}, else: {:halt, acc}
+      end)
+    end
   end
+
+  defp elapsed(state),
+    do: state.elapsed_ms || max(0, System.monotonic_time(:millisecond) - state.started_at)
 
   defp progress_payload(state) do
     %{
       "phase" => "progress",
+      "elapsed_ms" => elapsed(state),
+      "deadline_ms" => state.deadline_ms,
+      "last_tool" => state.last_tool,
+      "last_activity" => state.last_activity,
       "task_id" => state.task_id,
       "description" => state.description,
       "provider_session_id" => state.provider_session_id,
@@ -771,10 +811,14 @@ defmodule Ouroboros.Provider.Native.Subagent do
 
   defp settle(state, reason, error) do
     _ = state.deadline_timer && Process.cancel_timer(state.deadline_timer)
+    _ = state.progress_timer && Process.cancel_timer(state.progress_timer)
+    state = progress(state, true)
 
     state = %{
       state
       | status: reason,
+        elapsed_ms: elapsed(state),
+        progress_timer: nil,
         error: error || state.error,
         deadline_timer: nil,
         open_approvals: MapSet.new()
@@ -838,6 +882,10 @@ defmodule Ouroboros.Provider.Native.Subagent do
       # of the other.
       turn_id: state.turn_id,
       status: state.status,
+      elapsed_ms: elapsed(state),
+      deadline_ms: state.deadline_ms,
+      last_tool: state.last_tool,
+      last_activity: state.last_activity,
       error: state.error,
       turns: state.turns,
       tool_calls: state.tool_calls,
@@ -868,6 +916,10 @@ defmodule Ouroboros.Provider.Native.Subagent do
   def settled_payload(summary) do
     %{
       "phase" => "settled",
+      "elapsed_ms" => Map.get(summary, :elapsed_ms),
+      "deadline_ms" => Map.get(summary, :deadline_ms),
+      "last_tool" => Map.get(summary, :last_tool),
+      "last_activity" => Map.get(summary, :last_activity),
       "task_id" => summary.task_id,
       "description" => summary.description,
       "provider_session_id" => summary.provider_session_id,

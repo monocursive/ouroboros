@@ -71,19 +71,17 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
       "collect one first" — is something the model can act on. Settled-but-uncollected
       children do not count towards it; a parent may track at most 32 in total.
     * **`max_turns`** — the child's model round-trips — defaults to 12 and is capped at 30.
-    * **A wall-clock deadline** of 300 s by default, at most 900 s, settable per node
-      with `provider_options["subagent_deadline_ms"]`. `background: false` blocks the
-      parent's tool call for at most that long, and reports `timed_out` when it fires.
+    * **A wall-clock deadline** of 300 s by default, requested with `deadline_ms`,
+      bounded by `subagent_max_deadline_ms` (default 900 s, absolute 4 h).
+      `subagent_deadline_ms` sets the default. Foreground children are also bounded by
+      the loop tool timeout; long children must use `background: true`.
     * **A 16 KiB summary**, of which at most 12 KiB is the child's own final message.
 
   ## Background children, and why one can be refused at spawn
 
   `background: true` returns a `task_id` immediately; `agent_result` collects it later.
-  The child then outlives the turn that spawned it, which means the parent's approval
-  channel — a loop process, which ends with the turn — is not there any more. A child
-  that could raise an approval nobody can answer would hang until its own deadline, so
-  it is **refused at spawn** unless it cannot raise one: either the parent runs in
-  `auto_approve`, or the child's tools are all read-only. The refusal names the fix.
+  The session carries a background child's approvals to the human even between turns.
+  A one-shot run has no session owner and refuses background children at spawn.
 
   A background child is stopped when the **parent session closes** — not when the turn
   ends — and a collection after that says `stopped` rather than pretending it finished.
@@ -152,7 +150,12 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
         default: false,
         doc:
           "Return a task_id immediately instead of waiting. Collect it with agent_result. " <>
-            "A background child cannot ask anyone for permission."
+            "Interactive background children can ask for permission between turns. " <>
+            "Foreground children are bounded by the loop tool timeout; use background for long work."
+      ],
+      deadline_ms: [
+        type: :pos_integer,
+        doc: "Wall-clock limit in milliseconds, bounded by this node’s subagent_max_deadline_ms."
       ],
       max_turns: [
         type: :pos_integer,
@@ -173,16 +176,10 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
   @default_deadline_ms 300_000
   @min_deadline_ms 1_000
   @max_deadline_ms 900_000
+  @absolute_deadline_ms 14_400_000
   @max_prompt_bytes 32 * 1024
   @max_description_bytes 200
   @max_tools 64
-
-  # The tools whose `Ouroboros.Provider.Native.Tools.classify/3` mode is `:read` for every
-  # possible argument, which is what makes them unable to raise an approval under any
-  # posture (`Loop.decide/5` allows `:read` outright). `code_intel` is deliberately absent
-  # — its `rename` writes — and so is `web_fetch`, which is `:network`, and `ask_user`,
-  # whose whole purpose is to reach a person.
-  @never_asking ~w(read grep glob ls plan skill)
 
   @doc "The maximum nesting depth: a child may spawn children, a grandchild may not."
   @spec max_depth() :: pos_integer()
@@ -267,7 +264,7 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
         background: background?,
         depth: parent.depth + 1,
         tools: tools,
-        deadline_ms: deadline_ms(parent)
+        deadline_ms: deadline_ms(input, parent)
       })
     end
   end
@@ -440,28 +437,13 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
   defp child_forbidden(_parent), do: []
 
   defp background_ok(false, _tools, _parent), do: :ok
+  defp background_ok(true, _tools, %{session_pid: pid}) when is_pid(pid), do: :ok
 
-  defp background_ok(true, _tools, %{session_pid: nil}),
+  defp background_ok(true, _tools, _parent),
     do:
       {:error,
        "Refused: this run has no session process to hold a background child past the end " <>
          "of the turn. Spawn it with `background: false`."}
-
-  defp background_ok(true, _tools, %{approval_mode: :auto_approve}), do: :ok
-
-  defp background_ok(true, tools, _parent) do
-    asking = Enum.reject(tools, &(&1 in @never_asking))
-
-    if asking == [] do
-      :ok
-    else
-      {:error,
-       "Refused: a background child outlives the turn that spawned it, so an approval it " <>
-         "raises has nobody to reach and would hang until its deadline. " <>
-         "#{Enum.join(asking, ", ")} can ask. Either give it only read-only tools " <>
-         "(#{Enum.join(@never_asking, ", ")}), or spawn it with `background: false`."}
-    end
-  end
 
   # ---------------------------------------------------------------- placement
 
@@ -757,9 +739,7 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
         "`workspace:` a directory that exists there."
 
   # Who the child reports to, and the whole of the foreground/background difference. The
-  # loop can put an approval in front of a person and cannot outlive the turn; the session
-  # outlives the turn and has no approval channel of its own. A child gets exactly one of
-  # them, which is why a background child is refused above unless it cannot ask.
+  # loop owns foreground approvals; the session relays background approvals even between turns.
   defp subscriber(parent, true), do: parent.background_subscriber
   defp subscriber(parent, false), do: parent.subscriber
 
@@ -836,7 +816,14 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
   defp child_options(parent, input, child_id) do
     parent.options
     |> Map.new(fn {key, value} -> {to_string(key), value} end)
-    |> Map.take(["tool_timeout_ms", "checkpoint_limit", "subagent_deadline_ms", "subagent_model"])
+    |> Map.take([
+      "tool_timeout_ms",
+      "checkpoint_limit",
+      "subagent_deadline_ms",
+      "subagent_model",
+      "subagent_max_deadline_ms",
+      "bash_max_timeout_ms"
+    ])
     |> Map.merge(%{
       "max_iterations" => max_turns(input),
       "subagent_depth" => parent.depth + 1,
@@ -863,15 +850,22 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
     end
   end
 
-  defp deadline_ms(parent) do
-    case option(parent.options, "subagent_deadline_ms") do
-      value when is_integer(value) and value > 0 ->
-        value |> max(@min_deadline_ms) |> min(@max_deadline_ms)
+  defp deadline_ms(input, parent) do
+    ceiling =
+      positive_option(option(parent.options, "subagent_max_deadline_ms"), @max_deadline_ms)
+      |> max(@min_deadline_ms)
+      |> min(@absolute_deadline_ms)
 
-      _unset ->
-        @default_deadline_ms
-    end
+    default =
+      positive_option(option(parent.options, "subagent_deadline_ms"), @default_deadline_ms)
+
+    positive_option(Map.get(input, "deadline_ms"), default)
+    |> max(@min_deadline_ms)
+    |> min(ceiling)
   end
+
+  defp positive_option(value, _default) when is_integer(value) and value > 0, do: value
+  defp positive_option(_value, default), do: default
 
   defp max_turns(input) do
     case Map.get(input, "max_turns") do

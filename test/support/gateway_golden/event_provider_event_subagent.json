@@ -9,7 +9,9 @@
       "payload": {
         "approvals_denied": 0,
         "cost_usd": 0.0731,
+        "deadline_ms": 900000,
         "description": "audit the parser",
+        "elapsed_ms": 725000,
         "files": [
           "lib/ouroboros/web/presentation.ex",
           "lib/ouroboros/web/transcript.ex",
@@ -19,6 +21,8 @@
         "files_changed": 4,
         "input_tokens": 18400,
         "kind": "subagent",
+        "last_activity": "mix test test/parser_test.exs",
+        "last_tool": "bash",
         "node": "ouroboros@worker",
         "output_tokens": 2100,
         "phase": "settled",

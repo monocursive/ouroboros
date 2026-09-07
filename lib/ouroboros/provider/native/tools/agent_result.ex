@@ -80,13 +80,17 @@ defmodule Ouroboros.Provider.Native.Tools.AgentResult do
         {:ok, %{output: Subagent.render(summary), is_error: summary.status == :failed}}
 
       {:error, :still_running} ->
-        {:ok,
-         %{
-           output:
-             "Subagent #{task_id} is still running after #{wait_ms} ms. It has not been " <>
-               "lost — collect it again with the same task_id, or do something else first.",
-           is_error: false
-         }}
+        case Subagent.summary(pid) do
+          {:ok, summary} ->
+            {:ok, %{output: Subagent.render(summary), is_error: false}}
+
+          {:error, reason} ->
+            {:ok,
+             %{
+               output: "Subagent #{task_id} could not be reached: #{inspect(reason)}",
+               is_error: true
+             }}
+        end
 
       {:error, reason} ->
         _ = release.(task_id)

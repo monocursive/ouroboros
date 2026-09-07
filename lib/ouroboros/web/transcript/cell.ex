@@ -304,6 +304,8 @@ defmodule Ouroboros.Web.Transcript.Cell.Subagent do
     :provider_session_id,
     :node,
     :depth,
+    :elapsed_ms,
+    :last_activity,
     :turns,
     :tool_calls,
     :files,
@@ -329,6 +331,8 @@ defmodule Ouroboros.Web.Transcript.Cell.Subagent do
           worktree: boolean(),
           background: boolean(),
           depth: non_neg_integer() | nil,
+          elapsed_ms: non_neg_integer() | nil,
+          last_activity: String.t() | nil,
           turns: non_neg_integer() | nil,
           tool_calls: non_neg_integer() | nil,
           files: non_neg_integer() | nil,
@@ -368,6 +372,8 @@ defmodule Ouroboros.Web.Transcript.Cell.Subagent do
         worktree: cell.worktree or event.worktree,
         background: cell.background or event.background,
         depth: event.depth || cell.depth,
+        elapsed_ms: event.elapsed_ms || cell.elapsed_ms,
+        last_activity: overwrite(cell.last_activity, event.last_activity),
         turns: event.turns || cell.turns,
         tool_calls: event.tool_calls || cell.tool_calls,
         files: event.files_changed || cell.files
@@ -465,6 +471,8 @@ defmodule Ouroboros.Web.Transcript.Cell.Subagent do
   @spec digest(t()) :: String.t()
   def digest(%__MODULE__{} = cell) do
     []
+    |> maybe(cell.elapsed_ms, &Ouroboros.Web.Transcript.duration/1)
+    |> maybe(cell.last_activity, & &1)
     |> maybe(cell.turns, &"#{&1} turns")
     |> maybe(cell.tool_calls, &"#{&1} tool calls")
     |> maybe(cell.files, &"#{&1} files")

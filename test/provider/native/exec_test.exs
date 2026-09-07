@@ -5,6 +5,41 @@ defmodule Ouroboros.Provider.Native.ExecTest do
 
   @release_environment ~w(BINDIR EMU PATH PROGNAME RELEASE_NAME RELEASE_ROOT ROOTDIR)
 
+  test "an explicit timeout ceiling bounds a command while defaults stay at ten minutes" do
+    assert {:ok, %{timed_out?: true}} =
+             Exec.run("/bin/sh", ["-c", "sleep 1"], timeout_ms: 5_000, max_timeout_ms: 30)
+
+    assert Ouroboros.Provider.Native.Tools.Bash.max_timeout_ms(%{}) == 600_000
+
+    assert Ouroboros.Provider.Native.Tools.Bash.max_timeout_ms(%{
+             "bash_max_timeout_ms" => 1_800_000
+           }) == 1_800_000
+
+    assert Ouroboros.Provider.Native.Tools.Bash.max_timeout_ms(%{
+             "bash_max_timeout_ms" => 99_000_000
+           }) == 14_400_000
+  end
+
+  test "bash passes the node ceiling through to Exec without changing its default" do
+    root = Path.join(System.tmp_dir!(), "bash-ceiling-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(root)
+    on_exit(fn -> File.rm_rf(root) end)
+
+    context = %{
+      scope: %{root: root, roots: [root], sandbox_mode: :unrestricted},
+      session_dir: root,
+      provider_options: %{"bash_max_timeout_ms" => 30}
+    }
+
+    assert {:ok, %{output: output}} =
+             Ouroboros.Provider.Native.Tools.Bash.run(
+               %{command: "sleep 1", timeout_ms: 5_000},
+               context
+             )
+
+    assert output =~ "timed out after 30 ms"
+  end
+
   test "child commands inherit the host environment without the daemon release context" do
     previous = Map.take(System.get_env(), @release_environment)
 

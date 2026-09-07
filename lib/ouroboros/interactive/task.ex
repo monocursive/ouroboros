@@ -667,6 +667,7 @@ defmodule Ouroboros.Interactive.Task do
   def handle_info({:DOWN, monitor, :process, _pid, _reason}, runtime) do
     {:noreply,
      runtime
+     |> Approvals.caller_down(monitor)
      |> drop_subscriber_by_monitor(monitor)
      |> drop_turn_waiter_by_monitor(monitor)
      |> drop_ready_waiter_by_monitor(monitor)}

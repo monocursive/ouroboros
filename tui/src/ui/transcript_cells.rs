@@ -280,6 +280,8 @@ pub struct SubagentCell {
     pub worktree: bool,
     pub background: bool,
     pub depth: Option<u64>,
+    pub elapsed_ms: Option<u64>,
+    pub last_activity: Option<String>,
     pub turns: Option<u64>,
     pub tool_calls: Option<u64>,
     pub files: Option<u64>,
@@ -318,6 +320,8 @@ impl SubagentCell {
         self.worktree |= event.worktree;
         self.background |= event.background;
         self.depth = event.depth.or(self.depth);
+        self.elapsed_ms = event.elapsed_ms.or(self.elapsed_ms);
+        overwrite(&mut self.last_activity, &event.last_activity);
 
         self.turns = event.turns.or(self.turns);
         self.tool_calls = event.tool_calls.or(self.tool_calls);
@@ -429,6 +433,12 @@ impl SubagentCell {
     /// what it cost. Empty before the child has reported anything, which draws nothing.
     pub fn digest(&self) -> String {
         let mut facts = Vec::new();
+        if let Some(elapsed) = self.elapsed_ms {
+            facts.push(duration(elapsed.min(i64::MAX as u64) as i64));
+        }
+        if let Some(activity) = &self.last_activity {
+            facts.push(activity.clone());
+        }
 
         if let Some(turns) = self.turns {
             facts.push(format!("{turns} turns"));
@@ -6931,6 +6941,22 @@ diff --git a/src/lex.rs b/src/lex.rs
     }
 
     /// An empty payload is still a payload. It must draw a row, not a panic.
+    #[test]
+    fn progress_refreshes_the_same_child_row_with_elapsed_and_activity() {
+        let mut cell = SubagentCell::default();
+        cell.absorb(&crate::model::native::SubagentEvent::decode(&json!({
+            "phase": "progress", "task_id": "child", "elapsed_ms": 5000, "last_activity": "sleep 700"
+        })));
+        assert!(cell.digest().contains("5s"));
+        assert!(cell.digest().contains("sleep 700"));
+        cell.absorb(&crate::model::native::SubagentEvent::decode(&json!({
+            "phase": "progress", "task_id": "child", "elapsed_ms": 10000, "last_activity": "echo ok"
+        })));
+        assert!(cell.digest().contains("10s"));
+        assert!(cell.digest().contains("echo ok"));
+        assert!(!cell.digest().contains("sleep 700"));
+    }
+
     #[test]
     fn a_subagent_payload_with_nothing_in_it_still_draws_a_row() {
         let bare = event(1, "provider_event", json!({"kind": "subagent"}));

@@ -71,7 +71,8 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
       timeout_ms: [
         type: :pos_integer,
         default: 120_000,
-        doc: "Kill the command after this many milliseconds. Maximum 600000."
+        doc:
+          "Kill the command after this many milliseconds. Bounded by this node’s bash_max_timeout_ms (default 600000, absolute 4 h)."
       ],
       description: [
         type: :string,
@@ -91,13 +92,22 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
   # capped and says where it stopped.
   @max_captured_bytes 64 * 1024 * 1024
 
+  @doc "The node-configured command ceiling, never exceeding four hours."
+  def max_timeout_ms(options) do
+    case Map.get(options, "bash_max_timeout_ms") || Map.get(options, :bash_max_timeout_ms) do
+      value when is_integer(value) and value > 0 -> min(value, 14_400_000)
+      _ -> @max_timeout_ms
+    end
+  end
+
   @impl true
   def run(params, context) do
     with {:ok, plan} <- plan(params.command, context.scope) do
-      timeout = min(params.timeout_ms, @max_timeout_ms)
+      ceiling = max_timeout_ms(Map.get(context, :provider_options, %{}))
+      timeout = min(params.timeout_ms, ceiling)
 
       try do
-        finish(execute(plan, context.scope.root, timeout), plan, context, timeout)
+        finish(execute(plan, context.scope.root, timeout, ceiling), plan, context, timeout)
       after
         Sandbox.release(plan.scratch)
       end
@@ -226,11 +236,12 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
 
   # ------------------------------------------------------------------ execution
 
-  defp execute(plan, cwd, timeout_ms) do
+  defp execute(plan, cwd, timeout_ms, ceiling) do
     case Exec.run(plan.executable, plan.args,
            cd: cwd,
            env: plan.env,
            timeout_ms: timeout_ms,
+           max_timeout_ms: ceiling,
            max_bytes: @max_captured_bytes
          ) do
       {:ok, result} ->

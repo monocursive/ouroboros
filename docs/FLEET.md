@@ -995,3 +995,31 @@ stated in the tests), registry v2→v3 widen-on-read.
   partition policy — the standing architecture non-claims remain non-claims.
 - **Per-token scopes** on the gateway; a signer outside the distribution trust
   domain — both already on the project's deferral lists and unchanged here.
+
+## Long-running child agents
+
+Use a background child for builds or other work that should outlive the current turn:
+
+```text
+agent(machine: "builder", workspace: "/srv/project", background: true,
+      deadline_ms: 900000, prompt: "Build the project and report the result")
+```
+
+The node's `provider_options.subagent_deadline_ms` defaults to 300000 ms;
+`subagent_max_deadline_ms` defaults to 900000 ms and caps a requested per-call deadline.
+`bash_max_timeout_ms` defaults to 600000 ms. Both ceilings can be raised to four hours.
+A child's bash call must also request its needed `timeout_ms`. Hooks, checks and other
+Exec callers retain their ten-minute maximum. Foreground agents remain bounded by the
+loop's `tool_timeout_ms`; use `background: true` for long jobs.
+
+The folded row reports elapsed time and the last command's first line or file path.
+Updates arrive every five seconds, with an immediate update when bash starts and a final
+update when the child finishes, under a hard ceiling of 2000 updates per child. Activity is limited to 160 bytes and never includes file
+contents or tool output. `agent_result(task_id: "…", wait_ms: 0)` returns the current
+elapsed time, deadline and activity without waiting or removing a running child.
+
+Interactive children can ask for approval even after their parent's turn has finished.
+The approval names the child and its machine; the target's decision to ask always reaches
+the human, without being re-evaluated against the parent's rules. Closing the session
+stops its children and cancels their pending questions. One-shot runs refuse background
+children because they have no interactive session to hold them.

@@ -66,7 +66,7 @@ defmodule Ouroboros.Provider.Native.Exec do
   Runs `executable` with `args`, with no shell between them.
 
   Options: `cd`, `env` (non-credential `{name, value}` string pairs), `timeout_ms`
-  (default #{@default_timeout_ms}, capped at #{@max_timeout_ms}), `max_bytes` (default
+  (default #{@default_timeout_ms}), `max_timeout_ms` (default #{@max_timeout_ms}, absolute 4 h), `max_bytes` (default
   #{@default_max_bytes}). Ambient inheritance is limited to login, terminal, and
   toolchain variables; arbitrary daemon settings and credentials do not cross this
   boundary.
@@ -379,9 +379,15 @@ defmodule Ouroboros.Provider.Native.Exec do
   end
 
   defp timeout_ms(opts) do
+    ceiling =
+      case Keyword.get(opts, :max_timeout_ms) do
+        value when is_integer(value) and value > 0 -> min(value, 14_400_000)
+        _ -> @max_timeout_ms
+      end
+
     case Keyword.get(opts, :timeout_ms) do
-      value when is_integer(value) and value > 0 -> min(value, @max_timeout_ms)
-      _unset -> @default_timeout_ms
+      value when is_integer(value) and value > 0 -> min(value, ceiling)
+      _unset -> min(@default_timeout_ms, ceiling)
     end
   end
 

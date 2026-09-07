@@ -876,6 +876,9 @@ pub struct SubagentEvent {
     pub depth: Option<u64>,
     pub max_turns: Option<u64>,
     pub deadline_ms: Option<u64>,
+    pub elapsed_ms: Option<u64>,
+    pub last_tool: Option<String>,
+    pub last_activity: Option<String>,
     pub turns: Option<u64>,
     pub tool_calls: Option<u64>,
     pub files_changed: Option<u64>,
@@ -918,6 +921,9 @@ impl SubagentEvent {
             depth: count(map, "depth"),
             max_turns: count(map, "max_turns"),
             deadline_ms: count(map, "deadline_ms"),
+            elapsed_ms: count(map, "elapsed_ms"),
+            last_tool: at(map, "last_tool"),
+            last_activity: sentence(map, "last_activity", 160),
             turns: count(map, "turns"),
             tool_calls: count(map, "tool_calls"),
             files_changed: count(map, "files_changed"),
@@ -1222,6 +1228,19 @@ mod tests {
     /// A child that carries no placement ran here. `remote` defaults to false rather than
     /// to unknown, because every event this runtime wrote before fleet placement existed
     /// is a local child and must keep reading as one.
+    #[test]
+    fn child_progress_decodes_elapsed_and_minimized_activity() {
+        let event = SubagentEvent::decode(&json!({"phase": "progress", "elapsed_ms": 725000,
+            "deadline_ms": 900000, "last_tool": "bash", "last_activity": "mix test"}));
+        assert_eq!(event.elapsed_ms, Some(725000));
+        assert_eq!(event.deadline_ms, Some(900000));
+        assert_eq!(event.last_tool.as_deref(), Some("bash"));
+        assert_eq!(event.last_activity.as_deref(), Some("mix test"));
+        let old = SubagentEvent::decode(&json!({"phase": "progress"}));
+        assert!(old.elapsed_ms.is_none());
+        assert!(old.last_activity.is_none());
+    }
+
     #[test]
     fn a_child_agent_without_a_placement_is_local_not_unknown() {
         let old = SubagentEvent::decode(&json!({"phase": "spawned", "task_id": "t"}));
