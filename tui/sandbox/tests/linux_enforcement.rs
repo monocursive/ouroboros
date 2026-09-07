@@ -1134,7 +1134,7 @@ fn provisioned_delivery_and_approved_git_commit_keep_siblings_read_only() {
             target.to_str().unwrap(),
         );
     }
-    for command in ["mkdir .ouroboros/deliver/.GIT", "cd .ouroboros/deliver && env -i /bin/mkdir .git", "python3 -c 'import os; f=os.open(\".ouroboros/deliver\", os.O_RDONLY); os.mkdir(\".git\", dir_fd=f)'", "ln -s ../../.git .ouroboros/deliver/escape"] {
+    for command in ["python3 -c 'open(\".ouroboros/deliver/.git\", \"w\").write(\"bad\")'", "python3 -c 'import os; f=os.open(\".ouroboros/deliver\", os.O_RDONLY); os.open(\".ouroboros\", os.O_CREAT | os.O_WRONLY, dir_fd=f)'", "mkdir .ouroboros/deliver/.GIT", "cd .ouroboros/deliver && env -i /bin/mkdir .git", "python3 -c 'import os; f=os.open(\".ouroboros/deliver\", os.O_RDONLY); os.mkdir(\".git\", dir_fd=f)'", "ln -s ../../.git .ouroboros/deliver/escape"] {
         assert_reads_as_read_only_denial(&run_shell(&request.to_string(), command), command);
     }
 }

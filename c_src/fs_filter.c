@@ -32,6 +32,9 @@
 /* glibc may #define open to open64 after fcntl.h; intercept the names libc actually has. */
 #undef open
 #undef openat
+#undef open64
+#undef openat64
+#undef creat64
 #undef creat
 #undef mkdir
 #undef mkdirat
@@ -305,6 +308,34 @@ int creat(const char *path, mode_t mode) {
     real_creat = dlsym(RTLD_NEXT, "creat");
   }
   return real_creat(path, mode);
+}
+
+/* Python and other large-file builds call these public libc entry points directly.
+ * Forward through the same path checks; O_LARGEFILE preserves their open semantics. */
+int open64(const char *path, int flags, ...) {
+  mode_t mode = 0;
+  if (creating(flags)) {
+    va_list ap;
+    va_start(ap, flags);
+    mode = (mode_t)va_arg(ap, int);
+    va_end(ap);
+  }
+  return open(path, flags | O_LARGEFILE, mode);
+}
+
+int openat64(int dirfd, const char *path, int flags, ...) {
+  mode_t mode = 0;
+  if (creating(flags)) {
+    va_list ap;
+    va_start(ap, flags);
+    mode = (mode_t)va_arg(ap, int);
+    va_end(ap);
+  }
+  return openat(dirfd, path, flags | O_LARGEFILE, mode);
+}
+
+int creat64(const char *path, mode_t mode) {
+  return open64(path, O_CREAT | O_WRONLY | O_TRUNC, mode);
 }
 
 int rename(const char *oldpath, const char *newpath) {
