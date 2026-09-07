@@ -513,6 +513,46 @@ defmodule Ouroboros.Gateway.Methods.Contract do
          ]},
       handler: :handle_fleet_tags
     },
+    "subagent.spawn" => %{
+      scope: :operate,
+      timeout: 920_000,
+      params:
+        {:closed,
+         [
+           @session_id,
+           @session_node,
+           {"request_id", :required, :string, "stable id for transport retries"},
+           {"input", :required, :object,
+            "native agent arguments; posture is inherited from the session"}
+         ]},
+      handler: :handle_subagent_spawn
+    },
+    "subagent.result" => %{
+      scope: :operate,
+      timeout: 920_000,
+      params:
+        {:closed,
+         [
+           @session_id,
+           @session_node,
+           {"request_id", :required, :string, "stable id for transport retries"},
+           {"input", :required, :object, "native agent_result arguments"}
+         ]},
+      handler: :handle_subagent_result
+    },
+    "subagent.stop" => %{
+      scope: :operate,
+      timeout: 920_000,
+      params:
+        {:closed,
+         [
+           @session_id,
+           @session_node,
+           {"request_id", :required, :string, "stable id for transport retries"},
+           {"task_id", :required, :string, "child tracked by this session"}
+         ]},
+      handler: :handle_subagent_stop
+    },
     "fleet.status" => %{
       scope: :read,
       timeout: @default_timeout,

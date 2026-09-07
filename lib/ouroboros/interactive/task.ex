@@ -126,6 +126,23 @@ defmodule Ouroboros.Interactive.Task do
   end
 
   @impl true
+  def handle_call(:subagent_bridge_state, _from, runtime) do
+    session = runtime.session
+
+    if State.terminal?(session) or runtime.subagent_bridge_closed do
+      {:reply, {:error, :session_terminal}, runtime}
+    else
+      {:reply,
+       {:ok,
+        %{
+          request: State.request(session),
+          provider: session.provider,
+          provider_session_id: session.provider_session_id,
+          principal_id: session.harness_session_id || session.id
+        }}, runtime}
+    end
+  end
+
   def handle_call(:ready, from, runtime) do
     cond do
       ready?(runtime.session) ->
@@ -491,8 +508,11 @@ defmodule Ouroboros.Interactive.Task do
   # whether or not the call itself succeeded: the intent is the same either way, and
   # reviving a session someone asked to close would be the worse mistake.
   def handle_call(:close, _from, runtime) do
+    Ouroboros.Provider.Native.SubagentBridge.close(self())
     reply = with_harness_session(runtime, &Session.close/1)
-    {:reply, reply, schedule_poll(Resume.settle_resume(runtime), 0)}
+
+    {:reply, reply,
+     schedule_poll(Resume.settle_resume(%{runtime | subagent_bridge_closed: true}), 0)}
   end
 
   def handle_call(:kill, _from, %{session: session} = runtime)
@@ -501,8 +521,11 @@ defmodule Ouroboros.Interactive.Task do
   end
 
   def handle_call(:kill, _from, runtime) do
+    Ouroboros.Provider.Native.SubagentBridge.close(self())
     reply = with_harness_session(runtime, &Session.kill/1)
-    {:reply, reply, schedule_poll(Resume.settle_resume(runtime), 0)}
+
+    {:reply, reply,
+     schedule_poll(Resume.settle_resume(%{runtime | subagent_bridge_closed: true}), 0)}
   end
 
   def handle_call(_message, _from, runtime),
@@ -575,6 +598,24 @@ defmodule Ouroboros.Interactive.Task do
   # — so a note whose parent is not up is lost, and `interactive.delegations` reads the
   # team's own record rather than this one when it wants the truth.
   @impl true
+  def handle_cast({:subagent_bridge_event, event}, runtime) do
+    if State.terminal?(runtime.session) do
+      Ouroboros.Provider.Native.SubagentBridge.close(self())
+      {:noreply, runtime}
+    else
+      {_status, runtime} =
+        emit_runtime_event(runtime, event.type, event.payload,
+          provider: runtime.session.provider,
+          harness_session_id: runtime.session.harness_session_id,
+          provider_session_id: runtime.session.provider_session_id,
+          turn_id: nil,
+          request_id: event.request_id
+        )
+
+      {:noreply, runtime}
+    end
+  end
+
   def handle_cast({:delegation_settled, delegation_id, status, result_digest}, runtime) do
     {:noreply, settle_delegation(runtime, delegation_id, status, result_digest)}
   end
@@ -677,6 +718,7 @@ defmodule Ouroboros.Interactive.Task do
 
   @impl true
   def terminate(_reason, runtime) do
+    Ouroboros.Provider.Native.SubagentBridge.close(self())
     _ = release_workspace(runtime)
     :ok
   end
@@ -698,6 +740,7 @@ defmodule Ouroboros.Interactive.Task do
       terminal_observed_at: nil,
       pending_steers: [],
       resume_settled: false,
+      subagent_bridge_closed: false,
       external_approvals: %{},
       # I1. `request_id => effect_id` for approvals this coordinator has recorded, so the
       # `approval_resolved` a transport emits later can be stamped with the ledger entry
@@ -2358,6 +2401,8 @@ defmodule Ouroboros.Interactive.Task do
   end
 
   def persist(runtime, session, events) do
+    if State.terminal?(session), do: Ouroboros.Provider.Native.SubagentBridge.close(self())
+
     case Store.put(session) do
       :ok ->
         Enum.each(runtime.subscribers, fn {pid, _monitor} ->

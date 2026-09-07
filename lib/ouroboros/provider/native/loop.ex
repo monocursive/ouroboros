@@ -686,9 +686,34 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   # ---------------------------------------------------------------- tools
 
+  @doc "Dispatch a session-owned bridge tool through the native permission, hook and ledger path."
+  def run_tool(%__MODULE__{} = state, %{name: name} = call)
+      when name in ["agent", "agent_result", "fleet"] do
+    state = %{
+      state
+      | hooks: state.hooks || Hooks.load(state.scope.root),
+        tool_specs: build_tool_specs(state),
+        journal: Journal.sync(state.journal)
+    }
+
+    case run_call(state, call) do
+      {:continue, finished} ->
+        result = List.last(finished.messages)
+        {:ok, %{output: result.content, is_error: result.is_error}}
+
+      {:interrupted, _} ->
+        {:error, :interrupted}
+
+      {:failed, _, message, _} ->
+        {:error, message}
+    end
+  end
+
+  def run_tool(%__MODULE__{}, _call), do: {:error, :unsupported_bridge_tool}
+
   defp run_tools(state, calls) do
     Enum.reduce_while(calls, {:continue, state}, fn call, {:continue, state} ->
-      case run_tool(state, call) do
+      case run_call(state, call) do
         {:continue, state} ->
           # Interrupt is honoured *after* the tool that was already running, never in
           # the middle of it: a half-applied edit is worse than one extra tool call.
@@ -704,7 +729,7 @@ defmodule Ouroboros.Provider.Native.Loop do
     end)
   end
 
-  defp run_tool(state, call) do
+  defp run_call(state, call) do
     signature = signature(call)
     seen = if state.last_signature == signature, do: state.signature_repeats, else: 0
 
@@ -2229,9 +2254,12 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp run_subagent(state, call, hook_context, effect_id) do
     case subagent_parent(state) do
       {:ok, parent} ->
-        case AgentTool.plan(call.input, parent) do
-          {:ok, spec} -> spawn_subagent(state, call, spec, hook_context, effect_id)
-          {:error, message} -> refuse_subagent(state, call, hook_context, effect_id, message)
+        case Ouroboros.Provider.Native.Subagents.spawn(call.input, parent) do
+          {:ok, spec, started} ->
+            spawn_subagent(state, call, spec, started, hook_context, effect_id)
+
+          {:error, message} ->
+            refuse_subagent(state, call, hook_context, effect_id, message)
         end
 
       {:error, message} ->
@@ -2281,36 +2309,26 @@ defmodule Ouroboros.Provider.Native.Loop do
      }}
   end
 
-  defp spawn_subagent(state, call, spec, hook_context, effect_id) do
+  defp spawn_subagent(state, call, spec, started, hook_context, effect_id) do
     started_at = System.monotonic_time(:millisecond)
 
-    case Subagent.spawn(spec) do
-      {:ok, started} ->
-        emit(state, :provider_event, subagent_event(AgentTool.spawned_payload(spec, started)))
-        _ = track_subagent(state, spec, started)
+    emit(state, :provider_event, subagent_event(AgentTool.spawned_payload(spec, started)))
+    _ = track_subagent(state, spec, started)
 
-        if spec.background do
-          background_result(state, call, spec, started, hook_context, effect_id, started_at)
-        else
-          wait_for_subagent(
-            state,
-            call,
-            spec,
-            started,
-            hook_context,
-            effect_id,
-            started_at,
-            deadline(min(spec.deadline_ms + 5_000, state.tool_timeout_ms)),
-            %{}
-          )
-        end
-
-      # Every way a launch can fail is now mostly a fact about the node the child was
-      # placed on — its worktree root, its filesystem, its reachability — so the tool's own
-      # module says each of them in a sentence rather than inspecting a tuple into the
-      # transcript.
-      {:error, reason} ->
-        refuse_subagent(state, call, hook_context, effect_id, AgentTool.start_refusal(reason))
+    if spec.background do
+      background_result(state, call, spec, started, hook_context, effect_id, started_at)
+    else
+      wait_for_subagent(
+        state,
+        call,
+        spec,
+        started,
+        hook_context,
+        effect_id,
+        started_at,
+        deadline(min(spec.deadline_ms + 5_000, state.tool_timeout_ms)),
+        %{}
+      )
     end
   end
 

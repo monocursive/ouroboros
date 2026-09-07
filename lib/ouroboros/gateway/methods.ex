@@ -578,6 +578,36 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   @doc false
+  def handle_subagent_spawn(params), do: subagent_tool(params, "agent", params["input"])
+  def handle_subagent_result(params), do: subagent_tool(params, "agent_result", params["input"])
+
+  def handle_subagent_stop(params),
+    do: subagent_tool(params, "agent_result", %{"task_id" => params["task_id"], "stop" => true})
+
+  defp subagent_tool(params, name, input) do
+    safe(fn ->
+      with {:ok, session} <- session_target(:interactive, params) do
+        args = [session.id, params["request_id"], name, input]
+
+        result =
+          if session.node == node(),
+            do: apply(Ouroboros.Provider.Native.SubagentBridge, :call, args),
+            else:
+              :erpc.call(
+                session.node,
+                Ouroboros.Provider.Native.SubagentBridge,
+                :call,
+                args,
+                910_000
+              )
+
+        reply(result)
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
   def handle_fleet_status(_params) do
     safe(fn -> {:ok, Cluster.fleet_status()} end)
   end

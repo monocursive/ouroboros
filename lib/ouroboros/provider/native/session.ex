@@ -283,6 +283,30 @@ defmodule Ouroboros.Provider.Native.Session do
 
   def whereis(_provider_session_id), do: nil
 
+  @doc false
+  def bridge_tool(handle, request, call, emit),
+    do: GenServer.call(handle, {:bridge_tool, request, call, emit}, 15 * 60_000)
+
+  defp bridge_source(state, nil), do: {:ok, state}
+
+  defp bridge_source(state, request) do
+    with {:ok, scope} <-
+           Paths.scope(request.cwd, request.add_dirs, Loop.sandbox_mode(request.sandbox_mode)),
+         {:ok, model_spec} <- Loop.resolve_model(request.model) do
+      plan? = truthy_option(request.provider_options || %{}, "plan")
+
+      {:ok,
+       %{
+         state
+         | request: request,
+           scope: if(plan?, do: %{scope | sandbox_mode: :read_only}, else: scope),
+           model_spec: model_spec,
+           approval_mode: Loop.approval_mode(request.approval_mode),
+           plan_mode?: plan?
+       }}
+    end
+  end
+
   # ---------------------------------------------------------------- lifecycle
 
   @impl GenServer
@@ -314,6 +338,7 @@ defmodule Ouroboros.Provider.Native.Session do
       state = %{
         request: request,
         context: context,
+        owner_monitor: Process.monitor(context.owner),
         provider_session_id: provider_session_id,
         scope: scope,
         session_dir: session_dir,
@@ -587,6 +612,49 @@ defmodule Ouroboros.Provider.Native.Session do
     end
   end
 
+  def handle_call({:bridge_tool, _request, _call, _emit}, _from, %{loop: loop} = state)
+      when not is_nil(loop), do: {:reply, {:error, :busy}, state}
+
+  def handle_call({:bridge_tool, request, call, emit}, from, state) do
+    with {:ok, source} <- bridge_source(state, request) do
+      owner = self()
+
+      loop = %Loop{
+        emit: emit,
+        model_module: source.model_module,
+        model_spec: source.model_spec,
+        scope: source.scope,
+        session_dir: source.session_dir,
+        journal: source.journal,
+        session_id: source.context.session_id,
+        provider_session_id: source.provider_session_id,
+        turn_id: "bridge_" <> call.id,
+        approval_mode: loop_approval_mode(source),
+        allowed_tools: source.request.allowed_tools,
+        disallowed_tools: source.request.disallowed_tools,
+        session_pid: owner,
+        session_request: source.request,
+        session_context: source.context,
+        subagent_depth: source.subagent_depth,
+        subagent_parent: source.subagent_parent,
+        subagent_task_id: source.subagent_task_id,
+        tool_timeout_ms: source.tool_timeout_ms,
+        approval_timeout_ms: source.request.approval_timeout_ms,
+        hooks: nil
+      }
+
+      task =
+        Task.Supervisor.async_nolink(Jido.Harness.SessionTaskSupervisor, fn ->
+          {:bridge_result, Loop.run_tool(loop, call)}
+        end)
+
+      {:noreply,
+       %{state | loop: %{pid: task.pid, ref: task.ref, turn_id: loop.turn_id, bridge_from: from}}}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
   # ---------------------------------------------------------------- subagents (G3)
 
   # The parent session is the registry, and deliberately not a global one. A task id is
@@ -780,6 +848,23 @@ defmodule Ouroboros.Provider.Native.Session do
 
   def handle_info({:plan_exit_timeout, _stale}, state), do: {:noreply, state}
 
+  def handle_info(
+        {ref, {:bridge_result, result}},
+        %{loop: %{ref: ref, bridge_from: from}} = state
+      ) do
+    Process.demonitor(ref, [:flush])
+    GenServer.reply(from, result)
+    {:noreply, %{state | loop: nil}}
+  end
+
+  def handle_info(
+        {:DOWN, ref, :process, _pid, reason},
+        %{loop: %{ref: ref, bridge_from: from}} = state
+      ) do
+    GenServer.reply(from, {:error, {:bridge_tool_failed, reason}})
+    {:noreply, %{state | loop: nil}}
+  end
+
   def handle_info({ref, :ok}, %{loop: %{ref: ref}} = state) do
     Process.demonitor(ref, [:flush])
     {:noreply, release(state)}
@@ -877,6 +962,9 @@ defmodule Ouroboros.Provider.Native.Session do
 
     {:noreply, %{state | background_approvals: Map.new(open)}}
   end
+
+  def handle_info({:DOWN, monitor, :process, _pid, _reason}, %{owner_monitor: monitor} = state),
+    do: {:stop, :normal, state}
 
   def handle_info({:DOWN, monitor, :process, _pid, _reason}, state) do
     case Enum.find(state.background_approvals, fn {_id, entry} ->
@@ -1132,6 +1220,9 @@ defmodule Ouroboros.Provider.Native.Session do
   defp stop_loop(%{loop: nil} = state), do: state
 
   defp stop_loop(%{loop: loop} = state) do
+    if Map.has_key?(loop, :bridge_from),
+      do: GenServer.reply(loop.bridge_from, {:error, :interrupted})
+
     Process.demonitor(loop.ref, [:flush])
     _ = Task.Supervisor.terminate_child(Jido.Harness.SessionTaskSupervisor, loop.pid)
     %{state | loop: nil, approvals: MapSet.new()}

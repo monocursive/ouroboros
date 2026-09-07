@@ -104,12 +104,18 @@ defmodule Ouroboros.Provider.ClaudeAdapterTest do
       assert "mcp__ouroboros__approve" in argv
     end
 
-    test "the two auto modes are left exactly as they were" do
+    test "auto modes attach session tools while retaining their own approval behavior" do
       for mode <- [:auto_edit, :auto_approve] do
         argv = argv_for(interactive_request(approval_mode: mode))
 
         refute "--permission-prompt-tool" in argv, "#{mode} was bridged"
-        assert argv == pinned_argv(interactive_request(approval_mode: mode))
+        assert "--mcp-config" in argv
+
+        assert flag_value(argv, "--permission-mode") ==
+                 flag_value(
+                   pinned_argv(interactive_request(approval_mode: mode)),
+                   "--permission-mode"
+                 )
       end
     end
 
