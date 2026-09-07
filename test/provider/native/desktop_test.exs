@@ -214,7 +214,7 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
 
     test "enabled + workspace: desktop_state then desktop_act after static tools" do
       enable(fake_helper())
-      names = Enum.map(Tools.specs(nil, nil, workspace: "/tmp"), & &1.name)
+      names = Enum.map(Tools.specs(nil, nil, workspace: "/tmp", distributed: false), & &1.name)
 
       assert "desktop_state" in names
       assert "desktop_act" in names
