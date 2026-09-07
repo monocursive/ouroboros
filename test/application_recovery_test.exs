@@ -160,9 +160,10 @@ defmodule Ouroboros.ApplicationRecoveryTest do
     end
   end
 
-  setup do
+  setup context do
     cleanup_test_runs()
 
+    previous_data_dir = Application.get_env(:ouroboros, :data_dir)
     previous_roots = Application.get_env(:ouroboros, :workspace_allowed_roots)
     previous_providers = Application.get_env(:jido_harness, :providers)
     previous_provider_config = Application.get_env(:jido_harness, :provider_config)
@@ -187,6 +188,9 @@ defmodule Ouroboros.ApplicationRecoveryTest do
     purge_leftover_session_records()
 
     stop_application()
+
+    if context[:no_data_dir], do: Application.delete_env(:ouroboros, :data_dir)
+
     Application.put_env(:ouroboros, :workspace_allowed_roots, [workspace])
 
     Application.put_env(
@@ -209,6 +213,7 @@ defmodule Ouroboros.ApplicationRecoveryTest do
     on_exit(fn ->
       stop_application()
       cleanup_test_runs()
+      restore_env(:ouroboros, :data_dir, previous_data_dir)
       restore_env(:ouroboros, :workspace_allowed_roots, previous_roots)
       restore_env(:jido_harness, :providers, previous_providers)
       restore_env(:jido_harness, :provider_config, previous_provider_config)
@@ -219,6 +224,7 @@ defmodule Ouroboros.ApplicationRecoveryTest do
     {:ok, workspace: workspace}
   end
 
+  @tag no_data_dir: true
   test "a node with no durable directory still starts the children behind its owner" do
     assert Application.get_env(:ouroboros, :data_dir) in [nil, ""]
 
