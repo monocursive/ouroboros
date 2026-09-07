@@ -45,8 +45,8 @@ defmodule Ouroboros.Provider.ClaudeAdapter do
       `ouroboros_task_id` instead and is left exactly as it was. There is no human loop
       on the coding plane — a `coding.start` is a caller handing over a whole objective —
       so a permission prompt there would block on somebody who is not watching.
-    * **`approval_mode: :prompt` and `:default`.** `:auto_edit` and `:auto_approve`
-      produce byte-identical argv to the pinned adapter's. `:prompt` is the mode that
+    * **Every interactive posture gets the MCP tools.** `:auto_edit` and `:auto_approve`
+      retain their permission mode without a permission prompt override. `:prompt` is the mode that
       promises a person is asked, so it is the mode that gets one; `:default` is Claude's
       own default permission mode, which asks too — and under `--print` can only ask
       through this tool, so leaving it unbridged would be the silent denial again.
@@ -239,14 +239,12 @@ defmodule Ouroboros.Provider.ClaudeAdapter do
   # Dispatch
   # ---------------------------------------------------------------------------
 
-  defp bridge(%RunRequest{approval_mode: mode} = request) when mode in [:prompt, :default] do
+  defp bridge(%RunRequest{} = request) do
     case session_id(request) do
       nil -> nil
       session_id -> interactive_bridge(request, session_id)
     end
   end
-
-  defp bridge(_request), do: nil
 
   defp interactive_bridge(request, session_id) do
     with {:ok, binary} <- ouro_binary(),
@@ -276,10 +274,12 @@ defmodule Ouroboros.Provider.ClaudeAdapter do
   end
 
   defp composed_run(request, context, bridge, planning?) do
+    prompt_bridge = if request.approval_mode in [:prompt, :default], do: bridge
+
     options =
       request.provider_options
       |> Helpers.provider_options(@provider_options)
-      |> with_hooks(bridge)
+      |> with_hooks(prompt_bridge)
 
     request = if bridge, do: %{request | mcp_config: bridge.servers}, else: request
 
@@ -289,7 +289,7 @@ defmodule Ouroboros.Provider.ClaudeAdapter do
       executable =
         options[:cli_path] || Helpers.cli_path(context.config, Claude.spec().executable)
 
-      argv = argv |> with_prompt_tool(bridge) |> with_plan_mode(planning?)
+      argv = argv |> with_prompt_tool(prompt_bridge) |> with_plan_mode(planning?)
 
       CLIStream.run(:claude, request, context, executable, argv, &CLIMapper.claude/1)
     end

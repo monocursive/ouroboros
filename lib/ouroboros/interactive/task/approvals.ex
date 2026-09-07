@@ -85,7 +85,16 @@ defmodule Ouroboros.Interactive.Task.Approvals do
         "external"
       )
 
-    close_external_approval(runtime, request_id, decision, :human, reason, scope, effect_id)
+    close_external_approval(
+      runtime,
+      request_id,
+      decision,
+      :human,
+      reason,
+      scope,
+      effect_id,
+      response
+    )
   end
 
   def respond_provider(runtime, request_id, response) do
@@ -185,6 +194,7 @@ defmodule Ouroboros.Interactive.Task.Approvals do
 
     pending = %{
       from: from,
+      monitor: Process.monitor(elem(from, 0)),
       request_ref: request_ref,
       request: request,
       timer: timer,
@@ -195,6 +205,25 @@ defmodule Ouroboros.Interactive.Task.Approvals do
      %{runtime | external_approvals: Map.put(runtime.external_approvals, request_id, pending)}}
   end
 
+  def caller_down(runtime, monitor) do
+    case Enum.find(runtime.external_approvals, fn {_id, pending} ->
+           Map.get(pending, :monitor) == monitor
+         end) do
+      {request_id, _pending} ->
+        close_external_approval(
+          runtime,
+          request_id,
+          :deny,
+          :caller_stopped,
+          "the requesting child or tool stopped",
+          :once
+        )
+
+      nil ->
+        runtime
+    end
+  end
+
   def close_external_approval(
         runtime,
         request_id,
@@ -202,19 +231,33 @@ defmodule Ouroboros.Interactive.Task.Approvals do
         source,
         reason,
         scope,
-        effect_id \\ nil
+        effect_id \\ nil,
+        response \\ nil
       ) do
     {pending, table} = Map.pop(runtime.external_approvals, request_id)
     runtime = %{runtime | external_approvals: table}
 
     if pending do
       _ = Process.cancel_timer(pending.timer)
+      _ = Process.demonitor(pending.monitor, [:flush])
       record_permission(runtime, pending.request, request_id, decision, source, nil, scope)
 
       runtime =
         resolve_external_event(runtime, request_id, decision, source, reason, scope, effect_id)
 
-      GenServer.reply(pending.from, {:ok, external_answer(request_id, decision, source, reason)})
+      answer = external_answer(request_id, decision, source, reason)
+
+      answer =
+        if Map.has_key?(pending.request, :relay_payload) and is_map(response),
+          do:
+            Map.put(
+              answer,
+              :response,
+              Map.take(response, [:decision, :scope, :reason, :provider_options])
+            ),
+          else: answer
+
+      GenServer.reply(pending.from, {:ok, answer})
       runtime
     else
       runtime
@@ -265,6 +308,11 @@ defmodule Ouroboros.Interactive.Task.Approvals do
   # The shape the Codex and ACP dialects already emit, so the modal that reads
   # `tool_call` and `request_id` needs no new case. `input` rather than `command`,
   # because a `--permission-prompt-tool` call carries the tool's arguments object.
+  defp external_request_payload(_runtime, request_id, %{relay_payload: payload}, _verdict)
+       when is_map(payload) do
+    payload |> Map.put("request_id", request_id) |> Map.put("origin", "external")
+  end
+
   defp external_request_payload(runtime, request_id, request, verdict) do
     tool_call =
       %{"name" => Map.get(request, :tool_name)}
@@ -287,6 +335,9 @@ defmodule Ouroboros.Interactive.Task.Approvals do
   # `evaluate/1` is C1's contract: `{:allow, rule} | {:deny, rule} | {:ask, reason}`. With
   # no engine on the node every request is `:ask`, which is the honest default — the
   # runtime has no rules, so it has no basis to skip the human.
+  defp evaluate_permission(_runtime, %{relay_payload: payload}) when is_map(payload),
+    do: {:ask, :target_requested}
+
   defp evaluate_permission(runtime, request),
     do: Engine.evaluate(permission_subject(runtime, request))
 

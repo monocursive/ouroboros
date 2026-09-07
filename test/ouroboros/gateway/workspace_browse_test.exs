@@ -71,7 +71,14 @@ defmodule Ouroboros.Gateway.WorkspaceBrowseTest do
     # listener held at `read` scope is one that was not trusted to.
     refute Methods.permits?(:read, %{scope: :operate, timeout: 15_000})
 
-    assert {:ok, %{envelope: :closed, params: [%{name: "path", requirement: :optional}]}} =
+    assert {:ok,
+            %{
+              envelope: :closed,
+              params: [
+                %{name: "path", requirement: :optional},
+                %{name: "machine", requirement: :optional}
+              ]
+            }} =
              Methods.params("workspace.browse")
   end
 

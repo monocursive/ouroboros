@@ -54,17 +54,17 @@ defmodule Ouroboros.Web.Prefs do
 
   @filename "web.prefs.json"
 
-  # The five keys `interactive.start` takes that a person makes a standing choice about.
+  # The setup choices `interactive.start` takes, including the computer owning the folder.
   # `id` is deliberately absent: it is minted per form and idempotency is the whole reason
   # it exists, so a remembered one would adopt a session the operator already finished.
-  @keys ["provider", "model", "workspace", "sandbox_mode", "reasoning_effort"]
+  @keys ["machine", "provider", "model", "workspace", "sandbox_mode", "reasoning_effort"]
 
   # Closed vocabularies, restated here rather than reached for through the LiveView layer:
   # this module is read at mount and must not depend on anything that draws.
   @sandbox_modes ["read_only", "workspace_write", "unrestricted"]
   @efforts ["none", "low", "medium", "high", "xhigh", "max"]
 
-  # A preferences file is five short strings. Anything approaching this is not one, and
+  # A preferences file is a few short strings. Anything approaching this is not one, and
   # reading it into memory to find that out is what the bound is for.
   @max_bytes 64 * 1024
 

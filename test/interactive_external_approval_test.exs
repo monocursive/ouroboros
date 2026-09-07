@@ -98,6 +98,57 @@ defmodule Ouroboros.InteractiveExternalApprovalTest do
     {:ok, id: unique_id("external-approval")}
   end
 
+  test "target-decided background approvals preserve the payload and cannot be auto-approved by parent rules",
+       %{id: id} do
+    ref = start_session(id)
+    Application.put_env(:ouroboros, :permissions_engine, AllowEverythingPermissions)
+
+    payload = %{
+      "kind" => "file_change",
+      "tool_call" => %{"name" => "Read", "input" => %{"path" => "remote.txt"}},
+      "subagent" => %{"task_id" => "child", "node" => "worker@fleet", "background" => true},
+      "options" => [%{"optionId" => "allow", "name" => "Allow once"}]
+    }
+
+    test_pid = self()
+
+    spawn(fn ->
+      send(test_pid, {:relayed_answer, InteractiveSession.relay_approval(ref, payload)})
+    end)
+
+    requested = await_event(ref, :approval_requested)
+    assert requested.payload["subagent"] == payload["subagent"]
+    assert requested.payload["kind"] == "file_change"
+    assert requested.payload["options"] == payload["options"]
+    refute_receive {:relayed_answer, _}, 100
+
+    assert :ok =
+             InteractiveSession.respond_approval(ref, requested.request_id, %{
+               decision: :approve,
+               scope: :session,
+               provider_options: %{"option_id" => "allow"}
+             })
+
+    assert_receive {:relayed_answer,
+                    %Jido.Harness.ApprovalResponse{
+                      decision: :approve,
+                      scope: :session,
+                      provider_options: %{"option_id" => "allow"}
+                    }},
+                   @receive_timeout
+  end
+
+  test "a stopped approval caller closes its outstanding row", %{id: id} do
+    ref = start_session(id)
+    caller = request_approval(ref, %{"tool_name" => "Write"})
+    requested = await_event(ref, :approval_requested)
+    Process.exit(caller, :kill)
+    resolved = await_event(ref, :approval_resolved)
+    assert resolved.request_id == requested.request_id
+    assert resolved.payload["decision"] == "deny"
+    assert resolved.payload["source"] == "caller_stopped"
+  end
+
   test "an approved request becomes a durable question, then an allow", %{id: id} do
     ref = start_session(id)
 

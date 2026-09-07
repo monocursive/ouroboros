@@ -64,8 +64,7 @@ fn linux_report() -> Value {
 
     let notes = match (abi, user_mount) {
         (None, _) => "no Landlock on this kernel (needs 5.13 or newer)".to_string(),
-        (Some(_), false) => "unprivileged user namespaces are unavailable: the kernel or an \
-                             enclosing container policy refuses unshare(CLONE_NEWUSER)"
+        (Some(_), false) => "user namespace setup is unavailable: unshare, identity mapping, or private mounts were refused. Check container policy and AppArmor userns permissions for this exact ouro-sandbox executable"
             .to_string(),
         (Some(abi), true) => format!(
             "Landlock ABI {abi}, user and mount namespaces, seccomp belt{}",

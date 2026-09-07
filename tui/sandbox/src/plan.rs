@@ -62,6 +62,8 @@ pub const MAX_SCAN_VISITS: usize = 2_048;
 pub enum MountOp {
     /// Bind `path` onto itself and leave it writable. Emitted before any narrowing.
     BindWritable { path: String },
+    /// Reopen one validated provisioned-worktree subtree after enclosing denials.
+    BindException { path: String },
     /// A fresh private tmpfs at `path`.
     Tmpfs { path: String },
     /// A fresh private tmpfs at `path`, immediately made read-only: the host's contents are
@@ -252,6 +254,7 @@ pub struct PreloadFilter {
     pub library: String,
     /// Joined with `:` into `OUROBOROS_FS_DENY`, the variable `fs_filter.c` reads.
     pub denied_names: Vec<String>,
+    pub write_exceptions: Vec<String>,
 }
 
 /// Everything the executor needs, with no policy decisions left in it.
@@ -331,6 +334,16 @@ impl Plan {
             });
         }
 
+        for path in &policy.write_exceptions {
+            mounts.push(MountOp::BindException { path: path.clone() });
+        }
+        for path in existing_denied_dirs(&policy.write_exceptions, &policy.denied_names) {
+            mounts.push(MountOp::BindReadOnly {
+                path,
+                why: ReadOnlyReason::DeniedName,
+            });
+        }
+
         // Derived from the mount plan rather than rebuilt alongside it, so the two cannot
         // drift: whatever the mounts leave writable is exactly what Landlock grants. For a
         // shell that includes the `/dev` and `/proc` the sweep skips; for a builder the
@@ -356,6 +369,7 @@ impl Plan {
             (Some(library), [_, ..]) if !policy.mode.fences_reads() => Some(PreloadFilter {
                 library: library.to_string(),
                 denied_names: policy.denied_names.clone(),
+                write_exceptions: policy.write_exceptions.clone(),
             }),
             _ => None,
         };
@@ -409,7 +423,9 @@ fn writable_mount_paths(mounts: &[MountOp]) -> Vec<String> {
     let mut paths: Vec<String> = mounts
         .iter()
         .filter_map(|op| match op {
-            MountOp::BindWritable { path } | MountOp::Tmpfs { path } => Some(path.clone()),
+            MountOp::BindWritable { path }
+            | MountOp::BindException { path }
+            | MountOp::Tmpfs { path } => Some(path.clone()),
             _ => None,
         })
         .collect();
@@ -528,7 +544,8 @@ fn existing_denied_dirs(roots: &[String], names: &[String]) -> Vec<String> {
                     std::fs::symlink_metadata(&child),
                     Ok(meta) if meta.is_dir()
                 );
-                if !is_dir {
+                if matches!(std::fs::symlink_metadata(&child), Ok(meta) if meta.file_type().is_symlink())
+                {
                     continue;
                 }
 
@@ -544,7 +561,7 @@ fn existing_denied_dirs(roots: &[String], names: &[String]) -> Vec<String> {
                     // A denied directory is pinned read-only and not descended into:
                     // everything under it is covered by the bind at its root.
                     found.insert(child.to_string_lossy().to_string());
-                } else {
+                } else if is_dir {
                     queue.push((child, dir_depth + 1));
                 }
             }
@@ -973,6 +990,7 @@ mod tests {
             Some(PreloadFilter {
                 library: "/priv/libouro_fs_filter.so".to_string(),
                 denied_names: vec![".git".to_string()],
+                write_exceptions: vec![],
             })
         );
         assert_eq!(Plan::compile(&with_names, None).preload, None);
@@ -1000,6 +1018,41 @@ mod tests {
                 core_bytes: 0,
             }
         );
+    }
+
+    #[test]
+    fn provisioned_exceptions_reopen_only_the_named_subtrees_after_parent_denials() {
+        let tree = TempTree::new("exceptions");
+        let root = std::fs::canonicalize(tree.dir("workspace")).unwrap();
+        let delivery = tree.dir("workspace/.ouroboros/deliver");
+        let delivery = std::fs::canonicalize(delivery).unwrap();
+        let denied = tree.dir("workspace/.ouroboros/deliver/.git");
+        let denied = std::fs::canonicalize(denied).unwrap();
+        std::fs::write(root.join(".git"), "gitdir: elsewhere").unwrap();
+        let request = serde_json::json!({"mode":"workspace_write", "scratch":"/tmp/s", "writable":[root], "write_exceptions":[delivery], "denied_names":[".git", ".ouroboros"]});
+        let p = policy(&request.to_string());
+        let plan = Plan::compile(&p, Some("/filter.so"));
+        let position = plan
+            .mounts
+            .iter()
+            .position(|m| matches!(m, MountOp::BindException { .. }))
+            .unwrap();
+        assert!(plan.mounts[..position].iter().any(|m| matches!(m, MountOp::BindReadOnly {path, ..} if path == &root.join(".git").to_string_lossy())));
+        assert!(plan.mounts[position + 1..].iter().any(
+            |m| matches!(m, MountOp::BindReadOnly {path, ..} if path == &denied.to_string_lossy())
+        ));
+        assert!(plan
+            .landlock
+            .write_roots
+            .contains(&delivery.to_string_lossy().to_string()));
+        assert_eq!(plan.preload.unwrap().write_exceptions, p.write_exceptions);
+        for mode in ["read_only", "builder"] {
+            let request =
+                serde_json::json!({"mode":mode, "scratch":"/tmp/s", "write_exceptions":[delivery]});
+            assert!(Policy::from_json(&request.to_string()).is_err());
+        }
+        let request = serde_json::json!({"mode":"workspace_write", "scratch":"/tmp/s", "write_exceptions":[root.join("missing")]});
+        assert!(Policy::from_json(&request.to_string()).is_err());
     }
 
     // ---------------------------------------------------------------- the fs walk

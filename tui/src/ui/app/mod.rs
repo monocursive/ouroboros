@@ -56,6 +56,7 @@ mod details;
 mod footer;
 mod home;
 mod keys;
+mod location;
 mod machines;
 pub mod native;
 mod overlays;
@@ -72,6 +73,7 @@ use session::{
 };
 
 pub use footer::{SessionFacts, TranscriptFacts};
+pub use location::Location;
 pub use machines::{
     AddFailure, AddField, AddMachine, AddMethod, AddProgress, AddStage, AddStep, FleetJob,
     FormField, FormKind, MachineAction, MachineCandidate, MachineChoice, MachineForm,
@@ -231,6 +233,14 @@ impl Call {
 /// tag, so a slow runtime cannot make the UI queue a second copy of the same question.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Tag {
+    MachineAccount {
+        machine: String,
+        tag: Box<Tag>,
+    },
+    BrowseLocation {
+        machine: String,
+        path: Option<String>,
+    },
     Account,
     AccountLogin,
     AccountCancel,
@@ -1759,7 +1769,8 @@ impl App {
     }
 
     pub fn home_ready(&self) -> bool {
-        !self.home_requires_chatgpt() || self.codex_usable()
+        self.home_start_blocker().is_none()
+            && (!self.home_requires_chatgpt() || self.codex_usable())
     }
 
     pub fn home_provider(&self) -> &str {
@@ -1775,7 +1786,13 @@ impl App {
     }
 
     pub fn home_workspace(&self) -> String {
-        self.default_workspace()
+        self.config.location.workspace.clone().unwrap_or_else(|| {
+            if self.config.location.machine.is_empty() {
+                self.default_workspace()
+            } else {
+                String::new()
+            }
+        })
     }
 
     /// What the home composer should say about file access, and whether that is writable.
@@ -2270,6 +2287,9 @@ impl App {
                 );
             }
             Tab::Sessions => {
+                if self.sessions.open.is_none() {
+                    self.issue_if_due(Tag::Status, "runtime.status", json!({}), STATUS_TICKS);
+                }
                 self.issue_if_due(
                     Tag::Sessions(Plane::Interactive),
                     "interactive.list",
@@ -2483,7 +2503,18 @@ impl App {
     /// `-32601` so the pane that wanted it says which method is missing, in the place the
     /// data would have been — a client that discovered the gap by trying could not tell an
     /// older gateway from a broken one.
-    fn issue(&mut self, call: Call) {
+    fn issue(&mut self, mut call: Call) {
+        if matches!(
+            call.tag,
+            Tag::Account | Tag::AccountLogin | Tag::AccountCancel | Tag::AccountLogout
+        ) && !self.config.location.machine.is_empty()
+        {
+            call.params["machine"] = json!(self.config.location.machine);
+            call.tag = Tag::MachineAccount {
+                machine: self.config.location.machine.clone(),
+                tag: Box::new(call.tag),
+            };
+        }
         if !self.hello.serves(&call.method) {
             let message = format!("this gateway does not serve {}", call.method);
 

@@ -399,6 +399,7 @@ defmodule Ouroboros.Provider.Native.Replay do
 
     Context.build(
       system_prompt: Keyword.get(context.opts, :system_prompt),
+      fleet: Map.get(turn.started, "fleet_snapshot"),
       cwd: scope.root,
       add_dirs: scope.roots -- [scope.root],
       sandbox_mode: scope.sandbox_mode,
@@ -409,6 +410,7 @@ defmodule Ouroboros.Provider.Native.Replay do
           Keyword.get(context.opts, :disallowed_tools),
           workspace: scope.root,
           context_window: window,
+          distributed: Map.get(turn.started, "distributed_tools", Node.alive?()),
           subagent_depth: Keyword.get(context.opts, :subagent_depth, 0)
         ),
       model_module: context.delegate,
@@ -464,6 +466,7 @@ defmodule Ouroboros.Provider.Native.Replay do
       model_module: ReplayModel,
       model_spec: Map.get(turn.started, "model_spec"),
       system: prefix.system,
+      tool_specs: prefix.tools,
       context_window: prefix.context_window,
       prefix_fingerprint: prefix.fingerprint,
       scope: scope,

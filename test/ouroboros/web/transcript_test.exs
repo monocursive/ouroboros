@@ -44,6 +44,34 @@ defmodule Ouroboros.Web.TranscriptTest do
   # ------------------------------------------------------------------------------------
 
   describe "entries" do
+    test "subagent progress refreshes elapsed time and the last activity" do
+      alias Ouroboros.Web.Transcript.Cell.Subagent
+      alias Ouroboros.EventPresentation.SubagentEvent
+
+      cell =
+        Subagent.absorb(%Subagent{}, %SubagentEvent{
+          phase: :progress,
+          task_id: "child",
+          elapsed_ms: 5_000,
+          last_activity: "sleep 700"
+        })
+
+      assert Subagent.detail(cell) =~ "5s"
+      assert Subagent.detail(cell) =~ "sleep 700"
+
+      cell =
+        Subagent.absorb(cell, %SubagentEvent{
+          phase: :progress,
+          task_id: "child",
+          elapsed_ms: 10_000,
+          last_activity: "echo ok"
+        })
+
+      assert Subagent.detail(cell) =~ "10s"
+      assert Subagent.detail(cell) =~ "echo ok"
+      refute Subagent.detail(cell) =~ "sleep 700"
+    end
+
     test "a contiguous ledger interleaves nothing but its events" do
       events = %{1 => event(:session_ready, %{}), 2 => event(:turn_started, %{})}
 

@@ -28,14 +28,17 @@ async function signIn(page) {
 
 test("sign-in recovery and progressive session setup", async ({ page }) => {
   await signIn(page);
-  await expect(page.getByRole("link", { name: /Machines/ })).toBeVisible();
-  await page.getByRole("link", { name: /Machines/ }).click();
-  await expect(page).toHaveTitle("Advanced · Machines · Ouroboros");
+  const machines = page.locator(".ouro-topbar").getByRole("link", { name: /Machines/ });
+  await expect(machines).toBeVisible();
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await machines.click();
+  await expect(page).toHaveTitle("Machines · Ouroboros");
   await page.getByRole("link", { name: "Sessions", exact: true }).click();
 
   await page.getByRole("link", { name: "New session", exact: true }).click();
   await expect(page).toHaveTitle("New session · Ouroboros");
   await expect(page.locator("#workspace")).toBeVisible();
+  await expectMinimumTarget(page.getByRole("combobox", { name: "Computer", exact: true }));
   await expect(page.locator("#initial-message")).toBeVisible();
   await expectMinimumTarget(page.locator("#workspace"));
   await expectMinimumTarget(page.locator("#initial-message"));
@@ -65,6 +68,8 @@ test("session controls stay reachable and dialogs are modal", async ({ page }, t
   await expect(start).toBeEnabled();
   await start.click();
   await expect(page).toHaveURL(/\/s\/interactive\//);
+  await expect(page.locator(".ouro-topbar").getByRole("link", { name: /Machines/ })).toBeVisible();
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
 
   const composer = page.locator("#ouro-composer-input");
   await expect(composer).toBeVisible();

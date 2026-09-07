@@ -1,3 +1,5 @@
+Code.require_file("scripts/patch_erlexec.exs", __DIR__)
+
 defmodule Ouroboros.MixProject do
   use Mix.Project
 
@@ -40,9 +42,28 @@ defmodule Ouroboros.MixProject do
   # always done — no new packaging mechanism or Node requirement.
   defp aliases do
     [
+      "deps.patch": &patch_erlexec/1,
+      "deps.get": ["deps.get", "deps.patch"],
+      "deps.precompile": ["deps.patch"],
       "web.assets": &copy_web_assets/1,
-      compile: ["web.assets", "compile"]
+      # A restored .app can make Mix consider a dependency current even after its
+      # native source was patched. Let Rebar/make check erlexec incrementally before
+      # compiling the application; do not trust a cached unpatched exec-port.
+      compile: &compile_project/1
     ]
+  end
+
+  defp patch_erlexec(_args),
+    do: Ouroboros.Build.ErlexecPatch.apply!(Mix.Project.deps_path())
+
+  defp compile_project(args) do
+    unless "--no-compile" in args do
+      Mix.Task.run("deps.patch")
+      Mix.Task.run("deps.compile", ["erlexec"])
+    end
+
+    Mix.Task.run("web.assets")
+    Mix.Task.run("compile", args)
   end
 
   # The JavaScript `Ouroboros.Web` serves is the prebuilt bundle that already shipped
@@ -158,6 +179,9 @@ defmodule Ouroboros.MixProject do
       # provider protocol changes cannot enter the runtime implicitly.
       {:jido_harness,
        github: "agentjido/jido_harness", ref: "8bf0d52f4fed0d8a9d2594000d8b3a775da16f8b"},
+      # The macOS process-group race workaround verifies this exact upstream source.
+      # Remove/review patches/erlexec-2.3.4-macos-setpgid.patch when upgrading.
+      {:erlexec, "== 2.3.4", override: true},
       # Gradual success typing (`mix dialyzer` / `make dialyzer`, and a CI job). Runtime
       # false so a packaged node never ships the checker; `:dev`/`:test` so the lock
       # still pins it for CI.

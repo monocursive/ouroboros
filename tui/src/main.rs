@@ -35,9 +35,9 @@ use rand::TryRngCore;
 use serde_json::{json, Value};
 
 use ouro::cli::{
-    AcpArgs, Cli, Command, DesktopCommand, FleetCommand, ForkArgs, HookCommand, InviteCommand,
-    LedgerArgs, McpCommand, ReplayArgs, RunArgs, ServiceCommand, SessionsCommand, SyncCommand,
-    WasmCommand,
+    AcpArgs, Cli, Command, DesktopCommand, FleetCommand, FleetTagCommand, ForkArgs, HookCommand,
+    InviteCommand, LedgerArgs, McpCommand, ReplayArgs, RunArgs, ServiceCommand, SessionsCommand,
+    SyncCommand, WasmCommand,
 };
 use ouro::config::{self, Loaded, StartFlags};
 use ouro::fleet_add;
@@ -1393,6 +1393,46 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
     paths.ensure_private_data_dir()?;
 
     match command {
+        FleetCommand::Tag { command } => {
+            let (machine, change) = match &command {
+                FleetTagCommand::Add { tag, machine } => {
+                    (machine.as_deref(), Some((tag.as_str(), true)))
+                }
+                FleetTagCommand::Remove { tag, machine } => {
+                    (machine.as_deref(), Some((tag.as_str(), false)))
+                }
+                FleetTagCommand::List { machine } => (machine.as_deref(), None),
+            };
+            let tags = if let Some(machine) = machine {
+                let (operation, tag) = match change {
+                    Some((tag, true)) => ("add", Some(tag)),
+                    Some((tag, false)) => ("remove", Some(tag)),
+                    None => ("list", None),
+                };
+                let result = fleet_rpc(
+                    paths,
+                    "fleet.tags",
+                    json!({"machine": machine, "operation": operation, "tag": tag.unwrap_or("")}),
+                )
+                .await?;
+                serde_json::from_value::<Vec<String>>(result["tags"].clone())
+                    .context("decoding machine tags")?
+            } else {
+                fleet::tags(&paths.data_dir, None, change)?
+            };
+            println!(
+                "Tags: {}",
+                if tags.is_empty() {
+                    "—".into()
+                } else {
+                    tags.join(" ")
+                }
+            );
+            if change.is_some() {
+                println!("Saved. Connected agents see this change on the next fleet probe.");
+            }
+            Ok(())
+        }
         FleetCommand::Protocol => {
             println!("2");
             Ok(())

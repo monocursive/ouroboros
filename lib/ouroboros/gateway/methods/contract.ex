@@ -501,6 +501,58 @@ defmodule Ouroboros.Gateway.Methods.Contract do
         {:closed, [{"artifact", :required, :string, "CA-attested revocation, at most 16 KiB"}]},
       handler: :handle_fleet_revoke
     },
+    "fleet.tags" => %{
+      scope: :operate,
+      timeout: 15000,
+      params:
+        {:closed,
+         [
+           {"machine", :required, :string, "connected machine name or node"},
+           {"operation", :required, :string, "add, remove, or list; tags are advisory"},
+           {"tag", :optional, :string, "validated tag for add/remove; omit for list"}
+         ]},
+      handler: :handle_fleet_tags
+    },
+    "subagent.spawn" => %{
+      scope: :operate,
+      timeout: 920_000,
+      params:
+        {:closed,
+         [
+           @session_id,
+           @session_node,
+           {"request_id", :required, :string, "stable id for transport retries"},
+           {"input", :required, :object,
+            "native agent arguments; posture is inherited from the session"}
+         ]},
+      handler: :handle_subagent_spawn
+    },
+    "subagent.result" => %{
+      scope: :operate,
+      timeout: 920_000,
+      params:
+        {:closed,
+         [
+           @session_id,
+           @session_node,
+           {"request_id", :required, :string, "stable id for transport retries"},
+           {"input", :required, :object, "native agent_result arguments"}
+         ]},
+      handler: :handle_subagent_result
+    },
+    "subagent.stop" => %{
+      scope: :operate,
+      timeout: 920_000,
+      params:
+        {:closed,
+         [
+           @session_id,
+           @session_node,
+           {"request_id", :required, :string, "stable id for transport retries"},
+           {"task_id", :required, :string, "child tracked by this session"}
+         ]},
+      handler: :handle_subagent_stop
+    },
     "fleet.status" => %{
       scope: :read,
       timeout: @default_timeout,
@@ -1210,6 +1262,29 @@ defmodule Ouroboros.Gateway.Methods.Contract do
   def wasm_sign_timeout, do: @wasm_sign_timeout
   def wasm_upload_timeout, do: @wasm_upload_timeout
   def worker_options, do: @worker_options
+
+  # Setup belongs to the computer that will run the work. Keep this list explicit:
+  # accepting a machine here must never turn into an arbitrary remote RPC facility.
+  @machine_scoped ~w(runtime.providers runtime.models workspace.browse account.read
+    account.login.start account.login.complete account.login.cancel account.logout
+    grok.account.read grok.account.login.start grok.account.login.cancel
+    credentials.anthropic.set credentials.xai.set)
+  @methods Map.new(@methods, fn {name, entry} ->
+             if name in @machine_scoped do
+               params = Tuple.to_list(entry.params)
+
+               descriptor =
+                 {"machine", :optional, :string,
+                  "connected fleet machine name or node; omitted means this runtime; never falls back locally"}
+
+               params = List.update_at(params, 1, &(&1 ++ [descriptor])) |> List.to_tuple()
+               {name, %{entry | params: params}}
+             else
+               {name, entry}
+             end
+           end)
+
+  def machine_scoped?(name), do: name in @machine_scoped
 
   @table Map.new(@methods, fn {name, entry} -> {name, Map.drop(entry, [:params, :handler])} end)
   def table, do: @table

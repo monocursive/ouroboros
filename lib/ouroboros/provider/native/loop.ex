@@ -209,6 +209,7 @@ defmodule Ouroboros.Provider.Native.Loop do
     # journal record, so a reader can see at a glance which turns shared a prefix and where
     # a `configure` or a compaction rotated it.
     :prefix_fingerprint,
+    :fleet_snapshot,
     # R1. The session's turn journal, or `nil` for a run that keeps no record — the coding
     # plane's finite run, and the loop tests that have no session directory. Every write
     # goes through `journal/3` below, which never fails a turn.
@@ -299,7 +300,9 @@ defmodule Ouroboros.Provider.Native.Loop do
     state = %{
       state
       | hooks: state.hooks || Hooks.load(state.scope.root),
-        tool_specs: build_tool_specs(state),
+        # Live discovery can finish after the opening prefix; replay must keep its recorded layout.
+        tool_specs:
+          if(state.tool_source == :live, do: build_tool_specs(state), else: tool_specs(state)),
         turn_files: %{},
         turn_paths: [],
         turn_commands: [],
@@ -318,7 +321,9 @@ defmodule Ouroboros.Provider.Native.Loop do
         "sandbox_mode" => state.scope.sandbox_mode,
         "max_iterations" => state.max_iterations,
         "prefix_fingerprint" => state.prefix_fingerprint,
-        "system_sha256" => text_digest(state.system)
+        "system_sha256" => text_digest(state.system),
+        "fleet_snapshot" => state.fleet_snapshot,
+        "distributed_tools" => Enum.any?(state.tool_specs, &(&1.name == "fleet"))
       })
 
     injected = injected(Hooks.notify(state.hooks, :user_prompt_submit, hook_base(state)))
@@ -686,9 +691,34 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   # ---------------------------------------------------------------- tools
 
+  @doc "Dispatch a session-owned bridge tool through the native permission, hook and ledger path."
+  def run_tool(%__MODULE__{} = state, %{name: name} = call)
+      when name in ["agent", "agent_result", "fleet"] do
+    state = %{
+      state
+      | hooks: state.hooks || Hooks.load(state.scope.root),
+        tool_specs: build_tool_specs(state),
+        journal: Journal.sync(state.journal)
+    }
+
+    case run_call(state, call) do
+      {:continue, finished} ->
+        result = List.last(finished.messages)
+        {:ok, %{output: result.content, is_error: result.is_error}}
+
+      {:interrupted, _} ->
+        {:error, :interrupted}
+
+      {:failed, _, message, _} ->
+        {:error, message}
+    end
+  end
+
+  def run_tool(%__MODULE__{}, _call), do: {:error, :unsupported_bridge_tool}
+
   defp run_tools(state, calls) do
     Enum.reduce_while(calls, {:continue, state}, fn call, {:continue, state} ->
-      case run_tool(state, call) do
+      case run_call(state, call) do
         {:continue, state} ->
           # Interrupt is honoured *after* the tool that was already running, never in
           # the middle of it: a half-applied edit is worse than one extra tool call.
@@ -704,7 +734,7 @@ defmodule Ouroboros.Provider.Native.Loop do
     end)
   end
 
-  defp run_tool(state, call) do
+  defp run_call(state, call) do
     signature = signature(call)
     seen = if state.last_signature == signature, do: state.signature_repeats, else: 0
 
@@ -973,6 +1003,7 @@ defmodule Ouroboros.Provider.Native.Loop do
     context =
       %{
         scope: state.scope,
+        provider_options: provider_options(state),
         session_dir: state.session_dir,
         reads: state.reads,
         # G3. `agent_result` collects a child the *session* holds, not one this turn owns,
@@ -990,7 +1021,10 @@ defmodule Ouroboros.Provider.Native.Loop do
     baselines = CodeIntel.baseline(classified.write_paths, root: state.scope.root)
 
     started = System.monotonic_time(:millisecond)
-    result = Tools.execute(module, call.input, context, execute_timeout(state, classified))
+
+    result =
+      Tools.execute(module, call.input, context, execute_timeout(state, classified, call.input))
+
     elapsed = System.monotonic_time(:millisecond) - started
 
     state =
@@ -1066,7 +1100,7 @@ defmodule Ouroboros.Provider.Native.Loop do
     {:continue, state}
   end
 
-  defp execute_timeout(state, %{tool: "desktop_act"}),
+  defp execute_timeout(state, %{tool: "desktop_act"}, _input),
     do: max(state.tool_timeout_ms, Desktop.config(:act_timeout_ms))
 
   # W13. A capability's own deadline plus the pool's call margin can exceed the ordinary
@@ -1074,10 +1108,24 @@ defmodule Ouroboros.Provider.Native.Loop do
   # capability that was still inside the bound it was deployed under. The tool derives the
   # exact deadline from the target; this is the ceiling, so the tool's own error is the one
   # that fires.
-  defp execute_timeout(state, %{tool: "capability"}),
+  defp execute_timeout(state, %{tool: "capability"}, _input),
     do: max(state.tool_timeout_ms, CapabilityTool.max_timeout_ms())
 
-  defp execute_timeout(state, _classified), do: state.tool_timeout_ms
+  defp execute_timeout(state, %{tool: "bash"}, input) do
+    options = provider_options(state)
+    requested = Map.get(input, "timeout_ms", 120_000)
+    timeout = if is_integer(requested) and requested > 0, do: requested, else: 120_000
+    # Let bash reap its process and return its own timeout result before the tool task dies.
+    min(timeout, Ouroboros.Provider.Native.Tools.Bash.max_timeout_ms(options)) + 5_000
+  end
+
+  defp execute_timeout(state, _classified, _input), do: state.tool_timeout_ms
+
+  # One-shot loops have no SessionRequest. Their tools retain the default bounds.
+  defp provider_options(%{session_request: %{provider_options: options}}),
+    do: Map.new(options || %{})
+
+  defp provider_options(_state), do: %{}
 
   defp maybe_desktop_runner(context, %{desktop_runner: fun}) when is_function(fun, 3),
     do: Map.put(context, :desktop_runner, fun)
@@ -2001,7 +2049,15 @@ defmodule Ouroboros.Provider.Native.Loop do
     emit_escalation(state, pending, "approved", granted_by, request_id)
 
     started = System.monotonic_time(:millisecond)
-    result = Tools.execute(pending.module, pending.call.input, context, state.tool_timeout_ms)
+
+    result =
+      Tools.execute(
+        pending.module,
+        pending.call.input,
+        context,
+        execute_timeout(state, pending.classified, pending.call.input)
+      )
+
     elapsed = System.monotonic_time(:millisecond) - started
 
     output =
@@ -2203,9 +2259,12 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp run_subagent(state, call, hook_context, effect_id) do
     case subagent_parent(state) do
       {:ok, parent} ->
-        case AgentTool.plan(call.input, parent) do
-          {:ok, spec} -> spawn_subagent(state, call, spec, hook_context, effect_id)
-          {:error, message} -> refuse_subagent(state, call, hook_context, effect_id, message)
+        case Ouroboros.Provider.Native.Subagents.spawn(call.input, parent) do
+          {:ok, spec, started} ->
+            spawn_subagent(state, call, spec, started, hook_context, effect_id)
+
+          {:error, message} ->
+            refuse_subagent(state, call, hook_context, effect_id, message)
         end
 
       {:error, message} ->
@@ -2247,7 +2306,7 @@ defmodule Ouroboros.Provider.Native.Loop do
        model_spec: state.model_spec,
        approval_mode: state.approval_mode,
        tool_names: state |> tool_specs() |> Enum.map(& &1.name),
-       options: Map.new(state.session_request.provider_options || %{}),
+       options: provider_options(state),
        subscriber: self(),
        background_subscriber: state.session_pid,
        running: counts.running,
@@ -2255,38 +2314,45 @@ defmodule Ouroboros.Provider.Native.Loop do
      }}
   end
 
-  defp spawn_subagent(state, call, spec, hook_context, effect_id) do
+  defp spawn_subagent(state, call, spec, started, hook_context, effect_id) do
     started_at = System.monotonic_time(:millisecond)
 
-    case Subagent.spawn(spec) do
-      {:ok, started} ->
-        emit(state, :provider_event, subagent_event(AgentTool.spawned_payload(spec, started)))
-        _ = track_subagent(state, spec, started)
+    emit(state, :provider_event, subagent_event(AgentTool.spawned_payload(spec, started)))
+    _ = track_subagent(state, spec, started)
 
-        if spec.background do
-          background_result(state, call, spec, started, hook_context, effect_id, started_at)
-        else
-          wait_for_subagent(
-            state,
-            call,
-            spec,
-            started,
-            hook_context,
-            effect_id,
-            started_at,
-            deadline(spec.deadline_ms + 5_000),
-            %{}
-          )
-        end
-
-      # Every way a launch can fail is now mostly a fact about the node the child was
-      # placed on — its worktree root, its filesystem, its reachability — so the tool's own
-      # module says each of them in a sentence rather than inspecting a tuple into the
-      # transcript.
-      {:error, reason} ->
-        refuse_subagent(state, call, hook_context, effect_id, AgentTool.start_refusal(reason))
+    if spec.background do
+      background_result(state, call, spec, started, hook_context, effect_id, started_at)
+    else
+      wait_for_subagent(
+        state,
+        call,
+        spec,
+        started,
+        hook_context,
+        effect_id,
+        started_at,
+        deadline(min(spec.deadline_ms + 5_000, state.tool_timeout_ms)),
+        %{}
+      )
     end
   end
+
+  defp provisioning_result(%{provisioned: true} = started) do
+    paths = Map.get(started, :untracked, [])
+    count = Map.get(started, :untracked_count, length(paths))
+
+    "\nSnapshot #{started.commit} provisioned on #{Map.get(started, :node)} " <>
+      "(#{started.bytes} transferred bytes). Included #{count} untracked file(s)" <>
+      if(paths == [],
+        do: ".",
+        else:
+          ":\n" <>
+            Enum.join(paths, "\n") <>
+            if(count > length(paths), do: "\n… #{count - length(paths)} more", else: "")
+      )
+  end
+
+  defp provisioning_result(_), do: ""
 
   defp background_result(state, call, spec, started, hook_context, effect_id, started_at) do
     result =
@@ -2295,7 +2361,7 @@ defmodule Ouroboros.Provider.Native.Loop do
           "Subagent #{spec.task_id} (#{spec.description}) is running in the background as " <>
             "#{started.provider_session_id}. Collect it with " <>
             "`agent_result` and that task_id — it is stopped when this session closes, and " <>
-            "a collection after that says so.",
+            "a collection after that says so." <> provisioning_result(started),
         is_error: false
       })
 
@@ -2395,7 +2461,13 @@ defmodule Ouroboros.Provider.Native.Loop do
 
       :native_interrupt ->
         summary = settle_subagent(state, spec, started, :stopped)
-        emit(state, :provider_event, subagent_event(Subagent.settled_payload(summary)))
+
+        payload =
+          if summary.status == :returning,
+            do: Subagent.returning_payload(summary),
+            else: Subagent.settled_payload(summary)
+
+        emit(state, :provider_event, subagent_event(payload))
         settle_tool_effect(state, effect_id, :refused, nil, 0)
         {:interrupted, %{state | interrupted?: true}}
 
@@ -2422,6 +2494,33 @@ defmodule Ouroboros.Provider.Native.Loop do
     end
   end
 
+  defp finish_subagent(
+         state,
+         call,
+         spec,
+         started,
+         %{status: :returning} = summary,
+         hook_context,
+         effect_id,
+         started_at
+       ) do
+    emit(state, :provider_event, subagent_event(Subagent.returning_payload(summary)))
+    state = fold_subagent_usage(state, spec, summary)
+    # The foreground wait is over, but this session still owns a result in flight.
+    # Keep its task registered until agent_result receives the final settlement.
+    result =
+      Tools.normalize_result_of(%{
+        output:
+          Subagent.render(summary) <>
+            "\nThe return continues in this session. Collect it with agent_result and task_id #{spec.task_id}." <>
+            provisioning_result(started),
+        is_error: false
+      })
+
+    settle_tool_effect(state, effect_id, result, System.monotonic_time(:millisecond) - started_at)
+    {:continue, tool_result(state, call, append_context(result, hook_context))}
+  end
+
   defp finish_subagent(state, call, spec, started, summary, hook_context, effect_id, started_at) do
     emit(state, :provider_event, subagent_event(Subagent.settled_payload(summary)))
     state = fold_subagent_usage(state, spec, summary)
@@ -2434,7 +2533,7 @@ defmodule Ouroboros.Provider.Native.Loop do
 
     result =
       Tools.normalize_result_of(%{
-        output: Subagent.render(summary),
+        output: Subagent.render(summary) <> provisioning_result(started),
         is_error: summary.status in [:failed, :timed_out]
       })
 
@@ -2442,8 +2541,8 @@ defmodule Ouroboros.Provider.Native.Loop do
     {:continue, tool_result(state, call, append_context(result, hook_context))}
   end
 
-  defp settle_subagent(_state, _spec, started, reason) do
-    case Subagent.stop(started.pid, reason) do
+  defp settle_subagent(state, _spec, started, reason) do
+    case Subagent.stop(started.pid, reason, state.session_pid) do
       {:ok, summary} ->
         summary
 

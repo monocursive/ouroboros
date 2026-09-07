@@ -499,6 +499,7 @@ defmodule Ouroboros.Web.Live.Cells do
       <button
         type="button"
         class="ouro-subagent-row"
+        aria-expanded={to_string(@open)}
         phx-click={if @open, do: "collapse", else: "expand"}
         phx-value-block={@block}
       >

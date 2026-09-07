@@ -5,6 +5,16 @@ impl App {
 
     pub(super) fn answer(&mut self, tag: Tag, result: Result<Value, ClientError>) {
         self.in_flight.remove(&tag);
+        let tag = match tag {
+            Tag::MachineAccount { machine, tag } => {
+                if machine != self.config.location.machine {
+                    return;
+                }
+                *tag
+            }
+            Tag::Account if !self.config.location.machine.is_empty() => return,
+            tag => tag,
+        };
 
         if let Err(error) = &result {
             if matches!(
@@ -20,6 +30,8 @@ impl App {
         let ticks = self.ticks;
 
         match tag {
+            Tag::MachineAccount { .. } => unreachable!("machine account tag is unwrapped above"),
+            Tag::BrowseLocation { machine, path } => self.location_browsed(machine, path, result),
             Tag::Account => {
                 match result {
                     Ok(value) => match AccountState::decode(&value) {
@@ -43,7 +55,7 @@ impl App {
                                 }
 
                                 self.finish_home_login();
-                            } else if !self.in_flight.contains(&Tag::AccountLogin) {
+                            } else if !self.account_call_pending(&Tag::AccountLogin) {
                                 if let (Some(Overlay::Account(dialog)), Some(account)) =
                                     (self.overlay.as_mut(), self.account.value.as_ref())
                                 {

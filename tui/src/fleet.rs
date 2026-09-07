@@ -322,6 +322,8 @@ impl Drop for EpmdRuntimeWatch {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Profile {
+    #[serde(default = "empty_tags")]
+    pub tags: Value,
     pub schema: u8,
     pub fleet_id: String,
     pub name: String,
@@ -663,6 +665,109 @@ pub fn load(data_dir: &Path) -> Result<Option<Profile>> {
     Ok(Some(profile))
 }
 
+/// Tags describe this machine; they never change membership or permissions.
+pub fn tags(
+    data_dir: &Path,
+    machine: Option<&str>,
+    change: Option<(&str, bool)>,
+) -> Result<Vec<String>> {
+    let _lock = lock_live_fleet_update(data_dir, "ouro fleet tag")?;
+    let mut profile =
+        load(data_dir)?.context("this machine is standalone; create or join a fleet first")?;
+    if let Some(machine) = machine {
+        if machine != profile.machine && machine != profile.node {
+            bail!(
+                "this profile belongs to {}; run `ouro fleet tag` on machine {} to edit its tags",
+                profile.machine,
+                machine
+            );
+        }
+    }
+    if let Some((tag, add)) = change {
+        if add {
+            validate_tags(&[tag.to_string()])?;
+            let mut tags = validated_tags(&profile.tags)?;
+            if !tags.iter().any(|existing| existing == tag) {
+                tags.push(tag.to_string());
+            }
+            validate_tags(&tags)?;
+            profile.tags = serde_json::to_value(tags)?;
+        } else {
+            // Removal is also the repair path for a malformed advisory tag. Keep every
+            // other profile field untouched, and validate the resulting list before writing.
+            let mut tags =
+                profile.tags.as_array().cloned().context(
+                    "fleet tags must be a list; repair only the tags field in the profile",
+                )?;
+            tags.retain(|value| value.as_str() != Some(tag));
+            let repaired = Value::Array(tags);
+            validated_tags(&repaired)?;
+            profile.tags = repaired;
+        }
+        write_profile(data_dir, &profile)?;
+    }
+    validated_tags(&profile.tags)
+}
+
+fn empty_tags() -> Value {
+    Value::Array(Vec::new())
+}
+
+fn validated_tags(value: &Value) -> Result<Vec<String>> {
+    let tags: Vec<String> = serde_json::from_value(value.clone()).context(
+        "fleet tags must be a list of strings; repair only the tags field in the profile",
+    )?;
+    validate_tags(&tags)?;
+    Ok(tags)
+}
+
+fn validate_tags(tags: &[String]) -> Result<()> {
+    if tags.len() > 32 {
+        bail!("fleet tags must contain at most 32 tags");
+    }
+    for tag in tags {
+        let valid = !tag.is_empty()
+            && tag.len() <= 64
+            && (tag.as_bytes()[0].is_ascii_lowercase() || tag.as_bytes()[0].is_ascii_digit())
+            && tag
+                .bytes()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"._:-".contains(&c));
+        if !valid {
+            bail!("invalid fleet tag {tag:?}; use 1–64 lowercase letters, digits, dots, underscores, colons or hyphens, starting with a letter or digit");
+        }
+    }
+    Ok(())
+}
+
+/// Optional posture facts remain readable against an older runtime.
+pub fn render_machine_facts(machine: &Value) -> String {
+    let Some(facts) = machine.get("facts").filter(|value| value.is_object()) else {
+        return "platform unknown · tags unknown".into();
+    };
+    let os = facts.get("os").and_then(Value::as_str).unwrap_or("unknown");
+    let arch = facts
+        .get("arch")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let tags = facts
+        .get("tags")
+        .and_then(Value::as_array)
+        .map(|tags| {
+            tags.iter()
+                .filter_map(Value::as_str)
+                .take(32)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|tags| !tags.is_empty())
+        .unwrap_or_else(|| "—".into());
+    let mut text = format!("{os}/{arch} · tags: {tags}");
+    if let Some(error) = facts.get("tags_error").and_then(Value::as_str) {
+        text.push_str(&format!(" · {error}"));
+    }
+    text
+}
+
 pub fn summary(data_dir: &Path) -> Summary {
     let staging_problem = match inspect_orphan_staging(data_dir) {
         Ok(staging) if staging.is_empty() => None,
@@ -729,6 +834,7 @@ pub fn create(
     ensure_epmd_port_available(host, epmd_port)?;
     let (dist_port_min, dist_port_max) = dist_ports(ports.dist);
     let profile = Profile {
+        tags: empty_tags(),
         schema: PROFILE_SCHEMA,
         fleet_id: fleet_id.clone(),
         name: fleet_name,
@@ -1177,6 +1283,7 @@ pub fn join(data_dir: &Path, invitation_path: &Path, ports: Ports) -> Result<Pro
         None => (default_min, default_max),
     };
     let profile = Profile {
+        tags: empty_tags(),
         schema: PROFILE_SCHEMA,
         fleet_id: invitation.fleet_id.clone(),
         name: invitation.name.clone(),
@@ -1457,6 +1564,7 @@ pub fn render_live_status(data_dir: &Path, value: &Value) -> Option<String> {
         text.push_str(&format!(
             "  {marker} {name:<18} {state:<10} {role:<8} {node}\n"
         ));
+        text.push_str(&format!("      {}\n", render_machine_facts(machine)));
         if machine.get("revoked?").and_then(Value::as_bool) == Some(true) {
             text.push_str("      credential permanently revoked; TLS access refused\n");
         } else if state == "offline" {
@@ -1544,6 +1652,9 @@ pub fn doctor(data_dir: &Path) -> DoctorReport {
     };
 
     if let Some(profile) = &profile {
+        if let Err(error) = validated_tags(&profile.tags) {
+            checks.push(warn(format!("advisory tags ignored: {error:#}. Remove the named tag with `ouro fleet tag remove TAG`, or repair only the tags field in the profile; fleet identity remains valid")));
+        }
         match validate_materials(data_dir, false) {
             Ok(()) => checks.push(ok(
                 "TLS certificate, key, cookie, and VM arguments are private and readable",
@@ -2121,6 +2232,7 @@ where
     // Only the machine name participates in OS service identity. The remaining fields
     // are inert placeholders and are never persisted or shown.
     let service_profile = Profile {
+        tags: empty_tags(),
         schema: PROFILE_SCHEMA,
         fleet_id: "000000000000000000000000".into(),
         name: "incomplete fleet recovery".into(),
@@ -3244,6 +3356,7 @@ fn validate_invitation(invitation: &Invitation) -> Result<()> {
         );
     }
     let profile = Profile {
+        tags: empty_tags(),
         schema: PROFILE_SCHEMA,
         fleet_id: invitation.fleet_id.clone(),
         name: invitation.name.clone(),
@@ -3840,12 +3953,12 @@ fn start_owned_epmd(
                 profile.epmd_port
             );
         }
-        match ensure_epmd_port_available(&profile.host, profile.epmd_port) {
-            Ok(EpmdPortState::CompatibleRunning) => break,
-            Ok(EpmdPortState::Available) if Instant::now() < deadline => {
+        match owned_epmd_ready(address, profile.epmd_port) {
+            Ok(true) => break,
+            Ok(false) if Instant::now() < deadline => {
                 thread::sleep(Duration::from_millis(25));
             }
-            Ok(EpmdPortState::Available) => {
+            Ok(false) => {
                 drop(lock.take());
                 clean_failed_epmd_child(&mut child, &lock_path)?;
                 bail!(
@@ -4299,6 +4412,27 @@ fn remove_epmd_owner_artifacts(data_dir: &Path) -> Result<()> {
 fn ensure_epmd_port_available(host: &str, port: u16) -> Result<EpmdPortState> {
     let address = resolve_fleet_ipv4(host)?;
     ensure_epmd_address_port_available(address, port)
+}
+
+// Preflight may reserve sockets before a process starts. Readiness must only probe:
+// binding here races our own child, either stealing its port or misreporting its
+// newly bound socket as somebody else's conflict. Both listeners and the interface
+// fence still have to pass before the launcher records ownership.
+fn owned_epmd_ready(address: Ipv4Addr, port: u16) -> Result<bool> {
+    let advertised = epmd_probe(address, port);
+    let loopback = if address.is_loopback() {
+        advertised
+    } else {
+        epmd_probe(Ipv4Addr::LOCALHOST, port)
+    };
+    if advertised == EpmdProbe::Incompatible || loopback == EpmdProbe::Incompatible {
+        bail!("packaged EPMD port {port} accepts TCP but does not speak the documented NAMES protocol");
+    }
+    if advertised == EpmdProbe::Compatible && loopback == EpmdProbe::Compatible {
+        ensure_epmd_not_exposed_on_other_interfaces(address, port)?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 fn ensure_owned_epmd_listener_state(owner: &EpmdOwner) -> Result<OwnedEpmdListenerState> {
@@ -5064,8 +5198,74 @@ mod tests {
         assert!(validate_ready_status(&status, None).is_err());
     }
 
+    #[test]
+    fn tags_round_trip_and_validate_before_persisting() {
+        let dir = scratch("tags");
+        fs::create_dir(dir.join("fleet")).unwrap();
+        let profile = sample_profile("studio");
+        write_profile(&dir, &profile).unwrap();
+        assert_eq!(
+            tags(&dir, None, Some(("xcode", true))).unwrap(),
+            vec!["xcode"]
+        );
+        assert_eq!(
+            tags(&dir, None, Some(("xcode", true))).unwrap(),
+            vec!["xcode"]
+        );
+        assert_eq!(
+            load(&dir).unwrap().unwrap().tags,
+            serde_json::json!(["xcode"])
+        );
+        assert!(tags(&dir, None, Some(("BAD tag", true)))
+            .unwrap_err()
+            .to_string()
+            .contains("BAD tag"));
+        assert_eq!(
+            tags(&dir, None, Some(("xcode", false))).unwrap(),
+            Vec::<String>::new()
+        );
+        let mut invalid = profile;
+        invalid.tags = serde_json::json!(["BAD"]);
+        let encoded = serde_json::to_vec(&invalid).unwrap();
+        write_private_atomic(&profile_path(&dir), &encoded).unwrap();
+        assert!(doctor(&dir).text.contains("BAD"));
+        assert!(
+            load(&dir).unwrap().is_some(),
+            "advisory tags cannot block daemon profile loading"
+        );
+        assert_eq!(
+            tags(&dir, None, Some(("BAD", false))).unwrap(),
+            Vec::<String>::new()
+        );
+        for malformed in [
+            serde_json::json!([null]),
+            serde_json::json!({"invalid": true}),
+        ] {
+            invalid.tags = malformed.clone();
+            write_profile(&dir, &invalid).unwrap();
+            assert_eq!(load(&dir).unwrap().unwrap().tags, malformed);
+            assert!(doctor(&dir).text.contains("advisory tags ignored"));
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn facts_render_with_tags_and_older_peers_stay_unknown() {
+        assert_eq!(
+            render_machine_facts(&serde_json::json!({})),
+            "platform unknown · tags unknown"
+        );
+        assert_eq!(
+            render_machine_facts(
+                &serde_json::json!({"facts": {"os": "macos", "arch": "aarch64", "tags": ["xcode", "ios"]}})
+            ),
+            "macos/aarch64 · tags: xcode ios"
+        );
+    }
+
     fn sample_profile(machine: &str) -> Profile {
         Profile {
+            tags: empty_tags(),
             schema: PROFILE_SCHEMA,
             fleet_id: "00112233445566778899aabb".into(),
             name: "Workshop fleet".into(),
@@ -5903,6 +6103,25 @@ mod tests {
     }
 
     #[test]
+    fn owned_epmd_readiness_waits_for_a_protocol_listener_and_rejects_other_services() {
+        let reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        assert!(!owned_epmd_ready(Ipv4Addr::LOCALHOST, port).unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let server = fake_epmd(port, stop.clone());
+        assert!(owned_epmd_ready(Ipv4Addr::LOCALHOST, port).unwrap());
+        stop.store(true, Ordering::Relaxed);
+        server.join().unwrap();
+
+        let other = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let error = owned_epmd_ready(Ipv4Addr::LOCALHOST, other.local_addr().unwrap().port())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not speak"), "{error}");
+    }
+
+    #[test]
     fn epmd_preflight_reuses_a_real_lingering_daemon_and_rejects_arbitrary_listeners() {
         assert!(local_ipv4_interfaces()
             .unwrap()
@@ -6112,6 +6331,7 @@ mod tests {
     #[test]
     fn doctor_warns_when_pinned_ports_sit_inside_the_ephemeral_range() {
         let first_generation = Profile {
+            tags: empty_tags(),
             schema: PROFILE_SCHEMA,
             fleet_id: "cafecafecafecafecafecafe".into(),
             name: "lab".into(),

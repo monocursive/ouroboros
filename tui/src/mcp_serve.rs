@@ -1,4 +1,4 @@
-//! `ouro mcp-serve`: the permission prompt Claude Code has no other way to reach.
+//! `ouro mcp-serve`: session-bound approvals, code intelligence, and fleet child tools.
 //!
 //! ## Why this exists
 //!
@@ -46,7 +46,10 @@
 //! The connection is opened on first use and held for the server's lifetime; a transport
 //! failure is retried exactly once against a fresh connection. A *timeout* is never
 //! retried: a call that ran out of time may be sitting in front of a person, and asking
-//! again would put a second question beside it.
+//! again would put a second question beside it. Native child calls also carry one
+//! bridge-generated request id across that reconnect, so the owning session can replay
+//! its result without spawning a second child. Session identity and owner routing come
+//! only from the bridge environment; model arguments cannot select another owner.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -54,6 +57,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
+use rand::TryRngCore;
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
@@ -76,6 +80,16 @@ pub const TOOL_NAME: &str = "approve";
 pub const CODE_INTEL_TOOL: &str = "code_intel";
 pub const DIAGNOSTICS_TOOL: &str = "diagnostics";
 pub const TOUCH_TOOL: &str = "touch";
+pub const AGENT_TOOL: &str = "agent";
+pub const AGENT_RESULT_TOOL: &str = "agent_result";
+pub const FLEET_TOOL: &str = "fleet";
+pub const SUBAGENT_SPAWN_METHOD: &str = "subagent.spawn";
+pub const SUBAGENT_RESULT_METHOD: &str = "subagent.result";
+pub const SUBAGENT_STOP_METHOD: &str = "subagent.stop";
+pub const FLEET_METHOD: &str = "fleet.status";
+const SUBAGENT_SPAWN_TIMEOUT: Duration = Duration::from_secs(930);
+const SUBAGENT_RESULT_TIMEOUT: Duration = Duration::from_secs(75);
+const MAX_FLEET_OUTPUT_BYTES: usize = 64 * 1024;
 
 /// The gateway method the permission tool forwards to.
 pub const APPROVAL_METHOD: &str = "interactive.request_approval";
@@ -225,8 +239,8 @@ impl Gateway {
             .map_err(|error| format!("the runtime at {} did not answer: {error}", bridge.addr))
     }
 
-    /// One call, with exactly one reconnect. `retry` is false for anything whose outcome
-    /// the runtime may still be deciding.
+    /// One call, with at most one reconnect and identical parameters. Timeouts are never
+    /// retried; child calls carry a stable invocation id for host-side deduplication.
     async fn call(
         &mut self,
         bridge: &Bridge,
@@ -365,8 +379,102 @@ impl Server {
             CODE_INTEL_TOOL => Ok(text_result(self.code_intel(arguments).await)),
             DIAGNOSTICS_TOOL => Ok(text_result(self.diagnostics(arguments).await)),
             TOUCH_TOOL => Ok(text_result(self.touch(arguments).await)),
+            AGENT_TOOL | AGENT_RESULT_TOOL => Ok(match self.subagent(name, arguments).await {
+                Ok(result) => result,
+                Err(reason) => text_result(Err(reason)),
+            }),
+            FLEET_TOOL => Ok(text_result(self.fleet(arguments).await)),
             other => Err((-32602, format!("unknown tool: {other}"))),
         }
+    }
+
+    async fn subagent(&mut self, name: &str, arguments: Value) -> Result<Value, String> {
+        let input = native_arguments(name, &arguments)?;
+        let bridge = self.configured()?;
+        // One identifier per invocation, minted before Gateway's reconnect loop. JSON-RPC
+        // ids may be reused by a client after a reply, so they cannot key the runtime cache.
+        let mut random = [0u8; 24];
+        rand::rngs::OsRng
+            .try_fill_bytes(&mut random)
+            .map_err(|error| format!("could not identify this child request: {error}"))?;
+        let request_id = format!(
+            "mcp-{}",
+            random
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        let stop = name == AGENT_RESULT_TOOL && input.get("stop") == Some(&Value::Bool(true));
+        let method = if name == AGENT_TOOL {
+            SUBAGENT_SPAWN_METHOD
+        } else if stop {
+            SUBAGENT_STOP_METHOD
+        } else {
+            SUBAGENT_RESULT_METHOD
+        };
+        let mut params = Map::new();
+        params.insert("id".into(), json!(bridge.session_id));
+        params.insert("request_id".into(), json!(request_id));
+        if stop {
+            params.insert("task_id".into(), input["task_id"].clone());
+        } else {
+            params.insert("input".into(), Value::Object(input.clone()));
+        }
+        self.route(&bridge, &mut params);
+        let timeout = if name == AGENT_TOOL {
+            SUBAGENT_SPAWN_TIMEOUT
+        } else {
+            SUBAGENT_RESULT_TIMEOUT
+        };
+        let result = self
+            .gateway
+            .call(&bridge, method, Value::Object(params), timeout)
+            .await
+            .map_err(|error| format!("{error} (child request {request_id})"))?;
+        let output = result
+            .get("output")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "the runtime returned no child tool output".to_string())?;
+        let is_error = result
+            .get("is_error")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| "the runtime returned no child tool outcome".to_string())?;
+        Ok(json!({"content": [{"type": "text", "text": output}], "isError": is_error}))
+    }
+
+    async fn fleet(&mut self, arguments: Value) -> Result<String, String> {
+        let arguments = if arguments.is_null() {
+            json!({})
+        } else {
+            arguments
+        };
+        native_arguments(FLEET_TOOL, &arguments)?;
+        let bridge = self.configured()?;
+        let mut params = Map::new();
+        self.route(&bridge, &mut params);
+        let mut result = self
+            .gateway
+            .call(
+                &bridge,
+                FLEET_METHOD,
+                Value::Object(params),
+                CODE_INTEL_TIMEOUT,
+            )
+            .await?;
+        let machines = result
+            .get_mut("machines")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| "the runtime returned no fleet machine list".to_string())?;
+        let omitted = machines.len().saturating_sub(64);
+        machines.truncate(64);
+        if omitted > 0 {
+            result["omitted_machines"] = json!(omitted);
+        }
+        let output = serde_json::to_string(&result).map_err(|error| error.to_string())?;
+        if output.len() > MAX_FLEET_OUTPUT_BYTES {
+            return Err("the fleet inventory exceeds this tool's 64 KiB output limit".into());
+        }
+        Ok(output)
     }
 
     // -----------------------------------------------------------------------
@@ -716,7 +824,7 @@ fn tool_result(behavior: Value) -> Value {
     json!({"content": [{"type": "text", "text": text}], "isError": false})
 }
 
-/// What the three model-facing tools answer with. A refusal is `isError` and says what
+/// What model-facing tools answer with. A refusal is `isError` and says what
 /// went wrong in the same text block, because a tool that fails silently is one the model
 /// will call again with the same arguments.
 fn text_result(outcome: Result<String, String>) -> Value {
@@ -729,6 +837,54 @@ fn text_result(outcome: Result<String, String>) -> Value {
 // ---------------------------------------------------------------------------
 // Argument reading
 // ---------------------------------------------------------------------------
+
+fn native_arguments<'a>(name: &str, value: &'a Value) -> Result<&'a Map<String, Value>, String> {
+    let input = object(value, name)?;
+    let allowed: &[&str] = match name {
+        AGENT_TOOL => &[
+            "prompt",
+            "description",
+            "tools",
+            "worktree",
+            "machine",
+            "workspace",
+            "sync",
+            "background",
+            "deadline_ms",
+            "max_turns",
+        ],
+        AGENT_RESULT_TOOL => &["task_id", "wait_ms", "stop"],
+        FLEET_TOOL => &[],
+        _ => return Err("unknown native tool".into()),
+    };
+    for key in input.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(format!("{name} does not accept {key}"));
+        }
+    }
+    for (key, value) in input {
+        let valid = match key.as_str() {
+            "prompt" | "description" | "machine" | "workspace" | "task_id" => value.is_string(),
+            "tools" => value
+                .as_array()
+                .is_some_and(|tools| tools.iter().all(Value::is_string)),
+            "worktree" | "sync" | "background" | "stop" => value.is_boolean(),
+            "deadline_ms" | "max_turns" => value.as_u64().is_some_and(|n| n > 0),
+            "wait_ms" => value.as_u64().is_some(),
+            _ => false,
+        };
+        if !valid {
+            return Err(format!("invalid {key} argument for {name}"));
+        }
+    }
+    if name == AGENT_TOOL {
+        string_argument(input, "prompt")?;
+    }
+    if name == AGENT_RESULT_TOOL {
+        string_argument(input, "task_id")?;
+    }
+    Ok(input)
+}
 
 fn object<'a>(arguments: &'a Value, tool: &str) -> Result<&'a Map<String, Value>, String> {
     arguments
@@ -1038,7 +1194,49 @@ fn tool_descriptors() -> Vec<Value> {
         code_intel_descriptor(),
         diagnostics_descriptor(),
         touch_descriptor(),
+        agent_descriptor(),
+        agent_result_descriptor(),
+        fleet_descriptor(),
     ]
+}
+
+fn agent_descriptor() -> Value {
+    json!({
+        "name": AGENT_TOOL, "title": "Delegate work to a native child",
+        "description": "Start a child owned by this Ouroboros session. Put the full goal and constraints in prompt; the child has none of this conversation. Its tools and permissions are bounded by this session. Call fleet before choosing machine or tag:NAME. Use sync:true to send this repository including uncommitted work into an isolated remote worktree; dependencies are installed there and changes return as a Git ref. Use background:true for long work and collect with agent_result. Foreground waits are bounded by the loop tool timeout. Approvals reach this session's human, including between turns.",
+        "inputSchema": {"type": "object", "properties": {
+            "prompt": {"type": "string", "minLength": 1},
+            "description": {"type": "string", "default": ""},
+            "tools": {"type": "array", "items": {"type": "string"}, "default": []},
+            "worktree": {"type": "boolean", "default": false},
+            "machine": {"type": "string", "default": ""},
+            "workspace": {"type": "string", "default": "", "description": "An absolute path on the target, required with machine unless sync:true. Cannot combine with sync:true."},
+            "sync": {"type": "boolean", "default": false},
+            "background": {"type": "boolean", "default": false},
+            "deadline_ms": {"type": "integer", "minimum": 1, "description": "Bounded by the configured child deadline ceiling, at most four hours."},
+            "max_turns": {"type": "integer", "minimum": 1, "default": 12, "description": "Maximum 30 model round-trips."}
+        }, "required": ["prompt"], "additionalProperties": false}
+    })
+}
+
+fn agent_result_descriptor() -> Value {
+    json!({
+        "name": AGENT_RESULT_TOOL, "title": "Collect or stop a native child",
+        "description": "Collect the task_id returned by agent. A running child remains collectable and reports elapsed time and last activity. Set wait_ms:0 for an immediate snapshot, or stop:true to stop editing while preserving its work and any return in flight.",
+        "inputSchema": {"type": "object", "properties": {
+            "task_id": {"type": "string", "minLength": 1},
+            "wait_ms": {"type": "integer", "minimum": 0, "default": 30000, "description": "Clamped to 60000 milliseconds."},
+            "stop": {"type": "boolean", "default": false}
+        }, "required": ["task_id"], "additionalProperties": false}
+    })
+}
+
+fn fleet_descriptor() -> Value {
+    json!({
+        "name": FLEET_TOOL, "title": "Read this session's fleet",
+        "description": "List live fleet machines, connectivity, advisory tags and toolchains before choosing a machine for agent. These facts do not grant authority. The bridge reads the fleet of the session that started this agent.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
+    })
 }
 
 /// The description is written for the model, and R4 §(d) is why it says when *not* to call

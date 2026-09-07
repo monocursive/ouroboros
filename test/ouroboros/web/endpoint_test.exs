@@ -150,28 +150,32 @@ defmodule Ouroboros.Web.EndpointTest do
     } do
       # Fail-closed: a registered owner is the only source of either fact. The named
       # process is how `document/2` finds it, the same `whereis` the gateway listener uses.
-      refute Process.whereis(Ouroboros.RuntimeOwner)
+      # An isolated OUROBOROS_DATA_DIR already has a durable owner. Keep that owner
+      # alive; otherwise create a distinctive claim so invented process facts fail.
+      unless Process.whereis(Ouroboros.RuntimeOwner) do
+        start_supervised!(
+          {Ouroboros.RuntimeOwner,
+           data_dir: dir,
+           os_pid: 4242,
+           identity: "web-publication-vm",
+           birth: "test:web:4242",
+           pid_state: fn _pid -> :alive end,
+           birth_state: fn _pid, _birth -> :alive end}
+        )
+      end
 
-      start_supervised!(
-        {Ouroboros.RuntimeOwner,
-         data_dir: dir,
-         os_pid: 4242,
-         identity: "web-publication-vm",
-         birth: "test:web:4242",
-         pid_state: fn _pid -> :alive end,
-         birth_state: fn _pid, _birth -> :alive end}
-      )
+      %{pid: owner_pid, birth: owner_birth} = Ouroboros.RuntimeOwner.claim()
 
       published = Publication.document(config, 4560)
 
-      assert published["pid"] == 4242
-      assert published["birth"] == "test:web:4242"
+      assert published["pid"] == owner_pid
+      assert published["birth"] == owner_birth
 
       start_supervised!({Ouroboros.Web, config: config})
       written = Endpoint.publication_path(dir) |> File.read!() |> JSON.decode!()
 
-      assert written["pid"] == 4242
-      assert written["birth"] == "test:web:4242"
+      assert written["pid"] == owner_pid
+      assert written["birth"] == owner_birth
     end
   end
 

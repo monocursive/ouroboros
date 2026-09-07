@@ -1133,13 +1133,15 @@ fn home(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(message).wrap(Wrap { trim: false }), hero);
 
     let workspace = app.home_workspace();
-    let folder = if workspace.is_empty() {
-        "Folder: chosen by the connected runtime".to_string()
-    } else if app.spawned() {
-        format!("Folder: {workspace}")
-    } else {
-        format!("Folder on connected machine: {workspace}")
-    };
+    let folder = format!(
+        "{} · Folder: {}",
+        app.home_machine_label(),
+        if workspace.is_empty() {
+            "Choose a project"
+        } else {
+            &workspace
+        }
+    );
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(Span::styled(
@@ -1148,7 +1150,11 @@ fn home(frame: &mut Frame, area: Rect, app: &App) {
             )),
             Line::from(Span::styled(
                 super::tree::truncate(
-                    &format!("Using {}  ·  /options to change", app.home_model_label()),
+                    &format!(
+                        "{} computer & project  ·  Using {}  ·  /options to change",
+                        app.keymap.label(Action::ChooseLocation),
+                        app.home_model_label()
+                    ),
                     width as usize,
                 ),
                 Style::default().fg(theme::muted()),

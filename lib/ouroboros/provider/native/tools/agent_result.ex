@@ -36,6 +36,11 @@ defmodule Ouroboros.Provider.Native.Tools.AgentResult do
         required: true,
         doc: "The task_id `agent` returned when it spawned the child in the background."
       ],
+      stop: [
+        type: :boolean,
+        default: false,
+        doc: "Stop this session's child and collect its summary."
+      ],
       wait_ms: [
         type: :non_neg_integer,
         default: 30_000,
@@ -68,8 +73,34 @@ defmodule Ouroboros.Provider.Native.Tools.AgentResult do
     task_id = String.trim(params.task_id)
 
     case lookup.(task_id) do
-      {:ok, pid} -> await(task_id, pid, wait_ms(params), release)
-      :error -> {:ok, %{output: unknown(task_id), is_error: true}}
+      {:ok, pid} ->
+        if Map.get(params, :stop, false) do
+          case Subagent.stop(pid, :stopped) do
+            {:ok, %{status: :returning} = summary} ->
+              # The existing session subscriber still owns this return. Keep its
+              # registry entry until acknowledgment or a retained-work error settles it.
+              {:ok,
+               %{
+                 output:
+                   Subagent.render(summary) <>
+                     "\nThe return is still in progress; collect it again with the same task_id.",
+                 is_error: false
+               }}
+
+            {:ok, summary} ->
+              _ = release.(task_id)
+              {:ok, %{output: Subagent.render(summary), is_error: false}}
+
+            {:error, reason} ->
+              {:ok,
+               %{output: "Subagent could not be stopped: #{inspect(reason)}", is_error: true}}
+          end
+        else
+          await(task_id, pid, wait_ms(params), release)
+        end
+
+      :error ->
+        {:ok, %{output: unknown(task_id), is_error: true}}
     end
   end
 
@@ -80,13 +111,17 @@ defmodule Ouroboros.Provider.Native.Tools.AgentResult do
         {:ok, %{output: Subagent.render(summary), is_error: summary.status == :failed}}
 
       {:error, :still_running} ->
-        {:ok,
-         %{
-           output:
-             "Subagent #{task_id} is still running after #{wait_ms} ms. It has not been " <>
-               "lost — collect it again with the same task_id, or do something else first.",
-           is_error: false
-         }}
+        case Subagent.summary(pid) do
+          {:ok, summary} ->
+            {:ok, %{output: Subagent.render(summary), is_error: false}}
+
+          {:error, reason} ->
+            {:ok,
+             %{
+               output: "Subagent #{task_id} could not be reached: #{inspect(reason)}",
+               is_error: true
+             }}
+        end
 
       {:error, reason} ->
         _ = release.(task_id)

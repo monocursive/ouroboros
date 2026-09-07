@@ -768,6 +768,37 @@ defmodule Ouroboros.InteractiveSession do
 
   def request_approval(_session, _request), do: {:error, :invalid_approval_request}
 
+  @doc "Relay a target-decided approval without re-evaluating it against the parent's rules."
+  def relay_approval(session, payload) when is_map(payload) do
+    tool = Map.get(payload, "tool_call", %{})
+
+    request = %{
+      relay_payload: payload,
+      tool_name: Map.get(tool, "name"),
+      input: Map.get(tool, "input"),
+      cwd: Map.get(tool, "cwd")
+    }
+
+    case request_approval(session, request) do
+      {:ok, %{response: response}} ->
+        Jido.Harness.ApprovalResponse.new!(response)
+
+      {:ok, answer} ->
+        Jido.Harness.ApprovalResponse.new!(%{
+          decision: if(answer.decision in [:allow, "allow"], do: :approve, else: :deny),
+          scope: :once,
+          reason: Map.get(answer, :reason)
+        })
+
+      {:error, reason} ->
+        Jido.Harness.ApprovalResponse.new!(%{
+          decision: :deny,
+          scope: :once,
+          reason: "approval channel unavailable: #{inspect(reason)}"
+        })
+    end
+  end
+
   @doc false
   def local_request_approval(id, request_ref, request, timeout) do
     with :ok <- validate_id(id),

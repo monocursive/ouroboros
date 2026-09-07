@@ -263,12 +263,16 @@ fn build_landlock(plan: &Plan, abi: i32) -> Result<libc::c_int> {
         .iter()
         .map(|path| (path, read))
         .chain(plan.landlock.write_roots.iter().map(|path| (path, write)))
-        .chain(
-            plan.landlock
-                .read_only_overrides
-                .iter()
-                .map(|path| (path, read)),
-        )
+        .chain(plan.landlock.read_only_overrides.iter().map(|path| {
+            (
+                path,
+                if std::path::Path::new(path).is_file() {
+                    file_read_set(abi)
+                } else {
+                    read
+                },
+            )
+        }))
         // The file grants last, and narrowest of all: a rule on `/dev/null` governs that
         // node and grants nothing else in a `/dev` the builder has no rule for.
         .chain(
@@ -348,7 +352,11 @@ fn apply_landlock(fd: libc::c_int) -> Result<()> {
 /// Whether this process could create the namespaces the helper needs. Destructive: the
 /// caller becomes the owner of a new user namespace. Only `doctor` calls it.
 pub fn probe_namespaces() -> (bool, bool) {
-    let user_mount = unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) } == 0;
+    let uid = unsafe { libc::getuid() };
+    let gid = unsafe { libc::getgid() };
+    let user_mount = unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) } == 0
+        && map_identity(uid, gid).is_ok()
+        && mount(None, "/", None, libc::MS_REC | libc::MS_PRIVATE, None).is_ok();
     let net = user_mount && unsafe { libc::unshare(libc::CLONE_NEWNET) } == 0;
     (user_mount, net)
 }
@@ -369,14 +377,7 @@ fn enter_namespaces(plan: &Plan) -> Result<()> {
         ));
     }
 
-    // `setgroups` must be denied before `gid_map` can be written by an unprivileged
-    // process; the kernel refuses the map otherwise.
-    write_proc("/proc/self/setgroups", "deny")?;
-    // Identity mapping, not a map to root: a file the command creates in the workspace
-    // must be owned by the user who owns the workspace, and mapping to uid 0 would make
-    // every artefact root-owned on the host.
-    write_proc("/proc/self/uid_map", &format!("{uid} {uid} 1"))?;
-    write_proc("/proc/self/gid_map", &format!("{gid} {gid} 1"))?;
+    map_identity(uid, gid)?;
 
     if plan.network == NetworkPosture::Unshare {
         // Non-fatal. A namespace with loopback down is still network-isolated, which is
@@ -385,6 +386,19 @@ fn enter_namespaces(plan: &Plan) -> Result<()> {
         // trade than running without it.
         let _ = bring_loopback_up();
     }
+
+    Ok(())
+}
+
+fn map_identity(uid: libc::uid_t, gid: libc::gid_t) -> Result<()> {
+    // `setgroups` must be denied before `gid_map` can be written by an unprivileged
+    // process; the kernel refuses the map otherwise.
+    write_proc("/proc/self/setgroups", "deny")?;
+    // Identity mapping, not a map to root: a file the command creates in the workspace
+    // must be owned by the user who owns the workspace, and mapping to uid 0 would make
+    // every artefact root-owned on the host.
+    write_proc("/proc/self/uid_map", &format!("{uid} {uid} 1"))?;
+    write_proc("/proc/self/gid_map", &format!("{gid} {gid} 1"))?;
 
     Ok(())
 }
@@ -522,6 +536,22 @@ fn apply_mounts(plan: &Plan, snapshot: &[mountinfo::Mount]) -> Result<()> {
                 // is still pristine at this point, which is the entire reason this step
                 // comes before the sweep.
                 mount(Some(path), path, None, libc::MS_BIND | libc::MS_REC, None)?;
+            }
+
+            MountOp::BindException { path } => {
+                if std::fs::canonicalize(path).ok().as_deref() != Some(std::path::Path::new(path)) {
+                    return Err(Failure(format!(
+                        "write exception changed before mount: {path}"
+                    )));
+                }
+                mount(Some(path), path, None, libc::MS_BIND, None)?;
+                mount(
+                    None,
+                    path,
+                    None,
+                    libc::MS_REMOUNT | libc::MS_BIND | libc::MS_NOSUID | libc::MS_NODEV,
+                    None,
+                )?;
             }
 
             MountOp::Tmpfs { path } => {
@@ -845,6 +875,18 @@ pub fn run(plan: &Plan, target: &[String]) -> Result<std::convert::Infallible> {
     if let Some(preload) = &plan.preload {
         set_env("LD_PRELOAD", &preload.library)?;
         set_env("OUROBOROS_FS_DENY", &preload.denied_names.join(":"))?;
+        let exceptions = preload
+            .write_exceptions
+            .iter()
+            .map(|p| {
+                p.as_bytes()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join(":");
+        set_env("OUROBOROS_FS_WRITE_EXCEPTIONS", &exceptions)?;
     }
 
     let program = CString::new(target[0].as_str())

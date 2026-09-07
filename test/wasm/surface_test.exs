@@ -143,9 +143,19 @@ defmodule Ouroboros.Wasm.SurfaceTest do
     end
 
     test "no data directory is no store, and that is `nil` rather than zero" do
+      previous = Application.fetch_env(:ouroboros, :data_dir)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:ouroboros, :data_dir, value)
+          :error -> Application.delete_env(:ouroboros, :data_dir)
+        end
+      end)
+
+      Application.delete_env(:ouroboros, :data_dir)
       status = Surface.status(root: nil, registry: :a_register_that_is_not_running)
 
-      # `root: nil` falls through to `:data_dir`, which the suite does not set.
+      # `root: nil` falls through to `:data_dir`; isolate it from the launch environment.
       assert status.store.root == nil
       assert status.store.held == nil
       assert status.store.bytes == nil

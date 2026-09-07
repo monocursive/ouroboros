@@ -55,7 +55,7 @@ impl MenuItem {
             Self::Create => "Make this Mac the owner (restarts once)".into(),
             Self::Join => "On the invited machine (restarts once)".into(),
             Self::Invite => "Owner-only; copy the file privately".into(),
-            Self::Service => "Write a recovery unit; you activate it".into(),
+            Self::Service => "Start automatic recovery and check it is enabled".into(),
             Self::Status => "Who is known, connected, or offline".into(),
             Self::Doctor => "Names, TLS, versions, recovery".into(),
             Self::Sync => "Signed roster for other existing members".into(),
@@ -109,7 +109,7 @@ impl MenuItem {
                 "Enter machine name and host, then writes a mode-0600 invitation. Contents never appear on screen."
             }
             Self::Service => {
-                "Writes a launchd or systemd user unit. It does not start anything; review and run the activation command."
+                "Installs and starts automatic recovery, then checks it is enabled. Ouroboros stays available after you close this terminal."
             }
             Self::Status => "Enter shows known, connected, and offline machines from this runtime.",
             Self::Doctor => {
@@ -142,7 +142,7 @@ impl MachineAction {
             Self::Create => "ouro fleet create --machine NAME --host HOST",
             Self::Join => "ouro fleet join INVITE.ouro",
             Self::Invite => "ouro fleet invite --machine NAME --host HOST --out INVITE.ouro",
-            Self::Service => "ouro fleet service install",
+            Self::Service => "ouro fleet service install && ouro fleet service start",
             Self::Status => "ouro fleet status",
             Self::Doctor => "ouro fleet doctor",
             Self::Sync => "ouro fleet sync export --out fleet.ouro-roster",
@@ -462,6 +462,7 @@ pub const TAILSCALE_UP_QUOTED: &str = crate::fleet_add::TAILSCALE_UP_COMMAND;
 
 #[derive(Debug, Clone)]
 pub struct AddMachine {
+    pub advanced: bool,
     pub step: AddStep,
     pub method: AddMethod,
     pub target: String,
@@ -492,6 +493,7 @@ pub struct AddMachine {
 impl AddMachine {
     pub(super) fn new() -> Self {
         Self {
+            advanced: false,
             step: AddStep::Method,
             method: AddMethod::Ssh,
             target: String::new(),
@@ -541,6 +543,22 @@ impl AddMachine {
         }
     }
 
+    fn fill_suggestions(&mut self) {
+        if self.host.trim().is_empty() && self.method == AddMethod::Ssh {
+            // This is still shown in the review step before any connection is made.
+            self.host = self
+                .target
+                .trim()
+                .rsplit('@')
+                .next()
+                .unwrap_or_default()
+                .into();
+        }
+        if self.machine.trim().is_empty() {
+            self.machine = crate::fleet::machine_from_host(self.host.trim()).unwrap_or_default();
+        }
+    }
+
     /// Flipping the switch withdraws any consent already given: the operator agreed to a
     /// specific plan, and this is a different one.
     fn toggle_setup_tailscale(&mut self) {
@@ -567,18 +585,14 @@ impl AddMachine {
 
     pub fn fields(&self, standalone: bool) -> Vec<AddField> {
         let mut fields = match self.method {
-            AddMethod::Ssh => vec![
-                AddField::Target,
-                AddField::Machine,
-                AddField::Host,
-                AddField::Via,
-                AddField::Tailscale,
-                AddField::Binary,
-            ],
+            AddMethod::Ssh => vec![AddField::Target, AddField::Machine, AddField::Host],
             AddMethod::Prepare => vec![AddField::Machine, AddField::Host],
         };
         if standalone {
             fields.extend([AddField::OwnerMachine, AddField::OwnerHost]);
+        }
+        if self.advanced && self.method == AddMethod::Ssh {
+            fields.extend([AddField::Via, AddField::Tailscale, AddField::Binary]);
         }
         fields
     }
@@ -778,6 +792,29 @@ impl MachineChoice {
 }
 
 impl App {
+    pub fn machine_fact_lines(&self) -> Vec<String> {
+        self.status
+            .value
+            .as_ref()
+            .and_then(|status| status.cluster.get("fleet"))
+            .and_then(|fleet| fleet.get("machines"))
+            .and_then(Value::as_array)
+            .map(|machines| {
+                machines
+                    .iter()
+                    .take(4)
+                    .map(|machine| {
+                        let name = machine
+                            .get("machine")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown");
+                        format!("{name} · {}", crate::fleet::render_machine_facts(machine))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The fleet state a person needs, without the distribution vocabulary used by the
     /// runtime protocol. Local membership says what should be present; live status says
     /// what is present now. Neither source contains a cookie, key, or certificate.
@@ -997,9 +1034,8 @@ impl App {
     /// offline members are visible in Machines, not selectable here: a start form should
     /// never invite a request that the runtime already knows it cannot route.
     pub fn machine_choices(&self) -> Vec<MachineChoice> {
-        let summary = self.machine_summary();
         let mut choices = vec![MachineChoice::Local {
-            label: summary.machine,
+            label: self.local_machine_label(),
         }];
         let Some(status) = self.status.value.as_ref() else {
             return choices;
@@ -1808,9 +1844,20 @@ impl App {
                         }
                     }
                 }
+                KeyCode::F(6) => {
+                    if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
+                        if let Some(add) = machines.add.as_mut() {
+                            add.advanced = !add.advanced;
+                            if !add.fields(standalone).contains(&add.field) {
+                                add.field = add.form_field();
+                            }
+                        }
+                    }
+                }
                 KeyCode::Enter => {
                     if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
                         if let Some(add) = machines.add.as_mut() {
+                            add.fill_suggestions();
                             add.step = AddStep::Confirm;
                         }
                     }
@@ -2178,6 +2225,12 @@ impl App {
             if let Some(add) = machines.add.as_mut() {
                 add.step = step;
                 if let Some(field) = field {
+                    if matches!(
+                        field,
+                        AddField::Via | AddField::Tailscale | AddField::Binary
+                    ) {
+                        add.advanced = true;
+                    }
                     add.field = field;
                 }
             }
@@ -2505,6 +2558,7 @@ mod tests {
         // Turn the switch on from the form, then confirm the plan.
         app.machines_key(key(KeyCode::Esc));
         assert_eq!(step(&app), AddStep::Form);
+        app.machines_key(key(KeyCode::F(6)));
         // The form left off on the fleet host; the switch sits two fields on, past `via`.
         app.machines_key(key(KeyCode::Tab));
         app.machines_key(key(KeyCode::Tab));

@@ -304,6 +304,8 @@ defmodule Ouroboros.Web.Transcript.Cell.Subagent do
     :provider_session_id,
     :node,
     :depth,
+    :elapsed_ms,
+    :last_activity,
     :turns,
     :tool_calls,
     :files,
@@ -313,6 +315,9 @@ defmodule Ouroboros.Web.Transcript.Cell.Subagent do
     :status,
     :error,
     :worktree_kept,
+    :returned_ref,
+    :return_error,
+    deliveries: [],
     remote: false,
     worktree: false,
     background: false,
@@ -329,6 +334,8 @@ defmodule Ouroboros.Web.Transcript.Cell.Subagent do
           worktree: boolean(),
           background: boolean(),
           depth: non_neg_integer() | nil,
+          elapsed_ms: non_neg_integer() | nil,
+          last_activity: String.t() | nil,
           turns: non_neg_integer() | nil,
           tool_calls: non_neg_integer() | nil,
           files: non_neg_integer() | nil,
@@ -339,6 +346,9 @@ defmodule Ouroboros.Web.Transcript.Cell.Subagent do
           settled: boolean(),
           error: String.t() | nil,
           worktree_kept: String.t() | nil,
+          returned_ref: String.t() | nil,
+          return_error: String.t() | nil,
+          deliveries: [map()],
           unknown_phases: [String.t()]
         }
 
@@ -368,6 +378,8 @@ defmodule Ouroboros.Web.Transcript.Cell.Subagent do
         worktree: cell.worktree or event.worktree,
         background: cell.background or event.background,
         depth: event.depth || cell.depth,
+        elapsed_ms: event.elapsed_ms || cell.elapsed_ms,
+        last_activity: overwrite(cell.last_activity, event.last_activity),
         turns: event.turns || cell.turns,
         tool_calls: event.tool_calls || cell.tool_calls,
         files: event.files_changed || cell.files
@@ -386,6 +398,9 @@ defmodule Ouroboros.Web.Transcript.Cell.Subagent do
       cell
       | settled: true,
         status: overwrite(cell.status, event.status),
+        returned_ref: event.returned_ref,
+        return_error: event.return_error,
+        deliveries: event.deliveries,
         input_tokens: event.input_tokens || cell.input_tokens,
         output_tokens: event.output_tokens || cell.output_tokens,
         cost_usd: event.cost_usd || cell.cost_usd,
@@ -465,6 +480,8 @@ defmodule Ouroboros.Web.Transcript.Cell.Subagent do
   @spec digest(t()) :: String.t()
   def digest(%__MODULE__{} = cell) do
     []
+    |> maybe(cell.elapsed_ms, &Ouroboros.Web.Transcript.duration/1)
+    |> maybe(cell.last_activity, & &1)
     |> maybe(cell.turns, &"#{&1} turns")
     |> maybe(cell.tool_calls, &"#{&1} tool calls")
     |> maybe(cell.files, &"#{&1} files")
@@ -488,7 +505,10 @@ defmodule Ouroboros.Web.Transcript.Cell.Subagent do
   def rows(%__MODULE__{} = cell) do
     Enum.map(cell.unknown_phases, &"phase #{&1}, which this client does not model") ++
       maybe([], cell.error, &"Error: #{&1}") ++
-      maybe([], cell.worktree_kept, &"Worktree kept (it holds uncommitted work): #{&1}") ++
+      maybe([], cell.returned_ref, &"Changes returned as #{&1}") ++
+      maybe([], cell.return_error, &"Return: #{&1}") ++
+      Enum.map(cell.deliveries, &"Delivered: #{&1.path} (#{&1.bytes} bytes)") ++
+      maybe([], cell.worktree_kept, &"Worktree kept: #{&1}") ++
       maybe([], cell.provider_session_id, &"session #{&1}")
   end
 
@@ -516,11 +536,22 @@ defmodule Ouroboros.Web.Transcript.Cell.Subagent do
   @doc "The digest with its status word in front, as one line."
   @spec detail(t()) :: String.t()
   def detail(%__MODULE__{} = cell) do
-    case {status_word(cell), digest(cell)} do
-      {nil, digest} -> digest
-      {status, ""} -> status
-      {status, digest} -> "#{status} · #{digest}"
-    end
+    delivery =
+      case length(cell.deliveries) do
+        0 -> nil
+        1 -> "1 delivery"
+        count -> "#{count} deliveries"
+      end
+
+    [
+      status_word(cell),
+      if(cell.returned_ref, do: "changes returned"),
+      if(cell.return_error, do: "return incomplete"),
+      delivery,
+      digest(cell)
+    ]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join(" · ")
   end
 
   @doc "The whole row as plain text, for an export and a voice."

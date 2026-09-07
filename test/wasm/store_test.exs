@@ -697,8 +697,14 @@ defmodule Ouroboros.Wasm.StoreNoDataDirTest do
   alias Ouroboros.Wasm.Store
 
   test "a node with no data directory says so rather than inventing a store" do
-    # The suite configures no `:data_dir`, and no `:root` is passed.
-    assert Application.get_env(:ouroboros, :data_dir) in [nil, ""]
+    previous = Application.get_env(:ouroboros, :data_dir)
+    Application.delete_env(:ouroboros, :data_dir)
+
+    on_exit(fn ->
+      if previous == nil,
+        do: Application.delete_env(:ouroboros, :data_dir),
+        else: Application.put_env(:ouroboros, :data_dir, previous)
+    end)
 
     assert {:error, :no_data_dir} = Store.root()
     assert {:error, :no_data_dir} = Store.put("bytes")

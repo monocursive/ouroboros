@@ -3,7 +3,7 @@
 An implemented secure core plus the evolution design for a fleet of Ouroboros runtimes
 — a Mac, a Linux laptop, a VPS — joined as one BEAM cluster.
 
-## Current shipped core (2026-08-21)
+## Current implemented core (2026-09-07)
 
 The beginner path no longer requires the environment/OpenSSL runbook described later in
 this document. From the first Mac you launch, `/machines` is a menu that can add, create,
@@ -48,7 +48,7 @@ ouro fleet service start
 # Either machine
 ouro fleet status
 ouro fleet doctor
-ouro new --machine laptop --provider codex --workspace /absolute/path/on/laptop/project
+ouro new --machine laptop --provider native --workspace /absolute/path/on/laptop/project
 
 # If an expected invitation is abandoned, publish the signed membership change
 ouro fleet invite cancel --machine laptop --out fleet.ouro-roster
@@ -201,6 +201,29 @@ runs that exercise on Linux before a release artifact may publish. This remains 
 isolated same-host proof, not a claim that a release has already been installed on three
 physical networks.
 
+On 2026-09-07 the Mac and Ubuntu 26.04 VPS also formed the TLS fleet directly over
+Tailscale, with readiness passing after a VPS service restart. A native child received
+the Mac's dirty and untracked files in a VPS-owned worktree, read and edited them through
+native tools under `workspace_write`, and returned changes plus a delivered report. The
+first bundle was 180885 bytes; the second was 540 bytes and reused the same mirror.
+The Mac's HEAD, index bytes and working status were unchanged. Both returned commits
+passed a real single-commit cherry-pick tree comparison, acknowledgments were repeatable,
+and returned worktrees and source snapshot pins were removed after acknowledgment.
+
+That round trip used scripted model responses to exercise placement, tools and transfer
+without a model-provider dependency. A paused child also received a committed edit and
+delivery fixture through a bounded peer RPC; its dirty write used the real native tool.
+The packaged daemons loaded the branch's updated runtime modules for this check. It is
+physical transport and workspace evidence, not a release installation or AI-provider claim.
+
+The final acceptance on the same day used packaged source `8706591` on both machines:
+real Claude Code on the Mac delegated through MCP to a real OpenAI-powered native child
+on the VPS, collected its returned commit and inspected it with `git show`. Dirty and
+untracked inputs reached the child, exclusions stayed absent, and the parent's HEAD,
+index and working files stayed unchanged. This check used no scripted models or hotloaded
+modules. See the [complete implementation acceptance record](proposals/fleet-aware-subagents-validation.md)
+for build, test and isolated fleet posture details.
+
 What has been proven across two real machines (2026-08-28): a `make dist-linux`
 artifact was deployed from a macOS checkout to a fresh Ubuntu 26.04 VPS by
 `ouro fleet add` (probe, artifact resolution, binary + invitation copy, remote join),
@@ -250,13 +273,156 @@ inventory rather than placement fences. Bump the integer whenever fleet posture,
 session routing, or distributed ownership semantics become unsafe across revisions; do
 not replace it with a build-path or source hash.
 
+### Agent awareness and advisory tags
+
+Native distributed sessions have a read-only `fleet` tool and a labelled fleet snapshot
+in the opening prompt. Call `fleet` before placing work: it lists at most 64 machines,
+including disconnected machines with their last disconnect time. OS, CPU, hostname,
+operator tags, toolchain presence and provisionability travel as optional posture facts;
+older peers remain valid with unknown facts. Detection never executes a toolchain.
+`ouro fleet status` and `/machines` show platform and tags.
+
+```sh
+ouro fleet tag add xcode --machine studio
+ouro fleet tag list --machine studio
+ouro fleet tag remove xcode --machine studio
+```
+
+Omit `--machine` to edit the local profile even while its daemon is stopped. Remote
+changes use the authenticated operator gateway and the target's installed client, which
+shares the profile writer and lifecycle lock used by local management. Connected peers refresh every five seconds in a bounded background batch, so edits
+appear without a reconnect. Tags allow 1–64 lowercase letters/digits plus `. _ : -`, starting with a
+letter or digit, at most 32 per machine. Invalid profile tags are shown with a reason and never block daemon startup.
+`ouro fleet tag remove BAD` can repair a malformed string tag; malformed tag arrays
+can be repaired directly in the profile without changing its identity fields. A native child can use `machine: "tag:xcode"`; exactly one
+connected match is required, and only its concrete node is retained. Multiple matches
+name the machines so the agent can choose deliberately. Tags and facts grant no authority.
+
+Local automated evidence: `fleet_test.exs`, `cluster_test.exs`, and the real-VM
+`subagent_remote_test.exs` cover optional facts, profile validation, tag matching and a
+child reading on the tagged peer, including its hostname. Rust fleet tests cover profile
+tag persistence, diagnostics and optional-fact rendering. This is separate from the
+physical-machine deployment evidence above.
+
 Still intentionally deferred: automatic Tailscale LocalAPI discovery and auto-join
 (Add lists `tailscale status --json` peers and `~/.ssh/config` hosts as optional
-targets; it does not join them without a confirm), free-form tags,
+targets; it does not join them without a confirm),
 logical workspace maps, heterogeneous forge orchestration, replicated journals, live
 provider migration, quorum/fencing, and multi-cluster federation. One Erlang cluster is
 one trust domain. A network partition can produce independent views; no section below
 should be read as a claim of partition-safe consensus.
+
+## Long-running child agents
+
+Use a background child for builds or other work that should outlive the current turn:
+
+```text
+agent(machine: "builder", sync: true, background: true,
+      deadline_ms: 900000, prompt: "Build the project and report the result")
+```
+
+`sync: true` provisions the current Git workspace on the worker. Use `workspace:`
+instead when deliberately selecting a checkout that already exists on that worker.
+
+The node's `provider_options.subagent_deadline_ms` defaults to 300000 ms;
+`subagent_max_deadline_ms` defaults to 900000 ms and caps a requested per-call deadline.
+`bash_max_timeout_ms` defaults to 600000 ms. Both ceilings can be raised to four hours.
+A child's bash call must also request its needed `timeout_ms`. Hooks, checks and other
+Exec callers retain their ten-minute maximum. Foreground agents remain bounded by the
+loop's `tool_timeout_ms`; use `background: true` for long jobs.
+
+The folded row reports elapsed time and the last command's first line or file path.
+Updates arrive every five seconds, with an immediate update when bash starts and a final
+update when the child finishes, under a hard ceiling of 2000 updates per child. Activity is limited to 160 bytes and never includes file
+contents or tool output. `agent_result(task_id: "…", wait_ms: 0)` returns the current
+elapsed time, deadline and activity without waiting or removing a running child.
+
+Interactive children can ask for approval even after their parent's turn has finished.
+The approval names the child and its machine; the target's decision to ask always reaches
+the human, without being re-evaluated against the parent's rules. Closing the session
+stops its children and cancels their pending questions. One-shot runs refuse background
+children because they have no interactive session to hold them.
+
+A real Ubuntu 26.04 run on 2026-09-07 completed `sleep 700 && echo ok` in 700.085 seconds
+inside the normal Linux sandbox. The parent became idle after 20 ms and stayed idle
+through all 140 progress observations; collection returned `completed` and `ok`. Model
+responses were scripted for this timing gate; the shell, sandbox, elapsed time, progress
+and session lifecycle were real. This is local/live implementation evidence, not a
+published release claim.
+
+## Returned child work and deliveries
+
+A child started with `sync: true` receives a snapshot of the parent's committed,
+staged, unstaged, and eligible untracked files. When its turn ends, the target closes
+the child session and captures its committed and dirty work. The return travels in
+bounded, verified chunks and is imported into the original repository as
+`refs/ouroboros/subagents/<task_id>`. The parent's HEAD, index, and working files stay
+as they were. Inspect the child’s changes with `git show <returned_ref>` and
+apply them deliberately with `git cherry-pick <returned_commit>`. The returned commit
+combines the child's committed and dirty changes relative to the provisioned snapshot;
+intermediate child commits are not preserved as separate commits in that return.
+
+Capture clears optimization flags in its private index and rehashes materialized
+tracked files, including files marked `assume-unchanged` or `skip-worktree`. Absent
+sparse-checkout entries retain their indexed content. Repository clean, smudge, and
+process filters are disabled for capture without changing the source configuration;
+external transformations such as Git LFS filtering do not run during a snapshot.
+
+Ignored files do not travel. Add workspace-specific exclusions in `ouroboros.toml`:
+
+```toml
+[provision]
+exclude = [".env", "secrets/"]
+```
+
+Put reports and other artifacts in `.ouroboros/deliver/`. This directory is prepared
+before launch and excluded from the Git snapshot. Only regular files are accepted;
+symlinks, traversal paths, special files, more than 128 files, and archives larger
+than 32 MiB are refused. The target may lower the capture limit with its
+`:deliver_max_bytes` application setting. The parent verifies the uncompressed archive and every
+file's size and digest while extracting into
+`<data_dir>/deliveries/<task_id>/`. The model result and both transcript clients name
+the returned ref and each delivered path and size.
+
+Settlement stays observable while returning work: `summary` reports `returning`,
+`agent_result` keeps the task collectable, and stopping the child does not discard a
+return in flight. When a foreground wait reaches the loop timeout or is interrupted,
+the session takes ownership of the unfinished return. The task stays tracked and
+collectable with `agent_result`; its settled event arrives only after return finishes.
+Return transport is bounded to ten minutes, with an independent
+worker ceiling. Only an acknowledged return, followed by a fresh comparison of the
+child's HEAD, tree, and delivery contents, authorizes deletion of its worktree. A
+failed, ambiguous, or concurrently changed return retains the target worktree and
+snapshot pin and names the error and location. A received Git ref remains available
+even when a later delivery or cleanup step fails.
+
+Concurrent returns to the same repository retry import contention within the same
+ten-minute deadline. An acknowledgment retried after a partial failure verifies any
+already-installed deliveries against their complete size/digest manifest; changed
+files or unsafe paths are refused, never overwritten to make the retry succeed.
+
+Parent repository paths stay in a parent-local capability registry; remote return
+requests carry an opaque capability, repository identity, commit, and task ID. A
+lost parent process or distribution link cannot authorize target cleanup. Returned
+refs are retained for inspection and may be removed explicitly with
+`git update-ref -d refs/ouroboros/subagents/<task_id>` after the work is accepted.
+
+## Vendor sessions and native children
+
+Interactive Claude Code sessions receive `agent`, `agent_result`, and `fleet` through
+`ouro mcp-serve` in every approval posture. Their children use the same native dispatch,
+permission rules, hooks, effect ledger and approval channel as native sessions. The
+owner's current configuration is read for each call. The gateway accepts the session ID
+and tool input; it does not accept a caller-supplied principal or permission posture.
+Closing the owner closes its sidecar and children. A stable request ID prevents an
+ambiguous spawn response from becoming a duplicate child on retry.
+
+Configure a native model on the owner with `OUROBOROS_NATIVE_MODEL` or the runtime's
+`:native_model` setting, using an existing native credential source. Vendor model aliases
+are not native model specifications. The selected worker also needs credentials for
+the child's native model. After a child is created, result and stop remain
+available even if the native default is removed. The previously removed Codex CLI
+transport remains removed; this bridge does not reintroduce it.
 
 ## Historical design record (pre-implementation snapshot)
 
@@ -265,7 +431,7 @@ the implemented core above. It is retained as design history, **not** as current
 feature documentation. In particular, its “does not exist” statements and file:line
 citations describe the pre-fleet tree and are now intentionally stale. Use the current
 core section above or the README for operation; use the remainder only to understand
-decisions and deferred ideas such as tags, Tailscale discovery, logical workspaces, and
+decisions and deferred ideas such as broader tag routing, Tailscale discovery, logical workspaces, and
 HA.
 
 The longer-term design targets discovery without a hand-maintained host list and routing
@@ -989,8 +1155,8 @@ stated in the tests), registry v2→v3 widen-on-read.
   spans nodes.
 - **Rollout-registry reconciliation** across driving nodes; operator exit from
   `:quarantined` beyond `reconcile_quarantine/1`.
-- **Workspace provisioning** (clone/worktree on target) and shared-filesystem lease
-  coordination.
+- **Shared-filesystem lease coordination** across nodes. Snapshot provisioning uses
+  a target-local mirror and detached worktree; it does not coordinate a shared checkout.
 - **Session migration/adoption** across nodes; consensus placement, quorum,
   partition policy — the standing architecture non-claims remain non-claims.
 - **Per-token scopes** on the gateway; a signer outside the distribution trust

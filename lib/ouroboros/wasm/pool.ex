@@ -1685,7 +1685,14 @@ defmodule Ouroboros.Wasm.Pool do
           process: process_setting(state)
         )
 
-      case Sandbox.wrap({:argv, [state.helper_path | helper_argv(state)]}, %{}, policy, detection) do
+      # Linux overlays scratch with a private tmpfs. Re-enter it after those mounts;
+      # the Port's initial cwd alone would still name the covered host directory.
+      case Sandbox.wrap(
+             {:argv, [state.helper_path | helper_argv(state)]},
+             %{root: scratch},
+             policy,
+             detection
+           ) do
         {:ok, {executable, args}} ->
           {:ok,
            %{
@@ -1712,6 +1719,13 @@ defmodule Ouroboros.Wasm.Pool do
     end
   end
 
+  # The VM's cwd may be outside the helper's read fence. Start inside its private
+  # scratch so interpreters and relative filesystem operations have an accessible cwd.
+  defp working_directory(%{scratch: scratch}) when is_binary(scratch),
+    do: [{:cd, String.to_charlist(scratch)}]
+
+  defp working_directory(_plan), do: []
+
   defp spawn_child(state, plan) do
     port =
       Port.open(
@@ -1731,7 +1745,7 @@ defmodule Ouroboros.Wasm.Pool do
           :hide,
           {:args, plan.args},
           {:env, plan.env}
-        ]
+        ] ++ working_directory(plan)
       )
 
     os_pid =

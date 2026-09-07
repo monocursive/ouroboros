@@ -2344,7 +2344,7 @@ pub fn render_outcome(outcome: &Outcome) -> String {
     match outcome.kind {
         OutcomeKind::Enrolled => {
             text.push_str(&format!(
-                "{machine} is enrolled at {host} with managed recovery. Connection verification is reported above; inspect `ouro fleet status`.\nProvider sign-in stays on that machine; start a session there after it is connected.\n",
+                "{machine} is enrolled at {host} with managed recovery. Connection verification is reported above; inspect `ouro fleet status`.\nNext: return to the task screen and press F5 to choose this computer and a project. Enter your task; ChatGPT sign-in is guided here and saved on that computer. Or choose this computer on the web New session page.\n",
                 machine = outcome.machine,
                 host = outcome.host
             ));

@@ -120,7 +120,7 @@ defmodule Ouroboros.Web.Live.MachinesLive do
     socket =
       socket
       |> assign(:scope, Config.for_endpoint(socket.endpoint).scope)
-      |> assign(:page_title, "Advanced · Machines")
+      |> assign(:page_title, "Machines")
       |> assign(:fleet, nil)
       |> assign(:fleet_error, nil)
       |> assign(:status, nil)
@@ -419,7 +419,7 @@ defmodule Ouroboros.Web.Live.MachinesLive do
     ~H"""
     <main class="ouro-page ouro-machines">
       <header class="ouro-header">
-        <p class="ouro-subhead">Advanced</p>
+        <p class="ouro-subhead">Your computers</p>
         <h1>{@view.name || "Machines"}</h1>
         <p class="ouro-subhead ouro-top-row">
           <a class="ouro-backlink" href="/">Sessions</a>
@@ -452,7 +452,7 @@ defmodule Ouroboros.Web.Live.MachinesLive do
     ~H"""
     <section class="ouro-panel">
       <div class="ouro-panel-head">
-        <h2>{@view.local_node}</h2>
+        <h2>Connected through {@view.this_machine || @view.local_node}</h2>
         <button type="button" class="ouro-button" phx-click="refresh">Refresh</button>
       </div>
 
@@ -508,6 +508,16 @@ defmodule Ouroboros.Web.Live.MachinesLive do
       <span class={["ouro-member-chip", "ouro-member-chip-#{@member.presence}"]}>
         {@member.presence}
       </span>
+      <a
+        :if={@member.presence == :connected}
+        class="ouro-button-quiet"
+        href={"/new?" <> URI.encode_query(%{"machine" => if(@member.this_machine?, do: "", else: @member.node)})}
+      >
+        Set up & start a task
+      </a>
+      <p :if={@member.presence == :connected} class="ouro-footnote">
+        Connected. AI sign-in is checked when you start a task.
+      </p>
     </li>
     """
   end
@@ -527,16 +537,9 @@ defmodule Ouroboros.Web.Live.MachinesLive do
         <button type="button" class="ouro-button" phx-click="refresh">Refresh</button>
       </div>
       <p class="ouro-empty-body">
-        This computer is not connected to other Ouroboros machines. Ask an administrator to
-        set up shared machines if you need them.
+        You can work here now. To use another computer, connect it once with the guided setup below.
       </p>
-      <details class="ouro-technical">
-        <summary>Administrator setup</summary>
-        <p>
-          Create a fleet with <code>ouro fleet create</code>, then add machines from the
-          terminal client.
-        </p>
-      </details>
+      <a class="ouro-button" href="/new?machine=">Start a task here</a>
     </section>
     """
   end
@@ -574,13 +577,30 @@ defmodule Ouroboros.Web.Live.MachinesLive do
 
   defp terminal_add(assigns) do
     ~H"""
-    <details class="ouro-panel ouro-technical ouro-machine-admin">
-      <summary>Administrator setup</summary>
+    <section class="ouro-panel ouro-machine-admin" id="add-computer">
+      <h2>Connect another computer</h2>
       <p class="ouro-empty-body">
-        Add a machine from a trusted terminal with <code>ouro fleet add user@host</code>.
-        The terminal client guides the SSH probe, copy, invitation, and enrolment.
+        This one-time step uses the Ouroboros terminal app on the computer where you first set it up.
+        Once connected, you can choose either computer from this web app.
       </p>
-    </details>
+      <ol class="ouro-empty-body">
+        <li>Open <code>ouro</code>, type <code>/machines</code>, and press Enter.</li>
+        <li>
+          Choose a discovered computer, or <strong>Add a reachable machine</strong>
+          to enter its address.
+        </li>
+        <li>
+          Review the setup and confirm. Keep both computers awake until the connection check completes.
+        </li>
+        <li>
+          Return here, refresh, then choose <strong>Set up & start a task</strong>
+          to connect its AI account and choose a project.
+        </li>
+      </ol>
+      <p class="ouro-footnote">
+        The guided connection currently needs SSH access to the other computer, or an invitation you transfer yourself. Browser-only pairing is not available yet.
+      </p>
+    </section>
     """
   end
 end

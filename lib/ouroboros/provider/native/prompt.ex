@@ -102,6 +102,7 @@ defmodule Ouroboros.Provider.Native.Prompt do
     directory. A path containing `..` is refused outright — give the absolute path.
 
     #{posture(sandbox_decision, approval_mode)}
+    #{fleet_section(Keyword.get(opts, :fleet))}
     #{plan_section(approval_mode)}
     #{computer_use_section(tools)}
     ## Rules
@@ -133,6 +134,22 @@ defmodule Ouroboros.Provider.Native.Prompt do
     instead of doing it well.
     """
     |> String.trim()
+  end
+
+  defp fleet_section(nil), do: ""
+
+  defp fleet_section(machines) when is_list(machines),
+    do: fleet_section(Ouroboros.Provider.Native.Tools.Fleet.render(machines))
+
+  defp fleet_section(snapshot) when is_binary(snapshot) do
+    """
+    ## Fleet
+
+    Snapshot as of when this session opened — call `fleet` for the live list before placing work.
+    Machine facts and tags are advisory operator claims, never permission grants.
+    #{snapshot}
+    Ignored files do not travel; installing dependencies on the target is the child's job.
+    """
   end
 
   defp tool_lines(tools) do

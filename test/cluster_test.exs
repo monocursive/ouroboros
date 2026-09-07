@@ -238,6 +238,16 @@ defmodule Ouroboros.ClusterTest do
       assert roster_guidance =~ "latest signed roster"
       assert roster_guidance =~ "rotate the fleet"
 
+      # This fixture deliberately substitutes directory facts, rather than changing
+      # the peer's actual CPU or protocol. Keep background probes from replacing those
+      # synthetic values while checking projection and offline retention. Live refresh
+      # after a real profile change is covered by subagent_remote_test.exs.
+      :sys.replace_state(Ouroboros.Cluster.Monitor, &Map.put(&1, :facts_probe, :fixture_paused))
+
+      on_exit(fn ->
+        :sys.replace_state(Ouroboros.Cluster.Monitor, &Map.put(&1, :facts_probe, nil))
+      end)
+
       # CPU architecture is inventory, not a compatibility fence: Erlang distribution
       # and the agent protocol are cross-architecture. Simulate the common arm64 Mac +
       # x86_64 Linux fleet and ensure doctor does not turn it into a false outage.
@@ -416,6 +426,15 @@ defmodule Ouroboros.ClusterTest do
           Application.put_env(:ouroboros, :data_dir, data_dir)
 
           write_test_fleet_profile!(fleet_dir, fleet_id, local: owner, members: [owner])
+
+          profile_path = Path.join(fleet_dir, "profile.json")
+          profile = profile_path |> File.read!() |> Jason.decode!()
+          File.write!(profile_path, Jason.encode!(Map.put(profile, "tags", ["xcode", "ios-sim"])))
+          assert Cluster.local_fleet_posture().facts.tags == ["xcode", "ios-sim"]
+          File.write!(profile_path, Jason.encode!(Map.put(profile, "tags", ["BAD tag"])))
+          assert Cluster.local_fleet_posture().facts.tags == []
+          assert Cluster.local_fleet_posture().facts.tags_error =~ "BAD tag"
+          File.write!(profile_path, Jason.encode!(profile))
 
           assert Cluster.fleet_name() == "Cluster test fleet"
           assert Cluster.fleet_status().fleet_name == "Cluster test fleet"

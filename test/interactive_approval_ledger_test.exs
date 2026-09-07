@@ -250,6 +250,74 @@ defmodule Ouroboros.InteractiveApprovalLedgerTest do
   end
 
   describe "the native agent" do
+    test "a background child asks after its parent turn and reaches the human through the harness",
+         %{id: id, workspace: workspace} do
+      {child_spec, child_agent} =
+        NativeModelScript.start([
+          [
+            {:tool_call,
+             %{
+               id: "child-write",
+               name: "write",
+               input: %{"path" => "background.txt", "content" => "approved between turns"}
+             }}
+          ],
+          [{:text, "done"}, {:finish, :stop}]
+        ])
+
+      {parent_spec, _} =
+        NativeModelScript.start([
+          [
+            {:tool_call,
+             %{id: "spawn", name: "agent", input: %{"prompt" => "write", "background" => true}}}
+          ],
+          [{:text, "child is working"}, {:finish, :stop}]
+        ])
+
+      :sys.suspend(child_agent)
+
+      assert {:ok, ref} =
+               InteractiveSession.start(
+                 id: id,
+                 provider: :native,
+                 workspace: workspace,
+                 model: parent_spec,
+                 approval_mode: :prompt,
+                 provider_options: %{"subagent_model" => child_spec}
+               )
+
+      on_exit(fn -> InteractiveSession.close(ref) end)
+      assert {:ok, _} = InteractiveSession.send_message(ref, "go", id: "turn-background")
+      spawn_approval = await_event(ref, :approval_requested)
+      assert :ok = InteractiveSession.respond_approval(ref, spawn_approval.request_id, :approve)
+      await_event(ref, :turn_completed)
+      :sys.resume(child_agent)
+
+      child_approval =
+        assert_eventually(fn ->
+          {:ok, replay} = InteractiveSession.replay(ref)
+
+          Enum.find(
+            replay,
+            &(&1.type == :approval_requested and is_map(&1.payload["subagent"]))
+          )
+        end)
+
+      assert child_approval.payload["subagent"]["background"] == true
+      assert child_approval.payload["origin"] == "external"
+      refute File.exists?(Path.join(workspace, "background.txt"))
+      assert :ok = InteractiveSession.respond_approval(ref, child_approval.request_id, :approve)
+      assert_eventually(fn -> File.exists?(Path.join(workspace, "background.txt")) end)
+      assert File.read!(Path.join(workspace, "background.txt")) == "approved between turns"
+
+      assert Enum.any?(
+               approvals(id),
+               &(&1.result.origin == "external" and &1.result.decision == :allow)
+             )
+
+      retire_session(id)
+    end
+
     test "a human answer and the tool it admitted are both in the ledger",
          %{id: id, workspace: workspace} do
       command = "echo hello-#{System.unique_integer([:positive, :monotonic])}"

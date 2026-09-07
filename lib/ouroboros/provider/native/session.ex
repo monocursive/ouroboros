@@ -283,6 +283,30 @@ defmodule Ouroboros.Provider.Native.Session do
 
   def whereis(_provider_session_id), do: nil
 
+  @doc false
+  def bridge_tool(handle, request, call, emit),
+    do: GenServer.call(handle, {:bridge_tool, request, call, emit}, 15 * 60_000)
+
+  defp bridge_source(state, nil), do: {:ok, state}
+
+  defp bridge_source(state, request) do
+    with {:ok, scope} <-
+           Paths.scope(request.cwd, request.add_dirs, Loop.sandbox_mode(request.sandbox_mode)),
+         {:ok, model_spec} <- Loop.resolve_model(request.model) do
+      plan? = truthy_option(request.provider_options || %{}, "plan")
+
+      {:ok,
+       %{
+         state
+         | request: request,
+           scope: if(plan?, do: %{scope | sandbox_mode: :read_only}, else: scope),
+           model_spec: model_spec,
+           approval_mode: Loop.approval_mode(request.approval_mode),
+           plan_mode?: plan?
+       }}
+    end
+  end
+
   # ---------------------------------------------------------------- lifecycle
 
   @impl GenServer
@@ -314,6 +338,7 @@ defmodule Ouroboros.Provider.Native.Session do
       state = %{
         request: request,
         context: context,
+        owner_monitor: Process.monitor(context.owner),
         provider_session_id: provider_session_id,
         scope: scope,
         session_dir: session_dir,
@@ -385,6 +410,8 @@ defmodule Ouroboros.Provider.Native.Session do
         # loop, because a background child outlives the turn that spawned it and the loop
         # does not. Closing the session stops every one of them.
         subagents: %{},
+        background_approvals: %{},
+        queued_child_approvals: %{},
         # A child can settle before the loop's tracking call reaches this process. These
         # bounded tombstones preserve that ordering fact until the corresponding track.
         settled_subagents: MapSet.new(),
@@ -518,6 +545,21 @@ defmodule Ouroboros.Provider.Native.Session do
     {:reply, :ok, answer_plan_exit(state, response)}
   end
 
+  def handle_call({:respond_approval, request_id, response}, _from, state)
+      when is_map_key(state.background_approvals, request_id) do
+    {pending, rest} = Map.pop(state.background_approvals, request_id)
+    Subagent.respond(pending.pid, pending.child_request_id, response)
+
+    emit(state, %{
+      type: :approval_resolved,
+      request_id: request_id,
+      turn_id: nil,
+      payload: %{"decision" => Atom.to_string(response.decision)}
+    })
+
+    {:reply, :ok, %{state | background_approvals: rest}}
+  end
+
   def handle_call({:respond_approval, request_id, response}, _from, state) do
     if MapSet.member?(state.approvals, request_id) and state.loop do
       Kernel.send(state.loop.pid, {:native_approval, request_id, response})
@@ -570,6 +612,49 @@ defmodule Ouroboros.Provider.Native.Session do
     end
   end
 
+  def handle_call({:bridge_tool, _request, _call, _emit}, _from, %{loop: loop} = state)
+      when not is_nil(loop), do: {:reply, {:error, :busy}, state}
+
+  def handle_call({:bridge_tool, request, call, emit}, from, state) do
+    with {:ok, source} <- bridge_source(state, request) do
+      owner = self()
+
+      loop = %Loop{
+        emit: emit,
+        model_module: source.model_module,
+        model_spec: source.model_spec,
+        scope: source.scope,
+        session_dir: source.session_dir,
+        journal: source.journal,
+        session_id: source.context.session_id,
+        provider_session_id: source.provider_session_id,
+        turn_id: "bridge_" <> call.id,
+        approval_mode: loop_approval_mode(source),
+        allowed_tools: source.request.allowed_tools,
+        disallowed_tools: source.request.disallowed_tools,
+        session_pid: owner,
+        session_request: source.request,
+        session_context: source.context,
+        subagent_depth: source.subagent_depth,
+        subagent_parent: source.subagent_parent,
+        subagent_task_id: source.subagent_task_id,
+        tool_timeout_ms: source.tool_timeout_ms,
+        approval_timeout_ms: source.request.approval_timeout_ms,
+        hooks: nil
+      }
+
+      task =
+        Task.Supervisor.async_nolink(Jido.Harness.SessionTaskSupervisor, fn ->
+          {:bridge_result, Loop.run_tool(loop, call)}
+        end)
+
+      {:noreply,
+       %{state | loop: %{pid: task.pid, ref: task.ref, turn_id: loop.turn_id, bridge_from: from}}}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
   # ---------------------------------------------------------------- subagents (G3)
 
   # The parent session is the registry, and deliberately not a global one. A task id is
@@ -590,10 +675,15 @@ defmodule Ouroboros.Provider.Native.Session do
         status: if(settled?, do: :settled, else: :running)
       }
 
+      Enum.each(Map.get(state.queued_child_approvals, task_id, []), fn message ->
+        Kernel.send(self(), message)
+      end)
+
       {:reply, :ok,
        %{
          state
-         | subagents: Map.put(state.subagents, task_id, entry),
+         | queued_child_approvals: Map.delete(state.queued_child_approvals, task_id),
+           subagents: Map.put(state.subagents, task_id, entry),
            settled_subagents: MapSet.delete(state.settled_subagents, task_id)
        }}
     end
@@ -758,6 +848,23 @@ defmodule Ouroboros.Provider.Native.Session do
 
   def handle_info({:plan_exit_timeout, _stale}, state), do: {:noreply, state}
 
+  def handle_info(
+        {ref, {:bridge_result, result}},
+        %{loop: %{ref: ref, bridge_from: from}} = state
+      ) do
+    Process.demonitor(ref, [:flush])
+    GenServer.reply(from, result)
+    {:noreply, %{state | loop: nil}}
+  end
+
+  def handle_info(
+        {:DOWN, ref, :process, _pid, reason},
+        %{loop: %{ref: ref, bridge_from: from}} = state
+      ) do
+    GenServer.reply(from, {:error, {:bridge_tool_failed, reason}})
+    {:noreply, %{state | loop: nil}}
+  end
+
   def handle_info({ref, :ok}, %{loop: %{ref: ref}} = state) do
     Process.demonitor(ref, [:flush])
     {:noreply, release(state)}
@@ -794,21 +901,124 @@ defmodule Ouroboros.Provider.Native.Session do
   # answer "no such task" about a child that finished a second ago.
   def handle_info({:subagent, task_id, {:settled, summary}}, state) do
     emit(state, subagent_event(Subagent.settled_payload(summary)))
+    state = cancel_child_approvals(state, task_id)
     {:noreply, mark_subagent_settled(state, task_id)}
   end
 
-  # An approval a background child raised reaches nobody here, and this process must not
-  # pretend otherwise. `Subagent` denies it at source with a legible reason and counts it
-  # in the digest; this clause exists so that a message which somehow arrives is dropped
-  # rather than matched by something else.
-  def handle_info({:subagent, _task_id, {:approval, _request_id, _payload}}, state),
-    do: {:noreply, state}
+  # The harness only accepts turn-owned approvals. Interactive children instead use
+  # the coordinator's durable external channel, which remains open between turns.
+  # Direct adapter clients (including embedders) receive the ordinary event here.
+  def handle_info({:subagent, task_id, {:approval, child_request_id, payload}} = message, state) do
+    case Map.get(state.subagents, task_id) do
+      nil ->
+        queued = Map.update(state.queued_child_approvals, task_id, [message], &[message | &1])
+        {:noreply, %{state | queued_child_approvals: queued}}
+
+      entry ->
+        request_id = "sub_approval_" <> Paths.new_session_id()
+
+        payload =
+          Map.put(payload, "subagent", %{
+            "task_id" => task_id,
+            "description" => entry.meta.description,
+            "provider_session_id" => entry.meta.provider_session_id,
+            "node" => Atom.to_string(entry.meta.node),
+            "background" => true
+          })
+
+        pending = %{pid: entry.pid, child_request_id: child_request_id, task_id: task_id}
+
+        case interactive_owner(state) do
+          nil ->
+            emit(state, %{
+              type: :approval_requested,
+              request_id: request_id,
+              turn_id: nil,
+              payload: payload
+            })
+
+            {:noreply, put_in(state.background_approvals[request_id], pending)}
+
+          owner ->
+            task =
+              Task.Supervisor.async_nolink(Jido.Harness.SessionTaskSupervisor, fn ->
+                response = Ouroboros.InteractiveSession.relay_approval(owner, payload)
+                Subagent.respond(entry.pid, child_request_id, response)
+              end)
+
+            {:noreply,
+             put_in(state.background_approvals[request_id], Map.put(pending, :task, task))}
+        end
+    end
+  end
+
+  def handle_info({ref, :ok}, state) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+
+    open =
+      Enum.reject(state.background_approvals, fn {_id, entry} ->
+        match?(%{task: %{ref: ^ref}}, entry)
+      end)
+
+    {:noreply, %{state | background_approvals: Map.new(open)}}
+  end
+
+  def handle_info({:DOWN, monitor, :process, _pid, _reason}, %{owner_monitor: monitor} = state),
+    do: {:stop, :normal, state}
 
   def handle_info({:DOWN, monitor, :process, _pid, _reason}, state) do
-    {:noreply, forget_by_monitor(state, monitor)}
+    case Enum.find(state.background_approvals, fn {_id, entry} ->
+           match?(%{task: %{ref: ^monitor}}, entry)
+         end) do
+      {request_id, pending} ->
+        Subagent.respond(
+          pending.pid,
+          pending.child_request_id,
+          ApprovalResponse.new!(%{
+            decision: :deny,
+            scope: :once,
+            reason: "approval relay stopped"
+          })
+        )
+
+        {:noreply,
+         %{state | background_approvals: Map.delete(state.background_approvals, request_id)}}
+
+      nil ->
+        {:noreply, forget_by_monitor(state, monitor)}
+    end
   end
 
   def handle_info(_message, state), do: {:noreply, state}
+
+  defp cancel_child_approvals(state, task_id) do
+    {closed, open} =
+      Enum.split_with(state.background_approvals, fn {_id, entry} -> entry.task_id == task_id end)
+
+    Enum.each(closed, fn {request_id, entry} ->
+      if Map.has_key?(entry, :task) do
+        Task.shutdown(entry.task, :brutal_kill)
+      else
+        emit(state, %{
+          type: :approval_resolved,
+          request_id: request_id,
+          turn_id: nil,
+          payload: %{"decision" => "deny", "reason" => "child settled"}
+        })
+      end
+    end)
+
+    %{
+      state
+      | background_approvals: Map.new(open),
+        queued_child_approvals: Map.delete(state.queued_child_approvals, task_id)
+    }
+  end
+
+  defp interactive_owner(state) do
+    metadata = state.request.metadata || %{}
+    Map.get(metadata, :ouroboros_session_id) || Map.get(metadata, "ouroboros_session_id")
+  end
 
   defp forget_subagent(state, task_id) do
     state = %{state | settled_subagents: MapSet.delete(state.settled_subagents, task_id)}
@@ -849,8 +1059,12 @@ defmodule Ouroboros.Provider.Native.Session do
 
   defp forget_by_monitor(state, monitor) do
     case Enum.find(state.subagents, fn {_task_id, entry} -> entry.monitor == monitor end) do
-      {task_id, _entry} -> %{state | subagents: Map.delete(state.subagents, task_id)}
-      nil -> state
+      {task_id, _entry} ->
+        state = cancel_child_approvals(state, task_id)
+        %{state | subagents: Map.delete(state.subagents, task_id)}
+
+      nil ->
+        state
     end
   end
 
@@ -862,6 +1076,10 @@ defmodule Ouroboros.Provider.Native.Session do
     do: state
 
   defp stop_subagents(state, _reason) do
+    Enum.each(state.background_approvals, fn {_id, entry} ->
+      if Map.has_key?(entry, :task), do: Task.shutdown(entry.task, :brutal_kill)
+    end)
+
     Enum.each(state.subagents, fn {_task_id, entry} ->
       Process.demonitor(entry.monitor, [:flush])
       _ = Subagent.stop(entry.pid, :stopped)
@@ -940,6 +1158,7 @@ defmodule Ouroboros.Provider.Native.Session do
         tool_specs: state.prompt_context.tools,
         context_window: state.prompt_context.context_window,
         prefix_fingerprint: state.prompt_context.fingerprint,
+        fleet_snapshot: state.prompt_context.fleet_snapshot,
         # R1. The loop is the journal's writer for the length of the turn; it syncs the
         # handle at the top of `run_turn/2` because this process may have advanced the file
         # since the handle was built.
@@ -1002,6 +1221,9 @@ defmodule Ouroboros.Provider.Native.Session do
   defp stop_loop(%{loop: nil} = state), do: state
 
   defp stop_loop(%{loop: loop} = state) do
+    if Map.has_key?(loop, :bridge_from),
+      do: GenServer.reply(loop.bridge_from, {:error, :interrupted})
+
     Process.demonitor(loop.ref, [:flush])
     _ = Task.Supervisor.terminate_child(Jido.Harness.SessionTaskSupervisor, loop.pid)
     %{state | loop: nil, approvals: MapSet.new()}
@@ -1502,6 +1724,7 @@ defmodule Ouroboros.Provider.Native.Session do
 
     [
       system_prompt: state.request.system_prompt,
+      fleet: Ouroboros.Provider.Native.Tools.Fleet.snapshot(),
       cwd: state.scope.root,
       add_dirs: state.scope.roots -- [state.scope.root],
       sandbox_mode: state.scope.sandbox_mode,

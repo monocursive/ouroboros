@@ -257,7 +257,7 @@ pub const SUBAGENT_MARKER: &str = "↳";
 
 /// One child agent's whole life, as a single row that is rewritten in place.
 ///
-/// A child sends up to sixty-four progress reports, so this is folded by `task_id` rather
+/// A child sends coalesced progress reports, so this is folded by `task_id` rather
 /// than appended to: a parent transcript that grew a line every time a child counted its
 /// turns would be a transcript about the counting. Latest wins, and only for the fields an
 /// event actually carried — a progress report that omits its tool-call count leaves the
@@ -280,6 +280,8 @@ pub struct SubagentCell {
     pub worktree: bool,
     pub background: bool,
     pub depth: Option<u64>,
+    pub elapsed_ms: Option<u64>,
+    pub last_activity: Option<String>,
     pub turns: Option<u64>,
     pub tool_calls: Option<u64>,
     pub files: Option<u64>,
@@ -290,8 +292,11 @@ pub struct SubagentCell {
     pub status: Option<String>,
     pub settled: bool,
     pub error: Option<String>,
-    /// The path of a worktree the runtime kept because it still held uncommitted work.
+    /// The path of a worktree retained for dirty work, an unfinished return, or failed cleanup.
     pub worktree_kept: Option<String>,
+    pub returned_ref: Option<String>,
+    pub return_error: Option<String>,
+    pub deliveries: Vec<crate::model::native::Delivery>,
     /// Phase words this build does not model, in arrival order. Named rather than dropped.
     pub unknown_phases: Vec<String>,
 }
@@ -318,6 +323,8 @@ impl SubagentCell {
         self.worktree |= event.worktree;
         self.background |= event.background;
         self.depth = event.depth.or(self.depth);
+        self.elapsed_ms = event.elapsed_ms.or(self.elapsed_ms);
+        overwrite(&mut self.last_activity, &event.last_activity);
 
         self.turns = event.turns.or(self.turns);
         self.tool_calls = event.tool_calls.or(self.tool_calls);
@@ -326,6 +333,9 @@ impl SubagentCell {
         if phase.settled() {
             self.settled = true;
             overwrite(&mut self.status, &event.status);
+            self.returned_ref.clone_from(&event.returned_ref);
+            self.return_error.clone_from(&event.return_error);
+            self.deliveries.clone_from(&event.deliveries);
             self.input_tokens = event.input_tokens.or(self.input_tokens);
             self.output_tokens = event.output_tokens.or(self.output_tokens);
             self.cost_usd = event.cost_usd.or(self.cost_usd);
@@ -429,6 +439,12 @@ impl SubagentCell {
     /// what it cost. Empty before the child has reported anything, which draws nothing.
     pub fn digest(&self) -> String {
         let mut facts = Vec::new();
+        if let Some(elapsed) = self.elapsed_ms {
+            facts.push(duration(elapsed.min(i64::MAX as u64) as i64));
+        }
+        if let Some(activity) = &self.last_activity {
+            facts.push(activity.clone());
+        }
 
         if let Some(turns) = self.turns {
             facts.push(format!("{turns} turns"));
@@ -469,8 +485,20 @@ impl SubagentCell {
             rows.push(format!("Error: {error}"));
         }
 
+        if let Some(reference) = &self.returned_ref {
+            rows.push(format!("Changes returned as {reference}"));
+        }
+        if let Some(error) = &self.return_error {
+            rows.push(format!("Return: {error}"));
+        }
+        for delivery in &self.deliveries {
+            rows.push(format!(
+                "Delivered: {} ({} bytes)",
+                delivery.path, delivery.bytes
+            ));
+        }
         if let Some(path) = &self.worktree_kept {
-            rows.push(format!("Worktree kept (it holds uncommitted work): {path}"));
+            rows.push(format!("Worktree kept: {path}"));
         }
 
         if let Some(session) = &self.provider_session_id {
@@ -502,11 +530,26 @@ impl SubagentCell {
 
     /// The digest with its status word in front, as one line.
     pub fn detail(&self) -> String {
-        match (self.status_word(), self.digest()) {
-            (Some(status), digest) if digest.is_empty() => status.to_string(),
-            (Some(status), digest) => format!("{status} · {digest}"),
-            (None, digest) => digest,
+        let mut facts = Vec::new();
+        if let Some(status) = self.status_word() {
+            facts.push(status.to_string());
         }
+        if self.returned_ref.is_some() {
+            facts.push("changes returned".into());
+        }
+        if self.return_error.is_some() {
+            facts.push("return incomplete".into());
+        }
+        match self.deliveries.len() {
+            0 => {}
+            1 => facts.push("1 delivery".into()),
+            count => facts.push(format!("{count} deliveries")),
+        }
+        let digest = self.digest();
+        if !digest.is_empty() {
+            facts.push(digest);
+        }
+        facts.join(" · ")
     }
 
     /// The whole row as plain text, for `/details`, the export, and a voice.
@@ -821,7 +864,7 @@ pub enum Cell {
     /// One child agent this session spawned, folded across its whole life. Its own cell
     /// rather than a [`Cell::Runtime`] block because it is the one row here that is
     /// *rewritten* — a block is a thing that happened, and a child is a thing happening.
-    Subagent(SubagentCell),
+    Subagent(Box<SubagentCell>),
     Divider {
         text: String,
         tone: Tone,
@@ -3408,7 +3451,7 @@ fn project_subagent(
         Some(index) => index,
         None => {
             let index = cells.len();
-            cells.push(Cell::Subagent(SubagentCell::default()));
+            cells.push(Cell::Subagent(Box::default()));
 
             if let Some(task) = &event.task_id {
                 tracked.insert(task.clone(), index);
@@ -3454,35 +3497,51 @@ pub fn body_rows(text: &str) -> Vec<String> {
 fn render_subagent(lines: &mut Vec<Line<'static>>, subagent: &SubagentCell, width: usize) {
     separate(lines);
 
-    lines.push(Line::from(Span::styled(
-        format!("{SUBAGENT_MARKER} {}", subagent.headline()),
-        Style::default()
-            .fg(colour(subagent.tone()))
-            .add_modifier(Modifier::BOLD),
-    )));
+    let inner_width = width.max(8).saturating_sub(2);
+    let heading_style = Style::default()
+        .fg(colour(subagent.tone()))
+        .add_modifier(Modifier::BOLD);
+
+    for (index, row) in wrap_limited(&subagent.headline(), inner_width, 4)
+        .into_iter()
+        .enumerate()
+    {
+        let prefix = if index == 0 { SUBAGENT_MARKER } else { " " };
+        lines.push(Line::from(Span::styled(
+            format!("{prefix} {row}"),
+            heading_style,
+        )));
+    }
 
     let digest = subagent.digest();
+    let detail = match subagent.status_word() {
+        Some(status) if !digest.is_empty() => format!("{status} · {digest}"),
+        Some(status) => status.to_string(),
+        None => digest,
+    };
 
-    match subagent.status_word() {
-        Some(status) => {
-            let mut spans = vec![Span::styled(
-                format!("  {status}"),
-                Style::default().fg(colour(subagent.tone())),
-            )];
-
-            if !digest.is_empty() {
-                spans.push(Span::styled(format!(" · {digest}"), theme::muted()));
+    let detail_rows = if detail.is_empty() {
+        Vec::new()
+    } else {
+        wrap_limited(&detail, inner_width, 8)
+    };
+    for (index, row) in detail_rows.into_iter().enumerate() {
+        let mut spans = vec![Span::raw("  ")];
+        match subagent
+            .status_word()
+            .filter(|_| index == 0)
+            .and_then(|status| row.strip_prefix(status).map(|rest| (status, rest)))
+        {
+            Some((status, rest)) => {
+                spans.push(Span::styled(
+                    status.to_string(),
+                    Style::default().fg(colour(subagent.tone())),
+                ));
+                spans.push(Span::styled(rest.to_string(), theme::muted()));
             }
-
-            lines.push(Line::from(spans));
+            None => spans.push(Span::styled(row, theme::muted())),
         }
-        None if !digest.is_empty() => {
-            lines.push(Line::from(Span::styled(
-                format!("  {digest}"),
-                theme::muted(),
-            )));
-        }
-        None => {}
+        lines.push(Line::from(spans));
     }
 
     for row in subagent.rows() {
@@ -6932,6 +6991,22 @@ diff --git a/src/lex.rs b/src/lex.rs
 
     /// An empty payload is still a payload. It must draw a row, not a panic.
     #[test]
+    fn progress_refreshes_the_same_child_row_with_elapsed_and_activity() {
+        let mut cell = SubagentCell::default();
+        cell.absorb(&crate::model::native::SubagentEvent::decode(&json!({
+            "phase": "progress", "task_id": "child", "elapsed_ms": 5000, "last_activity": "sleep 700"
+        })));
+        assert!(cell.digest().contains("5s"));
+        assert!(cell.digest().contains("sleep 700"));
+        cell.absorb(&crate::model::native::SubagentEvent::decode(&json!({
+            "phase": "progress", "task_id": "child", "elapsed_ms": 10000, "last_activity": "echo ok"
+        })));
+        assert!(cell.digest().contains("10s"));
+        assert!(cell.digest().contains("echo ok"));
+        assert!(!cell.digest().contains("sleep 700"));
+    }
+
+    #[test]
     fn a_subagent_payload_with_nothing_in_it_still_draws_a_row() {
         let bare = event(1, "provider_event", json!({"kind": "subagent"}));
         let cells = subagent_cells(&[bare]);
@@ -7001,7 +7076,7 @@ diff --git a/src/lex.rs b/src/lex.rs
         let rendered = plain(&render_cells(&subagent_cells(&[kept]), 120));
 
         assert!(
-            rendered.contains("Worktree kept (it holds uncommitted work): /tmp/ouro-w1"),
+            rendered.contains("Worktree kept: /tmp/ouro-w1"),
             "{rendered}"
         );
         assert!(

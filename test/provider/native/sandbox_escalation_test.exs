@@ -42,12 +42,12 @@ defmodule Ouroboros.Provider.Native.SandboxEscalationTest do
                   end)
 
   # What a denied write looks like from inside each backend. Seatbelt refuses the syscall
-  # (`EPERM`, which every program spells `Operation not permitted`); bubblewrap mounts the
-  # protected root read-only, so the same write fails `EROFS` (`Read-only file system`).
+  # (`EPERM`, which every program spells `Operation not permitted`); both Linux backends
+  # mount protected roots read-only, so the write fails `EROFS` (`Read-only file system`).
   # `Sandbox.denial_line?/1` recognises both; these assertions have to expect the one this
   # node's backend produces, or they pass only on the platform they were written on.
   @denial (case @backend do
-             :bwrap -> "Read-only file system"
+             backend when backend in [:bwrap, :ouro_sandbox] -> "Read-only file system"
              _other -> "Operation not permitted"
            end)
 

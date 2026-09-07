@@ -38,11 +38,8 @@ defmodule Ouroboros.Provider.Native.Subagent do
   foreground child whose parent turn died has nobody to report to, and is stopped rather
   than left running against a workspace nobody is watching.
 
-  A background child therefore has no way to reach a human, which is why
-  `Ouroboros.Provider.Native.Tools.Agent` refuses to spawn one whose tools could ask.
-  If one asks anyway — a rule engine that changed under it, an MCP tool that classifies
-  as `:execute` — the request is **denied immediately with a legible reason** and counted
-  in the digest, rather than left to hang until the child's approval deadline.
+  Interactive background children relay approvals through the session process, including
+  between turns. One-shot runs refuse background work because they have no session owner.
 
   ## Lifecycle, precisely
 
@@ -131,10 +128,12 @@ defmodule Ouroboros.Provider.Native.Subagent do
   @remote_spawn_timeout @open_timeout + 20_000
   @remote_stop_timeout 15_000
   @registry Ouroboros.Provider.Native.Registry
+  @return_timeout_ms 615_000
   @max_summary_bytes 16 * 1024
   @max_text_bytes 12 * 1024
   @max_files 50
-  @max_progress 64
+  @max_progress 2000
+  @progress_interval_ms 5_000
   @max_description_bytes 200
 
   @typedoc "What a caller asks for when it spawns a child."
@@ -148,6 +147,9 @@ defmodule Ouroboros.Provider.Native.Subagent do
           optional(:node) => node(),
           optional(:remote) => boolean(),
           optional(:worktree) => boolean(),
+          optional(:provision_source) => String.t() | nil,
+          optional(:provision_options) => keyword(),
+          optional(:provision) => map(),
           optional(:deadline_ms) => pos_integer(),
           optional(:background) => boolean(),
           optional(:depth) => non_neg_integer(),
@@ -172,11 +174,48 @@ defmodule Ouroboros.Provider.Native.Subagent do
   """
   @spec spawn(spec()) :: {:ok, map()} | {:error, term()}
   def spawn(spec) do
-    case Map.get(spec, :node) || node() do
-      target when target == node() -> start_and_launch(spec)
-      target -> spawn_remote(target, spec)
+    with {:ok, prepared, local_metadata} <- prepare_provision(spec) do
+      result =
+        case Map.get(prepared, :node) || node() do
+          target when target == node() -> start_and_launch(prepared)
+          target -> spawn_remote(target, prepared)
+        end
+
+      case result do
+        {:ok, started} -> {:ok, Map.merge(started, local_metadata)}
+        error -> error
+      end
     end
   end
+
+  defp prepare_provision(%{provision_source: source} = spec) when is_binary(source) do
+    alias Ouroboros.Workspace.Provision
+    target = Map.get(spec, :node) || node()
+
+    case Provision.prepare(source, target, spec.task_id, Map.get(spec, :provision_options, [])) do
+      {:ok, provision} ->
+        prepared =
+          spec
+          |> Map.drop([:provision_source, :provision_options])
+          |> Map.put(:provision, Provision.remote_metadata(provision))
+          |> Map.put(:prompt, Provision.instructions(provision) <> spec.prompt)
+
+        {:ok, prepared,
+         %{
+           provisioned: true,
+           commit: provision.commit,
+           bytes: provision.bytes,
+           untracked: provision.snapshot.untracked,
+           untracked_count: provision.snapshot.untracked_count
+         }}
+
+      {:error, reason} ->
+        {:error, {:subagent_provision_failed, target, reason}}
+    end
+  end
+
+  defp prepare_provision(spec),
+    do: {:ok, Map.drop(spec, [:provision_source, :provision_options]), %{}}
 
   @doc """
   Starts and launches one child **on this node**, for `spawn/1` and for its own `:erpc`.
@@ -192,7 +231,7 @@ defmodule Ouroboros.Provider.Native.Subagent do
            {__MODULE__, spec}
          ) do
       {:ok, pid} ->
-        case safe_call(pid, :launch, @open_timeout + 5_000) do
+        case safe_call(pid, :launch, launch_timeout(spec)) do
           {:ok, started} ->
             {:ok, Map.put(started, :pid, pid)}
 
@@ -233,7 +272,14 @@ defmodule Ouroboros.Provider.Native.Subagent do
   end
 
   defp remote_start_call(target, spec) do
-    {:returned, :erpc.call(target, __MODULE__, :start_and_launch, [spec], @remote_spawn_timeout)}
+    {:returned,
+     :erpc.call(
+       target,
+       __MODULE__,
+       :start_and_launch,
+       [spec],
+       max(@remote_spawn_timeout, launch_timeout(spec) + 15_000)
+     )}
   catch
     :error, {:erpc, reason} -> {:ambiguous, reason}
     kind, reason -> {:ambiguous, {kind, reason}}
@@ -248,11 +294,17 @@ defmodule Ouroboros.Provider.Native.Subagent do
   defp recover_started(pid, spec) do
     provider_session_id = Map.get(spec.request_attrs, :provider_session_id)
 
-    case safe_call(pid, {:recover_start, provider_session_id}, @open_timeout + 5_000) do
+    case safe_call(pid, {:recover_start, provider_session_id}, launch_timeout(spec)) do
       {:ok, _started} = ok -> ok
       {:error, reason} -> {:error, {:subagent_unstartable, reason}}
     end
   end
+
+  # A provisioned launch includes the target's bounded Git checkout before provider
+  # startup. Keep every enclosing wait above that budget so a valid checkout is not
+  # mislabeled as an ambiguous remote start after 35 seconds.
+  defp launch_timeout(%{provision: provision}) when is_map(provision), do: @open_timeout + 140_000
+  defp launch_timeout(_), do: @open_timeout + 5_000
 
   @doc "This child's summary now, whether or not it has settled."
   @spec summary(pid()) :: {:ok, map()} | {:error, term()}
@@ -281,14 +333,32 @@ defmodule Ouroboros.Provider.Native.Subagent do
 
   `:stopped` is the reason a parent uses when it is going away; `:timed_out` is the
   deadline's. A child that had already completed keeps the status it earned — a stop
-  after the fact does not rewrite what happened.
+  after the fact does not rewrite what happened. A provisioned child may report
+  `:returning`: its editing has stopped, but its bounded return remains alive and
+  collectable through `await/2` until the acknowledged result or retention error arrives.
   """
   @spec stop(pid(), :stopped | :timed_out) :: {:ok, map()} | {:error, term()}
   def stop(pid, reason \\ :stopped) do
-    result = safe_call(pid, {:settle, reason}, 10_000)
-    _ = stop_process(pid)
+    stop(pid, reason, nil)
+  end
+
+  @doc "Stops editing and atomically hands an unfinished return to the session owner."
+  def stop(pid, reason, return_owner) when is_pid(return_owner) or is_nil(return_owner) do
+    result = safe_call(pid, {:settle, reason, return_owner}, 10_000)
+    unless match?({:ok, %{status: :returning}}, result), do: stop_process(pid)
     result
   end
+
+  @doc false
+  def returning_payload(summary) do
+    summary
+    |> settled_payload()
+    |> Map.put("phase", "progress")
+    |> Map.put("last_activity", "Returning changes; collect with agent_result")
+  end
+
+  @doc false
+  def return_timeout_ms, do: @return_timeout_ms
 
   @doc "Renders one summary as the bounded text a tool result carries."
   @spec render(map()) :: String.t()
@@ -311,9 +381,12 @@ defmodule Ouroboros.Provider.Native.Subagent do
       clip(summary.text, @max_text_bytes),
       "",
       digest,
+      "Elapsed: #{Map.get(summary, :elapsed_ms, 0)} ms / deadline #{Map.get(summary, :deadline_ms, 0)} ms",
+      Map.get(summary, :last_activity),
       files_line(summary.files_changed, summary.files_changed_count),
       worktree_line(summary.worktree),
       approvals_line(summary.approvals_denied),
+      returned_line(summary),
       "Transcript: #{summary.provider_session_id}"
     ]
     |> Enum.reject(&is_nil/1)
@@ -326,6 +399,20 @@ defmodule Ouroboros.Provider.Native.Subagent do
     do: GenServer.start_link(__MODULE__, spec, name: via(spec.task_id))
 
   # ---------------------------------------------------------------- server
+
+  defp returned_line(%{returned_ref: ref, returned_commit: commit} = summary) do
+    [
+      "Changes returned as #{ref}. Inspect with `git diff HEAD #{ref}`; apply with `git cherry-pick #{commit}`.",
+      Map.get(summary, :return_error)
+      | Enum.map(Map.get(summary, :deliveries, []), fn file ->
+          "Delivered: #{file.path} (#{file.bytes} bytes)"
+        end)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n")
+  end
+
+  defp returned_line(summary), do: Map.get(summary, :return_error)
 
   # A local child's summary reads exactly as it always did. A remote one says where it ran,
   # because "completed" about a machine the reader did not pick is half a sentence.
@@ -359,6 +446,12 @@ defmodule Ouroboros.Provider.Native.Subagent do
        remote?: node() != origin,
        worktree_requested?: Map.get(spec, :worktree) == true,
        worktree: nil,
+       provision: Map.get(spec, :provision),
+       returned: %{},
+       return_task: nil,
+       return_timer: nil,
+       settlement: nil,
+       orphaned?: false,
        background?: Map.get(spec, :background, false),
        depth: Map.get(spec, :depth, 1),
        tools: Map.get(spec, :tools, []),
@@ -378,6 +471,12 @@ defmodule Ouroboros.Provider.Native.Subagent do
        approvals_denied: 0,
        open_approvals: MapSet.new(),
        progress_sent: 0,
+       started_at: System.monotonic_time(:millisecond),
+       elapsed_ms: nil,
+       last_progress_at: nil,
+       progress_timer: nil,
+       last_tool: nil,
+       last_activity: nil,
        # `cost` starts as `nil` rather than `0.0`, and stays `nil` until some `usage`
        # payload actually carried a price. `Ouroboros.Provider.Native.Cost` omits
        # `cost_usd` for a model it cannot price, and a zero folded in on its behalf would
@@ -428,10 +527,30 @@ defmodule Ouroboros.Provider.Native.Subagent do
     {:noreply, %{state | waiters: [{from, timer} | state.waiters]}}
   end
 
-  def handle_call({:settle, reason}, _from, state) do
+  def handle_call({:settle, reason}, from, state),
+    do: handle_call({:settle, reason, nil}, from, state)
+
+  def handle_call({:settle, reason, return_owner}, _from, state) do
     state = settle(state, reason, settle_note(reason))
+    state = handoff_return(state, return_owner)
     {:reply, {:ok, summary_of(state)}, state}
   end
+
+  # The old loop may exit immediately after the reply. Replace its monitor before
+  # returning, so neither that DOWN nor a fast return completion can lose the result.
+  defp handoff_return(%{status: :returning} = state, owner) when is_pid(owner) do
+    Process.demonitor(state.subscriber_monitor, [:flush])
+
+    %{
+      state
+      | subscriber: owner,
+        subscriber_monitor: Process.monitor(owner),
+        background?: true,
+        orphaned?: false
+    }
+  end
+
+  defp handoff_return(state, _owner), do: state
 
   @impl GenServer
   def handle_cast({:respond, child_request_id, response}, state) do
@@ -444,7 +563,28 @@ defmodule Ouroboros.Provider.Native.Subagent do
   end
 
   @impl GenServer
+  def handle_info({ref, result}, %{return_task: %{ref: ref}} = state) do
+    Process.demonitor(ref, [:flush])
+    return_completed(state, result)
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{return_task: %{ref: ref}} = state),
+    do: return_completed(state, {:error, {:return_worker_failed, reason}})
+
+  def handle_info(:return_deadline, %{return_task: task} = state) when not is_nil(task) do
+    Task.Supervisor.terminate_child(Jido.Harness.SessionTaskSupervisor, task.pid)
+    Process.demonitor(task.ref, [:flush])
+    return_completed(state, {:error, :return_deadline_expired})
+  end
+
   def handle_info({:session_adapter_event, event}, state), do: {:noreply, absorb(state, event)}
+
+  def handle_info(:progress_tick, %{status: :running} = state) do
+    state = progress(%{state | progress_timer: nil})
+    {:noreply, schedule_progress(state)}
+  end
+
+  def handle_info(:progress_tick, state), do: {:noreply, state}
 
   def handle_info({:subagent_deadline, task_id}, %{task_id: task_id} = state),
     do: {:noreply, settle(state, :timed_out, "the child's wall-clock deadline expired")}
@@ -469,13 +609,18 @@ defmodule Ouroboros.Provider.Native.Subagent do
         {:DOWN, monitor, :process, _pid, _reason},
         %{subscriber_monitor: monitor} = state
       ) do
-    {:stop, :normal, settle(state, :stopped, "the parent stopped watching this child")}
+    state = settle(%{state | orphaned?: true}, :stopped, "the parent stopped watching this child")
+    if state.status == :returning, do: {:noreply, state}, else: {:stop, :normal, state}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl GenServer
   def terminate(_reason, state) do
+    if state.return_task,
+      do:
+        Task.Supervisor.terminate_child(Jido.Harness.SessionTaskSupervisor, state.return_task.pid)
+
     _ = close_child(state)
     _ = retire_worktree(state)
     :ok
@@ -500,6 +645,29 @@ defmodule Ouroboros.Provider.Native.Subagent do
   # isolation and got the parent's working copy would make edits it believes are contained,
   # which is the worst of the three possible outcomes.
   # `Ouroboros.Provider.Native.Tools.Agent.start_refusal/1` says each of these in words.
+  defp provision_worktree(%{provision: provision} = state) when is_map(provision) do
+    case Ouroboros.Workspace.Mirrors.worktree(provision.repo_id, provision.commit, state.task_id,
+           source_node: Atom.to_string(state.origin)
+         ) do
+      {:ok, worktree} ->
+        case Ouroboros.Workspace.Deliveries.prepare(worktree.root) do
+          :ok ->
+            {:ok,
+             %{
+               state
+               | worktree: Worktree.public(worktree),
+                 request_attrs: Map.put(state.request_attrs, :cwd, worktree.root)
+             }}
+
+          {:error, reason} ->
+            {:error, {:subagent_worktree_unprovisionable, node(), reason}}
+        end
+
+      {:error, reason} ->
+        {:error, {:subagent_worktree_unprovisionable, node(), reason}}
+    end
+  end
+
   defp provision_worktree(%{worktree_requested?: false} = state), do: {:ok, state}
 
   defp provision_worktree(state) do
@@ -562,7 +730,7 @@ defmodule Ouroboros.Provider.Native.Subagent do
         }
 
         case Session.send(state.handle, TurnRequest.new!(state.prompt), turn_id) do
-          :ok -> {:ok, state}
+          :ok -> {:ok, schedule_progress(state)}
           other -> {:error, {:subagent_turn_refused, other}}
         end
 
@@ -585,13 +753,23 @@ defmodule Ouroboros.Provider.Native.Subagent do
   # transcript — every event, every tool result — is on disk under its session
   # directory, addressable by the `provider_session_id` the spawn event names.
   defp absorb(%{status: status} = state, _event)
-       when status in [:completed, :failed, :stopped, :timed_out],
+       when status in [:completed, :failed, :stopped, :timed_out, :returning],
        do: state
 
   defp absorb(state, %{type: :approval_requested} = event), do: relay_approval(state, event)
 
-  defp absorb(state, %{type: :tool_call}),
-    do: progress(%{state | tool_calls: state.tool_calls + 1})
+  defp absorb(state, %{type: :tool_call, payload: payload}) do
+    tool = Map.get(payload, "name")
+
+    state = %{
+      state
+      | tool_calls: state.tool_calls + 1,
+        last_tool: tool,
+        last_activity: activity(payload)
+    }
+
+    progress(state, tool == "bash")
+  end
 
   defp absorb(state, %{type: :tool_result}), do: progress(state)
 
@@ -652,12 +830,6 @@ defmodule Ouroboros.Provider.Native.Subagent do
   # translation: the loop mints a parent request id, puts it on the parent's own
   # approval channel, and hands the answer back to `respond/3`, which addresses the
   # child by the id the child minted. Two id spaces, one person.
-  defp relay_approval(%{background?: true} = state, %{request_id: request_id})
-       when is_binary(request_id) do
-    _ = deny_unreachable(state, request_id)
-    %{state | approvals_denied: state.approvals_denied + 1}
-  end
-
   defp relay_approval(state, %{request_id: request_id, payload: payload})
        when is_binary(request_id) do
     notify(state, {:approval, request_id, payload})
@@ -666,34 +838,57 @@ defmodule Ouroboros.Provider.Native.Subagent do
 
   defp relay_approval(state, _event), do: state
 
-  defp deny_unreachable(%{handle: nil}, _request_id), do: :ok
+  defp progress(state, force? \\ false)
+  defp progress(%{progress_sent: sent} = state, _force?) when sent >= @max_progress, do: state
 
-  defp deny_unreachable(%{handle: handle}, request_id) do
-    Session.respond_approval(
-      handle,
-      request_id,
-      ApprovalResponse.new!(%{
-        decision: :deny,
-        scope: :once,
-        reason:
-          "this subagent runs in the background, where an approval has nobody to reach. " <>
-            "Do the part that needs permission in the foreground, or ask the parent for it."
-      })
-    )
-  catch
-    :exit, _reason -> :ok
+  defp progress(state, force?) do
+    now = System.monotonic_time(:millisecond)
+
+    if force? or is_nil(state.last_progress_at) or
+         now - state.last_progress_at >= @progress_interval_ms do
+      notify(state, {:progress, progress_payload(state)})
+      %{state | progress_sent: state.progress_sent + 1, last_progress_at: now}
+    else
+      state
+    end
   end
 
-  defp progress(%{progress_sent: sent} = state) when sent >= @max_progress, do: state
+  defp schedule_progress(%{progress_sent: sent} = state) when sent >= @max_progress, do: state
 
-  defp progress(state) do
-    notify(state, {:progress, progress_payload(state)})
-    %{state | progress_sent: state.progress_sent + 1}
+  defp schedule_progress(state),
+    do: %{
+      state
+      | progress_timer: Process.send_after(self(), :progress_tick, @progress_interval_ms)
+    }
+
+  # Only the command's first line or a path is useful in the folded row. Never copy
+  # write content, patches, tool results or a whole arbitrary tool argument map.
+  defp activity(payload) do
+    input = Map.get(payload, "input", %{})
+    value = if is_map(input), do: Map.get(input, "command") || Map.get(input, "path"), else: nil
+
+    if is_binary(value) do
+      value
+      |> String.split("\n", parts: 2)
+      |> hd()
+      |> String.trim()
+      |> String.graphemes()
+      |> Enum.reduce_while("", fn char, acc ->
+        if byte_size(acc) + byte_size(char) <= 160, do: {:cont, acc <> char}, else: {:halt, acc}
+      end)
+    end
   end
+
+  defp elapsed(state),
+    do: state.elapsed_ms || max(0, System.monotonic_time(:millisecond) - state.started_at)
 
   defp progress_payload(state) do
     %{
       "phase" => "progress",
+      "elapsed_ms" => elapsed(state),
+      "deadline_ms" => state.deadline_ms,
+      "last_tool" => state.last_tool,
+      "last_activity" => state.last_activity,
       "task_id" => state.task_id,
       "description" => state.description,
       "provider_session_id" => state.provider_session_id,
@@ -712,26 +907,71 @@ defmodule Ouroboros.Provider.Native.Subagent do
   # ---------------------------------------------------------------- settling
 
   defp settle(%{status: status} = state, _reason, _error)
-       when status in [:completed, :failed, :stopped, :timed_out],
+       when status in [:completed, :failed, :stopped, :timed_out, :returning],
        do: state
 
   defp settle(state, reason, error) do
     _ = state.deadline_timer && Process.cancel_timer(state.deadline_timer)
+    _ = state.progress_timer && Process.cancel_timer(state.progress_timer)
+    state = progress(state, true)
 
     state = %{
       state
       | status: reason,
+        elapsed_ms: elapsed(state),
+        progress_timer: nil,
         error: error || state.error,
         deadline_timer: nil,
         open_approvals: MapSet.new()
     }
 
-    # The child session is closed *before* the summary goes out, so the transcript on
-    # disk is at least as new as the digest that describes it — the same
-    # checkpoint-before-broadcast ordering the session itself keeps.
-    _ = close_child(state)
-    state = %{state | worktree: retire_worktree(state), handle: nil}
+    if is_map(state.provision) and is_map(state.worktree) do
+      # Closing the child and transporting its result can take minutes. Keep the owner
+      # responsive; await/2 only releases its collectors once the return has finalized.
+      task =
+        Task.Supervisor.async_nolink(Jido.Harness.SessionTaskSupervisor, fn ->
+          close_child(state)
+          Ouroboros.Workspace.Return.finish(state.worktree, state.provision)
+        end)
 
+      %{
+        state
+        | status: :returning,
+          settlement: reason,
+          return_task: task,
+          return_timer: Process.send_after(self(), :return_deadline, @return_timeout_ms)
+      }
+    else
+      close_child(state)
+      finish_settlement(%{state | handle: nil})
+    end
+  end
+
+  defp return_completed(state, result) do
+    if state.return_timer, do: Process.cancel_timer(state.return_timer)
+    state = %{state | status: state.settlement, return_task: nil, return_timer: nil, handle: nil}
+
+    state =
+      case result do
+        {:ok, returned, retired} ->
+          %{state | returned: returned, worktree: retired}
+
+        {:error, reason} ->
+          message = "Return failed; work is kept at #{state.worktree["path"]}: #{inspect(reason)}"
+
+          %{
+            state
+            | returned: %{return_error: message},
+              worktree: Map.put(state.worktree, "retired", "kept")
+          }
+      end
+
+    state = finish_settlement(state)
+    if state.orphaned?, do: {:stop, :normal, state}, else: {:noreply, state}
+  end
+
+  defp finish_settlement(state) do
+    state = %{state | worktree: retire_worktree(state)}
     summary = summary_of(state)
     notify(state, {:settled, summary})
     reply_waiters(state, summary)
@@ -784,6 +1024,10 @@ defmodule Ouroboros.Provider.Native.Subagent do
       # of the other.
       turn_id: state.turn_id,
       status: state.status,
+      elapsed_ms: elapsed(state),
+      deadline_ms: state.deadline_ms,
+      last_tool: state.last_tool,
+      last_activity: state.last_activity,
       error: state.error,
       turns: state.turns,
       tool_calls: state.tool_calls,
@@ -807,6 +1051,15 @@ defmodule Ouroboros.Provider.Native.Subagent do
       depth: state.depth,
       tools: state.tools
     }
+    |> Map.merge(
+      Map.take(state.returned, [
+        :returned_ref,
+        :returned_commit,
+        :returned_files,
+        :deliveries,
+        :return_error
+      ])
+    )
   end
 
   @doc "The digest a `provider_event` carries when a child settles."
@@ -814,6 +1067,10 @@ defmodule Ouroboros.Provider.Native.Subagent do
   def settled_payload(summary) do
     %{
       "phase" => "settled",
+      "elapsed_ms" => Map.get(summary, :elapsed_ms),
+      "deadline_ms" => Map.get(summary, :deadline_ms),
+      "last_tool" => Map.get(summary, :last_tool),
+      "last_activity" => Map.get(summary, :last_activity),
       "task_id" => summary.task_id,
       "description" => summary.description,
       "provider_session_id" => summary.provider_session_id,
@@ -835,6 +1092,12 @@ defmodule Ouroboros.Provider.Native.Subagent do
     |> maybe_put("cost_usd", summary.usage.cost)
     |> maybe_put("error", summary.error)
     |> maybe_put("worktree", summary.worktree)
+    |> Map.merge(
+      Map.new(
+        [:returned_ref, :returned_commit, :returned_files, :deliveries, :return_error],
+        fn key -> {Atom.to_string(key), Map.get(summary, key)} end
+      )
+    )
   end
 
   # ---------------------------------------------------------------- helpers

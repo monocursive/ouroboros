@@ -1034,3 +1034,109 @@ fn the_request_can_arrive_on_stdin_without_eating_the_commands_own_input() {
         "the command's own input"
     );
 }
+
+#[test]
+fn provisioned_delivery_and_approved_git_commit_keep_siblings_read_only() {
+    require_enforcement!();
+    let workspace = Workspace::new("provisioned");
+    let base = workspace.root.parent().unwrap();
+    let mirror = base.join("mirror.git");
+    let child = base.join("child");
+    let sibling = base.join("sibling");
+    let git = |cwd: &Path, args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", combined(&out));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git(base, &["init", "--bare", mirror.to_str().unwrap()]);
+    git(
+        base,
+        &["clone", mirror.to_str().unwrap(), child.to_str().unwrap()],
+    );
+    git(
+        &child,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "base",
+        ],
+    );
+    git(&child, &["push", "origin", "HEAD:main"]);
+    std::fs::remove_dir_all(&child).unwrap();
+    git(
+        &mirror,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            child.to_str().unwrap(),
+            "main",
+        ],
+    );
+    git(
+        &mirror,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            sibling.to_str().unwrap(),
+            "main",
+        ],
+    );
+    let admin = PathBuf::from(git(&child, &["rev-parse", "--absolute-git-dir"]));
+    let sibling_admin = PathBuf::from(git(&sibling, &["rev-parse", "--absolute-git-dir"]));
+    let delivery = child.join(".ouroboros/deliver");
+    std::fs::create_dir_all(&delivery).unwrap();
+    let library = base.join("filter.so");
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../c_src/fs_filter.c");
+    let cc = Command::new("cc")
+        .args(["-shared", "-fPIC", "-Wall", "-Werror", "-o"])
+        .arg(&library)
+        .arg(source)
+        .arg("-ldl")
+        .output()
+        .unwrap();
+    assert!(cc.status.success(), "{}", combined(&cc));
+    let mut request = serde_json::json!({"mode":"workspace_write", "cwd":child, "scratch":workspace.scratch, "writable":[child], "protected":[mirror], "denied_names":[".git", ".ouroboros"], "write_exceptions":[delivery], "fs_filter_library":library, "network":true});
+    let log = run_shell(&request.to_string(), "printf log > .ouroboros/deliver/log");
+    assert!(log.status.success(), "{}", combined(&log));
+    let temporary = run_shell(&request.to_string(), "python3 -c 'import tempfile, os, stat; f=tempfile.TemporaryFile(dir=\".ouroboros/deliver\"); f.write(b\"ok\"); f.seek(0); assert f.read()==b\"ok\"; assert stat.S_IMODE(os.fstat(f.fileno()).st_mode)==0o600'");
+    assert!(temporary.status.success(), "{}", combined(&temporary));
+    std::fs::write(child.join("changed"), "changed").unwrap();
+    let command = "git add changed && git -c user.name=Test -c user.email=test@example.invalid commit -qm child";
+    assert_reads_as_read_only_denial(&run_shell(&request.to_string(), command), "ordinary git");
+    request["mode"] = "workspace_write_escalated".into();
+    request["write_exceptions"] = serde_json::json!([delivery, admin, mirror.join("objects")]);
+    let committed = run_shell(&request.to_string(), command);
+    assert!(committed.status.success(), "{}", combined(&committed));
+    assert_eq!(git(&child, &["log", "-1", "--format=%s"]), "child");
+    for target in [
+        child.join(".git"),
+        mirror.join("config"),
+        mirror.join("hooks/bad"),
+        mirror.join("refs/bad"),
+        sibling_admin.join("HEAD"),
+        sibling.join("bad"),
+        child.join(".ouroboros/state"),
+    ] {
+        assert_reads_as_read_only_denial(
+            &run_shell(
+                &request.to_string(),
+                &format!("printf bad > '{}'", target.display()),
+            ),
+            target.to_str().unwrap(),
+        );
+    }
+    for command in ["python3 -c 'open(\".ouroboros/deliver/.git\", \"w\").write(\"bad\")'", "python3 -c 'import os; f=os.open(\".ouroboros/deliver\", os.O_RDONLY); os.open(\".ouroboros\", os.O_CREAT | os.O_WRONLY, dir_fd=f)'", "mkdir .ouroboros/deliver/.GIT", "cd .ouroboros/deliver && env -i /bin/mkdir .git", "python3 -c 'import os; f=os.open(\".ouroboros/deliver\", os.O_RDONLY); os.mkdir(\".git\", dir_fd=f)'", "ln -s ../../.git .ouroboros/deliver/escape"] {
+        assert_reads_as_read_only_denial(&run_shell(&request.to_string(), command), command);
+    }
+}

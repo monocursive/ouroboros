@@ -537,12 +537,57 @@ defmodule Ouroboros.Gateway.Methods do
     case Contract.handler(method) do
       {:ok, handler} when handler != :connection ->
         case Contract.validate(method, params) do
-          :ok -> apply(__MODULE__, handler, [params])
+          :ok -> invoke_on_machine(method, handler, params)
           {:invalid, message} -> invalid_params(message)
         end
 
       _ ->
         {:error, code(:method_not_found), "unknown method #{inspect(method)}"}
+    end
+  end
+
+  defp invoke_on_machine(method, handler, params) do
+    if Contract.machine_scoped?(method) and Map.has_key?(params, "machine") do
+      machine = params["machine"]
+
+      if is_binary(machine) and String.trim(machine) != "" and
+           not String.starts_with?(machine, "tag:") do
+        case Ouroboros.Cluster.resolve_machine(machine) do
+          {:ok, target} when target == node() ->
+            apply(__MODULE__, handler, [Map.delete(params, "machine")])
+
+          {:ok, target} ->
+            with :ok <- Ouroboros.Cluster.ensure_placeable(target) do
+              params = Map.delete(params, "machine")
+              # A loopback browser callback on the other computer is inaccessible here.
+              params =
+                if method == "account.login.start",
+                  do: Map.put(params, "flow", "device_code"),
+                  else: params
+
+              try do
+                :erpc.call(target, __MODULE__, :invoke, [method, params], 10_000)
+              catch
+                _, _ ->
+                  {:error, code(:unavailable),
+                   "#{machine} stopped answering. Reconnect it and check setup before retrying.",
+                   %{"outcome" => "unknown", "machine" => machine}}
+              end
+            else
+              {:error, _} ->
+                unavailable("#{machine} is not ready for work. Open Machines to check it.")
+            end
+
+          {:error, _} ->
+            unavailable(
+              "#{machine} is offline or unknown. Reconnect it, or choose another computer."
+            )
+        end
+      else
+        invalid_params("params.machine must be a nonempty machine name")
+      end
+    else
+      apply(__MODULE__, handler, [params])
     end
   end
 
@@ -562,6 +607,52 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   @doc false
+  def handle_fleet_tags(params) do
+    safe(fn ->
+      with {:ok, machine} <- fetch_string(params, "machine"),
+           operation when operation in ["add", "remove", "list"] <- Map.get(params, "operation"),
+           {:ok, target} <- Cluster.resolve_machine(machine),
+           {:ok, tags} <- Cluster.Tags.change(target, operation, Map.get(params, "tag")) do
+        {:ok, %{node: target, tags: tags}}
+      else
+        {:invalid, message} -> invalid_params(message)
+        {:error, reason} -> invalid_params("fleet tags: #{inspect(reason)}")
+        _ -> invalid_params("operation must be add, remove, or list")
+      end
+    end)
+  end
+
+  @doc false
+  def handle_subagent_spawn(params), do: subagent_tool(params, "agent", params["input"])
+  def handle_subagent_result(params), do: subagent_tool(params, "agent_result", params["input"])
+
+  def handle_subagent_stop(params),
+    do: subagent_tool(params, "agent_result", %{"task_id" => params["task_id"], "stop" => true})
+
+  defp subagent_tool(params, name, input) do
+    safe(fn ->
+      with {:ok, session} <- session_target(:interactive, params) do
+        args = [session.id, params["request_id"], name, input]
+
+        result =
+          if session.node == node(),
+            do: apply(Ouroboros.Provider.Native.SubagentBridge, :call, args),
+            else:
+              :erpc.call(
+                session.node,
+                Ouroboros.Provider.Native.SubagentBridge,
+                :call,
+                args,
+                910_000
+              )
+
+        reply(result)
+      else
+        {:invalid, message} -> invalid_params(message)
+      end
+    end)
+  end
+
   def handle_fleet_status(_params) do
     safe(fn -> {:ok, Cluster.fleet_status()} end)
   end

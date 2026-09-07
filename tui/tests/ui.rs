@@ -25,6 +25,7 @@ use support::{app, fixture, full_hello, render};
 
 fn fleet_profile() -> Profile {
     Profile {
+        tags: serde_json::json!([]),
         schema: 1,
         fleet_id: "fleet-test-0123456789".into(),
         name: "Studio fleet".into(),
@@ -957,11 +958,15 @@ fn machines_service_confirms_before_writing_a_unit() {
         service.text()
     );
     assert!(
-        service.contains("does not start the daemon"),
+        service.contains("Installs and starts automatic recovery"),
         "{}",
         service.text()
     );
-    assert!(service.contains("activation command"), "{}", service.text());
+    assert!(
+        service.contains("checks it is enabled"),
+        "{}",
+        service.text()
+    );
     assert!(app.take_fleet_job().is_none());
     assert!(app
         .drain()
@@ -1062,7 +1067,7 @@ fn machines_add_flow_reviews_a_plan_then_requests_a_fleet_restart() {
         "{}",
         form.text()
     );
-    assert!(form.contains("host"), "{}", form.text());
+    assert!(form.contains("Private address"), "{}", form.text());
 
     type_text(&mut app, "linux-laptop");
     app.apply(key(KeyCode::Tab));
@@ -1141,12 +1146,20 @@ fn machines_add_picks_a_known_tailscale_host_and_prefills_this_mac() {
         "{}",
         form.text()
     );
-    assert!(form.contains("tailscale"), "{}", form.text());
     assert!(form.contains("studio.tailnet.ts.net"), "{}", form.text());
+    assert!(form.contains("F6 advanced options"), "{}", form.text());
     assert!(
-        form.contains("A Mac binary will not run on Linux"),
+        form.contains("This computer's name    studio"),
         "{}",
         form.text()
+    );
+    app.apply(key(KeyCode::F(6)));
+    let advanced = render(&mut app, 120, 34);
+    assert!(advanced.contains("tailscale"), "{}", advanced.text());
+    assert!(
+        advanced.contains("A Mac binary will not run on Linux"),
+        "{}",
+        advanced.text()
     );
 }
 
@@ -5605,7 +5618,7 @@ fn attached_runtime_footer_preserves_the_complete_endpoint_at_standard_width() {
 }
 
 #[test]
-fn the_visible_tab_is_the_only_one_polled() {
+fn home_polls_machine_status_but_defers_provider_inventory_to_the_dashboard() {
     let mut app = shell(full_hello());
     app.open_home();
     app.apply(Msg::Tick);
@@ -5614,12 +5627,15 @@ fn the_visible_tab_is_the_only_one_polled() {
 
     assert!(methods.contains(&"interactive.list".to_string()));
     assert!(methods.contains(&"coding.list".to_string()));
-    assert!(!methods.contains(&"runtime.status".to_string()));
+    assert!(methods.contains(&"runtime.status".to_string()));
+    assert!(!methods.contains(&"runtime.providers".to_string()));
+    assert!(!methods.contains(&"agents.list".to_string()));
 
     app.apply(key(KeyCode::BackTab));
 
     let methods: Vec<String> = app.drain().into_iter().map(|call| call.method).collect();
-    assert!(methods.contains(&"runtime.status".to_string()));
+    // The home request is still pending; switching tabs must not duplicate it.
+    assert!(!methods.contains(&"runtime.status".to_string()));
     assert!(methods.contains(&"runtime.providers".to_string()));
 }
 
@@ -5684,4 +5700,41 @@ fn tabs_wrap_in_both_directions() {
 
     app.apply(key(KeyCode::Tab));
     assert_eq!(app.tab, Tab::Sessions);
+}
+
+/// The full transcript viewport draws prewrapped rows, so a long child heading or
+/// digest must wrap before reaching Paragraph; otherwise its tail vanishes silently.
+#[test]
+fn fleet_child_facts_survive_the_actual_narrow_transcript_viewport() {
+    for width in [40, 80, 120] {
+        let mut app = with_open_session();
+        notify(&mut app, fixture("event_provider_event_subagent"));
+        let screen = render(&mut app, width, 36);
+        let visible = screen.text().split_whitespace().collect::<String>();
+        for fact in [
+            "ouroboros@worker",
+            "12m 05s",
+            "test/parser_test.exs",
+            "31 tool calls",
+            "$0.0731",
+        ] {
+            assert!(
+                visible.contains(&fact.split_whitespace().collect::<String>()),
+                "{fact} clipped at {width}:\n{}",
+                screen.text()
+            );
+        }
+        let joined = screen.rows.iter().map(|row| row.trim()).collect::<String>();
+        assert!(
+            joined.contains("refs/ouroboros/subagents/task-subagent-000000000001"),
+            "{}",
+            screen.text()
+        );
+        assert!(
+            joined
+                .contains("/home/indie/.ouroboros/deliveries/task-subagent-000000000001/tests.txt"),
+            "{}",
+            screen.text()
+        );
+    }
 }

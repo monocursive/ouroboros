@@ -181,6 +181,7 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
       Enum.flat_map(on_disk(policy.protected), &["--ro-bind", &1, &1]) ++
       Enum.flat_map(writable(policy), &["--bind", &1, &1]) ++
       protected_segment_binds(policy) ++
+      exception_binds(policy) ++
       ["--tmpfs", policy.scratch] ++
       network(policy, unshare_net) ++
       chdir(scope)
@@ -193,11 +194,31 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
 
     case {segments, filter_library()} do
       {[_ | _] = names, path} when is_binary(path) ->
-        ["--setenv", "LD_PRELOAD", path, "--setenv", "OUROBOROS_FS_DENY", Enum.join(names, ":")]
+        ["--setenv", "LD_PRELOAD", path, "--setenv", "OUROBOROS_FS_DENY", Enum.join(names, ":")] ++
+          if Map.has_key?(policy, :write_exceptions) do
+            [
+              "--setenv",
+              "OUROBOROS_FS_WRITE_EXCEPTIONS",
+              Enum.map_join(policy.write_exceptions, ":", &Base.encode16(&1, case: :lower))
+            ]
+          else
+            []
+          end
 
       _absent ->
         []
     end
+  end
+
+  defp exception_binds(policy) do
+    roots = Map.get(policy, :write_exceptions, [])
+
+    {nested, _} =
+      Enum.reduce(roots, {[], @max_segment_visits}, fn root, acc ->
+        descend(root, policy.protected_segments, @max_segment_depth, acc)
+      end)
+
+    Enum.flat_map(roots, &["--bind", &1, &1]) ++ Enum.flat_map(nested, &["--ro-bind", &1, &1])
   end
 
   defp filter_library do
@@ -254,11 +275,21 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
           child = Path.join(dir, entry)
           {found, budget} = acc
 
-          cond do
-            not directory?(child) -> acc
-            # A matched directory is bound whole; there is nothing below it left to find.
-            entry in segments -> {[child | found], budget}
-            true -> descend(child, segments, depth - 1, acc)
+          case File.lstat(child) do
+            {:ok, %{type: type}} when type in [:directory, :regular] ->
+              cond do
+                Enum.any?(segments, &(String.downcase(entry) == String.downcase(&1))) ->
+                  {[child | found], budget}
+
+                type == :directory ->
+                  descend(child, segments, depth - 1, acc)
+
+                true ->
+                  acc
+              end
+
+            _ ->
+              acc
           end
         end)
 
@@ -270,7 +301,6 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
   # `File.dir?/1` follows symlinks, and following them is how a bounded walk becomes an
   # unbounded one — and how a bind could name a destination outside the writable root
   # that the link happens to point at.
-  defp directory?(path), do: match?({:ok, %File.Stat{type: :directory}}, File.lstat(path))
 
   # Protected roots are mounted only when present. Unlike protected *segments*, these are
   # absolute operator locations outside writable roots; an absent one stays unreachable

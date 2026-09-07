@@ -427,6 +427,14 @@ body.phx-loading {
 
 /* -------------------------------------------------------------------------- Layout */
 
+.ouro-new-fields {
+  display: contents;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
 .ouro-deck {
   display: flex;
   flex-direction: column;
@@ -3000,6 +3008,29 @@ body .ouro-subagent-row {
   gap: 0.45rem;
 }
 
+/* Child activity and return summaries must wrap with the conversation width. */
+body .ouro-subagent-row {
+  display: grid;
+  grid-template-columns: 1.25rem minmax(0, 1fr);
+  align-items: start;
+}
+
+body .ouro-subagent-headline,
+body .ouro-subagent-detail {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+body .ouro-subagent-rows {
+  overflow-wrap: anywhere;
+}
+
+body .ouro-subagent-detail {
+  grid-column: 2;
+  margin-left: 0;
+  white-space: normal;
+}
+
 body .ouro-tool-mark,
 body .ouro-subagent-mark {
   width: 1.25rem;
@@ -3899,10 +3930,11 @@ body .ouro-gate {
   }
   body .ouro-deck:not(.ouro-session-open) .ouro-columns {
     display: flex;
-    flex-direction: column-reverse;
+    flex-direction: column;
     overflow: auto;
   }
   body .ouro-deck:not(.ouro-session-open) .ouro-focus {
+    order: -1;
     flex: 0 0 auto;
   }
   body .ouro-deck:not(.ouro-session-open) .ouro-rail {
@@ -3986,21 +4018,29 @@ body .ouro-gate {
   body .ouro-topbar {
     padding: 0.4rem 0.75rem;
     gap: 0.5rem;
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
     min-height: 3.5rem;
   }
   body .ouro-topbar .ouro-presence {
-    display: none;
+    display: flex;
+    min-height: 2.75rem;
   }
   body .ouro-topbar .ouro-wordmark {
     font-size: 0.9rem;
   }
   body .ouro-topbar-right {
     gap: 0.35rem;
+    flex-wrap: wrap;
+  }
+  body .ouro-topbar-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 2.75rem;
   }
   body .ouro-topbar .ouro-icon-button {
-    min-width: 2rem;
-    width: 2rem;
+    min-width: 2.75rem;
+    width: 2.75rem;
+    min-height: 2.75rem;
   }
   body .ouro-topbar .ouro-button {
     padding-inline: 0.65rem;
@@ -4008,8 +4048,6 @@ body .ouro-gate {
   }
 
 
-  body .ouro-presence-label,
-  body .ouro-pill,
   body .ouro-today {
     display: none;
   }

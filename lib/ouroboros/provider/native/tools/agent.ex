@@ -71,19 +71,17 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
       "collect one first" — is something the model can act on. Settled-but-uncollected
       children do not count towards it; a parent may track at most 32 in total.
     * **`max_turns`** — the child's model round-trips — defaults to 12 and is capped at 30.
-    * **A wall-clock deadline** of 300 s by default, at most 900 s, settable per node
-      with `provider_options["subagent_deadline_ms"]`. `background: false` blocks the
-      parent's tool call for at most that long, and reports `timed_out` when it fires.
+    * **A wall-clock deadline** of 300 s by default, requested with `deadline_ms`,
+      bounded by `subagent_max_deadline_ms` (default 900 s, absolute 4 h).
+      `subagent_deadline_ms` sets the default. Foreground children are also bounded by
+      the loop tool timeout; long children must use `background: true`.
     * **A 16 KiB summary**, of which at most 12 KiB is the child's own final message.
 
   ## Background children, and why one can be refused at spawn
 
   `background: true` returns a `task_id` immediately; `agent_result` collects it later.
-  The child then outlives the turn that spawned it, which means the parent's approval
-  channel — a loop process, which ends with the turn — is not there any more. A child
-  that could raise an approval nobody can answer would hang until its own deadline, so
-  it is **refused at spawn** unless it cannot raise one: either the parent runs in
-  `auto_approve`, or the child's tools are all read-only. The refusal names the fix.
+  The session carries a background child's approvals to the human even between turns.
+  A one-shot run has no session owner and refuses background children at spawn.
 
   A background child is stopped when the **parent session closes** — not when the turn
   ends — and a collection after that says `stopped` rather than pretending it finished.
@@ -129,22 +127,35 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
         type: :string,
         default: "",
         doc:
-          "Run the child on another machine of this fleet. Name a connected machine; omit " <>
-            "to run it on this one."
+          "Run the child on another machine of this fleet. Call fleet for the live list. " <>
+            "Name a connected machine or use tag:NAME when exactly one matches; omit to run here."
       ],
       workspace: [
         type: :string,
         default: "",
         doc:
           "Absolute path of the child's workspace on that machine. Required with " <>
-            "`machine:`; refused without it."
+            "`machine:` unless sync is true; refused without it."
+      ],
+      sync: [
+        type: :boolean,
+        default: false,
+        doc:
+          "Send a snapshot of this repository, including uncommitted work, to the machine. " <>
+            "Requires machine and creates an isolated worktree there. Cannot be combined with workspace. " <>
+            "Ignored files do not travel; the child installs dependencies."
       ],
       background: [
         type: :boolean,
         default: false,
         doc:
           "Return a task_id immediately instead of waiting. Collect it with agent_result. " <>
-            "A background child cannot ask anyone for permission."
+            "Interactive background children can ask for permission between turns. " <>
+            "Foreground children are bounded by the loop tool timeout; use background for long work."
+      ],
+      deadline_ms: [
+        type: :pos_integer,
+        doc: "Wall-clock limit in milliseconds, bounded by this node’s subagent_max_deadline_ms."
       ],
       max_turns: [
         type: :pos_integer,
@@ -165,16 +176,10 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
   @default_deadline_ms 300_000
   @min_deadline_ms 1_000
   @max_deadline_ms 900_000
+  @absolute_deadline_ms 14_400_000
   @max_prompt_bytes 32 * 1024
   @max_description_bytes 200
   @max_tools 64
-
-  # The tools whose `Ouroboros.Provider.Native.Tools.classify/3` mode is `:read` for every
-  # possible argument, which is what makes them unable to raise an approval under any
-  # posture (`Loop.decide/5` allows `:read` outright). `code_intel` is deliberately absent
-  # — its `rename` writes — and so is `web_fetch`, which is `:network`, and `ask_user`,
-  # whose whole purpose is to reach a person.
-  @never_asking ~w(read grep glob ls plan skill)
 
   @doc "The maximum nesting depth: a child may spawn children, a grandchild may not."
   @spec max_depth() :: pos_integer()
@@ -255,10 +260,12 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
         # the target a value that cannot mean there what it means here.
         context: context(parent, placement.remote?),
         worktree: placement.worktree?,
+        provision_source: if(placement.sync?, do: parent.scope.root),
+        provision_options: provision_options(parent.options),
         background: background?,
         depth: parent.depth + 1,
         tools: tools,
-        deadline_ms: deadline_ms(parent)
+        deadline_ms: deadline_ms(input, parent)
       })
     end
   end
@@ -331,6 +338,12 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
       "node" => Atom.to_string(child_node),
       "remote" => child_node != node()
     }
+    |> Map.merge(
+      Map.new(
+        Map.take(started, [:provisioned, :commit, :bytes, :untracked, :untracked_count]),
+        fn {key, value} -> {Atom.to_string(key), value} end
+      )
+    )
   end
 
   @doc "What the model is told when it calls `agent` past the depth cap."
@@ -425,28 +438,13 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
   defp child_forbidden(_parent), do: []
 
   defp background_ok(false, _tools, _parent), do: :ok
+  defp background_ok(true, _tools, %{session_pid: pid}) when is_pid(pid), do: :ok
 
-  defp background_ok(true, _tools, %{session_pid: nil}),
+  defp background_ok(true, _tools, _parent),
     do:
       {:error,
        "Refused: this run has no session process to hold a background child past the end " <>
          "of the turn. Spawn it with `background: false`."}
-
-  defp background_ok(true, _tools, %{approval_mode: :auto_approve}), do: :ok
-
-  defp background_ok(true, tools, _parent) do
-    asking = Enum.reject(tools, &(&1 in @never_asking))
-
-    if asking == [] do
-      :ok
-    else
-      {:error,
-       "Refused: a background child outlives the turn that spawned it, so an approval it " <>
-         "raises has nobody to reach and would hang until its deadline. " <>
-         "#{Enum.join(asking, ", ")} can ask. Either give it only read-only tools " <>
-         "(#{Enum.join(@never_asking, ", ")}), or spawn it with `background: false`."}
-    end
-  end
 
   # ---------------------------------------------------------------- placement
 
@@ -458,13 +456,32 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
     machine = text(Map.get(input, "machine"))
     workspace = text(Map.get(input, "workspace"))
     worktree? = truthy(Map.get(input, "worktree"))
+    sync? = truthy(Map.get(input, "sync"))
 
-    with {:ok, target} <- chosen_machine(machine),
+    with :ok <- sync_arguments(sync?, machine, workspace),
+         {:ok, target} <- chosen_machine(machine),
          remote? = target != node(),
-         {:ok, root} <- placement_root(remote?, machine, workspace, parent, target) do
-      {:ok, %{node: target, remote?: remote?, root: root, worktree?: worktree?}}
+         {:ok, root} <-
+           if(sync?,
+             do: {:ok, nil},
+             else: placement_root(remote?, machine, workspace, parent, target)
+           ) do
+      {:ok,
+       %{node: target, remote?: remote?, root: root, worktree?: worktree? or sync?, sync?: sync?}}
     end
   end
+
+  defp sync_arguments(true, "", _),
+    do:
+      {:error,
+       "Refused: `sync: true` requires `machine:`. Call `fleet` to choose a connected machine."}
+
+  defp sync_arguments(true, _, workspace) when workspace != "",
+    do:
+      {:error,
+       "Refused: `workspace:` cannot be combined with `sync: true`: in-place sync could overwrite somebody's checkout. Omit workspace to create an isolated snapshot worktree."}
+
+  defp sync_arguments(_, _, _), do: :ok
 
   defp chosen_machine(""), do: {:ok, node()}
 
@@ -491,18 +508,49 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
   both the whole name of one machine and part of `core@a2`, and a caller who typed the
   whole name meant the whole name.
 
-  Public and pure because resolution is a fact about a name and a list rather than about a
-  fleet, and a refusal that names the candidates has to be readable back without one.
+  The candidate list bounds placement; friendly names and tags use the live directory.
+  A refusal names the connected candidates and their advertised tags.
   `{:error, message}` is the sentence the model is shown.
   """
   @spec resolve_machine(String.t(), [node()]) :: {:ok, node()} | {:error, String.t()}
+  def resolve_machine("tag:" <> _tag = name, candidates) do
+    machines =
+      Cluster.fleet_status().machines
+      |> Enum.filter(&(&1.node in candidates and &1.state in [:local, :connected]))
+
+    case Ouroboros.Cluster.Facts.resolve(name, machines) do
+      {:ok, target} ->
+        {:ok, target}
+
+      {:error, :unknown_machine} ->
+        {:error,
+         "Refused: no connected machine matches `machine: #{inspect(name)}`. Connected machines and tags: #{Ouroboros.Cluster.Facts.labels(machines)}. Call `fleet` for the live list."}
+
+      {:error, {:ambiguous_machine, targets}} ->
+        matches = Enum.filter(machines, &(&1.node in targets))
+
+        {:error,
+         "Refused: `machine: #{inspect(name)}` matches several connected machines: #{Ouroboros.Cluster.Facts.labels(matches)}. Name one concrete machine."}
+    end
+  end
+
   def resolve_machine(name, candidates) when is_binary(name) and is_list(candidates) do
     case Enum.filter(candidates, &(Atom.to_string(&1) == name)) do
       [target] ->
         {:ok, target}
 
       _none_or_ambiguous ->
-        case Enum.filter(candidates, &String.contains?(Atom.to_string(&1), name)) do
+        named =
+          Cluster.fleet_status().machines
+          |> Enum.filter(&(&1.node in candidates and &1.machine == name))
+          |> Enum.map(& &1.node)
+
+        matches =
+          if named == [],
+            do: Enum.filter(candidates, &String.contains?(Atom.to_string(&1), name)),
+            else: named
+
+        case matches do
           [target] -> {:ok, target}
           [] -> {:error, unknown_machine_refusal(name, candidates)}
           many -> {:error, ambiguous_machine_refusal(name, many)}
@@ -550,7 +598,7 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
     do:
       "Refused: `machine: \"#{name}\"` asks for another machine, and this node is not part " <>
         "of a fleet — it runs without distribution, so there is no other machine to reach. " <>
-        "An operator forms a fleet with OUROBOROS_CLUSTER_STRATEGY (see docs/FLEET.md). " <>
+        "Create a fleet with `ouro fleet create`, then connect a machine with `ouro fleet add user@host` (see docs/FLEET.md). " <>
         "Omit `machine:` to run the child here."
 
   defp unknown_machine_refusal(name, candidates) do
@@ -558,20 +606,31 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
       [] ->
         "Refused: no machine matches `machine: \"#{name}\"` — this node is distributed but " <>
           "no other machine is connected to it right now, so there is nowhere to place a " <>
-          "child. Omit `machine:` to run it here."
+          "child. Omit `machine:` to run it here. Connected machines and tags: #{directory_labels(candidates)}."
 
       connected ->
         "Refused: no machine matches `machine: \"#{name}\"`. The machines connected to this " <>
           "one are: #{join_nodes(connected)}. Name one of those — in full, or by a fragment " <>
-          "that fits only it — or omit `machine:` to run the child here."
+          "that fits only it — or omit `machine:` to run the child here. Connected machines and tags: #{directory_labels(candidates)}."
     end
+  end
+
+  defp directory_labels(candidates) do
+    known = Cluster.fleet_status().machines
+
+    candidates
+    |> Enum.map(fn candidate ->
+      Enum.find(known, &(&1.node == candidate)) ||
+        %{node: candidate, machine: to_string(candidate), facts: nil}
+    end)
+    |> Ouroboros.Cluster.Facts.labels()
   end
 
   defp ambiguous_machine_refusal(name, matches),
     do:
       "Refused: `machine: \"#{name}\"` matches #{length(matches)} connected machines: " <>
         "#{join_nodes(matches)}. Name one of them in full — a fragment that fits two " <>
-        "machines cannot choose between them."
+        "machines cannot choose between them. Advertised tags: #{directory_labels(matches)}."
 
   @doc """
   Renders one `Ouroboros.Cluster.ensure_placeable/1` refusal as the sentence the model sees.
@@ -612,7 +671,8 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
       "Refused: `machine: \"#{name}\"` resolves to #{target}, and a child there needs a " <>
         "`workspace:` — the absolute path of the tree it should work in on that machine. " <>
         "This session's own paths name directories on this machine and mean nothing on that " <>
-        "one, so there is nothing for the child to inherit."
+        "one, so there is nothing for the child to inherit. Or pass `sync: true` to provision " <>
+        "this repository there, including uncommitted work."
 
   defp relative_workspace_refusal(workspace, target),
     do:
@@ -633,6 +693,22 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
   attached, so each gets said rather than inspected into the transcript.
   """
   @spec start_refusal(term()) :: String.t()
+  def start_refusal({:subagent_provision_failed, target, {:provisioning_unavailable, _}}),
+    do:
+      "Refused: #{target} runs a release without provisioning. Upgrade Ouroboros there, or use `workspace:` with an existing checkout."
+
+  def start_refusal({:subagent_provision_failed, target, {:bundle_too_large, bytes}}),
+    do:
+      "Refused: the snapshot for #{target} exceeds the #{bytes}-byte bundle limit. Push to a Git remote both machines can reach and use `workspace:` with a checkout there."
+
+  def start_refusal({:subagent_provision_failed, _target, :snapshot_requires_a_commit}),
+    do:
+      "Refused: this repository has no HEAD commit. Commit something first, then use `sync: true`; subsequent uncommitted changes travel too."
+
+  def start_refusal({:subagent_provision_failed, target, reason}),
+    do:
+      "Refused: the repository could not be provisioned on #{target}: #{inspect(reason)}. No child was launched. Check `fleet` for the target's provisioning readiness."
+
   def start_refusal({:subagent_worktree_root_not_admitted, target}),
     do: worktree_root_refusal(target)
 
@@ -706,9 +782,7 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
         "`workspace:` a directory that exists there."
 
   # Who the child reports to, and the whole of the foreground/background difference. The
-  # loop can put an approval in front of a person and cannot outlive the turn; the session
-  # outlives the turn and has no approval channel of its own. A child gets exactly one of
-  # them, which is why a background child is refused above unless it cannot ask.
+  # loop owns foreground approvals; the session relays background approvals even between turns.
   defp subscriber(parent, true), do: parent.background_subscriber
   defp subscriber(parent, false), do: parent.subscriber
 
@@ -782,10 +856,24 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
 
   # ---------------------------------------------------------------- options
 
+  defp provision_options(options) do
+    for key <- [:provision_max_bytes, :provision_deadline_ms],
+        value = option(options, Atom.to_string(key)),
+        is_integer(value) and value > 0,
+        do: {key, value}
+  end
+
   defp child_options(parent, input, child_id) do
     parent.options
     |> Map.new(fn {key, value} -> {to_string(key), value} end)
-    |> Map.take(["tool_timeout_ms", "checkpoint_limit", "subagent_deadline_ms", "subagent_model"])
+    |> Map.take([
+      "tool_timeout_ms",
+      "checkpoint_limit",
+      "subagent_deadline_ms",
+      "subagent_model",
+      "subagent_max_deadline_ms",
+      "bash_max_timeout_ms"
+    ])
     |> Map.merge(%{
       "max_iterations" => max_turns(input),
       "subagent_depth" => parent.depth + 1,
@@ -812,15 +900,21 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
     end
   end
 
-  defp deadline_ms(parent) do
-    case option(parent.options, "subagent_deadline_ms") do
-      value when is_integer(value) and value > 0 ->
-        value |> max(@min_deadline_ms) |> min(@max_deadline_ms)
+  defp deadline_ms(input, parent) do
+    ceiling =
+      positive_option(option(parent.options, "subagent_max_deadline_ms"), @max_deadline_ms)
+      |> min(@absolute_deadline_ms)
 
-      _unset ->
-        @default_deadline_ms
-    end
+    default =
+      positive_option(option(parent.options, "subagent_deadline_ms"), @default_deadline_ms)
+
+    positive_option(Map.get(input, "deadline_ms"), default)
+    |> max(@min_deadline_ms)
+    |> min(ceiling)
   end
+
+  defp positive_option(value, _default) when is_integer(value) and value > 0, do: value
+  defp positive_option(_value, default), do: default
 
   defp max_turns(input) do
     case Map.get(input, "max_turns") do

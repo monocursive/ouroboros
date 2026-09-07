@@ -72,6 +72,7 @@ defmodule Ouroboros.Web.Live.NewSession do
             model_choice: :runtime_default,
             model_text: "",
             model_search: "",
+            machine: "",
             workspace: "",
             sandbox: nil,
             effort: nil
@@ -82,6 +83,7 @@ defmodule Ouroboros.Web.Live.NewSession do
           model_choice: model_choice(),
           model_text: String.t(),
           model_search: String.t(),
+          machine: String.t(),
           workspace: String.t(),
           sandbox: String.t() | nil,
           effort: String.t() | nil
@@ -116,6 +118,7 @@ defmodule Ouroboros.Web.Live.NewSession do
       provider: Map.get(prefs, "provider"),
       model_choice: if(Map.has_key?(prefs, "model"), do: :custom, else: :runtime_default),
       model_text: Map.get(prefs, "model", ""),
+      machine: Map.get(prefs, "machine", ""),
       workspace: Map.get(prefs, "workspace", ""),
       sandbox: Map.get(prefs, "sandbox_mode", "workspace_write"),
       effort: Map.get(prefs, "reasoning_effort")
@@ -997,6 +1000,7 @@ defmodule Ouroboros.Web.Live.NewSession do
       provider ->
         {:ok,
          %{"id" => form.id || mint_id(), "provider" => provider}
+         |> put_stated("machine", trimmed(form.machine))
          |> put_stated("model", model_intent(form, field).send)
          |> put_stated("workspace", trimmed(form.workspace))
          |> put_stated("sandbox_mode", stated(form.sandbox, @sandbox_modes))

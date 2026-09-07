@@ -90,6 +90,8 @@ const HEADER: &str = "\
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
+    pub location: TaskLocation,
+    #[serde(default)]
     pub defaults: Defaults,
     #[serde(default)]
     pub onboarding: Onboarding,
@@ -107,6 +109,17 @@ pub struct Config {
     pub accessibility: AccessibilityConfig,
     #[serde(default)]
     pub budget: BudgetConfig,
+}
+
+/// The project is always stored with the computer it belongs to.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskLocation {
+    #[serde(default)]
+    pub machine: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub workspace: Option<String>,
 }
 
 /// Which palette this client draws in. `[theme]` in `config.toml`.

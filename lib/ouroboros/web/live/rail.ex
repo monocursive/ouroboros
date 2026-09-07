@@ -172,19 +172,22 @@ defmodule Ouroboros.Web.Live.Rail do
 
   A conversation nobody named and a task are different things with the same problem: the
   rail needs a word. The task's objective is what it was asked to do, which is the closest
-  thing it has to a name; a conversation with neither falls back to its id, which is at
-  least addressable.
+  thing it has to a name. An unnamed conversation gets a friendly project label;
+  its stable id remains in its route and session details.
   """
   @spec title(Row.t()) :: String.t()
   def title(%Row{} = row) do
-    [row.title, row.id]
-    |> Enum.find_value(row.id, fn candidate ->
-      case candidate do
-        text when is_binary(text) -> if String.trim(text) == "", do: nil, else: String.trim(text)
-        _absent -> nil
-      end
-    end)
+    case row.title do
+      text when is_binary(text) and text != "" -> String.trim(text) |> untitled(row.workspace)
+      _ -> untitled("", row.workspace)
+    end
   end
+
+  defp untitled("", workspace) when is_binary(workspace) and workspace != "",
+    do: "New conversation · " <> Path.basename(workspace)
+
+  defp untitled("", _), do: "New conversation"
+  defp untitled(title, _), do: title
 
   @doc """
   The word a settled row reports, from the status alone.

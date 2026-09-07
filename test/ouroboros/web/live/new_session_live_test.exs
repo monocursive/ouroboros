@@ -1752,6 +1752,51 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   # Harness
   # ------------------------------------------------------------------------------------
 
+  describe "destination selection" do
+    setup :endpoint
+
+    test "an unavailable saved computer cannot reuse local setup or folders", %{conn: conn} do
+      {:ok, view, _} = live(conn, "/new?machine=offline-laptop")
+      assert has_element?(view, "#machine option[selected]", "offline-laptop")
+      assert render(view) =~ "offline or unknown"
+      assert has_element?(view, "button[type=submit][disabled]")
+      assert has_element?(view, ~s(input[name=workspace][value=""]))
+      html = view |> element("button", "Browse…") |> render_click()
+      assert html =~ "offline or unknown"
+      refute html =~ "Use this directory"
+    end
+
+    test "switching computers keeps the task and restores each project draft", %{conn: conn} do
+      {:ok, view, _} = live(conn, "/new")
+      _ = change(view, %{"workspace" => "/local/project", "initial_message" => "Keep my task"})
+
+      _ =
+        render_change(view, "change", %{
+          "machine" => "offline-laptop",
+          "workspace" => "/local/project",
+          "initial_message" => "Keep my task"
+        })
+
+      assert has_element?(view, ~s(input[name=workspace][value=""]))
+      assert has_element?(view, "textarea", "Keep my task")
+      _ = render_change(view, "change", %{"machine" => "", "initial_message" => "Keep my task"})
+      assert has_element?(view, ~s(input[name=workspace][value="/local/project"]))
+      assert has_element?(view, "textarea", "Keep my task")
+    end
+
+    test "start params keep the computer and its folder together" do
+      form =
+        NewSession.new(%{
+          "machine" => "server",
+          "workspace" => "/srv/project",
+          "provider" => "native"
+        })
+
+      assert {:ok, %{"machine" => "server", "workspace" => "/srv/project"}} =
+               NewSession.start_params(form, :unsupported)
+    end
+  end
+
   defp endpoint(_context, scope \\ :operate)
 
   defp endpoint(context, scope), do: endpoint_with(context, scope, fn _dir -> :ok end)

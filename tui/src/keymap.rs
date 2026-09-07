@@ -59,6 +59,7 @@ pub enum Scope {
 /// question someone is asking, then the leader verbs, then the composer motions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Action {
+    ChooseLocation,
     // ----- global ------------------------------------------------------------------
     Send,
     Steer,
@@ -116,7 +117,8 @@ pub enum Action {
 
 impl Action {
     /// Every action, in listing order.
-    pub const ALL: [Action; 46] = [
+    pub const ALL: [Action; 47] = [
+        Self::ChooseLocation,
         Self::StarterExplore,
         Self::StarterReview,
         Self::StarterPlan,
@@ -171,6 +173,7 @@ impl Action {
             Self::StarterExplore => "starter_explore",
             Self::StarterReview => "starter_review",
             Self::StarterPlan => "starter_plan",
+            Self::ChooseLocation => "choose_location",
             Self::Send => "send",
             Self::Steer => "steer",
             Self::Newline => "newline",
@@ -263,6 +266,7 @@ impl Action {
             Self::StarterExplore => "f2",
             Self::StarterReview => "f3",
             Self::StarterPlan => "f4",
+            Self::ChooseLocation => "f5",
             Self::Send => "enter",
             Self::Steer => "alt+enter",
             Self::Newline => "ctrl+j",
@@ -315,6 +319,7 @@ impl Action {
             Self::StarterExplore => "draft a project walkthrough, on an empty home",
             Self::StarterReview => "draft a review of local changes, on an empty home",
             Self::StarterPlan => "draft a small improvement plan, on an empty home",
+            Self::ChooseLocation => "choose the computer and project for your task",
             Self::Send => "send, or queue a follow-up while the agent is busy",
             Self::Steer => "steer the running turn, where the transport can be steered",
             Self::Newline => "newline (shift+enter where the terminal reports it)",
@@ -367,7 +372,10 @@ impl Action {
             Scope::Leader => "leader",
             Scope::Editor => "composing",
             Scope::Global => match self {
-                Self::StarterExplore | Self::StarterReview | Self::StarterPlan => "getting started",
+                Self::StarterExplore
+                | Self::StarterReview
+                | Self::StarterPlan
+                | Self::ChooseLocation => "getting started",
                 Self::Send
                 | Self::Steer
                 | Self::Newline
