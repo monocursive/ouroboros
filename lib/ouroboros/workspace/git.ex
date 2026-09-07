@@ -44,7 +44,12 @@ defmodule Ouroboros.Workspace.Git do
     # These are runtime bookkeeping commands, not a developer's interactive Git
     # invocation. Even update-ref can execute reference-transaction hooks; neither
     # snapshots nor bundle imports may turn that bookkeeping into extra user commands.
-    args = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false" | args]
+    config =
+      Enum.flat_map(Keyword.get(opts, :config, []), fn {key, value} ->
+        ["-c", key <> "=" <> value]
+      end)
+
+    args = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"] ++ config ++ args
 
     case Exec.run("git", args, options) do
       {:ok, %{status: 0, truncated?: false, timed_out?: false, output: output}} ->
@@ -61,6 +66,40 @@ defmodule Ouroboros.Workspace.Git do
 
       {:error, reason} ->
         {:error, {:git_unavailable, reason}}
+    end
+  end
+
+  # Attributes can select commands from local config (including included config).
+  # Override every configured driver for capture, including required/process drivers,
+  # without editing the operator's configuration or running a filter to discover it.
+  def without_filters(root, opts) do
+    case run(
+           root,
+           [
+             "config",
+             "--null",
+             "--name-only",
+             "--get-regexp",
+             "^filter\\..*\\.(clean|smudge|process|required)$"
+           ],
+           opts
+         ) do
+      {:ok, keys} ->
+        config =
+          keys
+          |> String.split(<<0>>, trim: true)
+          |> Enum.uniq()
+          |> Enum.map(fn key ->
+            {key, if(String.ends_with?(key, ".required"), do: "false", else: "")}
+          end)
+
+        {:ok, Keyword.update(opts, :config, config, &(&1 ++ config))}
+
+      {:error, {:git, 1, ""}} ->
+        {:ok, opts}
+
+      error ->
+        error
     end
   end
 

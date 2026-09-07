@@ -4,9 +4,11 @@ defmodule Ouroboros.Workspace.Return do
   @deadline_ms 600_000
 
   def finish(worktree, provision, opts \\ []) do
+    ceiling = System.monotonic_time(:millisecond) + @deadline_ms
+
     opts =
       opts
-      |> Keyword.put(:deadline, System.monotonic_time(:millisecond) + @deadline_ms)
+      |> Keyword.update(:deadline, ceiling, &min(&1, ceiling))
       |> Keyword.put_new(:deliver_max_bytes, delivery_limit())
 
     root = worktree["path"]
@@ -98,15 +100,7 @@ defmodule Ouroboros.Workspace.Return do
     target = provision.source_node
     deadline = Keyword.fetch!(opts, :deadline)
 
-    with {:ok, token} <-
-           Provision.rpc(
-             target,
-             Returns,
-             :begin_import,
-             [provision.return_token, kind, metadata],
-             deadline,
-             opts
-           ) do
+    with {:ok, token} <- begin_import(provision, kind, metadata, deadline, opts, 25) do
       result =
         with :ok <- Provision.send_chunks(path, target, Returns, token, deadline, opts),
              {:ok, _} <-
@@ -125,6 +119,30 @@ defmodule Ouroboros.Workspace.Return do
         do: Provision.rpc(target, Returns, :cancel_import, [token], deadline, opts)
 
       result
+    end
+  end
+
+  defp begin_import(provision, kind, metadata, deadline, opts, delay) do
+    case Provision.rpc(
+           provision.source_node,
+           Returns,
+           :begin_import,
+           [provision.return_token, kind, metadata],
+           deadline,
+           opts
+         ) do
+      {:error, :return_repository_busy} ->
+        remaining = deadline - System.monotonic_time(:millisecond)
+
+        if remaining > 0 do
+          Process.sleep(min(delay, remaining))
+          begin_import(provision, kind, metadata, deadline, opts, min(delay * 2, 500))
+        else
+          {:error, :provision_deadline_exceeded}
+        end
+
+      result ->
+        result
     end
   end
 end

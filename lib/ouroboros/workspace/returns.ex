@@ -288,13 +288,29 @@ defmodule Ouroboros.Workspace.Returns do
     temporary = target <> ".incoming-" <> entry.archive.token
 
     with :ok <- File.mkdir_p(directory),
-         {:ok, verified} <- Deliveries.extract(entry.archive.path, temporary, files),
-         :ok <- File.rename(temporary, target) do
+         {:ok, verified} <- install_deliveries(entry.archive.path, temporary, target, files) do
       {:ok,
        Enum.map(verified, fn file -> %{path: Path.join(target, file.path), bytes: file.bytes} end)}
     else
       error ->
         File.rm_rf(temporary)
+        error
+    end
+  end
+
+  defp install_deliveries(archive, temporary, target, files) do
+    case File.lstat(target) do
+      {:error, :enoent} ->
+        with {:ok, verified} <- Deliveries.extract(archive, temporary, files),
+             :ok <- File.rename(temporary, target),
+             do: {:ok, verified}
+
+      {:ok, _} ->
+        # An earlier attempt may have installed the files before Git failed. Only
+        # exact regular-file content can authorize acknowledgment; never overwrite it.
+        Deliveries.verify_directory(target, files)
+
+      error ->
         error
     end
   end

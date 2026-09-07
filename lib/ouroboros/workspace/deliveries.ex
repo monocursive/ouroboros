@@ -65,6 +65,21 @@ defmodule Ouroboros.Workspace.Deliveries do
     end
   end
 
+  @doc "Verify an already-installed delivery directory before retrying an acknowledgment."
+  def verify_directory(directory, expected) do
+    with true <- valid_manifest?(expected),
+         {:ok, %{type: :directory}} <- File.lstat(directory),
+         {:ok, acc} <- walk(directory, "", nil, %{files: [], bytes: 0, entries: 0}, @max_bytes),
+         files = Enum.sort_by(acc.files, & &1.path),
+         true <- files == Enum.sort_by(expected, & &1.path) do
+      {:ok, files}
+    else
+      false -> {:error, :delivery_manifest_mismatch}
+      {:ok, _} -> {:error, :unsafe_delivery_destination}
+      error -> error
+    end
+  end
+
   defp directory_or_missing(path) do
     case File.lstat(path) do
       {:ok, %{type: :directory}} -> :ok

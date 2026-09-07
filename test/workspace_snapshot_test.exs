@@ -58,6 +58,83 @@ defmodule Ouroboros.WorkspaceSnapshotTest do
     refute files =~ "deliver"
   end
 
+  test "captures materialized index-flagged files and preserves absent sparse entries", %{
+    root: root
+  } do
+    for name <- ["assumed.txt", "skipped.txt", "absent.txt"] do
+      File.write!(Path.join(root, name), "initial\n")
+    end
+
+    git!(root, ["add", "."])
+    git!(root, ["commit", "-qm", "flag fixtures"])
+
+    git!(root, [
+      "sparse-checkout",
+      "set",
+      "--no-cone",
+      "/tracked.txt",
+      "/assumed.txt",
+      "/.gitignore"
+    ])
+
+    git!(root, ["update-index", "--assume-unchanged", "assumed.txt"])
+    git!(root, ["update-index", "--skip-worktree", "skipped.txt", "absent.txt"])
+    refute File.exists?(Path.join(root, "absent.txt"))
+    File.write!(Path.join(root, "assumed.txt"), "actual assumed edit\n")
+    File.write!(Path.join(root, "skipped.txt"), "actual skipped edit\n")
+    before = state(root)
+
+    assert {:ok, snapshot} = Snapshot.commit(root, "task-index-flags")
+    assert state(root) == before
+    assert git!(root, ["show", snapshot.commit <> ":assumed.txt"]) == "actual assumed edit"
+    assert git!(root, ["show", snapshot.commit <> ":skipped.txt"]) == "actual skipped edit"
+    assert git!(root, ["show", snapshot.commit <> ":absent.txt"]) == "initial"
+  end
+
+  for filter <- ["clean", "process"] do
+    test "snapshot disables repository #{filter} filters without altering config", %{root: root} do
+      File.write!(Path.join(root, ".gitattributes"), "tracked.txt filter=review\n")
+
+      git!(root, [
+        "config",
+        "filter.review.#{unquote(filter)}",
+        "printf invoked > filter-ran; cat"
+      ])
+
+      git!(root, ["config", "filter.review.required", "true"])
+      File.write!(Path.join(root, "tracked.txt"), "raw working content\n")
+      index = File.read!(Path.join(root, ".git/index"))
+      config = File.read!(Path.join(root, ".git/config"))
+
+      result = Snapshot.commit(root, "task-filter-#{unquote(filter)}")
+      refute File.exists?(Path.join(root, "filter-ran"))
+      assert {:ok, snapshot} = result
+      assert git!(root, ["show", snapshot.commit <> ":tracked.txt"]) == "raw working content"
+      assert File.read!(Path.join(root, ".git/index")) == index
+      assert File.read!(Path.join(root, ".git/config")) == config
+    end
+  end
+
+  test "rehashes contents even when the index stat cache considers a file unchanged", %{
+    root: root
+  } do
+    git!(root, ["config", "core.trustctime", "false"])
+    git!(root, ["config", "core.checkStat", "minimal"])
+    path = Path.join(root, "tracked.txt")
+    stamp = {{2020, 1, 1}, {0, 0, 0}}
+    File.touch!(path, stamp)
+    git!(root, ["add", "tracked.txt"])
+    File.write!(path, "updated\n")
+    File.touch!(path, stamp)
+    # Demonstrate the stale-cache precondition instead of relying on timing.
+    assert {:ok, ""} = Git.run(root, ["diff", "--quiet"])
+    before = state(root)
+
+    assert {:ok, snapshot} = Snapshot.commit(root, "task-stat-cache")
+    assert state(root) == before
+    assert git!(root, ["show", snapshot.commit <> ":tracked.txt"]) == "updated"
+  end
+
   test "works inside a detached worktree whose .git is a file", %{root: root} do
     path = Path.join(root, "child")
     git!(root, ["worktree", "add", "--detach", path, "HEAD"])

@@ -12,6 +12,7 @@ defmodule Ouroboros.Workspace.Snapshot do
   def commit(workspace, task_id, opts \\ []) do
     with true <- Git.valid_id?(task_id),
          {:ok, root} <- Git.run(workspace, ["rev-parse", "--show-toplevel"], opts),
+         {:ok, opts} <- Git.without_filters(root, opts),
          {:ok, head} <- head(root, opts),
          {:ok, excludes} <-
            if(Keyword.get(opts, :return_snapshot, false),
@@ -55,14 +56,29 @@ defmodule Ouroboros.Workspace.Snapshot do
   defp snapshot(root, head, task_id, temporary, excludes, opts) do
     index = Path.join(temporary, "index")
     env = [{"GIT_INDEX_FILE", index}, {"GIT_OPTIONAL_LOCKS", "0"}]
-    private = Keyword.update(opts, :env, env, &(env ++ &1))
+
+    private =
+      opts
+      |> Keyword.update(:env, env, &(env ++ &1))
+      # The real checkout may be sparse, but materialized out-of-cone edits still
+      # belong in the snapshot. Retain skip-worktree only for genuinely absent files.
+      |> Keyword.update(
+        :config,
+        [{"core.sparseCheckout", "false"}],
+        &(&1 ++ [{"core.sparseCheckout", "false"}])
+      )
+
     paths = [":/"] ++ Enum.map(excludes, &(":(top,exclude)" <> &1))
 
     with {:ok, parent} <- snapshot_parent(head, opts),
          {:ok, original_index} <-
            Git.run(root, ["rev-parse", "--path-format=absolute", "--git-path", "index"], opts),
          :ok <- copy_index(original_index, index, root, head, private),
+         :ok <- refresh_index_flags(root, private),
          {:ok, _} <- Git.run(root, ["add", "-A", "--" | paths], private),
+         # Rehash tracked content even when its size and timestamps match the cached
+         # index stat. Cleanup must compare contents, not trust a stat-cache shortcut.
+         {:ok, _} <- Git.run(root, ["add", "--renormalize", "--" | paths], private),
          # Remove excluded tracked paths from the private index too. Merely excluding
          # them from `add` would ship the version staged in the real index.
          {:ok, _} <-
@@ -132,6 +148,58 @@ defmodule Ouroboros.Workspace.Snapshot do
          created_at: DateTime.utc_now() |> DateTime.to_iso8601(),
          name: Path.basename(root)
        }}
+    end
+  end
+
+  defp refresh_index_flags(root, opts) do
+    with {:ok, files} <- Git.run(root, ["ls-files", "-z"], opts) do
+      files
+      |> String.split(<<0>>, trim: true)
+      |> Enum.uniq()
+      |> Enum.chunk_every(32)
+      |> Enum.reduce_while(:ok, fn paths, :ok ->
+        # Absent skip-worktree entries belong to sparse checkouts: retain their
+        # indexed blobs. Materialized entries must be read regardless of index flags.
+        result =
+          with {:ok, materialized} <- materialized_paths(root, paths),
+               {:ok, _} <-
+                 Git.run(
+                   root,
+                   [
+                     "update-index",
+                     "--no-assume-unchanged",
+                     "--no-fsmonitor-valid",
+                     "--" | paths
+                   ],
+                   opts
+                 ),
+               :ok <- clear_skip_worktree(root, materialized, opts),
+               do: :ok
+
+        case result do
+          :ok -> {:cont, :ok}
+          error -> {:halt, error}
+        end
+      end)
+    end
+  end
+
+  defp materialized_paths(root, paths) do
+    Enum.reduce_while(paths, {:ok, []}, fn path, {:ok, found} ->
+      case File.lstat(Path.join(root, path)) do
+        {:ok, _} -> {:cont, {:ok, [path | found]}}
+        {:error, :enoent} -> {:cont, {:ok, found}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp clear_skip_worktree(_root, [], _opts), do: :ok
+
+  defp clear_skip_worktree(root, paths, opts) do
+    case Git.run(root, ["update-index", "--no-skip-worktree", "--" | paths], opts) do
+      {:ok, _} -> :ok
+      error -> error
     end
   end
 

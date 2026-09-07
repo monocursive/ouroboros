@@ -362,6 +362,12 @@ apply them deliberately with `git cherry-pick <returned_commit>`. The returned c
 combines the child's committed and dirty changes relative to the provisioned snapshot;
 intermediate child commits are not preserved as separate commits in that return.
 
+Capture clears optimization flags in its private index and rehashes materialized
+tracked files, including files marked `assume-unchanged` or `skip-worktree`. Absent
+sparse-checkout entries retain their indexed content. Repository clean, smudge, and
+process filters are disabled for capture without changing the source configuration;
+external transformations such as Git LFS filtering do not run during a snapshot.
+
 Ignored files do not travel. Add workspace-specific exclusions in `ouroboros.toml`:
 
 ```toml
@@ -389,6 +395,11 @@ child's HEAD, tree, and delivery contents, authorizes deletion of its worktree. 
 failed, ambiguous, or concurrently changed return retains the target worktree and
 snapshot pin and names the error and location. A received Git ref remains available
 even when a later delivery or cleanup step fails.
+
+Concurrent returns to the same repository retry import contention within the same
+ten-minute deadline. An acknowledgment retried after a partial failure verifies any
+already-installed deliveries against their complete size/digest manifest; changed
+files or unsafe paths are refused, never overwritten to make the retry succeed.
 
 Parent repository paths stay in a parent-local capability registry; remote return
 requests carry an opaque capability, repository identity, commit, and task ID. A

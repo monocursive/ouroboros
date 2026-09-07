@@ -67,6 +67,7 @@ defmodule Ouroboros.WorkspaceReturnsTest do
       data: data,
       worktrees: worktrees,
       returns: returns,
+      mirrors: mirrors,
       provision: provision,
       worktree: worktree,
       rpc: rpc
@@ -179,6 +180,179 @@ defmodule Ouroboros.WorkspaceReturnsTest do
              Worktree.remove(%{path: c.worktree.path, repository: c.worktree.repository},
                root: c.worktrees
              )
+  end
+
+  test "returns assumed-unchanged edits before removing the child worktree", c do
+    git!(c.worktree.path, ["update-index", "--assume-unchanged", "source.txt"])
+    File.write!(Path.join(c.worktree.path, "source.txt"), "must return this edit")
+
+    assert {:ok, receipt, retired} =
+             Return.finish(Worktree.public(c.worktree), Provision.remote_metadata(c.provision),
+               rpc: c.rpc,
+               root: c.worktrees
+             )
+
+    assert git!(c.repo, ["show", receipt.returned_ref <> ":source.txt"]) ==
+             "must return this edit"
+
+    assert retired["retired"] == "removed"
+    refute File.exists?(c.worktree.path)
+  end
+
+  test "a late assumed-unchanged edit cannot authorize cleanup", c do
+    rpc = fn target, module, function, args, timeout ->
+      result = c.rpc.(target, module, function, args, timeout)
+
+      if function == :acknowledge do
+        git!(c.worktree.path, ["update-index", "--assume-unchanged", "source.txt"])
+        File.write!(Path.join(c.worktree.path, "source.txt"), "unacknowledged edit")
+      end
+
+      result
+    end
+
+    assert {:ok, receipt, retired} =
+             Return.finish(Worktree.public(c.worktree), Provision.remote_metadata(c.provision),
+               rpc: rpc,
+               root: c.worktrees
+             )
+
+    assert retired["retired"] == "kept"
+    assert receipt.return_error =~ "changed_since_return"
+    assert File.read!(Path.join(c.worktree.path, "source.txt")) == "unacknowledged edit"
+  end
+
+  test "overlapping returns wait for the repository and both complete", c do
+    {:ok, second} =
+      Provision.prepare(c.repo, node(), "task-second",
+        rpc: c.rpc,
+        returns_opts: [server: c.returns]
+      )
+
+    {:ok, second_tree} =
+      Mirrors.worktree(second.repo_id, second.commit, second.task_id, server: c.mirrors)
+
+    File.write!(Path.join(c.worktree.path, "first.txt"), "first result")
+    File.write!(Path.join(second_tree.path, "second.txt"), "second result")
+    owner = self()
+
+    paused = fn target, module, function, args, timeout ->
+      result = c.rpc.(target, module, function, args, timeout)
+
+      if function == :begin_import and match?({:ok, _}, result) do
+        send(owner, {:import_open, self()})
+
+        receive do
+          :resume -> :ok
+        after
+          10_000 -> flunk("return never resumed")
+        end
+      end
+
+      result
+    end
+
+    first_task =
+      Task.async(fn ->
+        Return.finish(
+          Worktree.public(c.worktree),
+          Provision.remote_metadata(c.provision),
+          rpc: paused,
+          root: c.worktrees
+        )
+      end)
+
+    assert_receive {:import_open, first_pid}, 10_000
+
+    observed = fn target, module, function, args, timeout ->
+      result = c.rpc.(target, module, function, args, timeout)
+      if result == {:error, :return_repository_busy}, do: send(owner, :repository_busy)
+      result
+    end
+
+    second_task =
+      Task.async(fn ->
+        Return.finish(
+          Worktree.public(second_tree),
+          Provision.remote_metadata(second),
+          rpc: observed,
+          root: c.worktrees
+        )
+      end)
+
+    assert_receive :repository_busy, 10_000
+    send(first_pid, :resume)
+    assert {:ok, first_receipt, %{"retired" => "removed"}} = Task.await(first_task, 10_000)
+    assert {:ok, second_receipt, %{"retired" => "removed"}} = Task.await(second_task, 10_000)
+    assert git!(c.repo, ["show", first_receipt.returned_ref <> ":first.txt"]) == "first result"
+    assert git!(c.repo, ["show", second_receipt.returned_ref <> ":second.txt"]) == "second result"
+  end
+
+  test "busy return retries remain bounded by the caller's deadline", c do
+    owner = self()
+
+    rpc = fn target, module, function, args, timeout ->
+      if function == :begin_import do
+        send(owner, :attempted_import)
+        {:error, :return_repository_busy}
+      else
+        c.rpc.(target, module, function, args, timeout)
+      end
+    end
+
+    started = System.monotonic_time(:millisecond)
+
+    assert {:error, :provision_deadline_exceeded} =
+             Return.finish(Worktree.public(c.worktree), Provision.remote_metadata(c.provision),
+               rpc: rpc,
+               root: c.worktrees,
+               deadline: started + 2_000
+             )
+
+    assert_received :attempted_import
+    assert System.monotonic_time(:millisecond) - started < 5_000
+    assert File.dir?(c.worktree.path)
+  end
+
+  test "acknowledgment retries verify deliveries installed before a transient Git failure", c do
+    Deliveries.prepare(c.worktree.path)
+    File.write!(Path.join(c.worktree.path, ".ouroboros/deliver/report.txt"), "report")
+    lock = Path.join(c.repo, ".git/refs/ouroboros/snapshots/#{c.provision.task_id}.lock")
+    owner = self()
+
+    rpc = fn target, module, function, args, timeout ->
+      if function == :acknowledge, do: File.write!(lock, "")
+      result = c.rpc.(target, module, function, args, timeout)
+
+      if function == :acknowledge do
+        File.rm!(lock)
+        send(owner, {:acknowledge_args, args})
+      end
+
+      result
+    end
+
+    assert {:error, {:git, _, _}} =
+             Return.finish(Worktree.public(c.worktree), Provision.remote_metadata(c.provision),
+               rpc: rpc,
+               root: c.worktrees
+             )
+
+    assert_received {:acknowledge_args, args}
+    path = Path.join(c.data, "deliveries/#{c.provision.task_id}/report.txt")
+    assert File.read!(path) == "report"
+
+    File.write!(path, "edited")
+
+    assert {:error, :delivery_manifest_mismatch} =
+             apply(Returns, :acknowledge, args ++ [[server: c.returns]])
+
+    assert File.read!(path) == "edited"
+    assert File.dir?(c.worktree.path)
+    File.write!(path, "report")
+    assert {:ok, receipt} = apply(Returns, :acknowledge, args ++ [[server: c.returns]])
+    assert receipt.acknowledged
+    assert {:ok, ^receipt} = apply(Returns, :acknowledge, args ++ [[server: c.returns]])
   end
 
   test "a concurrent edit or delivery after capture prevents cleanup", c do
