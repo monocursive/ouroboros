@@ -172,11 +172,47 @@ defmodule Ouroboros.Provider.Native.Subagent do
   """
   @spec spawn(spec()) :: {:ok, map()} | {:error, term()}
   def spawn(spec) do
-    case Map.get(spec, :node) || node() do
-      target when target == node() -> start_and_launch(spec)
-      target -> spawn_remote(target, spec)
+    with {:ok, prepared, local_metadata} <- prepare_provision(spec) do
+      result =
+        case Map.get(prepared, :node) || node() do
+          target when target == node() -> start_and_launch(prepared)
+          target -> spawn_remote(target, prepared)
+        end
+
+      case result do
+        {:ok, started} -> {:ok, Map.merge(started, local_metadata)}
+        error -> error
+      end
     end
   end
+
+  defp prepare_provision(%{provision_source: source} = spec) when is_binary(source) do
+    alias Ouroboros.Workspace.Provision
+    target = Map.get(spec, :node) || node()
+
+    case Provision.prepare(source, target, spec.task_id) do
+      {:ok, provision} ->
+        prepared =
+          spec
+          |> Map.delete(:provision_source)
+          |> Map.put(:provision, Provision.remote_metadata(provision))
+          |> Map.put(:prompt, Provision.instructions(provision) <> spec.prompt)
+
+        {:ok, prepared,
+         %{
+           provisioned: true,
+           commit: provision.commit,
+           bytes: provision.bytes,
+           untracked: provision.snapshot.untracked,
+           untracked_count: provision.snapshot.untracked_count
+         }}
+
+      {:error, reason} ->
+        {:error, {:subagent_provision_failed, target, reason}}
+    end
+  end
+
+  defp prepare_provision(spec), do: {:ok, Map.delete(spec, :provision_source), %{}}
 
   @doc """
   Starts and launches one child **on this node**, for `spawn/1` and for its own `:erpc`.
@@ -359,6 +395,7 @@ defmodule Ouroboros.Provider.Native.Subagent do
        remote?: node() != origin,
        worktree_requested?: Map.get(spec, :worktree) == true,
        worktree: nil,
+       provision: Map.get(spec, :provision),
        background?: Map.get(spec, :background, false),
        depth: Map.get(spec, :depth, 1),
        tools: Map.get(spec, :tools, []),
@@ -500,6 +537,23 @@ defmodule Ouroboros.Provider.Native.Subagent do
   # isolation and got the parent's working copy would make edits it believes are contained,
   # which is the worst of the three possible outcomes.
   # `Ouroboros.Provider.Native.Tools.Agent.start_refusal/1` says each of these in words.
+  defp provision_worktree(%{provision: provision} = state) when is_map(provision) do
+    case Ouroboros.Workspace.Mirrors.worktree(provision.repo_id, provision.commit, state.task_id,
+           source_node: Atom.to_string(state.origin)
+         ) do
+      {:ok, worktree} ->
+        {:ok,
+         %{
+           state
+           | worktree: Worktree.public(worktree),
+             request_attrs: Map.put(state.request_attrs, :cwd, worktree.root)
+         }}
+
+      {:error, reason} ->
+        {:error, {:subagent_worktree_unprovisionable, node(), reason}}
+    end
+  end
+
   defp provision_worktree(%{worktree_requested?: false} = state), do: {:ok, state}
 
   defp provision_worktree(state) do

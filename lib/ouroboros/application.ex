@@ -163,6 +163,7 @@ defmodule Ouroboros.Application do
           Ouroboros.Interactive.Store,
           Ouroboros.Team.Store,
           Ouroboros.Control.Grants,
+          Ouroboros.Workspace.Mirrors,
           # The permission engine sits with the other durable authority, above every
           # session that consults it. If its store restarts, rest_for_one takes the
           # sessions down with it rather than letting a live provider session keep

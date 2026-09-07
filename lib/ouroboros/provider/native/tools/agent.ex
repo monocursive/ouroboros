@@ -137,7 +137,15 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
         default: "",
         doc:
           "Absolute path of the child's workspace on that machine. Required with " <>
-            "`machine:`; refused without it."
+            "`machine:` unless sync is true; refused without it."
+      ],
+      sync: [
+        type: :boolean,
+        default: false,
+        doc:
+          "Send a snapshot of this repository, including uncommitted work, to the machine. " <>
+            "Requires machine and creates an isolated worktree there. Cannot be combined with workspace. " <>
+            "Ignored files do not travel; the child installs dependencies."
       ],
       background: [
         type: :boolean,
@@ -255,6 +263,7 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
         # the target a value that cannot mean there what it means here.
         context: context(parent, placement.remote?),
         worktree: placement.worktree?,
+        provision_source: if(placement.sync?, do: parent.scope.root),
         background: background?,
         depth: parent.depth + 1,
         tools: tools,
@@ -331,6 +340,12 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
       "node" => Atom.to_string(child_node),
       "remote" => child_node != node()
     }
+    |> Map.merge(
+      Map.new(
+        Map.take(started, [:provisioned, :commit, :bytes, :untracked, :untracked_count]),
+        fn {key, value} -> {Atom.to_string(key), value} end
+      )
+    )
   end
 
   @doc "What the model is told when it calls `agent` past the depth cap."
@@ -458,13 +473,32 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
     machine = text(Map.get(input, "machine"))
     workspace = text(Map.get(input, "workspace"))
     worktree? = truthy(Map.get(input, "worktree"))
+    sync? = truthy(Map.get(input, "sync"))
 
-    with {:ok, target} <- chosen_machine(machine),
+    with :ok <- sync_arguments(sync?, machine, workspace),
+         {:ok, target} <- chosen_machine(machine),
          remote? = target != node(),
-         {:ok, root} <- placement_root(remote?, machine, workspace, parent, target) do
-      {:ok, %{node: target, remote?: remote?, root: root, worktree?: worktree?}}
+         {:ok, root} <-
+           if(sync?,
+             do: {:ok, nil},
+             else: placement_root(remote?, machine, workspace, parent, target)
+           ) do
+      {:ok,
+       %{node: target, remote?: remote?, root: root, worktree?: worktree? or sync?, sync?: sync?}}
     end
   end
+
+  defp sync_arguments(true, "", _),
+    do:
+      {:error,
+       "Refused: `sync: true` requires `machine:`. Call `fleet` to choose a connected machine."}
+
+  defp sync_arguments(true, _, workspace) when workspace != "",
+    do:
+      {:error,
+       "Refused: `workspace:` cannot be combined with `sync: true`: in-place sync could overwrite somebody's checkout. Omit workspace to create an isolated snapshot worktree."}
+
+  defp sync_arguments(_, _, _), do: :ok
 
   defp chosen_machine(""), do: {:ok, node()}
 
@@ -612,7 +646,8 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
       "Refused: `machine: \"#{name}\"` resolves to #{target}, and a child there needs a " <>
         "`workspace:` — the absolute path of the tree it should work in on that machine. " <>
         "This session's own paths name directories on this machine and mean nothing on that " <>
-        "one, so there is nothing for the child to inherit."
+        "one, so there is nothing for the child to inherit. Or pass `sync: true` to provision " <>
+        "this repository there, including uncommitted work."
 
   defp relative_workspace_refusal(workspace, target),
     do:
@@ -633,6 +668,22 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
   attached, so each gets said rather than inspected into the transcript.
   """
   @spec start_refusal(term()) :: String.t()
+  def start_refusal({:subagent_provision_failed, target, {:provisioning_unavailable, _}}),
+    do:
+      "Refused: #{target} runs a release without provisioning. Upgrade Ouroboros there, or use `workspace:` with an existing checkout."
+
+  def start_refusal({:subagent_provision_failed, target, {:bundle_too_large, bytes}}),
+    do:
+      "Refused: the snapshot for #{target} exceeds the #{bytes}-byte bundle limit. Push to a Git remote both machines can reach and use `workspace:` with a checkout there."
+
+  def start_refusal({:subagent_provision_failed, _target, :snapshot_requires_a_commit}),
+    do:
+      "Refused: this repository has no HEAD commit. Commit something first, then use `sync: true`; subsequent uncommitted changes travel too."
+
+  def start_refusal({:subagent_provision_failed, target, reason}),
+    do:
+      "Refused: the repository could not be provisioned on #{target}: #{inspect(reason)}. No child was launched. Check `fleet` for the target's provisioning readiness."
+
   def start_refusal({:subagent_worktree_root_not_admitted, target}),
     do: worktree_root_refusal(target)
 

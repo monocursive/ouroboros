@@ -124,6 +124,41 @@ defmodule Ouroboros.Workspace.Worktree do
 
   # ---------------------------------------------------------------- planes
 
+  @doc "Creates a recorded detached worktree from a node-owned bare mirror."
+  def create_detached(repository, commit, session_id, opts \\ []) do
+    runner = runner(opts)
+
+    with :ok <- validate_session_id(session_id),
+         true <- Ouroboros.Workspace.Git.valid_commit?(commit),
+         true <- admissible?(opts),
+         {:ok, repository} <- WorkspacePath.canonicalize(repository),
+         {:ok, target} <- prepare_target(repository, session_id, opts),
+         :ok <- add(runner, repository, target, commit),
+         {:ok, canonical} <- canonicalize_created(target) do
+      worktree = %{
+        path: canonical,
+        root: canonical,
+        branch: nil,
+        base_commit: commit,
+        repository: repository,
+        session_id: session_id,
+        created_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+        node: Atom.to_string(node()),
+        provisioned: true,
+        repo_id: Keyword.get(opts, :repo_id),
+        source_node: Keyword.get(opts, :source_node)
+      }
+
+      case record(worktree, opts) do
+        :ok -> {:ok, worktree}
+        {:error, reason} -> {:error, {:worktree_unrecorded, canonical, reason, :retained}}
+      end
+    else
+      false -> {:error, :detached_worktree_not_admitted}
+      error -> error
+    end
+  end
+
   @doc """
   Provisions a worktree for a session or task record that asked for one.
 
@@ -210,6 +245,11 @@ defmodule Ouroboros.Workspace.Worktree do
       "base_commit" => worktree.base_commit,
       "repository" => worktree.repository
     }
+    |> Map.merge(
+      Map.new([:provisioned, :repo_id, :source_node], fn key ->
+        {Atom.to_string(key), Map.get(worktree, key)}
+      end)
+    )
   end
 
   defp describe_reason(:dirty), do: "uncommitted changes"
@@ -245,6 +285,11 @@ defmodule Ouroboros.Workspace.Worktree do
       not File.dir?(path) ->
         _ = forget(path, opts)
         {:ok, :removed}
+
+      Map.get(worktree, :provisioned, false) ->
+        # A clean Git status does not mean remote work reached its parent: committed
+        # child edits are clean too. Boot reconciliation must keep these as well.
+        {:ok, {:kept, :awaiting_return}}
 
       dirty?(runner, path) ->
         {:ok, {:kept, :dirty}}
@@ -352,19 +397,39 @@ defmodule Ouroboros.Workspace.Worktree do
 
     Enum.any?(roots, fn allowed ->
       case WorkspacePath.canonicalize(allowed) do
-        {:ok, canonical} -> WorkspacePath.within?(candidate, canonical)
+        {:ok, canonical} -> is_binary(candidate) and WorkspacePath.within?(candidate, canonical)
         {:error, _reason} -> false
       end
     end)
   end
 
-  # The worktree root may not exist yet on the first session of a fresh node, and a root
-  # that cannot be canonicalized is compared as written rather than treated as absent —
-  # the check that follows it is the lease, which canonicalizes for real and refuses.
+  # Resolve the existing ancestor when the first worktree directory has not yet been
+  # created. Comparing a literal /var path with its canonical /private/var grant would
+  # otherwise refuse a correctly configured fresh Mac. Unreadable paths and symlink
+  # errors still fail closed; only a missing directory can use this future path.
   defp canonical_or_literal(path) do
     case WorkspacePath.canonicalize(path) do
-      {:ok, canonical} -> canonical
-      {:error, _reason} -> path
+      {:ok, canonical} ->
+        canonical
+
+      {:error, _reason} ->
+        case File.lstat(path) do
+          {:error, :enoent} ->
+            parent = Elixir.Path.dirname(path)
+
+            if parent != path do
+              case canonical_or_literal(parent) do
+                canonical when is_binary(canonical) ->
+                  Elixir.Path.join(canonical, Elixir.Path.basename(path))
+
+                _ ->
+                  nil
+              end
+            end
+
+          _ ->
+            nil
+        end
     end
   end
 
@@ -689,6 +754,11 @@ defmodule Ouroboros.Workspace.Worktree do
       "created_at" => worktree.created_at,
       "node" => worktree.node
     }
+    |> Map.merge(
+      Map.new([:provisioned, :repo_id, :source_node], fn key ->
+        {Atom.to_string(key), Map.get(worktree, key)}
+      end)
+    )
   end
 
   defp decode(%{"path" => path, "repository" => repository} = entry)
@@ -702,7 +772,10 @@ defmodule Ouroboros.Workspace.Worktree do
         repository: repository,
         session_id: Map.get(entry, "session_id", ""),
         created_at: Map.get(entry, "created_at", ""),
-        node: Map.get(entry, "node", "")
+        node: Map.get(entry, "node", ""),
+        provisioned: Map.get(entry, "provisioned", false),
+        repo_id: Map.get(entry, "repo_id"),
+        source_node: Map.get(entry, "source_node")
       }
     ]
   end

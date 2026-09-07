@@ -496,6 +496,7 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
                :worktree,
                :machine,
                :workspace,
+               :sync,
                :background,
                :max_turns
              ]

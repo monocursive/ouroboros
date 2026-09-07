@@ -108,6 +108,79 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
 
   # ---------------------------------------------------------------- the round trip
 
+  test "sync transfers this working tree and resolves its workspace on the peer", context do
+    alias Ouroboros.Workspace.{Git, Mirrors}
+    root = context.origin_workspace
+
+    for args <- [
+          ["init", "-q"],
+          ["config", "user.name", "Test"],
+          ["config", "user.email", "test@example.invalid"]
+        ] do
+      assert {:ok, _} = Git.run(root, args)
+    end
+
+    File.write!(Path.join(root, "changed.txt"), "committed")
+    assert {:ok, _} = Git.run(root, ["add", "."])
+    assert {:ok, _} = Git.run(root, ["commit", "-qm", "Initial"])
+    File.write!(Path.join(root, "changed.txt"), "uncommitted on the parent")
+    File.write!(Path.join(root, "untracked.txt"), "also travels")
+    put_peer_env!(context.peer, :data_dir, context.peer_data)
+    put_peer_env!(context.peer, :workspace_allowed_roots, [context.peer_root])
+    :ok = peer_call(context.peer, Supervisor, :terminate_child, [Ouroboros.Supervisor, Mirrors])
+
+    assert {:ok, _} =
+             peer_call(context.peer, Supervisor, :restart_child, [Ouroboros.Supervisor, Mirrors])
+
+    %{handle: handle} =
+      open(
+        context,
+        [
+          [
+            agent_call(
+              %{
+                "prompt" => "read changed.txt",
+                "machine" => Atom.to_string(context.peer),
+                "sync" => true
+              },
+              "sync1"
+            )
+          ],
+          finish()
+        ],
+        [
+          [{:tool_call, %{id: "read1", name: "read", input: %{"path" => "changed.txt"}}}],
+          [{:text, "read snapshot on peer"}, {:finish, :stop}]
+        ]
+      )
+
+    send_turn(handle)
+    events = collect_until(:turn_completed, [], 90_000)
+
+    assert length(subagent_events(events, "spawned")) == 1,
+           inspect(Enum.filter(events, &(&1.type == :tool_result)),
+             pretty: true,
+             limit: :infinity
+           )
+
+    [spawned] = subagent_events(events, "spawned")
+    assert spawned.payload["provisioned"] == true
+    assert spawned.payload["bytes"] > 0
+    assert spawned.payload["untracked"] == ["untracked.txt"]
+    workspace = spawned.payload["workspace"]
+    assert workspace =~ "/data/worktrees/"
+
+    assert peer_call(context.peer, File, :read!, [Path.join(workspace, "changed.txt")]) ==
+             "uncommitted on the parent"
+
+    assert peer_call(context.peer, File, :read!, [Path.join(workspace, "untracked.txt")]) ==
+             "also travels"
+
+    [settled] = subagent_events(events, "settled")
+    assert settled.payload["worktree"]["retired"] == "kept"
+    assert File.read!(Path.join(root, "changed.txt")) == "uncommitted on the parent"
+  end
+
   describe "a child placed on another machine" do
     test "a repeated remote start with the same task_id recovers one child", context do
       {model_spec, _agent} =
