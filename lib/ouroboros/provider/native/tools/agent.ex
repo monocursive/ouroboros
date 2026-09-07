@@ -227,6 +227,7 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
       request_attrs =
         %{
           provider: :native,
+          metadata: Map.take(parent.request.metadata || %{}, [:audit_actor_id, "audit_actor_id"]),
           cwd: placement.root,
           model: model(parent),
           provider_session_id: child_id,

@@ -142,6 +142,10 @@ defmodule Ouroboros.MixProject do
       # Ouroboros calls ReqLLM directly from the in-process provider. Keep that boundary
       # explicit rather than relying on Jido.AI's transitive dependency.
       {:req_llm, "~> 1.20"},
+      {:req, "~> 0.7"},
+      # Optional at runtime: the audit journal works without an index. Ship SQLite in
+      # the release so enabling local search needs no server or sqlite3 installation.
+      {:exqlite, "~> 0.39.0"},
       # `ouroboros.toml` — the native agent's hooks and `[checks]` — is TOML because
       # every other agent's project configuration is. The library is already in the tree
       # as `llm_db`'s dependency; it is declared here so the runtime reads a dependency
@@ -150,7 +154,7 @@ defmodule Ouroboros.MixProject do
       # `web_fetch` streams every status through Mint so a 302/404 body is cancelled at
       # the cap the way a 200 already was. Declared here rather than inherited from Req
       # so the runtime names the client it opens sockets with.
-      {:mint, "~> 1.8"},
+      {:mint, "~> 1.10"},
       # Cluster formation. The runtime's distribution semantics never depended on how
       # nodes found each other; this is the discovery half, and it stays off unless
       # `OUROBOROS_CLUSTER_STRATEGY` names a strategy.

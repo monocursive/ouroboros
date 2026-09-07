@@ -71,6 +71,9 @@ defmodule Ouroboros.Application do
 
   @impl true
   def start(_type, _args) do
+    if System.get_env("OUROBOROS_COLLECTOR_CONFIG"),
+      do: raise("Run the custody collector with release eval; it cannot share the agent runtime")
+
     # Resolved before anything is supervised, because it decides what gets supervised.
     # An unrecognized role raises here rather than booting the privileged tree.
     role = Ouroboros.Cluster.boot_role!()
@@ -145,6 +148,9 @@ defmodule Ouroboros.Application do
           # servers too; unfinished acknowledged attempts then recover as ambiguous
           # instead of continuing beside a replacement empty ledger.
           Ouroboros.Agent.EffectLedger,
+          Ouroboros.Audit.Store,
+          Ouroboros.Audit.Index,
+          Ouroboros.Audit.Worker,
           # Native model admission is in-memory scheduling, not durable authority. It
           # sits after the ledger and before Jido so a lease-server crash restarts the
           # sessions that consume its leases — otherwise Finch connections outlive the

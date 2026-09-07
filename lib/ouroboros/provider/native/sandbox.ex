@@ -329,6 +329,14 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   @spec decision(map(), detection()) ::
           {:sandboxed, String.t(), policy()} | {:unsandboxed, term()} | {:refused, term()}
   def decision(scope, detection \\ detect()) do
+    if Ouroboros.Audit.required?() do
+      audit_decision(scope, detection)
+    else
+      ordinary_decision(scope, detection)
+    end
+  end
+
+  defp ordinary_decision(scope, detection) do
     case normalize(Map.get(scope, :sandbox_mode)) do
       mode when mode in [:read_only, :workspace_write] ->
         case detection.backend do
@@ -348,6 +356,50 @@ defmodule Ouroboros.Provider.Native.Sandbox do
 
       other ->
         {:refused, {:unknown_sandbox_mode, other}}
+    end
+  end
+
+  defp audit_decision(scope, detection) do
+    mode = normalize(Map.get(scope, :sandbox_mode))
+
+    with true <- mode in [:read_only, :workspace_write, :workspace_write_escalated],
+         true <- fences_reads?(detection) and fences_network?(detection),
+         :ok <- Ouroboros.Audit.admit_scope(scope) do
+      ordinary = policy(scope, mode)
+
+      readable =
+        roots(
+          [
+            "/usr/bin",
+            "/usr/lib",
+            "/usr/lib64",
+            "/usr/share",
+            "/bin",
+            "/lib",
+            "/lib64",
+            "/System",
+            "/dev/null",
+            "/dev/urandom"
+          ] ++ Map.get(scope, :roots, [scope.root])
+        )
+
+      if Enum.any?(readable, &Ouroboros.Audit.overlaps_protected?/1) do
+        {:refused, :audit_read_root_overlaps_protected_storage}
+      else
+        policy =
+          ordinary
+          |> Map.merge(%{
+            mode: :builder,
+            readable: readable,
+            network: false,
+            loopback: false,
+            process: :audit
+          })
+
+        {:sandboxed, label(detection), policy}
+      end
+    else
+      _ -> {:refused, :required_audit_containment_unavailable}
     end
   end
 
@@ -841,6 +893,12 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   """
   @spec escalation(map(), policy(), String.t(), keyword()) :: String.t()
   def escalation(violation, policy, label, opts \\ [])
+
+  def escalation(%{evidence: evidence}, %{process: :audit}, label, _opts) do
+    "\nRequired audit containment (#{label}) refused an operation: #{evidence}\n" <>
+      "Readable paths are restricted to the workspace and system executables/libraries. " <>
+      "External and loopback network access are denied. Use a supported tool within this policy."
+  end
 
   def escalation(%{constraint: constraint, evidence: evidence}, policy, label, opts) do
     "\nThe sandbox (#{label}, sandbox_mode: #{policy.mode}) appears to have stopped this " <>

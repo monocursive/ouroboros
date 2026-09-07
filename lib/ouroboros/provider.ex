@@ -238,9 +238,17 @@ defmodule Ouroboros.Provider do
       end)
 
     cond do
-      unsupported != [] -> {:error, refusal(provider, unsupported)}
-      refused = unanswerable_prompt(provider, plane, taken, capability) -> {:error, refused}
-      true -> {:ok, taken}
+      Ouroboros.Audit.admit_provider(provider) != :ok ->
+        {:error, "Required audit mode only admits providers with native call recording."}
+
+      unsupported != [] ->
+        {:error, refusal(provider, unsupported)}
+
+      refused = unanswerable_prompt(provider, plane, taken, capability) ->
+        {:error, refused}
+
+      true ->
+        {:ok, taken}
     end
   end
 

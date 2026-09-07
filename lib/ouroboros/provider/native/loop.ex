@@ -346,6 +346,14 @@ defmodule Ouroboros.Provider.Native.Loop do
     _ = report_hook_errors(state)
 
     iterate(state, 1)
+  rescue
+    error in Ouroboros.Audit.Unavailable ->
+      emit(state, :turn_failed, %{
+        "error" => Exception.message(error),
+        "reason" => "audit_unavailable"
+      })
+
+      {:ok, %{state | interrupted?: true}}
   end
 
   # A repository whose `ouroboros.toml` does not parse, one whose hooks were declined for
@@ -468,6 +476,8 @@ defmodule Ouroboros.Provider.Native.Loop do
   # ---------------------------------------------------------------- model
 
   defp call_model(state, iteration) do
+    if state.tool_source == :live, do: Ouroboros.Audit.ensure_actor(state.session_request)
+
     request = %{
       model: state.model_spec,
       system: iteration_system(state.system, iteration, state.max_iterations),
@@ -495,16 +505,31 @@ defmodule Ouroboros.Provider.Native.Loop do
             "system_sha256" => text_digest(request.system),
             "message_count" => length(request.messages),
             "tools_sha256" => tools_digest(request.tools),
-            "ledger_effect_id" => effect_id
+            "ledger_effect_id" => effect_id,
+            "request" =>
+              if(Ouroboros.Audit.enabled?(), do: Model.project(state.model_module, request)),
+            "model" => request.model,
+            "capture_boundary" => "normalized_projection"
           })
 
         started = System.monotonic_time(:millisecond)
 
-        case Model.stream(state.model_module, request, []) do
+        case Model.stream(
+               state.model_module,
+               request,
+               audit_model_options(state, effect_id, iteration)
+             ) do
           {:ok, stream} ->
             consume(state, stream, iteration, effect_id, started)
 
           {:error, reason} ->
+            _ =
+              audit_journal(state, "model_failed", %{
+                "ledger_effect_id" => effect_id,
+                "iteration" => iteration,
+                "status" => Inference.status_of(reason)
+              })
+
             settle_inference_effect(
               state,
               effect_id,
@@ -566,9 +591,18 @@ defmodule Ouroboros.Provider.Native.Loop do
   # because a turn can stream tens of thousands of deltas and `++` per chunk is quadratic.
   defp consume(state, stream, iteration, effect_id, started) do
     {text, calls, usages, reasoning_details, provider_metadata, chunks} =
-      Enum.reduce(stream, {[], [], [], [], %{}, []}, fn chunk,
-                                                        {text, calls, usages, details, metadata,
-                                                         chunks} ->
+      Enum.reduce(Stream.with_index(stream), {[], [], [], [], %{}, []}, fn {chunk, chunk_index},
+                                                                           {text, calls, usages,
+                                                                            details, metadata,
+                                                                            chunks} ->
+        _ =
+          audit_journal(state, "model_chunk", %{
+            "ledger_effect_id" => effect_id,
+            "iteration" => iteration,
+            "chunk_index" => chunk_index,
+            "chunk" => Journal.jsonable(chunk)
+          })
+
         chunks = [Journal.jsonable(chunk) | chunks]
 
         case chunk do
@@ -608,7 +642,10 @@ defmodule Ouroboros.Provider.Native.Loop do
     state =
       journal(state, "model_result", %{
         "iteration" => iteration,
+        "ledger_effect_id" => effect_id,
         "chunks" => chunks,
+        "usage" => if(map_size(usage) == 0, do: nil, else: usage),
+        "provider_metadata" => provider_metadata,
         "duration_ms" => elapsed
       })
 
@@ -616,11 +653,28 @@ defmodule Ouroboros.Provider.Native.Loop do
 
     {:ok, state, final, calls, reasoning_details, provider_metadata}
   rescue
+    error in Ouroboros.Audit.Unavailable ->
+      reraise error, __STACKTRACE__
+
     error ->
+      _ =
+        audit_journal(state, "model_failed", %{
+          "ledger_effect_id" => effect_id,
+          "iteration" => iteration,
+          "status" => "stream_failed"
+        })
+
       settle_inference_effect(state, effect_id, :stream_failed, started, nil, %{})
       {:error, state, {:stream_failed, Exception.message(error)}}
   catch
     :exit, reason ->
+      _ =
+        audit_journal(state, "model_failed", %{
+          "ledger_effect_id" => effect_id,
+          "iteration" => iteration,
+          "status" => "stream_failed"
+        })
+
       settle_inference_effect(state, effect_id, :stream_failed, started, nil, %{})
       {:error, state, {:stream_exited, inspect(reason)}}
   end
@@ -778,6 +832,13 @@ defmodule Ouroboros.Provider.Native.Loop do
   # reference it will not have an entry for. Everything past it is gated, and everything
   # gated is recorded.
   defp dispatch(state, call) do
+    state =
+      audit_journal(state, "tool_proposed", %{
+        "call_id" => call.id,
+        "tool" => call.name,
+        "arguments" => call.input
+      })
+
     case Tools.lookup(call.name, state.allowed_tools, state.disallowed_tools) do
       {:error, :unknown_tool} ->
         emit_tool_call(state, call, nil)
@@ -914,8 +975,22 @@ defmodule Ouroboros.Provider.Native.Loop do
            effect_id: effect_id
          } = attempt
        ) do
+    Ouroboros.Audit.ensure_actor(state.session_request)
+
     case open_tool_effect(state, call, classified, effect_id, authority) do
       :ok ->
+        state =
+          audit_journal(state, "tool_dispatch", %{
+            "call_id" => call.id,
+            "tool" => call.name,
+            "ledger_effect_id" => effect_id,
+            "attempt_id" => effect_id <> ":1",
+            "arguments" => call.input,
+            "authority" => authority,
+            "cwd" => state.scope.root,
+            "sandbox_mode" => state.scope.sandbox_mode
+          })
+
         cond do
           module == AgentTool ->
             run_subagent(state, call, hook_context, effect_id)
@@ -1005,6 +1080,18 @@ defmodule Ouroboros.Provider.Native.Loop do
         scope: state.scope,
         provider_options: provider_options(state),
         session_dir: state.session_dir,
+        audit:
+          if(Ouroboros.Audit.enabled?(),
+            do: %{
+              stream: Ouroboros.Audit.Store.stream_id(state.session_dir),
+              fields: %{
+                "turn_id" => state.turn_id,
+                "call_id" => call.id,
+                "ledger_effect_id" => effect_id,
+                "attempt_id" => effect_id <> ":1"
+              }
+            }
+          ),
         reads: state.reads,
         # G3. `agent_result` collects a child the *session* holds, not one this turn owns,
         # so it is handed two closures over the session rather than a pid to call: the tool
@@ -1026,6 +1113,17 @@ defmodule Ouroboros.Provider.Native.Loop do
       Tools.execute(module, call.input, context, execute_timeout(state, classified, call.input))
 
     elapsed = System.monotonic_time(:millisecond) - started
+
+    state =
+      audit_journal(state, "tool_response", %{
+        "call_id" => call.id,
+        "tool" => call.name,
+        "ledger_effect_id" => effect_id,
+        "attempt_id" => effect_id <> ":1",
+        "result" => result,
+        "duration_ms" => elapsed,
+        "is_error" => result.is_error
+      })
 
     state =
       if classified.tool == "desktop_act", do: flush_interrupt(state), else: state
@@ -1216,6 +1314,36 @@ defmodule Ouroboros.Provider.Native.Loop do
 
   # ---------------------------------------------------------------- checkpoint
 
+  defp retain_file_evidence(state, path, digest, kind) do
+    if Ouroboros.Audit.enabled?() do
+      content =
+        case digest do
+          :absent ->
+            %{"absent" => true}
+
+          digest when is_binary(digest) ->
+            case Checkpoint.get_blob(state.session_dir, digest) do
+              {:ok, bytes} ->
+                %{"encoding" => "base64", "data" => Base.encode64(bytes), "sha256" => digest}
+
+              _ ->
+                %{"unavailable" => "snapshot_unreadable"}
+            end
+
+          _ ->
+            %{"unavailable" => "snapshot_not_captured"}
+        end
+
+      if Ouroboros.Audit.required?() and Ouroboros.Audit.Config.current().capture == :full and
+           Map.has_key?(content, "unavailable"),
+         do: raise(Ouroboros.Audit.Unavailable, reason: :file_evidence_unavailable)
+
+      audit_journal(state, kind, %{"path" => path, "content" => content})
+    else
+      state
+    end
+  end
+
   defp snapshot_before(state, []), do: state
 
   defp snapshot_before(state, paths) do
@@ -1224,6 +1352,7 @@ defmodule Ouroboros.Provider.Native.Loop do
         state
       else
         {:ok, before} = Checkpoint.snapshot(state.session_dir, path)
+        state = retain_file_evidence(state, path, before, "file_before")
 
         %{
           state
@@ -1241,6 +1370,7 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp snapshot_after(state, changed) do
     Enum.reduce(changed, state, fn path, state ->
       {:ok, digest} = Checkpoint.snapshot(state.session_dir, path)
+      state = retain_file_evidence(state, path, digest, "file_after")
 
       case Map.fetch(state.turn_files, path) do
         {:ok, entry} ->
@@ -1798,9 +1928,24 @@ defmodule Ouroboros.Provider.Native.Loop do
   # `respond_approval` verb, the same wait, with `kind: "question"` so a client that has
   # learned about questions can render a picker and one that has not still shows a modal
   # whose approve-with-a-reason is the answer.
+  defp audit_tool_response(state, call, effect_id, result, elapsed, status \\ nil) do
+    audit_journal(state, "tool_response", %{
+      "call_id" => call.id,
+      "tool" => call.name,
+      "ledger_effect_id" => effect_id,
+      "attempt_id" => effect_id <> ":1",
+      "result" => result,
+      "duration_ms" => elapsed,
+      "status" => status || if(result.is_error, do: "failed", else: "completed"),
+      "is_error" => result.is_error
+    })
+  end
+
   defp ask_question(state, call, hook_context, effect_id) do
     case AskUser.question(call.input) do
       {:error, :empty_question} ->
+        result = %{output: "ask_user needs a `question`. Nothing was asked.", is_error: true}
+        state = audit_tool_response(state, call, effect_id, result, 0)
         settle_tool_effect(state, effect_id, :failed, 0, 0)
 
         {:continue,
@@ -1840,6 +1985,7 @@ defmodule Ouroboros.Provider.Native.Loop do
     receive do
       {:native_approval, ^request_id, %ApprovalResponse{} = response} ->
         result = payload |> AskUser.answer(response) |> Tools.normalize_result_of()
+        state = audit_tool_response(state, call, effect_id, result, nil)
         settle_tool_effect(state, effect_id, result, nil)
 
         state =
@@ -1856,6 +2002,16 @@ defmodule Ouroboros.Provider.Native.Loop do
         wait_for_answer(state, call, request_id, payload, hook_context, effect_id, deadline)
 
       :native_interrupt ->
+        state =
+          audit_tool_response(
+            state,
+            call,
+            effect_id,
+            %{output: "interrupted", is_error: true},
+            nil,
+            "interrupted"
+          )
+
         settle_tool_effect(state, effect_id, :refused, nil, 0)
 
         state =
@@ -1876,6 +2032,16 @@ defmodule Ouroboros.Provider.Native.Loop do
           payload
           |> AskUser.unanswered(state.approval_timeout_ms)
           |> Tools.normalize_result_of()
+
+        state =
+          audit_tool_response(
+            state,
+            call,
+            effect_id,
+            result,
+            state.approval_timeout_ms,
+            "timed_out"
+          )
 
         settle_tool_effect(state, effect_id, :timed_out, state.approval_timeout_ms, 0)
 
@@ -2043,6 +2209,29 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp rerun(state, pending, granted_by, request_id) do
     context = %{pending.context | scope: Sandbox.escalated_scope(state.scope)}
 
+    context =
+      if context[:audit],
+        do:
+          put_in(
+            context,
+            [:audit, :fields, "attempt_id"],
+            pending.call.id <> ":escalation:" <> to_string(request_id)
+          ),
+        else: context
+
+    Ouroboros.Audit.ensure_actor(state.session_request)
+
+    state =
+      audit_journal(state, "tool_dispatch", %{
+        "call_id" => pending.call.id,
+        "tool" => pending.call.name,
+        "attempt_id" => pending.call.id <> ":escalation:" <> to_string(request_id),
+        "arguments" => pending.call.input,
+        "approval_request_id" => request_id,
+        "authority" => granted_by,
+        "sandbox_mode" => context.scope.sandbox_mode
+      })
+
     # Emitted before the re-run rather than after it: everything the event states is
     # already known, and a command that takes its full deadline should not leave a client
     # holding an answered approval with nothing to show for it.
@@ -2059,6 +2248,16 @@ defmodule Ouroboros.Provider.Native.Loop do
       )
 
     elapsed = System.monotonic_time(:millisecond) - started
+
+    state =
+      audit_journal(state, "tool_response", %{
+        "call_id" => pending.call.id,
+        "tool" => pending.call.name,
+        "attempt_id" => pending.call.id <> ":escalation:" <> to_string(request_id),
+        "result" => result,
+        "duration_ms" => elapsed,
+        "is_error" => result.is_error
+      })
 
     output =
       "The OS sandbox stopped the first attempt at this command (#{pending.offer.evidence}). " <>
@@ -2277,8 +2476,11 @@ defmodule Ouroboros.Provider.Native.Loop do
   # what `:failed` means there.
   defp refuse_subagent(state, call, hook_context, effect_id, message) do
     result = Tools.normalize_result_of(%{output: message, is_error: true})
+    state = audit_tool_response(state, call, effect_id, result, 0)
     settle_tool_effect(state, effect_id, result, 0)
-    {:continue, tool_result(state, call, append_context(result, hook_context))}
+
+    {:continue,
+     tool_result(state, call, append_context(result, hook_context), ledger_ref: effect_id)}
   end
 
   # What a child inherits, gathered in one place so that "a child may never be more
@@ -2365,8 +2567,12 @@ defmodule Ouroboros.Provider.Native.Loop do
         is_error: false
       })
 
-    settle_tool_effect(state, effect_id, result, System.monotonic_time(:millisecond) - started_at)
-    {:continue, tool_result(state, call, append_context(result, hook_context))}
+    elapsed = System.monotonic_time(:millisecond) - started_at
+    state = audit_tool_response(state, call, effect_id, result, elapsed)
+    settle_tool_effect(state, effect_id, result, elapsed)
+
+    {:continue,
+     tool_result(state, call, append_context(result, hook_context), ledger_ref: effect_id)}
   end
 
   # The wait, and the four things that can interrupt it. `pending` maps the parent request
@@ -2467,6 +2673,16 @@ defmodule Ouroboros.Provider.Native.Loop do
             do: Subagent.returning_payload(summary),
             else: Subagent.settled_payload(summary)
 
+        state =
+          audit_tool_response(
+            state,
+            call,
+            effect_id,
+            %{output: Subagent.render(summary), is_error: true},
+            nil,
+            "interrupted"
+          )
+
         emit(state, :provider_event, subagent_event(payload))
         settle_tool_effect(state, effect_id, :refused, nil, 0)
         {:interrupted, %{state | interrupted?: true}}
@@ -2517,8 +2733,12 @@ defmodule Ouroboros.Provider.Native.Loop do
         is_error: false
       })
 
-    settle_tool_effect(state, effect_id, result, System.monotonic_time(:millisecond) - started_at)
-    {:continue, tool_result(state, call, append_context(result, hook_context))}
+    elapsed = System.monotonic_time(:millisecond) - started_at
+    state = audit_tool_response(state, call, effect_id, result, elapsed)
+    settle_tool_effect(state, effect_id, result, elapsed)
+
+    {:continue,
+     tool_result(state, call, append_context(result, hook_context), ledger_ref: effect_id)}
   end
 
   defp finish_subagent(state, call, spec, started, summary, hook_context, effect_id, started_at) do
@@ -2537,8 +2757,15 @@ defmodule Ouroboros.Provider.Native.Loop do
         is_error: summary.status in [:failed, :timed_out]
       })
 
-    settle_tool_effect(state, effect_id, result, System.monotonic_time(:millisecond) - started_at)
-    {:continue, tool_result(state, call, append_context(result, hook_context))}
+    elapsed = System.monotonic_time(:millisecond) - started_at
+
+    state =
+      audit_tool_response(state, call, effect_id, result, elapsed, to_string(summary.status))
+
+    settle_tool_effect(state, effect_id, result, elapsed)
+
+    {:continue,
+     tool_result(state, call, append_context(result, hook_context), ledger_ref: effect_id)}
   end
 
   defp settle_subagent(state, _spec, started, reason) do
@@ -3040,6 +3267,33 @@ defmodule Ouroboros.Provider.Native.Loop do
   end
 
   # ---------------------------------------------------------------- journal (R1)
+
+  defp audit_journal(
+         %{tool_source: :live, journal: %Journal{audit_stream: stream}} = state,
+         kind,
+         fields
+       )
+       when is_binary(stream),
+       do: journal(state, kind, fields)
+
+  defp audit_journal(state, _kind, _fields), do: state
+
+  defp audit_model_options(
+         %{tool_source: :live, journal: %Journal{audit_stream: stream}} = state,
+         effect_id,
+         iteration
+       )
+       when is_binary(stream),
+       do: [
+         audit_context: %{
+           journal: state.journal,
+           turn_id: state.turn_id,
+           effect_id: effect_id,
+           iteration: iteration
+         }
+       ]
+
+  defp audit_model_options(_, _, _), do: []
 
   # Every journal write goes through here, and it can only ever advance the state: the
   # handle carries its own degradation, `Journal.append/3` never raises, and a turn whose

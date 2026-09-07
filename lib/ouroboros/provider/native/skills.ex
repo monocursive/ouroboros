@@ -117,7 +117,7 @@ defmodule Ouroboros.Provider.Native.Skills do
         {:error, {:unknown_skill, wanted, Enum.map(skills, & &1.name)}}
 
       skill ->
-        case File.read(skill.path) do
+        case read_content(skill.path) do
           {:ok, content} ->
             {:ok, Map.put(skill, :body, clip(strip_frontmatter(content), @max_body_bytes))}
 
@@ -181,9 +181,7 @@ defmodule Ouroboros.Provider.Native.Skills do
   defp read_skill(directory, entry, scope) do
     path = Path.join(directory, @skill_file)
 
-    with true <- File.dir?(directory),
-         {:ok, %File.Stat{size: size}} when size <= @max_body_bytes * 4 <- File.stat(path),
-         {:ok, content} <- File.read(path),
+    with {:ok, content} <- read_content(path),
          true <- String.valid?(content) do
       front = frontmatter(content)
       name = front |> Map.get("name", entry) |> normalize_name(entry)
@@ -203,6 +201,42 @@ defmodule Ouroboros.Provider.Native.Skills do
     else
       _not_a_skill -> []
     end
+  end
+
+  # Discovery reads frontmatter too, so the same check applies there and at load.
+  # Read the resolved inode with a hard bound, never the original symlink spelling.
+  defp read_content(path) do
+    with {:ok, resolved} <- Ouroboros.Workspace.Path.canonicalize_file(path),
+         false <- Ouroboros.Audit.protected_path?(resolved),
+         :ok <- Ouroboros.Audit.File.no_symlinks(Path.dirname(resolved)),
+         {:ok, %{type: :regular, size: size} = expected} <- File.lstat(resolved),
+         true <- size <= @max_body_bytes * 4 do
+      case File.open(resolved, [:read, :binary], fn file ->
+             with {:ok, info} <- :file.read_file_info(file),
+                  actual = File.Stat.from_record(info),
+                  true <- same_file?(actual, expected),
+                  {:ok, ^resolved} <- Ouroboros.Workspace.Path.canonicalize_file(path),
+                  false <- Ouroboros.Audit.protected_path?(resolved),
+                  bytes when is_binary(bytes) <- IO.binread(file, @max_body_bytes * 4 + 1),
+                  true <- byte_size(bytes) <= @max_body_bytes * 4 do
+               {:ok, bytes}
+             else
+               :eof -> {:ok, ""}
+               _ -> {:error, :skill_changed_or_too_large}
+             end
+           end) do
+        {:ok, result} -> result
+        error -> error
+      end
+    else
+      _ -> {:error, :skill_path_unavailable_or_protected}
+    end
+  end
+
+  defp same_file?(actual, expected) do
+    actual.type == :regular and actual.inode == expected.inode and
+      actual.major_device == expected.major_device and
+      actual.minor_device == expected.minor_device
   end
 
   # A skill's name becomes a lookup key the model types; anything that is not the

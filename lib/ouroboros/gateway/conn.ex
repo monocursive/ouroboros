@@ -236,6 +236,7 @@ defmodule Ouroboros.Gateway.Conn do
       peer: nil,
       client: nil,
       authenticated?: false,
+      identity: nil,
       # Set when this connection has decided to end: the frame in hand is written, and
       # then it stops. A failed write and an overloaded queue both land here.
       closing?: false,
@@ -528,9 +529,12 @@ defmodule Ouroboros.Gateway.Conn do
   end
 
   defp route(method, id, params, state) do
+    Ouroboros.Audit.Identity.install(state.identity)
+
     case Methods.fetch(method) do
       {:ok, entry} ->
-        if Methods.permits?(state.config.scope, entry) do
+        if Methods.permits?(state.config.scope, entry) and
+             Ouroboros.Audit.Identity.permits?(state.identity, method, entry.scope) do
           {:continue, invoke(method, id, params, entry, audit(state, method, params, entry))}
         else
           {:continue,
@@ -581,6 +585,8 @@ defmodule Ouroboros.Gateway.Conn do
 
   defp hello(id, params, state) do
     with :ok <- authenticate(params, state.config),
+         {:ok, identity} <-
+           Ouroboros.Audit.Identity.authenticate(params["token"], state.config.token),
          :ok <- check_protocol(params) do
       _ = Process.cancel_timer(state.hello_timer)
 
@@ -588,7 +594,8 @@ defmodule Ouroboros.Gateway.Conn do
         state
         | authenticated?: true,
           hello_timer: nil,
-          client: client_name(params)
+          client: client_name(params),
+          identity: identity
       }
 
       Logger.info(
@@ -599,7 +606,7 @@ defmodule Ouroboros.Gateway.Conn do
 
       {:continue, respond(state, id, {:ok, hello_result(state)})}
     else
-      :unauthenticated ->
+      failure when failure in [:unauthenticated, {:error, :unauthenticated}] ->
         {:close,
          respond_error(
            state,
@@ -621,15 +628,9 @@ defmodule Ouroboros.Gateway.Conn do
   end
 
   defp authenticate(params, config) do
-    with token when is_binary(token) <- Map.get(params, "token"),
-         true <-
-           :crypto.hash_equals(
-             :crypto.hash(:sha256, token),
-             :crypto.hash(:sha256, config.token)
-           ) do
-      :ok
-    else
-      _refused -> :unauthenticated
+    case Ouroboros.Audit.Identity.authenticate(params["token"], config.token) do
+      {:ok, _} -> :ok
+      _ -> :unauthenticated
     end
   end
 
@@ -841,6 +842,12 @@ defmodule Ouroboros.Gateway.Conn do
   end
 
   defp stream_event(state, key, method, session_id, event) do
+    if Ouroboros.Audit.Identity.permits?(state.identity, method, :read),
+      do: stream_event_authorized(state, key, method, session_id, event),
+      else: state
+  end
+
+  defp stream_event_authorized(state, key, method, session_id, event) do
     cond do
       not Map.has_key?(state.subscriptions, key) ->
         # An event that crossed an unsubscribe. The plane stopped sending after it, and a
@@ -936,10 +943,11 @@ defmodule Ouroboros.Gateway.Conn do
 
   defp start_request(state, {id, method, params, entry}) do
     method_invoker = state.method_invoker
+    identity = state.identity
 
     task =
       Task.Supervisor.async_nolink(state.task_supervisor, fn ->
-        method_invoker.(method, params)
+        Ouroboros.Audit.Identity.with_subject(identity, fn -> method_invoker.(method, params) end)
       end)
 
     timer = Process.send_after(self(), {:request_timeout, task.ref}, entry.timeout)

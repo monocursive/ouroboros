@@ -1,5 +1,10 @@
 defmodule Ouroboros.Provider.Native.Journal do
   @moduledoc """
+  Extended audit mode delegates to `Ouroboros.Audit.Store`: segmented retention,
+  independent blob ownership, and required-mode recording failures that raise before
+  further execution. The best-effort and trim behavior below describes standard mode.
+
+
   The append-only, hash-chained record of what a native session actually was.
 
   `<session dir>/journal.ndjson`, one JSON object per line, mode `0600`, beside
@@ -91,6 +96,7 @@ defmodule Ouroboros.Provider.Native.Journal do
   defstruct [
     :path,
     :session_dir,
+    :audit_stream,
     seq: 0,
     prev: @seed,
     bytes: 0,
@@ -109,28 +115,40 @@ defmodule Ouroboros.Provider.Native.Journal do
 
   @doc "Where one session's journal lives."
   @spec path(String.t()) :: String.t()
-  def path(session_dir), do: Path.join(session_dir, @filename)
+  def path(session_dir) do
+    if Ouroboros.Audit.enabled?(),
+      do: Ouroboros.Audit.session_path(session_dir),
+      else: Path.join(session_dir, @filename)
+  end
 
   @doc "The journal format version, carried by every `session_opened` record."
   @spec version() :: pos_integer()
-  def version, do: @journal_version
+  def version, do: if(Ouroboros.Audit.enabled?(), do: 2, else: @journal_version)
 
   @doc """
   Opens (creating if need be) the journal for a session directory.
 
-  Never returns an error: a journal that cannot be opened is a *degraded* handle, because
+  Standard mode returns a degraded handle on failure. Required audit raises
+  `Ouroboros.Audit.Unavailable` when admission cannot be recorded. In standard mode,
   the one thing this module must not do is turn a recording failure into a refused
   effect. The caller reads `degraded?` and says so once.
   """
   @spec open(String.t() | nil, keyword()) :: t() | nil
   def open(session_dir, opts \\ [])
 
-  def open(nil, _opts), do: nil
+  def open(nil, _opts) do
+    if Ouroboros.Audit.required?(),
+      do: raise(Ouroboros.Audit.Unavailable, reason: :session_directory_required)
+
+    nil
+  end
 
   def open(session_dir, opts) when is_binary(session_dir) do
     %__MODULE__{
       path: path(session_dir),
       session_dir: session_dir,
+      audit_stream:
+        if(Ouroboros.Audit.enabled?(), do: Ouroboros.Audit.Store.stream_id(session_dir)),
       budget_bytes: budget_bytes(opts)
     }
     |> sync()
@@ -147,6 +165,14 @@ defmodule Ouroboros.Provider.Native.Journal do
   """
   @spec sync(t() | nil) :: t() | nil
   def sync(nil), do: nil
+
+  def sync(%{audit_stream: stream} = journal) when is_binary(stream) do
+    case Ouroboros.Audit.Store.read(journal.path) do
+      {:ok, result} -> %{journal | seq: result.verified_through, prev: result.head, synced?: true}
+      _ -> %{journal | degraded?: true, synced?: false}
+    end
+  end
+
   def sync(%__MODULE__{} = journal), do: resync(%{journal | degraded?: false})
 
   # The same tail read without touching `degraded?`, so an append that re-syncs mid-window
@@ -189,6 +215,13 @@ defmodule Ouroboros.Provider.Native.Journal do
 
   # Still tried when `degraded?`: a transient write failure must not disable the journal
   # for the rest of the turn. What `degraded?` buys is that the caller announces it once.
+  def append(%{audit_stream: stream} = journal, kind, fields) when is_binary(stream) do
+    case Ouroboros.Audit.append(stream, kind, fields) do
+      {:ok, record} -> %{journal | seq: record["seq"], prev: record["hash"], synced?: true}
+      {:error, _} -> %{journal | degraded?: true}
+    end
+  end
+
   def append(%__MODULE__{} = journal, kind, fields), do: do_append(journal, kind, fields)
 
   defp do_append(%{synced?: false} = journal, kind, fields) do
@@ -309,6 +342,10 @@ defmodule Ouroboros.Provider.Native.Journal do
   hole, which is the same contract the file checkpoint makes about a dropped turn.
   """
   @spec resolve_blob(String.t(), map()) :: {:ok, term()} | {:error, term()}
+  def resolve_blob(_session_dir, %{"store" => "audit-v2"} = marker) do
+    Ouroboros.Audit.Store.blob(Ouroboros.Audit.Config.current(), marker)
+  end
+
   def resolve_blob(session_dir, %{"blob" => digest}) when is_binary(digest) do
     case Checkpoint.get_blob(session_dir, digest) do
       {:ok, content} -> decode(content)
@@ -495,6 +532,25 @@ defmodule Ouroboros.Provider.Native.Journal do
   end
 
   defp scan(path) do
+    if File.dir?(path) do
+      case Ouroboros.Audit.Store.read(path) do
+        {:ok, result} ->
+          {:ok,
+           Map.merge(result, %{
+             head_seq: result.verified_through,
+             truncated_through: nil,
+             broken_at: nil
+           })}
+
+        error ->
+          error
+      end
+    else
+      scan_legacy(path)
+    end
+  end
+
+  defp scan_legacy(path) do
     case File.read(path) do
       {:ok, contents} ->
         {:ok, fold(contents)}

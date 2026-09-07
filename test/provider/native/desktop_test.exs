@@ -714,6 +714,51 @@ defmodule Ouroboros.Provider.Native.DesktopTest do
   end
 
   describe "artifact/2" do
+    test "encrypted screenshots retain their byte limit, digest and model representation" do
+      previous = Application.get_env(:ouroboros, :audit)
+
+      config =
+        Ouroboros.Audit.Config.new!(
+          encryption_key_id: "screenshots",
+          encryption_keys: %{"screenshots" => :binary.copy(<<5>>, 32)}
+        )
+
+      Application.put_env(:ouroboros, :audit, config)
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:ouroboros, :audit, previous),
+          else: Application.delete_env(:ouroboros, :audit)
+      end)
+
+      bytes = jpeg("encrypted screenshot")
+      # The envelope exceeds this cap, but the decoded image fits exactly.
+      Application.put_env(:ouroboros, :computer_use, max_image_bytes: byte_size(bytes))
+      dir = session_dir()
+      assert {:ok, image} = Desktop.stage_image(%{"path" => temp_image(bytes)}, dir)
+      assert Ouroboros.Audit.Content.encrypted?(File.read!(image.path))
+      remember_last(dir, calculator_state(image.path, image.sha256))
+      assert {:ok, fetched} = Desktop.artifact(image.sha256)
+      assert Base.decode64!(fetched.bytes) == bytes
+
+      [part] =
+        Ouroboros.Provider.Native.Model.ReqLLM.tool_result_parts(
+          [Map.put(image, :type, :image)],
+          true
+        )
+
+      assert part.data == bytes
+      assert {:ok, _} = Desktop.stage_image(%{"path" => temp_image(bytes)}, dir)
+
+      Application.put_env(:ouroboros, :audit, %{
+        config
+        | encryption_key_id: "new",
+          encryption_keys: %{"new" => :binary.copy(<<6>>, 32)}
+      })
+
+      assert {:error, :not_found} = Desktop.artifact(image.sha256)
+    end
+
     test "serves a staged screenshot from the live pool, and from an existing named session dir" do
       bytes = jpeg("art")
       digest = sha(bytes)

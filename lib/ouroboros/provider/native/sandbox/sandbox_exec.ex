@@ -83,6 +83,13 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
   paths are parameters.
   """
   @spec profile(Ouroboros.Provider.Native.Sandbox.policy()) :: String.t()
+  def profile(%{mode: :builder, process: :audit} = policy) do
+    policy
+    |> Map.put(:process, :open)
+    |> profile()
+    |> String.replace("(allow mach-lookup)", "(deny mach-lookup)")
+  end
+
   def profile(%{mode: :builder, process: :sealed} = policy) do
     [
       "(version 1)",

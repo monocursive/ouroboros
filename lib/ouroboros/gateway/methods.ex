@@ -477,11 +477,23 @@ defmodule Ouroboros.Gateway.Methods do
   """
   @spec subscribe(plane(), InteractiveRef.t() | TaskRef.t(), non_neg_integer()) :: result()
   def subscribe(:interactive, session, cursor) do
-    safe(fn -> reply(InteractiveSession.subscribe(session, cursor: cursor)) end)
+    if Ouroboros.Audit.Identity.permits?(
+         Ouroboros.Audit.Identity.current(),
+         "interactive.subscribe",
+         :read
+       ),
+       do: safe(fn -> reply(InteractiveSession.subscribe(session, cursor: cursor)) end),
+       else: {:error, code(:scope_denied), "This identity may not read session events."}
   end
 
   def subscribe(:coding, session, cursor) do
-    safe(fn -> reply(CodingSession.subscribe(session, cursor: cursor)) end)
+    if Ouroboros.Audit.Identity.permits?(
+         Ouroboros.Audit.Identity.current(),
+         "coding.subscribe",
+         :read
+       ),
+       do: safe(fn -> reply(CodingSession.subscribe(session, cursor: cursor)) end),
+       else: {:error, code(:scope_denied), "This identity may not read session events."}
   end
 
   @doc "Stops event delivery to the calling process. Same `self()` rule as `subscribe/3`."
@@ -534,6 +546,64 @@ defmodule Ouroboros.Gateway.Methods do
   """
   @spec invoke(String.t(), map()) :: result()
   def invoke(method, params) do
+    case fetch(method) do
+      {:ok, entry} ->
+        if Ouroboros.Audit.Identity.permits?(
+             Ouroboros.Audit.Identity.current(),
+             method,
+             entry.scope
+           ) do
+          invoke_recorded(method, params, entry)
+        else
+          {:error, code(:scope_denied), "This identity may not perform #{method}."}
+        end
+
+      _ ->
+        {:error, code(:method_not_found), "unknown method #{inspect(method)}"}
+    end
+  end
+
+  def invoke_as(subject, method, params),
+    do: Ouroboros.Audit.Identity.with_subject(subject, fn -> invoke(method, params) end)
+
+  defp invoke_recorded(method, params, entry) do
+    audit? =
+      Ouroboros.Audit.enabled?() and
+        (entry.scope == :operate or String.starts_with?(method, "audit.")) and
+        method not in ["audit.status", "audit.doctor"]
+
+    call_id = Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
+
+    if audit?,
+      do:
+        Ouroboros.Audit.administrative("access_started", %{
+          "call_id" => call_id,
+          "method" => method,
+          "actor_id" => Ouroboros.Audit.Identity.actor(),
+          "target" =>
+            Map.take(params, ["id", "session_id", "stream_id", "request_id", "machine"]),
+          "decision" => Map.take(params, ["decision", "scope", "approved", "response"])
+        })
+
+    result = invoke_handler(method, params)
+
+    if audit?,
+      do:
+        Ouroboros.Audit.administrative("access_finished", %{
+          "call_id" => call_id,
+          "method" => method,
+          "actor_id" => Ouroboros.Audit.Identity.actor(),
+          "status" => if(match?({:ok, _}, result), do: "completed", else: "failed")
+        })
+
+    result
+  rescue
+    _ in Ouroboros.Audit.Unavailable ->
+      {:error, code(:unavailable),
+       "Required audit recording is unavailable; the operation may have an unknown outcome."}
+  end
+
+  defp invoke_handler(method, params) do
     case Contract.handler(method) do
       {:ok, handler} when handler != :connection ->
         case Contract.validate(method, params) do
@@ -566,7 +636,13 @@ defmodule Ouroboros.Gateway.Methods do
                   else: params
 
               try do
-                :erpc.call(target, __MODULE__, :invoke, [method, params], 10_000)
+                :erpc.call(
+                  target,
+                  __MODULE__,
+                  :invoke_as,
+                  [Ouroboros.Audit.Identity.current(), method, params],
+                  10_000
+                )
               catch
                 _, _ ->
                   {:error, code(:unavailable),
@@ -592,6 +668,34 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   @doc false
+  defp audit_actor_options(opts) do
+    if Ouroboros.Audit.enabled?() do
+      Keyword.put(opts, :audit_actor_id, Ouroboros.Audit.Identity.actor())
+    else
+      opts
+    end
+  end
+
+  def handle_audit_hold(params), do: audit_reply(Ouroboros.Audit.API.call("hold", params))
+  def handle_audit_purge(params), do: audit_reply(Ouroboros.Audit.API.call("purge", params))
+
+  def handle_audit_retention(params),
+    do: audit_reply(Ouroboros.Audit.API.call("retention", params))
+
+  def handle_audit_status(params), do: audit_reply(Ouroboros.Audit.API.call("status", params))
+  def handle_audit_doctor(params), do: audit_reply(Ouroboros.Audit.API.call("doctor", params))
+  def handle_audit_search(params), do: audit_reply(Ouroboros.Audit.API.call("search", params))
+  def handle_audit_show(params), do: audit_reply(Ouroboros.Audit.API.call("show", params))
+  def handle_audit_artifact(params), do: audit_reply(Ouroboros.Audit.API.call("artifact", params))
+  def handle_audit_export(params), do: audit_reply(Ouroboros.Audit.API.call("export", params))
+  def handle_audit_download(params), do: audit_reply(Ouroboros.Audit.API.call("download", params))
+  def handle_audit_reindex(params), do: audit_reply(Ouroboros.Audit.API.call("reindex", params))
+  def handle_audit_flush(params), do: audit_reply(Ouroboros.Audit.API.call("flush", params))
+  defp audit_reply({:ok, result}), do: {:ok, result}
+
+  defp audit_reply({:error, reason}),
+    do: {:error, code(:unavailable), "Audit operation failed: #{inspect(reason, limit: 3)}"}
+
   def handle_runtime_status(_params) do
     safe(fn -> {:ok, Ouroboros.status()} end)
   end
@@ -1312,7 +1416,9 @@ defmodule Ouroboros.Gateway.Methods do
       case options(params, @start_options) do
         {:ok, opts} ->
           {owner, opts} = Keyword.pop(opts, :node, node())
-          Placement.start_interactive(owner, opts)
+
+          with :ok <- Ouroboros.Audit.admit_remote(owner),
+               do: Placement.start_interactive(owner, audit_actor_options(opts))
 
         {:invalid, message} ->
           invalid_params(message)
@@ -1628,7 +1734,9 @@ defmodule Ouroboros.Gateway.Methods do
       with {:ok, objective} <- fetch_string(params, "objective"),
            {:ok, opts} <- options(params, @start_options, ["objective"]) do
         {owner, opts} = Keyword.pop(opts, :node, node())
-        Placement.start_coding(owner, objective, opts)
+
+        with :ok <- Ouroboros.Audit.admit_remote(owner),
+             do: Placement.start_coding(owner, objective, audit_actor_options(opts))
       else
         {:invalid, message} -> invalid_params(message)
       end

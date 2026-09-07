@@ -1,7 +1,7 @@
 import Config
 
-if config_env() == :prod do
-  # `Ouroboros.DataDir` is the one module of this application this file calls, and it is
+if config_env() == :prod and is_nil(System.get_env("OUROBOROS_COLLECTOR_CONFIG")) do
+  # `Ouroboros.DataDir` is callable before applications start, and it is
   # written to be callable here: no application environment, no other module, no process.
   # The derivation it holds is the cross-language contract with `tui/src/runtime.rs`
   # (`Paths::discover`) — the client spawns this daemon and then reads `gateway.json` out
@@ -867,4 +867,19 @@ if runtime_log_file do
       max_no_files: runtime_log_max_files,
       compress_on_rotate: false
     ]
+end
+
+# Audit is node configuration. No repository or session option can reduce this policy.
+if is_nil(System.get_env("OUROBOROS_COLLECTOR_CONFIG")) and
+     (System.get_env("OUROBOROS_AUDIT_MODE") || System.get_env("OUROBOROS_AUDIT_CONFIG")) do
+  config :ouroboros,
+         :audit,
+         Ouroboros.Audit.Config.from_environment!(
+           Application.get_env(:ouroboros, :data_dir) || gateway_data_dir ||
+             Ouroboros.DataDir.resolve!(
+               System.get_env("OUROBOROS_DATA_DIR"),
+               System.get_env("XDG_DATA_HOME"),
+               System.get_env("HOME")
+             )
+         )
 end
