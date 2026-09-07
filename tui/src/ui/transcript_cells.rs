@@ -864,7 +864,7 @@ pub enum Cell {
     /// One child agent this session spawned, folded across its whole life. Its own cell
     /// rather than a [`Cell::Runtime`] block because it is the one row here that is
     /// *rewritten* — a block is a thing that happened, and a child is a thing happening.
-    Subagent(SubagentCell),
+    Subagent(Box<SubagentCell>),
     Divider {
         text: String,
         tone: Tone,
@@ -3451,7 +3451,7 @@ fn project_subagent(
         Some(index) => index,
         None => {
             let index = cells.len();
-            cells.push(Cell::Subagent(SubagentCell::default()));
+            cells.push(Cell::Subagent(Box::default()));
 
             if let Some(task) = &event.task_id {
                 tracked.insert(task.clone(), index);
