@@ -537,12 +537,57 @@ defmodule Ouroboros.Gateway.Methods do
     case Contract.handler(method) do
       {:ok, handler} when handler != :connection ->
         case Contract.validate(method, params) do
-          :ok -> apply(__MODULE__, handler, [params])
+          :ok -> invoke_on_machine(method, handler, params)
           {:invalid, message} -> invalid_params(message)
         end
 
       _ ->
         {:error, code(:method_not_found), "unknown method #{inspect(method)}"}
+    end
+  end
+
+  defp invoke_on_machine(method, handler, params) do
+    if Contract.machine_scoped?(method) and Map.has_key?(params, "machine") do
+      machine = params["machine"]
+
+      if is_binary(machine) and String.trim(machine) != "" and
+           not String.starts_with?(machine, "tag:") do
+        case Ouroboros.Cluster.resolve_machine(machine) do
+          {:ok, target} when target == node() ->
+            apply(__MODULE__, handler, [Map.delete(params, "machine")])
+
+          {:ok, target} ->
+            with :ok <- Ouroboros.Cluster.ensure_placeable(target) do
+              params = Map.delete(params, "machine")
+              # A loopback browser callback on the other computer is inaccessible here.
+              params =
+                if method == "account.login.start",
+                  do: Map.put(params, "flow", "device_code"),
+                  else: params
+
+              try do
+                :erpc.call(target, __MODULE__, :invoke, [method, params], 10_000)
+              catch
+                _, _ ->
+                  {:error, code(:unavailable),
+                   "#{machine} stopped answering. Reconnect it and check setup before retrying.",
+                   %{"outcome" => "unknown", "machine" => machine}}
+              end
+            else
+              {:error, _} ->
+                unavailable("#{machine} is not ready for work. Open Machines to check it.")
+            end
+
+          {:error, _} ->
+            unavailable(
+              "#{machine} is offline or unknown. Reconnect it, or choose another computer."
+            )
+        end
+      else
+        invalid_params("params.machine must be a nonempty machine name")
+      end
+    else
+      apply(__MODULE__, handler, [params])
     end
   end
 

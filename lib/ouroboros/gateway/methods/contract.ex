@@ -1263,6 +1263,29 @@ defmodule Ouroboros.Gateway.Methods.Contract do
   def wasm_upload_timeout, do: @wasm_upload_timeout
   def worker_options, do: @worker_options
 
+  # Setup belongs to the computer that will run the work. Keep this list explicit:
+  # accepting a machine here must never turn into an arbitrary remote RPC facility.
+  @machine_scoped ~w(runtime.providers runtime.models workspace.browse account.read
+    account.login.start account.login.complete account.login.cancel account.logout
+    grok.account.read grok.account.login.start grok.account.login.cancel
+    credentials.anthropic.set credentials.xai.set)
+  @methods Map.new(@methods, fn {name, entry} ->
+             if name in @machine_scoped do
+               params = Tuple.to_list(entry.params)
+
+               descriptor =
+                 {"machine", :optional, :string,
+                  "connected fleet machine name or node; omitted means this runtime; never falls back locally"}
+
+               params = List.update_at(params, 1, &(&1 ++ [descriptor])) |> List.to_tuple()
+               {name, %{entry | params: params}}
+             else
+               {name, entry}
+             end
+           end)
+
+  def machine_scoped?(name), do: name in @machine_scoped
+
   @table Map.new(@methods, fn {name, entry} -> {name, Map.drop(entry, [:params, :handler])} end)
   def table, do: @table
 
