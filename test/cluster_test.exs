@@ -238,6 +238,16 @@ defmodule Ouroboros.ClusterTest do
       assert roster_guidance =~ "latest signed roster"
       assert roster_guidance =~ "rotate the fleet"
 
+      # This fixture deliberately substitutes directory facts, rather than changing
+      # the peer's actual CPU or protocol. Keep background probes from replacing those
+      # synthetic values while checking projection and offline retention. Live refresh
+      # after a real profile change is covered by subagent_remote_test.exs.
+      :sys.replace_state(Ouroboros.Cluster.Monitor, &Map.put(&1, :facts_probe, :fixture_paused))
+
+      on_exit(fn ->
+        :sys.replace_state(Ouroboros.Cluster.Monitor, &Map.put(&1, :facts_probe, nil))
+      end)
+
       # CPU architecture is inventory, not a compatibility fence: Erlang distribution
       # and the agent protocol are cross-architecture. Simulate the common arm64 Mac +
       # x86_64 Linux fleet and ensure doctor does not turn it into a false outage.

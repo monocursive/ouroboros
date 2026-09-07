@@ -25,7 +25,7 @@ defmodule Ouroboros.Cluster.Tags do
          true <- Path.type(helper) == :absolute and File.regular?(helper),
          data when is_binary(data) <- Application.get_env(:ouroboros, :data_dir),
          {:ok, %{status: 0}} <-
-           Exec.run(helper, ["fleet", "tag", operation, tag],
+           Exec.run(helper, ["fleet", "tag", operation, "--", tag],
              timeout_ms: 5_000,
              max_bytes: 4_096,
              env: [{"OUROBOROS_DATA_DIR", data}]

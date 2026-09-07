@@ -63,7 +63,7 @@ defmodule Ouroboros.Cluster.TagsTest do
 
     File.write!(helper, """
     #!/bin/sh
-    [ "$#" = 4 ] && [ "$1" = fleet ] && [ "$2" = tag ] && [ "$3" = add ] && [ "$4" = xcode ] || exit 9
+    [ "$#" = 5 ] && [ "$1" = fleet ] && [ "$2" = tag ] && [ "$3" = add ] && [ "$4" = -- ] && [ "$5" = xcode ] || exit 9
     printf '%s' '#{updated}' > "$OUROBOROS_DATA_DIR/fleet/profile.json"
     """)
 
@@ -77,21 +77,21 @@ defmodule Ouroboros.Cluster.TagsTest do
   end
 
   test "remote removal can repair an invalid existing advisory tag", context do
-    File.write!(context.path, Jason.encode!(Map.put(context.profile, "tags", ["BAD"])))
+    File.write!(context.path, Jason.encode!(Map.put(context.profile, "tags", ["--bad"])))
     helper = Path.join(context.root, "ouro")
     repaired = Jason.encode!(context.profile)
 
     File.write!(helper, """
     #!/bin/sh
-    [ "$#" = 4 ] && [ "$1" = fleet ] && [ "$2" = tag ] && [ "$3" = remove ] && [ "$4" = BAD ] || exit 9
+    [ "$#" = 5 ] && [ "$1" = fleet ] && [ "$2" = tag ] && [ "$3" = remove ] && [ "$4" = -- ] && [ "$5" = --bad ] || exit 9
     printf '%s' '#{repaired}' > "$OUROBOROS_DATA_DIR/fleet/profile.json"
     """)
 
     File.chmod!(helper, 0o700)
     System.put_env("OUROBOROS_PROCESS_ID_HELPER", helper)
     assert %{tags: [], tags_error: error} = Facts.local()
-    assert error =~ "BAD"
-    assert {:ok, []} = Tags.change(node(), "remove", "BAD")
+    assert error =~ "--bad"
+    assert {:ok, []} = Tags.change(node(), "remove", "--bad")
   end
 
   test "remote management has an operator gate and a bounded validated contract" do
