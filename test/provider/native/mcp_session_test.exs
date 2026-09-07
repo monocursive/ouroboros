@@ -104,6 +104,36 @@ defmodule Ouroboros.Provider.Native.McpSessionTest do
     assert List.last(names) == "mcp__fake__add"
   end
 
+  @tag :live_tool_refresh
+  test "a live session discovers MCP tools that became available after its cached opening",
+       context do
+    servers = Application.fetch_env!(:ouroboros, :mcp_servers)
+    Application.put_env(:ouroboros, :mcp_servers, %{})
+
+    %{agent: agent, handle: handle} =
+      open(context, [
+        [{:text, "before the server is available"}, {:finish, :stop}],
+        [{:text, "after the server is available"}, {:finish, :stop}]
+      ])
+
+    assert :ok = Session.send(handle, TurnRequest.new!("first turn"), "turn-1")
+    collect_until(:turn_completed)
+    [first] = NativeModelScript.requests(agent)
+    refute Enum.any?(first.tools, &(&1.name == "mcp__fake__echo"))
+
+    # A real server is now ready, just as one whose opening handshake exceeded the
+    # list wait. The session retains its cached opening context throughout.
+    Application.put_env(:ouroboros, :mcp_servers, servers)
+    specs = Ouroboros.Provider.Native.Mcp.specs(context.workspace)
+    assert Enum.any?(specs, &(&1.name == "mcp__fake__echo"))
+
+    assert :ok = Session.send(handle, TurnRequest.new!("second turn"), "turn-2")
+    collect_until(:turn_completed)
+    [_, second] = NativeModelScript.requests(agent)
+    assert Enum.any?(second.tools, &(&1.name == "mcp__fake__echo"))
+    assert second.system == first.system
+  end
+
   test "a deny rule refuses the call before the server ever sees it", context do
     Application.put_env(:ouroboros, :permissions_engine, __MODULE__.DenyMcp)
 

@@ -300,7 +300,9 @@ defmodule Ouroboros.Provider.Native.Loop do
     state = %{
       state
       | hooks: state.hooks || Hooks.load(state.scope.root),
-        tool_specs: tool_specs(state),
+        # Live discovery can finish after the opening prefix; replay must keep its recorded layout.
+        tool_specs:
+          if(state.tool_source == :live, do: build_tool_specs(state), else: tool_specs(state)),
         turn_files: %{},
         turn_paths: [],
         turn_commands: [],
