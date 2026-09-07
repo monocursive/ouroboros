@@ -104,6 +104,35 @@ defmodule Ouroboros.WorkspaceMirrorsTest do
     assert {:error, _} = Git.run(c.repo, ["rev-parse", "--verify", Snapshot.ref("task-cap")])
   end
 
+  test "a timed-out transfer releases its snapshot pin and target import lock", c do
+    rpc = fn target, module, function, args, timeout ->
+      result = c.rpc.(target, module, function, args, timeout)
+
+      if function == :put_chunk do
+        send(self(), :chunk_accepted)
+        Process.sleep(5_100)
+        {:error, :provision_deadline_exceeded}
+      else
+        result
+      end
+    end
+
+    assert {:error, :provision_deadline_exceeded} =
+             Provision.prepare(c.repo, node(), "task-expiry",
+               rpc: rpc,
+               provision_deadline_ms: 5_000
+             )
+
+    assert_received :chunk_accepted
+    assert {:error, _} = Git.run(c.repo, ["rev-parse", "--verify", Snapshot.ref("task-expiry")])
+    {snapshot, _bytes, metadata} = bundle(c, "task-after-expiry")
+
+    assert {:ok, token} =
+             Mirrors.begin_import(snapshot.repo_id, metadata, node(), server: c.server)
+
+    assert :ok = Mirrors.cancel_import(token, server: c.server)
+  end
+
   test "reconciles only interrupted upload files at boot", c do
     directory = Path.join(c.root, "reconcile")
     File.mkdir_p!(Path.join(directory, "mirrors"))
@@ -119,6 +148,53 @@ defmodule Ouroboros.WorkspaceMirrorsTest do
 
   test "refuses repository path traversal", c do
     assert {:error, :invalid_repository_id} = Mirrors.heads("../elsewhere", server: c.server)
+  end
+
+  test "preserves SHA-256 repository format when creating a mirror", c do
+    repo = Path.join(c.root, "sha256-source")
+    File.mkdir_p!(repo)
+    git!(repo, ["init", "-q", "--object-format=sha256"])
+    File.write!(Path.join(repo, "file"), "sha256 work")
+    git!(repo, ["add", "."])
+
+    git!(repo, [
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "-qm",
+      "Initial"
+    ])
+
+    assert {:ok, provision} = Provision.prepare(repo, node(), "task-sha256", rpc: c.rpc)
+    assert byte_size(provision.commit) == 64
+
+    assert {:ok, worktree} =
+             Mirrors.worktree(provision.repo_id, provision.commit, provision.task_id,
+               server: c.server
+             )
+
+    assert File.read!(Path.join(worktree.root, "file")) == "sha256 work"
+  end
+
+  test "an old peer without provisioning is refused by name" do
+    assert {:error, {:provisioning_unavailable, target}} =
+             Provision.rpc(
+               node(),
+               Ouroboros.NotInstalledProvisioner,
+               :heads,
+               [],
+               System.monotonic_time(:millisecond) + 5_000
+             )
+
+    message =
+      Ouroboros.Provider.Native.Tools.Agent.start_refusal(
+        {:subagent_provision_failed, target, {:provisioning_unavailable, target}}
+      )
+
+    assert message =~ "release without provisioning"
+    assert message =~ Atom.to_string(target)
   end
 
   defp bundle(c, task_id) do

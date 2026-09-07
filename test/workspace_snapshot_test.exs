@@ -36,6 +36,10 @@ defmodule Ouroboros.WorkspaceSnapshotTest do
   end
 
   test "excludes tracked and untracked paths and deliveries", %{root: root} do
+    File.write!(Path.join(root, "tracked.txt"), "staged exclusion")
+    git!(root, ["add", "tracked.txt"])
+    File.write!(Path.join(root, "tracked.txt"), "unstaged exclusion")
+
     File.write!(
       Path.join(root, "ouroboros.toml"),
       "[provision]\nexclude = [\"tracked.txt\", \"private*\"]\n"

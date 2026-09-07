@@ -40,13 +40,20 @@ defmodule Ouroboros.Workspace.Mirrors do
 
   @impl true
   def handle_call({:heads, repo_id}, _from, state) do
-    result = with {:ok, path} <- mirror(state, repo_id), do: read_heads(path)
+    result =
+      case mirror(state, repo_id) do
+        {:ok, path} -> read_heads(path)
+        {:error, :mirror_not_found} -> {:ok, []}
+        error -> error
+      end
+
     {:reply, result, state}
   end
 
   def handle_call({:begin, repo_id, metadata, source}, _from, state) do
     result =
-      with {:ok, path} <- mirror(state, repo_id),
+      with {:ok, format} <- object_format(metadata),
+           {:ok, path} <- mirror(state, repo_id, format),
            false <- Enum.any?(state.transfers, fn {_id, t} -> t.repo_id == repo_id end),
            true <- map_size(state.transfers) < @max_mirrors,
            true <- is_atom(source),
@@ -159,14 +166,15 @@ defmodule Ouroboros.Workspace.Mirrors do
     {:noreply, %{state | transfers: Map.new(live)}}
   end
 
-  defp mirror(%{root: nil}, _id), do: {:error, :provision_requires_data_directory}
+  defp mirror(state, id, format \\ nil)
+  defp mirror(%{root: nil}, _id, _format), do: {:error, :provision_requires_data_directory}
 
-  defp mirror(state, id) do
+  defp mirror(state, id, format) do
     if is_binary(id) and Regex.match?(~r/\A[a-f0-9]{64}\z/, id) do
       path = Path.join(state.root, id)
 
       with :ok <- File.mkdir_p(state.root),
-           :ok <- ensure_mirror(path, state.root),
+           :ok <- ensure_mirror(path, state.root, format),
            {:ok, canonical} <- WorkspacePath.canonicalize(path),
            {:ok, root} <- WorkspacePath.canonicalize(state.root),
            true <- WorkspacePath.within?(canonical, root) do
@@ -180,15 +188,22 @@ defmodule Ouroboros.Workspace.Mirrors do
     end
   end
 
-  defp ensure_mirror(path, root) do
+  defp ensure_mirror(path, root, format) do
     case File.lstat(path) do
       {:ok, %{type: :directory}} ->
-        :ok
+        case Git.run(path, ["rev-parse", "--show-object-format"]) do
+          {:ok, actual} when is_nil(format) or actual == format -> :ok
+          _ -> {:error, :mirror_object_format_mismatch}
+        end
+
+      {:error, :enoent} when is_nil(format) ->
+        {:error, :mirror_not_found}
 
       {:error, :enoent} ->
         with {:ok, entries} <- File.ls(root),
              true <- Enum.count(entries, &(byte_size(&1) == 64)) < @max_mirrors,
-             {:ok, _} <- Git.run(root, ["init", "--bare", "--template=", path]),
+             {:ok, _} <-
+               Git.run(root, ["init", "--bare", "--template=", "--object-format=#{format}", path]),
              :ok <- File.chmod(path, 0o700) do
           :ok
         else
@@ -213,4 +228,12 @@ defmodule Ouroboros.Workspace.Mirrors do
       error -> error
     end
   end
+
+  defp object_format(%{commit: commit}) do
+    if Git.valid_commit?(commit),
+      do: {:ok, if(byte_size(commit) == 64, do: "sha256", else: "sha1")},
+      else: {:error, :invalid_bundle_metadata}
+  end
+
+  defp object_format(_), do: {:error, :invalid_bundle_metadata}
 end

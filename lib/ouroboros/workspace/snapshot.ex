@@ -59,6 +59,7 @@ defmodule Ouroboros.Workspace.Snapshot do
              [
                "rm",
                "-r",
+               "-f",
                "--cached",
                "--ignore-unmatch",
                "--" | Enum.map(excludes, &(":(top)" <> &1))

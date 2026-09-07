@@ -22,9 +22,15 @@ defmodule Ouroboros.Workspace.Provision do
         {:ok, provision} ->
           {:ok, provision}
 
-        {:error, _} = error ->
-          Snapshot.release(snapshot.root, task_id, opts)
-          error
+        {:error, reason} = error ->
+          # Cleanup has its own small budget: using an expired transfer deadline here
+          # would leave every timed-out attempt pinned forever without running Git.
+          cleanup_opts = opts |> Keyword.delete(:deadline) |> Keyword.put(:timeout_ms, 5_000)
+
+          case Snapshot.release(snapshot.root, task_id, cleanup_opts) do
+            {:ok, _} -> error
+            cleanup -> {:error, {:provision_cleanup_failed, reason, cleanup}}
+          end
       end
     end
   end
@@ -96,7 +102,7 @@ defmodule Ouroboros.Workspace.Provision do
             end
 
           if match?({:error, _}, result),
-            do: rpc(target, Mirrors, :cancel_import, [token], deadline, opts)
+            do: rpc(target, Mirrors, :cancel_import, [token], now() + 5_000, opts, 5_000)
 
           result
         end

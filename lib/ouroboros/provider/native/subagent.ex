@@ -226,7 +226,7 @@ defmodule Ouroboros.Provider.Native.Subagent do
            {__MODULE__, spec}
          ) do
       {:ok, pid} ->
-        case safe_call(pid, :launch, @open_timeout + 5_000) do
+        case safe_call(pid, :launch, launch_timeout(spec)) do
           {:ok, started} ->
             {:ok, Map.put(started, :pid, pid)}
 
@@ -267,7 +267,14 @@ defmodule Ouroboros.Provider.Native.Subagent do
   end
 
   defp remote_start_call(target, spec) do
-    {:returned, :erpc.call(target, __MODULE__, :start_and_launch, [spec], @remote_spawn_timeout)}
+    {:returned,
+     :erpc.call(
+       target,
+       __MODULE__,
+       :start_and_launch,
+       [spec],
+       max(@remote_spawn_timeout, launch_timeout(spec) + 15_000)
+     )}
   catch
     :error, {:erpc, reason} -> {:ambiguous, reason}
     kind, reason -> {:ambiguous, {kind, reason}}
@@ -282,11 +289,17 @@ defmodule Ouroboros.Provider.Native.Subagent do
   defp recover_started(pid, spec) do
     provider_session_id = Map.get(spec.request_attrs, :provider_session_id)
 
-    case safe_call(pid, {:recover_start, provider_session_id}, @open_timeout + 5_000) do
+    case safe_call(pid, {:recover_start, provider_session_id}, launch_timeout(spec)) do
       {:ok, _started} = ok -> ok
       {:error, reason} -> {:error, {:subagent_unstartable, reason}}
     end
   end
+
+  # A provisioned launch includes the target's bounded Git checkout before provider
+  # startup. Keep every enclosing wait above that budget so a valid checkout is not
+  # mislabeled as an ambiguous remote start after 35 seconds.
+  defp launch_timeout(%{provision: provision}) when is_map(provision), do: @open_timeout + 140_000
+  defp launch_timeout(_), do: @open_timeout + 5_000
 
   @doc "This child's summary now, whether or not it has settled."
   @spec summary(pid()) :: {:ok, map()} | {:error, term()}
