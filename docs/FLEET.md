@@ -304,6 +304,96 @@ provider migration, quorum/fencing, and multi-cluster federation. One Erlang clu
 one trust domain. A network partition can produce independent views; no section below
 should be read as a claim of partition-safe consensus.
 
+## Long-running child agents
+
+Use a background child for builds or other work that should outlive the current turn:
+
+```text
+agent(machine: "builder", workspace: "/srv/project", background: true,
+      deadline_ms: 900000, prompt: "Build the project and report the result")
+```
+
+The node's `provider_options.subagent_deadline_ms` defaults to 300000 ms;
+`subagent_max_deadline_ms` defaults to 900000 ms and caps a requested per-call deadline.
+`bash_max_timeout_ms` defaults to 600000 ms. Both ceilings can be raised to four hours.
+A child's bash call must also request its needed `timeout_ms`. Hooks, checks and other
+Exec callers retain their ten-minute maximum. Foreground agents remain bounded by the
+loop's `tool_timeout_ms`; use `background: true` for long jobs.
+
+The folded row reports elapsed time and the last command's first line or file path.
+Updates arrive every five seconds, with an immediate update when bash starts and a final
+update when the child finishes, under a hard ceiling of 2000 updates per child. Activity is limited to 160 bytes and never includes file
+contents or tool output. `agent_result(task_id: "…", wait_ms: 0)` returns the current
+elapsed time, deadline and activity without waiting or removing a running child.
+
+Interactive children can ask for approval even after their parent's turn has finished.
+The approval names the child and its machine; the target's decision to ask always reaches
+the human, without being re-evaluated against the parent's rules. Closing the session
+stops its children and cancels their pending questions. One-shot runs refuse background
+children because they have no interactive session to hold them.
+
+A real Ubuntu 26.04 run on 2026-09-07 completed `sleep 700 && echo ok` in 700.085 seconds
+inside the normal Linux sandbox. The parent became idle after 20 ms and stayed idle
+through all 140 progress observations; collection returned `completed` and `ok`. Model
+responses were scripted for this timing gate; the shell, sandbox, elapsed time, progress
+and session lifecycle were real. This is local/live implementation evidence, not a
+published release claim.
+
+## Returned child work and deliveries
+
+A child started with `sync: true` receives a snapshot of the parent's committed,
+staged, unstaged, and eligible untracked files. When its turn ends, the target closes
+the child session and captures its committed and dirty work. The return travels in
+bounded, verified chunks and is imported into the original repository as
+`refs/ouroboros/subagents/<task_id>`. The parent's HEAD, index, and working files stay
+as they were. Inspect the child’s changes with `git show <returned_ref>` and
+apply them deliberately with `git cherry-pick <returned_commit>`. The returned commit
+combines the child's committed and dirty changes relative to the provisioned snapshot;
+intermediate child commits are not preserved as separate commits in that return.
+
+Put reports and other artifacts in `.ouroboros/deliver/`. This directory is prepared
+before launch and excluded from the Git snapshot. Only regular files are accepted;
+symlinks, traversal paths, special files, more than 128 files, and archives larger
+than 32 MiB are refused. The target may lower the capture limit with its
+`:deliver_max_bytes` application setting. The parent verifies the uncompressed archive and every
+file's size and digest while extracting into
+`<data_dir>/deliveries/<task_id>/`. The model result and both transcript clients name
+the returned ref and each delivered path and size.
+
+Settlement stays observable while returning work: `summary` reports `returning`,
+`agent_result` keeps the task collectable, and stopping the child does not discard a
+return in flight. When a foreground wait reaches the loop timeout or is interrupted,
+the session takes ownership of the unfinished return. The task stays tracked and
+collectable with `agent_result`; its settled event arrives only after return finishes.
+Return transport is bounded to ten minutes, with an independent
+worker ceiling. Only an acknowledged return, followed by a fresh comparison of the
+child's HEAD, tree, and delivery contents, authorizes deletion of its worktree. A
+failed, ambiguous, or concurrently changed return retains the target worktree and
+snapshot pin and names the error and location. A received Git ref remains available
+even when a later delivery or cleanup step fails.
+
+Parent repository paths stay in a parent-local capability registry; remote return
+requests carry an opaque capability, repository identity, commit, and task ID. A
+lost parent process or distribution link cannot authorize target cleanup. Returned
+refs are retained for inspection and may be removed explicitly with
+`git update-ref -d refs/ouroboros/subagents/<task_id>` after the work is accepted.
+
+## Vendor sessions and native children
+
+Interactive Claude Code sessions receive `agent`, `agent_result`, and `fleet` through
+`ouro mcp-serve` in every approval posture. Their children use the same native dispatch,
+permission rules, hooks, effect ledger and approval channel as native sessions. The
+owner's current configuration is read for each call. The gateway accepts the session ID
+and tool input; it does not accept a caller-supplied principal or permission posture.
+Closing the owner closes its sidecar and children. A stable request ID prevents an
+ambiguous spawn response from becoming a duplicate child on retry.
+
+Configure a native model on the owner with `OUROBOROS_NATIVE_MODEL` or the runtime's
+`:native_model` setting, using an existing native credential source. Vendor model aliases
+are not native model specifications. After a child is created, result and stop remain
+available even if the native default is removed. The previously removed Codex CLI
+transport remains removed; this bridge does not reintroduce it.
+
 ## Historical design record (pre-implementation snapshot)
 
 Everything below this heading is the original adversarial evolution survey that led to
@@ -1041,93 +1131,3 @@ stated in the tests), registry v2→v3 widen-on-read.
   partition policy — the standing architecture non-claims remain non-claims.
 - **Per-token scopes** on the gateway; a signer outside the distribution trust
   domain — both already on the project's deferral lists and unchanged here.
-
-## Long-running child agents
-
-Use a background child for builds or other work that should outlive the current turn:
-
-```text
-agent(machine: "builder", workspace: "/srv/project", background: true,
-      deadline_ms: 900000, prompt: "Build the project and report the result")
-```
-
-The node's `provider_options.subagent_deadline_ms` defaults to 300000 ms;
-`subagent_max_deadline_ms` defaults to 900000 ms and caps a requested per-call deadline.
-`bash_max_timeout_ms` defaults to 600000 ms. Both ceilings can be raised to four hours.
-A child's bash call must also request its needed `timeout_ms`. Hooks, checks and other
-Exec callers retain their ten-minute maximum. Foreground agents remain bounded by the
-loop's `tool_timeout_ms`; use `background: true` for long jobs.
-
-The folded row reports elapsed time and the last command's first line or file path.
-Updates arrive every five seconds, with an immediate update when bash starts and a final
-update when the child finishes, under a hard ceiling of 2000 updates per child. Activity is limited to 160 bytes and never includes file
-contents or tool output. `agent_result(task_id: "…", wait_ms: 0)` returns the current
-elapsed time, deadline and activity without waiting or removing a running child.
-
-Interactive children can ask for approval even after their parent's turn has finished.
-The approval names the child and its machine; the target's decision to ask always reaches
-the human, without being re-evaluated against the parent's rules. Closing the session
-stops its children and cancels their pending questions. One-shot runs refuse background
-children because they have no interactive session to hold them.
-
-## Returned child work and deliveries
-
-A child started with `sync: true` receives a snapshot of the parent's committed,
-staged, unstaged, and eligible untracked files. When its turn ends, the target closes
-the child session and captures its committed and dirty work. The return travels in
-bounded, verified chunks and is imported into the original repository as
-`refs/ouroboros/subagents/<task_id>`. The parent's HEAD, index, and working files stay
-as they were. Inspect the returned changes with `git diff HEAD <returned_ref>` and
-apply them deliberately with `git cherry-pick <returned_commit>`. The returned commit
-combines the child's committed and dirty changes relative to the provisioned snapshot;
-intermediate child commits are not preserved as separate commits in that return.
-
-Put reports and other artifacts in `.ouroboros/deliver/`. This directory is prepared
-before launch and excluded from the Git snapshot. Only regular files are accepted;
-symlinks, traversal paths, special files, more than 128 files, and archives larger
-than 32 MiB are refused. The target may lower the capture limit with its
-`:deliver_max_bytes` application setting. The parent verifies the uncompressed archive and every
-file's size and digest while extracting into
-`<data_dir>/deliveries/<task_id>/`. The model result and both transcript clients name
-the returned ref and each delivered path and size.
-
-Settlement stays observable while returning work: `summary` reports `returning`,
-`agent_result` keeps the task collectable, and stopping the child does not discard a
-return in flight. When a foreground wait reaches the loop timeout or is interrupted,
-the session takes ownership of the unfinished return. The task stays tracked and
-collectable with `agent_result`; its settled event arrives only after return finishes.
-Return transport is bounded to ten minutes, with an independent
-worker ceiling. Only an acknowledged return, followed by a fresh comparison of the
-child's HEAD, tree, and delivery contents, authorizes deletion of its worktree. A
-failed, ambiguous, or concurrently changed return retains the target worktree and
-snapshot pin and names the error and location. A received Git ref remains available
-even when a later delivery or cleanup step fails.
-
-Parent repository paths stay in a parent-local capability registry; remote return
-requests carry an opaque capability, repository identity, commit, and task ID. A
-lost parent process or distribution link cannot authorize target cleanup. Returned
-refs are retained for inspection and may be removed explicitly with
-`git update-ref -d refs/ouroboros/subagents/<task_id>` after the work is accepted.
-
-## Vendor sessions and native children
-
-Interactive Claude Code sessions receive `agent`, `agent_result`, and `fleet` through
-`ouro mcp-serve` in every approval posture. Their children use the same native dispatch,
-permission rules, hooks, effect ledger and approval channel as native sessions. The
-owner's current configuration is read for each call. The gateway accepts the session ID
-and tool input; it does not accept a caller-supplied principal or permission posture.
-Closing the owner closes its sidecar and children. A stable request ID prevents an
-ambiguous spawn response from becoming a duplicate child on retry.
-
-Configure a native model on the owner with `OUROBOROS_NATIVE_MODEL` or the runtime's
-`:native_model` setting, using an existing native credential source. Vendor model aliases
-are not native model specifications. After a child is created, result and stop remain
-available even if the native default is removed. The previously removed Codex CLI
-transport remains removed; this bridge does not reintroduce it.
-
-A real Ubuntu 26.04 run on 2026-09-07 completed `sleep 700 && echo ok` in 700.085 seconds
-inside the normal Linux sandbox. The parent became idle after 20 ms and stayed idle
-through all 140 progress observations; collection returned `completed` and `ok`. Model
-responses were scripted for this timing gate; the shell, sandbox, elapsed time, progress
-and session lifecycle were real. This is local/live implementation evidence, not a
-published release claim.

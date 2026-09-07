@@ -62,24 +62,44 @@ admits only the exact sandbox executable paths used by the tests.
   Model responses were scripted; command, timing, containment and lifecycle were real.
   Evidence: `/tmp/ouro-long-child-700-evidence/`.
 
+- **MCP bridge round trip:** the actual Rust stdio bridge connected over authenticated
+  gateway TCP to a live session, listed the fleet, spawned a physical VPS child, collected
+  its result, and inspected its returned Git ref. The child model was scripted and the
+  parent was an MCP driver, not Claude. Evidence: `/tmp/ouro-fleet-mcp-wire-result.json`.
+- **Claude parent:** the real CLI was invoked, but its OAuth session expired and automatic
+  refresh failed before any MCP call. No provider success is claimed; the remaining live
+  check awaits Mac reauthentication. No credentials were copied to the VPS.
+
 ## Client and integrated checks
 
-- Initial complete Rust default run: **1658 passed**, no failures or ignored tests.
+- Initial complete Rust runs: **1658 default / 1667 embed passed**, no failures or ignored
+  tests. The later terminal wrapping change is included in the fresh final run.
 - Browser/protocol focused gate after display changes: **219 passed**.
 - Actual web components rendered at desktop and phone widths. This caught long activity
   overflow and hidden return outcomes in folded rows. Wrapping now keeps page content at
   viewport width, folded rows name returned changes/delivery counts or incomplete returns,
   and expand buttons expose `aria-expanded`. Retained work is labelled without assuming
   it is uncommitted. Render fixtures: `/tmp/ouro-fleet-visual/`.
-- Initial full Elixir run is under diagnosis; stale protocol docs were regenerated and
-  their gate now passes. Sandbox-helper failures and data-directory test isolation are
-  being checked before a fresh full integrated run.
+- Actual terminal App rendering covers running, returned and retained children at 40,
+  80 and 120 columns. Explicit wrapping fixes clipped headings, activity and return refs.
+  The UI, presentation corpus and transcript-cell gate passed **260 tests**. Rendered
+  SVG/PNG/text fixtures: `/tmp/ouro-fleet-rendered/`.
+- Fleet replay records its opening snapshot and tool availability, preserving them even
+  when distribution is stopped before verification. The integrated replay/context/loop
+  gate passed **85 tests**. Removing the recorded snapshot or rebuilding recorded tools
+  from live distribution each failed the committed regression; restored gates passed.
+- The initial full Elixir run exposed stale protocol docs, configuration-dependent
+  fixtures and sandbox helper startup failures. Docs and fixtures were corrected, and
+  the helper now starts inside its admitted scratch directory. That superseded run was
+  stopped; fresh final Mac and Linux runs use the integrated source. Process-start delays
+  observed on the Mac remain under investigation until the quiet run completes.
 
 ## Remaining acceptance
 
 - [ ] Run the real Claude parent / remote child check.
 - [ ] Full final Elixir and Rust default/embed suites, format, Clippy and script checks.
 - [ ] Final packaged builds and direct Mac/VPS readiness with the final source.
-- [ ] Finish rendered TUI verification and reconcile this record to final evidence.
+- [x] Finish rendered TUI verification.
+- [ ] Reconcile this record to final integrated evidence.
 
 No push, merge, publication or production release is claimed.
