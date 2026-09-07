@@ -435,6 +435,8 @@ defmodule Ouroboros.Wasm.PoolTest do
                Pool.status(start_pool(responding_helper()))
 
       # Refused: nothing was spawned, so no process posture was taken either.
+      without_data_dir()
+
       pool =
         start_pool(responding_helper(),
           scratch_root: nil,
@@ -637,6 +639,13 @@ defmodule Ouroboros.Wasm.PoolTest do
       refute File.exists?(unmarked), "a scratch with no owner at all was kept"
     end
 
+    test "the helper starts in its readable private scratch, independent of the VM cwd" do
+      pool = start_pool(env_dump_helper())
+
+      assert {:ok, %{"tmpdir" => scratch, "cwd" => cwd}} = Pool.inspect(component(), pool)
+      assert cwd == scratch
+    end
+
     test "the child's own scratch carries an owner marker it cannot rewrite" do
       pool = start_pool(env_dump_helper())
 
@@ -653,6 +662,8 @@ defmodule Ouroboros.Wasm.PoolTest do
 
     @tag :capture_log
     test "`:required` with nowhere private to put a scratch refuses, and the status says so" do
+      without_data_dir()
+
       # No data directory and no `scratch_root`: `System.tmp_dir!()` is writable by every
       # account on the machine, so there is nowhere this node will put the one directory its
       # containment helper may write in. That is a refusal and not a `/tmp` fallback.
@@ -1963,7 +1974,8 @@ defmodule Ouroboros.Wasm.PoolTest do
   defp env_dump_helper do
     write_helper("""
     #!/bin/sh
-    exec awk '
+    helper_cwd=$(pwd -P)
+    exec awk -v helper_cwd="$helper_cwd" '
     {
       id = $0
       sub(/.*"id":/, "", id)
@@ -1973,7 +1985,7 @@ defmodule Ouroboros.Wasm.PoolTest do
       } else {
         names = ""
         for (k in ENVIRON) { names = names k " " }
-        printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"result\\":{\\"env\\":\\"%s\\",\\"tmpdir\\":\\"%s\\"}}\\n", id, names, ENVIRON["TMPDIR"])
+        printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"result\\":{\\"env\\":\\"%s\\",\\"tmpdir\\":\\"%s\\",\\"cwd\\":\\"%s\\"}}\\n", id, names, ENVIRON["TMPDIR"], helper_cwd)
       }
       fflush()
     }
@@ -2114,5 +2126,18 @@ defmodule Ouroboros.Wasm.PoolTest do
         on_exit(fn -> File.rm_rf(dir) end)
         dir
     end
+  end
+
+  defp without_data_dir do
+    previous = Application.fetch_env(:ouroboros, :data_dir)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, value} -> Application.put_env(:ouroboros, :data_dir, value)
+        :error -> Application.delete_env(:ouroboros, :data_dir)
+      end
+    end)
+
+    Application.delete_env(:ouroboros, :data_dir)
   end
 end

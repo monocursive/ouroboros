@@ -1012,6 +1012,10 @@ defmodule Ouroboros.Wasm.PrecompiledTest do
   describe "a skipped precompile is an answer, and it names itself" do
     @tag @needs_live
     test "every reason this node can have for signing the source form alone", context do
+      previous_data_dir = Application.get_env(:ouroboros, :data_dir)
+      on_exit(fn -> restore(:data_dir, previous_data_dir) end)
+      Application.delete_env(:ouroboros, :data_dir)
+
       bytes = File.read!(@guest)
       scratch = Path.join(context.tmp, "sign")
 

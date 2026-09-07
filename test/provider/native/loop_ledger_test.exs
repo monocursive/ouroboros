@@ -204,7 +204,10 @@ defmodule Ouroboros.Provider.Native.LoopLedgerTest do
         start_loop(
           context,
           [
-            [{:tool_call, %{id: "c1", name: "bash", input: %{"command" => "sleep 5"}}}],
+            [
+              {:tool_call,
+               %{id: "c1", name: "bash", input: %{"command" => "sleep 5", "timeout_ms" => 150}}}
+            ],
             [{:text, "too slow"}, {:finish, :stop}]
           ],
           tool_timeout_ms: 150
