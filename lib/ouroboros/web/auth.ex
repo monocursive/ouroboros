@@ -96,11 +96,47 @@ defmodule Ouroboros.Web.Auth do
   def on_mount(:ensure_session, _params, session, socket) do
     case session do
       %{@session_key => id} when is_binary(id) ->
-        {:cont, Phoenix.Component.assign(socket, :web_session, id)}
+        subject =
+          Map.get(session, "ouroboros_identity", %{"id" => "local-owner", "local" => true})
+
+        case Ouroboros.Audit.Identity.resolve(subject) do
+          {:ok, _} ->
+            Ouroboros.Audit.Identity.install(subject)
+
+            socket =
+              socket
+              |> Phoenix.Component.assign(:web_session, id)
+              |> Phoenix.Component.assign(:audit_subject, subject)
+
+            socket =
+              Phoenix.LiveView.attach_hook(socket, :audit_events, :handle_event, fn _,
+                                                                                    _,
+                                                                                    socket ->
+                audit_socket(socket)
+              end)
+
+            socket =
+              Phoenix.LiveView.attach_hook(socket, :audit_messages, :handle_info, fn _, socket ->
+                audit_socket(socket)
+              end)
+
+            {:cont, socket}
+
+          _ ->
+            {:halt, Phoenix.LiveView.redirect(socket, to: "/")}
+        end
 
       _otherwise ->
         {:halt, Phoenix.LiveView.redirect(socket, to: "/")}
     end
+  end
+
+  defp audit_socket(socket) do
+    method = if socket.view == Ouroboros.Web.AuditLive, do: "audit.show", else: "interactive.get"
+
+    if Ouroboros.Audit.Identity.permits?(socket.assigns.audit_subject, method, :read),
+      do: {:cont, socket},
+      else: {:halt, Phoenix.LiveView.redirect(socket, to: "/")}
   end
 
   defp exchange_query(conn, config) do
@@ -122,19 +158,22 @@ defmodule Ouroboros.Web.Auth do
   end
 
   defp exchange(conn, presented, config) do
-    if token_matches?(presented, config.token) do
-      conn
-      |> fetch_session()
-      # A fresh cookie for a fresh exchange: re-presenting the token must never adopt a
-      # session id somebody else already knows.
-      |> configure_session(renew: true)
-      |> put_session(@session_key, new_session_id())
-      |> put_resp_header("cache-control", "no-store")
-      |> put_resp_header("location", "/")
-      |> send_resp(:found, "")
-      |> halt()
-    else
-      refuse(conn)
+    case Ouroboros.Audit.Identity.authenticate(presented, config.token) do
+      {:ok, subject} ->
+        conn
+        |> fetch_session()
+        # A fresh cookie for a fresh exchange: re-presenting the token must never adopt a
+        # session id somebody else already knows.
+        |> configure_session(renew: true)
+        |> put_session(@session_key, new_session_id())
+        |> put_session("ouroboros_identity", subject)
+        |> put_resp_header("cache-control", "no-store")
+        |> put_resp_header("location", "/")
+        |> send_resp(:found, "")
+        |> halt()
+
+      _ ->
+        refuse(conn)
     end
   end
 
@@ -142,8 +181,21 @@ defmodule Ouroboros.Web.Auth do
     conn = fetch_session(conn)
 
     case get_session(conn, @session_key) do
-      id when is_binary(id) -> put_private(conn, :ouroboros_web_session, id)
-      _otherwise -> refuse(conn)
+      id when is_binary(id) ->
+        subject =
+          get_session(conn, "ouroboros_identity") || %{"id" => "local-owner", "local" => true}
+
+        case Ouroboros.Audit.Identity.resolve(subject) do
+          {:ok, _} ->
+            Ouroboros.Audit.Identity.install(subject)
+            put_private(conn, :ouroboros_web_session, id)
+
+          _ ->
+            refuse(conn)
+        end
+
+      _otherwise ->
+        refuse(conn)
     end
   end
 

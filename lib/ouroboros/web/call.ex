@@ -72,7 +72,12 @@ defmodule Ouroboros.Web.Call do
       when scope in [:read, :operate] and is_binary(method) and is_map(params) and is_list(opts) do
     case Methods.fetch(method) do
       {:ok, entry} ->
-        if Methods.permits?(scope, entry) do
+        if Methods.permits?(scope, entry) and
+             Ouroboros.Audit.Identity.permits?(
+               Ouroboros.Audit.Identity.current(),
+               method,
+               entry.scope
+             ) do
           _ = audit(method, params, entry, opts)
           run(method, params, entry, opts)
         else
@@ -97,14 +102,27 @@ defmodule Ouroboros.Web.Call do
   @spec available?(scope(), String.t()) :: boolean()
   def available?(scope, method) when scope in [:read, :operate] and is_binary(method) do
     case Methods.fetch(method) do
-      {:ok, entry} -> Methods.permits?(scope, entry)
-      :error -> false
+      {:ok, entry} ->
+        Methods.permits?(scope, entry) and
+          Ouroboros.Audit.Identity.permits?(
+            Ouroboros.Audit.Identity.current(),
+            method,
+            entry.scope
+          )
+
+      :error ->
+        false
     end
   end
 
   defp run(method, params, entry, opts) do
     supervisor = Keyword.get(opts, :task_supervisor, Ouroboros.Web.TaskSupervisor)
-    task = Task.Supervisor.async_nolink(supervisor, fn -> Methods.invoke(method, params) end)
+    subject = Ouroboros.Audit.Identity.current()
+
+    task =
+      Task.Supervisor.async_nolink(supervisor, fn ->
+        Ouroboros.Audit.Identity.with_subject(subject, fn -> Methods.invoke(method, params) end)
+      end)
 
     case Task.yield(task, entry.timeout) || Task.shutdown(task, :brutal_kill) do
       {:ok, {:ok, _value} = result} -> result
