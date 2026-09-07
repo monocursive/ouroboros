@@ -157,9 +157,17 @@ defmodule Ouroboros.Gateway.SessionReplayVerifyTest do
       assert started["fleet_snapshot"] =~ "Place work with agent"
       assert started["distributed_tools"] == true
 
-      assert {:ok, verdict} = Methods.invoke("interactive.replay_verify", %{"id" => context.id})
-      assert verdict["verified"], inspect(verdict)
-      retire_session(context.id)
+      recorded_node = node()
+      name_type = if :net_kernel.longnames(), do: :longnames, else: :shortnames
+      assert :ok = Node.stop()
+
+      try do
+        assert {:ok, verdict} = Methods.invoke("interactive.replay_verify", %{"id" => context.id})
+        assert verdict["verified"], inspect(verdict)
+      after
+        {:ok, _} = Node.start(recorded_node, name_type)
+        retire_session(context.id)
+      end
     end
 
     test "a flipped byte mid-journal is a chain break, not a verdict", context do

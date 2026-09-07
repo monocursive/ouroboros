@@ -300,7 +300,7 @@ defmodule Ouroboros.Provider.Native.Loop do
     state = %{
       state
       | hooks: state.hooks || Hooks.load(state.scope.root),
-        tool_specs: build_tool_specs(state),
+        tool_specs: tool_specs(state),
         turn_files: %{},
         turn_paths: [],
         turn_commands: [],
