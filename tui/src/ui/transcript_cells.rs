@@ -294,6 +294,9 @@ pub struct SubagentCell {
     pub error: Option<String>,
     /// The path of a worktree the runtime kept because it still held uncommitted work.
     pub worktree_kept: Option<String>,
+    pub returned_ref: Option<String>,
+    pub return_error: Option<String>,
+    pub deliveries: Vec<crate::model::native::Delivery>,
     /// Phase words this build does not model, in arrival order. Named rather than dropped.
     pub unknown_phases: Vec<String>,
 }
@@ -330,6 +333,9 @@ impl SubagentCell {
         if phase.settled() {
             self.settled = true;
             overwrite(&mut self.status, &event.status);
+            self.returned_ref.clone_from(&event.returned_ref);
+            self.return_error.clone_from(&event.return_error);
+            self.deliveries.clone_from(&event.deliveries);
             self.input_tokens = event.input_tokens.or(self.input_tokens);
             self.output_tokens = event.output_tokens.or(self.output_tokens);
             self.cost_usd = event.cost_usd.or(self.cost_usd);
@@ -479,6 +485,18 @@ impl SubagentCell {
             rows.push(format!("Error: {error}"));
         }
 
+        if let Some(reference) = &self.returned_ref {
+            rows.push(format!("Changes returned as {reference}"));
+        }
+        if let Some(error) = &self.return_error {
+            rows.push(format!("Return: {error}"));
+        }
+        for delivery in &self.deliveries {
+            rows.push(format!(
+                "Delivered: {} ({} bytes)",
+                delivery.path, delivery.bytes
+            ));
+        }
         if let Some(path) = &self.worktree_kept {
             rows.push(format!("Worktree kept (it holds uncommitted work): {path}"));
         }

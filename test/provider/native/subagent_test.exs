@@ -445,6 +445,31 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       send(child, :stop)
     end
 
+    test "provisioning takes only bounded-policy options from the actual parent" do
+      parent = bare_parent("provision-policy")
+
+      parent = %{
+        parent
+        | options: %{
+            "provision_max_bytes" => 4096,
+            "provision_deadline_ms" => 100,
+            "rpc" => fn -> :unsafe end,
+            "other" => true
+          }
+      }
+
+      assert {:ok, spec} = AgentTool.plan(%{"prompt" => "x"}, parent)
+      assert spec.provision_options == [provision_max_bytes: 4096, provision_deadline_ms: 100]
+
+      assert {:ok, bad} =
+               AgentTool.plan(%{"prompt" => "x"}, %{
+                 parent
+                 | options: %{"provision_max_bytes" => -1, "provision_deadline_ms" => "forever"}
+               })
+
+      assert bad.provision_options == []
+    end
+
     test "a child inherits its parent's posture and can never widen it" do
       parent = %{
         depth: 0,

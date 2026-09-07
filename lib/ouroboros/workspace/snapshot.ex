@@ -13,7 +13,11 @@ defmodule Ouroboros.Workspace.Snapshot do
     with true <- Git.valid_id?(task_id),
          {:ok, root} <- Git.run(workspace, ["rev-parse", "--show-toplevel"], opts),
          {:ok, head} <- head(root, opts),
-         {:ok, excludes} <- exclusions(root),
+         {:ok, excludes} <-
+           if(Keyword.get(opts, :return_snapshot, false),
+             do: {:ok, [@deliver_path]},
+             else: exclusions(root)
+           ),
          {:ok, temporary} <- Git.temp_directory() do
       try do
         snapshot(root, head, task_id, temporary, excludes, opts)

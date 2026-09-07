@@ -315,6 +315,9 @@ defmodule Ouroboros.Web.Transcript.Cell.Subagent do
     :status,
     :error,
     :worktree_kept,
+    :returned_ref,
+    :return_error,
+    deliveries: [],
     remote: false,
     worktree: false,
     background: false,
@@ -343,6 +346,9 @@ defmodule Ouroboros.Web.Transcript.Cell.Subagent do
           settled: boolean(),
           error: String.t() | nil,
           worktree_kept: String.t() | nil,
+          returned_ref: String.t() | nil,
+          return_error: String.t() | nil,
+          deliveries: [map()],
           unknown_phases: [String.t()]
         }
 
@@ -392,6 +398,9 @@ defmodule Ouroboros.Web.Transcript.Cell.Subagent do
       cell
       | settled: true,
         status: overwrite(cell.status, event.status),
+        returned_ref: event.returned_ref,
+        return_error: event.return_error,
+        deliveries: event.deliveries,
         input_tokens: event.input_tokens || cell.input_tokens,
         output_tokens: event.output_tokens || cell.output_tokens,
         cost_usd: event.cost_usd || cell.cost_usd,
@@ -496,6 +505,9 @@ defmodule Ouroboros.Web.Transcript.Cell.Subagent do
   def rows(%__MODULE__{} = cell) do
     Enum.map(cell.unknown_phases, &"phase #{&1}, which this client does not model") ++
       maybe([], cell.error, &"Error: #{&1}") ++
+      maybe([], cell.returned_ref, &"Changes returned as #{&1}") ++
+      maybe([], cell.return_error, &"Return: #{&1}") ++
+      Enum.map(cell.deliveries, &"Delivered: #{&1.path} (#{&1.bytes} bytes)") ++
       maybe([], cell.worktree_kept, &"Worktree kept (it holds uncommitted work): #{&1}") ++
       maybe([], cell.provider_session_id, &"session #{&1}")
   end

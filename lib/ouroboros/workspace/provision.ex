@@ -4,7 +4,7 @@ defmodule Ouroboros.Workspace.Provision do
   objects, commit IDs and bounded metadata cross distribution; source paths stay here.
   The target resolves and admits its own worktree when the child starts.
   """
-  alias Ouroboros.Workspace.{Bundle, Git, Mirrors, Snapshot}
+  alias Ouroboros.Workspace.{Bundle, Git, Mirrors, Returns, Snapshot}
 
   @deadline_ms 600_000
   @chunk_timeout_ms 30_000
@@ -18,9 +18,18 @@ defmodule Ouroboros.Workspace.Provision do
       )
 
     with {:ok, snapshot} <- Snapshot.commit(workspace, task_id, opts) do
-      case ship(snapshot, target, opts) do
-        {:ok, provision} ->
-          {:ok, provision}
+      returns_opts = Keyword.get(opts, :returns_opts, [])
+
+      case Returns.register(snapshot, returns_opts) do
+        {:ok, return_token} ->
+          case ship(snapshot, target, opts) do
+            {:ok, provision} ->
+              {:ok, Map.put(provision, :return_token, return_token)}
+
+            {:error, _} = error ->
+              Returns.unregister(return_token, returns_opts)
+              error
+          end
 
         {:error, reason} = error ->
           # Cleanup has its own small budget: using an expired transfer deadline here
@@ -113,7 +122,17 @@ defmodule Ouroboros.Workspace.Provision do
   end
 
   def remote_metadata(provision),
-    do: Map.take(provision, [:repo_id, :commit, :task_id, :bytes, :chunks, :basis, :source_node])
+    do:
+      Map.take(provision, [
+        :repo_id,
+        :commit,
+        :task_id,
+        :bytes,
+        :chunks,
+        :basis,
+        :source_node,
+        :return_token
+      ])
 
   def instructions(provision) do
     snapshot = provision.snapshot

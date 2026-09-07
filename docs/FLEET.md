@@ -1020,8 +1020,8 @@ stated in the tests), registry v2→v3 widen-on-read.
   spans nodes.
 - **Rollout-registry reconciliation** across driving nodes; operator exit from
   `:quarantined` beyond `reconcile_quarantine/1`.
-- **Workspace provisioning** (clone/worktree on target) and shared-filesystem lease
-  coordination.
+- **Shared-filesystem lease coordination** across nodes. Snapshot provisioning uses
+  a target-local mirror and detached worktree; it does not coordinate a shared checkout.
 - **Session migration/adoption** across nodes; consensus placement, quorum,
   partition policy — the standing architecture non-claims remain non-claims.
 - **Per-token scopes** on the gateway; a signer outside the distribution trust
@@ -1054,3 +1054,37 @@ The approval names the child and its machine; the target's decision to ask alway
 the human, without being re-evaluated against the parent's rules. Closing the session
 stops its children and cancels their pending questions. One-shot runs refuse background
 children because they have no interactive session to hold them.
+
+## Returned child work and deliveries
+
+A child started with `sync: true` receives a snapshot of the parent's committed,
+staged, unstaged, and eligible untracked files. When its turn ends, the target closes
+the child session and captures its committed and dirty work. The return travels in
+bounded, verified chunks and is imported into the original repository as
+`refs/ouroboros/subagents/<task_id>`. The parent's HEAD, index, and working files stay
+as they were. Inspect the returned changes with `git diff HEAD <returned_ref>` and
+apply them deliberately with `git cherry-pick <returned_commit>`.
+
+Put reports and other artifacts in `.ouroboros/deliver/`. This directory is prepared
+before launch and excluded from the Git snapshot. Only regular files are accepted;
+symlinks, traversal paths, special files, more than 128 files, and archives larger
+than 32 MiB are refused. The target may lower the capture limit with its
+`:deliver_max_bytes` application setting. The parent verifies the uncompressed archive and every
+file's size and digest while extracting into
+`<data_dir>/deliveries/<task_id>/`. The model result and both transcript clients name
+the returned ref and each delivered path and size.
+
+Settlement stays observable while returning work: `summary` reports `returning`,
+`agent_result` keeps the task collectable, and stopping the child does not discard a
+return in flight. Return transport is bounded to ten minutes, with an independent
+worker ceiling. Only an acknowledged return, followed by a fresh comparison of the
+child's HEAD, tree, and delivery contents, authorizes deletion of its worktree. A
+failed, ambiguous, or concurrently changed return retains the target worktree and
+snapshot pin and names the error and location. A received Git ref remains available
+even when a later delivery or cleanup step fails.
+
+Parent repository paths stay in a parent-local capability registry; remote return
+requests carry an opaque capability, repository identity, commit, and task ID. A
+lost parent process or distribution link cannot authorize target cleanup. Returned
+refs are retained for inspection and may be removed explicitly with
+`git update-ref -d refs/ouroboros/subagents/<task_id>` after the work is accepted.

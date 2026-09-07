@@ -282,7 +282,29 @@ defmodule Ouroboros.Workspace.Worktree do
     end
   end
 
-  def remove(%{path: path} = worktree, opts) do
+  def remove(%{path: path}, opts) do
+    # Provenance comes from the durable marker, including through alternate path spellings.
+    with {:ok, canonical} <- WorkspacePath.canonicalize(path),
+         entry when is_map(entry) <- find(canonical, opts) || find(path, opts) do
+      remove_recorded(entry, opts)
+    else
+      nil ->
+        {:error, {:unknown_worktree, path}}
+
+      {:error, _} ->
+        if File.exists?(path),
+          do: {:error, {:unknown_worktree, path}},
+          else:
+            (
+              forget(path, opts)
+              {:ok, :removed}
+            )
+    end
+  end
+
+  def remove(_worktree, _opts), do: {:error, :invalid_worktree}
+
+  defp remove_recorded(%{path: path} = worktree, opts) do
     runner = runner(opts)
 
     cond do
@@ -293,7 +315,7 @@ defmodule Ouroboros.Workspace.Worktree do
       Map.get(worktree, :provisioned, false) ->
         # A clean Git status does not mean remote work reached its parent: committed
         # child edits are clean too. Boot reconciliation must keep these as well.
-        {:ok, {:kept, :awaiting_return}}
+        remove_returned(worktree, opts)
 
       dirty?(runner, path) ->
         {:ok, {:kept, :dirty}}
@@ -310,7 +332,45 @@ defmodule Ouroboros.Workspace.Worktree do
     end
   end
 
-  def remove(_worktree, _opts), do: {:error, :invalid_worktree}
+  defp remove_returned(worktree, opts) do
+    alias Ouroboros.Workspace.{Deliveries, Git, Snapshot}
+
+    case {Keyword.get(opts, :returned_snapshot), Keyword.get(opts, :return_receipt)} do
+      {%{commit: commit, tree: tree, head: head} = snapshot,
+       %{acknowledged: true, returned_commit: commit, task_id: task_id, manifest: files}} ->
+        verification_id = "verify-" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+
+        result =
+          with true <- snapshot.root == worktree.path and task_id == worktree.session_id,
+               {:ok, current} <-
+                 Snapshot.commit(worktree.path, verification_id, return_snapshot: true),
+               true <- current.tree == tree and current.head == head,
+               {:ok, current_files} <- Deliveries.inventory(worktree.path),
+               true <- current_files == files,
+               {:ok, _} <-
+                 Git.run(worktree.repository, [
+                   "-c",
+                   "core.hooksPath=/dev/null",
+                   "worktree",
+                   "remove",
+                   "--force",
+                   worktree.path
+                 ]) do
+            _ = forget(worktree.path, opts)
+            _ = Snapshot.release(worktree.repository, task_id)
+            {:ok, :removed}
+          else
+            false -> {:ok, {:kept, :changed_since_return}}
+            {:error, reason} -> {:ok, {:kept, {:return_cleanup_failed, reason}}}
+          end
+
+        _ = Snapshot.release(worktree.repository, verification_id)
+        result
+
+      _ ->
+        {:ok, {:kept, :awaiting_return}}
+    end
+  end
 
   # ---------------------------------------------------------------- reconcile
 

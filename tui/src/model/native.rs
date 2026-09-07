@@ -856,6 +856,17 @@ impl SubagentPhase {
 /// to "unknown". Nothing below invents a number the runtime did not send: a zero this
 /// client made up would be indistinguishable from a zero the child measured.
 #[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReturnedFile {
+    pub path: Option<String>,
+    pub status: Option<String>,
+}
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Delivery {
+    pub path: String,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SubagentEvent {
     pub phase: Option<SubagentPhase>,
     pub task_id: Option<String>,
@@ -879,6 +890,11 @@ pub struct SubagentEvent {
     pub elapsed_ms: Option<u64>,
     pub last_tool: Option<String>,
     pub last_activity: Option<String>,
+    pub returned_ref: Option<String>,
+    pub returned_commit: Option<String>,
+    pub returned_files: Vec<ReturnedFile>,
+    pub deliveries: Vec<Delivery>,
+    pub return_error: Option<String>,
     pub turns: Option<u64>,
     pub tool_calls: Option<u64>,
     pub files_changed: Option<u64>,
@@ -924,6 +940,35 @@ impl SubagentEvent {
             elapsed_ms: count(map, "elapsed_ms"),
             last_tool: at(map, "last_tool"),
             last_activity: sentence(map, "last_activity", 160),
+            returned_ref: at(map, "returned_ref"),
+            returned_commit: at(map, "returned_commit"),
+            return_error: sentence(map, "return_error", 1024),
+            returned_files: map
+                .get("returned_files")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .take(16)
+                .filter_map(Value::as_object)
+                .map(|file| ReturnedFile {
+                    path: at(file, "path"),
+                    status: at(file, "status"),
+                })
+                .collect(),
+            deliveries: map
+                .get("deliveries")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .take(128)
+                .filter_map(Value::as_object)
+                .filter_map(|file| {
+                    Some(Delivery {
+                        path: at(file, "path")?,
+                        bytes: count(file, "bytes")?,
+                    })
+                })
+                .collect(),
             turns: count(map, "turns"),
             tool_calls: count(map, "tool_calls"),
             files_changed: count(map, "files_changed"),
@@ -1200,6 +1245,31 @@ mod tests {
             DelegationRow::decode_list(&json!([{"delegation_id": "d1"}, 7])).len(),
             1
         );
+    }
+
+    #[test]
+    fn a_child_return_preserves_refs_and_bounds_delivery_rows() {
+        let value = SubagentEvent::decode(&json!({
+            "returned_ref": "refs/ouroboros/subagents/task-1",
+            "returned_commit": "abc", "return_error": "kept after a late edit",
+            "returned_files": vec![json!({"path": "file", "status": "M"}); 30],
+            "deliveries": vec![json!({"path": "/data/report", "bytes": 42}); 200]
+        }));
+        assert_eq!(
+            value.returned_ref.as_deref(),
+            Some("refs/ouroboros/subagents/task-1")
+        );
+        assert_eq!(value.returned_commit.as_deref(), Some("abc"));
+        assert_eq!(
+            value.return_error.as_deref(),
+            Some("kept after a late edit")
+        );
+        assert_eq!(value.returned_files.len(), 16);
+        assert_eq!(value.deliveries.len(), 128);
+        assert_eq!(value.deliveries[0].bytes, 42);
+        let malformed =
+            SubagentEvent::decode(&json!({"deliveries": [{"path": "/x", "bytes": -1}, 4]}));
+        assert!(malformed.deliveries.is_empty());
     }
 
     /// One key, two shapes: `spawned` says whether the child got a worktree, and `settled`

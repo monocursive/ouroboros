@@ -2314,6 +2314,23 @@ defmodule Ouroboros.Provider.Native.Loop do
     end
   end
 
+  defp provisioning_result(%{provisioned: true} = started) do
+    paths = Map.get(started, :untracked, [])
+    count = Map.get(started, :untracked_count, length(paths))
+
+    "\nSnapshot #{started.commit} provisioned on #{Map.get(started, :node)} " <>
+      "(#{started.bytes} transferred bytes). Included #{count} untracked file(s)" <>
+      if(paths == [],
+        do: ".",
+        else:
+          ":\n" <>
+            Enum.join(paths, "\n") <>
+            if(count > length(paths), do: "\n… #{count - length(paths)} more", else: "")
+      )
+  end
+
+  defp provisioning_result(_), do: ""
+
   defp background_result(state, call, spec, started, hook_context, effect_id, started_at) do
     result =
       Tools.normalize_result_of(%{
@@ -2321,7 +2338,7 @@ defmodule Ouroboros.Provider.Native.Loop do
           "Subagent #{spec.task_id} (#{spec.description}) is running in the background as " <>
             "#{started.provider_session_id}. Collect it with " <>
             "`agent_result` and that task_id — it is stopped when this session closes, and " <>
-            "a collection after that says so.",
+            "a collection after that says so." <> provisioning_result(started),
         is_error: false
       })
 
@@ -2460,7 +2477,7 @@ defmodule Ouroboros.Provider.Native.Loop do
 
     result =
       Tools.normalize_result_of(%{
-        output: Subagent.render(summary),
+        output: Subagent.render(summary) <> provisioning_result(started),
         is_error: summary.status in [:failed, :timed_out]
       })
 

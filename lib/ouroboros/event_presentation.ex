@@ -332,6 +332,9 @@ defmodule Ouroboros.EventPresentation.SubagentEvent do
     :elapsed_ms,
     :last_tool,
     :last_activity,
+    :returned_ref,
+    :returned_commit,
+    :return_error,
     :turns,
     :tool_calls,
     :files_changed,
@@ -346,7 +349,9 @@ defmodule Ouroboros.EventPresentation.SubagentEvent do
     worktree: false,
     background: false,
     tools: [],
-    files: []
+    files: [],
+    returned_files: [],
+    deliveries: []
   ]
 
   @type phase :: :spawned | :progress | :settled | {:other, String.t()}
@@ -368,6 +373,11 @@ defmodule Ouroboros.EventPresentation.SubagentEvent do
           elapsed_ms: non_neg_integer() | nil,
           last_tool: String.t() | nil,
           last_activity: String.t() | nil,
+          returned_ref: String.t() | nil,
+          returned_commit: String.t() | nil,
+          return_error: String.t() | nil,
+          returned_files: [map()],
+          deliveries: [map()],
           turns: non_neg_integer() | nil,
           tool_calls: non_neg_integer() | nil,
           files_changed: non_neg_integer() | nil,
@@ -1383,6 +1393,29 @@ defmodule Ouroboros.EventPresentation do
     }
   end
 
+  defp returned_files(files) when is_list(files) do
+    files
+    |> Enum.take(16)
+    |> Enum.filter(&is_map/1)
+    |> Enum.map(fn file ->
+      %{path: label_at(file, "path"), status: label_at(file, "status")}
+    end)
+  end
+
+  defp returned_files(_), do: []
+
+  defp deliveries(files) when is_list(files) do
+    files
+    |> Enum.take(128)
+    |> Enum.filter(&is_map/1)
+    |> Enum.map(fn file ->
+      %{path: label_at(file, "path"), bytes: strict_count(file, "bytes")}
+    end)
+    |> Enum.filter(&(is_binary(&1.path) and is_integer(&1.bytes)))
+  end
+
+  defp deliveries(_), do: []
+
   defp decode_subagent(payload) do
     worktree_detail = decode_worktree(Map.get(payload, "worktree"))
 
@@ -1406,6 +1439,11 @@ defmodule Ouroboros.EventPresentation do
       elapsed_ms: strict_count(payload, "elapsed_ms"),
       last_tool: label_at(payload, "last_tool"),
       last_activity: sentence(payload, "last_activity", 160),
+      returned_ref: label_at(payload, "returned_ref"),
+      returned_commit: label_at(payload, "returned_commit"),
+      return_error: sentence(payload, "return_error", 1024),
+      returned_files: returned_files(Map.get(payload, "returned_files")),
+      deliveries: deliveries(Map.get(payload, "deliveries")),
       turns: strict_count(payload, "turns"),
       tool_calls: strict_count(payload, "tool_calls"),
       files_changed: strict_count(payload, "files_changed"),

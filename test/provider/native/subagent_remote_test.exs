@@ -144,6 +144,7 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
   test "sync transfers this working tree and resolves its workspace on the peer", context do
     alias Ouroboros.Workspace.{Git, Mirrors}
     root = context.origin_workspace
+    Application.put_env(:ouroboros, :data_dir, context.origin_data)
 
     for args <- [
           ["init", "-q"],
@@ -165,7 +166,12 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
     assert {:ok, _} =
              peer_call(context.peer, Supervisor, :restart_child, [Ouroboros.Supervisor, Mirrors])
 
-    %{handle: handle} =
+    {:ok, original_status} = Git.run(root, ["status", "--porcelain"])
+    {:ok, original_head} = Git.run(root, ["rev-parse", "HEAD"])
+    {:ok, index} = Git.run(root, ["rev-parse", "--path-format=absolute", "--git-path", "index"])
+    original_index = File.read!(index)
+
+    %{handle: handle, child_agent: child_agent} =
       open(
         context,
         [
@@ -183,20 +189,21 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
         ],
         [
           [{:tool_call, %{id: "read1", name: "read", input: %{"path" => "changed.txt"}}}],
-          [{:text, "read snapshot on peer"}, {:finish, :stop}]
+          [
+            {:tool_call,
+             %{
+               id: "write1",
+               name: "write",
+               input: %{"path" => "changed.txt", "content" => "returned dirty child work"}
+             }}
+          ],
+          [{:text, "read and edited snapshot on peer"}, {:finish, :stop}]
         ]
       )
 
+    :ok = peer_call(context.peer, :sys, :suspend, [child_agent])
     send_turn(handle)
-    events = collect_until(:turn_completed, [], 90_000)
-
-    assert length(subagent_events(events, "spawned")) == 1,
-           inspect(Enum.filter(events, &(&1.type == :tool_result)),
-             pretty: true,
-             limit: :infinity
-           )
-
-    [spawned] = subagent_events(events, "spawned")
+    spawned = await_subagent_event("spawned")
     assert spawned.payload["provisioned"] == true
     assert spawned.payload["bytes"] > 0
     assert spawned.payload["untracked"] == ["untracked.txt"]
@@ -209,8 +216,55 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
     assert peer_call(context.peer, File, :read!, [Path.join(workspace, "untracked.txt")]) ==
              "also travels"
 
+    # A peer-side artifact proves transport and extraction independently of the
+    # permission policy for a model writing into the protected .ouroboros segment.
+    :ok = peer_call(context.peer, File, :mkdir_p!, [Path.join(workspace, ".ouroboros/deliver")])
+
+    :ok =
+      peer_call(context.peer, File, :write!, [
+        Path.join(workspace, ".ouroboros/deliver/report.txt"),
+        "peer report"
+      ])
+
+    [{child, _}] =
+      peer_call(context.peer, Registry, :lookup, [
+        Ouroboros.Provider.Native.Registry,
+        {:subagent, spawned.payload["task_id"]}
+      ])
+
+    # A receiver stalled between chunks must not stall observation, stop, or falsely
+    # make agent_result release a child whose Git return is still in flight.
+    :sys.suspend(Ouroboros.Workspace.Returns)
+
+    try do
+      :ok = peer_call(context.peer, :sys, :resume, [child_agent])
+      wait_until(fn -> match?({:ok, %{status: :returning}}, Subagent.summary(child)) end)
+      started_at = System.monotonic_time(:millisecond)
+      assert {:ok, %{status: :returning}} = Subagent.stop(child)
+      assert System.monotonic_time(:millisecond) - started_at < 2_000
+      assert {:error, :still_running} = Subagent.await(child, 0)
+      assert peer_call(context.peer, Process, :alive?, [child])
+      assert peer_call(context.peer, File, :exists?, [workspace])
+    after
+      :sys.resume(Ouroboros.Workspace.Returns)
+    end
+
+    events = collect_until(:turn_completed, [], 90_000)
     [settled] = subagent_events(events, "settled")
-    assert settled.payload["worktree"]["retired"] == "kept"
+    assert settled.payload["return_error"] == nil, inspect(settled.payload)
+    assert settled.payload["worktree"]["retired"] == "removed"
+    refute peer_call(context.peer, File, :exists?, [workspace])
+
+    assert {:ok, "returned dirty child work"} =
+             Git.run(root, ["show", settled.payload["returned_ref"] <> ":changed.txt"])
+
+    assert {:ok, ^original_status} = Git.run(root, ["status", "--porcelain"])
+    assert {:ok, ^original_head} = Git.run(root, ["rev-parse", "HEAD"])
+    assert File.read!(index) == original_index
+    assert [%{"path" => delivered, "bytes" => 11}] = settled.payload["deliveries"]
+    assert File.read!(delivered) == "peer report"
+    assert tool_result(events, "agent").payload["output"] =~ "git cherry-pick"
+    assert tool_result(events, "agent").payload["output"] =~ "untracked.txt"
     assert File.read!(Path.join(root, "changed.txt")) == "uncommitted on the parent"
   end
 
@@ -676,7 +730,7 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
     # child pointed at an origin agent by that text calls a pid that does not exist on the
     # peer — which is also the truthful shape of the feature, since a real remote child uses
     # the target's own model configuration and credentials.
-    {child_spec, _child_agent} =
+    {child_spec, child_agent} =
       peer_call(context.peer, NativeModelScript, :start_unlinked, [child_script])
 
     options =
@@ -712,7 +766,7 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
     {:ok, handle} = Session.open(request, session_context)
     on_exit(fn -> if Process.alive?(handle), do: Session.close(handle) end)
 
-    %{handle: handle, session_id: session_id}
+    %{handle: handle, session_id: session_id, child_agent: child_agent}
   end
 
   defp agent_call(input, id \\ "c1"), do: {:tool_call, %{id: id, name: "agent", input: input}}
@@ -741,6 +795,19 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
 
   defp tool_result(events, name),
     do: Enum.find(events, &(&1.type == :tool_result and &1.payload["name"] == name))
+
+  defp await_subagent_event(phase) do
+    receive do
+      {:session_adapter_event,
+       %{type: :provider_event, payload: %{"kind" => "subagent", "phase" => ^phase}} = event} ->
+        event
+
+      {:session_adapter_event, _} ->
+        await_subagent_event(phase)
+    after
+      90_000 -> flunk("no subagent #{phase}")
+    end
+  end
 
   defp await_approval(timeout \\ 60_000) do
     receive do

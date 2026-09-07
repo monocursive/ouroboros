@@ -128,6 +128,7 @@ defmodule Ouroboros.Provider.Native.Subagent do
   @remote_spawn_timeout @open_timeout + 20_000
   @remote_stop_timeout 15_000
   @registry Ouroboros.Provider.Native.Registry
+  @return_timeout_ms 615_000
   @max_summary_bytes 16 * 1024
   @max_text_bytes 12 * 1024
   @max_files 50
@@ -188,11 +189,11 @@ defmodule Ouroboros.Provider.Native.Subagent do
     alias Ouroboros.Workspace.Provision
     target = Map.get(spec, :node) || node()
 
-    case Provision.prepare(source, target, spec.task_id) do
+    case Provision.prepare(source, target, spec.task_id, Map.get(spec, :provision_options, [])) do
       {:ok, provision} ->
         prepared =
           spec
-          |> Map.delete(:provision_source)
+          |> Map.drop([:provision_source, :provision_options])
           |> Map.put(:provision, Provision.remote_metadata(provision))
           |> Map.put(:prompt, Provision.instructions(provision) <> spec.prompt)
 
@@ -210,7 +211,8 @@ defmodule Ouroboros.Provider.Native.Subagent do
     end
   end
 
-  defp prepare_provision(spec), do: {:ok, Map.delete(spec, :provision_source), %{}}
+  defp prepare_provision(spec),
+    do: {:ok, Map.drop(spec, [:provision_source, :provision_options]), %{}}
 
   @doc """
   Starts and launches one child **on this node**, for `spawn/1` and for its own `:erpc`.
@@ -328,14 +330,19 @@ defmodule Ouroboros.Provider.Native.Subagent do
 
   `:stopped` is the reason a parent uses when it is going away; `:timed_out` is the
   deadline's. A child that had already completed keeps the status it earned — a stop
-  after the fact does not rewrite what happened.
+  after the fact does not rewrite what happened. A provisioned child may report
+  `:returning`: its editing has stopped, but its bounded return remains alive and
+  collectable through `await/2` until the acknowledged result or retention error arrives.
   """
   @spec stop(pid(), :stopped | :timed_out) :: {:ok, map()} | {:error, term()}
   def stop(pid, reason \\ :stopped) do
     result = safe_call(pid, {:settle, reason}, 10_000)
-    _ = stop_process(pid)
+    unless match?({:ok, %{status: :returning}}, result), do: stop_process(pid)
     result
   end
+
+  @doc false
+  def return_timeout_ms, do: @return_timeout_ms
 
   @doc "Renders one summary as the bounded text a tool result carries."
   @spec render(map()) :: String.t()
@@ -363,6 +370,7 @@ defmodule Ouroboros.Provider.Native.Subagent do
       files_line(summary.files_changed, summary.files_changed_count),
       worktree_line(summary.worktree),
       approvals_line(summary.approvals_denied),
+      returned_line(summary),
       "Transcript: #{summary.provider_session_id}"
     ]
     |> Enum.reject(&is_nil/1)
@@ -375,6 +383,20 @@ defmodule Ouroboros.Provider.Native.Subagent do
     do: GenServer.start_link(__MODULE__, spec, name: via(spec.task_id))
 
   # ---------------------------------------------------------------- server
+
+  defp returned_line(%{returned_ref: ref, returned_commit: commit} = summary) do
+    [
+      "Changes returned as #{ref}. Inspect with `git diff HEAD #{ref}`; apply with `git cherry-pick #{commit}`.",
+      Map.get(summary, :return_error)
+      | Enum.map(Map.get(summary, :deliveries, []), fn file ->
+          "Delivered: #{file.path} (#{file.bytes} bytes)"
+        end)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n")
+  end
+
+  defp returned_line(summary), do: Map.get(summary, :return_error)
 
   # A local child's summary reads exactly as it always did. A remote one says where it ran,
   # because "completed" about a machine the reader did not pick is half a sentence.
@@ -409,6 +431,11 @@ defmodule Ouroboros.Provider.Native.Subagent do
        worktree_requested?: Map.get(spec, :worktree) == true,
        worktree: nil,
        provision: Map.get(spec, :provision),
+       returned: %{},
+       return_task: nil,
+       return_timer: nil,
+       settlement: nil,
+       orphaned?: false,
        background?: Map.get(spec, :background, false),
        depth: Map.get(spec, :depth, 1),
        tools: Map.get(spec, :tools, []),
@@ -500,6 +527,20 @@ defmodule Ouroboros.Provider.Native.Subagent do
   end
 
   @impl GenServer
+  def handle_info({ref, result}, %{return_task: %{ref: ref}} = state) do
+    Process.demonitor(ref, [:flush])
+    return_completed(state, result)
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{return_task: %{ref: ref}} = state),
+    do: return_completed(state, {:error, {:return_worker_failed, reason}})
+
+  def handle_info(:return_deadline, %{return_task: task} = state) when not is_nil(task) do
+    Task.Supervisor.terminate_child(Jido.Harness.SessionTaskSupervisor, task.pid)
+    Process.demonitor(task.ref, [:flush])
+    return_completed(state, {:error, :return_deadline_expired})
+  end
+
   def handle_info({:session_adapter_event, event}, state), do: {:noreply, absorb(state, event)}
 
   def handle_info(:progress_tick, %{status: :running} = state) do
@@ -532,13 +573,18 @@ defmodule Ouroboros.Provider.Native.Subagent do
         {:DOWN, monitor, :process, _pid, _reason},
         %{subscriber_monitor: monitor} = state
       ) do
-    {:stop, :normal, settle(state, :stopped, "the parent stopped watching this child")}
+    state = settle(%{state | orphaned?: true}, :stopped, "the parent stopped watching this child")
+    if state.status == :returning, do: {:noreply, state}, else: {:stop, :normal, state}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl GenServer
   def terminate(_reason, state) do
+    if state.return_task,
+      do:
+        Task.Supervisor.terminate_child(Jido.Harness.SessionTaskSupervisor, state.return_task.pid)
+
     _ = close_child(state)
     _ = retire_worktree(state)
     :ok
@@ -568,12 +614,18 @@ defmodule Ouroboros.Provider.Native.Subagent do
            source_node: Atom.to_string(state.origin)
          ) do
       {:ok, worktree} ->
-        {:ok,
-         %{
-           state
-           | worktree: Worktree.public(worktree),
-             request_attrs: Map.put(state.request_attrs, :cwd, worktree.root)
-         }}
+        case Ouroboros.Workspace.Deliveries.prepare(worktree.root) do
+          :ok ->
+            {:ok,
+             %{
+               state
+               | worktree: Worktree.public(worktree),
+                 request_attrs: Map.put(state.request_attrs, :cwd, worktree.root)
+             }}
+
+          {:error, reason} ->
+            {:error, {:subagent_worktree_unprovisionable, node(), reason}}
+        end
 
       {:error, reason} ->
         {:error, {:subagent_worktree_unprovisionable, node(), reason}}
@@ -665,7 +717,7 @@ defmodule Ouroboros.Provider.Native.Subagent do
   # transcript — every event, every tool result — is on disk under its session
   # directory, addressable by the `provider_session_id` the spawn event names.
   defp absorb(%{status: status} = state, _event)
-       when status in [:completed, :failed, :stopped, :timed_out],
+       when status in [:completed, :failed, :stopped, :timed_out, :returning],
        do: state
 
   defp absorb(state, %{type: :approval_requested} = event), do: relay_approval(state, event)
@@ -819,7 +871,7 @@ defmodule Ouroboros.Provider.Native.Subagent do
   # ---------------------------------------------------------------- settling
 
   defp settle(%{status: status} = state, _reason, _error)
-       when status in [:completed, :failed, :stopped, :timed_out],
+       when status in [:completed, :failed, :stopped, :timed_out, :returning],
        do: state
 
   defp settle(state, reason, error) do
@@ -837,12 +889,53 @@ defmodule Ouroboros.Provider.Native.Subagent do
         open_approvals: MapSet.new()
     }
 
-    # The child session is closed *before* the summary goes out, so the transcript on
-    # disk is at least as new as the digest that describes it — the same
-    # checkpoint-before-broadcast ordering the session itself keeps.
-    _ = close_child(state)
-    state = %{state | worktree: retire_worktree(state), handle: nil}
+    if is_map(state.provision) and is_map(state.worktree) do
+      # Closing the child and transporting its result can take minutes. Keep the owner
+      # responsive; await/2 only releases its collectors once the return has finalized.
+      task =
+        Task.Supervisor.async_nolink(Jido.Harness.SessionTaskSupervisor, fn ->
+          close_child(state)
+          Ouroboros.Workspace.Return.finish(state.worktree, state.provision)
+        end)
 
+      %{
+        state
+        | status: :returning,
+          settlement: reason,
+          return_task: task,
+          return_timer: Process.send_after(self(), :return_deadline, @return_timeout_ms)
+      }
+    else
+      close_child(state)
+      finish_settlement(%{state | handle: nil})
+    end
+  end
+
+  defp return_completed(state, result) do
+    if state.return_timer, do: Process.cancel_timer(state.return_timer)
+    state = %{state | status: state.settlement, return_task: nil, return_timer: nil, handle: nil}
+
+    state =
+      case result do
+        {:ok, returned, retired} ->
+          %{state | returned: returned, worktree: retired}
+
+        {:error, reason} ->
+          message = "Return failed; work is kept at #{state.worktree["path"]}: #{inspect(reason)}"
+
+          %{
+            state
+            | returned: %{return_error: message},
+              worktree: Map.put(state.worktree, "retired", "kept")
+          }
+      end
+
+    state = finish_settlement(state)
+    if state.orphaned?, do: {:stop, :normal, state}, else: {:noreply, state}
+  end
+
+  defp finish_settlement(state) do
+    state = %{state | worktree: retire_worktree(state)}
     summary = summary_of(state)
     notify(state, {:settled, summary})
     reply_waiters(state, summary)
@@ -922,6 +1015,15 @@ defmodule Ouroboros.Provider.Native.Subagent do
       depth: state.depth,
       tools: state.tools
     }
+    |> Map.merge(
+      Map.take(state.returned, [
+        :returned_ref,
+        :returned_commit,
+        :returned_files,
+        :deliveries,
+        :return_error
+      ])
+    )
   end
 
   @doc "The digest a `provider_event` carries when a child settles."
@@ -954,6 +1056,12 @@ defmodule Ouroboros.Provider.Native.Subagent do
     |> maybe_put("cost_usd", summary.usage.cost)
     |> maybe_put("error", summary.error)
     |> maybe_put("worktree", summary.worktree)
+    |> Map.merge(
+      Map.new(
+        [:returned_ref, :returned_commit, :returned_files, :deliveries, :return_error],
+        fn key -> {Atom.to_string(key), Map.get(summary, key)} end
+      )
+    )
   end
 
   # ---------------------------------------------------------------- helpers

@@ -547,6 +547,15 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
          "last_activity" => "mix test test/parser_test.exs",
          "provider_session_id" => "provider-0000000000000009",
          "status" => "completed",
+         "returned_ref" => "refs/ouroboros/subagents/task-subagent-000000000001",
+         "returned_commit" => String.duplicate("a", 40),
+         "returned_files" => [%{"path" => "lib/parser.ex", "status" => "M"}],
+         "deliveries" => [
+           %{
+             "path" => "/home/indie/.ouroboros/deliveries/task-subagent-000000000001/tests.txt",
+             "bytes" => 42
+           }
+         ],
          "turns" => 9,
          "tool_calls" => 31,
          "files_changed" => 4,

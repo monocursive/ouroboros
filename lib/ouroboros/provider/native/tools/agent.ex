@@ -261,6 +261,7 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
         context: context(parent, placement.remote?),
         worktree: placement.worktree?,
         provision_source: if(placement.sync?, do: parent.scope.root),
+        provision_options: provision_options(parent.options),
         background: background?,
         depth: parent.depth + 1,
         tools: tools,
@@ -854,6 +855,13 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
   def portable?(_value), do: true
 
   # ---------------------------------------------------------------- options
+
+  defp provision_options(options) do
+    for key <- [:provision_max_bytes, :provision_deadline_ms],
+        value = option(options, Atom.to_string(key)),
+        is_integer(value) and value > 0,
+        do: {key, value}
+  end
 
   defp child_options(parent, input, child_id) do
     parent.options

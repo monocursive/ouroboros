@@ -500,6 +500,37 @@ defmodule Ouroboros.EventPresentationTest do
                )
     end
 
+    test "returned child refs and delivery rows survive bounded decoding" do
+      result =
+        Presentation.from_event(
+          event(:provider_event, %{
+            "kind" => "subagent",
+            "phase" => "settled",
+            "returned_ref" => "refs/ouroboros/subagents/task-1",
+            "returned_commit" => "abc",
+            "return_error" => "kept after a late edit",
+            "returned_files" => List.duplicate(%{"path" => "file", "status" => "M"}, 30),
+            "deliveries" => List.duplicate(%{"path" => "/data/report", "bytes" => 42}, 200)
+          })
+        )
+
+      assert result.returned_ref == "refs/ouroboros/subagents/task-1"
+      assert result.returned_commit == "abc"
+      assert result.return_error == "kept after a late edit"
+      assert length(result.returned_files) == 16
+      assert length(result.deliveries) == 128
+
+      malformed =
+        Presentation.from_event(
+          event(:provider_event, %{
+            "kind" => "subagent",
+            "deliveries" => [%{"path" => "/x", "bytes" => -1}, 4]
+          })
+        )
+
+      assert malformed.deliveries == []
+    end
+
     test "a subagent phase this build does not model is kept verbatim" do
       assert %SubagentEvent{phase: {:other, "hibernating"}} =
                Presentation.from_event(

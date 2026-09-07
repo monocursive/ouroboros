@@ -10,6 +10,12 @@
         "approvals_denied": 0,
         "cost_usd": 0.0731,
         "deadline_ms": 900000,
+        "deliveries": [
+          {
+            "bytes": 42,
+            "path": "/home/indie/.ouroboros/deliveries/task-subagent-000000000001/tests.txt"
+          }
+        ],
         "description": "audit the parser",
         "elapsed_ms": 725000,
         "files": [
@@ -28,6 +34,14 @@
         "phase": "settled",
         "provider_session_id": "provider-0000000000000009",
         "remote": true,
+        "returned_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "returned_files": [
+          {
+            "path": "lib/parser.ex",
+            "status": "M"
+          }
+        ],
+        "returned_ref": "refs/ouroboros/subagents/task-subagent-000000000001",
         "status": "completed",
         "summary_bytes": 512,
         "task_id": "task-subagent-000000000001",
