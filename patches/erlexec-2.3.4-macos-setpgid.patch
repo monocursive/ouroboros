@@ -1,0 +1,44 @@
+--- a/c_src/exec_impl.cpp
++++ b/c_src/exec_impl.cpp
+@@ -779,8 +779,33 @@
+-        // PTY children that own their session/group already got it from setsid().
+-        if (!op.pty_owns_group() &&
+-            op.group() != std::numeric_limits<int>::max() &&
+-            setpgid(0, op.group()) < 0)
+-        {
+-            err.write("Cannot set effective group to %d", op.group());
+-            perror(err.c_str());
+-            exit(EXIT_FAILURE);
++        // PTY children already own their session/group through setsid().
++        if (!op.pty_owns_group() && op.group() != std::numeric_limits<int>::max()) {
++            bool established = false;
++            int setup_error = 0;
++#ifdef __APPLE__
++            // Concurrent parent/child setpgid can return EPERM on macOS while
++            // the other call establishes this exact group. Retry only setup,
++            // before exec, with three 1ms pauses and a checked postcondition.
++            const pid_t expected = op.group() == 0 ? getpid() : op.group();
++            for (int attempt = 0; attempt < 4; ++attempt) {
++                if (setpgid(0, op.group()) == 0) {
++                    established = true;
++                    break;
++                }
++                setup_error = errno;
++                if (setup_error != EPERM) break;
++                if (getpgid(0) == expected) {
++                    established = true;
++                    break;
++                }
++                struct timespec pause = {0, 1000000};
++                if (attempt < 3) nanosleep(&pause, nullptr);
++            }
++#else
++            established = setpgid(0, op.group()) == 0;
++            setup_error = errno;
++#endif
++            if (!established) {
++                errno = setup_error;
++                err.write("Cannot set effective group to %d", op.group());
++                perror(err.c_str());
++                exit(EXIT_FAILURE);
++            }
