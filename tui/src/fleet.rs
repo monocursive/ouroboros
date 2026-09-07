@@ -3953,12 +3953,12 @@ fn start_owned_epmd(
                 profile.epmd_port
             );
         }
-        match ensure_epmd_port_available(&profile.host, profile.epmd_port) {
-            Ok(EpmdPortState::CompatibleRunning) => break,
-            Ok(EpmdPortState::Available) if Instant::now() < deadline => {
+        match owned_epmd_ready(address, profile.epmd_port) {
+            Ok(true) => break,
+            Ok(false) if Instant::now() < deadline => {
                 thread::sleep(Duration::from_millis(25));
             }
-            Ok(EpmdPortState::Available) => {
+            Ok(false) => {
                 drop(lock.take());
                 clean_failed_epmd_child(&mut child, &lock_path)?;
                 bail!(
@@ -4412,6 +4412,27 @@ fn remove_epmd_owner_artifacts(data_dir: &Path) -> Result<()> {
 fn ensure_epmd_port_available(host: &str, port: u16) -> Result<EpmdPortState> {
     let address = resolve_fleet_ipv4(host)?;
     ensure_epmd_address_port_available(address, port)
+}
+
+// Preflight may reserve sockets before a process starts. Readiness must only probe:
+// binding here races our own child, either stealing its port or misreporting its
+// newly bound socket as somebody else's conflict. Both listeners and the interface
+// fence still have to pass before the launcher records ownership.
+fn owned_epmd_ready(address: Ipv4Addr, port: u16) -> Result<bool> {
+    let advertised = epmd_probe(address, port);
+    let loopback = if address.is_loopback() {
+        advertised
+    } else {
+        epmd_probe(Ipv4Addr::LOCALHOST, port)
+    };
+    if advertised == EpmdProbe::Incompatible || loopback == EpmdProbe::Incompatible {
+        bail!("packaged EPMD port {port} accepts TCP but does not speak the documented NAMES protocol");
+    }
+    if advertised == EpmdProbe::Compatible && loopback == EpmdProbe::Compatible {
+        ensure_epmd_not_exposed_on_other_interfaces(address, port)?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 fn ensure_owned_epmd_listener_state(owner: &EpmdOwner) -> Result<OwnedEpmdListenerState> {
@@ -6079,6 +6100,25 @@ mod tests {
             .unwrap(),
             Ipv4Addr::new(10, 0, 0, 1)
         );
+    }
+
+    #[test]
+    fn owned_epmd_readiness_waits_for_a_protocol_listener_and_rejects_other_services() {
+        let reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        assert!(!owned_epmd_ready(Ipv4Addr::LOCALHOST, port).unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let server = fake_epmd(port, stop.clone());
+        assert!(owned_epmd_ready(Ipv4Addr::LOCALHOST, port).unwrap());
+        stop.store(true, Ordering::Relaxed);
+        server.join().unwrap();
+
+        let other = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let error = owned_epmd_ready(Ipv4Addr::LOCALHOST, other.local_addr().unwrap().port())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not speak"), "{error}");
     }
 
     #[test]
