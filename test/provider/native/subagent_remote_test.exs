@@ -141,131 +141,172 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
 
   # ---------------------------------------------------------------- the round trip
 
-  test "sync transfers this working tree and resolves its workspace on the peer", context do
-    alias Ouroboros.Workspace.{Git, Mirrors}
-    root = context.origin_workspace
-    Application.put_env(:ouroboros, :data_dir, context.origin_data)
+  for stop_kind <- [:deadline, :interrupt] do
+    @tag return_stop_kind: stop_kind
+    test "sync returns stay collectable after foreground #{stop_kind}",
+         %{return_stop_kind: stop_kind} = context do
+      alias Ouroboros.Workspace.{Git, Mirrors}
+      root = context.origin_workspace
+      Application.put_env(:ouroboros, :data_dir, context.origin_data)
 
-    for args <- [
-          ["init", "-q"],
-          ["config", "user.name", "Test"],
-          ["config", "user.email", "test@example.invalid"]
-        ] do
-      assert {:ok, _} = Git.run(root, args)
-    end
+      for args <- [
+            ["init", "-q"],
+            ["config", "user.name", "Test"],
+            ["config", "user.email", "test@example.invalid"]
+          ] do
+        assert {:ok, _} = Git.run(root, args)
+      end
 
-    File.write!(Path.join(root, "changed.txt"), "committed")
-    assert {:ok, _} = Git.run(root, ["add", "."])
-    assert {:ok, _} = Git.run(root, ["commit", "-qm", "Initial"])
-    File.write!(Path.join(root, "changed.txt"), "uncommitted on the parent")
-    File.write!(Path.join(root, "untracked.txt"), "also travels")
-    put_peer_env!(context.peer, :data_dir, context.peer_data)
-    put_peer_env!(context.peer, :workspace_allowed_roots, [context.peer_root])
-    :ok = peer_call(context.peer, Supervisor, :terminate_child, [Ouroboros.Supervisor, Mirrors])
+      File.write!(Path.join(root, "changed.txt"), "committed")
+      assert {:ok, _} = Git.run(root, ["add", "."])
+      assert {:ok, _} = Git.run(root, ["commit", "-qm", "Initial"])
+      File.write!(Path.join(root, "changed.txt"), "uncommitted on the parent")
+      File.write!(Path.join(root, "untracked.txt"), "also travels")
+      put_peer_env!(context.peer, :data_dir, context.peer_data)
+      put_peer_env!(context.peer, :workspace_allowed_roots, [context.peer_root])
+      :ok = peer_call(context.peer, Supervisor, :terminate_child, [Ouroboros.Supervisor, Mirrors])
 
-    assert {:ok, _} =
-             peer_call(context.peer, Supervisor, :restart_child, [Ouroboros.Supervisor, Mirrors])
+      assert {:ok, _} =
+               peer_call(context.peer, Supervisor, :restart_child, [Ouroboros.Supervisor, Mirrors])
 
-    {:ok, original_status} = Git.run(root, ["status", "--porcelain"])
-    {:ok, original_head} = Git.run(root, ["rev-parse", "HEAD"])
-    {:ok, index} = Git.run(root, ["rev-parse", "--path-format=absolute", "--git-path", "index"])
-    original_index = File.read!(index)
+      {:ok, original_status} = Git.run(root, ["status", "--porcelain"])
+      {:ok, original_head} = Git.run(root, ["rev-parse", "HEAD"])
+      {:ok, index} = Git.run(root, ["rev-parse", "--path-format=absolute", "--git-path", "index"])
+      original_index = File.read!(index)
 
-    %{handle: handle, child_agent: child_agent} =
-      open(
-        context,
-        [
+      %{handle: handle, child_agent: child_agent} =
+        open(
+          context,
           [
-            agent_call(
-              %{
-                "prompt" => "read changed.txt",
-                "machine" => Atom.to_string(context.peer),
-                "sync" => true
-              },
-              "sync1"
-            )
+            [
+              agent_call(
+                %{
+                  "prompt" => "read changed.txt",
+                  "machine" => Atom.to_string(context.peer),
+                  "sync" => true
+                },
+                "sync1"
+              )
+            ],
+            finish()
           ],
-          finish()
-        ],
-        [
-          [{:tool_call, %{id: "read1", name: "read", input: %{"path" => "changed.txt"}}}],
           [
-            {:tool_call,
-             %{
-               id: "write1",
-               name: "write",
-               input: %{"path" => "changed.txt", "content" => "returned dirty child work"}
-             }}
+            [{:tool_call, %{id: "read1", name: "read", input: %{"path" => "changed.txt"}}}],
+            [
+              {:tool_call,
+               %{
+                 id: "write1",
+                 name: "write",
+                 input: %{"path" => "changed.txt", "content" => "returned dirty child work"}
+               }}
+            ],
+            [{:text, "read and edited snapshot on peer"}, {:finish, :stop}]
           ],
-          [{:text, "read and edited snapshot on peer"}, {:finish, :stop}]
-        ]
-      )
+          %{
+            provider_options: %{
+              "tool_timeout_ms" => if(stop_kind == :deadline, do: 3_000, else: 120_000)
+            }
+          }
+        )
 
-    :ok = peer_call(context.peer, :sys, :suspend, [child_agent])
-    send_turn(handle)
-    spawned = await_subagent_event("spawned")
-    assert spawned.payload["provisioned"] == true
-    assert spawned.payload["bytes"] > 0
-    assert spawned.payload["untracked"] == ["untracked.txt"]
-    workspace = spawned.payload["workspace"]
-    assert workspace =~ "/data/worktrees/"
+      :ok = peer_call(context.peer, :sys, :suspend, [child_agent])
+      send_turn(handle)
+      spawned = await_subagent_event("spawned")
+      assert spawned.payload["provisioned"] == true
+      assert spawned.payload["bytes"] > 0
+      assert spawned.payload["untracked"] == ["untracked.txt"]
+      workspace = spawned.payload["workspace"]
+      assert workspace =~ "/data/worktrees/"
 
-    assert peer_call(context.peer, File, :read!, [Path.join(workspace, "changed.txt")]) ==
-             "uncommitted on the parent"
+      assert peer_call(context.peer, File, :read!, [Path.join(workspace, "changed.txt")]) ==
+               "uncommitted on the parent"
 
-    assert peer_call(context.peer, File, :read!, [Path.join(workspace, "untracked.txt")]) ==
-             "also travels"
+      assert peer_call(context.peer, File, :read!, [Path.join(workspace, "untracked.txt")]) ==
+               "also travels"
 
-    # A peer-side artifact proves transport and extraction independently of the
-    # permission policy for a model writing into the protected .ouroboros segment.
-    :ok = peer_call(context.peer, File, :mkdir_p!, [Path.join(workspace, ".ouroboros/deliver")])
+      # A peer-side artifact proves transport and extraction independently of the
+      # permission policy for a model writing into the protected .ouroboros segment.
+      :ok = peer_call(context.peer, File, :mkdir_p!, [Path.join(workspace, ".ouroboros/deliver")])
 
-    :ok =
-      peer_call(context.peer, File, :write!, [
-        Path.join(workspace, ".ouroboros/deliver/report.txt"),
-        "peer report"
-      ])
+      :ok =
+        peer_call(context.peer, File, :write!, [
+          Path.join(workspace, ".ouroboros/deliver/report.txt"),
+          "peer report"
+        ])
 
-    [{child, _}] =
-      peer_call(context.peer, Registry, :lookup, [
-        Ouroboros.Provider.Native.Registry,
-        {:subagent, spawned.payload["task_id"]}
-      ])
+      [{child, _}] =
+        peer_call(context.peer, Registry, :lookup, [
+          Ouroboros.Provider.Native.Registry,
+          {:subagent, spawned.payload["task_id"]}
+        ])
 
-    # A receiver stalled between chunks must not stall observation, stop, or falsely
-    # make agent_result release a child whose Git return is still in flight.
-    :sys.suspend(Ouroboros.Workspace.Returns)
+      # A receiver stalled between chunks must not stall observation, stop, or falsely
+      # make agent_result release a child whose Git return is still in flight.
+      :sys.suspend(Ouroboros.Workspace.Returns)
 
-    try do
-      :ok = peer_call(context.peer, :sys, :resume, [child_agent])
-      wait_until(fn -> match?({:ok, %{status: :returning}}, Subagent.summary(child)) end)
-      started_at = System.monotonic_time(:millisecond)
-      assert {:ok, %{status: :returning}} = Subagent.stop(child)
-      assert System.monotonic_time(:millisecond) - started_at < 2_000
-      assert {:error, :still_running} = Subagent.await(child, 0)
-      assert peer_call(context.peer, Process, :alive?, [child])
-      assert peer_call(context.peer, File, :exists?, [workspace])
-    after
-      :sys.resume(Ouroboros.Workspace.Returns)
+      try do
+        :ok = peer_call(context.peer, :sys, :resume, [child_agent])
+        wait_until(fn -> match?({:ok, %{status: :returning}}, Subagent.summary(child)) end)
+        started_at = System.monotonic_time(:millisecond)
+        assert {:ok, %{status: :returning}} = Subagent.stop(child)
+        assert System.monotonic_time(:millisecond) - started_at < 2_000
+        assert {:error, :still_running} = Subagent.await(child, 0)
+        assert peer_call(context.peer, Process, :alive?, [child])
+        assert peer_call(context.peer, File, :exists?, [workspace])
+        if stop_kind == :interrupt, do: Session.interrupt(handle, :active)
+        terminal = if stop_kind == :interrupt, do: :turn_interrupted, else: :turn_completed
+        events = collect_until(terminal, [], 10_000)
+        assert subagent_events(events, "settled") == []
+
+        assert {:ok, ^child} =
+                 GenServer.call(handle, {:subagent_lookup, spawned.payload["task_id"]})
+
+        assert %{subscriber: ^handle, background?: true, status: :returning} =
+                 peer_call(context.peer, :sys, :get_state, [child])
+
+        assert %{running: 1, tracked: 1} = GenServer.call(handle, :subagent_counts)
+
+        if stop_kind == :deadline do
+          assert tool_result(events, "agent").payload["output"] =~ "Collect it with agent_result"
+          assert tool_result(events, "agent").payload["output"] =~ "untracked.txt"
+        end
+      after
+        :sys.resume(Ouroboros.Workspace.Returns)
+      end
+
+      settled = await_subagent_event("settled")
+      assert settled.payload["return_error"] == nil, inspect(settled.payload)
+      assert settled.payload["worktree"]["retired"] == "removed"
+      refute peer_call(context.peer, File, :exists?, [workspace])
+
+      assert {:ok, "returned dirty child work"} =
+               Git.run(root, ["show", settled.payload["returned_ref"] <> ":changed.txt"])
+
+      assert {:ok, ^original_status} = Git.run(root, ["status", "--porcelain"])
+      assert {:ok, ^original_head} = Git.run(root, ["rev-parse", "HEAD"])
+      assert File.read!(index) == original_index
+      assert [%{"path" => delivered, "bytes" => 11}] = settled.payload["deliveries"]
+      assert File.read!(delivered) == "peer report"
+      task_id = spawned.payload["task_id"]
+
+      context = %{
+        subagents: %{
+          lookup: fn id -> GenServer.call(handle, {:subagent_lookup, id}) end,
+          release: fn id -> GenServer.call(handle, {:subagent_release, id}) end
+        }
+      }
+
+      assert {:ok, result} =
+               Ouroboros.Provider.Native.Tools.AgentResult.run(
+                 %{task_id: task_id, wait_ms: 0},
+                 context
+               )
+
+      assert result.output =~ "git cherry-pick"
+      assert result.output =~ settled.payload["returned_ref"]
+      assert :error = GenServer.call(handle, {:subagent_lookup, task_id})
+      assert File.read!(Path.join(root, "changed.txt")) == "uncommitted on the parent"
     end
-
-    events = collect_until(:turn_completed, [], 90_000)
-    [settled] = subagent_events(events, "settled")
-    assert settled.payload["return_error"] == nil, inspect(settled.payload)
-    assert settled.payload["worktree"]["retired"] == "removed"
-    refute peer_call(context.peer, File, :exists?, [workspace])
-
-    assert {:ok, "returned dirty child work"} =
-             Git.run(root, ["show", settled.payload["returned_ref"] <> ":changed.txt"])
-
-    assert {:ok, ^original_status} = Git.run(root, ["status", "--porcelain"])
-    assert {:ok, ^original_head} = Git.run(root, ["rev-parse", "HEAD"])
-    assert File.read!(index) == original_index
-    assert [%{"path" => delivered, "bytes" => 11}] = settled.payload["deliveries"]
-    assert File.read!(delivered) == "peer report"
-    assert tool_result(events, "agent").payload["output"] =~ "git cherry-pick"
-    assert tool_result(events, "agent").payload["output"] =~ "untracked.txt"
-    assert File.read!(Path.join(root, "changed.txt")) == "uncommitted on the parent"
   end
 
   describe "a child placed on another machine" do

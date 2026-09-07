@@ -2438,7 +2438,13 @@ defmodule Ouroboros.Provider.Native.Loop do
 
       :native_interrupt ->
         summary = settle_subagent(state, spec, started, :stopped)
-        emit(state, :provider_event, subagent_event(Subagent.settled_payload(summary)))
+
+        payload =
+          if summary.status == :returning,
+            do: Subagent.returning_payload(summary),
+            else: Subagent.settled_payload(summary)
+
+        emit(state, :provider_event, subagent_event(payload))
         settle_tool_effect(state, effect_id, :refused, nil, 0)
         {:interrupted, %{state | interrupted?: true}}
 
@@ -2465,6 +2471,33 @@ defmodule Ouroboros.Provider.Native.Loop do
     end
   end
 
+  defp finish_subagent(
+         state,
+         call,
+         spec,
+         started,
+         %{status: :returning} = summary,
+         hook_context,
+         effect_id,
+         started_at
+       ) do
+    emit(state, :provider_event, subagent_event(Subagent.returning_payload(summary)))
+    state = fold_subagent_usage(state, spec, summary)
+    # The foreground wait is over, but this session still owns a result in flight.
+    # Keep its task registered until agent_result receives the final settlement.
+    result =
+      Tools.normalize_result_of(%{
+        output:
+          Subagent.render(summary) <>
+            "\nThe return continues in this session. Collect it with agent_result and task_id #{spec.task_id}." <>
+            provisioning_result(started),
+        is_error: false
+      })
+
+    settle_tool_effect(state, effect_id, result, System.monotonic_time(:millisecond) - started_at)
+    {:continue, tool_result(state, call, append_context(result, hook_context))}
+  end
+
   defp finish_subagent(state, call, spec, started, summary, hook_context, effect_id, started_at) do
     emit(state, :provider_event, subagent_event(Subagent.settled_payload(summary)))
     state = fold_subagent_usage(state, spec, summary)
@@ -2485,8 +2518,8 @@ defmodule Ouroboros.Provider.Native.Loop do
     {:continue, tool_result(state, call, append_context(result, hook_context))}
   end
 
-  defp settle_subagent(_state, _spec, started, reason) do
-    case Subagent.stop(started.pid, reason) do
+  defp settle_subagent(state, _spec, started, reason) do
+    case Subagent.stop(started.pid, reason, state.session_pid) do
       {:ok, summary} ->
         summary
 

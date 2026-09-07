@@ -1078,7 +1078,10 @@ the returned ref and each delivered path and size.
 
 Settlement stays observable while returning work: `summary` reports `returning`,
 `agent_result` keeps the task collectable, and stopping the child does not discard a
-return in flight. Return transport is bounded to ten minutes, with an independent
+return in flight. When a foreground wait reaches the loop timeout or is interrupted,
+the session takes ownership of the unfinished return. The task stays tracked and
+collectable with `agent_result`; its settled event arrives only after return finishes.
+Return transport is bounded to ten minutes, with an independent
 worker ceiling. Only an acknowledged return, followed by a fresh comparison of the
 child's HEAD, tree, and delivery contents, authorizes deletion of its worktree. A
 failed, ambiguous, or concurrently changed return retains the target worktree and

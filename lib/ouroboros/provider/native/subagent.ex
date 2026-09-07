@@ -336,9 +336,22 @@ defmodule Ouroboros.Provider.Native.Subagent do
   """
   @spec stop(pid(), :stopped | :timed_out) :: {:ok, map()} | {:error, term()}
   def stop(pid, reason \\ :stopped) do
-    result = safe_call(pid, {:settle, reason}, 10_000)
+    stop(pid, reason, nil)
+  end
+
+  @doc "Stops editing and atomically hands an unfinished return to the session owner."
+  def stop(pid, reason, return_owner) when is_pid(return_owner) or is_nil(return_owner) do
+    result = safe_call(pid, {:settle, reason, return_owner}, 10_000)
     unless match?({:ok, %{status: :returning}}, result), do: stop_process(pid)
     result
+  end
+
+  @doc false
+  def returning_payload(summary) do
+    summary
+    |> settled_payload()
+    |> Map.put("phase", "progress")
+    |> Map.put("last_activity", "Returning changes; collect with agent_result")
   end
 
   @doc false
@@ -511,10 +524,30 @@ defmodule Ouroboros.Provider.Native.Subagent do
     {:noreply, %{state | waiters: [{from, timer} | state.waiters]}}
   end
 
-  def handle_call({:settle, reason}, _from, state) do
+  def handle_call({:settle, reason}, from, state),
+    do: handle_call({:settle, reason, nil}, from, state)
+
+  def handle_call({:settle, reason, return_owner}, _from, state) do
     state = settle(state, reason, settle_note(reason))
+    state = handoff_return(state, return_owner)
     {:reply, {:ok, summary_of(state)}, state}
   end
+
+  # The old loop may exit immediately after the reply. Replace its monitor before
+  # returning, so neither that DOWN nor a fast return completion can lose the result.
+  defp handoff_return(%{status: :returning} = state, owner) when is_pid(owner) do
+    Process.demonitor(state.subscriber_monitor, [:flush])
+
+    %{
+      state
+      | subscriber: owner,
+        subscriber_monitor: Process.monitor(owner),
+        background?: true,
+        orphaned?: false
+    }
+  end
+
+  defp handoff_return(state, _owner), do: state
 
   @impl GenServer
   def handle_cast({:respond, child_request_id, response}, state) do
