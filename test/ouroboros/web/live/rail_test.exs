@@ -287,8 +287,8 @@ defmodule Ouroboros.Web.Live.RailTest do
     end
 
     test "a title is never blank" do
-      assert Rail.title(interactive("abc", title: nil)) == "abc"
-      assert Rail.title(interactive("abc", title: "   ")) == "abc"
+      assert Rail.title(interactive("abc", title: nil)) =~ "New conversation"
+      assert Rail.title(interactive("abc", title: "   ")) =~ "New conversation"
       assert Rail.title(interactive("abc", title: " Named ")) == "Named"
       assert Rail.title(coding("t1")) == "do the thing"
     end

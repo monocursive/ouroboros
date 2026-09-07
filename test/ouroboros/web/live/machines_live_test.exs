@@ -366,19 +366,18 @@ defmodule Ouroboros.Web.Live.MachinesLiveTest do
     test "mounts as an advanced page with a contextual title", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/machines")
 
-      assert html =~ "Advanced"
+      assert html =~ "Your computers"
       assert html =~ "Machines"
-      assert html =~ "Advanced · Machines · Ouroboros"
+      assert html =~ "Machines · Ouroboros"
     end
 
     test "a fleetless runtime leads with plain guidance and keeps commands advanced" do
       html = render_component(&MachinesLive.no_fleet/1, %{})
 
       assert html =~ MachinesLive.no_fleet_title()
-      assert html =~ "not connected to other Ouroboros machines"
-      assert html =~ "Ask an administrator"
-      assert html =~ "Administrator setup"
-      assert html =~ "<code>ouro fleet create</code>"
+      assert html =~ "You can work here now"
+      assert html =~ "Start a task here"
+      refute html =~ "Ask an administrator"
       refute html =~ "ouro-members"
       refute html =~ "<form"
       refute html =~ "<input"
@@ -415,8 +414,9 @@ defmodule Ouroboros.Web.Live.MachinesLiveTest do
          %{conn: conn} do
       {:ok, _view, html} = live(conn, "/machines")
 
-      assert html =~ "Administrator setup"
-      assert html =~ "<code>ouro fleet add user@host</code>"
+      assert html =~ "Connect another computer"
+      assert html =~ "<code>/machines</code>"
+      assert html =~ "Browser-only pairing is not available yet"
       refute html =~ "<form"
     end
 

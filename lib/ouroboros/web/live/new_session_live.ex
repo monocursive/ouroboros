@@ -70,7 +70,12 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       |> assign(:data_dir, config.data_dir)
       # Where the operator's last successful start left this form. `read/1` is total, so a
       # corrupt file is a form with no defaults rather than a page that will not mount.
-      |> assign(:form, NewSession.new(Prefs.read(config.data_dir)))
+      |> assign(:form, initial_form(Prefs.read(config.data_dir), params))
+      |> assign(:machines, [])
+      |> assign(:local_machine, "This computer")
+      |> assign(:project_drafts, %{})
+      |> assign(:started_node, nil)
+      |> assign(:pending_start, nil)
       |> assign(:providers, nil)
       |> assign(:providers_error, nil)
       |> assign(:catalogue, nil)
@@ -97,7 +102,100 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     # The lists are read on the connected mount alone. The static first paint says it is
     # reading rather than showing an empty picker, which would be a claim that this node
     # serves no providers.
-    {:ok, if(connected?(socket), do: load(socket), else: socket)}
+    {:ok, if(connected?(socket), do: socket |> load_machines() |> load(), else: socket)}
+  end
+
+  defp initial_form(prefs, params) do
+    form = NewSession.new(prefs)
+
+    case params["machine"] do
+      machine when is_binary(machine) and machine != form.machine ->
+        %{
+          form
+          | machine: machine,
+            workspace: "",
+            provider: nil,
+            model_choice: :runtime_default,
+            model_text: "",
+            effort: nil
+        }
+
+      _ ->
+        form
+    end
+  end
+
+  defp load_machines(socket) do
+    case Call.call(socket.assigns.scope, "fleet.status", %{}) do
+      {:ok, fleet} ->
+        machines = Map.get(fleet, :machines, [])
+        local = Enum.find(machines, &(Map.get(&1, :state) == :local))
+
+        local_label =
+          if local && local[:machine] not in [nil, "nonode"],
+            do: local[:machine],
+            else: :inet.gethostname() |> elem(1) |> to_string()
+
+        socket
+        |> assign(:machines, machines)
+        |> assign(:local_machine, local_label)
+        |> assign(
+          :form,
+          if(local && socket.assigns.form.machine in [local[:machine], to_string(local[:node])],
+            do: %{socket.assigns.form | machine: ""},
+            else: socket.assigns.form
+          )
+        )
+
+      _ ->
+        socket
+    end
+  end
+
+  defp machine_label(assigns) do
+    if blank?(assigns.form.machine),
+      do: assigns.local_machine,
+      else:
+        Enum.find_value(assigns.machines, assigns.form.machine, fn machine ->
+          if to_string(machine[:node]) == assigns.form.machine or
+               machine[:machine] == assigns.form.machine,
+             do: machine[:machine] || assigns.form.machine
+        end)
+  end
+
+  defp switch_machine(socket, machine) do
+    old = socket.assigns.form
+    drafts = Map.put(socket.assigns.project_drafts, old.machine, old.workspace)
+
+    form = %{
+      NewSession.new()
+      | machine: machine,
+        workspace: Map.get(drafts, machine, ""),
+        sandbox: old.sandbox
+    }
+
+    socket
+    |> assign(:form, form)
+    |> assign(:project_drafts, drafts)
+    |> assign(:providers, nil)
+    |> assign(:providers_error, nil)
+    |> assign(:catalogue, nil)
+    |> assign(:catalogue_error, nil)
+    |> assign(:account, nil)
+    |> assign(:login, nil)
+    |> assign(:polling_account?, false)
+    |> assign(:grok_account, nil)
+    |> assign(:grok_login, nil)
+    |> assign(:polling_grok_account?, false)
+    |> assign(:api_key_dialog?, false)
+    |> assign(:api_key_error, nil)
+    |> assign(:browse, nil)
+    |> assign(:browse_refusal, nil)
+    |> assign(:browse_open?, false)
+    |> assign(:provider_invalid?, false)
+    |> assign(:refusal, nil)
+    |> load_machines()
+    |> load()
   end
 
   defp starter("explain"),
@@ -118,6 +216,20 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   # reading of it. The submit handler reads the browser payload through the same function;
   # rendered controls and the request can therefore never disagree.
   @impl true
+  def handle_event(event, _params, %{assigns: %{pending_start: pending}} = socket)
+      when event != "start" and not is_nil(pending), do: {:noreply, socket}
+
+  def handle_event(event, _params, %{assigns: %{started_id: id}} = socket)
+      when event != "start" and not is_nil(id), do: {:noreply, socket}
+
+  def handle_event("change", %{"machine" => machine} = params, socket)
+      when machine != socket.assigns.form.machine do
+    {:noreply,
+     socket
+     |> assign(:initial_message, params["initial_message"] || socket.assigns.initial_message)
+     |> switch_machine(machine)}
+  end
+
   def handle_event("change", params, socket) do
     form = params |> read_form(socket.assigns.form) |> reconcile(socket)
 
@@ -148,6 +260,9 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     # entitled to assume.
     {:noreply, socket |> assign(:browse_open?, true) |> browse(nil)}
   end
+
+  def handle_event("refresh-computer", _params, socket),
+    do: {:noreply, switch_machine(socket, socket.assigns.form.machine)}
 
   def handle_event("browse-close", _params, socket) do
     {:noreply, assign(socket, :browse_open?, false)}
@@ -301,6 +416,25 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   # Start
   # ------------------------------------------------------------------------------------
 
+  def handle_event("start", _params, %{assigns: %{started_id: id}} = socket) when is_binary(id),
+    do: {:noreply, send_initial(socket, id)}
+
+  def handle_event("start", _params, %{assigns: %{pending_start: params}} = socket)
+      when is_map(params),
+      do: {:noreply, start(socket, params)}
+
+  def handle_event("start", %{"machine" => machine} = params, socket)
+      when machine != socket.assigns.form.machine do
+    {:noreply,
+     socket
+     |> assign(:initial_message, params["initial_message"] || socket.assigns.initial_message)
+     |> switch_machine(machine)
+     |> assign(:refusal, %{
+       message: "Computer changed. Check the project and sign-in, then start.",
+       detail: nil
+     })}
+  end
+
   def handle_event("start", params, socket) do
     form = params |> read_form(socket.assigns.form) |> reconcile(socket)
 
@@ -317,6 +451,13 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     grok_required? = NewSession.requires_grok?(form)
 
     cond do
+      form.machine != "" and blank?(form.workspace) ->
+        {:noreply,
+         assign(socket, :refusal, %{
+           message: "Choose a project folder on this computer first.",
+           detail: "Browse shows folders on the selected computer."
+         })}
+
       not socket.assigns.loaded? ->
         {:noreply,
          assign(socket, :refusal, %{
@@ -474,6 +615,8 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
             socket
             |> assign(:started_id, id)
+            |> assign(:started_node, Map.get(answer, :node) || Map.get(answer, "node"))
+            |> assign(:pending_start, nil)
             |> send_initial(id)
 
           :error ->
@@ -489,7 +632,12 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
         # The form is left exactly as it was. A refusal is information about the request,
         # and a page that cleared the fields would make the operator retype what the
         # runtime just told them to change.
-        socket |> assign(:starting?, false) |> assign(:refusal, NewSession.refusal(refused))
+        uncertain? = match?({:error, _, _, %{"outcome" => "unknown"}}, refused)
+
+        socket
+        |> assign(:starting?, false)
+        |> assign(:refusal, NewSession.refusal(refused))
+        |> assign(:pending_start, if(uncertain?, do: params))
     end
   end
 
@@ -509,6 +657,11 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
         "input" => message,
         "turn_id" => "web-" <> digest
       }
+
+      params =
+        if socket.assigns.started_node,
+          do: Map.put(params, "node", to_string(socket.assigns.started_node)),
+          else: params
 
       case call(socket, "interactive.send_message", params) do
         {:ok, _turn} ->
@@ -581,6 +734,12 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   end
 
   defp call(socket, method, params) do
+    params =
+      if Ouroboros.Gateway.Methods.Contract.machine_scoped?(method) and
+           not blank?(socket.assigns.form.machine),
+         do: Map.put(params, "machine", socket.assigns.form.machine),
+         else: params
+
     Call.call(socket.assigns.scope, method, params, session: socket.assigns[:web_session])
   end
 
@@ -669,7 +828,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
     api_key_required? = match?(%{managed?: false, usable?: false}, api_key)
 
     advanced_required? =
-      assigns.provider_invalid? or not chatgpt_ready? or not grok_ready? or api_key_required?
+      assigns.provider_invalid?
 
     can_start? = Call.available?(assigns.scope, "interactive.start")
 
@@ -702,6 +861,12 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       |> assign(:provider_ready?, provider_ready?)
       |> assign(:can_browse?, Call.available?(assigns.scope, "workspace.browse"))
       |> assign(:provider_label, provider_label(assigns.form.provider))
+      |> assign(:machine_label, machine_label(assigns))
+      |> assign(:locked?, not is_nil(assigns.pending_start) or not is_nil(assigns.started_id))
+      |> assign(
+        :destination_known?,
+        Enum.any?(assigns.machines, &(to_string(&1[:node]) == assigns.form.machine))
+      )
 
     ~H"""
     <div class="ouro-new">
@@ -715,79 +880,133 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
       </header>
 
       <form id="new-session" class="ouro-new-form" phx-change="change" phx-submit="start">
-        <.workspace_field
-          workspace={@form.workspace}
-          default_workspace={@default_workspace}
-          can_browse={@can_browse?}
-          open={@browse_open?}
-          listing={@browse}
-          refusal={@browse_refusal}
-        />
-
-        <section class="ouro-new-field" aria-labelledby="initial-message-label">
-          <div class="ouro-new-label-row">
-            <label class="ouro-new-label" id="initial-message-label" for="initial-message">
-              What should the agent do?
-            </label>
-            <span class="ouro-new-aside">Optional</span>
-          </div>
-          <textarea
-            id="initial-message"
-            class="ouro-new-input ouro-new-message"
-            name="initial_message"
-            rows="5"
-            placeholder="Describe the result you want. You can add more instructions later."
-          >{@initial_message}</textarea>
-          <p class="ouro-new-hint">This becomes the first message in the session.</p>
-        </section>
-
-        <details
-          class="ouro-new-advanced"
-          data-ouro-disclosure={"setup:#{@advanced_required?}"}
-          open={@advanced_required?}
-        >
-          <summary>
-            <span>Advanced settings</span>
-            <span class="ouro-new-advanced-summary">
-              {@provider_label} · {@intent.send ||
-                if(@field == :unsupported,
-                  do: "Provider chooses the model",
-                  else: "Recommended model"
-                )} · {sandbox_title(@form.sandbox)}
-            </span>
-          </summary>
-
-          <.provider_field
-            rows={@providers}
-            error={@providers_error}
-            invalid={@provider_invalid?}
-            loaded={@loaded?}
-            chosen={@form.provider}
+        <fieldset class="ouro-new-fields" disabled={@locked? or @starting?} aria-label="Task setup">
+          <section class="ouro-new-field" aria-labelledby="machine-label">
+            <div class="ouro-new-label-row">
+              <label id="machine-label" class="ouro-new-label" for="machine">Computer</label>
+              <a href="/machines" class="ouro-new-aside">Manage computers</a>
+            </div>
+            <select
+              id="machine"
+              name="machine"
+              class="ouro-new-input"
+              disabled={@starting? or not is_nil(@pending_start) or not is_nil(@started_id)}
+            >
+              <option value="" selected={@form.machine == ""}>
+                {@local_machine} · runs this web app
+              </option>
+              <option
+                :for={machine <- @machines}
+                :if={machine[:state] != :local}
+                value={to_string(machine[:node])}
+                selected={@form.machine == to_string(machine[:node])}
+                disabled={machine[:state] != :connected}
+              >
+                {machine[:machine] || to_string(machine[:node])}{if machine[:state] != :connected,
+                  do: " · offline"}
+              </option>
+              <option
+                :if={@form.machine != "" and not @destination_known?}
+                value={@form.machine}
+                selected
+              >
+                {@form.machine} · saved selection
+              </option>
+            </select>
+            <p class="ouro-new-hint">
+              Your project, AI sign-in, and task stay on <strong>{@machine_label}</strong>.
+            </p>
+            <p :if={@providers_error} class="ouro-refusal" role="alert">{@providers_error}</p>
+            <button
+              :if={@providers_error}
+              type="button"
+              class="ouro-new-secondary"
+              phx-click="refresh-computer"
+            >Check again</button>
+          </section>
+          <.workspace_field
+            workspace={@form.workspace}
+            default_workspace={if @form.machine == "", do: @default_workspace}
+            machine_label={@machine_label}
+            can_browse={@can_browse?}
+            open={@browse_open?}
+            listing={@browse}
+            refusal={@browse_refusal}
           />
 
-          <.model_field
-            field={@field}
-            visible={@visible}
-            form={@form}
-            intent={@intent}
-            error={@catalogue_error}
-          />
+          <section class="ouro-new-field" aria-labelledby="initial-message-label">
+            <div class="ouro-new-label-row">
+              <label class="ouro-new-label" id="initial-message-label" for="initial-message">
+                What should the agent do?
+              </label>
+              <span class="ouro-new-aside">Optional</span>
+            </div>
+            <textarea
+              id="initial-message"
+              class="ouro-new-input ouro-new-message"
+              name="initial_message"
+              rows="5"
+              placeholder="Describe the result you want. You can add more instructions later."
+            >{@initial_message}</textarea>
+            <p class="ouro-new-hint">This becomes the first message in the session.</p>
+          </section>
 
-          <.thinking_field effort={@form.effort} choices={@efforts} />
-          <.sandbox_field sandbox={@form.sandbox} />
-          <.account_card :if={@gated?} card={@account_card} scope={@scope} />
-          <.grok_account_card
-            :if={@grok_gated?}
-            card={@grok_account_card}
-            scope={@scope}
-            api_key={@api_key_card}
-          />
-          <.api_key_card
-            :if={is_map(@api_key_card)}
-            card={@api_key_card}
-            can_set={@can_set_api_key?}
-          />
-        </details>
+          <section :if={@gated? or @grok_gated? or is_map(@api_key_card)} aria-label="AI connection">
+            <p class="ouro-new-hint">AI connection on <strong>{@machine_label}</strong></p>
+            <.account_card :if={@gated?} card={@account_card} scope={@scope} />
+            <.grok_account_card
+              :if={@grok_gated?}
+              card={@grok_account_card}
+              scope={@scope}
+              api_key={@api_key_card}
+            />
+            <.api_key_card
+              :if={is_map(@api_key_card)}
+              card={@api_key_card}
+              can_set={@can_set_api_key?}
+            />
+          </section>
+
+          <details
+            class="ouro-new-advanced"
+            data-ouro-disclosure={"setup:#{@advanced_required?}"}
+            open={@advanced_required?}
+          >
+            <summary>
+              <span>Advanced settings</span>
+              <span class="ouro-new-advanced-summary">
+                {@provider_label} · {@intent.send ||
+                  if(@field == :unsupported,
+                    do: "Provider chooses the model",
+                    else: "Recommended model"
+                  )} · {sandbox_title(@form.sandbox)}
+              </span>
+            </summary>
+
+            <.provider_field
+              rows={@providers}
+              error={@providers_error}
+              invalid={@provider_invalid?}
+              loaded={@loaded?}
+              chosen={@form.provider}
+            />
+
+            <.model_field
+              field={@field}
+              visible={@visible}
+              form={@form}
+              intent={@intent}
+              error={@catalogue_error}
+            />
+
+            <.thinking_field effort={@form.effort} choices={@efforts} />
+            <.sandbox_field sandbox={@form.sandbox} />
+          </details>
+        </fieldset>
+
+        <p :if={@locked?} class="ouro-new-hint" role="status">
+          Your task may already exist. Check and retry the same task before changing its computer or project.
+        </p>
 
         <p :if={@refusal} class="ouro-refusal ouro-new-refusal" role="alert">
           {@refusal.message}
@@ -800,18 +1019,23 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
             type="submit"
             class="ouro-button"
             disabled={
-              not @can_start? or not @provider_ready? or @starting? or
-                not @chatgpt_ready? or not @grok_ready? or @api_key_required?
+              not @can_start? or @starting? or
+                (not @locked? and
+                   (not @provider_ready? or (@form.machine != "" and @form.workspace == "") or
+                      not @chatgpt_ready? or not @grok_ready? or @api_key_required?))
             }
           >
-            {start_label(
-              @can_start?,
-              @starting?,
-              @chatgpt_ready?,
-              @grok_ready?,
-              @api_key_required?,
-              @api_key_card
-            )}
+            {if @locked?,
+              do: "Check & retry task",
+              else:
+                start_label(
+                  @can_start?,
+                  @starting?,
+                  @chatgpt_ready?,
+                  @grok_ready?,
+                  @api_key_required?,
+                  @api_key_card
+                )}
           </button>
         </footer>
 
@@ -1069,6 +1293,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
 
   attr :workspace, :string, required: true
   attr :default_workspace, :string, default: nil
+  attr :machine_label, :string, default: "this computer"
   attr :can_browse, :boolean, required: true
   attr :open, :boolean, required: true
   attr :listing, :any, required: true
@@ -1103,12 +1328,10 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
         </button>
       </div>
       <p class="ouro-new-hint">
-        {if String.trim(@workspace) == "",
-          do: "Default project on this machine: ",
-          else: "Project on this machine: "}
+        {if String.trim(@workspace) == "", do: "Default project on ", else: "Project on "}{@machine_label}:
         <span class="ouro-mono">{if String.trim(@workspace) == "",
-          do: @default_workspace,
-          else: Path.expand(String.trim(@workspace), @default_workspace || File.cwd!())}</span>
+          do: @default_workspace || "Choose a folder with Browse",
+          else: String.trim(@workspace)}</span>
       </p>
 
       <.browse_panel :if={@open} listing={@listing} refusal={@refusal} />
@@ -1185,6 +1408,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
           <button
             type="button"
             class="ouro-browse-use"
+            aria-label={"Use folder #{entry["name"]}"}
             phx-click="browse-use"
             phx-value-path={Path.join(@path || "", entry["name"])}
           >

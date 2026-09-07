@@ -225,8 +225,9 @@ defmodule Ouroboros.Web.PrefsTest do
       assert Prefs.path(dir) == Path.join(dir, "web.prefs.json")
     end
 
-    test "the keys are the five interactive.start parameters a person chooses" do
+    test "the remembered project includes its destination computer" do
       assert Prefs.keys() == [
+               "machine",
                "provider",
                "model",
                "workspace",
