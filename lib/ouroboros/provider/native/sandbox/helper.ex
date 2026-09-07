@@ -58,7 +58,10 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
       ouro-sandbox exec --request '{"version":1,...}' -- /bin/sh -c '...'
 
   `request/2` is the pure half — the policy, as the helper will read it — and is what the
-  tests pin.
+  tests pin. Provisioned worktrees additionally carry `write_exceptions`: at most
+  three existing canonical directory grants, only in workspace modes. Older helpers
+  reject this unknown field rather than silently losing its semantics. See
+  `docs/WORKTREE-ACCESS.md`.
 
   ## Failures are legible on purpose
 
@@ -252,6 +255,7 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
 
     base
     |> readable(policy)
+    |> maybe_put("write_exceptions", Map.get(policy, :write_exceptions))
     |> maybe_put("cwd", chdir(scope))
     |> maybe_put("fs_filter_library", filter_library(policy))
   end

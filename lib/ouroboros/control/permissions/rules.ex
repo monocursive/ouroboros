@@ -2,9 +2,9 @@ defmodule Ouroboros.Control.Permissions.Rules do
   @moduledoc """
   The decision algorithm, and the protected paths no rule can talk over.
 
-  Pure: given a request and a list of rules, this module answers. It reads application
-  configuration for the protected-path list (the data directory is where it is because an
-  operator put it there) and nothing else.
+  Given a request and a list of rules, this module answers. Protected paths use node
+  configuration and the runtime-owned worktree registry, whose verified provisioned
+  delivery directories are the sole exception to the `.ouroboros` segment fence.
 
   ## The algorithm, exactly
 
@@ -65,8 +65,9 @@ defmodule Ouroboros.Control.Permissions.Rules do
   """
   @spec protected_write?(String.t()) :: boolean()
   def protected_write?(path) when is_binary(path) do
-    Enum.any?(@protected_segments, &protected_segment?(path, &1)) or
-      (Enum.any?(protected_roots(), &Paths.within?(path, &1)) and not worktree_write?(path))
+    not Ouroboros.Workspace.Access.delivery_write?(path) and
+      (Enum.any?(@protected_segments, &protected_segment?(path, &1)) or
+         (Enum.any?(protected_roots(), &Paths.within?(path, &1)) and not worktree_write?(path)))
   end
 
   def protected_write?(_path), do: false

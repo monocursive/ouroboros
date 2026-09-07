@@ -117,6 +117,8 @@ pub struct Request {
     /// Roots the command may write under, in `workspace_write`.
     #[serde(default)]
     pub writable: Vec<String>,
+    #[serde(default)]
+    pub write_exceptions: Vec<String>,
     /// Roots the command may *read* under, in `builder` mode only.
     ///
     /// A list the daemon widens and this helper never does: an entry must be absolute, an
@@ -229,6 +231,7 @@ pub struct Policy {
     pub cwd: Option<String>,
     pub scratch: String,
     pub writable: Vec<String>,
+    pub write_exceptions: Vec<String>,
     /// Empty for every mode but `builder`, where it is the whole read set beside the
     /// writable roots.
     pub readable: Vec<String>,
@@ -259,6 +262,28 @@ impl Policy {
 
         for path in &request.writable {
             absolute("writable", path)?;
+        }
+        if !request.write_exceptions.is_empty() {
+            if !matches!(
+                request.mode,
+                Mode::WorkspaceWrite | Mode::WorkspaceWriteEscalated
+            ) || request.write_exceptions.len() > 3
+            {
+                return Err(RequestError::Malformed(
+                    "write_exceptions require a workspace mode and at most three roots".into(),
+                ));
+            }
+            for path in &request.write_exceptions {
+                absolute("write_exceptions", path)?;
+                if !std::path::Path::new(path).is_dir()
+                    || std::fs::canonicalize(path).ok().as_deref()
+                        != Some(std::path::Path::new(path))
+                {
+                    return Err(RequestError::Malformed(
+                        "write_exceptions must name existing canonical directories".into(),
+                    ));
+                }
+            }
         }
         for path in &request.readable {
             absolute("readable", path)?;
@@ -321,6 +346,7 @@ impl Policy {
                     .into_iter()
                     .filter(|p| *p != request.scratch),
             ),
+            write_exceptions: dedup_sorted(request.write_exceptions.into_iter()),
             readable: dedup_sorted(request.readable.into_iter()),
             protected: dedup_sorted(request.protected.into_iter()),
             denied_names: dedup_sorted(request.denied_names.into_iter()),

@@ -150,7 +150,8 @@ defmodule Ouroboros.Workspace.Worktree do
         node: Atom.to_string(node()),
         provisioned: true,
         repo_id: Keyword.get(opts, :repo_id),
-        source_node: Keyword.get(opts, :source_node)
+        source_node: Keyword.get(opts, :source_node),
+        git_dir: Ouroboros.Workspace.Access.recorded_git_dir(canonical, repository)
       }
 
       case record(worktree, opts) do
@@ -250,7 +251,7 @@ defmodule Ouroboros.Workspace.Worktree do
       "repository" => worktree.repository
     }
     |> Map.merge(
-      Map.new([:provisioned, :repo_id, :source_node], fn key ->
+      Map.new([:provisioned, :repo_id, :source_node, :git_dir], fn key ->
         {Atom.to_string(key), Map.get(worktree, key)}
       end)
     )
@@ -819,7 +820,7 @@ defmodule Ouroboros.Workspace.Worktree do
       "node" => worktree.node
     }
     |> Map.merge(
-      Map.new([:provisioned, :repo_id, :source_node], fn key ->
+      Map.new([:provisioned, :repo_id, :source_node, :git_dir], fn key ->
         {Atom.to_string(key), Map.get(worktree, key)}
       end)
     )
@@ -839,7 +840,8 @@ defmodule Ouroboros.Workspace.Worktree do
         node: Map.get(entry, "node", ""),
         provisioned: Map.get(entry, "provisioned", false),
         repo_id: Map.get(entry, "repo_id"),
-        source_node: Map.get(entry, "source_node")
+        source_node: Map.get(entry, "source_node"),
+        git_dir: Map.get(entry, "git_dir")
       }
     ]
   end

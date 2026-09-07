@@ -167,6 +167,7 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
     |> Enum.concat(protected_rules(policy))
     |> Enum.concat(reallow_rules(policy))
     |> Enum.concat(segment_rules(policy))
+    |> Enum.concat(exception_rules(policy))
     |> Enum.concat(network_rules(policy))
     |> Enum.join("\n")
     |> Kernel.<>("\n")
@@ -188,7 +189,18 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
     do: named(policy.writable, "OURO_WRITABLE") ++ named(readable(policy), "OURO_READABLE")
 
   def parameters(policy) do
-    named(policy.writable, "OURO_WRITABLE") ++ named(policy.protected, "OURO_PROTECTED")
+    named(policy.writable, "OURO_WRITABLE") ++
+      named(policy.protected, "OURO_PROTECTED") ++
+      named(Map.get(policy, :write_exceptions, []), "OURO_EXCEPTION") ++
+      named(
+        Enum.map(Map.get(policy, :write_exceptions, []), fn path ->
+          "^" <>
+            Regex.escape(path) <>
+            "/([^/]+/)*\\.[gG][iI][tT]($|/)|^" <>
+            Regex.escape(path) <> "/([^/]+/)*\\.[oO][uU][rR][oO][bB][oO][rR][oO][sS]($|/)"
+        end),
+        "OURO_EXCEPTION_DENY"
+      )
   end
 
   defp readable(policy), do: Map.get(policy, :readable, [])
@@ -342,6 +354,17 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
     paths
     |> Enum.with_index()
     |> Enum.flat_map(fn {path, index} -> ["-D", "#{prefix}_#{index}=#{path}"] end)
+  end
+
+  defp exception_rules(policy) do
+    Map.get(policy, :write_exceptions, [])
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {_path, index} ->
+      [
+        "(allow file-write* (subpath (param \"OURO_EXCEPTION_#{index}\")))",
+        "(deny file-write* (regex (param \"OURO_EXCEPTION_DENY_#{index}\")))"
+      ]
+    end)
   end
 
   defp segment_rules(policy) do

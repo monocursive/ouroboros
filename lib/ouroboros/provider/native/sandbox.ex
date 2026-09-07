@@ -388,6 +388,7 @@ defmodule Ouroboros.Provider.Native.Sandbox do
       scratch: nil,
       network: network_allowed?()
     }
+    |> Ouroboros.Workspace.Access.policy(Map.get(scope, :root))
   end
 
   @doc """
@@ -756,6 +757,16 @@ defmodule Ouroboros.Provider.Native.Sandbox do
 
   @doc "The environment a sandboxed child needs, on top of whatever it inherits."
   @spec env(policy()) :: [{String.t(), String.t()}]
+  def env(%{scratch: scratch, write_exceptions: [_ | _]}) when is_binary(scratch),
+    do: [
+      {"TMPDIR", scratch},
+      {"TMP", scratch},
+      {"TEMP", scratch},
+      {"GIT_CONFIG_NOSYSTEM", "1"},
+      {"GIT_CONFIG_GLOBAL", "/dev/null"},
+      {"GIT_CONFIG_COUNT", "0"}
+    ]
+
   def env(%{scratch: scratch}) when is_binary(scratch),
     do: [{"TMPDIR", scratch}, {"TMP", scratch}, {"TEMP", scratch}]
 
@@ -877,8 +888,15 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   read, which is the weaker check and is why the caller should pass the command it ran.
   """
   @spec escalatable?(map() | nil, policy() | nil, String.t() | nil) :: boolean()
-  def escalatable?(%{constraint: :filesystem} = violation, %{mode: :workspace_write}, command),
-    do: not protected_text?(Map.get(violation, :evidence)) and not protected_text?(command)
+  def escalatable?(
+        %{constraint: :filesystem} = violation,
+        %{mode: :workspace_write} = policy,
+        command
+      ) do
+    evidence = Ouroboros.Workspace.Access.escalation_text(Map.get(violation, :evidence), policy)
+    command = Ouroboros.Workspace.Access.escalation_text(command, policy)
+    not protected_text?(evidence) and not protected_text?(command)
+  end
 
   def escalatable?(_violation, _policy, _command), do: false
 
@@ -1232,6 +1250,13 @@ defmodule Ouroboros.Provider.Native.Sandbox do
       "This session's sandbox allows no writes at all outside $TMPDIR, which points at a " <>
         "scratch directory this command owns."
 
+  defp constraint_text(:filesystem, %{write_exceptions: exceptions, writable: writable}),
+    do:
+      "This worktree allows ordinary workspace writes and the following verified exceptions: " <>
+        Enum.join(exceptions, ", ") <>
+        ". Other Git metadata, runtime data, and nested protected names remain read-only. Workspace: " <>
+        Enum.join(writable, ", ") <> "."
+
   defp constraint_text(:filesystem, %{mode: :workspace_write, writable: writable}),
     do:
       "This session's sandbox allows writes only under " <>
@@ -1261,6 +1286,10 @@ defmodule Ouroboros.Provider.Native.Sandbox do
     do:
       "move this session to `sandbox_mode: workspace_write`, which makes the workspace " <>
         "writable while keeping `.git` and the runtime's own config read-only."
+
+  defp escalation_text(:filesystem, %{mode: :workspace_write_escalated}),
+    do:
+      "use the granted workspace and delivery paths. This command already used its one approved rerun; no broader filesystem escalation is available."
 
   defp escalation_text(:filesystem, %{mode: :workspace_write}),
     do:

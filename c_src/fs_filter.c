@@ -20,6 +20,7 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,6 +47,16 @@
 static char names[MAX_NAMES][MAX_NAME];
 static int name_count = -1;
 static char preload_path[4096];
+static char exceptions[3][PATH_MAX];
+static int exception_count;
+static char deny_env[MAX_NAMES * MAX_NAME];
+static char exception_env[3 * PATH_MAX * 2 + 3];
+
+static int unhex(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  return -1;
+}
 
 static int lower_eq(const char *a, const char *b) {
   for (;;) {
@@ -83,6 +94,7 @@ static void load_names(void) {
     return;
   }
 
+  snprintf(deny_env, sizeof(deny_env), "%s", env);
   cursor = env;
   while (*cursor && i < MAX_NAMES) {
     const char *end = cursor;
@@ -99,6 +111,28 @@ static void load_names(void) {
     cursor = *end ? end + 1 : end;
   }
   name_count = i;
+
+  env = getenv("OUROBOROS_FS_WRITE_EXCEPTIONS");
+  if (env && strlen(env) < sizeof(exception_env)) {
+    snprintf(exception_env, sizeof(exception_env), "%s", env);
+    cursor = env;
+    while (*cursor && exception_count < 3) {
+      char decoded[PATH_MAX];
+      size_t n = 0;
+      int valid = 1;
+      while (*cursor && *cursor != ':') {
+        int hi = unhex(*cursor++);
+        int lo = *cursor && *cursor != ':' ? unhex(*cursor++) : -1;
+        if (hi < 0 || lo < 0 || n + 1 >= sizeof(decoded) || (hi == 0 && lo == 0)) { valid = 0; break; }
+        decoded[n++] = (char)((hi << 4) | lo);
+      }
+      decoded[n] = '\0';
+      char canonical[PATH_MAX];
+      if (!valid || !realpath(decoded, canonical) || strcmp(decoded, canonical)) break;
+      memcpy(exceptions[exception_count++], decoded, n + 1);
+      if (*cursor == ':') cursor++;
+    }
+  }
 
   env = getenv("LD_PRELOAD");
   if (env != NULL) {
@@ -125,7 +159,7 @@ static int component_denied(const char *component) {
   return 0;
 }
 
-static int path_denied(const char *path) {
+static int components_denied(const char *path) {
   const char *start;
   const char *cursor;
   char component[MAX_NAME];
@@ -153,6 +187,48 @@ static int path_denied(const char *path) {
   }
 }
 
+/* Resolve an existing target or its parent before granting an exception. Missing
+ * parents fail closed; mkdir -p creates them one at a time. dirfd is respected. */
+static int path_denied_at(int dirfd, const char *path) {
+  char absolute[PATH_MAX], canonical[PATH_MAX], parent[PATH_MAX];
+  load_names();
+  if (!path || !*path) return 0;
+  if (!exception_count) return components_denied(path);
+  if (*path == '/') {
+    if (snprintf(absolute, sizeof(absolute), "%s", path) >= (int)sizeof(absolute)) return 1;
+  } else {
+    char base[PATH_MAX];
+    if (dirfd == AT_FDCWD) {
+      if (!getcwd(base, sizeof(base))) return 1;
+    } else {
+      char fdpath[64];
+      snprintf(fdpath, sizeof(fdpath), "/proc/self/fd/%d", dirfd);
+      ssize_t n = readlink(fdpath, base, sizeof(base) - 1);
+      if (n < 0) return 1;
+      base[n] = '\0';
+    }
+    if (snprintf(absolute, sizeof(absolute), "%s/%s", base, path) >= (int)sizeof(absolute)) return 1;
+  }
+  if (!realpath(absolute, canonical)) {
+    snprintf(parent, sizeof(parent), "%s", absolute);
+    char *slash = strrchr(parent, '/');
+    if (!slash || !slash[1]) return components_denied(path);
+    *slash = '\0';
+    char resolved[PATH_MAX];
+    if (!realpath(*parent ? parent : "/", resolved)) return components_denied(path);
+    if (snprintf(canonical, sizeof(canonical), "%s/%s", resolved, slash + 1) >= (int)sizeof(canonical)) return 1;
+  }
+  for (int i = 0; i < exception_count; i++) {
+    size_t n = strlen(exceptions[i]);
+    if (!strncmp(canonical, exceptions[i], n) && (canonical[n] == '/' || !canonical[n])) {
+      return components_denied(canonical + n);
+    }
+  }
+  return components_denied(path);
+}
+
+static int path_denied(const char *path) { return path_denied_at(AT_FDCWD, path); }
+
 static int creating(int flags) { return (flags & O_CREAT) != 0; }
 
 int mkdir(const char *path, mode_t mode) {
@@ -169,7 +245,7 @@ int mkdir(const char *path, mode_t mode) {
 
 int mkdirat(int dirfd, const char *path, mode_t mode) {
   static int (*real_mkdirat)(int, const char *, mode_t) = NULL;
-  if (path_denied(path)) {
+  if (path_denied_at(dirfd, path)) {
     errno = EROFS;
     return -1;
   }
@@ -202,7 +278,7 @@ int open(const char *path, int flags, ...) {
 int openat(int dirfd, const char *path, int flags, ...) {
   static int (*real_openat)(int, const char *, int, ...) = NULL;
   mode_t mode = 0;
-  if (creating(flags) && path_denied(path)) {
+  if (creating(flags) && path_denied_at(dirfd, path)) {
     errno = EROFS;
     return -1;
   }
@@ -245,7 +321,7 @@ int rename(const char *oldpath, const char *newpath) {
 
 int renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath) {
   static int (*real_renameat)(int, const char *, int, const char *) = NULL;
-  if (path_denied(newpath)) {
+  if (path_denied_at(newdirfd, newpath)) {
     errno = EROFS;
     return -1;
   }
@@ -281,7 +357,7 @@ int symlink(const char *target, const char *linkpath) {
 
 int symlinkat(const char *target, int newdirfd, const char *linkpath) {
   static int (*real_symlinkat)(const char *, int, const char *) = NULL;
-  if (path_denied(linkpath) || path_denied(target)) {
+  if (path_denied_at(newdirfd, linkpath) || path_denied(target)) {
     errno = EROFS;
     return -1;
   }
@@ -294,41 +370,24 @@ int symlinkat(const char *target, int newdirfd, const char *linkpath) {
 /* Keep LD_PRELOAD on exec so `env -u LD_PRELOAD git init` does not drop the net. */
 static char **with_preload(char *const envp[]) {
   static char preload_entry[4096 + 16];
-  int count = 0;
-  int i;
-  char **copy;
-  int replaced = 0;
-
+  static char deny_entry[sizeof(deny_env) + 32];
+  static char exception_entry[sizeof(exception_env) + 48];
+  int count = 0, kept = 0;
   load_names();
-  if (preload_path[0] == '\0') {
-    return NULL;
-  }
-
+  if (!preload_path[0]) return NULL;
   snprintf(preload_entry, sizeof(preload_entry), "LD_PRELOAD=%s", preload_path);
-
-  if (envp != NULL) {
-    while (envp[count] != NULL) {
-      count++;
-    }
+  snprintf(deny_entry, sizeof(deny_entry), "OUROBOROS_FS_DENY=%s", deny_env);
+  snprintf(exception_entry, sizeof(exception_entry), "OUROBOROS_FS_WRITE_EXCEPTIONS=%s", exception_env);
+  if (envp) while (envp[count]) count++;
+  char **copy = malloc((size_t)(count + 4) * sizeof(char *));
+  if (!copy) return NULL;
+  for (int i = 0; i < count; i++) {
+    if (strncmp(envp[i], "LD_PRELOAD=", 11) && strncmp(envp[i], "OUROBOROS_FS_DENY=", 17) && strncmp(envp[i], "OUROBOROS_FS_WRITE_EXCEPTIONS=", 28)) copy[kept++] = envp[i];
   }
-
-  copy = malloc((size_t)(count + 2) * sizeof(char *));
-  if (copy == NULL) {
-    return NULL;
-  }
-
-  for (i = 0; i < count; i++) {
-    if (strncmp(envp[i], "LD_PRELOAD=", 11) == 0) {
-      copy[i] = preload_entry;
-      replaced = 1;
-    } else {
-      copy[i] = envp[i];
-    }
-  }
-  if (!replaced) {
-    copy[count++] = preload_entry;
-  }
-  copy[count] = NULL;
+  copy[kept++] = preload_entry;
+  copy[kept++] = deny_entry;
+  copy[kept++] = exception_entry;
+  copy[kept] = NULL;
   return copy;
 }
 
@@ -344,3 +403,19 @@ int execve(const char *pathname, char *const argv[], char *const envp[]) {
   free(patched);
   return rc;
 }
+
+/* execvp is used by env(1); libc's internal execve does not use interposition. */
+extern char **environ;
+__attribute__((constructor)) static void capture_policy(void) { load_names(); }
+
+int execvpe(const char *file, char *const argv[], char *const envp[]) {
+  static int (*real_execvpe)(const char *, char *const[], char *const[]) = NULL;
+  if (!real_execvpe) real_execvpe = dlsym(RTLD_NEXT, "execvpe");
+  char **patched = with_preload(envp);
+  int rc = real_execvpe(file, argv, patched ? patched : envp);
+  free(patched);
+  return rc;
+}
+
+int execvp(const char *file, char *const argv[]) { return execvpe(file, argv, environ); }
+int execv(const char *file, char *const argv[]) { return execve(file, argv, environ); }
