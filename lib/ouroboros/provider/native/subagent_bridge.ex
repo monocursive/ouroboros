@@ -7,7 +7,8 @@ defmodule Ouroboros.Provider.Native.SubagentBridge do
   transport. Other providers get a native sidecar using this node's configured native model,
   since vendor aliases such as `sonnet` are not portable model specifications.
 
-  Calls are serialized while the coordinator remains free to handle approvals. Up to 128
+  Calls are serialized while the coordinator remains free to handle approvals. Foreground
+  approval relays are cancelled when their Loop, dispatch or owner ends. Up to 128
   spawn receipts are retained for the owner's lifetime, with no eviction: forgetting one
   would let an ambiguous transport retry launch another child. Further spawns are refused
   once full. Result/stop receipts have a separate bounded cache, so collecting and stopping
@@ -17,7 +18,7 @@ defmodule Ouroboros.Provider.Native.SubagentBridge do
   use GenServer, restart: :temporary
   alias Ouroboros.Interactive.Task, as: Owner
   alias Ouroboros.Provider.Native.{Loop, Session, Tools}
-  alias Jido.Harness.SessionRequest
+  alias Jido.Harness.{ApprovalResponse, SessionRequest}
 
   @limit 128
   @timeout 15 * 60_000
@@ -71,7 +72,8 @@ defmodule Ouroboros.Provider.Native.SubagentBridge do
        model: nil,
        owned?: false,
        task: nil,
-       cache: %{}
+       cache: %{},
+       relays: %{}
      }}
   end
 
@@ -126,9 +128,35 @@ defmodule Ouroboros.Provider.Native.SubagentBridge do
   def handle_call({:session, session, owned?, model}, _from, state),
     do: {:reply, :ok, %{state | session: session, owned?: owned?, model: model}}
 
+  # The Loop emit callback must return immediately so its deadline and interrupt receive
+  # remain live. Relay callers are owned here and die when that dispatch or Loop ends.
+  def handle_call({:relay_approval, event}, {loop, _}, state) do
+    if state.task == nil or map_size(state.relays) >= 8 do
+      deny_relay(loop, event.request_id)
+      {:reply, :ok, state}
+    else
+      task =
+        Task.Supervisor.async_nolink(Jido.Harness.SessionTaskSupervisor, fn ->
+          response = Ouroboros.InteractiveSession.relay_approval(state.id, event.payload)
+          send(loop, {:native_approval, event.request_id, response})
+          :ok
+        end)
+
+      relay = %{
+        task: task,
+        loop: loop,
+        monitor: Process.monitor(loop),
+        request_id: event.request_id
+      }
+
+      {:reply, :ok, %{state | relays: Map.put(state.relays, task.ref, relay)}}
+    end
+  end
+
   @impl true
   def handle_info({ref, reply}, %{task: %{ref: ref} = task} = state) do
     Process.demonitor(ref, [:flush])
+    state = cancel_relays(state)
     Enum.each(task.waiters, &GenServer.reply(&1, reply))
     {:noreply, %{state | task: nil, cache: Map.put(state.cache, task.id, {task.key, reply})}}
   end
@@ -138,8 +166,35 @@ defmodule Ouroboros.Provider.Native.SubagentBridge do
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{task: %{ref: ref} = task} = state) do
     reply = {:error, {:bridge_dispatch_failed, reason}}
+    state = cancel_relays(state)
     Enum.each(task.waiters, &GenServer.reply(&1, reply))
     {:noreply, %{state | task: nil, cache: Map.put(state.cache, task.id, {task.key, reply})}}
+  end
+
+  def handle_info({ref, _reply}, state) when is_map_key(state.relays, ref) do
+    {relay, relays} = Map.pop(state.relays, ref)
+    Process.demonitor(ref, [:flush])
+    Process.demonitor(relay.monitor, [:flush])
+    {:noreply, %{state | relays: relays}}
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+    case Map.pop(state.relays, ref) do
+      {nil, _} ->
+        case Enum.find(state.relays, fn {_key, relay} -> relay.monitor == ref end) do
+          {key, relay} ->
+            Task.shutdown(relay.task, :brutal_kill)
+            {:noreply, %{state | relays: Map.delete(state.relays, key)}}
+
+          nil ->
+            {:noreply, state}
+        end
+
+      {relay, relays} ->
+        Process.demonitor(relay.monitor, [:flush])
+        deny_relay(relay.loop, relay.request_id)
+        {:noreply, %{state | relays: relays}}
+    end
   end
 
   def handle_info({:session_adapter_event, %{type: :provider_event} = event}, state) do
@@ -155,9 +210,26 @@ defmodule Ouroboros.Provider.Native.SubagentBridge do
 
   @impl true
   def terminate(_reason, state) do
+    cancel_relays(state)
     if state.task, do: Process.exit(state.task.pid, :kill)
     if state.owned? and is_pid(state.session), do: Session.close(state.session)
     :ok
+  end
+
+  defp cancel_relays(state) do
+    Enum.each(state.relays, fn {_ref, relay} ->
+      Process.demonitor(relay.monitor, [:flush])
+      Task.shutdown(relay.task, :brutal_kill)
+    end)
+
+    %{state | relays: %{}}
+  end
+
+  defp deny_relay(loop, request_id) do
+    response =
+      ApprovalResponse.new!(%{decision: :deny, scope: :once, reason: "Approval relay stopped"})
+
+    send(loop, {:native_approval, request_id, response})
   end
 
   defp receipt_count(cache, name),
@@ -182,8 +254,7 @@ defmodule Ouroboros.Provider.Native.SubagentBridge do
          {:ok, session, owned?} <- transport(bridge, state, snapshot, request) do
       emit = fn event ->
         if event.type == :approval_requested do
-          response = Ouroboros.InteractiveSession.relay_approval(state.id, event.payload)
-          send(self(), {:native_approval, event.request_id, response})
+          GenServer.call(bridge, {:relay_approval, event})
         else
           GenServer.cast(state.owner, {:subagent_bridge_event, event})
         end

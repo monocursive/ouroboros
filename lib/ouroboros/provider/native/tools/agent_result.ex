@@ -76,6 +76,17 @@ defmodule Ouroboros.Provider.Native.Tools.AgentResult do
       {:ok, pid} ->
         if Map.get(params, :stop, false) do
           case Subagent.stop(pid, :stopped) do
+            {:ok, %{status: :returning} = summary} ->
+              # The existing session subscriber still owns this return. Keep its
+              # registry entry until acknowledgment or a retained-work error settles it.
+              {:ok,
+               %{
+                 output:
+                   Subagent.render(summary) <>
+                     "\nThe return is still in progress; collect it again with the same task_id.",
+                 is_error: false
+               }}
+
             {:ok, summary} ->
               _ = release.(task_id)
               {:ok, %{output: Subagent.render(summary), is_error: false}}

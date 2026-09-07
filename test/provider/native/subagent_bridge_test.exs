@@ -217,6 +217,70 @@ defmodule Ouroboros.Provider.Native.SubagentBridgeTest do
     assert_receive {:DOWN, ^monitor, :process, ^session, _}, 5_000
   end
 
+  for stop_kind <- [:deadline, :interrupt, :owner] do
+    @tag approval_stop_kind: stop_kind
+    test "unanswered foreground approval does not block #{stop_kind} and is cancelled",
+         %{approval_stop_kind: stop_kind} = context do
+      {model, _script} =
+        NativeModelScript.start([
+          [
+            {:tool_call,
+             %{id: "write", name: "write", input: %{"path" => "out.txt", "content" => "x"}}}
+          ],
+          [{:text, "done"}, {:finish, :stop}]
+        ])
+
+      Application.put_env(:ouroboros, :native_model, model)
+
+      {id, owner} =
+        owner(context, %{
+          approval_mode: :prompt,
+          sandbox_mode: :workspace_write,
+          approval_timeout_ms: 30_000
+        })
+
+      pending =
+        Task.async(fn ->
+          SubagentBridge.call(id, "pending-child", "agent", %{
+            "prompt" => "write",
+            "deadline_ms" => if(stop_kind == :deadline, do: 1_000, else: 30_000)
+          })
+        end)
+
+      assert_receive {:approval, _, parent_approval}, 5_000
+      GenServer.reply(parent_approval, {:ok, %{response: %{decision: :approve, scope: :once}}})
+      assert_receive {:approval, %{relay_payload: %{"subagent" => _}}, {relay, _}}, 5_000
+      relay_monitor = Process.monitor(relay)
+      [{bridge, _}] = Registry.lookup(Ouroboros.Interactive.Registry, {SubagentBridge, owner})
+      session = :sys.get_state(bridge).session
+
+      case stop_kind do
+        :interrupt ->
+          assert :ok = Ouroboros.Provider.Native.Session.interrupt(session, :active)
+          assert {:error, :interrupted} = Task.await(pending, 5_000)
+
+        :owner ->
+          GenServer.stop(owner)
+          assert {:error, {:bridge_unavailable, _}} = Task.await(pending, 5_000)
+
+        :deadline ->
+          assert {:ok, %{is_error: true, output: output}} = Task.await(pending, 5_000)
+          assert output =~ "timed_out"
+      end
+
+      # No human answer is needed to finish, and the approval coordinator's monitored
+      # caller dies so it can close the obsolete request through its normal DOWN path.
+      assert_receive {:DOWN, ^relay_monitor, :process, ^relay, _}, 5_000
+
+      if stop_kind != :owner do
+        assert :sys.get_state(bridge).relays == %{}
+        assert :sys.get_state(bridge).task == nil
+      end
+
+      refute File.exists?(Path.join(context.root, "out.txt"))
+    end
+  end
+
   test "unknown vendor allowlist entries never become unrestricted native defaults", context do
     assert {:ok, request} =
              SubagentBridge.native_request(%{

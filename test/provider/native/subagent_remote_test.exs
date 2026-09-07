@@ -265,6 +265,30 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
                  peer_call(context.peer, :sys, :get_state, [child])
 
         assert %{running: 1, tracked: 1} = GenServer.call(handle, :subagent_counts)
+        wait_until(fn -> :sys.get_state(handle).loop == nil end)
+        observer = self()
+
+        assert {:ok, %{is_error: false, output: pending_return}} =
+                 Session.bridge_tool(
+                   handle,
+                   nil,
+                   %{
+                     id: "stop-return",
+                     name: "agent_result",
+                     input: %{"task_id" => spawned.payload["task_id"], "stop" => true}
+                   },
+                   fn event -> send(observer, {:bridge_tool_event, event}) end
+                 )
+
+        assert {:ok, ^child} =
+                 GenServer.call(handle, {:subagent_lookup, spawned.payload["task_id"]})
+
+        assert pending_return =~ "return is still in progress"
+
+        assert %{subscriber: ^handle, background?: true, status: :returning} =
+                 peer_call(context.peer, :sys, :get_state, [child])
+
+        assert %{running: 1, tracked: 1} = GenServer.call(handle, :subagent_counts)
 
         if stop_kind == :deadline do
           assert tool_result(events, "agent").payload["output"] =~ "Collect it with agent_result"
