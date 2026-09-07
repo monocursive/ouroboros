@@ -22,8 +22,10 @@ use serde_json::{json, Value};
 use tokio::net::TcpListener;
 
 use ouro::mcp_serve::{
-    Bridge, Server, APPROVAL_METHOD, CODE_INTEL_TOOL, DIAGNOSTICS_METHOD, DIAGNOSTICS_TOOL,
-    INFO_METHOD, PROTOCOL_VERSION, REQUEST_METHOD, TOOL_NAME, TOUCH_METHOD, TOUCH_TOOL,
+    Bridge, Server, AGENT_RESULT_TOOL, AGENT_TOOL, APPROVAL_METHOD, CODE_INTEL_TOOL,
+    DIAGNOSTICS_METHOD, DIAGNOSTICS_TOOL, FLEET_METHOD, FLEET_TOOL, INFO_METHOD, PROTOCOL_VERSION,
+    REQUEST_METHOD, SUBAGENT_RESULT_METHOD, SUBAGENT_SPAWN_METHOD, SUBAGENT_STOP_METHOD, TOOL_NAME,
+    TOUCH_METHOD, TOUCH_TOOL,
 };
 
 use support::{listener, Peer, TOKEN};
@@ -164,11 +166,19 @@ async fn the_handshake_and_the_tool_it_advertises() {
         .map(|tool| tool["name"].as_str().expect("a name"))
         .collect();
 
-    // One tool for the harness and three for the model. The permission prompt is first
+    // One tool for the harness and six for the model. The permission prompt is first
     // because it is the one `--permission-prompt-tool` is pointed at by name.
     assert_eq!(
         names,
-        vec![TOOL_NAME, CODE_INTEL_TOOL, DIAGNOSTICS_TOOL, TOUCH_TOOL]
+        vec![
+            TOOL_NAME,
+            CODE_INTEL_TOOL,
+            DIAGNOSTICS_TOOL,
+            TOUCH_TOOL,
+            AGENT_TOOL,
+            AGENT_RESULT_TOOL,
+            FLEET_TOOL
+        ]
     );
     assert_eq!(tools[0]["name"], TOOL_NAME);
     assert_eq!(tools[0]["inputSchema"]["type"], "object");
@@ -1025,4 +1035,242 @@ async fn code_intel_without_a_runtime_says_it_was_run_by_hand() {
 
     assert!(failed(&response), "{response}");
     assert!(text(&response).contains("not by hand"), "{response}");
+}
+
+#[tokio::test]
+async fn native_tool_schemas_match_argument_types_and_exclude_owner_authority() {
+    let mut server = Server::new(Err("unused".into()));
+    let listed = decode(
+        &server
+            .handle_line(&frame(json!({"jsonrpc":"2.0", "id":1,
+        "method":"tools/list"})))
+            .await
+            .unwrap(),
+    );
+    let tools = listed["result"]["tools"].as_array().unwrap();
+    let schema =
+        |name: &str| &tools.iter().find(|tool| tool["name"] == name).unwrap()["inputSchema"];
+    let agent = schema(AGENT_TOOL);
+    assert_eq!(agent["required"], json!(["prompt"]));
+    assert_eq!(agent["additionalProperties"], false);
+    assert_eq!(agent["properties"].as_object().unwrap().len(), 10);
+    for key in ["prompt", "description", "machine", "workspace"] {
+        assert_eq!(agent["properties"][key]["type"], "string");
+    }
+    for key in ["worktree", "sync", "background"] {
+        assert_eq!(agent["properties"][key]["type"], "boolean");
+    }
+    assert_eq!(agent["properties"]["tools"]["items"]["type"], "string");
+    assert_eq!(agent["properties"]["deadline_ms"]["minimum"], 1);
+    assert_eq!(agent["properties"]["max_turns"]["default"], 12);
+    assert_eq!(
+        schema(AGENT_RESULT_TOOL)["properties"]["stop"]["type"],
+        "boolean"
+    );
+    assert_eq!(
+        schema(AGENT_RESULT_TOOL)["properties"]["wait_ms"]["minimum"],
+        0
+    );
+    assert_eq!(schema(FLEET_TOOL)["properties"], json!({}));
+    for tool in [AGENT_TOOL, AGENT_RESULT_TOOL, FLEET_TOOL] {
+        for field in [
+            "id",
+            "node",
+            "request_id",
+            "approval_mode",
+            "sandbox_mode",
+            "provider_options",
+        ] {
+            assert!(schema(tool)["properties"].get(field).is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_ambiguous_spawn_reconnect_reuses_one_session_bound_request() {
+    let (listen, address) = listener().await;
+    let input = json!({"prompt":"build the project", "machine":"tag:linux", "sync":true,
+        "background":true, "deadline_ms":900000, "tools":["bash", "read"]});
+    let expected_input = input.clone();
+    let script = tokio::spawn(async move {
+        let mut first = Peer::accept(&listen).await;
+        first.hello(&[SUBAGENT_SPAWN_METHOD]).await;
+        let accepted = first.request_for(SUBAGENT_SPAWN_METHOD).await;
+        // The host accepted the spawn but its reply was lost. A reconnect must ask
+        // for the same cached invocation, never produce a second child.
+        drop(first);
+        let mut second = Peer::accept(&listen).await;
+        second.hello(&[SUBAGENT_SPAWN_METHOD]).await;
+        let retry = answer(
+            &mut second,
+            SUBAGENT_SPAWN_METHOD,
+            json!({"output":"task-1 started", "is_error":false}),
+        )
+        .await;
+        assert_eq!(accepted["params"], retry["params"]);
+        assert_eq!(retry["params"]["id"], SESSION);
+        assert_eq!(retry["params"]["node"], "ouroboros@host");
+        assert_eq!(retry["params"]["input"], expected_input);
+        let id = retry["params"]["request_id"].as_str().unwrap();
+        assert!(id.starts_with("mcp-") && id.len() <= 128);
+        assert_eq!(retry["params"].as_object().unwrap().len(), 4);
+    });
+    let mut server = server(address, Duration::from_secs(5));
+    let reply = decode(
+        &server
+            .handle_line(&tool_call(AGENT_TOOL, input))
+            .await
+            .unwrap(),
+    );
+    assert!(!failed(&reply), "{reply}");
+    assert_eq!(text(&reply), "task-1 started");
+    script.await.unwrap();
+}
+
+#[tokio::test]
+async fn result_and_stop_keep_the_bridge_owner_and_preserve_native_errors() {
+    let (listen, address) = listener().await;
+    let script = tokio::spawn(async move {
+        let mut peer = Peer::accept(&listen).await;
+        peer.hello(&[SUBAGENT_RESULT_METHOD, SUBAGENT_STOP_METHOD])
+            .await;
+        let collected = answer(
+            &mut peer,
+            SUBAGENT_RESULT_METHOD,
+            json!({"output":"unknown task", "is_error":true}),
+        )
+        .await;
+        let stopped = answer(
+            &mut peer,
+            SUBAGENT_STOP_METHOD,
+            json!({"output":"returning; still collectable", "is_error":false}),
+        )
+        .await;
+        for call in [&collected, &stopped] {
+            assert_eq!(call["params"]["id"], SESSION);
+            assert_eq!(call["params"]["node"], "ouroboros@host");
+        }
+        assert_eq!(
+            collected["params"]["input"],
+            json!({"task_id":"task-1", "wait_ms":0})
+        );
+        assert_eq!(stopped["params"]["task_id"], "task-1");
+        assert!(stopped["params"].get("input").is_none());
+        assert_ne!(
+            collected["params"]["request_id"], stopped["params"]["request_id"],
+            "MCP ids may be reused for a later logical invocation"
+        );
+    });
+    let mut server = server(address, Duration::from_secs(5));
+    let reply = decode(
+        &server
+            .handle_line(&tool_call(
+                AGENT_RESULT_TOOL,
+                json!({"task_id":"task-1", "wait_ms":0}),
+            ))
+            .await
+            .unwrap(),
+    );
+    assert!(failed(&reply));
+    assert_eq!(text(&reply), "unknown task");
+    let reply = decode(
+        &server
+            .handle_line(&tool_call(
+                AGENT_RESULT_TOOL,
+                json!({"task_id":"task-1", "stop":true}),
+            ))
+            .await
+            .unwrap(),
+    );
+    assert!(!failed(&reply));
+    assert_eq!(text(&reply), "returning; still collectable");
+    script.await.unwrap();
+}
+
+#[tokio::test]
+async fn fleet_routes_to_the_bridge_owner_and_bounds_the_inventory() {
+    let (listen, address) = listener().await;
+    let script = tokio::spawn(async move {
+        let mut peer = Peer::accept(&listen).await;
+        peer.hello(&[FLEET_METHOD]).await;
+        let request = answer(
+            &mut peer,
+            FLEET_METHOD,
+            json!({"machines":vec![
+            json!({"machine":"builder", "state":"online", "facts":{"tags":["linux"]}}); 65]}),
+        )
+        .await;
+        assert_eq!(request["params"], json!({"node":"ouroboros@host"}));
+    });
+    let mut server = server(address, Duration::from_secs(5));
+    let reply = decode(
+        &server
+            .handle_line(&tool_call(FLEET_TOOL, json!({})))
+            .await
+            .unwrap(),
+    );
+    assert!(!failed(&reply), "{reply}");
+    let inventory: Value = serde_json::from_str(&text(&reply)).unwrap();
+    assert_eq!(inventory["machines"].as_array().unwrap().len(), 64);
+    assert_eq!(inventory["omitted_machines"], 1);
+    assert_eq!(inventory["machines"][0]["facts"]["tags"], json!(["linux"]));
+    script.await.unwrap();
+}
+
+#[tokio::test]
+async fn forged_native_owner_or_posture_arguments_are_rejected_before_connecting() {
+    let (listen, address) = listener().await;
+    let mut server = server(address, Duration::from_millis(100));
+    for tool in [AGENT_TOOL, AGENT_RESULT_TOOL, FLEET_TOOL] {
+        for field in [
+            "id",
+            "node",
+            "request_id",
+            "approval_mode",
+            "sandbox_mode",
+            "provider_options",
+        ] {
+            let mut input = match tool {
+                AGENT_TOOL => json!({"prompt":"x"}),
+                AGENT_RESULT_TOOL => json!({"task_id":"task-1"}),
+                _ => json!({}),
+            };
+            input[field] = json!("forged");
+            let reply = tokio::time::timeout(
+                Duration::from_secs(1),
+                server.handle_line(&tool_call(tool, input)),
+            )
+            .await
+            .expect("validation is local")
+            .unwrap();
+            let reply = decode(&reply);
+            assert!(failed(&reply), "{reply}");
+            assert!(
+                text(&reply).contains(&format!("does not accept {field}")),
+                "{reply}"
+            );
+        }
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), listen.accept())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn malformed_native_arguments_are_refused_without_losing_mcp() {
+    let mut server = Server::new(Err("must not connect".into()));
+    for (tool, input) in [
+        (AGENT_TOOL, json!({"prompt":"x", "deadline_ms":0})),
+        (AGENT_TOOL, json!({"prompt":"x", "tools":[true]})),
+        (AGENT_TOOL, json!({"prompt":"x", "background":"true"})),
+        (AGENT_TOOL, json!({"prompt":3})),
+        (AGENT_RESULT_TOOL, json!({"task_id":"x", "wait_ms":-1})),
+        (AGENT_RESULT_TOOL, json!({"task_id":"x", "stop":1})),
+    ] {
+        let reply = decode(&server.handle_line(&tool_call(tool, input)).await.unwrap());
+        assert!(failed(&reply));
+        assert!(text(&reply).starts_with("invalid "), "{reply}");
+    }
 }
