@@ -105,6 +105,15 @@ defmodule Ouroboros.WorkspaceReturnsTest do
     assert git!(c.repo, ["show", receipt.returned_ref <> ":source.txt"]) == "dirty child"
     assert git!(c.repo, ["show", receipt.returned_ref <> ":committed.txt"]) == "committed child"
 
+    # The advertised single-commit cherry-pick must include the child's commits too,
+    # not merely the dirty delta captured after its last commit.
+    applied = Path.join(c.root, "apply-return")
+    git!(c.repo, ["worktree", "add", "--detach", applied, c.provision.commit])
+    git!(applied, ["cherry-pick", receipt.returned_commit])
+
+    assert git!(applied, ["rev-parse", "HEAD^{tree}"]) ==
+             git!(c.repo, ["rev-parse", receipt.returned_ref <> "^{tree}"])
+
     assert receipt.returned_files == [
              %{status: "A", path: "committed.txt"},
              %{status: "M", path: "source.txt"}
@@ -210,7 +219,10 @@ defmodule Ouroboros.WorkspaceReturnsTest do
     assert {:ok, receipt, retired} =
              Return.finish(
                Worktree.public(c.worktree),
-               Provision.remote_metadata(c.provision), rpc: rpc, root: c.worktrees)
+               Provision.remote_metadata(c.provision),
+               rpc: rpc,
+               root: c.worktrees
+             )
 
     assert retired["retired"] == "kept"
     assert receipt.return_error =~ "changed_since_return"

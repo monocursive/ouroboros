@@ -1,6 +1,6 @@
 defmodule Ouroboros.WorkspaceMirrorsTest do
   use ExUnit.Case, async: false
-  alias Ouroboros.Workspace.{Bundle, Git, Mirrors, Provision, Snapshot, Worktree}
+  alias Ouroboros.Workspace.{Bundle, Git, Mirrors, Provision, Returns, Snapshot, Worktree}
 
   setup do
     {:ok, root} = Git.temp_directory()
@@ -22,6 +22,8 @@ defmodule Ouroboros.WorkspaceMirrorsTest do
     server =
       start_supervised!({Mirrors, name: nil, data_dir: data, worktree_opts: [root: worktrees]})
 
+    returns = start_supervised!({Returns, name: nil, data_dir: Path.join(root, "parent-data")})
+
     rpc = fn _target, module, function, args, _timeout ->
       apply(module, function, args ++ [[server: server]])
     end
@@ -34,12 +36,25 @@ defmodule Ouroboros.WorkspaceMirrorsTest do
       File.rm_rf(root)
     end)
 
-    %{root: root, repo: repo, server: server, rpc: rpc, data: data, worktrees: worktrees}
+    %{
+      root: root,
+      repo: repo,
+      server: server,
+      rpc: rpc,
+      data: data,
+      worktrees: worktrees,
+      returns: returns
+    }
   end
 
   test "ships dirty work, uses a target-owned worktree and reuses bundle basis", c do
     File.write!(Path.join(c.repo, "uncommitted"), "first")
-    assert {:ok, first} = Provision.prepare(c.repo, node(), "task-first", rpc: c.rpc)
+
+    assert {:ok, first} =
+             Provision.prepare(c.repo, node(), "task-first",
+               returns_opts: [server: c.returns],
+               rpc: c.rpc
+             )
 
     assert {:ok, worktree} =
              Mirrors.worktree(first.repo_id, first.commit, first.task_id, server: c.server)
@@ -51,7 +66,13 @@ defmodule Ouroboros.WorkspaceMirrorsTest do
     assert %{kept: [%{reason: :awaiting_return}]} = Worktree.reconcile(root: c.worktrees)
 
     File.write!(Path.join(c.repo, "uncommitted"), "second")
-    assert {:ok, second} = Provision.prepare(c.repo, node(), "task-second", rpc: c.rpc)
+
+    assert {:ok, second} =
+             Provision.prepare(c.repo, node(), "task-second",
+               returns_opts: [server: c.returns],
+               rpc: c.rpc
+             )
+
     assert second.repo_id == first.repo_id
     assert second.basis == [first.commit]
     assert second.bytes < first.bytes / 2
@@ -99,7 +120,11 @@ defmodule Ouroboros.WorkspaceMirrorsTest do
 
   test "bounds bundle size and releases a failed snapshot pin", c do
     assert {:error, {:bundle_too_large, 64}} =
-             Provision.prepare(c.repo, node(), "task-cap", rpc: c.rpc, provision_max_bytes: 64)
+             Provision.prepare(c.repo, node(), "task-cap",
+               returns_opts: [server: c.returns],
+               rpc: c.rpc,
+               provision_max_bytes: 64
+             )
 
     assert {:error, _} = Git.run(c.repo, ["rev-parse", "--verify", Snapshot.ref("task-cap")])
   end
@@ -119,6 +144,7 @@ defmodule Ouroboros.WorkspaceMirrorsTest do
 
     assert {:error, :provision_deadline_exceeded} =
              Provision.prepare(c.repo, node(), "task-expiry",
+               returns_opts: [server: c.returns],
                rpc: rpc,
                provision_deadline_ms: 5_000
              )
@@ -167,7 +193,12 @@ defmodule Ouroboros.WorkspaceMirrorsTest do
       "Initial"
     ])
 
-    assert {:ok, provision} = Provision.prepare(repo, node(), "task-sha256", rpc: c.rpc)
+    assert {:ok, provision} =
+             Provision.prepare(repo, node(), "task-sha256",
+               returns_opts: [server: c.returns],
+               rpc: c.rpc
+             )
+
     assert byte_size(provision.commit) == 64
 
     assert {:ok, worktree} =

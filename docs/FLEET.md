@@ -1063,7 +1063,9 @@ the child session and captures its committed and dirty work. The return travels 
 bounded, verified chunks and is imported into the original repository as
 `refs/ouroboros/subagents/<task_id>`. The parent's HEAD, index, and working files stay
 as they were. Inspect the returned changes with `git diff HEAD <returned_ref>` and
-apply them deliberately with `git cherry-pick <returned_commit>`.
+apply them deliberately with `git cherry-pick <returned_commit>`. The returned commit
+combines the child's committed and dirty changes relative to the provisioned snapshot;
+intermediate child commits are not preserved as separate commits in that return.
 
 Put reports and other artifacts in `.ouroboros/deliver/`. This directory is prepared
 before launch and excluded from the Git snapshot. Only regular files are accepted;

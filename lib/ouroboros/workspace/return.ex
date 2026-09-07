@@ -12,7 +12,11 @@ defmodule Ouroboros.Workspace.Return do
     root = worktree["path"]
 
     with {:ok, snapshot} <-
-           Snapshot.commit(root, provision.task_id, Keyword.put(opts, :return_snapshot, true)),
+           Snapshot.commit(
+             root,
+             provision.task_id,
+             Keyword.merge(opts, return_snapshot: true, return_base: provision.commit)
+           ),
          {:ok, deliveries} <- Deliveries.capture(root, provision.task_id, snapshot.commit, opts) do
       try do
         with {:ok, receipt} <- ship(snapshot, provision, deliveries, opts) do

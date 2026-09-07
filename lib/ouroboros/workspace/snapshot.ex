@@ -38,6 +38,13 @@ defmodule Ouroboros.Workspace.Snapshot do
 
   def ref(task_id), do: "refs/ouroboros/snapshots/" <> task_id
 
+  # A return is one applicable commit containing all child edits. Its observed HEAD
+  # stays separate in the snapshot so retirement still detects later commits.
+  defp snapshot_parent(head, opts) do
+    parent = Keyword.get(opts, :return_base, head)
+    if Git.valid_commit?(parent), do: {:ok, parent}, else: {:error, :invalid_snapshot_parent}
+  end
+
   defp head(root, opts) do
     case Git.run(root, ["rev-parse", "--verify", "HEAD^{commit}"], opts) do
       {:ok, head} -> {:ok, head}
@@ -51,7 +58,8 @@ defmodule Ouroboros.Workspace.Snapshot do
     private = Keyword.update(opts, :env, env, &(env ++ &1))
     paths = [":/"] ++ Enum.map(excludes, &(":(top,exclude)" <> &1))
 
-    with {:ok, original_index} <-
+    with {:ok, parent} <- snapshot_parent(head, opts),
+         {:ok, original_index} <-
            Git.run(root, ["rev-parse", "--path-format=absolute", "--git-path", "index"], opts),
          :ok <- copy_index(original_index, index, root, head, private),
          {:ok, _} <- Git.run(root, ["add", "-A", "--" | paths], private),
@@ -84,7 +92,7 @@ defmodule Ouroboros.Workspace.Snapshot do
                "commit-tree",
                tree,
                "-p",
-               head,
+               parent,
                "-m",
                "Ouroboros snapshot #{task_id}"
              ],

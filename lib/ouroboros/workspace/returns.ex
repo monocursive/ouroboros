@@ -7,6 +7,7 @@ defmodule Ouroboros.Workspace.Returns do
   use GenServer
   alias Ouroboros.Workspace.{Bundle, Deliveries, Git, Snapshot}
   @max_tasks 500
+  @max_files 50
 
   def start_link(opts \\ []),
     do: GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
@@ -302,7 +303,7 @@ defmodule Ouroboros.Workspace.Returns do
     text
     |> String.split(<<0>>, trim: true)
     |> Enum.chunk_every(2)
-    |> Enum.take(16)
+    |> Enum.take(@max_files)
     |> Enum.flat_map(fn
       [status, path] -> [%{status: status, path: path}]
       _ -> []
