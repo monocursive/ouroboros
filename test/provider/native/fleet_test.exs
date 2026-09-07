@@ -15,6 +15,18 @@ defmodule Ouroboros.Provider.Native.FleetTest do
     assert Facts.tags(%{}) == []
   end
 
+  test "monitorless status preserves optional facts" do
+    monitor = Process.whereis(Ouroboros.Cluster.Monitor)
+    Process.unregister(Ouroboros.Cluster.Monitor)
+
+    try do
+      local = Enum.find(Ouroboros.Cluster.fleet_status().machines, &(&1.node == node()))
+      assert local.facts == Facts.local()
+    after
+      Process.register(monitor, Ouroboros.Cluster.Monitor)
+    end
+  end
+
   test "invalid tags produce an explicit error, including null and oversized lists" do
     assert Facts.validate_tags(["xcode", "ios-sim", "xcode"]) == %{tags: ["xcode", "ios-sim"]}
 

@@ -14,6 +14,9 @@ defmodule Ouroboros.Cluster.Monitor do
   @max_fleet_roster_entries 4_096
   # A display label, bounded where it is read rather than by every surface that draws it.
   @max_fleet_name_chars 120
+  @facts_refresh_ms 5_000
+  @facts_probe_timeout_ms 5_000
+  @facts_probe_limit 64
   # A fleet profile accepted by this monitor must never exceed the evidence journal that
   # makes its session lists complete. Derive the limits from one contract so adding the
   # 257th otherwise-valid machine cannot turn all prior owner evidence unavailable.
@@ -40,7 +43,9 @@ defmodule Ouroboros.Cluster.Monitor do
         session_owners: session_owners,
         session_owner_evidence: session_owner_evidence,
         started_at: now,
-        refreshing?: true
+        refreshing?: true,
+        facts_probe: nil,
+        facts_cursor: 0
       }
       |> refresh_expected()
       |> observe_local(now)
@@ -50,6 +55,7 @@ defmodule Ouroboros.Cluster.Monitor do
     # supervisor or monitor restarts). Probe them after init so a slow or half-booted peer
     # never holds this supervisor's start handshake open.
     send(self(), {:refresh_connected, Node.list()})
+    Process.send_after(self(), :refresh_facts, @facts_refresh_ms)
     {:ok, state}
   end
 
@@ -149,6 +155,80 @@ defmodule Ouroboros.Cluster.Monitor do
     {:noreply, %{state | refreshing?: false}}
   end
 
+  # Healthy peers must be refreshed too: the operator can change tags without a
+  # reconnect. One bounded batch runs outside the directory process, so a slow peer
+  # cannot stall opening a session or reading status. No overlapping batches.
+  def handle_info(:refresh_facts, state) do
+    Process.send_after(self(), :refresh_facts, @facts_refresh_ms)
+
+    connected = Enum.sort(Node.list())
+
+    if state.facts_probe == nil and connected != [] do
+      owner = self()
+      token = make_ref()
+      cursor = rem(state.facts_cursor, length(connected))
+
+      targets =
+        (Enum.drop(connected, cursor) ++ Enum.take(connected, cursor))
+        |> Enum.take(@facts_probe_limit)
+
+      {pid, monitor} =
+        spawn_monitor(fn ->
+          results =
+            :erpc.multicall(
+              targets,
+              Ouroboros.Cluster,
+              :local_fleet_posture,
+              [],
+              @facts_probe_timeout_ms
+            )
+
+          send(owner, {:facts_refreshed, token, Enum.zip(targets, results)})
+        end)
+
+      {:noreply,
+       %{state | facts_probe: {pid, monitor, token}, facts_cursor: cursor + length(targets)}}
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info(
+        {:facts_refreshed, token, results},
+        %{facts_probe: {_pid, monitor, token}} = state
+      ) do
+    Process.demonitor(monitor, [:flush])
+    connected = Node.list()
+
+    updated =
+      Enum.reduce(results, state, fn {target, result}, acc ->
+        if target in connected do
+          posture =
+            case result do
+              {:ok, value} ->
+                if Ouroboros.Cluster.valid_fleet_posture?(target, value),
+                  do: {:ok, value},
+                  else: {:error, :invalid_fleet_posture}
+
+              error ->
+                {:error, error}
+            end
+
+          observe_posture(acc, target, posture, timestamp())
+        else
+          acc
+        end
+      end)
+
+    {:noreply, %{updated | facts_probe: nil}}
+  end
+
+  def handle_info(
+        {:DOWN, monitor, :process, pid, _reason},
+        %{facts_probe: {pid, monitor, _token}} = state
+      ),
+      do: {:noreply, %{state | facts_probe: nil}}
+
   def handle_info(_message, state), do: {:noreply, state}
 
   defp observe_join(state, joined) do
@@ -168,11 +248,14 @@ defmodule Ouroboros.Cluster.Monitor do
   # A node that just appeared is exactly the node most likely to be mid-boot,
   # unreachable again, or not running this runtime at all. Every one of those is an
   # observation to retain, never a reason to crash the monitor.
-  defp observe_up(state, target, now) do
+  defp observe_up(state, target, now),
+    do: observe_posture(state, target, Ouroboros.Cluster.fleet_posture(target), now)
+
+  defp observe_posture(state, target, posture, now) do
     base = Map.get(state.machines, target, new_machine(target, now))
 
     observed =
-      case Ouroboros.Cluster.fleet_posture(target) do
+      case posture do
         {:ok, posture} ->
           Map.merge(base, %{
             machine: posture.machine,
@@ -1898,6 +1981,7 @@ defmodule Ouroboros.Cluster do
           # answers a posture with no key, and `nil` is "not known", not "no helper".
           wasm: posture && Map.get(posture, :wasm),
           workspace: posture && Map.get(posture, :workspace),
+          facts: posture && Map.get(posture, :facts),
           compatibility:
             cond do
               target == node() ->

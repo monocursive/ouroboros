@@ -20,7 +20,7 @@ defmodule Ouroboros.Cluster.Tags do
   def local("list", _), do: profile_tags()
 
   def local(operation, tag) when operation in ["add", "remove"] do
-    with %{tags: [_]} <- Facts.validate_tags([tag]),
+    with :ok <- valid_change(operation, tag),
          helper when is_binary(helper) <- System.get_env("OUROBOROS_PROCESS_ID_HELPER"),
          true <- Path.type(helper) == :absolute and File.regular?(helper),
          data when is_binary(data) <- Application.get_env(:ouroboros, :data_dir),
@@ -32,7 +32,7 @@ defmodule Ouroboros.Cluster.Tags do
            ) do
       profile_tags()
     else
-      %{tags_error: reason} ->
+      {:error, reason} ->
         {:error, reason}
 
       nil ->
@@ -48,6 +48,17 @@ defmodule Ouroboros.Cluster.Tags do
   end
 
   def local(_, _), do: {:error, :invalid_tag_operation}
+
+  # A malformed existing string may be removed remotely too. It never becomes a
+  # selector or authority; the writer validates the remaining list before saving.
+  defp valid_change("remove", tag) when is_binary(tag) and byte_size(tag) <= 1024, do: :ok
+
+  defp valid_change(_operation, tag) do
+    case Facts.validate_tags([tag]) do
+      %{tags_error: reason} -> {:error, reason}
+      %{tags: [_]} -> :ok
+    end
+  end
 
   defp profile_tags do
     case Ouroboros.Cluster.Monitor.fleet_profile_storage() do

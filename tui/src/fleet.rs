@@ -322,8 +322,8 @@ impl Drop for EpmdRuntimeWatch {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Profile {
-    #[serde(default)]
-    pub tags: Vec<String>,
+    #[serde(default = "empty_tags")]
+    pub tags: Value,
     pub schema: u8,
     pub fleet_id: String,
     pub name: String,
@@ -684,16 +684,41 @@ pub fn tags(
         }
     }
     if let Some((tag, add)) = change {
-        validate_tags(&[tag.to_string()])?;
-        if add && !profile.tags.iter().any(|existing| existing == tag) {
-            profile.tags.push(tag.to_string());
-        } else if !add {
-            profile.tags.retain(|existing| existing != tag);
+        if add {
+            validate_tags(&[tag.to_string()])?;
+            let mut tags = validated_tags(&profile.tags)?;
+            if !tags.iter().any(|existing| existing == tag) {
+                tags.push(tag.to_string());
+            }
+            validate_tags(&tags)?;
+            profile.tags = serde_json::to_value(tags)?;
+        } else {
+            // Removal is also the repair path for a malformed advisory tag. Keep every
+            // other profile field untouched, and validate the resulting list before writing.
+            let mut tags =
+                profile.tags.as_array().cloned().context(
+                    "fleet tags must be a list; repair only the tags field in the profile",
+                )?;
+            tags.retain(|value| value.as_str() != Some(tag));
+            let repaired = Value::Array(tags);
+            validated_tags(&repaired)?;
+            profile.tags = repaired;
         }
-        validate_tags(&profile.tags)?;
         write_profile(data_dir, &profile)?;
     }
-    Ok(profile.tags)
+    validated_tags(&profile.tags)
+}
+
+fn empty_tags() -> Value {
+    Value::Array(Vec::new())
+}
+
+fn validated_tags(value: &Value) -> Result<Vec<String>> {
+    let tags: Vec<String> = serde_json::from_value(value.clone()).context(
+        "fleet tags must be a list of strings; repair only the tags field in the profile",
+    )?;
+    validate_tags(&tags)?;
+    Ok(tags)
 }
 
 fn validate_tags(tags: &[String]) -> Result<()> {
@@ -809,7 +834,7 @@ pub fn create(
     ensure_epmd_port_available(host, epmd_port)?;
     let (dist_port_min, dist_port_max) = dist_ports(ports.dist);
     let profile = Profile {
-        tags: Vec::new(),
+        tags: empty_tags(),
         schema: PROFILE_SCHEMA,
         fleet_id: fleet_id.clone(),
         name: fleet_name,
@@ -1258,7 +1283,7 @@ pub fn join(data_dir: &Path, invitation_path: &Path, ports: Ports) -> Result<Pro
         None => (default_min, default_max),
     };
     let profile = Profile {
-        tags: Vec::new(),
+        tags: empty_tags(),
         schema: PROFILE_SCHEMA,
         fleet_id: invitation.fleet_id.clone(),
         name: invitation.name.clone(),
@@ -1627,6 +1652,9 @@ pub fn doctor(data_dir: &Path) -> DoctorReport {
     };
 
     if let Some(profile) = &profile {
+        if let Err(error) = validated_tags(&profile.tags) {
+            checks.push(warn(format!("advisory tags ignored: {error:#}. Remove the named tag with `ouro fleet tag remove TAG`, or repair only the tags field in the profile; fleet identity remains valid")));
+        }
         match validate_materials(data_dir, false) {
             Ok(()) => checks.push(ok(
                 "TLS certificate, key, cookie, and VM arguments are private and readable",
@@ -2204,7 +2232,7 @@ where
     // Only the machine name participates in OS service identity. The remaining fields
     // are inert placeholders and are never persisted or shown.
     let service_profile = Profile {
-        tags: Vec::new(),
+        tags: empty_tags(),
         schema: PROFILE_SCHEMA,
         fleet_id: "000000000000000000000000".into(),
         name: "incomplete fleet recovery".into(),
@@ -3074,7 +3102,6 @@ fn validate_profile(profile: &Profile) -> Result<()> {
     if profile.fleet_id.len() != 24 || !profile.fleet_id.chars().all(|c| c.is_ascii_hexdigit()) {
         bail!("fleet profile has an invalid fleet id");
     }
-    validate_tags(&profile.tags)?;
     validate_fleet_name(&profile.name)?;
     validate_machine(&profile.machine)?;
     validate_host(&profile.host)?;
@@ -3329,7 +3356,7 @@ fn validate_invitation(invitation: &Invitation) -> Result<()> {
         );
     }
     let profile = Profile {
-        tags: Vec::new(),
+        tags: empty_tags(),
         schema: PROFILE_SCHEMA,
         fleet_id: invitation.fleet_id.clone(),
         name: invitation.name.clone(),
@@ -5164,7 +5191,10 @@ mod tests {
             tags(&dir, None, Some(("xcode", true))).unwrap(),
             vec!["xcode"]
         );
-        assert_eq!(load(&dir).unwrap().unwrap().tags, vec!["xcode"]);
+        assert_eq!(
+            load(&dir).unwrap().unwrap().tags,
+            serde_json::json!(["xcode"])
+        );
         assert!(tags(&dir, None, Some(("BAD tag", true)))
             .unwrap_err()
             .to_string()
@@ -5174,10 +5204,28 @@ mod tests {
             Vec::<String>::new()
         );
         let mut invalid = profile;
-        invalid.tags = vec!["BAD".into()];
+        invalid.tags = serde_json::json!(["BAD"]);
         let encoded = serde_json::to_vec(&invalid).unwrap();
         write_private_atomic(&profile_path(&dir), &encoded).unwrap();
         assert!(doctor(&dir).text.contains("BAD"));
+        assert!(
+            load(&dir).unwrap().is_some(),
+            "advisory tags cannot block daemon profile loading"
+        );
+        assert_eq!(
+            tags(&dir, None, Some(("BAD", false))).unwrap(),
+            Vec::<String>::new()
+        );
+        for malformed in [
+            serde_json::json!([null]),
+            serde_json::json!({"invalid": true}),
+        ] {
+            invalid.tags = malformed.clone();
+            write_profile(&dir, &invalid).unwrap();
+            assert_eq!(load(&dir).unwrap().unwrap().tags, malformed);
+            assert!(doctor(&dir).text.contains("advisory tags ignored"));
+        }
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -5196,7 +5244,7 @@ mod tests {
 
     fn sample_profile(machine: &str) -> Profile {
         Profile {
-            tags: Vec::new(),
+            tags: empty_tags(),
             schema: PROFILE_SCHEMA,
             fleet_id: "00112233445566778899aabb".into(),
             name: "Workshop fleet".into(),
@@ -6243,7 +6291,7 @@ mod tests {
     #[test]
     fn doctor_warns_when_pinned_ports_sit_inside_the_ephemeral_range() {
         let first_generation = Profile {
-            tags: Vec::new(),
+            tags: empty_tags(),
             schema: PROFILE_SCHEMA,
             fleet_id: "cafecafecafecafecafecafe".into(),
             name: "lab".into(),

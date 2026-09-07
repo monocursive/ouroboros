@@ -114,7 +114,6 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
       ])
 
     :ok = peer_call(peer, System, :put_env, ["OUROBOROS_FLEET_ID", fleet_id])
-    send(Ouroboros.Cluster.Monitor, {:nodeup, peer})
 
     wait_until(fn ->
       Enum.any?(
@@ -270,6 +269,25 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
     end
 
     test "runs there, reads a file there, and reports back here", context do
+      # The peer is already connected and healthy. Edit its profile in place, then
+      # wait for the periodic probe; no synthetic nodeup or reconnect may teach us.
+      profile_path = Path.join([context.peer_data, "fleet", "profile.json"])
+      profile = peer_call(context.peer, File, :read!, [profile_path]) |> Jason.decode!()
+      assert Ouroboros.Cluster.resolve_machine("tag:peer-build") == {:ok, context.peer}
+
+      :ok =
+        peer_call(context.peer, File, :write!, [
+          profile_path,
+          Jason.encode!(Map.put(profile, "tags", ["peer-hot"]))
+        ])
+
+      wait_until(
+        fn -> Ouroboros.Cluster.resolve_machine("tag:peer-hot") == {:ok, context.peer} end,
+        12_000
+      )
+
+      assert Ouroboros.Cluster.resolve_machine("tag:peer-build") == {:error, :unknown_machine}
+
       %{handle: handle} =
         open(
           context,
@@ -278,7 +296,7 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
               agent_call(%{
                 "prompt" => "read lib/remote.ex and say what it defines",
                 "description" => "remote read",
-                "machine" => "tag:peer-build",
+                "machine" => "tag:peer-hot",
                 "workspace" => context.peer_workspace
               })
             ],
@@ -297,8 +315,8 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
       facts = peer_call(context.peer, Ouroboros.Cluster, :local_fleet_posture, []).facts
       {:ok, hostname} = peer_call(context.peer, :inet, :gethostname, [])
       assert facts.hostname == to_string(hostname)
-      assert facts.tags == ["peer-build"]
-      assert Ouroboros.Cluster.resolve_machine("tag:peer-build") == {:ok, context.peer}
+      assert facts.tags == ["peer-hot"]
+      assert Ouroboros.Cluster.resolve_machine("tag:peer-hot") == {:ok, context.peer}
 
       send_turn(handle)
       events = collect_until(:turn_completed, [], 90_000)

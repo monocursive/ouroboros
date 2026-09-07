@@ -267,10 +267,11 @@ ouro fleet tag remove xcode --machine studio
 
 Omit `--machine` to edit the local profile even while its daemon is stopped. Remote
 changes use the authenticated operator gateway and the target's installed client, which
-shares the profile writer and lifecycle lock used by local management. They appear at
-the next probe. Tags allow 1–64 lowercase letters/digits plus `. _ : -`, starting with a
-letter or digit, at most 32 per machine. Invalid profile tags are shown with a reason,
-never silently adopted. A native child can use `machine: "tag:xcode"`; exactly one
+shares the profile writer and lifecycle lock used by local management. Connected peers refresh every five seconds in a bounded background batch, so edits
+appear without a reconnect. Tags allow 1–64 lowercase letters/digits plus `. _ : -`, starting with a
+letter or digit, at most 32 per machine. Invalid profile tags are shown with a reason and never block daemon startup.
+`ouro fleet tag remove BAD` can repair a malformed string tag; malformed tag arrays
+can be repaired directly in the profile without changing its identity fields. A native child can use `machine: "tag:xcode"`; exactly one
 connected match is required, and only its concrete node is retained. Multiple matches
 name the machines so the agent can choose deliberately. Tags and facts grant no authority.
 

@@ -25,7 +25,7 @@ use support::{app, fixture, full_hello, render};
 
 fn fleet_profile() -> Profile {
     Profile {
-        tags: Vec::new(),
+        tags: serde_json::json!([]),
         schema: 1,
         fleet_id: "fleet-test-0123456789".into(),
         name: "Studio fleet".into(),

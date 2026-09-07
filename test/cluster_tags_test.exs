@@ -76,6 +76,24 @@ defmodule Ouroboros.Cluster.TagsTest do
     assert {:ok, ["xcode"]} = Tags.change(node(), "list", nil)
   end
 
+  test "remote removal can repair an invalid existing advisory tag", context do
+    File.write!(context.path, Jason.encode!(Map.put(context.profile, "tags", ["BAD"])))
+    helper = Path.join(context.root, "ouro")
+    repaired = Jason.encode!(context.profile)
+
+    File.write!(helper, """
+    #!/bin/sh
+    [ "$#" = 4 ] && [ "$1" = fleet ] && [ "$2" = tag ] && [ "$3" = remove ] && [ "$4" = BAD ] || exit 9
+    printf '%s' '#{repaired}' > "$OUROBOROS_DATA_DIR/fleet/profile.json"
+    """)
+
+    File.chmod!(helper, 0o700)
+    System.put_env("OUROBOROS_PROCESS_ID_HELPER", helper)
+    assert %{tags: [], tags_error: error} = Facts.local()
+    assert error =~ "BAD"
+    assert {:ok, []} = Tags.change(node(), "remove", "BAD")
+  end
+
   test "remote management has an operator gate and a bounded validated contract" do
     entry = Methods.table()["fleet.tags"]
     refute Methods.permits?(:read, entry)
