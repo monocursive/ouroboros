@@ -213,6 +213,9 @@ pub enum Command {
     /// a clean stream for a pipe.
     Ledger(LedgerArgs),
 
+    /// Investigate retained evidence, or verify an exported bundle entirely offline.
+    Audit(AuditArgs),
+
     /// Re-read a recorded session against its journal and print it, deterministically.
     ///
     /// Replay executes nothing, spends nothing, and writes no ledger entry: it reads the
@@ -398,6 +401,99 @@ pub struct LedgerArgs {
     /// A file holding the gateway token. Omitted, the token beside gateway.json is used.
     #[arg(long, value_name = "PATH")]
     pub token_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct AuditArgs {
+    /// Query another connected machine through this gateway.
+    #[arg(long, global = true)]
+    pub machine: Option<String>,
+    #[command(subcommand)]
+    pub command: AuditCommand,
+    #[arg(long, global = true)]
+    pub addr: Option<String>,
+    #[arg(long, global = true)]
+    pub token_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuditCommand {
+    Status,
+    Doctor,
+    /// Filter retained metadata. Output is JSON; content is never searched implicitly.
+    Search {
+        #[arg(long)]
+        stream_id: Option<String>,
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        actor_id: Option<String>,
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        tool: Option<String>,
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long)]
+        until: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
+    },
+    Show {
+        stream_id: String,
+        #[arg(long, default_value_t = 0)]
+        since_seq: u64,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+    Artifact {
+        stream_id: String,
+        blob: String,
+    },
+    Retention,
+    /// Place or release a retention hold. Administrator role required.
+    Hold {
+        stream_id: String,
+        #[arg(long)]
+        release: bool,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Delete only expired, closed, unheld evidence and server export copies.
+    Purge {
+        stream_id: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Restore a verified evidence snapshot into a new directory, without running agents.
+    Restore {
+        directory: PathBuf,
+        destination: PathBuf,
+        #[arg(long)]
+        expected_digest: String,
+    },
+    /// Download a snapshot into a new private directory and verify every file.
+    Export {
+        destination: PathBuf,
+        #[arg(long)]
+        stream_id: Option<String>,
+    },
+    /// No gateway, daemon startup, credentials, or model execution.
+    Verify {
+        directory: PathBuf,
+        /// A manifest SHA-256 obtained through an independent trusted channel.
+        #[arg(long)]
+        expected_digest: Option<String>,
+        /// Independently obtained JSON map of key IDs to base64 Ed25519 public keys.
+        #[arg(long)]
+        trusted_keys: Option<PathBuf>,
+    },
+    Reindex,
+    Flush,
 }
 
 /// `ouro replay`'s flags.

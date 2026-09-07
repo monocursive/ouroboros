@@ -38,7 +38,10 @@ pub(super) const DEFAULT_GATEWAY_MAX_FRAME: u64 = 1_048_576;
 pub(super) const DEFAULT_GATEWAY_QUEUE_LIMIT: u64 = 1_000;
 
 pub(super) const PROVIDER_PATH_VARIABLES: [&str; 2] = ["AMP_CLI_PATH", "GEMINI_CLI_PATH"];
-pub(super) const ADVANCED_SERVICE_AUTHORITY_VARIABLES: [&str; 15] = [
+pub(super) const ADVANCED_SERVICE_AUTHORITY_VARIABLES: [&str; 18] = [
+    "OUROBOROS_AUDIT_CONFIG",
+    "OUROBOROS_AUDIT_MODE",
+    "OUROBOROS_COLLECTOR_CONFIG",
     "OUROBOROS_FORGE_BUILDER_NODE",
     "OUROBOROS_SIGNER_KEY_PATH",
     "OUROBOROS_SIGNER_ID",
@@ -139,7 +142,7 @@ pub(super) fn capture_service_environment() -> Result<ServiceEnvironment> {
         .collect::<Vec<_>>();
     if !advanced.is_empty() {
         bail!(
-            "automatic fleet recovery does not silently copy advanced signing/forge/orchestration authority ({}) into a user service. Unset these variables for the beginner recovery unit, or run service-run from your own reviewed process-manager boundary",
+            "automatic fleet recovery does not silently copy audit/signing/forge/orchestration authority ({}) into a user service. Configure an operator-managed service with these settings; do not remove a required audit policy merely to install a default unit. The custody collector uses release eval separately",
             advanced.join(", ")
         );
     }
@@ -210,7 +213,7 @@ pub(crate) fn validated_runtime_authority_env(
         DEFAULT_GATEWAY_QUEUE_LIMIT,
         1,
     )?;
-    Ok(vec![
+    let mut environment = vec![
         ("OUROBOROS_WORKSPACE_ROOTS".into(), workspace_roots),
         (
             "OUROBOROS_GATEWAY_MAX_FRAME".into(),
@@ -220,7 +223,27 @@ pub(crate) fn validated_runtime_authority_env(
             "OUROBOROS_GATEWAY_QUEUE_LIMIT".into(),
             gateway_queue_limit.to_string(),
         ),
-    ])
+    ];
+    if value("OUROBOROS_COLLECTOR_CONFIG").is_some() {
+        bail!("the custody collector must run separately with release eval, not the fleet agent launcher");
+    }
+    if let Some(policy) = value("OUROBOROS_AUDIT_CONFIG") {
+        let path = Path::new(policy);
+        if !path.is_absolute() {
+            bail!("OUROBOROS_AUDIT_CONFIG must be an absolute policy path");
+        }
+        path_text(path).context("validating the inherited audit policy path")?;
+        // The release validates privacy, content and keys before boot.
+        // Preserve the operator's policy through the fleet environment scrubber.
+        environment.push(("OUROBOROS_AUDIT_CONFIG".into(), policy.into()));
+    }
+    if let Some(mode) = value("OUROBOROS_AUDIT_MODE") {
+        if !matches!(mode, "standard" | "local" | "required") {
+            bail!("OUROBOROS_AUDIT_MODE must be standard, local or required");
+        }
+        environment.push(("OUROBOROS_AUDIT_MODE".into(), mode.into()));
+    }
+    Ok(environment)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1230,5 +1253,34 @@ pub(super) fn service_recovery_check(
                     .unwrap_or_default()
             )),
         ),
+    }
+}
+
+#[cfg(test)]
+mod audit_environment_tests {
+    use super::*;
+
+    #[test]
+    fn fleet_keeps_explicit_audit_policy_and_refuses_ambiguous_settings() {
+        let caller = vec![
+            (
+                "OUROBOROS_AUDIT_CONFIG".into(),
+                "/private/operator/audit.json".into(),
+            ),
+            ("OUROBOROS_AUDIT_MODE".into(), "required".into()),
+        ];
+        let environment = validated_runtime_authority_env(&caller).unwrap();
+        assert!(caller.iter().all(|pair| environment.contains(pair)));
+        for invalid in [
+            ("OUROBOROS_AUDIT_CONFIG", "./workspace/audit.json"),
+            ("OUROBOROS_AUDIT_MODE", ""),
+            ("OUROBOROS_AUDIT_MODE", "requried"),
+            ("OUROBOROS_COLLECTOR_CONFIG", "/private/collector.json"),
+        ] {
+            assert!(
+                validated_runtime_authority_env(&[(invalid.0.into(), invalid.1.into())]).is_err()
+            );
+        }
+        assert!(ADVANCED_SERVICE_AUTHORITY_VARIABLES.contains(&"OUROBOROS_AUDIT_CONFIG"));
     }
 }

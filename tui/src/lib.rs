@@ -8,6 +8,7 @@
 
 pub mod acp_serve;
 pub mod agents;
+pub mod audit_cli;
 pub mod cli;
 pub mod clipboard;
 pub mod config;
