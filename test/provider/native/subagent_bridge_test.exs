@@ -383,4 +383,31 @@ defmodule Ouroboros.Provider.Native.SubagentBridgeTest do
     assert text =~ "child answer"
     assert map_size(:sys.get_state(bridge).cache) == 256
   end
+
+  test "collecting an existing child does not require a native default to remain configured",
+       context do
+    {id, _owner} = owner(context)
+
+    assert {:ok, %{is_error: false}} =
+             SubagentBridge.call(id, "spawn", "agent", %{
+               "prompt" => "child",
+               "background" => true
+             })
+
+    assert_receive {:bridge_event, %{payload: %{"phase" => "spawned", "task_id" => task_id}}},
+                   5_000
+
+    Application.delete_env(:ouroboros, :native_model)
+
+    assert {:ok, %{is_error: false, output: result}} =
+             SubagentBridge.call(id, "result", "agent_result", %{
+               "task_id" => task_id,
+               "wait_ms" => 5_000
+             })
+
+    assert result =~ "child answer"
+
+    assert {:error, {:no_model, _}} =
+             SubagentBridge.call(id, "new-spawn", "agent", %{"prompt" => "needs a model"})
+  end
 end

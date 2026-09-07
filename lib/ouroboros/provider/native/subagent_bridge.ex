@@ -68,6 +68,7 @@ defmodule Ouroboros.Provider.Native.SubagentBridge do
        id: id,
        monitor: Process.monitor(owner),
        session: nil,
+       model: nil,
        owned?: false,
        task: nil,
        cache: %{}
@@ -122,8 +123,8 @@ defmodule Ouroboros.Provider.Native.SubagentBridge do
   end
 
   # A sidecar is recorded before dispatch can create a child, so owner termination always closes it.
-  def handle_call({:session, session, owned?}, _from, state),
-    do: {:reply, :ok, %{state | session: session, owned?: owned?}}
+  def handle_call({:session, session, owned?, model}, _from, state),
+    do: {:reply, :ok, %{state | session: session, owned?: owned?, model: model}}
 
   @impl true
   def handle_info({ref, reply}, %{task: %{ref: ref} = task} = state) do
@@ -174,8 +175,10 @@ defmodule Ouroboros.Provider.Native.SubagentBridge do
   end
 
   defp run(bridge, state, request_id, name, input) do
+    model = if name == "agent_result", do: state.model
+
     with {:ok, snapshot} <- GenServer.call(state.owner, :subagent_bridge_state),
-         {:ok, request} <- native_request(snapshot),
+         {:ok, request} <- native_request(snapshot, model),
          {:ok, session, owned?} <- transport(bridge, state, snapshot, request) do
       emit = fn event ->
         if event.type == :approval_requested do
@@ -205,7 +208,7 @@ defmodule Ouroboros.Provider.Native.SubagentBridge do
         {:error, :no_live_transport}
 
       session ->
-        :ok = GenServer.call(bridge, {:session, session, false})
+        :ok = GenServer.call(bridge, {:session, session, false, nil})
         {:ok, session, false}
     end
   end
@@ -222,18 +225,20 @@ defmodule Ouroboros.Provider.Native.SubagentBridge do
     }
 
     with {:ok, session} <- Session.open(request, context) do
-      :ok = GenServer.call(bridge, {:session, session, true})
+      :ok = GenServer.call(bridge, {:session, session, true, request.model})
       {:ok, session, true}
     end
   end
 
   @doc false
-  def native_request(%{request: request, provider: provider}) do
+  def native_request(snapshot), do: native_request(snapshot, nil)
+
+  defp native_request(%{request: request, provider: provider}, fallback_model) do
     if provider == :native do
       {:ok, nil}
     else
       # Vendor model aliases are not ReqLLM specs. Resolve the node's native default explicitly.
-      with {:ok, model} <- Loop.resolve_model(nil) do
+      with {:ok, model} <- Loop.resolve_model(fallback_model) do
         allowed = translate_tools(request[:allowed_tools], :allow)
         disallowed = translate_tools(request[:disallowed_tools], :deny)
 
