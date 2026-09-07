@@ -1158,6 +1158,7 @@ defmodule Ouroboros.Provider.Native.Session do
         tool_specs: state.prompt_context.tools,
         context_window: state.prompt_context.context_window,
         prefix_fingerprint: state.prompt_context.fingerprint,
+        fleet_snapshot: state.prompt_context.fleet_snapshot,
         # R1. The loop is the journal's writer for the length of the turn; it syncs the
         # handle at the top of `run_turn/2` because this process may have advanced the file
         # since the handle was built.

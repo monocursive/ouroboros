@@ -140,6 +140,28 @@ defmodule Ouroboros.Gateway.SessionReplayVerifyTest do
       retire_session(id)
     end
 
+    test "a fleet opening snapshot is recorded and the distributed turn replays", context do
+      if not Node.alive?(), do: Node.start(:fleet_replay_verify, :shortnames)
+
+      if is_nil(Process.whereis(Ouroboros.Cluster.Monitor)),
+        do: start_supervised!({Ouroboros.Cluster.Monitor, []})
+
+      wait_until(fn -> Ouroboros.Provider.Native.Tools.Fleet.snapshot() != nil end)
+      session = start_native(context.id, context, [[{:text, "hello fleet"}, {:finish, :stop}]])
+      assert {:ok, _} = InteractiveSession.send_message(session, "say hello")
+      await_turn(session)
+
+      records = journal_path(session) |> File.stream!() |> Enum.map(&JSON.decode!/1)
+      started = Enum.find(records, &(&1["kind"] == "turn_started"))
+      assert is_binary(started["fleet_snapshot"])
+      assert started["fleet_snapshot"] =~ "Place work with agent"
+      assert started["distributed_tools"] == true
+
+      assert {:ok, verdict} = Methods.invoke("interactive.replay_verify", %{"id" => context.id})
+      assert verdict["verified"], inspect(verdict)
+      retire_session(context.id)
+    end
+
     test "a flipped byte mid-journal is a chain break, not a verdict", context do
       id = context.id
       session = start_native(id, context, [[{:text, "hello back"}, {:finish, :stop}]])

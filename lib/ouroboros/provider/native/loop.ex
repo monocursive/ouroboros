@@ -209,6 +209,7 @@ defmodule Ouroboros.Provider.Native.Loop do
     # journal record, so a reader can see at a glance which turns shared a prefix and where
     # a `configure` or a compaction rotated it.
     :prefix_fingerprint,
+    :fleet_snapshot,
     # R1. The session's turn journal, or `nil` for a run that keeps no record — the coding
     # plane's finite run, and the loop tests that have no session directory. Every write
     # goes through `journal/3` below, which never fails a turn.
@@ -318,7 +319,9 @@ defmodule Ouroboros.Provider.Native.Loop do
         "sandbox_mode" => state.scope.sandbox_mode,
         "max_iterations" => state.max_iterations,
         "prefix_fingerprint" => state.prefix_fingerprint,
-        "system_sha256" => text_digest(state.system)
+        "system_sha256" => text_digest(state.system),
+        "fleet_snapshot" => state.fleet_snapshot,
+        "distributed_tools" => Enum.any?(state.tool_specs, &(&1.name == "fleet"))
       })
 
     injected = injected(Hooks.notify(state.hooks, :user_prompt_submit, hook_base(state)))

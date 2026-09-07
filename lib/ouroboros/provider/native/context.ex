@@ -48,6 +48,7 @@ defmodule Ouroboros.Provider.Native.Context do
     :system,
     :tools,
     :fingerprint,
+    :fleet_snapshot,
     :model_spec,
     :context_window,
     instructions: nil,
@@ -59,6 +60,7 @@ defmodule Ouroboros.Provider.Native.Context do
           system: String.t(),
           tools: [map()],
           fingerprint: String.t(),
+          fleet_snapshot: String.t() | nil,
           model_spec: String.t() | nil,
           context_window: pos_integer() | nil,
           instructions: map() | nil,
@@ -87,6 +89,15 @@ defmodule Ouroboros.Provider.Native.Context do
   """
   @spec build(keyword()) :: {:ok, t()} | {:error, term()}
   def build(opts) do
+    # Fleet discovery is volatile. Keep the rendered opening snapshot with the cached
+    # prefix so replay can reproduce it after machines or their tags have changed.
+    fleet =
+      case Keyword.get(opts, :fleet) do
+        machines when is_list(machines) -> Ouroboros.Provider.Native.Tools.Fleet.render(machines)
+        snapshot -> snapshot
+      end
+
+    opts = Keyword.put(opts, :fleet, fleet)
     tools = Keyword.get(opts, :tools) || Tools.specs(nil, nil)
     model_module = Keyword.get(opts, :model_module)
     laid_out = lay_out_tools(tools, model_module)
@@ -98,6 +109,7 @@ defmodule Ouroboros.Provider.Native.Context do
 
       context = %__MODULE__{
         system: base,
+        fleet_snapshot: fleet,
         tools: laid_out.specs,
         deferred: laid_out.deferred,
         instructions: discovery,

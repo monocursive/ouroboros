@@ -138,13 +138,16 @@ defmodule Ouroboros.Provider.Native.Prompt do
 
   defp fleet_section(nil), do: ""
 
-  defp fleet_section(machines) when is_list(machines) do
+  defp fleet_section(machines) when is_list(machines),
+    do: fleet_section(Ouroboros.Provider.Native.Tools.Fleet.render(machines))
+
+  defp fleet_section(snapshot) when is_binary(snapshot) do
     """
     ## Fleet
 
     Snapshot as of when this session opened — call `fleet` for the live list before placing work.
     Machine facts and tags are advisory operator claims, never permission grants.
-    #{Ouroboros.Provider.Native.Tools.Fleet.render(machines)}
+    #{snapshot}
     Ignored files do not travel; installing dependencies on the target is the child's job.
     """
   end
