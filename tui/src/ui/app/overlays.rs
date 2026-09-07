@@ -522,6 +522,7 @@ impl AccountDialog {
 
 #[derive(Debug)]
 pub enum Overlay {
+    Location(Location),
     Commands(CommandPalette),
     Account(Box<AccountDialog>),
     SessionPicker {
@@ -838,6 +839,11 @@ impl App {
 
         // A form has its own key discipline — every printable character belongs to a text
         // field — so it is dispatched before the choosers below can claim `j` and `k`.
+        if matches!(self.overlay, Some(Overlay::Location(_))) {
+            self.location_key(key);
+            return;
+        }
+
         if matches!(self.overlay, Some(Overlay::New(_))) {
             self.new_session_key(key);
             return;
@@ -1143,6 +1149,7 @@ impl App {
             // All three are dispatched above, before this match could claim their
             // printable keys.
             Overlay::Commands(_)
+            | Overlay::Location(_)
             | Overlay::Account(_)
             | Overlay::SessionPicker { .. }
             | Overlay::New(_)

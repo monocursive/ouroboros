@@ -990,6 +990,7 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
         ),
         Overlay::Prompt { label, buffer, .. } => prompt(frame, area, label, buffer),
         Overlay::New(dialog) => new_session(frame, area, app, dialog),
+        Overlay::Location(dialog) => location(frame, area, app, dialog),
         Overlay::Backtrack {
             entries,
             choice,
@@ -1307,6 +1308,13 @@ fn account_dialog(frame: &mut Frame, area: Rect, app: &App, dialog: &AccountDial
     let connected = app.chatgpt_connected();
     let mut lines = Vec::new();
     let mut controls = Vec::new();
+
+    if !app.config.location.machine.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("Connect on {}", app.home_machine_label()),
+            theme::label(),
+        )));
+    }
 
     if connected {
         let account = app
@@ -2005,10 +2013,10 @@ fn machine_form(frame: &mut Frame, area: Rect, form: &MachineForm) {
                 }
                 FormKind::Service => {
                     lines.push(Line::from(
-                        "Writes a launchd or systemd user unit. It does not start the daemon.",
+                        "Installs and starts automatic recovery, then checks it is enabled.",
                     ));
                     lines.push(Line::from(
-                        "After it writes, run the activation command it prints. Do not also run ouro daemon.",
+                        "Ouroboros stays available after closing this terminal. Your computer still needs to be awake and connected.",
                     ));
                 }
                 FormKind::SyncExport => {
@@ -2231,7 +2239,7 @@ fn add_machine(frame: &mut Frame, area: Rect, app: &App, machines: &Machines, ad
             for field in add.fields(standalone) {
                 lines.push(add_field_row(add, field, add.field == field));
             }
-            if add.method == AddMethod::Ssh {
+            if add.method == AddMethod::Ssh && add.advanced {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
                     "A Mac binary will not run on Linux. Leave dest. binary empty if that host already has matching ouro, or pass a Linux build.",
@@ -2247,7 +2255,7 @@ fn add_machine(frame: &mut Frame, area: Rect, app: &App, machines: &Machines, ad
             }
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                "Tab fields · Enter review · Esc back. Invitation contents stay off screen.",
+                "Tab fields · F6 advanced options · Enter review · Esc back",
                 Style::default().fg(theme::muted()),
             )));
         }
@@ -2566,9 +2574,23 @@ fn method_row(focused: bool, label: &str) -> Line<'static> {
 
 fn add_field_row(add: &AddMachine, field: AddField, focused: bool) -> Line<'static> {
     let (label, value) = match field {
-        AddField::Target => ("ssh target", add.target.as_str()),
-        AddField::Machine => ("machine", add.machine.as_str()),
-        AddField::Host => ("fleet host", add.host.as_str()),
+        AddField::Target => ("Connect to", add.target.as_str()),
+        AddField::Machine => (
+            "Computer name",
+            if add.machine.is_empty() {
+                "(suggested from address)"
+            } else {
+                add.machine.as_str()
+            },
+        ),
+        AddField::Host => (
+            "Private address",
+            if add.host.is_empty() {
+                "(same as Connect to)"
+            } else {
+                add.host.as_str()
+            },
+        ),
         AddField::Via => ("via", add.via_label()),
         AddField::Tailscale => (
             "tailscale setup",
@@ -2579,8 +2601,8 @@ fn add_field_row(add: &AddMachine, field: AddField, focused: bool) -> Line<'stat
             },
         ),
         AddField::Binary => ("dest. binary", add.binary.as_str()),
-        AddField::OwnerHost => ("this Mac host", add.owner_host.as_str()),
-        AddField::OwnerMachine => ("this Mac name", add.owner_machine.as_str()),
+        AddField::OwnerHost => ("This computer's address", add.owner_host.as_str()),
+        AddField::OwnerMachine => ("This computer's name", add.owner_machine.as_str()),
     };
     let value_style = if field == AddField::Tailscale && add.setup_tailscale {
         Style::default().fg(theme::warn())
@@ -2662,6 +2684,68 @@ fn sandbox_mode_name(dialog: &NewSession) -> String {
         .sandbox_mode()
         .map(|mode| mode.as_str().to_string())
         .unwrap_or_else(|| "unset".to_string())
+}
+
+fn location(frame: &mut Frame, area: Rect, app: &App, dialog: &super::app::Location) {
+    let popup = centered(area, 76, 22.min(area.height));
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(access::borders(Borders::ALL))
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(Span::styled(" Computer & project ", theme::heading()));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let rows = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(1),
+        Constraint::Length(3),
+    ])
+    .split(inner);
+    let heading = if dialog.browsing {
+        format!(
+            "2. Choose a project on {}\n{}",
+            dialog.label,
+            dialog.path.as_deref().unwrap_or("Reading folders…")
+        )
+    } else {
+        "1. Choose the computer that will do the work\nOnly connected computers are offered. /machines manages the others.".into()
+    };
+    frame.render_widget(Paragraph::new(heading).wrap(Wrap { trim: false }), rows[0]);
+    let labels: Vec<String> = if dialog.browsing {
+        dialog
+            .entries
+            .iter()
+            .map(|(label, _)| label.clone())
+            .collect()
+    } else {
+        app.machine_choices()
+            .iter()
+            .map(|choice| match choice {
+                super::app::MachineChoice::Local { label } => {
+                    format!("{label} · connected runtime")
+                }
+                super::app::MachineChoice::Connected { machine, .. } => machine.clone(),
+            })
+            .collect()
+    };
+    let mut state = ListState::default().with_selected(Some(if dialog.browsing {
+        dialog.selected
+    } else {
+        dialog.computer
+    }));
+    frame.render_stateful_widget(
+        List::new(labels)
+            .highlight_symbol("› ")
+            .highlight_style(theme::heading()),
+        rows[1],
+        &mut state,
+    );
+    let foot = if dialog.pending {
+        "Reading folders on this computer…"
+    } else {
+        dialog.error.as_deref().unwrap_or("↑/↓ choose · Enter open / use · Esc back\nYour task draft is kept. Nothing starts until you submit it.")
+    };
+    frame.render_widget(Paragraph::new(foot).wrap(Wrap { trim: false }), rows[2]);
 }
 
 fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {

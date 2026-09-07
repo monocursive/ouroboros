@@ -406,6 +406,7 @@ fn the_backtrack_setting_that_predates_the_map_still_means_what_it_meant() {
 #[test]
 fn the_default_map_is_exactly_what_this_client_bound_before_it_had_one() {
     let expected: &[(Action, &str)] = &[
+        (Action::ChooseLocation, "f5"),
         (Action::StarterExplore, "f2"),
         (Action::StarterReview, "f3"),
         (Action::StarterPlan, "f4"),

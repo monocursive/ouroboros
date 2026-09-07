@@ -14,6 +14,7 @@ impl App {
     /// first frame, so the composer is typeable while they are still in flight.
     pub fn open_home(&mut self) {
         self.tab = Tab::Sessions;
+        self.issue_if_due(Tag::Status, "runtime.status", json!({}), STATUS_TICKS);
         self.issue_if_due(Tag::Account, "account.read", json!({}), ACCOUNT_TICKS);
         self.issue_if_due(
             Tag::Sessions(Plane::Interactive),
@@ -97,6 +98,11 @@ impl App {
                     return;
                 }
             }
+        }
+
+        if self.keymap.hits(Action::ChooseLocation, key) {
+            self.open_location();
+            return;
         }
 
         match self
@@ -202,6 +208,13 @@ impl App {
                 "Connection lost. Your draft is here; wait for reconnection, then press Enter."
                     .into(),
             )
+        } else if !self.config.location.machine.is_empty()
+            && !self
+                .machine_choices()
+                .iter()
+                .any(|choice| choice.wire_name() == Some(self.config.location.machine.as_str()))
+        {
+            Some(format!("{} is offline or still being checked. Your draft is here. Press {} to choose another computer.", self.home_machine_label(), self.keymap.label(Action::ChooseLocation)))
         } else if !self.hello.serves("interactive.start") {
             Some("This runtime does not serve interactive.start. Update it to start a task; /runtime has connection details.".into())
         } else if !self.hello.operates() {
@@ -226,7 +239,7 @@ impl App {
     pub(super) fn finish_home_login(&mut self) {
         let active =
             matches!(&self.overlay, Some(Overlay::Account(dialog)) if dialog.error.is_none());
-        if !active || self.in_flight.contains(&Tag::AccountLogin) {
+        if !active || self.account_call_pending(&Tag::AccountLogin) {
             return;
         }
         self.overlay = None;
@@ -312,8 +325,8 @@ impl App {
                 plane: Plane::Interactive,
                 provider: provider.to_string(),
                 model: Some(self.home_model().to_string()),
-                machine: String::new(),
-                workspace: self.default_workspace(),
+                machine: self.config.location.machine.clone(),
+                workspace: self.home_workspace(),
                 approval_mode: self.config.defaults.approval_mode(),
                 sandbox_mode: self.config.defaults.sandbox_mode(),
                 reasoning_effort: None,
@@ -466,14 +479,20 @@ impl App {
             .open_info()
             .and_then(|session| session.workspace.clone())
             .filter(|path| !path.is_empty())
-            .unwrap_or_else(|| self.default_workspace());
+            .unwrap_or_else(|| self.home_workspace());
+
+        let machine = self
+            .sessions
+            .open_info()
+            .and_then(|session| session.node.clone())
+            .unwrap_or_else(|| self.config.location.machine.clone());
 
         let request = StartRequest {
             id: new_session_id(),
             plane: Plane::Interactive,
             provider,
             model: Some(self.home_model().to_string()),
-            machine: String::new(),
+            machine,
             workspace,
             approval_mode: self.config.defaults.approval_mode(),
             sandbox_mode: Some(SandboxMode::WorkspaceWrite),
@@ -516,8 +535,8 @@ impl App {
     pub(super) fn open_account(&mut self) {
         // A cancelled attempt still owns its response until it arrives. Never adopt its
         // late login id into a replacement dialog (or silently deduplicate the new call).
-        if self.in_flight.contains(&Tag::AccountLogin)
-            || self.in_flight.contains(&Tag::AccountCancel)
+        if self.account_call_pending(&Tag::AccountLogin)
+            || self.account_call_pending(&Tag::AccountCancel)
         {
             self.home_error = Some("Finishing the previous sign-in attempt. Your draft is here; try again in a moment.".into());
             return;
@@ -525,7 +544,7 @@ impl App {
         self.home_login_start = None;
         self.home_error = None;
         if self.chatgpt_connected() {
-            let flow = if self.spawned() {
+            let flow = if self.spawned() && self.config.location.machine.is_empty() {
                 AccountFlow::Browser
             } else {
                 AccountFlow::DeviceCode
@@ -558,7 +577,7 @@ impl App {
             return;
         }
 
-        let flow = if self.spawned() {
+        let flow = if self.spawned() && self.config.location.machine.is_empty() {
             AccountFlow::Browser
         } else {
             AccountFlow::DeviceCode

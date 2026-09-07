@@ -68,6 +68,121 @@ fn harness(connected: bool) -> App {
     app
 }
 
+fn remote_status() -> serde_json::Value {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../test/support/gateway_golden/runtime_status_result.json"
+    ))
+    .unwrap();
+    let mut status = fixture["result"].clone();
+    status["connected_nodes"] = json!(["ouro-server@server"]);
+    status["cluster"]["fleet"] = json!({"machines": [{"node":"ouro-server@server", "machine":"server", "state":"connected", "role":"core", "compatibility":"compatible"}]});
+    status
+}
+
+#[test]
+fn home_location_browses_remote_folders_and_keeps_account_and_start_on_that_computer() {
+    let mut app = harness(true);
+    answer(&mut app, Tag::Status, remote_status());
+    type_text(&mut app, "Explain the remote project");
+    app.apply(key(KeyCode::F(5)));
+    assert!(matches!(app.overlay, Some(Overlay::Location(_))));
+    app.apply(key(KeyCode::Down));
+    app.apply(key(KeyCode::Enter));
+    let browse = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "workspace.browse")
+        .unwrap();
+    assert_eq!(browse.params["machine"], "server");
+    answer(
+        &mut app,
+        browse.tag,
+        json!({"path":"/srv/project", "parent":null, "roots":["/srv/project"], "entries":[]}),
+    );
+    assert!(render(&mut app, 80, 24).contains("Use this folder"));
+    app.apply(key(KeyCode::Enter));
+    assert!(app.overlay.is_none());
+    assert_eq!(app.home_workspace(), "/srv/project");
+    assert_eq!(
+        app.home_draft.submission().as_deref(),
+        Some("Explain the remote project")
+    );
+    let saved = app.take_config_save().unwrap();
+    assert_eq!(saved.location.machine, "server");
+    assert_eq!(saved.location.workspace.as_deref(), Some("/srv/project"));
+    answer(&mut app, Tag::Account, account(true)); // a late local read cannot grant remote readiness
+    assert!(!app.home_ready());
+    let read = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "account.read")
+        .unwrap();
+    assert_eq!(read.params["machine"], "server");
+    answer(&mut app, read.tag, account(true));
+    assert!(app.home_ready());
+    app.apply(key(KeyCode::Enter));
+    let start = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "interactive.start")
+        .unwrap();
+    assert_eq!(start.params["machine"], "server");
+    assert_eq!(start.params["workspace"], "/srv/project");
+}
+
+#[test]
+fn remote_sign_in_uses_device_code_and_offline_destination_keeps_the_draft() {
+    let mut app = harness(false);
+    answer(&mut app, Tag::Status, remote_status());
+    app.config.location.machine = "server".into();
+    app.config.location.label = "Server".into();
+    app.config.location.workspace = Some("/srv/project".into());
+    type_text(&mut app, "Keep this task");
+    app.apply(key(KeyCode::Enter));
+    let login = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "account.login.start")
+        .unwrap();
+    assert_eq!(login.params["machine"], "server");
+    assert_eq!(login.params["flow"], "device_code");
+    app.apply(key(KeyCode::Esc));
+    let mut status = remote_status();
+    status["connected_nodes"] = json!([]);
+    status["cluster"]["fleet"]["machines"][0]["state"] = json!("offline");
+    answer(&mut app, Tag::Status, status);
+    app.apply(key(KeyCode::Enter));
+    assert!(app.home_error.as_deref().unwrap().contains("offline"));
+    assert_eq!(
+        app.home_draft.submission().as_deref(),
+        Some("Keep this task")
+    );
+    assert!(!app
+        .drain()
+        .iter()
+        .any(|call| call.method == "interactive.start"));
+}
+
+#[test]
+fn folder_reply_after_back_does_not_change_the_selected_project() {
+    let mut app = harness(true);
+    app.apply(key(KeyCode::F(5)));
+    app.apply(key(KeyCode::Enter));
+    let browse = app
+        .drain()
+        .into_iter()
+        .find(|call| call.method == "workspace.browse")
+        .unwrap();
+    app.apply(key(KeyCode::Esc));
+    app.apply(key(KeyCode::Esc));
+    answer(
+        &mut app,
+        browse.tag,
+        json!({"path":"/wrong", "roots":["/wrong"], "entries":[]}),
+    );
+    assert_eq!(app.home_workspace(), "/work/ouroboros");
+}
+
 #[test]
 fn ouro_opens_on_the_coding_harness_without_an_onboarding_modal() {
     let mut app = harness(false);

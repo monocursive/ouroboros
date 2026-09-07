@@ -1955,20 +1955,22 @@ fn run_blocking_fleet_job(
         app::FleetJob::Service => {
             let installed =
                 fleet::service_install(&data_dir).map_err(|error| format!("{error:#}"))?;
-            let status = if installed.installed {
-                "recovery unit written"
-            } else {
-                "recovery unit already matches"
-            };
+            fleet::service_activate(&data_dir)
+                .map_err(|error| format!("Recovery was installed, but could not be started. Retry this action after addressing: {error:#}"))?;
+            fleet::recovery_ready(&data_dir).map_err(|error| {
+                format!(
+                    "Recovery was started, but could not be verified. Retry this action: {error:#}"
+                )
+            })?;
             Ok((
                 vec![
-                    status.into(),
+                    "Recovery is active and enabled".into(),
                     format!("unit {}", installed.path.display()),
                     format!("manager {}", installed.kind.label()),
                 ],
                 format!(
-                    "Activate (does not start on its own):\n  {}\n\nDeactivate:\n  {}",
-                    installed.activation, installed.deactivation
+                    "This computer will keep Ouroboros available after you close the terminal.\n\nTo turn recovery off later:\n  {}",
+                    installed.deactivation
                 ),
             ))
         }

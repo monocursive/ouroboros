@@ -22,6 +22,9 @@ fn main() {
         ("sign-in-small", 60, 18, false),
         ("expired", 80, 24, false),
         ("start-error", 80, 24, true),
+        ("location", 80, 24, true),
+        ("location-small", 60, 18, true),
+        ("project-picker", 80, 24, true),
     ] {
         let mut app = support::app(support::full_hello());
         app.launch_dir = Some("/work/ouroboros".into());
@@ -34,6 +37,31 @@ fn main() {
                 "login": {"status":"idle"}
             })),
         });
+        if name.starts_with("location") || name == "project-picker" {
+            let fixture: serde_json::Value = serde_json::from_str(include_str!(
+                "../../test/support/gateway_golden/runtime_status_result.json"
+            ))
+            .unwrap();
+            let mut status = fixture["result"].clone();
+            status["connected_nodes"] = json!(["ouro-server@server"]);
+            status["cluster"]["fleet"] = json!({"machines": [{"node":"ouro-server@server", "machine":"Studio", "state":"connected", "role":"core", "compatibility":"compatible"}]});
+            app.apply(Msg::Answer {
+                tag: Tag::Status,
+                result: Ok(status),
+            });
+            app.apply(Msg::Key(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE)));
+            if name == "project-picker" {
+                app.apply(Msg::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+                app.apply(Msg::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+                if let Some(call) = app
+                    .drain()
+                    .into_iter()
+                    .find(|call| call.method == "workspace.browse")
+                {
+                    app.apply(Msg::Answer {tag: call.tag, result: Ok(json!({"path":"/home/michael/projects", "parent":"/home/michael", "roots":["/home/michael"], "entries":[{"name":"Ouroboros"},{"name":"Website"}]}))});
+                }
+            }
+        }
         if name == "chat" {
             app.apply(Msg::Answer {
                 tag: Tag::Sessions(Plane::Interactive),
