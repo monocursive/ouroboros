@@ -973,7 +973,7 @@ defmodule Ouroboros.Provider.Native.Loop do
     context =
       %{
         scope: state.scope,
-        provider_options: Map.new(state.session_request.provider_options || %{}),
+        provider_options: provider_options(state),
         session_dir: state.session_dir,
         reads: state.reads,
         # G3. `agent_result` collects a child the *session* holds, not one this turn owns,
@@ -1082,7 +1082,7 @@ defmodule Ouroboros.Provider.Native.Loop do
     do: max(state.tool_timeout_ms, CapabilityTool.max_timeout_ms())
 
   defp execute_timeout(state, %{tool: "bash"}, input) do
-    options = Map.new(state.session_request.provider_options || %{})
+    options = provider_options(state)
     requested = Map.get(input, "timeout_ms", 120_000)
     timeout = if is_integer(requested) and requested > 0, do: requested, else: 120_000
     # Let bash reap its process and return its own timeout result before the tool task dies.
@@ -1090,6 +1090,12 @@ defmodule Ouroboros.Provider.Native.Loop do
   end
 
   defp execute_timeout(state, _classified, _input), do: state.tool_timeout_ms
+
+  # One-shot loops have no SessionRequest. Their tools retain the default bounds.
+  defp provider_options(%{session_request: %{provider_options: options}}),
+    do: Map.new(options || %{})
+
+  defp provider_options(_state), do: %{}
 
   defp maybe_desktop_runner(context, %{desktop_runner: fun}) when is_function(fun, 3),
     do: Map.put(context, :desktop_runner, fun)
@@ -2267,7 +2273,7 @@ defmodule Ouroboros.Provider.Native.Loop do
        model_spec: state.model_spec,
        approval_mode: state.approval_mode,
        tool_names: state |> tool_specs() |> Enum.map(& &1.name),
-       options: Map.new(state.session_request.provider_options || %{}),
+       options: provider_options(state),
        subscriber: self(),
        background_subscriber: state.session_pid,
        running: counts.running,
