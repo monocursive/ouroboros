@@ -309,9 +309,12 @@ should be read as a claim of partition-safe consensus.
 Use a background child for builds or other work that should outlive the current turn:
 
 ```text
-agent(machine: "builder", workspace: "/srv/project", background: true,
+agent(machine: "builder", sync: true, background: true,
       deadline_ms: 900000, prompt: "Build the project and report the result")
 ```
+
+`sync: true` provisions the current Git workspace on the worker. Use `workspace:`
+instead when deliberately selecting a checkout that already exists on that worker.
 
 The node's `provider_options.subagent_deadline_ms` defaults to 300000 ms;
 `subagent_max_deadline_ms` defaults to 900000 ms and caps a requested per-call deadline.
@@ -350,6 +353,13 @@ as they were. Inspect the child’s changes with `git show <returned_ref>` and
 apply them deliberately with `git cherry-pick <returned_commit>`. The returned commit
 combines the child's committed and dirty changes relative to the provisioned snapshot;
 intermediate child commits are not preserved as separate commits in that return.
+
+Ignored files do not travel. Add workspace-specific exclusions in `ouroboros.toml`:
+
+```toml
+[provision]
+exclude = [".env", "secrets/"]
+```
 
 Put reports and other artifacts in `.ouroboros/deliver/`. This directory is prepared
 before launch and excluded from the Git snapshot. Only regular files are accepted;
@@ -390,7 +400,8 @@ ambiguous spawn response from becoming a duplicate child on retry.
 
 Configure a native model on the owner with `OUROBOROS_NATIVE_MODEL` or the runtime's
 `:native_model` setting, using an existing native credential source. Vendor model aliases
-are not native model specifications. After a child is created, result and stop remain
+are not native model specifications. The selected worker also needs credentials for
+the child's native model. After a child is created, result and stop remain
 available even if the native default is removed. The previously removed Codex CLI
 transport remains removed; this bridge does not reintroduce it.
 
