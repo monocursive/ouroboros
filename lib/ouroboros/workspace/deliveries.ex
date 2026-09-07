@@ -184,7 +184,7 @@ defmodule Ouroboros.Workspace.Deliveries do
 
   defp same_file?(a, b),
     do:
-      a.type == :regular and b.type == :regular and
+      b.type == :regular and
         Map.take(a, [:inode, :major_device, :minor_device, :size, :mtime, :ctime]) ==
           Map.take(b, [:inode, :major_device, :minor_device, :size, :mtime, :ctime])
 

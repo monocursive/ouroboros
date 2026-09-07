@@ -38,7 +38,7 @@ test("sign-in recovery and progressive session setup", async ({ page }) => {
   await page.getByRole("link", { name: "New session", exact: true }).click();
   await expect(page).toHaveTitle("New session · Ouroboros");
   await expect(page.locator("#workspace")).toBeVisible();
-  await expectMinimumTarget(page.getByLabel("Computer", { exact: true }));
+  await expectMinimumTarget(page.getByRole("combobox", { name: "Computer", exact: true }));
   await expect(page.locator("#initial-message")).toBeVisible();
   await expectMinimumTarget(page.locator("#workspace"));
   await expectMinimumTarget(page.locator("#initial-message"));

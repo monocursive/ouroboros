@@ -958,11 +958,15 @@ fn machines_service_confirms_before_writing_a_unit() {
         service.text()
     );
     assert!(
-        service.contains("does not start the daemon"),
+        service.contains("Installs and starts automatic recovery"),
         "{}",
         service.text()
     );
-    assert!(service.contains("activation command"), "{}", service.text());
+    assert!(
+        service.contains("checks it is enabled"),
+        "{}",
+        service.text()
+    );
     assert!(app.take_fleet_job().is_none());
     assert!(app
         .drain()
@@ -1063,7 +1067,7 @@ fn machines_add_flow_reviews_a_plan_then_requests_a_fleet_restart() {
         "{}",
         form.text()
     );
-    assert!(form.contains("host"), "{}", form.text());
+    assert!(form.contains("Private address"), "{}", form.text());
 
     type_text(&mut app, "linux-laptop");
     app.apply(key(KeyCode::Tab));
@@ -1142,12 +1146,20 @@ fn machines_add_picks_a_known_tailscale_host_and_prefills_this_mac() {
         "{}",
         form.text()
     );
-    assert!(form.contains("tailscale"), "{}", form.text());
     assert!(form.contains("studio.tailnet.ts.net"), "{}", form.text());
+    assert!(form.contains("F6 advanced options"), "{}", form.text());
     assert!(
-        form.contains("A Mac binary will not run on Linux"),
+        form.contains("This computer's name    studio"),
         "{}",
         form.text()
+    );
+    app.apply(key(KeyCode::F(6)));
+    let advanced = render(&mut app, 120, 34);
+    assert!(advanced.contains("tailscale"), "{}", advanced.text());
+    assert!(
+        advanced.contains("A Mac binary will not run on Linux"),
+        "{}",
+        advanced.text()
     );
 }
 
@@ -5606,7 +5618,7 @@ fn attached_runtime_footer_preserves_the_complete_endpoint_at_standard_width() {
 }
 
 #[test]
-fn the_visible_tab_is_the_only_one_polled() {
+fn home_polls_machine_status_but_defers_provider_inventory_to_the_dashboard() {
     let mut app = shell(full_hello());
     app.open_home();
     app.apply(Msg::Tick);
@@ -5615,12 +5627,15 @@ fn the_visible_tab_is_the_only_one_polled() {
 
     assert!(methods.contains(&"interactive.list".to_string()));
     assert!(methods.contains(&"coding.list".to_string()));
-    assert!(!methods.contains(&"runtime.status".to_string()));
+    assert!(methods.contains(&"runtime.status".to_string()));
+    assert!(!methods.contains(&"runtime.providers".to_string()));
+    assert!(!methods.contains(&"agents.list".to_string()));
 
     app.apply(key(KeyCode::BackTab));
 
     let methods: Vec<String> = app.drain().into_iter().map(|call| call.method).collect();
-    assert!(methods.contains(&"runtime.status".to_string()));
+    // The home request is still pending; switching tabs must not duplicate it.
+    assert!(!methods.contains(&"runtime.status".to_string()));
     assert!(methods.contains(&"runtime.providers".to_string()));
 }
 

@@ -375,23 +375,6 @@ defmodule Ouroboros.Provider.Native.Tools do
   defp validation_reason(%{__exception__: true} = reason),
     do: reason |> Exception.message() |> validation_reason()
 
-  defp validation_reason(reason) when is_map(reason) do
-    case value(reason, :errors) do
-      errors when is_list(errors) ->
-        errors
-        |> Enum.map(fn
-          error when is_map(error) -> value(error, :message)
-          error -> error_message(error)
-        end)
-        |> Enum.filter(&(is_binary(&1) and &1 != ""))
-        |> Enum.uniq()
-        |> Enum.join("; ")
-
-      _other ->
-        error_message(reason)
-    end
-  end
-
   defp validation_reason(reason) when is_binary(reason) do
     case Regex.run(~r/message: "([^"]+)"/, reason, capture: :all_but_first) do
       [message] -> message
@@ -399,8 +382,6 @@ defmodule Ouroboros.Provider.Native.Tools do
       _opaque -> "Arguments do not match the advertised schema."
     end
   end
-
-  defp validation_reason(reason), do: error_message(reason)
 
   defp required_summary([]), do: "Required arguments: none."
   defp required_summary(required), do: "Required arguments: #{Enum.join(required, ", ")}."
@@ -817,9 +798,6 @@ defmodule Ouroboros.Provider.Native.Tools do
   defp describe(%{__exception__: true} = error), do: Exception.message(error)
   defp describe(reason) when is_binary(reason), do: reason
   defp describe(reason), do: inspect(reason)
-
-  defp error_message(reason) when is_binary(reason), do: reason
-  defp error_message(reason), do: inspect(reason)
 
   defp value(map, key) when is_map(map),
     do: Map.get(map, key) || Map.get(map, Atom.to_string(key))

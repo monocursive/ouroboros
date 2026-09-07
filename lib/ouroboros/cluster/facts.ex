@@ -18,18 +18,14 @@ defmodule Ouroboros.Cluster.Facts do
         {_, os} -> Atom.to_string(os)
       end
 
-    hostname =
-      case :inet.gethostname() do
-        {:ok, value} -> to_string(value)
-        _ -> "unknown"
-      end
+    {:ok, hostname} = :inet.gethostname()
 
     data_dir = Application.get_env(:ouroboros, :data_dir)
 
     Map.merge(tag_facts, %{
       os: os,
       arch: :erlang.system_info(:system_architecture) |> to_string() |> String.split("-") |> hd(),
-      hostname: hostname,
+      hostname: to_string(hostname),
       toolchains: toolchains,
       provisionable:
         "git" in toolchains and is_binary(data_dir) and File.dir?(data_dir) and

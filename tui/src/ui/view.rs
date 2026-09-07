@@ -2614,7 +2614,7 @@ fn add_field_row(add: &AddMachine, field: AddField, focused: bool) -> Line<'stat
             if focused { "> " } else { "  " },
             Style::default().fg(theme::accent()),
         ),
-        Span::styled(format!("{label:<16}"), theme::label()),
+        Span::styled(format!("{label:<24}"), theme::label()),
         Span::styled(
             if value.is_empty() { "—" } else { value }.to_string(),
             value_style,
