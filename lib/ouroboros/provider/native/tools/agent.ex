@@ -903,7 +903,6 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
   defp deadline_ms(input, parent) do
     ceiling =
       positive_option(option(parent.options, "subagent_max_deadline_ms"), @max_deadline_ms)
-      |> max(@min_deadline_ms)
       |> min(@absolute_deadline_ms)
 
     default =

@@ -585,6 +585,10 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
              AgentTool.plan(%{"prompt" => "build", "deadline_ms" => 99_000_000}, parent)
 
     assert spec.deadline_ms == 14_400_000
+
+    parent = %{parent | options: %{"subagent_max_deadline_ms" => 250}}
+    assert {:ok, spec} = AgentTool.plan(%{"prompt" => "build", "deadline_ms" => 1_000}, parent)
+    assert spec.deadline_ms == 250
   end
 
   test "500 tool calls coalesce and the last progress carries the latest activity", context do
