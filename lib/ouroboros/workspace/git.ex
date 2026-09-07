@@ -29,6 +29,18 @@ defmodule Ouroboros.Workspace.Git do
   defp execute(root, args, opts) do
     options = Keyword.merge([cd: root, timeout_ms: 120_000, max_bytes: 2 * 1024 * 1024], opts)
 
+    env =
+      options
+      |> Keyword.get(:env, [])
+      |> Map.new()
+      |> Map.merge(%{
+        "GIT_CONFIG_NOSYSTEM" => "1",
+        "GIT_CONFIG_GLOBAL" => "/dev/null",
+        "GIT_CONFIG_COUNT" => "0"
+      })
+
+    options = Keyword.put(options, :env, Map.to_list(env))
+
     # These are runtime bookkeeping commands, not a developer's interactive Git
     # invocation. Even update-ref can execute reference-transaction hooks; neither
     # snapshots nor bundle imports may turn that bookkeeping into extra user commands.
