@@ -3,7 +3,7 @@
 An implemented secure core plus the evolution design for a fleet of Ouroboros runtimes
 — a Mac, a Linux laptop, a VPS — joined as one BEAM cluster.
 
-## Current shipped core (2026-08-21)
+## Current implemented core (2026-09-07)
 
 The beginner path no longer requires the environment/OpenSSL runbook described later in
 this document. From the first Mac you launch, `/machines` is a menu that can add, create,
@@ -48,7 +48,7 @@ ouro fleet service start
 # Either machine
 ouro fleet status
 ouro fleet doctor
-ouro new --machine laptop --provider codex --workspace /absolute/path/on/laptop/project
+ouro new --machine laptop --provider native --workspace /absolute/path/on/laptop/project
 
 # If an expected invitation is abandoned, publish the signed membership change
 ouro fleet invite cancel --machine laptop --out fleet.ouro-roster
@@ -200,6 +200,21 @@ late join, hub loss/rejoin, automatic service-run crash restart, and final clean
 runs that exercise on Linux before a release artifact may publish. This remains an
 isolated same-host proof, not a claim that a release has already been installed on three
 physical networks.
+
+On 2026-09-07 the Mac and Ubuntu 26.04 VPS also formed the TLS fleet directly over
+Tailscale, with readiness passing after a VPS service restart. A native child received
+the Mac's dirty and untracked files in a VPS-owned worktree, read and edited them through
+native tools under `workspace_write`, and returned changes plus a delivered report. The
+first bundle was 180885 bytes; the second was 540 bytes and reused the same mirror.
+The Mac's HEAD, index bytes and working status were unchanged. Both returned commits
+passed a real single-commit cherry-pick tree comparison, acknowledgments were repeatable,
+and returned worktrees and source snapshot pins were removed after acknowledgment.
+
+That round trip used scripted model responses to exercise placement, tools and transfer
+without a model-provider dependency. A paused child also received a committed edit and
+delivery fixture through a bounded peer RPC; its dirty write used the real native tool.
+The packaged daemons loaded the branch's updated runtime modules for this check. It is
+physical transport and workspace evidence, not a release installation or AI-provider claim.
 
 What has been proven across two real machines (2026-08-28): a `make dist-linux`
 artifact was deployed from a macOS checkout to a fresh Ubuntu 26.04 VPS by
@@ -1093,3 +1108,26 @@ requests carry an opaque capability, repository identity, commit, and task ID. A
 lost parent process or distribution link cannot authorize target cleanup. Returned
 refs are retained for inspection and may be removed explicitly with
 `git update-ref -d refs/ouroboros/subagents/<task_id>` after the work is accepted.
+
+## Vendor sessions and native children
+
+Interactive Claude Code sessions receive `agent`, `agent_result`, and `fleet` through
+`ouro mcp-serve` in every approval posture. Their children use the same native dispatch,
+permission rules, hooks, effect ledger and approval channel as native sessions. The
+owner's current configuration is read for each call. The gateway accepts the session ID
+and tool input; it does not accept a caller-supplied principal or permission posture.
+Closing the owner closes its sidecar and children. A stable request ID prevents an
+ambiguous spawn response from becoming a duplicate child on retry.
+
+Configure a native model on the owner with `OUROBOROS_NATIVE_MODEL` or the runtime's
+`:native_model` setting, using an existing native credential source. Vendor model aliases
+are not native model specifications. After a child is created, result and stop remain
+available even if the native default is removed. The previously removed Codex CLI
+transport remains removed; this bridge does not reintroduce it.
+
+A real Ubuntu 26.04 run on 2026-09-07 completed `sleep 700 && echo ok` in 700.085 seconds
+inside the normal Linux sandbox. The parent became idle after 20 ms and stayed idle
+through all 140 progress observations; collection returned `completed` and `ok`. Model
+responses were scripted for this timing gate; the shell, sandbox, elapsed time, progress
+and session lifecycle were real. This is local/live implementation evidence, not a
+published release claim.
