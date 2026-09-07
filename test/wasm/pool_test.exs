@@ -640,10 +640,13 @@ defmodule Ouroboros.Wasm.PoolTest do
     end
 
     test "the helper starts in its readable private scratch, independent of the VM cwd" do
-      pool = start_pool(env_dump_helper())
+      pool = start_pool(env_dump_helper(true))
 
-      assert {:ok, %{"tmpdir" => scratch, "cwd" => cwd}} = Pool.inspect(component(), pool)
+      assert {:ok, %{"tmpdir" => scratch, "cwd" => cwd, "relative_write" => written}} =
+               Pool.inspect(component(), pool)
+
       assert cwd == scratch
+      assert written == "scratch-relative-write"
     end
 
     test "the child's own scratch carries an owner marker it cannot rewrite" do
@@ -1971,11 +1974,22 @@ defmodule Ouroboros.Wasm.PoolTest do
   # Answers every non-`doctor` request with the *names* of every variable in its own
   # environment, space-separated. Names only: the point is which variables crossed the spawn
   # boundary at all, and a value that did cross has no business in a test log either.
-  defp env_dump_helper do
+  defp env_dump_helper(cwd_probe \\ false) do
+    probe =
+      if cwd_probe do
+        """
+        printf '%s' scratch-relative-write > cwd-probe
+        relative_write=$(cat "$TMPDIR/cwd-probe")
+        """
+      else
+        "relative_write="
+      end
+
     write_helper("""
     #!/bin/sh
     helper_cwd=$(pwd -P)
-    exec awk -v helper_cwd="$helper_cwd" '
+    #{probe}
+    exec awk -v helper_cwd="$helper_cwd" -v relative_write="$relative_write" '
     {
       id = $0
       sub(/.*"id":/, "", id)
@@ -1985,7 +1999,7 @@ defmodule Ouroboros.Wasm.PoolTest do
       } else {
         names = ""
         for (k in ENVIRON) { names = names k " " }
-        printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"result\\":{\\"env\\":\\"%s\\",\\"tmpdir\\":\\"%s\\",\\"cwd\\":\\"%s\\"}}\\n", id, names, ENVIRON["TMPDIR"], helper_cwd)
+        printf("{\\"jsonrpc\\":\\"2.0\\",\\"id\\":%s,\\"result\\":{\\"env\\":\\"%s\\",\\"tmpdir\\":\\"%s\\",\\"cwd\\":\\"%s\\",\\"relative_write\\":\\"%s\\"}}\\n", id, names, ENVIRON["TMPDIR"], helper_cwd, relative_write)
       }
       fflush()
     }

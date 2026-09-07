@@ -1685,7 +1685,14 @@ defmodule Ouroboros.Wasm.Pool do
           process: process_setting(state)
         )
 
-      case Sandbox.wrap({:argv, [state.helper_path | helper_argv(state)]}, %{}, policy, detection) do
+      # Linux overlays scratch with a private tmpfs. Re-enter it after those mounts;
+      # the Port's initial cwd alone would still name the covered host directory.
+      case Sandbox.wrap(
+             {:argv, [state.helper_path | helper_argv(state)]},
+             %{root: scratch},
+             policy,
+             detection
+           ) do
         {:ok, {executable, args}} ->
           {:ok,
            %{
