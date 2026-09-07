@@ -2,7 +2,8 @@
 
 Work branch: `codex/fleet-aware-subagents`, based on `ffded0b` (`dev`).
 The specification is [fleet-aware-subagents.md](fleet-aware-subagents.md).
-This is an implementation acceptance record, not a release claim.
+Acceptance completed on 2026-09-07. This is an implementation acceptance record,
+not a release claim.
 
 ## Implemented and checked
 
@@ -66,14 +67,47 @@ admits only the exact sandbox executable paths used by the tests.
   gateway TCP to a live session, listed the fleet, spawned a physical VPS child, collected
   its result, and inspected its returned Git ref. The child model was scripted and the
   parent was an MCP driver, not Claude. Evidence: `/tmp/ouro-fleet-mcp-wire-result.json`.
-- **Claude parent:** the real CLI was invoked, but its OAuth session expired and automatic
-  refresh failed before any MCP call. No provider success is claimed; the remaining live
-  check awaits Mac reauthentication. No credentials were copied to the VPS.
+- **Native AI on the packaged VPS:** after the operator completed OpenAI device sign-in,
+  `openai_codex:gpt-5.6-sol` through ReqLLM actually called native write and read tools and
+  verified `VPS_NATIVE_AI_READY` in its test workspace. This used the packaged runtime
+  at `31b3047`, without a scripted model or hotloaded modules. The test session was closed.
+  Evidence: VPS `/tmp/ouro-final-vps-native-smoke.log`.
+- **Real Claude parent and real native child:** after Mac reauthentication, Claude Code
+  called the actual MCP `agent` and `agent_result` tools to delegate to the VPS's
+  `openai_codex:gpt-5.6-sol` child, collect its returned commit, and inspect it with
+  `git show`. The child actually read dirty and untracked inputs and returned
+  `PHYSICAL_CLAUDE_REAL_NATIVE_RETURN_OK`. Ignored/configured exclusions stayed absent;
+  parent HEAD, index and working files stayed unchanged. Both machines ran final packaged
+  source `8706591`, with no scripted models, hotloaded modules or model configuration
+  overrides. Test sessions were closed. Credentials were authorized separately on each
+  machine and were not copied between them.
+  Evidence: `/tmp/ouro-fleet-real-claude-result.json` and
+  `/tmp/ouro-fleet-real-claude.log`.
+
+Final `make ouro` builds at `8706591` succeeded on both hosts. The installed VPS service
+is enabled, authenticated and ready after restart, with its native execution boundary
+confirming the installed toolchains. The two final packaged daemons report two connected
+machines over verified TLS; `fleet doctor` succeeds on both. The Mac acceptance profile
+is isolated under `/tmp` and manually started, so managed recovery is intentionally not
+installed there. Its explicitly pinned test ports overlap the ephemeral range; normal
+product defaults are unchanged. This does not claim an upgrade of the user's default Mac
+daemon. Evidence: `/tmp/ouro-fleet-final-mac-package.log`,
+`/tmp/ouro-fleet-final-mac-posture.log` and `/tmp/ouro-final-linux-evidence/summary.json`.
 
 ## Client and integrated checks
 
-- Initial complete Rust runs: **1658 default / 1667 embed passed**, no failures or ignored
-  tests. The later terminal wrapping change is included in the fresh final run.
+- Final full Elixir suites at runtime/test tree `31b3047`: **4083 passed / 9 skipped on
+  Mac**, **4065 passed / 27 skipped on Ubuntu**, zero failures or invalid tests. Linux
+  required the real WASM helper and complete offline forge dependency cache. Mac ran
+  with eight test cases at once and without competing build jobs. Logs:
+  `/tmp/ouro-fleet-final-31b3047/mix.log` and VPS
+  `/tmp/ouro-final-d6adc509-gate.log` (`d6adc509` has the identical tree).
+
+- Complete Rust suites at `31b3047`: **1659 default / 1668 embed passed**, no failures or
+  ignored tests. Strict Clippy then caught the enlarged child payload inflating every
+  transcript enum value. The two-line layout fix at `8706591` boxes that payload; its
+  **260 affected UI/corpus/transcript tests**, both strict all-target Clippy configurations
+  and formatting passed. Script lifecycle checks and Elixir formatting also passed.
 - Browser/protocol focused gate after display changes: **219 passed**.
 - Actual web components rendered at desktop and phone widths. This caught long activity
   overflow and hidden return outcomes in folded rows. Wrapping now keeps page content at
@@ -88,18 +122,26 @@ admits only the exact sandbox executable paths used by the tests.
   when distribution is stopped before verification. The integrated replay/context/loop
   gate passed **85 tests**. Removing the recorded snapshot or rebuilding recorded tools
   from live distribution each failed the committed regression; restored gates passed.
-- The initial full Elixir run exposed stale protocol docs, configuration-dependent
-  fixtures and sandbox helper startup failures. Docs and fixtures were corrected, and
-  the helper now starts inside its admitted scratch directory. That superseded run was
-  stopped; fresh final Mac and Linux runs use the integrated source. Process-start delays
-  observed on the Mac remain under investigation until the quiet run completes.
+- Integration fixed protocol documentation drift and fixtures that assumed no fleet or
+  isolated data directory, plus Linux sandbox error wording. WASM helpers now enter their
+  admitted scratch both before launch and after Linux mounts it. A real kernel regression
+  checks relative-write/absolute-read agreement; removing backend cwd failed on Linux,
+  restoring it passed. The earlier Mac startup timeouts did not recur in the full quiet
+  run.
+- Live tools continue to refresh between turns while replay keeps recorded schemas. A
+  real MCP server becoming ready after session opening reaches the next model request.
+  Removing the live/replay distinction failed that regression; restored MCP/replay gate
+  passed **13 tests**.
 
-## Remaining acceptance
+## Acceptance
 
-- [ ] Run the real Claude parent / remote child check.
-- [ ] Full final Elixir and Rust default/embed suites, format, Clippy and script checks.
-- [ ] Final packaged builds and direct Mac/VPS readiness with the final source.
+- [x] Run the real Claude parent / remote child check.
+- [x] Full final Elixir suites on Mac and Ubuntu.
+- [x] Full Rust default/embed suites, affected tests after the layout fix, format, Clippy
+  and script checks.
+- [x] Final packaged builds and direct Mac/VPS connectivity with the final source;
+  managed VPS readiness and isolated manual Mac posture verified.
 - [x] Finish rendered TUI verification.
-- [ ] Reconcile this record to final integrated evidence.
+- [x] Reconcile this record to final integrated evidence.
 
 No push, merge, publication or production release is claimed.

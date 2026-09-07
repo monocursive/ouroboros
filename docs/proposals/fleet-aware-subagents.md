@@ -1,7 +1,7 @@
 # Proposal: fleet-aware subagents
 
 **Status:** slices A–E implemented on `codex/fleet-aware-subagents`;
-[final acceptance is in progress](fleet-aware-subagents-validation.md)
+[final acceptance completed 2026-09-07](fleet-aware-subagents-validation.md)
 **Written against:** `ffded0b` (dev, 2026-09-05); every citation below was read at that ref
 **Scope:** the native provider's `agent` tool, the cluster posture seam, workspace
 provisioning, and the two clients that draw subagent rows

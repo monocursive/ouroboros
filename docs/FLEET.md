@@ -216,6 +216,14 @@ delivery fixture through a bounded peer RPC; its dirty write used the real nativ
 The packaged daemons loaded the branch's updated runtime modules for this check. It is
 physical transport and workspace evidence, not a release installation or AI-provider claim.
 
+The final acceptance on the same day used packaged source `8706591` on both machines:
+real Claude Code on the Mac delegated through MCP to a real OpenAI-powered native child
+on the VPS, collected its returned commit and inspected it with `git show`. Dirty and
+untracked inputs reached the child, exclusions stayed absent, and the parent's HEAD,
+index and working files stayed unchanged. This check used no scripted models or hotloaded
+modules. See the [complete implementation acceptance record](proposals/fleet-aware-subagents-validation.md)
+for build, test and isolated fleet posture details.
+
 What has been proven across two real machines (2026-08-28): a `make dist-linux`
 artifact was deployed from a macOS checkout to a fresh Ubuntu 26.04 VPS by
 `ouro fleet add` (probe, artifact resolution, binary + invitation copy, remote join),
