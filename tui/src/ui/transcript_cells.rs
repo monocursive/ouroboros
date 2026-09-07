@@ -3497,35 +3497,51 @@ pub fn body_rows(text: &str) -> Vec<String> {
 fn render_subagent(lines: &mut Vec<Line<'static>>, subagent: &SubagentCell, width: usize) {
     separate(lines);
 
-    lines.push(Line::from(Span::styled(
-        format!("{SUBAGENT_MARKER} {}", subagent.headline()),
-        Style::default()
-            .fg(colour(subagent.tone()))
-            .add_modifier(Modifier::BOLD),
-    )));
+    let inner_width = width.max(8).saturating_sub(2);
+    let heading_style = Style::default()
+        .fg(colour(subagent.tone()))
+        .add_modifier(Modifier::BOLD);
+
+    for (index, row) in wrap_limited(&subagent.headline(), inner_width, 4)
+        .into_iter()
+        .enumerate()
+    {
+        let prefix = if index == 0 { SUBAGENT_MARKER } else { " " };
+        lines.push(Line::from(Span::styled(
+            format!("{prefix} {row}"),
+            heading_style,
+        )));
+    }
 
     let digest = subagent.digest();
+    let detail = match subagent.status_word() {
+        Some(status) if !digest.is_empty() => format!("{status} · {digest}"),
+        Some(status) => status.to_string(),
+        None => digest,
+    };
 
-    match subagent.status_word() {
-        Some(status) => {
-            let mut spans = vec![Span::styled(
-                format!("  {status}"),
-                Style::default().fg(colour(subagent.tone())),
-            )];
-
-            if !digest.is_empty() {
-                spans.push(Span::styled(format!(" · {digest}"), theme::muted()));
+    let detail_rows = if detail.is_empty() {
+        Vec::new()
+    } else {
+        wrap_limited(&detail, inner_width, 8)
+    };
+    for (index, row) in detail_rows.into_iter().enumerate() {
+        let mut spans = vec![Span::raw("  ")];
+        match subagent
+            .status_word()
+            .filter(|_| index == 0)
+            .and_then(|status| row.strip_prefix(status).map(|rest| (status, rest)))
+        {
+            Some((status, rest)) => {
+                spans.push(Span::styled(
+                    status.to_string(),
+                    Style::default().fg(colour(subagent.tone())),
+                ));
+                spans.push(Span::styled(rest.to_string(), theme::muted()));
             }
-
-            lines.push(Line::from(spans));
+            None => spans.push(Span::styled(row, theme::muted())),
         }
-        None if !digest.is_empty() => {
-            lines.push(Line::from(Span::styled(
-                format!("  {digest}"),
-                theme::muted(),
-            )));
-        }
-        None => {}
+        lines.push(Line::from(spans));
     }
 
     for row in subagent.rows() {

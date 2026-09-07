@@ -5686,3 +5686,40 @@ fn tabs_wrap_in_both_directions() {
     app.apply(key(KeyCode::Tab));
     assert_eq!(app.tab, Tab::Sessions);
 }
+
+/// The full transcript viewport draws prewrapped rows, so a long child heading or
+/// digest must wrap before reaching Paragraph; otherwise its tail vanishes silently.
+#[test]
+fn fleet_child_facts_survive_the_actual_narrow_transcript_viewport() {
+    for width in [40, 80, 120] {
+        let mut app = with_open_session();
+        notify(&mut app, fixture("event_provider_event_subagent"));
+        let screen = render(&mut app, width, 36);
+        let visible = screen.text().split_whitespace().collect::<String>();
+        for fact in [
+            "ouroboros@worker",
+            "12m 05s",
+            "test/parser_test.exs",
+            "31 tool calls",
+            "$0.0731",
+        ] {
+            assert!(
+                visible.contains(&fact.split_whitespace().collect::<String>()),
+                "{fact} clipped at {width}:\n{}",
+                screen.text()
+            );
+        }
+        let joined = screen.rows.iter().map(|row| row.trim()).collect::<String>();
+        assert!(
+            joined.contains("refs/ouroboros/subagents/task-subagent-000000000001"),
+            "{}",
+            screen.text()
+        );
+        assert!(
+            joined
+                .contains("/home/indie/.ouroboros/deliveries/task-subagent-000000000001/tests.txt"),
+            "{}",
+            screen.text()
+        );
+    }
+}
