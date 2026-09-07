@@ -315,7 +315,8 @@ reading.
 | `signing.decisions` | bounded `:erpc.call(signing_node, Signing.Service, :decisions, [])` — requires `OUROBOROS_SIGNING_NODE` configured **and** `Node.alive?()` (a `OUROBOROS_DIST=none` daemon cannot erpc), else `-32004`. Upstream failure shape is `{:error, {:signing_service_unavailable, _}}`, a nested tuple |
 | `grants.list` `{principal}` | `Control.Grants.list/1` (per-principal by design — there is no list-all, and the gateway does not add one). `Grants.list/1` swallows `:exit` into `[]` ([grants.ex:159](../lib/ouroboros/control/grants.ex)), so the handler pre-checks `Process.whereis(Grants)` to answer `-32004` instead of a false empty |
 | `permissions.list` `{scope?, workspace?, node?}` | `Control.Permissions.list/1` on the named machine (local by default; a remote one is a bounded `:erpc`, so an unreachable machine is reported as unreachable rather than as a gateway timeout). Returns the `:node` rules read from `config :ouroboros, :permissions` alongside the stored `:user`/`:workspace`/`:session` ones, each with `id`, `pattern`, `kind`, `decision`, `scope`, `workspace`, `session_id`, `created_at`, and `fragile` — the last true for an argument-constraining `Bash` pattern, which is accepted but easy to route around |
-| `fleet.status` | `Cluster.fleet_status/0` — expected/connected/offline machines, compatibility, TLS posture |
+| `fleet.status` | `Cluster.fleet_status/0` — expected/connected/offline machines, compatibility, TLS posture, optional OS/arch/tags/toolchains |
+| `fleet.tags` | Operator-scoped add/remove/list of advisory tags on a connected machine; target-owned atomic profile writer |
 | `fleet.revoke` `{artifact}` | Operate scope. Verify and durably import a CA-signed revocation, close connections authenticated by that credential, and return surviving machines' acknowledgements plus offline/pending holders. The CLI exposes this through `fleet revoke` and `fleet import-revocation`. |
 | `fleet.doctor` | `Cluster.fleet_doctor/0` — live fleet checks merged with host-local certificate/interface/port/log/service facts |
 | `runtime.lsp.status` | `Ouroboros.CodeIntel.status/0` — every language server this node owns: state, pids, RSS, root, uptime, restarts, open documents, and the host memory budget. `enabled: false` and an empty list where `OUROBOROS_CODE_INTEL=0`. Node-local by construction; a fleet answer is one call per machine, because a pool runs where the files are |
@@ -1004,7 +1005,10 @@ ouro fleet sync import ROSTER
 ouro fleet sessions forget --machine NAME --accept-state-loss
                       after signed removal + restart, irreversibly retire this
                       gateway/data-dir's offline session-owner evidence
-ouro fleet status     expected/connected/offline machines and TLS posture
+ouro fleet tag add|remove TAG [--machine NAME]
+ouro fleet tag list [--machine NAME]
+                      edit local or connected target tags; visible next probe
+ouro fleet status     expected/connected/offline machines, OS/arch, tags and TLS posture
 ouro fleet doctor     actionable profile/network/runtime/service checks
 ouro fleet service install|status|remove
                       generate and inspect launchd/systemd user recovery

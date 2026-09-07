@@ -649,7 +649,7 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
                  AgentTool.plan(%{"prompt" => "x", "machine" => "builder-2"}, parent)
 
         assert message =~ "this node is not part of a fleet"
-        assert message =~ "OUROBOROS_CLUSTER_STRATEGY"
+        assert message =~ "ouro fleet create"
         assert message =~ "docs/FLEET.md"
         assert message =~ "Omit `machine:`"
       end

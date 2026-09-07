@@ -88,6 +88,40 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
 
     put_peer_env!(peer, :native_data_dir, peer_data)
     put_peer_env!(peer, :native_model_module, NativeModelScript)
+    put_peer_env!(peer, :data_dir, peer_data)
+    [node_name, host] = String.split(Atom.to_string(peer), "@")
+    machine = String.replace_prefix(node_name, "ouro-", "")
+    fleet_id = "00112233445566778899aabb"
+
+    profile = %{
+      "schema" => 1,
+      "fleet_id" => fleet_id,
+      "machine" => machine,
+      "host" => host,
+      "node" => Atom.to_string(peer),
+      "role" => "core",
+      "roster_revision" => 1,
+      "tags" => ["peer-build"],
+      "members" => [%{"machine" => machine, "host" => host, "node" => Atom.to_string(peer)}]
+    }
+
+    :ok = peer_call(peer, File, :mkdir_p!, [Path.join(peer_data, "fleet")])
+
+    :ok =
+      peer_call(peer, File, :write!, [
+        Path.join([peer_data, "fleet", "profile.json"]),
+        Jason.encode!(profile)
+      ])
+
+    :ok = peer_call(peer, System, :put_env, ["OUROBOROS_FLEET_ID", fleet_id])
+    send(Ouroboros.Cluster.Monitor, {:nodeup, peer})
+
+    wait_until(fn ->
+      Enum.any?(
+        Ouroboros.Cluster.fleet_status().machines,
+        &(&1.node == peer and Ouroboros.Cluster.Facts.tags(&1) == ["peer-build"])
+      )
+    end)
 
     on_exit(fn ->
       Enum.each(previous, fn {key, value} -> restore(key, value) end)
@@ -244,7 +278,7 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
               agent_call(%{
                 "prompt" => "read lib/remote.ex and say what it defines",
                 "description" => "remote read",
-                "machine" => Atom.to_string(context.peer),
+                "machine" => "tag:peer-build",
                 "workspace" => context.peer_workspace
               })
             ],
@@ -259,6 +293,12 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
             ]
           ]
         )
+
+      facts = peer_call(context.peer, Ouroboros.Cluster, :local_fleet_posture, []).facts
+      {:ok, hostname} = peer_call(context.peer, :inet, :gethostname, [])
+      assert facts.hostname == to_string(hostname)
+      assert facts.tags == ["peer-build"]
+      assert Ouroboros.Cluster.resolve_machine("tag:peer-build") == {:ok, context.peer}
 
       send_turn(handle)
       events = collect_until(:turn_completed, [], 90_000)
@@ -737,7 +777,7 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
   # The same shape `test/cluster_test.exs` uses: a peer booted on this VM's code path,
   # running the whole application, with the storages a second node must not share.
   defp start_app_peer! do
-    name = String.to_atom("ouroboros_subagent_peer_#{unique()}")
+    name = String.to_atom("ouro-subagent-peer-#{unique()}")
 
     {:ok, peer, peer_node} =
       :peer.start(%{name: name, args: code_path_args(), wait_boot: 30_000})

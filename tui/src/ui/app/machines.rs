@@ -778,6 +778,29 @@ impl MachineChoice {
 }
 
 impl App {
+    pub fn machine_fact_lines(&self) -> Vec<String> {
+        self.status
+            .value
+            .as_ref()
+            .and_then(|status| status.cluster.get("fleet"))
+            .and_then(|fleet| fleet.get("machines"))
+            .and_then(Value::as_array)
+            .map(|machines| {
+                machines
+                    .iter()
+                    .take(4)
+                    .map(|machine| {
+                        let name = machine
+                            .get("machine")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown");
+                        format!("{name} · {}", crate::fleet::render_machine_facts(machine))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The fleet state a person needs, without the distribution vocabulary used by the
     /// runtime protocol. Local membership says what should be present; live status says
     /// what is present now. Neither source contains a cookie, key, or certificate.

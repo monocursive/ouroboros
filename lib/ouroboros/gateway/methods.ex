@@ -562,6 +562,22 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   @doc false
+  def handle_fleet_tags(params) do
+    safe(fn ->
+      with {:ok, machine} <- fetch_string(params, "machine"),
+           operation when operation in ["add", "remove", "list"] <- Map.get(params, "operation"),
+           {:ok, target} <- Cluster.resolve_machine(machine),
+           {:ok, tags} <- Cluster.Tags.change(target, operation, Map.get(params, "tag")) do
+        {:ok, %{node: target, tags: tags}}
+      else
+        {:invalid, message} -> invalid_params(message)
+        {:error, reason} -> invalid_params("fleet tags: #{inspect(reason)}")
+        _ -> invalid_params("operation must be add, remove, or list")
+      end
+    end)
+  end
+
+  @doc false
   def handle_fleet_status(_params) do
     safe(fn -> {:ok, Cluster.fleet_status()} end)
   end

@@ -250,9 +250,39 @@ inventory rather than placement fences. Bump the integer whenever fleet posture,
 session routing, or distributed ownership semantics become unsafe across revisions; do
 not replace it with a build-path or source hash.
 
+### Agent awareness and advisory tags
+
+Native distributed sessions have a read-only `fleet` tool and a labelled fleet snapshot
+in the opening prompt. Call `fleet` before placing work: it lists at most 64 machines,
+including disconnected machines with their last disconnect time. OS, CPU, hostname,
+operator tags, toolchain presence and provisionability travel as optional posture facts;
+older peers remain valid with unknown facts. Detection never executes a toolchain.
+`ouro fleet status` and `/machines` show platform and tags.
+
+```sh
+ouro fleet tag add xcode --machine studio
+ouro fleet tag list --machine studio
+ouro fleet tag remove xcode --machine studio
+```
+
+Omit `--machine` to edit the local profile even while its daemon is stopped. Remote
+changes use the authenticated operator gateway and the target's installed client, which
+shares the profile writer and lifecycle lock used by local management. They appear at
+the next probe. Tags allow 1–64 lowercase letters/digits plus `. _ : -`, starting with a
+letter or digit, at most 32 per machine. Invalid profile tags are shown with a reason,
+never silently adopted. A native child can use `machine: "tag:xcode"`; exactly one
+connected match is required, and only its concrete node is retained. Multiple matches
+name the machines so the agent can choose deliberately. Tags and facts grant no authority.
+
+Local automated evidence: `fleet_test.exs`, `cluster_test.exs`, and the real-VM
+`subagent_remote_test.exs` cover optional facts, profile validation, tag matching and a
+child reading on the tagged peer, including its hostname. Rust fleet tests cover profile
+tag persistence, diagnostics and optional-fact rendering. This is separate from the
+physical-machine deployment evidence above.
+
 Still intentionally deferred: automatic Tailscale LocalAPI discovery and auto-join
 (Add lists `tailscale status --json` peers and `~/.ssh/config` hosts as optional
-targets; it does not join them without a confirm), free-form tags,
+targets; it does not join them without a confirm),
 logical workspace maps, heterogeneous forge orchestration, replicated journals, live
 provider migration, quorum/fencing, and multi-cluster federation. One Erlang cluster is
 one trust domain. A network partition can produce independent views; no section below
@@ -265,7 +295,7 @@ the implemented core above. It is retained as design history, **not** as current
 feature documentation. In particular, its “does not exist” statements and file:line
 citations describe the pre-fleet tree and are now intentionally stale. Use the current
 core section above or the README for operation; use the remainder only to understand
-decisions and deferred ideas such as tags, Tailscale discovery, logical workspaces, and
+decisions and deferred ideas such as broader tag routing, Tailscale discovery, logical workspaces, and
 HA.
 
 The longer-term design targets discovery without a hand-maintained host list and routing

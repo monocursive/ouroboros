@@ -322,6 +322,8 @@ impl Drop for EpmdRuntimeWatch {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Profile {
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub schema: u8,
     pub fleet_id: String,
     pub name: String,
@@ -663,6 +665,84 @@ pub fn load(data_dir: &Path) -> Result<Option<Profile>> {
     Ok(Some(profile))
 }
 
+/// Tags describe this machine; they never change membership or permissions.
+pub fn tags(
+    data_dir: &Path,
+    machine: Option<&str>,
+    change: Option<(&str, bool)>,
+) -> Result<Vec<String>> {
+    let _lock = lock_live_fleet_update(data_dir, "ouro fleet tag")?;
+    let mut profile =
+        load(data_dir)?.context("this machine is standalone; create or join a fleet first")?;
+    if let Some(machine) = machine {
+        if machine != profile.machine && machine != profile.node {
+            bail!(
+                "this profile belongs to {}; run `ouro fleet tag` on machine {} to edit its tags",
+                profile.machine,
+                machine
+            );
+        }
+    }
+    if let Some((tag, add)) = change {
+        validate_tags(&[tag.to_string()])?;
+        if add && !profile.tags.iter().any(|existing| existing == tag) {
+            profile.tags.push(tag.to_string());
+        } else if !add {
+            profile.tags.retain(|existing| existing != tag);
+        }
+        validate_tags(&profile.tags)?;
+        write_profile(data_dir, &profile)?;
+    }
+    Ok(profile.tags)
+}
+
+fn validate_tags(tags: &[String]) -> Result<()> {
+    if tags.len() > 32 {
+        bail!("fleet tags must contain at most 32 tags");
+    }
+    for tag in tags {
+        let valid = !tag.is_empty()
+            && tag.len() <= 64
+            && (tag.as_bytes()[0].is_ascii_lowercase() || tag.as_bytes()[0].is_ascii_digit())
+            && tag
+                .bytes()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"._:-".contains(&c));
+        if !valid {
+            bail!("invalid fleet tag {tag:?}; use 1–64 lowercase letters, digits, dots, underscores, colons or hyphens, starting with a letter or digit");
+        }
+    }
+    Ok(())
+}
+
+/// Optional posture facts remain readable against an older runtime.
+pub fn render_machine_facts(machine: &Value) -> String {
+    let Some(facts) = machine.get("facts").filter(|value| value.is_object()) else {
+        return "platform unknown · tags unknown".into();
+    };
+    let os = facts.get("os").and_then(Value::as_str).unwrap_or("unknown");
+    let arch = facts
+        .get("arch")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let tags = facts
+        .get("tags")
+        .and_then(Value::as_array)
+        .map(|tags| {
+            tags.iter()
+                .filter_map(Value::as_str)
+                .take(32)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|tags| !tags.is_empty())
+        .unwrap_or_else(|| "—".into());
+    let mut text = format!("{os}/{arch} · tags: {tags}");
+    if let Some(error) = facts.get("tags_error").and_then(Value::as_str) {
+        text.push_str(&format!(" · {error}"));
+    }
+    text
+}
+
 pub fn summary(data_dir: &Path) -> Summary {
     let staging_problem = match inspect_orphan_staging(data_dir) {
         Ok(staging) if staging.is_empty() => None,
@@ -729,6 +809,7 @@ pub fn create(
     ensure_epmd_port_available(host, epmd_port)?;
     let (dist_port_min, dist_port_max) = dist_ports(ports.dist);
     let profile = Profile {
+        tags: Vec::new(),
         schema: PROFILE_SCHEMA,
         fleet_id: fleet_id.clone(),
         name: fleet_name,
@@ -1177,6 +1258,7 @@ pub fn join(data_dir: &Path, invitation_path: &Path, ports: Ports) -> Result<Pro
         None => (default_min, default_max),
     };
     let profile = Profile {
+        tags: Vec::new(),
         schema: PROFILE_SCHEMA,
         fleet_id: invitation.fleet_id.clone(),
         name: invitation.name.clone(),
@@ -1457,6 +1539,7 @@ pub fn render_live_status(data_dir: &Path, value: &Value) -> Option<String> {
         text.push_str(&format!(
             "  {marker} {name:<18} {state:<10} {role:<8} {node}\n"
         ));
+        text.push_str(&format!("      {}\n", render_machine_facts(machine)));
         if machine.get("revoked?").and_then(Value::as_bool) == Some(true) {
             text.push_str("      credential permanently revoked; TLS access refused\n");
         } else if state == "offline" {
@@ -2121,6 +2204,7 @@ where
     // Only the machine name participates in OS service identity. The remaining fields
     // are inert placeholders and are never persisted or shown.
     let service_profile = Profile {
+        tags: Vec::new(),
         schema: PROFILE_SCHEMA,
         fleet_id: "000000000000000000000000".into(),
         name: "incomplete fleet recovery".into(),
@@ -2990,6 +3074,7 @@ fn validate_profile(profile: &Profile) -> Result<()> {
     if profile.fleet_id.len() != 24 || !profile.fleet_id.chars().all(|c| c.is_ascii_hexdigit()) {
         bail!("fleet profile has an invalid fleet id");
     }
+    validate_tags(&profile.tags)?;
     validate_fleet_name(&profile.name)?;
     validate_machine(&profile.machine)?;
     validate_host(&profile.host)?;
@@ -3244,6 +3329,7 @@ fn validate_invitation(invitation: &Invitation) -> Result<()> {
         );
     }
     let profile = Profile {
+        tags: Vec::new(),
         schema: PROFILE_SCHEMA,
         fleet_id: invitation.fleet_id.clone(),
         name: invitation.name.clone(),
@@ -5064,8 +5150,53 @@ mod tests {
         assert!(validate_ready_status(&status, None).is_err());
     }
 
+    #[test]
+    fn tags_round_trip_and_validate_before_persisting() {
+        let dir = scratch("tags");
+        fs::create_dir(dir.join("fleet")).unwrap();
+        let profile = sample_profile("studio");
+        write_profile(&dir, &profile).unwrap();
+        assert_eq!(
+            tags(&dir, None, Some(("xcode", true))).unwrap(),
+            vec!["xcode"]
+        );
+        assert_eq!(
+            tags(&dir, None, Some(("xcode", true))).unwrap(),
+            vec!["xcode"]
+        );
+        assert_eq!(load(&dir).unwrap().unwrap().tags, vec!["xcode"]);
+        assert!(tags(&dir, None, Some(("BAD tag", true)))
+            .unwrap_err()
+            .to_string()
+            .contains("BAD tag"));
+        assert_eq!(
+            tags(&dir, None, Some(("xcode", false))).unwrap(),
+            Vec::<String>::new()
+        );
+        let mut invalid = profile;
+        invalid.tags = vec!["BAD".into()];
+        let encoded = serde_json::to_vec(&invalid).unwrap();
+        write_private_atomic(&profile_path(&dir), &encoded).unwrap();
+        assert!(doctor(&dir).text.contains("BAD"));
+    }
+
+    #[test]
+    fn facts_render_with_tags_and_older_peers_stay_unknown() {
+        assert_eq!(
+            render_machine_facts(&serde_json::json!({})),
+            "platform unknown · tags unknown"
+        );
+        assert_eq!(
+            render_machine_facts(
+                &serde_json::json!({"facts": {"os": "macos", "arch": "aarch64", "tags": ["xcode", "ios"]}})
+            ),
+            "macos/aarch64 · tags: xcode ios"
+        );
+    }
+
     fn sample_profile(machine: &str) -> Profile {
         Profile {
+            tags: Vec::new(),
             schema: PROFILE_SCHEMA,
             fleet_id: "00112233445566778899aabb".into(),
             name: "Workshop fleet".into(),
@@ -6112,6 +6243,7 @@ mod tests {
     #[test]
     fn doctor_warns_when_pinned_ports_sit_inside_the_ephemeral_range() {
         let first_generation = Profile {
+            tags: Vec::new(),
             schema: PROFILE_SCHEMA,
             fleet_id: "cafecafecafecafecafecafe".into(),
             name: "lab".into(),

@@ -417,6 +417,15 @@ defmodule Ouroboros.ClusterTest do
 
           write_test_fleet_profile!(fleet_dir, fleet_id, local: owner, members: [owner])
 
+          profile_path = Path.join(fleet_dir, "profile.json")
+          profile = profile_path |> File.read!() |> Jason.decode!()
+          File.write!(profile_path, Jason.encode!(Map.put(profile, "tags", ["xcode", "ios-sim"])))
+          assert Cluster.local_fleet_posture().facts.tags == ["xcode", "ios-sim"]
+          File.write!(profile_path, Jason.encode!(Map.put(profile, "tags", ["BAD tag"])))
+          assert Cluster.local_fleet_posture().facts.tags == []
+          assert Cluster.local_fleet_posture().facts.tags_error =~ "BAD tag"
+          File.write!(profile_path, Jason.encode!(profile))
+
           assert Cluster.fleet_name() == "Cluster test fleet"
           assert Cluster.fleet_status().fleet_name == "Cluster test fleet"
 

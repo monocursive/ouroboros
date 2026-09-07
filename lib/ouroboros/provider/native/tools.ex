@@ -52,6 +52,7 @@ defmodule Ouroboros.Provider.Native.Tools do
   alias Ouroboros.Provider.Native.Tools.DesktopAct
   alias Ouroboros.Provider.Native.Tools.DesktopState
   alias Ouroboros.Provider.Native.Tools.Edit
+  alias Ouroboros.Provider.Native.Tools.Fleet
   alias Ouroboros.Provider.Native.Tools.Glob
   alias Ouroboros.Provider.Native.Tools.Grep
   alias Ouroboros.Provider.Native.Tools.Ls
@@ -89,6 +90,7 @@ defmodule Ouroboros.Provider.Native.Tools do
       AskUser,
       AgentTool,
       AgentResult,
+      Fleet,
       Skill,
       Plan
     ]
@@ -123,7 +125,9 @@ defmodule Ouroboros.Provider.Native.Tools do
     allowed = normalize(allowed)
     disallowed = normalize(disallowed)
 
-    hidden = depth_hidden(opts)
+    hidden =
+      depth_hidden(opts) ++
+        if(Keyword.get(opts, :distributed, Node.alive?()), do: [], else: ["fleet"])
 
     static =
       modules()

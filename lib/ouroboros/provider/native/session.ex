@@ -1632,6 +1632,7 @@ defmodule Ouroboros.Provider.Native.Session do
 
     [
       system_prompt: state.request.system_prompt,
+      fleet: Ouroboros.Provider.Native.Tools.Fleet.snapshot(),
       cwd: state.scope.root,
       add_dirs: state.scope.roots -- [state.scope.root],
       sandbox_mode: state.scope.sandbox_mode,

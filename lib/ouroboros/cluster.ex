@@ -187,6 +187,7 @@ defmodule Ouroboros.Cluster.Monitor do
             # "not known", never "admission is off". Placement that needs the fact reads
             # with `Map.get/2`.
             workspace: Map.get(posture, :workspace),
+            facts: Map.get(posture, :facts),
             probe_error: nil
           })
 
@@ -466,6 +467,7 @@ defmodule Ouroboros.Cluster.Monitor do
       # means everywhere in this record — never "it has no helper".
       wasm: nil,
       workspace: nil,
+      facts: nil,
       probe_error: nil
     }
   end
@@ -857,6 +859,7 @@ defmodule Ouroboros.Cluster.Monitor do
       {:ok,
        %{
          name: profile_name(profile),
+         tag_facts: Ouroboros.Cluster.Facts.validate_tags(Map.get(profile, "tags", [])),
          roster_revision: revision,
          members: active.by_machine,
          tombstones: removed.by_machine
@@ -1407,7 +1410,7 @@ defmodule Ouroboros.Cluster do
   @doc "Resolves an already-known node name or friendly machine name without creating an atom."
   @spec resolve_machine(String.t()) :: {:ok, node()} | {:error, term()}
   def resolve_machine(name) when is_binary(name) do
-    resolve_directory_machine(name, &(&1.state in [:local, :connected]))
+    Ouroboros.Cluster.Facts.resolve(name, fleet_status().machines)
   end
 
   def resolve_machine(_name), do: {:error, :unknown_machine}
@@ -1442,7 +1445,8 @@ defmodule Ouroboros.Cluster do
       machine: machine_name(),
       runtime: runtime_identity(),
       wasm: wasm_posture(),
-      workspace: workspace_admission_posture()
+      workspace: workspace_admission_posture(),
+      facts: Ouroboros.Cluster.Facts.local()
     })
   end
 
@@ -1797,19 +1801,16 @@ defmodule Ouroboros.Cluster do
   end
 
   defp resolve_directory_machine(name, include?) do
-    candidates =
-      fleet_status().machines
-      |> Enum.filter(include?)
-      |> Enum.filter(fn machine ->
-        Atom.to_string(machine.node) == name or machine.machine == name
-      end)
-      |> Enum.map(& &1.node)
-      |> Enum.uniq()
-
-    case candidates do
+    fleet_status().machines
+    |> Enum.filter(include?)
+    |> Enum.filter(&Ouroboros.Cluster.Facts.matches?(&1, name))
+    |> Enum.map(& &1.node)
+    |> Enum.uniq()
+    |> Enum.sort()
+    |> case do
       [target] -> {:ok, target}
       [] -> {:error, :unknown_machine}
-      targets -> {:error, {:ambiguous_machine, Enum.sort(targets)}}
+      targets -> {:error, {:ambiguous_machine, targets}}
     end
   end
 

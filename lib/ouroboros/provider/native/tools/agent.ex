@@ -127,8 +127,8 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
         type: :string,
         default: "",
         doc:
-          "Run the child on another machine of this fleet. Name a connected machine; omit " <>
-            "to run it on this one."
+          "Run the child on another machine of this fleet. Call fleet for the live list. " <>
+            "Name a connected machine or use tag:NAME when exactly one matches; omit to run here."
       ],
       workspace: [
         type: :string,
@@ -507,18 +507,49 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
   both the whole name of one machine and part of `core@a2`, and a caller who typed the
   whole name meant the whole name.
 
-  Public and pure because resolution is a fact about a name and a list rather than about a
-  fleet, and a refusal that names the candidates has to be readable back without one.
+  The candidate list bounds placement; friendly names and tags use the live directory.
+  A refusal names the connected candidates and their advertised tags.
   `{:error, message}` is the sentence the model is shown.
   """
   @spec resolve_machine(String.t(), [node()]) :: {:ok, node()} | {:error, String.t()}
+  def resolve_machine("tag:" <> _tag = name, candidates) do
+    machines =
+      Cluster.fleet_status().machines
+      |> Enum.filter(&(&1.node in candidates and &1.state in [:local, :connected]))
+
+    case Ouroboros.Cluster.Facts.resolve(name, machines) do
+      {:ok, target} ->
+        {:ok, target}
+
+      {:error, :unknown_machine} ->
+        {:error,
+         "Refused: no connected machine matches `machine: #{inspect(name)}`. Connected machines and tags: #{Ouroboros.Cluster.Facts.labels(machines)}. Call `fleet` for the live list."}
+
+      {:error, {:ambiguous_machine, targets}} ->
+        matches = Enum.filter(machines, &(&1.node in targets))
+
+        {:error,
+         "Refused: `machine: #{inspect(name)}` matches several connected machines: #{Ouroboros.Cluster.Facts.labels(matches)}. Name one concrete machine."}
+    end
+  end
+
   def resolve_machine(name, candidates) when is_binary(name) and is_list(candidates) do
     case Enum.filter(candidates, &(Atom.to_string(&1) == name)) do
       [target] ->
         {:ok, target}
 
       _none_or_ambiguous ->
-        case Enum.filter(candidates, &String.contains?(Atom.to_string(&1), name)) do
+        named =
+          Cluster.fleet_status().machines
+          |> Enum.filter(&(&1.node in candidates and &1.machine == name))
+          |> Enum.map(& &1.node)
+
+        matches =
+          if named == [],
+            do: Enum.filter(candidates, &String.contains?(Atom.to_string(&1), name)),
+            else: named
+
+        case matches do
           [target] -> {:ok, target}
           [] -> {:error, unknown_machine_refusal(name, candidates)}
           many -> {:error, ambiguous_machine_refusal(name, many)}
@@ -566,7 +597,7 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
     do:
       "Refused: `machine: \"#{name}\"` asks for another machine, and this node is not part " <>
         "of a fleet — it runs without distribution, so there is no other machine to reach. " <>
-        "An operator forms a fleet with OUROBOROS_CLUSTER_STRATEGY (see docs/FLEET.md). " <>
+        "Create a fleet with `ouro fleet create`, then connect a machine with `ouro fleet add user@host` (see docs/FLEET.md). " <>
         "Omit `machine:` to run the child here."
 
   defp unknown_machine_refusal(name, candidates) do
@@ -574,20 +605,31 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
       [] ->
         "Refused: no machine matches `machine: \"#{name}\"` — this node is distributed but " <>
           "no other machine is connected to it right now, so there is nowhere to place a " <>
-          "child. Omit `machine:` to run it here."
+          "child. Omit `machine:` to run it here. Connected machines and tags: #{directory_labels(candidates)}."
 
       connected ->
         "Refused: no machine matches `machine: \"#{name}\"`. The machines connected to this " <>
           "one are: #{join_nodes(connected)}. Name one of those — in full, or by a fragment " <>
-          "that fits only it — or omit `machine:` to run the child here."
+          "that fits only it — or omit `machine:` to run the child here. Connected machines and tags: #{directory_labels(candidates)}."
     end
+  end
+
+  defp directory_labels(candidates) do
+    known = Cluster.fleet_status().machines
+
+    candidates
+    |> Enum.map(fn candidate ->
+      Enum.find(known, &(&1.node == candidate)) ||
+        %{node: candidate, machine: to_string(candidate), facts: nil}
+    end)
+    |> Ouroboros.Cluster.Facts.labels()
   end
 
   defp ambiguous_machine_refusal(name, matches),
     do:
       "Refused: `machine: \"#{name}\"` matches #{length(matches)} connected machines: " <>
         "#{join_nodes(matches)}. Name one of them in full — a fragment that fits two " <>
-        "machines cannot choose between them."
+        "machines cannot choose between them. Advertised tags: #{directory_labels(matches)}."
 
   @doc """
   Renders one `Ouroboros.Cluster.ensure_placeable/1` refusal as the sentence the model sees.

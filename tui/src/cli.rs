@@ -1242,7 +1242,33 @@ pub struct RunArgs {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum FleetTagCommand {
+    /// Add an advisory tag on this machine.
+    Add {
+        tag: String,
+        #[arg(long)]
+        machine: Option<String>,
+    },
+    /// Remove an advisory tag on this machine.
+    Remove {
+        tag: String,
+        #[arg(long)]
+        machine: Option<String>,
+    },
+    /// List this machine's tags.
+    List {
+        #[arg(long)]
+        machine: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum FleetCommand {
+    /// Label this machine with advisory tags; changes appear on the next fleet probe.
+    Tag {
+        #[command(subcommand)]
+        command: FleetTagCommand,
+    },
     /// Print the machine-management protocol revision, without starting a runtime.
     Protocol,
     /// Install the current TLS revocation policy on a stopped, previously created fleet.
@@ -1526,6 +1552,23 @@ mod tests {
     }
 
     /// B2. `--plan` is a plain boolean on both surfaces, with no flag it fights.
+    #[test]
+    fn fleet_tags_accept_a_remote_machine_selector() {
+        let cli = Cli::try_parse_from([
+            "ouro",
+            "fleet",
+            "tag",
+            "add",
+            "xcode",
+            "--machine",
+            "studio",
+        ])
+        .unwrap();
+        assert!(
+            matches!(cli.command, Some(Command::Fleet { command: FleetCommand::Tag { command: FleetTagCommand::Add { tag, machine: Some(machine) } } }) if tag == "xcode" && machine == "studio")
+        );
+    }
+
     #[test]
     fn plan_is_a_boolean_on_new_and_on_run() {
         let Some(Command::New { plan, .. }) = parse(&["new", "--plan"]).command else {

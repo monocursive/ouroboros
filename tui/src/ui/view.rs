@@ -1837,9 +1837,10 @@ fn machines(frame: &mut Frame, area: Rect, app: &App, machines: &Machines) {
     }
 
     let summary = app.machine_summary();
+    let machine_facts = app.machine_fact_lines();
 
     let rows = Layout::vertical([
-        Constraint::Length(6),
+        Constraint::Length(6 + machine_facts.len() as u16),
         Constraint::Length(items.len() as u16 + 1),
         Constraint::Min(4),
         Constraint::Length(2),
@@ -1899,6 +1900,11 @@ fn machines(frame: &mut Frame, area: Rect, app: &App, machines: &Machines) {
             Style::default().fg(theme::warn()),
         )));
     }
+    facts.extend(
+        machine_facts
+            .into_iter()
+            .map(|line| Line::from(Span::styled(line, theme::label()))),
+    );
     frame.render_widget(Paragraph::new(facts).wrap(Wrap { trim: false }), rows[0]);
 
     let mut actions = vec![Line::from(Span::styled(

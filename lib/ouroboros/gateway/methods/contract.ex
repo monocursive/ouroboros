@@ -501,6 +501,18 @@ defmodule Ouroboros.Gateway.Methods.Contract do
         {:closed, [{"artifact", :required, :string, "CA-attested revocation, at most 16 KiB"}]},
       handler: :handle_fleet_revoke
     },
+    "fleet.tags" => %{
+      scope: :operate,
+      timeout: 15000,
+      params:
+        {:closed,
+         [
+           {"machine", :required, :string, "connected machine name or node"},
+           {"operation", :required, :string, "add, remove, or list; tags are advisory"},
+           {"tag", :optional, :string, "validated tag for add/remove; omit for list"}
+         ]},
+      handler: :handle_fleet_tags
+    },
     "fleet.status" => %{
       scope: :read,
       timeout: @default_timeout,
