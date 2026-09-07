@@ -1122,7 +1122,7 @@ fn a_settled_child_agent_is_one_row_naming_its_machine_and_its_digest() {
     );
     assert_eq!(
         child.detail(),
-        "completed · 12m 05s · mix test test/parser_test.exs · 9 turns · 31 tool calls · 4 files · 18400 in / 2100 out tokens · $0.0731"
+        "completed · changes returned · 1 delivery · 12m 05s · mix test test/parser_test.exs · 9 turns · 31 tool calls · 4 files · 18400 in / 2100 out tokens · $0.0731"
     );
     assert_eq!(child.rows(), vec![
         "Changes returned as refs/ouroboros/subagents/task-subagent-000000000001",

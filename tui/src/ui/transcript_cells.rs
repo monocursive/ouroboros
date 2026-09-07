@@ -257,7 +257,7 @@ pub const SUBAGENT_MARKER: &str = "↳";
 
 /// One child agent's whole life, as a single row that is rewritten in place.
 ///
-/// A child sends up to sixty-four progress reports, so this is folded by `task_id` rather
+/// A child sends coalesced progress reports, so this is folded by `task_id` rather
 /// than appended to: a parent transcript that grew a line every time a child counted its
 /// turns would be a transcript about the counting. Latest wins, and only for the fields an
 /// event actually carried — a progress report that omits its tool-call count leaves the
@@ -292,7 +292,7 @@ pub struct SubagentCell {
     pub status: Option<String>,
     pub settled: bool,
     pub error: Option<String>,
-    /// The path of a worktree the runtime kept because it still held uncommitted work.
+    /// The path of a worktree retained for dirty work, an unfinished return, or failed cleanup.
     pub worktree_kept: Option<String>,
     pub returned_ref: Option<String>,
     pub return_error: Option<String>,
@@ -498,7 +498,7 @@ impl SubagentCell {
             ));
         }
         if let Some(path) = &self.worktree_kept {
-            rows.push(format!("Worktree kept (it holds uncommitted work): {path}"));
+            rows.push(format!("Worktree kept: {path}"));
         }
 
         if let Some(session) = &self.provider_session_id {
@@ -530,11 +530,26 @@ impl SubagentCell {
 
     /// The digest with its status word in front, as one line.
     pub fn detail(&self) -> String {
-        match (self.status_word(), self.digest()) {
-            (Some(status), digest) if digest.is_empty() => status.to_string(),
-            (Some(status), digest) => format!("{status} · {digest}"),
-            (None, digest) => digest,
+        let mut facts = Vec::new();
+        if let Some(status) = self.status_word() {
+            facts.push(status.to_string());
         }
+        if self.returned_ref.is_some() {
+            facts.push("changes returned".into());
+        }
+        if self.return_error.is_some() {
+            facts.push("return incomplete".into());
+        }
+        match self.deliveries.len() {
+            0 => {}
+            1 => facts.push("1 delivery".into()),
+            count => facts.push(format!("{count} deliveries")),
+        }
+        let digest = self.digest();
+        if !digest.is_empty() {
+            facts.push(digest);
+        }
+        facts.join(" · ")
     }
 
     /// The whole row as plain text, for `/details`, the export, and a voice.
@@ -7045,7 +7060,7 @@ diff --git a/src/lex.rs b/src/lex.rs
         let rendered = plain(&render_cells(&subagent_cells(&[kept]), 120));
 
         assert!(
-            rendered.contains("Worktree kept (it holds uncommitted work): /tmp/ouro-w1"),
+            rendered.contains("Worktree kept: /tmp/ouro-w1"),
             "{rendered}"
         );
         assert!(

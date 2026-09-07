@@ -508,7 +508,7 @@ defmodule Ouroboros.Web.Transcript.Cell.Subagent do
       maybe([], cell.returned_ref, &"Changes returned as #{&1}") ++
       maybe([], cell.return_error, &"Return: #{&1}") ++
       Enum.map(cell.deliveries, &"Delivered: #{&1.path} (#{&1.bytes} bytes)") ++
-      maybe([], cell.worktree_kept, &"Worktree kept (it holds uncommitted work): #{&1}") ++
+      maybe([], cell.worktree_kept, &"Worktree kept: #{&1}") ++
       maybe([], cell.provider_session_id, &"session #{&1}")
   end
 
@@ -536,11 +536,22 @@ defmodule Ouroboros.Web.Transcript.Cell.Subagent do
   @doc "The digest with its status word in front, as one line."
   @spec detail(t()) :: String.t()
   def detail(%__MODULE__{} = cell) do
-    case {status_word(cell), digest(cell)} do
-      {nil, digest} -> digest
-      {status, ""} -> status
-      {status, digest} -> "#{status} · #{digest}"
-    end
+    delivery =
+      case length(cell.deliveries) do
+        0 -> nil
+        1 -> "1 delivery"
+        count -> "#{count} deliveries"
+      end
+
+    [
+      status_word(cell),
+      if(cell.returned_ref, do: "changes returned"),
+      if(cell.return_error, do: "return incomplete"),
+      delivery,
+      digest(cell)
+    ]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join(" · ")
   end
 
   @doc "The whole row as plain text, for an export and a voice."

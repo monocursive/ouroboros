@@ -3000,6 +3000,29 @@ body .ouro-subagent-row {
   gap: 0.45rem;
 }
 
+/* Child activity and return summaries must wrap with the conversation width. */
+body .ouro-subagent-row {
+  display: grid;
+  grid-template-columns: 1.25rem minmax(0, 1fr);
+  align-items: start;
+}
+
+body .ouro-subagent-headline,
+body .ouro-subagent-detail {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+body .ouro-subagent-rows {
+  overflow-wrap: anywhere;
+}
+
+body .ouro-subagent-detail {
+  grid-column: 2;
+  margin-left: 0;
+  white-space: normal;
+}
+
 body .ouro-tool-mark,
 body .ouro-subagent-mark {
   width: 1.25rem;

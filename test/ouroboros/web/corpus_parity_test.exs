@@ -842,7 +842,7 @@ defmodule Ouroboros.Web.CorpusParityTest do
                "12m 05s · mix test test/parser_test.exs · 9 turns · 31 tool calls · 4 files · 18400 in / 2100 out tokens · $0.0731"
 
       assert Cell.Subagent.detail(child) ==
-               "completed · 12m 05s · mix test test/parser_test.exs · 9 turns · 31 tool calls · 4 files · 18400 in / 2100 out tokens · " <>
+               "completed · changes returned · 1 delivery · 12m 05s · mix test test/parser_test.exs · 9 turns · 31 tool calls · 4 files · 18400 in / 2100 out tokens · " <>
                  "$0.0731"
 
       assert Cell.Subagent.rows(child) == [
