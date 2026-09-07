@@ -29,9 +29,14 @@ defmodule Ouroboros.Workspace.Git do
   defp execute(root, args, opts) do
     options = Keyword.merge([cd: root, timeout_ms: 120_000, max_bytes: 2 * 1024 * 1024], opts)
 
+    # These are runtime bookkeeping commands, not a developer's interactive Git
+    # invocation. Even update-ref can execute reference-transaction hooks; neither
+    # snapshots nor bundle imports may turn that bookkeeping into extra user commands.
+    args = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false" | args]
+
     case Exec.run("git", args, options) do
       {:ok, %{status: 0, truncated?: false, timed_out?: false, output: output}} ->
-        {:ok, String.trim_trailing(output, "\n")}
+        {:ok, String.replace_suffix(output, "\n", "")}
 
       {:ok, %{truncated?: true}} ->
         {:error, :git_output_too_large}

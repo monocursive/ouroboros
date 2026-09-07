@@ -74,6 +74,16 @@ defmodule Ouroboros.WorkspaceSnapshotTest do
     assert {:error, :invalid_provision_excludes} = Snapshot.commit(root, "task-config")
   end
 
+  test "snapshot bookkeeping never executes repository reference hooks", %{root: root} do
+    hook = Path.join(root, ".git/hooks/reference-transaction")
+    File.write!(hook, "#!/bin/sh\nprintf invoked > hook-ran\n")
+    File.chmod!(hook, 0o755)
+    assert {:ok, _} = Snapshot.commit(root, "task-hooks")
+    assert {:ok, _} = Snapshot.release(root, "task-hooks")
+    refute File.exists?(Path.join(root, "hook-ran"))
+    refute File.exists?(Path.join(root, ".git/hook-ran"))
+  end
+
   test "refuses an unborn repository with an actionable reason" do
     {:ok, root} = Git.temp_directory()
     on_exit(fn -> File.rm_rf(root) end)

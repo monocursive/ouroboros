@@ -126,7 +126,11 @@ defmodule Ouroboros.Workspace.Worktree do
 
   @doc "Creates a recorded detached worktree from a node-owned bare mirror."
   def create_detached(repository, commit, session_id, opts \\ []) do
-    runner = runner(opts)
+    base_runner = runner(opts)
+
+    runner = fn args, cwd ->
+      base_runner.(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false" | args], cwd)
+    end
 
     with :ok <- validate_session_id(session_id),
          true <- Ouroboros.Workspace.Git.valid_commit?(commit),
