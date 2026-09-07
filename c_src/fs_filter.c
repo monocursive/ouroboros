@@ -233,6 +233,7 @@ static int path_denied_at(int dirfd, const char *path) {
 static int path_denied(const char *path) { return path_denied_at(AT_FDCWD, path); }
 
 static int creating(int flags) { return (flags & O_CREAT) != 0; }
+static int needs_mode(int flags) { return creating(flags) || (flags & O_TMPFILE) == O_TMPFILE; }
 
 int mkdir(const char *path, mode_t mode) {
   static int (*real_mkdir)(const char *, mode_t) = NULL;
@@ -268,7 +269,7 @@ int open(const char *path, int flags, ...) {
   if (real_open == NULL) {
     real_open = dlsym(RTLD_NEXT, "open");
   }
-  if (creating(flags)) {
+  if (needs_mode(flags)) {
     va_list ap;
     va_start(ap, flags);
     mode = (mode_t)va_arg(ap, int);
@@ -288,7 +289,7 @@ int openat(int dirfd, const char *path, int flags, ...) {
   if (real_openat == NULL) {
     real_openat = dlsym(RTLD_NEXT, "openat");
   }
-  if (creating(flags)) {
+  if (needs_mode(flags)) {
     va_list ap;
     va_start(ap, flags);
     mode = (mode_t)va_arg(ap, int);
@@ -314,7 +315,7 @@ int creat(const char *path, mode_t mode) {
  * Forward through the same path checks; O_LARGEFILE preserves their open semantics. */
 int open64(const char *path, int flags, ...) {
   mode_t mode = 0;
-  if (creating(flags)) {
+  if (needs_mode(flags)) {
     va_list ap;
     va_start(ap, flags);
     mode = (mode_t)va_arg(ap, int);
@@ -325,7 +326,7 @@ int open64(const char *path, int flags, ...) {
 
 int openat64(int dirfd, const char *path, int flags, ...) {
   mode_t mode = 0;
-  if (creating(flags)) {
+  if (needs_mode(flags)) {
     va_list ap;
     va_start(ap, flags);
     mode = (mode_t)va_arg(ap, int);

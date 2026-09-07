@@ -1109,6 +1109,8 @@ fn provisioned_delivery_and_approved_git_commit_keep_siblings_read_only() {
     let mut request = serde_json::json!({"mode":"workspace_write", "cwd":child, "scratch":workspace.scratch, "writable":[child], "protected":[mirror], "denied_names":[".git", ".ouroboros"], "write_exceptions":[delivery], "fs_filter_library":library, "network":true});
     let log = run_shell(&request.to_string(), "printf log > .ouroboros/deliver/log");
     assert!(log.status.success(), "{}", combined(&log));
+    let temporary = run_shell(&request.to_string(), "python3 -c 'import tempfile, os, stat; f=tempfile.TemporaryFile(dir=\".ouroboros/deliver\"); f.write(b\"ok\"); f.seek(0); assert f.read()==b\"ok\"; assert stat.S_IMODE(os.fstat(f.fileno()).st_mode)==0o600'");
+    assert!(temporary.status.success(), "{}", combined(&temporary));
     std::fs::write(child.join("changed"), "changed").unwrap();
     let command = "git add changed && git -c user.name=Test -c user.email=test@example.invalid commit -qm child";
     assert_reads_as_read_only_denial(&run_shell(&request.to_string(), command), "ordinary git");
