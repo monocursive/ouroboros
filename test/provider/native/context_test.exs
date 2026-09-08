@@ -109,10 +109,18 @@ defmodule Ouroboros.Provider.Native.ContextTest do
     end
 
     test "tool order is Tools.modules/0's order, not a sort" do
-      {:ok, context} = Context.build(cwd: "/tmp", instructions: false)
+      for distributed <- [false, true] do
+        {:ok, context} =
+          Context.build(
+            cwd: "/tmp",
+            instructions: false,
+            tools: Tools.specs(nil, nil, distributed: distributed)
+          )
 
-      assert Enum.map(context.tools, & &1.name) ==
-               Enum.map(Ouroboros.Provider.Native.Tools.modules(), & &1.name())
+        assert Enum.map(context.tools, & &1.name) ==
+                 Enum.map(Tools.modules(), & &1.name()) --
+                   if(distributed, do: [], else: ["fleet"])
+      end
     end
 
     test "descriptions are full where no model module declares tool search" do
