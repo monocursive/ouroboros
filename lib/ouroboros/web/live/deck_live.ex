@@ -1648,7 +1648,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
       )
 
     ~H"""
-    <div class="ouro-row-wrap">
+    <div id={"session-row-#{@row.plane}-#{@row.id}"} class="ouro-row-wrap">
       <.link
         patch={@href}
         aria-current={@selected? && "page"}
@@ -1669,6 +1669,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
       </.link>
       <details
         :if={@can_rename or @can_close or @can_delete}
+        id={"session-actions-#{@row.plane}-#{@row.id}"}
         class="ouro-row-actions"
         data-ouro-disclosure={"actions:#{@row.plane}:#{@row.id}"}
       >

@@ -108,8 +108,22 @@ test("session controls stay reachable and dialogs are modal", async ({ page }, t
 
   // A periodic deck refresh must not close a menu or a modal under its reader.
   await actions.click();
+  await actions.focus();
+  await expect(actions).toBeFocused();
+
+  // A new session moves this row down the rail. Its open menu and keyboard focus
+  // must follow the session instead of staying on the row's old position.
+  const another = await page.context().newPage();
+  await another.goto("/new");
+  await another.getByRole("button", { name: "Start session" }).click();
+  await expect(another).toHaveURL(/\/s\/interactive\//);
+  const newSessionPath = new URL(another.url()).pathname;
+  await another.close();
+  await page.bringToFront();
+  await expect(page.locator(`.ouro-row-wrap > a[href="${newSessionPath}"]`)).toHaveCount(1);
   await page.waitForTimeout(3500);
   await expect(end).toBeVisible();
+  await expect(actions).toBeFocused();
   await end.click();
   await page.waitForTimeout(3500);
   await expect(dialog).toBeVisible();

@@ -13,7 +13,8 @@ module.exports = defineConfig({
   reporter: process.env.CI ? "github" : "list",
   use: {
     baseURL: `http://127.0.0.1:${port}`,
-    channel: process.platform === "darwin" ? "chrome" : "chromium",
+    // Use Playwright's pinned browser on every host, matching CI.
+    channel: "chromium",
     trace: "retain-on-failure",
     screenshot: "only-on-failure"
   },
