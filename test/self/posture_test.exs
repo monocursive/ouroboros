@@ -37,13 +37,15 @@ defmodule Ouroboros.Self.PostureTest do
     end
 
     test "a near miss is not a posture", %{signers: signers} do
-      for typo <- ["Self", "SELF", "self ", " self"] |> Enum.reject(&(String.trim(&1) == "self")) do
+      for typo <- ["Self", "SELF", "selfish", "sel"] do
         assert {:error, _message} = Posture.configure(env(typo, signers))
       end
 
-      # And the trim is real: a variable an operator exported with a trailing newline is
-      # still the posture they meant.
-      assert {:ok, _settings} = Posture.configure(env("self ", signers))
+      # Surrounding whitespace is not a near miss: a variable an operator exported with a
+      # trailing newline is still the posture they meant.
+      for spelling <- ["self", " self", "self ", "\tself\n"] do
+        assert {:ok, _settings} = Posture.configure(env(spelling, signers))
+      end
     end
   end
 
