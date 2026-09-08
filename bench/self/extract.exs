@@ -71,15 +71,23 @@ defmodule Bench.Self.Extract.Candidate do
   def rank(candidates),
     do: Enum.sort_by(candidates, fn c -> {if(c.fix?, do: 0, else: 1), c.non_test_lines, c.sha} end)
 
-  @doc "One named commit, examined with the size filter lifted. `--commits` uses this."
+  @doc """
+  One named commit, examined with the size filter lifted. `--commits` uses this.
+
+  A merge is dropped here as it is in `select/3`. The sweep asks `git log --no-merges` and
+  never sees one; this door is the one a caller names a sha at, and a merge's "diff against
+  its first parent" is the other branch's work, which is not a task anybody did.
+  """
   @spec named(Path.t(), String.t()) :: {:ok, t()} | {:drop, String.t()}
   def named(repo, sha) do
     with full when is_binary(full) <- Git.out(repo, ["rev-parse", sha <> "^{commit}"]),
-         parent when is_binary(parent) <- Git.out(repo, ["rev-parse", full <> "^"]),
+         parents when parents != [] <- Git.parents(repo, full),
+         [parent] <- parents,
          subject when is_binary(subject) <- Git.out(repo, ["--no-pager", "log", "-1", "--format=%s", full]) do
       examine(repo, %{sha: full, base: parent, subject: subject}, :infinity)
     else
-      nil -> {:drop, "unknown_commit"}
+      [_first, _second | _more] -> {:drop, "merge_commit"}
+      _unknown -> {:drop, "unknown_commit"}
     end
   end
 
@@ -212,28 +220,47 @@ defmodule Bench.Self.Extract.Instruction do
   nothing about what changed. When a commit only edits existing test bodies, that file's
   own titles are used, so a task is never handed an empty acceptance list.
 
-  The rules paragraph states the two grading conditions the agent could otherwise only
-  discover by failing them. Saying them does not make gaming easier — the grader enforces
-  them either way — and not saying them would be measuring a rule nobody was told.
+  The rules paragraph states the grading conditions the agent could otherwise only discover
+  by failing them. Saying them does not make gaming easier — the grader enforces them
+  either way — and not saying them would be measuring a rule nobody was told.
+
+  **The body frequently describes the change.** A commit message written by the person who
+  made the change often names the function, the file, or the exact behaviour; the corpus
+  measures executing a described change against tests nobody showed the agent, and this
+  file is where that is decided rather than hidden. `subject-only` is the harder question,
+  and `--instruction subject-only` is how a second corpus asks it: the subject, the
+  acceptance list, and the rules, with the body dropped.
   """
 
   alias Bench.Self.Git
 
+  @kinds ~w(full subject-only)
   @max_titles 12
   @max_body 4_000
   @title ~r/^\s*test[\s(]+"((?:[^"\\]|\\.)*)"/m
 
   @rules "Rules. Files that already exist under `test/` must not be modified or deleted — " <>
            "the change is graded against tests restored from the history after the session " <>
-           "ends. New test files of your own are allowed and are left in place. Work only " <>
-           "inside this worktree."
+           "ends, applied to a fresh checkout of the starting commit. New test files of " <>
+           "your own are allowed and are left in place, but they are yours: they are not " <>
+           "copied into the tree the grade runs in. The change is collected as a diff over " <>
+           "`lib/`, `assets/`, `priv/`, `config/`, `docs/` and `README.md`; a change to any " <>
+           "other path — `mix.exs` and `.formatter.exs` included — is refused rather than " <>
+           "graded. Work only inside this worktree."
 
-  @spec build(Path.t(), map()) :: String.t()
-  def build(repo, candidate) do
-    [subject_and_body(repo, candidate.sha), acceptance(titles(repo, candidate)), @rules]
+  @doc "The instruction kinds `--instruction` accepts."
+  @spec kinds() :: [String.t()]
+  def kinds, do: @kinds
+
+  @spec build(Path.t(), map(), String.t()) :: String.t()
+  def build(repo, candidate, kind \\ "full") do
+    [head(repo, candidate.sha, kind), acceptance(titles(repo, candidate)), @rules]
     |> Enum.reject(&(&1 == ""))
     |> Enum.join("\n\n")
   end
+
+  defp head(repo, sha, "subject-only"), do: Git.out(repo, ["--no-pager", "log", "-1", "--format=%s", sha]) || ""
+  defp head(repo, sha, _full), do: subject_and_body(repo, sha)
 
   @doc ~S'The `test "…"` titles a commit adds to its hidden test files.'
   @spec titles(Path.t(), map()) :: [String.t()]
@@ -322,6 +349,9 @@ defmodule Bench.Self.Extract do
           ref: :string,
           commits: :string,
           verify: :string,
+          history: :string,
+          instruction: :string,
+          reinstruct: :string,
           max_tasks: :integer,
           max_diff_lines: :integer,
           task_ceiling_secs: :integer,
@@ -335,22 +365,115 @@ defmodule Bench.Self.Extract do
       )
 
     root = Path.expand(Path.dirname(__ENV__.file))
-    repo = Path.expand(Path.join(root, "../.."))
+    own = Path.expand(Path.join(root, "../.."))
+
+    # `--history` is the repository whose commits become tasks; it defaults to this
+    # checkout, and the selftest points it at a two-file fixture repository so that the
+    # extractor's own gates — a parent that already passes, a commit that does not — can be
+    # proved in seconds rather than argued about. The *checkout* stays this one either way:
+    # the reserved prompt delimiters are a property of the runtime under test, and the
+    # `deps/`/`_build/` that get cloned into a tree belong to this project.
+    repo = Path.expand(opts[:history] || own)
 
     config =
       @defaults
       |> Map.merge(Map.new(Keyword.take(opts, Map.keys(@defaults))))
       |> Map.merge(%{
         repo: repo,
+        checkout: own,
+        support: if(Git.same_repository?(own, repo), do: own, else: nil),
+        instruction_kind: opts[:instruction] || "full",
         root: root,
         out: Path.expand(opts[:out] || Path.join(root, "tasks")),
         keep: opts[:keep] == true
       })
 
-    case opts[:verify] do
-      nil -> extract(config, opts)
-      dir -> System.halt(verify_existing(config, Path.expand(dir)))
+    cond do
+      config.instruction_kind not in Instruction.kinds() ->
+        die("--instruction must be one of " <> Enum.join(Instruction.kinds(), ", "))
+
+      is_binary(opts[:reinstruct]) ->
+        System.halt(reinstruct(config, Path.expand(opts[:reinstruct])))
+
+      is_binary(opts[:verify]) ->
+        System.halt(verify_existing(config, Path.expand(opts[:verify])))
+
+      true ->
+        extract(config, opts)
     end
+  end
+
+  # ------------------------------------------------------------------ --reinstruct
+
+  # Rewrites an existing corpus's instructions from the history, without rebuilding a tree.
+  #
+  # An instruction is derived — subject, body, the titles the commit adds, the rules — so
+  # when the derivation changes, the corpus is stale rather than wrong, and re-deriving it
+  # is not the same job as re-extracting it. Re-extraction would pick different commits;
+  # this keeps the pins and rewrites the prose. It is also how a `subject-only` corpus is
+  # made from a `full` one: same thirty commits, one variable changed.
+  defp reinstruct(config, dir) do
+    case TaskFile.load_all(dir, nil) do
+      {:error, reason} ->
+        say("reinstruct  #{reason}")
+        64
+
+      {:ok, []} ->
+        say("reinstruct  #{dir} holds no tasks")
+        64
+
+      {:ok, tasks} ->
+        Enum.each(tasks, fn task ->
+          instruction = Instruction.build(config.repo, candidate(task), config.instruction_kind)
+
+          task
+          |> Map.drop(["dir"])
+          |> Map.put("instruction", instruction)
+          |> Map.put("instruction_kind", config.instruction_kind)
+          |> then(&TaskFile.write(task["dir"], &1))
+
+          say("reinstruct  #{task["id"]} #{String.length(instruction)} characters")
+        end)
+
+        say("reinstruct  #{length(tasks)} task(s) in #{dir} are now #{config.instruction_kind}")
+        collisions(dir)
+    end
+  end
+
+  defp collisions(dir) do
+    reloaded =
+      case TaskFile.load_all(dir, nil) do
+        {:ok, list} -> list
+        {:error, _reason} -> []
+      end
+
+    pairs =
+      for a <- reloaded,
+          b <- reloaded,
+          a["dir"] != b["dir"],
+          String.contains?(b["instruction"], a["instruction"]),
+          do: {a["id"], b["id"]}
+
+    case pairs do
+      [] ->
+        0
+
+      [{inner, outer} | _rest] ->
+        say("reinstruct  #{inner}'s instruction is now contained in #{outer}'s; the runner will refuse this corpus")
+        1
+    end
+  end
+
+  defp candidate(task) do
+    %{
+      sha: task["commit_sha"],
+      base: task["base_sha"],
+      subject: task["subject"],
+      fix?: false,
+      non_test_lines: get_in(task, ["measured", "diff_lines"]) || 0,
+      hidden: task["hidden_tests"],
+      solution: task["solution_files"]
+    }
   end
 
   # ------------------------------------------------------------------ extraction
@@ -368,7 +491,7 @@ defmodule Bench.Self.Extract do
     config =
       config
       |> Map.put(:scratch, scratch)
-      |> Map.put(:delimiters, delimiters(config.repo))
+      |> Map.put(:delimiters, delimiters(config.checkout))
     considered = Enum.take(candidates, config.max_candidates)
 
     {accepted, dynamic_drops} =
@@ -455,7 +578,7 @@ defmodule Bench.Self.Extract do
       say("verify  #{short} ok   #{candidate.non_test_lines} non-test lines, " <>
             "#{length(graded)} graded file(s), #{bytes} solution bytes")
 
-      {:ok, task(candidate, measured, instruction)}
+      {:ok, task(candidate, measured, instruction, config.instruction_kind)}
     else
       {:drop, class, detail} ->
         say("verify  #{short} drop #{class}#{if detail == "", do: "", else: " — " <> detail}")
@@ -496,7 +619,7 @@ defmodule Bench.Self.Extract do
   # it is dropped here rather than left in the corpus to fail `not_completed` and read like
   # the agent's fault. The list comes from the runtime; see `Bench.Self.Prompt`.
   defp instruction(candidate, config) do
-    text = Instruction.build(config.repo, candidate)
+    text = Instruction.build(config.repo, candidate, config.instruction_kind)
 
     if Prompt.reserved?(text, config.delimiters),
       do: {:drop, "instruction_reserved_delimiter", "the runtime refuses a prompt carrying its own delimiters"},
@@ -519,7 +642,7 @@ defmodule Bench.Self.Extract do
     ceiling_ms = config.task_ceiling_secs * 1_000
 
     try do
-      with {:ok, %{setup_ms: setup_ms}} <- prepared(config.repo, dir, candidate.base, ceiling_ms, log),
+      with {:ok, %{setup_ms: setup_ms}} <- prepared(config, dir, candidate.base, ceiling_ms, log),
            :ok <- restored(config.repo, dir, candidate.sha, candidate.hidden),
            {:ok, parent_ms} <- fails_at_parent(dir, graded, ceiling_ms, log),
            :ok <- under_ceiling(setup_ms + parent_ms, ceiling_ms),
@@ -532,8 +655,13 @@ defmodule Bench.Self.Extract do
     end
   end
 
-  defp prepared(repo, dir, base, ceiling_ms, log) do
-    case Workspace.prepare(repo, dir, base, envs: ["test"], timeout_ms: ceiling_ms, log: log) do
+  defp prepared(%{repo: repo, support: support}, dir, base, ceiling_ms, log) do
+    case Workspace.prepare(repo, dir, base,
+           envs: ["test"],
+           support_from: support,
+           timeout_ms: ceiling_ms,
+           log: log
+         ) do
       {:ok, prepared} -> {:ok, prepared}
       {:error, reason} -> {:drop, "setup_failed", reason}
     end
@@ -608,10 +736,11 @@ defmodule Bench.Self.Extract do
     |> min(1_800)
   end
 
-  defp task(candidate, measured, instruction) do
+  defp task(candidate, measured, instruction, kind) do
     %{
       "base_sha" => candidate.base,
       "instruction" => instruction,
+      "instruction_kind" => kind,
       "commit_sha" => candidate.sha,
       "subject" => candidate.subject,
       "hidden_tests" => candidate.hidden,
@@ -694,7 +823,7 @@ defmodule Bench.Self.Extract do
         config =
           config
           |> Map.put(:scratch, scratch)
-          |> Map.put(:delimiters, delimiters(config.repo))
+          |> Map.put(:delimiters, delimiters(config.checkout))
 
         candidate = %{
           sha: task["commit_sha"],

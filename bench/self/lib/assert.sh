@@ -79,13 +79,19 @@ expect_not_contains() {
 
 # One field of the `run` object in a runner `result.json`.
 #
-# Not a JSON parser. `JSON.encode!/1` writes compact output and the `run` object is flat,
-# so `"run":{` up to the first `}` is exactly that object and a field in it is
-# `"name":value` up to the next `,` or `}`. Isolating the object first matters: `tasks`
-# is a key in both the run object and the document, and a reader that took the last match
-# would answer with the task array.
+# Not a JSON parser. `JSON.encode!/1` writes compact output, and the `run` object runs from
+# `"run":{` to the `},"tasks":[` that starts the task array — the one place a nested object
+# ends and a named array begins. Isolating it first matters: `tasks` is a key in both the
+# run object and the document, and a reader that took the last match would answer with the
+# task array.
+#
+# `run.flags` is the one object nested inside it, and it is deleted before the search
+# rather than searched: it carries a `model`, an `oracle`, a `timeout` and a `history` of
+# its own — every one of them a name the run object also uses — so a reader that did not
+# remove it would sometimes answer with the flag instead of the result.
 run_field() {
-  sed -n 's/.*"run":{\([^}]*\)}.*/\1/p' "$1" 2>/dev/null |
+  sed -n 's/.*"run":{\(.*\)},"tasks":\[.*/\1/p' "$1" 2> /dev/null |
+    sed 's/"flags":{[^}]*}//' |
     grep -o "\"$2\":[^,}]*" |
     head -1 |
     sed 's/^"[^"]*"://' |
@@ -99,5 +105,37 @@ expect_json() {
     ok "$4"
   else
     fail "$4: run.$2 is '$got', wanted '$3'"
+  fi
+}
+
+# Every task's `reason` in a runner `result.json`, one per line.
+#
+# The `run` object has no `reason` key, so every match is a task's. No reason this corpus
+# produces contains a quote or a comma, which is what makes a grep enough here — the same
+# bargain `run_field` makes, and stated for the same reason.
+task_reasons() {
+  grep -o '"reason":"[^"]*"' "$1" 2> /dev/null | sed -e 's/^"reason":"//' -e 's/"$//'
+}
+
+# Asserts that EVERY task has the given reason. `expect_contains` over the whole file was
+# what this replaces, and it could not tell "every task failed for this reason" from
+# "the word appears once" — nor from a field name in the run object, which is how the
+# spend-cap assertion managed to hold whatever happened.
+expect_every_reason() {
+  got=$(task_reasons "$1" | sort -u | tr '\n' ' ' | sed 's/ *$//')
+
+  if [ "$got" = "$2" ]; then
+    ok "$3"
+  else
+    fail "$3: the task reasons are '$got', wanted every one to be '$2'"
+  fi
+}
+
+# Asserts that at least one task has the given reason.
+expect_reason() {
+  if task_reasons "$1" | grep -q -x -F -e "$2"; then
+    ok "$3"
+  else
+    fail "$3: no task's reason is '$2' (they are: $(task_reasons "$1" | tr '\n' ' '))"
   fi
 }

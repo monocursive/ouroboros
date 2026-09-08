@@ -66,37 +66,76 @@ nobody wrote by hand.
       `--no-approve-all` runs the unattended posture instead, where a headless run answers
       `deny`/`once`;
    4. grading, below;
-   5. `git worktree remove --force`, on every path including failure.
+   5. the workspace and the grading tree are removed, on every path including failure.
 5. Writes `result.json` and every trajectory under `--out`, prints a table, stops the
-   daemon, removes the scratch directory.
+   daemon, sweeps any temporary ref the run left, removes the scratch directory.
 
-`--keep` skips step 4.5 and the last part of step 5, so the worktrees stay on disk *and*
-registered with git. `git worktree list` shows them; `git worktree remove --force <dir>`,
-or `git worktree prune` once they are deleted, is how they go away.
+`--keep` skips step 4.5 and the last part of step 5, so the trees stay on disk. The
+grading trees are registered worktrees — `git worktree list` shows them and
+`git worktree remove --force <dir>` is how they go away; the workspaces are ordinary
+clones, so `rm -rf` is all they need. A finished run leaves neither, and leaves no ref
+under `refs/bench-self`; `selftest.sh` asserts both.
 
 Exit status: `0` when every task ran and passed, `1` when one failed, `3` when the run
-stopped at the spend cap with tasks still to run, `64` for a refusal.
+stopped at the spend cap with tasks still to run, and `64` for a refusal — including a
+completed turn nobody could price, which stops the run because a running total that
+cannot move is not a cap.
 
 ## Grading
 
-In order. The first thing that is not true is the reason.
+**The grade is a diff on a pristine tree, not the tree the agent worked in.** It used to be
+the tree, and an adversarial review took that apart twice over: one new file under
+`test/support/` — allowed, because writing your own tests is part of the work — is on
+`elixirc_paths(:test)`, so `mix test` compiled it into the grading VM, its module body ran
+*after* both checks had passed, and it rewrote every restored hidden test. Score: 2/2. One
+`test: ["cmd true"]` line in `mix.exs` made `mix test` exit 0 over a suite asserting
+`1 == 2`. Score: 1/1.
+
+So, in order. The first thing that is not true is the reason.
 
 1. **`completed`.** The result object says `completed`. `timeout` is its own reason;
-   anything else is `not_completed`.
-2. **The tests were not touched.** No file that already existed under `test/` was modified
-   or deleted — `modified_tests`. Checked two ways: `git status --porcelain -- test`, and
-   `git diff --name-status <base_sha> -- test`, which compares the working tree against
-   the commit the task started from. The second is the one that matters: an agent that
-   *commits* its edit to a test leaves `git status` clean. New files are allowed and are
-   left in place, so writing your own tests is fine.
-3. **The hidden tests pass.** Every path under `test/` the commit touched is written into
-   the worktree from `commit_sha` — `test/support/**` included, because a commit whose
-   fixture and test moved together is only gradable with both — and `mix test <the
-   _test.exs paths>` must pass under a wall clock. Otherwise `tests_failed`.
+   anything else is `not_completed`. A completed turn that reported no `usage.cost_usd` on
+   a paid run is `setup_failed: unpriced_turn`, and the run stops there.
+2. **The task is gradable.** It names at least one `_test.exs`, or `setup_failed`:
+   `mix test` with no paths runs the whole suite.
+3. **The tests were not touched.** For every path that existed under `test/` at
+   `base_sha`, the file on disk is hashed and compared with the base's blob — by content,
+   never through the index, because `git update-index --assume-unchanged` makes `git
+   status` *and* `git diff` forget a file that is sitting there modified. A missing file is
+   a deletion. Either is `modified_tests`. A path that did not exist at the base is not in
+   this list at all, so a new test of your own — staged, edited, committed, whatever — is
+   not a modification of anything.
+4. **The change stays in the source roots.** The agent's change is collected as
+   `git diff --binary <base_sha>` (after `git add -N`, so new files count) over `lib/`,
+   `assets/`, `priv/`, `config/`, `docs/` and `README.md` — the roots the thirty tasks
+   actually use. A diff touching anything else is `refused`, not filtered: an agent that
+   rewrote `mix.exs` did not do the task, and grading the rest of its diff would report a
+   number for work nobody checked.
+5. **The pins agree with the history.** Else `setup_failed`: git is the authority for what
+   a task's `task.json` claims, and a weaker grade would look exactly like a pass.
+6. **The hidden tests pass in a tree the agent never touched.** A fresh
+   `git worktree add --detach <base_sha>`, with `deps/` and `_build/` cloned from the
+   *checkout* — never from the agent's workspace. The diff is applied there and compiled;
+   *then* every path under `test/` the commit touched is written in from `commit_sha`
+   (`test/support/**` included, because a commit whose fixture and test moved together is
+   only gradable with both); then `mix test <the _test.exs paths>` runs under a wall clock.
+   Compiling before restoring is what makes a compile-time rewrite pointless: whatever a
+   module body writes into `test/` is overwritten by the restore that follows it.
+7. **The suite reported a pass, and the tests it ran were the real ones.** Not the exit
+   status — that is a number the code under test can set. `Result: <n> passed` with no
+   `Failed:` line, `n` at least the number of hidden test files, an uncut capture, and
+   process exit 0. This is `bench/self/lib/improve/gate-verdict.sh`'s rule, which the
+   improve loop applies to the same suites; the two agree by construction rather than by
+   coincidence. Afterwards the restored files are hashed again and must still be
+   `commit_sha`'s, so a rewrite at any point during the run is caught rather than believed.
 
-A worktree or compile that does not come up is `setup_failed`, and so is a `task.json`
-whose `hidden_tests` disagree with what the history says the commit touched: git is the
-authority for the pins, and a weaker grade would look exactly like a pass.
+A tree or compile that does not come up is `setup_failed`.
+
+**What this still cannot do.** The grading tree compiles and runs the agent's own `lib/`
+code, and Elixir runs module bodies at compile time. The ordering above and the hash check
+after remove every way of *rewriting a test*; nothing here can tell ExUnit's summary from
+one the graded code printed itself, and nothing that parses the output of a VM the graded
+code runs in ever could. It is stated here rather than defended.
 
 ## The corpus is a list of pins
 
@@ -109,6 +148,7 @@ authority for the pins, and a weaker grade would look exactly like a pass.
   "commit_sha": "…",         the answer: where the hidden tests come from
   "subject": "…",
   "instruction": "…",        subject, body, acceptance list, rules
+  "instruction_kind": "full",   or "subject-only"
   "hidden_tests": ["test/…"],
   "solution_files": ["lib/…"],
   "timeout_secs": 600,
@@ -122,15 +162,29 @@ carrying a doctored copy of its test.
 
 The `instruction` is the commit subject, the body with its trailers and any pasted diff
 removed, an **Acceptance** list of the `test "…"` titles the commit *adds* (at most
-twelve, never a test body), and a rules paragraph stating the two grading conditions.
-Saying the rules does not make gaming easier — the grader enforces them either way — and
-not saying them would be measuring a rule nobody was told.
+twelve, never a test body), and a rules paragraph stating the grading conditions. Saying
+the rules does not make gaming easier — the grader enforces them either way — and not
+saying them would be measuring a rule nobody was told.
+
+**The body frequently describes the change.** It is a commit message written by the person
+who made it, so it often names the function, the file, or the exact behaviour: of the
+thirty tasks, 28 carry a body at all and **14 name a file the solution changes** by path or
+by name (16 if a module name derived from that path counts). What the number measures is
+therefore *executing a described change* against tests nobody showed the agent, in a
+repository whose history stops at the base — not discovering what to change.
+
+`--instruction subject-only` builds the harder corpus: the subject, the acceptance list and
+the rules, with the body dropped. `--reinstruct <dir>` rewrites an existing corpus's
+instructions in place from the same history, which is how the second corpus is made from
+the first without re-extracting — same thirty commits, one variable changed. Neither has
+been run against a model; the committed corpus is `full`.
 
 ## Extraction
 
 `elixir bench/self/extract.exs [--replace] [--max-tasks 30] [--max-diff-lines 300]
 [--task-ceiling-secs 600] [--max-solution-bytes 393216] [--max-candidates 90]
-[--commit-checks 2] [--jobs 3] [--commits SHA,SHA] [--out DIR] [--verify <task-dir>]`
+[--commit-checks 2] [--jobs 3] [--commits SHA,SHA] [--out DIR] [--verify <task-dir>]
+[--history <repo>] [--instruction full|subject-only] [--reinstruct <dir>]`
 
 Candidates are commits reachable from `dev` that touch `lib/`, add or modify at least one
 `test/**/*_test.exs`, are not merges, and stay out of `tui/`, `assets/`, `.github/`,
@@ -147,6 +201,7 @@ Dropped, each reported with a count:
 | `diff_too_large` | over `--max-diff-lines` |
 | `solution_not_utf8`, `solution_too_large` | the oracle's script has to hold the file's bytes |
 | `instruction_reserved_delimiter` | the instruction quotes one of the prompt assembler's own block tags, and `Runtime.Exposure` refuses such a prompt before the agent sees it. The list is asked of the runtime, not copied |
+| `merge_commit` | `--commits` named a merge: the diff against its first parent is the other branch's work |
 | `parent_already_passes` | the hidden tests pass without the change: nothing to do |
 | `commit_does_not_pass` | the hidden tests do not pass *at the commit* on this machine |
 | `over_task_ceiling`, `*_timeout` | compile plus test at the parent over `--task-ceiling-secs` |
@@ -188,7 +243,22 @@ reports cost only when the turn ends. What bounds a single task is `--timeout` (
 own `timeout_secs` by default). Budget accordingly: the worst case is the cap plus one
 task's cost.
 
-## The oracle, and the two controls
+## What a `result.json` says about itself
+
+A number is only quotable if the file it came from can show what produced it. `run` carries
+every flag as given (`filter`, `oracle`, `oracle_cheat`, `fake_cost_usd`, `fake_status`,
+`oracle_as_paid`, `approve_all`/`no_approve_all`, `timeout`, `tasks_dir`, `repo`,
+`history`, `model`, `keep`), a `corpus_sha256` over the sorted `task.json` bytes, the
+client binary's `ouro_bin_sha256`, an `ouro_sha` with a `-dirty` suffix when the checkout
+has uncommitted changes, both repository paths, and what the grader runs. A run with
+`--oracle-cheat` sets `run.cheat` and the report says in words that no number from it is
+quotable. Per task, `grade_command` is the exact `mix test` line, `grade_setup_ms` is the
+grading tree's own build, and `unpriced` says whether the turn reported a cost.
+
+Quote a number with its `ouro_sha`, its `corpus_sha256`, its `model`, and `run.cheat` being
+absent. Without those four it is a number from somewhere.
+
+## The oracle, and the controls
 
 `--oracle` answers every task with the commit's own non-test files, through
 [`bench/local`'s scripted model](../local/README.md#the-scripted-model-seam) — the same
@@ -199,18 +269,43 @@ every task `pass` at $0, and the runner fails the run if it reports anything els
 That proves the grader accepts a correct answer. Two seams prove it *rejects* the two
 things it exists to reject. Both are refused outside `--oracle`:
 
-| seam | what it does | what must happen | the mutation it kills |
+| seam | what it does | what must happen | what it kills |
 |---|---|---|---|
 | `--oracle-cheat no-solution` | answers with nothing at all | every task `tests_failed` | skipping the hidden-test restore. The **parent's** copy of each test passes, so a runner that did not restore would grade doing nothing as a full pass |
-| `--oracle-cheat blank-tests` | writes the real solution **and** overwrites a pre-existing hidden test with a file that asserts nothing | every task `modified_tests` | skipping the modified-test check. The solution is correct, so without that check the restore would put the real test back and the task would pass |
+| `--oracle-cheat blank-tests` | writes the real solution **and** overwrites a pre-existing hidden test with a file that asserts nothing | every task `modified_tests` | skipping the modified-test check. The solution is correct, so without it the restore would put the real test back and the task would pass |
+| `--oracle-cheat commit-tests` | the same, then `git commit`s it, so `git status` is clean | every task `modified_tests` | a check that reads `git status` |
+| `--oracle-cheat hide-tests` | the same, then `git update-index --assume-unchanged`es it, so `git status` *and* `git diff` report a clean tree | every task `modified_tests` | a check that asks git rather than the file. **Proved against the previous version** |
+| `--oracle-cheat stage-new-test` | writes the real solution and adds a test of its own, staged and then edited (`AM`) | every task **passes** | a check that reads the `M` and fails a file that did not exist at the base. **Proved against the previous version** |
+| `--oracle-cheat game-support` | writes no solution and one new `test/support/*.ex` whose module body rewrites every restored hidden test at compile time | every task `tests_failed` | grading the agent's tree. **Scored 2/2 against the previous version** |
+| `--oracle-cheat mixexs-alias` | writes the real solution and a `mix.exs` carrying a `test:` alias that makes `mix test` exit 0 | every task `refused` | grading a diff that reaches outside the source roots, and reading the exit status. **Proved against the previous version** |
+| `--oracle-cheat history-cheat` | one `bash` call: `git log --all --grep "<its own subject>"`, then `git show "$sha:$f"` for every non-test file | every task `tests_failed` | a workspace that shares the repository's object store. **Scored 1/1 against the previous version** |
 | `--fake-cost-usd <usd>` | charges each task that cost instead of its real one | the cap stops the run | a spend total that ignores a task |
+| `--fake-status <status>` | replaces the result object's `status` | every task `not_completed` | a grade that ignores whether the turn finished |
+| `--oracle-as-paid` | applies the paid path's unpriced-turn rule to an oracle run | the run stops, exit 64 | a turn with no `cost_usd` counting as $0 against the cap |
 
 ## The selftest
 
-`bench/self/selftest.sh` (`make bench-self`) is the $0 gate. It extracts two pinned
-commits, runs the oracle over them, checks both spend refusals, checks that the seams are
-oracle-only, drives the cap, and runs the two controls above. A few minutes; no key, no
-network beyond git and the local hex cache, no spend.
+`bench/self/selftest.sh` (`make bench-self`) is the $0 gate: twelve phases, no key, no
+network beyond git and the local hex cache, no spend. About twenty minutes, most of it real
+trees being compiled twice per task.
+
+The cheap half runs first, and it runs against a **fixture repository** — a two-file Mix
+project `lib/fixture.sh` builds in a second, with a history shaped to contain one of each
+thing the extractor and the grader have to tell apart: a real fix, a commit whose hidden
+test already passes at its parent, one whose own test does not pass, and a merge. Two of
+those have no example in the corpus by construction, since a commit that trips either gate
+is dropped before it becomes a task; proving them against this repository would mean
+hunting for a commit that happens to trip them, which is a fact about the history rather
+than about the code.
+
+The phases: the verdict rule; the refusals that come before anything is built (`--spend`,
+the four seams on a model this node *can* price, and an `OURO_BIN` that names nothing —
+none of which may start a daemon); the oracle's environment, asserted by spawning `env`
+through the runner's own builder; the extractor's two gates and the merge; four corpora
+that are not corpora; the fixture corpus against the oracle and eight scripted agents that
+must not score; then the same claims against real commits — extraction, the oracle at $0,
+the cap, the two original controls, and the three proved exploits; and finally that no
+worktree and no `refs/bench-self` ref is left behind.
 
 The two commits it pins:
 
@@ -220,7 +315,7 @@ The two commits it pins:
 | `2d5a0ea6` | `fix(replay): a boundary keeps the record's own name for it` |
 
 Both change one file under `lib/` and one test file that already existed — which is what
-the `blank-tests` control needs.
+the blanking controls need.
 
 ## What is different from `bench/local`, and why
 
@@ -228,9 +323,11 @@ the `blank-tests` control needs.
   the packaged default model authenticates through it. Only `OUROBOROS_DATA_DIR` is
   scratch, so the run cannot touch the operator's sessions and `ouro stop` can only ever
   mean this run's runtime. Under `--oracle` the posture is `bench/local`'s exactly — a
-  scratch config home and every provider key removed from the environment.
+  scratch config home, and every provider key plus `GITHUB_TOKEN` and the runtime's own
+  three secrets removed from the environment, because the oracle runs no model and no
+  operator tool and a variable it cannot use is one it should not carry.
 - **A real repository as the workspace.** Which is why setup is timed separately, why the
-  worktree is removed on every path, and why `--keep` exists.
+  workspace and the grading tree are removed on every path, and why `--keep` exists.
 - **No `check.sh`.** The grade is the commit's own tests. Nobody writes an assertion.
 
 ## What this does not measure

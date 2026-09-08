@@ -44,6 +44,26 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
   call made outside a loop reads exactly as honestly as one made inside: the guidance
   text never claims somebody is being asked.
 
+  ## What the command can read out of the environment
+
+  Not the operator's credentials, and that is asserted rather than assumed:
+  `test/provider/native/bash_environment_test.exs` plants a real `ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`, `AWS_SECRET_ACCESS_KEY` and `GITHUB_TOKEN` in the daemon's own
+  environment and reads `env` back out of this tool.
+
+  The containment is `Ouroboros.Provider.Native.Exec`'s and it is an **allowlist**, not a
+  list of names to drop: erlexec is given `:clear`, and the child's environment is rebuilt
+  from login, terminal and toolchain variables, with anything
+  `Ouroboros.ProcessEnvironment.sensitive?/2` recognises removed on top. A provider key is
+  outside the allowlist and matches the credential pattern, so it is excluded twice. A
+  denylist would have to be kept up to date with every provider anybody adds; this cannot
+  fall behind one.
+
+  `GITHUB_TOKEN` does not cross either, which is the same rule read the other way: an
+  operator who wants their agent to use `gh` cannot get there by exporting it before
+  starting the daemon. That is a real limitation of this posture rather than an oversight,
+  and the test states it as one.
+
   ## Everything else is unchanged
 
   Every child goes through `priv/provider-exec`, the same `umask 022` wrapper every

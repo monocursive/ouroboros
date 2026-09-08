@@ -30,7 +30,8 @@ help:
 	@echo "make dialyzer         gradual mix dialyzer; PLTs live under _build/plts"
 	@echo "make bench-local      the local eval corpus: no key, no network, no docker"
 	@echo "make self-export      write this node's promoted policy + record into priv/self/"
-	@echo "make bench-self       the self corpus oracle: no key, no network, no spend"
+	@echo "make bench-self       the self corpus selftest: no key, no network, no spend"
+	@echo "make improve-selftest the improve loop's selftest: no key, no network, no spend"
 	@echo "make golden           regenerate the gateway fixtures and fail on drift"
 	@echo "make protocol-docs    regenerate docs/PROTOCOL.md and fail on drift"
 	@echo "make release-tarball  MIX_ENV=prod mix release, printing the tarball path"
@@ -308,8 +309,10 @@ self-export:
 	@echo "==> self-export: the promoted policy and its record into priv/self/"
 	@echo "    (stop the daemon first: this opens the same data directory, and refuses while one holds it)"
 	$(MIX) ouroboros.self.export
-# The $0 half of the self corpus: the oracle, the spend guard, and the two negative
-# controls that make the grader falsifiable. A *paid* run is `bench/self/run.sh --spend
+# The $0 half of the self corpus: the verdict rule, every refusal, the extractor's gates,
+# and the eight scripted agents that must not score — three of which are exploits an
+# adversarial review used to make an earlier version of the grader say `pass`. Twenty
+# minutes or so; the cheap half runs first. A *paid* run is `bench/self/run.sh --spend
 # <usd>` and is never a make target, because a target is a thing people run without
 # reading it. See docs/BENCHMARKS.md §5.
 bench-self:

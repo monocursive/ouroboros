@@ -30,8 +30,19 @@ defmodule Bench.Self.Exec do
   """
 
   @default_cap 256 * 1024
+  @cut_prefix "\n[bench.self: output cut after "
 
   @type outcome :: {:ok, integer(), String.t()} | {:timeout, String.t()}
+
+  @doc """
+  Whether a captured output was cut short by its cap.
+
+  A reader that derives a *verdict* from a child's output has to know this: a cut
+  capture is missing whatever the child said last, and treating it as a summary that
+  simply was not printed would turn a truncation into a grade.
+  """
+  @spec cut?(String.t()) :: boolean()
+  def cut?(output), do: String.contains?(output, @cut_prefix)
 
   @spec run(String.t(), [String.t()], keyword()) :: outcome()
   def run(program, argv, opts) do
@@ -47,6 +58,14 @@ defmodule Bench.Self.Exec do
         path -> "exec " <> Bench.Self.Shell.line([program | argv]) <> " 2>" <> Bench.Self.Shell.quote_arg(path)
       end
 
+    # stdin is left alone unless a caller names a file: `ouro run` owns its own, and a
+    # harness that quietly redirected it would be changing the thing it is measuring.
+    command =
+      case Keyword.get(opts, :stdin_file) do
+        nil -> command
+        path -> command <> " <" <> Bench.Self.Shell.quote_arg(path)
+      end
+
     port =
       Port.open({:spawn_executable, sh()}, [
         :binary,
@@ -57,7 +76,7 @@ defmodule Bench.Self.Exec do
         env: Enum.map(env, &variable/1)
       ])
 
-    collect(port, [], 0, cap, System.monotonic_time(:millisecond) + deadline_ms)
+    collect(port, [], 0, false, cap, System.monotonic_time(:millisecond) + deadline_ms)
   end
 
   @doc "`run/3` plus the wall time it took, which is the number the corpus reports."
@@ -68,40 +87,49 @@ defmodule Bench.Self.Exec do
     {outcome, System.monotonic_time(:millisecond) - started}
   end
 
-  defp collect(port, chunks, bytes, cap, deadline) do
+  defp collect(port, chunks, bytes, cut?, cap, deadline) do
     remaining = deadline - System.monotonic_time(:millisecond)
 
     receive do
       {^port, {:data, data}} ->
-        {chunks, bytes} = keep([data | chunks], bytes + byte_size(data), cap)
-        collect(port, chunks, bytes, cap, deadline)
+        {chunks, bytes, cut?} = keep(chunks, bytes, cut?, data, cap)
+        collect(port, chunks, bytes, cut?, cap, deadline)
 
       {^port, {:exit_status, status}} ->
-        {:ok, status, flatten(chunks)}
+        {:ok, status, flatten(chunks, cut?, cap)}
     after
       max(remaining, 0) ->
         kill(port)
-        {:timeout, flatten(chunks)}
+        {:timeout, flatten(chunks, cut?, cap)}
     end
   end
 
-  # The tail is what diagnoses a failure: a compiler names the file it choked on at the
-  # end, and ExUnit's counts are the last line. Dropping the head keeps a runaway child
-  # from being a memory bug in the harness.
-  defp keep(chunks, bytes, cap) when bytes <= cap * 2, do: {chunks, bytes}
+  # The head, and the cut is marked. This is a reversal of what this function used to do,
+  # and the reason is `Bench.Self.Verdict`: the grade is now read *out of* `mix test`'s
+  # own output rather than off its exit status. Keeping the tail would mean a child that
+  # can keep writing can push the real summary out of the window and leave a forged one
+  # behind it — the same class of attack as `System.halt(0)`, which is why the exit status
+  # stopped being the verdict in the first place. Keeping the head instead makes a
+  # runaway child lose its summary, and a reader that finds none fails closed.
+  defp keep(chunks, bytes, true, _data, _cap), do: {chunks, bytes, true}
 
-  defp keep(chunks, _bytes, cap) do
-    {kept, bytes} =
-      Enum.reduce_while(chunks, {[], 0}, fn chunk, {acc, size} ->
-        if size >= cap,
-          do: {:halt, {acc, size}},
-          else: {:cont, {[chunk | acc], size + byte_size(chunk)}}
-      end)
+  defp keep(chunks, bytes, false, data, cap) do
+    room = max(cap - bytes, 0)
 
-    {Enum.reverse(kept), bytes}
+    if byte_size(data) <= room do
+      {[data | chunks], bytes + byte_size(data), false}
+    else
+      {[binary_part(data, 0, room) | chunks], cap, true}
+    end
   end
 
-  defp flatten(chunks), do: chunks |> Enum.reverse() |> IO.iodata_to_binary()
+  defp flatten(chunks, cut?, cap) do
+    text = chunks |> Enum.reverse() |> IO.iodata_to_binary()
+
+    if cut?,
+      do: text <> @cut_prefix <> Integer.to_string(cap) <> " bytes]\n",
+      else: text
+  end
 
   # `Port.close/1` closes the pipe; the child is signalled by OS pid so that a process
   # ignoring EOF still goes away. Only ever a pid this script started.
@@ -142,12 +170,23 @@ defmodule Bench.Self.Env do
   @keys ~w(
     ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY GROQ_API_KEY
     OPENROUTER_API_KEY XAI_API_KEY MISTRAL_API_KEY DEEPSEEK_API_KEY TOGETHER_API_KEY
-    CEREBRAS_API_KEY PERPLEXITY_API_KEY ZAI_API_KEY AWS_SECRET_ACCESS_KEY
+    CEREBRAS_API_KEY PERPLEXITY_API_KEY ZAI_API_KEY
+    AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+    GITHUB_TOKEN OUROBOROS_GATEWAY_TOKEN OUROBOROS_WEB_TOKEN
+    OUROBOROS_CLUSTER_GOSSIP_SECRET
   )
 
-  @doc "Every known model-provider key, the set the oracle refuses to pass on."
-  @spec provider_keys() :: [String.t()]
-  def provider_keys, do: @keys
+  @doc """
+  Every secret the **oracle** refuses to pass on.
+
+  Wider than the model keys, because the oracle runs no model and no operator tool: it
+  answers from a script and spends nothing by construction, so a variable it cannot use
+  is one it should not carry. `GITHUB_TOKEN` and the three `OUROBOROS_*` secrets are
+  here for that reason and that reason only — the *paid* path passes the environment
+  through on purpose, where an operator may well want their agent to use `gh`.
+  """
+  @spec secrets() :: [String.t()]
+  def secrets, do: @keys
 
   @doc """
   The changes a child's environment needs: `overrides` set, `drop` removed.
@@ -245,6 +284,12 @@ defmodule Bench.Self.Git do
   alias Bench.Self.{Exec, Shell}
 
   @lock :bench_self_git_worktree
+  @ref_prefix "refs/bench-self"
+  @base_branch "bench-self-base"
+  # `git init` points HEAD at its default branch, and git refuses to fetch into the branch
+  # HEAD is on — even an unborn one. So the empty repository starts on a name nothing ever
+  # fetches into, and the base arrives on its own branch beside it.
+  @init_branch "bench-self-empty"
 
   @doc "Runs git in `repo`, with stderr folded into the captured output."
   @spec run(Path.t(), [String.t()], keyword()) :: {:ok, String.t()} | {:error, String.t()}
@@ -275,14 +320,38 @@ defmodule Bench.Self.Git do
   """
   @spec show(Path.t(), String.t(), String.t()) :: {:ok, binary()} | {:error, String.t()}
   def show(repo, sha, path) do
+    # stderr goes to /dev/null rather than to this process's own: asking for a path a
+    # commit does not have is a *question* here — the extractor asks it of every hidden
+    # test at the parent — and git answers a question it does not like with `fatal:` on
+    # stderr. The exit status is the answer; the noise would read like a broken run.
     case Exec.run(git(), ["--no-pager", "show", sha <> ":" <> path],
            cd: repo,
            timeout_ms: 60_000,
+           stderr: "/dev/null",
            max_output_bytes: 8 * 1024 * 1024
          ) do
       {:ok, 0, body} -> {:ok, body}
       {:ok, code, _body} -> {:error, "git show #{sha}:#{path} exited #{code}"}
       {:timeout, _body} -> {:error, "git show #{sha}:#{path} timed out"}
+    end
+  end
+
+  @doc """
+  Whether this repository has `sha` as a commit.
+
+  The workspace asserts this is **false** for its task's `commit_sha`: the history cut is
+  a property to be checked per task, not one to be assumed because the code that makes it
+  looks right.
+  """
+  @spec has_commit?(Path.t(), String.t()) :: boolean()
+  def has_commit?(repo, sha) do
+    case Exec.run(git(), ["cat-file", "-e", sha <> "^{commit}"],
+           cd: repo,
+           timeout_ms: 60_000,
+           stderr: :stdout
+         ) do
+      {:ok, 0, _out} -> true
+      _absent -> false
     end
   end
 
@@ -333,6 +402,34 @@ defmodule Bench.Self.Git do
     end
   end
 
+  @doc """
+  `git diff --binary` between `base` and the working tree, over `pathspec`.
+
+  stderr is *not* folded in, for `show/3`'s reason: this output is a patch, and a warning
+  mixed into it would be applied as if the agent had written it.
+  """
+  @spec diff_binary(Path.t(), String.t(), [String.t()]) :: {:ok, binary()} | {:error, String.t()}
+  def diff_binary(dir, base, pathspec) do
+    case Exec.run(git(), ["--no-pager", "diff", "--binary", "--no-renames", base, "--"] ++ pathspec,
+           cd: dir,
+           timeout_ms: 120_000,
+           max_output_bytes: 8 * 1024 * 1024
+         ) do
+      {:ok, 0, body} -> {:ok, body}
+      {:ok, code, body} -> {:error, "git diff --binary #{base} exited #{code}: " <> String.slice(body, 0, 400)}
+      {:timeout, _body} -> {:error, "git diff --binary #{base} timed out"}
+    end
+  end
+
+  @doc "Applies a patch `diff_binary/3` produced, in `dir`."
+  @spec apply_patch(Path.t(), Path.t()) :: :ok | {:error, String.t()}
+  def apply_patch(dir, patch_file) do
+    case run(dir, ["apply", "--binary", "--whitespace=nowarn", patch_file], timeout_ms: 120_000) do
+      {:ok, _out} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   @doc "Added and deleted lines between two commits over `pathspec`."
   @spec diff_lines(Path.t(), String.t(), String.t(), [String.t()]) :: non_neg_integer()
   def diff_lines(repo, base, sha, pathspec \\ []) do
@@ -367,10 +464,12 @@ defmodule Bench.Self.Git do
   end
 
   @doc """
-  Removes a worktree this script made, and prunes only if the removal did not take.
+  Removes a worktree this script made, and deregisters only that one if it did not take.
 
-  A bare `git worktree prune` is deliberately not run on the happy path: other worktrees
-  of this repository belong to other people, and pruning is a repository-wide sweep.
+  `git worktree prune` is never run. It is a repository-wide sweep: it deregisters every
+  worktree whose directory has gone, including the ones other people are in the middle of
+  using. What has to be removed here is one administrative directory — the one whose
+  `gitdir` file names the path this script made — so that is what is removed.
   """
   @spec worktree_remove(Path.t(), Path.t()) :: :ok
   def worktree_remove(repo, dir) do
@@ -381,10 +480,215 @@ defmodule Bench.Self.Git do
 
         {:error, _reason} ->
           File.rm_rf(dir)
-          _ = run(repo, ["worktree", "prune"], timeout_ms: 120_000)
+          deregister(repo, dir)
           :ok
       end
     end)
+  end
+
+  defp deregister(repo, dir) do
+    case out(repo, ["rev-parse", "--git-common-dir"]) do
+      nil ->
+        :ok
+
+      common ->
+        wanted = Path.expand(dir)
+
+        [Path.expand(common, repo), "worktrees", "*", "gitdir"]
+        |> Path.join()
+        |> Path.wildcard()
+        |> Enum.filter(fn gitdir ->
+          case File.read(gitdir) do
+            {:ok, body} -> Path.expand(Path.dirname(String.trim(body))) == wanted
+            _unreadable -> false
+          end
+        end)
+        |> Enum.each(&File.rm_rf(Path.dirname(&1)))
+
+        :ok
+    end
+  end
+
+  @doc """
+  A workspace at `sha` whose history **stops** there.
+
+  `git worktree add` shares the repository's object store, so the commit that is a task's
+  answer — and every commit after it — is reachable from inside the worktree, and the
+  instruction is that commit's own subject. One `git log --all --grep` and a `git show`
+  per file is then a full pass with no reading and no reasoning; the review proved it.
+
+  This builds the workspace as a real clone instead: a temporary ref at `sha`, then a
+  fetch of that ref alone through the **`file://` transport**, which packs only the
+  objects reachable from what was asked for. A plain path clone would hardlink the whole
+  object store and hand the answer back. The ref is deleted as soon as the fetch returns,
+  on every path.
+
+  The history *up to* the base is all there, which is the point: reading how this code
+  base got here is legitimate engineering context, and cutting it would measure something
+  nobody does.
+  """
+  @spec clone_at(Path.t(), Path.t(), String.t(), String.t(), keyword()) :: :ok | {:error, String.t()}
+  def clone_at(repo, dir, sha, ref, opts \\ []) do
+    timeout_ms = Keyword.get(opts, :timeout_ms, 600_000)
+    File.mkdir_p!(dir)
+
+    try do
+      with :ok <- update_ref(repo, ref, sha),
+           {:ok, _out} <-
+             run(dir, ["-c", "init.defaultBranch=" <> @init_branch, "init", "--quiet"],
+               timeout_ms: timeout_ms
+             ),
+           {:ok, _out} <-
+             run(dir, ["fetch", "--quiet", "--no-tags", "file://" <> repo, ref <> ":refs/heads/" <> @base_branch],
+               timeout_ms: timeout_ms
+             ),
+           {:ok, _out} <-
+             run(dir, ["checkout", "--quiet", "--detach", "refs/heads/" <> @base_branch], timeout_ms: timeout_ms),
+           {:ok, _out} <- run(dir, ["config", "user.email", "bench-self@localhost"]),
+           {:ok, _out} <- run(dir, ["config", "user.name", "bench.self"]) do
+        :ok
+      end
+    after
+      delete_ref(repo, ref)
+    end
+  end
+
+  @doc "The `refs/` prefix every temporary ref this corpus makes lives under."
+  @spec ref_prefix() :: String.t()
+  def ref_prefix, do: @ref_prefix
+
+  @doc "The temporary ref one task's clone fetches from."
+  @spec task_ref(String.t(), String.t()) :: String.t()
+  def task_ref(run_id, id), do: Enum.join([@ref_prefix, run_id, id], "/")
+
+  @spec update_ref(Path.t(), String.t(), String.t()) :: :ok | {:error, String.t()}
+  def update_ref(repo, ref, sha) do
+    case run(repo, ["update-ref", ref, sha]) do
+      {:ok, _out} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @spec delete_ref(Path.t(), String.t()) :: :ok
+  def delete_ref(repo, ref) do
+    _ = run(repo, ["update-ref", "-d", ref])
+    :ok
+  end
+
+  @doc "Every ref under this corpus's own prefix — empty is the invariant a run leaves behind."
+  @spec temporary_refs(Path.t()) :: [String.t()]
+  def temporary_refs(repo) do
+    case run(repo, ["for-each-ref", "--format=%(refname)", @ref_prefix]) do
+      {:ok, output} -> String.split(output, "\n", trim: true)
+      {:error, _reason} -> []
+    end
+  end
+
+  @doc """
+  Every blob at `sha` under `pathspec`, as `%{path => object id}`.
+
+  `-z` rather than the default listing: without it a path with an unusual byte is
+  C-quoted, and a reader that did not unquote would compare a name to a different name.
+  """
+  @spec blobs(Path.t(), String.t(), [String.t()]) :: {:ok, %{String.t() => String.t()}} | {:error, String.t()}
+  def blobs(repo, sha, pathspec \\ []) do
+    case run(repo, ["--no-pager", "ls-tree", "-r", "-z", sha, "--"] ++ pathspec,
+           max_output_bytes: 4 * 1024 * 1024
+         ) do
+      {:ok, output} ->
+        {:ok,
+         output
+         |> String.split(<<0>>, trim: true)
+         |> Enum.flat_map(fn entry ->
+           with [meta, path] <- String.split(entry, "\t", parts: 2),
+                [_mode, "blob", object] <- String.split(meta, " ", trim: true) do
+             [{path, object}]
+           else
+             _other -> []
+           end
+         end)
+         |> Map.new()}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  `git hash-object` for files on disk, as `%{path => object id}`.
+
+  This is how a modified file is detected: by content, against the blob the base commit
+  holds. The index is not consulted, because the index is the agent's — one
+  `git update-index --assume-unchanged` makes `git status` and `git diff` forget a file
+  that is sitting there modified, which the review proved.
+
+  Every path must exist; a caller separates the missing ones first and reports them as
+  deletions. A path that has become a symlink is hashed as the bytes it points at, which
+  is a difference from what git would store — noted rather than defended, because the
+  agent's `test/` tree is not what is graded any more.
+  """
+  @spec hash_objects(Path.t(), [String.t()]) :: {:ok, %{String.t() => String.t()}} | {:error, String.t()}
+  def hash_objects(_dir, []), do: {:ok, %{}}
+
+  def hash_objects(dir, paths) do
+    paths
+    |> Enum.chunk_every(200)
+    |> Enum.reduce_while({:ok, %{}}, fn chunk, {:ok, acc} ->
+      case run(dir, ["hash-object", "--"] ++ chunk, max_output_bytes: 1024 * 1024) do
+        {:ok, output} ->
+          hashes = String.split(output, "\n", trim: true)
+
+          if length(hashes) == length(chunk) do
+            {:cont, {:ok, Map.merge(acc, Map.new(Enum.zip(chunk, hashes)))}}
+          else
+            {:halt, {:error, "git hash-object answered #{length(hashes)} ids for #{length(chunk)} paths"}}
+          end
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  @doc """
+  Whether two paths are the same git repository.
+
+  Not the same directory: a linked worktree, the improve loop's `--repo`, and the checkout
+  itself are three paths and one object store. What this answers is whether a `deps/` and
+  `_build/` built in one belong in a tree built from the other.
+  """
+  @spec same_repository?(Path.t(), Path.t()) :: boolean()
+  def same_repository?(a, b) do
+    case {common_dir(a), common_dir(b)} do
+      {nil, _other} -> false
+      {_one, nil} -> false
+      {one, other} -> one == other
+    end
+  end
+
+  defp common_dir(path) do
+    case out(path, ["rev-parse", "--git-common-dir"]) do
+      nil -> nil
+      dir -> Path.expand(dir, path)
+    end
+  end
+
+  @doc "The parents of one commit. Two or more is a merge."
+  @spec parents(Path.t(), String.t()) :: [String.t()]
+  def parents(repo, sha) do
+    case out(repo, ["--no-pager", "log", "-1", "--format=%P", sha]) do
+      nil -> []
+      text -> String.split(text, " ", trim: true)
+    end
+  end
+
+  @doc "Whether the repository has uncommitted changes — the `-dirty` in a reported sha."
+  @spec dirty?(Path.t()) :: boolean()
+  def dirty?(repo) do
+    case run(repo, ["status", "--porcelain"], max_output_bytes: 1024 * 1024) do
+      {:ok, output} -> String.trim(output) != ""
+      {:error, _reason} -> false
+    end
   end
 
   defp integer(text) do
@@ -404,9 +708,9 @@ defmodule Bench.Self.Workspace do
   @moduledoc """
   One tree at one commit, built the same way for the extractor and for the runner.
 
-  A detached worktree at `sha`, with `deps/`, `_build/` and the two sealed helper
-  directories cloned in from the repository, `mix deps.get` when the commit's `mix.lock`
-  is not the one those `deps/` were fetched for, and `mix compile` per environment. The
+  A tree at `sha`, with `deps/`, `_build/` and the two sealed helper directories cloned in
+  from the checkout, `mix deps.get` when the commit's `mix.lock` is not the one those
+  `deps/` were fetched for, and `mix compile` per environment. The
   compile is the runner's *setup*: it is timed separately from the agent's turn, because
   a benchmark that charged the agent for a cold build would be measuring this machine.
   """
@@ -415,14 +719,38 @@ defmodule Bench.Self.Workspace do
 
   @cloned ~w(deps _build)
   @seeded ~w(priv/wasm priv/sandbox)
+  @test_output_cap 8 * 1024 * 1024
 
   @type prepared :: %{setup_ms: non_neg_integer(), log: Path.t() | nil}
 
   @doc """
+  The paths this module puts into a tree that the tree's own commit does not carry.
+
+  `Bench.Self.Change` needs them by name. `.gitignore` at an older commit does not
+  necessarily ignore all four — `priv/wasm` and `priv/sandbox` are recent entries — so
+  without this list the sealed helper binaries read as files the *agent* added, land in
+  the graded diff, and the patch then fails to apply against a grading tree that was
+  handed the same binaries.
+  """
+  @spec seeded() :: [String.t()]
+  def seeded, do: @cloned ++ @seeded
+
+  @doc """
   Builds the tree at `sha` in `dir`. The caller owns removal, on every path.
 
-  Options: `:envs` (default `["test"]`), `:timeout_ms` per compile (default 600 000),
-  `:log` (a file every child's output is appended to).
+  Two shapes of tree, and which one is which matters:
+
+    * `mode: {:clone, ref}` builds the **agent's workspace** — a clone whose history stops
+      at `sha` (`Bench.Self.Git.clone_at/5`), because a worktree shares the repository's
+      object store and would hand the agent the commit that is the answer;
+    * `mode: :worktree` (the default) builds the **grading tree** and the extractor's
+      proving tree — cheaper, and reachability does not matter where no agent runs.
+
+  Options: `:mode`, `:support_from` (where `deps/`, `_build/` and the sealed helpers are
+  cloned from — default `repo`, `nil` for a history that is not this project; for the
+  grading tree always the *checkout*, never the agent's workspace), `:absent` (a sha the
+  built tree must not be able to reach), `:envs` (default `["test"]`), `:timeout_ms` per
+  child (default 600 000), `:log` (a file every child's output is appended to).
   """
   @spec prepare(Path.t(), Path.t(), String.t(), keyword()) ::
           {:ok, prepared()} | {:error, String.t()}
@@ -430,17 +758,60 @@ defmodule Bench.Self.Workspace do
     envs = Keyword.get(opts, :envs, ["test"])
     timeout_ms = Keyword.get(opts, :timeout_ms, 600_000)
     log = Keyword.get(opts, :log)
+    support = Keyword.get(opts, :support_from, repo)
     started = System.monotonic_time(:millisecond)
 
-    with :ok <- Git.worktree_add(repo, dir, sha),
-         :ok <- clone_support(repo, dir),
-         :ok <- deps(repo, dir, timeout_ms, log),
+    with :ok <- build(repo, dir, sha, Keyword.get(opts, :mode, :worktree), timeout_ms),
+         :ok <- absent(dir, Keyword.get(opts, :absent)),
+         :ok <- clone_support(support, dir),
+         :ok <- deps(support, dir, timeout_ms, log),
          :ok <- compile(dir, envs, timeout_ms, log) do
       {:ok, %{setup_ms: System.monotonic_time(:millisecond) - started, log: log}}
     end
   end
 
-  @doc "`mix test <paths>` in a prepared tree. `{:ok, exit_status, ms}` or `{:timeout, ms}`."
+  @doc "Removes a tree this module built, in the shape it was built in."
+  @spec remove(Path.t(), Path.t(), keyword()) :: :ok
+  def remove(repo, dir, opts \\ []) do
+    case Keyword.get(opts, :mode, :worktree) do
+      :worktree ->
+        Git.worktree_remove(repo, dir)
+
+      {:clone, _ref} ->
+        File.rm_rf(dir)
+        :ok
+    end
+  end
+
+  @doc "`mix compile` in a tree something has changed in since `prepare/4` built it."
+  @spec recompile(Path.t(), [String.t()], keyword()) :: :ok | {:error, String.t()}
+  def recompile(dir, envs, opts \\ []),
+    do: compile(dir, envs, Keyword.get(opts, :timeout_ms, 600_000), Keyword.get(opts, :log))
+
+  defp build(repo, dir, sha, :worktree, _timeout_ms), do: Git.worktree_add(repo, dir, sha)
+
+  defp build(repo, dir, sha, {:clone, ref}, timeout_ms),
+    do: Git.clone_at(repo, dir, sha, ref, timeout_ms: timeout_ms)
+
+  defp absent(_dir, nil), do: :ok
+
+  defp absent(dir, sha) do
+    if Git.has_commit?(dir, sha) do
+      {:error,
+       "#{String.slice(sha, 0, 12)} is reachable from the workspace: the history was not " <>
+         "cut, and the task's own answer is one `git log --all --grep` away"}
+    else
+      :ok
+    end
+  end
+
+  @doc """
+  `mix test <paths>` in a prepared tree.
+
+  `{:ok, exit_status, ms, output}` or `{:timeout, ms, output}`. The output cap is
+  deliberately generous, because `Bench.Self.Verdict` reads the grade out of this text and
+  a cut capture is a failed grade rather than a summary that was not printed.
+  """
   @spec test(Path.t(), [String.t()], keyword()) ::
           {:ok, integer(), non_neg_integer(), String.t()} | {:timeout, non_neg_integer(), String.t()}
   def test(dir, paths, opts \\ []) do
@@ -451,6 +822,7 @@ defmodule Bench.Self.Workspace do
         cd: dir,
         timeout_ms: timeout_ms,
         stderr: :stdout,
+        max_output_bytes: @test_output_cap,
         env: Env.build(%{"MIX_ENV" => "test"})
       )
 
@@ -459,6 +831,15 @@ defmodule Bench.Self.Workspace do
       {:timeout, out} -> {:timeout, ms, out}
     end
   end
+
+  @doc "The command line `test/3` runs, for the record a run leaves behind."
+  @spec test_command([String.t()]) :: String.t()
+  def test_command(paths), do: "MIX_ENV=test mix test " <> Bench.Self.Shell.line(paths)
+
+  # `nil` is "there is nothing of this project to clone in" — a history that is not this
+  # checkout's repository, which is how the selftest builds a two-file fixture project
+  # without a 300 MB `_build` belonging to something else landing in it.
+  defp clone_support(nil, _dir), do: :ok
 
   defp clone_support(repo, dir) do
     Enum.reduce_while(@cloned ++ @seeded, :ok, fn relative, :ok ->
@@ -487,6 +868,8 @@ defmodule Bench.Self.Workspace do
   # the versions it pinned, and Mix refuses to compile against the wrong ones rather than
   # guessing — which is the right refusal, and is why this is a byte comparison and not a
   # retry on an error message.
+  defp deps(nil, _dir, _timeout_ms, _log), do: :ok
+
   defp deps(repo, dir, timeout_ms, log) do
     if File.read(Path.join(repo, "mix.lock")) == File.read(Path.join(dir, "mix.lock")) do
       :ok
@@ -600,6 +983,7 @@ defmodule Bench.Self.Hidden do
 
       with {:ok, body} <- Git.show(repo, commit, path),
            :ok <- File.mkdir_p(Path.dirname(target)),
+           :ok <- real_directories(dir, path),
            _removed = File.rm(target),
            :ok <- File.write(target, body) do
         {:cont, :ok}
@@ -609,6 +993,288 @@ defmodule Bench.Self.Hidden do
       end
     end)
   end
+
+  @doc """
+  Whether every restored path still holds `commit`'s bytes.
+
+  Run **after** the graded `mix test`, and the reason is that a grading tree runs the
+  agent's own code: an Elixir module body executes at compile time, in the same BEAM that
+  is about to load these files. Restoring after the compile makes a compile-time rewrite
+  pointless; hashing afterwards makes one at any later moment visible instead of silent.
+  """
+  @spec intact(Path.t(), Path.t(), String.t(), [String.t()]) :: :ok | {:error, String.t()}
+  def intact(repo, dir, commit, paths) do
+    with {:ok, wanted} <- Git.blobs(repo, commit, paths) do
+      {present, gone} = Enum.split_with(paths, &File.regular?(Path.join(dir, &1)))
+
+      case Git.hash_objects(dir, present) do
+        {:ok, got} ->
+          changed = Enum.filter(present, &(Map.get(got, &1) != Map.get(wanted, &1)))
+
+          case Enum.sort(gone ++ changed) do
+            [] -> :ok
+            bad -> {:error, "the restored hidden tests changed while grading: " <> Enum.join(bad, ", ")}
+          end
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  # `File.write/2` follows a symlink, and `File.rm/1` before it removes only the last
+  # component. A tree in which `test/support` has become a link to somewhere else is one
+  # where the grader would be writing where it did not choose, so every component below
+  # the tree root has to be a real directory.
+  defp real_directories(dir, path) do
+    path
+    |> Path.dirname()
+    |> Path.split()
+    |> Enum.reduce_while({:ok, dir}, fn segment, {:ok, at} ->
+      next = Path.join(at, segment)
+
+      case File.lstat(next) do
+        {:ok, %File.Stat{type: :directory}} -> {:cont, {:ok, next}}
+        {:ok, %File.Stat{type: type}} -> {:halt, {:error, "#{path}: #{next} is a #{type}, not a directory"}}
+        {:error, :enoent} -> {:cont, {:ok, next}}
+        {:error, reason} -> {:halt, {:error, "#{path}: #{next} is unreadable (#{inspect(reason)})"}}
+      end
+    end)
+    |> case do
+      {:ok, _at} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+end
+
+defmodule Bench.Self.Verdict do
+  @moduledoc """
+  What one `mix test` **reported**, as opposed to how its process ended.
+
+  `mix test`'s exit status is a number the code under test can set — one
+  `System.at_exit(fn _ -> System.halt(0) end)` in `test/test_helper.exs` makes every suite
+  exit 0, and the review proved the neighbouring trick: a `test: ["cmd true"]` alias in
+  `mix.exs` made `mix test` exit 0 over a suite asserting `1 == 2`. So the verdict is
+  ExUnit's own summary line.
+
+  The rule is the one `bench/self/lib/improve/gate-verdict.sh` applies to the improve
+  loop's gate: the same rule in a second language rather than a second rule, because the
+  two grade the same repository's suites and disagreeing about what green means would be
+  worse than either answer on its own. Green is
+
+    * the process exited 0,
+    * the capture was not cut short by the harness cap,
+    * at least one `Result:` line, and every one of them a clean pass,
+    * no `Failed:` line, and
+    * at least `least` passing tests — the number of hidden `_test.exs` files, because a
+      file that ran contributed at least one test.
+
+  Elixir 1.20's ExUnit prints `Result: 6 passed`, `Result: 1 passed, 1 skipped,
+  1 excluded`, `Result: 1/2 passed` beside `Failed: 1 test`, and `Result: 0 tests,
+  3 excluded`. Only the first two shapes are a pass; `<m>/<n> passed` is a failure summary
+  and `0 tests` is a suite that ran nothing.
+
+  What this cannot do is tell ExUnit's summary from one the code under test printed
+  itself. Nothing that parses the output of a VM the graded code runs in can. What it
+  does is remove the *cheap* forgeries: an exit status, a truncated capture, a suite that
+  reported nothing, and a summary that reports fewer tests than there are files.
+  """
+
+  @spec of(String.t(), integer(), non_neg_integer()) :: {:ok, String.t()} | {:error, String.t()}
+  def of(output, status, least) do
+    lines = summary_lines(output)
+    summary = Enum.join(lines, " ")
+    {results, passes, failed, passed} = counts(lines)
+
+    cond do
+      status != 0 ->
+        {:error, "mix test exited #{status}" <> note(summary)}
+
+      Bench.Self.Exec.cut?(output) ->
+        {:error, "mix test exited 0 but its output was cut short by the harness cap" <> note(summary)}
+
+      results == 0 ->
+        {:error, "mix test exited 0 but printed no `Result:` line: the suite did not report"}
+
+      failed > 0 ->
+        {:error, "mix test exited 0 but the suite reported a failure" <> note(summary)}
+
+      passes != results ->
+        {:error, "mix test exited 0 but a result line is not a pass" <> note(summary)}
+
+      passed < least ->
+        {:error,
+         "mix test exited 0 reporting #{passed} passing test(s) for #{least} hidden test " <>
+           "file(s)" <> note(summary)}
+
+      true ->
+        {:ok, summary}
+    end
+  end
+
+  defp summary_lines(output) do
+    output
+    |> String.split("\n")
+    |> Enum.filter(&(String.starts_with?(&1, "Result:") or String.starts_with?(&1, "Failed:")))
+    |> Enum.map(&String.trim/1)
+  end
+
+  defp counts(lines) do
+    Enum.reduce(lines, {0, 0, 0, 0}, fn line, {results, passes, failed, passed} ->
+      case String.split(line, ~r/\s+/, trim: true) do
+        ["Failed:" | _rest] ->
+          {results, passes, failed + 1, passed}
+
+        ["Result:", count | rest] ->
+          if integer(count) != nil and match?(["passed" <> _tail | _more], rest),
+            do: {results + 1, passes + 1, failed, passed + integer(count)},
+            else: {results + 1, passes, failed, passed}
+
+        _other ->
+          {results + 1, passes, failed, passed}
+      end
+    end)
+  end
+
+  defp integer(text) do
+    case Integer.parse(text) do
+      {value, ""} -> value
+      _other -> nil
+    end
+  end
+
+  defp note(""), do: ""
+  defp note(summary), do: ": " <> summary
+end
+
+defmodule Bench.Self.Change do
+  @moduledoc """
+  What the agent changed, as a patch that can be applied somewhere else.
+
+  The grader grades this, not the tree the agent worked in, and that is the whole answer
+  to the review's first exploit. A file the agent adds under `test/` is *allowed* — writing
+  your own tests is part of the work — but `test/support/**` is on `elixirc_paths(:test)`,
+  so such a file is compiled into the grading VM, its module body runs there, and the
+  review's `zz_bench_self_exploit.ex` used exactly that to rewrite every restored hidden
+  test between the check and the run. `mix.exs` is the same shape of hole one level up:
+  `test: ["cmd true"]` and the suite "passes".
+
+  So: the change is collected as `git diff --binary <base_sha>` over the source roots this
+  corpus actually uses, and *only* those. Everything else is a refusal rather than a
+  filtered-out edit, because an agent that rewrote `mix.exs` did not do the task, and
+  silently grading the rest of its diff would report a number for work nobody checked.
+
+  The allowed roots are derived, not chosen: every `solution_files` entry across the
+  thirty tasks is under `lib/`, `priv/`, `docs/`, `config/` or `README.md`, and `assets/`
+  joins them as the one remaining source root of this repository. `config/` is here on
+  those grounds and is worth naming: `config/*.exs` is Elixir the build evaluates, so it
+  can run code in the grading VM the way `test/support` can. What contains it is order —
+  the grading tree compiles the diff *before* the hidden tests are restored — and
+  `Bench.Self.Hidden.intact/4`, which re-reads their bytes afterwards.
+  """
+
+  alias Bench.Self.Git
+
+  @allowed_roots ~w(lib/ assets/ priv/ config/ docs/)
+  @allowed_files ~w(README.md)
+
+  @type collected :: %{
+          patch: binary(),
+          graded: [String.t()],
+          new_tests: [String.t()],
+          refused: [String.t()]
+        }
+
+  @doc "The roots a graded diff may touch."
+  @spec allowed() :: [String.t()]
+  def allowed, do: @allowed_roots ++ @allowed_files
+
+  @doc """
+  Collects the working tree's change against `base`, classified.
+
+  `git add -N` first: an untracked file is in no diff at all, and a change the grader
+  cannot see is a change it would grade as absent.
+  """
+  @spec collect(Path.t(), String.t()) :: {:ok, collected()} | {:error, String.t()}
+  def collect(dir, base) do
+    with {:ok, _out} <- Git.run(dir, ["add", "--intent-to-add", "--", "."]),
+         {:ok, entries} <- Git.name_status(dir, base, nil, []) do
+      classified = Enum.group_by(entries, &class(elem(&1, 0), elem(&1, 1)), &elem(&1, 1))
+      graded = Enum.sort(Map.get(classified, :graded, []))
+
+      case patch(dir, base, graded) do
+        {:ok, patch} ->
+          {:ok,
+           %{
+             patch: patch,
+             graded: graded,
+             new_tests: Enum.sort(Map.get(classified, :new_test, [])),
+             refused: Enum.sort(Map.get(classified, :refused, []))
+           }}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  @doc """
+  Every pre-existing path under `test/` whose **content** differs from `base`, plus the
+  ones that are gone.
+
+  By content, and never through the index: `git update-index --assume-unchanged` makes
+  both `git status` and `git diff` forget a file that is sitting there modified, which the
+  review proved against the previous check. Hashing the file answers the question the
+  index was being asked. It also settles the false positive the previous check had — a new
+  file that was staged and then edited reads as `AM`, which is not a modification of
+  anything, because the path did not exist at `base` and so is not in this list at all.
+  """
+  @spec modified_tests(Path.t(), Path.t(), String.t()) :: {:ok, [String.t()]} | {:error, String.t()}
+  def modified_tests(repo, dir, base) do
+    with {:ok, wanted} <- Git.blobs(repo, base, ["test"]) do
+      {present, gone} =
+        wanted
+        |> Map.keys()
+        |> Enum.sort()
+        |> Enum.split_with(&File.regular?(Path.join(dir, &1)))
+
+      case Git.hash_objects(dir, present) do
+        {:ok, got} ->
+          changed = Enum.filter(present, &(Map.get(got, &1) != Map.get(wanted, &1)))
+          {:ok, Enum.sort(gone ++ changed)}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp class(status, path) do
+    cond do
+      harness?(path) -> :harness
+      under_test?(path) and String.starts_with?(status, "A") -> :new_test
+      under_test?(path) -> :modified_test
+      allowed?(path) -> :graded
+      true -> :refused
+    end
+  end
+
+  # `deps/`, `_build/` and the two sealed helper directories are put into every tree by
+  # `Bench.Self.Workspace`, not by the agent. `.gitignore` hides them at recent commits and
+  # not at older ones, so at an older base they read as files somebody added — and a diff
+  # that carried `priv/wasm/ouro-wasm` would fail to apply against a grading tree that was
+  # handed the same binary. They are neither graded nor refused, because they are not the
+  # agent's.
+  defp harness?(path),
+    do: Enum.any?(Bench.Self.Workspace.seeded(), &(path == &1 or String.starts_with?(path, &1 <> "/")))
+
+  defp under_test?(path), do: path == "test" or String.starts_with?(path, "test/")
+
+  defp allowed?(path),
+    do: path in @allowed_files or Enum.any?(@allowed_roots, &String.starts_with?(path, &1))
+
+  defp patch(_dir, _base, []), do: {:ok, ""}
+  defp patch(dir, base, paths), do: Git.diff_binary(dir, base, paths)
 end
 
 defmodule Bench.Self.Prompt do
@@ -682,15 +1348,27 @@ defmodule Bench.Self.TaskFile do
       |> Enum.sort()
       |> Enum.map(&Path.join(root, &1))
       |> Enum.filter(&File.dir?/1)
-      |> Enum.reduce_while({:ok, []}, fn dir, {:ok, acc} ->
-        case load(dir) do
-          {:ok, task} -> {:cont, {:ok, [task | acc]}}
-          {:error, reason} -> {:halt, {:error, reason}}
+      |> Enum.reduce_while({:ok, [], []}, fn dir, {:ok, acc, skipped} ->
+        # A directory that holds no `task.json` is not a task — a scratch directory, a
+        # `.DS_Store`'s parent, a half-written extraction. It is reported and passed over,
+        # because refusing the whole corpus for it would make one stray directory the
+        # reason a benchmark cannot run.
+        if File.regular?(Path.join(dir, "task.json")) do
+          case load(dir) do
+            {:ok, task} -> {:cont, {:ok, [task | acc], skipped}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+        else
+          {:cont, {:ok, acc, [dir | skipped]}}
         end
       end)
       |> case do
-        {:ok, tasks} -> filtered(Enum.reverse(tasks), filter)
-        {:error, reason} -> {:error, reason}
+        {:ok, tasks, skipped} ->
+          Enum.each(Enum.reverse(skipped), &IO.puts(:stderr, "corpus  #{&1} holds no task.json; skipped"))
+          filtered(Enum.reverse(tasks), filter)
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   end
@@ -726,7 +1404,9 @@ defmodule Bench.Self.TaskFile do
   """
   @spec encode(map()) :: String.t()
   def encode(task) do
-    order = ~w(id base_sha commit_sha subject instruction hidden_tests solution_files timeout_secs measured)
+    order =
+      ~w(id base_sha commit_sha subject instruction instruction_kind hidden_tests
+         solution_files timeout_secs measured)
 
     body =
       order

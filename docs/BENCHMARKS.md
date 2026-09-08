@@ -1,6 +1,7 @@
 # Benchmarks
 
-Status: written 2026-08-23. Two things live here, and they measure different things.
+Status: written 2026-08-23, revised 2026-09-08. Three things live here, and they measure
+different things.
 
 > **There is no Terminal-Bench number for Ouroboros.** Not a bad one, not a provisional
 > one — none. The adapter that would produce one is written and its decidable half is
@@ -9,15 +10,15 @@ Status: written 2026-08-23. Two things live here, and they measure different thi
 > is. That is the commitment `AGENT_EXPERIENCE.md` §10 makes, and this file is where it
 > is kept.
 
-| | [Terminal-Bench 2.1](#2-terminal-bench-21) | [The local corpus](#3-the-local-corpus) |
-|---|---|---|
-| Question | can the agent solve real terminal work? | does the agent's plumbing hold? |
-| Model | a real one, paid for | a scripted one, free |
-| Needs | docker, a key, a Linux `ouro` | Elixir and a built client |
-| Runtime | hours | ~5 seconds |
-| Comparable to other agents | yes, that is the point | no, and it never will be |
-| Run it | `bench/terminal_bench/README.md` | `make bench-local` |
-| Status here | never run | **17/17 green** on macOS 15 / Elixir 1.20.2 / OTP 29 |
+| | [Terminal-Bench 2.1](#2-terminal-bench-21) | [The local corpus](#3-the-local-corpus) | [The self corpus](#5-the-self-corpus) |
+|---|---|---|---|
+| Question | can the agent solve real terminal work? | does the agent's plumbing hold? | can the agent make a change to *this* code base that tests it was never shown accept? |
+| Model | a real one, paid for | a scripted one, free | a real one, paid for — or the oracle, free |
+| Needs | docker, a key, a Linux `ouro` | Elixir and a built client | Elixir, git, a built client, and a model this node can price |
+| Runtime | hours | ~5 seconds | ~30 minutes for the $0 oracle over 30 tasks |
+| Comparable to other agents | yes, that is the point | no, and it never will be | no: every task is a commit from this repository |
+| Run it | `bench/terminal_bench/README.md` | `make bench-local` | `make bench-self`, then `bench/self/run.sh --spend <usd>` |
+| Status here | never run | **17/17 green** on macOS 15 / Elixir 1.20.2 / OTP 29 | **oracle 30/30 at $0**; no paid run has happened |
 
 ---
 
@@ -35,7 +36,13 @@ bounds bind, the events reach a client, and the numbers come back — end to end
 the real `ouro run` client against a real spawned runtime, with a scripted model standing
 in for a paid one.
 
-**Measured by neither.**
+**Measured by the self corpus.** Whether the agent, driving a real model, can make a change
+to *this* code base that a commit's own tests then accept, without touching the tests it was
+given, in a workspace whose history stops at the commit before the answer. The instruction is
+that commit's message, which frequently describes the change — see [§5](#5-the-self-corpus)
+for what that does and does not measure.
+
+**Measured by none of them.**
 
 - **Model quality.** The corpus scripts the model's answers; it cannot tell you whether a
   model would have chosen them.
@@ -225,19 +232,27 @@ was supposed to mean:
 
 **Ouroboros, graded on changes to Ouroboros.** Thirty tasks, each one a commit from this
 repository's own history. The agent is given the commit's message and the titles of the
-tests that commit added; it works in a detached git worktree at the commit's parent; it is
-graded by restoring those tests from the history and running them. Nobody wrote an
-assertion and nobody wrote an answer key — the history is both.
+tests that commit added; it works in a clone of this repository whose history stops at the
+commit's **parent**; and it is graded by taking its change as a diff, applying that diff to
+a fresh tree at the parent, restoring those tests from the history, and running them.
+Nobody wrote an assertion and nobody wrote an answer key — the history is both.
 
 Run it, and what every flag means: [bench/self/README.md](../bench/self/README.md). The
 extraction policy and the decisions behind it: [SELF.md §S0](SELF.md).
 
 ### What it measures, and what it does not
 
-**Measured.** Whether the agent, driving a real model, can make a change to this code base
-that satisfies tests it was never shown, without editing the tests it *was* given. That is
-the whole loop — reading unfamiliar code, finding the seam, changing it, and proving it —
-against a grade nobody tuned.
+**Measured.** Whether the agent, driving a real model, can execute a change this code base
+already received, well enough that tests it was never shown accept it, without editing the
+tests it *was* given — against a grade nobody tuned.
+
+**The instruction is the commit message, and it frequently describes the change.** It was
+written by the person who made it, so it often names the function, the file, or the exact
+behaviour. Of the thirty tasks, 28 carry a body beyond the subject and **14 name a file the
+solution changes** by path or by name (16 if a module name derived from that path counts).
+So the number is about *executing a described change*, not about discovering what to change.
+`extract.exs --instruction subject-only` builds the corpus that asks the harder question —
+subject, acceptance list and rules, with the body dropped — and no run of it has happened.
 
 **Not measured**, on top of [§1](#1-what-is-measured-and-what-is-not)'s list:
 
@@ -251,6 +266,50 @@ against a grade nobody tuned.
   seen these commits. This corpus cannot tell that apart from competence, and it does not
   try to.
 
+### How the grade is protected, and where it still is not
+
+An adversarial review of the first version made it say `pass` three ways without doing any
+work. Each is now a control the `$0` selftest runs every time.
+
+| what the review did | what it scored | what changed |
+|---|---|---|
+| added one new file under `test/support/` whose module body rewrote every restored hidden test at compile time — a file the grader *allows*, because writing your own tests is part of the work | **2/2 pass** | the grade is a **diff applied to a pristine tree**. The agent's `test/`, `mix.exs`, `.formatter.exs`, `deps/` and `_build/` never reach the grading VM |
+| added `test: ["cmd true"]` to `mix.exs`, which makes `mix test` exit 0 over any suite | `mix test` on a suite asserting `1 == 2` exited **0** | a diff that touches anything outside `lib/`, `assets/`, `priv/`, `config/`, `docs/`, `README.md` is `refused`; and the verdict is ExUnit's `Result:` line, not the exit status |
+| one `bash` call: `git log --all --grep "<the task's own subject>"`, then `git show` for every non-test file of that commit — the workspace was a worktree of this repository, so the answer commit was reachable | **1/1 pass** | the workspace is a **clone that fetches only the base's ancestors** through the `file://` transport. The answer's absence is asserted per task. 0.4 s per task |
+
+Three more rules the same review forced: a completed turn that reports no `usage.cost_usd`
+now stops a paid run (it used to count as $0, so a cap could never bind); the modified-test
+check reads file *content* against the base commit's blobs rather than asking git, because
+`git update-index --assume-unchanged` made both `git status` and `git diff` forget a test
+that was sitting there blanked; and `result.json` records every flag, a digest of the
+corpus, the client binary's sha256, a `-dirty` `ouro_sha`, and the grader's own command
+line.
+
+**Quote a number only with its `ouro_sha`, its `corpus_sha256`, its `model`, and
+`run.cheat` absent.** Without those four it is a number from somewhere.
+
+**What is still not defended.** The grading tree compiles and runs the agent's own `lib/`
+code, and Elixir runs module bodies at compile time. Restoring the hidden tests *after* that
+compile, and re-hashing them against `commit_sha` after the run, removes every way of
+rewriting a test. Nothing here can tell ExUnit's summary from one the graded code printed
+itself — no reader of the output of a VM the graded code runs in could.
+
+### Two facts about the runtime this work turned up
+
+- **`bench/local`'s key stripping was a no-op.** `Port.open`'s `env` option *extends* the
+  caller's environment, so filtering a copy of `System.get_env/0` and passing the remainder
+  removed nothing: every model key the operator had exported was in every child. Fixed —
+  removals are `{name, false}` — and `bench/local/run.exs` now refuses to start its daemon
+  if a dropped name still reaches a child, asserted by spawning `env` through that very
+  environment.
+- **The native `bash` tool never did leak model keys.** The review raised it as plausible;
+  it is not true. `Provider.Native.Exec` gives erlexec `:clear` and rebuilds the child's
+  environment from an allowlist, then drops anything `ProcessEnvironment.sensitive?/2`
+  recognises, so a provider key is excluded twice over.
+  `test/provider/native/bash_environment_test.exs` plants real keys and reads `env` back
+  out of the tool. `GITHUB_TOKEN` does not cross either, which is a real limitation of the
+  posture rather than an oversight.
+
 ### What has actually been run
 
 > **No paid run has happened.** Not a bad one, not a provisional one — none. The corpus,
@@ -260,29 +319,30 @@ against a grade nobody tuned.
 
 The oracle: the corpus answered with each commit's own files through
 [`bench/local`'s scripted model](../bench/local/README.md#the-scripted-model-seam), which
-proves the worktrees, the hidden-test restore, the modified-test check and the budget
-arithmetic — and nothing about any model.
+proves the workspaces, the diff collection, the pristine grading tree, the hidden-test
+restore, the modified-test check and the budget arithmetic — and nothing about any model.
 
 | | |
 |---|---|
 | Date | 2026-09-08 |
 | Corpus | 30 tasks, extracted from `dev` at `c2d9f55` |
 | Result | **30/30**, `$0.0000` spent of a `$1.00` cap |
-| Wall | 875 s total: 603 s building the thirty worktrees, 215 s running the restored tests, and 11.6 s of agent turns |
+| Wall | 3 054 s total: 1 141 s building the thirty workspaces, 1 795 s building the thirty grading trees and running the restored tests, and 10.4 s of agent turns |
 | Work | 67 `write` calls, 67 approvals requested and 67 answered under `--approve-all` |
 | Machine | macOS 15, Elixir 1.20.2, OTP 29, `ouro` debug build |
 
-The 11.6 seconds is the honest shape of an oracle: the scripted model answers instantly, so
-almost all of that wall clock is thirty worktrees being cloned, compiled, and then compiled
-again by the grader's `mix test`. It is the number to subtract when reading a paid run's
-wall clock, which is why setup and grading are timed per task and separately from the turn.
+The ten seconds is the honest shape of an oracle: the scripted model answers instantly, so
+almost all of that wall clock is sixty trees being cloned, compiled, and compiled again.
+Two trees per task is what the diff-on-a-pristine-tree grade costs, and it is the number to
+subtract when reading a paid run's wall clock — which is why setup, the agent's turn and
+grading are timed separately per task.
 
-`bench/self/selftest.sh` (`make bench-self`) was green on the same machine and day. It
-extracts two pinned commits, runs the oracle over them, checks both spend refusals and the
-cap, and runs two negative controls that make the grader falsifiable: an agent that changes
-nothing must fail every task (which is only true if the hidden tests are really restored —
-the parent's copy of each test passes), and an agent that blanks a pre-existing test must
-fail every task (which is only true if the modified-test check exists).
+`bench/self/selftest.sh` (`make bench-self`) was green on the same machine and day: twelve
+phases, no key, no spend. It proves the verdict rule, the refusals that come before anything
+is built, that the oracle's environment carries no secret, the extractor's two gates against
+a fixture history built to trip them, four corpora that are not corpora, and then — against
+this repository's own commits — extraction, the oracle at $0, the spend cap, and eight
+scripted agents that must not score, three of which are the review's exploits above.
 
 ### The paid command
 
@@ -301,8 +361,10 @@ reaches a cap, and `--spend` would be decoration.
 
 `--spend` is required and a model this node cannot price is refused before the first task.
 The total is checked between tasks, so **one task can overshoot the cap by its own cost**;
-what bounds a single task is its `timeout_secs`. Results, including every trajectory, land
-under `bench/self/results/<timestamp>/` and are gitignored.
+what bounds a single task is its `timeout_secs`. A completed turn that reports no
+`usage.cost_usd` stops the run at exit 64 rather than counting as $0, because a total that
+cannot move is not a cap. Results, including every trajectory and the exact diff each task
+was graded on, land under `bench/self/results/<timestamp>/` and are gitignored.
 
 ### The noise expectation
 

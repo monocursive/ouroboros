@@ -105,9 +105,15 @@ the effect ledger on.
 
 `bench/self` turns this repository's own history into a benchmark. A task is a commit: the
 agent is given the commit's message and the titles of the tests that commit added, works in
-a detached git worktree at the commit's **parent**, and is graded by restoring those tests
-from the history and running them. Nobody writes an assertion; the answer already exists and
-so does the grade.
+a **clone whose history stops at the commit's parent**, and is graded by taking its change
+as a diff, applying that diff to a fresh tree at the parent, restoring those tests from the
+history, and running them. Nobody writes an assertion; the answer already exists and so
+does the grade.
+
+The shape of both halves — a clone rather than a worktree, a diff rather than the agent's
+tree — is what an adversarial review of the first version left behind. It made that version
+say `pass` three ways without doing any work; each is now a control the `$0` selftest runs
+every time (S-D3, S-D53, S-D54).
 
 Thirty tasks, extracted on 2026-09-08 from `dev` at `c2d9f55`. The mechanism is in
 [bench/self/README.md](../bench/self/README.md); the numbers are in
@@ -153,10 +159,19 @@ drop. `commit_does_not_pass` fired in earlier extractions of the same history; t
 second finding below.
 
 The thirty are all `fix` commits: 3 to 188 non-test lines changed (median 36), one to three
-hidden test files, one to five solution files, instructions 912 to 2 949 characters
-(median 1 682).
+hidden test files, one to five solution files, instructions 1 242 to 3 279 characters
+(median 2 012).
 
-**Two things extraction found.** Neither is fixed here; this slice changes no `lib/`.
+**The instruction is the commit message, and it frequently describes the change.** 28 of
+the thirty carry a body beyond the subject, and **14 name a file the solution changes** by
+path or by name — 16 if a module name derived from that path counts. So what a number here
+measures is *executing a described change* against tests nobody showed the agent, in a
+repository whose history stops at the base. Not discovery. `extract.exs --instruction
+subject-only` builds the corpus that asks the harder question; the committed one is `full`
+and says so in every `task.json`.
+
+**Two things extraction found.** Neither is fixed here; this slice changes no `lib/` for
+them.
 
 - **The runtime refuses a prompt that quotes its own delimiters.**
   `Runtime.Exposure.wrap_prompt_capture/2` refuses text for which
@@ -178,16 +193,26 @@ hidden test files, one to five solution files, instructions 912 to 2 949 charact
 
 **Grading**, in order; the first thing that is not true is the reason.
 
-1. `completed` inside the timeout — else `timeout` or `not_completed`.
-2. No file that already existed under `test/` was modified or deleted — else
-   `modified_tests`. Checked both by `git status --porcelain -- test` and by
-   `git diff --name-status <base_sha> -- test`, which compares the *working tree* against
-   the commit the task started from. The second is the one that matters: an agent that
-   commits its edit to a test leaves `git status` clean. New files are allowed and left in
-   place.
-3. The hidden tests, restored from `commit_sha`, pass under a wall clock — else
-   `tests_failed`. `setup_failed` covers a tree that could not be built and a `task.json`
-   that disagrees with the history.
+1. `completed` inside the timeout — else `timeout` or `not_completed`. On a paid run a
+   completed turn that reported no `usage.cost_usd` is `setup_failed: unpriced_turn` and
+   the run stops: a running total that cannot move is not a cap.
+2. The task names at least one `_test.exs` — else `setup_failed`.
+3. No file that already existed under `test/` differs in **content** from `base_sha` — else
+   `modified_tests`. Every such path is hashed and compared with the base commit's blob;
+   the index is never consulted, because `git update-index --assume-unchanged` makes both
+   `git status` and `git diff` forget a file sitting there modified. A path that did not
+   exist at the base cannot be a modification, so a new test of the agent's own is fine
+   however it is staged or committed.
+4. The change — `git diff --binary <base_sha>` after `git add -N` — touches only `lib/`,
+   `assets/`, `priv/`, `config/`, `docs/` and `README.md`, else `refused`.
+5. `task.json`'s pins agree with the history, else `setup_failed`.
+6. That diff, applied to a **fresh worktree at `base_sha`** whose `deps/` and `_build/`
+   come from the checkout, compiles; the hidden tests are restored from `commit_sha`
+   *after* that compile; and `mix test` reports them all passing — `Result: N passed`, no
+   `Failed:` line, `N` at least the number of hidden test files, an uncut capture, exit 0.
+   The rule is `bench/self/lib/improve/gate-verdict.sh`'s, which S3's gate applies to the
+   same suites. Afterwards the restored files are hashed again and must still be
+   `commit_sha`'s. Anything else is `tests_failed`.
 
 **The budget.** `--spend <usd>` is required, and a model `Ouroboros.Provider.Native.Cost`
 cannot price is refused before the first task: a total that is permanently zero would sail
@@ -760,21 +785,35 @@ the hidden set from git and refuses a `task.json` that disagrees.
 with both. Only the `_test.exs` members are handed to ExUnit; a task naming none of them is
 `setup_failed` rather than a whole-suite run.
 
-**S-D3. The modified-test check reads the working tree against `base_sha`,** not only
-`git status`. The plan named `git status --porcelain -- test/`; that misses an agent that
-commits its edit. Both run, and either one firing is `modified_tests`.
+**S-D3. The modified-test check reads file content against `base_sha`'s blobs,** and never
+the index. The plan named `git status --porcelain -- test/`; that misses an agent that
+commits its edit, and the review showed that adding `git diff` misses one that runs
+`git update-index --assume-unchanged`, which makes *both* report a clean tree over a
+blanked test. Hashing the file answers the question the index was being asked. It also
+settles a false positive the old check had: a new file staged and then edited reads as
+`AM`, which is not a modification of anything, because the path did not exist at the base.
+Three scripted controls cover it — `blank-tests`, `commit-tests`, `hide-tests` — and a
+fourth, `stage-new-test`, must pass.
 
-**S-D4. The instruction states the rules.** It carries the subject, the body with trailers
-and any pasted diff removed, an acceptance list of the `test "…"` titles the commit *adds*
-(at most twelve, never a body), and a paragraph saying that pre-existing tests must not be
-modified and that new ones are allowed. Saying it does not help an agent game the grade —
-the grader enforces it either way — and not saying it would be measuring a rule nobody was
-told.
+**S-D4. The instruction states the rules, including the ones the diff grader adds.** It
+carries the subject, the body with trailers and any pasted diff removed, an acceptance list
+of the `test "…"` titles the commit *adds* (at most twelve, never a body), and a paragraph
+saying that pre-existing tests must not be modified, that new ones are allowed but are not
+copied into the tree the grade runs in, and which source roots a change may touch. Saying
+it does not help an agent game the grade — the grader enforces it either way — and not
+saying it would be measuring a rule nobody was told. `task.json` records
+`instruction_kind`, and `extract.exs --reinstruct` re-derives an existing corpus's
+instructions from the same history when that derivation changes.
 
-**S-D5. `--spend` is required, an unpriced model is refused, and the cap is checked between
-tasks.** One task can therefore overshoot by its own cost; that is stated in the README and
-here rather than hidden, because `ouro run` has no cost flag and the runtime reports cost
-only when a turn ends.
+**S-D5. `--spend` is required, an unpriced model is refused, an unpriced *turn* stops the
+run, and the cap is checked between tasks.** One task can therefore overshoot by its own
+cost; that is stated in the README and here rather than hidden, because `ouro run` has no
+cost flag and the runtime reports cost only when a turn ends. A completed turn carrying no
+`usage.cost_usd` used to count as $0, which the review pointed out makes the cap
+decoration: every turn of a run the node cannot price is free and the total never moves. It
+is now `setup_failed: unpriced_turn`, exit 64, with the remaining tasks reported as not
+run. The oracle is exempt, because it spends nothing by construction; `--oracle-as-paid`
+removes the exemption, which is how the selftest proves the rule without a key.
 
 **S-D6. The oracle answers with `write`, one call per changed non-test file.** The plan said
 `apply_patch`. `Tools.Write` has no read-before-write guard, whole-file content at
@@ -783,10 +822,17 @@ What the oracle proves is the grader, not a patch format. The cost is a corpus r
 whose changed files exceed `--max-solution-bytes` is dropped, because the scripted model caps
 a script file at 1 MiB.
 
-**S-D7. Two negative controls, behind a seam refused outside `--oracle`.**
-`--oracle-cheat no-solution` and `--oracle-cheat blank-tests` (with `--fake-cost-usd` for the
-budget) turn the plan's "mutations that must go red" into assertions `selftest.sh` runs every
-time, rather than something a reviewer re-derives. Each is refused with `--spend` alone.
+**S-D7. Eight negative controls, behind four seams refused outside `--oracle`.** The plan
+asked for "mutations that must go red"; these turn them into assertions `selftest.sh` runs
+every time, rather than something a reviewer re-derives. `--oracle-cheat` now scripts eight
+agents — `no-solution`, `blank-tests`, `commit-tests`, `hide-tests`, `stage-new-test`,
+`game-support`, `mixexs-alias`, `history-cheat` — of which the last three are the review's
+own exploits, kept as scripts rather than as prose. `--fake-cost-usd` drives the cap,
+`--fake-status` drives the completed check, and `--oracle-as-paid` drives the unpriced-turn
+rule. Every seam is refused outside `--oracle`, and the selftest proves each refusal on a
+run whose model this node *can* price — otherwise the refusal under test might be the
+pricing pre-flight's, which is how the first version of those assertions passed while
+proving nothing.
 
 **S-D8. Three candidate filters the plan did not name.** A commit that changes `mix.exs` or
 `mix.lock` is dropped, because the `deps/` and `_build/` cloned into a worktree were built
@@ -799,10 +845,58 @@ corpus is a task about this corpus.
 **S-D9. A child's environment is a delta, and a removal is `{name, false}`.**
 `:erlang.open_port`'s `env` option *extends* the caller's environment: a variable left out of
 the list is still inherited. `Bench.Self.Env.build/2` therefore emits removals explicitly.
-The oracle's claim that it runs with no provider key in the environment depends on this and
-would otherwise be false. `bench/local/run.exs` builds its environment the other way and its
-`@dropped` list removes nothing; nothing is spent there because the scripted model never
-makes a request, but the guarantee its README states is not the one the code provides.
+The oracle's claim that it runs with no provider key in the environment depends on this,
+and the selftest asserts it by spawning `env` through that builder rather than by reading
+the list. `bench/local/run.exs` built its environment the other way and its `@dropped` list
+removed nothing at all — every model key the operator had exported was in every child, and
+the README said otherwise. Fixed here as well, with a check in `run.exs` that refuses to
+start the daemon if a dropped name still reaches a child. The oracle's list is wider than
+the model keys — `GITHUB_TOKEN` and the runtime's own three secrets join it — because the
+oracle runs no model and no operator tool, so a variable it cannot use is one it should not
+carry.
+
+**S-D53. The grader grades a diff applied to a pristine tree, not the agent's tree.**
+S0's block (S-D1..S-D9) was full when this was decided and every other slice's is
+allocated, so the two decisions the adversarial review forced take the next free numbers
+rather than renumber anybody.
+
+The agent's tree used to be the thing tested, and two files in it could decide the result.
+`test/support/**` is on `elixirc_paths(:test)`, so one new file there — *allowed*, because
+writing your own tests is part of the work — is compiled into the grading VM, and its
+module body runs after every check has passed: the review's rewrote every restored hidden
+test and scored 2/2. `mix.exs` is the same hole one level up: `test: ["cmd true"]` made
+`mix test` exit 0 over a suite asserting `1 == 2`.
+
+So the agent's change is collected as `git diff --binary <base_sha>` (after `git add -N`,
+so new files count) over the source roots the thirty tasks actually use — `lib/`,
+`assets/`, `priv/`, `config/`, `docs/`, `README.md` — and applied to a fresh worktree at
+`base_sha` whose `deps/` and `_build/` come from the *checkout*, never from the agent. A
+diff touching anything else is `refused` rather than filtered: an agent that rewrote
+`mix.exs` did not do the task. The verdict is ExUnit's own `Result:` line under
+`gate-verdict.sh`'s rule, not the exit status, which is a number the code under test can
+set. The diff is compiled *before* the hidden tests are restored, and their bytes are
+re-checked against `commit_sha` afterwards, so a compile-time rewrite changes nothing and a
+later one is caught.
+
+The cost is a second tree per task: the oracle over thirty tasks went from about fifteen
+minutes to about thirty. What is still not defended is named in
+[BENCHMARKS.md §5](BENCHMARKS.md#5-the-self-corpus): the grading tree runs the agent's own
+`lib/`, and no reader of a VM's output can tell ExUnit's summary from one that VM printed.
+
+**S-D54. The workspace is a clone whose history stops at the base.** `git worktree add`
+shares the repository's object store, so the commit that *is* the answer — and every commit
+after it — was reachable from inside the agent's workspace, and the instruction is that
+commit's own subject. The review scored 1/1 with one `bash` call: `git log --all --grep`,
+then `git show "$sha:$f"` per file.
+
+The workspace is now built by registering a temporary ref `refs/bench-self/<run>/<id>` at
+`base_sha`, fetching that ref alone through the **`file://` transport** — which packs only
+what the asked-for ref reaches, where a plain path clone would hardlink the whole object
+store — and deleting the ref on every path. That the answer is absent is asserted per task
+rather than assumed. It costs 0.4 s and 4 MiB per task on this repository. The history *up
+to* the base is all there, deliberately: reading how a code base got here is legitimate
+engineering context, and cutting it would measure something nobody does. `Hidden.restore`
+still reads from the repository, which is where it always read from.
 
 <!-- S1-decisions -->
 
