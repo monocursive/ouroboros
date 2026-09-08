@@ -1,0 +1,64 @@
+{
+  "id": 25,
+  "jsonrpc": "2.0",
+  "result": {
+    "allowable_tools": [
+      "read"
+    ],
+    "demotions": [
+      {
+        "at": "2026-01-01T00:01:30.000000Z",
+        "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "reason": "human_contradiction",
+        "seq": 4,
+        "session_id": "session-0000000000000000000001",
+        "tool": "bash"
+      }
+    ],
+    "durability": "synced_checkpoint",
+    "evidence": {
+      "by_tool": {
+        "bash": 214,
+        "read": 63
+      },
+      "records": 277,
+      "unreadable": 0,
+      "without_document": 0
+    },
+    "node": "ouroboros@golden",
+    "policy": {
+      "component_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "name": "no-network-shell"
+    },
+    "thresholds": {
+      "contradictions": 0,
+      "decisions": 50
+    },
+    "tools": [
+      {
+        "actor": "operator:ana",
+        "evidence": {
+          "contradictions": 0,
+          "decisions": 214,
+          "replayed_at": "2026-01-01T00:00:00.000000Z",
+          "report_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "promoted_at": "2026-01-01T00:00:00.000000Z",
+        "seq": 1,
+        "tool": "bash"
+      },
+      {
+        "actor": "operator:ana",
+        "evidence": {
+          "contradictions": 0,
+          "decisions": 63,
+          "replayed_at": "2026-01-01T00:01:30.000000Z",
+          "report_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "promoted_at": "2026-01-01T00:01:30.000000Z",
+        "seq": 3,
+        "tool": "read"
+      }
+    ]
+  }
+}

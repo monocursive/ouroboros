@@ -213,6 +213,21 @@ pub enum Command {
     /// a clean stream for a pipe.
     Ledger(LedgerArgs),
 
+    /// Earned widening: what this node's policy component has been allowed to resolve, and
+    /// the replay that earned it (docs/SELF.md §S2).
+    ///
+    /// A signed policy component may only ever narrow — an `allow` it returns is honoured
+    /// only for a tool an operator listed in `policy_allowable_tools`, and read as `ask`
+    /// otherwise. This is the other way in: replay the component against decisions humans
+    /// already made on the node, and promote a tool only where it contradicted none of them.
+    ///
+    /// `replay --out report.json` writes the evidence file `promote --evidence` hands back.
+    /// The node re-runs the replay itself before it writes anything, so the file is a record
+    /// of what was decided on rather than the decision.
+    ///
+    /// Reads a runtime that is already running; it never starts one.
+    Policy(PolicyArgs),
+
     /// Investigate retained evidence, or verify an exported bundle entirely offline.
     Audit(AuditArgs),
 
@@ -401,6 +416,108 @@ pub struct LedgerArgs {
     /// A file holding the gateway token. Omitted, the token beside gateway.json is used.
     #[arg(long, value_name = "PATH")]
     pub token_file: Option<PathBuf>,
+}
+
+/// `ouro policy`'s flags. `--addr`, `--token-file` and `--json` are global, so they may be
+/// typed before or after the subcommand.
+#[derive(Debug, Args)]
+pub struct PolicyArgs {
+    #[command(subcommand)]
+    pub command: PolicyCommand,
+
+    /// The whole answer as JSON on stdout instead of a table. Remarks — where a report was
+    /// written, what a demotion was recorded against — go to stderr either way.
+    #[arg(long, global = true)]
+    pub json: bool,
+
+    /// Where the gateway listens. Omitted, the local gateway.json is read instead.
+    #[arg(long, global = true, value_name = "HOST:PORT")]
+    pub addr: Option<String>,
+
+    /// A file holding the gateway token. Omitted, the token beside gateway.json is used.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub token_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PolicyCommand {
+    /// The promotion record: the policy it is bound to, every tool promoted under it and
+    /// whether a later demotion withdrew it, this node's thresholds, and the size of the
+    /// decision corpus.
+    ///
+    /// The corpus holds the exact request a component would have been shown for every
+    /// permission a human answered, so what this prints of it is counts and nothing else.
+    /// There is no verb that serves a row.
+    Status,
+
+    /// Replay a policy component against the decisions humans made on this node, and print
+    /// what it would have said about each of them.
+    ///
+    /// Decides nothing: the component is stood up under its own dry instance, no permission
+    /// is recorded, and the instance deciding this node's live permissions is untouched.
+    Replay(PolicyReplayArgs),
+
+    /// Promote one tool for one policy, on a report `replay --out` wrote.
+    ///
+    /// The node checks the report names the bytes it would evaluate and hashes to its own
+    /// digest, then **re-runs the replay itself** and refuses unless the re-run clears its
+    /// thresholds. Who promoted is the identity this client authenticated as; there is no
+    /// flag for it.
+    Promote(PolicyPromoteArgs),
+
+    /// Withdraw one tool's promotion. Narrowing, and idempotent.
+    Demote(PolicyDemoteArgs),
+
+    /// Forget the whole record — the policy name, the bytes, and every tool promoted under
+    /// them. The one way to point this node's record at a different policy or at
+    /// re-deployed bytes, and deliberately a separate act.
+    Clear,
+}
+
+/// `ouro policy replay`'s flags.
+#[derive(Debug, Args)]
+pub struct PolicyReplayArgs {
+    /// The live lane-W policy to replay, by the name it was deployed under.
+    pub name: String,
+
+    /// Replay only answers recorded at or after this ISO 8601 instant.
+    #[arg(long, value_name = "ISO8601")]
+    pub since: Option<String>,
+
+    /// Write the report here, for `ouro policy promote --evidence` to hand back.
+    #[arg(long, value_name = "PATH")]
+    pub out: Option<PathBuf>,
+}
+
+/// `ouro policy promote`'s flags.
+#[derive(Debug, Args)]
+pub struct PolicyPromoteArgs {
+    /// The policy the report is about.
+    pub name: String,
+
+    /// The one tool this promotion is about. A promotion is per tool, always.
+    #[arg(long, value_name = "TOOL")]
+    pub tool: String,
+
+    /// The report file `ouro policy replay --out` wrote.
+    #[arg(long, value_name = "PATH")]
+    pub evidence: PathBuf,
+}
+
+/// `ouro policy demote`'s flags.
+#[derive(Debug, Args)]
+pub struct PolicyDemoteArgs {
+    /// The promoted policy. Another name narrows nothing.
+    pub name: String,
+
+    /// The tool whose promotion is withdrawn.
+    #[arg(long, value_name = "TOOL")]
+    pub tool: String,
+
+    /// Why. The runtime echoes it and stores an enumerated term instead, so this is a note
+    /// for the person reading the reply rather than a field in the record.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: String,
 }
 
 #[derive(Debug, Args)]

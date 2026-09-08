@@ -1,0 +1,26 @@
+{
+  "id": 23,
+  "jsonrpc": "2.0",
+  "result": {
+    "allowable_tools": [],
+    "demotions": [],
+    "durability": "ephemeral_checkpoint",
+    "evidence": {
+      "by_tool": {
+        "bash": 96,
+        "read": 40,
+        "web_fetch": 12
+      },
+      "records": 148,
+      "unreadable": 0,
+      "without_document": 1
+    },
+    "node": "ouroboros@golden",
+    "policy": null,
+    "thresholds": {
+      "contradictions": 0,
+      "decisions": 50
+    },
+    "tools": []
+  }
+}

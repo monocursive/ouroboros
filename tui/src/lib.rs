@@ -23,6 +23,7 @@ pub mod ledger_cli;
 pub mod mcp_cli;
 pub mod mcp_serve;
 pub mod model;
+pub mod policy_cli;
 pub mod proto;
 pub mod replay_cli;
 pub mod run;

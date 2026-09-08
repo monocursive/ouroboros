@@ -4866,6 +4866,9 @@ mod tests {
                 "ledger_export_result",
                 "ledger_list_result",
                 "mcp_list_result",
+                "policy_promote_result",
+                "policy_replay_result",
+                "policy_status_result",
                 "runtime_status_result",
                 "stream_ended_notification",
                 "stream_lagged_notification",
@@ -5589,6 +5592,125 @@ mod tests {
         let decoded: Value =
             serde_json::from_str(line["line"].as_str().expect("a line")).expect("a JSON object");
         assert_eq!(decoded["id"], line["id"]);
+    }
+
+    /// S2b's three `policy.*` frames, decoded through the renderers that draw them.
+    ///
+    /// The claim this test exists for is the negative one. The decision corpus these counts
+    /// are over holds the exact document a policy component would have been shown for every
+    /// permission a human answered — command lines, paths, domains — and no verb serves a row
+    /// of it. So the fixtures are walked for a field that could hold one, and the rendered
+    /// pages are searched for a path separator. A field added upstream that carried a request
+    /// would fail here before any client learned to draw it.
+    #[test]
+    fn the_policy_fixtures_carry_counts_and_never_a_request() {
+        for name in [
+            "policy_status_result",
+            "policy_promote_result",
+            "policy_replay_result",
+        ] {
+            let result = fixture(name)["result"].clone();
+
+            for forbidden in ["document", "command", "paths", "write_paths", "domains"] {
+                assert!(
+                    !keys_of(&result).contains(&forbidden.to_string()),
+                    "{name} carries a {forbidden} key"
+                );
+            }
+        }
+
+        // The empty record, which is what every node answers until somebody promotes: a
+        // `null` policy and empty lists are answers, and the corpus is already countable.
+        let empty = &fixture("policy_status_result")["result"];
+
+        assert!(empty["policy"].is_null());
+        assert_eq!(
+            empty["allowable_tools"].as_array().expect("a list").len(),
+            0
+        );
+        assert_eq!(empty["evidence"]["records"], 148);
+        assert_eq!(empty["evidence"]["by_tool"]["bash"], 96);
+        assert_eq!(empty["thresholds"]["decisions"], 50);
+
+        let page = crate::policy_cli::render_status(empty);
+        assert!(page.contains("nothing promoted on this node"), "{page}");
+        assert!(page.contains("148 answers"), "{page}");
+        assert!(
+            page.contains("50 decisions and at most 0 contradictions"),
+            "{page}"
+        );
+
+        // The populated record, where the pair that matters is `tools` against
+        // `allowable_tools`: `bash` is promoted and not allowable, because its demotion's
+        // sequence is higher than its promotion's.
+        let record = &fixture("policy_promote_result")["result"];
+
+        assert_eq!(record["policy"]["name"], "no-network-shell");
+        assert_eq!(record["allowable_tools"], serde_json::json!(["read"]));
+        assert_eq!(record["tools"][0]["tool"], "bash");
+        assert_eq!(record["tools"][0]["evidence"]["contradictions"], 0);
+        assert_eq!(record["demotions"][0]["reason"], "human_contradiction");
+        assert_eq!(
+            record["demotions"][0]["fingerprint"]
+                .as_str()
+                .expect("a digest")
+                .len(),
+            64
+        );
+
+        let page = crate::policy_cli::render_status(record);
+        let bash = page
+            .lines()
+            .find(|line| line.starts_with("bash "))
+            .expect("a bash row");
+
+        assert!(bash.contains("no"), "{page}");
+        assert!(page.contains("human_contradiction"), "{page}");
+
+        // The report. `decisions` is `agreements + contradictions + stricter + asks`, and
+        // `agreements` contains `would_resolve`; the fixture is arithmetic a second
+        // implementation can check rather than a shape it has to trust.
+        let report = &fixture("policy_replay_result")["result"];
+        let bash = &report["per_tool"]["bash"];
+        let count = |key: &str| bash[key].as_u64().expect("a count");
+
+        assert_eq!(
+            count("decisions"),
+            count("agreements") + count("contradictions") + count("stricter") + count("asks")
+        );
+        assert!(count("would_resolve") <= count("agreements"));
+
+        // A contradiction row is a digest, a session and an instant. Never a document.
+        let row = &bash["contradiction_rows"][0];
+        assert_eq!(row["fingerprint"].as_str().expect("a digest").len(), 64);
+        assert!(row["session_id"].is_string());
+        assert!(row["at"].is_string());
+        assert_eq!(row.as_object().expect("an object").len(), 3);
+
+        let page = crate::policy_cli::render_report(report);
+        assert!(page.contains("277 rows, 0 unreadable"), "{page}");
+        assert!(page.contains("the whole corpus"), "{page}");
+        assert!(
+            !page.contains('/'),
+            "a rendered report names no path: {page}"
+        );
+    }
+
+    /// Every key in a JSON term, at any depth. The only honest way to assert a field is
+    /// absent from a frame rather than absent from the one place somebody looked.
+    fn keys_of(value: &Value) -> Vec<String> {
+        match value {
+            Value::Object(table) => table
+                .iter()
+                .flat_map(|(key, member)| {
+                    let mut found = vec![key.clone()];
+                    found.extend(keys_of(member));
+                    found
+                })
+                .collect(),
+            Value::Array(items) => items.iter().flat_map(keys_of).collect(),
+            _ => Vec::new(),
+        }
     }
 
     /// D11's `workspace.browse` (docs/WEB.md §7). No client renders this yet — the web

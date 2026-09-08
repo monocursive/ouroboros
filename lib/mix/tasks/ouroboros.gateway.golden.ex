@@ -142,6 +142,9 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       {"wasm_rollback_result", wasm_rollback_result()},
       {"agents_message_truncated_result", agents_message_truncated_result()},
       {"workspace_browse_result", workspace_browse_result()},
+      {"policy_status_result", policy_status_result()},
+      {"policy_promote_result", policy_promote_result()},
+      {"policy_replay_result", policy_replay_result()},
       {"ledger_list_result", ledger_list_result()},
       {"ledger_export_result", ledger_export_result()},
       {"interactive_journal_result", interactive_journal_result()},
@@ -1645,6 +1648,155 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       truncated: true,
       reply: "{\"findings\":[{\"file\":\"lib/a.ex\"… truncated at 65536 bytes."
     })
+  end
+
+  # S2b. The promotion record on a node that has earned nothing yet, which is what every node
+  # answers until somebody replays and promotes — so `policy` is `null` and `allowable_tools`
+  # is empty, and both are *answers* rather than missing keys.
+  #
+  # What is worth pinning here is `evidence`. It is `Control.PolicyEvidence.count/0` and the
+  # whole of what this boundary may say about the corpus: a total, a count per tool, and the
+  # two degraded counts. The corpus itself holds the exact command lines, paths and domains a
+  # human was asked about, and there is no verb that serves a row of it. A client that grew a
+  # renderer for a document would be rendering something this protocol never sends.
+  defp policy_status_result do
+    Conn.result_frame(23, %{
+      node: :ouroboros@golden,
+      policy: nil,
+      tools: [],
+      demotions: [],
+      allowable_tools: [],
+      durability: :ephemeral_checkpoint,
+      thresholds: %{decisions: 50, contradictions: 0},
+      evidence: %{
+        records: 148,
+        by_tool: %{"bash" => 96, "read" => 40, "web_fetch" => 12},
+        without_document: 1,
+        unreadable: 0
+      }
+    })
+  end
+
+  # The same shape after a promotion and a later demotion, which is the pair a client has to
+  # render together: `read` is promoted and allowable, `bash` is promoted and **not** —
+  # its demotion's `seq` is higher than its promotion's, and the sequence is the record's own
+  # counter rather than a clock, so two writes in one microsecond still order.
+  #
+  # A demotion carries the fingerprint of the human answer that contradicted the component and
+  # the session it came from, and never the command line: the digest is what joins it to the
+  # `:permission` ledger entry beside it. `evidence` in a promoted tool is the *re-run's*
+  # numbers with the report's digest beside them, which is what makes an audit able to see
+  # both the report an operator handed in and what the node found when it checked.
+  defp policy_promote_result do
+    Conn.result_frame(25, %{
+      node: :ouroboros@golden,
+      policy: %{name: "no-network-shell", component_sha256: String.duplicate("b", 64)},
+      tools: [
+        %{
+          tool: "bash",
+          seq: 1,
+          promoted_at: @timestamp,
+          actor: "operator:ana",
+          evidence: %{
+            report_sha256: String.duplicate("d", 64),
+            decisions: 214,
+            contradictions: 0,
+            replayed_at: @timestamp
+          }
+        },
+        %{
+          tool: "read",
+          seq: 3,
+          promoted_at: @turn_end_timestamp,
+          actor: "operator:ana",
+          evidence: %{
+            report_sha256: String.duplicate("e", 64),
+            decisions: 63,
+            contradictions: 0,
+            replayed_at: @turn_end_timestamp
+          }
+        }
+      ],
+      demotions: [
+        %{
+          tool: "bash",
+          seq: 4,
+          at: @turn_end_timestamp,
+          reason: :human_contradiction,
+          fingerprint: String.duplicate("a", 64),
+          session_id: @session_id
+        }
+      ],
+      allowable_tools: ["read"],
+      durability: :synced_checkpoint,
+      thresholds: %{decisions: 50, contradictions: 0},
+      evidence: %{
+        records: 277,
+        by_tool: %{"bash" => 214, "read" => 63},
+        without_document: 0,
+        unreadable: 0
+      }
+    })
+  end
+
+  # S2b. A replay report, sealed by the same `Journal.digest/1` the engine seals one with, so
+  # the fixture *is* a report `policy.promote` would accept rather than a picture of one: a
+  # client that recomputes the digest over everything but `report_sha256` and `replayed_at`
+  # gets the value printed here.
+  #
+  # `bash` is the tool a promotion would be refused for and `read` the one it would be granted
+  # for, in one report, because the interesting arithmetic is the relationship between the
+  # columns: `decisions` is `agreements + contradictions + stricter + asks`, and `agreements`
+  # contains `would_resolve`. A contradiction row carries a fingerprint, a session and an
+  # instant — never the document, which is the rule the whole band is built on.
+  defp policy_replay_result do
+    body = %{
+      "policy_name" => "no-network-shell",
+      "component_sha256" => String.duplicate("b", 64),
+      "corpus_size" => 277,
+      "unreadable" => 0,
+      "since" => nil,
+      "per_tool" => %{
+        "bash" => %{
+          "decisions" => 214,
+          "agreements" => 180,
+          "contradictions" => 2,
+          "would_resolve" => 24,
+          "stricter" => 9,
+          "asks" => 23,
+          "unreadable" => 0,
+          "contradiction_rows" => [
+            %{
+              "fingerprint" => String.duplicate("a", 64),
+              "session_id" => @session_id,
+              "at" => @timestamp
+            },
+            %{
+              "fingerprint" => String.duplicate("c", 64),
+              "session_id" => @session_id,
+              "at" => @turn_end_timestamp
+            }
+          ]
+        },
+        "read" => %{
+          "decisions" => 63,
+          "agreements" => 57,
+          "contradictions" => 0,
+          "would_resolve" => 41,
+          "stricter" => 4,
+          "asks" => 2,
+          "unreadable" => 0,
+          "contradiction_rows" => []
+        }
+      }
+    }
+
+    Conn.result_frame(
+      24,
+      body
+      |> Map.put("report_sha256", Ouroboros.Provider.Native.Journal.digest(body))
+      |> Map.put("replayed_at", @timestamp)
+    )
   end
 
   defp ledger_entry do

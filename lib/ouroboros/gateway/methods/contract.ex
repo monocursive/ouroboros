@@ -26,6 +26,22 @@ defmodule Ouroboros.Gateway.Methods.Contract do
   @replay_verify_timeout 120_000
   @team_timeout 60000
   @hello_deadline 10000
+  # S2b. `policy.status` reads the whole evidence corpus to count it — at most 10 000 rows or
+  # 64 MiB, which is a sequential read and a decode per line rather than a query. `policy.replay`
+  # and `policy.promote` ask a wasm component once per row in that corpus, so their ceiling is
+  # `wasm.deploy`'s: above the work rather than above one call. `policy.promote` additionally
+  # admits `outcome: :unknown`, because the replay it re-runs and the checkpoint it writes do
+  # not stop when this socket's ceiling fires.
+  @policy_status_timeout 30_000
+  @policy_replay_timeout 180_000
+  # The bytes a `policy.demote` reason may carry. It is echoed and never stored, so this bounds
+  # a reply rather than a record.
+  @policy_reason_bytes 512
+  # `Ouroboros.Wasm.PolicyEngine.promotion_thresholds/0`, restated for the generated reference.
+  # Literals rather than a compile-time call into the wasm plane, and held equal to it by
+  # `Ouroboros.Gateway.PolicyTest`.
+  @policy_min_decisions 50
+  @policy_max_contradictions 0
   @approval_modes %{
     "default" => :default,
     "prompt" => :prompt,
@@ -1090,6 +1106,64 @@ defmodule Ouroboros.Gateway.Methods.Contract do
       params: {:open, []},
       handler: :handle_plans_list
     },
+    "policy.clear" => %{
+      scope: :operate,
+      timeout: @default_timeout,
+      params:
+        {:closed, [],
+         "no parameters at all: this forgets the whole record, and a parameter would suggest there is a part of it to keep. The actor is the gateway principal, so an unattributed caller is refused rather than recorded as one"},
+      handler: :handle_policy_clear
+    },
+    "policy.demote" => %{
+      scope: :operate,
+      timeout: @default_timeout,
+      params:
+        {:closed,
+         [
+           {"name", :required, :string, "the promoted policy; another name narrows nothing"},
+           {"tool", :required, :string, "the tool whose promotion is withdrawn"},
+           {"reason", :required, :string,
+            "why, in at most #{@policy_reason_bytes} bytes. It is **echoed and not stored**: a demotion's `reason` in the record is an enumerated atom (`operator_demotion` for this verb, `human_contradiction` for the canary), because a record fsynced on every write is not where free text belongs"}
+         ],
+         "narrowing, and idempotent: a tool that is not promoted is already where this leaves it"},
+      handler: :handle_policy_demote
+    },
+    "policy.promote" => %{
+      scope: :operate,
+      timeout: @policy_replay_timeout,
+      outcome: :unknown,
+      params:
+        {:closed,
+         [
+           {"name", :required, :string, "a live lane-W rollout of kind `policy` on this node"},
+           {"tool", :required, :string, "the one tool this promotion is about"},
+           {"report", :required, :object,
+            "a `policy.replay` report, whole. It must still name this policy's `component_sha256` and hash to its own `report_sha256`, so a report about other bytes or one somebody edited is refused by name"}
+         ],
+         "the report is evidence that a replay happened, not that it is still true, so the node **re-runs the replay itself** and writes the re-run's numbers into the record beside the report's digest. Promotion needs at least #{@policy_min_decisions} decisions and exactly #{@policy_max_contradictions} contradictions for that tool, in the re-run. `outcome: unknown` on a ceiling: the replay and the checkpoint do not stop because this socket did"},
+      handler: :handle_policy_promote
+    },
+    "policy.replay" => %{
+      scope: :operate,
+      timeout: @policy_replay_timeout,
+      params:
+        {:closed,
+         [
+           {"name", :required, :string, "a live lane-W rollout of kind `policy` on this node"},
+           {"since", :optional, :string,
+            "an ISO 8601 instant; only human answers recorded at or after it are replayed"}
+         ],
+         "`operate` rather than `read` because it stands a component up, the same split `computer_use.status` and `computer_use.probe` make. It decides nothing: the instance is a dry one under its own name, no `:permission` entry and no evidence row is written, and the live instance is untouched"},
+      handler: :handle_policy_replay
+    },
+    "policy.status" => %{
+      scope: :read,
+      timeout: @policy_status_timeout,
+      params:
+        {:closed, [],
+         "node-local by construction and therefore without a `node` parameter: the promotion record and the corpus are where the decisions were made, so this asks the machine rather than routing to it. `evidence` is `Ouroboros.Control.PolicyEvidence.count/0` and is the **whole** of what this protocol says about the decision corpus — a total, a count per tool, and the two degraded counts. No verb serves a row of it: the corpus holds the exact request a policy component would have been shown, command lines and paths included. `durability` is how the record is kept — `ephemeral_checkpoint`, `synced_checkpoint`, `durable_checkpoint`, or `unavailable` when the authority itself did not answer, which is a different fact from an empty record and is why it is a value rather than a missing key"},
+      handler: :handle_policy_status
+    },
     "runtime.lsp.status" => %{
       scope: :read,
       timeout: @default_timeout,
@@ -1363,6 +1437,9 @@ defmodule Ouroboros.Gateway.Methods.Contract do
   def permission_rule_scopes, do: @permission_rule_scopes
   def permission_scopes, do: @permission_scopes
   def plan_exit_choices, do: @plan_exit_choices
+  def policy_max_contradictions, do: @policy_max_contradictions
+  def policy_min_decisions, do: @policy_min_decisions
+  def policy_reason_bytes, do: @policy_reason_bytes
   def reasoning_efforts, do: @reasoning_efforts
   def replay_limit, do: @replay_limit
   def start_options, do: @start_options

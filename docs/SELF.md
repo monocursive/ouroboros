@@ -341,6 +341,40 @@ happens to an `allow`, because that component never says one), and appends to
 Not in this slice: a classifier, a model anywhere in the promotion path, promotion without a
 human actor, fleet-wide replay, and the gateway verbs and `ouro policy` CLI (S2b).
 
+**Verbs and CLI (S2b).** Five verbs put the above in front of a person. `policy.status`
+(`:read`) answers the record — the policy it is bound to, every tool promoted under it with the
+actor and the numbers it was promoted on, the newest twenty demotions, `allowable_tools`, the
+record's durability and this node's thresholds — beside `PolicyEvidence.count/0`. `policy.replay`
+(`:operate`) answers the sealed report; `policy.promote` (`:operate`, `outcome: unknown`) takes
+`{name, tool, report}` and answers the record after the write; `policy.demote` takes
+`{name, tool, reason}` and `policy.clear` takes nothing, and both answer the record too. Every
+envelope is closed and none of the five takes a `node`: the record is a checkpoint on this
+machine and the corpus is a file on it. **No evidence document crosses this boundary.** The
+counts are the whole of what these verbs say about the corpus, and a contradiction row carries a
+fingerprint, a session id and an instant. `Ouroboros.Gateway.PolicyTest` walks a populated
+reply for a `document`, `command`, `paths`, `write_paths` or `domains` key at any depth and for
+a path separator in any string, and `tui/src/model.rs`'s
+`the_policy_fixtures_carry_counts_and_never_a_request` does the same to all three golden frames
+and to the pages the client renders from them.
+
+The client is `ouro policy status|replay|promote|demote|clear`. `replay --out report.json`
+writes the file `promote --evidence report.json` hands back — the runtime re-runs the replay
+before it writes anything, so the file is a record of what was decided on rather than the
+decision. A table for a person and `--json` for a pipe, and stdout carries only the answer:
+where a report was written and the sentence a demotion was recorded against both go to stderr.
+The client states no threshold of its own — the report table prints the seven counts and derives
+nothing, and `status` prints the thresholds the node itself sent — `the_gate_is_the_node_s_own_numbers`
+proves a runtime that states none is said so rather than filled in from a constant compiled into
+the client.
+
+Proved in `test/ouroboros/gateway/policy_test.exs`, `tui/src/policy_cli.rs`'s own tests,
+`tui/tests/policy_cli.rs` against the scripted gateway with the golden frames, and
+`test/support/gateway_golden/policy_{status,promote,replay}_result.json` with the sections
+`docs/PROTOCOL.md` generates from them.
+
+Not in S2b either: a `node` parameter, a fleet-wide replay, and any verb that serves a corpus
+row.
+
 ### S3. The outer loop
 
 <!-- S3 -->
@@ -768,6 +802,37 @@ thresholds are `decisions >= 50` and `contradictions == 0`, so a component that 
 everything is promotable and resolves nothing. `would_resolve` is the number that says whether a
 promotion is worth making, and it is in the report for an operator to read; adding it as a third
 gate would be inventing a threshold the plan did not set.
+
+**S-D27. The actor is the gateway principal, and an unattributed caller is refused rather than
+recorded.** `policy.promote` and `policy.clear` have no `actor` parameter: who promoted is the
+identity the connection authenticated as, read by `Audit.Identity.actor/0` from the runtime's
+own side of the socket, because a promotion whose actor a client could type is a promotion with
+anybody's name on it. That function cannot fail — with no resolvable subject it answers the
+placeholder `runtime-unattributed`, which is a fine ledger principal for something the runtime
+did to itself and is not a human — so both verbs check for it and answer `-32003` with
+`reason: unattributed_actor`. `policy.demote` does **not**: narrowing is safe, `PolicyPromotion`
+requires no actor for it, and a demotion nobody can name is still a demotion. The check runs
+before the plane is asked, so an unattributed caller does not learn which policies this node
+runs.
+
+**S-D28. Four of the five verbs answer the same object.** `status`, `promote`, `demote` and
+`clear` all answer the record as it stands after the call, so a client has one shape to render
+and every write proves itself by handing back what the record now says rather than by an
+acknowledgement a caller has to trust. It is bounded in the three places it could grow: the
+demotions are the newest twenty of the two hundred the record keeps, the evidence is
+`PolicyEvidence.count/0`, and the tools are the record's own map. `demote` adds exactly one key,
+`reason`, which is the sentence the operator typed **echoed** — the record stores the enumerated
+term `:operator_demotion` instead, because a checkpoint fsynced on every write is not where free
+text belongs, and the CLI puts the echo on stderr for the same reason.
+
+**S-D29. None of the five takes a `node`, and `policy.replay` is `:operate`.** The promotion
+record is a checkpoint on this machine and the corpus is a file on it, so there is nothing to
+route to; a client asks the machine that made the decisions. `replay` is `:operate` rather than
+`:read` for the reason `computer_use.probe` is — it stands a component up — even though it
+decides nothing, records nothing and never touches the live instance. `promote` additionally
+admits `outcome: :unknown`, the admission `wasm.deploy` makes: the replay it re-runs and the
+checkpoint it writes do not stop because a socket's ceiling fired, and a client reconciles with
+`policy.status` rather than by retrying blind.
 
 <!-- S3-decisions -->
 

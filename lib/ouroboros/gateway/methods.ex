@@ -83,6 +83,8 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Control
   alias Ouroboros.Control.Grants
   alias Ouroboros.Control.Permissions
+  alias Ouroboros.Control.PolicyEvidence
+  alias Ouroboros.Control.PolicyPromotion
   alias Ouroboros.Gateway.Methods.Browse
   alias Ouroboros.Gateway.Methods.Contract
   alias Ouroboros.Gateway.Methods.Encode
@@ -114,6 +116,7 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Wasm.Deploy, as: WasmDeploy
   alias Ouroboros.Wasm.Upload, as: WasmUpload
   alias Ouroboros.Wasm.Download, as: WasmDownload
+  alias Ouroboros.Wasm.PolicyEngine
 
   import Ouroboros.Gateway.Methods.Safe,
     only: [
@@ -1092,6 +1095,259 @@ defmodule Ouroboros.Gateway.Methods do
       {:invalid, message} -> invalid_params(message)
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # S2b — earned widening on the wire (docs/SELF.md §S2)
+  #
+  # `Ouroboros.Control.PolicyEvidence` holds the exact bytes a policy component would have
+  # been handed for every permission request a human answered on this node. That corpus is
+  # the most sensitive file the runtime writes — command lines, paths and domains, redacted
+  # only as far as `PolicyEngine.document/1` redacts them — and **no part of it crosses this
+  # boundary**. Under `:read` these verbs serve `PolicyEvidence.count/0`: totals per tool,
+  # and the two degraded counts. A replay report carries the fingerprint, the session id and
+  # the timestamp of each contradiction, which is what makes one findable in the `:permission`
+  # ledger entry beside it, and never the document.
+  #
+  # Node-local by construction, so none of the five takes a `node`. The record is a
+  # checkpoint on this machine and the corpus is a file on it; there is nothing to route to
+  # (plan §0 row 9 — a fleet-wide replay is not in v1).
+  #
+  # The actor is the connection's principal, `Ouroboros.Audit.Identity.actor/0`, and never a
+  # parameter: a promotion whose actor a client could type is a promotion with anybody's name
+  # on it. `promote` and `clear` are the two calls `Control.PolicyPromotion` requires an actor
+  # for, and both refuse an unattributed caller rather than writing the placeholder
+  # `Identity.actor/0` answers with when the identity behind the socket has been revoked.
+  # ---------------------------------------------------------------------------
+
+  # The placeholder `Ouroboros.Audit.Identity.actor/0` answers with when there is no resolvable
+  # subject. It is a perfectly good ledger principal for something the runtime did to itself; it
+  # is not a human, and S2's rule is that a promotion has one.
+  @unattributed_actor "runtime-unattributed"
+
+  # How many demotions a reply carries. The record keeps two hundred, because a demotion is the
+  # durable statement that a human contradicted a component; a reply is read by a person and by
+  # a table, and the newest twenty are the ones that explain the current state.
+  @policy_demotions_shown 20
+
+  @policy_reason_bytes Contract.policy_reason_bytes()
+
+  @doc false
+  def handle_policy_status(_params), do: safe(fn -> {:ok, policy_record()} end)
+
+  @doc false
+  def handle_policy_replay(params) do
+    with {:ok, name} <- fetch_string(params, "name"),
+         {:ok, since} <- fetch_optional_string(params, "since") do
+      safe(fn ->
+        case PolicyEngine.replay(name, replay_opts(since)) do
+          {:ok, report} -> {:ok, report}
+          {:error, reason} -> policy_refusal(reason)
+        end
+      end)
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  @doc false
+  def handle_policy_promote(params) do
+    with {:ok, name} <- fetch_string(params, "name"),
+         {:ok, tool} <- fetch_string(params, "tool"),
+         {:ok, report} <- fetch_object(params, "report"),
+         {:ok, actor} <- attributed_actor() do
+      safe(fn ->
+        case PolicyEngine.promote(name, tool, report, actor) do
+          {:ok, _record} -> {:ok, policy_record()}
+          {:error, reason} -> policy_refusal(reason)
+        end
+      end)
+    else
+      {:invalid, message} -> invalid_params(message)
+      {:unattributed, message} -> policy_unattributed(message)
+    end
+  end
+
+  # The reason **text** never reaches the record: `PolicyPromotion` stores an enumerated atom,
+  # and `:operator_demotion` is this verb's. The sentence an operator typed is echoed in the
+  # reply, where it is read once, rather than fsynced into a checkpoint on every write.
+  @doc false
+  def handle_policy_demote(params) do
+    with {:ok, name} <- fetch_string(params, "name"),
+         {:ok, tool} <- fetch_string(params, "tool"),
+         {:ok, reason} <- fetch_bounded_string(params, "reason", @policy_reason_bytes) do
+      safe(fn ->
+        case PolicyPromotion.demote(name, tool, %{reason: :operator_demotion}) do
+          :ok -> {:ok, Map.put(policy_record(), :reason, reason)}
+          {:error, refusal} -> policy_refusal(refusal)
+        end
+      end)
+    else
+      {:invalid, message} -> invalid_params(message)
+    end
+  end
+
+  @doc false
+  def handle_policy_clear(_params) do
+    with {:ok, actor} <- attributed_actor() do
+      safe(fn ->
+        case PolicyPromotion.clear(actor) do
+          :ok -> {:ok, policy_record()}
+          {:error, reason} -> policy_refusal(reason)
+        end
+      end)
+    else
+      {:unattributed, message} -> policy_unattributed(message)
+    end
+  end
+
+  # The one shape four of the five verbs answer with, so a client renders the record once and
+  # every write proves itself by handing back what the record now says. Bounded everywhere it
+  # could grow: the tools are the record's own map, the demotions are the newest
+  # `#{@policy_demotions_shown}`, and `evidence` is `PolicyEvidence.count/0` — counts, never
+  # rows.
+  defp policy_record do
+    status = PolicyPromotion.status()
+
+    %{
+      node: node(),
+      policy:
+        case {status.policy_name, status.component_sha256} do
+          {name, sha} when is_binary(name) and is_binary(sha) ->
+            %{name: name, component_sha256: sha}
+
+          _unbound ->
+            nil
+        end,
+      tools:
+        status.tools
+        |> Enum.map(fn {tool, entry} ->
+          entry |> Map.take([:promoted_at, :actor, :evidence, :seq]) |> Map.put(:tool, tool)
+        end)
+        |> Enum.sort_by(& &1.tool),
+      demotions:
+        status.demotions
+        |> Enum.sort_by(&(-Map.get(&1, :seq, 0)))
+        |> Enum.take(@policy_demotions_shown),
+      allowable_tools: status.allowable_tools,
+      durability: status.durability,
+      thresholds: PolicyEngine.promotion_thresholds(),
+      evidence: PolicyEvidence.count()
+    }
+  end
+
+  defp replay_opts(nil), do: []
+  defp replay_opts(since), do: [since: since]
+
+  # The connection's principal, or a refusal. `Identity.actor/0` cannot fail — it answers
+  # `#{@unattributed_actor}` when the subject behind this call resolves to nobody — so the
+  # check is on that value rather than on an error.
+  defp attributed_actor do
+    case Ouroboros.Audit.Identity.actor() do
+      actor when is_binary(actor) and actor != "" and actor != @unattributed_actor ->
+        {:ok, actor}
+
+      _unattributed ->
+        {:unattributed,
+         "this call has no resolvable identity, and a promotion record names the human who " <>
+           "made it; authenticate with a configured identity and retry"}
+    end
+  end
+
+  defp policy_unattributed(message),
+    do: {:error, code(:scope_denied), message, %{"reason" => "unattributed_actor"}}
+
+  # D11's posture, for the eleven named tuples `Wasm.PolicyEngine` and
+  # `Control.PolicyPromotion` answer with: a closed `data.reason` a client branches on, beside
+  # a sentence a person reads. Anything else is `upstream_error` carrying the term, which is
+  # what every other verb does with a refusal nobody enumerated.
+  defp policy_refusal({:no_live_policy, name}) do
+    {:error, code(:not_found),
+     "no live lane-W policy named #{inspect(name)} on this node; `wasm.list` names what is " <>
+       "deployed", %{"reason" => "no_live_policy", "name" => to_string(name)}}
+  end
+
+  defp policy_refusal({:policy_not_verifiable, detail}) do
+    {:error, code(:upstream_error),
+     "that component's manifest does not verify against this node's own trust policy, so " <>
+       "this node will not run it even dry",
+     %{"reason" => "policy_not_verifiable", "detail" => Wire.to_json(detail)}}
+  end
+
+  defp policy_refusal({:report_names_other_bytes, stated}) do
+    {:error, code(:invalid_params),
+     "params.report was made against different component bytes than this node would " <>
+       "evaluate; replay again and promote on the new report",
+     %{"reason" => "report_names_other_bytes", "component_sha256" => Wire.to_json(stated)}}
+  end
+
+  defp policy_refusal(:report_unsealed) do
+    {:error, code(:invalid_params),
+     "params.report carries no report_sha256, so it is not a report this node sealed",
+     %{"reason" => "report_unsealed"}}
+  end
+
+  defp policy_refusal(:report_digest_mismatch) do
+    {:error, code(:invalid_params),
+     "params.report does not hash to its own report_sha256; it was edited after the replay " <>
+       "that produced it", %{"reason" => "report_digest_mismatch"}}
+  end
+
+  defp policy_refusal({:no_decisions_for_tool, tool}) do
+    {:error, code(:upstream_error),
+     "the corpus holds no replayable decision for #{inspect(tool)}, so there is nothing this " <>
+       "component could have earned", %{"reason" => "no_decisions_for_tool", "tool" => tool}}
+  end
+
+  defp policy_refusal({:policy_contradicted_a_human, tool, contradictions}) do
+    {:error, code(:upstream_error),
+     "the re-run found #{contradictions} contradiction(s) for #{inspect(tool)}: this " <>
+       "component would have allowed a call a human denied",
+     %{
+       "reason" => "policy_contradicted_a_human",
+       "tool" => tool,
+       "contradictions" => contradictions
+     }}
+  end
+
+  defp policy_refusal({:not_enough_decisions, tool, decisions, required}) do
+    {:error, code(:upstream_error),
+     "the re-run found #{decisions} decision(s) for #{inspect(tool)} and a promotion needs " <>
+       "#{required}",
+     %{
+       "reason" => "not_enough_decisions",
+       "tool" => tool,
+       "decisions" => decisions,
+       "required" => required
+     }}
+  end
+
+  defp policy_refusal({:policy_promotion_bound_to, name, sha}) do
+    {:error, code(:upstream_error),
+     "this node's promotion record already holds #{inspect(name)}; clear it with policy.clear " <>
+       "before promoting anything else",
+     %{
+       "reason" => "policy_promotion_bound_to",
+       "name" => Wire.to_json(name),
+       "component_sha256" => Wire.to_json(sha)
+     }}
+  end
+
+  defp policy_refusal({:policy_promotion_unrecordable, detail}) do
+    {:error, code(:upstream_error),
+     "the effect ledger refused the promotion entry, so nothing was widened",
+     %{"reason" => "policy_promotion_unrecordable", "detail" => Wire.to_json(detail)}}
+  end
+
+  defp policy_refusal({:policy_promotion_checkpoint_failed, detail}) do
+    {:error, code(:upstream_error),
+     "the promotion record could not be checkpointed, so nothing was written",
+     %{"reason" => "policy_promotion_checkpoint_failed", "detail" => Wire.to_json(detail)}}
+  end
+
+  defp policy_refusal({:policy_promotion_unavailable, _detail}),
+    do: unavailable("the policy promotion record is not running on this node")
+
+  defp policy_refusal(reason), do: upstream_error(reason)
 
   # ---------------------------------------------------------------------------
   # D4 — MCP servers on the wire
@@ -3571,6 +3827,30 @@ defmodule Ouroboros.Gateway.Methods do
     do: {:invalid, "params must include api_key or workspace_id"}
 
   defp require_anthropic_update(_api_key, _workspace_id), do: :ok
+
+  # A required JSON object. Not `is_map/1` alone: a list decodes to a list and a struct never
+  # arrives over this wire, so the guard is the honest one — a map that is not a struct.
+  defp fetch_object(params, key) do
+    case Map.get(params, key) do
+      value when is_map(value) and not is_struct(value) -> {:ok, value}
+      _other -> {:invalid, "params.#{key} must be an object"}
+    end
+  end
+
+  # A required string with a byte ceiling. The ceiling is on bytes rather than on graphemes
+  # because what it protects is a reply frame.
+  defp fetch_bounded_string(params, key, limit) do
+    case Map.get(params, key) do
+      value when is_binary(value) and value != "" and byte_size(value) <= limit ->
+        {:ok, value}
+
+      value when is_binary(value) ->
+        {:invalid, "params.#{key} must be between 1 and #{limit} bytes"}
+
+      _other ->
+        {:invalid, "params.#{key} must be a nonempty string of at most #{limit} bytes"}
+    end
+  end
 
   # An absent optional string is `nil` rather than an error; a present one is held to the
   # same rule as a required one, so `""` is a mistake and not a silent default.

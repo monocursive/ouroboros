@@ -100,6 +100,9 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
     "wasm_rollback_result" => {:method, "wasm.rollback"},
     "agents_message_truncated_result" => {:method, "agents.message"},
     "workspace_browse_result" => {:method, "workspace.browse"},
+    "policy_status_result" => {:method, "policy.status"},
+    "policy_promote_result" => {:method, "policy.promote"},
+    "policy_replay_result" => {:method, "policy.replay"},
     "interactive_event_notification" => {:notification, "interactive.event"},
     "interactive_event_excerpt_notification" => {:notification, "interactive.event"},
     "coding_event_notification" => {:notification, "coding.event"},
@@ -135,7 +138,7 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
   # alphabetically, so a new band appears in the reference the day it appears in the table.
   @band_order ~w(
     handshake runtime fleet account agents interactive coding teams
-    plans control permissions grants code_intel ledger workspace capabilities
+    plans control permissions policy grants code_intel ledger workspace capabilities
     upgrade signing wasm
   )
 

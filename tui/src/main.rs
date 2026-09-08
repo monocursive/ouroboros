@@ -213,6 +213,7 @@ async fn run(cli: Cli) -> Result<()> {
         Some(Command::Web { print }) => web(&paths, cli.dev, print).await,
         Some(Command::Stop) => stop(&paths, cli.dev).await,
         Some(Command::Ledger(args)) => ledger(&paths, args).await,
+        Some(Command::Policy(args)) => policy(&paths, args).await,
         Some(Command::Audit(args)) => audit(&paths, args).await,
         Some(Command::Replay(args)) => replay(&paths, args).await,
         Some(Command::Fork(args)) => fork(&paths, args).await,
@@ -2721,6 +2722,63 @@ async fn ledger(paths: &Paths, args: LedgerArgs) -> Result<()> {
     let mut err = std::io::stderr().lock();
 
     ouro::ledger_cli::run(&connected.client, &options, &mut out, &mut err).await
+}
+
+/// `ouro policy`: earned widening, against a runtime that is already up.
+///
+/// No spawn and no boot screen, for `ouro ledger`'s reason: every one of these is a question
+/// about, or a change to, a record that only exists where the decisions were made, and
+/// starting a machine to ask it would be asking a machine that has never decided anything.
+///
+/// Both streams are locked once, here, and handed down: the answer goes to stdout and every
+/// remark about the call to stderr, so `--json` stays a clean pipe.
+async fn policy(paths: &Paths, args: ouro::cli::PolicyArgs) -> Result<()> {
+    let (address, token) = remote_endpoint(paths, args.addr, args.token_file).await?;
+    let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
+    let connected = attach_with(address, token, false, None, hook).await?;
+    let client = &connected.client;
+
+    let mut out = std::io::stdout().lock();
+    let mut err = std::io::stderr().lock();
+
+    match args.command {
+        ouro::cli::PolicyCommand::Status => {
+            ouro::policy_cli::status(client, args.json, &mut out, &mut err).await
+        }
+        ouro::cli::PolicyCommand::Replay(replay) => {
+            let options = ouro::policy_cli::ReplayOptions {
+                name: replay.name,
+                since: replay.since,
+                out: replay.out,
+                json: args.json,
+            };
+
+            ouro::policy_cli::replay(client, &options, &mut out, &mut err).await
+        }
+        ouro::cli::PolicyCommand::Promote(promote) => {
+            let options = ouro::policy_cli::PromoteOptions {
+                name: promote.name,
+                tool: promote.tool,
+                evidence: promote.evidence,
+                json: args.json,
+            };
+
+            ouro::policy_cli::promote(client, &options, &mut out, &mut err).await
+        }
+        ouro::cli::PolicyCommand::Demote(demote) => {
+            let options = ouro::policy_cli::DemoteOptions {
+                name: demote.name,
+                tool: demote.tool,
+                reason: demote.reason,
+                json: args.json,
+            };
+
+            ouro::policy_cli::demote(client, &options, &mut out, &mut err).await
+        }
+        ouro::cli::PolicyCommand::Clear => {
+            ouro::policy_cli::clear(client, args.json, &mut out, &mut err).await
+        }
+    }
 }
 
 async fn audit(paths: &Paths, args: ouro::cli::AuditArgs) -> Result<()> {
