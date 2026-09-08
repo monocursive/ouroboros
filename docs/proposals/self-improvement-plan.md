@@ -48,12 +48,12 @@ line, fixed in §S0 below. The proposal's order S0 → S3 → S1 → S2 → S4 i
 Each slice: implementer → my gates and a read of the full diff → a separate adversarial
 reviewer with a stated threat model, PROVED/PLAUSIBLE labels and a mutation table → fix wave
 back to the implementer with its context intact → I re-run every former mutation survivor →
-cherry-pick onto the integration branch `self` → the combined gate.
+cherry-pick onto the integration branch `self-integrate` → the combined gate.
 
 ## 2. Ground rules for every agent
 
 1. **Base.** `dev` at `160ca08`. Your worktree is at `.claude/worktrees/<slice>` on branch
-   `self/<slice>`; verify with `git rev-parse HEAD` and `git merge-base --is-ancestor 160ca08 HEAD`
+   `self-<slice>`; verify with `git rev-parse HEAD` and `git merge-base --is-ancestor 160ca08 HEAD`
    before touching anything. Every command starts with `cd <absolute worktree path>`.
 2. **Commit on your branch, never push, never touch another slice's files.** Write the commit
    message to your scratch directory early (`commit-msg.txt`) so an interrupted run can be
@@ -455,7 +455,7 @@ that directory's path. I re-run every former survivor before the slice is cherry
 
 ## 6. Integration and the gates I run
 
-Branch `self` from `dev`. Per slice, after its review: cherry-pick, `mix compile
+Branch `self-integrate` from `dev`. Per slice, after its review: cherry-pick, `mix compile
 --warnings-as-errors`, the slice's suites. After the wave: the full `mix test` detached,
 `mix dialyzer`, `cargo +1.95 clippy --all-targets -- -D warnings` (both feature sets),
 `cargo test` for the crates touched, `make bench-local`, `bench/self/selftest.sh`,
