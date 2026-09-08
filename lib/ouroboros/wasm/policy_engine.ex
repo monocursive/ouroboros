@@ -1160,9 +1160,6 @@ defmodule Ouroboros.Wasm.PolicyEngine do
     with {:ok, entry} <- resolve(name_or_sha, opts),
          {:ok, precompiled} <- dry_provenance(entry, opts) do
       sha = entry.component_sha256
-      # One instance for the whole batch: every ask keeps it, and the `after` below puts it
-      # down once.
-      opts = Keyword.put(opts, :keep, true)
 
       try do
         {per_tool, per_shape, corpus_size, unreadable} =
@@ -1184,8 +1181,9 @@ defmodule Ouroboros.Wasm.PolicyEngine do
            "per_shape" => finish_shapes(per_shape)
          })}
       after
-        # A replay is a batch with an end, so it puts the dry instance down rather than leaving
-        # a second copy of the policy standing in a pool every capability on this node shares.
+        # A replay is a batch with an end: nothing in the loop above drops the instance — that
+        # is what makes ten thousand rows one instantiation — and this puts it down rather than
+        # leaving a second copy of the policy standing in a pool every capability here shares.
         _ = Pool.drop(@dry_prefix <> sha, Keyword.get(opts, :pool, Pool))
       end
     end

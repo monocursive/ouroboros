@@ -157,6 +157,14 @@ defmodule Ouroboros.Wasm.PolicyPromotionTest do
       # than no ledger. Let `evaluate_with/3` reach `decided/6` and this goes red.
       assert permission_entries(sha) == before
       assert {:ok, %{records: 0}} = PolicyEvidence.count()
+
+      # And the same through a replay, which is the only caller that keeps the dry instance
+      # standing — so rows two onward take the branch a single `evaluate_with` never does, and
+      # a `record/2` hidden in *that* branch would otherwise be invisible here.
+      seed_corpus!(context, denied(3))
+      assert {:ok, report} = PolicyEngine.replay("no-network-shell")
+      assert report["corpus_size"] == 3
+      assert permission_entries(sha) == before
     end
 
     @tag @needs_live
@@ -175,6 +183,15 @@ defmodule Ouroboros.Wasm.PolicyPromotionTest do
       # And a real decision does stand it up, so the assertion above is about the dry path
       # rather than about a pool that instantiates nothing.
       assert {:deny, _stated} = PolicyEngine.evaluate(request(context, "curl https://x"))
+
+      assert {:ok, %{"payload" => _payload}} =
+               Pool.call(live, "evaluate", document(context, "ls"), pool)
+
+      # The other half, and the one that matters on a node that is serving: a dry evaluation
+      # beside a *standing* live instance leaves it standing. Give the two paths one prefix and
+      # the dry path's own clean-up takes this node's permission engine down with it.
+      assert {:ok, :deny, _rule} =
+               PolicyEngine.evaluate_with(sha, document(context, "curl https://y"))
 
       assert {:ok, %{"payload" => _payload}} =
                Pool.call(live, "evaluate", document(context, "ls"), pool)
@@ -842,9 +859,11 @@ defmodule Ouroboros.Wasm.PolicyPromotionTest do
                })
 
       # Widen the actor check in `canary/1` and a node's own rules start demoting the policy
-      # that was promoted for the calls those rules never see.
-      Process.sleep(100)
-      assert shapes!("guard", env.sha) == ["git status"]
+      # that was promoted for the calls those rules never see. The sentinel is what makes that
+      # observable: if the rule's deny demoted, the shape is gone before the human's deny
+      # arrives and the demotion the record holds is the rule's, in the rule's session.
+      assert [demotion] = sentinel_demotion!("guard", env.sha, "canary-2-sentinel")
+      assert demotion.session_id == "sentinel-session"
     end
 
     test "a human approve is not a contradiction either" do
@@ -858,25 +877,34 @@ defmodule Ouroboros.Wasm.PolicyPromotionTest do
                  request: bash_request("git status")
                })
 
-      Process.sleep(100)
-      assert shapes!("guard", env.sha) == ["git status"]
+      assert [demotion] = sentinel_demotion!("guard", env.sha, "canary-3-sentinel")
+      assert demotion.session_id == "sentinel-session"
     end
 
     test "a deny the policy would also have denied leaves the promotion standing" do
-      env = scripted_policy(evaluate: List.duplicate(result(verdict("deny", "no")), 8))
+      # One `deny` in the plan, then `allow`s: the first canary ask agrees with the human and
+      # must change nothing, and the sentinel's ask is the one that contradicts.
+      env =
+        scripted_policy(
+          evaluate:
+            [result(verdict("deny", "no"))] ++
+              List.duplicate(result(verdict("allow", "fine")), 8)
+        )
+
       assert {:ok, _record} = promote!("guard", env.sha, "bash", "git status")
 
       assert :ok =
                PolicyEngine.record("canary-4", %{
                  decision: :deny,
+                 scope: :once,
                  actor: :human,
                  request: bash_request("git status")
                })
 
       # The canary is about the component being *more permissive* than a human, which is the
       # only direction a promotion can be wrong in.
-      Process.sleep(200)
-      assert shapes!("guard", env.sha) == ["git status"]
+      assert [demotion] = sentinel_demotion!("guard", env.sha, "canary-4-sentinel")
+      assert demotion.session_id == "sentinel-session"
     end
 
     test "a deny outside every promoted shape costs nothing" do
@@ -899,8 +927,8 @@ defmodule Ouroboros.Wasm.PolicyPromotionTest do
                  request: read_request()
                })
 
-      Process.sleep(100)
-      assert shapes!("guard", env.sha) == ["git status"]
+      assert [demotion] = sentinel_demotion!("guard", env.sha, "canary-6-sentinel")
+      assert demotion.session_id == "sentinel-session"
     end
 
     test "a human deny on a shadowed call is what the canary is there for (S-D29)" do
@@ -1056,11 +1084,17 @@ defmodule Ouroboros.Wasm.PolicyPromotionTest do
       assert status.shadow_every == PolicyEngine.shadow_every()
       assert status.thresholds == PolicyEngine.promotion_thresholds()
 
-      assert :ok = PolicyPromotion.clear("operator:ana")
-      assert PolicyEngine.configured_policy() == nil
-
+      # The record still names "guard" and the configuration now names something else: the one
+      # step where the two orders disagree, and configuration wins. Read the record first and
+      # a node's policy is whatever it was once promoted to rather than what its operator says.
       Application.put_env(:ouroboros, :wasm_policy, "somebody-else")
       assert PolicyEngine.configured_policy() == "somebody-else"
+      assert %{policy_name: "somebody-else", source: :config} = PolicyEngine.status()
+
+      # And `clear/1` is the way off, with the configuration gone too.
+      Application.delete_env(:ouroboros, :wasm_policy)
+      assert :ok = PolicyPromotion.clear("operator:ana")
+      assert PolicyEngine.configured_policy() == nil
     end
 
     test "allowable_shapes/3 is the earned half, and both gates are inside it" do
@@ -1449,6 +1483,27 @@ defmodule Ouroboros.Wasm.PolicyPromotionTest do
   end
 
   defp shapes!(name, sha, tool \\ "bash"), do: PolicyPromotion.allowable_shapes(name, sha, tool)
+
+  # A contradiction that *must* demote, answered after the one under test, waited for. It is
+  # what makes a negative canary assertion deterministic: a `Process.sleep` long enough to be
+  # sure the canary did *not* fire is a sleep nobody can size, and under load it passes by
+  # accident. The sentinel's session id is what the demotion is then checked against.
+  defp sentinel_demotion!(name, sha, id) do
+    request =
+      bash_request("git status --sentinel")
+      |> put_in([:principal, :session_id], "sentinel-session")
+
+    assert :ok =
+             PolicyEngine.record(id, %{
+               decision: :deny,
+               scope: :once,
+               actor: :human,
+               request: request
+             })
+
+    await_shapes(name, sha, [])
+    PolicyPromotion.status().demotions
+  end
 
   # The canary's dry ask runs off the answer path (S-D24), so a caller that needs to see a
   # demotion waits for the record to change rather than for `record/2` to return.
