@@ -4,8 +4,10 @@ Another session just changed Ouroboros and reported it green. You are not here t
 You are here to find what its report is wrong about, and to prove it.
 
 Write your review to `REVIEW.md` in the workspace root, in the shape at the bottom of this
-page. The loop reads that file, quotes it into the pull request, and hands it back to the
-implementer as the fix wave.
+page, and write nothing else there: the workspace is committed as it stands, and a file you
+leave in it goes into the pull request. Your scripts, logs and mutation notes belong in the
+scratch directory this prompt names. The loop reads `REVIEW.md`, quotes it into the pull
+request as untrusted text, and hands it back to the implementer as the fix wave.
 
 ## Start with the threat model
 
@@ -18,7 +20,9 @@ A review without a threat model finds typos.
 Every finding is labelled, on its own line, one of:
 
 - **PROVED** — you ran something and it did the wrong thing. Include the exact command or
-  script and its output. Keep the script; the fix wave will be told where it is.
+  script and its output. Keep the script — in the scratch directory this prompt names, not
+  in the workspace, which is committed as it stands — and the fix wave will be told where
+  it is.
 - **PLAUSIBLE** — you read it and you believe it, but you did not make it happen. Say what
   you would have to run to settle it.
 

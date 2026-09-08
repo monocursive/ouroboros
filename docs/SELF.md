@@ -434,54 +434,100 @@ row.
 <!-- S3 -->
 
 `bench/self/improve.sh <task.md>` runs this repository's own change protocol through
-Ouroboros native sessions: a worktree from `dev`, an implementer session, a gate, an
-adversarial reviewer session, a fix wave resumed into the implementer's own session, a
-second gate that decides, the optional corpus, the protected-namespace scan, one commit and
-`gh pr create --base dev`. The three prompts are `docs/self/briefs/implementer.md`,
-`reviewer.md` and `fix-wave.md`. `bench/self/IMPROVE.md` documents the flags, the step
-table and the environment variables.
+Ouroboros native sessions: a worktree from `dev`, an implementer session, a scan for edits
+to the build definitions the gates themselves run, a gate, an adversarial reviewer session,
+a fix wave resumed into the implementer's own session, the same scan again, a second gate
+that decides, the optional corpus, the protected-namespace scan, a check on where the
+change landed, one commit and `gh pr create --base dev`. The three prompts are
+`docs/self/briefs/implementer.md`, `reviewer.md` and `fix-wave.md`. `bench/self/IMPROVE.md`
+documents the flags, the step table, the gate rule and the environment variables.
 
-**What a test proves.** `bench/self/improve-selftest.sh` drives the whole script against
-`bench/self/lib/improve/shim-ouro.sh`, a labelled test shim standing in for the client —
-no model, no key, no network, no spend. Seventy-eight checks over five phases:
+**What a test proves.** `bench/self/improve-selftest.sh` (`make improve-selftest`) drives
+the whole script against `bench/self/lib/improve/shim-ouro.sh`, a labelled test shim
+standing in for the client, and against stub `mix`, `git` and `gh` programs for the phases
+that are about something other than the gates — no model, no key, no network, no spend.
+191 checks over sixteen phases, each phase declaring how many checks it runs so that a
+check deleted along with the thing it covered leaves the suite red rather than green and
+shorter (`improve-selftest.sh 4 9` runs two of them and nothing else):
 
 - `--dry-run` prints every command with its paths resolved and creates no directory, no
-  worktree, no branch and no runtime.
+  worktree, no branch and no runtime; asked about a client that is not built it names the
+  path and exits 0, while a real run refuses.
+- The argument surface: `--spend` takes money and the timeouts take whole seconds, `--`
+  means what follows is the task, a title that slugifies to nothing is refused by name, and
+  a title whose 72nd byte falls inside a character is cut at 72 *characters* and is still
+  valid UTF-8.
+- `bench/self/lib/improve/gate-verdict.sh` on eleven crafted gate logs, including the
+  `make test` and `mix dialyzer` shapes no selftest could afford to produce for real.
 - The green pass: the worktree descends from `dev` and is on `self/improve-<slug>`; the
   implementer, reviewer and fix-wave sessions ran, the fix wave resuming the implementer's
   own session id; both gates ran `mix format`, `mix compile --warnings-as-errors` and the
-  touched suite, asserted on the ExUnit `Result:` line rather than on an exit code, so a
-  gate that skipped the suite is not mistaken for one that passed it; `REVIEW.md` exists;
-  `PR_BODY.md` carries the review, the task and `lib/ouroboros/control/grants.ex` with its
-  hunk header under "Human review required"; one commit carries the task title and
-  `Co-Authored-By: Ouroboros native session shim-impl` and carries neither `REVIEW.md` nor
-  `PR_BODY.md`; nothing was pushed and nothing leaked into the checkout the script ran
-  from.
+  touched suite, asserted on the ExUnit `Result:` line; the loop's `steps.tsv` and logs are
+  under the node data dir and the reviewer has a scratch directory of its own, named in its
+  prompt; `PR_BODY.md` carries the review as a blockquote it cannot escape — the shim's
+  review closes a fence two ways and writes `## Human review required` at column 0, and the
+  body still has exactly one such heading at column 0 — plus the task and
+  `lib/ouroboros/control/grants.ex` with its hunk header; one commit carries the task title
+  and a `Co-Authored-By` trailer `git interpret-trailers --parse` recognises, and carries
+  neither `REVIEW.md` nor `PR_BODY.md`; nothing was pushed and nothing leaked into the
+  checkout the script ran from.
 - A session that leaves the suite failing: gate 2 is red, the script exits non-zero, and
   there is no commit, no body and no push.
-- A session that reports `completed` and changed nothing: the script refuses before it
-  gates or reviews anything.
-- A session that commits its own work, which the implementer brief tells it not to do: the
-  gates still run, and the script refuses at the commit step rather than opening a pull
-  request whose commits carry neither the task title nor the session trailer. It is
-  refused with its own message, not as "the sessions changed nothing".
+- A worktree that is already there, a session that changed nothing, and a session that
+  commits its own work: each refused with its own message.
+- A session that adds `System.at_exit(fn _ -> System.halt(0) end)` to
+  `test/test_helper.exs`, which makes `mix test` exit 0 whatever ExUnit reports: refused by
+  the build-definition scan before any gate runs, and — run again under
+  `--allow-build-changes` — caught by the gate, which reads the `Result:` line rather than
+  the exit status.
+- A change that hides itself from `git diff`: a rename inside the namespace, a mode change,
+  a binary, a path with a space, an added line beginning `++ `, and
+  `lib/ouroboros/control/** -diff` in `.gitattributes`. All seven paths are still listed
+  under "Human review required", and the path the `++ ` line names is not.
+- A file left in the workspace where a change may not land, beside one the task file asked
+  for by name: the first is refused at the commit step with the allow-list printed, the
+  second is not.
+- A client that prints two result objects: the loop reads the last one, reports the id and
+  status it read, reports the fix wave it could not resume as rc 64, and does not describe
+  it as resumed from the implementer's own session.
+- The push and the pull request against a stub `git` and a stub `gh`: the exact argv of
+  `git push -u origin <branch>` and of `gh pr create --base dev --head … --body-file …`, and
+  a body that loses its section the step before the push refusing before either.
+- A gate step that holds no model credentials, watched through a stub `mix` that records
+  its environment, beside the shim's own environment which still has the key.
+- A client that ignores its own `--timeout`: the deadline fires, `ouro stop` runs first, the
+  client is killed, and the step says so. A supervisor's SIGTERM exits 143, names the signal,
+  and still reaches `ouro stop` through the EXIT trap.
+- No watchdog `sleep` outlived the run.
 
-Eleven mutations were run against the script and each turned the selftest red: dropping the
-"Human review required" heading from the body writer; letting the commit sweep in
-`REVIEW.md` and `PR_BODY.md`; making the gate skip the touched suite; running the gate in
-the checkout instead of the worktree; letting `--dry-run` create the worktree and branch;
-narrowing the protected set so `lib/ouroboros/control/` is not scanned; skipping the fix
-wave; making a red gate 2 non-decisive; suppressing `REVIEW.md`; removing the empty-change
-refusal; and removing the self-committed-change refusal.
+Nineteen mutations were run against the script, each against the phase or phases that are
+supposed to catch it. Eighteen turned the selftest red: making the gate read `mix test`'s
+exit status instead of its log; deleting the build-definition refusal; leaving the model
+credentials in the gate's environment; taking the protected paths from `--name-only`, and
+again from the `---`/`+++` lines of the diff body the way the reviewed version did; dropping
+the quote from the review the body carries; letting that quote run past its bound; keeping
+the first result object instead of the last; passing `--workspace` alongside `--resume`;
+deleting the check on where the change landed; deleting the pull request's second body
+check; deleting the empty-change refusal, the existing-worktree refusal, the slug refusal,
+the `--spend` validation and the `git add -N`; making the run's data directory
+world-writable; and restoring the watchdog that orphans its own `sleep`.
+
+The one survivor is honest and deliberate. Deleting *only* the line that kills the
+watchdog's `sleep` by pid changes nothing observable, because the watchdog also kills it
+from its own signal handler and the canceller sweeps the subshell's children — three
+mechanisms for one property. The mutation that removes all three is the nineteenth, and it
+goes red.
 
 **What is not proved.** That a model can do the work. The shim's change is a comment in
 `lib/ouroboros/control/grants.ex` and a test that cannot fail, so what the selftest
 establishes is the plumbing: the worktree, the gates, the body, the refusals and the
 commit. No session in this slice has ever been served by a real model, no pull request has
 been opened, `make test` and `mix dialyzer` have never run inside the loop (the selftest
-uses `--quick`), and the corpus step has never run at all — `bench/self/run.sh` is S0's and
-did not exist at `dev` when this was written. The first real run, with a key and a spend,
-and the pull request it produces, are the human step in the plan's §7.
+uses `--quick`; the verdict on their logs is tested on crafted files instead), the corpus
+step has never run at all — `bench/self/run.sh` is S0's and did not exist at `dev` when this
+was written — and the deadline's process-group kill has been watched ending a shell script,
+not a real client with children of its own. The first real run, with a key and a spend, and
+the pull request it produces, are the human step in the plan's §7.
 
 ### S4. Ship what it forged
 
@@ -1035,50 +1081,80 @@ checkpoint it writes do not stop because a socket's ceiling fired, and a client 
 
 <!-- S3-decisions -->
 
-**S-D30. Gate 1 records, gate 2 decides.** A red gate after the implementer stops nothing:
-the review and the fix wave exist to answer it, and a body that shows gate 1 red and gate 2
-green shows the loop working. A red gate after the fix wave stops the script before the
-commit, so nothing reaches a branch that the gates did not pass. Both rc lines go in the
-pull request body.
+**S-D30. Gate 1 records, gate 2 decides — and a refusal decides before either.** A red gate
+after the implementer stops nothing: the review and the fix wave exist to answer it, and a
+body that shows gate 1 red and gate 2 green shows the loop working. A red gate after the fix
+wave stops the script before the commit, so nothing reaches a branch that the gates did not
+pass. Both rc lines go in the pull request body. Separately from the gates the loop can
+*refuse* the change and exit 2, which it does before gate 1 when the diff has edited a build
+definition and at the commit step when the change landed outside the allowed paths; a
+refusal writes the body, names the paths in a section of its own, and commits nothing.
 
-**S-D31. Every gate carries `mix compile --warnings-as-errors`, and a diff with no test
-files does not get a free pass.** `mix test` with no arguments is the whole suite, which is
-minutes and is not this gate; a diff that touches no `test/**/*_test.exs` therefore skips
-the suite, and says so in its rc line and in the body. Compiling under
-`--warnings-as-errors` is what keeps that skip from being a hole. Without `--quick`,
-`make test` and `mix dialyzer` run too and the body says which of the two shapes it got.
+**S-D31. A gate step is green when its log says so, not when the command exits 0, and it
+holds no model credentials.** `mix test`'s exit status is a number the change under test can
+set: one line in `test/test_helper.exs` — `System.at_exit(fn _ -> System.halt(0) end)` —
+formats, compiles, and makes every suite exit 0 whatever ExUnit reports. So the step is
+green only when the log carries at least one `Result:` line, every one of them is a clean
+pass, there is no `Failed:` line, and at least one test ran; `make test` is held to the same
+rule over its whole log and `mix dialyzer` must say `done (passed successfully)`. The rule
+lives in `bench/self/lib/improve/gate-verdict.sh` so that it can be tested on crafted logs,
+including the two shapes no selftest could afford to produce. `mix test` with no arguments
+is the whole suite, which is minutes and is not this gate, so a diff touching no
+`test/**/*_test.exs` skips it and says so; `--warnings-as-errors` is what keeps that skip
+from being a hole. And because `mix format` evaluates `.formatter.exs`, `mix test`
+evaluates `test/test_helper.exs` and `make test` runs the Makefile, the gate subshell drops
+the model credentials `bench/local/run.exs` drops — the sessions keep them, because a model
+has to authenticate; a gate running model-authored code does not.
 
-**S-D32. Diffs are taken against the sha the worktree was branched from, recorded once, and
-not against `dev`.** The plan says `git diff dev...HEAD`; a run is an hour and `dev` moves.
-Pinning `base_sha` at worktree creation makes the gate, the review, the scan and the body
-all describe the same change. `git add -A -N` runs before every diff, or a whole new module
-the session created is invisible to all four.
+**S-D32. The change is `git diff --name-status -M -z` against the sha the worktree was
+branched from, and never the diff body.** The plan says `git diff dev...HEAD`; a run is an
+hour and `dev` moves, so `base_sha` is pinned at worktree creation and the gate, the review,
+the scan and the body all describe the same change. `git add -A -N` runs before every diff,
+or a whole new module the session created is invisible to all four. The path list is
+`--name-status` because a rename produces no `@@` line, a mode change produces no hunk, a
+binary is "Binary files … differ", one line in `.gitattributes` turns a whole namespace into
+that, and an added line beginning `++ ` is rendered `+++ …`, which a scan reading the diff
+body would take for a file header. `-z` keeps paths raw, so a name with a space or a
+non-ASCII byte survives; the `@@` lines under a path are detail, and a path with none of
+them still changed.
 
-**S-D33. The commit is the loop's, and it carries the loop's paperwork nowhere.**
-`REVIEW.md` and `PR_BODY.md` are evidence about the change rather than the change, so
-`git add` excludes both by pathspec and leaves them in the worktree beside the commit. The
-loop's commit always carries the task title as its subject and
-`Co-Authored-By: Ouroboros native session <id>` as its trailer — so a session that
-committed its own work, which the implementer brief tells it not to do, is refused at the
-commit step with a message naming the branch and the recovery, rather than papered over
-with an empty commit or an amend. That refusal is distinct from "the sessions changed
-nothing", because the two mean opposite things.
+**S-D33. The commit is the loop's, it carries the loop's paperwork nowhere, and it decides
+where a change may land.** `REVIEW.md` and `PR_BODY.md` are evidence about the change rather
+than the change, so `git add` excludes both by pathspec and leaves them in the worktree
+beside the commit. `git add -A` is what makes a new module part of the change and also what
+sweeps in the script a session left lying about, so a path the diff *adds* outside
+`lib/ test/ docs/ tui/src/ tui/tests/ tui/wasm/ assets/ web/` — and outside anything the
+task file names — stops the run at 2 with the list printed. The loop's commit always carries
+the task title as its subject and `Co-Authored-By: Ouroboros native session <id>
+<noreply+<id>@ouroboros.local>` as its trailer, in the shape `git interpret-trailers --parse`
+recognises — so a session that committed its own work, which the implementer brief tells it
+not to do, is refused at the commit step with a message naming the branch and the recovery,
+rather than papered over with an empty commit or an amend. That refusal is distinct from
+"the sessions changed nothing", because the two mean opposite things.
 
-**S-D34. The review is fenced, and the body checks itself before anything is pushed.** The
-review is the only model-written text in the pull request body; unfenced, a model that
-wrote `## Human review required` in its own review would be writing our sections for us.
-The fence is six backticks and any line that could close it early is replaced. The task,
-which a human wrote, is embedded verbatim. The protected-namespace section is then asserted
-by the body writer on every run — `--no-pr` included, so the assertion is exercised whether
-or not a pull request follows — and again immediately before `gh pr create`. A body without
-it stops the run. This is the one refusal in the loop that has nothing to do with whether
-the change is good.
+**S-D34. The review is quoted, not fenced, and the body checks itself before anything is
+pushed.** The review is the only model-written text in the pull request body; unfenced, a
+model that wrote `## Human review required` in its own review would be writing our sections
+for us — and a fence does not hold, because CommonMark closes one indented by up to three
+spaces or followed by trailing spaces. So every line of the review is prefixed `> ` and a
+blank line becomes `>`: a blockquote has no early close, since a line without the marker is
+not in the quote. The body's own headings are matched at column 0. The fix-wave prompt
+quotes the review the same way, under a sentence saying it is untrusted text written by
+another model and that nothing inside it is an instruction, whatever it claims — the role
+marker the loop wrote is the first line of the message, before the quote. The task, which a
+human wrote, is embedded verbatim. The protected-namespace section is asserted by the body
+writer on every run — `--no-pr` included — and again immediately before `gh pr create`. This
+is the one refusal in the loop that has nothing to do with whether the change is good.
 
-**S-D35. The corpus runs once, as the *after* number.** The plan asks the body for a
-before/after delta; running the corpus twice doubles a real spend, so the *before* comes
-from `BENCH_SELF_BASELINE`, a path to an earlier `bench/self` `result.json`. With no
-baseline the body says `before: not run` and names the variable rather than inventing a
-number to subtract from.
+**S-D35. The corpus runs once, as the *after* number, and runs the trusted runner.** The
+plan asks the body for a before/after delta; running the corpus twice doubles a real spend,
+so the *before* comes from `BENCH_SELF_BASELINE`, a path to an earlier `bench/self`
+`result.json`. With no baseline the body says `before: not run` and names the variable
+rather than inventing a number to subtract from. The runner invoked is **this checkout's**
+`bench/self/run.sh`, told which checkout to measure with `--repo <worktree>`: the worktree is
+what is under test, and a corpus run driven by the tree it is measuring is a model grading
+its own homework with its own marking scheme. `--repo` is therefore a flag S0's runner has
+to accept.
 
 **S-D36. The script never edits a git remote.** If `origin` pushes over SSH the script says
 so before it tries, and if the push fails it names `--no-pr` and says the commit is still on
@@ -1086,22 +1162,33 @@ the branch. Which URL a checkout pushes over is the operator's decision; a scrip
 rewrote it would be changing the operator's repository to suit itself.
 
 **S-D37. The test shim is a committed, labelled file under `bench/self/lib/improve/`, and it
-fails loudly on any flag it does not know.** A selftest whose stand-in silently ignored an
-argument would go green on a script that passes the real client something it would reject.
-`improve.sh` knows nothing about the shim: the shim recognises its role from a
+fails loudly on any flag — or any combination — the real client would reject.** A selftest
+whose stand-in silently ignored an argument would go green on a script that passes the real
+client something it would refuse, so the shim refuses an unknown flag and refuses `--resume`
+together with `--workspace`, which the real client rejects because a resumed session already
+has one. `improve.sh` knows nothing about the shim: the shim recognises its role from a
 `OUROBOROS-IMPROVE-ROLE:` line the prompts carry anyway, and remembers the workspace of a
-session it started in its own state directory, because `--resume` conflicts with
-`--workspace` in the real client.
+session it started in its own state directory. Its misbehaviours are `OURO_SHIM_*`
+variables, one per refusal the selftest has to watch happen, and they are listed in
+`bench/self/IMPROVE.md`.
 
 **S-D38. `--dry-run` walks the whole script and executes nothing, including the client
-resolution's failure.** Asked what it would do on a checkout with no built client, it names
-the path it would have taken and says the path is not there, rather than refusing to answer.
+resolution's failure.** Asked what it would do on a checkout with no built client — or with
+an explicit `--ouro` naming a path that is not there — it names the path it would have taken
+and says the path is not there, rather than refusing to answer. A run that is not a dry run
+refuses the same path.
 
-**S-D39. Two environment variables exist for the selftest and are documented for everyone.**
+**S-D39. Two environment variables exist for the selftest and are documented for everyone;
+everything else the loop writes about a run lives under the node data dir.**
 `OUROBOROS_IMPROVE_WORKTREES` moves the worktree out of `.claude/worktrees`, and
-`OUROBOROS_IMPROVE_RUN_DIR` moves the daemon data dir and the logs out of a fresh
-`mktemp -d`. The selftest needs both to keep its worktrees and logs inside its own scratch;
-making them ordinary documented knobs is cheaper than a test-only code path in the script.
+`OUROBOROS_IMPROVE_RUN_DIR` moves the run directory out of a fresh `mktemp -d`. The selftest
+needs both to keep its worktrees and logs inside its own scratch; making them ordinary
+documented knobs is cheaper than a test-only code path in the script. `steps.tsv`, the logs,
+the scan output and the watchdog records then live under `<data dir>/improve/`, which is a
+protected write root for every session and for the sandbox — the body's gate table is read
+back out of `steps.tsv`, and a session that could append to it could write its own gate
+results into its own pull request. The run directory is never exported to a session; the one
+path under it a session is given is `<run dir>/review-scratch/`, the reviewer's own.
 
 <!-- S4-decisions -->
 

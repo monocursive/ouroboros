@@ -13,7 +13,7 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test forge-linux-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test dialyzer bench-local self-export golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check bench-self
+.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test forge-linux-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test dialyzer bench-local self-export golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check bench-self improve-selftest
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -315,6 +315,13 @@ self-export:
 bench-self:
 	@echo "==> bench-self: the self corpus selftest (no model key, no network, no spend)"
 	./bench/self/selftest.sh
+# Deliberately not part of `make test`, for the same reason as `bench-local`: it makes a
+# dozen git worktrees, clones `_build` into each, and runs the gates inside them, which is
+# minutes rather than seconds. It needs no model key, no network and no spend — the client
+# is a shim. See bench/self/IMPROVE.md.
+improve-selftest:
+	@echo "==> improve-selftest: the outer loop against a shim client (no key, no spend)"
+	./bench/self/improve-selftest.sh
 
 # Deliberately not part of `make test`, for the same reason `fleet-e2e` is not: it needs
 # tools `make test` must not require. The install.sh half needs only `sh` and a sha256

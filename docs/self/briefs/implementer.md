@@ -25,6 +25,19 @@ human. Nothing you write merges itself.
   for a human whatever you and the reviewer conclude. Go there only when the task is there,
   and when you do, say in your report exactly what authority moved.
 
+## Where a change may land
+
+The loop refuses a change that edits a build definition — `Makefile`, `mix.exs`,
+`.formatter.exs`, `test/test_helper.exs`, anything under `config/`, `scripts/`, `bench/`,
+`priv/`, `.github/`, `.claude/`, the cargo manifests, `.gitattributes`, `.gitignore` —
+because the gates that judge your change would then be running your build files, as the
+operator, on the operator's machine. It also refuses a change that adds a file outside
+`lib/ test/ docs/ tui/src/ tui/tests/ tui/wasm/ assets/ web/` unless the task file named
+the path. Both stop the run before anything is committed.
+
+If the task cannot be done without one of those, say so in your report and stop. Asking is
+the whole point of the refusal; working around it is not.
+
 ## Tests
 
 - Every behaviour you claim needs a test that would go **red** without your change. Write
