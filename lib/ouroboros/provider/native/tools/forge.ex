@@ -41,32 +41,49 @@ defmodule Ouroboros.Provider.Native.Tools.Forge do
   has no register entry before it exists, so what makes `Forge(<name>)` an honest allow is
   not a lookup — it is that the forge is held to the name the engine was shown.
 
-  Only `preview` and `forge` carry that name into the request context. `deploy` names an
-  artifact id, which is not a name a rule is written in, and `status` names nothing; both
-  therefore match no `Forge(…)` rule at all and can only be denied or asked. That is the
-  narrow reading and it is deliberate: an allow on `Forge(vet)` is a sentence about
-  building `vet`, and reading it as permission to deploy whatever bundle an id resolves to
-  would be a second sentence nobody said.
+  A `deploy` names an artifact id rather than a name, and it carries a name to the engine
+  all the same — the one that id *resolves to* (Q-B). `Tools.classify/3` reads the bundle
+  out of this node's forged ring, decodes it, and verifies its signed manifest against this
+  node's trust policy — the check `Ouroboros.Wasm.PolicyEngine` makes before loading a byte
+  — and requires the kind to be `:capability` before any name reaches the engine. So one
+  `Forge(vet)` rule covers building `vet` and deploying `vet`, which is the sentence
+  somebody answering that prompt meant, and what it does *not* cover is anything else that
+  id might resolve to: `deploy/3` re-reads the same bundle, re-verifies it, and refuses
+  unless the kind, the author and the name all still hold — the name against what the
+  engine was actually shown, which the loop hands back as `forge_evaluated_name` the way it
+  hands `desktop_evaluated_app` to the desktop tools. A `status` names nothing.
 
-  **`path` is the session's own workspace.** Resolved through
+  **`path` is the session's own workspace, and it is declared.** Resolved through
   `Ouroboros.Provider.Native.Paths.resolve/2` with the session's scope, the same
-  containment `read` uses, before `Wasm.Forge` is told a directory exists.
+  containment `read` uses, before `Wasm.Forge` is told a directory exists — and put in the
+  permission request's `paths`, because a `preview` reads every file in that directory. A
+  `Read` rule that denies or asks therefore covers a forge of it; an allow `Read` rule does
+  not make a forge an allow.
 
-  **The ledger is the gate, not the log.** A `:forge` or `:deploy` entry is written under
-  the session principal *before* the effect and settled after, exactly as
-  `Ouroboros.Agent.Effects.Runner` does it, and a ledger that cannot record refuses the
-  operation. `preview` gets no entry of its own — the ledger has no kind for it, and
+  **The ledger is the gate, not the log, and an entry is never left to nobody.** A `:forge`
+  or `:deploy` entry is written under the session principal *before* the effect and settled
+  after, exactly as `Ouroboros.Agent.Effects.Runner` does it, and a ledger that cannot
+  record refuses the operation. The three ways a settle can fail to run are closed the way
+  the runner closes them: a raise or a throw settles `:failed` with the class and is
+  re-raised; a brutal kill at the loop's tool timeout is caught by the ledger's own runner
+  monitor (`watch_runner/3`, attached before the effect starts) and settles `:ambiguous`.
+  `preview` gets no entry of its own — the ledger has no kind for it, and
   `Ouroboros.Agent.EffectLedger` is not this slice's file — so what accounts for a preview
   is its `:tool_call` entry, which every tool call has.
 
   ### What `authority` says, and what it cannot
 
-  A tool is handed `scope`, `audit`, `principal` and no permission decision, so the
-  `authority` on these entries is an honest statement of *class* — this ran because the
-  native loop admitted the call — and never a rule id this module did not see. The chain to
-  the actual decision runs through `cause`: it names the `:tool_call` ledger entry for this
-  call, whose own `attempt.permission_entry_id` names the `:permission` entry. Two hops,
-  each one written by the thing that knew the fact.
+  A tool is handed `scope`, `principal` and no permission decision, so the `authority` on
+  these entries is an honest statement of *class* — this ran because the native loop
+  admitted the call — and never a rule id this module did not see. The chain to the actual
+  decision runs through `cause`: it names the `:tool_call` ledger entry for this call, whose
+  own `attempt.permission_entry_id` names the `:permission` entry. Two hops, each one
+  written by the thing that knew the fact.
+
+  Neither hop depends on this node's audit stream. The loop puts that `:tool_call` entry's
+  id on the tool context as `ledger_effect_id`, plainly and beside `principal`, because the
+  entry itself is written on every admitted call whether or not audit is on; the audit
+  fields are read only as a fallback for a caller that assembles a context the old way.
 
   ## Visibility
 
@@ -322,7 +339,10 @@ defmodule Ouroboros.Provider.Native.Tools.Forge do
   Nothing here trims: a name padded with a non-breaking space is not a capability name, so
   the engine is told nothing rather than told something that is almost true.
 
-  `nil` for every operation that does not pass a name on. See the moduledoc.
+  `nil` for every operation that does not pass a name on. See the moduledoc. This is the one
+  place that decides *which* operations those are: `request_context/1` splits `deploy` off
+  first, because a deploy's name is resolved rather than written, and asks this about
+  everything else rather than keeping a second list of operation names beside it.
   """
   @spec request_name(term(), term()) :: String.t() | nil
   def request_name(operation, name) when operation in ["preview", "forge"] do
@@ -403,18 +423,19 @@ defmodule Ouroboros.Provider.Native.Tools.Forge do
   """
   @spec request_context(map()) :: map()
   def request_context(input) when is_map(input) do
-    case operation(input) do
-      operation when operation in ["preview", "forge"] ->
+    operation = operation(input)
+
+    case operation do
+      # The one operation whose name is not a parameter: it is resolved, and `request_name/2`
+      # has nothing to say about it.
+      "deploy" ->
+        deploy_context(param(input, :artifact_id))
+
+      _named ->
         case request_name(operation, param(input, :name)) do
           name when is_binary(name) -> %{forge: name}
           nil -> %{}
         end
-
-      "deploy" ->
-        deploy_context(param(input, :artifact_id))
-
-      _other ->
-        %{}
     end
   rescue
     _error -> %{}
