@@ -37,6 +37,8 @@ defmodule Ouroboros.Control.Permissions.Matcher do
   | `ComputerUse(app:*)` | either desktop tool when `context.app` is a nonempty binary |
   | `Capability(<name>)` | the `capability` tool when `context.capability` is that name |
   | `Capability(*)` | the `capability` tool when `context.capability` is a nonempty binary |
+  | `Forge(<name>)` | the `forge` tool when `context.forge` is that name |
+  | `Forge(*)` | the `forge` tool when `context.forge` is a nonempty binary |
 
   `Edit` and `Write` overlap on purpose. A provider that reports a tool this runtime does
   not recognise is judged by both, because the alternative — judging it by neither —
@@ -159,6 +161,25 @@ defmodule Ouroboros.Control.Permissions.Matcher do
 
   defp do_matches?(%Pattern{kind: :capability, spec: %{name: name}}, request, _quantifier),
     do: request.tool == "capability" and context_value(request.context, "capability") == name
+
+  # ── Forge (S1) ───────────────────────────────────────────────────────────────────────
+
+  # `context.forge` is set by `Ouroboros.Provider.Native.Tools.classify/3` only for a name
+  # in `Wasm.Artifact.name?/1`'s charset, and only for the two operations that hand that
+  # exact string to `Ouroboros.Wasm.Forge` — which refuses a project named anything else.
+  # So an unresolved name, a `deploy` and a `status` have no key and match nothing: an
+  # allow on `*` must not cover "we could not tell what this would build". The `:any`
+  # clause precedes the exact one for the reason it does above.
+  defp do_matches?(%Pattern{kind: :forge, spec: %{name: :any}}, request, _quantifier) do
+    request.tool == "forge" and
+      case context_value(request.context, "forge") do
+        name when is_binary(name) -> name != ""
+        _other -> false
+      end
+  end
+
+  defp do_matches?(%Pattern{kind: :forge, spec: %{name: name}}, request, _quantifier),
+    do: request.tool == "forge" and context_value(request.context, "forge") == name
 
   # ── helpers ────────────────────────────────────────────────────────────────────────
 

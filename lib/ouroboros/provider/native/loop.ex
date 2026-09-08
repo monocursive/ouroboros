@@ -169,6 +169,7 @@ defmodule Ouroboros.Provider.Native.Loop do
   alias Ouroboros.Provider.Native.ToolAttempt
   alias Ouroboros.Provider.Native.Tools.AskUser
   alias Ouroboros.Provider.Native.Tools.Capability, as: CapabilityTool
+  alias Ouroboros.Provider.Native.Tools.Forge, as: ForgeTool
   alias Ouroboros.Wasm.Pool, as: WasmPool
 
   @default_max_iterations 100
@@ -1093,6 +1094,12 @@ defmodule Ouroboros.Provider.Native.Loop do
             }
           ),
         reads: state.reads,
+        # S1. Who this session *is*, as one string, for the one tool whose output is signed
+        # under an identity: `Tools.Forge` records it as a forged capability's `author` and
+        # compares it against a bundle's before deploying one. The loop derives it (nothing
+        # else may), the tool reads it and nothing else, and it is deliberately not a
+        # parameter — see `Tools.Forge`'s moduledoc.
+        principal: principal(state),
         # G3. `agent_result` collects a child the *session* holds, not one this turn owns,
         # so it is handed two closures over the session rather than a pid to call: the tool
         # never learns which process tracks what, and a run with no session gets `nil` and
@@ -1208,6 +1215,14 @@ defmodule Ouroboros.Provider.Native.Loop do
   # that fires.
   defp execute_timeout(state, %{tool: "capability"}, _input),
     do: max(state.tool_timeout_ms, CapabilityTool.max_timeout_ms())
+
+  # S1. A forge is a cargo build under an OS sandbox, and its ceiling is minutes rather than
+  # the ordinary tool timeout's seconds. `Ouroboros.Wasm.Forge` stops its own build at that
+  # ceiling and runs the `after` that removes the scratch tree; a loop that killed the task
+  # first would leave a compiler running and report a timeout for a build still inside the
+  # bound it was given.
+  defp execute_timeout(state, %{tool: "forge"}, _input),
+    do: max(state.tool_timeout_ms, ForgeTool.max_timeout_ms())
 
   defp execute_timeout(state, %{tool: "bash"}, input) do
     options = provider_options(state)

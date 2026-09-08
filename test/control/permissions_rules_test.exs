@@ -217,7 +217,79 @@ defmodule Ouroboros.Control.PermissionsRulesTest do
       paths = Rules.protected_paths()
       assert "**/.git/**" in paths
       assert "**/.ouroboros/**" in paths
+      assert "**/ouroboros.toml" in paths
       assert Enum.any?(paths, &String.ends_with?(&1, "/**"))
+    end
+
+    # S1. `ouroboros.toml` is the workspace hook manifest: the file that says which programs
+    # this runtime runs before and after a tool call, and with what. A session that could
+    # write it could give itself a hook, which is a program this runtime runs.
+    test "the workspace hook manifest is refused at every depth and in every case",
+         %{root: root} do
+      for path <- [
+            "ouroboros.toml",
+            "nested/ouroboros.toml",
+            "a/b/c/d/ouroboros.toml",
+            "Ouroboros.TOML",
+            "nested/OUROBOROS.toml",
+            "a/b/oUrObOrOs.ToMl"
+          ] do
+        assert Rules.protected_write?(Path.join(root, path)), "#{path} was writable"
+      end
+
+      # A file whose name merely contains it is another file, and a *directory* by that name
+      # is not the manifest either — this is the final component, not a segment.
+      for path <- [
+            "ouroboros.toml.bak",
+            "my-ouroboros.toml",
+            "ouroboros.tom",
+            "ouroboros.toml/inner.txt",
+            "ouroboros_toml"
+          ] do
+        refute Rules.protected_write?(Path.join(root, path)), "#{path} was protected"
+      end
+    end
+
+    test "no rule talks over a write to the hook manifest, and the refusal names it",
+         %{root: root} do
+      for tool <- ["write", "edit", "apply_patch"] do
+        request =
+          Request.new(%{
+            tool: tool,
+            mode: :write,
+            paths: ["ouroboros.toml"],
+            context: %{workspace: root}
+          })
+
+        assert {:deny, %{id: "protected-path", pattern: "**/ouroboros.toml"}} =
+                 Rules.decide(request, [rule(:node, :allow, "Write(**)")]),
+               "#{tool} wrote the hook manifest"
+      end
+
+      # A patch that also touches it takes the whole request down with it, which is the
+      # same quantifier every other protected path is judged under.
+      multi =
+        Request.new(%{
+          tool: "apply_patch",
+          mode: :write,
+          paths: ["lib/a.ex", "docs/ouroboros.toml"],
+          context: %{workspace: root}
+        })
+
+      assert {:deny, %{id: "protected-path"}} =
+               Rules.decide(multi, [rule(:node, :allow, "Edit(**)")])
+
+      # Reading it is not protected, for the reason no read is: the threat is a session
+      # rewriting the authority that governs it, not one looking at it.
+      read =
+        Request.new(%{
+          tool: "read",
+          mode: :read,
+          paths: ["ouroboros.toml"],
+          context: %{workspace: root}
+        })
+
+      assert {:allow, _ref} = Rules.decide(read, [rule(:node, :allow, "Read(**)")])
     end
   end
 

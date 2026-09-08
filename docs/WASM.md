@@ -1075,6 +1075,17 @@ is `:read` and returns a capability's whole state, so for a `wasm/` agent it car
 same in-band marker: the sibling verb labels those two fields, and a read-only listener
 must not be the way around the label.
 
+**The other half of the seam: `forge`.** A second native tool,
+`Ouroboros.Provider.Native.Tools.Forge`, lets a model session *produce* a capability rather
+than only reach one — validate a Cargo project in its workspace, build it, sign it through
+`Ouroboros.Upgrade.Signing.Service`, and deploy the bundle it forged to this node. It adds
+nothing to this lane: C9, the sandboxed offline build, the signature, the trust policy, the
+evaluation and the rollout are all the ones described above, reached with a session principal
+as the manifest's `author`. It is off unless `config :ouroboros, :native_forge_tool` is
+`true`, its permission language is `Forge(<name>)` / `Forge(*)` beside `Capability(<name>)`,
+and `Tool(forge)` is deny-and-ask only for `Tool(capability)`'s reason. It is documented
+where the claim it serves is: [SELF.md §S1](SELF.md) and its decisions S-D10..S-D19.
+
 ## 8. Lane H: hooks and policy as components
 
 ### 8.1 Wasm hooks

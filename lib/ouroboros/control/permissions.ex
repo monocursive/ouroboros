@@ -293,10 +293,14 @@ defmodule Ouroboros.Control.Permissions do
   def suggest(%Request{} = request) do
     computer_use = computer_use_app(request)
     capability = capability_name(request)
+    forge = forge_name(request)
 
     cond do
       is_binary(capability) ->
         "Capability(#{capability})"
+
+      is_binary(forge) ->
+        "Forge(#{forge})"
 
       is_binary(computer_use) ->
         "ComputerUse(app:#{computer_use})"
@@ -785,4 +789,19 @@ defmodule Ouroboros.Control.Permissions do
   end
 
   defp capability_name(_request), do: nil
+
+  # S1. The rule an operator would write for a forge keys on what is being built, never on
+  # the tool: `Tool(forge)` is "let this session add any capability to this runtime, now and
+  # later", which is not what somebody answering one prompt about `vet` meant to say, and
+  # `Pattern.decisions/1` refuses to let it carry an allow at all. The name is the one the
+  # forge will be *held* to, so `nil` here is a call — a deploy, a status, a name outside
+  # the charset — that nothing honest can be suggested for.
+  defp forge_name(%Request{tool: "forge", context: context}) when is_map(context) do
+    case Map.get(context, :forge) || Map.get(context, "forge") do
+      name when is_binary(name) and name != "" -> name
+      _other -> nil
+    end
+  end
+
+  defp forge_name(_request), do: nil
 end

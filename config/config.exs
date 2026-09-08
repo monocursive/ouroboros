@@ -52,6 +52,14 @@ config :ouroboros,
   # the machine holding the key. Anything but these two words is refused, not read as the
   # default — a typo asked for a forge not to run here.
   wasm_forge_placement: :local,
+  # Whether a model session is shown the `forge` tool at all (docs/SELF.md §S1). `false` is
+  # the default and the posture: a session that can forge can change the runtime it is
+  # running in, which is the whole claim of self-improvement and not a thing to have on by
+  # accident. `OUROBOROS_POSTURE=self` sets it true; nothing else does. Off, the name is
+  # absent from every session's tool list and `Tools.lookup/3` answers `:unknown_tool` —
+  # the same posture the Computer Use tools take, so a model is never taught a name it
+  # cannot use. Read as exactly `true`: a typo leaves it shut rather than widening it.
+  native_forge_tool: false,
   coding_storage: {Jido.Storage.ETS, table: :ouroboros_coding},
   interactive_storage: {Jido.Storage.ETS, table: :ouroboros_interactive},
   team_storage: {Jido.Storage.ETS, table: :ouroboros_teams},
