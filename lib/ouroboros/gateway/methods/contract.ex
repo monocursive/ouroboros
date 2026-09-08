@@ -182,6 +182,116 @@ defmodule Ouroboros.Gateway.Methods.Contract do
   @turn_id_param {"turn_id", :optional, :string,
                   "caller-supplied; resending the same `{id, input, turn_id}` returns the same turn rather than starting a second"}
   @methods %{
+    "audit.hold" => %{
+      scope: :operate,
+      timeout: 30_000,
+      params:
+        {:closed,
+         [
+           {"stream_id", :required, :string, nil},
+           {"held", :required, :boolean, nil},
+           {"reason", :required, :string, nil}
+         ]},
+      handler: :handle_audit_hold
+    },
+    "audit.purge" => %{
+      scope: :operate,
+      timeout: 60_000,
+      params:
+        {:closed, [{"stream_id", :required, :string, nil}, {"reason", :required, :string, nil}]},
+      handler: :handle_audit_purge
+    },
+    "audit.retention" => %{
+      scope: :read,
+      timeout: 30_000,
+      params: {:closed, []},
+      handler: :handle_audit_retention
+    },
+    "audit.status" => %{
+      scope: :read,
+      timeout: @default_timeout,
+      params: {:closed, []},
+      handler: :handle_audit_status
+    },
+    "audit.doctor" => %{
+      scope: :read,
+      timeout: 60_000,
+      params: {:closed, []},
+      handler: :handle_audit_doctor
+    },
+    "audit.search" => %{
+      scope: :read,
+      timeout: 30_000,
+      params:
+        {:closed,
+         [
+           {"stream_id", :optional, :string, nil},
+           {"session_id", :optional, :string, nil},
+           {"provider_session_id", :optional, :string, nil},
+           {"turn_id", :optional, :string, nil},
+           {"call_id", :optional, :string, nil},
+           {"ledger_effect_id", :optional, :string, nil},
+           {"actor_id", :optional, :string, nil},
+           {"model", :optional, :string, nil},
+           {"tool", :optional, :string, nil},
+           {"kind", :optional, :string, nil},
+           {"status", :optional, :string, nil},
+           {"since", :optional, :string, nil},
+           {"until", :optional, :string, nil},
+           {"limit", {:optional, 100}, :positive_integer, nil},
+           {"offset", {:optional, 0}, :non_negative_integer, nil}
+         ]},
+      handler: :handle_audit_search
+    },
+    "audit.show" => %{
+      scope: :read,
+      timeout: 30_000,
+      params:
+        {:closed,
+         [
+           {"stream_id", :required, :string, nil},
+           {"since_seq", {:optional, 0}, :non_negative_integer, nil},
+           {"limit", {:optional, 100}, :positive_integer, nil}
+         ]},
+      handler: :handle_audit_show
+    },
+    "audit.artifact" => %{
+      scope: :read,
+      timeout: 30_000,
+      params:
+        {:closed, [{"stream_id", :required, :string, nil}, {"blob", :required, :string, nil}]},
+      handler: :handle_audit_artifact
+    },
+    "audit.export" => %{
+      scope: :read,
+      timeout: 60_000,
+      params: {:closed, [{"stream_id", :optional, :string, nil}]},
+      handler: :handle_audit_export
+    },
+    "audit.download" => %{
+      scope: :read,
+      timeout: 30_000,
+      params:
+        {:closed,
+         [
+           {"bundle_id", :required, :string, nil},
+           {"path", :required, :string, nil},
+           {"offset", {:optional, 0}, :non_negative_integer, nil}
+         ]},
+      handler: :handle_audit_download
+    },
+    "audit.reindex" => %{
+      scope: :operate,
+      timeout: 60_000,
+      params: {:closed, []},
+      handler: :handle_audit_reindex
+    },
+    "audit.flush" => %{
+      scope: :operate,
+      timeout: 60_000,
+      params: {:closed, []},
+      handler: :handle_audit_flush
+    },
     "account.login.cancel" => %{
       scope: :operate,
       timeout: @default_timeout,
@@ -1265,7 +1375,7 @@ defmodule Ouroboros.Gateway.Methods.Contract do
 
   # Setup belongs to the computer that will run the work. Keep this list explicit:
   # accepting a machine here must never turn into an arbitrary remote RPC facility.
-  @machine_scoped ~w(runtime.providers runtime.models workspace.browse account.read
+  @machine_scoped ~w(audit.status audit.doctor audit.search audit.show audit.artifact audit.export audit.download audit.reindex audit.flush audit.retention audit.hold audit.purge runtime.providers runtime.models workspace.browse account.read
     account.login.start account.login.complete account.login.cancel account.logout
     grok.account.read grok.account.login.start grok.account.login.cancel
     credentials.anthropic.set credentials.xai.set)

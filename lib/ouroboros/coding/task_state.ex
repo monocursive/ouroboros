@@ -16,7 +16,9 @@ defmodule Ouroboros.Coding.TaskState do
     :worktree,
     :parent
   ]
+  # Trusted runtime attribution, deliberately absent from public/provider options.
   @request_options [
+    :audit_actor_id,
     :model,
     :provider_session_id,
     :max_turns,
@@ -431,9 +433,11 @@ defmodule Ouroboros.Coding.TaskState do
         ouroboros_task_id: state.id,
         ouroboros_node: Atom.to_string(node())
       }
+      |> Map.merge(Map.take(state.options, [:audit_actor_id]))
       |> Trace.put(prompt_trace, :ouroboros_prompt)
 
     state.options
+    |> Map.delete(:audit_actor_id)
     |> Map.delete(:agent_profile)
     |> Map.delete(:runtime_exposure)
     |> Map.merge(%{

@@ -213,6 +213,7 @@ async fn run(cli: Cli) -> Result<()> {
         Some(Command::Web { print }) => web(&paths, cli.dev, print).await,
         Some(Command::Stop) => stop(&paths, cli.dev).await,
         Some(Command::Ledger(args)) => ledger(&paths, args).await,
+        Some(Command::Audit(args)) => audit(&paths, args).await,
         Some(Command::Replay(args)) => replay(&paths, args).await,
         Some(Command::Fork(args)) => fork(&paths, args).await,
         Some(Command::Desktop { command }) => desktop(&paths, command).await,
@@ -2720,6 +2721,40 @@ async fn ledger(paths: &Paths, args: LedgerArgs) -> Result<()> {
     let mut err = std::io::stderr().lock();
 
     ouro::ledger_cli::run(&connected.client, &options, &mut out, &mut err).await
+}
+
+async fn audit(paths: &Paths, args: ouro::cli::AuditArgs) -> Result<()> {
+    if let ouro::cli::AuditCommand::Verify {
+        directory,
+        expected_digest,
+        trusted_keys,
+    } = &args.command
+    {
+        let result = ouro::audit_cli::verify_with_keys(
+            directory,
+            expected_digest.as_deref(),
+            trusted_keys.as_deref(),
+        )?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    if let ouro::cli::AuditCommand::Restore {
+        directory,
+        destination,
+        expected_digest,
+    } = &args.command
+    {
+        let result = ouro::audit_cli::restore(directory, destination, expected_digest)?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    let (address, token) = remote_endpoint(paths, args.addr, args.token_file).await?;
+    let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
+    let connected = attach_with(address, token, false, None, hook).await?;
+    let result =
+        ouro::audit_cli::run(&connected.client, args.command, args.machine.as_deref()).await?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
 }
 
 /// `ouro replay`: one read against a runtime that is already up.

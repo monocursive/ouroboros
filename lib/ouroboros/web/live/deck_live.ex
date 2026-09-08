@@ -1505,6 +1505,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
         <Layouts.bell_toggle />
         <Layouts.theme_toggle />
         <a class="ouro-topbar-link" href="/settings">Settings</a>
+        <a class="ouro-topbar-link" href="/audit">Audit</a>
         <a class="ouro-button" href="/new">
           New session
         </a>
@@ -1647,7 +1648,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
       )
 
     ~H"""
-    <div class="ouro-row-wrap">
+    <div id={"session-row-#{@row.plane}-#{@row.id}"} class="ouro-row-wrap">
       <.link
         patch={@href}
         aria-current={@selected? && "page"}
@@ -1668,6 +1669,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
       </.link>
       <details
         :if={@can_rename or @can_close or @can_delete}
+        id={"session-actions-#{@row.plane}-#{@row.id}"}
         class="ouro-row-actions"
         data-ouro-disclosure={"actions:#{@row.plane}:#{@row.id}"}
       >

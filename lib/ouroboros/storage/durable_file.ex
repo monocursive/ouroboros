@@ -32,7 +32,7 @@ defmodule Ouroboros.Storage.DurableFile do
   @impl true
   def get_checkpoint(key, opts) do
     with {:ok, path} <- checkpoint_path(key, opts) do
-      case File.read(path) do
+      case Ouroboros.Audit.Content.read(path) do
         {:ok, binary} -> safe_binary_to_term(binary)
         {:error, :enoent} -> :not_found
         {:error, reason} -> {:error, reason}
@@ -91,10 +91,11 @@ defmodule Ouroboros.Storage.DurableFile do
   def delete_thread(_thread_id, _opts), do: {:error, :thread_operations_not_supported}
 
   defp write_checkpoint(device, temporary, path, data, opts) do
-    binary = :erlang.term_to_binary(data)
+    binary = :erlang.term_to_binary(data) |> Ouroboros.Audit.Content.encode()
 
     precommit =
-      with :ok <- hook(opts, :before_write),
+      with :ok <- File.chmod(temporary, 0o600),
+           :ok <- hook(opts, :before_write),
            :ok <- :file.write(device, binary),
            :ok <- hook(opts, :before_file_sync),
            :ok <- :file.sync(device),

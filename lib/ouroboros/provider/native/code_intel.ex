@@ -62,7 +62,7 @@ defmodule Ouroboros.Provider.Native.CodeIntel do
   def baseline(paths, opts \\ [])
 
   def baseline(paths, opts) when is_list(paths) do
-    if Config.enabled?() do
+    if Config.enabled?() and not Ouroboros.Audit.required?() do
       paths
       |> Enum.uniq()
       |> Map.new(fn path -> {path, baseline_for(path, pool_opts(opts))} end)
@@ -96,7 +96,7 @@ defmodule Ouroboros.Provider.Native.CodeIntel do
   def feedback([], _baselines, _opts), do: ""
 
   def feedback(paths, baselines, opts) do
-    if Config.enabled?() do
+    if Config.enabled?() and not Ouroboros.Audit.required?() do
       reports =
         paths
         |> Enum.uniq()

@@ -215,6 +215,23 @@ defmodule Ouroboros.Provider.Native.Prompt do
     |> String.trim()
   end
 
+  defp posture({:sandboxed, label, %{mode: :builder, process: :audit} = policy}, approval_mode) do
+    writes =
+      if policy.writable == [],
+        do: "The workspace is read-only; writes are limited to private scratch space.",
+        else:
+          "Only the workspace and declared writable roots may be changed; .git and .ouroboros remain protected."
+
+    """
+    `bash` runs inside the #{label} OS sandbox under required audit policy.
+    Reads are limited to the workspace, declared roots and required system files.
+    Audit evidence, credentials and runtime state cannot be read or changed.
+    #{writes} Network access, including loopback, is denied.
+    A denied command cannot weaken these protections.#{approvals(approval_mode)}
+    """
+    |> String.trim()
+  end
+
   defp posture({:sandboxed, label, %{mode: :read_only} = policy}, approval_mode) do
     """
     This session is **read-only**. `write`, `edit`, `apply_patch`, and writing

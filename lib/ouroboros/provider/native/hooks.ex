@@ -901,26 +901,46 @@ defmodule Ouroboros.Provider.Native.Hooks do
   # second one.
   defp invoke(hook, payload, ceiling \\ nil)
 
-  defp invoke(%{kind: :component} = hook, payload, ceiling) do
-    case run_component(hook, hook.pool, encode(payload), ceiling) do
-      {:ok, reply} ->
-        case narrow(parse_output(reply), hook) do
-          # A component has no exit code, so `permissionDecision: "deny"` is its `exit 2`.
-          # Answering in the same shape is what gives `pre_compact/2` and the post hooks
-          # the same behaviour they have for a shell hook that blocked.
-          %{decision: :deny} = answer -> {:deny, component_denial(answer, hook)}
-          answer -> {:ok, answer}
-        end
+  defp invoke(hook, payload, ceiling) do
+    id = Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false)
 
-      # A hook that failed to run is not consent and not a denial — the same posture a
-      # crashed shell hook gets, for the same reason.
-      {:ignored, note} ->
-        report(label(hook), note)
-        {:ok, empty()}
+    Ouroboros.Audit.administrative("hook_dispatch", %{
+      "call_id" => id,
+      "actor_id" => Ouroboros.Audit.Identity.actor(),
+      "hook" => label(hook),
+      "request" => payload,
+      "command" => Map.get(hook, :command)
+    })
+
+    context = %{
+      stream: Ouroboros.Provider.Native.Journal.digest("ouroboros.audit.administration"),
+      fields: %{
+        "call_id" => id,
+        "session_id" => payload["session_id"],
+        "attempt_id" => id <> ":1"
+      }
+    }
+
+    result =
+      Ouroboros.Audit.with_execution(context, fn -> invoke_recorded(hook, payload, ceiling) end)
+
+    Ouroboros.Audit.administrative("hook_result", %{"call_id" => id, "result" => result})
+    result
+  end
+
+  defp invoke_recorded(%{kind: :component} = hook, payload, ceiling) do
+    if Ouroboros.Audit.required?() do
+      Ouroboros.Audit.execution("hook_refused", %{
+        "reason_code" => "component_audit_containment_unsupported"
+      })
+
+      raise Ouroboros.Audit.Unavailable, reason: :component_audit_containment_unsupported
+    else
+      invoke_component_recorded(hook, payload, ceiling)
     end
   end
 
-  defp invoke(hook, payload, ceiling) do
+  defp invoke_recorded(hook, payload, ceiling) do
     stdin = encode(payload)
 
     case sandboxed_shell(hook.command, hook.cwd, hook_sandbox_mode(hook),
@@ -967,6 +987,25 @@ defmodule Ouroboros.Provider.Native.Hooks do
     end
   end
 
+  defp invoke_component_recorded(hook, payload, ceiling) do
+    case run_component(hook, hook.pool, encode(payload), ceiling) do
+      {:ok, reply} ->
+        case narrow(parse_output(reply), hook) do
+          # A component has no exit code, so `permissionDecision: "deny"` is its `exit 2`.
+          # Answering in the same shape is what gives `pre_compact/2` and the post hooks
+          # the same behaviour they have for a shell hook that blocked.
+          %{decision: :deny} = answer -> {:deny, component_denial(answer, hook)}
+          answer -> {:ok, answer}
+        end
+
+      # A hook that failed to run is not consent and not a denial — the same posture a
+      # crashed shell hook gets, for the same reason.
+      {:ignored, note} ->
+        report(label(hook), note)
+        {:ok, empty()}
+    end
+  end
+
   # PreToolUse/PostToolUse are read_only (scratch `$TMPDIR` writes only). `[checks]` pass
   # `:workspace_write` at their own call site so typecheck/lint can write ordinary build
   # artifacts under the workspace. Other lifecycle events (SessionStart/End, FileChanged,
@@ -981,10 +1020,17 @@ defmodule Ouroboros.Provider.Native.Hooks do
 
   defp hook_sandbox_mode(_hook), do: :workspace_write
 
-  # Same wrap call site as `Tools.Bash`: detect, `policy/2`, scratch, `wrap/4`. Wrap only
-  # when a backend exists — `decide/2` is not consulted, because a hook with no backend
-  # is ignored rather than run ambient, including under `:workspace_write`.
+  # Same admission and wrap policy as `Tools.Bash`. A hook with no backend is ignored
+  # rather than run ambient, including under `:workspace_write`.
   defp sandboxed_shell(command, _cwd, :unrestricted, opts) do
+    if Ouroboros.Audit.required?() do
+      Ouroboros.Audit.execution("hook_refused", %{
+        "reason_code" => "unrestricted_hook_in_required_mode"
+      })
+
+      raise Ouroboros.Audit.Unavailable, reason: :unrestricted_hook_in_required_mode
+    end
+
     Logger.warning(
       "native hook running with no OS sandbox: sandbox_mode: :unrestricted was requested"
     )
@@ -1011,8 +1057,9 @@ defmodule Ouroboros.Provider.Native.Hooks do
   defp command_scope(_other, _mode), do: {:error, :no_workspace}
 
   defp wrap_shell(command, scope, detection, opts) do
-    with {:ok, scratch} <- Sandbox.scratch() do
-      policy = Sandbox.with_scratch(Sandbox.policy(scope, scope.sandbox_mode), scratch)
+    with {:sandboxed, _label, base_policy} <- Sandbox.decision(scope, detection),
+         {:ok, scratch} <- Sandbox.scratch() do
+      policy = Sandbox.with_scratch(base_policy, scratch)
 
       case Sandbox.wrap({:shell, command}, scope, policy, detection) do
         {:ok, {executable, args}} ->
@@ -1033,6 +1080,8 @@ defmodule Ouroboros.Provider.Native.Hooks do
       end
     else
       {:error, reason} -> {:ignored, reason}
+      {:refused, reason} -> {:ignored, reason}
+      _ -> {:ignored, :sandbox_required}
     end
   end
 

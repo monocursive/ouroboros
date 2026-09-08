@@ -259,6 +259,9 @@ defmodule Ouroboros.Provider.Native.Replay do
       length(calls) != length(results) ->
         {:boundary, :ambiguous_inference, Map.get(List.last(calls) || started, "seq")}
 
+      Enum.any?(group, &(Map.get(&1, "capture") in ["metadata", "redacted"])) ->
+        {:boundary, :audit_content_withheld_or_redacted, Map.get(started, "seq")}
+
       is_nil(prompt) ->
         {:boundary, :no_prompt, Map.get(started, "seq")}
 

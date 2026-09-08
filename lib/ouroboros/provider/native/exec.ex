@@ -126,24 +126,38 @@ defmodule Ouroboros.Provider.Native.Exec do
       |> maybe_cd(Keyword.get(opts, :cd))
       |> maybe_env(Keyword.get(opts, :env))
 
+    Ouroboros.Audit.execution("process_dispatch", %{
+      "command" => [wrapper | args],
+      "cwd" => Keyword.get(opts, :cd),
+      "capture_boundary" => "spawn_argv",
+      "max_bytes" => max_bytes
+    })
+
     case :exec.run([wrapper | args], options, @startup_timeout_ms) do
       {:ok, exec_pid, os_pid} ->
         state = empty_output()
         deadline = System.monotonic_time(:millisecond) + timeout
 
-        case collect(exec_pid, os_pid, state, max_bytes, deadline) do
-          {:ok, output, status} ->
-            {:ok, result(output, status, false)}
+        try do
+          case collect(exec_pid, os_pid, state, max_bytes, deadline) do
+            {:ok, output, status} ->
+              {:ok, result(output, status, false)}
 
-          {:timeout, output} ->
-            output = terminate_group(exec_pid, os_pid, output, max_bytes)
-            {:ok, result(output, 124, true)}
+            {:timeout, output} ->
+              output = terminate_group(exec_pid, os_pid, output, max_bytes)
+              {:ok, result(output, 124, true)}
+          end
+        rescue
+          error in Ouroboros.Audit.Unavailable ->
+            Erlexec.signal(os_pid, :sigkill)
+            reraise error, __STACKTRACE__
         end
 
       {:error, reason} ->
         {:error, {:spawn_failed, reason}}
     end
   rescue
+    error in Ouroboros.Audit.Unavailable -> reraise error, __STACKTRACE__
     error -> {:error, {:spawn_failed, Exception.message(error)}}
   catch
     kind, reason -> {:error, {:spawn_failed, kind, reason}}
@@ -319,6 +333,12 @@ defmodule Ouroboros.Provider.Native.Exec do
   end
 
   defp append(output, stream, data, max_bytes) when is_binary(data) do
+    Ouroboros.Audit.execution("process_output", %{
+      "channel" => to_string(stream),
+      "chunk" => %{"encoding" => "base64", "data" => Base.encode64(data)},
+      "bytes" => byte_size(data)
+    })
+
     bytes_key = if stream == :stdout, do: :stdout_bytes, else: :stderr_bytes
     used = Map.fetch!(output, bytes_key)
     available = max(max_bytes - used, 0)

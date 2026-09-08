@@ -28,7 +28,7 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
   alias Ouroboros.Test.NativeModelScript
   alias Ouroboros.Workspace.Worktree
 
-  setup do
+  setup tags do
     root = Path.join(System.tmp_dir!(), "native-subagent-#{System.unique_integer([:positive])}")
     workspace = Path.join(root, "workspace")
     File.mkdir_p!(Path.join(workspace, "lib"))
@@ -49,6 +49,27 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
 
     Application.put_env(:ouroboros, :native_data_dir, data_dir)
     Application.put_env(:ouroboros, :native_model_module, NativeModelScript)
+
+    if tags[:audit_outcome] do
+      previous_audit = Application.get_env(:ouroboros, :audit)
+      :ok = Supervisor.terminate_child(Ouroboros.Supervisor, Ouroboros.Audit.Store)
+      {:ok, canonical_root} = Ouroboros.Workspace.Path.canonicalize(root)
+
+      config =
+        Ouroboros.Audit.Config.new!(
+          mode: :local,
+          capture: :full,
+          root: Path.join(canonical_root, "evidence")
+        )
+
+      Application.put_env(:ouroboros, :audit, config)
+      start_supervised!({Ouroboros.Audit.Store, config: config})
+
+      on_exit(fn ->
+        restore(:audit, previous_audit)
+        Supervisor.restart_child(Ouroboros.Supervisor, Ouroboros.Audit.Store)
+      end)
+    end
 
     on_exit(fn ->
       Enum.each(previous, fn {key, value} -> restore(key, value) end)
@@ -145,8 +166,26 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
     end)
   end
 
-  defp tool_result(events, name),
-    do: Enum.find(events, &(&1.type == :tool_result and &1.payload["name"] == name))
+  defp tool_result(events, name) do
+    if name == "agent" and Ouroboros.Audit.enabled?(), do: assert_agent_audit()
+    Enum.find(events, &(&1.type == :tool_result and &1.payload["name"] == name))
+  end
+
+  defp assert_agent_audit(expected \\ nil) do
+    config = Ouroboros.Audit.Config.current()
+
+    calls =
+      for stream <- Ouroboros.Audit.Store.streams(config.root),
+          {:ok, %{records: records}} =
+            Ouroboros.Audit.Store.read(Ouroboros.Audit.Store.stream_path(config.root, stream)),
+          call <- Ouroboros.Audit.Query.calls(records),
+          call.name == "agent",
+          do: call
+
+    assert calls != []
+    assert Enum.all?(calls, &(&1.outcome != "unknown" and &1.terminal_event_id != nil))
+    if expected, do: assert(Enum.all?(calls, &(&1.outcome == expected)))
+  end
 
   defp agent_call(input, id \\ "c1"), do: {:tool_call, %{id: id, name: "agent", input: input}}
 
@@ -178,6 +217,7 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
   # ---------------------------------------------------------------- the round trip
 
   describe "a parent spawns a child" do
+    @tag audit_outcome: true
     test "the child reads a file in its own session and the parent gets only the summary",
          context do
       %{handle: handle, session_id: session_id} =
@@ -835,6 +875,7 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
   # ---------------------------------------------------------------- deadlines
 
   describe "the deadline" do
+    @tag audit_outcome: true
     test "fires, stops the child, and reports timed_out with what it had", context do
       %{handle: handle} =
         open(
@@ -929,6 +970,7 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
   # ---------------------------------------------------------------- background
 
   describe "a background child" do
+    @tag audit_outcome: true
     test "returns a task_id, settles on the session's own stream, and is collectable",
          context do
       %{handle: handle} =
@@ -1124,6 +1166,7 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       assert File.read!(Path.join(context.workspace, "lib/b.ex")) =~ "defmodule B"
     end
 
+    @tag audit_outcome: true
     test "interrupting the parent stops the child and says it was stopped", context do
       %{handle: handle} =
         open(
@@ -1144,6 +1187,7 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
 
       assert settled.payload["task_id"] == spawned.payload["task_id"]
       assert settled.payload["status"] == "stopped"
+      assert_agent_audit("interrupted")
     end
   end
 

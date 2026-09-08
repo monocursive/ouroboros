@@ -481,6 +481,25 @@ principals non-spoofable and the gateway won't reintroduce spoofing),
 upgrade `prepare/commit/promote/rollback` (stay in the remote console where
 they belong).
 
+Audit investigation is optional and described in [AUDIT.md](AUDIT.md). These methods
+all accept `machine?` to query a selected connected node; they do not silently fall back
+locally. Named organization roles apply in addition to the listener scope.
+
+| Method | Behavior |
+| --- | --- |
+| `audit.status` `{machine?}` | Effective capture, durability, coverage and storage health. |
+| `audit.doctor` `{machine?}` | Verify retained chains and report index/operational privacy status. |
+| `audit.search` `{stream_id?, session_id?, provider_session_id?, actor_id?, turn_id?, call_id?, ledger_effect_id?, model?, tool?, kind?, status?, since?, until?, limit?, offset?, machine?}` | Bounded metadata search with source and indexing watermark. |
+| `audit.show` `{stream_id, since_seq?, limit?, machine?}` | Verified stream, paginated records, correlated calls and unknown outcomes. |
+| `audit.artifact` `{stream_id, blob, machine?}` | Read a referenced artifact under the configured decryption/capture policy. |
+| `audit.export` `{stream_id?, machine?}` | Create a consistent evidence snapshot and return its manifest and digest. |
+| `audit.download` `{bundle_id, path, offset?, machine?}` | Download an allowlisted snapshot file in bounded chunks. |
+| `audit.reindex` `{machine?}` | Administrator: rebuild disposable SQLite metadata from canonical evidence. |
+| `audit.flush` `{machine?}` | Administrator: retry delivery to the configured independent custodian. |
+| `audit.retention` `{machine?}` | Read canonical hold and purge decisions. |
+| `audit.hold` `{stream_id, held, reason, machine?}` | Administrator: place or release a recorded retention hold. |
+| `audit.purge` `{stream_id, reason, machine?}` | Administrator: purge expired, closed, unheld evidence and server export copies. |
+
 ### 2.5 Event streaming
 
 On `interactive.subscribe` / `coding.subscribe`, the Conn process becomes the

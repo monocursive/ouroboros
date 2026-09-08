@@ -134,14 +134,17 @@ defmodule Ouroboros.Provider.Native.Tools do
       |> Enum.filter(fn module ->
         name = module.name()
 
-        name not in hidden and name not in disallowed and
+        Ouroboros.Audit.tool_supported?(name) and name not in hidden and name not in disallowed and
           (allowed == [] or name in allowed)
       end)
       |> Enum.map(&spec(&1, opts))
 
-    static ++
-      desktop_specs(allowed, disallowed, opts) ++
-      capability_specs(allowed, disallowed, opts) ++ mcp_specs(allowed, disallowed, opts)
+    if Ouroboros.Audit.required?(),
+      do: static,
+      else:
+        static ++
+          desktop_specs(allowed, disallowed, opts) ++
+          capability_specs(allowed, disallowed, opts) ++ mcp_specs(allowed, disallowed, opts)
   end
 
   @doc """
@@ -641,12 +644,36 @@ defmodule Ouroboros.Provider.Native.Tools do
   """
   @spec execute(module() | {module(), String.t()}, map(), map(), timeout()) :: map()
   def execute(module, input, context, timeout_ms) do
-    task = Task.async(fn -> invoke(module, input, context) end)
+    if Ouroboros.Audit.tool_supported?(label(module)) do
+      execute_supported(module, input, context, timeout_ms)
+    else
+      %{
+        output:
+          "Required audit refuses this tool because its containment and evidence coverage are insufficient.",
+        is_error: true
+      }
+    end
+  end
+
+  defp execute_supported(module, input, context, timeout_ms) do
+    task =
+      Task.async(fn ->
+        try do
+          Ouroboros.Audit.with_execution(Map.get(context, :audit), fn ->
+            invoke(module, input, context)
+          end)
+        rescue
+          error in Ouroboros.Audit.Unavailable -> {:audit_unavailable, error.reason}
+        end
+      end)
 
     if module == DesktopAct do
       await_interruptible(task, timeout_ms, label(module))
     else
       case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
+        {:ok, {:audit_unavailable, reason}} ->
+          raise Ouroboros.Audit.Unavailable, reason: reason
+
         {:ok, result} ->
           normalize_result(result)
 
@@ -697,10 +724,16 @@ defmodule Ouroboros.Provider.Native.Tools do
 
       module ->
         with {:ok, params} <- module.validate_params(atomize(module, input)) do
+          Ouroboros.Audit.execution("tool_effective_input", %{
+            "tool" => module.name(),
+            "arguments" => params
+          })
+
           module.run(params, context)
         end
     end
   rescue
+    error in Ouroboros.Audit.Unavailable -> reraise error, __STACKTRACE__
     error -> {:error, {:tool_raised, Exception.message(error)}}
   catch
     :exit, reason -> {:error, {:tool_exited, inspect(reason)}}

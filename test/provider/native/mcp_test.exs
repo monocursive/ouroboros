@@ -489,14 +489,12 @@ defmodule Ouroboros.Provider.Native.McpTest do
     setup context do
       configure(context, args: ["--tools", "echo,add"])
       on_exit(fn -> Pool.stop_workspace(Pool, context.workspace) end)
-      specs = Tools.specs(nil, nil, workspace: context.workspace)
-      %{specs: specs}
+      Tools.specs(nil, nil, workspace: context.workspace, distributed: false)
+      :ok
     end
 
     test "MCP tools follow the static and any node-local desktop tools in the spec list",
          context do
-      names = Enum.map(context.specs, & &1.name)
-
       desktop =
         if Desktop.enabled?() do
           ["desktop_state"] ++ if(Desktop.act_enabled?(), do: ["desktop_act"], else: [])
@@ -504,13 +502,29 @@ defmodule Ouroboros.Provider.Native.McpTest do
           []
         end
 
-      assert names ==
-               Enum.map(Tools.modules(), & &1.name()) ++
-                 desktop ++ ["mcp__fake__echo", "mcp__fake__add"]
+      # Other suites may start distribution; neither registry assertion depends on
+      # whether they happened to run first.
+      for distributed <- [false, true] do
+        names =
+          Tools.specs(nil, nil, workspace: context.workspace, distributed: distributed)
+          |> Enum.map(& &1.name)
+
+        static =
+          Enum.map(Tools.modules(), & &1.name()) -- if(distributed, do: [], else: ["fleet"])
+
+        assert names == static ++ desktop ++ ["mcp__fake__echo", "mcp__fake__add"]
+      end
     end
 
     test "no MCP tool appears when the caller named no workspace" do
-      assert Enum.map(Tools.specs(nil, nil), & &1.name) == Enum.map(Tools.modules(), & &1.name())
+      for distributed <- [false, true] do
+        names = Enum.map(Tools.specs(nil, nil, distributed: distributed), & &1.name)
+
+        static =
+          Enum.map(Tools.modules(), & &1.name()) -- if(distributed, do: [], else: ["fleet"])
+
+        assert names == static
+      end
     end
 
     test "lookup resolves an advertised name to the one dynamic module, carrying the name",

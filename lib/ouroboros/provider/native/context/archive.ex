@@ -165,7 +165,7 @@ defmodule Ouroboros.Provider.Native.Context.Archive do
   defp write_private(path, json) do
     temporary = path <> ".tmp-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
 
-    with :ok <- File.write(temporary, json, [:binary, :sync]),
+    with :ok <- File.write(temporary, Ouroboros.Audit.Content.encode(json), [:binary, :sync]),
          :ok <- File.chmod(temporary, 0o600),
          :ok <- File.rename(temporary, path) do
       :ok
@@ -175,7 +175,7 @@ defmodule Ouroboros.Provider.Native.Context.Archive do
   end
 
   defp read_file(path) do
-    case File.read(path) do
+    case Ouroboros.Audit.Content.read(path) do
       {:ok, json} -> {:ok, json}
       {:error, :enoent} -> {:error, :no_archive}
       {:error, reason} -> {:error, {:archive_unreadable, reason}}

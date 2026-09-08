@@ -3376,6 +3376,11 @@ mod tests {
         let actual_cookie =
             fs::read_to_string(crate::fleet::fleet_dir(&dir).join("cookie")).expect("fleet cookie");
         let caller = vec![
+            (
+                "OUROBOROS_AUDIT_CONFIG".into(),
+                "/private/operator/audit.json".into(),
+            ),
+            ("OUROBOROS_AUDIT_MODE".into(), "required".into()),
             ("OUROBOROS_COOKIE".into(), "legacy-secret".into()),
             ("OUROBOROS_NODE".into(), "wrong@127.0.0.9".into()),
             ("OUROBOROS_WORKSPACE_ROOTS".into(), "/srv/project".into()),
@@ -3392,6 +3397,11 @@ mod tests {
         };
 
         assert_eq!(get("OUROBOROS_NODE"), Some(profile.node.as_str()));
+        assert_eq!(
+            get("OUROBOROS_AUDIT_CONFIG"),
+            Some("/private/operator/audit.json")
+        );
+        assert_eq!(get("OUROBOROS_AUDIT_MODE"), Some("required"));
         assert_eq!(get("OUROBOROS_GATEWAY_PORT"), Some("48501"));
         assert!(get("OUROBOROS_COOKIE_FILE").is_some());
         assert!(get("OUROBOROS_BOOT_COOKIE_DECOY").is_some());

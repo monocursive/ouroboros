@@ -174,7 +174,8 @@ defmodule Ouroboros.Provider.Native.Subagent do
   """
   @spec spawn(spec()) :: {:ok, map()} | {:error, term()}
   def spawn(spec) do
-    with {:ok, prepared, local_metadata} <- prepare_provision(spec) do
+    with :ok <- Ouroboros.Audit.admit_remote(Map.get(spec, :node) || node()),
+         {:ok, prepared, local_metadata} <- prepare_provision(spec) do
       result =
         case Map.get(prepared, :node) || node() do
           target when target == node() -> start_and_launch(prepared)

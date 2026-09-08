@@ -392,8 +392,8 @@ defmodule Ouroboros.Provider.Native.Desktop do
     cap = config(:max_image_bytes)
 
     with {:ok, %File.Stat{size: size}} <- File.stat(path),
-         true <- size <= cap,
-         {:ok, bytes} <- File.read(path),
+         true <- size <= div(cap * 4 + 2, 3) + 4096,
+         {:ok, bytes} <- Ouroboros.Audit.Content.read(path),
          true <- byte_size(bytes) <= cap do
       {:ok, %{bytes: Base.encode64(bytes), media_type: media, size: byte_size(bytes)}}
     else
@@ -1391,7 +1391,7 @@ defmodule Ouroboros.Provider.Native.Desktop do
   end
 
   defp write_once(path, bytes) do
-    case File.write(path, bytes, [:binary, :exclusive]) do
+    case File.write(path, Ouroboros.Audit.Content.encode(bytes), [:binary, :exclusive]) do
       :ok -> File.chmod(path, 0o600)
       {:error, :eexist} -> verify_existing(path, bytes)
       {:error, reason} -> {:error, reason}
@@ -1399,7 +1399,7 @@ defmodule Ouroboros.Provider.Native.Desktop do
   end
 
   defp verify_existing(path, bytes) do
-    case File.read(path) do
+    case Ouroboros.Audit.Content.read(path) do
       {:ok, ^bytes} -> :ok
       {:ok, _other} -> {:error, {:sha_collision, path}}
       {:error, reason} -> {:error, reason}

@@ -328,6 +328,7 @@ defmodule Ouroboros.Provider.Native.Session do
            ),
          {:ok, scope} <-
            Paths.scope(request.cwd, request.add_dirs, Loop.sandbox_mode(request.sandbox_mode)),
+         :ok <- Ouroboros.Audit.admit_scope(scope),
          {:ok, model_spec} <- Loop.resolve_model(request.model),
          {:ok, session_dir, durable?} <- Paths.session_dir(provider_session_id),
          {:ok, checkpoint_path, _durable?} <- Checkpoint.locate(provider_session_id),
@@ -441,7 +442,13 @@ defmodule Ouroboros.Provider.Native.Session do
                 "provider_session_id" => provider_session_id,
                 "resumed" => state.resumed?,
                 "forked_from_provider_session_id" => if(fork?, do: request.provider_session_id),
-                "journal_version" => Journal.version()
+                "journal_version" => Journal.version(),
+                "session_id" => context.session_id,
+                "parent_session_id" => state.subagent_parent,
+                "parent_task_id" => state.subagent_task_id,
+                "workspace" => scope.root,
+                "audit_policy" => Ouroboros.Audit.Config.public(),
+                "actor_id" => Ouroboros.Audit.actor_id(request) || "runtime-unattributed"
               }
               |> Map.merge(seeded_fields(seeded))
             )
@@ -719,6 +726,7 @@ defmodule Ouroboros.Provider.Native.Session do
     case checkpoint(state) do
       {:ok, _digest} ->
         _ = session_end(state, "closed")
+        state = journal(state, "session_closed", %{"status" => "closed"})
 
         emit(state, %{
           type: :session_closed,
@@ -2136,6 +2144,8 @@ defmodule Ouroboros.Provider.Native.Session do
   end
 
   defp stream_summary(state, request, turn_id, effect_id, prompt_sha256) do
+    Ouroboros.Audit.ensure_actor(state.request)
+
     _ =
       journal_direct(state, "model_call", %{
         "turn_id" => turn_id,
@@ -2144,21 +2154,38 @@ defmodule Ouroboros.Provider.Native.Session do
         "system_sha256" => text_digest(request.system),
         "message_count" => length(request.messages),
         "tools_sha256" => Journal.digest([]),
+        "request" =>
+          if(Ouroboros.Audit.enabled?(), do: Model.project(state.model_module, request)),
+        "model" => request.model,
         "ledger_effect_id" => effect_id
       })
 
     started = System.monotonic_time(:millisecond)
 
-    case Model.stream(state.model_module, request, []) do
+    opts =
+      if Ouroboros.Audit.enabled?(),
+        do: [
+          audit_context: %{
+            journal: state.journal,
+            turn_id: turn_id,
+            effect_id: effect_id,
+            iteration: 1
+          }
+        ],
+        else: []
+
+    case Model.stream(state.model_module, request, opts) do
       {:ok, stream} ->
-        {text, chunks, usage} = collect(stream)
+        {text, chunks, usage} = collect(stream, state, turn_id, effect_id)
         elapsed = System.monotonic_time(:millisecond) - started
 
         journal =
           journal_direct(state, "model_result", %{
             "turn_id" => turn_id,
             "iteration" => 1,
+            "ledger_effect_id" => effect_id,
             "chunks" => chunks,
+            "usage" => if(map_size(usage) == 0, do: nil, else: usage),
             "duration_ms" => elapsed
           })
 
@@ -2167,6 +2194,12 @@ defmodule Ouroboros.Provider.Native.Session do
         {:ok, text, seq}
 
       {:error, reason} ->
+        journal_direct(state, "model_failed", %{
+          "turn_id" => turn_id,
+          "ledger_effect_id" => effect_id,
+          "status" => "request_failed"
+        })
+
         Inference.settle(
           effect_id,
           Inference.status_of(reason),
@@ -2177,6 +2210,23 @@ defmodule Ouroboros.Provider.Native.Session do
 
         {:error, reason}
     end
+  rescue
+    error in Ouroboros.Audit.Unavailable ->
+      reraise error, __STACKTRACE__
+
+    _ ->
+      Inference.settle(effect_id, :failed, 0, nil, %{})
+      {:error, :summary_stream_failed}
+  catch
+    _, _ ->
+      journal_direct(state, "model_failed", %{
+        "turn_id" => turn_id,
+        "ledger_effect_id" => effect_id,
+        "status" => "stream_interrupted"
+      })
+
+      Inference.settle(effect_id, :failed, 0, nil, %{})
+      {:error, :summary_stream_interrupted}
   end
 
   defp summariser_cause(_turn_id), do: "native.compaction.inference"
@@ -2184,9 +2234,20 @@ defmodule Ouroboros.Provider.Native.Session do
   # The whole stream, retained: the text the summary is, the chunks the journal records —
   # thinking included, which nothing durable held before R1 — and the provider's last usage
   # map for the ledger's token counts.
-  defp collect(stream) do
+  defp collect(stream, state, turn_id, effect_id) do
     {text, chunks, usage} =
-      Enum.reduce(stream, {[], [], %{}}, fn chunk, {text, chunks, usage} ->
+      Enum.reduce(Stream.with_index(stream), {[], [], %{}}, fn {chunk, index},
+                                                               {text, chunks, usage} ->
+        if Ouroboros.Audit.enabled?(),
+          do:
+            journal_direct(state, "model_chunk", %{
+              "turn_id" => turn_id,
+              "iteration" => 1,
+              "ledger_effect_id" => effect_id,
+              "chunk_index" => index,
+              "chunk" => Journal.jsonable(chunk)
+            })
+
         chunks = [Journal.jsonable(chunk) | chunks]
 
         case chunk do
@@ -2198,9 +2259,21 @@ defmodule Ouroboros.Provider.Native.Session do
 
     {IO.iodata_to_binary(text), Enum.reverse(chunks), usage}
   rescue
-    _error -> {"", [], %{}}
+    error in Ouroboros.Audit.Unavailable ->
+      reraise error, __STACKTRACE__
+
+    error ->
+      if Ouroboros.Audit.enabled?(),
+        do:
+          journal_direct(state, "model_failed", %{
+            "turn_id" => turn_id,
+            "ledger_effect_id" => effect_id,
+            "status" => "stream_failed"
+          })
+
+      reraise error, __STACKTRACE__
   catch
-    :exit, _reason -> {"", [], %{}}
+    :exit, reason -> exit(reason)
   end
 
   # ---------------------------------------------------------------- handoff

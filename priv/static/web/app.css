@@ -4152,3 +4152,16 @@ body .ouro-gate {
     animation: none;
   }
 }
+
+/* Evidence is untrusted text. Keep long fields inside their inspection panel. */
+.ouro-audit pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 32rem; overflow: auto; padding: 1rem; font-size: .8rem; }
+.ouro-audit code, .ouro-audit .ouro-mono { overflow-wrap: anywhere; }
+.ouro-audit details { margin: 1rem 0; }
+.ouro-audit summary { cursor: pointer; padding: .65rem 0; }
+.ouro-audit-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 1rem; align-items: end; margin: 1rem 0; }
+.ouro-audit-filters label { display: grid; gap: .4rem; }
+.ouro-audit-filters input { min-width: 0; padding: .6rem; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: .3rem; }
+.ouro-audit-scroll { overflow-x: auto; }
+.ouro-audit-table { width: 100%; border-collapse: collapse; text-align: left; font-size: .85rem; }
+.ouro-audit-table th, .ouro-audit-table td { padding: .7rem; border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent); vertical-align: top; }
+.ouro-audit-event { padding: .7rem 0; border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent); }

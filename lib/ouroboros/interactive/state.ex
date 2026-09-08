@@ -267,9 +267,11 @@ defmodule Ouroboros.Interactive.State do
         ouroboros_session_id: state.id,
         ouroboros_node: Atom.to_string(state.node)
       }
+      |> Map.merge(Map.take(state.options, [:audit_actor_id]))
       |> Trace.put(prompt_trace, :ouroboros_prompt)
 
     state.options
+    |> Map.delete(:audit_actor_id)
     |> Map.delete(:agent_profile)
     |> Map.delete(:runtime_exposure)
     |> rename(:runtime_timeout_ms, :turn_runtime_timeout_ms)
@@ -952,6 +954,7 @@ defmodule Ouroboros.Interactive.State do
           :attachments,
           :reasoning_effort,
           :provider_options,
+          :audit_actor_id,
           :approval_mode,
           :sandbox_mode,
           :runtime_exposure,

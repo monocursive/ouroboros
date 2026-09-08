@@ -496,9 +496,28 @@
     }
   };
 
+  var sessionMenuFocus = new WeakMap();
+
   var liveSocket = new LiveSocket("/live", Socket, {
     params: { _csrf_token: csrfToken },
     dom: {
+      onPatchStart: function (container) {
+        var focused = document.activeElement;
+        if (focused && container.contains(focused) && focused.closest(".ouro-row-actions")) {
+          sessionMenuFocus.set(container, focused);
+        }
+      },
+      onPatchEnd: function (container) {
+        var focused = sessionMenuFocus.get(container);
+        sessionMenuFocus.delete(container);
+        // Moving a keyed row can blur its summary or action button. LiveView restores
+        // text inputs itself; restore this menu only if the patch left focus on body.
+        // A dialog or another control that received focus keeps it.
+        if (focused && focused.isConnected && document.activeElement === document.body &&
+            focused.getClientRects().length > 0) {
+          focused.focus({ preventScroll: true });
+        }
+      },
       onBeforeElUpdated: function (from, to) {
         // Polls may reorder sessions or refresh permissions while a disclosure is open.
         // Preserve the person's choice only while this is still the same item.

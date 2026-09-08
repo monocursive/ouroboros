@@ -152,7 +152,7 @@ defmodule Ouroboros.Provider.Native.Attachments do
   end
 
   defp write_once(path, bytes) do
-    case File.write(path, bytes, [:binary, :exclusive]) do
+    case File.write(path, Ouroboros.Audit.Content.encode(bytes), [:binary, :exclusive]) do
       :ok -> File.chmod(path, 0o600)
       {:error, :eexist} -> verify_existing(path, bytes)
       {:error, reason} -> {:error, reason}
@@ -160,7 +160,7 @@ defmodule Ouroboros.Provider.Native.Attachments do
   end
 
   defp verify_existing(path, bytes) do
-    case File.read(path) do
+    case Ouroboros.Audit.Content.read(path) do
       {:ok, ^bytes} -> :ok
       {:ok, _other} -> {:error, {:attachment_digest_collision, path}}
       {:error, reason} -> {:error, reason}

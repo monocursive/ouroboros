@@ -277,12 +277,18 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
 
     case spill(output, context) do
       {:ok, path} ->
-        {inline,
-         "\n(full output, #{byte_size(output)} bytes: #{path} — read it if you need the middle)"}
+        {inline, "\n(full output, #{byte_size(output)} bytes: #{path}" <> spill_guidance() <> ")"}
 
       {:error, _reason} ->
         {inline, "\n(#{elided} bytes could not be spilled to a file and are lost)"}
     end
+  end
+
+  defp spill_guidance do
+    if Ouroboros.Audit.enabled?(),
+      do:
+        " — retained as operational content; available to the operator in retained session output",
+      else: " — read it if you need the middle"
   end
 
   defp spill(output, context) do
@@ -294,8 +300,8 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
         path = Path.join([dir, "output", name])
 
         with :ok <- File.mkdir_p(Path.dirname(path)),
-             :ok <- File.write(path, output),
-             :ok <- File.chmod(path, 0o600) do
+             :ok <- File.chmod(Path.dirname(path), 0o700),
+             :ok <- Ouroboros.Audit.File.atomic(path, Ouroboros.Audit.Content.encode(output)) do
           {:ok, path}
         end
 
@@ -308,6 +314,14 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
 
   defp describe({:workspace_write_without_backend, _} = reason),
     do: Sandbox.refusal_text(reason)
+
+  defp describe(reason)
+       when reason in [
+              :required_audit_containment_unavailable,
+              :audit_read_root_overlaps_protected_storage
+            ],
+       do:
+         "required audit needs enforced filesystem read/write and network isolation; this command was not run"
 
   defp describe({:unknown_sandbox_mode, mode}),
     do:

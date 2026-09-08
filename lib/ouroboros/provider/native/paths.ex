@@ -68,8 +68,12 @@ defmodule Ouroboros.Provider.Native.Paths do
     with :ok <- reject_traversal(path),
          absolute = absolutize(path, scope.root),
          {:ok, canonical} <- canonicalize(absolute),
+         false <- Ouroboros.Audit.protected_path?(canonical),
          :ok <- contained(canonical, scope) do
       {:ok, canonical}
+    else
+      true -> {:error, :protected_audit_path}
+      error -> error
     end
   end
 

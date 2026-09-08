@@ -118,7 +118,7 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
     with {:ok, json} <- encode_json(payload),
          temporary =
            path <> ".tmp-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false),
-         :ok <- File.write(temporary, json, [:binary, :sync]),
+         :ok <- File.write(temporary, Ouroboros.Audit.Content.encode(json), [:binary, :sync]),
          :ok <- File.chmod(temporary, 0o600),
          :ok <- File.rename(temporary, path) do
       {:ok, digest}
@@ -209,7 +209,7 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
   end
 
   defp read_file(path) do
-    case File.read(path) do
+    case Ouroboros.Audit.Content.read(path) do
       {:ok, json} -> {:ok, json}
       {:error, :enoent} -> {:error, :no_checkpoint}
       {:error, reason} -> {:error, {:checkpoint_unreadable, reason}}
@@ -487,7 +487,7 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
 
         with :ok <- File.mkdir_p(directory),
              _ <- File.chmod(directory, 0o700),
-             :ok <- File.write(temporary, content, [:binary]),
+             :ok <- File.write(temporary, Ouroboros.Audit.Content.encode(content), [:binary]),
              :ok <- File.chmod(temporary, 0o600),
              :ok <- File.rename(temporary, path) do
           digest
@@ -504,7 +504,7 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
   def get_blob(session_dir, digest) when is_binary(digest) do
     path = Path.join(blob_dir(session_dir), digest)
 
-    case File.read(path) do
+    case Ouroboros.Audit.Content.read(path) do
       {:ok, content} ->
         # The store is content-addressed, so verifying is one hash and it turns a
         # corrupted blob into a named unrestorable file instead of a silently wrong one.
@@ -850,7 +850,7 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
   defp read_manifest(session_dir) do
     path = manifest_path(session_dir)
 
-    case File.read(path) do
+    case Ouroboros.Audit.Content.read(path) do
       {:ok, json} ->
         case decode_manifest(json) do
           {:ok, manifest} ->
@@ -897,7 +897,7 @@ defmodule Ouroboros.Provider.Native.Checkpoint do
 
     with {:ok, json} <- encode_manifest(manifest),
          :ok <- File.mkdir_p(Path.dirname(path)),
-         :ok <- File.write(temporary, json, [:binary, :sync]),
+         :ok <- File.write(temporary, Ouroboros.Audit.Content.encode(json), [:binary, :sync]),
          :ok <- File.chmod(temporary, 0o600),
          :ok <- File.rename(temporary, path) do
       :ok

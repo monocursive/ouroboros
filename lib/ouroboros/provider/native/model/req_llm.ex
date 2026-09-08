@@ -53,6 +53,8 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
 
   @impl true
   def stream(request, opts) do
+    {audit, opts} = Keyword.pop(opts, :audit_context)
+
     with {:ok, configured} <- configured_options(),
          {:ok, tools} <- build_tools(request.tools, request.model),
          {:ok, context} <- build_context(request) do
@@ -63,6 +65,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
         |> put_unless_nil(:reasoning_effort, request[:reasoning_effort])
         |> put_unless_nil(:max_tokens, request[:max_tokens])
         |> put_transport_options(request)
+        |> audit_transport(audit)
 
       Admission.with_stream(fn ->
         case ReqLLM.stream_text(request.model, context, generation_opts) do
@@ -72,7 +75,74 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
       end)
     end
   rescue
+    error in Ouroboros.Audit.Unavailable -> reraise error, __STACKTRACE__
     error -> {:error, {:model_client_error, Exception.message(error)}}
+  end
+
+  defp audit_transport(options, nil) do
+    if Ouroboros.Audit.required?(),
+      do: raise(Ouroboros.Audit.Unavailable, reason: :missing_model_audit_context)
+
+    options
+  end
+
+  defp audit_transport(options, audit) do
+    options
+    |> Keyword.put(:cache, nil)
+    |> Keyword.put(:max_retries, 0)
+    |> Keyword.delete(:openai_stream_transport)
+    |> Keyword.update(:provider_options, [], fn opts ->
+      Keyword.drop(opts, [:openai_stream_transport, :openai_websocket_session])
+    end)
+    |> Keyword.put(:stream_transport, :http)
+    |> Keyword.put(:on_finch_request, fn request ->
+      {body, raw_body} =
+        case request.body do
+          nil ->
+            {nil, nil}
+
+          body when is_binary(body) or is_list(body) ->
+            bytes = IO.iodata_to_binary(body)
+
+            parsed =
+              case JSON.decode(bytes) do
+                {:ok, json} -> json
+                _ -> %{"content" => bytes, "encoding" => "non_json"}
+              end
+
+            {parsed, bytes}
+
+          _ ->
+            raise Ouroboros.Audit.Unavailable, reason: :uncapturable_transport_body
+        end
+
+      Ouroboros.Provider.Native.Journal.append(audit.journal, "model_transport", %{
+        "turn_id" => audit.turn_id,
+        "iteration" => audit.iteration,
+        "ledger_effect_id" => audit.effect_id,
+        "attempt_id" => audit.effect_id <> ":http:1",
+        "method" => request.method,
+        "endpoint" => %{
+          scheme: request.scheme,
+          host: request.host,
+          port: request.port,
+          path: request.path
+        },
+        "request" => body,
+        "request_sha256" =>
+          if(raw_body, do: :crypto.hash(:sha256, raw_body) |> Base.encode16(case: :lower)),
+        "bytes" => if(raw_body, do: byte_size(raw_body), else: 0),
+        "headers" =>
+          Enum.filter(request.headers, fn {name, _} ->
+            String.downcase(name) in ["content-type", "accept"]
+          end),
+        "query" => %{"withheld" => "transport_credentials_may_be_present"},
+        "capture_boundary" => "finch_request_before_dispatch",
+        "max_retries" => 0
+      })
+
+      request
+    end)
   end
 
   # R1. The same two builders `stream/2` runs, rendered as plain data for a digest. It is
@@ -669,7 +739,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     media_type = value(part, :media_type) || "application/octet-stream"
 
     with true <- is_binary(path),
-         {:ok, bytes} <- File.read(path),
+         {:ok, bytes} <- Ouroboros.Audit.Content.read(path),
          true <- digest(bytes) == expected do
       [ReqLLM.Message.ContentPart.image(bytes, media_type)]
     else
@@ -696,7 +766,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
         media_type = value(part, :media_type) || "application/octet-stream"
 
         with true <- is_binary(path),
-             {:ok, bytes} <- File.read(path),
+             {:ok, bytes} <- Ouroboros.Audit.Content.read(path),
              true <- digest(bytes) == expected do
           ReqLLM.Message.ContentPart.image(bytes, media_type)
         else

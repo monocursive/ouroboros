@@ -118,6 +118,7 @@ runs them. [WASM.md](docs/WASM.md) is the design behind it.
 - [Agent experience](docs/AGENT_EXPERIENCE.md)
 - [Terminal client](docs/TUI.md)
 - [Web interface](docs/WEB.md)
+- [Traceability and audit](docs/AUDIT.md)
 - [Fleet setup](docs/FLEET.md)
 - [Computer use](docs/COMPUTER_USE.md)
 - [WebAssembly components](docs/WASM_GUIDE.md)
