@@ -36,6 +36,23 @@ defmodule Ouroboros.Self.Export do
   not in this node's trust policy, because then `signers.txt` could not be written and the
   bundle would arrive somewhere with no way to accept it.
 
+  ## The directory it leaves behind
+
+  Written into a staging directory beside the destination and moved in one `File.rename/2`
+  per file, so a boot that reads `priv/self` while an export is running reads three whole
+  files or the three that were there before — never a `promotions.json` naming a bundle that
+  is half on disk.
+
+  And it leaves **one** bundle. A policy renamed between two exports used to leave both, and
+  `Ouroboros.Self.Boot` globs `*.ouro-wasm`, so the next installation deployed a policy
+  nobody promoted beside the one somebody did. Every `*.ouro-wasm` this export did not write
+  is removed and named in the report's `removed`. `README.md` is untouched: it is the
+  repository's file, not an export's.
+
+  `:out` may be confined with `:confine_to` — see `confine/2`. `mix ouroboros.self.export`
+  always passes the repository root, so `--out` cannot write a signed bundle and a trust
+  suggestion outside the checkout.
+
   ## Nothing here is a secret
 
   A public key, a component that was already distributed as a signed bundle, and counts of
@@ -64,7 +81,8 @@ defmodule Ouroboros.Self.Export do
           component_sha256: String.t(),
           signer_id: String.t(),
           tools: [String.t()],
-          bundle_bytes: pos_integer()
+          bundle_bytes: pos_integer(),
+          removed: [String.t()]
         }
 
   @doc "Where an export goes when nobody names a directory: `#{@default_out}`."
@@ -85,17 +103,84 @@ defmodule Ouroboros.Self.Export do
   """
   @spec run(keyword()) :: {:ok, report()} | {:error, term()}
   def run(opts \\ []) when is_list(opts) do
-    out = Keyword.get(opts, :out, @default_out)
-
-    with {:ok, name, sha, tools} <- promoted(opts),
+    with {:ok, out} <-
+           confine(Keyword.get(opts, :out, @default_out), Keyword.get(opts, :confine_to)),
+         {:ok, name, sha, tools} <- promoted(opts),
          {:ok, entry} <- live_entry(name, sha, opts),
          {:ok, manifest} <- manifest(entry, sha, opts),
+         # Before the bundle is assembled, not after: this is the cheapest refusal of the
+         # four and the only one about *trust*. A manifest nobody signed, or one signed by
+         # an id this node's trust policy does not carry, has no `signers.txt` line to
+         # write — and a bundle that arrives somewhere with no way to accept it is worse
+         # than a refusal here. It also means the unsigned case is reachable at all:
+         # `Bundle.encode/3` refuses a manifest with no signature first (`:signature_required`).
+         {:ok, signer_id, public} <- signer(manifest, opts),
          {:ok, bytes} <- component(sha, opts),
          {:ok, precompiled} <- precompiled(manifest, opts),
-         {:ok, bundle} <- Bundle.encode(manifest, bytes, precompiled),
-         {:ok, signer_id, public} <- signer(manifest, opts),
-         :ok <- prepare(out) do
+         {:ok, bundle} <- Bundle.encode(manifest, bytes, precompiled) do
       write(out, name, sha, tools, manifest, bundle, signer_id, public)
+    end
+  end
+
+  @doc """
+  Resolves an `--out` and refuses one that leaves `root` (S4 fix wave, LOW-4).
+
+  `nil` for `root` means the caller is inside this application and named a directory on
+  purpose — a test's own temporary tree, say — and is not confined. Every operator-facing
+  caller passes one: `mix ouroboros.self.export` passes the repository it is running in,
+  because `--out ../../../somewhere` writing a signed bundle and a trust suggestion outside
+  the checkout is a switch doing something its name does not say.
+
+  Both sides are resolved before they are compared, and the *existing* prefix of the target
+  is canonicalized through the filesystem, so a symlinked `priv/self` — or a `/tmp` that is
+  really `/private/tmp` — is judged by where it actually lands rather than by how it was
+  spelled. A path with no existing ancestor inside the root cannot pass.
+  """
+  @spec confine(Path.t(), Path.t() | nil) :: {:ok, Path.t()} | {:error, term()}
+  def confine(out, nil) when is_binary(out), do: {:ok, out}
+
+  def confine(out, root) when is_binary(out) and is_binary(root) do
+    resolved = resolve(out)
+    inside = resolve(root)
+
+    if resolved == inside or String.starts_with?(resolved, inside <> "/") do
+      {:ok, out}
+    else
+      {:error, {:out_escapes_root, resolved, inside}}
+    end
+  end
+
+  def confine(out, root), do: {:error, {:invalid_export_path, out, root}}
+
+  # `Path.expand/1` settles `..` and a relative spelling; `real/2` settles the symlinks,
+  # which is the half that matters here — a `priv/self` that is a link to somewhere else *is*
+  # somewhere else, and a prefix check on the spelling would call it inside.
+  #
+  # Written here rather than through `Ouroboros.Workspace.Path.canonicalize/1` because that
+  # one insists the path be an existing directory (an export may be the thing that creates
+  # it) and refuses a path that crosses two links as a cycle, which `/tmp` on a Mac plus a
+  # symlinked `priv/self` is. Component by component, bounded, and a name with nothing behind
+  # it is kept as written.
+  defp resolve(path), do: real(Path.expand(path), 0)
+
+  @max_link_depth 32
+
+  defp real(path, depth) when depth > @max_link_depth, do: path
+  defp real("/", _depth), do: "/"
+
+  defp real(path, depth) do
+    parent = real(Path.dirname(path), depth)
+    joined = Path.join(parent, Path.basename(path))
+
+    case File.read_link(joined) do
+      {:ok, target} ->
+        absolute =
+          if Path.type(target) == :absolute, do: target, else: Path.join(parent, target)
+
+        real(Path.expand(absolute), depth + 1)
+
+      {:error, _not_a_link} ->
+        joined
     end
   end
 
@@ -220,49 +305,121 @@ defmodule Ouroboros.Self.Export do
 
   ## ── writing ───────────────────────────────────────────────────────────────────────────
 
-  defp prepare(out) do
-    case File.mkdir_p(out) do
+  # S4 fix wave (MEDIUM-3). Written into a fresh directory beside the destination and moved
+  # in, rather than written over the destination in place.
+  #
+  # Two reasons, and the second is the finding. A partly written export is a `priv/self` a
+  # boot would read: three files whose `promotions.json` names a bundle that is half on disk.
+  # A `File.rename/2` within one filesystem is atomic, so each of the three either is the new
+  # file or is still the old one, and the staging directory is a sibling of the destination so
+  # the rename never crosses a device. And the *previous* export's bundle is only replaced
+  # when it had the same name: a policy renamed between two exports left both files here, and
+  # `Ouroboros.Self.Boot` globs `*.ouro-wasm` — so the next install deployed a policy nobody
+  # promoted, alongside the one somebody did. Anything ending `.ouro-wasm` that this export
+  # did not write is removed, and the report says which.
+  #
+  # The directory is not replaced wholesale, deliberately: `priv/self/README.md` is committed
+  # beside these three files and is not an export's to delete.
+  defp stage(out) do
+    staging =
+      out <>
+        ".tmp-#{System.unique_integer([:positive, :monotonic])}-" <>
+        Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
+
+    with :ok <- mkdir(out),
+         :ok <- mkdir(staging) do
+      {:ok, staging}
+    end
+  end
+
+  defp mkdir(path) do
+    case File.mkdir_p(path) do
       :ok -> :ok
-      {:error, reason} -> {:error, {:export_directory_unusable, out, reason}}
+      {:error, reason} -> {:error, {:export_directory_unusable, path, reason}}
     end
   end
 
   defp write(out, name, sha, tools, manifest, bundle, signer_id, public) do
-    bundle_path = Path.join(out, name <> ".ouro-wasm")
-    promotions_path = Path.join(out, @promotions)
-    signers_path = Path.join(out, @signers)
+    basename = name <> ".ouro-wasm"
 
-    record =
-      document(name, sha, tools, manifest, signer_id, Path.basename(bundle_path))
+    record = document(name, sha, tools, manifest, signer_id, basename)
+    signers = "#{signer_id}:#{Base.encode64(public)}\n"
 
-    with :ok <- put(bundle_path, bundle),
-         :ok <- put(promotions_path, record),
-         :ok <- put(signers_path, "#{signer_id}:#{Base.encode64(public)}\n") do
-      Logger.info(
-        "self export: #{name} at #{String.slice(sha, 0, 12)} signed by #{signer_id}, " <>
-          "#{length(Map.keys(tools))} promoted tool(s) into #{out}"
-      )
-
-      {:ok,
-       %{
-         out: out,
-         bundle: bundle_path,
-         promotions: promotions_path,
-         signers: signers_path,
-         policy_name: name,
-         component_sha256: sha,
-         signer_id: signer_id,
-         tools: tools |> Map.keys() |> Enum.sort(),
-         bundle_bytes: byte_size(bundle)
-       }}
+    with {:ok, staging} <- stage(out) do
+      try do
+        with :ok <- put(staging, basename, bundle),
+             :ok <- put(staging, @promotions, record),
+             :ok <- put(staging, @signers, signers),
+             :ok <- publish(staging, out, [basename, @promotions, @signers]) do
+          removed = sweep(out, basename)
+          settled(out, basename, name, sha, tools, signer_id, bundle, removed)
+        end
+      after
+        File.rm_rf(staging)
+      end
     end
   end
 
-  defp put(path, contents) do
+  defp settled(out, basename, name, sha, tools, signer_id, bundle, removed) do
+    Logger.info(
+      "self export: #{name} at #{String.slice(sha, 0, 12)} signed by #{signer_id}, " <>
+        "#{length(Map.keys(tools))} promoted tool(s) into #{out}" <> removed_detail(removed)
+    )
+
+    {:ok,
+     %{
+       out: out,
+       bundle: Path.join(out, basename),
+       promotions: Path.join(out, @promotions),
+       signers: Path.join(out, @signers),
+       policy_name: name,
+       component_sha256: sha,
+       signer_id: signer_id,
+       tools: tools |> Map.keys() |> Enum.sort(),
+       bundle_bytes: byte_size(bundle),
+       removed: removed
+     }}
+  end
+
+  defp removed_detail([]), do: ""
+
+  defp removed_detail(removed),
+    do: "; removed #{length(removed)} stale bundle(s): " <> Enum.join(removed, ", ")
+
+  defp put(dir, basename, contents) do
+    path = Path.join(dir, basename)
+
     case File.write(path, contents) do
       :ok -> :ok
       {:error, reason} -> {:error, {:export_unwritable, path, reason}}
     end
+  end
+
+  # One rename per file. Not a directory swap: `README.md` lives here too and belongs to the
+  # repository rather than to an export.
+  defp publish(staging, out, names) do
+    Enum.reduce_while(names, :ok, fn basename, :ok ->
+      source = Path.join(staging, basename)
+      destination = Path.join(out, basename)
+
+      case File.rename(source, destination) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, {:export_unwritable, destination, reason}}}
+      end
+    end)
+  end
+
+  # Every other `*.ouro-wasm` in the directory: an earlier export's bundle under a name this
+  # policy no longer has. They are not the promoted policy and `Ouroboros.Self.Boot` would
+  # read them as if they were.
+  defp sweep(out, keep) do
+    out
+    |> Path.join("*.ouro-wasm")
+    |> Path.wildcard()
+    |> Enum.map(&Path.basename/1)
+    |> Enum.reject(&(&1 == keep))
+    |> Enum.sort()
+    |> Enum.filter(&(File.rm(Path.join(out, &1)) == :ok))
   end
 
   @doc """

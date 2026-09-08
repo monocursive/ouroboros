@@ -25,6 +25,21 @@ defmodule Ouroboros.Self.Boot do
   take the supervision chain with it, and a capability that did not ship is a fact to
   report rather than a reason to refuse the boot.
 
+  **And only a policy ships.** This directory is a directory in a repository, so what it
+  holds is whatever `Ouroboros.Self.Export` wrote plus whatever anybody committed beside it.
+  A manifest whose `kind` is anything but `:policy` is skipped by name with
+  `{:not_a_policy, kind}`: a capability bundle left here would otherwise start on every
+  fresh install under the posture, because of where its file was rather than because anyone
+  promoted it.
+
+  ## After `Ouroboros.Wasm.Boot`, not beside it
+
+  Every decision below is a question about the rollout register — whether a name is already
+  `:live`, whether the sha `promotions.json` names is live *now* — and `Ouroboros.Wasm.Boot`
+  is what restarts this node's own capabilities into that register. So the two are one task
+  in that order (`run_after_wasm/0`) and not two tasks racing, which is what they were:
+  `Task.start_link` returns as soon as the process exists.
+
   ## Promotions are applied over an empty record and nowhere else
 
   `promotions.json` is a widening — it says which tools a policy component may resolve an
@@ -86,6 +101,30 @@ defmodule Ouroboros.Self.Boot do
   @spec default_root() :: Path.t()
   def default_root, do: Application.app_dir(:ouroboros, "priv/self")
 
+  @doc """
+  `Ouroboros.Wasm.Boot.run/0` and then `run/0`, in that order, in one task (S4, LOW-6).
+
+  What `Ouroboros.Application.boot_restart_children/0` starts when both halves are on, and
+  the reason it is one child rather than two: `Task.start_link` returns as soon as the
+  process exists, so two task children of the same supervisor run concurrently — and every
+  decision this module makes is a question about the rollout register `Ouroboros.Wasm.Boot`
+  is busy restarting into. Concurrently, "is this name already live?" has two answers
+  depending on which task got there first.
+
+  Named rather than a closure so the child spec says the order out loud, and split from
+  `run_after_wasm/2` so a test can prove it without booting either half.
+  """
+  @spec run_after_wasm() :: :ok
+  def run_after_wasm, do: run_after_wasm(&Ouroboros.Wasm.Boot.run/0, &run/0)
+
+  @doc false
+  @spec run_after_wasm((-> any()), (-> any())) :: :ok
+  def run_after_wasm(wasm, self) when is_function(wasm, 0) and is_function(self, 0) do
+    _ = wasm.()
+    _ = self.()
+    :ok
+  end
+
   @doc "Runs `ship/1` and logs what it did. The shape the supervision tree starts."
   @spec run() :: :ok
   def run do
@@ -141,12 +180,28 @@ defmodule Ouroboros.Self.Boot do
     with {:ok, bundle} <- read_bundle(path),
          {:ok, %{artifact: artifact, bytes: bytes, precompiled: precompiled}} <-
            Bundle.decode(bundle),
+         :ok <- a_policy(artifact),
          :ok <- not_live(artifact, opts) do
       rollout(path, artifact, bytes, precompiled, report, opts)
     else
       {:error, reason} -> skip(report, path, reason)
     end
   end
+
+  # S4 fix wave. `priv/self` is a directory in a repository and this globs it, so what lands
+  # here is whatever the export wrote plus whatever anybody committed beside it. Only one
+  # kind of thing belongs: the promoted **policy**. A capability bundle dropped in here would
+  # otherwise be deployed and started on every fresh install of this runtime under the
+  # posture — a component nobody promoted, running because of where its file was.
+  #
+  # Asked before `not_live/2` and before the rollout, so a bundle of the wrong kind is
+  # refused whatever else is true of it. It is a *claim* at this point — `Bundle.decode/1`
+  # parses and does not verify — and that is the safe direction for a claim: this only ever
+  # narrows what deploys, and the rollout still verifies the manifest against this node's own
+  # trust policy before it stages a byte. A capability bundle that lied about its kind to get
+  # past this line would be skipped by the same line for saying `:policy`.
+  defp a_policy(%Artifact{kind: :policy}), do: :ok
+  defp a_policy(%Artifact{kind: kind}), do: {:error, {:not_a_policy, kind}}
 
   # Bounded before it is read, and bounded by the same number a bundle could legally weigh.
   # A file larger than any bundle this build admits is not a bundle, and reading it into

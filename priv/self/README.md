@@ -19,6 +19,12 @@ and logs nothing.
 | `promotions.json` | The policy name, its component sha256, and the tools that component had **currently** earned the right to resolve, each with the replay numbers that earned it. |
 | `signers.txt` | `signer_id:base64_public_key` — the exact line `OUROBOROS_UPGRADE_TRUSTED_SIGNERS` takes, and the one `ouro wasm keygen` printed when the key was minted. |
 
+Exactly three, and exactly one bundle: an export replaces those files with one atomic rename
+each and **removes every other `*.ouro-wasm`** it finds here, naming them in its output. A
+policy renamed between two exports would otherwise leave both, and the boot task globs this
+directory — so the next installation would deploy a policy nobody promoted beside the one
+somebody did. This README is left alone; it belongs to the repository, not to an export.
+
 ## What committing these does, and what it does not
 
 It does **not** grant anything. A bundle here is a file in a repository, and the boot task
@@ -27,6 +33,11 @@ manifest against the receiving node's own trust policy before it writes a byte. 
 operator has not put the key from `signers.txt` into `OUROBOROS_UPGRADE_TRUSTED_SIGNERS`
 skips every bundle here by name, with the reason in its log, and boots with the rules it
 shipped with.
+
+Only a **policy** is deployed. A bundle here whose manifest says any other kind — a
+capability, say — is skipped with `{:not_a_policy, kind}` before anything else is asked about
+it: what runs on a fresh install should be what somebody promoted, not what somebody's file
+was sitting next to.
 
 `promotions.json` is applied only over an **empty** `Ouroboros.Control.PolicyPromotion`
 record, and only for a component sha that is live on the receiving node under the name the

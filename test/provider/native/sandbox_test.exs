@@ -96,6 +96,23 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
     end
   end
 
+  # The same, for a *file*: `canonicalize/1` insists on a directory, so a credential's path
+  # is resolved through its parent — which is also what `Sandbox.hidden_files/0` does, and
+  # for the same reason (the file may not exist yet).
+  # Exactly what `Ouroboros.Provider.Native.Tools.Bash.plan/2` does with a wrapped command,
+  # which is what the reviewers' exploits reproduced: the policy, the argv, `System.cmd`.
+  defp sandboxed(scope, policy, detection, command) do
+    {:ok, {executable, args}} = Sandbox.wrap({:shell, command}, scope, policy, detection)
+
+    {output, status} =
+      System.cmd(executable, args, env: Sandbox.env(policy), stderr_to_stdout: true)
+
+    {String.trim(output), status}
+  end
+
+  defp canonical_file(path),
+    do: path |> Path.dirname() |> canonical_root() |> Path.join(Path.basename(path))
+
   defp run(module, input, context, timeout \\ 30_000),
     do: Ouroboros.Provider.Native.Tools.execute(module, input, context, timeout)
 
@@ -1309,6 +1326,207 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
     end
   end
 
+  # S4 fix wave, HIGH-1 and HIGH-1b. The write fence above is not a read fence, and the two
+  # exploits that proved it were the same shape: a sandboxed `bash` read this node's signing
+  # seed (and derived the keypair with `:crypto`), and a sandboxed `bash` read this node's
+  # gateway token and drove `policy.demote`/`policy.clear` against its own runtime.
+  describe "the node's own credentials are hidden from a read" do
+    setup do
+      saved =
+        Map.new(
+          [:data_dir, :signer_key_path, :gateway, :web],
+          &{&1, Application.get_env(:ouroboros, &1)}
+        )
+
+      on_exit(fn -> Enum.each(saved, fn {key, value} -> restore_app_env(key, value) end) end)
+      :ok
+    end
+
+    test "hidden_files names the seed, the two tokens and the cookie secret", %{root: root} do
+      data_dir = Path.join(root, "data")
+      File.mkdir_p!(data_dir)
+      key = Path.join(root, "keys/signer.key")
+      File.mkdir_p!(Path.dirname(key))
+
+      Application.put_env(:ouroboros, :data_dir, data_dir)
+      Application.put_env(:ouroboros, :signer_key_path, key)
+      Application.put_env(:ouroboros, :gateway, token_file: Path.join(data_dir, "named.token"))
+
+      Application.put_env(:ouroboros, :web,
+        token_file: Path.join(data_dir, "named.token"),
+        secret_file: Path.join(data_dir, "named.secret")
+      )
+
+      hidden = Sandbox.hidden_files()
+
+      for path <- [
+            key,
+            Path.join(data_dir, "named.token"),
+            Path.join(data_dir, "named.secret"),
+            # The names `ouro` and the daemon agree on with nobody configuring them.
+            Path.join(data_dir, "gateway.token"),
+            Path.join(data_dir, "web.secret")
+          ] do
+        assert path in hidden or canonical_file(path) in hidden,
+               "#{path} is not fenced: #{inspect(hidden)}"
+      end
+    end
+
+    # The conventional names are re-derived in `Sandbox` rather than imported, for
+    # `protected_roots/0`'s reason. This is the check that the two agree.
+    test "the conventional names are the ones the gateway and the web surface use", %{
+      root: root
+    } do
+      data_dir = Path.join(root, "data")
+      File.mkdir_p!(data_dir)
+      Application.put_env(:ouroboros, :data_dir, data_dir)
+      Application.delete_env(:ouroboros, :gateway)
+      Application.delete_env(:ouroboros, :web)
+
+      hidden = Sandbox.hidden_files()
+
+      assert Ouroboros.Web.Config.default_token_file(data_dir) in hidden
+      assert Ouroboros.Web.Config.default_secret_file(data_dir) in hidden
+    end
+
+    # Seatbelt resolves the path the kernel opens, and on macOS `/var/folders/…` is
+    # `/private/var/folders/…` by then. A rule on the spelling alone renders perfectly and
+    # denies nothing — which is what the first cut of this fix did.
+    test "each path is listed as written and as the kernel resolves it", %{root: root} do
+      data_dir = Path.join(root, "data")
+      File.mkdir_p!(data_dir)
+      Application.put_env(:ouroboros, :data_dir, data_dir)
+
+      hidden = Sandbox.hidden_files()
+      token = Path.join(data_dir, "gateway.token")
+
+      assert token in hidden
+      assert canonical_file(token) in hidden
+    end
+
+    test "a surface configured with a literal token contributes no path", %{root: root} do
+      Application.put_env(:ouroboros, :data_dir, Path.join(root, "data"))
+      Application.put_env(:ouroboros, :gateway, token: "a-literal-token")
+      Application.delete_env(:ouroboros, :web)
+      Application.delete_env(:ouroboros, :signer_key_path)
+
+      refute "a-literal-token" in Sandbox.hidden_files()
+    end
+
+    test "every session policy carries them, in every mode", %{
+      scope: scope,
+      read_only: read_only,
+      root: root
+    } do
+      data_dir = Path.join(root, "data")
+      File.mkdir_p!(data_dir)
+      Application.put_env(:ouroboros, :data_dir, data_dir)
+      token = Path.join(data_dir, "gateway.token")
+
+      for {mode, one} <- [
+            {:read_only, read_only},
+            {:workspace_write, scope},
+            {:workspace_write_escalated, scope}
+          ] do
+        assert token in Sandbox.policy(one, mode).hidden_files,
+               "#{mode} does not hide the gateway token"
+      end
+    end
+
+    test "a build has none: a policy closed on reads has already hidden them" do
+      assert Sandbox.builder_policy(writable: ["/tmp"]).hidden_files == []
+    end
+
+    test "hides_files? is true only where the backend can deny one named path a read" do
+      assert Sandbox.hides_files?(:sandbox_exec)
+      assert Sandbox.hides_files?(:bwrap)
+      refute Sandbox.hides_files?(:ouro_sandbox)
+      refute Sandbox.hides_files?(:none)
+
+      assert Sandbox.hides_files?(%{backend: :sandbox_exec, read_fence: true})
+      refute Sandbox.hides_files?(%{backend: :ouro_sandbox, read_fence: true})
+      refute Sandbox.hides_files?(%{})
+    end
+
+    test "Seatbelt denies read and write, last of all the file rules" do
+      policy =
+        fixed_policy(:workspace_write)
+        |> Map.put(:write_exceptions, ["/ws/delivery"])
+        |> Map.put(:hidden_files, ["/srv/ouroboros/data/gateway.token"])
+
+      profile = SandboxExec.profile(policy)
+
+      assert profile =~ ~s{(deny file-read* (literal (param "OURO_HIDDEN_FILE_0")))}
+      assert profile =~ ~s{(deny file-write* (literal (param "OURO_HIDDEN_FILE_0")))}
+
+      assert "OURO_HIDDEN_FILE_0=/srv/ouroboros/data/gateway.token" in SandboxExec.parameters(
+               policy
+             )
+
+      # Last-match-wins: after the blanket `(allow file-read*)` this profile opens with, and
+      # after the delivery re-allow, which is the only rule that reopens a denied subtree.
+      read_allow = :binary.match(profile, "(allow file-read*)")
+
+      exception =
+        :binary.match(profile, ~s{(allow file-write* (subpath (param "OURO_EXCEPTION_0")))})
+
+      deny = :binary.match(profile, ~s{(deny file-read* (literal (param "OURO_HIDDEN_FILE_0")))})
+
+      assert elem(read_allow, 0) < elem(deny, 0)
+      assert elem(exception, 0) < elem(deny, 0)
+    end
+
+    # The loopback exception is what the S2b exploit reached the gateway over, and it stays:
+    # `mix` and `cargo` coordinate concurrent compilers over it. The credential is the fence.
+    test "and the loopback exception is untouched" do
+      profile =
+        fixed_policy(:workspace_write)
+        |> Map.put(:hidden_files, ["/srv/ouroboros/data/gateway.token"])
+        |> SandboxExec.profile()
+
+      assert profile =~ ~s{(allow network-outbound (remote ip "localhost:*"))}
+    end
+
+    test "bubblewrap masks the path with /dev/null", %{root: root, scope: scope} do
+      present = Path.join(root, "data/gateway.token")
+      File.mkdir_p!(Path.dirname(present))
+      File.write!(present, "a-token")
+      absent = Path.join(root, "data/web.secret")
+      nowhere = Path.join(root, "no-such-dir/signer.key")
+
+      policy =
+        Sandbox.policy(scope, :workspace_write)
+        |> Map.put(:hidden_files, [present, absent, nowhere])
+        |> Sandbox.with_scratch(Path.join(root, "scratch"))
+
+      argv = Bwrap.options(scope, policy)
+
+      # The source is `/dev/null` in both cases — unlike `protected_files`, which binds the
+      # file over itself and would leave the bytes readable.
+      assert ["--ro-bind", "/dev/null", present] |> subsequence_of?(argv)
+      assert ["--ro-bind", "/dev/null", absent] |> subsequence_of?(argv)
+      refute ["--ro-bind", present, present] |> subsequence_of?(argv)
+
+      # A path whose parent does not exist is skipped: bubblewrap cannot make the mount
+      # point and would fail the command outright, and there are no bytes there to hide.
+      refute ["--ro-bind", "/dev/null", nowhere] |> subsequence_of?(argv)
+    end
+
+    # The helper's wire format has a read *allow*-set and no per-path deny, so it sends
+    # nothing and says so through `hides_files?/1`.
+    test "the ouro-sandbox request carries no hidden_files field", %{scope: scope, root: root} do
+      policy =
+        Sandbox.policy(scope, :workspace_write)
+        |> Map.put(:hidden_files, [Path.join(root, "data/gateway.token")])
+        |> Sandbox.with_scratch(Path.join(root, "scratch"))
+
+      request = Helper.request(policy, scope)
+
+      refute Map.has_key?(request, "hidden_files")
+      refute request |> JSON.encode!() |> String.contains?("gateway.token")
+    end
+  end
+
   describe "bash on a node with no backend" do
     setup do
       previous_app = Application.get_env(:ouroboros, :allow_unsandboxed_bash)
@@ -1437,6 +1655,88 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
 
         assert result.is_error, "#{command} was allowed: #{result.output}"
         refute File.exists?(manifest), "#{command} created the hook manifest"
+      end
+    end
+
+    # S4/HIGH-1 and HIGH-1b, the two reviewers' exploits adopted as one regression.
+    #
+    # `rv-s4/exploit-1-key-readable.exs` planted an Ed25519 seed where docs/SELF.md tells the
+    # operator to put it, ran the exact pipeline `Tools.Bash.plan/2` runs — detect, decide,
+    # scratch, with_scratch, wrap, `System.cmd` — and `cat`ed the seed out through a
+    # `workspace_write` shell, then derived the keypair and signed arbitrary bytes with it.
+    # `rv-s2b/live_sandbox_to_gateway.sh` did the same to `gateway.token` and drove
+    # `policy.demote` and `policy.clear` against the node's own gateway with it.
+    #
+    # This is the kernel's answer to both. The seed is planted in both places the exploit
+    # used — under the data directory and in a directory of the daemon user's own — because
+    # the fence is on the configured path and not on the data directory.
+    test "no shell reads this node's signing seed or its gateway token", %{
+      root: root,
+      scope: scope
+    } do
+      saved =
+        Map.new([:data_dir, :signer_key_path], &{&1, Application.get_env(:ouroboros, &1)})
+
+      on_exit(fn -> Enum.each(saved, fn {key, value} -> restore_app_env(key, value) end) end)
+
+      data_dir = Path.join(root, "credentials")
+      elsewhere = Path.join(root, "home-keys")
+      File.mkdir_p!(data_dir)
+      File.mkdir_p!(elsewhere)
+
+      seed = :crypto.strong_rand_bytes(32)
+      encoded = Base.encode64(seed)
+      token = Path.join(data_dir, "gateway.token")
+      secret = Path.join(data_dir, "web.secret")
+      File.write!(token, "a-real-looking-operator-token")
+      File.write!(secret, "a-real-looking-cookie-secret")
+
+      for {label, key} <- [
+            {"under the data directory", Path.join(data_dir, "signer.key")},
+            {"anywhere the daemon user can read", Path.join(elsewhere, "signer.key")}
+          ] do
+        File.write!(key, encoded)
+        File.chmod!(key, 0o600)
+
+        Application.put_env(:ouroboros, :data_dir, data_dir)
+        Application.put_env(:ouroboros, :signer_key_path, key)
+
+        detection = Sandbox.detect()
+        assert Sandbox.hides_files?(detection), "this backend cannot hide a file"
+
+        {:sandboxed, _label, policy} = Sandbox.decide(scope, detection)
+        {:ok, scratch} = Sandbox.scratch()
+        policy = Sandbox.with_scratch(policy, scratch)
+
+        try do
+          for {what, path} <- [
+                {"the seed #{label}", key},
+                {"the gateway token", token},
+                {"the cookie secret", secret}
+              ] do
+            {output, status} = sandboxed(scope, policy, detection, "cat #{path}")
+
+            assert status != 0, "#{what} was readable: #{output}"
+            refute output =~ encoded, "#{what} leaked the seed"
+            refute output =~ "operator-token", "#{what} leaked the token"
+            refute output =~ "cookie-secret", "#{what} leaked the secret"
+            assert output =~ "Operation not permitted"
+          end
+
+          # A key a session may not read is a key it may not replace either.
+          {_output, status} = sandboxed(scope, policy, detection, "echo overwritten > #{key}")
+          assert status != 0
+          assert File.read!(key) == encoded
+
+          # The control: the same shell, the same policy, an ordinary file beside them. The
+          # fence is these paths, not the directory and not reads in general.
+          plain = Path.join(data_dir, "notes.txt")
+          File.write!(plain, "ordinary")
+          {output, 0} = sandboxed(scope, policy, detection, "cat #{plain}")
+          assert output =~ "ordinary"
+        after
+          Sandbox.release(scratch)
+        end
       end
     end
 

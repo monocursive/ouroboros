@@ -30,6 +30,13 @@ defmodule Ouroboros.Self.Fixture do
                __DIR__
              )
 
+  # S4 fix wave (MEDIUM-2). The other kind of thing a `priv/self` could hold: a real,
+  # really-signed **capability**, which the boot must skip because of what it is.
+  @capability Path.expand(
+                "../../tui/wasm/guest/examples/counter/target/wasm32-wasip2/release/counter.wasm",
+                __DIR__
+              )
+
   # `policy_acp_test.exs`' signed test story, verbatim: one case per direction of what the
   # component claims to do, run against the real component at deploy.
   @eval %{
@@ -57,8 +64,10 @@ defmodule Ouroboros.Self.Fixture do
     if LiveFixture.required?() do
       LiveFixture.ensure!()
 
-      unless File.regular?(@component) do
-        raise "OUROBOROS_REQUIRE_WASM is set and there is no #{@component}; `make wasm-examples`"
+      for path <- [@component, @capability] do
+        unless File.regular?(path) do
+          raise "OUROBOROS_REQUIRE_WASM is set and there is no #{path}; `make wasm-examples`"
+        end
       end
     end
 
@@ -122,6 +131,105 @@ defmodule Ouroboros.Self.Fixture do
       sha: signed.component_sha256,
       name: signed.name,
       signer: signer,
+      service: service,
+      registry: registry,
+      store_root: store_root,
+      pool: pool,
+      trust_policy: trust_policy
+    }
+  end
+
+  @doc "The `counter` example, and the tag a suite needing it carries."
+  def capability_component, do: @capability
+
+  @doc "The `@tag` for a test that needs the built `counter` capability beside the helper."
+  def capability_tag, do: LiveFixture.tag(@capability)
+
+  @doc """
+  A real signed bundle whose `kind` is `:capability`, for a test about what does *not* ship.
+
+  Signed by `live.service` under `live.signer`, so it is a bundle the receiving node's trust
+  policy accepts — which is the point: what stops it is its kind and not its signature.
+  Never deployed anywhere; the caller drops the bytes into a `priv/self` and boots it.
+  """
+  def capability_bundle!(live, name \\ "counter") do
+    bytes = File.read!(@capability)
+    {:ok, epoch} = Epoch.next([node()])
+
+    {:ok, artifact} =
+      Artifact.build(bytes,
+        name: name,
+        epoch: epoch,
+        kind: :capability,
+        imports: ["log"],
+        author: "self-export-test",
+        # A capability's eval spec is a probe list over the component's own state, and one is
+        # required to sign at all under `signing_require_wasm_eval` — which this posture
+        # asserts is on. Never replayed here: the point of this bundle is that it is refused
+        # before anything about it is exercised.
+        eval: %{probes: [%{input: %{"n" => 1}, expect: :any_reply}], budget_ms: 5_000}
+      )
+
+    {:ok, value} =
+      Service.sign_artifact(
+        artifact,
+        live.signer,
+        %{
+          requester: node(),
+          payload: Artifact.signing_payload(artifact, live.signer),
+          component_bytes: bytes
+        },
+        live.service
+      )
+
+    {:ok, signed} = Artifact.with_signature(artifact, %{signer: live.signer, value: value})
+    {:ok, bundle} = Ouroboros.Wasm.Bundle.encode(signed, bytes, nil)
+    %{artifact: signed, bundle: bundle}
+  end
+
+  @doc """
+  The same, deployed live with **no signature at all** (S4 fix wave, LOW-5).
+
+  A node outside production may set `allow_unsigned: true` — `config/config.exs` does — and
+  a rollout there accepts a manifest nobody signed. `Ouroboros.Self.Export` must still refuse
+  to export it, because `signers.txt` is the line the receiving operator pastes and there is
+  no key to write on it. This is the world where that refusal is the only thing standing.
+  """
+  def live_unsigned!(tmp) do
+    trust_policy = [allow_unsigned: true, trusted_signers: %{}]
+    trust!(trust_policy)
+
+    registry = registry!()
+    store_root = Path.join(tmp, "store-#{System.unique_integer([:positive])}")
+    pool = pool!(tmp)
+
+    bytes = File.read!(@component)
+    {:ok, epoch} = Epoch.next([node()])
+
+    {:ok, artifact} =
+      Artifact.build(bytes,
+        name: "no-network-shell",
+        epoch: epoch,
+        kind: :policy,
+        imports: ["log"],
+        author: "self-export-test",
+        eval: @eval
+      )
+
+    {:ok, outcome} =
+      Rollout.deploy(artifact, bytes, [node()],
+        registry: registry,
+        store_root: store_root,
+        trust_policy: trust_policy,
+        pool: pool
+      )
+
+    :live = outcome.state
+
+    %{
+      artifact: artifact,
+      sha: artifact.component_sha256,
+      name: artifact.name,
       registry: registry,
       store_root: store_root,
       pool: pool,

@@ -196,6 +196,7 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
       protected_segment_binds(policy) ++
       protected_file_binds(policy) ++
       exception_binds(policy) ++
+      hidden_file_binds(policy) ++
       ["--tmpfs", policy.scratch] ++
       network(policy, unshare_net) ++
       chdir(scope)
@@ -272,6 +273,30 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
       source = if File.exists?(destination), do: destination, else: "/dev/null"
       ["--ro-bind", source, destination]
     end)
+  end
+
+  # S4. This node's own credentials — the signing seed, the gateway and web tokens, the web
+  # cookie secret — hidden from a **read**, which is what `protected_file_binds/1` above
+  # cannot do: it binds the file over itself, so the bytes are still there to `cat`.
+  #
+  # `/dev/null` over the path is the mask. bubblewrap resolves the source in the host root it
+  # keeps open for exactly this, so `--dev /dev` earlier in the argv does not take it away,
+  # and it creates the mount point when the destination is absent — which is the case worth
+  # having: a token file written by a daemon *after* this namespace was built is written to
+  # an inode outside it and stays invisible here. The shell sees a zero-length character
+  # device, not an `EPERM`; that is a weaker signal than Seatbelt's and the same containment.
+  #
+  # Emitted last, after the delivery re-allows, for the reason the Seatbelt profile puts its
+  # deny last: later binds overlay earlier ones and this one must be the one on top.
+  #
+  # Skipped where neither the file nor its parent directory exists: bubblewrap cannot create
+  # a mount point under a directory that is not there and would fail to start the command at
+  # all, and a path with no parent has no bytes to hide.
+  defp hidden_file_binds(policy) do
+    policy
+    |> Map.get(:hidden_files, [])
+    |> Enum.filter(&(File.exists?(&1) or File.dir?(Path.dirname(&1))))
+    |> Enum.flat_map(&["--ro-bind", "/dev/null", &1])
   end
 
   defp protected_segment_binds(policy) do

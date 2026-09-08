@@ -56,9 +56,29 @@ in `children(:signer)`, so a single machine could forge and never sign. Under th
 it directly after the durable authority above it — the ledger, grants, the promotion record and
 permissions — and before anything that can forge. This is the dev loop
 `Ouroboros.Upgrade.Forge.Signer`'s moduledoc describes and it is **not custody**: the key is a
-file beside the application, readable by every process this user runs, and anyone holding it
-signs as this identity. A fleet names `OUROBOROS_SIGNING_NODE` instead, and then this node
-starts no service — the peer signs.
+file beside the application, and what keeps the model's own shell out of it is one thing — the
+OS sandbox's read fence.
+
+**Say that plainly, because it is the whole of the one-machine posture's security.** The seed
+sits on the same disk as the session that may forge. The permission engine cannot help: a shell
+declares no paths, so `cat $OUROBOROS_SIGNER_KEY_PATH` is a read nothing upstream sees. The
+review of this slice did exactly that, derived the keypair with four lines of `:crypto`, and
+signed a manifest the node would then have loaded — around `signing_require_wasm_eval`, the rate
+limit and the signing journal, because all three are inside
+`Ouroboros.Upgrade.Signing.Service` and none of them is inside the key. So the seed is in the
+sandbox's `hidden_files` (S-D49) and denied a read for every session on the node, and **the
+eval-spec requirement is only as strong as that fence**. The same list carries this node's
+`gateway.token`: a session that can read it speaks to its own runtime's gateway as the operator,
+and the sandbox deliberately keeps loopback open for build tools.
+
+Two of the three backends can render that fence. `ouro-sandbox` cannot, says so through
+`Sandbox.hides_files?/1`, and on such a node the application starts **no** local signing service
+at all — a forge there ends at `:no_signing_service` — unless `OUROBOROS_SELF_UNFENCED_KEY=1`
+says the operator accepts that any session can read the seed and sign in its name.
+
+**On a fleet, name a `:signer` node.** `OUROBOROS_SIGNING_NODE` puts the key on another host,
+this node starts no service, and none of the above applies: the seed is not on the machine the
+model has a shell on, which is the posture to prefer wherever there is more than one machine.
 
 **The operator's recipe**, which is `ouro wasm keygen`'s own output plus one line:
 
@@ -450,18 +470,37 @@ learned), on a policy the register does not have `:live` at that sha (the export
 running, not what is remembered), on a manifest whose declared precompiled artifact this node no
 longer holds, and on a signer whose public key this node's trust policy does not carry — because
 then `signers.txt` could not be written and the bundle would arrive somewhere with no way to
-accept it.
+accept it. That last check runs before the bundle is assembled: it is the cheapest of the four
+and the only one about trust.
 
-**The boot.** `Ouroboros.Self.Boot` is a `:transient` `Task` beside `Ouroboros.Wasm.Boot` in the
-lane-W restart chain, started only when `self_ship` is true and this node has a durable data
-directory. For each `priv/self/*.ouro-wasm` whose name is not already `:live` on this node's
-register, it deploys through `Ouroboros.Wasm.Rollout.deploy/4` — the ordinary rollout, which
+The three files are written into a staging directory beside the destination and moved in one
+`File.rename/2` each, and **every other `*.ouro-wasm` in the destination is removed** and named
+in the report — a policy renamed between two exports otherwise left both files there, and the
+boot below globs the directory (S-D50). `README.md` is left alone.
+
+`--out` is resolved (`..`, a relative spelling, and the symlinks on the way) and refused unless
+it lands inside the directory `mix` is running in. And the task refuses to run at all while a
+live pid holds the data directory it would open, because it **starts the application** — the
+promotion record is a `GenServer`'s durable state and the bundle is assembled out of the store
+beside it, so there is no reading them without a VM — and two runtimes on one set of journals is
+what `Ouroboros.RuntimeOwner` exists to refuse. Stop the daemon first; `make self-export` says
+so. The VM it does start has `OUROBOROS_GATEWAY=0` and `OUROBOROS_WEB=0`.
+
+**The boot.** `Ouroboros.Self.Boot` is the second half of one `:transient` `Task` whose first
+half is `Ouroboros.Wasm.Boot` — one child of the lane-W restart chain and not two, because two
+`Task` children of one supervisor start concurrently and every decision below is a question
+about the register `Wasm.Boot` is busy restarting into (S-D51). Started only when `self_ship` is
+true and this node has a durable data directory. For each `priv/self/*.ouro-wasm` whose manifest
+says `kind: :policy` and whose name is not already `:live` on this node's register, it deploys
+through `Ouroboros.Wasm.Rollout.deploy/4` — the ordinary rollout, which
 verifies the manifest against **this node's own** trust policy before its checkpoint and again
 on every target before it stages a byte. A fresh install therefore runs a shipped policy only
 because its operator pasted `signers.txt` into `OUROBOROS_UPGRADE_TRUSTED_SIGNERS`; until they
 do, every bundle is skipped by name with `{:untrusted_signer, id}` in the log and the node boots
-with the rules it shipped with. Nothing here raises — a boot task that raised would take the
-supervision chain with it.
+with the rules it shipped with. A bundle of any other kind is skipped with `{:not_a_policy,
+kind}` before any of that: a capability committed beside the policy would otherwise start on
+every fresh install because of where its file was. Nothing here raises — a boot task that raised
+would take the supervision chain with it.
 
 Then `promotions.json`, and only under two conditions: this node's promotion record is
 **empty**, and the sha the file names is `:live` here *now*, under the name the file gives.
@@ -491,6 +530,35 @@ checkout — is an empty report and no log line.
   to the key the manifest was verified against; a demoted tool is not in the record; a re-export
   is byte-identical apart from `exported_at`; an empty record and a policy that is not live are
   refusals that write nothing.
+- `boot_test.exs`, after the review — a really-signed **capability** bundle dropped beside the
+  policy is skipped `{:not_a_policy, :capability}` and never reaches the register; a bundle
+  above the size ceiling is skipped by its `stat` without being read; a `*.ouro-wasm` that is a
+  directory, and an empty one, are skipped by type; a `promotions.json` outside the size bound
+  or of the wrong type is not parsed. And the tree starts **one** task, whose function is
+  `Self.Boot.run_after_wasm/0`, with the lane-W half proved to run first.
+- `boot_test.exs`, the posture's key — on a node whose sandbox reports `hides_files?: false`
+  (`native_sandbox: :none` is the seam) `self_signing_children/0` returns `[]` and logs the
+  sentence naming the consequence and both ways out; with `OUROBOROS_SELF_UNFENCED_KEY=1` it
+  returns the service *and* logs what was accepted; a `signing_node` posture is unaffected.
+- `sandbox_test.exs` — `hidden_files/0` names the seed, both tokens and the cookie secret, in
+  the spelling they are configured with and in the one the kernel resolves, and agrees with
+  `Ouroboros.Web.Config`'s own defaults; every session policy carries them in all three modes
+  and a builder policy does not; the Seatbelt profile denies read *and* write last of all the
+  file rules and leaves the loopback exception alone; bubblewrap masks the path with
+  `/dev/null` and skips one whose parent is not there; the `ouro-sandbox` request carries no
+  such field. **Live on this machine** (Seatbelt): the reviewers' two exploits, adopted — a
+  sandboxed `bash` `cat` of the seed (under the data directory *and* in a directory of the
+  daemon user's own), of `gateway.token` and of `web.secret` is `Operation not permitted` and
+  leaks no bytes, a write to the seed fails and leaves it unchanged, and an ordinary file
+  beside them still reads.
+- `export_test.exs`, after the review — a re-export after a rename leaves exactly one bundle,
+  names the one it removed, and leaves `README.md` and no staging directory behind; `--out`
+  is refused for the reviewer's `../../../` traversal, for a sibling whose name merely starts
+  with the root's, and for a symlink pointing out of the repository, while a symlink pointing
+  in is accepted; the mix task refuses while a live pid holds the data directory, by
+  `gateway.json` or by `runtime.owner`, and lets a stale marker through to the `--out` fence;
+  a signer this node's trust policy does not carry, and a manifest with no signature at all,
+  are refusals that write nothing.
 - `posture_test.exs` — every refusal in §2, one test each, and the two settings the posture
   will not run under.
 - `runtime_config_test.exs` — `config/runtime.exs` itself, through `Config.Reader.read!/2`: the
@@ -516,8 +584,14 @@ model wrote. The three live runs above were three virtual machines with three da
 on **one host**, not three hosts, and none of them was started by `ouro --dev daemon` — the
 posture was given to `mix run` with the same environment the launcher exports, including
 `OUROBOROS_PROCESS_ID_HELPER`. `make self-export` against a running daemon's data directory has
-not been run, and no export has been committed by the outer loop's pull request. `mix dialyzer`
+not been run — its refusal is proved by a unit test that plants a live pid in the marker, not by
+a daemon — and no export has been committed by the outer loop's pull request. `mix dialyzer`
 and the full suite are the integrator's gates and not this section's claim.
+
+The read fence (S-D49) is proved live on **Seatbelt only**. The bubblewrap form — `/dev/null`
+bound read-only over the path — is asserted at the argv level and has not been run on a Linux
+host from this worktree; CI's ubuntu-24.04 job is where that claim gets made. `ouro-sandbox`
+claims nothing: it reports `hides_files?: false` and the posture refuses to hold a key there.
 
 ## 4. Decisions
 
@@ -968,6 +1042,68 @@ node an operator promoted a tool on: without a line in `config/runtime.exs`' pro
 every promotion was forgotten at restart. It is now a `DurableFile` under the data directory
 beside `:grants_storage`, and held to the same rule — an acknowledged promotion must survive the
 crash that follows it, and so must the demotion that withdrew it.
+
+**S-D49. The sandbox hides this node's own credentials from a read, and a node that cannot do
+that does not hold a signing key.** The S1 wave gave the sandbox `protected_files`, which fences
+*writes*. The review of this slice proved what that leaves open: the default `:workspace_write`
+policy allows `file-read*` everywhere, so the model's own `bash` read the seed at
+`OUROBOROS_SIGNER_KEY_PATH`, derived the Ed25519 keypair with four lines of `:crypto`, and
+signed a manifest — around `signing_require_wasm_eval`, the rate limit and the signing journal,
+all of which live inside `Ouroboros.Upgrade.Signing.Service` and none of which live inside the
+key. The S2b review proved the same shell reads `gateway.token` and drives `policy.demote`,
+`policy.clear` and every other `:operate` verb against the node's own gateway.
+
+So `Ouroboros.Provider.Native.Sandbox`'s policy gains a fourth fence, `hidden_files`: concrete
+paths denied for **read** as well as for write, on every session on the node, in every mode but
+`:unrestricted`. Four things — the signing seed (`:signer_key_path`), the gateway token, the web
+token, and `web.secret` — each listed under the name it is configured with and under the name
+the kernel resolves. Seatbelt writes `(deny file-read* (literal (param …)))` last of all the
+file rules, after the delivery re-allows, because the shell profile opens with a blanket
+`(allow file-read*)` and SBPL is last-match-wins. bubblewrap binds `/dev/null` read-only over
+the path: the shell sees an empty device where the seed was.
+
+**The loopback exception stands.** `mix` and `cargo` coordinate concurrent compilers over
+`localhost` and a build that cannot open a socket fails `:eperm` without having reached another
+machine, so what is fenced is the credential and not the socket. A session may still connect to
+this node's gateway; it can no longer authenticate as this node's operator.
+
+`ouro-sandbox` cannot express it — Landlock attaches rights to inodes and the helper's wire
+format carries a read *allow*-set, so "everything but this one file" would be an enumeration of
+the filesystem — and it says so: `Sandbox.hides_files?/1` is `false`, `detect/0`'s notes carry
+the sentence, and that is what `capabilities.preview` shows. On such a node
+`Ouroboros.Application.self_signing_children/0` starts **no** local signing service: a key this
+node cannot fence is a key it declines to hold, and a forge there ends at
+`:no_signing_service`. `OUROBOROS_SELF_UNFENCED_KEY=1` is the operator accepting the
+consequence, logged in the sentence that names it. A fleet posture is unaffected —
+`OUROBOROS_SIGNING_NODE` puts the key on another host.
+
+**S-D50. An export replaces `priv/self`'s files and removes every bundle it did not write.**
+`Ouroboros.Self.Boot` globs `priv/self/*.ouro-wasm`, so a policy renamed between two exports
+left both files there and the next installation deployed one nobody promoted. The export now
+writes into a staging directory beside the destination and moves each file in with one
+`File.rename/2` — atomic, so a boot reading the directory mid-export reads three whole files or
+the three that were there before — and then removes every other `*.ouro-wasm`, naming them in
+the report's `removed`. The directory is not replaced wholesale: `README.md` is committed beside
+those three files and is the repository's, not an export's.
+
+And `--out` is confined. It is resolved — `..`, a relative spelling, and every symlink on the
+way, including a symlinked `priv/self` — and refused unless it lands inside the directory `mix`
+is running in. `mix ouroboros.self.export` also refuses to run at all while a live pid holds the
+data directory it would open (`gateway.json` or `runtime.owner`), because the task **starts the
+application** — it must: the promotion record is a `GenServer`'s durable state and the bundle is
+assembled out of the store beside it — and two runtimes on one set of journals is what
+`Ouroboros.RuntimeOwner` exists to refuse. That VM is started with `OUROBOROS_GATEWAY=0` and
+`OUROBOROS_WEB=0`: a one-shot read of durable state has no business binding a port.
+
+**S-D51. Only a policy ships, and the lane-W boot goes first.** `Ouroboros.Self.Boot` deploys
+only a bundle whose manifest says `kind: :policy`; anything else is skipped with
+`{:not_a_policy, kind}`. `priv/self` is a directory in a repository, and a capability bundle
+committed beside the policy would otherwise start on every fresh install under the posture
+because of where its file was rather than because anyone promoted it. And `Wasm.Boot.run/0` and
+`Self.Boot.run/0` are now **one** `:transient` task in that order rather than two children of
+one supervisor: `Task.start_link` returns as soon as the process exists, and every decision
+`Self.Boot` makes — is this name already live, is this sha live now — is a question about the
+register `Wasm.Boot` is busy restarting into.
 
 ## 5. Open
 

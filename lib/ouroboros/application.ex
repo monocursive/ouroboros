@@ -254,7 +254,7 @@ defmodule Ouroboros.Application do
               subtree(
                 Ouroboros.Wasm.RuntimeSupervisor,
                 [Ouroboros.Wasm.Supervisor] ++
-                  wasm_restart_children() ++ self_restart_children(),
+                  boot_restart_children(),
                 :rest_for_one
               ),
               Ouroboros.Provider.Native.Desktop.Supervisor,
@@ -352,6 +352,18 @@ defmodule Ouroboros.Application do
   #
   # Public (undocumented) for `wasm_restart_children/0`'s reason: `test/self/boot_test.exs`
   # reads the decision off the spec this tree actually builds rather than restating it.
+  # S4 fix wave. And it starts nothing at all on a node whose sandbox cannot **hide** that
+  # file from a session's own shell. The review of this slice proved the whole of it: the
+  # default `:workspace_write` policy fences writes and not reads, so the model's `bash` read
+  # the seed, derived the keypair with `:crypto`, and signed a manifest — around the eval
+  # spec, the rate limit and the journal that are the only things this service adds. The
+  # fence is `Ouroboros.Provider.Native.Sandbox`'s `hidden_files`, two of the three backends
+  # can render it, and `hides_files?/1` is how the third says it cannot. A key this node
+  # cannot fence is a key it declines to hold, and `OUROBOROS_SELF_UNFENCED_KEY=1` is the
+  # operator saying they accept the consequence in the sentence below.
+  #
+  # `Sandbox.detect/0` here rather than a fresh probe: it is cached in `:persistent_term`, so
+  # this is the same answer every `bash` call in the VM will get, decided once at boot.
   @doc false
   @spec self_signing_children() :: [Supervisor.child_spec() | {module(), keyword()}]
   def self_signing_children do
@@ -360,9 +372,43 @@ defmodule Ouroboros.Application do
     if Application.get_env(:ouroboros, :self_posture, false) == true and
          is_nil(Application.get_env(:ouroboros, :signing_node)) and
          is_binary(key_path) and key_path != "" do
-      [{Ouroboros.Upgrade.Signing.Service, [key_path: key_path]}]
+      signing_service_if_fenced(key_path)
     else
       []
+    end
+  end
+
+  defp signing_service_if_fenced(key_path) do
+    detection = Ouroboros.Provider.Native.Sandbox.detect()
+
+    cond do
+      Ouroboros.Provider.Native.Sandbox.hides_files?(detection) ->
+        [{Ouroboros.Upgrade.Signing.Service, [key_path: key_path]}]
+
+      System.get_env(Ouroboros.Self.Posture.unfenced_key_env()) == "1" ->
+        Logger.warning(
+          "#{Ouroboros.Self.Posture.unfenced_key_env()}=1: starting the one-machine signing " <>
+            "service with #{key_path} on a #{Ouroboros.Provider.Native.Sandbox.label(detection)} " <>
+            "sandbox, which cannot hide one named file from a read. Any session on this node " <>
+            "can read the signing seed and sign in this key's name — around the signed " <>
+            "evaluation spec, the rate limit and the signing journal (docs/SELF.md S-D49)."
+        )
+
+        [{Ouroboros.Upgrade.Signing.Service, [key_path: key_path]}]
+
+      true ->
+        Logger.error(
+          "OUROBOROS_POSTURE=self names a signing key at #{key_path}, and this node's " <>
+            "#{Ouroboros.Provider.Native.Sandbox.label(detection)} sandbox cannot hide a " <>
+            "named file from a read: any session on this node can read the signing seed and " <>
+            "sign in this key's name. No local signing service was started, so a forge here " <>
+            "ends at :no_signing_service. Name a `:signer` peer with OUROBOROS_SIGNING_NODE " <>
+            "so the key lives on another host, or set " <>
+            "#{Ouroboros.Self.Posture.unfenced_key_env()}=1 to accept that consequence " <>
+            "(docs/SELF.md §2, S-D49)."
+        )
+
+        []
     end
   end
 
@@ -393,6 +439,36 @@ defmodule Ouroboros.Application do
       ]
     else
       []
+    end
+  end
+
+  # S4 fix wave (LOW-6). What the tree actually starts, and it is **one** task where both
+  # halves are on, not two.
+  #
+  # Two `Task` children under the same supervisor start concurrently: `Task.start_link`
+  # returns as soon as the process exists, so the supervisor's next child starts while the
+  # first task is still running. That is fine for two tasks that share nothing, and these
+  # two do not: `Ouroboros.Wasm.Boot` restarts into the rollout register what *this* node was
+  # running, and every decision `Ouroboros.Self.Boot` makes — whether a shipped bundle's name
+  # is already `:live`, whether the sha `promotions.json` names is live here *now* — is a
+  # question about that same register. Run concurrently, the answer depends on which task got
+  # there first: a fresh install could deploy a shipped bundle over a name `Wasm.Boot` was a
+  # millisecond from restarting, or apply a promotion for a component that was live and had
+  # not been re-registered yet.
+  #
+  # So they are chained, in the order the dependency runs: `Wasm.Boot.run/0` and then
+  # `Self.Boot.run/0`, in one `:transient` child under `Ouroboros.Wasm.Boot`'s id.
+  # `Ouroboros.Self.Boot.run_after_wasm/0` is that pair, named so the spec says the order
+  # rather than closing over it.
+  @doc false
+  @spec boot_restart_children() :: [Supervisor.child_spec()]
+  def boot_restart_children do
+    case {wasm_restart_children(), self_restart_children()} do
+      {[wasm], [_self]} ->
+        [%{wasm | start: {Task, :start_link, [&Ouroboros.Self.Boot.run_after_wasm/0]}}]
+
+      {wasm, self} ->
+        wasm ++ self
     end
   end
 

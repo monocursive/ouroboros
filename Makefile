@@ -306,7 +306,7 @@ bench-local:
 # else is holding, with OUROBOROS_DATA_DIR.
 self-export:
 	@echo "==> self-export: the promoted policy and its record into priv/self/"
-	@echo "    (stop the daemon first: this opens the same data directory)"
+	@echo "    (stop the daemon first: this opens the same data directory, and refuses while one holds it)"
 	$(MIX) ouroboros.self.export
 # The $0 half of the self corpus: the oracle, the spend guard, and the two negative
 # controls that make the grader falsifiable. A *paid* run is `bench/self/run.sh --spend

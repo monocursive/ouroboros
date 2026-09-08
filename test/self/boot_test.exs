@@ -222,6 +222,123 @@ defmodule Ouroboros.Self.BootTest do
     end
   end
 
+  # S4 fix wave, MEDIUM-2. `priv/self` is a directory in a repository and `ship/1` globs it,
+  # so what lands there is whatever the export wrote plus whatever anybody committed beside
+  # it. Only the promoted policy belongs.
+  describe "only a policy ships" do
+    @tag Fixture.capability_tag()
+    test "a really-signed capability bundle beside the policy is skipped by kind", context do
+      %{export: export, live: live} = exported!(context)
+      install = install!(context)
+
+      # Signed by the same key that signed the policy, so its trust is not what stops it.
+      capability = Fixture.capability_bundle!(live)
+      File.write!(Path.join(export.out, "counter.ouro-wasm"), capability.bundle)
+      assert capability.artifact.kind == :capability
+
+      report = Boot.ship(ship_opts(export, install))
+
+      assert [%{name: "no-network-shell", kind: :policy}] = report.deployed
+
+      assert [%{bundle: "counter.ouro-wasm", reason: {:not_a_policy, :capability}}] =
+               report.skipped
+
+      # And it is not running: nothing about where a file sits deploys a component.
+      assert Registry.live(install.registry) |> Enum.map(& &1.module) == [
+               "wasm/no-network-shell"
+             ]
+    end
+
+    @tag Fixture.capability_tag()
+    test "and a capability alone deploys nothing at all", context do
+      live = Fixture.live_policy!(context.tmp)
+      root = Path.join(context.tmp, "priv-self-capability")
+      File.mkdir_p!(root)
+      File.write!(Path.join(root, "counter.ouro-wasm"), Fixture.capability_bundle!(live).bundle)
+
+      install = install!(context)
+
+      report =
+        Boot.ship(
+          root: root,
+          registry: install.registry,
+          store_root: install.store_root,
+          pool: install.pool,
+          promotion: install.promotion
+        )
+
+      assert report.deployed == []
+      assert [%{reason: {:not_a_policy, :capability}}] = report.skipped
+      assert Registry.live(install.registry) == []
+    end
+  end
+
+  # S4 fix wave, LOW-5: the three bounds the reviewer's mutations survived.
+  describe "what ship/1 refuses to read" do
+    test "a bundle larger than any legal one is not read into memory", context do
+      root = Path.join(context.tmp, "priv-self-huge")
+      File.mkdir_p!(root)
+      path = Path.join(root, "huge.ouro-wasm")
+
+      # Sparse: the ceiling is 80MB and `read_bundle/1` stats before it reads, which is the
+      # whole point of the check. Writing 80MB to prove it would be proving the disk.
+      {:ok, io} = File.open(path, [:write, :binary])
+      {:ok, _position} = :file.position(io, Ouroboros.Wasm.Bundle.max_bytes() + 1)
+      :ok = IO.binwrite(io, "x")
+      :ok = File.close(io)
+      assert File.stat!(path).size > Ouroboros.Wasm.Bundle.max_bytes()
+
+      report = Boot.ship(root: root, registry: Fixture.registry!())
+
+      assert [%{bundle: "huge.ouro-wasm", reason: {:bundle_too_large, size}}] = report.skipped
+      assert size > Ouroboros.Wasm.Bundle.max_bytes()
+      assert report.deployed == []
+    end
+
+    test "a bundle that is a directory, or empty, is skipped rather than read", context do
+      root = Path.join(context.tmp, "priv-self-odd")
+      File.mkdir_p!(Path.join(root, "a-directory.ouro-wasm"))
+      File.write!(Path.join(root, "empty.ouro-wasm"), "")
+
+      report = Boot.ship(root: root, registry: Fixture.registry!())
+
+      assert [
+               %{bundle: "a-directory.ouro-wasm", reason: {:not_a_regular_file, :directory}},
+               # A zero-byte file fails the same guard's size half: nothing to decode, and
+               # not a byte of it is read to find that out.
+               %{bundle: "empty.ouro-wasm", reason: {:not_a_regular_file, :regular}}
+             ] = report.skipped
+
+      assert report.deployed == []
+    end
+
+    test "a promotions.json outside the size bound is not parsed", context do
+      for {label, contents} <- [
+            {"too large", String.duplicate("x", 256 * 1024 + 1)},
+            {"empty", ""}
+          ] do
+        root = Path.join(context.tmp, "priv-self-record-#{label |> String.replace(" ", "-")}")
+        File.mkdir_p!(root)
+        File.write!(Path.join(root, "promotions.json"), contents)
+
+        report = Boot.ship(root: root, registry: Fixture.registry!())
+
+        assert {:skipped, {:promotions_unusable, {:promotions_size, _size}}} = report.promotions
+        assert report.promoted == []
+      end
+    end
+
+    test "a promotions.json that is a directory is skipped by its type", context do
+      root = Path.join(context.tmp, "priv-self-record-dir")
+      File.mkdir_p!(Path.join(root, "promotions.json"))
+
+      report = Boot.ship(root: root, registry: Fixture.registry!())
+
+      assert report.promotions == {:skipped, {:not_a_regular_file, :directory}}
+      assert report.promoted == []
+    end
+  end
+
   describe "the switch and the supervision spec" do
     test "enabled? needs both self_ship and a durable data directory" do
       saved_ship = Application.get_env(:ouroboros, :self_ship)
@@ -273,6 +390,49 @@ defmodule Ouroboros.Self.BootTest do
       assert {Task, :start_link, [fun]} = spec.start
       assert is_function(fun, 0)
     end
+
+    # S4 fix wave, LOW-6. Two `Task` children of one supervisor start concurrently —
+    # `Task.start_link` returns as soon as the process exists — and every decision
+    # `Self.Boot` makes is a question about the register `Wasm.Boot` is busy restarting into.
+    test "the tree starts ONE task where both halves are on, and wasm goes first" do
+      saved_ship = Application.get_env(:ouroboros, :self_ship)
+      saved_dir = Application.get_env(:ouroboros, :data_dir)
+
+      on_exit(fn ->
+        restore(:self_ship, saved_ship)
+        restore(:data_dir, saved_dir)
+      end)
+
+      Application.put_env(:ouroboros, :self_ship, true)
+      Application.put_env(:ouroboros, :data_dir, "/tmp/does-not-need-to-exist")
+
+      assert Ouroboros.Wasm.Boot.enabled?()
+      assert Boot.enabled?()
+
+      assert [chained] = Ouroboros.Application.boot_restart_children()
+      assert chained.restart == :transient
+      assert chained.start == {Task, :start_link, [&Ouroboros.Self.Boot.run_after_wasm/0]}
+
+      # And with only the lane-W half on, the tree is exactly what it was.
+      Application.delete_env(:ouroboros, :self_ship)
+      refute Boot.enabled?()
+
+      assert Ouroboros.Application.boot_restart_children() ==
+               Ouroboros.Application.wasm_restart_children()
+    end
+
+    test "run_after_wasm runs the lane-W boot before this one" do
+      test_pid = self()
+
+      assert Boot.run_after_wasm(
+               fn -> send(test_pid, {:ran, :wasm}) end,
+               fn -> send(test_pid, {:ran, :self}) end
+             ) == :ok
+
+      # The order, not merely that both ran: one sender to one receiver preserves it, and a
+      # `receive` takes matching messages in mailbox order.
+      assert drain() == [:wasm, :self]
+    end
   end
 
   describe "the one-machine signing posture" do
@@ -319,6 +479,48 @@ defmodule Ouroboros.Self.BootTest do
       Application.put_env(:ouroboros, :self_posture, true)
       Application.delete_env(:ouroboros, :signing_node)
       Application.delete_env(:ouroboros, :signer_key_path)
+
+      assert Ouroboros.Application.self_signing_children() == []
+    end
+
+    # S4 fix wave, HIGH-1. Holding a signing seed on a node whose sandbox cannot hide it
+    # from a session's own shell is holding it in public: the review read the seed out
+    # through `bash`, derived the keypair with `:crypto`, and signed arbitrary bytes.
+    # `native_sandbox: :none` is the seam — it is what `detect/0` reads before its cache, and
+    # a node with no backend is the honest worst case of one that cannot hide a file.
+    test "a node whose sandbox cannot hide the key starts no service, and says why", context do
+      key = unfenceable_key(context)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert Ouroboros.Application.self_signing_children() == []
+        end)
+
+      assert log =~ "cannot hide a named file from a read"
+      assert log =~ "can read the signing seed and sign in this key's name"
+      assert log =~ "OUROBOROS_SIGNING_NODE"
+      assert log =~ Ouroboros.Self.Posture.unfenced_key_env()
+      assert log =~ key
+    end
+
+    test "unless the operator says they accept that, in one variable", context do
+      key = unfenceable_key(context)
+      System.put_env(Ouroboros.Self.Posture.unfenced_key_env(), "1")
+      on_exit(fn -> System.delete_env(Ouroboros.Self.Posture.unfenced_key_env()) end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert [{Ouroboros.Upgrade.Signing.Service, [key_path: ^key]}] =
+                   Ouroboros.Application.self_signing_children()
+        end)
+
+      # It starts, and the log says exactly what was accepted rather than nothing at all.
+      assert log =~ "can read the signing seed and sign in this key's name"
+    end
+
+    test "a fleet posture is unaffected: the key is on another host", context do
+      _key = unfenceable_key(context)
+      Application.put_env(:ouroboros, :signing_node, :signer@fleet)
 
       assert Ouroboros.Application.self_signing_children() == []
     end
@@ -420,4 +622,38 @@ defmodule Ouroboros.Self.BootTest do
 
   defp restore(key, nil), do: Application.delete_env(:ouroboros, key)
   defp restore(key, value), do: Application.put_env(:ouroboros, key, value)
+
+  # The posture, a real key file, and a node whose sandbox cannot hide it.
+  defp unfenceable_key(context) do
+    saved = Application.get_env(:ouroboros, :native_sandbox)
+
+    on_exit(fn ->
+      restore(:native_sandbox, saved)
+      Ouroboros.Provider.Native.Sandbox.forget()
+    end)
+
+    key = Path.join(context.tmp, "signer-#{System.unique_integer([:positive])}.key")
+    File.write!(key, :crypto.strong_rand_bytes(32))
+    File.chmod!(key, 0o600)
+
+    Application.put_env(:ouroboros, :self_posture, true)
+    Application.delete_env(:ouroboros, :signing_node)
+    Application.put_env(:ouroboros, :signer_key_path, key)
+    Application.put_env(:ouroboros, :native_sandbox, :none)
+    Ouroboros.Provider.Native.Sandbox.forget()
+
+    refute Ouroboros.Provider.Native.Sandbox.hides_files?(
+             Ouroboros.Provider.Native.Sandbox.detect()
+           )
+
+    key
+  end
+
+  defp drain do
+    receive do
+      {:ran, what} -> [what | drain()]
+    after
+      0 -> []
+    end
+  end
 end
