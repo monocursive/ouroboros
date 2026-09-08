@@ -1305,7 +1305,7 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       assert elem(allow, 0) < elem(deny, 0)
     end
 
-    test "bubblewrap binds the file over itself when it is there and /dev/null when it is not",
+    test "bubblewrap binds the file over itself when it is there and the scratch directory when it is not",
          %{root: root, scope: scope} do
       present = Path.join(root, "workspace/ouroboros.toml")
       File.write!(present, "[[hooks]]\n")
@@ -1318,8 +1318,23 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
 
       argv = Bwrap.options(scope, policy)
 
-      assert ["--ro-bind", "/dev/null", absent] |> subsequence_of?(argv)
+      # An empty directory, never `/dev/null`: a character device at that path made `git add
+      # -A` refuse a whole tree in CI, and git ignores an empty directory by design.
+      assert ["--ro-bind", policy.scratch, absent] |> subsequence_of?(argv)
+      refute ["--ro-bind", "/dev/null", absent] |> subsequence_of?(argv)
       assert ["--ro-bind", present, present] |> subsequence_of?(argv)
+
+      # And the manifest's name joins the create filter's list, where this build has the
+      # library — that is what refuses a create beneath a writable root, which no root-level
+      # bind reaches.
+      assert {:ok, {_bwrap, wrapped}} =
+               Bwrap.wrap({:shell, "echo hi"}, scope, policy, "/usr/bin/bwrap")
+
+      if File.regular?(Application.app_dir(:ouroboros, "priv/native/libouro_fs_filter.so")) do
+        assert env_value(wrapped, "OUROBOROS_FS_DENY") == ".git:.ouroboros:ouroboros.toml"
+      else
+        refute "OUROBOROS_FS_DENY" in wrapped
+      end
 
       # After the writable bind that would otherwise have made it writable.
       assert index_of(argv, scope.root) < index_of(argv, present)
@@ -2001,22 +2016,34 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
     end
 
     test "clearing removes only what is still a stub", %{workspace: workspace} do
-      stub_file = Path.join(workspace, "ouroboros.toml")
+      # The manifest stub is an empty directory (the scratch bind's shape); a zero-byte file
+      # is what the first cut left, and clearing knows both.
+      stub_file = Path.join(workspace, "ouroboros.toml.first-cut")
       stub_dir = Path.join(workspace, ".git")
+      stub_manifest = Path.join(workspace, "ouroboros.toml")
       real_file = Path.join(workspace, "kept.toml")
       real_dir = Path.join(workspace, ".ouroboros")
       missing = Path.join(workspace, "never-there")
 
       File.write!(stub_file, "")
       File.mkdir_p!(stub_dir)
+      File.mkdir_p!(stub_manifest)
       File.write!(real_file, "[[hooks]]\n")
       File.mkdir_p!(Path.join(real_dir, "sessions"))
 
       assert :ok =
-               Bwrap.clear_mount_point_stubs([stub_file, stub_dir, real_file, real_dir, missing])
+               Bwrap.clear_mount_point_stubs([
+                 stub_file,
+                 stub_dir,
+                 stub_manifest,
+                 real_file,
+                 real_dir,
+                 missing
+               ])
 
       refute File.exists?(stub_file)
       refute File.exists?(stub_dir)
+      refute File.exists?(stub_manifest)
       assert File.read!(real_file) == "[[hooks]]\n"
       assert File.dir?(Path.join(real_dir, "sessions"))
       refute File.exists?(missing)
@@ -2067,9 +2094,10 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
 
     # S1/HIGH-1's Linux half. Same claim as the sandbox-exec case above, by a different
     # mechanism: an existing manifest is bound read-only over itself and an absent one has
-    # `/dev/null` bound onto it, so a create fails `EROFS` and a rename or an unlink over the
-    # mount point fails `EBUSY`. Runs where the live bubblewrap suite runs — Linux CI's
-    # ubuntu-24.04 job and `scripts/sandbox-linux-test.sh` — and is skipped, loudly, on a Mac.
+    # the empty scratch directory bound onto it, so a create fails `EROFS` or `EISDIR` and a
+    # rename or an unlink over the mount point fails `EBUSY`. Runs where the live bubblewrap
+    # suite runs — Linux CI's ubuntu-24.04 job and `scripts/wasm-linux-test.sh` — and is
+    # skipped, loudly, on a Mac.
     test "no shell reaches the hook manifest, present or absent", %{
       context: context,
       workspace: workspace
@@ -2111,6 +2139,25 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       for path <- absent_before do
         refute File.exists?(path), "#{path} was left behind by the sandbox"
       end
+    end
+
+    # The shape of the mask, from inside: a directory, which git ignores and nothing writes
+    # into — not a device, which made `git add -A` refuse a whole tree in CI.
+    test "an absent hook manifest is masked as an empty directory inside the namespace", %{
+      context: context,
+      workspace: workspace
+    } do
+      refute File.exists?(Path.join(workspace, "ouroboros.toml"))
+
+      assert %{is_error: false, output: output} =
+               run(
+                 Bash,
+                 %{"command" => "ls -ld ouroboros.toml && find . -name ouroboros.toml -type f"},
+                 context
+               )
+
+      assert output =~ ~r/^d/m
+      refute output =~ ~r/^\.\/ouroboros\.toml$/m
     end
 
     test "and an existing hook manifest stays readable and unwritable", %{

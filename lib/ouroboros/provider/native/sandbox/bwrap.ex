@@ -205,7 +205,14 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
   # The filter is argv of `wrap/4`, not of `options/2`: the options half is pinned
   # byte-for-byte and must not grow when a `.so` happens to be on disk.
   defp filter_env(policy) do
-    segments = List.wrap(policy.protected_segments)
+    # The segment names the filter has always refused, then the protected files' basenames
+    # (S1): the filter denies any path *component* in the list, so `ouroboros.toml` here is
+    # what refuses a create of the hook manifest beneath a writable root, where no root-level
+    # bind reaches.
+    segments =
+      (List.wrap(policy.protected_segments) ++
+         Enum.map(Map.get(policy, :protected_files, []), &String.downcase(Path.basename(&1))))
+      |> Enum.uniq()
 
     case {segments, filter_library()} do
       {[_ | _] = names, path} when is_binary(path) ->
@@ -255,21 +262,20 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
   The destinations bubblewrap has to *create* as mount points for this policy — and leaves
   behind on the host when the command exits.
 
-  Two binds above name a path that may not exist yet: `--ro-bind /dev/null <file>` for an
+  Two binds above name a path that may not exist yet: `--ro-bind <scratch> <file>` for an
   absent hook manifest (`protected_file_binds/1`) and `--ro-bind <scratch> <dir>` for an
   absent `.git`/`.ouroboros` under a writable root (`protected_segment_binds/1`). bubblewrap
   makes the mount point inside the writable bind, which *is* the host's directory, and its
   teardown unmounts but never unlinks. Measured with bubblewrap 0.8.0 in a
-  `debian:bookworm-slim` container: `cp template ouroboros.toml` is `Permission denied`
-  inside the namespace **and** `/ws/ouroboros.toml` exists on the host afterwards, mode
-  0444, size 0; the same for an absent `.git`, which is left as an empty directory. CI's
-  ubuntu-24.04 job failed the "present or absent" test on exactly that file.
+  `debian:bookworm-slim` container: after the command, `/ws/ouroboros.toml` and `/ws/.git`
+  are both still there on the host as empty directories. CI's ubuntu-24.04 job failed the
+  "present or absent" test on exactly such a leftover (a zero-byte file, in the first cut).
 
   So the caller that spawned the command clears these afterwards with
-  `clear_mount_point_stubs/1`, and only where the path is still the stub — a zero-byte
-  regular file or an empty directory. Anything else there was not bubblewrap's and is left
-  alone. This is computed from the same `File.exists?/1` answers `options/3` reads, at the
-  same moment, so the argv and this list agree.
+  `clear_mount_point_stubs/1`, and only where the path is still the stub — an empty
+  directory, or a zero-byte regular file. Anything else there was not bubblewrap's and is
+  left alone. This is computed from the same `File.exists?/1` answers `options/3` reads, at
+  the same moment, so the argv and this list agree.
   """
   @spec mount_point_stubs(Ouroboros.Provider.Native.Sandbox.policy()) :: [String.t()]
   def mount_point_stubs(policy) do
@@ -310,22 +316,27 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
   # and before the delivery exceptions — the same place the Seatbelt profile puts its
   # `literal` deny, and the same order `Rules.protected_write?/1` reads the policy in.
   #
-  # Two cases, and the second is the one that matters. **The file exists**: a read-only bind
-  # of it over itself, exactly as an existing `.git` is handled — a write is `EROFS`. **The
-  # file does not exist**: a read-only bind of `/dev/null` onto the path. bubblewrap creates
-  # the mount point (it makes a regular file when the source is not a directory), so the
-  # destination is there, is read-only, and is a mount point — `cp`/`tee`/`sed -i` fail
-  # `EROFS`, `mv` over it and `rm` of it fail `EBUSY`, and the empty scratch *directory* the
-  # segment binds use would have been the wrong shape here: a directory named
-  # `ouroboros.toml` fails a create with `EISDIR`, which is a refusal that reads like a bug.
-  #
-  # `/dev/null` is resolved in the host's root, which bubblewrap keeps open for exactly this,
-  # so `--dev /dev` earlier in the argv does not take it away.
+  # Two cases. **The file exists**: a read-only bind of it over itself, exactly as an
+  # existing `.git` is handled — a write is `EROFS`, a rename over it or an unlink of it is
+  # `EBUSY`. **The file does not exist**: the empty scratch *directory* bound read-only onto
+  # the path, exactly as an absent `.git` is handled. The first cut bound `/dev/null` there,
+  # and CI showed why that is wrong: the namespace then holds a character device called
+  # `ouroboros.toml`, and `git add -A` refuses the whole tree ("can only add regular files,
+  # symbolic links or git-directories") — a session's ordinary commit failed in the fenced
+  # profile. An empty directory is what git ignores by design, and the kernel does the
+  # refusing: measured with bubblewrap 0.8.0 in a `debian:bookworm-slim` container, `cp` and
+  # `mv` into it are `EROFS`, `tee` and a `>` redirect are `EISDIR`, `sed -i` "not a regular
+  # file", `rm -rf` of it `EBUSY`, and `git add -A && git commit` in the same tree succeeds.
+  # `Ouroboros.Provider.Native.Hooks` reads the manifest as a file, so a directory at that
+  # path is no manifest at all — and the directory is gone from the host again once the bash
+  # tool clears the stubs (`mount_point_stubs/1`). The name also joins `OUROBOROS_FS_DENY`
+  # (`filter_env/1`), so a create *beneath* a writable root — `sub/ouroboros.toml`, which no
+  # root-level bind covers — is refused by the same libc filter that refuses a new `.git`.
   defp protected_file_binds(policy) do
     policy
     |> Map.get(:protected_files, [])
     |> Enum.flat_map(fn destination ->
-      source = if File.exists?(destination), do: destination, else: "/dev/null"
+      source = if File.exists?(destination), do: destination, else: policy.scratch
       ["--ro-bind", source, destination]
     end)
   end

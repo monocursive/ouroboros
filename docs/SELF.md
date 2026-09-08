@@ -1056,13 +1056,19 @@ sandbox policy grew a third fence beside `protected` (roots) and `protected_segm
 per writable root — `Sandbox.protected_files/2`. Seatbelt writes one
 `(deny file-write* (literal (param …)))`, which matches a path the kernel resolves whether or
 not a file is there; bubblewrap binds the file read-only over itself when it exists and binds
-`/dev/null` read-only onto it when it does not, so the destination is present, read-only and
-busy. That mount point is created inside the host's own directory and bubblewrap's teardown
-never unlinks it — measured with 0.8.0, and CI's ubuntu-24.04 job failed the live test on the
-zero-byte file it left — so the bash tool names every stub the argv will have to create
-(`Bwrap.mount_point_stubs/1`, read from the same `File.exists?` the argv reads) and clears
-what is still a stub once the command has ended, the empty `.git`/`.ouroboros` directory the
-pre-existing segment binds had been leaving behind on every Linux command included. Proved
+the empty scratch directory read-only onto the path when it does not, exactly as it handles an
+absent `.git` — so the destination is present, read-only and busy, and a create is `EROFS` or
+`EISDIR`. The first cut bound `/dev/null` there, and CI showed why that is wrong: a character
+device named `ouroboros.toml` made `git add -A` refuse the whole tree in the fenced profile
+(measured, bubblewrap 0.8.0: an empty directory refuses `cp`, `mv`, `tee`, a redirect, `sed -i`
+and `rm -rf`, and `git add -A && git commit` succeeds beside it). The manifest's basename also
+joins the `LD_PRELOAD` name filter's list, so a create beneath a writable root is refused by
+the same libc filter that refuses a new `.git`. Either mount point outlives the namespace on
+the host — bubblewrap creates it inside the host's own directory and never unlinks it — so the
+bash tool names every stub the argv will have to create (`Bwrap.mount_point_stubs/1`, read from
+the same `File.exists?` the argv reads) and clears what is still a stub once the command has
+ended, the empty `.git`/`.ouroboros` directory the pre-existing segment binds had been leaving
+behind on every Linux command included. Proved
 live on this machine: a sandboxed `Tools.Bash.run/2` doing
 `cp template ouroboros.toml` exits non-zero and the file does not exist afterwards, with
 `.git/pwned` as the control.
