@@ -21,7 +21,7 @@ defmodule Ouroboros.Wasm.PolicyEngine do
   |---|---|
   | `deny` | **stands.** The call is refused and the component's rule is the stated reason. |
   | `ask` | stands. It is the same question the node was already going to ask. |
-  | `allow` | honoured **only** for a tool named in `config :ouroboros, :policy_allowable_tools`, which is empty by default. Otherwise it is read as `ask`. |
+  | `allow` | honoured **only** for a tool named in `config :ouroboros, :policy_allowable_tools` (empty by default) or one this policy has *earned* at these bytes (S2, below). Otherwise it is read as `ask`. |
 
   Everything else is `ask`: a component that traps, one that misses its deadline, one whose
   bytes will not link, one this node cannot load, a verdict that is not JSON, a `decision` that
@@ -34,6 +34,21 @@ defmodule Ouroboros.Wasm.PolicyEngine do
   approval channel with a signature on it — and the point of lane W is that a signature is
   provenance, not trust (D5). An operator who wants a component to resolve `read` calls says so
   by naming `read`.
+
+  ## Earned widening (S2, docs/SELF.md §S2)
+
+  There is one other way onto that list, and it is not a shortcut around it. `replay/2` asks this
+  component — dry, recording nothing — every decision a human made on this node, out of
+  `Ouroboros.Control.PolicyEvidence`; `promote/5` re-runs that replay and records the tool in
+  `Ouroboros.Control.PolicyPromotion` only where the component contradicted no human across at
+  least fifty decisions. `settle/6` then honours an `allow` for that tool — but only while the
+  record's policy name **and** component sha match the row about to answer, so a re-deploy under
+  the same name has earned nothing. `record/2` carries the reverse: one human `deny` for a
+  promoted tool that the promoted bytes would have allowed demotes it inside the same call.
+
+  So the bound on an `allow` is still exactly two things, and both are node-local statements
+  about *these bytes*: what an operator listed, and what these bytes earned against decisions
+  this node's humans already made.
 
   ## Determinism, and why it is structural
 
@@ -106,15 +121,19 @@ defmodule Ouroboros.Wasm.PolicyEngine do
 
   The seam carries this module's answer and turns every failure of its own into an ask, so
   nothing there widens a verdict — and nothing there narrows one either. **The bound on an
-  `allow` is this module's**, `allowable_tools/0`, and it is the only one: a seam that added a
+  `allow` is this module's**, `allowable_tools/1`, and it is the only one: a seam that added a
   second gate would be a refusal an operator could not find in either place.
+
+  The same four readers are also the four places a human answer becomes evidence, because all of
+  them record it through `Control.Permissions.record/2` and that is where the corpus is written.
   """
 
   require Logger
 
   alias Jido.Harness.Redaction
-  alias Ouroboros.Control.Permissions
+  alias Ouroboros.Control.{Permissions, PolicyEvidence, PolicyPromotion}
   alias Ouroboros.Control.Permissions.Request
+  alias Ouroboros.Provider.Native.Journal
   alias Ouroboros.Wasm
   alias Ouroboros.Wasm.{Artifact, Pool, Rollout, Store, Verifier}
 
@@ -228,9 +247,30 @@ defmodule Ouroboros.Wasm.PolicyEngine do
     _kind, _reason -> {:ask, :authority_unavailable}
   end
 
-  @doc "The delegate's, unchanged: a human's answer is not this module's to interpret."
+  @doc """
+  The delegate's answer, unchanged, plus the demotion canary (S2, S-D24).
+
+  A human's answer is still not this module's to interpret: `Ouroboros.Control.Permissions`
+  writes the ledger entry and the evidence row, the return value is its return value, and
+  nothing here can change what was recorded.
+
+  What this adds is the one check that makes a promotion reversible. When the answer is a
+  **human `deny`** for a tool this node has promoted (`Ouroboros.Control.PolicyPromotion`), the
+  promoted component is asked — dry, recording nothing — what it would have said about the same
+  request. If it would have said `allow`, the promotion was wrong about the thing it was
+  promoted for, and the tool is demoted inside this call. The deny itself is recorded exactly as
+  it would have been.
+
+  It is deliberately not a vote. One human contradiction is enough, because the threshold a
+  promotion had to clear was *zero* contradictions over fifty decisions: a single one is the
+  evidence for that promotion being false, and re-earning it is a replay away.
+  """
   @spec record(String.t(), map()) :: :ok | {:error, term()}
-  defdelegate record(decision_id, answer), to: Permissions
+  def record(decision_id, answer) do
+    written = Permissions.record(decision_id, answer)
+    _ = canary(answer)
+    written
+  end
 
   @doc "The delegate's, unchanged: the rule language is `Control.Permissions`'."
   @spec suggest(map() | keyword()) :: String.t() | nil
@@ -239,22 +279,38 @@ defmodule Ouroboros.Wasm.PolicyEngine do
   @doc """
   The name of the policy component this node consults, or `nil`.
 
-  `nil` — the default — makes this engine exactly `Control.Permissions` with an extra function
-  call, which is the posture a node that has not been given a policy should have.
+  `config :ouroboros, :wasm_policy` first, then the name
+  `Ouroboros.Control.PolicyPromotion` holds (S2). Configuration outranks the record because an
+  operator naming a policy is the stronger statement of the two, and because a node whose only
+  policy came from a promotion record it has forgotten how it acquired is a node nobody can
+  reason about — the record says which name it is bound to, and `policy.status` prints it.
+
+  `nil` — the default, with neither set — makes this engine exactly `Control.Permissions` with
+  an extra function call, which is the posture a node that has not been given a policy should
+  have.
   """
   @spec configured_policy() :: String.t() | nil
   def configured_policy do
     case Application.get_env(:ouroboros, :wasm_policy) do
-      name when is_binary(name) and name != "" -> name
-      _unset -> nil
+      name when is_binary(name) and name != "" ->
+        name
+
+      _unset ->
+        case PolicyPromotion.policy() do
+          {name, _sha} -> name
+          nil -> nil
+        end
     end
   end
 
   @doc """
-  The tools whose `allow` this node honours from a policy component. Empty by default.
+  The tools whose `allow` this node honours from *any* policy component. Empty by default.
 
-  A malformed value is read as the empty list rather than as "everything": this is a bound on
-  what an untrusted component may resolve, and a bound that falls open on a typo is not one.
+  `config :ouroboros, :policy_allowable_tools` and nothing else. A malformed value is read as
+  the empty list rather than as "everything": this is a bound on what an untrusted component may
+  resolve, and a bound that falls open on a typo is not one.
+
+  This is the operator's half. The earned half is name-scoped and is `allowable_tools/1`.
   """
   @spec allowable_tools() :: [String.t()]
   def allowable_tools do
@@ -263,6 +319,23 @@ defmodule Ouroboros.Wasm.PolicyEngine do
       _invalid -> []
     end
   end
+
+  @doc """
+  The tools whose `allow` this node honours **from `name`**: the configured list plus what that
+  policy has earned (S2, S-D22).
+
+  The earned half comes from `Ouroboros.Control.PolicyPromotion` and is scoped to the name the
+  record is bound to. A different name gets the configured list and nothing more — a promotion
+  is a statement about one component's judgement, and carrying it to another component would be
+  transferring a reputation.
+
+  `settle/6` narrows this once more, by the component's **bytes**: see there.
+  """
+  @spec allowable_tools(String.t() | nil) :: [String.t()]
+  def allowable_tools(name) when is_binary(name) and name != "",
+    do: Enum.uniq(allowable_tools() ++ PolicyPromotion.allowable_tools(name))
+
+  def allowable_tools(_unnamed), do: allowable_tools()
 
   @doc false
   @spec max_rule_chars() :: pos_integer()
@@ -652,16 +725,34 @@ defmodule Ouroboros.Wasm.PolicyEngine do
     do: decided(:deny, :deny, rule, name, entry, request)
 
   defp settle(:allow, rule, name, entry, request, asked) do
-    if request.tool in allowable_tools() do
+    if request.tool in honoured_allow_tools(name, entry.component_sha256) do
       decided(:allow, :approve, rule, name, entry, request)
     else
       # The default, and the one the moduledoc calls the whole posture: an `allow` for a tool no
-      # operator listed is read as the question it was already going to be.
+      # operator listed and no replay earned is read as the question it was already going to be.
       asked
     end
   end
 
   defp settle(:ask, _rule, _name, _entry, _request, asked), do: asked
+
+  # The configured list always; the promotion record's list **only** when the record names this
+  # policy *and* the bytes about to answer are the bytes it was promoted for.
+  #
+  # The sha check is the point of the record rather than belt-and-braces. A promotion is a
+  # measurement of one component's judgement against decisions humans made, and a re-deploy
+  # under the same name is different bytes that have measured nothing. Without this, widening a
+  # policy would be a one-time cost and every later version of it would inherit the widening —
+  # which is the shape of every supply-chain problem lane W exists to not have.
+  defp honoured_allow_tools(name, sha) do
+    earned =
+      case PolicyPromotion.policy() do
+        {^name, ^sha} -> PolicyPromotion.allowable_tools(name)
+        _other_policy_or_other_bytes -> []
+      end
+
+    allowable_tools() ++ earned
+  end
 
   # An honoured verdict: recorded as this engine's own decision, then returned with the
   # component's rule as the reason a person or a model reads.
@@ -728,6 +819,490 @@ defmodule Ouroboros.Wasm.PolicyEngine do
 
   defp short(sha) when is_binary(sha) and byte_size(sha) >= 12, do: binary_part(sha, 0, 12)
   defp short(sha), do: to_string(sha)
+
+  ## ── earned widening: the dry path, the replay, the promotion (S2) ─────────────────────
+
+  # How many contradiction rows a report carries. A report is written to a file an operator
+  # reads and hands back to `promote/5`; the number that matters is the count, and the rows are
+  # there so a person can find the sessions. Twenty is enough to see a pattern.
+  @max_contradiction_rows 20
+
+  # What `promote/5` requires of the re-run, per tool. Fifty decisions because a component that
+  # agreed with a handful of answers has demonstrated nothing about a tool it will then resolve
+  # for every session; zero contradictions because the whole claim of a promotion is that this
+  # component has never been more permissive than a human on this node.
+  @promotion_min_decisions 50
+  @promotion_max_contradictions 0
+
+  # The dry instance's name. A separate instance under a separate name from the live
+  # `#{@instance_prefix}<sha>`, so a replay of ten thousand requests cannot touch the state of
+  # the component that is deciding this node's live permissions — which is the one property
+  # that makes a dry evaluation safe to run on a node that is serving.
+  @dry_prefix "wasm/policy/dry/"
+
+  @doc """
+  Asks a policy component one question **without** deciding anything (S2, S-D23).
+
+  `name_or_sha` is a live lane-W rollout of kind `:policy` on this node, by the name it was
+  deployed under or by its component digest. `document` is a request document in
+  `document/1`'s form — the corpus holds exactly those bytes, which is what makes a replay a
+  replay rather than a re-derivation.
+
+  The provenance check is the live path's, not a relaxed version of it: the manifest the
+  register row names is fetched, verified against **this node's** trust policy, held to the
+  row's sha and required to declare `:policy`, all before a byte is loaded. A component
+  nobody can verify is not one this node will dry-run either.
+
+  Four things it does not do. It does not record a `:permission` entry — a dry evaluation is
+  not a decision and a ledger full of decisions nobody made is worse than no ledger. It does
+  not write evidence. It does not honour or degrade anything: the verdict comes back as the
+  component said it, `allow` included, and what may be done with an `allow` is `settle/6`'s
+  question. And it does not touch the live instance: the component stands under
+  `#{@dry_prefix}<sha>` and the live one under `#{@instance_prefix}<sha>`.
+
+  The instance is left standing, exactly as the live path leaves its own, so a caller asking
+  many questions pays for one instantiation. `replay/2` drops it when it is done.
+  """
+  @spec evaluate_with(String.t(), String.t(), keyword()) ::
+          {:ok, verdict(), String.t()} | {:error, term()}
+  def evaluate_with(name_or_sha, document, opts \\ [])
+
+  def evaluate_with(name_or_sha, document, opts)
+      when is_binary(name_or_sha) and name_or_sha != "" and is_binary(document) and is_list(opts) do
+    opts = merged_opts(opts)
+
+    with {:ok, entry} <- resolve(name_or_sha, opts),
+         {:ok, precompiled} <- dry_provenance(entry, opts) do
+      dry_ask(entry.component_sha256, precompiled, document, opts)
+    end
+  rescue
+    error -> {:error, {:policy_dry_exception, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {:policy_dry_exception, "#{kind}: #{bounded_reason(reason)}"}}
+  end
+
+  def evaluate_with(_name_or_sha, _document, _opts), do: {:error, :invalid_dry_evaluation}
+
+  @doc """
+  Replays a policy component against this node's corpus of human answers (S2, S-D21).
+
+  `Ouroboros.Control.PolicyEvidence` holds one row per human answer, carrying the exact
+  document the component would have been handed. This asks the component every one of them,
+  dry, and counts what it said against what the human said — per tool, because promotion is per
+  tool:
+
+  | key | what it counts |
+  |---|---|
+  | `decisions` | rows for this tool that produced a verdict |
+  | `agreements` | the component pointed the same way the human did |
+  | `contradictions` | the component said `allow` where the human said **deny** |
+  | `would_resolve` | the component said `allow` where the human said approve — the prompts a promotion would remove |
+  | `stricter` | the component said `deny` where the human approved — costs nothing, since a `deny` stands anyway |
+  | `asks` | the component said `ask`, which is the question the node was already going to put |
+  | `unreadable` | rows for this tool with no document, or whose dry ask failed |
+
+  `decisions` is exactly `agreements + contradictions + stricter + asks`, and `agreements`
+  contains `would_resolve`.
+
+  A contradiction row carries the fingerprint, the session id and the timestamp of the human
+  answer — **never the document**. The point of a report is that it can be read, filed and
+  handed to `promote/5`; a command line in it would make it a thing nobody may store.
+
+  The report is sealed with `report_sha256` over the canonical JSON of everything in it except
+  that key and `replayed_at`. Two replays over the same corpus therefore produce the same
+  digest, which is what lets `promote/5` say "this report is about these bytes and this corpus"
+  rather than "this report is about something".
+
+  Options: `:since` (an ISO 8601 string or a `DateTime`, passed to the corpus), plus the engine
+  seams `:registry`, `:store_root` and `:pool`.
+  """
+  @spec replay(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def replay(name_or_sha, opts \\ [])
+
+  def replay(name_or_sha, opts) when is_binary(name_or_sha) and name_or_sha != "" do
+    opts = merged_opts(opts)
+    since = Keyword.get(opts, :since)
+
+    with {:ok, entry} <- resolve(name_or_sha, opts),
+         {:ok, precompiled} <- dry_provenance(entry, opts) do
+      sha = entry.component_sha256
+
+      try do
+        {per_tool, corpus_size, unreadable} =
+          [since: since]
+          |> PolicyEvidence.stream()
+          |> Enum.reduce({%{}, 0, 0}, fn row, acc ->
+            tally(row, acc, sha, precompiled, opts)
+          end)
+
+        {:ok,
+         seal(%{
+           "policy_name" => policy_name_of(entry),
+           "component_sha256" => sha,
+           "corpus_size" => corpus_size,
+           "unreadable" => unreadable,
+           "since" => stated_since(since),
+           "per_tool" => Map.new(per_tool, fn {tool, counts} -> {tool, finish(counts)} end)
+         })}
+      after
+        # A replay is a batch with an end, so it puts the dry instance down rather than leaving
+        # a second copy of the policy standing in a pool every capability on this node shares.
+        _ = Pool.drop(@dry_prefix <> sha, Keyword.get(opts, :pool, Pool))
+      end
+    end
+  rescue
+    error -> {:error, {:policy_replay_exception, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {:policy_replay_exception, "#{kind}: #{bounded_reason(reason)}"}}
+  end
+
+  def replay(_name_or_sha, _opts), do: {:error, :invalid_replay}
+
+  @doc """
+  Promotes one tool for one policy, on a report, for a named human (S2, S-D22).
+
+  Three gates, and the middle one is the whole design:
+
+    1. The report must be **about these bytes**: its `component_sha256` is the sha this node
+       would evaluate for `name`, and its `report_sha256` is the digest of its own contents.
+       A report somebody edited is refused by the second half, and a report about a policy that
+       has since been re-deployed by the first.
+    2. **The replay is re-run, here, now.** The report an operator hands in is evidence that a
+       replay happened, not that it is still true: the corpus has grown since, and the rows it
+       grew by are exactly the ones nobody looked at. The numbers written into the record are
+       the *re-run's*, and the report's digest is written beside them so an audit can see both.
+    3. The re-run must show at least #{@promotion_min_decisions} decisions and exactly
+       #{@promotion_max_contradictions} contradictions **for this tool**.
+
+  Then `Ouroboros.Control.PolicyPromotion` is asked to record it, which is where the checkpoint
+  discipline and the `:policy_promotion` ledger entry are.
+
+  `actor` is the human. There is no path through this function that promotes without one.
+  """
+  @spec promote(String.t(), String.t(), map(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def promote(name, tool, report, actor, opts \\ [])
+
+  def promote(name, tool, report, actor, opts)
+      when is_binary(name) and is_binary(tool) and is_map(report) and is_binary(actor) and
+             is_list(opts) do
+    opts = merged_opts(opts)
+
+    with {:ok, entry} <- resolve(name, opts),
+         :ok <- report_names(report, entry.component_sha256),
+         {:ok, rerun} <- replay(name, opts),
+         {:ok, counts} <- tool_counts(rerun, tool),
+         :ok <- earned?(counts, tool) do
+      PolicyPromotion.promote(
+        name,
+        entry.component_sha256,
+        tool,
+        %{
+          report_sha256: Map.get(report, "report_sha256"),
+          decisions: counts["decisions"],
+          contradictions: counts["contradictions"],
+          replayed_at: rerun["replayed_at"]
+        },
+        actor,
+        Keyword.get(opts, :promotion, PolicyPromotion)
+      )
+    end
+  end
+
+  def promote(_name, _tool, _report, _actor, _opts), do: {:error, :invalid_promotion}
+
+  ## ── the dry path's internals ──────────────────────────────────────────────────────────
+
+  # A caller's options over the node's, so a test that named a register and a store gets them
+  # and a caller that named nothing gets `:wasm_policy_opts`.
+  defp merged_opts(opts), do: Keyword.merge(engine_opts(), opts)
+
+  # A name or a digest, resolved against the same live lane-W `:policy` rows the live path
+  # reads. Not "any manifest in the store": a policy this node would never load is not one a
+  # measurement of it says anything about, and a store is a cache of bytes rather than a
+  # statement about which of them decide.
+  defp resolve(name_or_sha, opts) do
+    live = Rollout.live(Keyword.take(opts, [:registry]) ++ [kind: :policy])
+
+    found =
+      Enum.find(live, fn row ->
+        Map.get(row, :module) == "wasm/" <> name_or_sha or
+          Map.get(row, :component_sha256) == name_or_sha
+      end)
+
+    case found do
+      %{component_sha256: sha} = entry when is_binary(sha) -> {:ok, entry}
+      _absent -> {:error, {:no_live_policy, name_or_sha}}
+    end
+  end
+
+  # `provenance/3`'s three checks, with the reason returned instead of logged once: this path is
+  # asked by an operator who typed a name, and "the engine went inert" is not an answer to a
+  # question somebody asked directly.
+  defp dry_provenance(entry, opts) do
+    with {:ok, manifest} <- signed_manifest(entry, opts),
+         :ok <- Verifier.verify_manifest(manifest, trust_policy(opts)),
+         :ok <- matches_entry(manifest, entry) do
+      {:ok, manifest.precompiled}
+    else
+      {:error, reason} -> {:error, {:policy_not_verifiable, bounded_reason(reason)}}
+    end
+  end
+
+  # `ask_component/5`'s shape against the dry instance name, and nothing else shared: the live
+  # function records, warns once and settles, none of which a dry ask may do.
+  defp dry_ask(sha, precompiled, document, opts) do
+    pool = Keyword.get(opts, :pool, Pool)
+    instance = @dry_prefix <> sha
+    deadline = System.monotonic_time(:millisecond) + decision_timeout()
+
+    case bounded(deadline, fn -> Pool.call(instance, "evaluate", document, pool) end) do
+      {:ok, {:ok, %{"payload" => payload}}} when is_binary(payload) ->
+        read_or_error(payload)
+
+      {:ok, {:error, %{refusal: "unknown_instance"}}} ->
+        with :ok <- stand_up_dry(sha, instance, precompiled, opts, deadline),
+             {:ok, {:ok, %{"payload" => payload}}} when is_binary(payload) <-
+               bounded(deadline, fn -> Pool.call(instance, "evaluate", document, pool) end) do
+          read_or_error(payload)
+        else
+          refused -> {:error, {:policy_dry_refused, bounded_reason(refused)}}
+        end
+
+      :expired ->
+        _ = spawn(fn -> Pool.drop(instance, pool) end)
+        {:error, {:policy_dry_timeout, decision_timeout()}}
+
+      refused ->
+        {:error, {:policy_dry_refused, bounded_reason(refused)}}
+    end
+  end
+
+  # `stand_up/5` against the dry name. It is a separate function rather than a parameter on the
+  # live one because the two must not be able to converge on one instance name by accident.
+  defp stand_up_dry(sha, instance, precompiled, opts, deadline) do
+    pool = Keyword.get(opts, :pool, Pool)
+
+    with {:ok, {:ok, _loaded}} <-
+           bounded(deadline, fn ->
+             Pool.load_component(sha, precompiled, pool,
+               kind: :policy,
+               store: store_opts(Keyword.get(opts, :store_root))
+             )
+           end),
+         {:ok, {:ok, _stood}} <-
+           bounded(deadline, fn ->
+             Pool.instantiate(instance, sha, "{}", Wasm.capability_limits(), pool, kind: :policy)
+           end) do
+      :ok
+    else
+      {:ok, {:error, %{refusal: "instance_exists"}}} -> :ok
+      _refused_or_expired -> :error
+    end
+  end
+
+  # A verdict outside the grammar is an *error* here rather than the `ask` the live path reads
+  # it as. The live path has a human to fall back on; a replay counting an unreadable verdict as
+  # an ask would be counting a component's malformed answers as good behaviour.
+  defp read_or_error(payload) do
+    case read_verdict(payload) do
+      {:ok, decision, rule} -> {:ok, decision, rule}
+      :unreadable -> {:error, :policy_verdict_unreadable}
+    end
+  end
+
+  ## ── the replay's internals ────────────────────────────────────────────────────────────
+
+  @empty_counts %{
+    "decisions" => 0,
+    "agreements" => 0,
+    "contradictions" => 0,
+    "would_resolve" => 0,
+    "stricter" => 0,
+    "asks" => 0,
+    "unreadable" => 0
+  }
+
+  # A line nobody can decode has no tool to attribute it to, so it is counted once for the
+  # corpus and never for a tool. A reader who sees a non-zero `unreadable` beside a `corpus_size`
+  # knows the difference between "this policy agreed with everything" and "there was nothing to
+  # disagree with".
+  defp tally(:unreadable, {per_tool, size, unreadable}, _sha, _precompiled, _opts),
+    do: {per_tool, size + 1, unreadable + 1}
+
+  defp tally({:ok, row}, {per_tool, size, unreadable}, sha, precompiled, opts) do
+    tool = Map.get(row, "tool") || "unknown"
+    counts = Map.get(per_tool, tool, @empty_counts)
+
+    counts =
+      case Map.get(row, "document") do
+        document when is_binary(document) ->
+          case dry_ask(sha, precompiled, document, opts) do
+            {:ok, verdict, _rule} -> score(counts, verdict, Map.get(row, "decision"), row)
+            {:error, _reason} -> bump(counts, "unreadable")
+          end
+
+        _no_document ->
+          bump(counts, "unreadable")
+      end
+
+    {Map.put(per_tool, tool, counts), size + 1, unreadable}
+  end
+
+  # The five outcomes, and the two that matter are the `allow`s. A `deny` the human also denied
+  # is agreement; a `deny` the human approved is the component being stricter than a person,
+  # which changes nothing because a `deny` stands whether the tool is promoted or not.
+  defp score(counts, :allow, "deny", row) do
+    counts
+    |> bump("decisions")
+    |> bump("contradictions")
+    |> Map.update("rows", [contradiction_row(row)], &[contradiction_row(row) | &1])
+  end
+
+  defp score(counts, :allow, _approved, _row) do
+    counts |> bump("decisions") |> bump("agreements") |> bump("would_resolve")
+  end
+
+  defp score(counts, :deny, "deny", _row), do: counts |> bump("decisions") |> bump("agreements")
+  defp score(counts, :deny, _approved, _row), do: counts |> bump("decisions") |> bump("stricter")
+  defp score(counts, :ask, _decision, _row), do: counts |> bump("decisions") |> bump("asks")
+
+  defp bump(counts, key), do: Map.update(counts, key, 1, &(&1 + 1))
+
+  # The fingerprint, the session and the time. Never the document — see `replay/2`.
+  defp contradiction_row(row) do
+    %{
+      "fingerprint" => get_in(row, ["fingerprint", "sha256"]),
+      "session_id" => Map.get(row, "session_id"),
+      "at" => Map.get(row, "at")
+    }
+  end
+
+  # Sorted and bounded, so the report is a function of the corpus rather than of the order it
+  # was written in — which is also what makes `report_sha256` reproducible.
+  defp finish(counts) do
+    rows =
+      counts
+      |> Map.get("rows", [])
+      |> Enum.sort_by(&{&1["fingerprint"], &1["session_id"], &1["at"]})
+      |> Enum.take(@max_contradiction_rows)
+
+    counts |> Map.delete("rows") |> Map.put("contradiction_rows", rows)
+  end
+
+  defp policy_name_of(entry) do
+    case Map.get(entry, :module) do
+      "wasm/" <> name -> name
+      _other -> nil
+    end
+  end
+
+  defp stated_since(nil), do: nil
+  defp stated_since(%DateTime{} = at), do: DateTime.to_iso8601(at)
+  defp stated_since(at) when is_binary(at), do: at
+  defp stated_since(_other), do: nil
+
+  # `replayed_at` is outside the digest deliberately. It is the one field that differs between
+  # two replays of the same corpus, and a digest that changed every time would say nothing about
+  # whether the *evidence* was the same — which is the only question `promote/5` asks it.
+  defp seal(body) do
+    body
+    |> Map.put("report_sha256", Journal.digest(body))
+    |> Map.put("replayed_at", DateTime.utc_now() |> DateTime.to_iso8601())
+  end
+
+  ## ── the promotion's gates ─────────────────────────────────────────────────────────────
+
+  defp report_names(report, sha) do
+    stated = Map.get(report, "component_sha256")
+    digest = Map.get(report, "report_sha256")
+
+    cond do
+      stated != sha ->
+        {:error, {:report_names_other_bytes, stated}}
+
+      not is_binary(digest) ->
+        {:error, :report_unsealed}
+
+      digest != report |> Map.drop(["report_sha256", "replayed_at"]) |> Journal.digest() ->
+        {:error, :report_digest_mismatch}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp tool_counts(report, tool) do
+    case get_in(report, ["per_tool", tool]) do
+      counts when is_map(counts) -> {:ok, counts}
+      _absent -> {:error, {:no_decisions_for_tool, tool}}
+    end
+  end
+
+  defp earned?(counts, tool) do
+    decisions = Map.get(counts, "decisions", 0)
+    contradictions = Map.get(counts, "contradictions", 0)
+
+    cond do
+      contradictions > @promotion_max_contradictions ->
+        {:error, {:policy_contradicted_a_human, tool, contradictions}}
+
+      decisions < @promotion_min_decisions ->
+        {:error, {:not_enough_decisions, tool, decisions, @promotion_min_decisions}}
+
+      true ->
+        :ok
+    end
+  end
+
+  @doc false
+  @spec promotion_thresholds() :: %{decisions: pos_integer(), contradictions: non_neg_integer()}
+  def promotion_thresholds,
+    do: %{decisions: @promotion_min_decisions, contradictions: @promotion_max_contradictions}
+
+  ## ── the demotion canary ───────────────────────────────────────────────────────────────
+
+  # A human deny, for a tool this node promoted, that the promoted bytes would have allowed.
+  #
+  # Everything about this is bounded and total: it runs only for a human `deny`, only for a tool
+  # the record currently holds, and every failure in it is silence. It cannot change the answer
+  # it was called beside — `record/2` has already returned the delegate's value by the time this
+  # matters — and it cannot widen anything, because the only write it makes is a demotion.
+  defp canary(answer) do
+    with :human <- Map.get(answer, :actor),
+         :deny <- Map.get(answer, :decision),
+         request when is_map(request) <- Map.get(answer, :request),
+         %Request{} = request <- Request.new(request),
+         {name, sha} when is_binary(name) <- PolicyPromotion.policy(),
+         true <- request.tool in PolicyPromotion.allowable_tools(name),
+         {:ok, document} <- document(request),
+         {:ok, :allow, rule} <- evaluate_with(sha, document) do
+      fingerprint = Permissions.fingerprint(request)
+
+      Logger.warning(
+        "policy #{inspect(name)}@#{short(sha)} would have allowed a #{request.tool} call a " <>
+          "human denied (session=#{inspect(request.principal.session_id)}, " <>
+          "request=#{binary_part(fingerprint.sha256, 0, 16)}, #{@untrusted} #{rule}); " <>
+          "demoting #{inspect(request.tool)}"
+      )
+
+      PolicyPromotion.demote(name, request.tool, %{
+        reason: :human_contradiction,
+        fingerprint: fingerprint.sha256,
+        session_id: request.principal.session_id
+      })
+    else
+      _not_a_contradiction -> :ok
+    end
+  rescue
+    # A canary that raised must not turn a recorded human answer into an exception two frames
+    # away in whichever seam asked.
+    error ->
+      Logger.warning("policy demotion canary failed: #{Exception.message(error)}")
+      :ok
+  catch
+    _kind, _reason -> :ok
+  end
 
   ## ── the request document ──────────────────────────────────────────────────────────────
 

@@ -101,6 +101,61 @@ anywhere.
 
 <!-- S2 -->
 
+A policy component may only ever *narrow*: an `allow` it returns is honoured for a tool named in
+`config :ouroboros, :policy_allowable_tools`, empty by default, and read as `ask` otherwise
+(docs/WASM.md §8.2, D20). Widening that list is an operator typing a tool name. S2 is the one
+other way in — the component is replayed against decisions humans actually made on this node,
+and a tool is promoted only where it contradicted none of them.
+
+**The corpus.** `Ouroboros.Control.PolicyEvidence` writes one NDJSON row per human answer at
+`<data_dir>/policy/evidence.ndjson` (directory `0700`, file `0600`), at
+`Control.Permissions.record/2` — the one seam where the full request and a human's answer are
+both in scope. The row holds `{at, node, session_id, tool, mode, fingerprint, decision, scope,
+permission_entry_id, document}`, where `document` is **exactly**
+`Wasm.PolicyEngine.document/1`'s output for the request and `fingerprint` is the digest
+`Control.Permissions.fingerprint/1` writes into the `:permission` ledger entry beside it. It was
+needed because nothing durable held the request a policy would be shown: a `:permission` entry
+holds a digest of the command line, and so does the session journal's approval record. Nothing
+is written for `actor: :rule` (that measures the rules) or `actor: :classifier` (that is the
+component grading itself). Bounded at 10 000 rows or 64 MiB, oldest dropped by one rewrite to
+90% of the bound. A write failure is logged once per reason per boot and never refuses the
+answer that caused it.
+
+**The record.** `Ouroboros.Control.PolicyPromotion` is a GenServer on `Control.Grants`'
+checkpoint discipline — write, fsync, then acknowledge; a failed checkpoint is not applied and
+not reported as promoted — with storage from `config :ouroboros, :policy_promotion_storage` (ETS
+in dev and test). It holds one policy name at one component sha and, under them, the tools
+promoted and the demotions since. Promoting under a different name, or under the same name at
+different bytes, is refused until `clear/1`. The order of a promotion and a demotion is the
+record's own sequence number rather than a timestamp.
+
+**The engine.** `PolicyEngine.evaluate_with/3` verifies provenance exactly as the live path does
+(the manifest the register row names, against this node's trust policy, held to the row's sha
+and required to declare `:policy`), stands the component under `wasm/policy/dry/<sha>`, asks
+once, and records nothing. `replay/2` counts `decisions`, `agreements`, `contradictions`
+(`allow` where the human denied), `would_resolve` (`allow` where the human approved), `stricter`
+(`deny` where the human approved), `asks` and `unreadable` per tool, carries contradiction rows
+holding a fingerprint, a session id and a timestamp and never a document, and seals the whole
+thing with a `report_sha256`. `promote/5` refuses a report that does not name this policy's sha
+or does not hash to its own digest, **re-runs the replay**, and refuses unless the re-run shows
+`decisions >= 50` and `contradictions == 0` for that tool. `record/2` gained the canary: a human
+`deny` for a promoted tool that the promoted bytes would have allowed demotes that tool inside
+the same call and logs a warning naming the tool, the session and the sha.
+
+**What a promotion cannot do.** It cannot survive a re-deploy: `settle/6` honours an earned
+`allow` only when the record's name *and* sha match the row about to answer. It cannot be
+transferred: `allowable_tools/1` is name-scoped. It cannot happen without a named human actor,
+without a ledger entry, or without a durable checkpoint.
+
+Proved in `test/control/policy_evidence_test.exs`, `test/control/policy_promotion_test.exs`,
+`test/wasm/policy_promotion_test.exs` (the real `no-network-shell`, signed and deployed through
+the real rollout, for the dry path and the replay's arithmetic; a scripted verdict for what
+happens to an `allow`, because that component never says one), and appends to
+`test/effect_ledger_test.exs` and `test/provider/native/loop_ledger_test.exs`.
+
+Not in this slice: a classifier, a model anywhere in the promotion path, promotion without a
+human actor, fleet-wide replay, and the gateway verbs and `ouro policy` CLI (S2b).
+
 ### S3. The outer loop
 
 <!-- S3 -->
@@ -201,6 +256,55 @@ is unchanged.
 
 
 <!-- S2-decisions -->
+
+**S-D20. The corpus is written at `Control.Permissions.record/2`, for human answers only, and
+nowhere else.** Every seam that asks a human — the native loop, the interactive plane's external
+approvals, the interactive shell, the ACP seam — records the answer through that one function,
+so writing there is what makes the corpus complete without four call sites agreeing to be
+correct. The native loop passed no request at all before this (plan §0 row 2); its four
+human-answer sites now pass `request: permission_request(state, classified)` and the other
+eleven `record/6` call sites are unchanged. A row is written even when the ledger refused the
+entry, with `permission_entry_id` left `nil` rather than naming an entry that does not exist.
+
+**S-D21. `replayed_at` is outside `report_sha256`.** The plan says the digest covers "everything
+else"; taken literally that includes the timestamp, and two replays of one corpus would then
+produce two digests, which is the opposite of what `promote/5` asks the digest. The digest
+covers everything except itself and `replayed_at`, contradiction rows are sorted, and both
+determinism and order-independence are tests.
+
+**S-D22. One policy, one sha, per record — and the sha is checked again at the moment of the
+`allow`.** A promotion is a measurement of one component's judgement against decisions humans
+made. A re-deploy under the same name is different bytes that have measured nothing, so
+`honoured_allow_tools/2` requires the register row's sha to equal the record's before it adds a
+single earned tool. Without it, widening a policy would be a one-time cost that every later
+version of it inherits.
+
+**S-D23. A dry evaluation stands its own instance and records nothing.** `wasm/policy/dry/<sha>`
+rather than the live `wasm/policy/<sha>`: a replay of ten thousand requests must not be able to
+touch the state of the component deciding this node's live permissions. It writes no
+`:permission` entry and no evidence row, because a ledger full of decisions nobody made is worse
+than no ledger. A verdict outside the grammar is an *error* on this path rather than the `ask`
+the live path reads it as — a replay counting malformed answers as good behaviour would promote
+on them.
+
+**S-D24. One human contradiction demotes.** Not a vote and not a ratio: the threshold a
+promotion cleared was *zero* contradictions over fifty decisions, so a single one is the
+evidence for that promotion being false, and re-earning it is a replay away. The canary is
+bounded, total, and cannot change the answer it runs beside.
+
+**S-D25. The ledger sits on opposite sides of a widening and a narrowing.** A promotion writes
+its `:policy_promotion` entry *before* it checkpoints, and a ledger that refuses refuses the
+promotion. A demotion and a `clear` write theirs *after*, and a ledger that refuses is logged
+rather than obeyed. This is `Control.Permissions`' own rule for an unrecordable answer: an allow
+nobody can account for has not been granted, but refusing without an audit entry is still
+refusing. The plan's blanket "a ledger that refuses refuses the write" would have made a broken
+audit trail into a permission surface nobody could narrow.
+
+**S-D26. A promotion says a component may be listened to, not that it is useful.** The
+thresholds are `decisions >= 50` and `contradictions == 0`, so a component that answers `ask` to
+everything is promotable and resolves nothing. `would_resolve` is the number that says whether a
+promotion is worth making, and it is in the report for an operator to read; adding it as a third
+gate would be inventing a threshold the plan did not set.
 
 <!-- S3-decisions -->
 

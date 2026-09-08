@@ -169,6 +169,12 @@ defmodule Ouroboros.Application do
           Ouroboros.Interactive.Store,
           Ouroboros.Team.Store,
           Ouroboros.Control.Grants,
+          # S2. What a signed policy component has earned the right to resolve, beside the
+          # authority that says what an agent may do to the cluster and above every session
+          # that consults it. Its checkpoint is read once here, at boot: a promotion that was
+          # never durably written is a promotion this node does not have, which is the
+          # direction a permission record must fail in.
+          Ouroboros.Control.PolicyPromotion,
           Ouroboros.Workspace.Mirrors,
           Ouroboros.Workspace.Returns,
           # The permission engine sits with the other durable authority, above every

@@ -69,6 +69,7 @@ defmodule Ouroboros.Control.Permissions do
   require Logger
 
   alias Ouroboros.Agent.EffectLedger
+  alias Ouroboros.Control.PolicyEvidence
   alias Ouroboros.Control.Permissions.{Paths, Pattern, Request, Rule, Rules, Shell}
 
   @store_key {:ouroboros, :control_permissions, 1}
@@ -156,11 +157,36 @@ defmodule Ouroboros.Control.Permissions do
   map `evaluate/1` took, and `:principal` on its own when the call is all that is left.
   Without either, the entry is recorded against `"unattributed"` rather than not at all —
   an audit that drops what it cannot attribute is worse than one that says so.
+
+  ## The decision corpus (S2, S-D20)
+
+  An answer whose `actor` is `:human` **and** which carries a `:request` also leaves one row
+  in `Ouroboros.Control.PolicyEvidence`: the request in the exact form
+  `Ouroboros.Wasm.PolicyEngine.document/1` would hand a policy component, beside what the
+  human decided. That is the corpus `Ouroboros.Wasm.PolicyEngine.replay/2` measures a
+  candidate policy against, and this is the one seam where the full request and a human's
+  answer are both in scope — the ledger holds a fingerprint of the request and nothing more,
+  by design.
+
+  The corpus is written **after** the ledger and never instead of it: a corpus write that
+  fails is logged once and the answer stands, because the ledger is the authority and this is
+  evidence. `permission_entry_id` is carried only where the ledger accepted the entry, so the
+  row never names a `:permission` entry that does not exist.
   """
   @spec record(String.t(), answer()) :: :ok | {:error, term()}
   def record(decision_id, answer)
       when is_binary(decision_id) and decision_id != "" and is_map(answer) do
-    ledger_write(decision_id, answer, answered_request(answer))
+    request = answered_request(answer)
+    written = ledger_write(decision_id, answer, request)
+
+    # Only an answer that carried a `:request`. `answered_request/1` also builds one out of a
+    # bare `:principal` so the ledger row is attributable, and that request has no tool, no
+    # command and no paths — a document built from it would be evidence of nothing.
+    _ =
+      if is_map(Map.get(answer, :request)),
+        do: PolicyEvidence.write(if(written == :ok, do: decision_id), answer, request)
+
+    written
   end
 
   def record(_decision_id, _answer), do: {:error, :invalid_permission_record}
@@ -557,9 +583,19 @@ defmodule Ouroboros.Control.Permissions do
 
   defp attempt(_request), do: %{tool: "unknown", mode: :write, provider: nil, fingerprint: nil}
 
-  # The command line and the paths never reach the ledger. Their digest does, which is
-  # enough to prove two entries were the same decision and nothing else.
-  defp fingerprint(%Request{} = request) do
+  @doc """
+  The digest of what one request was about: its command line, its paths and its domains.
+
+  The command line and the paths never reach the ledger. This does, which is enough to prove
+  two entries were the same decision and nothing else.
+
+  Public because `Ouroboros.Control.PolicyEvidence` writes the same value beside the same
+  answer, and two implementations of one digest are two digests: a corpus row and the
+  `:permission` entry it names have to agree on what "the same request" means, or a
+  contradiction found by a replay could not be traced back to the ledger row that recorded it.
+  """
+  @spec fingerprint(Request.t()) :: %{sha256: String.t(), bytes: non_neg_integer()}
+  def fingerprint(%Request{} = request) do
     material = [request.command || "" | request.paths ++ request.domains] |> Enum.join("\n")
 
     %{

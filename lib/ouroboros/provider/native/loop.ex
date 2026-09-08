@@ -1852,7 +1852,16 @@ defmodule Ouroboros.Provider.Native.Loop do
     receive do
       {:native_approval, ^request_id, %ApprovalResponse{decision: :approve} = response} ->
         state = if persist?, do: grant(state, classified, response.scope), else: state
-        entry_id = record(state, :approve, response.scope, :human, nil)
+
+        entry_id =
+          record(
+            state,
+            :approve,
+            response.scope,
+            :human,
+            nil,
+            permission_request(state, classified)
+          )
 
         state =
           journal_approval(state, request_id, call.id, question, %{
@@ -1866,7 +1875,15 @@ defmodule Ouroboros.Provider.Native.Loop do
          authority(:allow, "human", response.scope, :human, nil, entry_id, request_id)}
 
       {:native_approval, ^request_id, %ApprovalResponse{} = response} ->
-        entry_id = record(state, :deny, response.scope, :human, nil)
+        entry_id =
+          record(
+            state,
+            :deny,
+            response.scope,
+            :human,
+            nil,
+            permission_request(state, classified)
+          )
 
         state =
           journal_approval(state, request_id, call.id, question, %{
@@ -2191,11 +2208,30 @@ defmodule Ouroboros.Provider.Native.Loop do
     receive do
       {:native_approval, ^request_id, %ApprovalResponse{decision: :approve} = response} ->
         state = grant_escalation(state, pending.classified, response.scope)
-        _ = record(state, :approve, response.scope, :human, escalation_ref(nil))
+
+        _ =
+          record(
+            state,
+            :approve,
+            response.scope,
+            :human,
+            escalation_ref(nil),
+            permission_request(state, pending.classified)
+          )
+
         rerun(state, pending, "human", request_id)
 
       {:native_approval, ^request_id, %ApprovalResponse{} = response} ->
-        _ = record(state, :deny, response.scope, :human, escalation_ref(nil))
+        _ =
+          record(
+            state,
+            :deny,
+            response.scope,
+            :human,
+            escalation_ref(nil),
+            permission_request(state, pending.classified)
+          )
+
         declined(state, pending, :human, response.reason, request_id)
 
       {:native_approval, _other_id, _response} ->
@@ -2398,19 +2434,27 @@ defmodule Ouroboros.Provider.Native.Loop do
   # Returns the id of the `:permission` entry this decision was written under, or `nil`
   # when there was no engine to write it into. A `:tool_call` entry links to that id
   # rather than restating the decision, so the two records cannot drift.
-  defp record(state, decision, scope, actor, rule_ref) do
+  # `request` is the call the answer was about, and it is passed at exactly the four sites where
+  # a *human* answered: `Ouroboros.Control.Permissions` writes a decision-evidence row for those
+  # and only those (S2, S-D20), and a rule's or a hook's answer is not evidence of a human's
+  # judgement. Optional, so the other eleven call sites are unchanged.
+  defp record(state, decision, scope, actor, rule_ref, request \\ nil) do
     decision_id =
       "ndec_" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
 
-    case Permissions.record(decision_id, %{
-           decision: decision,
-           scope: scope,
-           actor: actor,
-           rule_ref: rule_ref,
-           reason: nil,
-           session_id: state.session_id,
-           provider: :native
-         }) do
+    answer = %{
+      decision: decision,
+      scope: scope,
+      actor: actor,
+      rule_ref: rule_ref,
+      reason: nil,
+      session_id: state.session_id,
+      provider: :native
+    }
+
+    answer = if is_map(request), do: Map.put(answer, :request, request), else: answer
+
+    case Permissions.record(decision_id, answer) do
       :ok -> decision_id
       {:error, _no_engine_or_refused} -> nil
     end

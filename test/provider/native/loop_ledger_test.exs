@@ -58,11 +58,15 @@ defmodule Ouroboros.Provider.Native.LoopLedgerTest do
 
   @moduletag :capture_log
 
+  alias Jido.Harness.ApprovalResponse
   alias Ouroboros.Agent.EffectLedger
+  alias Ouroboros.Control.Permissions.Request
+  alias Ouroboros.Control.PolicyEvidence
   alias Ouroboros.Provider.Native.Loop
   alias Ouroboros.Provider.Native.LoopLedgerTest.RefusingStorage
   alias Ouroboros.Provider.Native.Paths
   alias Ouroboros.Test.NativeModelScript
+  alias Ouroboros.Wasm.PolicyEngine
 
   @secret "sk-live-do-not-record-me"
 
@@ -352,6 +356,99 @@ defmodule Ouroboros.Provider.Native.LoopLedgerTest do
       assert find(events, :tool_call).payload["ledger_ref"] == nil
       assert find(events, :tool_result).payload["is_error"]
       assert entries(context) == []
+    end
+  end
+
+  describe "a human answer leaves the decision corpus S2 replays (S-D20)" do
+    test "one row, holding exactly the document the engine would have handed a policy",
+         context do
+      # `:policy_evidence_root` is the test seam `Control.PolicyEvidence` derives its path from;
+      # with no data directory, a bare `mix test` has nowhere to write and every write is
+      # skipped, which is why this has to be named here.
+      root = Path.join(context.root, "policy")
+      Application.put_env(:ouroboros, :policy_evidence_root, root)
+      on_exit(fn -> Application.delete_env(:ouroboros, :policy_evidence_root) end)
+
+      command = "printf hello"
+
+      {loop, _agent} =
+        start_loop(
+          context,
+          [
+            [{:tool_call, %{id: "c1", name: "bash", input: %{"command" => command}}}],
+            [{:text, "refused"}, {:finish, :stop}]
+          ],
+          approval_mode: :prompt,
+          approval_timeout_ms: 10_000
+        )
+
+      pid = run(loop)
+
+      assert_receive {:event, %{type: :approval_requested} = ask}, 30_000
+
+      send(
+        pid,
+        {:native_approval, ask.request_id, %ApprovalResponse{decision: :deny, scope: :once}}
+      )
+
+      collect()
+
+      assert [{:ok, row}] = Enum.to_list(PolicyEvidence.stream())
+      assert row["tool"] == "bash"
+      assert row["decision"] == "deny"
+      assert row["scope"] == "once"
+      assert row["session_id"] == context.session_id
+
+      # The exact bytes a policy component would have been shown for this call. The four
+      # human-answer sites in the loop pass `request:` for precisely this: without it
+      # `answered_request/1` finds nothing and there is no document to write.
+      assert {:ok, expected} =
+               PolicyEngine.document(
+                 Request.new(%{
+                   principal: %{
+                     session_id: context.session_id,
+                     provider: :native,
+                     node: node()
+                   },
+                   tool: "bash",
+                   command: command,
+                   paths: [],
+                   mode: :execute,
+                   domains: [],
+                   context: %{
+                     approval_mode: :prompt,
+                     sandbox_mode: context.scope.sandbox_mode,
+                     workspace: context.scope.root,
+                     turn_id: "turn-1"
+                   }
+                 })
+               )
+
+      assert row["document"] == expected
+
+      # And it names the `:permission` entry the same answer wrote, so a replay's contradiction
+      # can be traced back to the ledger row that recorded it.
+      {:ok, permissions} = EffectLedger.list(principal: context.session_id, effect: :permission)
+      assert Enum.any?(permissions, &(&1.id == row["permission_entry_id"]))
+    end
+
+    test "a call the rules never asked a human about leaves nothing", context do
+      root = Path.join(context.root, "policy")
+      Application.put_env(:ouroboros, :policy_evidence_root, root)
+      on_exit(fn -> Application.delete_env(:ouroboros, :policy_evidence_root) end)
+
+      # `:auto_approve` is a *rule* answering, and a rule's answer is the rule. A corpus filled
+      # with them would make a replay measure the node's own configuration.
+      {loop, _agent} =
+        start_loop(context, [
+          [{:tool_call, %{id: "c1", name: "bash", input: %{"command" => "printf hi"}}}],
+          [{:text, "done"}, {:finish, :stop}]
+        ])
+
+      run(loop)
+      collect()
+
+      assert Enum.to_list(PolicyEvidence.stream()) == []
     end
   end
 

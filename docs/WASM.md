@@ -1305,6 +1305,21 @@ A model-backed classifier (the original C6 sketch) remains possible *behind* the
 interface; the wasm module is the deterministic, offline-testable version, and it is the one
 that landed.
 
+**`:policy_allowable_tools` is no longer the only input to what an `allow` may resolve** (S2).
+It is still the only one an operator writes, and it is still empty by default. Beside it there
+is now a durable, node-local *promotion record* — `Ouroboros.Control.PolicyPromotion` — holding
+one policy name at one component sha256 and the tools that name has **earned** the right to
+resolve, where earned means: the component was replayed, dry, against a corpus of decisions
+humans actually made on this node (`Ouroboros.Control.PolicyEvidence`, one row per human answer,
+holding exactly the bytes `PolicyEngine.document/1` would have handed it), and it contradicted
+none of them across at least fifty of them. `settle/6` adds the record's tools to the configured
+list only when the record's name *and* sha match the row about to answer, so a re-deployed policy
+has earned nothing; and a human `deny` for a promoted tool that the promoted bytes would have
+allowed demotes that tool inside the same `record/2` call. The dry path
+(`PolicyEngine.evaluate_with/3`) verifies provenance exactly as the live path does, stands the
+component under `wasm/policy/dry/<sha>` rather than `wasm/policy/<sha>`, and records nothing.
+Full statement, decisions S-D20 through S-D26, and what is not in it: [SELF.md §S2](SELF.md).
+
 ## 9. Deferred lanes
 
 ### 9.1 Tools (lane T)
