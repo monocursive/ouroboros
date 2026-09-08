@@ -160,6 +160,56 @@ human actor, fleet-wide replay, and the gateway verbs and `ouro policy` CLI (S2b
 
 <!-- S3 -->
 
+`bench/self/improve.sh <task.md>` runs this repository's own change protocol through
+Ouroboros native sessions: a worktree from `dev`, an implementer session, a gate, an
+adversarial reviewer session, a fix wave resumed into the implementer's own session, a
+second gate that decides, the optional corpus, the protected-namespace scan, one commit and
+`gh pr create --base dev`. The three prompts are `docs/self/briefs/implementer.md`,
+`reviewer.md` and `fix-wave.md`. `bench/self/IMPROVE.md` documents the flags, the step
+table and the environment variables.
+
+**What a test proves.** `bench/self/improve-selftest.sh` drives the whole script against
+`bench/self/lib/improve/shim-ouro.sh`, a labelled test shim standing in for the client —
+no model, no key, no network, no spend. Seventy-eight checks over five phases:
+
+- `--dry-run` prints every command with its paths resolved and creates no directory, no
+  worktree, no branch and no runtime.
+- The green pass: the worktree descends from `dev` and is on `self/improve-<slug>`; the
+  implementer, reviewer and fix-wave sessions ran, the fix wave resuming the implementer's
+  own session id; both gates ran `mix format`, `mix compile --warnings-as-errors` and the
+  touched suite, asserted on the ExUnit `Result:` line rather than on an exit code, so a
+  gate that skipped the suite is not mistaken for one that passed it; `REVIEW.md` exists;
+  `PR_BODY.md` carries the review, the task and `lib/ouroboros/control/grants.ex` with its
+  hunk header under "Human review required"; one commit carries the task title and
+  `Co-Authored-By: Ouroboros native session shim-impl` and carries neither `REVIEW.md` nor
+  `PR_BODY.md`; nothing was pushed and nothing leaked into the checkout the script ran
+  from.
+- A session that leaves the suite failing: gate 2 is red, the script exits non-zero, and
+  there is no commit, no body and no push.
+- A session that reports `completed` and changed nothing: the script refuses before it
+  gates or reviews anything.
+- A session that commits its own work, which the implementer brief tells it not to do: the
+  gates still run, and the script refuses at the commit step rather than opening a pull
+  request whose commits carry neither the task title nor the session trailer. It is
+  refused with its own message, not as "the sessions changed nothing".
+
+Eleven mutations were run against the script and each turned the selftest red: dropping the
+"Human review required" heading from the body writer; letting the commit sweep in
+`REVIEW.md` and `PR_BODY.md`; making the gate skip the touched suite; running the gate in
+the checkout instead of the worktree; letting `--dry-run` create the worktree and branch;
+narrowing the protected set so `lib/ouroboros/control/` is not scanned; skipping the fix
+wave; making a red gate 2 non-decisive; suppressing `REVIEW.md`; removing the empty-change
+refusal; and removing the self-committed-change refusal.
+
+**What is not proved.** That a model can do the work. The shim's change is a comment in
+`lib/ouroboros/control/grants.ex` and a test that cannot fail, so what the selftest
+establishes is the plumbing: the worktree, the gates, the body, the refusals and the
+commit. No session in this slice has ever been served by a real model, no pull request has
+been opened, `make test` and `mix dialyzer` have never run inside the loop (the selftest
+uses `--quick`), and the corpus step has never run at all — `bench/self/run.sh` is S0's and
+did not exist at `dev` when this was written. The first real run, with a key and a spend,
+and the pull request it produces, are the human step in the plan's §7.
+
 ### S4. Ship what it forged
 
 <!-- S4 -->
@@ -307,6 +357,74 @@ promotion is worth making, and it is in the report for an operator to read; addi
 gate would be inventing a threshold the plan did not set.
 
 <!-- S3-decisions -->
+
+**S-D30. Gate 1 records, gate 2 decides.** A red gate after the implementer stops nothing:
+the review and the fix wave exist to answer it, and a body that shows gate 1 red and gate 2
+green shows the loop working. A red gate after the fix wave stops the script before the
+commit, so nothing reaches a branch that the gates did not pass. Both rc lines go in the
+pull request body.
+
+**S-D31. Every gate carries `mix compile --warnings-as-errors`, and a diff with no test
+files does not get a free pass.** `mix test` with no arguments is the whole suite, which is
+minutes and is not this gate; a diff that touches no `test/**/*_test.exs` therefore skips
+the suite, and says so in its rc line and in the body. Compiling under
+`--warnings-as-errors` is what keeps that skip from being a hole. Without `--quick`,
+`make test` and `mix dialyzer` run too and the body says which of the two shapes it got.
+
+**S-D32. Diffs are taken against the sha the worktree was branched from, recorded once, and
+not against `dev`.** The plan says `git diff dev...HEAD`; a run is an hour and `dev` moves.
+Pinning `base_sha` at worktree creation makes the gate, the review, the scan and the body
+all describe the same change. `git add -A -N` runs before every diff, or a whole new module
+the session created is invisible to all four.
+
+**S-D33. The commit is the loop's, and it carries the loop's paperwork nowhere.**
+`REVIEW.md` and `PR_BODY.md` are evidence about the change rather than the change, so
+`git add` excludes both by pathspec and leaves them in the worktree beside the commit. The
+loop's commit always carries the task title as its subject and
+`Co-Authored-By: Ouroboros native session <id>` as its trailer — so a session that
+committed its own work, which the implementer brief tells it not to do, is refused at the
+commit step with a message naming the branch and the recovery, rather than papered over
+with an empty commit or an amend. That refusal is distinct from "the sessions changed
+nothing", because the two mean opposite things.
+
+**S-D34. The review is fenced, and the body checks itself before anything is pushed.** The
+review is the only model-written text in the pull request body; unfenced, a model that
+wrote `## Human review required` in its own review would be writing our sections for us.
+The fence is six backticks and any line that could close it early is replaced. The task,
+which a human wrote, is embedded verbatim. The protected-namespace section is then asserted
+by the body writer on every run — `--no-pr` included, so the assertion is exercised whether
+or not a pull request follows — and again immediately before `gh pr create`. A body without
+it stops the run. This is the one refusal in the loop that has nothing to do with whether
+the change is good.
+
+**S-D35. The corpus runs once, as the *after* number.** The plan asks the body for a
+before/after delta; running the corpus twice doubles a real spend, so the *before* comes
+from `BENCH_SELF_BASELINE`, a path to an earlier `bench/self` `result.json`. With no
+baseline the body says `before: not run` and names the variable rather than inventing a
+number to subtract from.
+
+**S-D36. The script never edits a git remote.** If `origin` pushes over SSH the script says
+so before it tries, and if the push fails it names `--no-pr` and says the commit is still on
+the branch. Which URL a checkout pushes over is the operator's decision; a script that
+rewrote it would be changing the operator's repository to suit itself.
+
+**S-D37. The test shim is a committed, labelled file under `bench/self/lib/improve/`, and it
+fails loudly on any flag it does not know.** A selftest whose stand-in silently ignored an
+argument would go green on a script that passes the real client something it would reject.
+`improve.sh` knows nothing about the shim: the shim recognises its role from a
+`OUROBOROS-IMPROVE-ROLE:` line the prompts carry anyway, and remembers the workspace of a
+session it started in its own state directory, because `--resume` conflicts with
+`--workspace` in the real client.
+
+**S-D38. `--dry-run` walks the whole script and executes nothing, including the client
+resolution's failure.** Asked what it would do on a checkout with no built client, it names
+the path it would have taken and says the path is not there, rather than refusing to answer.
+
+**S-D39. Two environment variables exist for the selftest and are documented for everyone.**
+`OUROBOROS_IMPROVE_WORKTREES` moves the worktree out of `.claude/worktrees`, and
+`OUROBOROS_IMPROVE_RUN_DIR` moves the daemon data dir and the logs out of a fresh
+`mktemp -d`. The selftest needs both to keep its worktrees and logs inside its own scratch;
+making them ordinary documented knobs is cheaper than a test-only code path in the script.
 
 <!-- S4-decisions -->
 
