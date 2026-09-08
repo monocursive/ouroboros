@@ -16,7 +16,7 @@ and logs nothing.
 | File | What it is |
 |---|---|
 | `<name>.ouro-wasm` | The signed bundle for the policy component the promotion record is bound to — the manifest, its signature, the precompiled artifact when the manifest declares one, and the component bytes. Byte for byte what `ouro wasm sign` produced. |
-| `promotions.json` | The policy name, its component sha256, and the tools that component had **currently** earned the right to resolve, each with the replay numbers that earned it. |
+| `promotions.json` | The policy name, its component sha256, and the **shapes** that component had **currently** earned the right to resolve, under the tool each belongs to — `tools: {"bash": {"mix test": {…}}}` — each with the replay numbers that earned it and the moment it was granted. A shape is a command prefix, the thing an operator would have written as `Bash(mix test *)`; a promotion is per `(tool, shape)` and never per tool. The file's own `version` is `2`. |
 | `signers.txt` | `signer_id:base64_public_key` — the exact line `OUROBOROS_UPGRADE_TRUSTED_SIGNERS` takes, and the one `ouro wasm keygen` printed when the key was minted. |
 
 Exactly three, and exactly one bundle: an export replaces those files with one atomic rename
@@ -42,9 +42,24 @@ was sitting next to.
 `promotions.json` is applied only over an **empty** `Ouroboros.Control.PolicyPromotion`
 record, and only for a component sha that is live on the receiving node under the name the
 file gives. A node that has promoted anything of its own keeps its own record. Each shipped
-promotion lands in the effect ledger under the actor `shipped:<sha256 of promotions.json>`,
-which is the honest answer to who promoted it: not a person, and traceable to these exact
-bytes.
+`(tool, shape)` lands in the effect ledger under the actor `shipped:<sha256 of
+promotions.json>`, which is the honest answer to who promoted it: not a person, and traceable
+to these exact bytes. A file whose `version` is not `2` is skipped by name — the version-1
+format promoted a whole tool, and there is no shape to translate that into.
+
+## Nothing here re-measures the promotion
+
+A promotion earned on a node goes through `Ouroboros.Wasm.PolicyEngine.promote/6`, which
+re-runs the replay against that node's own decision corpus and holds the counts to the
+thresholds. A promotion shipped in this directory cannot: a fresh install has no corpus, so
+the only answer that gate could give is "not earned", for a shape another machine did earn.
+So what lands here is the **exporting** node's evidence, re-verified by nothing on the
+receiving machine except the signature on the bundle beside it and the operator who put that
+key in `OUROBOROS_UPGRADE_TRUSTED_SIGNERS`. The counts in this file are numbers in a file.
+They are written into the receiving node's ledger unchanged so that what the widening was
+granted on is at least recorded where it took effect — and that, plus the empty-record and
+live-bytes conditions above, is the whole of what stands between a committed `promotions.json`
+and a widening nobody on this machine measured.
 
 ## Nothing here is a secret
 

@@ -542,7 +542,7 @@ node's `Ouroboros.Control.PolicyPromotion` record and writes three files:
 | File | What it is |
 |---|---|
 | `priv/self/<name>.ouro-wasm` | The signed bundle, assembled out of this node's own component store — the manifest, its signature, the precompiled artifact when the manifest declares one, and the component bytes. Byte for byte what `Ouroboros.Wasm.Bundle.encode/3` writes, which is what `ouro wasm sign` produced and what `ouro wasm deploy` takes. |
-| `priv/self/promotions.json` | The policy name, the component sha256, and the tools it has **currently** earned, each with its replay numbers. Ordered and pretty-printed, so a re-export that changed nothing but the clock is a one-line diff. |
+| `priv/self/promotions.json` | The policy name, the component sha256, and the **shapes** of each tool it has **currently** earned — `tools: {"bash": {"mix test": {…}}}` — each with the whole evidence map its promotion carries and the moment it was granted. Ordered and pretty-printed, so a re-export that changed nothing but the clock is a one-line diff. The file's own `version` is `2`. |
 | `priv/self/signers.txt` | `signer_id:base64_public_key` — the exact line `OUROBOROS_UPGRADE_TRUSTED_SIGNERS` takes, read out of *this* node's trust policy rather than out of the bundle. |
 
 It refuses, having written nothing, on an empty record (there is nothing an installation
@@ -584,13 +584,30 @@ would take the supervision chain with it.
 
 Then `promotions.json`, and only under two conditions: this node's promotion record is
 **empty**, and the sha the file names is `:live` here *now*, under the name the file gives.
-Each tool goes through `PolicyPromotion.promote/6` like any other promotion, so it lands in the
-effect ledger, with the actor `shipped:<sha256 of promotions.json>` — not a person, and
-traceable to the exact bytes that carried it. A node that has promoted anything of its own
-keeps its own record and the shipped one is reported as skipped rather than merged.
+Each `(tool, shape)` goes through `PolicyPromotion.promote/7` — one call each, with the
+evidence the file carried unchanged — so it lands in the effect ledger, with the actor
+`shipped:<sha256 of promotions.json>` — not a person, and traceable to the exact bytes that
+carried it. A node that has promoted anything of its own keeps its own record and the shipped
+one is reported as skipped rather than merged, and that is about the *record* and not about the
+tool: a shipped `bash`/`mix test` over a node's own `bash`/`mix format` is exactly the merge
+there is no honest answer for. A `promotions.json` whose `version` is not `2` is skipped by name
+with `{:unsupported_promotions_version, v}` (S-D52).
+
+**And that promotion is not measured here.** The gate for a promotion earned on *this* node is
+`Ouroboros.Wasm.PolicyEngine.promote/6`, which re-runs the replay against this node's own
+decision corpus and holds the counts to S-D27's thresholds. A shipped promotion cannot go
+through it: a fresh install has no corpus — that is what makes it fresh — so the only answer the
+engine could give is "not earned", for a shape another machine did earn. What is applied is the
+**exporting** node's evidence, re-verified here by nothing: not by a replay, because there is
+nothing to replay it against, and not by the counts in the file, which are numbers in a file.
+What stands behind it is the signature on the bundle it rides with and the operator who put that
+key in `OUROBOROS_UPGRADE_TRUSTED_SIGNERS`. That is why the record must be empty and the sha
+must be live first, why the file's evidence is written into the ledger unchanged rather than
+summarised, and why the actor names bytes instead of a person.
 
 Idempotent: a second boot deploys nothing (every name is already live) and promotes nothing
-(the record is no longer empty). A `priv/self` holding only its README — every ordinary
+(the record is no longer empty) — the same shapes with the same sequence numbers and the same
+`promoted_at`, not a fresh entry each. A `priv/self` holding only its README — every ordinary
 checkout — is an empty report and no log line.
 
 **What the tests prove**, with the real `no-network-shell` policy component signed by a real
@@ -598,18 +615,27 @@ checkout — is an empty report and no log line.
 `ouro-wasm` (`test/self/`):
 
 - `boot_test.exs` — a fresh install (its own register, store, helper pool and promotion record)
-  boots the exported bundle `:live` at the exporter's sha and applies the promotion, with the
-  `shipped:` actor and the evidence numbers on the record; a second boot changes neither the
-  register nor the record; a receiving node that trusts nobody skips the bundle by name with
+  boots the exported bundle `:live` at the exporter's sha and applies **both** shipped shapes of
+  `bash`, with the `shipped:` actor, each shape's own `decisions`, and all six evidence counts
+  on the record — read back through `PolicyPromotion.allowable_shapes/4`, which answers for
+  those bytes and `[]` for any others; a second boot changes neither the register nor the
+  record, and re-applies nothing (`tools` compares equal entry for entry, sequence numbers
+  included); a receiving node that trusts nobody skips the bundle by name with
   `{:untrusted_signer, …}` and promotes nothing, and `allow_unsigned: true` does not rescue it;
-  a record naming a sha, or a name, that is not live is not applied; a node with a record of its
-  own keeps it. Also that the tree starts a `:transient` task only under the switch, and that
-  the one-machine signing spec it builds loads a key and answers as its `signer_id`.
+  a record naming a sha, or a name, that is not live is not applied; a node with a shape of its
+  own keeps its record and gains neither shipped shape. Also that the tree starts a `:transient`
+  task only under the switch, and that the one-machine signing spec it builds loads a key and
+  answers as its `signer_id`.
 - `export_test.exs` — the bundle verifies under the trust policy that signed it and does not
   verify under an empty one; `signers.txt` parses back through `Self.Posture.trusted_signers/1`
-  to the key the manifest was verified against; a demoted tool is not in the record; a re-export
-  is byte-identical apart from `exported_at`; an empty record and a policy that is not live are
-  refusals that write nothing.
+  to the key the manifest was verified against; every allowable shape ships with its own
+  evidence and its `promoted_at` under `version: 2`, while a demoted shape does not and neither
+  does a tool whose every shape was demoted; a re-export is byte-identical apart from
+  `exported_at`; an empty record and a policy that is not live are refusals that write nothing.
+- `boot_test.exs`, the S4 follow-up — a `promotions.json` whose `version` is `1` (the per-tool
+  record, `tools: {"bash": {…evidence…}}`) is skipped by name, the bundle beside it still
+  deploys, and no shape named after an evidence key is promoted; a file with no `version` at all
+  is refused the same way.
 - `boot_test.exs`, after the review — a really-signed **capability** bundle dropped beside the
   policy is skipped `{:not_a_policy, :capability}` and never reaches the register; a bundle
   above the size ceiling is skipped by its `stat` without being read; a `*.ouro-wasm` that is a
@@ -1215,18 +1241,30 @@ whose policy was rolled back is a record about bytes nobody consults, and shippi
 a widening in a repository for a component the receiving node would then deploy on the strength
 of the record that came with it.
 
-**S-D43. A demoted tool is not shipped.** The export writes `status.allowable_tools` — promoted
-and not demoted since — and not `status.tools`. A demotion is the durable statement that a human
+**S-D43. A demoted shape is not shipped, and neither is a tool left with none.** The export
+writes `status.allowable` — `PolicyPromotion.allowable/3`'s answer, promoted for these bytes and
+not demoted since — and not `status.tools`. A demotion is the durable statement that a human
 contradicted this component on this machine; shipping the promotion it withdrew would re-widen
 somewhere else exactly what was narrowed here, and the receiving operator would have no way to
-see that it had ever been narrowed.
+see that it had ever been narrowed. Read out of the same `status/0` snapshot as the evidence
+beside it rather than through a second call, because two snapshots can disagree and the way they
+disagree is a shape in the file with no evidence under it.
 
-**S-D44. A shipped promotion goes through the ordinary API, with an actor that is not a
-person.** `Ouroboros.Self.Boot` calls `PolicyPromotion.promote/6` like `ouro policy promote`
-does, so a shipped widening is validated, checkpointed and ledgered exactly as a human's is. Its
-actor is `shipped:<sha256 of promotions.json>`. Inventing a person there would be a lie in the
-audit trail, and `"shipped"` alone would not say *which* file: the digest is what makes the
-entry traceable to bytes a reviewer can read.
+**S-D44. A shipped promotion goes through the record's own API, with an actor that is not a
+person — and it is measured nowhere.** `Ouroboros.Self.Boot` calls `PolicyPromotion.promote/7`
+once per `(tool, shape)`, so a shipped widening is validated, checkpointed and ledgered exactly
+as a human's is, with the actor `shipped:<sha256 of promotions.json>`. Inventing a person there
+would be a lie in the audit trail, and `"shipped"` alone would not say *which* file: the digest
+is what makes the entry traceable to bytes a reviewer can read.
+
+It does **not** go through `Ouroboros.Wasm.PolicyEngine.promote/6`, which is the gate every
+locally earned promotion goes through, because that function re-runs the replay against this
+node's own decision corpus — and a fresh install has no corpus, so the only answer it could give
+is "not earned" for a shape another machine did earn. So the honest sentence is: a shipped
+promotion is the exporting node's evidence, re-verified here by nothing but the signature on the
+bundle it rides with and the operator who trusted that key. The counts in the file are numbers
+in a file. They are carried into the ledger unchanged — all six, not a summary — so that what
+the widening was granted on is at least written down where it landed.
 
 **S-D45. Promotions are applied over an empty record and never merged.** Two records mean two
 answers to "which human promoted this", and there is no honest way to combine them. A node that
@@ -1330,6 +1368,17 @@ because of where its file was rather than because anyone promoted it. And `Wasm.
 one supervisor: `Task.start_link` returns as soon as the process exists, and every decision
 `Self.Boot` makes — is this name already live, is this sha live now — is a question about the
 register `Wasm.Boot` is busy restarting into.
+
+**S-D52. `promotions.json` carries its own version, and a version 1 is refused rather than
+translated.** The first S4 export wrote `version: 1` and `tools: {"<tool>": {…evidence…}}` — a
+promotion of the *tool*, which is the right to resolve every call to it and the widening the S2a
+wave removed after a blanket-allow component cleared the old thresholds on fifty harmless
+approvals (S-D27). Version 2 is `tools: {"<tool>": {"<shape>": {…evidence…, promoted_at}}}`.
+Nothing else in the file tells the two apart — both are a JSON object under a tool name — and a
+v1 file read as a v2 would promote shapes called `"decisions"` and `"report_sha256"`. There is
+no shape that means "every `bash` call", so there is nothing to translate a v1 promotion into: it
+is skipped by name with `{:unsupported_promotions_version, v}`, the bundle beside it still
+deploys, and the node boots with the rules it shipped with.
 
 ## 5. Open
 

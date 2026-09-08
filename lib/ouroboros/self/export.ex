@@ -4,11 +4,11 @@ defmodule Ouroboros.Self.Export do
   (docs/SELF.md §S4, S-D42).
 
   A promotion is durable node-local state: `Ouroboros.Control.PolicyPromotion` holds one
-  policy name, the component sha256 it is bound to, and the tools that component earned the
-  right to resolve, each with the replay numbers that earned it. None of that is in the
-  repository, so a fresh clone of this runtime starts with the rules it shipped with and
-  nothing a previous installation was taught. This is the file half of that gap; the boot
-  half is `Ouroboros.Self.Boot`.
+  policy name, the component sha256 it is bound to, and the **shapes** of each tool that
+  component earned the right to resolve, each with the replay numbers that earned it. None
+  of that is in the repository, so a fresh clone of this runtime starts with the rules it
+  shipped with and nothing a previous installation was taught. This is the file half of that
+  gap; the boot half is `Ouroboros.Self.Boot`.
 
   Three files, and each is one thing:
 
@@ -16,9 +16,12 @@ defmodule Ouroboros.Self.Export do
       signed manifest, the precompiled artifact when the manifest declares one, and the
       component bytes. Byte for byte what `Ouroboros.Wasm.Bundle.encode/3` writes, which is
       byte for byte what `ouro wasm sign` produced, and what `ouro wasm deploy` takes.
-    * `promotions.json` — the record: the policy name, the sha, and the tools **currently
-      allowable** with their evidence. Not the tools that were ever promoted: a tool a human
-      contradicted on this machine is a tool this machine narrowed, and shipping its
+    * `promotions.json` — the record: the policy name, the sha, and the shapes **currently
+      allowable** under each tool, with the evidence that earned them. A shape and not a
+      tool, because that is what a promotion is (S-D27): the right to resolve `bash` is the
+      right to resolve every `bash` call this node will ever make, and no corpus of past
+      answers is evidence for that. And not the shapes that were ever promoted: a shape a
+      human contradicted on this machine is a shape this machine narrowed, and shipping its
       promotion would re-widen it somewhere else (S-D43).
     * `signers.txt` — `signer_id:base64_public_key`, the exact line
       `OUROBOROS_UPGRADE_TRUSTED_SIGNERS` takes and `ouro wasm keygen` prints. It is not a
@@ -70,7 +73,14 @@ defmodule Ouroboros.Self.Export do
   @default_out "priv/self"
   @promotions "promotions.json"
   @signers "signers.txt"
-  @record_version 1
+
+  # Version 2 is the per-shape record, and it is the file's own version rather than the
+  # checkpoint's: `tools` holds `%{tool => %{shape => evidence}}` where version 1 held
+  # `%{tool => evidence}`. The two cannot be told apart by anything but this number — both are
+  # a JSON object under a tool name — and reading a v1 file as if the evidence keys were shape
+  # names would promote a shape called `"decisions"`. `Ouroboros.Self.Boot` refuses anything
+  # that is not exactly this.
+  @record_version 2
 
   @type report :: %{
           out: Path.t(),
@@ -81,6 +91,7 @@ defmodule Ouroboros.Self.Export do
           component_sha256: String.t(),
           signer_id: String.t(),
           tools: [String.t()],
+          shapes: %{String.t() => [String.t()]},
           bundle_bytes: pos_integer(),
           removed: [String.t()]
         }
@@ -192,7 +203,7 @@ defmodule Ouroboros.Self.Export do
     case status do
       %{policy_name: name, component_sha256: sha}
       when is_binary(name) and name != "" and is_binary(sha) ->
-        {:ok, name, sha, evidence(status)}
+        {:ok, name, sha, shipped(status)}
 
       %{error: reason} ->
         {:error, {:policy_promotion_unavailable, reason}}
@@ -202,13 +213,20 @@ defmodule Ouroboros.Self.Export do
     end
   end
 
-  # The tools currently allowable and their evidence, keyed by tool. `allowable_tools` is
-  # already "promoted and not demoted since", so a demotion drops a tool out of the export
-  # without this module knowing what a demotion is.
-  defp evidence(%{allowable_tools: allowable, tools: tools}) do
-    Map.new(allowable, fn tool ->
-      entry = Map.get(tools, tool, %{})
-      {tool, Map.get(entry, :evidence, %{})}
+  # The shapes currently allowable under each tool, with the whole promotion entry behind
+  # each one: `%{tool => %{shape => %{promoted_at: …, evidence: %{…}}}}`.
+  #
+  # `status.allowable` is `PolicyPromotion.allowable/3`'s answer for the record's own binding
+  # — "promoted for these bytes, and not demoted since" — so a demotion drops a shape out of
+  # the export without this module knowing what a demotion is (S-D43), and a tool whose every
+  # shape was demoted drops out with them. Taken out of the same `status/0` reply as
+  # `status.tools` rather than from a second `allowable/3` call, deliberately: two calls are
+  # two snapshots, and a promotion landing between them would put a shape in this file with no
+  # evidence beside it.
+  defp shipped(%{allowable: allowable, tools: tools}) do
+    Map.new(allowable, fn {tool, shapes} ->
+      promoted = Map.get(tools, tool, %{})
+      {tool, Map.new(shapes, &{&1, Map.get(promoted, &1, %{})})}
     end)
   end
 
@@ -361,9 +379,13 @@ defmodule Ouroboros.Self.Export do
   end
 
   defp settled(out, basename, name, sha, tools, signer_id, bundle, removed) do
+    shapes =
+      Map.new(tools, fn {tool, promoted} -> {tool, promoted |> Map.keys() |> Enum.sort()} end)
+
     Logger.info(
       "self export: #{name} at #{String.slice(sha, 0, 12)} signed by #{signer_id}, " <>
-        "#{length(Map.keys(tools))} promoted tool(s) into #{out}" <> removed_detail(removed)
+        "#{shapes |> Map.values() |> Enum.map(&length/1) |> Enum.sum()} promoted shape(s) " <>
+        "over #{map_size(shapes)} tool(s) into #{out}" <> removed_detail(removed)
     )
 
     {:ok,
@@ -376,6 +398,7 @@ defmodule Ouroboros.Self.Export do
        component_sha256: sha,
        signer_id: signer_id,
        tools: tools |> Map.keys() |> Enum.sort(),
+       shapes: shapes,
        bundle_bytes: byte_size(bundle),
        removed: removed
      }}
@@ -425,6 +448,10 @@ defmodule Ouroboros.Self.Export do
   @doc """
   The bytes `promotions.json` holds, for a caller that wants the record without a directory.
 
+  `tools` is `%{tool => %{shape => %{promoted_at: …, evidence: %{…}}}}` — the entries
+  `Ouroboros.Control.PolicyPromotion.status/0` keeps, for the shapes it currently calls
+  allowable.
+
   Public so `Ouroboros.Self.Boot`'s tests can build one by hand and so the drift between
   what is written and what is read is one function rather than two literals.
   """
@@ -442,20 +469,46 @@ defmodule Ouroboros.Self.Export do
       {"tools",
        tools
        |> Enum.sort_by(&elem(&1, 0))
-       |> Enum.map(fn {tool, evidence} -> {tool, tool_document(evidence)} end)}
+       |> Enum.map(fn {tool, shapes} -> {tool, tool_document(shapes)} end)}
     ])
   end
 
-  defp tool_document(evidence) when is_map(evidence) do
+  defp tool_document(shapes) when is_map(shapes) do
+    shapes
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.map(fn {shape, entry} -> {shape, shape_document(entry)} end)
+  end
+
+  defp tool_document(_other), do: []
+
+  # The whole evidence map the record holds for this shape, and the moment it was promoted.
+  # Every count and not only the two the thresholds used to be written in terms of: what makes
+  # `distinct_fingerprints`, `distinct_sessions` and `would_resolve` worth carrying is that
+  # they are the numbers that say the corpus was more than one answer repeated (S-D27), and a
+  # receiving operator reading this file has nothing else to judge the widening by.
+  #
+  # `promoted_at` is when it was promoted **here**, and it is for the person reading the file:
+  # `Ouroboros.Self.Boot` does not carry it into the receiving record, which stamps its own —
+  # a shipped promotion took effect there when that node applied it, and back-dating it would
+  # put a time on that machine's audit trail at which nothing happened on it.
+  #
+  # Not the actor. The promotion this file lands as on the receiving node is that node's, under
+  # `shipped:<digest of these bytes>`; carrying `operator:ana` across would put a person's name
+  # on a machine where they promoted nothing.
+  defp shape_document(%{evidence: evidence} = entry) when is_map(evidence) do
     [
+      {"promoted_at", Map.get(entry, :promoted_at, "")},
       {"decisions", Map.get(evidence, :decisions, 0)},
       {"contradictions", Map.get(evidence, :contradictions, 0)},
+      {"distinct_fingerprints", Map.get(evidence, :distinct_fingerprints, 0)},
+      {"distinct_sessions", Map.get(evidence, :distinct_sessions, 0)},
+      {"would_resolve", Map.get(evidence, :would_resolve, 0)},
       {"report_sha256", Map.get(evidence, :report_sha256, "")},
       {"replayed_at", Map.get(evidence, :replayed_at, "")}
     ]
   end
 
-  defp tool_document(_other), do: []
+  defp shape_document(_other), do: []
 
   ## ── a deterministic pretty JSON, because a human reads this diff ──────────────────────
 

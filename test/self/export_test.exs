@@ -45,7 +45,8 @@ defmodule Ouroboros.Self.ExportTest do
         PolicyPromotion.promote(
           "no-network-shell",
           sha,
-          "read",
+          Fixture.tool(),
+          Fixture.shape(),
           Fixture.evidence(),
           "operator:ana",
           context.promotion
@@ -74,7 +75,8 @@ defmodule Ouroboros.Self.ExportTest do
         PolicyPromotion.promote(
           live.name,
           live.sha,
-          "read",
+          Fixture.tool(),
+          Fixture.shape(),
           Fixture.evidence(112, 0),
           "operator:ana",
           context.promotion
@@ -92,7 +94,8 @@ defmodule Ouroboros.Self.ExportTest do
       assert report.policy_name == "no-network-shell"
       assert report.component_sha256 == live.sha
       assert report.signer_id == live.signer
-      assert report.tools == ["read"]
+      assert report.tools == ["bash"]
+      assert report.shapes == %{"bash" => ["mix test"]}
 
       # The bundle is a bundle: it verifies against the policy that signed it, and it
       # carries the exact component bytes the node is running.
@@ -130,40 +133,103 @@ defmodule Ouroboros.Self.ExportTest do
       assert record["exported_by"] == Atom.to_string(node())
       assert {:ok, _at, _offset} = DateTime.from_iso8601(record["exported_at"])
 
+      # Version 2 and the per-shape record: the shapes live under the tool, and each one
+      # carries the whole evidence map the promotion was granted on — all six counts, not
+      # the two the first thresholds were written in terms of — plus the moment it was
+      # granted. Drop any of `distinct_fingerprints`, `distinct_sessions` or
+      # `would_resolve` from the export and the receiving node's ledger entry understates
+      # what the widening was earned on.
+      assert record["version"] == 2
+
+      promoted_at = record["tools"]["bash"]["mix test"]["promoted_at"]
+      assert {:ok, _promoted, _offset} = DateTime.from_iso8601(promoted_at)
+
       assert record["tools"] == %{
-               "read" => %{
-                 "decisions" => 112,
-                 "contradictions" => 0,
-                 "report_sha256" => String.duplicate("a", 64),
-                 "replayed_at" => "2026-09-08T00:00:00Z"
+               "bash" => %{
+                 "mix test" => %{
+                   "promoted_at" => promoted_at,
+                   "decisions" => 112,
+                   "contradictions" => 0,
+                   "distinct_fingerprints" => 24,
+                   "distinct_sessions" => 3,
+                   "would_resolve" => 11,
+                   "report_sha256" => String.duplicate("a", 64),
+                   "replayed_at" => "2026-09-08T00:00:00Z"
+                 }
                }
              }
     end
 
     @tag @needs_live
-    test "a tool a human contradicted is not shipped", context do
+    test "every allowable shape ships, each with its own evidence", context do
+      live = Fixture.live_policy!(context.tmp)
+
+      for {shape, decisions} <- [{"mix test", 112}, {"git status", 61}] do
+        {:ok, _record} =
+          PolicyPromotion.promote(
+            live.name,
+            live.sha,
+            "bash",
+            shape,
+            Fixture.evidence(decisions, 0),
+            "operator:ana",
+            context.promotion
+          )
+      end
+
+      assert {:ok, report} =
+               Export.run(
+                 out: Path.join(context.tmp, "out"),
+                 promotion: context.promotion,
+                 registry: live.registry,
+                 store_root: live.store_root,
+                 trust_policy: live.trust_policy
+               )
+
+      assert report.tools == ["bash"]
+      assert report.shapes == %{"bash" => ["git status", "mix test"]}
+
+      record = report.promotions |> File.read!() |> JSON.decode!()
+
+      # Each shape's own numbers under its own key, and not one tool's evidence copied
+      # across both: the record holds a promotion per `(tool, shape)` and so does the file.
+      assert record["tools"]["bash"]["mix test"]["decisions"] == 112
+      assert record["tools"]["bash"]["git status"]["decisions"] == 61
+    end
+
+    @tag @needs_live
+    test "a shape a human contradicted is not shipped, nor a tool left with none", context do
       live = Fixture.live_policy!(context.tmp)
       out = Path.join(context.tmp, "out")
 
-      for tool <- ["read", "grep"] do
+      for {tool, shape} <- [
+            {"bash", "mix test"},
+            {"bash", "mix format"},
+            {"grep", "ouroboros"}
+          ] do
         {:ok, _record} =
           PolicyPromotion.promote(
             live.name,
             live.sha,
             tool,
+            shape,
             Fixture.evidence(),
             "operator:ana",
             context.promotion
           )
       end
 
-      :ok =
-        PolicyPromotion.demote(
-          live.name,
-          "grep",
-          %{reason: :human_contradiction},
-          context.promotion
-        )
+      # One shape of a tool that keeps another, and the only shape of a tool that does not.
+      for {tool, shape} <- [{"bash", "mix format"}, {"grep", "ouroboros"}] do
+        :ok =
+          PolicyPromotion.demote(
+            live.name,
+            tool,
+            shape,
+            %{reason: :human_contradiction},
+            context.promotion
+          )
+      end
 
       assert {:ok, report} =
                Export.run(
@@ -174,13 +240,16 @@ defmodule Ouroboros.Self.ExportTest do
                  trust_policy: live.trust_policy
                )
 
-      # S-D43. Shipping a demoted tool's promotion would re-widen somewhere else exactly
-      # what a human narrowed here. Export `status.tools` instead of `allowable_tools` and
-      # this goes red.
-      assert report.tools == ["read"]
+      # S-D43. Shipping a demoted shape's promotion would re-widen somewhere else exactly
+      # what a human narrowed here — and a tool whose every shape was contradicted leaves
+      # with them, rather than shipping as a tool with an empty object under it. Export
+      # `status.tools` instead of `status.allowable` and this goes red both ways.
+      assert report.tools == ["bash"]
+      assert report.shapes == %{"bash" => ["mix test"]}
 
       record = report.promotions |> File.read!() |> JSON.decode!()
-      assert Map.keys(record["tools"]) == ["read"]
+      assert Map.keys(record["tools"]) == ["bash"]
+      assert Map.keys(record["tools"]["bash"]) == ["mix test"]
     end
 
     @tag @needs_live
@@ -192,7 +261,8 @@ defmodule Ouroboros.Self.ExportTest do
         PolicyPromotion.promote(
           live.name,
           live.sha,
-          "read",
+          Fixture.tool(),
+          Fixture.shape(),
           Fixture.evidence(),
           "operator:ana",
           context.promotion
@@ -225,7 +295,8 @@ defmodule Ouroboros.Self.ExportTest do
         PolicyPromotion.promote(
           live.name,
           live.sha,
-          "read",
+          Fixture.tool(),
+          Fixture.shape(),
           Fixture.evidence(),
           "operator:ana",
           context.promotion
@@ -245,13 +316,21 @@ defmodule Ouroboros.Self.ExportTest do
       assert String.starts_with?(text, "{\n")
       assert String.ends_with?(text, "}\n")
       assert text =~ ~s(  "policy_name": "no-network-shell")
-      assert text =~ ~s(      "decisions": 57)
+
+      # One level deeper than it used to be: the tool at four spaces, the shape under it at
+      # six, and the evidence at eight. A person reading this diff sees which prefix earned
+      # what, indented under the tool it belongs to.
+      assert text =~ ~s(    "bash": {)
+      assert text =~ ~s(      "mix test": {)
+      assert text =~ ~s(        "decisions": 57)
+      assert text =~ ~s(        "distinct_fingerprints": 24)
 
       # The keys come out in the order the module writes them, not in the order a map
       # iterates: a diff a person reads should not reorder itself.
       assert index(text, "\"version\"") < index(text, "\"policy_name\"")
       assert index(text, "\"policy_name\"") < index(text, "\"component_sha256\"")
       assert index(text, "\"signer_id\"") < index(text, "\"tools\"")
+      assert index(text, "\"promoted_at\"") < index(text, "\"decisions\"")
     end
   end
 
@@ -269,7 +348,8 @@ defmodule Ouroboros.Self.ExportTest do
         PolicyPromotion.promote(
           live.name,
           live.sha,
-          "read",
+          Fixture.tool(),
+          Fixture.shape(),
           Fixture.evidence(),
           "operator:ana",
           context.promotion
@@ -321,7 +401,8 @@ defmodule Ouroboros.Self.ExportTest do
         PolicyPromotion.promote(
           live.name,
           live.sha,
-          "read",
+          Fixture.tool(),
+          Fixture.shape(),
           Fixture.evidence(),
           "operator:ana",
           context.promotion
@@ -404,7 +485,8 @@ defmodule Ouroboros.Self.ExportTest do
         PolicyPromotion.promote(
           live.name,
           live.sha,
-          "read",
+          Fixture.tool(),
+          Fixture.shape(),
           Fixture.evidence(),
           "operator:ana",
           context.promotion
@@ -435,7 +517,8 @@ defmodule Ouroboros.Self.ExportTest do
         PolicyPromotion.promote(
           live.name,
           live.sha,
-          "read",
+          Fixture.tool(),
+          Fixture.shape(),
           Fixture.evidence(),
           "operator:ana",
           context.promotion
@@ -487,7 +570,8 @@ defmodule Ouroboros.Self.ExportTest do
         PolicyPromotion.promote(
           live.name,
           live.sha,
-          "read",
+          Fixture.tool(),
+          Fixture.shape(),
           Fixture.evidence(),
           "operator:ana",
           context.promotion

@@ -43,23 +43,55 @@ defmodule Ouroboros.Self.BootTest do
 
       assert [%{name: "no-network-shell", kind: :policy}] = report.deployed
       assert report.skipped == []
-      assert report.promoted == ["read"]
+      assert report.promoted == [{"bash", "git status"}, {"bash", "mix test"}]
       assert report.promotions == :applied
 
       # The register of the *receiving* node says it is running, at the sha the exporter ran.
-      assert [entry] = Registry.live(install.registry)
-      assert entry.module == "wasm/no-network-shell"
-      assert entry.component_sha256 == live.sha
+      assert [live_entry] = Registry.live(install.registry)
+      assert live_entry.module == "wasm/no-network-shell"
+      assert live_entry.component_sha256 == live.sha
 
-      # And its promotion record allows exactly the tool the record shipped, bound to those
+      # And its promotion record allows exactly the shapes the record shipped, bound to those
       # bytes, under an actor naming the file that carried it.
       status = PolicyPromotion.status(install.promotion)
       assert status.policy_name == "no-network-shell"
       assert status.component_sha256 == live.sha
-      assert status.allowable_tools == ["read"]
-      assert status.tools["read"].actor == actor(export)
-      assert status.tools["read"].evidence.decisions == 57
-      assert status.tools["read"].evidence.report_sha256 == String.duplicate("a", 64)
+      assert status.allowable == %{"bash" => ["git status", "mix test"]}
+      assert status.allowable_tools == ["bash"]
+
+      # The whole evidence map made the round trip through the file: all six counts and the
+      # replay's own timestamp, not the two the first thresholds were written in terms of.
+      # `PolicyPromotion` counts an absent one as `0`, so an export or a boot that dropped
+      # `distinct_fingerprints` would land here as a promotion granted on nothing.
+      entry = status.tools["bash"]["mix test"]
+      assert entry.actor == actor(export)
+      assert entry.evidence.decisions == 57
+      assert entry.evidence.contradictions == 0
+      assert entry.evidence.distinct_fingerprints == 24
+      assert entry.evidence.distinct_sessions == 3
+      assert entry.evidence.would_resolve == 11
+      assert entry.evidence.report_sha256 == String.duplicate("a", 64)
+      assert entry.evidence.replayed_at == "2026-09-08T00:00:00Z"
+
+      # Each shape kept its own numbers rather than one tool's copied across both.
+      assert status.tools["bash"]["git status"].evidence.decisions == 61
+      assert status.tools["bash"]["git status"].actor == actor(export)
+
+      # And through the gated reader the permission path actually asks, which answers for
+      # these bytes and for no others.
+      assert PolicyPromotion.allowable_shapes(
+               "no-network-shell",
+               live.sha,
+               "bash",
+               install.promotion
+             ) == ["git status", "mix test"]
+
+      assert PolicyPromotion.allowable_shapes(
+               "no-network-shell",
+               String.duplicate("b", 64),
+               "bash",
+               install.promotion
+             ) == []
     end
 
     @tag @needs_live
@@ -82,6 +114,28 @@ defmodule Ouroboros.Self.BootTest do
 
       assert Registry.live(install.registry) == before
       assert PolicyPromotion.status(install.promotion) == recorded
+    end
+
+    @tag @needs_live
+    test "a second boot re-applies nothing", context do
+      %{export: export} = exported!(context)
+      install = install!(context)
+      opts = ship_opts(export, install)
+
+      first = Boot.ship(opts)
+      assert first.promoted == [{"bash", "git status"}, {"bash", "mix test"}]
+      applied = PolicyPromotion.status(install.promotion).tools
+
+      second = Boot.ship(opts)
+
+      assert second.promoted == []
+      assert second.promotions == {:skipped, {:record_bound_to, "no-network-shell"}}
+
+      # Not merely "no shape was added": the same shapes, with the same sequence numbers and
+      # the same `promoted_at`. A shipped promotion re-applied over itself would replace each
+      # entry with a fresh one, move the record's counter past every demotion recorded since,
+      # and write a second ledger entry for a widening that was granted once.
+      assert PolicyPromotion.status(install.promotion).tools == applied
     end
   end
 
@@ -163,17 +217,61 @@ defmodule Ouroboros.Self.BootTest do
       assert {:skipped, {:policy_not_live, "some-other-policy", _sha}} = report.promotions
     end
 
+    # The S4 follow-up. The first S4 export wrote `version: 1` and `tools: %{tool => evidence}`
+    # — a promotion of the *tool*, which is the widening the S2a wave removed after a
+    # blanket-allow component cleared the old thresholds on fifty harmless approvals. A file
+    # like that is refused by its version rather than translated: there is no shape that means
+    # "every `bash` call", and read as a v2 file its evidence keys would become shape names.
+    @tag @needs_live
+    test "a v1 promotions.json is skipped by name, and promotes no shape", context do
+      %{export: export, live: live} = exported!(context)
+      install = install!(context)
+
+      v1 =
+        export.promotions
+        |> File.read!()
+        |> JSON.decode!()
+        |> Map.put("version", 1)
+        |> Map.put("tools", %{
+          "bash" => %{
+            "decisions" => 57,
+            "contradictions" => 0,
+            "report_sha256" => String.duplicate("a", 64),
+            "replayed_at" => "2026-09-08T00:00:00Z"
+          }
+        })
+
+      File.write!(export.promotions, JSON.encode!(v1))
+
+      report = Boot.ship(ship_opts(export, install))
+
+      # The bundle is the same bundle and still deploys; it is the record that is refused.
+      # And nothing else refuses it: this install's record is empty and the sha the file
+      # names is live here, so the version is the only thing standing between a v1 file and
+      # a promotion of the whole `bash` tool.
+      assert length(report.deployed) == 1
+      assert report.promoted == []
+      assert report.promotions == {:skipped, {:unsupported_promotions_version, 1}}
+
+      # Nothing at all, and in particular no shape named after an evidence key.
+      assert PolicyPromotion.status(install.promotion).policy_name == nil
+      assert PolicyPromotion.allowable("no-network-shell", live.sha, install.promotion) == %{}
+    end
+
     @tag @needs_live
     test "a node that has already promoted something of its own keeps its own record",
          context do
       %{export: export, live: live} = exported!(context)
       install = install!(context)
 
+      # A shape of its own, under the same policy and the same bytes the file names — the
+      # closest case to a merge there is, and still not one.
       {:ok, _record} =
         PolicyPromotion.promote(
           "no-network-shell",
           live.sha,
-          "grep",
+          "bash",
+          "mix format",
           Fixture.evidence(9, 0),
           "operator:ana",
           install.promotion
@@ -185,8 +283,14 @@ defmodule Ouroboros.Self.BootTest do
       assert {:skipped, {:record_bound_to, "no-network-shell"}} = report.promotions
 
       status = PolicyPromotion.status(install.promotion)
-      assert status.allowable_tools == ["grep"]
-      assert status.tools["grep"].actor == "operator:ana"
+      assert status.allowable == %{"bash" => ["mix format"]}
+      assert status.tools["bash"]["mix format"].actor == "operator:ana"
+
+      # And neither shipped shape was added beside it: S-D45 is about the record, not about
+      # the tool — a shipped `(bash, "mix test")` over a node's own `(bash, "mix format")` is
+      # exactly the merge there is no honest answer for.
+      refute Map.has_key?(status.tools["bash"], "mix test")
+      refute Map.has_key?(status.tools["bash"], "git status")
     end
   end
 
@@ -335,6 +439,31 @@ defmodule Ouroboros.Self.BootTest do
       report = Boot.ship(root: root, registry: Fixture.registry!())
 
       assert report.promotions == {:skipped, {:not_a_regular_file, :directory}}
+      assert report.promoted == []
+    end
+
+    # The S4 follow-up. A `promotions.json` says which shape of the record it is, and this
+    # build reads exactly one — nothing else in the file tells a v1 from a v2, because both
+    # are a JSON object under a tool name. Asked before the record-empty and live-bytes gates,
+    # which is why the reason here is the version and not `{:policy_not_live, …}`: this
+    # register holds nothing at all.
+    test "a promotions.json with no version at all is not read", context do
+      root = Path.join(context.tmp, "priv-self-record-unversioned")
+      File.mkdir_p!(root)
+
+      File.write!(
+        Path.join(root, "promotions.json"),
+        JSON.encode!(%{
+          "policy_name" => "no-network-shell",
+          "component_sha256" => String.duplicate("a", 64),
+          "tools" => %{"bash" => %{"mix test" => %{}}}
+        })
+      )
+
+      report =
+        Boot.ship(root: root, registry: Fixture.registry!(), promotion: Fixture.promotion!())
+
+      assert report.promotions == {:skipped, {:unsupported_promotions_version, nil}}
       assert report.promoted == []
     end
   end
@@ -564,19 +693,26 @@ defmodule Ouroboros.Self.BootTest do
   ## helpers
 
   # A real export, written by the real task, out of a real live deployment.
+  #
+  # Two shapes of one tool, with different evidence, so a boot that applied the first and
+  # stopped — or applied one tool's evidence to every shape under it — is a red test rather
+  # than a passing one.
   defp exported!(context) do
     live = Fixture.live_policy!(context.tmp)
     promotion = Fixture.promotion!()
 
-    {:ok, _record} =
-      PolicyPromotion.promote(
-        live.name,
-        live.sha,
-        "read",
-        Fixture.evidence(),
-        "operator:ana",
-        promotion
-      )
+    for {shape, decisions} <- [{"mix test", 57}, {"git status", 61}] do
+      {:ok, _record} =
+        PolicyPromotion.promote(
+          live.name,
+          live.sha,
+          Fixture.tool(),
+          shape,
+          Fixture.evidence(decisions, 0),
+          "operator:ana",
+          promotion
+        )
+    end
 
     {:ok, report} =
       Export.run(

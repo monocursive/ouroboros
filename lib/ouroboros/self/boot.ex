@@ -42,17 +42,41 @@ defmodule Ouroboros.Self.Boot do
 
   ## Promotions are applied over an empty record and nowhere else
 
-  `promotions.json` is a widening — it says which tools a policy component may resolve an
-  `allow` for — so it is applied only when this node's `Ouroboros.Control.PolicyPromotion`
-  record is **empty**, and only for a component sha that is `:live` here *now*, under the
-  name the file names. A node that has promoted anything of its own keeps its own record;
-  the shipped one is reported as skipped rather than merged, because merging two records
-  would be inventing an answer to "which human promoted this".
+  `promotions.json` is a widening — it says which **shapes** of which tools a policy
+  component may resolve an `allow` for — so it is applied only when this node's
+  `Ouroboros.Control.PolicyPromotion` record is **empty**, and only for a component sha that
+  is `:live` here *now*, under the name the file names. A node that has promoted anything of
+  its own keeps its own record; the shipped one is reported as skipped rather than merged,
+  because merging two records would be inventing an answer to "which human promoted this".
 
-  Each promotion goes through `PolicyPromotion.promote/6` like any other, so it lands in the
-  effect ledger with an actor: `"shipped:<sha256 of promotions.json>"`. That string is the
-  honest answer to "who promoted this tool on this machine" — not a person, and traceable
-  to the exact bytes that carried it.
+  Each `(tool, shape)` goes through `PolicyPromotion.promote/7`, one call each, so a shipped
+  widening is validated, checkpointed and ledgered exactly as a human's is — with an actor:
+  `"shipped:<sha256 of promotions.json>"`. That string is the honest answer to "who promoted
+  this shape on this machine" — not a person, and traceable to the exact bytes that carried
+  it.
+
+  ## And what that costs, said out loud
+
+  `PolicyPromotion.promote/7` is `@doc false`, because the gate for a promotion earned
+  *here* is `Ouroboros.Wasm.PolicyEngine.promote/6`: it re-runs the replay against this
+  node's own decision corpus and holds the counts to the thresholds. A shipped promotion
+  cannot go through it. A fresh install has no corpus — that is what makes it fresh — so the
+  only answer the engine could give is "not earned", for a shape another machine did earn.
+
+  So this is the exporting node's evidence, re-verified here by **nothing**: not by a replay,
+  because there is nothing to replay it against, and not by these counts, which are numbers
+  in a file. What stands behind it is the signature on the bundle it rides with and the
+  operator who put that key in `OUROBOROS_UPGRADE_TRUSTED_SIGNERS`. That is why the record
+  has to be empty and the sha has to be live before a single shape is applied, why the file's
+  evidence is written into the ledger unchanged rather than summarised, and why the actor
+  names bytes instead of a person.
+
+  ## Version 2, and a version 1 is refused
+
+  A version-1 `promotions.json` held `tools: %{tool => evidence}` — the right to resolve
+  *every* call to a tool, which is the widening the S2a wave removed. It is skipped by name
+  with `{:unsupported_promotions_version, v}`: there is no honest shape to invent for it, and
+  read as if its evidence keys were shape names it would promote a shape called `"decisions"`.
 
   ## Idempotent
 
@@ -69,16 +93,20 @@ defmodule Ouroboros.Self.Boot do
 
   @promotions "promotions.json"
 
-  # A record of counts and names. Sixteen tools with their evidence is a few kilobytes;
-  # this is three orders of magnitude above every legitimate value and small enough that a
-  # hostile file is a refusal rather than a parse.
+  # The only `promotions.json` this build reads: the per-`(tool, shape)` record
+  # `Ouroboros.Self.Export` writes. See "Version 2, and a version 1 is refused" above.
+  @record_version 2
+
+  # A record of counts and names. Sixteen tools with their shapes and evidence is a few
+  # kilobytes; this is three orders of magnitude above every legitimate value and small enough
+  # that a hostile file is a refusal rather than a parse.
   @max_promotions_bytes 256 * 1024
 
   @type report :: %{
           root: Path.t() | nil,
           deployed: [map()],
           skipped: [map()],
-          promoted: [String.t()],
+          promoted: [{String.t(), String.t()}],
           promotions: atom() | tuple()
         }
 
@@ -298,20 +326,25 @@ defmodule Ouroboros.Self.Boot do
   defp bounded(size), do: {:error, {:promotions_size, size}}
 
   # The bytes that carried the promotion, named by their digest. Not a person: this is the
-  # honest answer to "who promoted this tool on this machine", and it points at the exact
+  # honest answer to "who promoted this shape on this machine", and it points at the exact
   # file a reviewer can read.
   defp actor(bytes), do: "shipped:" <> Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
 
   defp apply_record(report, record, actor, opts) do
     server = Keyword.get(opts, :promotion, PolicyPromotion)
 
-    with {:ok, name, sha, tools} <- fields(record),
+    with {:ok, name, sha, shapes} <- fields(record),
          :ok <- record_empty(server),
          :ok <- live_here(name, sha, opts) do
-      Enum.reduce(tools, %{report | promotions: :applied}, fn {tool, evidence}, acc ->
-        case PolicyPromotion.promote(name, sha, tool, evidence, actor, server) do
-          {:ok, _record} -> %{acc | promoted: acc.promoted ++ [tool]}
-          {:error, reason} -> %{acc | promotions: {:partial, tool, reason}}
+      # One `(tool, shape)` per call, through the record's own API and not through
+      # `Ouroboros.Wasm.PolicyEngine.promote/6` — the gate a promotion earned *here* goes
+      # through, which re-runs the replay against a decision corpus this install does not have.
+      # See "And what that costs, said out loud" above: what is applied here is the exporting
+      # node's evidence, re-verified by the signature on the bundle and by nothing else.
+      Enum.reduce(shapes, %{report | promotions: :applied}, fn {tool, shape, evidence}, acc ->
+        case PolicyPromotion.promote(name, sha, tool, shape, evidence, actor, server) do
+          {:ok, _record} -> %{acc | promoted: acc.promoted ++ [{tool, shape}]}
+          {:error, reason} -> %{acc | promotions: {:partial, tool, shape, reason}}
         end
       end)
     else
@@ -320,31 +353,53 @@ defmodule Ouroboros.Self.Boot do
   end
 
   defp fields(record) do
-    with name when is_binary(name) and name != "" <- Map.get(record, "policy_name"),
+    with :ok <- version(Map.get(record, "version")),
+         name when is_binary(name) and name != "" <- Map.get(record, "policy_name"),
          sha when is_binary(sha) <- Map.get(record, "component_sha256"),
          tools when is_map(tools) <- Map.get(record, "tools", %{}) do
-      {:ok, name, sha, Enum.sort_by(evidence(tools), &elem(&1, 0))}
+      {:ok, name, sha, shapes(tools)}
     else
+      {:error, reason} -> {:error, reason}
       _malformed -> {:error, :invalid_promotions_record}
     end
   end
 
-  # `PolicyPromotion.promote/6` validates every one of these itself and refuses anything it
-  # does not recognise. What this does is translate the file's strings into the atom-keyed
-  # map that function's contract names, and drop a tool whose evidence is not a map before
-  # the call rather than after it.
-  defp evidence(tools) do
-    tools
-    |> Enum.filter(fn {tool, evidence} -> is_binary(tool) and is_map(evidence) end)
-    |> Enum.map(fn {tool, evidence} ->
-      {tool,
+  # The file says which shape of the record it is, and this build reads exactly one. A v1
+  # file's `tools` is `%{tool => evidence}` and a v2 file's is `%{tool => %{shape => evidence}}`
+  # — both a JSON object under a tool name, so nothing but this number tells them apart, and a
+  # v1 file read as v2 would promote shapes called `"decisions"` and `"report_sha256"`. There is
+  # no shape to invent for a promotion that was written to cover a whole tool, so it is skipped
+  # by name and the node boots with the rules it shipped with.
+  defp version(@record_version), do: :ok
+  defp version(other), do: {:error, {:unsupported_promotions_version, other}}
+
+  # `PolicyPromotion.promote/7` validates every one of these itself and refuses anything it
+  # does not recognise. What this does is translate the file's strings into the atom-keyed map
+  # that function's contract names, drop a `(tool, shape)` whose evidence is not a map before
+  # the call rather than after it, and put them in one fixed order so a file that is applied
+  # twice is applied the same way twice.
+  #
+  # Every count the record holds, not the two the first thresholds were written in terms of:
+  # dropping `distinct_fingerprints`, `distinct_sessions` or `would_resolve` here would zero
+  # them (`PolicyPromotion` counts an absent one as 0) and the ledger entry on this node would
+  # then understate the evidence the widening was granted on.
+  defp shapes(tools) do
+    for {tool, promoted} <- tools,
+        is_binary(tool) and is_map(promoted),
+        {shape, evidence} <- promoted,
+        is_binary(shape) and is_map(evidence) do
+      {tool, shape,
        %{
          report_sha256: Map.get(evidence, "report_sha256"),
          decisions: Map.get(evidence, "decisions"),
          contradictions: Map.get(evidence, "contradictions"),
+         distinct_fingerprints: Map.get(evidence, "distinct_fingerprints"),
+         distinct_sessions: Map.get(evidence, "distinct_sessions"),
+         would_resolve: Map.get(evidence, "would_resolve"),
          replayed_at: Map.get(evidence, "replayed_at")
        }}
-    end)
+    end
+    |> Enum.sort_by(fn {tool, shape, _evidence} -> {tool, shape} end)
   end
 
   defp record_empty(server) do

@@ -332,15 +332,38 @@ defmodule Ouroboros.Self.Fixture do
     )
   end
 
-  @doc "The evidence shape `PolicyPromotion.promote/6` takes, with numbers a test can read."
+  @doc """
+  The evidence shape `PolicyPromotion.promote/7` takes, with numbers a test can read.
+
+  All six counts, not the two the first thresholds were written in terms of: the S2a wave
+  added `distinct_fingerprints`, `distinct_sessions` and `would_resolve` because a corpus of
+  one answer repeated is not evidence, and a suite that left them out could not tell an
+  export that carries them from one that zeroes them.
+  """
   def evidence(decisions \\ 57, contradictions \\ 0) do
     %{
       report_sha256: String.duplicate("a", 64),
       decisions: decisions,
       contradictions: contradictions,
+      distinct_fingerprints: 24,
+      distinct_sessions: 3,
+      would_resolve: 11,
       replayed_at: "2026-09-08T00:00:00Z"
     }
   end
+
+  @doc """
+  The `(tool, shape)` these suites promote: `bash` and a command prefix.
+
+  A promotion is per `(policy, tool, shape)` (S-D27) and `bash` is the only tool
+  `Ouroboros.Wasm.PolicyEngine.promote/6` will promote at all (`@promotable_tools`), so a
+  shape here is what an operator would have written as `Bash(mix test *)`.
+  `Ouroboros.Control.PolicyPromotion` itself takes any tool name — the `bash`-only rule is
+  the engine's gate and not the record's — which is what lets a demotion case in
+  `export_test.exs` use a second tool to prove a tool leaves when its last shape does.
+  """
+  def tool, do: "bash"
+  def shape, do: "mix test"
 
   @doc "A scratch directory removed when the test ends."
   def tmp!(prefix) do
