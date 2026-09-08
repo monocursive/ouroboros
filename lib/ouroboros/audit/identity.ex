@@ -106,6 +106,11 @@ defmodule Ouroboros.Audit.Identity do
         "audit.hold",
         "permissions.",
         "grants.",
+        # `policy.promote` hands a wasm component the authority to answer `allow` for a shape
+        # of `bash` on every future request, which is `permissions.add` with a component in
+        # place of the pattern. It belongs with the verbs beside it rather than one role below
+        # them (S2b review, MEDIUM-1). `policy.status` is `:read` and is unaffected.
+        "policy.",
         "credentials.",
         "release.",
         "upgrade.",

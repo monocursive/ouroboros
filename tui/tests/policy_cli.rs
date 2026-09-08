@@ -3,7 +3,8 @@
 //! Four claims, and the frames come from the golden fixtures rather than from shapes
 //! retyped here, so a regeneration on the Elixir side is picked up by the next `cargo test`:
 //!
-//!   * the params are the flags and nothing else, and `promote` never sends an actor;
+//!   * the params are the flags and nothing else — a `shape` where a promotion is per shape,
+//!     and never an actor;
 //!   * `replay --out` writes the file `promote --evidence` reads back, and says where on
 //!     stderr rather than on stdout;
 //!   * stdout carries only the answer, in both the table and the `--json` form;
@@ -110,12 +111,14 @@ async fn status_sends_an_empty_object_and_prints_the_record() {
 
     assert!(out.contains("no-network-shell"), "{out}");
     assert!(out.contains("synced_checkpoint"), "{out}");
-    // Promoted and not allowable, because a demotion newer than the promotion withdrew it.
-    let bash = out
+    // Promoted and not allowable, because a demotion newer than the promotion withdrew it —
+    // and the shape beside it, which is what was actually promoted.
+    let curl = out
         .lines()
-        .find(|line| line.starts_with("bash "))
-        .expect("a bash row");
-    assert!(bash.contains("no"), "{out}");
+        .find(|line| line.starts_with("bash  curl "))
+        .expect("a curl row");
+    assert!(curl.contains(" no  "), "{out}");
+    assert!(out.contains("mix test"), "{out}");
 
     assert_eq!(err, "");
 }
@@ -214,6 +217,53 @@ async fn replay_out_writes_the_file_promote_reads_back() {
     assert!(out.contains("277 rows, 0 unreadable"), "{out}");
 }
 
+/// R5. The report file is written **before** the page, and a report that could not be saved
+/// is an error rather than a table somebody acts on and then cannot hand over.
+#[tokio::test]
+async fn a_report_that_cannot_be_written_is_an_error_and_not_a_page() {
+    let scratch = Scratch::new("unwritable");
+    let path = scratch.join("no-such-directory").join("report.json");
+    let written = path.clone();
+
+    let (listen, address) = listener().await;
+
+    let script = tokio::spawn(async move {
+        let mut peer = Peer::accept(&listen).await;
+        peer.hello(&[REPLAY_METHOD]).await;
+        let request = peer.request_for(REPLAY_METHOD).await;
+        peer.result(&request["id"], result("policy_replay_result"))
+            .await;
+    });
+
+    let connected = ouro::transport::connect(
+        config(address),
+        std::sync::Arc::new(ouro::transport::NoReconnectHook),
+    )
+    .await
+    .expect("a handshake");
+
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+
+    let options = ReplayOptions {
+        name: "no-network-shell".into(),
+        out: Some(written),
+        ..ReplayOptions::default()
+    };
+
+    let refusal = policy_cli::replay(&connected.client, &options, &mut out, &mut err).await;
+
+    assert!(refusal.is_err(), "{refusal:?}");
+    assert!(
+        format!("{:#}", refusal.unwrap_err()).contains("writing the replay report"),
+        "the refusal names the file"
+    );
+    // Nothing on stdout: an operator who saw a table and no file would file the table.
+    assert!(out.is_empty(), "{out:?}");
+
+    script.await.expect("the script");
+}
+
 #[tokio::test]
 async fn promote_sends_the_report_whole_and_never_an_actor() {
     let scratch = Scratch::new("promote");
@@ -232,7 +282,8 @@ async fn promote_sends_the_report_whole_and_never_an_actor() {
         move |client, mut out, mut err| async move {
             let options = PromoteOptions {
                 name: "no-network-shell".into(),
-                tool: "read".into(),
+                tool: "bash".into(),
+                shape: "mix test".into(),
                 evidence,
                 json: false,
             };
@@ -244,13 +295,16 @@ async fn promote_sends_the_report_whole_and_never_an_actor() {
     .await;
 
     assert_eq!(params["name"], "no-network-shell");
-    assert_eq!(params["tool"], "read");
+    assert_eq!(params["tool"], "bash");
+    // A promotion is per `(tool, shape)`: the command prefix travels with the tool, and the
+    // report is handed back whole so the runtime can check its own seal.
+    assert_eq!(params["shape"], "mix test");
     assert_eq!(params["report"], result("policy_replay_result"));
 
     // Who promoted is the identity this client authenticated as, read by the runtime from
     // its own side of the socket. There is no spelling of it a client could send.
     assert!(params.get("actor").is_none(), "{params}");
-    assert_eq!(params.as_object().expect("an object").len(), 3, "{params}");
+    assert_eq!(params.as_object().expect("an object").len(), 4, "{params}");
 
     assert!(out.contains("no-network-shell"), "{out}");
 }
@@ -282,7 +336,8 @@ async fn promote_refuses_a_file_that_is_not_a_report_before_it_uses_the_socket()
 
     let options = PromoteOptions {
         name: "no-network-shell".into(),
-        tool: "read".into(),
+        tool: "bash".into(),
+        shape: "mix test".into(),
         evidence: path,
         json: false,
     };
@@ -310,6 +365,7 @@ async fn demote_carries_the_sentence_and_the_echo_lands_on_stderr() {
             let options = DemoteOptions {
                 name: "no-network-shell".into(),
                 tool: "bash".into(),
+                shape: "curl".into(),
                 reason: "it allowed a curl a human denied".into(),
                 json: false,
             };
@@ -325,6 +381,7 @@ async fn demote_carries_the_sentence_and_the_echo_lands_on_stderr() {
         json!({
             "name": "no-network-shell",
             "tool": "bash",
+            "shape": "curl",
             "reason": "it allowed a curl a human denied"
         })
     );
@@ -390,7 +447,8 @@ async fn a_refused_call_is_an_error_rather_than_an_empty_table() {
 
     let options = PromoteOptions {
         name: "no-network-shell".into(),
-        tool: "read".into(),
+        tool: "bash".into(),
+        shape: "mix test".into(),
         evidence: path,
         json: false,
     };

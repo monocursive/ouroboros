@@ -402,7 +402,7 @@ defmodule Ouroboros.Control.PolicyPromotion do
           demotion =
             reason
             |> Map.merge(%{tool: tool, shape: shape, at: now(), seq: seq})
-            |> Map.take([:tool, :shape, :at, :seq, :reason, :fingerprint, :session_id])
+            |> Map.take([:tool, :shape, :at, :seq, :reason, :fingerprint, :session_id, :actor])
 
           record = %{
             state.record
@@ -421,8 +421,11 @@ defmodule Ouroboros.Control.PolicyPromotion do
                   applied.record.component_sha256,
                   tool,
                   shape,
-                  Map.get(reason, :session_id) || "runtime",
-                  Map.take(demotion, [:reason, :fingerprint, :session_id])
+                  # The person who withdrew it, then the session whose human answer the canary
+                  # acted on, and only then the runtime. A narrowing an audit cannot attribute
+                  # is still a narrowing, but it is not one anybody can be asked about.
+                  Map.get(reason, :actor) || Map.get(reason, :session_id) || "runtime",
+                  Map.take(demotion, [:reason, :fingerprint, :session_id, :actor])
                 )
 
               {:reply, :ok, %{applied | shadow: Map.delete(applied.shadow, {tool, shape})}}
@@ -679,7 +682,12 @@ defmodule Ouroboros.Control.PolicyPromotion do
      %{
        reason: atom_or(Map.get(reason, :reason), :unstated),
        fingerprint: digest_or_nil(Map.get(reason, :fingerprint)),
-       session_id: identity_or_nil(Map.get(reason, :session_id))
+       session_id: identity_or_nil(Map.get(reason, :session_id)),
+       # Who withdrew it, when a person did. The canary names no actor — it is the runtime
+       # narrowing on a human's contradiction, and the session it saw that in is the principal
+       # there — but an operator calling `policy.demote` does, and their ledger entry says so
+       # rather than `runtime` (S2b review, MEDIUM-2).
+       actor: identity_or_nil(Map.get(reason, :actor))
      }}
   end
 

@@ -2,6 +2,7 @@
   "id": 23,
   "jsonrpc": "2.0",
   "result": {
+    "allowable": {},
     "allowable_tools": [],
     "demotions": [],
     "durability": "ephemeral_checkpoint",
@@ -11,15 +12,22 @@
         "read": 40,
         "web_fetch": 12
       },
+      "error": null,
+      "other_records": 0,
+      "other_tools": 0,
       "records": 148,
       "unreadable": 0,
       "without_document": 1
     },
     "node": "ouroboros@golden",
     "policy": null,
+    "shadow_every": 10,
     "thresholds": {
       "contradictions": 0,
-      "decisions": 50
+      "distinct_fingerprints": 20,
+      "distinct_sessions": 2,
+      "unreadable": 0,
+      "would_resolve": 1
     },
     "tools": []
   }

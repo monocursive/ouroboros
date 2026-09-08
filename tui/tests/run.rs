@@ -569,6 +569,104 @@ async fn plain_output_is_the_agents_words_and_nothing_else() {
     );
 }
 
+/// S2b. `--prompt-file`: the brief that does not fit in an argument.
+///
+/// Linux caps one `execve` argument at 128 KiB (`MAX_ARG_STRLEN`), so `ouro run "<brief>"`
+/// with a 100 KiB brief fails in the shell before this program starts. `bench/self/improve.sh`
+/// hands a session exactly that. The property is that the bytes in the file are the bytes in
+/// `interactive.send_message`, unchanged apart from the trim every prompt gets.
+#[tokio::test]
+async fn a_prompt_file_is_the_prompt_the_gateway_receives() {
+    let dir = std::env::temp_dir().join(format!(
+        "ouro-run-prompt-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("a clock")
+            .as_nanos()
+    ));
+
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let path = dir.join("brief.md");
+
+    // Past the OS argv ceiling this flag exists for, so the test is about the case that
+    // motivated it rather than about a short string read from a file.
+    let brief = format!(
+        "# The brief
+
+{}
+
+Do the thing.
+",
+        "a line of a very long brief
+"
+        .repeat(5_000)
+    );
+
+    assert!(
+        brief.len() > 128 * 1024,
+        "the brief is {} bytes",
+        brief.len()
+    );
+    std::fs::write(&path, &brief).expect("a written brief");
+
+    let prompt = run::read_prompt_file(&path).expect("a readable brief");
+    assert_eq!(prompt, brief.trim());
+
+    let expected = prompt.clone();
+
+    let ran = run_against(
+        start_plan(&prompt),
+        options(Output::Text),
+        move |mut peer| {
+            tokio::spawn(async move {
+                accept_start_of(&mut peer, json!([]), "native", &expected).await;
+
+                for frame in [
+                    text_event(1, "output_text_final", "read it"),
+                    event(2, "turn_completed", Some(TURN), json!({})),
+                ] {
+                    peer.notify(
+                        "interactive.event",
+                        json!({ "id": SESSION, "event": frame }),
+                    )
+                    .await;
+                }
+            })
+        },
+    )
+    .await;
+
+    assert_eq!(ran.report().status, Status::Completed);
+    assert_eq!(ran.out, "read it\n");
+
+    // The bound is on what a read returns, and a file past it is a refusal naming the file.
+    std::fs::write(&path, vec![b'x'; (run::MAX_PROMPT_FILE_BYTES + 2) as usize])
+        .expect("a big file");
+
+    let refusal = run::read_prompt_file(&path).expect_err("a brief past the bound");
+    assert!(
+        format!("{refusal:#}").contains("larger than"),
+        "{refusal:#}"
+    );
+
+    // And the three other ways a file is not a prompt.
+    std::fs::write(&path, "   \n\t ").expect("a blank file");
+    assert!(run::read_prompt_file(&path).is_err());
+
+    std::fs::write(&path, [0xff, 0xfe, 0xfd]).expect("bytes that are not UTF-8");
+    let refusal = run::read_prompt_file(&path).expect_err("not UTF-8");
+    assert!(format!("{refusal:#}").contains("not UTF-8"), "{refusal:#}");
+
+    let refusal = run::read_prompt_file(&dir).expect_err("a directory is not a prompt");
+    assert!(
+        format!("{refusal:#}").contains("is not a regular file"),
+        "{refusal:#}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn plain_output_falls_back_to_the_collapsed_deltas_when_no_final_arrives() {
     let ran = run_against(

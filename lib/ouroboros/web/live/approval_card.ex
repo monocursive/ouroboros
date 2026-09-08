@@ -311,6 +311,15 @@ defmodule Ouroboros.Web.Live.ApprovalCard do
   defp reason(value) when value in [":no_rule", "no_rule"],
     do: "This action needs your permission before it can run."
 
+  # S2, S-D29. A promoted policy component would have resolved this call without asking, and
+  # every Nth such call is put to a person anyway so the promotion stays checkable: the
+  # demotion canary can only see a contradiction inside promoted ground if somebody is still
+  # occasionally asked about it.
+  defp reason(value) when value in [":policy_shadow", "policy_shadow"],
+    do:
+      "A promoted policy would allow this; a person is asked one time in N so the promotion " <>
+        "stays checkable."
+
   defp reason(value), do: value
 
   attr :plan, :any, required: true

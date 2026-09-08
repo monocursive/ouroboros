@@ -804,7 +804,17 @@ async fn run_prompt(paths: &Paths, dev: bool, config: Loaded, args: RunArgs) -> 
         ));
     }
 
-    let prompt = args.prompt.trim().to_string();
+    // Either the argument or the file, never both — clap refuses the pair — and the file is
+    // read here, before a runtime is started, so an unreadable brief is a refusal rather than
+    // a daemon with nothing to do.
+    let prompt = match (&args.prompt, &args.prompt_file) {
+        (_, Some(path)) => match ouro::run::read_prompt_file(path) {
+            Ok(prompt) => prompt,
+            Err(error) => return Err(refuse_run(&options, &format!("{error:#}"))),
+        },
+        (Some(typed), None) => typed.trim().to_string(),
+        (None, None) => String::new(),
+    };
 
     if prompt.is_empty() {
         return Err(refuse_run(
@@ -2759,6 +2769,7 @@ async fn policy(paths: &Paths, args: ouro::cli::PolicyArgs) -> Result<()> {
             let options = ouro::policy_cli::PromoteOptions {
                 name: promote.name,
                 tool: promote.tool,
+                shape: promote.shape,
                 evidence: promote.evidence,
                 json: args.json,
             };
@@ -2769,6 +2780,7 @@ async fn policy(paths: &Paths, args: ouro::cli::PolicyArgs) -> Result<()> {
             let options = ouro::policy_cli::DemoteOptions {
                 name: demote.name,
                 tool: demote.tool,
+                shape: demote.shape,
                 reason: demote.reason,
                 json: args.json,
             };

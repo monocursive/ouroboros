@@ -37,11 +37,20 @@ defmodule Ouroboros.Gateway.Methods.Contract do
   # The bytes a `policy.demote` reason may carry. It is echoed and never stored, so this bounds
   # a reply rather than a record.
   @policy_reason_bytes 512
+  # A shape is a `bash` command prefix, bounded exactly as `Control.PolicyPromotion` bounds the
+  # one it writes into a checkpoint (`max_shape_bytes/0`), so a shape this boundary accepts is a
+  # shape that plane can store.
+  @policy_shape_bytes 128
   # `Ouroboros.Wasm.PolicyEngine.promotion_thresholds/0`, restated for the generated reference.
   # Literals rather than a compile-time call into the wasm plane, and held equal to it by
   # `Ouroboros.Gateway.PolicyTest`.
-  @policy_min_decisions 50
-  @policy_max_contradictions 0
+  @policy_thresholds %{
+    contradictions: 0,
+    unreadable: 0,
+    distinct_fingerprints: 20,
+    distinct_sessions: 2,
+    would_resolve: 1
+  }
   @approval_modes %{
     "default" => :default,
     "prompt" => :prompt,
@@ -1122,10 +1131,12 @@ defmodule Ouroboros.Gateway.Methods.Contract do
          [
            {"name", :required, :string, "the promoted policy; another name narrows nothing"},
            {"tool", :required, :string, "the tool whose promotion is withdrawn"},
+           {"shape", :required, :string,
+            "the command prefix whose promotion is withdrawn, in at most #{@policy_shape_bytes} bytes. A promotion is per `(tool, shape)`, so a narrowing is too: demoting `mix test` leaves `mix` standing, and `policy.status` names every shape the record holds"},
            {"reason", :required, :string,
             "why, in at most #{@policy_reason_bytes} bytes. It is **echoed and not stored**: a demotion's `reason` in the record is an enumerated atom (`operator_demotion` for this verb, `human_contradiction` for the canary), because a record fsynced on every write is not where free text belongs"}
          ],
-         "narrowing, and idempotent: a tool that is not promoted is already where this leaves it"},
+         "narrowing, and idempotent: a shape that is not promoted is already where this leaves it. The actor is the gateway principal and an unattributed caller is refused, because a demotion's ledger entry names the person who made it — narrowing is safe, but an audit trail that says `runtime` about a thing a human did is not"},
       handler: :handle_policy_demote
     },
     "policy.promote" => %{
@@ -1136,11 +1147,14 @@ defmodule Ouroboros.Gateway.Methods.Contract do
         {:closed,
          [
            {"name", :required, :string, "a live lane-W rollout of kind `policy` on this node"},
-           {"tool", :required, :string, "the one tool this promotion is about"},
+           {"tool", :required, :string,
+            "the one tool this promotion is about. `bash` is the only promotable tool in v1; every other name is refused as `tool_not_promotable`"},
+           {"shape", :required, :string,
+            "the command prefix this promotion is about — `mix`, `mix test` — in at most #{@policy_shape_bytes} bytes. A request is covered when every one of its sub-commands matches `Bash(<shape> *)`, which is the permission language's own word-prefix rule rather than a second one here"},
            {"report", :required, :object,
             "a `policy.replay` report, whole. It must still name this policy's `component_sha256` and hash to its own `report_sha256`, so a report about other bytes or one somebody edited is refused by name"}
          ],
-         "the report is evidence that a replay happened, not that it is still true, so the node **re-runs the replay itself** and writes the re-run's numbers into the record beside the report's digest. Promotion needs at least #{@policy_min_decisions} decisions and exactly #{@policy_max_contradictions} contradictions for that tool, in the re-run. `outcome: unknown` on a ceiling: the replay and the checkpoint do not stop because this socket did"},
+         "the report's digest binds the file to its own contents and nothing else — it is a plain sha256 anybody can recompute, so it proves the file was not edited on the way here and never who produced it. The gate is the **re-run**: this node replays the corpus itself and writes the re-run's numbers into the record, with the digest stored beside them as `report_sha256_as_submitted`. The re-run must show zero contradictions across the whole tool and, on this shape's definite verdicts, no unreadable verdict, at least #{@policy_thresholds.distinct_fingerprints} distinct requests, at least #{@policy_thresholds.distinct_sessions} distinct sessions and at least #{@policy_thresholds.would_resolve} call it would have resolved. `outcome: unknown` on a ceiling: the replay and the checkpoint do not stop because this socket did"},
       handler: :handle_policy_promote
     },
     "policy.replay" => %{
@@ -1151,7 +1165,7 @@ defmodule Ouroboros.Gateway.Methods.Contract do
          [
            {"name", :required, :string, "a live lane-W rollout of kind `policy` on this node"},
            {"since", :optional, :string,
-            "an ISO 8601 instant; only human answers recorded at or after it are replayed"}
+            "an ISO 8601 instant; only human answers recorded at or after it are replayed. Parsed here and refused as `-32602` when it is not one, because the corpus reads an unparseable instant as *no* filter — a typo would otherwise replay the whole corpus and the sealed report would state the typo as though it had narrowed it"}
          ],
          "`operate` rather than `read` because it stands a component up, the same split `computer_use.status` and `computer_use.probe` make. It decides nothing: the instance is a dry one under its own name, no `:permission` entry and no evidence row is written, and the live instance is untouched"},
       handler: :handle_policy_replay
@@ -1161,7 +1175,7 @@ defmodule Ouroboros.Gateway.Methods.Contract do
       timeout: @policy_status_timeout,
       params:
         {:closed, [],
-         "node-local by construction and therefore without a `node` parameter: the promotion record and the corpus are where the decisions were made, so this asks the machine rather than routing to it. `evidence` is `Ouroboros.Control.PolicyEvidence.count/0` and is the **whole** of what this protocol says about the decision corpus — a total, a count per tool, and the two degraded counts. No verb serves a row of it: the corpus holds the exact request a policy component would have been shown, command lines and paths included. `durability` is how the record is kept — `ephemeral_checkpoint`, `synced_checkpoint`, `durable_checkpoint`, or `unavailable` when the authority itself did not answer, which is a different fact from an empty record and is why it is a value rather than a missing key"},
+         "node-local by construction and therefore without a `node` parameter: the promotion record and the corpus are where the decisions were made, so this asks the machine rather than routing to it. `tools` is one row per promoted `(tool, shape)` with `allowed` beside it, because a shape can be promoted and withdrawn and both facts are the answer. `evidence` is `Ouroboros.Control.PolicyEvidence.count/0`, bounded: a total, the two degraded counts, the **32 busiest tools** by count, and `other_tools`/`other_records` for the rest — the corpus is bounded by rows rather than by how many distinct tools those rows name. No verb serves a row of it: the corpus holds the exact request a policy component would have been shown, command lines and paths included. `durability` is how the record is kept — `ephemeral_checkpoint`, `synced_checkpoint`, `durable_checkpoint`, or `unavailable` when the authority itself did not answer, which is a different fact from an empty record and is why it is a value rather than a missing key"},
       handler: :handle_policy_status
     },
     "runtime.lsp.status" => %{
@@ -1437,9 +1451,9 @@ defmodule Ouroboros.Gateway.Methods.Contract do
   def permission_rule_scopes, do: @permission_rule_scopes
   def permission_scopes, do: @permission_scopes
   def plan_exit_choices, do: @plan_exit_choices
-  def policy_max_contradictions, do: @policy_max_contradictions
-  def policy_min_decisions, do: @policy_min_decisions
   def policy_reason_bytes, do: @policy_reason_bytes
+  def policy_shape_bytes, do: @policy_shape_bytes
+  def policy_thresholds, do: @policy_thresholds
   def reasoning_efforts, do: @reasoning_efforts
   def replay_limit, do: @replay_limit
   def start_options, do: @start_options

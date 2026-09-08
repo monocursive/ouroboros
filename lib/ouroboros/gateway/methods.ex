@@ -1129,15 +1129,40 @@ defmodule Ouroboros.Gateway.Methods do
   # a table, and the newest twenty are the ones that explain the current state.
   @policy_demotions_shown 20
 
+  # How many of the corpus's tools `evidence.by_tool` names, busiest first. The corpus is
+  # bounded at ten thousand rows and sixty-four mebibytes, and **neither of those bounds the
+  # number of distinct tools those rows name**: an MCP server chooses its own tool names, so one
+  # row per name is ten thousand keys in a reply somebody has to render (S2b review, MEDIUM-4).
+  # The rest is said rather than hidden — `other_tools` and `other_records` are the count of
+  # what was left out and how many answers it stands for.
+  @policy_tools_shown 32
+
+  # The bytes any single string from another plane may occupy in one of these replies: a tool
+  # name from the corpus, a name echoed in a refusal, a term from the wasm plane. Every one of
+  # them is a value somebody else chose, and a reply frame is not the place to find out how long
+  # it was (S2b review, HIGH-2, LOW-2, LOW-3).
+  @policy_string_bytes 128
+  @policy_detail_bytes 256
+
   @policy_reason_bytes Contract.policy_reason_bytes()
+  @policy_shape_bytes Contract.policy_shape_bytes()
+
+  # What a demotion says on the wire. An allowlist rather than the record's entry, for the same
+  # reason the promoted rows below are built key by key.
+  @policy_demotion_keys [:tool, :shape, :at, :seq, :reason, :fingerprint, :session_id, :actor]
 
   @doc false
   def handle_policy_status(_params), do: safe(fn -> {:ok, policy_record()} end)
 
+  # `since` is parsed here rather than passed through. `PolicyEvidence.stream/1` reads an
+  # instant it cannot parse as **no filter at all**, which is the whole corpus, and the sealed
+  # report would then state the operator's typo in its `since` field as though it had narrowed
+  # anything (S2b review, LOW-1). A filter that silently does nothing is worse than a refusal.
   @doc false
   def handle_policy_replay(params) do
     with {:ok, name} <- fetch_string(params, "name"),
-         {:ok, since} <- fetch_optional_string(params, "since") do
+         {:ok, since} <- fetch_optional_string(params, "since"),
+         {:ok, since} <- policy_since(since) do
       safe(fn ->
         case PolicyEngine.replay(name, replay_opts(since)) do
           {:ok, report} -> {:ok, report}
@@ -1152,11 +1177,12 @@ defmodule Ouroboros.Gateway.Methods do
   @doc false
   def handle_policy_promote(params) do
     with {:ok, name} <- fetch_string(params, "name"),
-         {:ok, tool} <- fetch_string(params, "tool"),
+         {:ok, tool} <- fetch_bounded_string(params, "tool", @policy_string_bytes),
+         {:ok, shape} <- fetch_bounded_string(params, "shape", @policy_shape_bytes),
          {:ok, report} <- fetch_object(params, "report"),
          {:ok, actor} <- attributed_actor() do
       safe(fn ->
-        case PolicyEngine.promote(name, tool, report, actor) do
+        case PolicyEngine.promote(name, tool, shape, report, actor) do
           {:ok, _record} -> {:ok, policy_record()}
           {:error, reason} -> policy_refusal(reason)
         end
@@ -1170,19 +1196,31 @@ defmodule Ouroboros.Gateway.Methods do
   # The reason **text** never reaches the record: `PolicyPromotion` stores an enumerated atom,
   # and `:operator_demotion` is this verb's. The sentence an operator typed is echoed in the
   # reply, where it is read once, rather than fsynced into a checkpoint on every write.
+  #
+  # The actor is required here too, and the asymmetry the first version of this file had —
+  # "narrowing is always safe, so a demotion needs no name" — was the wrong half of the
+  # question (S2b review, MEDIUM-2). Narrowing *is* safe; an audit trail that says the runtime
+  # withdrew a promotion a person withdrew is not, and it is the same trail an investigation
+  # reads to find out who un-did the canary's work. The actor travels as the demotion's ledger
+  # principal.
   @doc false
   def handle_policy_demote(params) do
     with {:ok, name} <- fetch_string(params, "name"),
-         {:ok, tool} <- fetch_string(params, "tool"),
-         {:ok, reason} <- fetch_bounded_string(params, "reason", @policy_reason_bytes) do
+         {:ok, tool} <- fetch_bounded_string(params, "tool", @policy_string_bytes),
+         {:ok, shape} <- fetch_bounded_string(params, "shape", @policy_shape_bytes),
+         {:ok, reason} <- fetch_bounded_string(params, "reason", @policy_reason_bytes),
+         {:ok, actor} <- attributed_actor() do
       safe(fn ->
-        case PolicyPromotion.demote(name, tool, %{reason: :operator_demotion}) do
+        demotion = %{reason: :operator_demotion, actor: actor}
+
+        case PolicyPromotion.demote(name, tool, shape, demotion) do
           :ok -> {:ok, Map.put(policy_record(), :reason, reason)}
           {:error, refusal} -> policy_refusal(refusal)
         end
       end)
     else
       {:invalid, message} -> invalid_params(message)
+      {:unattributed, message} -> policy_unattributed(message)
     end
   end
 
@@ -1202,11 +1240,12 @@ defmodule Ouroboros.Gateway.Methods do
 
   # The one shape four of the five verbs answer with, so a client renders the record once and
   # every write proves itself by handing back what the record now says. Bounded everywhere it
-  # could grow: the tools are the record's own map, the demotions are the newest
-  # `#{@policy_demotions_shown}`, and `evidence` is `PolicyEvidence.count/0` — counts, never
-  # rows.
+  # could grow: one row per promoted `(tool, shape)` built key by key, the newest
+  # `#{@policy_demotions_shown}` demotions, and `evidence` is a bounded projection of
+  # `PolicyEvidence.count/0` — counts, never rows.
   defp policy_record do
     status = PolicyPromotion.status()
+    allowable = Map.get(status, :allowable, %{})
 
     %{
       node: node(),
@@ -1218,25 +1257,169 @@ defmodule Ouroboros.Gateway.Methods do
           _unbound ->
             nil
         end,
-      tools:
-        status.tools
-        |> Enum.map(fn {tool, entry} ->
-          entry |> Map.take([:promoted_at, :actor, :evidence, :seq]) |> Map.put(:tool, tool)
-        end)
-        |> Enum.sort_by(& &1.tool),
+      tools: promoted_shapes(status.tools, allowable),
       demotions:
         status.demotions
         |> Enum.sort_by(&(-Map.get(&1, :seq, 0)))
-        |> Enum.take(@policy_demotions_shown),
+        |> Enum.take(@policy_demotions_shown)
+        |> Enum.map(&Map.take(&1, @policy_demotion_keys)),
+      allowable: allowable,
       allowable_tools: status.allowable_tools,
       durability: status.durability,
+      shadow_every: PolicyEngine.shadow_every(),
       thresholds: PolicyEngine.promotion_thresholds(),
-      evidence: PolicyEvidence.count()
+      evidence: evidence_counts()
     }
   end
 
+  # One row per promoted `(tool, shape)`, **built** rather than taken. The record is a
+  # checkpoint this build writes and reads for its own purposes; a field it grows tomorrow is
+  # not a field this boundary serves today, and a projection that is a pass-through is a
+  # projection nobody chose (S2b review, survivors M5 and M5b).
+  #
+  # `allowed` is the pair a person needs together: a shape can be promoted and not allowable,
+  # because a demotion newer than its promotion withdrew it, and hiding either fact behind the
+  # other is how a record stops explaining itself.
+  defp promoted_shapes(tools, allowable) when is_map(tools) do
+    for {tool, shapes} <- tools,
+        is_binary(tool),
+        is_map(shapes),
+        {shape, entry} <- shapes,
+        is_binary(shape),
+        is_map(entry) do
+      %{
+        tool: tool,
+        shape: shape,
+        allowed: shape in Map.get(allowable, tool, []),
+        promoted_at: Map.get(entry, :promoted_at),
+        seq: Map.get(entry, :seq),
+        actor: Map.get(entry, :actor),
+        evidence: promotion_evidence(Map.get(entry, :evidence))
+      }
+    end
+    |> Enum.sort_by(&{&1.tool, &1.shape})
+  end
+
+  defp promoted_shapes(_absent, _allowable), do: []
+
+  # What a promotion was made on, and the one field here that is renamed on the way out.
+  #
+  # `report_sha256` is a plain sha256 over the report's own canonical JSON, with no key in it:
+  # it proves the file was not edited between the replay that produced it and the call that
+  # handed it in, and it proves **nothing** about who produced the numbers, because anybody can
+  # recompute it over contents of their choosing (S2b review, MEDIUM-3). The gate is the re-run,
+  # whose numbers are the other six fields here. So the digest goes out under the name of what
+  # it actually is — the digest as submitted — rather than under a name a reader could mistake
+  # for a signature.
+  defp promotion_evidence(evidence) when is_map(evidence) do
+    %{
+      report_sha256_as_submitted: Map.get(evidence, :report_sha256),
+      decisions: Map.get(evidence, :decisions),
+      contradictions: Map.get(evidence, :contradictions),
+      distinct_fingerprints: Map.get(evidence, :distinct_fingerprints),
+      distinct_sessions: Map.get(evidence, :distinct_sessions),
+      would_resolve: Map.get(evidence, :would_resolve),
+      replayed_at: Map.get(evidence, :replayed_at)
+    }
+  end
+
+  defp promotion_evidence(_absent), do: %{}
+
+  # `PolicyEvidence.count/0`, bounded for a reply (S2b review, MEDIUM-4).
+  #
+  # The corpus's bound is rows and bytes; `by_tool` has one key per distinct tool name those
+  # rows carry, and a tool name is a string a request chose. So the busiest
+  # `#{@policy_tools_shown}` are named, each bounded like every other string here, and the rest
+  # is counted. `error` is a key rather than a missing one for the same reason `durability` is:
+  # a corpus nobody could read is a different fact from an empty corpus.
+  defp evidence_counts do
+    case PolicyEvidence.count() do
+      {:ok, counts} -> bounded_counts(counts)
+      {:error, reason} -> Map.put(empty_counts(), :error, bounded_detail(reason))
+    end
+  end
+
+  defp empty_counts do
+    %{
+      records: 0,
+      by_tool: %{},
+      without_document: 0,
+      unreadable: 0,
+      other_tools: 0,
+      other_records: 0,
+      error: nil
+    }
+  end
+
+  defp bounded_counts(counts) do
+    {shown, rest} =
+      counts
+      |> Map.get(:by_tool, %{})
+      |> Enum.reduce(%{}, fn {tool, count}, acc ->
+        Map.update(acc, bounded_tool(tool), count, &(&1 + count))
+      end)
+      |> Enum.sort_by(fn {tool, count} -> {-count, tool} end)
+      |> Enum.split(@policy_tools_shown)
+
+    %{
+      records: Map.get(counts, :records, 0),
+      by_tool: Map.new(shown),
+      without_document: Map.get(counts, :without_document, 0),
+      unreadable: Map.get(counts, :unreadable, 0),
+      other_tools: length(rest),
+      other_records: rest |> Enum.map(&elem(&1, 1)) |> Enum.sum(),
+      error: nil
+    }
+  end
+
+  # A corpus row's `tool` is whatever that row said. `PolicyEvidence.count/0` already answers
+  # `"unknown"` for a row with no tool at all; anything that is not a string is the same fact.
+  defp bounded_tool(tool) when is_binary(tool), do: bounded_string(tool, @policy_string_bytes)
+  defp bounded_tool(_other), do: "unknown"
+
   defp replay_opts(nil), do: []
   defp replay_opts(since), do: [since: since]
+
+  defp policy_since(nil), do: {:ok, nil}
+
+  defp policy_since(since) do
+    case DateTime.from_iso8601(since) do
+      {:ok, _at, _offset} ->
+        {:ok, since}
+
+      {:error, _reason} ->
+        {:invalid,
+         "params.since must be an ISO 8601 instant such as 2026-09-08T00:00:00Z; the corpus " <>
+           "reads one it cannot parse as no filter at all, which is the whole corpus"}
+    end
+  end
+
+  # A string from somewhere else, cut to `limit` **bytes** on a character boundary and marked
+  # where it was cut. `valid_prefix/1` is `truncate/1`'s, for the same reason: half a codepoint
+  # is a string the JSON encoder on the way out would refuse.
+  defp bounded_string(text, limit) when is_binary(text) do
+    if byte_size(text) <= limit,
+      do: text,
+      else: text |> binary_part(0, limit) |> valid_prefix() |> Kernel.<>("…")
+  end
+
+  # A term another plane refused with, made fit to sit in `data.detail` (S2b review, LOW-3).
+  #
+  # Two rules, both about what a refusal is allowed to be. It is `inspect`ed under a printable
+  # ceiling and then cut, because a `File.Error` carries a message this band would otherwise
+  # echo whole; and every path separator in it is blanked, because the one thing these verbs
+  # must never say is where on this machine the decision corpus lives.
+  defp bounded_detail(term) do
+    term
+    |> inspect(limit: 8, printable_limit: @policy_detail_bytes, structs: false)
+    |> bounded_string(@policy_detail_bytes)
+    |> String.replace(~r{[/\\]+}, " ")
+  end
+
+  # A name a caller sent, echoed back in `data` so a client can branch on it, bounded because a
+  # refusal is not a mirror (S2b review, LOW-2).
+  defp bounded_name(name) when is_binary(name), do: bounded_string(name, @policy_string_bytes)
+  defp bounded_name(other), do: bounded_detail(other)
 
   # The connection's principal, or a refusal. `Identity.actor/0` cannot fail — it answers
   # `#{@unattributed_actor}` when the subject behind this call resolves to nobody — so the
@@ -1256,98 +1439,189 @@ defmodule Ouroboros.Gateway.Methods do
   defp policy_unattributed(message),
     do: {:error, code(:scope_denied), message, %{"reason" => "unattributed_actor"}}
 
-  # D11's posture, for the eleven named tuples `Wasm.PolicyEngine` and
-  # `Control.PolicyPromotion` answer with: a closed `data.reason` a client branches on, beside
-  # a sentence a person reads. Anything else is `upstream_error` carrying the term, which is
-  # what every other verb does with a refusal nobody enumerated.
-  defp policy_refusal({:no_live_policy, name}) do
+  # D11's posture, for the named tuples `Wasm.PolicyEngine` and `Control.PolicyPromotion`
+  # answer with: a closed `data.reason` a client branches on, beside a sentence a person reads.
+  # Anything else is `upstream_error` carrying the term, which is what every other verb does
+  # with a refusal nobody enumerated.
+  #
+  # **Nothing from another plane reaches `data` unbounded.** A name is a caller's parameter and
+  # a detail is an exception's message; both are echoed through `bounded_name/1` and
+  # `bounded_detail/1`, which cut and, for a detail, blank path separators. A refusal that
+  # mirrors half a megabyte back, or that names the file the decision corpus lives in, is a
+  # refusal that has told the caller something (S2b review, LOW-2 and LOW-3).
+  #
+  # Public, `@doc false`, for one reason: the S2b review found eleven of these twelve clauses
+  # untested, and most of them are reachable only by breaking a checkpoint or a ledger on
+  # purpose. A table test over this function holds every clause to its `data.reason` and its
+  # bounds; the ones that *are* reachable are also driven end to end through `invoke/2`.
+  @doc false
+  def policy_refusal({:no_live_policy, name}) do
     {:error, code(:not_found),
-     "no live lane-W policy named #{inspect(name)} on this node; `wasm.list` names what is " <>
-       "deployed", %{"reason" => "no_live_policy", "name" => to_string(name)}}
+     "no live lane-W policy of that name on this node; `wasm.list` names what is deployed",
+     %{"reason" => "no_live_policy", "name" => bounded_name(name)}}
   end
 
-  defp policy_refusal({:policy_not_verifiable, detail}) do
+  def policy_refusal({:policy_not_verifiable, detail}) do
     {:error, code(:upstream_error),
      "that component's manifest does not verify against this node's own trust policy, so " <>
        "this node will not run it even dry",
-     %{"reason" => "policy_not_verifiable", "detail" => Wire.to_json(detail)}}
+     %{"reason" => "policy_not_verifiable", "detail" => bounded_detail(detail)}}
   end
 
-  defp policy_refusal({:report_names_other_bytes, stated}) do
+  def policy_refusal({:report_names_other_bytes, stated}) do
     {:error, code(:invalid_params),
      "params.report was made against different component bytes than this node would " <>
        "evaluate; replay again and promote on the new report",
-     %{"reason" => "report_names_other_bytes", "component_sha256" => Wire.to_json(stated)}}
+     %{"reason" => "report_names_other_bytes", "component_sha256" => bounded_name(stated)}}
   end
 
-  defp policy_refusal(:report_unsealed) do
+  def policy_refusal(:report_unsealed) do
     {:error, code(:invalid_params),
      "params.report carries no report_sha256, so it is not a report this node sealed",
      %{"reason" => "report_unsealed"}}
   end
 
-  defp policy_refusal(:report_digest_mismatch) do
+  # Said carefully. The digest binds the file to its own contents and nothing else — it is a
+  # plain sha256, so a mismatch means the bytes changed after the replay wrote them, and a
+  # match means only that they did not (S2b review, MEDIUM-3).
+  def policy_refusal(:report_digest_mismatch) do
     {:error, code(:invalid_params),
-     "params.report does not hash to its own report_sha256; it was edited after the replay " <>
-       "that produced it", %{"reason" => "report_digest_mismatch"}}
+     "params.report does not hash to its own report_sha256, so it is not the file the replay " <>
+       "wrote; the digest binds a report to its own contents, and this node's re-run of the " <>
+       "replay is what decides whether a promotion is earned",
+     %{"reason" => "report_digest_mismatch"}}
   end
 
-  defp policy_refusal({:no_decisions_for_tool, tool}) do
-    {:error, code(:upstream_error),
-     "the corpus holds no replayable decision for #{inspect(tool)}, so there is nothing this " <>
-       "component could have earned", %{"reason" => "no_decisions_for_tool", "tool" => tool}}
+  def policy_refusal({:tool_not_promotable, tool}) do
+    {:error, code(:invalid_params),
+     "only `bash` may be promoted in this version: a promotion is a statement about a command " <>
+       "shape, and no other tool has one this node can express",
+     %{"reason" => "tool_not_promotable", "tool" => bounded_name(tool)}}
   end
 
-  defp policy_refusal({:policy_contradicted_a_human, tool, contradictions}) do
+  def policy_refusal({:no_decisions_for_tool, tool}) do
     {:error, code(:upstream_error),
-     "the re-run found #{contradictions} contradiction(s) for #{inspect(tool)}: this " <>
-       "component would have allowed a call a human denied",
+     "the corpus holds no replayable decision for that tool, so there is nothing this " <>
+       "component could have earned",
+     %{"reason" => "no_decisions_for_tool", "tool" => bounded_name(tool)}}
+  end
+
+  def policy_refusal({:no_decisions_for_shape, tool, shape}) do
+    {:error, code(:upstream_error),
+     "the corpus holds no replayable decision inside that shape; `policy.replay` names every " <>
+       "shape it found and how many requests each one covers",
+     %{
+       "reason" => "no_decisions_for_shape",
+       "tool" => bounded_name(tool),
+       "shape" => bounded_name(shape)
+     }}
+  end
+
+  def policy_refusal({:policy_contradicted_a_human, tool, contradictions}) do
+    {:error, code(:upstream_error),
+     "the re-run found #{contradictions} contradiction(s) across that tool: this component " <>
+       "would have allowed a call a human denied, so no shape of it is promotable",
      %{
        "reason" => "policy_contradicted_a_human",
-       "tool" => tool,
+       "tool" => bounded_name(tool),
        "contradictions" => contradictions
      }}
   end
 
-  defp policy_refusal({:not_enough_decisions, tool, decisions, required}) do
+  def policy_refusal({:policy_verdict_unreadable_on_shape, tool, shape, unreadable}) do
     {:error, code(:upstream_error),
-     "the re-run found #{decisions} decision(s) for #{inspect(tool)} and a promotion needs " <>
-       "#{required}",
+     "#{unreadable} row(s) inside that shape produced no readable verdict, and a component " <>
+       "cannot earn a shape by answering outside the grammar on part of it",
      %{
-       "reason" => "not_enough_decisions",
-       "tool" => tool,
-       "decisions" => decisions,
+       "reason" => "policy_verdict_unreadable_on_shape",
+       "tool" => bounded_name(tool),
+       "shape" => bounded_name(shape),
+       "unreadable" => unreadable
+     }}
+  end
+
+  def policy_refusal({:not_enough_distinct_requests, tool, shape, found, required}) do
+    {:error, code(:upstream_error),
+     "the re-run answered #{found} distinct request(s) definitely inside that shape and a " <>
+       "promotion needs #{required}; repetitions of one request are one piece of evidence",
+     %{
+       "reason" => "not_enough_distinct_requests",
+       "tool" => bounded_name(tool),
+       "shape" => bounded_name(shape),
+       "distinct_fingerprints" => found,
        "required" => required
      }}
   end
 
-  defp policy_refusal({:policy_promotion_bound_to, name, sha}) do
+  def policy_refusal({:not_enough_sessions, tool, shape, found, required}) do
     {:error, code(:upstream_error),
-     "this node's promotion record already holds #{inspect(name)}; clear it with policy.clear " <>
-       "before promoting anything else",
+     "the definite verdicts inside that shape come from #{found} session(s) and a promotion " <>
+       "needs #{required}; one session's habits are not a node's evidence",
      %{
-       "reason" => "policy_promotion_bound_to",
-       "name" => Wire.to_json(name),
-       "component_sha256" => Wire.to_json(sha)
+       "reason" => "not_enough_sessions",
+       "tool" => bounded_name(tool),
+       "shape" => bounded_name(shape),
+       "distinct_sessions" => found,
+       "required" => required
      }}
   end
 
-  defp policy_refusal({:policy_promotion_unrecordable, detail}) do
+  def policy_refusal({:promotion_would_resolve_nothing, tool, shape}) do
+    {:error, code(:upstream_error),
+     "this component would not have resolved a single call inside that shape, so promoting it " <>
+       "would remove no prompt and widen the surface for nothing",
+     %{
+       "reason" => "promotion_would_resolve_nothing",
+       "tool" => bounded_name(tool),
+       "shape" => bounded_name(shape)
+     }}
+  end
+
+  def policy_refusal({:policy_promotion_bound_to, name, sha}) do
+    {:error, code(:upstream_error),
+     "this node's promotion record is already bound to another policy or to other bytes; " <>
+       "clear it with policy.clear before promoting anything else",
+     %{
+       "reason" => "policy_promotion_bound_to",
+       "name" => bounded_name(name),
+       "component_sha256" => bounded_name(sha)
+     }}
+  end
+
+  def policy_refusal({:policy_promotion_unrecordable, detail}) do
     {:error, code(:upstream_error),
      "the effect ledger refused the promotion entry, so nothing was widened",
-     %{"reason" => "policy_promotion_unrecordable", "detail" => Wire.to_json(detail)}}
+     %{"reason" => "policy_promotion_unrecordable", "detail" => bounded_detail(detail)}}
   end
 
-  defp policy_refusal({:policy_promotion_checkpoint_failed, detail}) do
+  def policy_refusal({:policy_promotion_checkpoint_failed, detail}) do
     {:error, code(:upstream_error),
      "the promotion record could not be checkpointed, so nothing was written",
-     %{"reason" => "policy_promotion_checkpoint_failed", "detail" => Wire.to_json(detail)}}
+     %{"reason" => "policy_promotion_checkpoint_failed", "detail" => bounded_detail(detail)}}
   end
 
-  defp policy_refusal({:policy_promotion_unavailable, _detail}),
+  def policy_refusal({:policy_promotion_unavailable, _detail}),
     do: unavailable("the policy promotion record is not running on this node")
 
-  defp policy_refusal(reason), do: upstream_error(reason)
+  # The dry path's own three, which are what a component that hangs, crashes or answers
+  # something ungrammatical produces. They are named rather than left to `upstream_error`
+  # because an operator reading one has to be able to tell "this node refused" from "that
+  # component misbehaved".
+  def policy_refusal({dry, detail})
+      when dry in [:policy_dry_exception, :policy_dry_refused, :policy_replay_exception] do
+    {:error, code(:upstream_error),
+     "the dry evaluation of that component did not complete, so nothing was measured",
+     %{"reason" => to_string(dry), "detail" => bounded_detail(detail)}}
+  end
+
+  def policy_refusal(reason) when reason in [:invalid_replay, :invalid_promotion] do
+    {:error, code(:invalid_params),
+     "the wasm plane refused these parameters before it looked at anything: a name and a " <>
+       "shape are nonempty strings and a report is an object",
+     %{"reason" => to_string(reason)}}
+  end
+
+  def policy_refusal(reason), do: upstream_error(reason)
 
   # ---------------------------------------------------------------------------
   # D4 — MCP servers on the wire

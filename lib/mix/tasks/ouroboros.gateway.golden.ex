@@ -70,6 +70,18 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
   @harness_session_id "harness-0000000000000000001"
   @provider_session_id "provider-0000000000000001"
 
+  # S2b. `Ouroboros.Wasm.PolicyEngine.promotion_thresholds/0`, written out rather than called,
+  # for this file's rule: a fixture is literals, so that a change to the runtime shows up here
+  # as a diff a person approves rather than as a fixture that quietly followed it.
+  # `Ouroboros.Gateway.PolicyTest` holds the two equal.
+  @policy_thresholds %{
+    contradictions: 0,
+    unreadable: 0,
+    distinct_fingerprints: 20,
+    distinct_sessions: 2,
+    would_resolve: 1
+  }
+
   @diagnostic %{
     range: %{start: %{line: 11, character: 4}, end: %{line: 11, character: 12}},
     severity: :error,
@@ -1654,39 +1666,48 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
   # answers until somebody replays and promotes — so `policy` is `null` and `allowable_tools`
   # is empty, and both are *answers* rather than missing keys.
   #
-  # What is worth pinning here is `evidence`. It is `Control.PolicyEvidence.count/0` and the
-  # whole of what this boundary may say about the corpus: a total, a count per tool, and the
-  # two degraded counts. The corpus itself holds the exact command lines, paths and domains a
-  # human was asked about, and there is no verb that serves a row of it. A client that grew a
-  # renderer for a document would be rendering something this protocol never sends.
+  # What is worth pinning here is `evidence`. It is `Control.PolicyEvidence.count/0`, bounded,
+  # and the whole of what this boundary may say about the corpus: a total, the busiest tools by
+  # count, what was left out, and the two degraded counts. The corpus itself holds the exact
+  # command lines, paths and domains a human was asked about, and there is no verb that serves
+  # a row of it. A client that grew a renderer for a document would be rendering something this
+  # protocol never sends.
   defp policy_status_result do
     Conn.result_frame(23, %{
       node: :ouroboros@golden,
       policy: nil,
       tools: [],
       demotions: [],
+      allowable: %{},
       allowable_tools: [],
       durability: :ephemeral_checkpoint,
-      thresholds: %{decisions: 50, contradictions: 0},
+      shadow_every: 10,
+      thresholds: @policy_thresholds,
       evidence: %{
         records: 148,
         by_tool: %{"bash" => 96, "read" => 40, "web_fetch" => 12},
         without_document: 1,
-        unreadable: 0
+        unreadable: 0,
+        other_tools: 0,
+        other_records: 0,
+        error: nil
       }
     })
   end
 
-  # The same shape after a promotion and a later demotion, which is the pair a client has to
-  # render together: `read` is promoted and allowable, `bash` is promoted and **not** —
-  # its demotion's `seq` is higher than its promotion's, and the sequence is the record's own
-  # counter rather than a clock, so two writes in one microsecond still order.
+  # The same shape after two promotions and a later demotion, which is the pair a client has to
+  # render together: `bash`/`mix test` is promoted and allowable, `bash`/`curl` is promoted and
+  # **not** — its demotion's `seq` is higher than its promotion's, and the sequence is the
+  # record's own counter rather than a clock, so two writes in one microsecond still order.
+  # Promotion is per `(tool, shape)` (S-D27), so the two rows share a tool and differ in the
+  # command prefix, which is the thing a reader has to be able to tell apart.
   #
-  # A demotion carries the fingerprint of the human answer that contradicted the component and
-  # the session it came from, and never the command line: the digest is what joins it to the
-  # `:permission` ledger entry beside it. `evidence` in a promoted tool is the *re-run's*
-  # numbers with the report's digest beside them, which is what makes an audit able to see
-  # both the report an operator handed in and what the node found when it checked.
+  # A demotion carries the fingerprint of the human answer that contradicted the component, the
+  # session it came from and — for one an operator made — the actor who made it, and never the
+  # command line: the digest is what joins it to the `:permission` ledger entry beside it.
+  # `evidence` is the *re-run's* numbers with the submitted report's digest beside them under
+  # the name of what it is: `report_sha256_as_submitted` is a keyless sha256 over the report's
+  # own contents, so it says the file was not edited and nothing about who produced it.
   defp policy_promote_result do
     Conn.result_frame(25, %{
       node: :ouroboros@golden,
@@ -1694,25 +1715,35 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       tools: [
         %{
           tool: "bash",
+          shape: "curl",
+          allowed: false,
           seq: 1,
           promoted_at: @timestamp,
           actor: "operator:ana",
           evidence: %{
-            report_sha256: String.duplicate("d", 64),
+            report_sha256_as_submitted: String.duplicate("d", 64),
             decisions: 214,
             contradictions: 0,
+            distinct_fingerprints: 31,
+            distinct_sessions: 4,
+            would_resolve: 24,
             replayed_at: @timestamp
           }
         },
         %{
-          tool: "read",
+          tool: "bash",
+          shape: "mix test",
+          allowed: true,
           seq: 3,
           promoted_at: @turn_end_timestamp,
           actor: "operator:ana",
           evidence: %{
-            report_sha256: String.duplicate("e", 64),
+            report_sha256_as_submitted: String.duplicate("e", 64),
             decisions: 63,
             contradictions: 0,
+            distinct_fingerprints: 22,
+            distinct_sessions: 2,
+            would_resolve: 41,
             replayed_at: @turn_end_timestamp
           }
         }
@@ -1720,21 +1751,28 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       demotions: [
         %{
           tool: "bash",
+          shape: "curl",
           seq: 4,
           at: @turn_end_timestamp,
           reason: :human_contradiction,
           fingerprint: String.duplicate("a", 64),
-          session_id: @session_id
+          session_id: @session_id,
+          actor: nil
         }
       ],
-      allowable_tools: ["read"],
+      allowable: %{"bash" => ["mix test"]},
+      allowable_tools: ["bash"],
       durability: :synced_checkpoint,
-      thresholds: %{decisions: 50, contradictions: 0},
+      shadow_every: 10,
+      thresholds: @policy_thresholds,
       evidence: %{
         records: 277,
         by_tool: %{"bash" => 214, "read" => 63},
         without_document: 0,
-        unreadable: 0
+        unreadable: 0,
+        other_tools: 0,
+        other_records: 0,
+        error: nil
       }
     })
   end
@@ -1744,11 +1782,17 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
   # client that recomputes the digest over everything but `report_sha256` and `replayed_at`
   # gets the value printed here.
   #
-  # `bash` is the tool a promotion would be refused for and `read` the one it would be granted
+  # `bash` is the tool and `per_shape` is where a promotion is decided (S-D27): `mix test` is
+  # the shape this report would earn a promotion for and `curl` the one it would be refused
   # for, in one report, because the interesting arithmetic is the relationship between the
-  # columns: `decisions` is `agreements + contradictions + stricter + asks`, and `agreements`
-  # contains `would_resolve`. A contradiction row carries a fingerprint, a session and an
-  # instant — never the document, which is the rule the whole band is built on.
+  # columns and between the columns and `thresholds`. `decisions` is
+  # `agreements + contradictions + stricter + asks`, `agreements` contains `would_resolve`, and
+  # `distinct_fingerprints`/`distinct_sessions` count only the rows answered **definitely**, so
+  # both are at most `decisions - asks`. A contradiction row carries a fingerprint, a session
+  # and an instant — never the document, which is the rule the whole band is built on.
+  #
+  # `thresholds` travels *inside* the sealed body deliberately: a report is read months later,
+  # possibly by a different build, and the numbers it had to clear are part of what it says.
   defp policy_replay_result do
     body = %{
       "policy_name" => "no-network-shell",
@@ -1756,6 +1800,13 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       "corpus_size" => 277,
       "unreadable" => 0,
       "since" => nil,
+      "thresholds" => %{
+        "contradictions" => 0,
+        "unreadable" => 0,
+        "distinct_fingerprints" => 20,
+        "distinct_sessions" => 2,
+        "would_resolve" => 1
+      },
       "per_tool" => %{
         "bash" => %{
           "decisions" => 214,
@@ -1787,6 +1838,42 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
           "asks" => 2,
           "unreadable" => 0,
           "contradiction_rows" => []
+        }
+      },
+      "per_shape" => %{
+        "bash" => %{
+          "mix test" => %{
+            "decisions" => 96,
+            "agreements" => 90,
+            "contradictions" => 0,
+            "would_resolve" => 74,
+            "stricter" => 2,
+            "asks" => 4,
+            "unreadable" => 0,
+            "distinct_fingerprints" => 41,
+            "distinct_sessions" => 6,
+            "human_denies" => 2,
+            "contradiction_rows" => []
+          },
+          "curl" => %{
+            "decisions" => 34,
+            "agreements" => 26,
+            "contradictions" => 2,
+            "would_resolve" => 3,
+            "stricter" => 5,
+            "asks" => 1,
+            "unreadable" => 0,
+            "distinct_fingerprints" => 12,
+            "distinct_sessions" => 1,
+            "human_denies" => 7,
+            "contradiction_rows" => [
+              %{
+                "fingerprint" => String.duplicate("a", 64),
+                "session_id" => @session_id,
+                "at" => @timestamp
+              }
+            ]
+          }
         }
       }
     }

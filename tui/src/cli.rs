@@ -457,15 +457,17 @@ pub enum PolicyCommand {
     /// is recorded, and the instance deciding this node's live permissions is untouched.
     Replay(PolicyReplayArgs),
 
-    /// Promote one tool for one policy, on a report `replay --out` wrote.
+    /// Promote one command shape of one tool for one policy, on a report `replay --out`
+    /// wrote.
     ///
     /// The node checks the report names the bytes it would evaluate and hashes to its own
-    /// digest, then **re-runs the replay itself** and refuses unless the re-run clears its
-    /// thresholds. Who promoted is the identity this client authenticated as; there is no
-    /// flag for it.
+    /// digest — a keyless sha256 over the file's own contents, so that says the file was not
+    /// edited and nothing about who produced it — and then **re-runs the replay itself** and
+    /// refuses unless the re-run clears its thresholds. Who promoted is the identity this
+    /// client authenticated as; there is no flag for it.
     Promote(PolicyPromoteArgs),
 
-    /// Withdraw one tool's promotion. Narrowing, and idempotent.
+    /// Withdraw one shape's promotion. Narrowing, and idempotent.
     Demote(PolicyDemoteArgs),
 
     /// Forget the whole record — the policy name, the bytes, and every tool promoted under
@@ -495,9 +497,15 @@ pub struct PolicyPromoteArgs {
     /// The policy the report is about.
     pub name: String,
 
-    /// The one tool this promotion is about. A promotion is per tool, always.
+    /// The one tool this promotion is about. `bash` is the only promotable tool in v1.
     #[arg(long, value_name = "TOOL")]
     pub tool: String,
+
+    /// The command prefix this promotion is about — `mix`, `mix test`. A promotion is per
+    /// `(tool, shape)`, always: a request is covered when every one of its sub-commands
+    /// matches `Bash(<shape> *)`, and `ouro policy replay` names every shape it found.
+    #[arg(long, value_name = "PREFIX")]
+    pub shape: String,
 
     /// The report file `ouro policy replay --out` wrote.
     #[arg(long, value_name = "PATH")]
@@ -513,6 +521,11 @@ pub struct PolicyDemoteArgs {
     /// The tool whose promotion is withdrawn.
     #[arg(long, value_name = "TOOL")]
     pub tool: String,
+
+    /// The command prefix whose promotion is withdrawn. Narrowing is per shape too:
+    /// demoting `mix test` leaves `mix` standing, and `ouro policy status` names both.
+    #[arg(long, value_name = "PREFIX")]
+    pub shape: String,
 
     /// Why. The runtime echoes it and stores an enumerated term instead, so this is a note
     /// for the person reading the reply rather than a field in the record.
@@ -1357,9 +1370,19 @@ pub enum McpCommand {
 
 #[derive(Debug, Args)]
 pub struct RunArgs {
-    /// The prompt to run.
-    #[arg(value_name = "PROMPT")]
-    pub prompt: String,
+    /// The prompt to run. Omitted only when `--prompt-file` names one instead.
+    #[arg(value_name = "PROMPT", required_unless_present = "prompt_file")]
+    pub prompt: Option<String>,
+
+    /// Read the prompt from this file instead of from the command line.
+    ///
+    /// Linux caps one `execve` argument at 128 KiB, so a brief past that cannot be typed as
+    /// an argument at all — the shell refuses with `E2BIG` before this program starts. A file
+    /// has no such ceiling; this one refuses over a mebibyte, which is a very long brief.
+    /// Refused together with a positional prompt: two prompts is a question about which one
+    /// was meant, and a command that silently picked would be answering it.
+    #[arg(long, value_name = "PATH", conflicts_with = "prompt")]
+    pub prompt_file: Option<PathBuf>,
 
     /// Send the prompt into a session that already exists instead of starting one. The
     /// start options are refused with it: that session's provider and workspace were
@@ -2425,12 +2448,36 @@ mod tests {
             panic!("`ouro run \"fix the tests\"` must parse as Run");
         };
 
-        assert_eq!(args.prompt, "fix the tests");
+        assert_eq!(args.prompt.as_deref(), Some("fix the tests"));
+        assert_eq!(args.prompt_file, None);
         assert_eq!(args.resume, None);
         // The one number with a default, because a headless run that never ends is the
         // failure this command exists to prevent.
         assert_eq!(args.timeout, 600);
         assert!(!args.json && !args.stream_json && !args.approve_all && !args.verbose);
+    }
+
+    /// S2b. A brief that does not fit in an argument. Linux caps one `execve` argument at
+    /// 128 KiB, so `ouro run "<100 KiB brief>"` fails in the shell before this program starts;
+    /// `bench/self/improve.sh` hands a session exactly that, and this is the way in.
+    #[test]
+    fn ouro_run_takes_a_prompt_file_instead_of_a_prompt_but_never_both() {
+        let Some(Command::Run(args)) = parse(&["run", "--prompt-file", "brief.md"]).command else {
+            panic!("`ouro run --prompt-file brief.md` must parse as Run");
+        };
+
+        assert_eq!(args.prompt, None);
+        assert_eq!(args.prompt_file, Some(PathBuf::from("brief.md")));
+
+        // Two prompts is a question about which one was meant, and a command that picked
+        // silently would be answering it.
+        assert!(
+            Cli::try_parse_from(["ouro", "run", "hi", "--prompt-file", "brief.md"]).is_err(),
+            "a positional prompt and --prompt-file are one prompt too many"
+        );
+
+        // And neither is not a run at all.
+        assert!(Cli::try_parse_from(["ouro", "run"]).is_err());
     }
 
     #[test]
