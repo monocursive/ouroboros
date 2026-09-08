@@ -1,6 +1,6 @@
 # Self-improvement v1: implementation plan
 
-Status: **plan**, 2026-09-08. Implements [self-improvement.md](self-improvement.md) (the
+Status: **implemented**, 2026-09-08, on branch `self-integrate`. This document is the plan as written before the work; what was built, and every departure a review forced, is in [`docs/SELF.md`](../SELF.md), which claims only what its tests prove. Read that first; read this for the reasoning that preceded it. Plan §0 row 11 and the decisions `S-D27`–`S-D29` (per-shape earned widening), `S-D49` (the credential fence), and `S-D53`–`S-D54` (the pristine-tree grader and the history cut) record where the reviews changed the design. Implements [self-improvement.md](self-improvement.md) (the
 proposal) against `dev` at `160ca08`. Every file and line cited below was read at that ref.
 This document is the contract the implementing agents work to, the review protocol each slice
 runs under, and the record of where the plan departs from the proposal and why.
@@ -476,7 +476,7 @@ Branch `self-integrate` from `dev`. Per slice, after its review: cherry-pick, `m
 --warnings-as-errors`, the slice's suites. After the wave: the full `mix test` detached,
 `mix dialyzer`, `cargo +1.95 clippy --all-targets -- -D warnings` (both feature sets),
 `cargo test` for the crates touched, `make bench-local`, `bench/self/selftest.sh`,
-`bench/self/improve-selftest.sh`, golden and protocol-docs drift. Then a PR from `self` to
+`bench/self/improve-selftest.sh`, golden and protocol-docs drift. Then a PR from `self-integrate` to
 `dev`.
 
 ## 7. What stays with a human after the code lands
