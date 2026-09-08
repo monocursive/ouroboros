@@ -1863,13 +1863,14 @@ defmodule Ouroboros.Provider.Native.Loop do
     receive do
       {:native_approval, ^request_id, %ApprovalResponse{decision: :approve} = response} ->
         state = if persist?, do: grant(state, classified, response.scope), else: state
+        actor = answer_actor(response)
 
         entry_id =
           record(
             state,
             :approve,
             response.scope,
-            :human,
+            actor,
             nil,
             permission_request(state, classified)
           )
@@ -1878,20 +1879,22 @@ defmodule Ouroboros.Provider.Native.Loop do
           journal_approval(state, request_id, call.id, question, %{
             "decision" => "approve",
             "scope" => response.scope,
-            "actor" => "human",
+            "actor" => to_string(actor),
             "permission_entry_id" => entry_id
           })
 
         {:allow, state, call, classified, context,
-         authority(:allow, "human", response.scope, :human, nil, entry_id, request_id)}
+         authority(:allow, to_string(actor), response.scope, actor, nil, entry_id, request_id)}
 
       {:native_approval, ^request_id, %ApprovalResponse{} = response} ->
+        actor = answer_actor(response)
+
         entry_id =
           record(
             state,
             :deny,
             response.scope,
-            :human,
+            actor,
             nil,
             permission_request(state, classified)
           )
@@ -1900,14 +1903,14 @@ defmodule Ouroboros.Provider.Native.Loop do
           journal_approval(state, request_id, call.id, question, %{
             "decision" => "deny",
             "scope" => response.scope,
-            "actor" => "human",
+            "actor" => to_string(actor),
             "permission_entry_id" => entry_id
           })
 
         {:deny, state,
          "Refused: the operator denied this #{classified.tool} call" <>
            reason_suffix(response.reason) <> ".", classified,
-         authority(:deny, "human", response.scope, :human, nil, entry_id, request_id)}
+         authority(:deny, to_string(actor), response.scope, actor, nil, entry_id, request_id)}
 
       {:native_approval, _other_id, _response} ->
         wait_for_approval(
@@ -2219,31 +2222,34 @@ defmodule Ouroboros.Provider.Native.Loop do
     receive do
       {:native_approval, ^request_id, %ApprovalResponse{decision: :approve} = response} ->
         state = grant_escalation(state, pending.classified, response.scope)
+        actor = answer_actor(response)
 
         _ =
           record(
             state,
             :approve,
             response.scope,
-            :human,
+            actor,
             escalation_ref(nil),
             permission_request(state, pending.classified)
           )
 
-        rerun(state, pending, "human", request_id)
+        rerun(state, pending, to_string(actor), request_id)
 
       {:native_approval, ^request_id, %ApprovalResponse{} = response} ->
+        actor = answer_actor(response)
+
         _ =
           record(
             state,
             :deny,
             response.scope,
-            :human,
+            actor,
             escalation_ref(nil),
             permission_request(state, pending.classified)
           )
 
-        declined(state, pending, :human, response.reason, request_id)
+        declined(state, pending, actor, response.reason, request_id)
 
       {:native_approval, _other_id, _response} ->
         wait_for_escalation(state, pending, request_id, deadline)
@@ -2349,6 +2355,16 @@ defmodule Ouroboros.Provider.Native.Loop do
         "profile and " <>
         "declined" <> reason_suffix(reason) <> ". Do not ask for it again for this command."
 
+  # A client that answered with nobody at the keyboard (S2's fix wave). The sentence matters:
+  # telling the model "the operator declined" when no operator was asked is the same untruth
+  # in the transcript that labelling the ledger entry `:human` was in the audit.
+  defp decline_text(:automation, reason),
+    do:
+      "The client answering this session's approvals declined the fenced escalation re-run" <>
+        reason_suffix(reason) <>
+        ", with nobody at the keyboard. Do not ask for it again for " <>
+        "this command."
+
   defp decline_text(:rule, rule),
     do:
       "A permission rule (#{inspect(rule)}) refuses the fenced escalation re-run, so the " <>
@@ -2449,6 +2465,29 @@ defmodule Ouroboros.Provider.Native.Loop do
   # a *human* answered: `Ouroboros.Control.Permissions` writes a decision-evidence row for those
   # and only those (S2, S-D20), and a rule's or a hook's answer is not evidence of a human's
   # judgement. Optional, so the other eleven call sites are unchanged.
+  # Who answered an approval this loop was waiting on (S2's fix wave).
+  #
+  # `Jido.Harness.ApprovalResponse` has four fields and none of them is the actor, so a client
+  # that answered with nobody at the keyboard — `ouro run --approve-all`, the TUI's auto-approve
+  # toggle — reached here indistinguishable from a person, and every one of those answers was
+  # recorded as a human decision and became evidence a policy promotion is measured against
+  # (S2, S-D20). The gateway now puts the fact in `provider_options`, which is the one field
+  # the struct has that carries anything, and this reads it.
+  #
+  # An **absent** actor is `:human`, and deliberately: an interactive client that never says
+  # anything is a person at a terminal, which is what every client in this repository except
+  # the two headless ones is. The fact has to be *said* to be believed in either direction, and
+  # the direction that costs is this one — an unstated automation writes a corpus row.
+  defp answer_actor(%ApprovalResponse{provider_options: options}) when is_map(options) do
+    case Map.get(options, "actor") || Map.get(options, :actor) do
+      "human" -> :human
+      declared when is_binary(declared) and declared != "" -> :automation
+      _unstated -> :human
+    end
+  end
+
+  defp answer_actor(_response), do: :human
+
   defp record(state, decision, scope, actor, rule_ref, request \\ nil) do
     decision_id =
       "ndec_" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)

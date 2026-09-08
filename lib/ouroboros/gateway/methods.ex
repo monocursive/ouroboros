@@ -2480,10 +2480,24 @@ defmodule Ouroboros.Gateway.Methods do
           do: Map.put(approval, :provider_options, provider_options),
           else: approval
 
-      {:ok, if(actor == :human, do: approval, else: Map.put(approval, :actor, actor))}
+      {:ok, if(actor == :human, do: approval, else: declared_by(approval, actor))}
     else
       _refused -> {:invalid, approval_message()}
     end
+  end
+
+  # A non-human actor travels twice: as `:actor`, which the interactive plane's ledger entry
+  # and its permission entry read, and inside `provider_options`, which is the only slot
+  # `Jido.Harness.ApprovalResponse` has that survives the trip to a native run's loop (S2's fix
+  # wave — the loop labelled every answer `:human` because the fact never reached it). A client
+  # cannot write this key itself: `plan_exit_options/1` above admits `choice` and `follow_up`
+  # and nothing else, and this runs after it.
+  defp declared_by(approval, actor) do
+    options = Map.get(approval, :provider_options) || %{}
+
+    approval
+    |> Map.put(:actor, actor)
+    |> Map.put(:provider_options, Map.put(options, "actor", Atom.to_string(actor)))
   end
 
   defp plan_exit_options(nil), do: {:ok, nil}

@@ -1312,17 +1312,31 @@ that landed.
 **`:policy_allowable_tools` is no longer the only input to what an `allow` may resolve** (S2).
 It is still the only one an operator writes, and it is still empty by default. Beside it there
 is now a durable, node-local *promotion record* — `Ouroboros.Control.PolicyPromotion` — holding
-one policy name at one component sha256 and the tools that name has **earned** the right to
-resolve, where earned means: the component was replayed, dry, against a corpus of decisions
-humans actually made on this node (`Ouroboros.Control.PolicyEvidence`, one row per human answer,
-holding exactly the bytes `PolicyEngine.document/1` would have handed it), and it contradicted
-none of them across at least fifty of them. `settle/6` adds the record's tools to the configured
-list only when the record's name *and* sha match the row about to answer, so a re-deployed policy
-has earned nothing; and a human `deny` for a promoted tool that the promoted bytes would have
-allowed demotes that tool inside the same `record/2` call. The dry path
+one policy name at one component sha256 and the **shapes** that name has earned the right to
+resolve. A shape is a `bash` command prefix, the thing an operator would have written as
+`Bash(mix test *)`, and it is what an earned `allow` reaches: promotion is per
+`(policy, tool, shape)`, `bash` is the only promotable tool in v1, and a promoted shape covers a
+request only when every one of its sub-commands matches it.
+
+Earned means: the component was replayed, dry, against a corpus of decisions humans actually
+made on this node (`Ouroboros.Control.PolicyEvidence`, one row per human answer, holding exactly
+the bytes `PolicyEngine.document/1` would have handed it), and on the re-run it contradicted no
+human anywhere in that tool, left no verdict unreadable on the shape, answered **definitely** —
+an `ask` is an abstention and counts for nothing — across at least twenty distinct requests from
+at least two sessions, and would have resolved at least one call a human was actually asked
+about. The counted-rows version of that sentence, "contradicted none of them across at least
+fifty", was the one the adversarial review broke: a component that answers `allow` to everything
+clears it on fifty harmless approvals, because a corpus with no human `deny` in it has zero
+contradictions whatever the component says.
+
+`settle/6` honours an earned `allow` only when the record's name *and* sha match the row about
+to answer, so a re-deployed policy has earned nothing. Every tenth honoured allow inside a shape
+(`config :ouroboros, :policy_shadow_every`) is put to a human anyway, which is what keeps the
+demotion canary able to see: a human `deny` for a call a promoted shape covers, that the
+promoted bytes would have allowed, demotes every shape that covered it. The dry path
 (`PolicyEngine.evaluate_with/3`) verifies provenance exactly as the live path does, stands the
 component under `wasm/policy/dry/<sha>` rather than `wasm/policy/<sha>`, and records nothing.
-Full statement, decisions S-D20 through S-D26, and what is not in it: [SELF.md §S2](SELF.md).
+Full statement, decisions S-D20 through S-D29, and what is not in it: [SELF.md §S2](SELF.md).
 
 ## 9. Deferred lanes
 

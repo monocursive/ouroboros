@@ -92,6 +92,11 @@ defmodule Ouroboros.Agent.EffectLedger do
     # `fingerprint` is a digest of the command line, paths, and domains; the text of any
     # of them is exactly the content this ledger exists to keep out.
     permission: [:tool, :mode, :provider, :fingerprint],
+    # The `actor` this entry's *result* carries is `Ouroboros.Control.Permissions.actor/0`:
+    # `:human`, `:rule`, `:classifier`, and — since S2's fix wave — `:automation` for a client
+    # that answered with nobody at the keyboard and `:runtime` for this node answering its own
+    # unanswered question. They are stored as they arrive; the honesty is the caller's, and
+    # `Interactive.Task.Approvals` is where it now happens.
     # B7. A command an operator ran in a session's workspace, recorded before it runs.
     # `command_digest` is a digest of the command line and `cwd` is the directory it ran
     # in; the command text is exactly the content this ledger exists to keep out, and a
@@ -139,9 +144,13 @@ defmodule Ouroboros.Agent.EffectLedger do
     # S2. One change to what a policy component is allowed to resolve on this node:
     # `:promote`, `:demote` or `:clear`. `component_sha256` is the bytes the promotion is
     # *for* — a re-deployed policy with new bytes is a different policy and is not promoted —
-    # and `tool` is the one tool the action names, `nil` for a `:clear`. There is no request
-    # here to minimize: this entry is about a configuration change, not about a call.
-    policy_promotion: [:policy_name, :tool, :action, :component_sha256, :actor, :node]
+    # `tool` is the one tool the action names and `shape` the one command prefix within it
+    # (both `nil` for a `:clear`). A shape is a *rule*, the thing an operator would have typed
+    # as `Bash(mix test *)`, and it is here for the reason `operator_shell.cwd` is: an audit of
+    # what widened this node's permission surface that did not say what it widened would be
+    # unreadable. It is drawn from the redacted document the component was shown, never from a
+    # raw command line.
+    policy_promotion: [:policy_name, :tool, :shape, :action, :component_sha256, :actor, :node]
   }
   @result_fields %{
     start_agent: [:agent_id, :module, :node],
@@ -166,13 +175,18 @@ defmodule Ouroboros.Agent.EffectLedger do
       :input_tokens,
       :output_tokens
     ],
-    # S2. The numbers the promotion was earned on: how many human decisions the replay
-    # covered, how many of them the component contradicted, and the digest of the report those
-    # two came out of. A demotion carries `reason` and the `fingerprint` of the human answer
-    # that contradicted the component — the digest, never the command.
+    # S2. The numbers the promotion was earned on: how many corpus rows the replay covered for
+    # this shape, how many of them the component contradicted anywhere in the tool, how many
+    # distinct requests and sessions it answered *definitely*, how many prompts the promotion
+    # removes, and the digest of the report they came out of. A demotion carries `reason` and
+    # the `fingerprint` of the human answer that contradicted the component — the digest, never
+    # the command.
     policy_promotion: [
       :decisions,
       :contradictions,
+      :distinct_fingerprints,
+      :distinct_sessions,
+      :would_resolve,
       :report_sha256,
       :reason,
       :fingerprint,

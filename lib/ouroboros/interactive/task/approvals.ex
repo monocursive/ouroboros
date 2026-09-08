@@ -103,6 +103,15 @@ defmodule Ouroboros.Interactive.Task.Approvals do
     # answer holds however the provider asked the question.
     decision = if Map.get(response, :decision) == :approve, do: :allow, else: :deny
 
+    # S2's fix wave. `Jido.Harness.ApprovalResponse` has four fields and `:actor` is not one of
+    # them, so a declared non-human actor is dropped at the harness boundary and the native
+    # loop labels every answer `:human`. `provider_options` is the one slot the struct has that
+    # survives that trip, and this is where the fact is put into it — one place, so a gateway
+    # client and a direct caller of `InteractiveSession.respond_approval/3` are read the same
+    # way. A response that declares nothing is left alone: the loop reads an absent actor as a
+    # person, which is what an interactive client that never says is.
+    response = declare_actor(response)
+
     runtime =
       case harness_approval_subject(runtime, request_id) do
         :unknown ->
@@ -171,7 +180,7 @@ defmodule Ouroboros.Interactive.Task.Approvals do
   end
 
   defp settle_external_verdict(runtime, request_id, _ref, request, _from, {:allow, rule}) do
-    record_permission(runtime, request, request_id, :allow, :engine, rule)
+    record_permission(runtime, request, request_id, :allow, permission_actor(:engine, nil), rule)
 
     runtime =
       resolve_external_event(runtime, request_id, :allow, :engine, rule_reason(rule), :once)
@@ -180,7 +189,7 @@ defmodule Ouroboros.Interactive.Task.Approvals do
   end
 
   defp settle_external_verdict(runtime, request_id, _ref, request, _from, {:deny, rule}) do
-    record_permission(runtime, request, request_id, :deny, :engine, rule)
+    record_permission(runtime, request, request_id, :deny, permission_actor(:engine, nil), rule)
 
     runtime =
       resolve_external_event(runtime, request_id, :deny, :engine, rule_reason(rule), :once)
@@ -240,7 +249,16 @@ defmodule Ouroboros.Interactive.Task.Approvals do
     if pending do
       _ = Process.cancel_timer(pending.timer)
       _ = Process.demonitor(pending.monitor, [:flush])
-      record_permission(runtime, pending.request, request_id, decision, source, nil, scope)
+
+      record_permission(
+        runtime,
+        pending.request,
+        request_id,
+        decision,
+        permission_actor(source, response),
+        nil,
+        scope
+      )
 
       runtime =
         resolve_external_event(runtime, request_id, decision, source, reason, scope, effect_id)
@@ -346,12 +364,12 @@ defmodule Ouroboros.Interactive.Task.Approvals do
   # to "unattributed". Until 2026-08-23 this passed the subject where the id goes, which
   # the engine refuses as `:invalid_permission_record` — so no bridged decision ever
   # reached the ledger, and the test fixture mirrored the wrong shape.
-  defp record_permission(runtime, request, request_id, decision, source, rule, scope \\ :once) do
+  defp record_permission(runtime, request, request_id, decision, actor, rule, scope \\ :once) do
     _ =
       Engine.record(permission_decision_id(runtime, request_id), %{
         decision: if(decision == :allow, do: :approve, else: :deny),
         scope: scope,
-        actor: if(source == :engine, do: :rule, else: :human),
+        actor: actor,
         rule_ref: rule,
         reason: nil,
         request: permission_subject(runtime, request)
@@ -359,6 +377,28 @@ defmodule Ouroboros.Interactive.Task.Approvals do
 
     :ok
   end
+
+  # Who actually answered, in `Ouroboros.Control.Permissions.actor/0`'s vocabulary (S2's fix
+  # wave). It was `if(source == :engine, do: :rule, else: :human)`, which called a timeout, a
+  # gone caller and an `ouro run --approve-all` answer a human's decision — and that field is
+  # exactly what `Control.PolicyEvidence` reads to decide whether an answer becomes the
+  # evidence a policy promotion is measured against.
+  #
+  # The `:approval` entry beside this one has always been honest (`approval_actor/1`); this is
+  # the same reading, narrowed to the two words the permission vocabulary has for "not a
+  # person", because `:headless` and `:automation` are the same fact here.
+  defp permission_actor(:engine, _response), do: :rule
+
+  defp permission_actor(:human, response) do
+    case approval_actor(response) do
+      :human -> :human
+      _headless_or_automation -> :automation
+    end
+  end
+
+  # `:timeout`, `:caller_gone`, `:caller_stopped`, `:session_terminal`, `:capacity`,
+  # `:checkpoint_failed`: this runtime answering its own unanswered question.
+  defp permission_actor(_runtime_source, _response), do: :runtime
 
   # The engine's seams use `"<session id>:<provider request id>"`: stable across a retry
   # after a lost acknowledgement, so the same answer records one entry rather than two.
@@ -556,11 +596,26 @@ defmodule Ouroboros.Interactive.Task.Approvals do
     end
   end
 
+  defp declare_actor(response) do
+    case approval_actor(response) do
+      :human ->
+        response
+
+      actor ->
+        options =
+          if is_map(Map.get(response, :provider_options)),
+            do: Map.get(response, :provider_options),
+            else: %{}
+
+        Map.put(response, :provider_options, Map.put(options, "actor", Atom.to_string(actor)))
+    end
+  end
+
   # Who answered. The runtime observes a `respond_approval` and nothing about the caller
   # behind it, so `:human` is the honest default and anything else has to be *said*: a
   # caller that answers without a person at the keyboard — `ouro run --approve-all` is the
   # one that exists — names itself in the response. See TUI.md §2.4.
-  defp approval_actor(response) do
+  defp approval_actor(response) when is_map(response) do
     case Map.get(response, :actor) do
       actor when actor in [:human, :headless, :automation] -> actor
       "headless" -> :headless
@@ -568,6 +623,10 @@ defmodule Ouroboros.Interactive.Task.Approvals do
       _unstated -> :human
     end
   end
+
+  # No response at all is the coordinator answering on nobody's behalf; the callers that reach
+  # here that way pass a source `permission_actor/2` reads as `:runtime` anyway.
+  defp approval_actor(_absent), do: :human
 
   # Present only when the answer wrote a durable rule and said so. The "don't ask again"
   # button is a separate `permissions.add` call this seam never sees, so inventing an id

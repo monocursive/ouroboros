@@ -88,6 +88,22 @@ defmodule Ouroboros.Control.Permissions do
   @type server :: GenServer.server()
   @type rule_ref :: %{scope: atom(), id: String.t(), pattern: String.t()}
   @type outcome :: {:allow, rule_ref()} | {:deny, rule_ref()} | {:ask, atom()}
+  @typedoc """
+  Who made an answer, and it is not a courtesy field: `Ouroboros.Control.PolicyEvidence` reads
+  exactly this to decide whether an answer becomes decision evidence (S2, S-D20).
+
+    * `:human` — a person answered. The only actor whose answers are evidence.
+    * `:rule` — a rule an operator wrote decided.
+    * `:classifier` — a policy component decided (`Ouroboros.Wasm.PolicyEngine`).
+    * `:automation` — a client answered with nobody at the keyboard and said so:
+      `ouro run --approve-all`, the TUI's auto-approve toggle.
+    * `:runtime` — this node answered its own unanswered question: an approval that timed out,
+      one whose caller went away.
+
+  The last two were `:human` until S2's fix wave, which is how a headless run's approvals
+  became human decisions in the corpus a promotion is measured against.
+  """
+  @type actor :: :rule | :human | :classifier | :automation | :runtime
   # `:request` and `:principal` are read by `answered_request/1` below, which is the whole
   # reason a recorded answer can name the call it answered. They were missing here, and a
   # map type lists every key it admits — so every real caller "broke the contract", and
@@ -97,7 +113,7 @@ defmodule Ouroboros.Control.Permissions do
   @type answer :: %{
           required(:decision) => :approve | :deny,
           optional(:scope) => :once | :session | :always,
-          optional(:actor) => :rule | :human | :classifier,
+          optional(:actor) => actor(),
           optional(:rule_ref) => term(),
           optional(:reason) => String.t() | nil,
           optional(:request) => Request.t() | map(),
@@ -167,7 +183,7 @@ defmodule Ouroboros.Control.Permissions do
 
   ## The decision corpus (S2, S-D20)
 
-  An answer whose `actor` is `:human` **and** which carries a `:request` also leaves one row
+  An answer that **says** `actor: :human` and carries a `:request` also leaves one row
   in `Ouroboros.Control.PolicyEvidence`: the request in the exact form
   `Ouroboros.Wasm.PolicyEngine.document/1` would hand a policy component, beside what the
   human decided. That is the corpus `Ouroboros.Wasm.PolicyEngine.replay/2` measures a
@@ -179,6 +195,12 @@ defmodule Ouroboros.Control.Permissions do
   fails is logged once and the answer stands, because the ledger is the authority and this is
   evidence. `permission_entry_id` is carried only where the ledger accepted the entry, so the
   row never names a `:permission` entry that does not exist.
+
+  `:actor` has no default in the corpus: an answer that does not say who made it is not
+  evidence that a human made it. The ledger entry beside it still defaults to `:human`, which is
+  the older contract and the one every caller in this repository states explicitly — the two
+  differ deliberately, because a ledger row that over-attributes is a record a person can
+  correct and a corpus row that over-attributes is a promotion nobody can.
   """
   @spec record(String.t(), answer()) :: :ok | {:error, term()}
   def record(decision_id, answer)

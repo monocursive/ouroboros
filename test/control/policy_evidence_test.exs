@@ -108,6 +108,10 @@ defmodule Ouroboros.Control.PolicyEvidenceTest do
     end
 
     test "the file is 0600 inside a 0700 directory", context do
+      # Deleted first, so what is asserted is the mode *this module* creates them at rather
+      # than the one the test's own `mkdir_p` happened to leave behind.
+      File.rm_rf!(context.dir)
+
       assert :ok =
                Permissions.record("evid-mode-#{context.session}", %{
                  decision: :approve,
@@ -119,6 +123,29 @@ defmodule Ouroboros.Control.PolicyEvidenceTest do
       assert {:ok, %{mode: dir}} = File.stat(context.dir)
       assert Bitwise.band(file, 0o777) == 0o600
       assert Bitwise.band(dir, 0o777) == 0o700
+    end
+
+    test "the mode is set before the file holds a byte, and the directory is not re-opened",
+         context do
+      # L10. The file was created at the umask's mode and chmodded *after* the first write, so
+      # a command line was on disk world-readable for as long as that took. And the directory
+      # was chmodded on every append, which put an operator's deliberate `chmod 000` back to
+      # 0700 rather than failing visibly.
+      File.rm_rf!(context.dir)
+      refute File.exists?(context.dir)
+
+      assert :ok = PolicyEvidence.write("entry", human(:deny), request!("ls"))
+      assert {:ok, %{mode: mode}} = File.stat(PolicyEvidence.path())
+      assert Bitwise.band(mode, 0o777) == 0o600
+
+      # A directory an operator locked down stays locked down, and the write fails rather than
+      # re-opening it.
+      File.chmod!(context.dir, 0o000)
+      on_exit(fn -> File.chmod(context.dir, 0o700) end)
+
+      assert {:error, _reason} = PolicyEvidence.write("entry", human(:deny), request!("ls -la"))
+      assert {:ok, %{mode: locked}} = File.stat(context.dir)
+      assert Bitwise.band(locked, 0o777) == 0o000
     end
 
     test "a request too large for the engine's document is a row with no document", context do
@@ -135,8 +162,22 @@ defmodule Ouroboros.Control.PolicyEvidenceTest do
 
       assert [row] = rows()
       assert row["document"] == nil
-      assert PolicyEvidence.count().without_document == 1
-      assert PolicyEvidence.count().records == 1
+      assert {:ok, counts} = PolicyEvidence.count()
+      assert counts.without_document == 1
+      assert counts.records == 1
+    end
+
+    test "count/0 is total: a corpus nobody can read is an error, not an exception (M8)" do
+      # S2b serves this under `:read`. `stream/1` guards the stream's *construction*;
+      # enumerating it is where a file that has become unreadable raises, and a `:read` verb
+      # that raised would be a gateway 500 where a refusal belongs.
+      assert :ok = PolicyEvidence.write("entry", human(:deny), request!("ls"))
+      assert {:ok, %{records: 1}} = PolicyEvidence.count()
+
+      File.chmod!(PolicyEvidence.path(), 0o000)
+      on_exit(fn -> File.chmod(PolicyEvidence.path(), 0o600) end)
+
+      assert {:error, {:policy_evidence_unreadable, _reason}} = PolicyEvidence.count()
     end
   end
 
@@ -165,6 +206,62 @@ defmodule Ouroboros.Control.PolicyEvidenceTest do
 
       # The component grading itself is the one measurement that cannot mean anything.
       assert rows() == []
+    end
+
+    test "an answer that does not say who made it writes nothing (P5, L11)", context do
+      # The reverse mutation the reviewer left standing: `write/3` read
+      # `Map.get(answer, :actor, :human)`, so every caller that forgot to say became a human
+      # decision in the corpus. An actor is now required and has no default.
+      assert :skipped =
+               PolicyEvidence.write("entry", %{decision: :deny, scope: :once}, request!("ls"))
+
+      assert rows() == []
+
+      # And through the seam a session actually uses.
+      assert :ok =
+               Permissions.record("evid-unstated-#{context.session}", %{
+                 decision: :deny,
+                 request: bash_request(context, "ls")
+               })
+
+      assert rows() == []
+    end
+
+    test "a client that answered with nobody at the keyboard writes nothing (H4)", context do
+      for actor <- [:automation, :runtime] do
+        assert :ok =
+                 Permissions.record("evid-#{actor}-#{context.session}", %{
+                   decision: :approve,
+                   actor: actor,
+                   request: bash_request(context, "ls")
+                 })
+      end
+
+      assert rows() == []
+    end
+
+    test "an operator can turn the corpus off entirely (M6)", context do
+      Application.put_env(:ouroboros, :policy_evidence_enabled, false)
+      on_exit(fn -> Application.delete_env(:ouroboros, :policy_evidence_enabled) end)
+
+      refute PolicyEvidence.enabled?()
+
+      assert :ok =
+               Permissions.record("evid-off-#{context.session}", %{
+                 decision: :deny,
+                 actor: :human,
+                 request: bash_request(context, "psql 'password=hunter2'")
+               })
+
+      # No row, and no file: a node whose operator does not want human command lines on its
+      # disk does not get a file with one line in it either.
+      assert rows() == []
+      refute File.exists?(PolicyEvidence.path())
+
+      # A malformed value leaves it on: the failure this protects against is a node that
+      # silently stopped recording the evidence its promotions are measured against.
+      Application.put_env(:ouroboros, :policy_evidence_enabled, "no thanks")
+      assert PolicyEvidence.enabled?()
     end
 
     test "an answer with no request writes nothing", context do
@@ -218,7 +315,7 @@ defmodule Ouroboros.Control.PolicyEvidenceTest do
 
       assert PolicyEvidence.path() == nil
       assert PolicyEvidence.stream() |> Enum.to_list() == []
-      assert PolicyEvidence.count().records == 0
+      assert {:ok, %{records: 0}} = PolicyEvidence.count()
 
       assert :ok =
                Permissions.record("evid-nowhere", %{
@@ -238,12 +335,14 @@ defmodule Ouroboros.Control.PolicyEvidenceTest do
       assert third["tool"] == "read"
 
       # A replay that silently dropped it would report a corpus size that was not the corpus.
-      assert PolicyEvidence.count() == %{
-               records: 2,
-               by_tool: %{"bash" => 1, "read" => 1},
-               without_document: 0,
-               unreadable: 1
-             }
+      assert PolicyEvidence.count() ==
+               {:ok,
+                %{
+                  records: 2,
+                  by_tool: %{"bash" => 1, "read" => 1},
+                  without_document: 0,
+                  unreadable: 1
+                }}
     end
 
     test "`since` and `tool` filter decoded rows", context do
@@ -276,6 +375,10 @@ defmodule Ouroboros.Control.PolicyEvidenceTest do
                  request: bash_request(context, "the newest answer")
                })
 
+      # The rewrite runs off the answer path (L9), so this waits for the record to be bounded
+      # rather than for `record/2` to return: a human's answer must not pay for a rewrite of
+      # sixty-four mebibytes.
+      await(fn -> length(rows()) == 9_000 end)
       kept = rows()
 
       # Down to the low-water mark rather than to exactly the bound: a rewrite to 10 000 would
@@ -306,6 +409,7 @@ defmodule Ouroboros.Control.PolicyEvidenceTest do
                  request: bash_request(context, "ls")
                })
 
+      await(fn -> File.stat!(PolicyEvidence.path()).size <= PolicyEvidence.max_bytes() end)
       assert File.stat!(PolicyEvidence.path()).size <= PolicyEvidence.max_bytes()
 
       kept = rows()
@@ -329,6 +433,35 @@ defmodule Ouroboros.Control.PolicyEvidenceTest do
       context: %{}
     }
   end
+
+  # The corpus's bound is enforced by a process of its own (L9), so a test about the bound waits
+  # for the file rather than for the call that triggered it.
+  defp await(fun, attempts \\ 600)
+  defp await(_fun, 0), do: flunk("the corpus was not bounded within 60s")
+
+  defp await(fun, attempts) do
+    if fun.() do
+      :ok
+    else
+      Process.sleep(100)
+      await(fun, attempts - 1)
+    end
+  end
+
+  defp human(decision),
+    do: %{decision: decision, scope: :once, actor: :human, rule_ref: nil, reason: nil}
+
+  defp request!(command),
+    do:
+      Request.new(%{
+        principal: %{session_id: "evidence-session", provider: :native, node: node()},
+        tool: "bash",
+        command: command,
+        paths: [],
+        mode: :execute,
+        domains: [],
+        context: %{}
+      })
 
   defp rows do
     PolicyEvidence.stream()

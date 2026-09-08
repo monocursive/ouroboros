@@ -7,7 +7,9 @@ defmodule Ouroboros.Control.PolicyEvidence do
   named in `config :ouroboros, :policy_allowable_tools`, which is empty by default (docs/WASM.md
   D20). Widening that list is an operator typing a tool name, and the whole point of S2 is that
   there is one other way — replay the component against decisions a human already made and
-  promote a tool only where the component agreed with every one of them.
+  promote one **shape** of one tool, a command prefix such as `mix test`, only where the
+  component answered definitely, agreed with every one of them, and would have resolved calls
+  a human was actually asked about (S-D27, S-D28).
 
   Replay needs a corpus, and before this module there was nothing durable to replay. A
   `:permission` ledger entry holds `%{tool, mode, provider, fingerprint}` where the fingerprint
@@ -29,21 +31,35 @@ defmodule Ouroboros.Control.PolicyEvidence do
 
   ## What is written, and what is not
 
-  One record per answer whose `actor` is `:human` **and** which carries a request. Nothing for
-  `actor: :rule` — a rule's answer is the rule, and replaying a component against decisions the
-  rules already make would measure the rules — and nothing for `actor: :classifier`, which is
-  the policy component's own verdict and would be the component grading itself.
+  One record per answer that **says** `actor: :human` and carries a request. The actor is
+  required and has no default: an answer that does not say who made it is not evidence that a
+  human made it, and the first version of this module defaulted to `:human`, which turned every
+  caller that forgot into a human decision in the corpus. Nothing is written for `actor: :rule`
+  — a rule's answer is the rule, and replaying a component against decisions the rules already
+  make would measure the rules — nothing for `actor: :classifier`, which is the policy
+  component's own verdict and would be the component grading itself, and nothing for
+  `:automation` or `:runtime`, which are the two ways an approval is answered with nobody at
+  the keyboard (`ouro run --approve-all`, and a coordinator's own timeout).
 
   An answer with no request writes nothing: `Ouroboros.Control.Permissions.record/2` accepts one
   without, and a record with no document is not evidence of anything.
+
+  ## Turning it off
+
+  `config :ouroboros, :policy_evidence_enabled`, `true` by default. `false` writes nothing at
+  all — no directory, no file, no row — and `stream/1` then reads whatever is already on disk,
+  because a corpus an operator has stopped growing is still a corpus they may replay or delete.
+  It is the switch for a node whose operator does not want human command lines on its disk at
+  any bound; the bounds below are what they get if they leave it on.
 
   ## A write failure never refuses the answer
 
   The effect ledger is the authority ("a ledger that cannot record the call refuses it"); this
   is the corpus. A failed append is logged once per reason for the life of the node and the
   answer stands. The direction that costs is the safe one: a corpus that lost records replays
-  with *fewer* decisions, so `promote/4`'s `decisions >= 50` threshold is harder to reach, never
-  easier — and there is no failure of this module that can invent an agreement.
+  with *fewer* distinct fingerprints and *fewer* sessions, so
+  `Ouroboros.Wasm.PolicyEngine.promote/6`'s thresholds are harder to reach, never easier — and
+  there is no failure of this module that can invent an agreement.
 
   ## Bounds
 
@@ -62,7 +78,8 @@ defmodule Ouroboros.Control.PolicyEvidence do
   ## Nothing here is served over the gateway
 
   A record holds a command line. It is node-local, it is read by `PolicyEngine.replay/2` in the
-  same VM, and the only thing S2b exposes is the per-tool **count** under `:read`. A fleet-wide
+  same VM, and the only thing S2b exposes is the per-tool **count** under `:read` (`count/0`,
+  which is total for that reason). A fleet-wide
   replay would be a fleet-wide export of command lines and is not in v1 (plan §0 row 9).
 
   ## Where it lives
@@ -82,8 +99,11 @@ defmodule Ouroboros.Control.PolicyEvidence do
 
   @filename "evidence.ndjson"
 
+  # The registered name of the one process that may be rewriting the corpus to its bound.
+  @rewriter :ouroboros_policy_evidence_rewriter
+
   # The bound, in records and in bytes. Ten thousand human answers is more than a busy node
-  # produces in a month and five times what `promote/4` needs at its threshold; sixty-four
+  # produces in a month; sixty-four
   # mebibytes is the journal's budget, for the same reason — it is the number past which a file
   # nobody rotates becomes a file nobody can read.
   @max_records 10_000
@@ -100,8 +120,9 @@ defmodule Ouroboros.Control.PolicyEvidence do
   @min_row_bytes 200
 
   # The actors whose answers are evidence. `:rule` is the rules deciding, `:classifier` is the
-  # policy component deciding — neither is a human, and both would make a replay measure
-  # something other than what it claims to.
+  # policy component deciding, `:automation` is a client that answered with nobody at the
+  # keyboard and `:runtime` is this node answering its own unanswered question — none of them
+  # is a human, and each would make a replay measure something other than what it claims to.
   @evidence_actors [:human]
 
   @typedoc "One row of the corpus, as it is read back off disk: string keys, JSON values."
@@ -118,7 +139,9 @@ defmodule Ouroboros.Control.PolicyEvidence do
   def write(permission_entry_id, answer, request)
 
   def write(permission_entry_id, answer, %Request{} = request) when is_map(answer) do
-    if Map.get(answer, :actor, :human) in @evidence_actors do
+    # `Map.get(answer, :actor)` and not `Map.get(answer, :actor, :human)`: an unstated actor is
+    # not a human, it is a caller that did not say. See the moduledoc.
+    if Map.get(answer, :actor) in @evidence_actors and enabled?() do
       append(row(permission_entry_id, answer, request))
     else
       :skipped
@@ -126,6 +149,16 @@ defmodule Ouroboros.Control.PolicyEvidence do
   end
 
   def write(_permission_entry_id, _answer, _request), do: :skipped
+
+  @doc """
+  Whether this node writes a corpus at all. `config :ouroboros, :policy_evidence_enabled`.
+
+  `true` unless the key is set to exactly `false`: a malformed value leaves the corpus on,
+  because the failure this bound protects against is a node that silently stopped recording
+  the evidence its promotions are measured against.
+  """
+  @spec enabled?() :: boolean()
+  def enabled?, do: Application.get_env(:ouroboros, :policy_evidence_enabled, true) != false
 
   @doc """
   The corpus, oldest first, as a lazy stream of `{:ok, record}` and `:unreadable`.
@@ -171,33 +204,47 @@ defmodule Ouroboros.Control.PolicyEvidence do
   could not decode.
 
   This is the one thing S2b may serve over the gateway, under `:read`: counts, never rows.
+
+  **Total.** `stream/1` guards the *construction* of the stream; enumerating it is where a file
+  that has become unreadable raises, and this is a `:read` verb — so a corpus nobody can read
+  is `{:error, reason}` and never an exception two frames away in the gateway. A count is a
+  fact about a file, and "there is no fact" is one of the answers.
   """
-  @spec count() :: %{
-          records: non_neg_integer(),
-          by_tool: %{String.t() => non_neg_integer()},
-          without_document: non_neg_integer(),
-          unreadable: non_neg_integer()
-        }
+  @spec count() ::
+          {:ok,
+           %{
+             records: non_neg_integer(),
+             by_tool: %{String.t() => non_neg_integer()},
+             without_document: non_neg_integer(),
+             unreadable: non_neg_integer()
+           }}
+          | {:error, term()}
   def count do
-    Enum.reduce(
-      stream(),
-      %{records: 0, by_tool: %{}, without_document: 0, unreadable: 0},
-      fn
-        :unreadable, acc ->
-          %{acc | unreadable: acc.unreadable + 1}
+    {:ok,
+     Enum.reduce(
+       stream(),
+       %{records: 0, by_tool: %{}, without_document: 0, unreadable: 0},
+       fn
+         :unreadable, acc ->
+           %{acc | unreadable: acc.unreadable + 1}
 
-        {:ok, record}, acc ->
-          tool = Map.get(record, "tool", "unknown")
+         {:ok, record}, acc ->
+           tool = Map.get(record, "tool", "unknown")
 
-          %{
-            acc
-            | records: acc.records + 1,
-              by_tool: Map.update(acc.by_tool, tool, 1, &(&1 + 1)),
-              without_document:
-                acc.without_document + if(is_binary(record["document"]), do: 0, else: 1)
-          }
-      end
-    )
+           %{
+             acc
+             | records: acc.records + 1,
+               by_tool: Map.update(acc.by_tool, tool, 1, &(&1 + 1)),
+               without_document:
+                 acc.without_document + if(is_binary(record["document"]), do: 0, else: 1)
+           }
+       end
+     )}
+  rescue
+    error -> {:error, {:policy_evidence_unreadable, Exception.message(error)}}
+  catch
+    kind, reason ->
+      {:error, {:policy_evidence_unreadable, "#{kind}: #{inspect(reason, limit: 5)}"}}
   end
 
   @doc """
@@ -277,7 +324,7 @@ defmodule Ouroboros.Control.PolicyEvidence do
 
         case append_line(path, line) do
           :ok ->
-            enforce_bounds(path)
+            enforce_bounds_async(path)
             :ok
 
           {:error, reason} ->
@@ -293,14 +340,22 @@ defmodule Ouroboros.Control.PolicyEvidence do
       {:error, {:policy_evidence_write_failed, Exception.message(error)}}
   end
 
-  # The journal's `append_line/2`, with the directory created private rather than merely
-  # created: this file holds command lines, and a `0755` directory around a `0600` file names
-  # them to anybody who can list it.
+  # The journal's `append_line/2`, with two differences this file's contents pay for.
+  #
+  # The directory is created **private** rather than merely created: this file holds command
+  # lines, and a `0755` directory around a `0600` file names them to anybody who can list it.
+  # It is chmodded only at the moment it is created, never on every append — an append that
+  # re-opens a directory an operator has deliberately locked down is this module overruling
+  # them about their own filesystem, and it fails here instead, visibly, as a write error the
+  # answer does not depend on.
+  #
+  # The file is created and chmodded `0600` **before** it holds a byte, for the reason the mode
+  # exists: creating it at the umask's mode and chmodding after the first write leaves a window
+  # in which a command line is on disk world-readable. The window between `open` and `chmod` is
+  # closed by the `0700` directory, which is the only path to the file and exists first.
   defp append_line(path, line) do
-    dir = Path.dirname(path)
-
-    with :ok <- File.mkdir_p(dir),
-         _ = File.chmod(dir, 0o700),
+    with :ok <- ensure_dir(Path.dirname(path)),
+         :ok <- ensure_file(path),
          {:ok, device} <- File.open(path, [:append, :binary, :raw]) do
       result =
         case :file.write(device, line) do
@@ -309,9 +364,52 @@ defmodule Ouroboros.Control.PolicyEvidence do
         end
 
       _ = File.close(device)
-      _ = File.chmod(path, 0o600)
       result
     end
+  end
+
+  defp ensure_dir(dir) do
+    if File.dir?(dir),
+      do: :ok,
+      else: with(:ok <- File.mkdir_p(dir), do: File.chmod(dir, 0o700))
+  end
+
+  defp ensure_file(path) do
+    if File.regular?(path) do
+      :ok
+    else
+      case File.open(path, [:write, :binary, :raw, :exclusive]) do
+        {:ok, device} ->
+          _ = File.close(device)
+          File.chmod(path, 0o600)
+
+        # Another process created it between the two calls; the mode is theirs to set and they
+        # set the same one.
+        {:error, :eexist} ->
+          :ok
+
+        other ->
+          other
+      end
+    end
+  end
+
+  # Off the answer path (S-D28's sibling: nothing about the corpus may cost a human's answer
+  # latency). One rewriter at a time per node, by a registered name — two concurrent rewrites
+  # would each read the whole file and the last rename would win, which is correct but is work
+  # nobody needs. A rewrite that races an *append* can still lose that append, exactly as
+  # before and for the same reason: the direction is fewer decisions.
+  defp enforce_bounds_async(path) do
+    spawn(fn ->
+      try do
+        Process.register(self(), @rewriter)
+        enforce_bounds(path)
+      rescue
+        ArgumentError -> :ok
+      end
+    end)
+
+    :ok
   end
 
   # Both bounds, from one `stat` and — below the cheap gate — no read at all.

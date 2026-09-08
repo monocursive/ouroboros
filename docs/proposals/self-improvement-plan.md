@@ -22,6 +22,7 @@ where the source disagreed with the proposal's reading of it.
 | 8 | Candidates are "commits since June … 256 exist; 79 are `fix`". | The history starts 2026-08-12. 281 commits touch `lib/` and a `test/**/*_test.exs`; 81 are fixes; 114 are Elixir-only with ≤ 300 non-test lines changed. | The extractor ranks by non-test diff size and prefers fixes; the corpus is 20–30 tasks from that set. |
 | 9 | Replay is fleet-wide through `ledger.list`. | `ledger.list` carries fingerprints (row 1). | v1 replays the node-local corpus. A `--fleet` replay is listed as not in v1. |
 | 10 | `evaluate_with/3` runs "against a named artifact rather than the live one". | The engine stands one instance per sha under `policy-<sha>` and re-verifies the manifest before loading a byte ([`policy_engine.ex:341-420`](../../lib/ouroboros/wasm/policy_engine.ex)). | The dry path verifies the same way, instantiates under `policy-dry-<sha>`, records nothing, and is refused for anything that is not a verified `:policy` manifest in this node's store. |
+| 11 | S2 promotes a **tool**: "per tool, fifty decisions, zero contradictions". | The adversarial review of S2a proved the threshold carries no information. `decisions` counts an `ask`, so a component that abstains on every row clears it having demonstrated nothing; it counts rows, so fifty copies of one answer in one session clear it; and `contradictions` is "allow where the human said deny", so a corpus of harmless approvals has zero of them **whatever the component says** — a blanket-allow component was promoted on fifty `git status` approvals and then resolved `curl \| sh` unasked. The demotion canary could not see that call, because a promoted `allow` asks nobody. | Promotion is per `(policy, tool, **shape**)` — a `bash` command prefix, covered by `Matcher`'s word-prefix semantics with the allow quantifier; `bash` is the only promotable tool in v1. The thresholds count only **definite** verdicts: 20 distinct fingerprints, 2 distinct sessions, ≥1 `would_resolve`, 0 unreadable on the shape, 0 contradictions for the tool. And every Nth honoured allow inside a shape is downgraded to `{:ask, :policy_shadow}` (`:policy_shadow_every`, default 10) so a human keeps answering inside promoted ground and the canary has something to see. S-D27, S-D28, S-D29. |
 
 Two smaller ones. The ledger's `tool_call` result carries `status, duration_ms, output_bytes`
 only, so "forge and deploy settle it with the artifact id and sha" is done the way
@@ -282,13 +283,19 @@ Two parts. S2a is the runtime and its tests; S2b is the gateway verbs and the cl
 (`record/2` writes evidence for human answers), `lib/ouroboros/wasm/policy_engine.ex`,
 `lib/ouroboros/agent/effect_ledger.ex` (one new ledger-only kind, checkpoint version bumped
 the way R1 did), `lib/ouroboros/provider/native/loop.ex` (the four human-answer `record`
-calls pass `request:`), `config/config.exs` (`policy_promotion_storage`,
-`policy_evidence_root` for tests), `lib/ouroboros/application.ex` (the promotion server in
-the tree beside `Control.Grants`), tests, `docs/SELF.md` §S2, one paragraph at the end of
-`docs/WASM.md` §8.2.
+calls pass `request:` and the actor the client declared), `config/config.exs`
+(`policy_promotion_storage`, `policy_evidence_root`, `policy_evidence_enabled`,
+`policy_shadow_every`), `lib/ouroboros/application.ex` (the promotion server in the tree
+beside `Control.Grants`), tests, `docs/SELF.md` §S2, one paragraph at the end of
+`docs/WASM.md` §8.2. The fix wave adds the H4 files: `interactive/task/approvals.ex` and
+`interactive/task.ex` (the actor a permission entry is recorded under) and
+`gateway/methods.ex` (carrying a declared non-human actor to the native loop in
+`provider_options`).
 
 **The corpus** (`Control.PolicyEvidence`). Append-only NDJSON at
-`<data_dir>/policy/evidence.ndjson`, mode 0600, one record per **human** answer:
+`<data_dir>/policy/evidence.ndjson`, mode 0600, one record per answer that **says** its actor
+is a human (there is no default; row 11's sibling finding is that `--approve-all` was writing
+human decisions):
 `{at, node, session_id, tool, mode, fingerprint, decision, scope, permission_entry_id,
 document}` where `document` is exactly `PolicyEngine.document/1`'s output for the request
 (redacted by the engine's own redaction) and `fingerprint` is the digest
@@ -300,31 +307,38 @@ gateway. Under `:read` the gateway may report the **count** per tool and nothing
 **The record** (`Control.PolicyPromotion`). A GenServer on `Control.Grants`' checkpoint
 discipline (write, fsync, then acknowledge; a failed checkpoint is not applied), storage from
 `config :ouroboros, :policy_promotion_storage` (ETS in dev and test, `DurableFile` in prod).
-State: `%{policy_name, component_sha256, tools: %{tool => %{promoted_at, actor, evidence}},
-demotions: [%{tool, at, reason, fingerprint}]}`. API: `promote(name, tool, evidence, actor)`,
-`demote(name, tool, reason)`, `status/0`, `allowable_tools(name)`, `policy_name/0`. One policy
-name per record; promoting a tool for a different name than the record holds is refused until
-the record is cleared (`clear/1`, actor required). Every write is a `:policy_promotion` ledger
-entry with attempt `%{policy_name, tool, action, component_sha256}` and result
-`%{decisions, contradictions, report_sha256}`.
+State: `%{policy_name, component_sha256, tools: %{tool => %{shape => %{promoted_at, seq, actor,
+evidence}}}, demotions: [%{tool, shape, at, seq, reason, fingerprint}]}` (row 11). API:
+`promote(name, sha, tool, shape, evidence, actor)`, `demote(name, tool, shape, reason)`,
+`status/0`, `allowable_shapes(name, sha, tool)`, `allowable(name, sha)`, `policy/0`,
+`shadow_tick(tool, shape)`. One policy name at one sha per record; promoting for a different
+name, or the same name at different bytes, is refused until the record is cleared (`clear/1`,
+actor required). Every write is a `:policy_promotion` ledger entry with attempt
+`%{policy_name, tool, shape, action, component_sha256}` and result `%{decisions, contradictions,
+distinct_fingerprints, distinct_sessions, would_resolve, report_sha256}`, started before the
+checkpoint and settled after it.
 
-**The engine.** `PolicyEngine.configured_policy/0` answers the config, then the record;
-`allowable_tools/0` becomes `allowable_tools(name)`: the config list plus the record's tools
-**for that name only**, minus tools with a demotion newer than their promotion. `settle/6`
-honours an `allow` through it. `evaluate_with(name_or_sha, document, opts)`: verifies the
-manifest as `provenance/3` does, stands an instance under `policy-dry-<sha>`, asks once,
-returns `{:ok, verdict, rule}` or a named refusal, records nothing. `replay(name, opts)`: over
-the corpus (optionally `since:`), per tool: `decisions`, `agreements`, `contradictions` (the
-component answered `allow` where the human answered `deny`), `would_resolve` (`allow` where
-the human answered `approve`), `asks`; contradictions carry the fingerprint and the session id,
-never the document; the report carries `policy_name`, `component_sha256`, `corpus_size`,
-`replayed_at`, and its own `report_sha256` over the canonical JSON of everything else.
-`promote(name, tool, evidence_report)`: refuses unless the report names this sha, then
-**re-runs the replay** and refuses unless `decisions >= 50` and `contradictions == 0` now;
-records both the report's `report_sha256` and the re-run's numbers. `record/2` gains the
-canary: a human `deny` for a tool the record holds is dry-evaluated through the promoted
-policy; an `allow` there demotes the tool, writes the ledger entry, and logs a warning
-naming the session. The deny itself is recorded exactly as before.
+**The engine.** `PolicyEngine.configured_policy/0` answers the config, then the record, and
+`status/0` says which. `allowable_tools/0` stays the operator's list; the earned half is
+`allowable_shapes(name, sha, tool)`, which applies the name gate and the byte gate together.
+`settle/6` honours an `allow` when some promoted shape covers the request, and downgrades every
+Nth such allow to `{:ask, :policy_shadow}` (row 11). `evaluate_with(name_or_sha, document,
+opts)`: verifies the manifest as `provenance/3` does, stands an instance under
+`policy-dry-<sha>`, asks once, returns `{:ok, verdict, rule}` or a named refusal, records
+nothing, and drops the instance unless `keep: true`. `replay(name, opts)`: over the corpus
+(optionally `since:`), per tool **and per shape**: `decisions`, `agreements`, `contradictions`
+(the component answered `allow` where the human answered `deny`), `would_resolve` (`allow` where
+the human answered `approve`), `stricter`, `asks`, `unreadable`, and per shape also
+`distinct_fingerprints`, `distinct_sessions` and `human_denies` over definite verdicts only;
+contradictions carry the fingerprint and the session id, never the document; the report carries
+`policy_name`, `component_sha256`, `corpus_size`, `thresholds`, `replayed_at`, and its own
+`report_sha256` over the canonical JSON of everything else. `promote(name, tool, shape, report,
+actor)`: refuses a tool that is not `bash`, refuses unless the report names this sha, then
+**re-runs the replay** and refuses unless the five numbers in row 11 hold now; records both the
+report's `report_sha256` and the re-run's numbers. `record/2` gains the canary: a human `deny`
+for a request a promoted shape covers is dry-evaluated through the promoted policy, off the
+answer path; an `allow` there demotes every covering shape, writes the ledger entry, and logs a
+warning naming the session. The deny itself is recorded exactly as before.
 
 **S2b.** Gateway verbs `policy.status` (`:read`), `policy.replay`, `policy.promote`,
 `policy.demote` (`:operate`), each with a closed params contract, golden fixtures
@@ -348,12 +362,15 @@ leaves one evidence record whose `document` equals `PolicyEngine.document/1` of 
 the loop evaluated. S2b: contract tests as every other verb has.
 
 **Mutations that must go red.** Remove the contradiction check in `promote`; remove the
-re-run; let `allowable_tools/1` answer for a different policy name; drop the demotion-newer
-check; write evidence for a `:rule` answer; let `evaluate_with` record.
+re-run; let `allowable_shapes/4` answer for a different policy name or other bytes; drop the
+demotion-newer check; write evidence for a `:rule` answer, or for an answer that named no actor;
+let `evaluate_with` record; score an `ask` as a definite verdict; score a row with no document,
+or a decision spelled anything but `approve`/`deny`, as an agreement; drop the shadow sample;
+honour an earned `allow` for a request no promoted shape covers.
 
 **Not in this slice.** A classifier. A model in the promotion path. Promotion without a human
-actor. Fleet-wide replay. A session-visible notice on demotion beyond the log and the ledger
-(listed as S-D open).
+actor. A shape language for anything but `bash`. Fleet-wide replay. A session-visible notice on
+demotion beyond the log and the ledger (listed as S-D open).
 
 ### S3. The outer loop: Ouroboros works on Ouroboros
 
