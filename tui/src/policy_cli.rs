@@ -1766,6 +1766,21 @@ mod tests {
         write_report(&path, &report()).expect("a written report");
         assert_eq!(read_report(&path).expect("a read report"), report());
 
+        // LOW-4, the other direction. The type check is on the **handle**, so a report reached
+        // through a symlink — `latest.json -> 2026-09-08.json`, which is how an operator keeps
+        // one — is a report. A `symlink_metadata` on the path would refuse it, and would also
+        // be answering about whatever the name pointed at when it was asked rather than about
+        // the file that is then read.
+        #[cfg(unix)]
+        {
+            let link = dir.join("latest.json");
+            std::os::unix::fs::symlink(&path, &link).expect("a symlink");
+            assert_eq!(
+                read_report(&link).expect("a report through a symlink"),
+                report()
+            );
+        }
+
         // LOW-4. A directory is refused by the *open handle's* metadata rather than by a stat
         // on the path, so what was checked and what would be read are the same object.
         let refusal = read_report(&dir).expect_err("a directory is not a report");

@@ -395,34 +395,74 @@ Not in this slice: a classifier, a model anywhere in the promotion path, promoti
 human actor, a shape language for anything but `bash`, fleet-wide replay, and the gateway verbs
 and `ouro policy` CLI (S2b).
 
-**Verbs and CLI (S2b).** Five verbs put the above in front of a person. `policy.status`
-(`:read`) answers the record — the policy it is bound to, every tool promoted under it with the
-actor and the numbers it was promoted on, the newest twenty demotions, `allowable_tools`, the
-record's durability and this node's thresholds — beside `PolicyEvidence.count/0`. `policy.replay`
-(`:operate`) answers the sealed report; `policy.promote` (`:operate`, `outcome: unknown`) takes
-`{name, tool, report}` and answers the record after the write; `policy.demote` takes
-`{name, tool, reason}` and `policy.clear` takes nothing, and both answer the record too. Every
-envelope is closed and none of the five takes a `node`: the record is a checkpoint on this
-machine and the corpus is a file on it. **No evidence document crosses this boundary.** The
-counts are the whole of what these verbs say about the corpus, and a contradiction row carries a
-fingerprint, a session id and an instant. `Ouroboros.Gateway.PolicyTest` walks a populated
-reply for a `document`, `command`, `paths`, `write_paths` or `domains` key at any depth and for
-a path separator in any string, and `tui/src/model.rs`'s
+**Verbs and CLI (S2b).** Five verbs put the above in front of a person, and all five need the
+**administrator** role under required audit: `policy.promote` hands a wasm component the
+authority to answer `allow` for a shape of `bash` on every future request, which is
+`permissions.add` with a component in place of the pattern, so `"policy."` sits in
+`Audit.Identity.required_role/2`'s prefix list beside `permissions.`, `grants.` and `wasm.`.
+
+`policy.status` (`:read`) answers the record — the policy it is bound to, **one row per promoted
+`(tool, shape)`** with `allowed` beside it, the actor and the re-run's numbers each was promoted
+on, the newest twenty demotions, `allowable`, `allowable_tools`, the record's durability, this
+node's thresholds and its `shadow_every` — beside a bounded projection of
+`PolicyEvidence.count/0`. `policy.replay` (`:operate`) answers the sealed report, which since
+S2a's fix wave carries `thresholds` and `per_shape` as well as `per_tool`. `policy.promote`
+(`:operate`, `outcome: unknown`) takes `{name, tool, shape, report}` and answers the record after
+the write; `policy.demote` takes `{name, tool, shape, reason}` and `policy.clear` takes nothing,
+and both answer the record too. Every envelope is closed and none of the five takes a `node`: the
+record is a checkpoint on this machine and the corpus is a file on it.
+
+**No evidence document crosses this boundary.** The counts are the whole of what these verbs say
+about the corpus, and a contradiction row carries a fingerprint, a session id and an instant.
+`Ouroboros.Gateway.PolicyTest` walks a populated reply — and a *real* replay of the real
+`no-network-shell` over a seeded corpus, through `handle_policy_replay` itself — for a
+`document`, `command`, `paths`, `write_paths` or `domains` key at any depth and for a path
+separator in any string, and `tui/src/model.rs`'s
 `the_policy_fixtures_carry_counts_and_never_a_request` does the same to all three golden frames
 and to the pages the client renders from them.
 
-The client is `ouro policy status|replay|promote|demote|clear`. `replay --out report.json`
-writes the file `promote --evidence report.json` hands back — the runtime re-runs the replay
-before it writes anything, so the file is a record of what was decided on rather than the
-decision. A table for a person and `--json` for a pipe, and stdout carries only the answer:
-where a report was written and the sentence a demotion was recorded against both go to stderr.
-The client states no threshold of its own — the report table prints the seven counts and derives
-nothing, and `status` prints the thresholds the node itself sent — `the_gate_is_the_node_s_own_numbers`
-proves a runtime that states none is said so rather than filled in from a constant compiled into
-the client.
+Every part of a reply that could grow is bounded, and the bound says what it left out.
+`evidence.by_tool` is the busiest 32 tools with `other_tools` and `other_records` beside them —
+the corpus is bounded at ten thousand rows and sixty-four mebibytes, and neither of those bounds
+the number of *distinct tool names* those rows carry. A tool name, a name echoed in a refusal and
+a term from another plane are each cut to their own ceiling, and a refusal's `data.detail` is
+`inspect`ed under a printable limit and has its path separators blanked: the one thing these
+verbs must never say is where on this machine the corpus lives. `since` is parsed as an ISO 8601
+instant and refused as `-32602` when it is not one, because the corpus reads an instant it cannot
+parse as *no filter at all* and a sealed report would otherwise state the operator's typo as
+though it had narrowed something.
 
-Proved in `test/ouroboros/gateway/policy_test.exs`, `tui/src/policy_cli.rs`'s own tests,
-`tui/tests/policy_cli.rs` against the scripted gateway with the golden frames, and
+The client is `ouro policy status|replay|promote|demote|clear`. `replay --out report.json`
+writes the file `promote --tool bash --shape "mix test" --evidence report.json` hands back — the
+runtime re-runs the replay before it writes anything, so the file is a record of what was decided
+on rather than the decision. `replay`'s table prints the per-tool counts and then a per-shape
+table with a `needs` row taken from the report's **own** `thresholds` block, so an operator reads
+down a column and sees which shapes clear this node's bar and by how much. A table for a person
+and `--json` for a pipe, and stdout carries only the answer: where a report was written and the
+sentence a demotion was recorded against both go to stderr.
+
+The client states no threshold of its own — the report table derives nothing, and every number it
+prints as a requirement came out of the node's own answer;
+`the_gate_and_the_sample_are_the_node_s_own_numbers` proves a runtime that states none is said so
+rather than filled in from a constant compiled into the client.
+
+And every string the node sends passes one decode contract before it reaches a terminal
+(S-D29b): `ouro::model::plain` blanks control characters, a value over 4 KiB is cut on a
+character boundary with a marker, every column width is capped at 64 characters, and a digest is
+printed as a prefix only when it really is `[0-9a-f]{64}` and as `?` otherwise. The adversarial
+review reached all four of those through fields the node chooses — a non-ASCII digest panicked
+the client on a byte slice, an escape sequence in a tool name repainted the operator's terminal,
+a newline in a policy name forged a header line, and a 60 kB tool name padded every row of the
+table out to its own length.
+
+`ouro run --prompt-file PATH` is the other half of what the outer loop needs: Linux caps one
+`execve` argument at 128 KiB, so a 100 KiB brief cannot be typed as `ouro run "<brief>"` at all.
+The file is read before a runtime is started, refused over a mebibyte, refused when it is not a
+regular file by the open handle's own metadata, and refused together with a positional prompt.
+
+Proved in `test/ouroboros/gateway/policy_test.exs`, `test/provider/native/coding_approval_test.exs`,
+`tui/src/policy_cli.rs`'s own tests, `tui/tests/policy_cli.rs` and `tui/tests/run.rs` against the
+scripted gateway with the golden frames, and
 `test/support/gateway_golden/policy_{status,promote,replay}_result.json` with the sections
 `docs/PROTOCOL.md` generates from them.
 
@@ -1074,36 +1114,94 @@ promotion removed, which is the price of knowing it is still right. `0` disables
 honoured because an operator may have a reason, and is documented here and in S-D24 as blinding
 the canary.
 
-**S-D27. The actor is the gateway principal, and an unattributed caller is refused rather than
-recorded.** `policy.promote` and `policy.clear` have no `actor` parameter: who promoted is the
-identity the connection authenticated as, read by `Audit.Identity.actor/0` from the runtime's
-own side of the socket, because a promotion whose actor a client could type is a promotion with
-anybody's name on it. That function cannot fail — with no resolvable subject it answers the
-placeholder `runtime-unattributed`, which is a fine ledger principal for something the runtime
-did to itself and is not a human — so both verbs check for it and answer `-32003` with
-`reason: unattributed_actor`. `policy.demote` does **not**: narrowing is safe, `PolicyPromotion`
-requires no actor for it, and a demotion nobody can name is still a demotion. The check runs
-before the plane is asked, so an unattributed caller does not learn which policies this node
-runs.
+### The wire (S2b)
 
-**S-D28. Four of the five verbs answer the same object.** `status`, `promote`, `demote` and
-`clear` all answer the record as it stands after the call, so a client has one shape to render
-and every write proves itself by handing back what the record now says rather than by an
-acknowledgement a caller has to trust. It is bounded in the three places it could grow: the
-demotions are the newest twenty of the two hundred the record keeps, the evidence is
-`PolicyEvidence.count/0`, and the tools are the record's own map. `demote` adds exactly one key,
-`reason`, which is the sentence the operator typed **echoed** — the record stores the enumerated
-term `:operator_demotion` instead, because a checkpoint fsynced on every write is not where free
-text belongs, and the CLI puts the echo on stderr for the same reason.
+The plan gives this slice `S-D20`–`S-D29` and S2a's fix wave used all ten for the runtime; those
+numbers are cited from `policy_engine.ex`, `policy_promotion.ex`, `config/config.exs`,
+`docs/WASM.md` and the plan itself. The three decisions the **wire** made are therefore numbered
+`b` against the runtime's, rather than renumbering claims other files point at. An integrator who
+would rather widen the range can renumber these three and nothing else.
 
-**S-D29. None of the five takes a `node`, and `policy.replay` is `:operate`.** The promotion
-record is a checkpoint on this machine and the corpus is a file on it, so there is nothing to
-route to; a client asks the machine that made the decisions. `replay` is `:operate` rather than
-`:read` for the reason `computer_use.probe` is — it stands a component up — even though it
-decides nothing, records nothing and never touches the live instance. `promote` additionally
-admits `outcome: :unknown`, the admission `wasm.deploy` makes: the replay it re-runs and the
-checkpoint it writes do not stop because a socket's ceiling fired, and a client reconciles with
-`policy.status` rather than by retrying blind.
+**S-D27b. Who may promote, and who is named for it.** Two halves, and the review found both
+wrong. The **role**: `policy.*` needs `administrator` under required audit, because
+`policy.promote` hands a wasm component the authority to answer `allow` for a shape of `bash` on
+every future request — the same principal that is refused `permissions.add "Bash(*)" allow`
+could, one role lower, do it through a component. `"policy."` therefore sits in
+`Audit.Identity.required_role/2`'s prefix list with `permissions.`, `grants.`, `credentials.`,
+`wasm.` and the rest; `policy.status` is `:read` and an operator keeps it.
+
+The **actor**: none of the five verbs has an `actor` parameter. Who promoted is the identity the
+connection authenticated as, read by `Audit.Identity.actor/0` from the runtime's own side of the
+socket, because a promotion whose actor a client could type is a promotion with anybody's name on
+it. That function cannot fail — with no resolvable subject it answers the placeholder
+`runtime-unattributed`, a fine ledger principal for something the runtime did to itself and not a
+human — so `promote`, `clear` **and `demote`** check for it and answer `-32003` with
+`reason: unattributed_actor`. `demote` was the exception until the review: "narrowing is always
+safe, so a demotion needs no name". Narrowing is safe; an audit trail that says the runtime
+withdrew a promotion a person withdrew is not, and it is the same trail an investigation reads to
+find out who un-did the canary's work. The actor travels into `Control.PolicyPromotion` as the
+demotion's ledger principal, ahead of the session id the canary supplies and the literal
+`runtime` behind both. The check runs before the plane is asked, so an unattributed caller does
+not learn which policies this node runs.
+
+**S-D28b. Four of the five verbs answer one object, and every part of it is bounded and built.**
+`status`, `promote`, `demote` and `clear` all answer the record as it stands after the call, so a
+client has one shape to render and every write proves itself by handing back what the record now
+says rather than by an acknowledgement a caller has to trust. `demote` adds exactly one key,
+`reason`, the sentence the operator typed **echoed** — the record stores the enumerated term
+`:operator_demotion` instead, because a checkpoint fsynced on every write is not where free text
+belongs, and the CLI puts the echo on stderr for the same reason.
+
+Every row is **built key by key** rather than taken from the record. The record is a checkpoint
+this build writes and reads for its own purposes; a field it grows tomorrow is not a field this
+boundary serves today, and the review's surviving mutations were exactly that — the record's
+entry crossed the wire whole, and a `Map.put` of a new field went with it. A promoted row is
+`{tool, shape, allowed, promoted_at, seq, actor, evidence}` and the evidence is
+`{report_sha256_as_submitted, decisions, contradictions, distinct_fingerprints,
+distinct_sessions, would_resolve, replayed_at}` — one row per promoted `(tool, shape)`, with
+`allowed` beside it because a shape can be promoted and withdrawn and both facts are the answer.
+
+`report_sha256_as_submitted` is the digest under the name of what it is. `report_sha256` is a
+plain sha256 over the report's own canonical JSON with no key in it: it proves the file was not
+edited between the replay that produced it and the call that handed it in, and it proves
+**nothing** about who produced the numbers, because anybody can recompute it over contents of
+their choosing — the reviewer did, editing a golden report's contradictions to zero and
+re-sealing it. The gate is the **re-run**, whose numbers are the other six fields, and the
+contract, the refusal text and this decision say so rather than letting the word `sha256` do the
+work. No HMAC is invented: a keyed digest would need a key an operator has to keep, and the
+re-run already answers the question the key would have.
+
+The bounds: the demotions are the newest twenty of the two hundred the record keeps; the promoted
+rows are capped in the client's table with the remainder counted; and `evidence.by_tool` is the
+busiest **32** tools with `other_tools` and `other_records` beside them. That last one was
+unbounded — the corpus's ceiling is ten thousand rows and sixty-four mebibytes, and neither
+bounds how many *distinct tool names* those rows carry, so a corpus of MCP tools with generated
+names answered a megabyte-long `policy.status`. Every string in a reply is cut to its own
+ceiling, a refusal's `data.detail` is `inspect`ed under a printable limit with its path
+separators blanked, and `data.name` no longer mirrors a half-megabyte parameter back.
+
+**S-D29b. Node-local, `:operate`, and one decode contract for everything the client prints.**
+The promotion record is a checkpoint on this machine and the corpus is a file on it, so there is
+nothing to route to and none of the five takes a `node`; a client asks the machine that made the
+decisions. `replay` is `:operate` rather than `:read` for the reason `computer_use.probe` is — it
+stands a component up — even though it decides nothing, records nothing and never touches the
+live instance. `promote` additionally admits `outcome: :unknown`, the admission `wasm.deploy`
+makes: the replay it re-runs and the checkpoint it writes do not stop because a socket's ceiling
+fired, and a client reconciles with `policy.status` rather than by retrying blind.
+
+On the client's side, the gateway is authenticated and **not trusted** — a session's own bash can
+reach it — so every string the node sends passes one contract in `tui/src/policy_cli.rs` before
+it is measured or written: `ouro::model::plain` blanks control characters (the repo's own rule,
+stated at `agents.rs:59-63`), a value over 4 KiB is cut on a character boundary with a marker,
+every column width is capped at 64 characters, and `short/1` prints a digest prefix only when the
+value really is `[0-9a-f]{64}` and `?` otherwise. Each of those replaced a defect the review
+reached through a field the node chooses: a byte slice at `[..16]` panicked on any non-ASCII
+digest; an escape sequence in a tool name repainted the operator's terminal; a newline in a
+policy name forged a header line so a reader looking for `policy` found two; and one 60 kB tool
+name padded every row of the table out to its own length, with a value past 65 535 panicking the
+formatter outright because Rust packs a `{:width$}` into a `u16`. `--json` stays a verbatim
+passthrough of the node's answer, which is its contract; the *table* is the client's defence, and
+it has no renderer for a field the protocol does not send.
 
 <!-- S3-decisions -->
 

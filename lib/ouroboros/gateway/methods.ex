@@ -1617,8 +1617,7 @@ defmodule Ouroboros.Gateway.Methods do
   def policy_refusal(reason) when reason in [:invalid_replay, :invalid_promotion] do
     {:error, code(:invalid_params),
      "the wasm plane refused these parameters before it looked at anything: a name and a " <>
-       "shape are nonempty strings and a report is an object",
-     %{"reason" => to_string(reason)}}
+       "shape are nonempty strings and a report is an object", %{"reason" => to_string(reason)}}
   end
 
   def policy_refusal(reason), do: upstream_error(reason)

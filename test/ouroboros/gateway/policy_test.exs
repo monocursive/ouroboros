@@ -5,7 +5,8 @@ defmodule Ouroboros.Gateway.PolicyTest do
   use ExUnit.Case, async: false
 
   @moduledoc """
-  The five `policy.*` verbs (docs/SELF.md §S2, S-D27–S-D29 and S2b's S-D20–S-D24).
+  The five `policy.*` verbs (docs/SELF.md §S2, S-D27–S-D29 for the runtime and
+  S-D27b–S-D29b for the wire).
 
   The claim that matters most is a negative one: **no part of the evidence corpus crosses this
   boundary.** The corpus holds the exact document a policy component would have been shown for
@@ -730,7 +731,8 @@ defmodule Ouroboros.Gateway.PolicyTest do
         {{:tool_not_promotable, long}, :invalid_params, "tool_not_promotable"},
         {{:no_decisions_for_tool, long}, :upstream_error, "no_decisions_for_tool"},
         {{:no_decisions_for_shape, "bash", long}, :upstream_error, "no_decisions_for_shape"},
-        {{:policy_contradicted_a_human, "bash", 3}, :upstream_error, "policy_contradicted_a_human"},
+        {{:policy_contradicted_a_human, "bash", 3}, :upstream_error,
+         "policy_contradicted_a_human"},
         {{:policy_verdict_unreadable_on_shape, "bash", long, 2}, :upstream_error,
          "policy_verdict_unreadable_on_shape"},
         {{:not_enough_distinct_requests, "bash", long, 4, 20}, :upstream_error,
@@ -862,7 +864,9 @@ defmodule Ouroboros.Gateway.PolicyTest do
     test "since narrows the corpus the report is over", context do
       live_policy!(context)
 
-      seed_corpus!(context, for(n <- 1..4, do: {"bash", "curl https://example.test/#{n}", "deny"}),
+      seed_corpus!(
+        context,
+        for(n <- 1..4, do: {"bash", "curl https://example.test/#{n}", "deny"}),
         at: fn n -> "2026-09-0#{n}T00:00:00.000000Z" end
       )
 
