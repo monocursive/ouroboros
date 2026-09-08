@@ -15,7 +15,7 @@ different things.
 | Question | can the agent solve real terminal work? | does the agent's plumbing hold? | can the agent make a change to *this* code base that tests it was never shown accept? |
 | Model | a real one, paid for | a scripted one, free | a real one, paid for — or the oracle, free |
 | Needs | docker, a key, a Linux `ouro` | Elixir and a built client | Elixir, git, a built client, and a model this node can price |
-| Runtime | hours | ~5 seconds | ~30 minutes for the $0 oracle over 30 tasks |
+| Runtime | hours | ~5 seconds | 28 minutes for the $0 oracle over 30 tasks |
 | Comparable to other agents | yes, that is the point | no, and it never will be | no: every task is a commit from this repository |
 | Run it | `bench/terminal_bench/README.md` | `make bench-local` | `make bench-self`, then `bench/self/run.sh --spend <usd>` |
 | Status here | never run | **17/17 green** on macOS 15 / Elixir 1.20.2 / OTP 29 | **oracle 30/30 at $0**; no paid run has happened |
@@ -327,19 +327,22 @@ restore, the modified-test check and the budget arithmetic — and nothing about
 | Date | 2026-09-08 |
 | Corpus | 30 tasks, extracted from `dev` at `c2d9f55` |
 | Result | **30/30**, `$0.0000` spent of a `$1.00` cap |
-| Wall | 3 054 s total: 1 141 s building the thirty workspaces, 1 795 s building the thirty grading trees and running the restored tests, and 10.4 s of agent turns |
+| Wall | 1 660 s total: 660 s building the thirty workspaces, 625 s building the thirty grading trees, 189 s running the restored tests in them, and 12.3 s of agent turns |
 | Work | 67 `write` calls, 67 approvals requested and 67 answered under `--approve-all` |
 | Machine | macOS 15, Elixir 1.20.2, OTP 29, `ouro` debug build |
 
-The ten seconds is the honest shape of an oracle: the scripted model answers instantly, so
-almost all of that wall clock is sixty trees being cloned, compiled, and compiled again.
-Two trees per task is what the diff-on-a-pristine-tree grade costs, and it is the number to
-subtract when reading a paid run's wall clock — which is why setup, the agent's turn and
-grading are timed separately per task.
+The twelve seconds is the honest shape of an oracle: the scripted model answers instantly,
+so 99.3% of that wall clock is sixty trees being built and compiled. Two trees per task is
+what the diff-on-a-pristine-tree grade costs — it roughly doubled the oracle's wall clock —
+and it is the number to subtract when reading a paid run's, which is why setup, the agent's
+turn and grading are timed separately per task. The history-cut clone itself is not the
+cost: 0.50 s and 4.3 MiB of packed objects per task, measured over six of the thirty,
+against 22 s of `mix compile` in the tree it produces.
 
 `bench/self/selftest.sh` (`make bench-self`) was green on the same machine and day: twelve
-phases, no key, no spend. It proves the verdict rule, the refusals that come before anything
-is built, that the oracle's environment carries no secret, the extractor's two gates against
+phases, 118 assertions, 11 min 43 s, no key and no spend. It proves the verdict rule, the
+refusals that come before anything is built, that the oracle's environment carries no
+secret, the extractor's two gates against
 a fixture history built to trip them, four corpora that are not corpora, and then — against
 this repository's own commits — extraction, the oracle at $0, the spend cap, and eight
 scripted agents that must not score, three of which are the review's exploits above.

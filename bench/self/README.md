@@ -2,8 +2,9 @@
 
 Ouroboros, graded on changes to Ouroboros. Each task is a commit from this repository's
 own history: the agent is given the commit message and the titles of the tests that commit
-added, works in a detached worktree at the commit's parent, and is graded by restoring
-those tests from the history and running them.
+added, works in a clone whose history stops at the commit's parent, and is graded by
+taking its change as a diff, applying that diff to a fresh tree at the parent, restoring
+those tests from the history, and running them.
 
 ```sh
 make bench-self                                  # the $0 gate: selftest.sh
@@ -13,6 +14,7 @@ bench/self/run.sh --spend 5.00                   # a paid run
 bench/self/run.sh --spend 5.00 --filter 03       # one task
 bench/self/run.sh --spend 5.00 --no-approve-all # the unattended posture
 elixir bench/self/extract.exs --replace          # rebuild the corpus from the history
+bench/self/run.sh --spend 5.00 --repo /path/to/checkout    # grade another checkout's runtime
 ```
 
 Prerequisites: Elixir, git, a built client (`cd tui && cargo build`), and — for a paid run
@@ -22,10 +24,20 @@ refuses with a message if the client is missing.
 Two environment variables. `OURO_BIN` names the client, which is how you run this from a
 linked git worktree: a worktree has no `tui/target` of its own, and the runner will not
 reach outside the checkout to find one — grading a binary built from another commit is the
-failure this refusal exists to prevent. `BENCH_SELF_TMPDIR` overrides where the worktrees
-and the runtime's data directory are built, for a machine whose `$TMPDIR` is small; a task
-worktree is `deps/` plus `_build/` plus the checkout, so budget half a gigabyte per
-concurrent task (much less on APFS, where the clone shares blocks).
+failure this refusal exists to prevent. Naming a path that is not there is a *refusal*, not
+a fallback: a typo used to mean the corpus silently graded whatever `tui/target` happened
+to hold. `BENCH_SELF_TMPDIR` overrides where the trees and the runtime's data directory are
+built, for a machine whose `$TMPDIR` is small; a task costs two of them — one for the
+agent, one for the grade — each `deps/` plus `_build/` plus the checkout, so budget a
+gigabyte per task (much less on APFS, where the clone shares blocks).
+
+Two flags say *which* repository is which, and they are different questions.
+`--repo <checkout>` names the checkout whose runtime is under test: it is compiled, its
+client is used, its `deps/` and `_build/` are cloned into every tree. `--history <repo>`
+names the repository the corpus's commits live in. Both default to this checkout. The
+improve loop passes `--repo` at its own worktree while the corpus keeps grading against
+this history; `selftest.sh` passes `--history` at a two-file fixture project so the
+grader's rules can be proved in seconds.
 
 This is **not** [`bench/local`](../local/README.md). That corpus scripts the model and
 measures whether the plumbing holds. This one drives a real model and measures whether the
@@ -52,9 +64,15 @@ nobody wrote by hand.
    cap.
 3. Starts one `ouro --dev daemon` on a scratch `OUROBOROS_DATA_DIR` (mode 0700).
 4. Per task, and only while the running total is under `--spend`:
-   1. `git worktree add --detach <scratch>/work/<id> <base_sha>`, with `deps/`, `_build/`,
-      `priv/wasm/` and `priv/sandbox/` cloned in from this checkout (`cp -Rc` on macOS, so
-      APFS shares the blocks and a 300 MB `_build` costs metadata);
+   1. the workspace: a temporary ref `refs/bench-self/<run>/<id>` at `base_sha`, then a
+      **clone** of that ref alone through the `file://` transport into
+      `<scratch>/work/<id>`, then the ref is deleted. The `file://` transport packs only
+      what the asked-for ref reaches, so the commit that is the answer — and every commit
+      after it — is not in the workspace at all; that this is so is asserted per task
+      rather than assumed, and it costs 0.50 s and 4.3 MiB. The history *up to* the base is
+      all there. `deps/`, `_build/`,
+      `priv/wasm/` and `priv/sandbox/` are cloned in from the checkout (`cp -Rc` on macOS,
+      so APFS shares the blocks and a 300 MB `_build` costs metadata);
    2. `mix deps.get` when the commit's `mix.lock` is not the one those `deps/` were
       fetched for, then `mix compile` in `dev` and `test` — `test` alone under `--oracle`,
       where no agent will run a command. This is **setup**, timed and reported separately:
@@ -285,9 +303,10 @@ things it exists to reject. Both are refused outside `--oracle`:
 
 ## The selftest
 
-`bench/self/selftest.sh` (`make bench-self`) is the $0 gate: twelve phases, no key, no
-network beyond git and the local hex cache, no spend. About twenty minutes, most of it real
-trees being compiled twice per task.
+`bench/self/selftest.sh` (`make bench-self`) is the $0 gate: twelve phases, 118
+assertions, no key, no network beyond git and the local hex cache, no spend. Eleven minutes
+and forty seconds on the machine it was written on, most of it real trees being compiled
+twice per task.
 
 The cheap half runs first, and it runs against a **fixture repository** — a two-file Mix
 project `lib/fixture.sh` builds in a second, with a history shaped to contain one of each

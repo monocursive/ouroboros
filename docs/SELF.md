@@ -893,7 +893,9 @@ The workspace is now built by registering a temporary ref `refs/bench-self/<run>
 `base_sha`, fetching that ref alone through the **`file://` transport** — which packs only
 what the asked-for ref reaches, where a plain path clone would hardlink the whole object
 store — and deleting the ref on every path. That the answer is absent is asserted per task
-rather than assumed. It costs 0.4 s and 4 MiB per task on this repository. The history *up
+rather than assumed. It costs 0.50 s and 4.3 MiB of packed objects per task on this
+repository, measured over six of the thirty — against the 22 s of `mix compile` that
+follows it. The history *up
 to* the base is all there, deliberately: reading how a code base got here is legitimate
 engineering context, and cutting it would measure something nobody does. `Hidden.restore`
 still reads from the repository, which is where it always read from.

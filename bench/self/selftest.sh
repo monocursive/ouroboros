@@ -4,10 +4,10 @@
 #
 #     bench/self/selftest.sh
 #
-# No model key, no network beyond git and the local hex cache, no spend. Twenty minutes or
-# so: most of it is this repository's own trees being built and compiled twice per task —
-# once for the agent, once for the grade — and the cheap half runs first so that a broken
-# rule fails in seconds rather than in a quarter of an hour.
+# No model key, no network beyond git and the local hex cache, no spend. Twelve minutes on
+# the machine this was written on: most of it is this repository's own trees being built
+# and compiled twice per task — once for the agent, once for the grade — and the cheap half
+# runs first so that a broken rule fails in seconds rather than in ten minutes.
 #
 # The order is deliberate. Phases 1 to 6 need nothing of this repository's history and run
 # against a two-file fixture project (`lib/fixture.sh`), which compiles in a second; every
