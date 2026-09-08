@@ -181,7 +181,10 @@ defmodule Ouroboros.Application do
           # session that consults it. If its store restarts, rest_for_one takes the
           # sessions down with it rather than letting a live provider session keep
           # answering approvals from a replacement empty rule set.
-          Ouroboros.Control.Permissions,
+          Ouroboros.Control.Permissions
+        ] ++
+        self_signing_children() ++
+        [
           release_runtime()
         ] ++
         workspace_children() ++
@@ -250,7 +253,8 @@ defmodule Ouroboros.Application do
               Ouroboros.CodeIntel.Supervisor,
               subtree(
                 Ouroboros.Wasm.RuntimeSupervisor,
-                [Ouroboros.Wasm.Supervisor] ++ wasm_restart_children(),
+                [Ouroboros.Wasm.Supervisor] ++
+                  wasm_restart_children() ++ self_restart_children(),
                 :rest_for_one
               ),
               Ouroboros.Provider.Native.Desktop.Supervisor,
@@ -321,6 +325,69 @@ defmodule Ouroboros.Application do
         %{
           id: Ouroboros.Wasm.Boot,
           start: {Task, :start_link, [&Ouroboros.Wasm.Boot.run/0]},
+          restart: :transient
+        }
+      ]
+    else
+      []
+    end
+  end
+
+  # S4. The one-machine signing posture. A lane-W signature comes from an explicit service, a
+  # configured `:signer`-role peer, or **a service registered on this node** — in that order
+  # (`Ouroboros.Wasm.Deploy`) — and until now only `children(:signer)` above ever started one.
+  # So a single machine could forge and never sign, which is the whole `self` posture's loop.
+  #
+  # This is the dev loop `Ouroboros.Upgrade.Forge.Signer`'s moduledoc describes and it is not
+  # custody: the key is a file beside the application, readable by every process this user
+  # runs, and anyone holding it signs as this identity. A fleet names `OUROBOROS_SIGNING_NODE`
+  # instead — and then this starts nothing, because the peer signs and a second service here
+  # would be a second key to look after for no reason.
+  #
+  # It sits directly after the durable authority above it and before everything that can
+  # forge: the ledger a signature is journaled beside, the grants and permissions a session is
+  # held to, and the promotion record, are all already up when the key is loaded. `init/1`
+  # raises on a key it cannot use, so a posture configured with a missing or malformed seed
+  # fails the boot here rather than at the first forge.
+  #
+  # Public (undocumented) for `wasm_restart_children/0`'s reason: `test/self/boot_test.exs`
+  # reads the decision off the spec this tree actually builds rather than restating it.
+  @doc false
+  @spec self_signing_children() :: [Supervisor.child_spec() | {module(), keyword()}]
+  def self_signing_children do
+    key_path = Application.get_env(:ouroboros, :signer_key_path)
+
+    if Application.get_env(:ouroboros, :self_posture, false) == true and
+         is_nil(Application.get_env(:ouroboros, :signing_node)) and
+         is_binary(key_path) and key_path != "" do
+      [{Ouroboros.Upgrade.Signing.Service, [key_path: key_path]}]
+    else
+      []
+    end
+  end
+
+  # S4. The other half of the lane-W boot task above, and the same shape for the same
+  # reasons: a supervised one-shot `:transient` task, started after the helper pool it needs
+  # and after the register it reads, idempotent by construction so a `rest_for_one` restart
+  # reruns it harmlessly. `Ouroboros.Wasm.Boot` restarts what *this* node was running;
+  # `Ouroboros.Self.Boot` deploys what a previous installation forged and shipped in
+  # `priv/self/`, and neither writes what the other reads — `Wasm.Boot` claims mesh ids and
+  # never changes a register entry's state, which is the only fact `Self.Boot` decides on.
+  #
+  # Off unless `config :ouroboros, :self_ship` is true, which only `OUROBOROS_POSTURE=self`
+  # sets, and off on every node with no durable data directory: no store means nowhere to
+  # deploy to, which is every library start and every test run.
+  #
+  # Public (undocumented) for the same reason `wasm_restart_children/0` is: a test reads the
+  # restart type off the spec this tree actually starts rather than restating it.
+  @doc false
+  @spec self_restart_children() :: [Supervisor.child_spec()]
+  def self_restart_children do
+    if Ouroboros.Self.Boot.enabled?() do
+      [
+        %{
+          id: Ouroboros.Self.Boot,
+          start: {Task, :start_link, [&Ouroboros.Self.Boot.run/0]},
           restart: :transient
         }
       ]

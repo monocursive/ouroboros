@@ -47,8 +47,13 @@ defmodule Ouroboros.Control.Permissions.Seam do
   all, and this seam adds no gate of its own on top of it. That is deliberate rather
   than an omission — a second gate here would be a rule an operator cannot see in either
   place — and it is why the bound that matters lives in the engine: `PolicyEngine` honours
-  a component's `allow` only for the tools named in `:policy_allowable_tools`, empty by
-  default (D20).
+  a component's `allow` only for a tool it has been given, and there are exactly two ways
+  to give it one. `:policy_allowable_tools`, empty by default, is an operator typing a tool
+  name (D20). `Ouroboros.Control.PolicyPromotion`'s record is the other, and it is scoped to
+  the policy name and the component bytes it was earned at: a tool goes in when the
+  component was replayed against decisions humans made on this node and contradicted none of
+  them, and comes out the moment a human contradicts it once (docs/SELF.md §S2, S-D22). An
+  `allow` for a tool in neither is still read as `ask`.
 
   `remember/4` and `forget_session/1` stay on `Control.Permissions` whatever engine is
   named: they are rule-store operations rather than decisions. C13 asks an engine for

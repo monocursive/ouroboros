@@ -13,7 +13,7 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test forge-linux-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test dialyzer bench-local golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
+.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test forge-linux-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test dialyzer bench-local self-export golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -29,6 +29,7 @@ help:
 	@echo "make test             formatting, script checks, mix test, cargo test/fmt/clippy"
 	@echo "make dialyzer         gradual mix dialyzer; PLTs live under _build/plts"
 	@echo "make bench-local      the local eval corpus: no key, no network, no docker"
+	@echo "make self-export      write this node's promoted policy + record into priv/self/"
 	@echo "make golden           regenerate the gateway fixtures and fail on drift"
 	@echo "make protocol-docs    regenerate docs/PROTOCOL.md and fail on drift"
 	@echo "make release-tarball  MIX_ENV=prod mix release, printing the tarball path"
@@ -293,6 +294,19 @@ dialyzer:
 bench-local:
 	@echo "==> bench-local: the local eval corpus (no model key, no network, no docker)"
 	./bench/local/run.sh
+
+# S4. What this installation learned, written into priv/self/ so the next one carries it:
+# the promoted policy's signed bundle out of this node's store, the promotion record with
+# its replay numbers, and the signer line the receiving operator has to trust before any of
+# it deploys. The outer loop's pull request commits all three (docs/SELF.md §S4).
+#
+# It reads the running node's durable state, so it opens the data directory a second time.
+# Stop the daemon first — `make daemon-stop` — or run it against a data directory nothing
+# else is holding, with OUROBOROS_DATA_DIR.
+self-export:
+	@echo "==> self-export: the promoted policy and its record into priv/self/"
+	@echo "    (stop the daemon first: this opens the same data directory)"
+	$(MIX) ouroboros.self.export
 
 # Deliberately not part of `make test`, for the same reason `fleet-e2e` is not: it needs
 # tools `make test` must not require. The install.sh half needs only `sh` and a sha256

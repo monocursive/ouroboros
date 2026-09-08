@@ -18,6 +18,65 @@ human editing code. Humans stay at signing, merging, and promotion.
 
 <!-- S4-posture -->
 
+`OUROBOROS_POSTURE=self` is the one switch, read in `config/runtime.exs` in **every**
+environment — the development daemon is the loop the posture is for, and a posture that only
+existed in a release would make the loop a different runtime than the shipped one. It is never
+the default, and it refuses the boot with the name of the variable it is missing rather than
+falling back to something narrower that looks like it worked.
+
+The decision is `Ouroboros.Self.Posture.configure/2`, a pure function over an environment map
+and this build's two relevant settings, so every refusal below is a unit test rather than a
+virtual machine per case (S-D40). It stands on `String`, `Base`, `Map` and `File.regular?/1`
+alone — the second and last module a config provider calls, and it earns that the way
+`Ouroboros.DataDir` does: by depending on nothing.
+
+**What it requires, and what happens without it.**
+
+| Input | Why | Without it |
+|---|---|---|
+| `OUROBOROS_NATIVE_MODEL` | The posture exists so a model session can forge. | Refused. |
+| `OUROBOROS_SIGNING_NODE`, **or** `OUROBOROS_SIGNER_KEY_PATH` **and** `OUROBOROS_SIGNER_ID` | A lane-W signature comes from a `:signer` peer or from a service on this node, in that order (`Ouroboros.Wasm.Deploy`). | Refused, naming all three. |
+| `OUROBOROS_UPGRADE_TRUSTED_SIGNERS`, non-empty | `config/config.exs` sets `allow_unsigned: true` outside production; the posture closes that and needs a listed key for anything to deploy. | Refused. A malformed entry or a duplicate id is refused too, never a quietly narrowed set. |
+| `config :ouroboros, :wasm_forge_placement` is `:local` | The posture forges where the effect lands. | Refused, naming the setting. |
+| `config :ouroboros, :signing_require_wasm_eval` is `true` | Lane W has no build peer behind it, so the signed eval spec is the whole test story. | Refused, naming the setting. |
+
+**What it sets.** `native_forge_tool: true` (S1's tool becomes visible), `permissions_engine:
+Ouroboros.Wasm.PolicyEngine` (S2's engine, and the only engine a promotion record means
+anything to), `self_posture: true`, `self_ship: true` (`OUROBOROS_SELF_SHIP=false` takes the
+posture without taking `priv/self`), `upgrade_trust_policy: [allow_unsigned: false,
+trusted_signers: …]`, and the signer it was given — `signing_node` on a fleet, or
+`signer_key_path` and `signer_id` on one machine. It sets nothing else. In particular it does
+not touch `:policy_allowable_tools` or `:wasm_policy`: what a component may resolve is an
+operator typing a tool name or `Ouroboros.Control.PolicyPromotion`'s record, and neither is
+reachable from an environment variable.
+
+**The one-machine signing posture.** Until S4, `Ouroboros.Upgrade.Signing.Service` started only
+in `children(:signer)`, so a single machine could forge and never sign. Under the posture, on a
+`:core` node with a key path configured and no `OUROBOROS_SIGNING_NODE`, the application starts
+it directly after the durable authority above it — the ledger, grants, the promotion record and
+permissions — and before anything that can forge. This is the dev loop
+`Ouroboros.Upgrade.Forge.Signer`'s moduledoc describes and it is **not custody**: the key is a
+file beside the application, readable by every process this user runs, and anyone holding it
+signs as this identity. A fleet names `OUROBOROS_SIGNING_NODE` instead, and then this node
+starts no service — the peer signs.
+
+**The operator's recipe**, which is `ouro wasm keygen`'s own output plus one line:
+
+```
+ouro wasm keygen --id one-machine --out ~/.local/share/ouroboros/signer.key
+
+export OUROBOROS_POSTURE=self
+export OUROBOROS_NATIVE_MODEL=anthropic:claude-sonnet-5
+export OUROBOROS_SIGNER_KEY_PATH=$HOME/.local/share/ouroboros/signer.key
+export OUROBOROS_SIGNER_ID=one-machine
+export OUROBOROS_UPGRADE_TRUSTED_SIGNERS=one-machine:<the base64 key keygen printed>
+
+ouro --dev daemon
+```
+
+Everything else stays: permissions deny or ask, the native shell sandboxed, the helper sealed,
+the effect ledger on.
+
 ## 3. Slices
 
 ### S0. The measure: `bench/self`
@@ -223,6 +282,92 @@ and the pull request it produces, are the human step in the plan's §7.
 ### S4. Ship what it forged
 
 <!-- S4 -->
+
+The next installation of this runtime carries what this one learned: the policy component it
+forged, and what that component earned the right to resolve. Two halves, a file and a boot.
+
+**The export.** `make self-export` (`mix ouroboros.self.export [--out priv/self]`) reads this
+node's `Ouroboros.Control.PolicyPromotion` record and writes three files:
+
+| File | What it is |
+|---|---|
+| `priv/self/<name>.ouro-wasm` | The signed bundle, assembled out of this node's own component store — the manifest, its signature, the precompiled artifact when the manifest declares one, and the component bytes. Byte for byte what `Ouroboros.Wasm.Bundle.encode/3` writes, which is what `ouro wasm sign` produced and what `ouro wasm deploy` takes. |
+| `priv/self/promotions.json` | The policy name, the component sha256, and the tools it has **currently** earned, each with its replay numbers. Ordered and pretty-printed, so a re-export that changed nothing but the clock is a one-line diff. |
+| `priv/self/signers.txt` | `signer_id:base64_public_key` — the exact line `OUROBOROS_UPGRADE_TRUSTED_SIGNERS` takes, read out of *this* node's trust policy rather than out of the bundle. |
+
+It refuses, having written nothing, on an empty record (there is nothing an installation
+learned), on a policy the register does not have `:live` at that sha (the export ships what is
+running, not what is remembered), on a manifest whose declared precompiled artifact this node no
+longer holds, and on a signer whose public key this node's trust policy does not carry — because
+then `signers.txt` could not be written and the bundle would arrive somewhere with no way to
+accept it.
+
+**The boot.** `Ouroboros.Self.Boot` is a `:transient` `Task` beside `Ouroboros.Wasm.Boot` in the
+lane-W restart chain, started only when `self_ship` is true and this node has a durable data
+directory. For each `priv/self/*.ouro-wasm` whose name is not already `:live` on this node's
+register, it deploys through `Ouroboros.Wasm.Rollout.deploy/4` — the ordinary rollout, which
+verifies the manifest against **this node's own** trust policy before its checkpoint and again
+on every target before it stages a byte. A fresh install therefore runs a shipped policy only
+because its operator pasted `signers.txt` into `OUROBOROS_UPGRADE_TRUSTED_SIGNERS`; until they
+do, every bundle is skipped by name with `{:untrusted_signer, id}` in the log and the node boots
+with the rules it shipped with. Nothing here raises — a boot task that raised would take the
+supervision chain with it.
+
+Then `promotions.json`, and only under two conditions: this node's promotion record is
+**empty**, and the sha the file names is `:live` here *now*, under the name the file gives.
+Each tool goes through `PolicyPromotion.promote/6` like any other promotion, so it lands in the
+effect ledger, with the actor `shipped:<sha256 of promotions.json>` — not a person, and
+traceable to the exact bytes that carried it. A node that has promoted anything of its own
+keeps its own record and the shipped one is reported as skipped rather than merged.
+
+Idempotent: a second boot deploys nothing (every name is already live) and promotes nothing
+(the record is no longer empty). A `priv/self` holding only its README — every ordinary
+checkout — is an empty report and no log line.
+
+**What the tests prove**, with the real `no-network-shell` policy component signed by a real
+`Upgrade.Signing.Service` and deployed through the real rollout on this machine's own
+`ouro-wasm` (`test/self/`):
+
+- `boot_test.exs` — a fresh install (its own register, store, helper pool and promotion record)
+  boots the exported bundle `:live` at the exporter's sha and applies the promotion, with the
+  `shipped:` actor and the evidence numbers on the record; a second boot changes neither the
+  register nor the record; a receiving node that trusts nobody skips the bundle by name with
+  `{:untrusted_signer, …}` and promotes nothing, and `allow_unsigned: true` does not rescue it;
+  a record naming a sha, or a name, that is not live is not applied; a node with a record of its
+  own keeps it. Also that the tree starts a `:transient` task only under the switch, and that
+  the one-machine signing spec it builds loads a key and answers as its `signer_id`.
+- `export_test.exs` — the bundle verifies under the trust policy that signed it and does not
+  verify under an empty one; `signers.txt` parses back through `Self.Posture.trusted_signers/1`
+  to the key the manifest was verified against; a demoted tool is not in the record; a re-export
+  is byte-identical apart from `exported_at`; an empty record and a policy that is not live are
+  refusals that write nothing.
+- `posture_test.exs` — every refusal in §2, one test each, and the two settings the posture
+  will not run under.
+- `runtime_config_test.exs` — `config/runtime.exs` itself, through `Config.Reader.read!/2`: the
+  posture configures in `:dev` as well as `:prod`, closes `allow_unsigned` where
+  `config/config.exs` leaves it open, and raises on each missing input; and a production node
+  keeps the promotion record on a synced `DurableFile` beside its grants.
+
+**What was run live, once, on one machine.** `ouro wasm keygen --id one-machine`, then a
+runtime booted under `OUROBOROS_POSTURE=self` with the three variables it printed and a scratch
+data directory. That boot started `Ouroboros.Upgrade.Signing.Service` on a `:core` node and it
+answered as `one-machine` with the public key `keygen` had printed; `Ouroboros.Self.Boot` was a
+child of the lane-W runtime supervisor and reported nothing to ship. A second run then signed
+`no-network-shell` through that service, deployed it live through the node's own rollout into
+the node's own store and register, promoted `read` on the node's own record, and exported the
+three files. A **third** run, on a different data directory — an empty register, an empty store
+and an empty promotion record — deployed the exported bundle live, promoted `read` under the
+actor `shipped:37fe1b64…`, and on a second `ship/1` deployed nothing and promoted nothing.
+Removing `OUROBOROS_UPGRADE_TRUSTED_SIGNERS` refuses the boot with the variable's name.
+
+**What is not proved.** No model session has forged the policy that gets exported: the component
+is the guest SDK's `no-network-shell`, which is a real signed component and not something a
+model wrote. The three live runs above were three virtual machines with three data directories
+on **one host**, not three hosts, and none of them was started by `ouro --dev daemon` — the
+posture was given to `mix run` with the same environment the launcher exports, including
+`OUROBOROS_PROCESS_ID_HELPER`. `make self-export` against a running daemon's data directory has
+not been run, and no export has been committed by the outer loop's pull request. `mix dialyzer`
+and the full suite are the integrator's gates and not this section's claim.
 
 ## 4. Decisions
 
@@ -525,6 +670,69 @@ the path it would have taken and says the path is not there, rather than refusin
 making them ordinary documented knobs is cheaper than a test-only code path in the script.
 
 <!-- S4-decisions -->
+
+**S-D40. The posture is a pure function, and `config/runtime.exs` only calls it.** Every input
+the `self` arm reads is a refusal waiting to happen, and a refusal written inside a config file
+can only be tested by booting a virtual machine per case. `Ouroboros.Self.Posture.configure/2`
+takes the environment as a map and this build's two relevant settings as a keyword list, and
+answers `:off`, `{:ok, keywords}` or `{:error, sentence}`. It is the second module a config
+provider calls after `Ouroboros.DataDir` and it earns that the same way: no application
+environment, no process, no other module of this application. The two settings are arguments
+rather than reads so the function stays pure — and so a test can weaken one without touching
+the node.
+
+**S-D41. An unrecognised `OUROBOROS_POSTURE` refuses the boot rather than being ignored.** A
+node running a posture nobody named is a node whose fences nobody chose, and the operator who
+typed `OUROBOROS_POSTURE=fleet` believes something about what is running. `Self` and `SELF` are
+refusals; a trailing space or newline is not, because that is a shell expanding a variable and
+not an operator meaning something else.
+
+**S-D42. The export ships what is running, not what is remembered.** The promotion record names
+a policy and a sha; the register says what this node is actually running. The export requires
+both to agree — a `:live` entry under that name at that sha — and refuses otherwise. A record
+whose policy was rolled back is a record about bytes nobody consults, and shipping it would put
+a widening in a repository for a component the receiving node would then deploy on the strength
+of the record that came with it.
+
+**S-D43. A demoted tool is not shipped.** The export writes `status.allowable_tools` — promoted
+and not demoted since — and not `status.tools`. A demotion is the durable statement that a human
+contradicted this component on this machine; shipping the promotion it withdrew would re-widen
+somewhere else exactly what was narrowed here, and the receiving operator would have no way to
+see that it had ever been narrowed.
+
+**S-D44. A shipped promotion goes through the ordinary API, with an actor that is not a
+person.** `Ouroboros.Self.Boot` calls `PolicyPromotion.promote/6` like `ouro policy promote`
+does, so a shipped widening is validated, checkpointed and ledgered exactly as a human's is. Its
+actor is `shipped:<sha256 of promotions.json>`. Inventing a person there would be a lie in the
+audit trail, and `"shipped"` alone would not say *which* file: the digest is what makes the
+entry traceable to bytes a reviewer can read.
+
+**S-D45. Promotions are applied over an empty record and never merged.** Two records mean two
+answers to "which human promoted this", and there is no honest way to combine them. A node that
+has promoted anything of its own keeps its own; the shipped record is reported as skipped, by
+name, and an operator who wants it clears theirs first — deliberately, which is what
+`PolicyPromotion.clear/2` is for.
+
+**S-D46. The boot decides on the register before it verifies, and skips either way.** A bundle
+claiming a name this node already runs is skipped whether or not it would have verified. That is
+the safe direction for a claim nothing has checked yet, and it is what makes the second boot a
+no-op without re-verifying and re-deploying bytes that are already live.
+
+**S-D47. `Ouroboros.Self.Boot` deploys through `Wasm.Rollout.deploy/4` rather than through
+`Wasm.Deploy.deploy/3`.** The plan named the latter; it takes an **upload id** and its body is
+`Ouroboros.Wasm.Upload.take/2` followed by exactly the `Bundle.decode/1` and
+`Rollout.deploy/4` this module calls. Reaching it from a boot task would mean chunking a file
+already on disk through the gateway's 512 KiB upload slots — of which a node holds eight — to
+produce bytes it already has. Every verification is unchanged: the rollout is where a bundle is
+verified against this node's trust policy, before its checkpoint and again on every target
+(`Ouroboros.Wasm.Deploy`'s own moduledoc says so, and says why there is no second check).
+
+**S-D48. A production node keeps S2's promotion record on a synced durable file.** S2a shipped
+`:policy_promotion_storage` with an ETS default, which is right for a laptop and wrong for the
+node an operator promoted a tool on: without a line in `config/runtime.exs`' production block,
+every promotion was forgotten at restart. It is now a `DurableFile` under the data directory
+beside `:grants_storage`, and held to the same rule — an acknowledged promotion must survive the
+crash that follows it, and so must the demotion that withdrew it.
 
 ## 5. Open
 
