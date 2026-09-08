@@ -115,7 +115,6 @@ defmodule Ouroboros.Web.AuditLive do
       case error do
         {:error, _, message} -> message
         {:error, _, message, _} -> message
-        _ -> "Evidence is unavailable. Refresh or run ouro audit doctor."
       end
 
     assign(socket, error: message)

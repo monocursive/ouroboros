@@ -245,5 +245,6 @@ defmodule Ouroboros.Audit.Config do
           config.root
         ])
 
+  @spec invalid!(atom()) :: no_return()
   defp invalid!(field), do: raise(ArgumentError, "invalid audit configuration: #{field}")
 end
