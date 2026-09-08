@@ -1100,6 +1100,17 @@ defmodule Ouroboros.Provider.Native.Loop do
         # else may), the tool reads it and nothing else, and it is deliberately not a
         # parameter — see `Tools.Forge`'s moduledoc.
         principal: principal(state),
+        # S1/Q-A. The `:tool_call` ledger entry this call *is*, named plainly and not only
+        # inside `audit` above: that entry is written on every admitted call whether or not
+        # this node's audit stream is on, so the chain from a `:forge` entry back to the
+        # `:permission` entry that admitted it must not depend on audit being on either.
+        # `Tools.Forge` puts it in `cause.signal_id`; the second hop is that entry's own
+        # `attempt.permission_entry_id`.
+        ledger_effect_id: effect_id,
+        # S1/Q-B. What the permission engine resolved this call's artifact id to, handed back
+        # the way `desktop_evaluated_app` is: `Tools.Forge` re-reads the bundle and refuses to
+        # deploy one whose name is no longer the name the decision was about.
+        forge_evaluated_name: classified.context[:forge],
         # G3. `agent_result` collects a child the *session* holds, not one this turn owns,
         # so it is handed two closures over the session rather than a pid to call: the tool
         # never learns which process tracks what, and a run with no session gets `nil` and

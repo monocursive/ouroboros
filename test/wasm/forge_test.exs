@@ -104,6 +104,41 @@ defmodule Ouroboros.Wasm.ForgeTest do
                Forge.preview(%{dir: directory}, build?: false)
     end
 
+    # S1/MEDIUM-2. The allow-list is applied to a *name* before the file behind it is opened.
+    # The proof is a file that cannot be read: if the walk still read first, the refusal
+    # would be `forge_input_unreadable` with an `:eacces`, and it is not — it is the
+    # allow-list's own refusal, naming the file, which is the answer somebody who pointed a
+    # preview at the wrong directory needs.
+    test "a file the allow-list does not admit is refused by name, never opened", context do
+      directory = Path.join(context.tmp, "unreadable")
+      copy!(ForgeFixture.project_root(), directory)
+
+      secret = Path.join(directory, "id_rsa")
+      File.write!(secret, "PRIVATE KEY MATERIAL")
+      File.chmod!(secret, 0o000)
+      on_exit(fn -> File.chmod(secret, 0o600) end)
+
+      assert {:error, {:file_not_allowed, "id_rsa"}} =
+               Forge.preview(%{dir: directory}, build?: false)
+    end
+
+    test "a directory of secrets is refused without any of them being read", context do
+      directory = Path.join(context.tmp, "secrets")
+      File.mkdir_p!(directory)
+
+      for name <- ["prod-api-key.txt", "id_rsa"] do
+        path = Path.join(directory, name)
+        File.write!(path, "sk-live-abcdefghijklmnop")
+        File.chmod!(path, 0o000)
+        on_exit(fn -> File.chmod(path, 0o600) end)
+      end
+
+      assert {:error, {:file_not_allowed, name}} =
+               Forge.preview(%{dir: directory}, build?: false)
+
+      assert name in ["prod-api-key.txt", "id_rsa"]
+    end
+
     # Red without the `build.rs` arm of `validate_path/2` — and `src/build.rs` is the case
     # that matters, because `src/**.rs` is otherwise a path the allow-list admits.
     test "a build script is refused by name, wherever it is", context do

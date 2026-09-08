@@ -718,6 +718,27 @@ defmodule Ouroboros.Control.PermissionsTest do
       # it can only remember a deny or an ask, which is the honest set of answers here.
       assert Permissions.suggest(%{tool: "forge", mode: :execute}) == "Tool(forge)"
     end
+
+    # LOW-7. A suggestion is a rule the "don't ask again" modal is about to *persist*, so it
+    # is held to the charset `Forge(<name>)` parses. `suggest/1` takes a request a caller
+    # built, and a context key that never came through `Tools.classify/3` can hold anything.
+    test "a forge context that is not a name is never offered as a rule" do
+      for bad <- ["Not A Name", "Vet", "wasm/vet", "vet ", "", String.duplicate("a", 65), 42] do
+        suggestion =
+          Permissions.suggest(%{tool: "forge", mode: :execute, context: %{forge: bad}})
+
+        assert suggestion == "Tool(forge)",
+               "#{inspect(bad)} was offered as #{inspect(suggestion)}"
+      end
+
+      # The property behind it: every suggestion this function makes parses.
+      for name <- ["vet", "a.b-c_d", "0", String.duplicate("z", 64)] do
+        suggestion =
+          Permissions.suggest(%{tool: "forge", mode: :execute, context: %{forge: name}})
+
+        assert {:ok, _pattern} = Pattern.parse(suggestion)
+      end
+    end
   end
 
   # ── helpers ────────────────────────────────────────────────────────────────────────

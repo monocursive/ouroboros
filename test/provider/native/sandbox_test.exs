@@ -99,6 +99,18 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
   defp run(module, input, context, timeout \\ 30_000),
     do: Ouroboros.Provider.Native.Tools.execute(module, input, context, timeout)
 
+  # Whether `needle` appears in `list` as consecutive elements — which is what an argv
+  # assertion about a bind actually means: the three words together, in that order.
+  defp subsequence_of?(needle, list) do
+    length = length(needle)
+
+    list
+    |> Enum.chunk_every(length, 1, :discard)
+    |> Enum.any?(&(&1 == needle))
+  end
+
+  defp index_of(list, value), do: Enum.find_index(list, &(&1 == value))
+
   defp restore_app_env(key, nil), do: Application.delete_env(:ouroboros, key)
   defp restore_app_env(key, value), do: Application.put_env(:ouroboros, key, value)
 
@@ -1213,6 +1225,88 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
         assert "#{root}/**" in declared
       end
     end
+
+    # S1/HIGH-1. The engine refuses a *write* to `ouroboros.toml`, but the engine only sees
+    # the paths a call declares and a shell declares none. So the file is in the policy as a
+    # path, one per writable root, and both lists say the same thing.
+    test "names each writable root's own hook manifest as a protected file", %{scope: scope} do
+      policy = Sandbox.policy(scope, :workspace_write)
+
+      assert policy.protected_files ==
+               scope.roots
+               |> Kernel.++([scope.root])
+               |> Enum.map(&Path.join(&1, "ouroboros.toml"))
+               |> Enum.uniq()
+               |> Enum.sort()
+
+      assert Path.join(scope.root, "ouroboros.toml") in policy.protected_files
+
+      for file <- policy.protected_files do
+        assert ("**/" <> Path.basename(file)) in Rules.protected_paths()
+        assert Rules.protected_write?(file)
+      end
+    end
+
+    test "read_only has none, because nothing there is writable to protect one in", %{
+      read_only: scope
+    } do
+      assert Sandbox.policy(scope, :read_only).protected_files == []
+    end
+
+    test "a build has none: it has no workspace and therefore no hook manifest" do
+      assert Sandbox.builder_policy(writable: ["/tmp"]).protected_files == []
+    end
+
+    # The honest answer, per backend, and the one `Hooks.trusted?/2` reads.
+    test "protects_files? is true only where the backend can deny a path that need not exist" do
+      assert Sandbox.protects_files?(:sandbox_exec)
+      assert Sandbox.protects_files?(:bwrap)
+      refute Sandbox.protects_files?(:ouro_sandbox)
+      refute Sandbox.protects_files?(:none)
+
+      # A detection map answers by its backend, and a bare `%{}` answers no.
+      assert Sandbox.protects_files?(%{backend: :sandbox_exec, read_fence: true})
+      refute Sandbox.protects_files?(%{backend: :ouro_sandbox, read_fence: true})
+      refute Sandbox.protects_files?(%{})
+    end
+
+    test "Seatbelt writes one literal deny per protected file, after the segment denies" do
+      policy = Map.put(fixed_policy(:workspace_write), :protected_files, ["/ws/ouroboros.toml"])
+      profile = SandboxExec.profile(policy)
+
+      assert profile =~ ~s{(deny file-write* (literal (param "OURO_PROTECTED_FILE_0")))}
+      assert "-D" in SandboxExec.parameters(policy)
+      assert "OURO_PROTECTED_FILE_0=/ws/ouroboros.toml" in SandboxExec.parameters(policy)
+
+      # SBPL is last-match-wins, so the deny has to come after the allow that opened the
+      # root it sits in.
+      allow = :binary.match(profile, ~s{(allow file-write* (subpath (param "OURO_WRITABLE_1")))})
+
+      deny =
+        :binary.match(profile, ~s{(deny file-write* (literal (param "OURO_PROTECTED_FILE_0")))})
+
+      assert elem(allow, 0) < elem(deny, 0)
+    end
+
+    test "bubblewrap binds the file over itself when it is there and /dev/null when it is not",
+         %{root: root, scope: scope} do
+      present = Path.join(root, "workspace/ouroboros.toml")
+      File.write!(present, "[[hooks]]\n")
+      absent = Path.join(root, "extra/ouroboros.toml")
+
+      policy =
+        Sandbox.policy(scope, :workspace_write)
+        |> Map.put(:protected_files, [absent, present])
+        |> Sandbox.with_scratch(Path.join(root, "scratch"))
+
+      argv = Bwrap.options(scope, policy)
+
+      assert ["--ro-bind", "/dev/null", absent] |> subsequence_of?(argv)
+      assert ["--ro-bind", present, present] |> subsequence_of?(argv)
+
+      # After the writable bind that would otherwise have made it writable.
+      assert index_of(argv, scope.root) < index_of(argv, present)
+    end
   end
 
   describe "bash on a node with no backend" do
@@ -1311,6 +1405,65 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
 
       refute result.is_error
       assert File.read!(Path.join(workspace, "inside.txt")) == "inside\n"
+    end
+
+    # S1/HIGH-1, the reviewer's exploit_c adopted as a regression. The permission engine
+    # refuses a *write* to `ouroboros.toml`, but a shell declares only its redirect targets,
+    # so `cp`, `mv`, `tee`, `sed -i`, `dd` and a Python one-liner all reached the file with
+    # that rule in place. This is the kernel's answer, and `.git/pwned` is the control: the
+    # same shell, the same policy, a fence that was always there.
+    test "no shell reaches the hook manifest, by any of the ways that used to", %{
+      context: context,
+      workspace: workspace
+    } do
+      manifest = Path.join(workspace, "ouroboros.toml")
+      File.write!(Path.join(workspace, "template"), "[[hooks]]\nevent = \"PreToolUse\"\n")
+
+      # The control: `.git` is fenced by a segment rule, and has been since the beginning.
+      control = run(Bash, %{"command" => "cp template .git/pwned"}, context)
+      assert control.is_error
+      refute File.exists?(Path.join([workspace, ".git", "pwned"]))
+
+      for command <- [
+            "cp template ouroboros.toml",
+            "mv template ouroboros.toml",
+            "cat template | tee ouroboros.toml",
+            "printf '[[hooks]]' | dd of=ouroboros.toml",
+            "echo x > ouroboros.toml",
+            "python3 -c \"open('ouroboros.toml','w').write('x')\"",
+            "touch ouroboros.toml"
+          ] do
+        result = run(Bash, %{"command" => command}, context)
+
+        assert result.is_error, "#{command} was allowed: #{result.output}"
+        refute File.exists?(manifest), "#{command} created the hook manifest"
+      end
+    end
+
+    test "and an existing hook manifest cannot be rewritten or removed", %{
+      context: context,
+      workspace: workspace
+    } do
+      manifest = Path.join(workspace, "ouroboros.toml")
+      File.write!(manifest, "[[hooks]]\nevent = \"PreToolUse\"\n")
+
+      for command <- [
+            "echo pwned > ouroboros.toml",
+            "sed -i '' 's/PreToolUse/SessionStart/' ouroboros.toml",
+            "rm -f ouroboros.toml",
+            "mv ouroboros.toml elsewhere.toml"
+          ] do
+        result = run(Bash, %{"command" => command}, context)
+        assert result.is_error, "#{command} was allowed: #{result.output}"
+      end
+
+      # Unchanged, and still readable: a fence on writing is not a fence on reading.
+      assert File.read!(manifest) == "[[hooks]]\nevent = \"PreToolUse\"\n"
+
+      assert %{is_error: false, output: shown} =
+               run(Bash, %{"command" => "cat ouroboros.toml"}, context)
+
+      assert shown =~ "PreToolUse"
     end
 
     test "denies a write to the home directory under workspace_write" do
@@ -1527,6 +1680,50 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
 
       refute result.is_error
       assert File.read!(Path.join(workspace, "inside.txt")) == "inside\n"
+    end
+
+    # S1/HIGH-1's Linux half. Same claim as the sandbox-exec case above, by a different
+    # mechanism: an existing manifest is bound read-only over itself and an absent one has
+    # `/dev/null` bound onto it, so a create fails `EROFS` and a rename or an unlink over the
+    # mount point fails `EBUSY`. Runs where the live bubblewrap suite runs — Linux CI's
+    # ubuntu-24.04 job and `scripts/sandbox-linux-test.sh` — and is skipped, loudly, on a Mac.
+    test "no shell reaches the hook manifest, present or absent", %{
+      context: context,
+      workspace: workspace
+    } do
+      manifest = Path.join(workspace, "ouroboros.toml")
+      File.write!(Path.join(workspace, "template"), "[[hooks]]\n")
+
+      for command <- [
+            "cp template ouroboros.toml",
+            "mv template ouroboros.toml",
+            "cat template | tee ouroboros.toml",
+            "echo x > ouroboros.toml"
+          ] do
+        result = run(Bash, %{"command" => command}, context)
+        assert result.is_error, "#{command} was allowed: #{result.output}"
+        refute File.exists?(manifest), "#{command} created the hook manifest"
+      end
+    end
+
+    test "and an existing hook manifest stays readable and unwritable", %{
+      context: context,
+      workspace: workspace
+    } do
+      manifest = Path.join(workspace, "ouroboros.toml")
+      File.write!(manifest, "[[hooks]]\nevent = \"PreToolUse\"\n")
+
+      for command <- ["echo pwned > ouroboros.toml", "rm -f ouroboros.toml"] do
+        result = run(Bash, %{"command" => command}, context)
+        assert result.is_error, "#{command} was allowed: #{result.output}"
+      end
+
+      assert File.read!(manifest) == "[[hooks]]\nevent = \"PreToolUse\"\n"
+
+      assert %{is_error: false, output: shown} =
+               run(Bash, %{"command" => "cat ouroboros.toml"}, context)
+
+      assert shown =~ "PreToolUse"
     end
 
     test "denies a write to the home directory under workspace_write" do

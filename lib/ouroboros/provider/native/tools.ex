@@ -552,6 +552,25 @@ defmodule Ouroboros.Provider.Native.Tools do
     end
   end
 
+  # S1. A `preview` and a `forge` read every file in the project directory — that is the
+  # first thing `Ouroboros.Wasm.Forge` does with one — so the directory is declared, resolved
+  # through the session's own scope exactly as `read`'s path is. Declaring nothing was the
+  # hole: an operator's `Deny Read(<ws>/secret/**)` said nothing about a forge pointed at
+  # `secret`, because the engine had no path to match. `deploy` and `status` read this node's
+  # forged ring, which is inside the data directory and is not a workspace path a rule is
+  # written in; they declare nothing, as before.
+  defp paths("forge", input, scope) do
+    operation = Forge.operation(input)
+
+    case Map.get(input, "path") || Map.get(input, :path) do
+      path when is_binary(path) and path != "" and operation in ["preview", "forge"] ->
+        [resolve(path, scope)]
+
+      _absent ->
+        []
+    end
+  end
+
   defp paths(_name, _input, _scope), do: []
 
   defp write_paths(name, input, scope) when name in ["write", "edit"] do
@@ -627,23 +646,19 @@ defmodule Ouroboros.Provider.Native.Tools do
     end
   end
 
-  # S1/§S1. The name a `Forge(<name>)` rule matches, and the same string `Tools.Forge` hands
+  # S1/§S1. The name a `Forge(<name>)` rule matches. For a `preview` and a `forge` it is the
+  # `name` parameter, exact bytes, and the same string `Tools.Forge` hands
   # `Ouroboros.Wasm.Forge` a moment later — which refuses a project whose Cargo package is
-  # called anything else. That is what makes the allow honest here: a capability being
-  # forged has no register entry to resolve against, so the fact is not a lookup but the
-  # forge being *held* to the name the engine was shown. `Tools.Forge.request_name/2`
-  # answers only for the two operations that pass a name on; a deploy names an artifact id
-  # and carries no key, so no `Forge(…)` rule covers one.
-  defp context("forge", input) do
-    # `Map.get/2` and not `claimed_string/2`: the engine is asked about the *exact* string
-    # the model wrote, which is the string the forge is given (F1).
-    operation = Map.get(input, "operation") || Map.get(input, :operation)
-
-    case Forge.request_name(operation, Map.get(input, "name") || Map.get(input, :name)) do
-      name when is_binary(name) -> %{forge: name}
-      nil -> %{}
-    end
-  end
+  # called anything else. That is what makes the allow honest: a capability being forged has
+  # no register entry to resolve against, so the fact is not a lookup but the forge being
+  # *held* to the name the engine was shown. For a `deploy` it is the name the artifact id
+  # resolves to in this node's forged ring, with the bundle decoded and its manifest verified
+  # first (Q-B) — a fact about this node, like `Capability(…)`'s. A `status` names nothing.
+  #
+  # `Tools.Forge.request_context/1` and not a reading of the input here: the classifier and
+  # the tool must agree about which key spelling wins and about what a name is, and the way
+  # to guarantee that is one function (LOW-6).
+  defp context("forge", input), do: Forge.request_context(input)
 
   defp context(_name, _input), do: %{}
 

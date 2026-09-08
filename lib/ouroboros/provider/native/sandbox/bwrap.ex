@@ -38,6 +38,9 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
     * `--ro-bind <scratch> <path>` for each protected segment that does not exist yet.
       The empty scratch directory is a read-only placeholder at that destination, so a
       command cannot create `.git` or `.ouroboros` after admission.
+    * `--ro-bind <path> <path>` for each protected *file* that exists, and
+      `--ro-bind /dev/null <path>` for each that does not (S1). That is the workspace hook
+      manifest: one path per writable root, denied whether or not it is there.
     * `--tmpfs <scratch>` — a fresh, private, in-memory `$TMPDIR` for this one command,
       at the same path the macOS backend makes writable, so both backends give the
       shell the same `$TMPDIR` contract.
@@ -68,6 +71,16 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
   mkdir/open/rename of any path component named in the policy's protected segments.
   Static binaries that never call libc are outside that net; ordinary `mkdir`, `git`,
   and `/bin/sh` are not.
+
+  ## Protected files (S1)
+
+  A protected *file* is a bind rather than a filter, and unlike a protected segment it needs
+  no `LD_PRELOAD` half: the path is known before the namespace is set up, so the destination
+  can be created and made read-only whether or not anything is there. `/dev/null` is the
+  source for the absent case — a read-only character device is a mount point a create cannot
+  overwrite, a rename cannot replace and an unlink cannot remove, and it reads back as an
+  empty file rather than as the `EISDIR` an empty directory would give. Verified live by
+  `scripts/sandbox-linux-test.sh`.
   """
 
   # The walk is bounded twice: a repository with a deep `node_modules` must not turn
@@ -181,6 +194,7 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
       Enum.flat_map(on_disk(policy.protected), &["--ro-bind", &1, &1]) ++
       Enum.flat_map(writable(policy), &["--bind", &1, &1]) ++
       protected_segment_binds(policy) ++
+      protected_file_binds(policy) ++
       exception_binds(policy) ++
       ["--tmpfs", policy.scratch] ++
       network(policy, unshare_net) ++
@@ -234,6 +248,30 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
     for root <- writable(policy),
         segment <- policy.protected_segments,
         do: Path.join(root, segment)
+  end
+
+  # S1. The workspace hook manifest, one bind per writable root, after the writable binds
+  # and before the delivery exceptions — the same place the Seatbelt profile puts its
+  # `literal` deny, and the same order `Rules.protected_write?/1` reads the policy in.
+  #
+  # Two cases, and the second is the one that matters. **The file exists**: a read-only bind
+  # of it over itself, exactly as an existing `.git` is handled — a write is `EROFS`. **The
+  # file does not exist**: a read-only bind of `/dev/null` onto the path. bubblewrap creates
+  # the mount point (it makes a regular file when the source is not a directory), so the
+  # destination is there, is read-only, and is a mount point — `cp`/`tee`/`sed -i` fail
+  # `EROFS`, `mv` over it and `rm` of it fail `EBUSY`, and the empty scratch *directory* the
+  # segment binds use would have been the wrong shape here: a directory named
+  # `ouroboros.toml` fails a create with `EISDIR`, which is a refusal that reads like a bug.
+  #
+  # `/dev/null` is resolved in the host's root, which bubblewrap keeps open for exactly this,
+  # so `--dev /dev` earlier in the argv does not take it away.
+  defp protected_file_binds(policy) do
+    policy
+    |> Map.get(:protected_files, [])
+    |> Enum.flat_map(fn destination ->
+      source = if File.exists?(destination), do: destination, else: "/dev/null"
+      ["--ro-bind", source, destination]
+    end)
   end
 
   defp protected_segment_binds(policy) do

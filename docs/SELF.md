@@ -83,8 +83,18 @@ the forge refuses a disagreement during validation.
 **The permission language** gains `Forge(<name>)` and `Forge(*)` (kind `:forge`, a rollout
 name's charset), matched on `context.forge` exactly as `Capability(…)` is matched on
 `context.capability`; `Tool(forge)` joins `Tool(capability)` as deny-and-ask only; and
-`Ouroboros.Control.Permissions.suggest/1` offers `Forge(<name>)` for an ask that carries one.
-The corpus is in `test/control/permissions_test.exs`.
+`Ouroboros.Control.Permissions.suggest/1` offers `Forge(<name>)` for an ask that carries one,
+held to the charset that pattern parses. A `preview` and a `forge` also **declare the project
+directory they will read**, so a `Read(…)` rule that denies or asks covers a forge pointed at
+that directory; an allow `Read` rule does not make a forge an allow. The corpus is in
+`test/control/permissions_test.exs`.
+
+**The workspace hook manifest is fenced twice.** `Rules.protected_write?/1` refuses a write
+to any `ouroboros.toml`, and the OS sandbox policy carries the workspace root's own as a
+`protected_files` entry — a Seatbelt `literal` deny, a bubblewrap read-only bind — because a
+shell reaches that file without a redirect for the engine to read. On a backend that cannot
+express the fence, `Hooks.trusted?/2` declines the workspace's shell hooks instead. S-D19 has
+the whole of it.
 
 **The skill** is `.agents/skills/forge/SKILL.md`: the project shape a forge accepts, the
 `Cargo.lock` pin rule, the `manifest.json` with its evaluation spec, the world contract, the
@@ -250,13 +260,50 @@ called anything else — and to the `manifest.json` check, which refuses a propo
 a third thing. Nothing trims, strips or folds, on either side of the seam (the F1 rule from
 `Tools.Capability.resolve/1`).
 
-**S-D13. Only the operations that pass the name on put it in the request context.** A
-`deploy` names an artifact id and a `status` names nothing, so both carry no `forge` key and
-match no `Forge(…)` rule at all — they can be denied or asked and never allowed by one. The
-narrow reading, deliberately: an allow on `Forge(vet)` is a sentence about building `vet`,
-and reading it as permission to deploy whatever some id resolves to would be a second
-sentence nobody said. The alternative — resolving the id against the ring at classification
-time — would have let an unverified file on disk name itself into a permission decision.
+*The same bytes* means the two seams have to read the arguments the same way, and they used
+not to: the classifier read a string key first and the tool an atom key first, so a map
+carrying both spellings was judged as one operation and executed as another. There is now one
+reader — `Tools.Forge`'s own `param/2`, string key first — and `Tools.classify/3` calls it
+through `Forge.request_context/1` rather than reading the input itself. And what
+`Permissions.suggest/1` offers for a forge is held to the same charset a `Forge(<name>)`
+pattern parses, restated locally as `Pattern` restates it: a suggestion is a rule an operator
+is about to persist, and offering one `Pattern.parse/1` refuses would save a dead rule under
+a decision somebody thought they made.
+
+**S-D13. What each operation puts in front of the engine, and what it declares.** Three
+different answers, and each is a fact somebody can check.
+
+`preview` and `forge` carry `%{forge: name}` — the `name` parameter, exact bytes, when
+`Wasm.Artifact.name?/1` accepts it — and additionally **declare the resolved project
+directory** in the request's `paths`. Declaring nothing was a hole: `Deny Read(<ws>/secret/**)`
+said nothing about a forge pointed at `secret`, because the engine had no path to match. The
+`Read(…)` pattern therefore covers a `forge` request as well as a `mode: :read` one — but
+only under a **deny or ask** rule (`Matcher`'s quantifier is `:any` for exactly those two).
+`Allow Read(**)` is a sentence about reading; a forge builds and signs something this node
+will run, and the only rules that allow one are `Forge(<name>)` and `Forge(*)`.
+
+`deploy` carries `%{forge: name}` too, and the name is the one the **artifact id actually
+resolves to**: `Tools.classify/3` reads the bundle out of this node's forged ring, decodes
+it, and verifies its signed manifest against this node's trust policy the way
+`Ouroboros.Wasm.PolicyEngine` verifies one before loading a byte — the kind must be
+`:capability` — before any name reaches the engine. So `Forge(vet)` covers deploying `vet`,
+which is the sentence somebody answering that prompt meant. The earlier reading, that a
+deploy could only ever be denied or asked, made a `Forge(…)` allow unable to cover the second
+half of the thing it allowed. What it protected against instead — an unverified file naming
+itself into a decision — is answered by the verification rather than by silence. The tool
+then re-reads the same bundle, re-verifies it, and refuses unless the kind is `:capability`,
+the author is this session, and the name is still the one the decision was about (the loop
+hands that back as `forge_evaluated_name`, the way it hands `desktop_evaluated_app` to the
+desktop tools). A bundle swapped at that id between the decision and the deploy is refused by
+name.
+
+`status` carries nothing and declares nothing. It names nothing and builds nothing.
+
+**And a forge reads a directory before it judges it — so it judges the names first.**
+`Wasm.Forge`'s walk now checks a file against C9's allow-list *by name* before opening it, so
+a `preview` of a directory that is not a project refuses `secrets/id_rsa` without reading it.
+The refusal still names the file, because the directory belongs to whoever pointed the forge
+at it and "which file was wrong" is the answer they need.
 
 **S-D14. `Tool(forge)` is deny-and-ask only.** `Pattern.decisions/1`'s second
 `:deny_or_ask_only`, by `Tool(capability)`'s argument one step earlier: an allow on the tool
@@ -278,13 +325,39 @@ nodes — the fields the runner already writes. `preview` has no entry of its ow
 `Ouroboros.Agent.EffectLedger` has no kind for one and that file belongs to another slice;
 what accounts for a preview is the `:tool_call` entry every tool call has.
 
-**S-D17. `authority` is a class; `cause` is the link.** A tool is handed `scope`, `audit` and
-`principal` and no permission decision, so these entries say `%{decision: :granted, reason:
-:native_tool_call}` — an honest statement that the loop admitted the call — and never a rule
-id this module did not see. The chain to the decision is two hops and each is written by
-whatever knew the fact: this entry's `cause.signal_id` is the `:tool_call` ledger entry for
-the call, whose `attempt.permission_entry_id` names the `:permission` entry. When this node's
-audit stream is off the cause carries its type and no id, rather than inventing one.
+**And an entry that is `:started` is never left to nobody.** Three ways the settle could not
+run, each closed by a different mechanism, all of them `Effects.Runner`'s: the body **raises
+or throws**, and the entry is settled `:failed` with the class before the reason is re-raised
+into `run/2`'s own handler; the tool task is **brutally killed**, which `Tools.execute/4` does
+at the loop's timeout and which runs no line of this module at all, so the ledger is asked to
+`watch_runner/3` the task process before the effect starts and a monitor firing on a
+`:started` entry settles it `:ambiguous` — the honest word for "a build may have happened and
+nobody knows"; or it returns, and the two branches settle it themselves. A `watch_runner/3`
+that fails is logged and not a refusal, unlike in `Effects.Runner`: the entry is already
+durable and the effect already accounted for, and stopping a forge the ledger *did* record
+because a monitor could not be attached would trade the capability for bookkeeping.
+
+The loop's tool timeout for `forge` is `max(tool_timeout_ms, Forge.max_timeout_ms/0)`, and
+that ceiling is now the sum of the deadlines something else actually enforces:
+`Wasm.Forge.build_timeout/1`, `:signing_call_timeout`, `:capability_eval_timeout`, and the
+rollout's `stage`, `probe` and `start` per-node deadlines, plus 30 s of margin. One number
+for four operations, because the loop's table is on the tool name: a `forge` spends the first
+two terms and a `deploy` the rest.
+
+**S-D17. `authority` is a class; `cause` is the link, and the link does not depend on
+audit.** A tool is handed `scope`, `principal` and no permission decision, so these entries
+say `%{decision: :granted, reason: :native_tool_call}` — an honest statement that the loop
+admitted the call — and never a rule id this module did not see. The chain to the decision is
+two hops, each written by whatever knew the fact: this entry's `cause.signal_id` is the
+`:tool_call` ledger entry for the call, whose `attempt.permission_entry_id` names the
+`:permission` entry.
+
+The first hop used to be read out of the *audit* context, so it existed only on a node whose
+audit stream was on — while the `:tool_call` entry it names is written on every admitted call
+regardless. The loop now puts `ledger_effect_id` on the tool context plainly, beside
+`principal`; the audit fields remain a fallback for a caller that assembles a context the old
+way. Under the default `:standard` audit mode both hops are walkable, which is what
+`test/provider/native/forge_tool_test.exs` walks.
 
 **S-D18. One proposal format, one validator.** A project directory's `manifest.json` — the
 same file `Ouroboros.Runtime.Capabilities` reads for an operator's `capabilities.admit` —
@@ -295,14 +368,39 @@ operator's file and the model's parameter cannot come to disagree about what an 
 spec is. The `name` is always the parameter, and a manifest naming something else is refused
 before the forge.
 
-**S-D19. `ouroboros.toml` is a protected write.** `Rules.protected_write?/1` refuses any path
-whose final component is `ouroboros.toml`, case-folded for `.git`'s reason, at every depth —
-the workspace hook manifest `Ouroboros.Provider.Native.Hooks` reads to decide which programs
-run around a tool call. It joins the list for the reason the list exists: the engine's rules
-and the ledger were already fenced, and this file was reachable through an ordinary `write`
-in an ordinary workspace, which is where a self-improving session lives. Final component
-rather than segment, so a directory by that name is not it. The worktree-delivery exemption
-is unchanged.
+**S-D19. `ouroboros.toml` is refused by the permission engine *and* by the OS sandbox, and
+where the sandbox cannot refuse it the workspace is not trusted.** Three parts, because a
+rule the shell walks around is not a fence.
+
+*The engine.* `Rules.protected_write?/1` refuses any path whose final component is
+`ouroboros.toml`, case-folded for `.git`'s reason, at every depth — the workspace hook
+manifest `Ouroboros.Provider.Native.Hooks` reads to decide which programs run around a tool
+call. Final component rather than segment, so a directory by that name is not it. The
+worktree-delivery exemption is unchanged.
+
+*The kernel.* The engine only ever sees the paths a call **declares**, and a `bash` call
+declares its redirect targets and nothing else: `cp template ouroboros.toml`, `mv`, `tee`,
+`sed -i`, `dd` and `python3 -c` all reached the file with the engine's rule in place. So the
+sandbox policy grew a third fence beside `protected` (roots) and `protected_segments`
+(directory names): `protected_files`, concrete paths denied whether or not they exist, one
+per writable root — `Sandbox.protected_files/2`. Seatbelt writes one
+`(deny file-write* (literal (param …)))`, which matches a path the kernel resolves whether or
+not a file is there; bubblewrap binds the file read-only over itself when it exists and binds
+`/dev/null` read-only onto it when it does not, so the destination is present, read-only and
+busy. Proved live on this machine: a sandboxed `Tools.Bash.run/2` doing
+`cp template ouroboros.toml` exits non-zero and the file does not exist afterwards, with
+`.git/pwned` as the control.
+
+*And where it cannot.* `ouro-sandbox` cannot express it — Landlock attaches rights to inodes,
+so a path that need not exist cannot carry a rule, and the `LD_PRELOAD` name filter that
+carries the equivalent `.git` case is a libc filter a static binary walks past. It reports
+`Sandbox.protects_files?/1` as `false` rather than pretending, and `Hooks.trusted?/2` then
+answers `false` for every workspace on that node: the workspace's **shell** hooks and checks
+are declined and counted exactly as an untrusted workspace's are, with one warning naming the
+backend. Component hooks are unaffected — they run in the WebAssembly pool, can only narrow a
+decision, and are admitted from an untrusted workspace already (D8). Trusting a file the
+session can rewrite is trusting whatever it writes next; a node that cannot hold that one
+path shut does not get to call a workspace trusted.
 
 
 <!-- S2-decisions -->

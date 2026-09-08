@@ -37,7 +37,7 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   | mode | filesystem | network |
   |---|---|---|
   | `:read_only` | reads anywhere the process could already read; writes **only** into a per-call scratch directory that `$TMPDIR` points at | external network denied; loopback available for local IPC |
-  | `:workspace_write` | the above, plus writes under `scope.root` and every `scope.roots` entry — with any `.git` or `.ouroboros` segment beneath them, the node's data directory, and `$XDG_CONFIG_HOME/ouroboros` (or `~/.config/ouroboros`) kept read-only | external network denied unless the node opts in; loopback available for local IPC |
+  | `:workspace_write` | the above, plus writes under `scope.root` and every `scope.roots` entry — with any `.git` or `.ouroboros` segment beneath them, each root's own `ouroboros.toml`, the node's data directory, and `$XDG_CONFIG_HOME/ouroboros` (or `~/.config/ouroboros`) kept read-only | external network denied unless the node opts in; loopback available for local IPC |
   | `:unrestricted` | no sandbox, logged | no sandbox |
 
   Without a backend, `:read_only` and `:workspace_write` both refuse rather than wrapping
@@ -55,6 +55,16 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   shell never crosses. It is recomputed here rather than imported so the sandbox keeps
   working if the rule engine's shape changes; the two lists are checked against each
   other in `test/provider/native/sandbox_test.exs`.
+
+  **The workspace hook manifest is in that set as a file (S1).** `protected_files/2` names
+  each writable root's own `ouroboros.toml` — the file `Ouroboros.Provider.Native.Hooks`
+  reads to decide which programs run before and after every tool call. The engine denies a
+  write to it too, but the engine only sees the paths a call *declares*, and a shell declares
+  none: `cp x ouroboros.toml`, `mv`, `tee`, `sed -i`, `dd` and `python3 -c` reach it without
+  a redirect for the engine to read, which is why this one has to be a kernel rule. Seatbelt
+  and bubblewrap can express it; `ouro-sandbox` cannot, says so through `protects_files?/1`,
+  and `Hooks.trusted?/2` declines that workspace's shell hooks rather than trusting a fence
+  that is not there.
 
   **The `.git` consequence is real and is not a bug.** A sandboxed `git commit` fails,
   because committing writes into `.git`. That is Codex's rule and it is kept for
@@ -171,11 +181,20 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   `stat` only the root directory itself and what it may already read. Only Seatbelt can
   express it (`seals_process?/1`); the two Linux backends render a sealed policy exactly as
   they render an open one, and the pool's status says which of the two actually applied.
+
+  `protected_files` (S1) is the third fence beside `protected` and `protected_segments`, and
+  it is the one that names **files**: concrete absolute paths that may not be written *or
+  created*, whether or not they exist when the command starts. `protected` denies a subtree
+  and `protected_segments` denies a directory *name* at any depth; neither can say "this one
+  path, which may not exist yet". The workspace hook manifest is exactly that path — see
+  `protected_files/2` — and `protects_files?/1` is the question a caller asks before
+  believing the fence is there, because one of the three backends cannot express it.
   """
   @type policy :: %{
           optional(:readable) => [String.t()],
           optional(:loopback) => boolean(),
           optional(:process) => :sealed | :open,
+          optional(:protected_files) => [String.t()],
           mode: :read_only | :workspace_write | :workspace_write_escalated | :builder,
           writable: [String.t()],
           protected: [String.t()],
@@ -192,6 +211,16 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   # `.git` is Codex's rule; `.ouroboros` is this runtime's own, and both are already the
   # protected write segments `Ouroboros.Control.Permissions.Rules` denies.
   @protected_segments [".git", ".ouroboros"]
+
+  # S1. The workspace hook manifest, by the exact name `Ouroboros.Provider.Native.Hooks`
+  # reads at the root of a workspace (`hooks.ex`, `@project_file`). It is a *file* and not a
+  # segment, and the file is the point: what it holds is the list of programs this runtime
+  # runs before and after every tool call. The permission engine already refuses a write to
+  # it (`Control.Permissions.Rules.protected_write?/1`); this is the same policy enforced a
+  # second time by the kernel, because the engine only ever sees the paths a call *declares*
+  # and a shell declares none — `cp`, `mv`, `tee`, `sed -i`, `dd` and `python3 -c` all reach
+  # it without a redirect for the engine to read.
+  @hook_manifest "ouroboros.toml"
 
   # The read set every build starts from on this OS: the toolchain's own world and nothing
   # else. A compiler has to read a great deal — its libraries, its linker, the SDK it links
@@ -437,10 +466,36 @@ defmodule Ouroboros.Provider.Native.Sandbox do
       writable: writable(scope, mode),
       protected: protected_roots(),
       protected_segments: protected_segments(mode),
+      protected_files: protected_files(scope, mode),
       scratch: nil,
       network: network_allowed?()
     }
     |> Ouroboros.Workspace.Access.policy(Map.get(scope, :root))
+  end
+
+  @doc """
+  The concrete files this policy denies a write to, existing or not (S1).
+
+  One entry per writable root: that root's own `#{@hook_manifest}`. `Hooks.load/2` reads
+  exactly `Path.join(root, "#{@hook_manifest}")` and nothing deeper, so this is the whole of
+  what a hook manifest is on this node — a file *named* `#{@hook_manifest}` three directories
+  down is a file, and the engine's `protected_write?/1` refuses a write to it for belt and
+  braces, but it is not the manifest and the kernel is not asked to pretend it is.
+
+  Empty under `:read_only`, which has no writable root to protect one in: nothing there is
+  writable to begin with, and a deny for a path inside a tree that is already denied is a
+  rule that says nothing.
+
+  `protects_files?/1` says whether the backend that will render this can actually enforce it.
+  """
+  @spec protected_files(map(), :read_only | :workspace_write | :workspace_write_escalated) ::
+          [String.t()]
+  def protected_files(scope, mode) do
+    scope
+    |> writable(mode)
+    |> Enum.map(&Path.join(&1, @hook_manifest))
+    |> Enum.uniq()
+    |> Enum.sort()
   end
 
   @doc """
@@ -467,6 +522,10 @@ defmodule Ouroboros.Provider.Native.Sandbox do
       readable: roots(platform_readable() ++ Keyword.get(opts, :readable, [])),
       protected: [],
       protected_segments: [],
+      # A build has no workspace and therefore no workspace hook manifest; the scratch tree
+      # it writes into is one this node made for it. The fence a build gets is the read
+      # allow-set, which is a different question and a stronger one.
+      protected_files: [],
       scratch: nil,
       network: false,
       # A build keeps the loopback exception: `mix` and `cargo` coordinate concurrent
@@ -609,6 +668,44 @@ defmodule Ouroboros.Provider.Native.Sandbox do
   def seals_process?(:ouro_sandbox), do: false
   def seals_process?(:bwrap), do: false
   def seals_process?(:none), do: false
+
+  @doc """
+  Whether this backend can fence a policy's `protected_files` — one named path, whether or
+  not it exists when the command starts (S1, docs/SELF.md S-D19).
+
+  The fourth question beside `fences_reads?/1`, `fences_network?/1` and `seals_process?/1`,
+  and it is asked for one reason: `Ouroboros.Provider.Native.Hooks.trusted?/2` will not treat
+  a workspace as trusted for shell hooks on a node whose sandbox cannot keep the shell out of
+  that workspace's `#{@hook_manifest}`. A trust that the kernel does not back is a trust the
+  session can grant itself.
+
+  Two of the three answer yes by name:
+
+    * **Seatbelt** writes `(deny file-write* (literal (param …)))`, and SBPL matches a path
+      the kernel resolves whether or not anything is there — a create is a write to that
+      path, so `cp`, `mv`, `tee` and `sed -i` are all denied by the one rule.
+    * **bubblewrap** binds the path read-only over itself when the file exists and binds
+      `/dev/null` read-only onto it when it does not; bubblewrap creates the mount point, so
+      the destination exists, is read-only, and is busy — a write fails `EROFS` and an unlink
+      or a rename over it fails `EBUSY`.
+
+  **`ouro-sandbox` answers no, and that is the honest answer rather than a missing feature
+  in this file.** Landlock attaches rights to inodes, so it cannot write a rule for a path
+  that does not exist — the same limitation this module already states for creating a `.git`
+  that was not there — and the one right that would cover it, `MAKE_REG` on the parent, would
+  deny every legitimate file creation in the workspace. The `LD_PRELOAD` name filter that
+  carries the `.git` case is a libc filter: a static binary is outside it, so it is defence
+  in depth and not a fence to hang a trust decision on. So the helper backend reports `false`
+  here and the node declines shell hooks instead of pretending the file is fenced. A helper
+  that grows a real per-path deny is what changes this answer, not this function.
+  """
+  @spec protects_files?(detection() | backend()) :: boolean()
+  def protects_files?(%{backend: backend}), do: protects_files?(backend)
+  def protects_files?(:sandbox_exec), do: true
+  def protects_files?(:bwrap), do: true
+  def protects_files?(:ouro_sandbox), do: false
+  def protects_files?(:none), do: false
+  def protects_files?(_unknown), do: false
 
   @doc """
   The process posture a policy **actually** gets on this backend: `:sealed` only where the

@@ -78,6 +78,13 @@ defmodule Ouroboros.Control.Permissions do
   @stored_scopes [:user, :workspace, :session]
   @call_timeout 5_000
 
+  # S1. The charset `Forge(<name>)` parses, restated here for
+  # `Ouroboros.Control.Permissions.Pattern`'s own reason: this module is the permission engine
+  # and a rule's meaning must not change because another plane changed its mind about what a
+  # capability may be called. `suggest/1` is the only reader — a suggestion nobody can parse
+  # is a rule saved dead.
+  @forge_name ~r/\A[a-z0-9][a-z0-9._-]{0,63}\z/
+
   @type server :: GenServer.server()
   @type rule_ref :: %{scope: atom(), id: String.t(), pattern: String.t()}
   @type outcome :: {:allow, rule_ref()} | {:deny, rule_ref()} | {:ask, atom()}
@@ -832,9 +839,18 @@ defmodule Ouroboros.Control.Permissions do
   # `Pattern.decisions/1` refuses to let it carry an allow at all. The name is the one the
   # forge will be *held* to, so `nil` here is a call — a deploy, a status, a name outside
   # the charset — that nothing honest can be suggested for.
+  # And it is held to the charset a `Forge(<name>)` pattern parses, here rather than trusted
+  # to have been checked upstream: `suggest/1` takes a `Request` a caller built, and a
+  # suggestion is a rule an operator is about to *persist* through the "don't ask again"
+  # modal. Offering `Forge(Not A Name)` is offering a string `Pattern.parse/1` refuses — a
+  # dead rule saved under a decision somebody thought they made.
+  #
+  # The regex is restated locally exactly as `Pattern` restates it, and for the same reason:
+  # this module is the permission engine and must not depend on the WebAssembly plane for
+  # what a capability name is.
   defp forge_name(%Request{tool: "forge", context: context}) when is_map(context) do
     case Map.get(context, :forge) || Map.get(context, "forge") do
-      name when is_binary(name) and name != "" -> name
+      name when is_binary(name) -> if Regex.match?(@forge_name, name), do: name
       _other -> nil
     end
   end

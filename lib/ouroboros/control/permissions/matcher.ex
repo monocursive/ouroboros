@@ -24,7 +24,7 @@ defmodule Ouroboros.Control.Permissions.Matcher do
   | pattern | applies to |
   |---|---|
   | `Bash(…)` | a request carrying a command line |
-  | `Read(…)` | `mode: :read` |
+  | `Read(…)` | `mode: :read`; and, for a **deny or ask** rule only, the `forge` tool — a forge reads its project directory, so a `Read` rule that denies or asks covers it. An allow `Read` rule does not make a forge an allow; `Forge(…)` does |
   | `Edit(…)` | `mode: :write` whose tool is an editing tool, or is unrecognised |
   | `Write(…)` | `mode: :write` whose tool is a creating tool, or is unrecognised |
   | `WebFetch(domain:…)` | `mode: :network` |
@@ -83,8 +83,19 @@ defmodule Ouroboros.Control.Permissions.Matcher do
 
   # ── Paths ──────────────────────────────────────────────────────────────────────────
 
+  # S1. `mode: :read`, or a `forge` under a **deny or ask** rule. A forge is an `:execute`
+  # because it compiles, but the first thing it does is read every file in the directory it
+  # was pointed at, and `Ouroboros.Provider.Native.Tools.classify/3` declares that directory
+  # in `paths`. So an operator who wrote `Deny Read(<ws>/secret/**)` has said something about
+  # a forge of `secret`, and the narrow reading of it is the one that holds.
+  #
+  # The allow direction is deliberately not covered — `quantifier == :any` is exactly the
+  # deny-and-ask half (`Rules.quantifier/1`). `Allow Read(**)` is a sentence about reading;
+  # a forge builds, signs and produces something this node will run, and the only rules that
+  # allow one are `Forge(<name>)` and `Forge(*)`.
   defp do_matches?(%Pattern{kind: :read, spec: %{glob: glob}}, request, quantifier) do
-    request.mode == :read and path_quantifier(quantifier, request.paths, glob, request.root)
+    (request.mode == :read or (request.tool == "forge" and quantifier == :any)) and
+      path_quantifier(quantifier, request.paths, glob, request.root)
   end
 
   defp do_matches?(%Pattern{kind: :edit, spec: %{glob: glob}}, request, quantifier) do

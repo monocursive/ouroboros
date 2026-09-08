@@ -76,10 +76,15 @@ codegen-units = 1
 **The `ouroboros-guest` path.** `ouroboros-guest` is not published, so the dependency is a
 path, and that path must reach `tui/wasm/guest` **in the checkout your workspace is** —
 written relative to your project directory. If your project is at `<workspace>/capabilities/
-vet`, the path is `../../tui/wasm/guest`. Do not copy a path out of another machine's file,
-do not guess an absolute one, and do not point it at a directory you created: a cargo path
-dependency's proc-macros run during the build, so where this points is a question about what
-code executes.
+vet`, the path is `../../tui/wasm/guest`.
+
+The forge **rewrites this line** before it builds: whatever you wrote, the dependency it
+compiles against is this node's own SDK checkout, resolved by the node and not by your file.
+So the line is not the thing that decides what code runs at build time — it is the thing that
+has to agree with the `Cargo.lock` you pinned and with the manifest the forge validates, and
+a path that does not resolve on your side is a lock that does not match. Write it relative to
+your project so the three agree. Do not copy a path out of another machine's file, do not
+guess an absolute one, and do not point it at a directory you created.
 
 ### `src/lib.rs`
 
@@ -247,8 +252,20 @@ or write outside its tree fails there rather than being refused here.
 The first `forge` or `preview` for a name asks them, unless they have written a rule. The rule
 they are offered is `Forge(<name>)` — about the one capability, not about the tool. There is
 deliberately no way to write an allow for the tool itself, so if you need to build several
-capabilities, expect to be asked once per name. A `deploy` names an artifact id rather than a
-name, so it is asked about separately; say what you are deploying and why.
+capabilities, expect to be asked once per name.
 
-Writing `ouroboros.toml` is refused by the runtime whatever the rules say. So is anything
-under `.git` or `.ouroboros`.
+A `deploy` names an artifact id rather than a name, but the runtime resolves that id against
+the bundles it holds and verifies the signature before it asks anybody anything — so a
+`deploy` is covered by the **same** `Forge(<name>)` rule as the build that produced it, and
+an operator who allowed building `vet` has allowed deploying `vet`. If the bundle at that id
+is no longer the one the decision was about, the deploy is refused by name rather than
+shipped under somebody else's allow.
+
+A `preview` and a `forge` also tell the engine which directory they are about to read, so a
+rule that **denies or asks** about that directory covers them. An allow on `Read(…)` does not
+allow a forge; only `Forge(…)` does.
+
+Writing `ouroboros.toml` is refused by the permission engine whatever the rules say, and — on
+Seatbelt and on bubblewrap — by the OS sandbox as well, so a shell cannot reach it either by
+`cp`, `mv`, `tee` or a Python one-liner. On a backend that cannot fence a single file, shell
+hooks from this workspace are declined instead. So is anything under `.git` or `.ouroboros`.

@@ -1083,8 +1083,12 @@ nothing to this lane: C9, the sandboxed offline build, the signature, the trust 
 evaluation and the rollout are all the ones described above, reached with a session principal
 as the manifest's `author`. It is off unless `config :ouroboros, :native_forge_tool` is
 `true`, its permission language is `Forge(<name>)` / `Forge(*)` beside `Capability(<name>)`,
-and `Tool(forge)` is deny-and-ask only for `Tool(capability)`'s reason. It is documented
-where the claim it serves is: [SELF.md §S1](SELF.md) and its decisions S-D10..S-D19.
+and `Tool(forge)` is deny-and-ask only for `Tool(capability)`'s reason. A `deploy` is covered
+by the same `Forge(<name>)` rule as the build: the artifact id is resolved against this node's
+forged ring and its manifest verified — the check `Ouroboros.Wasm.PolicyEngine` makes before
+loading a byte — before any name reaches the engine, and the tool re-reads and re-verifies the
+same bundle before shipping it. It is documented where the claim it serves is:
+[SELF.md §S1](SELF.md) and its decisions S-D10..S-D19.
 
 ## 8. Lane H: hooks and policy as components
 

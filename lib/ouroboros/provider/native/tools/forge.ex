@@ -87,12 +87,16 @@ defmodule Ouroboros.Provider.Native.Tools.Forge do
   it refused.
   """
 
+  require Logger
+
   alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.Provider.Native.Paths
   alias Ouroboros.Runtime.Capabilities
+  alias Ouroboros.Upgrade.Rollout.Probe
   alias Ouroboros.Upgrade.Rollout.Registry
   alias Ouroboros.Wasm.Artifact
   alias Ouroboros.Wasm.Bundle
+  alias Ouroboros.Wasm.Verifier
 
   use Jido.Action,
     name: "forge",
@@ -223,9 +227,19 @@ defmodule Ouroboros.Provider.Native.Tools.Forge do
   # such session is this one string, and `deploy` compares authors.
   @anonymous "native"
 
-  # Signing, the epoch allocation and the deploy that follows a build, over the forge's own
-  # build ceiling. The build is minutes and this is seconds; it is slack, not a second bound.
-  @deploy_slack_ms 60_000
+  # `Ouroboros.Wasm.Rollout.deploy/4`'s two per-node deadlines that are plain defaults rather
+  # than functions or configuration (`rollout.ex`, `@default_stage_timeout_ms` and
+  # `@default_start_timeout_ms`). Restated here rather than imported because they are that
+  # module's private constants; they are the *documented* option defaults, and this is a
+  # ceiling rather than a deadline — a term that drifted downstream makes this number larger
+  # than it needs to be, never smaller than what it bounds.
+  @rollout_stage_timeout_ms 60_000
+  @rollout_start_timeout_ms 15_000
+
+  # What is left over: the scheduler, the epoch allocation, the bundle write, the register
+  # checkpoint, and a loaded machine. Slack over a sum of real deadlines, not a bound of its
+  # own.
+  @timeout_margin_ms 30_000
 
   # What a `status` listing spends. The ring holds eight bundles; each is read whole to be
   # decoded, so this is also the bound on what one listing reads off the disk.
@@ -253,14 +267,51 @@ defmodule Ouroboros.Provider.Native.Tools.Forge do
   @doc """
   The longest a `forge` call can take, for the loop's own tool timeout.
 
-  The forge's own build ceiling — never more than five minutes, and the deadline
-  `Ouroboros.Provider.Native.Exec` signals the sandboxed cargo process group at — plus
-  slack for the signature, the epoch and the deploy that follow it. A backstop: the forge
-  stops its own build, and a loop that killed the tool task first would report a timeout
-  for a build that was still inside the bound it was given.
+  A backstop and not a deadline: every term below is a bound something else already
+  enforces, and the loop's job is only to not kill the tool task while one of them is still
+  legitimately running. The forge stops its own build; a loop that killed the task first
+  would report a timeout for work that was inside the bound it was given, and would leave
+  the `:forge` ledger entry to the runner watch rather than to a settle.
+
+  The sum, term by term, each one read from the thing that enforces it:
+
+    * `Ouroboros.Wasm.Forge.build_timeout/1` — the cargo build, and the deadline
+      `Ouroboros.Provider.Native.Exec` signals the sandboxed process group at. Minutes; every
+      other term is seconds.
+    * `config :ouroboros, :signing_call_timeout` — the `:erpc` deadline on the signature
+      (`Ouroboros.Upgrade.Forge.Signer`, default 15 s).
+    * `config :ouroboros, :capability_eval_timeout` — the rollout's per-node `eval_timeout`
+      (`Ouroboros.Wasm.Rollout.deploy/4`, default 30 s).
+    * the rollout's other three per-node deadlines: `stage_timeout` (60 s),
+      `probe_timeout` (`Ouroboros.Upgrade.Rollout.Probe.budget_ms/0`) and `start_timeout`
+      (15 s).
+    * #{@timeout_margin_ms} ms of margin for everything that is not individually bounded —
+      the epoch allocation, the bundle write, the register checkpoint, scheduler delay on a
+      loaded host.
+
+  One number for four operations, because `execute_timeout/3` is a table on the tool name
+  and not on the operation: a `forge` spends the first two terms and a `deploy` the rest,
+  and the ceiling has to cover whichever one this call is.
   """
   @spec max_timeout_ms() :: pos_integer()
-  def max_timeout_ms, do: build_timeout() + @deploy_slack_ms
+  def max_timeout_ms do
+    build_timeout() + signing_timeout() + eval_timeout() + @rollout_stage_timeout_ms +
+      Probe.budget_ms() + @rollout_start_timeout_ms + @timeout_margin_ms
+  end
+
+  defp signing_timeout do
+    case Application.get_env(:ouroboros, :signing_call_timeout, 15_000) do
+      ms when is_integer(ms) and ms > 0 -> ms
+      _invalid -> 15_000
+    end
+  end
+
+  defp eval_timeout do
+    case Application.get_env(:ouroboros, :capability_eval_timeout, 30_000) do
+      ms when is_integer(ms) and ms > 0 -> ms
+      _invalid -> 30_000
+    end
+  end
 
   @doc """
   The name this call puts in the permission request's context, or `nil`.
@@ -308,10 +359,84 @@ defmodule Ouroboros.Provider.Native.Tools.Forge do
     kind, reason -> error("forge failed: #{kind} #{inspect(reason, limit: 5)}")
   end
 
-  # Exactly what the caller sent. `" forge "` is not `"forge"`, for `Tools.Capability`'s
-  # reason: a tool that repaired one into the other would behave by a normalisation the
-  # permission engine never performed.
-  defp operation(params), do: Map.get(params, :operation) || Map.get(params, "operation")
+  @doc """
+  The operation this call names, exactly as it was written.
+
+  `" forge "` is not `"forge"`, for `Tools.Capability`'s reason: a tool that repaired one
+  into the other would behave by a normalisation the permission engine never performed.
+
+  Public because the classifier reads it too, and it must read it the *same way* (LOW-6).
+  `Ouroboros.Provider.Native.Tools.classify/3` sees the model's JSON, whose keys are strings;
+  `run/2` sees what `Tools.atomize/2` left, whose keys are atoms. A map carrying both — a
+  caller assembling one by hand — used to be judged as one operation by the classifier and
+  executed as another by the tool, because the two disagreed about which spelling wins. There
+  is now one reader, `param/2`, string key first, and both seams call it.
+  """
+  @spec operation(map()) :: term()
+  def operation(params) when is_map(params), do: param(params, :operation)
+  def operation(_params), do: nil
+
+  @doc """
+  The permission request's context for one forge call: `%{forge: name}` or `%{}`.
+
+  Called by `Ouroboros.Provider.Native.Tools.classify/3`, and the whole of what a `Forge(…)`
+  rule matches on. Total by construction — a classifier that raised would refuse a call the
+  engine never judged — so everything below answers `%{}` rather than an error.
+
+  Three shapes:
+
+    * `preview` and `forge` carry the `name` parameter when
+      `Ouroboros.Wasm.Artifact.name?/1` accepts the exact bytes of it. `run/2` hands those
+      same bytes to `Ouroboros.Wasm.Forge`, which refuses a project whose Cargo package is
+      called anything else — so the allow is honest not because a name was looked up but
+      because the forge is *held* to the one the engine was shown.
+
+    * `deploy` carries the name of the bundle its `artifact_id` actually resolves to (Q-B).
+      This node's forged ring is read, the bundle decoded, and its manifest verified against
+      this node's own trust policy exactly as `Ouroboros.Wasm.PolicyEngine` verifies one
+      before loading a byte; the kind must be `:capability`. Only then is the name put in
+      front of the engine, so `Forge(vet)` covers deploying `vet` and nothing else. The
+      *author* is not checked here — the classifier is not given a principal — and `deploy/3`
+      checks it, along with all three of these again on the bytes as they are at that moment.
+
+    * `status` carries nothing. It names nothing and builds nothing.
+  """
+  @spec request_context(map()) :: map()
+  def request_context(input) when is_map(input) do
+    case operation(input) do
+      operation when operation in ["preview", "forge"] ->
+        case request_name(operation, param(input, :name)) do
+          name when is_binary(name) -> %{forge: name}
+          nil -> %{}
+        end
+
+      "deploy" ->
+        deploy_context(param(input, :artifact_id))
+
+      _other ->
+        %{}
+    end
+  rescue
+    _error -> %{}
+  catch
+    _kind, _reason -> %{}
+  end
+
+  def request_context(_input), do: %{}
+
+  # The bundle as it is on disk right now, judged the way this node judges any signed
+  # manifest before it acts on one. A refusal here is silence — `%{}` — and not a message:
+  # the classifier's answer is what a rule matches, and "no rule covers this" is what an
+  # unresolvable id should mean. The refusal a *model* reads comes from `deploy/3`.
+  defp deploy_context(artifact_id) do
+    with :ok <- artifact_id?(artifact_id),
+         {:ok, %Artifact{kind: :capability, name: name}} <- resolve_bundle(artifact_id),
+         true <- Artifact.name?(name) do
+      %{forge: name}
+    else
+      _unresolved -> %{}
+    end
+  end
 
   # Every operation needs an identity to record against, and `forge` needs one to sign into
   # a manifest. There is exactly one source for it and it is not a parameter.
@@ -366,15 +491,17 @@ defmodule Ouroboros.Provider.Native.Tools.Forge do
         |> put_present(:eval, proposal.eval)
         |> put_present(:start_config, proposal.start_config)
 
-      case forge_module().forge(%{dir: dir}, opts) do
-        {:ok, forged} ->
-          settle(effect_id, %{status: :ok, result: forged_result(forged)})
-          {:ok, %{output: render_forged(forged), is_error: false}}
+      settling(effect_id, :forge, fn ->
+        case forge_module().forge(%{dir: dir}, opts) do
+          {:ok, forged} ->
+            settle(effect_id, %{status: :ok, result: forged_result(forged)})
+            {:ok, %{output: render_forged(forged), is_error: false}}
 
-        {:error, reason} ->
-          settle(effect_id, %{status: :failed, error: {:forge_refused, class(reason)}})
-          error("forge refused: " <> describe(reason))
-      end
+          {:error, reason} ->
+            settle(effect_id, %{status: :failed, error: {:forge_refused, class(reason)}})
+            error("forge refused: " <> describe(reason))
+        end
+      end)
     else
       {:refused, result} -> {:ok, result}
     end
@@ -398,19 +525,68 @@ defmodule Ouroboros.Provider.Native.Tools.Forge do
 
   defp deploy(params, context, principal) do
     with {:ok, artifact} <- forged_artifact(string(params, :artifact_id)),
+         :ok <- deployable_kind?(artifact),
+         :ok <- agreed_deploy_name(artifact, context),
          :ok <- authored_by?(artifact, principal),
          {:ok, effect_id} <- open(:deploy, %{nodes: [node()]}, principal, context) do
-      case forge_module().deploy(artifact, [node()]) do
-        {:ok, outcome} ->
-          settle(effect_id, %{status: :ok, result: deployed_result(artifact, outcome)})
-          {:ok, %{output: render_deployed(artifact, outcome), is_error: false}}
+      settling(effect_id, :deploy, fn ->
+        case forge_module().deploy(artifact, [node()]) do
+          {:ok, outcome} ->
+            settle(effect_id, %{status: :ok, result: deployed_result(artifact, outcome)})
+            {:ok, %{output: render_deployed(artifact, outcome), is_error: false}}
 
-        {:error, reason} ->
-          settle(effect_id, %{status: :failed, error: {:deploy_refused, class(reason)}})
-          error("deploy refused: " <> describe(reason))
-      end
+          {:error, reason} ->
+            settle(effect_id, %{status: :failed, error: {:deploy_refused, class(reason)}})
+            error("deploy refused: " <> describe(reason))
+        end
+      end)
     else
       {:refused, result} -> {:ok, result}
+    end
+  end
+
+  # A lane-W bundle carries its kind in the manifest the signature covers, and this tool
+  # deploys exactly one of them. A `:policy` component is the *permission engine*: deploying
+  # one is deciding what this node's rules are, which is the operator's verb
+  # (`capabilities.admit`, `wasm.deploy`) and not a session's — `Ouroboros.Wasm.Forge.forge/2`
+  # already refuses to build anything but a capability, and this is the same judgement on the
+  # other side of the seam, where the bytes come off a disk rather than out of a build.
+  defp deployable_kind?(%Artifact{kind: :capability}), do: :ok
+
+  defp deployable_kind?(%Artifact{kind: kind}),
+    do:
+      refuse(
+        "that bundle is a #{inspect(kind)} component, and this tool deploys capabilities. " <>
+          "A policy component decides what this node's permission rules are, which is an " <>
+          "operator's verb. Nothing was deployed."
+      )
+
+  # What the permission engine was actually shown (Q-B). `Tools.classify/3` resolves the
+  # artifact id against the ring, verifies the manifest and puts the *resolved name* in the
+  # request context; the loop hands that name back on the tool context as
+  # `forge_evaluated_name`, exactly as it hands `desktop_evaluated_app` back to the desktop
+  # tools. So `Forge(vet)` allowing a deploy is a sentence about deploying `vet`, and a
+  # bundle swapped at that id between the decision and this moment is refused by name rather
+  # than shipped under somebody else's allow.
+  #
+  # Absent — a caller that did not come through the loop's classification — constrains
+  # nothing here, and the fresh decode, the manifest verification, the kind and the author
+  # all still stand. This is the one check that has an answer only because the engine was
+  # asked, so it is the one check that can be missing.
+  defp agreed_deploy_name(%Artifact{name: name}, context) do
+    case Map.get(context, :forge_evaluated_name) do
+      nil ->
+        :ok
+
+      ^name ->
+        :ok
+
+      other ->
+        refuse(
+          "the permission decision for this call was about #{inspect(other)} and that " <>
+            "artifact id now resolves to #{inspect(name)}. One decision, one bundle. " <>
+            "Nothing was deployed."
+        )
     end
   end
 
@@ -458,23 +634,72 @@ defmodule Ouroboros.Provider.Native.Tools.Forge do
   end
 
   defp forged_artifact(artifact_id) do
-    with :ok <- artifact_id?(artifact_id),
-         {:ok, root} <- forged_root(),
-         {:ok, bundle} <- read_bundle(Path.join(root, artifact_id <> Bundle.extension())),
-         {:ok, %{artifact: %Artifact{} = artifact}} <- Bundle.decode(bundle) do
-      {:ok, artifact}
-    else
-      {:refused, _result} = refusal ->
-        refusal
-
-      _unreadable ->
-        refuse(
-          "no bundle this node forged is filed under that artifact id. Call forge with " <>
-            "operation=status to see the ones there are; the ring keeps the last " <>
-            "#{@max_listed}."
-        )
+    with :ok <- artifact_id?(artifact_id) do
+      case resolve_bundle(artifact_id) do
+        {:ok, artifact} -> {:ok, artifact}
+        {:error, reason} -> refuse(unresolvable(reason))
+      end
     end
   end
+
+  # The bundle an artifact id names, as it is on disk *at this instant*: read, decoded, and
+  # its manifest verified against this node's own trust policy the way
+  # `Ouroboros.Wasm.PolicyEngine` verifies one before loading a byte. `request_context/1` and
+  # `deploy/3` both call it, and both call it fresh — a bundle judged at classification and
+  # deployed out of a variable would be a bundle nothing re-read after the decision.
+  #
+  # The verification is not ceremony. What `deploy/3` reads off this artifact — its author,
+  # its kind, its name — is only worth reading if the signature covers it, and every one of
+  # those three is a gate. Unverified they are three strings out of a file in a directory a
+  # sandboxed shell could have written.
+  defp resolve_bundle(artifact_id) do
+    with {:ok, root} <- forged_root(),
+         {:ok, bundle} <- bundle_bytes(Path.join(root, artifact_id <> Bundle.extension())),
+         {:ok, artifact} <- decoded(bundle) do
+      case Verifier.verify_manifest(artifact, trust_policy()) do
+        :ok -> {:ok, artifact}
+        {:error, reason} -> {:error, {:unverifiable, reason}}
+      end
+    end
+  end
+
+  defp bundle_bytes(path) do
+    case read_bundle(path) do
+      {:ok, bundle} -> {:ok, bundle}
+      _unreadable -> {:error, :no_such_bundle}
+    end
+  end
+
+  defp decoded(bundle) do
+    case Bundle.decode(bundle) do
+      {:ok, %{artifact: %Artifact{} = artifact}} -> {:ok, artifact}
+      _undecodable -> {:error, :undecodable_bundle}
+    end
+  end
+
+  # This node's own trust policy, read here rather than taken from anywhere a caller could
+  # name it: which signers this node trusts is an operator's fact about this machine.
+  defp trust_policy, do: Application.get_env(:ouroboros, :upgrade_trust_policy, [])
+
+  # Three different things to tell somebody, kept apart: the id names nothing, the file is
+  # not a bundle, or the bundle is one this node will not act on.
+  defp unresolvable(:no_such_bundle),
+    do:
+      "no bundle this node forged is filed under that artifact id. Call forge with " <>
+        "operation=status to see the ones there are; the ring keeps the last #{@max_listed}."
+
+  defp unresolvable(:undecodable_bundle),
+    do:
+      "the file filed under that artifact id is not a bundle this node can decode. " <>
+        "Nothing was deployed."
+
+  defp unresolvable({:unverifiable, reason}),
+    do:
+      "that bundle's signed manifest does not verify against this node's trust policy " <>
+        "(#{describe(reason)}). A bundle whose signature this node cannot check is not one " <>
+        "it will run, whoever forged it. Nothing was deployed."
+
+  defp unresolvable(reason), do: describe(reason)
 
   # The one place a string the model wrote becomes part of a filename, so it is held to the
   # charset `Wasm.Forge` files a bundle under before `Path.join/2` is asked anything.
@@ -707,6 +932,58 @@ defmodule Ouroboros.Provider.Native.Tools.Forge do
     end
   end
 
+  # `Effects.Runner`'s discipline for a body that can stop being anybody's to settle
+  # (`runner.ex:164`). Three ways an entry written `:started` never reaches a `settle`, and
+  # each is closed by a different mechanism:
+  #
+  #   * the body **raises** or **throws**. The entry is settled `:failed` with the class and
+  #     the reason is re-raised unchanged, so `run/2`'s own handler renders it to the model.
+  #     A `rescue` that swallowed it would turn a build that crashed into a quiet refusal.
+  #   * the task is **brutally killed** — `Tools.execute/4` does exactly that at the loop's
+  #     tool timeout — and no line in this process runs at all. That is what `watch_runner/3`
+  #     is for: the ledger monitors this process before the effect starts, and a monitor that
+  #     fires on a `:started` entry settles it `:ambiguous`, which is the honest word for
+  #     "a build may have happened and nobody knows".
+  #   * it returns, and both branches inside settle it themselves.
+  #
+  # A `watch_runner/3` that fails is **not** a refusal, unlike in `Effects.Runner`. There the
+  # watch is attached before the effect is permitted to start, so refusing costs nothing; here
+  # the entry is already durable and the operation is already accounted for, and stopping a
+  # forge the ledger *did* record because a monitor could not be attached would trade the
+  # capability for bookkeeping. What is lost is the ambiguity settlement on a kill, and the
+  # entry stays `:started` — which is exactly what it meant before this existed.
+  defp settling(effect_id, effect, fun) do
+    watch(effect_id)
+    fun.()
+  rescue
+    error ->
+      settle(effect_id, %{status: :failed, error: crashed(effect, :error)})
+      reraise error, __STACKTRACE__
+  catch
+    kind, reason ->
+      settle(effect_id, %{status: :failed, error: crashed(effect, kind)})
+      :erlang.raise(kind, reason, __STACKTRACE__)
+  end
+
+  defp crashed(:forge, kind), do: {:forge_crashed, kind}
+  defp crashed(:deploy, kind), do: {:deploy_crashed, kind}
+
+  defp watch(effect_id) do
+    case safe_ledger(fn -> EffectLedger.watch_runner(effect_id, self(), ledger()) end) do
+      :ok ->
+        :ok
+
+      other ->
+        Logger.warning(
+          "the effect ledger could not watch this forge's runner (#{inspect(other, limit: 5)}); " <>
+            "#{effect_id} will stay :started rather than settling :ambiguous if this call " <>
+            "is killed where it stands"
+        )
+
+        :ok
+    end
+  end
+
   defp settle(effect_id, outcome) do
     _ = safe_ledger(fn -> EffectLedger.settle(effect_id, outcome, ledger()) end)
     :ok
@@ -726,20 +1003,39 @@ defmodule Ouroboros.Provider.Native.Tools.Forge do
     "#{effect}-" <> binary_slice(digest, 0, 32)
   end
 
-  # The `:tool_call` ledger entry for the call this is happening inside, which the loop puts
-  # in the audit context as `ledger_effect_id`. Absent when this node's audit stream is off,
-  # and then the cause says what kind of thing caused it and stops there rather than
-  # inventing an id.
+  # The `:tool_call` ledger entry for the call this is happening inside. That entry exists
+  # whether or not this node's audit stream is on — the loop writes it on every admitted tool
+  # call — so the chain to the permission decision must not depend on audit either (Q-A). The
+  # loop puts its id on the tool context as `ledger_effect_id`, plainly, beside `principal`.
+  #
+  # Two hops, and this is the first: `cause.signal_id` names the `:tool_call` entry, and that
+  # entry's own `attempt.permission_entry_id` names the `:permission` entry that holds the
+  # decision. Each hop written by the thing that knew the fact.
   defp cause(effect, context) do
     base = %{signal_type: "native.tool.forge.#{effect}"}
 
-    case get_in(context, [Access.key(:audit, %{}), Access.key(:fields, %{}), "ledger_effect_id"]) do
+    case ledger_effect_id(context) do
       id when is_binary(id) and id != "" -> Map.put(base, :signal_id, id)
       _absent -> base
     end
-  rescue
-    _error -> %{signal_type: "native.tool.forge.#{effect}"}
   end
+
+  # Never by `rescue`: a context with no key, and one whose `:audit` is `nil` or is not a map,
+  # are absence, and each is written down as such rather than raised and caught. The audit
+  # fields stay as a fallback for a caller that assembles the context the way the loop did
+  # before this key existed. The guard is the only shape check that is left — a non-map
+  # context has already failed `principal/1` two calls earlier, which is where it belongs.
+  defp ledger_effect_id(context) when is_map(context) do
+    case Map.get(context, :ledger_effect_id) do
+      id when is_binary(id) and id != "" -> id
+      _absent -> audit_effect_id(Map.get(context, :audit))
+    end
+  end
+
+  defp audit_effect_id(%{fields: fields}) when is_map(fields),
+    do: Map.get(fields, "ledger_effect_id")
+
+  defp audit_effect_id(_absent), do: nil
 
   defp safe_ledger(fun) do
     fun.()
@@ -977,15 +1273,29 @@ defmodule Ouroboros.Provider.Native.Tools.Forge do
 
   defp build_timeout, do: Ouroboros.Wasm.Forge.build_timeout([])
 
-  # A parameter under either spelling. The loop hands this module atom keys (`Tools.atomize/2`
-  # converted the declared ones and dropped everything else); a caller reaching the action
-  # directly may not have. An atom key holding the schema's own `nil` default is absence, not
-  # a value, so it falls through rather than shadowing.
+  # A parameter under either spelling, **string key first** (LOW-6). The loop hands this
+  # module atom keys (`Tools.atomize/2` converted the declared ones and dropped everything
+  # else); a caller reaching the action directly may not have; and the classifier, which
+  # reads the model's JSON, only ever sees strings.
+  #
+  # The order is the point. `Ouroboros.Provider.Native.Tools.classify/3` calls this same
+  # function through `request_context/1`, so a map carrying *both* spellings of a key is
+  # judged and executed on the same value — where the two used to disagree, a call could be
+  # classified as one operation and run as another. String first because that is the spelling
+  # the classifier is guaranteed to see; an atom key holding the schema's own `nil` default is
+  # absence, not a value, so it falls through rather than shadowing.
   defp param(params, key) do
-    case Map.fetch(params, key) do
-      {:ok, nil} -> Map.get(params, Atom.to_string(key))
+    case Map.fetch(params, Atom.to_string(key)) do
+      {:ok, nil} -> atom_param(params, key)
       {:ok, value} -> value
-      :error -> Map.get(params, Atom.to_string(key))
+      :error -> atom_param(params, key)
+    end
+  end
+
+  defp atom_param(params, key) do
+    case Map.fetch(params, key) do
+      {:ok, value} -> value
+      :error -> nil
     end
   end
 

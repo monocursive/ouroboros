@@ -97,10 +97,21 @@ defmodule Ouroboros.Provider.Native.ForgeToolTest do
   # one it can run.
   @component "\0asm" <> <<0x0D, 0x00, 0x01, 0x00>> <> "this is not a real component"
 
+  # The signer id every bundle this file writes is signed under, and the one the trust policy
+  # in `setup` names.
+  @signer "s1-test"
+
   setup do
     previous =
       Map.new(
-        [:native_forge_tool, :forge_module, :forge_tool_ledger, :data_dir, :permissions],
+        [
+          :native_forge_tool,
+          :forge_module,
+          :forge_tool_ledger,
+          :data_dir,
+          :permissions,
+          :upgrade_trust_policy
+        ],
         &{&1, Application.fetch_env(:ouroboros, &1)}
       )
 
@@ -125,6 +136,18 @@ defmodule Ouroboros.Provider.Native.ForgeToolTest do
 
     Application.put_env(:ouroboros, :data_dir, data_dir)
 
+    # S1 fix wave. A bundle in the ring is only worth reading if this node can check the
+    # signature over it — `deploy` reads the author, the kind and the name off the manifest
+    # and gates on all three, and unverified those are three strings out of a file in a
+    # directory. So the ring holds *really* signed bundles here, under a key this test made
+    # and a trust policy that names it, which is the shape a `self` posture has.
+    {public, private} = :crypto.generate_key(:eddsa, :ed25519)
+
+    Application.put_env(:ouroboros, :upgrade_trust_policy,
+      allow_unsigned: false,
+      trusted_signers: %{@signer => public}
+    )
+
     {:ok, scope} = Paths.scope(workspace, [], :workspace_write)
     session_id = "forge-tool-#{System.unique_integer([:positive, :monotonic])}"
 
@@ -134,6 +157,7 @@ defmodule Ouroboros.Provider.Native.ForgeToolTest do
       data_dir: data_dir,
       forged: Path.join([data_dir, "wasm", "forged"]),
       scope: scope,
+      signing_key: private,
       session_dir: Path.join(root, "session"),
       session_id: session_id,
       principal: "session:" <> session_id,
@@ -220,13 +244,127 @@ defmodule Ouroboros.Provider.Native.ForgeToolTest do
       assert classify(%{"operation" => "preview", "name" => "vet"}, context).context ==
                %{forge: "vet"}
 
-      # A deploy names an artifact id. A `name` beside it is a string nothing will be held
-      # to, so it is not put in front of the engine — a `Forge(vet)` allow must not become
-      # permission to deploy whatever some id resolves to.
+      # A deploy's `name` parameter is a string nothing will be held to, so it contributes
+      # nothing; the name a deploy carries is the one its artifact id *resolves* to, and an
+      # id nothing is filed under resolves to nothing (Q-B, below).
       assert classify(%{"operation" => "deploy", "name" => "vet", "artifact_id" => "a"}, context).context ==
                %{}
 
       assert classify(%{"operation" => "status", "name" => "vet"}, context).context == %{}
+    end
+
+    # ── Q-B ────────────────────────────────────────────────────────────────────────────
+    test "a deploy carries the name its artifact id resolves to, verified first", context do
+      artifact = bundle!(context, "counter-a", context.principal)
+
+      assert classify(%{"operation" => "deploy", "artifact_id" => artifact.id}, context).context ==
+               %{forge: "counter-a"}
+
+      # And that is what makes one `Forge(counter-a)` rule cover the build and the deploy of
+      # the same capability, which is the sentence somebody answering that prompt meant.
+      Application.put_env(:ouroboros, :permissions, [{"Forge(counter-a)", :allow}])
+
+      assert {:allow, _rule} =
+               evaluate(%{"operation" => "deploy", "artifact_id" => artifact.id}, context)
+
+      assert {:allow, _rule} =
+               evaluate(%{"operation" => "forge", "name" => "counter-a"}, context)
+
+      # A different capability's name is a different rule.
+      other = bundle!(context, "counter-b", context.principal)
+
+      assert {:ask, _reason} =
+               evaluate(%{"operation" => "deploy", "artifact_id" => other.id}, context)
+    end
+
+    test "a bundle this node cannot verify names nothing to the engine", context do
+      {_public, other_key} = :crypto.generate_key(:eddsa, :ed25519)
+      artifact = bundle!(context, "counter-a", context.principal, nil, key: other_key)
+
+      # The file decodes; the signature is not one this node's trust policy accepts. Silence
+      # rather than a name: "no rule covers this" is the right answer for a bundle this node
+      # would not run, and the refusal a model reads comes from the tool.
+      assert classify(%{"operation" => "deploy", "artifact_id" => artifact.id}, context).context ==
+               %{}
+
+      assert %{is_error: true, output: output} =
+               run(%{"operation" => "deploy", "artifact_id" => artifact.id}, context)
+
+      assert output =~ "does not verify against this node's trust policy"
+      refute FakeForge.called?(:deploy)
+    end
+
+    test "a policy bundle names nothing either: this tool deploys capabilities", context do
+      artifact = bundle!(context, "myrules", context.principal, nil, kind: :policy)
+      assert artifact.kind == :policy
+
+      assert classify(%{"operation" => "deploy", "artifact_id" => artifact.id}, context).context ==
+               %{}
+    end
+
+    # ── MEDIUM-2(b) ────────────────────────────────────────────────────────────────────
+    test "a preview and a forge declare the project directory they will read", context do
+      project = project(context, "counter-a")
+
+      for operation <- ~w(preview forge) do
+        classified =
+          classify(%{"operation" => operation, "name" => "counter-a", "path" => project}, context)
+
+        assert classified.paths == [project], operation
+        assert classified.write_paths == []
+      end
+
+      # A deploy and a status read this node's forged ring, which is not a workspace path a
+      # rule is written in.
+      assert classify(%{"operation" => "deploy", "artifact_id" => "a"}, context).paths == []
+      assert classify(%{"operation" => "status"}, context).paths == []
+    end
+
+    test "a Read rule that denies covers a forge of that directory; an allow does not", context do
+      secret = Path.join(context.workspace, "secret")
+      File.mkdir_p!(secret)
+
+      Application.put_env(:ouroboros, :permissions, [
+        {"Read(#{secret}/**)", :deny},
+        {"Read(#{secret})", :deny},
+        {"Forge(*)", :allow}
+      ])
+
+      assert {:deny, _rule} =
+               evaluate(
+                 %{"operation" => "preview", "name" => "counter-a", "path" => "secret"},
+                 context
+               )
+
+      # The other direction: a wide `Read` allow is a sentence about reading, and it does not
+      # make a forge an allow. Only `Forge(…)` does.
+      Application.put_env(:ouroboros, :permissions, [{"Read(**)", :allow}])
+
+      refute match?(
+               {:allow, _rule},
+               evaluate(
+                 %{"operation" => "preview", "name" => "counter-a", "path" => "secret"},
+                 context
+               )
+             )
+    end
+
+    # ── LOW-6 ──────────────────────────────────────────────────────────────────────────
+    test "a map carrying both key spellings is judged and run as the same operation", context do
+      project = project(context, "counter-a")
+      FakeForge.answer(:forge, {:ok, receipt("counter-a")})
+
+      both = %{
+        "operation" => "status",
+        :operation => "forge",
+        "name" => "counter-a",
+        "path" => project
+      }
+
+      # The string key wins on both sides of the seam, so the classifier and the tool agree.
+      assert classify(both, context).context == %{}
+      assert %{is_error: false} = run(both, context)
+      refute FakeForge.called?(:forge)
     end
 
     test "a name that is not a rollout name contributes nothing, exactly as written", context do
@@ -1006,6 +1144,371 @@ defmodule Ouroboros.Provider.Native.ForgeToolTest do
       assert tool_call.attempt.tool == "forge"
       assert [%{effect: :forge, status: :ok}] = entries(context.principal, :forge)
     end
+
+    # ── Q-A ────────────────────────────────────────────────────────────────────────────
+    test "the cause chain reaches the permission entry under the default audit posture",
+         context do
+      _project = project(context, "counter-a")
+      FakeForge.answer(:forge, {:ok, receipt("counter-a")})
+      Application.put_env(:ouroboros, :permissions, [{"Forge(counter-a)", :allow}])
+
+      # Not `:required`, not `:off`: whatever this repository's own configuration is, which
+      # is `mode: :standard`. The chain must not depend on the audit stream, because the
+      # `:tool_call` entry it walks through does not.
+      events =
+        run_loop(context, [
+          [
+            {:tool_call,
+             %{
+               id: "c1",
+               name: "forge",
+               input: %{"operation" => "forge", "name" => "counter-a", "path" => "project"}
+             }}
+          ],
+          [{:text, "done"}, {:finish, :stop}]
+        ])
+
+      refute find(events, :tool_result).payload["is_error"]
+
+      [forge] = entries(context.principal, :forge)
+      {:ok, [tool_call]} = EffectLedger.list(principal: context.principal, effect: :tool_call)
+
+      # Hop one: the forge entry names the tool call it ran inside.
+      assert forge.cause.signal_id == tool_call.id
+
+      # Hop two: that tool call names the permission entry that admitted it. Looked up by the
+      # id rather than by principal, because `Control.Permissions.record/2` writes that entry
+      # under the *request's* principal and the loop does not yet hand it one (plan §0 row 2,
+      # S2's change and not this slice's) — the link is the id, and the id is what a reader
+      # follows.
+      assert is_binary(tool_call.attempt.permission_entry_id)
+      assert {:ok, permission} = EffectLedger.get(tool_call.attempt.permission_entry_id)
+      assert permission.effect == :permission
+      assert permission.result.decision in [:allow, :approve]
+    end
+
+    # ── LOW-5, M28/M41 ─────────────────────────────────────────────────────────────────
+    test "the loop gives a forge its own ceiling rather than the ordinary tool timeout",
+         context do
+      _project = project(context, "counter-a")
+
+      # Slower than the loop's configured tool timeout and far inside the forge's own
+      # ceiling. Without the `"forge"` clause in `execute_timeout/3` the task is killed at
+      # 50 ms and the call is a timeout.
+      FakeForge.answer(:forge, fn ->
+        Process.sleep(400)
+        {:ok, receipt("counter-a")}
+      end)
+
+      Application.put_env(:ouroboros, :permissions, [{"Forge(counter-a)", :allow}])
+
+      events =
+        run_loop(
+          context,
+          [
+            [
+              {:tool_call,
+               %{
+                 id: "c1",
+                 name: "forge",
+                 input: %{"operation" => "forge", "name" => "counter-a", "path" => "project"}
+               }}
+            ],
+            [{:text, "done"}, {:finish, :stop}]
+          ],
+          tool_timeout_ms: 50
+        )
+
+      refute find(events, :tool_result).payload["is_error"],
+             find(events, :tool_result).payload["output"]
+
+      # And the ceiling is the sum of the deadlines something else enforces, not a guess.
+      assert Forge.max_timeout_ms() >= Ouroboros.Wasm.Forge.build_timeout([])
+      assert Forge.max_timeout_ms() > Ouroboros.Wasm.Forge.build_timeout([]) + 60_000
+    end
+  end
+
+  # ══ the ledger entry is never left to nobody (MEDIUM-3) ═════════════════════════════
+  describe "an entry that is :started" do
+    test "is settled :failed when the forge raises, and the turn still sees the crash",
+         context do
+      project = project(context, "counter-a")
+      FakeForge.answer(:forge, fn -> raise "cargo exploded" end)
+
+      assert %{is_error: true, output: output} =
+               run(%{"operation" => "forge", "name" => "counter-a", "path" => project}, context)
+
+      assert output =~ "cargo exploded"
+
+      [entry] = entries(context.principal, :forge)
+      assert entry.status == :failed
+      assert entry.error.classification == {:forge_crashed, :error}
+    end
+
+    test "is settled :failed when the forge exits", context do
+      project = project(context, "counter-a")
+      FakeForge.answer(:forge, fn -> exit(:killed) end)
+
+      assert %{is_error: true} =
+               run(%{"operation" => "forge", "name" => "counter-a", "path" => project}, context)
+
+      [entry] = entries(context.principal, :forge)
+      assert entry.status == :failed
+      assert entry.error.classification == {:forge_crashed, :exit}
+    end
+
+    test "is settled :ambiguous when the tool task is killed where it stands", context do
+      # `Tools.execute/4` brutal-kills the task at the timeout, so no line of the tool runs.
+      # The ledger's own runner monitor is what closes the entry, exactly as it does for
+      # `Ouroboros.Agent.Effects.Runner`.
+      project = project(context, "counter-a")
+      FakeForge.answer(:forge, fn -> Process.sleep(5_000) end)
+
+      result =
+        Tools.execute(
+          Forge,
+          %{"operation" => "forge", "name" => "counter-a", "path" => project},
+          context.context,
+          300
+        )
+
+      assert result.is_error
+
+      [entry] = eventually(fn -> entries(context.principal, :forge) end, &match?([_one], &1))
+      assert entry.status == :ambiguous
+    end
+
+    test "a deploy that raises is settled too", context do
+      artifact = bundle!(context, "counter-a", context.principal)
+      FakeForge.answer(:deploy, fn -> raise "rollout exploded" end)
+
+      assert %{is_error: true} =
+               run(%{"operation" => "deploy", "artifact_id" => artifact.id}, context)
+
+      [entry] = entries(context.principal, :deploy)
+      assert entry.status == :failed
+      assert entry.error.classification == {:deploy_crashed, :error}
+    end
+  end
+
+  # ══ what deploy checks about the bundle it ships (MEDIUM-4, Q-B) ════════════════════
+  describe "deploy checks the bundle and not only its author" do
+    test "a policy bundle this principal authored is refused, and nothing deploys", context do
+      artifact = bundle!(context, "myrules", context.principal, nil, kind: :policy)
+      assert artifact.kind == :policy
+
+      FakeForge.answer(:deploy, {:ok, %{state: :live}})
+
+      assert %{is_error: true, output: output} =
+               run(%{"operation" => "deploy", "artifact_id" => artifact.id}, context)
+
+      assert output =~ "deploys capabilities"
+      refute FakeForge.called?(:deploy)
+      assert entries(context.principal, :deploy) == []
+    end
+
+    test "a bundle swapped for another capability at the same id is refused by name",
+         context do
+      mine = bundle!(context, "counter-a", context.principal)
+
+      # Same id on disk, a different capability inside it, same author and a real signature:
+      # every other gate passes, and only the name the decision was about does not.
+      theirs = bundle!(context, "counter-b", context.principal)
+      path = Path.join(context.forged, mine.id <> Bundle.extension())
+      File.cp!(Path.join(context.forged, theirs.id <> Bundle.extension()), path)
+
+      FakeForge.answer(:deploy, {:ok, %{state: :live}})
+
+      assert %{is_error: true, output: output} =
+               Forge.run(
+                 %{"operation" => "deploy", "artifact_id" => mine.id},
+                 Map.put(context.context, :forge_evaluated_name, "counter-a")
+               )
+               |> elem(1)
+
+      assert output =~ "One decision, one bundle"
+      refute FakeForge.called?(:deploy)
+    end
+
+    test "a bundle that is still the one the decision named deploys", context do
+      artifact = bundle!(context, "counter-a", context.principal)
+      FakeForge.answer(:deploy, {:ok, %{state: :live}})
+
+      assert {:ok, %{is_error: false}} =
+               Forge.run(
+                 %{"operation" => "deploy", "artifact_id" => artifact.id},
+                 Map.put(context.context, :forge_evaluated_name, "counter-a")
+               )
+
+      assert FakeForge.called?(:deploy)
+      retire(artifact.id)
+    end
+  end
+
+  # ══ the nine the reviewer's mutations survived (LOW-5) ══════════════════════════════
+  describe "bounds the reviewer could remove without a test noticing" do
+    # M17, M38.
+    test "a symlink in the forged ring is not read", context do
+      elsewhere = Path.join(context.root, "elsewhere")
+      other = bundle!(context, "counter-a", context.principal, elsewhere)
+
+      File.mkdir_p!(context.forged)
+      link = Path.join(context.forged, "linked" <> Bundle.extension())
+      File.ln_s!(Path.join(elsewhere, other.id <> Bundle.extension()), link)
+
+      FakeForge.answer(:deploy, {:ok, %{state: :live}})
+
+      assert %{is_error: true, output: output} =
+               run(%{"operation" => "deploy", "artifact_id" => "linked"}, context)
+
+      assert output =~ "no bundle this node forged is filed under that artifact id"
+      refute FakeForge.called?(:deploy)
+
+      # And `status` does not list what it would not read either.
+      assert %{is_error: false, output: listing} = run(%{"operation" => "status"}, context)
+      assert listing =~ "forged nothing"
+    end
+
+    # M37.
+    test "a bundle file bigger than a bundle may be is not read", context do
+      artifact = bundle!(context, "counter-a", context.principal)
+      path = Path.join(context.forged, artifact.id <> Bundle.extension())
+      File.write!(path, :binary.copy("x", Bundle.max_bytes() + 1))
+
+      FakeForge.answer(:deploy, {:ok, %{state: :live}})
+
+      assert %{is_error: true, output: output} =
+               run(%{"operation" => "deploy", "artifact_id" => artifact.id}, context)
+
+      assert output =~ "no bundle this node forged is filed under that artifact id"
+      refute FakeForge.called?(:deploy)
+    end
+
+    # M36. The ring keeps eight; a listing reads eight files and not the directory.
+    test "a status listing is bounded at the size of the ring", context do
+      for index <- 1..11 do
+        bundle!(context, "counter-#{index}", context.principal)
+        # `mtime` is a whole second on some filesystems, and the sort is by it.
+        File.touch!(
+          Path.join(context.forged, File.ls!(context.forged) |> Enum.max()),
+          System.os_time(:second) + index
+        )
+      end
+
+      assert %{is_error: false, output: output} = run(%{"operation" => "status"}, context)
+
+      listed = output |> String.split("\n") |> Enum.count(&String.contains?(&1, "artifact "))
+      assert listed <= 8, "the listing read #{listed} bundles off the ring"
+    end
+
+    # M41.
+    test "the forge is given the build ceiling as its own timeout", context do
+      project = project(context, "counter-a")
+      FakeForge.answer(:forge, {:ok, receipt("counter-a")})
+
+      assert %{is_error: false} =
+               run(%{"operation" => "forge", "name" => "counter-a", "path" => project}, context)
+
+      {_input, opts} = FakeForge.call(:forge)
+      assert Keyword.fetch!(opts, :timeout_ms) == Ouroboros.Wasm.Forge.build_timeout([])
+    end
+
+    # M31. The parameter and the manifest's own `start.config` are the same value and are
+    # held to the same bound (16 KiB, `Runtime.Capabilities`), through the same function —
+    # a second copy of the bound here is how the two come to disagree.
+    test "a start_config the runtime will not accept is refused before the forge", context do
+      project = project(context, "counter-a")
+      FakeForge.answer(:forge, {:ok, receipt("counter-a")})
+
+      assert %{is_error: true, output: output} =
+               run(
+                 %{
+                   "operation" => "forge",
+                   "name" => "counter-a",
+                   "path" => project,
+                   "start_config" => "\"" <> String.duplicate("x", 32 * 1024) <> "\""
+                 },
+                 context
+               )
+
+      assert output =~ "`start_config` was refused"
+      refute FakeForge.called?(:forge)
+    end
+
+    # M32.
+    test "a manifest.json over the bound is refused before it is parsed", context do
+      project = project(context, "counter-a")
+
+      File.write!(
+        Path.join(project, "manifest.json"),
+        "{\"pad\": \"" <> String.duplicate("x", 64 * 1024) <> "\"}"
+      )
+
+      FakeForge.answer(:forge, {:ok, receipt("counter-a")})
+
+      assert %{is_error: true, output: output} =
+               run(%{"operation" => "forge", "name" => "counter-a", "path" => project}, context)
+
+      assert output =~ "the bound is"
+      refute FakeForge.called?(:forge)
+    end
+
+    # M39. The manifest is the operator's own proposal format and it is closed: an `author`
+    # key in it is somebody claiming a provenance the signature will not carry.
+    test "a manifest.json carrying a key the format does not have is refused", context do
+      project =
+        project(
+          context,
+          "counter-a",
+          JSON.encode!(%{
+            "name" => "counter-a",
+            "description" => "a counter that counts",
+            "author" => "session:somebody-else"
+          })
+        )
+
+      FakeForge.answer(:forge, {:ok, receipt("counter-a")})
+
+      assert %{is_error: true, output: output} =
+               run(%{"operation" => "forge", "name" => "counter-a", "path" => project}, context)
+
+      assert output =~ "manifest.json was refused"
+      refute FakeForge.called?(:forge)
+    end
+  end
+
+  # ══ the required-audit claim the moduledoc makes (adopted from the reviewer) ════════
+  describe "under required audit" do
+    test "the spec is hidden and execute refuses by name", context do
+      previous = Application.fetch_env(:ouroboros, :audit)
+      evidence = Path.join(context.root, "evidence")
+      File.mkdir_p!(evidence)
+
+      Application.put_env(
+        :ouroboros,
+        :audit,
+        Ouroboros.Audit.Config.new!(mode: :required, root: evidence)
+      )
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:ouroboros, :audit, value)
+          :error -> Application.delete_env(:ouroboros, :audit)
+        end
+      end)
+
+      assert Ouroboros.Audit.required?()
+      refute Ouroboros.Audit.tool_supported?("forge")
+      refute Enum.any?(Tools.specs([], []), &(&1.name == "forge"))
+
+      # `lookup/3` does not consult the gate — the refusal is `Tools.execute/4`'s, which is
+      # the seam a call actually crosses.
+      assert Tools.lookup("forge", [], []) == {:ok, Forge}
+
+      result = Tools.execute(Forge, %{"operation" => "status"}, context.context, 5_000)
+      assert result.is_error
+      assert result.output =~ "Required audit refuses this tool"
+    end
   end
 
   ## Fixtures
@@ -1020,10 +1523,22 @@ defmodule Ouroboros.Provider.Native.ForgeToolTest do
       tool: classified.tool,
       command: classified.command,
       paths: classified.paths,
+      write_paths: classified.write_paths,
       mode: classified.mode,
       domains: classified.domains,
       context: classified.context
     }
+  end
+
+  # Classify, then ask the engine — the two halves a rule is judged by, in the order the loop
+  # asks them. `root` is the session's own, because a `Read(<relative>)` rule is resolved
+  # against it.
+  defp evaluate(input, context) do
+    input
+    |> classify(context)
+    |> request()
+    |> Map.put(:root, context.workspace)
+    |> Permissions.evaluate()
   end
 
   # The counter example, renamed, in a directory inside this session's workspace. A real
@@ -1075,20 +1590,17 @@ defmodule Ouroboros.Provider.Native.ForgeToolTest do
   # One decodable bundle in this node's forged ring, authored by `author`. Not runnable and
   # not meant to be: what the ring is read for is a manifest, and a manifest is what this
   # writes.
-  defp bundle!(context, name, author, directory \\ nil) do
+  defp bundle!(context, name, author, directory \\ nil, opts \\ []) do
     {:ok, artifact} =
       Artifact.build(@component,
         name: name,
         epoch: System.unique_integer([:positive, :monotonic]),
         author: author,
+        kind: Keyword.get(opts, :kind, :capability),
         imports: ["log"]
       )
 
-    {:ok, signed} =
-      Artifact.with_signature(artifact, %{
-        signer: "s1-test",
-        value: :crypto.strong_rand_bytes(64)
-      })
+    {:ok, signed} = sign!(artifact, Keyword.get(opts, :key, context.signing_key))
 
     {:ok, bundle} = Bundle.encode(signed, @component)
     directory = directory || context.forged
@@ -1096,6 +1608,17 @@ defmodule Ouroboros.Provider.Native.ForgeToolTest do
     File.write!(Path.join(directory, signed.id <> Bundle.extension()), bundle)
 
     signed
+  end
+
+  # A real Ed25519 signature over lane W's own payload, so `Ouroboros.Wasm.Verifier` accepts
+  # it under the trust policy `setup` installed. Random bytes would be refused, and a bundle
+  # this node will not verify is one `deploy` never reads an author out of.
+  defp sign!(artifact, key) do
+    Artifact.with_signature(artifact, %{
+      signer: @signer,
+      value:
+        :crypto.sign(:eddsa, :none, Artifact.signing_payload(artifact, @signer), [key, :ed25519])
+    })
   end
 
   defp entries(principal, effect) do
@@ -1109,7 +1632,20 @@ defmodule Ouroboros.Provider.Native.ForgeToolTest do
     :exit, _reason -> :ok
   end
 
-  defp run_loop(context, script) do
+  # A bounded wait for something another process writes — the effect ledger settling an entry
+  # from a monitor, here. Polling rather than a sleep: the machine this runs on is loaded, and
+  # a fixed sleep is either flaky or slow.
+  defp eventually(fun, done?, attempts \\ 100) do
+    value = fun.()
+
+    cond do
+      done?.(value) -> value
+      attempts <= 0 -> flunk("condition never held; last value #{inspect(value, limit: 5)}")
+      true -> Process.sleep(20) && eventually(fun, done?, attempts - 1)
+    end
+  end
+
+  defp run_loop(context, script, opts \\ []) do
     {model_spec, _agent} = NativeModelScript.start(script)
     test = self()
 
@@ -1124,7 +1660,8 @@ defmodule Ouroboros.Provider.Native.ForgeToolTest do
       provider_session_id: "forge-tool-test",
       turn_id: "turn-1",
       approval_mode: :auto_approve,
-      approval_timeout_ms: 2_000
+      approval_timeout_ms: 2_000,
+      tool_timeout_ms: Keyword.get(opts, :tool_timeout_ms, 120_000)
     }
 
     parent = self()
