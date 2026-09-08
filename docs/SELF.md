@@ -1057,7 +1057,13 @@ per writable root — `Sandbox.protected_files/2`. Seatbelt writes one
 `(deny file-write* (literal (param …)))`, which matches a path the kernel resolves whether or
 not a file is there; bubblewrap binds the file read-only over itself when it exists and binds
 `/dev/null` read-only onto it when it does not, so the destination is present, read-only and
-busy. Proved live on this machine: a sandboxed `Tools.Bash.run/2` doing
+busy. That mount point is created inside the host's own directory and bubblewrap's teardown
+never unlinks it — measured with 0.8.0, and CI's ubuntu-24.04 job failed the live test on the
+zero-byte file it left — so the bash tool names every stub the argv will have to create
+(`Bwrap.mount_point_stubs/1`, read from the same `File.exists?` the argv reads) and clears
+what is still a stub once the command has ended, the empty `.git`/`.ouroboros` directory the
+pre-existing segment binds had been leaving behind on every Linux command included. Proved
+live on this machine: a sandboxed `Tools.Bash.run/2` doing
 `cp template ouroboros.toml` exits non-zero and the file does not exist afterwards, with
 `.git/pwned` as the control.
 

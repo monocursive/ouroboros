@@ -130,6 +130,10 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
         finish(execute(plan, context.scope.root, timeout, ceiling), plan, context, timeout)
       after
         Sandbox.release(plan.scratch)
+        # bubblewrap creates a mount point for a protected path that did not exist and
+        # leaves it on the host as a zero-byte file or an empty directory; the plan named
+        # them before the namespace was built, and they go on every path out of here.
+        Sandbox.clear_stubs(plan.stubs)
       end
     else
       {:error, reason} -> {:ok, %{output: "bash refused: #{describe(reason)}", is_error: true}}
@@ -154,6 +158,9 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
   defp sandboxed(command, scope, policy, detection, label) do
     with {:ok, scratch} <- Sandbox.scratch(),
          policy = Sandbox.with_scratch(policy, scratch),
+         # Read before the wrap, from the same filesystem the wrap reads, so the stubs the
+         # argv will create are exactly the ones cleared afterwards.
+         stubs = Sandbox.stubs(policy, detection),
          {:ok, {executable, args}} <-
            wrap_or_release({:shell, command}, scope, policy, detection, scratch) do
       {:ok,
@@ -164,7 +171,8 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
          args: args,
          env: Sandbox.env(policy),
          policy: policy,
-         scratch: scratch
+         scratch: scratch,
+         stubs: stubs
        }}
     else
       {:error, reason} -> {:error, {:sandbox_unavailable, label, reason}}
@@ -190,7 +198,8 @@ defmodule Ouroboros.Provider.Native.Tools.Bash do
       args: ["-c", command],
       env: [],
       policy: nil,
-      scratch: nil
+      scratch: nil,
+      stubs: []
     }
   end
 

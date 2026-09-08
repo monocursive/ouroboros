@@ -1012,6 +1012,24 @@ defmodule Ouroboros.Provider.Native.Sandbox do
 
   def release(_absent), do: :ok
 
+  @doc """
+  The mount-point stubs the backend will leave on the host for this policy, to be cleared
+  with `clear_stubs/1` once the command has ended.
+
+  Only bubblewrap makes any — it has to create a mount point for an absent hook manifest
+  or an absent `.git`/`.ouroboros` under a writable root, inside the host's own directory,
+  and its teardown never unlinks it (`Bwrap.mount_point_stubs/1`). Seatbelt's `literal`
+  deny and the Landlock helper's rules need no mount point, so they answer `[]`.
+  """
+  @spec stubs(policy(), detection()) :: [String.t()]
+  def stubs(policy, %{backend: :bwrap}) when is_map(policy), do: Bwrap.mount_point_stubs(policy)
+  def stubs(_policy, _detection), do: []
+
+  @doc "Removes the stubs `stubs/2` named, where each is still a stub. Total."
+  @spec clear_stubs([String.t()] | nil) :: :ok
+  def clear_stubs(paths) when is_list(paths), do: Bwrap.clear_mount_point_stubs(paths)
+  def clear_stubs(_none), do: :ok
+
   # ----------------------------------------------------------------------- wrap
 
   @doc """

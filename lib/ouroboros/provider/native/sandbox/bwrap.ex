@@ -251,6 +251,61 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
         do: Path.join(root, segment)
   end
 
+  @doc """
+  The destinations bubblewrap has to *create* as mount points for this policy — and leaves
+  behind on the host when the command exits.
+
+  Two binds above name a path that may not exist yet: `--ro-bind /dev/null <file>` for an
+  absent hook manifest (`protected_file_binds/1`) and `--ro-bind <scratch> <dir>` for an
+  absent `.git`/`.ouroboros` under a writable root (`protected_segment_binds/1`). bubblewrap
+  makes the mount point inside the writable bind, which *is* the host's directory, and its
+  teardown unmounts but never unlinks. Measured with bubblewrap 0.8.0 in a
+  `debian:bookworm-slim` container: `cp template ouroboros.toml` is `Permission denied`
+  inside the namespace **and** `/ws/ouroboros.toml` exists on the host afterwards, mode
+  0444, size 0; the same for an absent `.git`, which is left as an empty directory. CI's
+  ubuntu-24.04 job failed the "present or absent" test on exactly that file.
+
+  So the caller that spawned the command clears these afterwards with
+  `clear_mount_point_stubs/1`, and only where the path is still the stub — a zero-byte
+  regular file or an empty directory. Anything else there was not bubblewrap's and is left
+  alone. This is computed from the same `File.exists?/1` answers `options/3` reads, at the
+  same moment, so the argv and this list agree.
+  """
+  @spec mount_point_stubs(Ouroboros.Provider.Native.Sandbox.policy()) :: [String.t()]
+  def mount_point_stubs(policy) do
+    files = policy |> Map.get(:protected_files, []) |> Enum.reject(&File.exists?/1)
+    dirs = policy |> segment_dirs() |> Enum.reject(&File.exists?/1)
+    Enum.uniq(files ++ dirs)
+  end
+
+  @doc """
+  Removes the stubs `mount_point_stubs/1` named, where each is still a stub. Total: a path
+  holding bytes, a directory with entries, a symlink, or nothing at all is left as it is.
+  """
+  @spec clear_mount_point_stubs([String.t()]) :: :ok
+  def clear_mount_point_stubs(paths) when is_list(paths) do
+    Enum.each(paths, &clear_stub/1)
+    :ok
+  end
+
+  def clear_mount_point_stubs(_none), do: :ok
+
+  defp clear_stub(path) when is_binary(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :regular, size: 0}} -> _ = File.rm(path)
+      # `rmdir` refuses a directory with entries, which is the point: only the empty
+      # placeholder goes.
+      {:ok, %File.Stat{type: :directory}} -> _ = File.rmdir(path)
+      _other -> :ok
+    end
+
+    :ok
+  rescue
+    _error -> :ok
+  end
+
+  defp clear_stub(_other), do: :ok
+
   # S1. The workspace hook manifest, one bind per writable root, after the writable binds
   # and before the delivery exceptions — the same place the Seatbelt profile puts its
   # `literal` deny, and the same order `Rules.protected_write?/1` reads the policy in.

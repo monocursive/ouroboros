@@ -78,7 +78,17 @@ defmodule Ouroboros.Wasm.ForgeToolAcceptanceTest do
   test "a session writes a capability, forges it, deploys it, and then calls it", context do
     name = "forge-tool-counter-#{System.unique_integer([:positive])}"
     id = "wasm/" <> name
-    on_exit(fn -> Ouroboros.Mesh.stop_agent(id) end)
+
+    # The rollout this session makes goes into the node's *default* register — the tool
+    # reaches it the way production does, by name — so it is retired here and not merely
+    # stopped: a `:live` entry left behind put `capability` into every later suite's tool
+    # list, and three ordering tests, a schema-strictness test and a replay verification
+    # went red in CI for a capability none of them deployed. `Rollout.rollback/2` marks the
+    # entry, stops the wrapper and keeps the bytes; the stop below is the belt to that.
+    on_exit(fn ->
+      _ = Ouroboros.Wasm.Rollout.rollback(name)
+      _ = Ouroboros.Mesh.stop_agent(id)
+    end)
 
     # The rules an operator would have written. `Forge(<name>)` is the whole permission
     # claim of this slice: an allow keyed on what will be built, honoured because the forge

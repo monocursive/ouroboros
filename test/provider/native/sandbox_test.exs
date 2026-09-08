@@ -1950,6 +1950,83 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
     end
   end
 
+  # S1's Linux half, measured after CI: bubblewrap creates the mount point for an absent
+  # protected path *inside the host's own directory* and never unlinks it, so `--ro-bind
+  # /dev/null <ws>/ouroboros.toml` leaves a zero-byte read-only file behind and `--ro-bind
+  # <scratch> <ws>/.git` leaves an empty directory. `Bwrap.mount_point_stubs/1` names them
+  # from the same `File.exists?` the argv reads, and the bash tool clears them afterwards.
+  # This half is pure filesystem and runs on every platform; the bubblewrap half is below.
+  describe "the mount-point stubs bubblewrap leaves behind" do
+    setup do
+      root = Path.join(System.tmp_dir!(), "native-stubs-#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm_rf(root) end)
+      workspace = Path.join(root, "workspace")
+      scratch = Path.join(root, "scratch")
+      File.mkdir_p!(workspace)
+      File.mkdir_p!(scratch)
+      {:ok, scope} = Paths.scope(workspace, [], :workspace_write)
+      policy = scope |> Sandbox.policy(:workspace_write) |> Sandbox.with_scratch(scratch)
+      %{workspace: scope.root, policy: policy, scratch: scratch}
+    end
+
+    test "names the absent manifest and the absent segment directories, and nothing that exists",
+         %{workspace: workspace, policy: policy} do
+      stubs = Bwrap.mount_point_stubs(policy)
+
+      assert Path.join(workspace, "ouroboros.toml") in stubs
+      assert Path.join(workspace, ".git") in stubs
+      assert Path.join(workspace, ".ouroboros") in stubs
+
+      File.write!(Path.join(workspace, "ouroboros.toml"), "[[hooks]]\n")
+      File.mkdir_p!(Path.join(workspace, ".git"))
+
+      stubs = Bwrap.mount_point_stubs(policy)
+      refute Path.join(workspace, "ouroboros.toml") in stubs
+      refute Path.join(workspace, ".git") in stubs
+      assert Path.join(workspace, ".ouroboros") in stubs
+    end
+
+    test "the sandbox seam answers them for bubblewrap and nothing for the others", %{
+      policy: policy,
+      workspace: workspace
+    } do
+      assert Path.join(workspace, "ouroboros.toml") in Sandbox.stubs(policy, %{
+               backend: :bwrap,
+               executable: "/usr/bin/bwrap"
+             })
+
+      for backend <- [:sandbox_exec, :ouro_sandbox, :none] do
+        assert Sandbox.stubs(policy, %{backend: backend, executable: nil}) == []
+      end
+    end
+
+    test "clearing removes only what is still a stub", %{workspace: workspace} do
+      stub_file = Path.join(workspace, "ouroboros.toml")
+      stub_dir = Path.join(workspace, ".git")
+      real_file = Path.join(workspace, "kept.toml")
+      real_dir = Path.join(workspace, ".ouroboros")
+      missing = Path.join(workspace, "never-there")
+
+      File.write!(stub_file, "")
+      File.mkdir_p!(stub_dir)
+      File.write!(real_file, "[[hooks]]\n")
+      File.mkdir_p!(Path.join(real_dir, "sessions"))
+
+      assert :ok =
+               Bwrap.clear_mount_point_stubs([stub_file, stub_dir, real_file, real_dir, missing])
+
+      refute File.exists?(stub_file)
+      refute File.exists?(stub_dir)
+      assert File.read!(real_file) == "[[hooks]]\n"
+      assert File.dir?(Path.join(real_dir, "sessions"))
+      refute File.exists?(missing)
+
+      # Total, in both spellings the bash tool can hand it.
+      assert :ok = Sandbox.clear_stubs([])
+      assert :ok = Sandbox.clear_stubs(nil)
+    end
+  end
+
   describe "the bwrap backend, live on this node" do
     @describetag :bwrap
     @describetag @needs_bwrap
@@ -2009,6 +2086,30 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
         result = run(Bash, %{"command" => command}, context)
         assert result.is_error, "#{command} was allowed: #{result.output}"
         refute File.exists?(manifest), "#{command} created the hook manifest"
+      end
+    end
+
+    # The residue the first run of the test above found in CI: the mask is a mount point,
+    # and bubblewrap's teardown leaves it on the host. After the command the bash tool
+    # clears what it named beforehand, so a workspace that had no manifest and no `.git`
+    # still has neither — the pre-existing `.git`/`.ouroboros` scratch binds had been
+    # leaving an empty directory behind on every Linux command for the same reason.
+    test "leaves no mount-point stub behind once the command has ended", %{
+      context: context,
+      workspace: workspace
+    } do
+      absent_before =
+        ["ouroboros.toml", ".git", ".ouroboros"]
+        |> Enum.map(&Path.join(workspace, &1))
+        |> Enum.reject(&File.exists?/1)
+
+      assert Path.join(workspace, "ouroboros.toml") in absent_before
+
+      assert %{is_error: false, output: output} = run(Bash, %{"command" => "echo hi"}, context)
+      assert output =~ "hi"
+
+      for path <- absent_before do
+        refute File.exists?(path), "#{path} was left behind by the sandbox"
       end
     end
 
