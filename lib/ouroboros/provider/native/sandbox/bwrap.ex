@@ -289,13 +289,29 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
   # Emitted last, after the delivery re-allows, for the reason the Seatbelt profile puts its
   # deny last: later binds overlay earlier ones and this one must be the one on top.
   #
-  # Skipped where neither the file nor its parent directory exists: bubblewrap cannot create
-  # a mount point under a directory that is not there and would fail to start the command at
-  # all, and a path with no parent has no bytes to hide.
+  # **Only where the file is actually there**, and that is not a nicety — it is what keeps
+  # this from breaking every command on a Linux node. Measured, in a privileged
+  # `debian:bookworm-slim` container with bubblewrap 0.8.0:
+  #
+  #     bwrap --ro-bind / / --ro-bind $DATA $DATA --ro-bind /dev/null $DATA/gateway.token
+  #       -> starts; `cat` of the token is `Permission denied` and the bytes never appear,
+  #          a write to it is denied, and the host's file is unchanged.
+  #     bwrap ... --ro-bind /dev/null $DATA/web.secret   (with no such file)
+  #       -> "bwrap: Can't create file at /tmp/data/web.secret: Read-only file system",
+  #          and the command does not run at all.
+  #
+  # The difference from `protected_file_binds/1` above, which does bind `/dev/null` onto a
+  # path that is not there: the hook manifest sits under a *writable* root, where bubblewrap
+  # can make the mount point. A credential sits under the node's data directory, which this
+  # very argv has already bound read-only. So an absent credential is left out, and the gap
+  # is the honest one: a file created after this namespace was built. These are written when
+  # the node boots, before any session has a command to run, and the *next* command builds a
+  # new namespace in which the file exists and is masked. Seatbelt has no such gap — a
+  # `literal` deny needs no mount point.
   defp hidden_file_binds(policy) do
     policy
     |> Map.get(:hidden_files, [])
-    |> Enum.filter(&(File.exists?(&1) or File.dir?(Path.dirname(&1))))
+    |> Enum.filter(&File.regular?/1)
     |> Enum.flat_map(&["--ro-bind", "/dev/null", &1])
   end
 

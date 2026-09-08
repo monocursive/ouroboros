@@ -1487,29 +1487,35 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       assert profile =~ ~s{(allow network-outbound (remote ip "localhost:*"))}
     end
 
-    test "bubblewrap masks the path with /dev/null", %{root: root, scope: scope} do
+    test "bubblewrap masks the path with /dev/null, and only where the file is there", %{
+      root: root,
+      scope: scope
+    } do
       present = Path.join(root, "data/gateway.token")
       File.mkdir_p!(Path.dirname(present))
       File.write!(present, "a-token")
       absent = Path.join(root, "data/web.secret")
-      nowhere = Path.join(root, "no-such-dir/signer.key")
+      directory = Path.join(root, "data/a-directory")
+      File.mkdir_p!(directory)
 
       policy =
         Sandbox.policy(scope, :workspace_write)
-        |> Map.put(:hidden_files, [present, absent, nowhere])
+        |> Map.put(:hidden_files, [present, absent, directory])
         |> Sandbox.with_scratch(Path.join(root, "scratch"))
 
       argv = Bwrap.options(scope, policy)
 
-      # The source is `/dev/null` in both cases — unlike `protected_files`, which binds the
-      # file over itself and would leave the bytes readable.
+      # The source is `/dev/null` — unlike `protected_files`, which binds the file over
+      # itself and would leave the bytes there to `cat`.
       assert ["--ro-bind", "/dev/null", present] |> subsequence_of?(argv)
-      assert ["--ro-bind", "/dev/null", absent] |> subsequence_of?(argv)
       refute ["--ro-bind", present, present] |> subsequence_of?(argv)
 
-      # A path whose parent does not exist is skipped: bubblewrap cannot make the mount
-      # point and would fail the command outright, and there are no bytes there to hide.
-      refute ["--ro-bind", "/dev/null", nowhere] |> subsequence_of?(argv)
+      # And a path that is not a regular file is left out entirely. Measured with bubblewrap
+      # 0.8.0 in a privileged container: `--ro-bind /dev/null <absent>` under a read-only
+      # bind is "Can't create file … Read-only file system" and `bwrap` runs *nothing* — so
+      # emitting it would take every command on a Linux node down with it.
+      refute ["--ro-bind", "/dev/null", absent] |> subsequence_of?(argv)
+      refute ["--ro-bind", "/dev/null", directory] |> subsequence_of?(argv)
     end
 
     # The helper's wire format has a read *allow*-set and no per-path deny, so it sends

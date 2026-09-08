@@ -833,11 +833,12 @@ defmodule Ouroboros.Provider.Native.Sandbox do
     * **Seatbelt** writes `(deny file-read* (literal (param …)))` beside the write deny, last
       in the profile, so it survives the delivery re-allow and the base `(allow file-read*)`
       that every shell policy opens with.
-    * **bubblewrap** binds `/dev/null` read-only over the path. The shell sees a
-      zero-length character device where the seed was: not a denial it can distinguish from
-      an empty file, which is a weaker signal than Seatbelt's `EPERM` and the same
-      containment. Unverified on this machine — no Linux host ran it here; CI's ubuntu-24.04
-      bubblewrap job is where that claim gets made.
+    * **bubblewrap** binds `/dev/null` read-only over the path, and only where the file is
+      there — see `Bwrap`'s `hidden_file_binds/1` for what happens otherwise. Measured
+      against bubblewrap 0.8.0 in a privileged `debian:bookworm-slim` container: a `cat` of
+      a masked credential is `Permission denied` and the bytes never appear, a write to it
+      is denied, and the host's file is unchanged. That was the `bwrap` argv directly; no
+      Linux host has run it through this module, which is CI's ubuntu-24.04 job to do.
 
   **`ouro-sandbox` answers no** for `protects_files?/1`'s reason turned around: Landlock
   attaches rights to inodes and its wire format carries a read *allow*-set, not a deny, so
