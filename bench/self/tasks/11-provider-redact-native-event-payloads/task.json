@@ -1,0 +1,16 @@
+{
+  "id": "11-provider-redact-native-event-payloads",
+  "base_sha": "51660977196144d9bb7633ef63fd2ba04edf7bb3",
+  "commit_sha": "6a7b5582921092e8426df055219dd5001c79234c",
+  "subject": "fix(provider): redact native event payloads at the provider boundary",
+  "instruction": "fix(provider): redact native event payloads at the provider boundary\n\n`Jido.Harness.EventStore` redacts before anything is journaled, so this is belt\nand braces — but it is the same belt `Ouroboros.Provider.CodexAdapter` already\nwears, and for the same reason. A `bash` result is an ordinary tool result this\nruntime puts on the wire, and a command that echoed `$ANTHROPIC_API_KEY` should\nnot reach a live subscriber in the clear on its way to a journal that would have\ncaught it.\n\nBoth places a native event is constructed — the session transport's emit and the\ncoding plane's run stream — now go through one `Loop.to_event/3` that applies\n`Redaction.redact/1`, which covers this node's own sensitive environment values.\n\nAcceptance. These tests are restored into the worktree after the session ends and must pass:\n  - a tool result that echoed a credential is redacted before it is emitted\n\nRules. Files that already exist under `test/` must not be modified or deleted — the change is graded against tests restored from the history after the session ends. New test files of your own are allowed and are left in place. Work only inside this worktree.",
+  "hidden_tests": [
+    "test/provider/native/session_test.exs"
+  ],
+  "solution_files": [
+    "lib/ouroboros/provider/native/loop.ex",
+    "lib/ouroboros/provider/native/session.ex"
+  ],
+  "timeout_secs": 600,
+  "measured": {"compile_ms": 58284, "diff_lines": 22, "test_ms": 10017}
+}

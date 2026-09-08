@@ -1,0 +1,18 @@
+{
+  "id": "21-code-intel-admit-the-workspace-of-every",
+  "base_sha": "7cf9e2061fdc918efcee4cb34ba7567af15aa58a",
+  "commit_sha": "9e42ac3eb01953a5fbead4b1ff2711f6aba19145",
+  "subject": "fix(code-intel): admit the workspace of every session this node holds",
+  "instruction": "fix(code-intel): admit the workspace of every session this node holds\n\nThe registry admitted a file only under `:workspace_allowed_roots`, and since an explicit `workspace_root:` is held to the same check, a node that configured no roots — the default, where the lease manager is off and a session may start anywhere — had no code intelligence at all: the native loop, the `code_intel.*` gateway verbs, the `mcp-serve` tools, and the post-edit hook all answered `outside_workspace`. The suites never saw it because every code-intelligence test configures roots.\n\nA session's workspace is already where this node runs an agent with a shell, so a language server with that directory as its working directory adds nothing the session lacks. The registry now admits the configured roots plus the workspace of every interactive session this node holds, read from the store through `InteractiveSession.workspaces/0`; a store that is not running admits nothing extra. Any other root named over the wire stays refused, `/` included, so a caller still cannot admit itself.\n\nAcceptance. These tests are restored into the worktree after the session ends and must pass:\n  - the default session source is the interactive store, which answers without a session\n  - a workspace a session on this node holds is admitted with no configured root\n  - a root no session holds stays refused, explicit or not\n  - a session holding one workspace admits nothing beside it\n  - a session store that is not running admits nothing extra and raises nothing\n\nRules. Files that already exist under `test/` must not be modified or deleted — the change is graded against tests restored from the history after the session ends. New test files of your own are allowed and are left in place. Work only inside this worktree.",
+  "hidden_tests": [
+    "test/code_intel/registry_test.exs"
+  ],
+  "solution_files": [
+    "README.md",
+    "lib/ouroboros/code_intel/registry.ex",
+    "lib/ouroboros/interactive_session.ex",
+    "lib/ouroboros/provider/native/code_intel.ex"
+  ],
+  "timeout_secs": 600,
+  "measured": {"compile_ms": 68822, "diff_lines": 63, "test_ms": 9133}
+}

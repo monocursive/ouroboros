@@ -1,0 +1,15 @@
+{
+  "id": "16-interactive-a-missing-mount-is-not-a",
+  "base_sha": "7e61085607792c10798a96f107ffaaf0c6ec50b8",
+  "commit_sha": "9ba07c331a86425379bce5dd9477942d2910e30c",
+  "subject": "fix(interactive): a missing mount is not a verdict on a checkpointed turn",
+  "instruction": "fix(interactive): a missing mount is not a verdict on a checkpointed turn\n\n`recover_checkpointed_dispatch/2` marked a turn ambiguous on any\n`authorize_turn_attachments/2` failure. For an attachment-level failure that is honest —\nthe named file is gone or outside the workspace, so the checkpointed input cannot be\nreproduced. `{:invalid_attachment_workspace, reason}` is different: the workspace *root*\nfailed to canonicalize, which is infrastructure, and the turn is still exactly\nreproducible once the root is back. It now takes the same bounded backoff an unreachable\n`Session.info/1` takes, instead of permanently burning a turn over a mount that was not\nup yet.\n\nRecovery reports its outcome to `refresh_session/1` rather than returning a runtime, so a\nretry short-circuits the pipeline the way every other retry does — checkpointing session\ninfo on top of it would have discarded the backoff it just scheduled.\n\nAcceptance. These tests are restored into the worktree after the session ends and must pass:\n  - a checkpointed attachment that cannot exist burns its turn, a missing root does not\n\nRules. Files that already exist under `test/` must not be modified or deleted — the change is graded against tests restored from the history after the session ends. New test files of your own are allowed and are left in place. Work only inside this worktree.",
+  "hidden_tests": [
+    "test/interactive_session_test.exs"
+  ],
+  "solution_files": [
+    "lib/ouroboros/interactive/task.ex"
+  ],
+  "timeout_secs": 600,
+  "measured": {"compile_ms": 63624, "diff_lines": 36, "test_ms": 18061}
+}

@@ -1,0 +1,17 @@
+{
+  "id": "04-provider-let-a-native-session-start",
+  "base_sha": "6a7b5582921092e8426df055219dd5001c79234c",
+  "commit_sha": "0bb951b357148f45fd75e90ea324e4af63d1d23d",
+  "subject": "fix(provider): let a native session start without naming its transport",
+  "instruction": "fix(provider): let a native session start without naming its transport\n\nDriving the transport through `Jido.Harness.Session` — rather than calling its\ncallbacks directly — immediately refused every session:\n\n    experimental session transport must be selected explicitly\n\n`Jido.Harness.Session.Manager` will not *default* to a transport whose\ncapabilities say `maturity: :experimental` (`session/manager.ex:128`). That flag\nexists so a provider with a stable transport and a newer one does not quietly\nput callers on the newer. This provider has exactly one transport, so the flag\nmeant something else here: every caller — `Ouroboros.InteractiveSession`,\n`ouro new --provider native`, the `n` dialog — would have had to pass\n`transport: :native` by hand or watch the session refuse to start. Choosing this\nprovider *is* the explicit selection. How new the loop is, and what it does not\nenforce, is stated in the README and the moduledoc where it can be read.\n\nTwo test files added, both of which exist because the unit tests could not have\ncaught this:\n\n- `harness_session_test.exs` drives the transport through the harness worker and\n  pins the division of labour — exactly one `turn_started` rather than two, the\n  worker's `input_accepted`/`approval_resolved` around the loop's events, the\n  worker's approval timeout denying, `follow_up` queueing, `steer` accepted\n  because the transport declares it. It also records honestly that the worker\n  finishes an interrupted turn as soon as `interrupt/2` returns `:ok`, so events\n  the loop emits while its current tool drains are dropped as stale.\n- `interactive_plane_test.exs` starts a session through\n  `Ouroboros.InteractiveSession` with nothing special asked for, which is the D1\n  acceptance claim in its plainest form.\n\nAcceptance. These tests are restored into the worktree after the session ends and must pass:\n  - a turn through the worker carries both the worker's markers and the loop's events\n  - an approval reaches the worker's pending set and resolves through it\n  - an unanswered approval is denied by the worker's timeout\n  - steer is accepted because the transport declares it, and reaches the model\n  - a follow-up is queued by the worker and runs after the turn\n  - interrupt is reported by the worker as soon as the transport accepts it\n  - the session closes cleanly through the worker\n  - a session started the ordinary way runs a turn and keeps a resumable id\n  - the plane's default approval_mode is not refused, unlike a managed transport\n  - the only transport is selectable by default, so choosing the provider is enough\n\nRules. Files that already exist under `test/` must not be modified or deleted — the change is graded against tests restored from the history after the session ends. New test files of your own are allowed and are left in place. Work only inside this worktree.",
+  "hidden_tests": [
+    "test/provider/native/harness_session_test.exs",
+    "test/provider/native/interactive_plane_test.exs",
+    "test/provider/native_test.exs"
+  ],
+  "solution_files": [
+    "lib/ouroboros/provider/native.ex"
+  ],
+  "timeout_secs": 600,
+  "measured": {"compile_ms": 47047, "diff_lines": 11, "test_ms": 15102}
+}

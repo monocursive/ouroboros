@@ -1,0 +1,16 @@
+{
+  "id": "17-interactive-make-a-list-row-a-row-and",
+  "base_sha": "d93501a1a8198fa62ba738e2a233da98c64a1d30",
+  "commit_sha": "1bff3859987dee94a75294262f5079e55cb6046e",
+  "subject": "fix(interactive): make a list row a row, and put the cursor on it",
+  "instruction": "fix(interactive): make a list row a row, and put the cursor on it\n\n`interactive.list` answered with `State.public/1` — the whole session, retained\nevent window and turn ledger included — for every session, from every fleet\nnode, on every refresh. A client that wanted one integer, the contiguous\nhigh-water mark, to know whether it had replayed everything, paid for a\ntranscript to learn it (H1).\n\n`State.summary/1` is the row contract: the same struct, the same `_struct` tag\nand the same field names, with `events` and `turns` emptied and `usage` reduced\nto `%{total_tokens, cost_usd}` — `nil` for either figure no provider reported,\nnever a zero that reads as \"this was free\". `cursor` is on it, as are the title\nand `title_source` from the rename slice and `forked_from`/`forks` from the\nfork slice, so a picker can draw a name, a position, a spend, and a lineage\nwithout opening anything. `options.capabilities` stays, because that is what a\nfooter greys its verbs from.\n\nNothing is lost, only moved: everything a row drops is one `interactive.info`\naway, addressed by the id the row already carries.\n\nAcceptance. These tests are restored into the worktree after the session ends and must pass:\n  - a row carries title, cursor, and a usage summary, and no event window\n  - an unspent session reports no tokens rather than a zero that reads as free\n  - a fork's parentage is visible from the list without opening either session\n\nRules. Files that already exist under `test/` must not be modified or deleted — the change is graded against tests restored from the history after the session ends. New test files of your own are allowed and are left in place. Work only inside this worktree.",
+  "hidden_tests": [
+    "test/interactive_controls_test.exs"
+  ],
+  "solution_files": [
+    "lib/ouroboros/interactive/state.ex",
+    "lib/ouroboros/interactive_session.ex"
+  ],
+  "timeout_secs": 600,
+  "measured": {"compile_ms": 48772, "diff_lines": 48, "test_ms": 16693}
+}

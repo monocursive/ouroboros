@@ -1,0 +1,15 @@
+{
+  "id": "03-data-dir-trust-a-symlinked-system-id",
+  "base_sha": "cb6c72e4339cf78b92ee619f320f5afcb5c01fb1",
+  "commit_sha": "8281972d7fa4157439c5a785eb2151b6ce8e261c",
+  "subject": "fix(data-dir): trust a symlinked system id/mkdir (Ubuntu 25.10+ coreutils)",
+  "instruction": "fix(data-dir): trust a symlinked system id/mkdir (Ubuntu 25.10+ coreutils)\n\nUbuntu 25.10+ ships coreutils as a multi-call binary: /usr/bin/id is a\nroot-owned symlink into /usr/lib/cargo/bin/coreutils/, and the lstat\nregular-file requirement made every release refuse to boot there\n(found live: a fresh Ubuntu 26.04 VPS died in the Config provider with\n\"cannot find a trusted absolute id executable\"). File.stat follows the\nlink; the trust anchor is the absolute system path itself.\n\nAcceptance. These tests are restored into the worktree after the session ends and must pass:\n  - accepts a symlink resolving to a regular executable\n  - refuses a dangling symlink and a non-executable file\n\nRules. Files that already exist under `test/` must not be modified or deleted — the change is graded against tests restored from the history after the session ends. New test files of your own are allowed and are left in place. Work only inside this worktree.",
+  "hidden_tests": [
+    "test/ouroboros/data_dir_test.exs"
+  ],
+  "solution_files": [
+    "lib/ouroboros/data_dir.ex"
+  ],
+  "timeout_secs": 600,
+  "measured": {"compile_ms": 66910, "diff_lines": 10, "test_ms": 12539}
+}

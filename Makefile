@@ -13,7 +13,7 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test forge-linux-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test dialyzer bench-local self-export golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check
+.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test forge-linux-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test dialyzer bench-local self-export golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check bench-self
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -30,6 +30,7 @@ help:
 	@echo "make dialyzer         gradual mix dialyzer; PLTs live under _build/plts"
 	@echo "make bench-local      the local eval corpus: no key, no network, no docker"
 	@echo "make self-export      write this node's promoted policy + record into priv/self/"
+	@echo "make bench-self       the self corpus oracle: no key, no network, no spend"
 	@echo "make golden           regenerate the gateway fixtures and fail on drift"
 	@echo "make protocol-docs    regenerate docs/PROTOCOL.md and fail on drift"
 	@echo "make release-tarball  MIX_ENV=prod mix release, printing the tarball path"
@@ -307,6 +308,13 @@ self-export:
 	@echo "==> self-export: the promoted policy and its record into priv/self/"
 	@echo "    (stop the daemon first: this opens the same data directory)"
 	$(MIX) ouroboros.self.export
+# The $0 half of the self corpus: the oracle, the spend guard, and the two negative
+# controls that make the grader falsifiable. A *paid* run is `bench/self/run.sh --spend
+# <usd>` and is never a make target, because a target is a thing people run without
+# reading it. See docs/BENCHMARKS.md §5.
+bench-self:
+	@echo "==> bench-self: the self corpus selftest (no model key, no network, no spend)"
+	./bench/self/selftest.sh
 
 # Deliberately not part of `make test`, for the same reason `fleet-e2e` is not: it needs
 # tools `make test` must not require. The install.sh half needs only `sh` and a sha256

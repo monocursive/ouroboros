@@ -1,0 +1,17 @@
+{
+  "id": "02-remove-hosted-ci-environment-assumptions",
+  "base_sha": "b7a38dae444014c18d989e8682f3ffac414bb2ad",
+  "commit_sha": "dcd72ed1d2e119b11352060a72fc3b567c962dd2",
+  "subject": "fix: remove hosted CI environment assumptions",
+  "instruction": "fix: remove hosted CI environment assumptions\n\nAcceptance. These tests are restored into the worktree after the session ends and must pass:\n  - a real language server completes the handshake and answers a question\n  - a valid hello reports what this build actually serves\n  - a wrong token is refused and the socket closes\n  - a missing token learns nothing more specific than 'unauthenticated'\n  - a protocol the server does not speak is told which one it does\n  - any method before hello is refused and closes the connection\n  - hello cannot be replayed to change anything\n  - a connection that never says hello is reaped when its deadline fires\n  - a connection that did say hello is not reaped by a stale deadline\n  - invalid JSON is a parse error and the connection survives\n  - a JSON value that is not an object is refused\n  - a request without an id has nowhere to be answered, and says so\n\nRules. Files that already exist under `test/` must not be modified or deleted — the change is graded against tests restored from the history after the session ends. New test files of your own are allowed and are left in place. Work only inside this worktree.",
+  "hidden_tests": [
+    "test/code_intel/live_lsp_test.exs",
+    "test/ouroboros/gateway/conn_test.exs",
+    "test/provider/native/mcp_test.exs"
+  ],
+  "solution_files": [
+    "lib/ouroboros/gateway/conn.ex"
+  ],
+  "timeout_secs": 600,
+  "measured": {"compile_ms": 69183, "diff_lines": 5, "test_ms": 29470}
+}

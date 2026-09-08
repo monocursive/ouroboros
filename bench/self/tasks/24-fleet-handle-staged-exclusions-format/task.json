@@ -1,0 +1,19 @@
+{
+  "id": "24-fleet-handle-staged-exclusions-format",
+  "base_sha": "4fad33c83790123c4b2419516ac8655ace07775b",
+  "commit_sha": "813c5366e2d9f6bf1bfc55b0d77017ea23b9bc40",
+  "subject": "fix(fleet): handle staged exclusions, format and transfer timeout boundaries",
+  "instruction": "fix(fleet): handle staged exclusions, format and transfer timeout boundaries\n\nAcceptance. These tests are restored into the worktree after the session ends and must pass:\n  - a timed-out transfer releases its snapshot pin and target import lock\n  - preserves SHA-256 repository format when creating a mirror\n  - an old peer without provisioning is refused by name\n  - captures staged, unstaged and untracked work without changing index or HEAD\n  - excludes tracked and untracked paths and deliveries\n  - works inside a detached worktree whose .git is a file\n  - rejects invalid config and task IDs before capturing\n  - refuses an unborn repository with an actionable reason\n\nRules. Files that already exist under `test/` must not be modified or deleted — the change is graded against tests restored from the history after the session ends. New test files of your own are allowed and are left in place. Work only inside this worktree.",
+  "hidden_tests": [
+    "test/workspace_mirrors_test.exs",
+    "test/workspace_snapshot_test.exs"
+  ],
+  "solution_files": [
+    "lib/ouroboros/provider/native/subagent.ex",
+    "lib/ouroboros/workspace/mirrors.ex",
+    "lib/ouroboros/workspace/provision.ex",
+    "lib/ouroboros/workspace/snapshot.ex"
+  ],
+  "timeout_secs": 621,
+  "measured": {"compile_ms": 73010, "diff_lines": 73, "test_ms": 34799}
+}

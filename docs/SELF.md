@@ -83,6 +83,122 @@ the effect ledger on.
 
 <!-- S0 -->
 
+`bench/self` turns this repository's own history into a benchmark. A task is a commit: the
+agent is given the commit's message and the titles of the tests that commit added, works in
+a detached git worktree at the commit's **parent**, and is graded by restoring those tests
+from the history and running them. Nobody writes an assertion; the answer already exists and
+so does the grade.
+
+Thirty tasks, extracted on 2026-09-08 from `dev` at `c2d9f55`. The mechanism is in
+[bench/self/README.md](../bench/self/README.md); the numbers are in
+[BENCHMARKS.md §5](BENCHMARKS.md#5-the-self-corpus). Nothing in this slice changes `lib/`.
+
+**The corpus is a list of pins.** `tasks/<id>/task.json` holds `base_sha`, `commit_sha`,
+the hidden test paths, the solution file paths, the instruction, and what extraction
+measured. No test content is stored: it is read with `git show <commit_sha>:<path>` at run
+time. So the number is reproducible for as long as `dev`'s history is, and a corpus file
+cannot quietly weaken a task by carrying a doctored copy of its test. The grader re-derives
+the hidden set from git and refuses a task whose `task.json` disagrees with it.
+
+**Extraction policy.** Candidates are commits reachable from `dev` that touch `lib/`, add
+or modify at least one `test/**/*_test.exs`, are not merges, and stay out of `tui/`,
+`assets/`, `.github/`, `scripts/` and `bench/`. Ranked `fix` first, then smaller non-test
+diff first, and verified in order until `--max-tasks` pass. Every accepted task was proved
+in a real tree: at the parent the hidden tests **fail**, at the commit they **pass**, in a
+worktree built exactly the way the runner builds one.
+
+Of 609 non-merge commits with a parent, these were dropped before any tree was built:
+
+| class | count | why |
+|---|---|---|
+| `no_lib_change` | 311 | not a change to behaviour under `lib/` |
+| `diff_too_large` | 78 | over `--max-diff-lines` (300) |
+| `no_test_added_or_modified` | 53 | nothing to grade against |
+| `excluded_tree` | 50 | Rust, assets, CI, a script, or this corpus itself |
+| `build_files_changed` | 4 | `mix.exs`/`mix.lock`: the cloned `_build` was compiled against a different dependency set |
+
+113 survived. 90 were offered to verification and 35 reached it before thirty had passed;
+of those, five were dropped:
+
+| class | count | why |
+|---|---|---|
+| `parent_already_passes` | 2 | the hidden tests pass without the change (`1b8b0302`, `595cafc7`) |
+| `solution_too_large` | 2 | the oracle's script has to hold every changed file's bytes (`2fafe14d` 426 370 B, `8928434c` 399 793 B) |
+| `instruction_reserved_delimiter` | 1 | `7e610856` — see below |
+
+The remaining classes exist and did not fire on the extraction that produced this corpus:
+`non_test_deletion`, `no_non_test_change`, `solution_not_utf8`, `commit_does_not_pass`,
+`over_task_ceiling`, `setup_failed`, the two test timeouts, and the instruction-containment
+drop. `commit_does_not_pass` fired in earlier extractions of the same history; that is the
+second finding below.
+
+The thirty are all `fix` commits: 3 to 188 non-test lines changed (median 36), one to three
+hidden test files, one to five solution files, instructions 912 to 2 949 characters
+(median 1 682).
+
+**Two things extraction found.** Neither is fixed here; this slice changes no `lib/`.
+
+- **The runtime refuses a prompt that quotes its own delimiters.**
+  `Runtime.Exposure.wrap_prompt_capture/2` refuses text for which
+  `AgentProfile.reserved_delimiter?/1` is true, so `7e610856` —
+  `fix(prompt): make the profile/session boundary real, and say what it enforces`, whose
+  message necessarily quotes `<ouroboros-session-instructions>` — is a task no agent can
+  ever be given. The first full oracle run graded it `not_completed` with the runtime's own
+  refusal in the detail, which read like the agent's fault. Extraction now asks the runtime
+  for the list and drops such candidates, and the runner refuses a corpus that carries one.
+- **Some of this repository's suites are load-sensitive, and extraction is load.**
+  `dcd72ed1` passed at its own commit in one extraction and not in the next; `c7e6a528`
+  passed extraction and then failed the oracle at
+  `test/workspace_returns_test.exs:312`. Three worktrees compiling and testing at once is
+  load, and a task whose *reference answer* passes only sometimes is noise in the
+  measurement rather than a task. Extraction therefore runs the commit's tests
+  `--commit-checks` times (default 2, different seeds) and requires every run to pass —
+  a screen, not a proof of determinism. The extractor is conservative in the right
+  direction throughout, so the failure mode is a smaller corpus, never a wrong one.
+
+**Grading**, in order; the first thing that is not true is the reason.
+
+1. `completed` inside the timeout — else `timeout` or `not_completed`.
+2. No file that already existed under `test/` was modified or deleted — else
+   `modified_tests`. Checked both by `git status --porcelain -- test` and by
+   `git diff --name-status <base_sha> -- test`, which compares the *working tree* against
+   the commit the task started from. The second is the one that matters: an agent that
+   commits its edit to a test leaves `git status` clean. New files are allowed and left in
+   place.
+3. The hidden tests, restored from `commit_sha`, pass under a wall clock — else
+   `tests_failed`. `setup_failed` covers a tree that could not be built and a `task.json`
+   that disagrees with the history.
+
+**The budget.** `--spend <usd>` is required, and a model `Ouroboros.Provider.Native.Cost`
+cannot price is refused before the first task: a total that is permanently zero would sail
+past any cap. The total is checked *between* tasks, so one task can overshoot the cap by
+its own cost; what bounds a single task is its `--timeout`. Note for whoever runs the paid
+half: the packaged default model is one of the unpriced ones, so the paid command has to
+name a model — checked on 2026-09-08, `openai_codex:gpt-5.6-sol` prices as `nil` and
+`anthropic:claude-sonnet-4-5` and `openai:gpt-4o` price as numbers.
+
+**What is proved, and by what.** The oracle over the whole corpus — every task answered with
+its own commit's files through `bench/local`'s scripted model — graded **30/30 at $0.0000**
+on 2026-09-08 (macOS 15 / Elixir 1.20.2 / OTP 29, 875 s wall, 67 `write` calls, 67 approvals
+requested and answered). That says the worktrees, the hidden-test restore, the modified-test
+check and the budget arithmetic work; it says nothing about any model.
+
+`bench/self/selftest.sh` — `make bench-self`, no key, no network beyond git and the local
+hex cache, no spend — extracts two pinned commits, runs the oracle over them, and drives
+seven groups of assertions. Green on the same machine and day. Two of its steps are negative
+controls, and they are what make the grader falsifiable rather than merely demonstrated:
+
+- `--oracle-cheat no-solution` answers with nothing and must fail every task
+  `tests_failed`. The **parent's** copy of each hidden test passes, so a runner that skipped
+  the restore would grade doing nothing as a full pass.
+- `--oracle-cheat blank-tests` writes the real solution *and* blanks a pre-existing hidden
+  test, and must fail every task `modified_tests`. Without that check the restore would put
+  the real test back and the task would pass.
+
+**What is not proved.** No paid run has happened: this environment has no model key. Every
+number in BENCHMARKS.md §5 today is the oracle's, which says the grader works and says
+nothing about any model.
+
 ### S1. The `forge` tool
 
 <!-- S1 -->
@@ -374,6 +490,60 @@ and the full suite are the integrator's gates and not this section's claim.
 Numbered `S-D<n>`; each slice appends its own under its marker and never renumbers another's.
 
 <!-- S0-decisions -->
+
+**S-D1. The corpus stores pins, not tests.** `task.json` holds shas and paths; hidden test
+content comes from `git show <commit_sha>:<path>` at run time. A copy in the corpus is a
+thing that can be edited without the history noticing, and the grader additionally re-derives
+the hidden set from git and refuses a `task.json` that disagrees.
+
+**S-D2. The hidden set is every path under `test/` the commit touched**, deletions excluded,
+`test/support/**` included — a commit whose fixture and test moved together is only gradable
+with both. Only the `_test.exs` members are handed to ExUnit; a task naming none of them is
+`setup_failed` rather than a whole-suite run.
+
+**S-D3. The modified-test check reads the working tree against `base_sha`,** not only
+`git status`. The plan named `git status --porcelain -- test/`; that misses an agent that
+commits its edit. Both run, and either one firing is `modified_tests`.
+
+**S-D4. The instruction states the rules.** It carries the subject, the body with trailers
+and any pasted diff removed, an acceptance list of the `test "…"` titles the commit *adds*
+(at most twelve, never a body), and a paragraph saying that pre-existing tests must not be
+modified and that new ones are allowed. Saying it does not help an agent game the grade —
+the grader enforces it either way — and not saying it would be measuring a rule nobody was
+told.
+
+**S-D5. `--spend` is required, an unpriced model is refused, and the cap is checked between
+tasks.** One task can therefore overshoot by its own cost; that is stated in the README and
+here rather than hidden, because `ouro run` has no cost flag and the runtime reports cost
+only when a turn ends.
+
+**S-D6. The oracle answers with `write`, one call per changed non-test file.** The plan said
+`apply_patch`. `Tools.Write` has no read-before-write guard, whole-file content at
+`commit_sha` is exact, and a generated V4A patch would be a second thing that can be wrong.
+What the oracle proves is the grader, not a patch format. The cost is a corpus rule: a task
+whose changed files exceed `--max-solution-bytes` is dropped, because the scripted model caps
+a script file at 1 MiB.
+
+**S-D7. Two negative controls, behind a seam refused outside `--oracle`.**
+`--oracle-cheat no-solution` and `--oracle-cheat blank-tests` (with `--fake-cost-usd` for the
+budget) turn the plan's "mutations that must go red" into assertions `selftest.sh` runs every
+time, rather than something a reviewer re-derives. Each is refused with `--spend` alone.
+
+**S-D8. Three candidate filters the plan did not name.** A commit that changes `mix.exs` or
+`mix.lock` is dropped, because the `deps/` and `_build/` cloned into a worktree were built
+for a different lock (the runner still runs `mix deps.get` when a task's lock differs, so the
+history's older locks are reachable — but a commit that *changes* the lock is not a coding
+task, it is a build change). A commit whose non-test diff deletes a file is dropped, because
+`write` cannot express a removal. `bench/` joins the excluded trees, so no task in this
+corpus is a task about this corpus.
+
+**S-D9. A child's environment is a delta, and a removal is `{name, false}`.**
+`:erlang.open_port`'s `env` option *extends* the caller's environment: a variable left out of
+the list is still inherited. `Bench.Self.Env.build/2` therefore emits removals explicitly.
+The oracle's claim that it runs with no provider key in the environment depends on this and
+would otherwise be false. `bench/local/run.exs` builds its environment the other way and its
+`@dropped` list removes nothing; nothing is spent there because the scripted model never
+makes a request, but the guarantee its README states is not the one the code provides.
 
 <!-- S1-decisions -->
 

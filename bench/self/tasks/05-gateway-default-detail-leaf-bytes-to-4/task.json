@@ -1,0 +1,18 @@
+{
+  "id": "05-gateway-default-detail-leaf-bytes-to-4",
+  "base_sha": "a3484e2c09d3f63f54f219a2d66a39528ebaa5f8",
+  "commit_sha": "661c0ca50f46389a662256cb6bdec387c8bfe875",
+  "subject": "fix(gateway): default detail_leaf_bytes to 4 MiB so a whole detail frame still fits the client",
+  "instruction": "fix(gateway): default detail_leaf_bytes to 4 MiB so a whole detail frame still fits the client\n\nThe 8 MiB default equalled the client's entire inbound line ceiling\n(DEFAULT_MAX_LINE, tui/src/transport.rs), so an event near the cap produced\na frame the client truncated instead of decoded once the envelope and JSON\nescaping were added. 4 MiB leaves that headroom. The streaming test's\noversized payload is 3 MB: still far past the 128 KiB leaf cap the excerpt\nhalf of the test exercises, and under the detail cap it asserts against.\n\nAcceptance. These tests are restored into the worktree after the session ends and must pass:\n  - a gateway with no token source is not a gateway\n  - a token too short to be worth checking is refused, with its length named\n  - leaving loopback requires the override to have been typed out\n  - an enabled gateway with nowhere to publish its port is refused\n  - every other malformed value names its own variable\n  - an unreadable token file is refused by path\n  - a first boot writes a 0600 credential and every boot after it reads that one\n  - an existing credential is never replaced, whatever wrote it\n  - generation still holds every other rule the struct enforces\n  - the flag alone generates nothing: there has to be a path to write\n  - loopback defaults, with the ephemeral port that removes the bind race\n  - the encoder reads the same caps this struct validates\n\nRules. Files that already exist under `test/` must not be modified or deleted — the change is graded against tests restored from the history after the session ends. New test files of your own are allowed and are left in place. Work only inside this worktree.",
+  "hidden_tests": [
+    "test/ouroboros/gateway/config_test.exs",
+    "test/ouroboros/gateway/streaming_test.exs"
+  ],
+  "solution_files": [
+    "config/runtime.exs",
+    "docs/TUI.md",
+    "lib/ouroboros/gateway/config.ex"
+  ],
+  "timeout_secs": 600,
+  "measured": {"compile_ms": 49653, "diff_lines": 12, "test_ms": 21430}
+}

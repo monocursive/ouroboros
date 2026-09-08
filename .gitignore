@@ -76,3 +76,7 @@ ouroboros-*.tar
 # `mix deps.get` does not live in the repository.
 /priv/static/web/phoenix.min.js
 /priv/static/web/phoenix_live_view.min.js
+
+# Where `bench/self/run.sh` writes a run: the result object, and one trajectory per task.
+# A measurement of one machine at one moment, not repository input.
+/bench/self/results/

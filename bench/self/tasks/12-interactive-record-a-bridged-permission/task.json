@@ -1,0 +1,15 @@
+{
+  "id": "12-interactive-record-a-bridged-permission",
+  "base_sha": "db8eeb99606f1a97cc299ac06be7989bda22edeb",
+  "commit_sha": "09fe0ea73be26f0b5743cf3d69dacbdc0bf28d66",
+  "subject": "fix(interactive): record a bridged permission decision the way the engine takes it",
+  "instruction": "fix(interactive): record a bridged permission decision the way the engine takes it\n\n`Ouroboros.Control.Permissions.record/2` takes a caller-minted decision id and the answer; the external-approval bridge passed the request subject where the id goes, so every call fell to the engine's catch-all, answered `{:error, :invalid_permission_record}`, and was swallowed — no bridged Claude decision, by rule or by a person, ever reached the effect ledger. The test fixture had been written to the same wrong shape, which is why the suite pinned the bug instead of catching it.\n\nThe bridge now records under `\"<session id>:<request id>\"` — the seams' stable id, so a retry after a lost acknowledgement finds the same entry — with the decision, the human's scope, the actor (`:rule` for the engine, `:human` otherwise), the rule, and the request map the engine evaluated, so the entry is attributed to the session. The fixture follows the real contract, and a test against the real engine reads the entry back from the ledger.\n\nFound by the I1 agent while wiring approvals into the ledger.\n\nAcceptance. These tests are restored into the worktree after the session ends and must pass:\n  - the durable engine writes the bridge's decision to the effect ledger under a stable id\n\nRules. Files that already exist under `test/` must not be modified or deleted — the change is graded against tests restored from the history after the session ends. New test files of your own are allowed and are left in place. Work only inside this worktree.",
+  "hidden_tests": [
+    "test/interactive_external_approval_test.exs"
+  ],
+  "solution_files": [
+    "lib/ouroboros/interactive/task.ex"
+  ],
+  "timeout_secs": 600,
+  "measured": {"compile_ms": 45118, "diff_lines": 24, "test_ms": 12854}
+}

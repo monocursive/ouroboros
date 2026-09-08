@@ -217,3 +217,99 @@ was supposed to mean:
   and it gets published anyway.
 - **It gets published before it is optimised.** A first number chosen from several runs is
   not a first number.
+
+
+---
+
+## 5. The self corpus
+
+**Ouroboros, graded on changes to Ouroboros.** Thirty tasks, each one a commit from this
+repository's own history. The agent is given the commit's message and the titles of the
+tests that commit added; it works in a detached git worktree at the commit's parent; it is
+graded by restoring those tests from the history and running them. Nobody wrote an
+assertion and nobody wrote an answer key — the history is both.
+
+Run it, and what every flag means: [bench/self/README.md](../bench/self/README.md). The
+extraction policy and the decisions behind it: [SELF.md §S0](SELF.md).
+
+### What it measures, and what it does not
+
+**Measured.** Whether the agent, driving a real model, can make a change to this code base
+that satisfies tests it was never shown, without editing the tests it *was* given. That is
+the whole loop — reading unfamiliar code, finding the seam, changing it, and proving it —
+against a grade nobody tuned.
+
+**Not measured**, on top of [§1](#1-what-is-measured-and-what-is-not)'s list:
+
+- **Generalisation.** Every task is a change someone already made to *this* code base,
+  ranked toward small fixes. A number here says the agent can re-derive a small fix in a
+  repository it has the whole of. It does not transfer to another repository and it is not
+  comparable to anything.
+- **Whether the answer is the commit's answer.** A different change that passes the hidden
+  tests without touching the given ones is a pass, which is the intent.
+- **The model's own knowledge of this repository.** A model trained on public code may have
+  seen these commits. This corpus cannot tell that apart from competence, and it does not
+  try to.
+
+### What has actually been run
+
+> **No paid run has happened.** Not a bad one, not a provisional one — none. The corpus,
+> the runner and the grader are written and their $0 half is tested; the number needs a
+> model key and a spend, which this environment does not have. When it happens it goes
+> below whatever it is, and the commitment is the same one §2 makes about Terminal-Bench.
+
+The oracle: the corpus answered with each commit's own files through
+[`bench/local`'s scripted model](../bench/local/README.md#the-scripted-model-seam), which
+proves the worktrees, the hidden-test restore, the modified-test check and the budget
+arithmetic — and nothing about any model.
+
+| | |
+|---|---|
+| Date | 2026-09-08 |
+| Corpus | 30 tasks, extracted from `dev` at `c2d9f55` |
+| Result | **30/30**, `$0.0000` spent of a `$1.00` cap |
+| Wall | 875 s total: 603 s building the thirty worktrees, 215 s running the restored tests, and 11.6 s of agent turns |
+| Work | 67 `write` calls, 67 approvals requested and 67 answered under `--approve-all` |
+| Machine | macOS 15, Elixir 1.20.2, OTP 29, `ouro` debug build |
+
+The 11.6 seconds is the honest shape of an oracle: the scripted model answers instantly, so
+almost all of that wall clock is thirty worktrees being cloned, compiled, and then compiled
+again by the grader's `mix test`. It is the number to subtract when reading a paid run's
+wall clock, which is why setup and grading are timed per task and separately from the turn.
+
+`bench/self/selftest.sh` (`make bench-self`) was green on the same machine and day. It
+extracts two pinned commits, runs the oracle over them, checks both spend refusals and the
+cap, and runs two negative controls that make the grader falsifiable: an agent that changes
+nothing must fail every task (which is only true if the hidden tests are really restored —
+the parent's copy of each test passes), and an agent that blanks a pre-existing test must
+fail every task (which is only true if the modified-test check exists).
+
+### The paid command
+
+```sh
+cd tui && cargo build                        # the client the corpus grades
+export OUROBOROS_NATIVE_MODEL=<provider:model>
+bench/self/run.sh --spend 5.00               # or --model <provider:model>
+```
+
+**Name the model.** The packaged default, `openai_codex:gpt-5.6-sol`, is not one `llm_db`
+prices, so a run that does not name a model is refused before the first task — checked on
+2026-09-08 by asking this checkout's own `Provider.Native.Cost.cost_usd/5`, which answered
+`nil` for it and a number for `anthropic:claude-sonnet-4-5` and `openai:gpt-4o`. The refusal
+is deliberate: an unpriced model reports no `cost_usd`, a running total of nothing never
+reaches a cap, and `--spend` would be decoration.
+
+`--spend` is required and a model this node cannot price is refused before the first task.
+The total is checked between tasks, so **one task can overshoot the cap by its own cost**;
+what bounds a single task is its `timeout_secs`. Results, including every trajectory, land
+under `bench/self/results/<timestamp>/` and are gitignored.
+
+### The noise expectation
+
+*(empty)*
+
+Two runs of the same model over the same corpus will not produce the same number: the model
+is sampled, and this repository has load-sensitive suites. This section records the observed
+difference after the **first pair** of paid runs — same model, same corpus, back to back —
+and every number in it will be measured rather than guessed. A tolerance chosen before the
+measurement is a tolerance chosen to be met.

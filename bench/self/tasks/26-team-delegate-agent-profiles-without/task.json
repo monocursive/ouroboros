@@ -1,0 +1,16 @@
+{
+  "id": "26-team-delegate-agent-profiles-without",
+  "base_sha": "3b88125881ec0a218b861ebb9f65f9e2acae61ca",
+  "commit_sha": "0b7bbc50c4691487f42e379a7a2eb9ce64a73c38",
+  "subject": "fix(team): delegate agent profiles without crashing or leaking prompt text",
+  "instruction": "fix(team): delegate agent profiles without crashing or leaking prompt text\n\n`portable_request?/1` reached its `is_map/1` clause with an `%Ouroboros.AgentProfile{}`\nand raised `Protocol.UndefinedError` (a struct has no `Enumerable`). The rescue then\nbuilt `{:invalid_delegation_options, Exception.message(error)}` from the raising term,\nso every delegation carrying a profile failed *and* embedded the whole profile —\nbase prompt, instructions, tool descriptions — in the returned and checkpointed error.\n\nDecompose structs before the map clause, mirroring `Interactive.State.serializable?/1`,\nand report only the exception type: this function only ever inspects prompt text.\n\nA delegated task also lost its prompt identity. `TaskState`'s request options drop\n`:agent_profile` and keep only the compiled prompt, so the owner received that text as\na *session* prompt, wrapped it a second time, and produced a task with `prompt_trace:\nnil` and no `metadata.ouroboros_prompt`. The assembler's inputs now travel beside the\ncompiled options as `coding_options.prompt_inputs`, never inside them: assembly is\ndeterministic, so the owner reproduces byte-identical options — which is what\n`verified_coding_task/1` compares — plus the same trace the local task would have.\n\nRedaction turns every struct it walks into a plain map, so the secret-bearing check\nnow compares the same struct-free projection redaction itself would produce.\n\nThe deterministic test adapter accepts the normalized prompt options, without which\nno test provider could exercise an assembled profile end to end.\n\nAcceptance. These tests are restored into the worktree after the session ends and must pass:\n  - a delegated agent profile keeps the prompt identity of the identical local task\n  - delegation errors carry no profile or prompt text\n\nRules. Files that already exist under `test/` must not be modified or deleted — the change is graded against tests restored from the history after the session ends. New test files of your own are allowed and are left in place. Work only inside this worktree.",
+  "hidden_tests": [
+    "test/support/test_harness_adapter.ex",
+    "test/team_test.exs"
+  ],
+  "solution_files": [
+    "lib/ouroboros/team/server.ex"
+  ],
+  "timeout_secs": 600,
+  "measured": {"compile_ms": 45473, "diff_lines": 80, "test_ms": 19000}
+}

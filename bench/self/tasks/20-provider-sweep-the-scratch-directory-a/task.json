@@ -1,0 +1,16 @@
+{
+  "id": "20-provider-sweep-the-scratch-directory-a",
+  "base_sha": "1c45d3121158b65906f922ce19ca58c7eb845893",
+  "commit_sha": "d7d8df64a73956b2436542f61ce28267a02bc7f7",
+  "subject": "fix(provider): sweep the scratch directory a killed bash tool leaves behind",
+  "instruction": "fix(provider): sweep the scratch directory a killed bash tool leaves behind\n\n`Tools.execute/4` ends a tool that overran its own deadline with\n`Task.shutdown(task, :brutal_kill)`, and a killed process runs no `after` clause — so\nthe per-call sandbox `$TMPDIR` survived exactly the case it was least wanted in. Found\nby counting `ouroboros-sandbox-*` directories after three test runs: three of them.\n\n`Sandbox.scratch/0` now sweeps abandoned ones on the way in: older than six hours,\nagainst a `bash` ceiling of ten minutes, so a live scratch directory can never be\nmistaken for a dead one; at most 200 per call, so a crowded temp directory costs a\nbounded amount of work. No timer and no process — a node where nobody runs `bash`\nhas nothing to sweep.\n\nAcceptance. These tests are restored into the worktree after the session ends and must pass:\n  - sweeps a scratch directory a killed tool task could not remove, and spares a live one\n\nRules. Files that already exist under `test/` must not be modified or deleted — the change is graded against tests restored from the history after the session ends. New test files of your own are allowed and are left in place. Work only inside this worktree.",
+  "hidden_tests": [
+    "test/provider/native/sandbox_test.exs"
+  ],
+  "solution_files": [
+    "README.md",
+    "lib/ouroboros/provider/native/sandbox.ex"
+  ],
+  "timeout_secs": 600,
+  "measured": {"compile_ms": 77621, "diff_lines": 61, "test_ms": 12956}
+}
