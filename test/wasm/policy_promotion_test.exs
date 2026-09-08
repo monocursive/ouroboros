@@ -147,6 +147,7 @@ defmodule Ouroboros.Wasm.PolicyPromotionTest do
     test "records nothing at all", context do
       %{sha: sha} = live_policy!(context)
       before = permission_entries(sha)
+      before_all = permission_entry_ids()
 
       assert {:ok, :deny, _rule} =
                PolicyEngine.evaluate_with(sha, document(context, "curl https://x"))
@@ -165,6 +166,11 @@ defmodule Ouroboros.Wasm.PolicyPromotionTest do
       assert {:ok, report} = PolicyEngine.replay("no-network-shell")
       assert report["corpus_size"] == 3
       assert permission_entries(sha) == before
+
+      # And not one `:permission` entry of any shape, not only the ones naming these bytes:
+      # "records nothing" has to mean nothing, and an entry written under some other rule id
+      # would be just as much a decision nobody made.
+      assert MapSet.difference(permission_entry_ids(), before_all) |> MapSet.size() == 0
     end
 
     @tag @needs_live
@@ -1656,5 +1662,12 @@ defmodule Ouroboros.Wasm.PolicyPromotionTest do
   defp permission_entries(sha) do
     {:ok, entries} = EffectLedger.list(effect: :permission, limit: 500)
     Enum.filter(entries, &(&1.result[:rule_id] == "wasm/policy/" <> sha))
+  end
+
+  # Ids rather than entries, and a set rather than a list: the ledger is node-wide and bounded,
+  # so what is asserted is that nothing was *added* — which retention cannot make untrue.
+  defp permission_entry_ids do
+    {:ok, entries} = EffectLedger.list(effect: :permission, limit: 500)
+    MapSet.new(entries, & &1.id)
   end
 end
