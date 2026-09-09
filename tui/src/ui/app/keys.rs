@@ -129,9 +129,10 @@ impl App {
         }
 
         match key.code {
-            // Bounded by the table rather than by a literal range: a digit past the last
-            // tab is a keypress with nowhere to go, not an index into a shorter array.
-            KeyCode::Char(digit @ '1'..='9') if !ctrl => {
+            // The literal range is the key range this shortcut has always claimed; the
+            // bound that matters is the table's. A digit past the last tab is a keypress
+            // with nowhere to go, not an index into a shorter array.
+            KeyCode::Char(digit @ '1'..='7') if !ctrl => {
                 let index = digit as usize - '1' as usize;
 
                 if let Some(tab) = Tab::ALL.get(index) {
