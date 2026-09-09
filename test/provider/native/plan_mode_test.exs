@@ -254,7 +254,17 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
 
       # The list the model is shown and the list the prompt describes are the same list.
       assert Enum.map(tools, & &1.name) == started.payload["tools"]
-      assert system =~ "`write`, `edit`, `apply_patch`, `bash`"
+
+      # The claim is that plan mode's refusal names all four write tools, not that it
+      # punctuates them one particular way: pinning the separators is what bent the shipped
+      # sentence into a comma splice when the list lost `code_intel`.
+      assert [plan_section] = Regex.run(~r/^## Plan mode$.*/ms, system)
+
+      for tool <- ~w(write edit apply_patch bash) do
+        assert plan_section =~ "`#{tool}`"
+      end
+
+      assert plan_section =~ "are refused for the whole of this mode"
     end
 
     test "the system prompt tells the model to plan and stop", context do

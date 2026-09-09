@@ -339,7 +339,7 @@ defmodule Ouroboros.Provider.Native.Prompt do
        when your turn ends, and they choose whether the work runs with edits auto-accepted,
        with each change approved by hand, or not yet.
 
-    `write`, `edit`, `apply_patch`, `bash` are refused for the whole of this mode,
+    `write`, `edit`, `apply_patch`, and `bash` are refused for the whole of this mode,
     whatever a permission rule says. If the task turns out to need no change, say that
     instead of planning one.
     """
