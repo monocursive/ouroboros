@@ -49,6 +49,7 @@ fn fleet_profile() -> Profile {
                 node: "ouro@workstation.test".into(),
             },
         ],
+        tombstones: Vec::new(),
         roster_revision: 1,
         gateway_port: 47_123,
         epmd_port: 14_123,

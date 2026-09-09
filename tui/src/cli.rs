@@ -1552,8 +1552,10 @@ pub enum FleetCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum SessionsCommand {
-    /// Irreversibly forget this machine's saved routing evidence for an offline owner.
-    /// Run this separately on every remaining cluster machine.
+    /// Declare a machine gone for good and irreversibly forget this machine's saved
+    /// routing evidence for it. Takes it out of this machine's roster and records it as
+    /// a tombstone, which is what the runtime requires before it will retire the
+    /// evidence. Run this separately on every remaining cluster machine.
     Forget {
         /// The machine whose offline session-owner evidence will be lost.
         #[arg(long, value_name = "NAME")]

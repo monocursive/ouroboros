@@ -311,6 +311,14 @@ pub struct Profile {
     pub node: String,
     pub role: String,
     pub members: Vec<Member>,
+    /// Machines this operator has declared permanently gone, by
+    /// `ouro fleet sessions forget --accept-state-loss`. A tombstone is the operator's
+    /// explicit statement, and it is what `fleet.forget_session_owner` requires before it
+    /// will release a dead machine's durable session-owner evidence: a partitioned but
+    /// live owner is never robbed of its sessions by an automatic rule. Defaulted so a
+    /// profile written before this field reads as "nothing declared gone".
+    #[serde(default)]
+    pub tombstones: Vec<Member>,
     #[serde(default = "initial_roster_revision")]
     pub roster_revision: u64,
     pub gateway_port: u16,
@@ -560,6 +568,89 @@ pub fn tags(
     validated_tags(&profile.tags)
 }
 
+/// Record, on this machine's roster only, that another machine is permanently gone.
+///
+/// This is the only writer of [`Profile::tombstones`], and the tombstone is the whole
+/// reason `fleet.forget_session_owner` has something to check. Nothing infers a tombstone
+/// from a disconnect: an unreachable peer is a peer this machine keeps retrying, so a
+/// partitioned owner is never robbed of its sessions. The operator saying
+/// `--accept-state-loss` is the statement, and this is where it is written down.
+///
+/// The member moves out of `members` into `tombstones` and the roster revision advances,
+/// so `ouro fleet status` stops expecting it. The roster is not replicated: every
+/// remaining machine needs the same command run locally.
+///
+/// Idempotent — a machine already declared gone is returned unchanged, so a retry after a
+/// failed gateway call asks the runtime again rather than refusing.
+pub fn forget_machine(data_dir: &Path, machine: &str) -> Result<Member> {
+    let _lock = lock_live_fleet_update(data_dir, "ouro fleet sessions forget")?;
+    let mut profile = load(data_dir)?.context(
+        "this machine is standalone; there is no cluster roster to declare a machine gone in",
+    )?;
+    if machine == profile.machine || machine == profile.node {
+        bail!(
+            "{machine} is this machine; `ouro fleet leave` retires this machine's own identity, and `ouro fleet sessions forget` is for a machine that is gone for good"
+        );
+    }
+    if let Some(gone) = profile
+        .tombstones
+        .iter()
+        .find(|entry| entry.machine == machine || entry.node == machine)
+    {
+        return Ok(gone.clone());
+    }
+    let Some(index) = profile
+        .members
+        .iter()
+        .position(|entry| entry.machine == machine || entry.node == machine)
+    else {
+        bail!(
+            "this machine's roster has no member named {machine}; `ouro fleet status` prints the names it knows"
+        );
+    };
+    let removed = profile.members.remove(index);
+    profile.roster_revision = profile
+        .roster_revision
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("this machine's roster revision is exhausted"))?;
+    profile.tombstones.push(removed.clone());
+    profile
+        .tombstones
+        .sort_by(|left, right| left.node.cmp(&right.node));
+    write_profile(data_dir, &profile).context(
+        "recording the machine as permanently gone before retiring its session evidence",
+    )?;
+    Ok(removed)
+}
+
+/// Undo [`forget_machine`] when the runtime refused to retire the evidence.
+///
+/// The refusal that matters is a machine that turned out to be connected: the roster must
+/// not quietly lose a member whose sessions this cluster is still answering for.
+pub fn restore_machine(data_dir: &Path, restored: &Member) -> Result<()> {
+    let _lock = lock_live_fleet_update(data_dir, "ouro fleet sessions forget")?;
+    let mut profile = load(data_dir)?
+        .context("this machine is standalone; there is no cluster roster to restore a member to")?;
+    profile
+        .tombstones
+        .retain(|entry| entry.node != restored.node);
+    if !profile
+        .members
+        .iter()
+        .any(|entry| entry.node == restored.node)
+    {
+        profile.members.push(restored.clone());
+        profile
+            .members
+            .sort_by(|left, right| left.node.cmp(&right.node));
+    }
+    profile.roster_revision = profile
+        .roster_revision
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("this machine's roster revision is exhausted"))?;
+    write_profile(data_dir, &profile).context("restoring the member the runtime refused to forget")
+}
+
 fn empty_tags() -> Value {
     Value::Array(Vec::new())
 }
@@ -694,6 +785,7 @@ pub fn create(
         node: member.node.clone(),
         role: "core".to_string(),
         members: vec![member.clone()],
+        tombstones: Vec::new(),
         roster_revision: initial_roster_revision(),
         gateway_port: ports
             .gateway
@@ -2068,6 +2160,29 @@ fn validate_profile(profile: &Profile) -> Result<()> {
         }
         if !machines.insert(&member.machine) {
             bail!("fleet profile repeats machine {}", member.machine);
+        }
+    }
+    let mut removed_nodes = BTreeSet::new();
+    for removed in &profile.tombstones {
+        validate_machine(&removed.machine)?;
+        validate_host(&removed.host)?;
+        if removed.node != self::member(&removed.machine, &removed.host).node {
+            bail!(
+                "fleet tombstone {} has a node that does not match its name and host",
+                removed.machine
+            );
+        }
+        if removed.node == profile.node {
+            bail!("fleet profile cannot tombstone the machine it belongs to");
+        }
+        if nodes.contains(&removed.node) || machines.contains(&removed.machine) {
+            bail!(
+                "fleet roster marks machine {} both active and removed",
+                removed.machine
+            );
+        }
+        if !removed_nodes.insert(&removed.node) {
+            bail!("fleet roster repeats removed node {}", removed.node);
         }
     }
     validate_port(profile.gateway_port, "gateway port")?;
@@ -3972,6 +4087,110 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// The tombstone is the operator's statement that a machine is gone, and the only
+    /// thing `fleet.forget_session_owner` will act on. It is written here, by hand, never
+    /// inferred from a machine being unreachable.
+    #[test]
+    fn declaring_a_machine_gone_moves_it_out_of_the_roster_and_can_be_undone() {
+        let dir = scratch("forget-machine");
+        fs::create_dir(dir.join("fleet")).unwrap();
+        let mut profile = sample_profile("studio");
+        let vps = member("vps", "vps.tailnet.ts.net");
+        profile.members.push(vps.clone());
+        write_profile(&dir, &profile).unwrap();
+        assert!(
+            load(&dir).unwrap().unwrap().tombstones.is_empty(),
+            "an unreachable peer is not a peer anyone declared gone"
+        );
+
+        assert_eq!(forget_machine(&dir, "vps").unwrap(), vps);
+        let after = load(&dir).unwrap().unwrap();
+        assert_eq!(
+            after.members,
+            vec![member("studio", "studio.tailnet.ts.net")]
+        );
+        assert_eq!(after.tombstones, vec![vps.clone()]);
+        assert_eq!(after.roster_revision, profile.roster_revision + 1);
+        assert_eq!(after.expected_peers(), 0);
+
+        // A gateway call that failed is retried against the same statement, so the second
+        // run must reach the gateway rather than refuse, and must not move the roster on.
+        assert_eq!(forget_machine(&dir, &vps.node).unwrap(), vps);
+        assert_eq!(
+            load(&dir).unwrap().unwrap().roster_revision,
+            profile.roster_revision + 1
+        );
+
+        // The runtime refusing — the machine turned out to be connected — puts it back.
+        restore_machine(&dir, &vps).unwrap();
+        let restored = load(&dir).unwrap().unwrap();
+        assert!(restored.tombstones.is_empty());
+        assert!(restored.members.contains(&vps));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn declaring_a_machine_gone_refuses_this_machine_and_a_name_the_roster_never_had() {
+        let dir = scratch("forget-machine-refusals");
+        fs::create_dir(dir.join("fleet")).unwrap();
+        let profile = sample_profile("studio");
+        write_profile(&dir, &profile).unwrap();
+
+        for own in ["studio", "ouro-studio@studio.tailnet.ts.net"] {
+            let refusal = forget_machine(&dir, own).unwrap_err().to_string();
+            assert!(refusal.contains("ouro fleet leave"), "{refusal}");
+        }
+        let unknown = forget_machine(&dir, "ghost").unwrap_err().to_string();
+        assert!(unknown.contains("no member named ghost"), "{unknown}");
+        assert!(load(&dir).unwrap().unwrap().tombstones.is_empty());
+
+        // A profile written before this field reads as "nothing declared gone" rather
+        // than as a profile this machine refuses to start from.
+        let mut encoded: Value =
+            serde_json::from_str(&fs::read_to_string(profile_path(&dir)).unwrap()).unwrap();
+        assert!(encoded
+            .as_object_mut()
+            .unwrap()
+            .remove("tombstones")
+            .is_some());
+        write_private_atomic(
+            &profile_path(&dir),
+            &serde_json::to_vec_pretty(&encoded).unwrap(),
+        )
+        .unwrap();
+        assert!(load(&dir).unwrap().unwrap().tombstones.is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_hand_edited_roster_cannot_call_a_machine_both_active_and_gone() {
+        let mut both = sample_profile("studio");
+        let vps = member("vps", "vps.tailnet.ts.net");
+        both.members.push(vps.clone());
+        both.tombstones.push(vps);
+        let refusal = validate_profile(&both).unwrap_err().to_string();
+        assert!(refusal.contains("both active and removed"), "{refusal}");
+
+        let mut itself = sample_profile("studio");
+        itself
+            .tombstones
+            .push(member("studio", "studio.tailnet.ts.net"));
+        let refusal = validate_profile(&itself).unwrap_err().to_string();
+        assert!(
+            refusal.contains("cannot tombstone the machine it belongs to"),
+            "{refusal}"
+        );
+
+        let mut mismatched = sample_profile("studio");
+        mismatched.tombstones.push(Member {
+            machine: "vps".into(),
+            host: "vps.tailnet.ts.net".into(),
+            node: "ouro-elsewhere@vps.tailnet.ts.net".into(),
+        });
+        let refusal = validate_profile(&mismatched).unwrap_err().to_string();
+        assert!(refusal.contains("fleet tombstone vps"), "{refusal}");
+    }
+
     #[test]
     fn facts_render_with_tags_and_older_peers_stay_unknown() {
         assert_eq!(
@@ -3997,6 +4216,7 @@ mod tests {
             node: format!("ouro-{machine}@studio.tailnet.ts.net"),
             role: "core".into(),
             members: vec![member(machine, "studio.tailnet.ts.net")],
+            tombstones: Vec::new(),
             roster_revision: initial_roster_revision(),
             gateway_port: 48_111,
             epmd_port: 14_111,
@@ -4601,6 +4821,7 @@ mod tests {
             node: "ouro-vps@127.0.0.1".into(),
             role: "core".into(),
             members: vec![member("vps", "127.0.0.1")],
+            tombstones: Vec::new(),
             roster_revision: initial_roster_revision(),
             // The exact exposure a real enrollment died on: gateway and distribution
             // pinned inside Linux's default ephemeral range, EPMD safely below it.

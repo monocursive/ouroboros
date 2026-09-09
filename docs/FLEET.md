@@ -176,9 +176,17 @@ owner-local state, then run this locally on every remaining machine:
 ouro fleet sessions forget --machine NAME --accept-state-loss
 ```
 
-It refuses while that node is connected, syncs the checkpoint before reporting success,
-and is irreversible per machine. It changes local discoverability evidence only: it
-deletes no files on the lost machine.
+`--accept-state-loss` is the operator saying the machine is gone for good, and that
+statement is the only thing that can retire the evidence. The command writes it into this
+machine's profile first — the member moves out of `members` into `tombstones` and the
+roster revision advances — and only then asks the runtime, which refuses without that
+tombstone. Nothing infers one from a disconnect, so a partitioned owner that comes back is
+still a member and still owns its sessions.
+
+The runtime also refuses while that node is connected, and the roster edit is rolled back
+if it does. On success it syncs the checkpoint before reporting, and is irreversible per
+machine. It changes local discoverability evidence only: it deletes no files on the lost
+machine.
 
 ## Gateway methods
 

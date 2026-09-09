@@ -1372,6 +1372,17 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                     attach_with(local_address(publication.port), token, false, None, hook)
                         .await
                         .context("connecting to this machine's local runtime")?;
+                // The operator's `--accept-state-loss` is what makes this machine gone
+                // for good, and the tombstone is where that statement is written down.
+                // The runtime refuses to retire durable evidence without it, so it is
+                // recorded first — and rolled back below if the runtime refuses anyway.
+                let removed = match fleet::forget_machine(&paths.data_dir, &machine) {
+                    Ok(removed) => removed,
+                    Err(error) => {
+                        attached.client.stop().await;
+                        return Err(error);
+                    }
+                };
                 let result = attached
                     .client
                     .call_with_timeout(
@@ -1382,11 +1393,35 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                     .await
                     .context("calling fleet.forget_session_owner");
                 attached.client.stop().await;
-                let result = result?;
-                let (result_machine, node, roster_revision) =
-                    parse_forget_session_owner_result(&machine, &result)?;
+                let confirmed = result.and_then(|value| {
+                    parse_forget_session_owner_result(&machine, &value).map(
+                        |(result_machine, node, roster_revision)| {
+                            (
+                                result_machine.to_string(),
+                                node.to_string(),
+                                roster_revision,
+                            )
+                        },
+                    )
+                });
+                let (result_machine, node, roster_revision) = match confirmed {
+                    Ok(confirmed) => confirmed,
+                    Err(error) => {
+                        return Err(match fleet::restore_machine(&paths.data_dir, &removed) {
+                            Ok(()) => error.context(format!(
+                                "{} is back in this machine's roster; nothing was forgotten",
+                                removed.machine
+                            )),
+                            Err(restore_error) => error.context(format!(
+                                "{} was taken out of this machine's roster and could not be put back ({restore_error:#}); repair {} before retrying",
+                                removed.machine,
+                                fleet::profile_path(&paths.data_dir).display()
+                            )),
+                        });
+                    }
+                };
                 println!(
-                    "Session-owner evidence permanently forgotten on this machine.\n  machine      {result_machine}\n  node         {node}\n  roster       revision {roster_revision}\n\nState loss was explicitly accepted: sessions discoverable only through this machine's saved evidence for {result_machine} may now be unavailable while that former owner is offline. This changed only the local evidence checkpoint; it did not delete journals on the removed machine. Repeat this exact command on every remaining cluster machine."
+                    "Session-owner evidence permanently forgotten on this machine.\n  machine      {result_machine}\n  node         {node}\n  roster       revision {roster_revision}\n\nState loss was explicitly accepted: sessions discoverable only through this machine's saved evidence for {result_machine} may now be unavailable while that former owner is offline. {result_machine} is out of this machine's roster and recorded as gone; this changed no files on the removed machine. Repeat this exact command on every remaining cluster machine."
                 );
                 Ok(())
             }

@@ -228,7 +228,7 @@ defmodule Ouroboros.Gateway.Methods.Safe do
 
   def forget_session_owner_reply({:error, {:session_owner_not_tombstoned, machine}}) do
     not_found(
-      "fleet profile has no roster tombstone for machine #{inspect(machine)}; cancel it and import the updated roster before accepting state loss"
+      "fleet profile has no roster tombstone for machine #{inspect(machine)}; run `ouro fleet sessions forget --machine NAME --accept-state-loss` on this machine, which records the tombstone before asking for this"
     )
   end
 
@@ -244,13 +244,13 @@ defmodule Ouroboros.Gateway.Methods.Safe do
 
   def forget_session_owner_reply({:error, :fleet_profile_unavailable}) do
     unavailable(
-      "no active fleet profile is available; this command only retires a member already tombstoned by a signed fleet roster"
+      "no active fleet profile is available; this command only retires a member this machine's own roster records as tombstoned"
     )
   end
 
   def forget_session_owner_reply({:error, {:fleet_profile_unavailable, reason}}) do
     {:error, code(:unavailable),
-     "the local fleet profile could not be validated; repair or re-import it before forgetting session state",
+     "the local fleet profile could not be validated; repair it before forgetting session state",
      %{"reason" => "fleet_profile_unavailable", "error" => Wire.to_json(reason)}}
   end
 
