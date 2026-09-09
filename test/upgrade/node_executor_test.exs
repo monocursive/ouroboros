@@ -131,19 +131,17 @@ defmodule Ouroboros.Upgrade.NodeExecutorTest do
     # Protecting only the loader leaves the enforcement path open: one patch against the
     # journal writer makes every durable write a silent no-op, one against the release
     # authorizer unlocks the durable lane, and the control plane decides what is patched
-    # at all. The forge and deploy entry points are protected for the symmetric reason —
-    # a signed replacement of the surfaces that *trigger* the lane is as good as forging
-    # it, so they are held to the same refusal as the surfaces that gate it.
+    # at all. The capability admission surface is protected for the symmetric reason —
+    # a signed replacement of the surface that *triggers* the lane is as good as forging
+    # it, so it is held to the same refusal as the surfaces that gate it.
     for module <- [
           NodeExecutor,
           Verifier,
           Ouroboros.Storage.DurableFile,
           Ouroboros.Release.Authorizer.Deny,
           Ouroboros.Release.Journal,
-          Ouroboros.Control.Store,
-          Ouroboros.Agent.Effects,
-          Ouroboros.Agent.Effects.Runner,
-          Ouroboros.Orchestration.ForgeExecutor,
+          Ouroboros.Control.Grants,
+          Ouroboros.Control.Permissions,
           Ouroboros.Runtime.Capabilities,
           Ouroboros.Mesh,
           Ouroboros.Mesh.Directory,

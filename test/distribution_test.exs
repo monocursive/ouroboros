@@ -1,6 +1,7 @@
 defmodule Ouroboros.DistributionTest do
   use ExUnit.Case, async: false
 
+  alias Ouroboros.Capability.DistributionReference
   alias Ouroboros.Mesh
 
   test "routes a typed agent message to a supervised Jido process on an OS peer" do
@@ -15,13 +16,21 @@ defmodule Ouroboros.DistributionTest do
     on_exit(fn -> :peer.stop(peer) end)
 
     storage = {Jido.Storage.ETS, table: peer_name}
-    :ok = :erpc.call(peer_node, Application, :put_env, [:ouroboros, :coding_storage, storage])
+
+    :ok =
+      :erpc.call(peer_node, Application, :put_env, [:ouroboros, :interactive_storage, storage])
 
     assert {:ok, _applications} =
              :erpc.call(peer_node, Application, :ensure_all_started, [:ouroboros])
 
     id = "distributed-worker-#{System.unique_integer([:positive])}"
-    assert {:ok, pid} = Mesh.start_agent_on(peer_node, id, role: "remote reviewer")
+
+    assert {:ok, pid} =
+             Mesh.start_agent_on(peer_node, id,
+               agent: DistributionReference,
+               role: "remote reviewer"
+             )
+
     assert node(pid) == peer_node
 
     assert_eventually(fn -> Mesh.whereis(id) == pid end)
@@ -51,7 +60,7 @@ defmodule Ouroboros.DistributionTest do
     id = "bare-peer-worker-#{System.unique_integer([:positive])}"
 
     assert {:error, {:placement_refused, ^peer_node, :runtime_not_running}} =
-             Mesh.start_agent_on(peer_node, id)
+             Mesh.start_agent_on(peer_node, id, agent: DistributionReference)
 
     assert Mesh.whereis(id) == nil
 
@@ -63,7 +72,7 @@ defmodule Ouroboros.DistributionTest do
     on_exit(fn -> Application.put_env(:ouroboros, :placement_role_check, previous) end)
 
     assert {:error, {:remote_start_failed, ^peer_node, {:exit, _reason}}} =
-             Mesh.start_agent_on(peer_node, id)
+             Mesh.start_agent_on(peer_node, id, agent: DistributionReference)
 
     assert Mesh.whereis(id) == nil
   end
