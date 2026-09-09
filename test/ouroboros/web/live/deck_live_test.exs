@@ -915,7 +915,13 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       _replacement = plane(id: id, backlogs: [{:ok, [said(2, "after restart")]}])
       send(view.pid, :poll)
 
-      assert_receive {:subscribed, _subscriber, 1}
+      # Five seconds, not the 100 ms default: `handle_info(:poll, …)`
+      # (`lib/ouroboros/web/live/deck_live.ex:458-461`) runs the whole synchronous
+      # `refresh/1` — `interactive.list`, `runtime_status`, `refresh_info` — *before*
+      # `recover_subscription/1`, so on a loaded machine the resubscribe is late rather
+      # than absent, and a 100 ms bound measures the machine instead of the recovery.
+      # The claim under test is that it happens at all, and from the right cursor.
+      assert_receive {:subscribed, _subscriber, 1}, 5_000
       assert_eventually(fn -> render(view) =~ "after restart" end)
       refute render(view) =~ "ouro-divider"
       assert render(view) =~ "mid-sentence"
