@@ -1054,7 +1054,7 @@ matches a call to that capability, `Capability(*)` matches a call to any, and wi
 written the engine's own posture applies: ask, once per capability, and the operator's
 answer is what persists. An *allow* on those patterns is honest because the name they match
 is one this node resolved against its live rollouts before the engine was asked — the same
-distinction `ComputerUse(app:…)` draws against `Tool(<name>:<param>=…)`, whose parameter is
+distinction `Capability(…)` draws against `Tool(<name>:<param>=…)`, whose parameter is
 whatever the provider reported. A name that does not resolve carries no `capability` in the
 request context at all, so `Capability(*)` cannot cover "we could not tell which one".
 

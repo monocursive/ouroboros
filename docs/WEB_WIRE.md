@@ -605,11 +605,9 @@ including doing nothing else.** T4–T6 are the migration and only exist under W
   assertion rewritten — only the fixture that stands up the runtime changes. If a test
   assertion has to change, that is a behaviour change the slice must name and justify.
 
-- **T5 — the other views.** `MachinesLive`, `NewSessionLive`, `StatusLive`, and the
-  artifact controller (which calls `computer_use.artifact` in-process today,
-  `WEB.md:305`). *Acceptance:* per-view LiveViewTest suites unchanged; the artifact
-  controller's sha-addressed caching behaviour asserted unchanged, since the payload now
-  arrives base64 through the wire rather than as a binary.
+- **T5 — the other views.** `MachinesLive`, `NewSessionLive`, `StatusLive`. (This plan
+  also named the artifact controller; it was deleted with the computer-use plane.)
+  *Acceptance:* per-view LiveViewTest suites unchanged.
 
 - **T6 — removals** (§5).
 

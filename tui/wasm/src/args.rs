@@ -1,6 +1,7 @@
 //! Argument parsing for the helper: two subcommands and one flag.
 //!
-//! Hand-rolled rather than clap, for the same reason `ouro-computer-use` hand-rolls its own:
+//! Hand-rolled rather than clap, for the same reason the now-deleted `ouro-computer-use`
+//! hand-rolled its own:
 //! this member exists to keep a large dependency out of `ouro`'s graph, and adding a second
 //! large one to parse three words would be a strange way to honour that. Parsing is a pure
 //! function over an argument iterator, so it is unit-testable without touching real argv.

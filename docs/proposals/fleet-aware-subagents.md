@@ -373,7 +373,7 @@ throughout.
   session's id, principal, and posture, with the same refusals in the same words. Facts
   come through `fleet.status`, which slice A already extends.
 - `ouro mcp-serve` (`tui/src/mcp_serve.rs`) serves `agent`, `agent_result`, and `fleet`
-  beside `approve` and `code_intel`, so a Claude Code or Codex session under Ouroboros
+  beside `approve`, so a Claude Code or Codex session under Ouroboros
   can place a native child on another machine. Approvals from that child reach the
   vendor session's channel through the `approval_requested` path the bridge already uses.
 

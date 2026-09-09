@@ -800,9 +800,9 @@ impl App {
             .map(|workspace| workspace.trim().to_string())
             .filter(|workspace| !workspace.is_empty());
 
-        // See `model::permission_add_params`: both prefixes name a node fact, so neither
-        // needs the workspace this session may not have.
-        if pattern.starts_with("ComputerUse(") || pattern.starts_with("Capability(") {
+        // See `model::permission_add_params`: the prefix names a node fact, so it does not
+        // need the workspace this session may not have.
+        if pattern.starts_with("Capability(") {
             return (
                 Some(ApprovalRule {
                     pattern: pattern.to_string(),
