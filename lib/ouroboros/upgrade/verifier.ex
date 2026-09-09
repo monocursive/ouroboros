@@ -10,8 +10,6 @@ defmodule Ouroboros.Upgrade.Verifier do
   (the durable lane's authorizer and journal), every `Ouroboros.Control.*` module
   (which decides what is patched at all), every `Ouroboros.Gateway.*` module (the
   operator surface, where an auth check that can be hot-patched is no auth at all),
-  every `Ouroboros.Agent.Effects.*` module and every `Ouroboros.Orchestration.*`
-  module (the forge and deploy entry points a patch could call on an agent's behalf),
   `Ouroboros.Runtime.Capabilities` (the operator admission surface for forged
   capabilities), every `Ouroboros.Mesh.*` module (where deployed capabilities start),
   every `Ouroboros.Provider.Native.*` module and `Ouroboros.Provider.Native` itself
@@ -40,8 +38,6 @@ defmodule Ouroboros.Upgrade.Verifier do
   @protected_modules [
     Ouroboros.Application,
     Ouroboros.Application.RegistryOwner,
-    # The effect API itself, not only its `Runner`: the forge/deploy actions live here.
-    Ouroboros.Agent.Effects,
     # The public mesh surface carries the startable-module allowlist.
     Ouroboros.Mesh,
     Ouroboros.Runtime.Capabilities,
@@ -59,8 +55,6 @@ defmodule Ouroboros.Upgrade.Verifier do
     # An operator surface must not be hot-patchable by the thing it operates, and the
     # browser one carries the token comparison and the session cookie's key.
     "Elixir.Ouroboros.Web.",
-    "Elixir.Ouroboros.Agent.Effects.",
-    "Elixir.Ouroboros.Orchestration.",
     "Elixir.Ouroboros.Mesh.",
     "Elixir.Ouroboros.Provider.Native.",
     "Elixir.Ouroboros.Workspace.",

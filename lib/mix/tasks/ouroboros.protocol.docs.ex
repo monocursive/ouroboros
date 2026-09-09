@@ -429,7 +429,6 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
   end
 
   defp method_for(:interactive), do: "interactive.event"
-  defp method_for(:coding), do: "coding.event"
 
   # ---------------------------------------------------------------------------
 
