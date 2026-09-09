@@ -129,9 +129,14 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Char(digit @ '1'..='7') if !ctrl => {
+            // Bounded by the table rather than by a literal range: a digit past the last
+            // tab is a keypress with nowhere to go, not an index into a shorter array.
+            KeyCode::Char(digit @ '1'..='9') if !ctrl => {
                 let index = digit as usize - '1' as usize;
-                self.select_tab(Tab::ALL[index]);
+
+                if let Some(tab) = Tab::ALL.get(index) {
+                    self.select_tab(*tab);
+                }
             }
             KeyCode::Tab => self.select_tab(Tab::ALL[(self.tab.index() + 1) % Tab::ALL.len()]),
             KeyCode::BackTab => {

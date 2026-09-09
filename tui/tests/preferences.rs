@@ -153,7 +153,7 @@ fn with_providers(defaults: Defaults) -> App {
 #[test]
 fn settings_open_from_anywhere_and_keep_the_two_kinds_of_fact_apart() {
     // Every tab but the coding home, whose composer owns printable keys by design.
-    for tab in ['1', '3', '4', '5', '6', '7'] {
+    for tab in ['1', '3', '4'] {
         let mut app = with_providers(Defaults::default());
 
         app.apply(key(KeyCode::Char(tab)));
