@@ -5,6 +5,26 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
 
   @module Ouroboros.Capability.Recorded
 
+  test "the rollout registry is supervised by the application on a :core node" do
+    # `Wasm.Deploy` and `Upgrade.Epoch` both ask `Process.whereis/1` for this name on the
+    # nodes they are about to deploy to, and a node that does not hold it is reported
+    # `:absent` rather than as an error — deliberately, so a lone signer can say "I have no
+    # register either". That makes "a `:core` node starts one" unobservable from inside
+    # either of them, and it has to be asserted here, against the child list slice C3 edits.
+    assert Ouroboros.Cluster.role() == :core
+
+    pid = Process.whereis(Registry)
+    assert is_pid(pid)
+
+    assert {Registry, ^pid, :worker, _modules} =
+             Ouroboros.Supervisor
+             |> Supervisor.which_children()
+             |> Enum.find(&(elem(&1, 0) == Registry))
+
+    assert Registry.durability() == :ephemeral_checkpoint
+    assert is_list(Registry.list())
+  end
+
   test "records a rollout and refuses transitions that would lose information" do
     registry = start_registry!()
 

@@ -1,5 +1,19 @@
+defmodule Ouroboros.Upgrade.SigningServiceTest.RefusingPolicy do
+  @moduledoc false
+
+  # A policy that is nothing but a different answer, so the only thing a refusal from it
+  # can be evidence of is that `:signing_policy` was read.
+
+  @behaviour Ouroboros.Upgrade.Signing.Policy
+
+  @impl true
+  def evaluate(_artifact, _context), do: {:refused, :this_policy_signs_nothing}
+end
+
 defmodule Ouroboros.Upgrade.SigningServiceTest do
   use ExUnit.Case, async: false
+
+  alias Ouroboros.Upgrade.SigningServiceTest.RefusingPolicy
 
   alias Ouroboros.Storage.DurableFile
   alias Ouroboros.Upgrade.Signing.{Journal, Policy, Service}
@@ -148,6 +162,35 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
                sign(service, artifact, request: %{})
 
       assert {:refused, {:invalid_artifact, _}} = sign(service, :not_an_artifact)
+    end
+
+    test "the shipped policy is the default and `:signing_policy` is what replaces it" do
+      # The rules a signature stands on are configuration, so what that configuration
+      # resolves to is worth asserting directly rather than inferring from a refusal.
+      assert Policy.configured() == Policy.Default
+
+      on_exit(fn -> Application.delete_env(:ouroboros, :signing_policy) end)
+      Application.put_env(:ouroboros, :signing_policy, RefusingPolicy)
+      assert Policy.configured() == RefusingPolicy
+
+      # And the override is live, not decorative: a service started without an explicit
+      # `:policy` takes the configured one and refuses with its reason.
+      service = start_service!()
+      assert {:refused, :this_policy_signs_nothing} = sign(service, artifact!())
+
+      # Anything that is not a module name is not a policy. A signer that read one would
+      # be a signer with no rules at all, so the shipped policy stands instead — the same
+      # direction `Service.policy/1` falls back in.
+      Application.put_env(:ouroboros, :signing_policy, "Elixir.Not.A.Module")
+      assert Policy.configured() == Policy.Default
+
+      Application.put_env(:ouroboros, :signing_policy, nil)
+      assert Policy.configured() == Policy.Default
+
+      # An explicit `:policy` still wins over the configured one, which is how a test or a
+      # second signer on one node runs its own rules.
+      Application.put_env(:ouroboros, :signing_policy, RefusingPolicy)
+      assert {:ok, _signature} = sign(start_service!(policy: Policy.Default), artifact!())
     end
   end
 
