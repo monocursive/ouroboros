@@ -89,7 +89,7 @@ impl Ownership {
                 daemon.detach();
                 println!("detached; the runtime is still running (pid {pid})");
             }
-            Quit::Shutdown | Quit::ApplyFleetIntent => {
+            Quit::Shutdown => {
                 if hello.serves("runtime.shutdown") && hello.operates() {
                     match client.call("runtime.shutdown", json!({})).await {
                         Ok(_result) => println!("the runtime accepted runtime.shutdown"),

@@ -1076,8 +1076,6 @@ pub struct RuntimeStatus {
     pub control: ControlStatus,
     #[serde(default)]
     pub upgrade: Value,
-    #[serde(default)]
-    pub release: Value,
     /// Signer posture and live capability count. Absent on older gateways.
     #[serde(default)]
     pub forge: Value,
@@ -1094,11 +1092,10 @@ impl RuntimeStatus {
         serde_json::from_value(value.clone())
     }
 
-    /// What `mode` a sub-map reports, for the two that have one.
+    /// What `mode` a sub-map reports, for the one that has one.
     pub fn mode(&self, section: &str) -> Option<&str> {
         let value = match section {
             "upgrade" => &self.upgrade,
-            "release" => &self.release,
             _ => return None,
         };
 
@@ -4385,7 +4382,7 @@ mod tests {
         );
 
         assert_eq!(status.mode("upgrade"), Some("ready"));
-        assert_eq!(status.mode("release"), Some("ready"));
+        assert_eq!(status.mode("release"), None);
         assert!(status.control.runs.is_empty());
         assert_eq!(status.cluster_summary(), "strategy=none  distributed=false");
         assert_eq!(status.forge_summary(), "signer=deny live=0 admit=no");

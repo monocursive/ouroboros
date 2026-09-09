@@ -4,7 +4,6 @@ use super::*;
 /// what the runtime reported, and nothing here can change them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsField {
-    Machines,
     Provider,
     Workspace,
     ApprovalMode,
@@ -13,8 +12,7 @@ pub enum SettingsField {
 }
 
 impl SettingsField {
-    pub const ALL: [SettingsField; 6] = [
-        SettingsField::Machines,
+    pub const ALL: [SettingsField; 5] = [
         SettingsField::Provider,
         SettingsField::Workspace,
         SettingsField::ApprovalMode,
@@ -132,7 +130,7 @@ impl App {
         self.issue_if_due(Tag::Status, "runtime.status", json!({}), STATUS_TICKS);
 
         self.overlay = Some(Overlay::Settings(Box::new(Settings {
-            field: SettingsField::Machines,
+            field: SettingsField::Provider,
             provider: 0,
             workspace: self.default_workspace(),
             approval: approval_index(self.config.defaults.approval_mode()),
@@ -170,7 +168,6 @@ impl App {
             }
             KeyCode::Enter => {
                 match settings.field {
-                    SettingsField::Machines => self.open_machines(),
                     SettingsField::Save => self.save_settings(),
                     _ => {
                         // Enter never saves from a field row, for the same reason it never

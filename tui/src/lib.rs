@@ -15,7 +15,6 @@ pub mod config;
 pub mod continuation;
 pub mod desktop_cli;
 pub mod fleet;
-pub mod fleet_add;
 pub mod hook;
 pub mod images;
 pub mod keymap;

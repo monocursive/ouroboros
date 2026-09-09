@@ -2496,7 +2496,6 @@ impl App {
             "/upgrades" => Some(Command::Upgrades),
             "/capabilities" => Some(Command::ListCapabilities),
             "/logs" => Some(Command::Logs),
-            "/machines" | "/fleet" => Some(Command::Machines),
             "/settings" => Some(Command::Settings),
             "/help" | "/hotkeys" => Some(Command::Help),
             "/keys" | "/keymap" => Some(Command::Keys),

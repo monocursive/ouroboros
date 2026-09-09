@@ -105,7 +105,6 @@ pub fn render_status(status: &Value) -> String {
     let _ = writeln!(page, "  control      {posture} ({runs} runs)");
 
     let _ = writeln!(page, "  upgrade      {}", mode(status, "upgrade"));
-    let _ = writeln!(page, "  release      {}", mode(status, "release"));
     let _ = writeln!(page, "  forge        {}", forge(status));
 
     page
