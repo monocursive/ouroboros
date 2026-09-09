@@ -81,6 +81,33 @@ defmodule Ouroboros.MeshTest do
       assert Mesh.whereis(id) == nil
     end
 
+    test "refuses a start that names no module at all" do
+      # `start_agent/2` used to default to `Ouroboros.Agent.Worker`, so a remote `:erpc`
+      # that named nothing quietly started a general-purpose agent. This runtime defines
+      # none, and a caller that named no module is asking for something no node can
+      # answer — so it is refused by the same allow-list, with the absence in the reason.
+      id = unique_id("nameless")
+
+      assert {:error, {:agent_module_not_allowed, nil}} = Mesh.start_agent(id)
+      assert {:error, {:agent_module_not_allowed, nil}} = Mesh.start_agent(id, role: "worker")
+      assert Mesh.whereis(id) == nil
+    end
+
+    test "the Ouroboros.Agent namespace is no longer reserved for anything" do
+      # The prefix admitted the two agents the coordination stack owned, `Agent.Worker`
+      # and `Agent.Coordinator`, and both went with it. A prefix with no modules under it
+      # is a standing invitation for the next module dropped into that namespace to
+      # become startable from any connected node.
+      #
+      # Neither of those two is *spelled* here on purpose: they are on
+      # `Ouroboros.Storage.RetiredAtoms` because an old effect-ledger entry can name them,
+      # and a test that interned them would be a second reason they exist.
+      for module <- [Ouroboros.Agent.Any, Ouroboros.Agent.Nested.Deeper] do
+        assert {:error, {:agent_module_not_allowed, ^module}} =
+                 Mesh.start_agent(unique_id("agent-namespace"), agent: module)
+      end
+    end
+
     test "accepts a module named by application config" do
       id = unique_id("configured")
       allow_agent_modules([ForgedAgent])
