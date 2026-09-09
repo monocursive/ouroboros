@@ -37,8 +37,7 @@ defmodule Ouroboros.Upgrade.Signing.Service do
   @moduledoc """
   The signing authority: a key, an independent policy, and a durable record, on a node
   whose supervision tree contains this service, cluster formation, and — when a data
-  directory is configured — the durable-directory owner, and nothing that holds sessions
-  or teams.
+  directory is configured — the durable-directory owner, and nothing that holds sessions.
 
   `Ouroboros.Upgrade.Forge.Signer` describes the seam. This is the thing on the other
   side of it. The forge asks; this process decides, and it decides *before* a signature
@@ -53,8 +52,8 @@ defmodule Ouroboros.Upgrade.Signing.Service do
       in this process's state. `Ouroboros.Upgrade.Forge.Signer.Local` — still shipped,
       still fine for a dev loop — reads its key from the configuration of the very
       application whose code it authorizes; an agent that can patch that application can
-      read it. This service moves the key to a host with no teams, no stores, no
-      sessions, no scheduler, and no control plane on it.
+      read it. This service moves the key to a host with no stores and no sessions
+      on it.
     * **The policy sees the whole artifact, not the payload.** A payload is a hash of
       claims. `Ouroboros.Upgrade.Signing.Policy` recomputes those claims from the BEAM
       bytes actually submitted and refuses anything outside `Ouroboros.Capability.`, so

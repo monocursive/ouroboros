@@ -103,7 +103,7 @@ defmodule Ouroboros.Models do
 
   Read from the Harness provider configuration a node actually starts sessions with —
   `session_defaults` first, because that is what an interactive session inherits, then
-  `request_defaults` for a node that only configured the coding plane. Not a preference
+  `request_defaults` for a node that configured no direct model. Not a preference
   this module holds: a default nobody configured is `nil`, not a model picked here.
   """
   @spec default_model(atom()) :: String.t() | nil

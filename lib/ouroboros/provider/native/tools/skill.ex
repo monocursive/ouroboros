@@ -28,8 +28,7 @@ defmodule Ouroboros.Provider.Native.Tools.Skill do
   The description the model sees for this session, with the skill catalogue in it.
 
   `Ouroboros.Provider.Native.Tools.specs/3` calls this when it is given a scope. With no
-  scope — the coding plane's prompt preview, for instance — the static description above
-  stands.
+  scope — a prompt preview, for instance — the static description above stands.
   """
   @spec description(keyword()) :: String.t()
   def description(opts) do

@@ -31,7 +31,7 @@ defmodule Ouroboros.Upgrade.Forge.BuildPeer do
   Nothing about the build changes: the same callback runs inside the same kind of
   non-distributed peer, and the same plain serializable terms come back. What changes is
   which host compiles agent-authored source — the point of the `:builder` role, whose
-  supervision tree contains no teams, stores, sessions, or control plane to lose.
+  supervision tree contains no stores or sessions to lose.
 
   That relocation carries one hard constraint. The artifact's runtime triple is whatever
   the *peer* observed, and `Ouroboros.Upgrade.Verifier` requires it to match every node

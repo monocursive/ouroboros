@@ -1,9 +1,9 @@
 defmodule Ouroboros.Workspace do
   @moduledoc """
-  Safe, node-local workspace admission for coding tasks.
+  Safe, node-local workspace admission for sessions and subagents.
 
   Configure one or more existing `:allowed_roots`, then acquire either an
-  `:exclusive` or `:shared_read` lease before starting a coding run. All roots
+  `:exclusive` or `:shared_read` lease before starting work in one. All roots
   are resolved component-by-component, including symbolic links, before the
   allow-list and conflict checks are applied.
 

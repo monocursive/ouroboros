@@ -236,11 +236,12 @@ defmodule Ouroboros.Provider.Native do
   end
 
   @doc """
-  Runs one finite coding-plane turn to completion and returns its event stream.
+  Runs one finite turn to completion and returns its event stream.
 
-  The run worker owns `run_started`/`run_completed`/`run_failed`; everything between
-  them is the session-backed bridge's stream. Coding and interactive turns therefore
-  restore and checkpoint the same conversation instead of maintaining two implementations.
+  Required by the `Jido.Harness` adapter behaviour. The run worker owns
+  `run_started`/`run_completed`/`run_failed`; everything between them is the
+  session-backed bridge's stream, so a finite run and a session turn restore and
+  checkpoint the same conversation instead of maintaining two implementations.
   """
   @impl true
   def run(%RunRequest{} = request, context) do

@@ -543,8 +543,8 @@ defmodule Ouroboros.Web.Live.NewSession do
   end
 
   # The shared catalogue also contains embedding, image, audio, moderation and realtime
-  # lanes. They cannot run an interactive coding turn, so offering them here creates a
-  # choice whose only outcome is a provider refusal.
+  # lanes. They cannot run an agent turn, so offering them here creates a choice whose
+  # only outcome is a provider refusal.
   defp agent_model?(model, default) do
     id = model |> Map.get(:id) |> to_string()
 

@@ -1609,8 +1609,8 @@ defmodule Ouroboros.Cluster do
   Asserts that agents and workers may be placed on `target`.
 
   Placement requires a connected `:core` node running a compatible version of this
-  runtime, because that is the only role whose tree contains the teams, stores, and
-  schedulers a placed worker will reach for. Compatibility is the Ouroboros application
+  runtime, because that is the only role whose tree contains the stores and session
+  supervisors a placed worker will reach for. Compatibility is the Ouroboros application
   contract, explicit fleet protocol revision, and OTP release; CPU architecture is
   inventory only and is deliberately not a placement fence. `config :ouroboros,
   :placement_role_check` (default `true`) disables the check for setups that place onto
