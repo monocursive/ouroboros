@@ -236,7 +236,7 @@ defmodule Ouroboros.Provider.Native.LoopJournalTest do
   end
 
   describe "the tool result recorded is the message that entered the conversation" do
-    test "post-hook, post-diagnostics content, not the tool's raw output", context do
+    test "post-hook content, not the tool's raw output", context do
       {loop, _agent} =
         start_loop(context, [
           [{:tool_call, %{id: "c1", name: "read", input: %{"path" => "lib/a.ex"}}}],

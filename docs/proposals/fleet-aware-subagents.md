@@ -58,8 +58,10 @@ each probe and keeps `state: :local | :connected | :offline` with timestamps
 (`cluster.ex:179-194`, `280-345`, `new_machine/2`). `Cluster.resolve_machine/1` accepts
 a node string or the friendly machine name (`cluster.ex:1409-1421`).
 
-**Prompt.** `Prompt.base/1` has sections Tools, Workspace, posture, plan, computer use,
-Rules, Ouroboros sources, Style (`prompt.ex:69-137`) and no fleet section. The prompt is
+**Prompt.** `Prompt.base/1` has sections Tools, Workspace, posture, plan, Rules,
+Ouroboros sources, Style (`prompt.ex:69-135`) and no fleet section. At `ffded0b` it also
+had a computer-use section; that plane was removed with desktop automation
+(`docs/proposals/core.md` §4 A4). The prompt is
 built when the session opens and again on compaction (`session.ex:1492-1520`), so
 whatever it says about the fleet is a snapshot.
 

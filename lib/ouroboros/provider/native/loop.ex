@@ -117,7 +117,7 @@ defmodule Ouroboros.Provider.Native.Loop do
     * **`tool_source`** — `:live` dispatches. `{:recorded, %{call_id => %{output:,
       is_error:, ledger_ref:}}}` makes the recorded `tool_result` content authoritative:
       `dispatch/2` answers from it *before* the tool lookup, so admission, hooks, sandbox,
-      LSP, MCP and the tool itself are never reached — their outputs are already baked into
+      MCP and the tool itself are never reached — their outputs are already baked into
       that content, and re-deriving any of it would be re-running it. A `call_id` the
       record does not hold comes back as an error result naming `{:not_in_record, id}`
       rather than as a dispatch. Any other non-`:live` value answers from an empty record:

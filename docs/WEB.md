@@ -302,7 +302,9 @@ mechanism.
 
 **The parity target is the GPUI desktop surface, not the seven-tab TUI.** The TUI remains
 the full-surface client; the web starts where the desktop stopped and can grow later.
-Inventory source: the removed `docs/DESKTOP.md` and the verified feature map of `tui/src/desktop.rs`.
+Inventory source: the removed `docs/DESKTOP.md` and the verified feature map of the GPUI
+client's `tui/src/desktop.rs`, deleted at W9. Neither file is in the tree; this table is
+what was read out of them.
 
 | Desktop feature (today) | Web treatment |
 |---|---|
@@ -345,12 +347,13 @@ Inventory source: the removed `docs/DESKTOP.md` and the verified feature map of 
     same work, and leaving them out would have made the file a partial memory of a form
     somebody had just filled in.
   - **A stored default is sendable**, and this is the one semantic here worth arguing
-    about. the removed `docs/DESKTOP.md`'s new-session paragraph reads "What the file supplies is where
-    the control *starts*; an explicit pick is what gets sent, and an untouched panel with
-    **no stored default** states no posture at all" — and the desktop implements exactly
-    what that last clause forces: `self.new_sandbox.or(configured_sandbox)`, under the
-    comment "the operator's pick, else the stored default, else nothing"
-    (`tui/src/desktop.rs:2264-2269`). The web matches it. "Absent, not defaulted" keeps its
+    about. The removed `docs/DESKTOP.md`'s new-session paragraph read "What the file
+    supplies is where the control *starts*; an explicit pick is what gets sent, and an
+    untouched panel with **no stored default** states no posture at all" — and the GPUI
+    client implemented exactly what that last clause forces:
+    `self.new_sandbox.or(configured_sandbox)`, under the comment "the operator's pick,
+    else the stored default, else nothing" (`tui/src/desktop.rs:2264-2269`, deleted at
+    W9). The web matches it. "Absent, not defaulted" keeps its
     meaning: what never reaches the plane is what the operator has never chosen, this time
     or last. A file that was drawn but not sent would show one posture and request another.
   - **Notifications are not a later slice; they landed in W8.** A topbar bell, off by

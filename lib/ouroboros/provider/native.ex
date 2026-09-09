@@ -4,10 +4,10 @@ defmodule Ouroboros.Provider.Native do
 
   Every other provider drives a vendor CLI. Ouroboros hands it a request, polls its
   events, and is never in the loop where a tool actually runs — so it cannot ask before
-  a command executes, append a diagnostic to an edit, or veto anything
+  a command executes, fold a conversation it does not hold, or veto anything
   (`docs/AGENT_EXPERIENCE.md` §3.3 F1/F2/F5). This adapter is the one place that is not
   true: the model call, the tool dispatch, and the file writes all happen here, which is
-  why it is the only honest home for permission rules, LSP, MCP, hooks, compaction and
+  why it is the only honest home for permission rules, MCP, hooks, compaction and
   checkpoints (§4.3, D1).
 
   It registers like the three adapters this runtime already overrides — through
@@ -56,12 +56,12 @@ defmodule Ouroboros.Provider.Native do
       the containment. `:unrestricted` is that weaker posture asked for by name, and is
       not what a missing backend quietly becomes. There is no seccomp filter and no
       domain allowlist on any backend.
-    * **LSP, MCP, hooks, compaction, and checkpoints live in this adapter.** They are
+    * **MCP, hooks, compaction, and checkpoints live in this adapter.** They are
       the reason this provider exists in-process rather than as another CLI: the loop
-      can ask before a tool runs, append a diagnostic to an edit, fold a conversation it
-      actually holds, and refuse a compaction whose archive cannot be written. Vendor
-      transports still own whatever of those they implement themselves; this module does
-      not invent a second copy for a transcript it never had.
+      can ask before a tool runs, fold a conversation it actually holds, and refuse a
+      compaction whose archive cannot be written. Vendor transports still own whatever
+      of those they implement themselves; this module does not invent a second copy for
+      a transcript it never had.
   """
 
   @behaviour Jido.Harness.Adapter

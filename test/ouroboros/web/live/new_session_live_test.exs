@@ -582,12 +582,12 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
   # Stored defaults (W8): `web.prefs.json`
   #
   # The semantics matched here are the **desktop's**, and they are not the ones a first
-  # reading of "absent, not defaulted" suggests. the removed `docs/DESKTOP.md` says "What the file
-  # supplies is where the control *starts*; an explicit pick is what gets sent, and an
-  # untouched panel with *no stored default* states no posture at all" — and the desktop
-  # implements the reading that sentence's last clause forces: `self.new_sandbox
-  # .or(configured_sandbox)`, under the comment "the operator's pick, else the stored
-  # default, else nothing" (`tui/src/desktop.rs:2264-2269`).
+  # reading of "absent, not defaulted" suggests. The removed `docs/DESKTOP.md` said "What
+  # the file supplies is where the control *starts*; an explicit pick is what gets sent,
+  # and an untouched panel with *no stored default* states no posture at all" — and the
+  # GPUI client implemented the reading that sentence's last clause forces:
+  # `self.new_sandbox.or(configured_sandbox)`, under the comment "the operator's pick, else
+  # the stored default, else nothing" (`tui/src/desktop.rs:2264-2269`, deleted at W9).
   #
   # So a seeded control is a **stated** control, on all five keys. The alternative — a file
   # that is displayed but not sent — would show an operator one posture and request another,
