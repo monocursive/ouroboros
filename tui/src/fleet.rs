@@ -1,10 +1,13 @@
-//! A small, local control plane for joining Ouroboros machines.
+//! This machine's cluster identity, and the EPMD it owns while its runtime runs.
 //!
-//! The profile deliberately contains only non-secret facts. The BEAM cookie, node key,
-//! and fleet CA key live in separate mode-0600 files and are passed to the release by
-//! path. An invitation is the one exception: it is a portable, mode-0600 envelope that
-//! contains the new machine's credential and the shared cookie. It never implements
-//! `Debug`, and no command prints its contents.
+//! `create` mints the identity — node name, private cookie, a self-signed CA and node
+//! certificate for TLS distribution, a private EPMD port — and `runtime_env` turns it
+//! into the environment the packaged release boots with. The profile deliberately
+//! contains only non-secret facts: the BEAM cookie, the node key and the CA key live in
+//! separate mode-0600 files and are passed to the release by path.
+//!
+//! Nothing here enrolls another machine. Two machines join a cluster because an operator
+//! gave them the same cookie and named each other, which is `docs/FLEET.md`.
 
 use std::collections::BTreeSet;
 use std::ffi::CStr;
