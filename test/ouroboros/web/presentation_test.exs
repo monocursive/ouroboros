@@ -24,7 +24,6 @@ defmodule Ouroboros.EventPresentationTest do
     FileChange,
     FileUpdate,
     Hidden,
-    ImageArtifact,
     Interrupted,
     Lifecycle,
     PlanStep,
@@ -92,8 +91,7 @@ defmodule Ouroboros.EventPresentationTest do
                call_id: "call-7",
                name: nil,
                output: %{"text" => "defmodule Ouroboros"},
-               is_error: false,
-               artifacts: []
+               is_error: false
              } = Presentation.from_event(result)
     end
 
@@ -126,51 +124,6 @@ defmodule Ouroboros.EventPresentationTest do
     test "a tool result output that is JSON null stays null rather than becoming absent" do
       assert %ToolResult{output: nil} =
                Presentation.from_event(event(:tool_result, %{"output" => nil}))
-    end
-  end
-
-  describe "desktop image artifacts" do
-    test "decodes_desktop_image_artifacts_and_tolerates_a_newer_gateways_extra_fields" do
-      sha = String.duplicate("ab", 32)
-
-      result =
-        event(:tool_result, %{
-          "call_id" => "call-9",
-          "output" => "captured",
-          "artifacts" => [
-            %{
-              "kind" => "image",
-              "sha256" => String.upcase(sha),
-              "media_type" => "image/png",
-              "bytes" => 4096,
-              "width" => 800,
-              "height" => 600,
-              "a_field_from_a_newer_gateway" => true
-            },
-            %{"kind" => "sound", "sha256" => sha},
-            %{"sha256" => "too-short"},
-            %{"media_type" => "image/png"}
-          ]
-        })
-
-      assert %ToolResult{artifacts: [artifact]} = Presentation.from_event(result)
-
-      assert %ImageArtifact{
-               sha256: ^sha,
-               media_type: "image/png",
-               size: 4096,
-               width: 800,
-               height: 600
-             } = artifact
-    end
-
-    test "an artifact naming no kind is taken as an image" do
-      sha = String.duplicate("0", 64)
-
-      assert %ToolResult{artifacts: [%ImageArtifact{sha256: ^sha}]} =
-               Presentation.from_event(
-                 event(:tool_result, %{"artifacts" => [%{"sha256" => sha}]})
-               )
     end
   end
 

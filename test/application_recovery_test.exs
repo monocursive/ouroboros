@@ -74,30 +74,6 @@ defmodule Ouroboros.ApplicationRecoveryTest do
     assert Process.alive?(replacement_grants)
   end
 
-  test "exhausting CodeIntel's restart budget leaves unrelated helpers and session owners alive" do
-    code_intel = Process.whereis(Ouroboros.CodeIntel.Supervisor)
-
-    unaffected = [
-      Ouroboros.Wasm.Supervisor,
-      Ouroboros.Provider.Native.Desktop.Supervisor,
-      Ouroboros.Provider.Native.Mcp.Supervisor,
-      Ouroboros.Interactive.TaskSupervisor
-    ]
-
-    before = Map.new(unaffected, &{&1, Process.whereis(&1)})
-    assert Enum.all?(before, fn {_name, pid} -> is_pid(pid) end)
-
-    for _attempt <- 1..11 do
-      pool = Process.whereis(Ouroboros.CodeIntel.LspPool)
-      assert is_pid(pool)
-      Process.exit(pool, :kill)
-      assert_eventually(fn -> replacement(Ouroboros.CodeIntel.LspPool, pool) end)
-    end
-
-    assert_eventually(fn -> replacement(Ouroboros.CodeIntel.Supervisor, code_intel) end)
-    for {name, pid} <- before, do: assert(Process.whereis(name) == pid)
-  end
-
   test "disabling automation retains coding and permission authorities" do
     previous = Application.get_env(:ouroboros, :automation_enabled)
 

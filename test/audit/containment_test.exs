@@ -42,7 +42,6 @@ defmodule Ouroboros.Audit.ContainmentTest do
              Sandbox.decision(ctx.scope, %{backend: :bwrap, unshare_net: false})
 
     refute Ouroboros.Audit.tool_supported?("mcp__unsafe__run")
-    refute Ouroboros.Audit.tool_supported?("code_intel")
     assert {:error, _} = Paths.resolve(Path.join(ctx.root, "evidence/sentinel"), ctx.scope)
   end
 

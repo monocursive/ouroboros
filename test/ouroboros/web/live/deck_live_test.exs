@@ -1765,24 +1765,6 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
         refute html =~ "ouro-inline-answers"
       end
     end
-
-    test "does not offer a Computer Use ask", %{conn: conn} do
-      id = session_id()
-      _listed = listed(id)
-
-      request =
-        asked(1, "r1", %{
-          "kind" => "permission",
-          "tool_call" => %{"name" => "desktop_act", "command" => "click"}
-        })
-
-      _plane = plane(id: id, backlogs: [{:ok, [request]}])
-
-      {:ok, _view, html} = live(conn, "/s/interactive/#{id}")
-
-      assert html =~ "ouro-row-needs_you"
-      refute html =~ "ouro-inline-answers"
-    end
   end
 
   # ------------------------------------------------------------------------------------
@@ -1833,25 +1815,6 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
         {fixture, _} = unquote(Macro.escape(request))
         id = session_id()
         _plane = plane(id: id, backlogs: [{:ok, [corpus(fixture, 1, "r1")]}])
-
-        {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
-        view |> element(~s(button[phx-click="auto_approve"])) |> render_click()
-
-        refute_receive {:responded, _id, _response}, 150
-      end
-    end
-
-    for tool <- ["desktop_state", "desktop_act"] do
-      test "never answers a #{tool} ask", %{conn: conn} do
-        id = session_id()
-
-        request =
-          asked(1, "r1", %{
-            "kind" => "permission",
-            "tool_call" => %{"name" => unquote(tool), "command" => "look"}
-          })
-
-        _plane = plane(id: id, backlogs: [{:ok, [request]}])
 
         {:ok, view, _html} = live(conn, "/s/interactive/#{id}")
         view |> element(~s(button[phx-click="auto_approve"])) |> render_click()
@@ -1977,15 +1940,15 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
       assert reason == "This Ouroboros node cannot save approval rules."
     end
 
-    test "a Computer Use pattern is user-scoped and needs no workspace" do
+    test "a Capability pattern is user-scoped and needs no workspace" do
       assert {rule, nil} =
                Transcript.suggested_rule(
-                 "ComputerUse(Safari)",
+                 "Capability(vet)",
                  Ouroboros.Gateway.Methods.names(),
                  nil
                )
 
-      assert rule.pattern == "ComputerUse(Safari)"
+      assert rule.pattern == "Capability(vet)"
       assert rule.workspace == ""
     end
   end

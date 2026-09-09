@@ -374,7 +374,7 @@ defmodule Ouroboros.Audit.SystemTest do
     File.write!(workspace, "workspace source")
 
     legacy =
-      for family <- ["attachments", "desktop", "output"] do
+      for family <- ["attachments", "output"] do
         relative = "native/example/#{family}/legacy.bin"
         path = Path.join(ctx.root, relative)
         File.mkdir_p!(Path.dirname(path))
@@ -395,7 +395,7 @@ defmodule Ouroboros.Audit.SystemTest do
            ]
   end
 
-  test "offline migration and rotation include legacy images, screenshots and output", ctx do
+  test "offline migration and rotation include legacy images and output", ctx do
     config = %{
       ctx.config
       | encryption_key_id: "old",
@@ -403,14 +403,14 @@ defmodule Ouroboros.Audit.SystemTest do
     }
 
     files =
-      for family <- ["attachments", "desktop", "output"] do
+      for family <- ["attachments", "output"] do
         file = Path.join(ctx.root, "native/legacy/#{family}/content.bin")
         File.mkdir_p!(Path.dirname(file))
         File.write!(file, <<0, 255, 1>> <> "private #{family}")
         {file, File.read!(file)}
       end
 
-    assert length(Content.inventory(ctx.root, config).plaintext) == 3
+    assert length(Content.inventory(ctx.root, config).plaintext) == 2
 
     assert {:error, :migration_requires_stopped_runtime_and_key} =
              Content.migrate(ctx.root, config)

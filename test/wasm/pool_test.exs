@@ -1726,8 +1726,7 @@ defmodule Ouroboros.Wasm.PoolTest do
 
   ## Fake helpers
   #
-  # Shell scripts standing in for `ouro-wasm`, the same technique
-  # `Ouroboros.Provider.Native.Desktop.PoolTest` uses: `awk` reads a line at a time and
+  # Shell scripts standing in for `ouro-wasm`: `awk` reads a line at a time and
   # `fflush()` puts each answer on the pipe immediately, which is the one portable way to
   # keep a shell's stdout buffering out of the handshake.
 

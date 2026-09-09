@@ -25,7 +25,6 @@
       "request_id": null,
       "semantic": {
         "data": {
-          "artifacts": [],
           "at": 1767225600000,
           "call_id": "acp-call-0000000000000001",
           "is_error": false,

@@ -463,38 +463,6 @@ fn an_acp_status_of_completed_settles_the_edit_without_an_is_error_field() {
     );
 }
 
-/// A Computer Use result is two cells in a fixed order: the tool row, then the picture it
-/// produced. The image carries the sha and the size the gateway stated and no bytes — the
-/// pixels are fetched by sha through `computer_use.artifact`.
-#[test]
-fn a_computer_use_result_is_a_tool_row_and_then_a_labelled_image() {
-    let projected = cells(&["event_tool_result_computer_use"]);
-
-    assert_eq!(projected.len(), 2, "{projected:?}");
-    assert_eq!(tool(&projected[0]).name, "desktop_state");
-    assert_eq!(tool(&projected[0]).state, ToolState::Completed);
-    assert_eq!(
-        summary(&projected[0]),
-        ("desktop state".to_string(), String::new(), String::new())
-    );
-
-    match &projected[1] {
-        Cell::Image(image) => {
-            assert_eq!(image.named, "desktop capture · abababababab");
-            assert_eq!(image.pixels, Some((1512, 982)));
-            assert_eq!(image.format.as_deref(), Some("png"));
-            assert_eq!(image.media_type.as_deref(), Some("image/png"));
-            assert_eq!(image.sha.as_deref(), Some(&"ab".repeat(32)[..]));
-            assert_eq!(image.note, None);
-            assert_eq!(
-                image.label(),
-                "[image 1512×982 png · desktop capture · abababababab]"
-            );
-        }
-        other => panic!("not an image cell: {other:?}"),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // What changed
 // ---------------------------------------------------------------------------
@@ -769,7 +737,6 @@ fn an_ordinary_permission_asks_with_the_command_the_reason_and_the_rule_that_wou
     let request = approval("event_approval_requested_permission");
 
     assert!(!request.question(), "a command is not a question");
-    assert!(!request.computer_use());
     assert_eq!(
         request.subject(),
         "git push --force origin main — no permission rule engine is configured on this \
@@ -1255,7 +1222,6 @@ fn every_transcript_fixture_renders_something_a_reader_can_see() {
         "event_tool_call_read",
         "event_tool_result_acp_edit",
         "event_tool_result_bash",
-        "event_tool_result_computer_use",
         "event_tool_result_read",
         "event_turn_completed",
         "event_turn_failed",

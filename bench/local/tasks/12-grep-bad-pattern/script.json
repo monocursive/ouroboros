@@ -1,0 +1,21 @@
+{
+  "instruction": "Corpus task 12: search notes.txt for an unbalanced pattern.",
+  "responses": [
+    [
+      {"type": "text", "text": "Searching for the heading."},
+      {"type": "tool_call", "id": "c1", "name": "grep", "input": {
+        "pattern": "(unclosed",
+        "path": "notes.txt"
+      }}
+    ],
+    [
+      {"type": "text", "text": "That pattern will not compile, so I read the file instead."},
+      {"type": "tool_call", "id": "c2", "name": "read", "input": {"path": "notes.txt"}}
+    ],
+    [
+      {"type": "text", "text": "It is prose, not code."},
+      {"type": "usage", "input_tokens": 260, "output_tokens": 36},
+      {"type": "finish", "reason": "stop"}
+    ]
+  ]
+}

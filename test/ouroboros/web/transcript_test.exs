@@ -397,38 +397,6 @@ defmodule Ouroboros.Web.TranscriptTest do
       assert [%Cell.Tool{output: "authoritative"}, %Cell.CommandOutput{text: "streaming\n"}] =
                cells
     end
-
-    test "a_desktop_state_result_projects_a_tool_cell_and_an_image_cell" do
-      sha = String.duplicate("cd", 32)
-
-      cells =
-        project([
-          event(:tool_call, %{"call_id" => "c1", "name" => "desktop_state"}, sequence: 1),
-          event(
-            :tool_result,
-            %{
-              "call_id" => "c1",
-              "output" => "captured",
-              "artifacts" => [
-                %{
-                  "kind" => "image",
-                  "sha256" => sha,
-                  "media_type" => "image/png",
-                  "width" => 100,
-                  "height" => 50
-                }
-              ]
-            },
-            sequence: 2
-          )
-        ])
-
-      assert [%Cell.Tool{name: "desktop_state"}, %Cell.Image{} = image] = cells
-      assert image.sha == sha
-      assert image.pixels == {100, 50}
-      assert image.format == "png"
-      assert Cell.Image.label(image) == "[image 100×50 png · desktop capture · cdcdcdcdcdcd]"
-    end
   end
 
   describe "exploration folding" do
@@ -937,16 +905,6 @@ defmodule Ouroboros.Web.TranscriptTest do
       end
     end
 
-    test "computer use observe and act are questions so auto-approve cannot answer them" do
-      for name <- ["desktop_state", "desktop_act"] do
-        assert Transcript.question?(%Approval{
-                 request_id: "r",
-                 sequence: 1,
-                 payload: %{"tool_call" => %{"name" => name}}
-               })
-      end
-    end
-
     test "an ordinary permission is not a question" do
       refute Transcript.question?(%Approval{
                request_id: "r",
@@ -1056,9 +1014,9 @@ defmodule Ouroboros.Web.TranscriptTest do
       assert {nil, ^reason} = Transcript.suggested_rule("Bash(ls:*)", methods, "   ")
     end
 
-    test "a ComputerUse pattern is user-scoped, so a missing workspace does not hide it" do
-      assert {%Approval.Rule{pattern: "ComputerUse(Safari)", workspace: ""}, nil} =
-               Transcript.suggested_rule("ComputerUse(Safari)", ["permissions.add"], nil)
+    test "a Capability pattern is user-scoped, so a missing workspace does not hide it" do
+      assert {%Approval.Rule{pattern: "Capability(vet)", workspace: ""}, nil} =
+               Transcript.suggested_rule("Capability(vet)", ["permissions.add"], nil)
     end
   end
 

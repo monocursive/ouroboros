@@ -240,7 +240,6 @@
     "fixture": "event_tool_result_acp_edit",
     "expected": {
       "data": {
-        "artifacts": [],
         "at": 1767225600000,
         "call_id": "acp-call-0000000000000001",
         "is_error": false,
@@ -264,7 +263,6 @@
     "fixture": "event_tool_result_bash",
     "expected": {
       "data": {
-        "artifacts": [],
         "at": 1767225600000,
         "call_id": "toolu_01Bash000000000000001",
         "is_error": false,
@@ -277,34 +275,9 @@
     }
   },
   {
-    "fixture": "event_tool_result_computer_use",
-    "expected": {
-      "data": {
-        "artifacts": [
-          {
-            "height": 982,
-            "media_type": "image/png",
-            "sha256": "abababababababababababababababababababababababababababababababab",
-            "size": 184320,
-            "width": 1512
-          }
-        ],
-        "at": 1767225600000,
-        "call_id": "toolu_01Desktop00000000001",
-        "is_error": false,
-        "kind": null,
-        "name": "desktop_state",
-        "output": "Captured the frontmost window of Calculator."
-      },
-      "kind": "ToolResult",
-      "version": 1
-    }
-  },
-  {
     "fixture": "event_tool_result_read",
     "expected": {
       "data": {
-        "artifacts": [],
         "at": 1767225600000,
         "call_id": "toolu_01Read000000000000001",
         "is_error": false,

@@ -76,8 +76,8 @@ defmodule Ouroboros.Gateway.SessionReplayVerifyTest do
     test "verification is operate scope, with a ceiling of its own" do
       table = Methods.table()
 
-      # `computer_use.status`/`probe` is the precedent: this starts a process — a real turn
-      # loop per recorded turn — even though it spends nothing and writes nothing.
+      # This starts a process — a real turn loop per recorded turn — even though it
+      # spends nothing and writes nothing.
       assert table["interactive.replay_verify"].scope == :operate
       assert "interactive.replay_verify" in Methods.names()
       assert Methods.permits?(:operate, table["interactive.replay_verify"])

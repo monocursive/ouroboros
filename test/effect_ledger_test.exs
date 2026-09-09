@@ -425,37 +425,33 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
       refute inspect(entry) =~ "rm -rf"
     end
 
-    test "a Computer Use subject keeps app, action, and window_id" do
+    test "a capability subject keeps the name and the component digest" do
       ledger = start_ledger!()
+      digest = String.duplicate("d", 64)
 
       assert {:ok, entry, :created} =
                EffectLedger.record_started(
                  %{
-                   id: "tool-cu",
+                   id: "tool-cap",
                    effect: :tool_call,
                    principal: "session:s1",
                    attempt: %{
                      session_id: "s1",
-                     tool: "desktop_act",
+                     tool: "capability",
                      provider: :native,
                      subject: %{
-                       app: "com.apple.calculator",
-                       desktop_action: "click",
-                       window_id: "w_1",
+                       capability: "vet",
+                       component_sha256: digest,
                        input: @secret
                      }
                    },
                    authority: %{decision: :allow},
-                   cause: %{signal_id: "tool-cu"}
+                   cause: %{signal_id: "tool-cap"}
                  },
                  ledger
                )
 
-      assert entry.attempt.subject == %{
-               app: "com.apple.calculator",
-               desktop_action: "click",
-               window_id: "w_1"
-             }
+      assert entry.attempt.subject == %{capability: "vet", component_sha256: digest}
 
       refute inspect(entry) =~ @secret
     end

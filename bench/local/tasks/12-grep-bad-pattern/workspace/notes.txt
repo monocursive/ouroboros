@@ -1,0 +1,2 @@
+Plain prose, in a file no pattern in this task was ever going to match.
+That is what makes this task's outcome the same on every machine.

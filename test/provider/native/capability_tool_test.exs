@@ -468,7 +468,7 @@ defmodule Ouroboros.Provider.Native.CapabilityToolTest do
       name = deploy_live("vet", @sha)
 
       # M23: the context key is the capability's name, and another tool could carry one —
-      # the desktop tools already put a resolved app there. A pattern that matched on the
+      # the classifier already puts a resolved fact there. A pattern that matched on the
       # context alone would judge a call it was never written about.
       elsewhere = %{
         principal: %{session_id: "w13", provider: :native, node: node()},

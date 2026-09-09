@@ -465,50 +465,6 @@ defmodule Ouroboros.Web.Live.CellsTest do
     end
   end
 
-  describe "images" do
-    test "a sha-addressed artifact is an img pointing at the controller route" do
-      cell = %Cell.Image{
-        named: "desktop capture · abc",
-        sha: String.duplicate("a", 64),
-        media_type: "image/png",
-        pixels: {800, 600},
-        format: "png"
-      }
-
-      html = paint(cell, plane: :interactive, session_id: "sess-9")
-
-      assert html =~ ~s(src="/artifact/interactive/sess-9/#{String.duplicate("a", 64)}")
-      assert html =~ ~s(width="800")
-      assert html =~ ~s(loading="lazy")
-      # The label is the alt text, not a caption under a picture the reader can see.
-      assert html =~ "alt="
-      refute html =~ "figcaption"
-    end
-
-    test "reserved characters in a session id stay inside one route segment" do
-      sha = String.duplicate("a", 64)
-      cell = %Cell.Image{named: "capture", sha: sha, media_type: "image/png"}
-
-      html = paint(cell, plane: :interactive, session_id: "a/b?c#d%e")
-
-      assert html =~ ~s(src="/artifact/interactive/a%2Fb%3Fc%23d%25e/#{sha}")
-    end
-
-    test "an image with no digest to fetch by says what it was instead of showing a hole" do
-      html = paint(%Cell.Image{named: "a picture", pixels: {10, 10}, format: "png"})
-
-      refute html =~ "<img"
-      assert html =~ "figcaption"
-      assert html =~ "a picture"
-    end
-
-    test "the corpus's computer-use result produces something drawable" do
-      html = draw(["event_tool_result_computer_use"])
-
-      assert is_binary(html)
-    end
-  end
-
   describe "files and command output" do
     test "a file row names its path and what happened to it" do
       html = paint(%Cell.File{path: "lib/a.ex", kind: "modified"})

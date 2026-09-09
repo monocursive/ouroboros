@@ -363,29 +363,6 @@ defmodule Ouroboros.Web.CorpusParityTest do
 
       assert summary(hd(projected)) == {"Edit", "lib/ouroboros/web/transcript.ex (+4 −3)", ""}
     end
-
-    # Mirrors `a_computer_use_result_is_a_tool_row_and_then_a_labelled_image`. A Computer
-    # Use result is two cells in a fixed order: the tool row, then the picture it produced.
-    # The image carries the sha and the size the gateway stated and no bytes — the pixels
-    # are fetched by sha through `computer_use.artifact`.
-    test "a_computer_use_result_is_a_tool_row_and_then_a_labelled_image" do
-      projected = cells(["event_tool_result_computer_use"])
-
-      assert length(projected) == 2, inspect(projected)
-      assert tool(hd(projected)).name == "desktop_state"
-      assert tool(hd(projected)).state == :completed
-      assert summary(hd(projected)) == {"desktop state", "", ""}
-
-      assert %Cell.Image{} = image = Enum.at(projected, 1)
-
-      assert image.named == "desktop capture · abababababab"
-      assert image.pixels == {1512, 982}
-      assert image.format == "png"
-      assert image.media_type == "image/png"
-      assert image.sha == String.duplicate("ab", 32)
-      assert image.note == nil
-      assert Cell.Image.label(image) == "[image 1512×982 png · desktop capture · abababababab]"
-    end
   end
 
   # ------------------------------------------------------------------------------------
@@ -585,7 +562,6 @@ defmodule Ouroboros.Web.CorpusParityTest do
       request = approval("event_approval_requested_permission")
 
       refute Approval.question?(request), "a command is not a question"
-      refute Approval.computer_use?(request)
 
       assert Approval.subject(request) ==
                "git push --force origin main — no permission rule engine is configured on this " <>
@@ -958,7 +934,6 @@ defmodule Ouroboros.Web.CorpusParityTest do
         "event_tool_call_read",
         "event_tool_result_acp_edit",
         "event_tool_result_bash",
-        "event_tool_result_computer_use",
         "event_tool_result_read",
         "event_turn_completed",
         "event_turn_failed",

@@ -167,14 +167,13 @@ defmodule Ouroboros.Wasm.ResolutionTest do
 
   @tag :subprocess
   test "no helper resolver selects a binary planted in a cwd ancestor (F1)" do
-    # The finding, for all three resolvers at once. Each of them walked six ancestors of the
+    # The finding, for both resolvers at once. Each of them walked six ancestors of the
     # daemon's working directory looking for `priv/<kind>/<binary>`, and two of them also had
     # a bare `Path.expand("priv/<kind>/…")` candidate. With no bundled helper — the documented
     # default, since nothing in this repo builds one for you — a *cloned repository* that
     # happened to contain that path supplied the binary the daemon spawns as its containment
-    # boundary: the wasm helper that contains untrusted guest code, the Computer Use helper
-    # that drives the desktop, and the sandbox helper that applies Landlock and seccomp before
-    # `execve`ing an untrusted command.
+    # boundary: the wasm helper that contains untrusted guest code, and the sandbox helper
+    # that applies Landlock and seccomp before `execve`ing an untrusted command.
     #
     # The subprocess is what makes this provable rather than incidental. `:code.lib_dir/1`
     # resolves an application from the *first* matching directory on the code path, so an
@@ -196,7 +195,6 @@ defmodule Ouroboros.Wasm.ResolutionTest do
       Map.new(
         [
           {:wasm, "wasm", "ouro-wasm"},
-          {:desktop, "computer-use", "ouro-computer-use"},
           {:sandbox, "sandbox", "ouro-sandbox"}
         ],
         fn {key, kind, name} ->
@@ -214,7 +212,7 @@ defmodule Ouroboros.Wasm.ResolutionTest do
       )
 
     code = """
-    for name <- ~w(OUROBOROS_WASM_HELPER OUROBOROS_COMPUTER_USE_HELPER OUROBOROS_SANDBOX_HELPER) do
+    for name <- ~w(OUROBOROS_WASM_HELPER OUROBOROS_SANDBOX_HELPER) do
       System.delete_env(name)
     end
 
@@ -222,7 +220,6 @@ defmodule Ouroboros.Wasm.ResolutionTest do
 
     IO.puts("PRIV:" <> inspect(:code.priv_dir(:ouroboros)))
     IO.puts("WASM:" <> Ouroboros.Wasm.helper_path())
-    IO.puts("DESKTOP:" <> Ouroboros.Provider.Native.Desktop.helper_path())
     IO.puts("SANDBOX:" <> inspect(Ouroboros.Provider.Native.Sandbox.Helper.executable()))
     """
 
@@ -241,10 +238,10 @@ defmodule Ouroboros.Wasm.ResolutionTest do
       |> Map.new()
 
     # The fixture is only meaningful if the subprocess really had no bundled helper: its
-    # `priv/` is the empty directory beside the fake ebin, which holds none of the three.
+    # `priv/` is the empty directory beside the fake ebin, which holds neither.
     assert lines["PRIV"] =~ Path.join([root, "codepath", "ouroboros", "priv"]), output
 
-    for {key, resolver} <- %{wasm: "WASM", desktop: "DESKTOP", sandbox: "SANDBOX"} do
+    for {key, resolver} <- %{wasm: "WASM", sandbox: "SANDBOX"} do
       resolved = Map.fetch!(lines, resolver)
 
       for path <- Map.fetch!(planted, key) do
@@ -258,7 +255,7 @@ defmodule Ouroboros.Wasm.ResolutionTest do
   end
 
   @tag :subprocess
-  test "relative helper overrides are rejected by all three containment resolvers" do
+  test "relative helper overrides are rejected by both containment resolvers" do
     root =
       Path.join(System.tmp_dir!(), "ouro-relative-helper-#{System.unique_integer([:positive])}")
 
@@ -269,14 +266,11 @@ defmodule Ouroboros.Wasm.ResolutionTest do
     code = """
     File.cd!(#{inspect(root)})
     System.put_env("OUROBOROS_WASM_HELPER", "priv/wasm/ouro-wasm")
-    System.put_env("OUROBOROS_COMPUTER_USE_HELPER", "priv/computer-use/ouro-computer-use")
     System.put_env("OUROBOROS_SANDBOX_HELPER", "priv/sandbox/ouro-sandbox")
     Application.put_env(:ouroboros, :wasm, helper_path: "configured/ouro-wasm")
-    Application.put_env(:ouroboros, :computer_use, helper_path: "configured/ouro-computer-use")
     Application.put_env(:ouroboros, :native_sandbox_helper, "configured/ouro-sandbox")
 
     IO.puts("WASM:" <> Ouroboros.Wasm.helper_path())
-    IO.puts("DESKTOP:" <> Ouroboros.Provider.Native.Desktop.helper_path())
     IO.puts("SANDBOX:" <> inspect(Ouroboros.Provider.Native.Sandbox.Helper.executable()))
     """
 
@@ -284,8 +278,6 @@ defmodule Ouroboros.Wasm.ResolutionTest do
     assert status == 0, output
     refute output =~ "WASM:priv/", output
     refute output =~ "WASM:configured/", output
-    refute output =~ "DESKTOP:priv/", output
-    refute output =~ "DESKTOP:configured/", output
     refute output =~ "SANDBOX:\"priv/", output
     refute output =~ "SANDBOX:\"configured/", output
   end
