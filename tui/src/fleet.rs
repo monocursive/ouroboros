@@ -509,7 +509,7 @@ pub fn load(data_dir: &Path) -> Result<Option<Profile>> {
             )
         })? {
             bail!(
-                "{} exists without {}. If you know this stopped machine's former name, clear only the recognized private files with `ouro fleet leave --discard-incomplete --machine NAME`; Ouroboros will first prove its recovery unit is inactive. Otherwise restore profile.json from backup before retrying",
+                "{} exists without {}. Restore profile.json from a backup to keep this machine's cluster identity, or run `ouro fleet leave` on this stopped machine to clear the recognized private files and start over with `ouro fleet create`",
                 fleet_dir(data_dir).display(),
                 path.display()
             );
@@ -649,6 +649,118 @@ pub fn restore_machine(data_dir: &Path, restored: &Member) -> Result<()> {
         .checked_add(1)
         .ok_or_else(|| anyhow!("this machine's roster revision is exhausted"))?;
     write_profile(data_dir, &profile).context("restoring the member the runtime refused to forget")
+}
+
+/// Add another machine to *this* machine's roster.
+///
+/// The roster is not replicated and never was: this writes `<data dir>/fleet/profile.json`
+/// here and nowhere else, so an operator runs it once per remaining machine. It exists so
+/// they never hand-edit that file — `validate_profile` refuses several shapes a careful
+/// person still gets wrong, starting with `node` not being `ouro-<machine>@<host>`.
+///
+/// It takes the same live lock `ouro fleet tag` takes rather than requiring a stopped
+/// runtime, because the running node re-reads the profile on its next reconnect sweep
+/// (about a second later) and starts dialing the new member without a restart.
+pub fn add_member(
+    data_dir: &Path,
+    machine: &str,
+    host: &str,
+    node: Option<&str>,
+) -> Result<Member> {
+    validate_machine(machine)?;
+    validate_host(host)?;
+    let added = member(machine, host);
+    if let Some(node) = node {
+        if node != added.node {
+            bail!(
+                "machine `{machine}` at `{host}` is node {}, not {node}; a node name is always `ouro-<machine>@<host>`",
+                added.node
+            );
+        }
+    }
+    let _lock = lock_live_fleet_update(data_dir, "ouro fleet members add")?;
+    let mut profile = load(data_dir)?.context(
+        "this machine is standalone; `ouro fleet create` gives it a cluster identity before it can have a roster",
+    )?;
+    if let Some(gone) = profile
+        .tombstones
+        .iter()
+        .find(|entry| entry.machine == machine || entry.node == added.node)
+    {
+        bail!(
+            "this machine's roster records {} as gone for good; `ouro fleet sessions restore {}` puts it back before it can be added again",
+            gone.node,
+            gone.machine
+        );
+    }
+    if let Some(existing) = profile
+        .members
+        .iter()
+        .find(|entry| entry.machine == machine || entry.node == added.node)
+    {
+        if existing == &added {
+            return Ok(added);
+        }
+        bail!(
+            "this machine's roster already names {} as {}; `ouro fleet members remove {}` first if its address changed",
+            existing.machine,
+            existing.node,
+            existing.machine
+        );
+    }
+    profile.members.push(added.clone());
+    profile
+        .members
+        .sort_by(|left, right| left.node.cmp(&right.node));
+    profile.roster_revision = profile
+        .roster_revision
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("this machine's roster revision is exhausted"))?;
+    write_profile(data_dir, &profile).context("adding the machine to this machine's roster")?;
+    Ok(added)
+}
+
+/// Take a machine out of *this* machine's roster.
+///
+/// This is the counterpart of `ouro fleet leave` run on that machine: it stops this one
+/// dialing it and stops `ouro fleet status` expecting it. It writes no tombstone — a
+/// tombstone is the operator saying durable session-owner evidence may be released, which
+/// is `ouro fleet sessions forget`.
+pub fn remove_member(data_dir: &Path, machine: &str) -> Result<Member> {
+    let _lock = lock_live_fleet_update(data_dir, "ouro fleet members remove")?;
+    let mut profile = load(data_dir)?
+        .context("this machine is standalone; there is no cluster roster to edit")?;
+    if machine == profile.machine || machine == profile.node {
+        bail!(
+            "{machine} is this machine; `ouro fleet leave` retires its own identity, and `ouro fleet members remove` edits this machine's view of the others"
+        );
+    }
+    let Some(index) = profile
+        .members
+        .iter()
+        .position(|entry| entry.machine == machine || entry.node == machine)
+    else {
+        if let Some(gone) = profile
+            .tombstones
+            .iter()
+            .find(|entry| entry.machine == machine || entry.node == machine)
+        {
+            bail!(
+                "this machine's roster already records {} as gone for good; nothing was changed",
+                gone.node
+            );
+        }
+        bail!(
+            "this machine's roster has no member named {machine}; `ouro fleet status` prints the names it knows"
+        );
+    };
+    let removed = profile.members.remove(index);
+    profile.roster_revision = profile
+        .roster_revision
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("this machine's roster revision is exhausted"))?;
+    write_profile(data_dir, &profile).context("taking the machine out of this machine's roster")?;
+    Ok(removed)
 }
 
 fn empty_tags() -> Value {
@@ -801,6 +913,215 @@ pub fn create(
     Ok(profile)
 }
 
+/// The non-secret and secret facts `create --from` reads out of a privately copied
+/// `<data dir>/fleet/` directory.
+struct SourceFleet {
+    fleet_id: String,
+    name: String,
+    members: Vec<Member>,
+    tombstones: Vec<Member>,
+    roster_revision: u64,
+    epmd_port: u16,
+    dist_port_min: u16,
+    dist_port_max: u16,
+    ca_cert_pem: String,
+    ca_key_pem: Zeroizing<String>,
+    cookie: Zeroizing<String>,
+}
+
+/// Read a copy of another machine's fleet directory, and refuse anything less than a
+/// complete one.
+///
+/// "Complete" is the whole point: the CA certificate alone cannot sign, a CA key alone
+/// cannot be bound to a certificate, and a cookie without the profile names no fleet. The
+/// source machine's own leaf is validated against the CA and key here, which is what
+/// proves the three files belong together before this machine trusts them.
+fn read_source_fleet(dir: &Path) -> Result<SourceFleet> {
+    ensure_private_dir(dir).with_context(|| {
+        format!(
+            "{} must be a private copy of another machine's fleet directory",
+            dir.display()
+        )
+    })?;
+    for (name, description) in [
+        (PROFILE_FILE, "copied fleet profile"),
+        (COOKIE_FILE, "copied fleet cookie"),
+        (CA_CERT_FILE, "copied fleet CA certificate"),
+        (CA_KEY_FILE, "copied fleet CA key"),
+        (NODE_CERT_FILE, "copied node certificate"),
+        (NODE_KEY_FILE, "copied node key"),
+    ] {
+        ensure_private_file(&dir.join(name), description).with_context(|| {
+            format!(
+                "{} is not a complete copy of a machine's fleet directory; copy the whole of `<data dir>/fleet/` from the first machine, privately",
+                dir.display()
+            )
+        })?;
+    }
+    let text = read_private(&dir.join(PROFILE_FILE), "copied fleet profile")?;
+    let profile: Profile = serde_json::from_str(&text).with_context(|| {
+        format!(
+            "{} is not a valid fleet profile",
+            dir.join(PROFILE_FILE).display()
+        )
+    })?;
+    validate_profile(&profile)?;
+    let cookie = Zeroizing::new(read_private(&dir.join(COOKIE_FILE), "copied fleet cookie")?);
+    validate_cookie(&cookie, &dir.join(COOKIE_FILE).display().to_string())?;
+    let ca_cert_pem = read_private(&dir.join(CA_CERT_FILE), "copied fleet CA certificate")?;
+    let ca_key_pem = Zeroizing::new(read_private(&dir.join(CA_KEY_FILE), "copied fleet CA key")?);
+    let node_cert_pem = read_private(&dir.join(NODE_CERT_FILE), "copied node certificate")?;
+    let node_key_pem = Zeroizing::new(read_private(&dir.join(NODE_KEY_FILE), "copied node key")?);
+    validate_tls_identity(
+        &member(&profile.machine, &profile.host),
+        &ca_cert_pem,
+        &node_cert_pem,
+        &node_key_pem,
+        Some(&ca_key_pem),
+        "copied fleet directory",
+    )?;
+    Ok(SourceFleet {
+        fleet_id: profile.fleet_id,
+        name: profile.name,
+        members: profile.members,
+        tombstones: profile.tombstones,
+        roster_revision: profile.roster_revision,
+        epmd_port: profile.epmd_port,
+        dist_port_min: profile.dist_port_min,
+        dist_port_max: profile.dist_port_max,
+        ca_cert_pem,
+        ca_key_pem,
+        cookie,
+    })
+}
+
+/// Give this machine an identity inside a cluster that already exists, from a private
+/// copy of the first machine's `<data dir>/fleet/`.
+///
+/// This is the file-based floor of `docs/proposals/core.md` §3 D4. The operator moves the
+/// directory the way they move any other private file; this reads the CA, the key and the
+/// cookie out of it and signs exactly one leaf — this machine's. Nothing is sent
+/// anywhere, nothing is installed, no machine is contacted, and no CA key is written
+/// here: the authority to sign a further machine stays where `ca-key.pem` already is.
+/// The first machine learns about this one when an operator runs `ouro fleet members add`
+/// on it.
+pub fn create_from(
+    data_dir: &Path,
+    source_dir: &Path,
+    machine: &str,
+    host: &str,
+    ports: Ports,
+) -> Result<Profile> {
+    validate_machine(machine)?;
+    validate_host(host)?;
+    ensure_usable_ipv4_resolution(host)?;
+    validate_ports(ports)?;
+    ensure_data_dir(data_dir)?;
+    let _lock = lock_stopped_fleet_mutation(data_dir, "ouro fleet create --from")?;
+    ensure_local_bind_address(host)?;
+
+    let final_dir = fleet_dir(data_dir);
+    if final_dir
+        .try_exists()
+        .with_context(|| format!("inspecting {}", final_dir.display()))?
+    {
+        bail!(
+            "this machine already has fleet state in {}; run `ouro fleet status` instead, or stop the runtime and run `ouro fleet leave` before joining a different cluster",
+            final_dir.display()
+        );
+    }
+
+    let source = read_source_fleet(source_dir)?;
+    let local = member(machine, host);
+    if let Some(existing) = source
+        .members
+        .iter()
+        .chain(source.tombstones.iter())
+        .find(|entry| entry.machine == machine || entry.node == local.node)
+    {
+        bail!(
+            "the copied roster already names machine `{}` as {}; `ouro fleet create --from` mints a machine that is not in it yet and will not reissue an existing one. Give this machine another `--machine` name, or move that machine's own fleet directory back to it",
+            existing.machine,
+            existing.node
+        );
+    }
+
+    let mut members = source.members.clone();
+    members.push(local.clone());
+    members.sort_by(|left, right| left.node.cmp(&right.node));
+    // One cluster is one EPMD port and one distribution range: `runtime_env` publishes
+    // `ERL_EPMD_PORT` per machine and every peer dials it, so the copy's numbers are the
+    // right default. An explicit port stays available for several test nodes on one host.
+    let epmd_port = ports.epmd.unwrap_or(source.epmd_port);
+    ensure_epmd_port_available(host, epmd_port)?;
+    let (dist_port_min, dist_port_max) = match ports.dist {
+        Some(_) => dist_ports(ports.dist),
+        None => (source.dist_port_min, source.dist_port_max),
+    };
+    let profile = Profile {
+        tags: empty_tags(),
+        schema: PROFILE_SCHEMA,
+        fleet_id: source.fleet_id.clone(),
+        name: source.name.clone(),
+        machine: machine.to_string(),
+        host: host.to_string(),
+        node: local.node.clone(),
+        role: "core".to_string(),
+        members,
+        // The operator's statements about machines that are gone travel with the roster;
+        // a machine already declared gone must not come back as a member on a machine
+        // that joins later.
+        tombstones: source.tombstones.clone(),
+        roster_revision: source.roster_revision.saturating_add(1),
+        gateway_port: ports
+            .gateway
+            .unwrap_or_else(|| default_gateway_port(&source.fleet_id, machine)),
+        epmd_port,
+        dist_port_min,
+        dist_port_max,
+    };
+    validate_profile(&profile)?;
+    ensure_runtime_ports_available(&profile)?;
+
+    let materials = joined_fleet_materials(&local, &source)?;
+    // The leaf has to satisfy the same check `runtime_env` runs before every boot, and it
+    // has to satisfy it against the copied CA bytes, not against a re-encoding of them.
+    validate_tls_identity(
+        &local,
+        &materials.ca_cert_pem,
+        &materials.node_cert_pem,
+        &materials.node_key_pem,
+        None,
+        "newly signed node credentials",
+    )?;
+    install_new_profile(data_dir, &profile, &materials)?;
+    Ok(profile)
+}
+
+/// Rewrite only the generated files from this machine's existing profile.
+///
+/// `ssl_dist.conf` and `vm.args` are the two files `validate_materials` compares
+/// byte-for-byte, and a profile written by an older Ouroboros carries a policy string
+/// this build no longer generates. The repair for that is not `leave` plus `create`:
+/// those mint a new fleet id, a new CA and a new cookie, so every other machine stops
+/// trusting this one and, with no enrollment, nothing can re-establish it. Identity, CA,
+/// cookie, members and tombstones are untouched here.
+pub fn regenerate(data_dir: &Path) -> Result<Profile> {
+    ensure_data_dir(data_dir)?;
+    let _lock = lock_stopped_fleet_mutation(data_dir, "ouro fleet create --regenerate")?;
+    let profile = load(data_dir)?.context(
+        "this machine has no cluster identity to regenerate; `ouro fleet create` mints one, and `ouro fleet create --from` mints one inside an existing cluster",
+    )?;
+    let root = fleet_dir(data_dir);
+    let (tls, vm_args) = generated_runtime_files(data_dir, &profile)?;
+    write_private_atomic(&root.join(TLS_OPTFILE), tls.as_bytes())?;
+    write_private_atomic(&root.join(VM_ARGS_FILE), vm_args.as_bytes())?;
+    validate_materials(data_dir, false).context(
+        "the regenerated policy files still do not describe a startable machine; the remaining problem is in the credentials, not in the generated files",
+    )?;
+    Ok(profile)
+}
+
 /// Environment overrides for a packaged runtime. `None` preserves the operator's
 /// existing environment workflow exactly; a profile is authoritative when present.
 pub fn runtime_env(data_dir: &Path) -> Result<Option<Vec<(String, String)>>> {
@@ -925,6 +1246,18 @@ pub fn render_status(data_dir: &Path) -> Result<String> {
             .join(", "),
     );
     text.push('\n');
+    if !profile.tombstones.is_empty() {
+        text.push_str("  gone         ");
+        text.push_str(
+            &profile
+                .tombstones
+                .iter()
+                .map(|member| member.machine.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        text.push_str(" (declared gone for good; `ouro fleet sessions restore NAME` undoes it)\n");
+    }
     if !runtime_live {
         text.push_str("\nNext: `ouro daemon`. It will keep retrying machines that start later.\n");
     } else {
@@ -1055,6 +1388,18 @@ pub fn render_live_status(data_dir: &Path, value: &Value) -> Option<String> {
             "      not joined yet; it can connect inward now, and this machine loads it as an outbound seed on its next restart\n",
         );
     }
+    // A declared-gone machine is out of `members`, so neither the local roster nor the
+    // live directory mentions it. Printing it is the only way an operator can see that a
+    // `sessions forget` — or a client that died halfway through one — happened at all.
+    for gone in &profile.tombstones {
+        text.push_str(&format!(
+            "  ✕ {:<18} {:<10} {:<8} {}\n",
+            gone.machine, "gone", "declared", gone.node
+        ));
+        text.push_str(
+            "      declared gone for good on this machine; `ouro fleet sessions restore NAME` undoes it\n",
+        );
+    }
     text.push_str(&format!(
         "\nAuthority: this machine's credentials cannot be reissued from anywhere else. Back up {} securely.\n",
         fleet_dir(data_dir).display()
@@ -1082,6 +1427,29 @@ pub fn doctor(data_dir: &Path) -> DoctorReport {
         ))),
         Err(error) => checks.push(problem(format!(
             "interrupted fleet setup cannot be recovered safely: {error:#}"
+        ))),
+    }
+    // `ouro fleet leave` is the only command that removes this directory and it refuses
+    // one holding an entry it does not recognize. Naming them here is what keeps that
+    // refusal from being a silent dead end.
+    let root = fleet_dir(data_dir);
+    match root.try_exists() {
+        Ok(true) => match unrecognized_fleet_entries(&root) {
+            Ok(unknown) if unknown.is_empty() => {}
+            Ok(unknown) => checks.push(problem(format!(
+                "{} holds {} entr{} no Ouroboros command recognizes ({}). `ouro fleet leave` refuses to remove a directory containing them; move or inspect them first",
+                root.display(),
+                unknown.len(),
+                if unknown.len() == 1 { "y" } else { "ies" },
+                unknown.join(", ")
+            ))),
+            Err(error) => checks.push(problem(format!(
+                "the fleet directory cannot be listed: {error:#}"
+            ))),
+        },
+        Ok(false) => {}
+        Err(error) => checks.push(problem(format!(
+            "the fleet directory cannot be inspected: {error:#}"
         ))),
     }
     let profile = match load(data_dir) {
@@ -1268,6 +1636,18 @@ pub fn doctor(data_dir: &Path) -> DoctorReport {
             ))),
         }
 
+        if !profile.tombstones.is_empty() {
+            checks.push(warn(format!(
+                "this machine's roster declares {} gone for good: {}. They are out of `members`, so nothing dials them and `ouro fleet status` does not expect them; `ouro fleet sessions restore NAME` undoes one",
+                profile.tombstones.len(),
+                profile
+                    .tombstones
+                    .iter()
+                    .map(|member| member.machine.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
         checks.push(warn(format!(
             "this machine's cluster credentials cannot be reissued from anywhere else. Back up {} securely; there is no recovery from disk loss",
             fleet_dir(data_dir).display()
@@ -1415,17 +1795,34 @@ fn live_doctor_text(value: Option<&Value>, field: &str) -> Result<String> {
 
 /// Removes only the known fleet files, and only while no runtime owns this data dir.
 /// Unknown entries are refused before anything is deleted.
-pub fn leave(data_dir: &Path) -> Result<bool> {
+/// What `leave` removed, so the caller can say it out loud.
+///
+/// `machine` is `None` for a directory whose `profile.json` is missing or unreadable —
+/// the state a crash between `install_new_profile`'s staging rename and its fsync leaves.
+/// `leave` is the only command that removes a fleet directory, so it has to work on that
+/// directory too; the recognized private files are removed either way and named in
+/// `removed`.
+#[derive(Debug)]
+pub struct Removal {
+    pub machine: Option<String>,
+    pub profile_readable: bool,
+    pub removed: Vec<String>,
+}
+
+pub fn leave(data_dir: &Path) -> Result<Option<Removal>> {
     leave_with_epmd_program(data_dir, None)
 }
 
 /// Packaged CLI path: the current embedded release supplies its own EPMD control binary
 /// so cleanup never resolves a security-sensitive command through PATH.
-pub fn leave_with_epmd(data_dir: &Path, epmd_program: &Path) -> Result<bool> {
+pub fn leave_with_epmd(data_dir: &Path, epmd_program: &Path) -> Result<Option<Removal>> {
     leave_with_epmd_program(data_dir, Some(epmd_program))
 }
 
-fn leave_with_epmd_program(data_dir: &Path, epmd_program: Option<&Path>) -> Result<bool> {
+fn leave_with_epmd_program(
+    data_dir: &Path,
+    epmd_program: Option<&Path>,
+) -> Result<Option<Removal>> {
     ensure_data_dir(data_dir)?;
     let _lock = lock_stopped_fleet_mutation(data_dir, "ouro fleet leave")?;
 
@@ -1434,17 +1831,20 @@ fn leave_with_epmd_program(data_dir: &Path, epmd_program: Option<&Path>) -> Resu
         .try_exists()
         .with_context(|| format!("inspecting {}", dir.display()))?
     {
-        return Ok(false);
+        return Ok(None);
     }
-    let profile = load(data_dir)?.ok_or_else(|| {
-        anyhow!(
-            "{} exists without a readable profile; nothing was removed",
-            dir.display()
-        )
-    })?;
-    retire_epmd_before_profile_removal(data_dir, Some(&profile), epmd_program)?;
-    remove_recognized_fleet_dir(&dir)?;
-    Ok(true)
+    // An unreadable profile must not lock the operator out of the one command that
+    // cleans up: every other surface refuses such a directory, so refusing here too
+    // leaves `rm -rf` as the only repair. The EPMD retirement below already accepts
+    // `None` and then trusts only the ownership marker and its lock.
+    let profile = load(data_dir).unwrap_or_default();
+    retire_epmd_before_profile_removal(data_dir, profile.as_ref(), epmd_program)?;
+    let removed = remove_recognized_fleet_dir(&dir)?;
+    Ok(Some(Removal {
+        machine: profile.as_ref().map(|profile| profile.machine.clone()),
+        profile_readable: profile.is_some(),
+        removed,
+    }))
 }
 
 fn retire_epmd_before_profile_removal(
@@ -1644,25 +2044,25 @@ fn epmd_registered_names(address: Ipv4Addr, port: u16) -> Result<Vec<String>> {
         .collect())
 }
 
-fn remove_recognized_fleet_dir(dir: &Path) -> Result<()> {
+fn remove_recognized_fleet_dir(dir: &Path) -> Result<Vec<String>> {
     ensure_private_dir(dir)?;
     let known = known_fleet_files();
     let mut present = Vec::new();
+    let mut names = Vec::new();
     let mut cluster_directory = None;
-    let mut unknown = Vec::new();
+    let unknown = unrecognized_fleet_entries(dir)?;
     for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let entry = entry?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
-            unknown.push(name.to_string_lossy().into_owned());
             continue;
         };
         if name == CLUSTER_DIRECTORY_DIR {
             cluster_directory = Some(entry.path());
-        } else if known.contains(name) {
+            names.push(name.to_string());
+        } else if known.contains(name) || retired_revocation_file(name) {
             present.push(entry.path());
-        } else {
-            unknown.push(name.to_string());
+            names.push(name.to_string());
         }
     }
     if !unknown.is_empty() {
@@ -1672,6 +2072,7 @@ fn remove_recognized_fleet_dir(dir: &Path) -> Result<()> {
             unknown.join(", ")
         );
     }
+    names.sort();
     // Validate the complete recognized shape before unlinking the first credential.
     // A late symlink or foreign file must leave every known secret intact.
     for path in &present {
@@ -1692,7 +2093,44 @@ fn remove_recognized_fleet_dir(dir: &Path) -> Result<()> {
     }
     fs::remove_dir(dir).with_context(|| format!("removing empty {}", dir.display()))?;
     sync_parent(dir)?;
-    Ok(())
+    Ok(names)
+}
+
+/// Entries in `<data dir>/fleet/` that no lifecycle command recognizes.
+///
+/// `leave` refuses to remove such a directory, so anything listed here is a dead end
+/// until the operator moves it: `doctor` therefore names them instead of calling the
+/// machine healthy.
+fn unrecognized_fleet_entries(dir: &Path) -> Result<Vec<String>> {
+    let known = known_fleet_files();
+    let mut unknown = Vec::new();
+    for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            unknown.push(name.to_string_lossy().into_owned());
+            continue;
+        };
+        if name == CLUSTER_DIRECTORY_DIR || known.contains(name) || retired_revocation_file(name) {
+            continue;
+        }
+        unknown.push(name.to_string());
+    }
+    unknown.sort();
+    Ok(unknown)
+}
+
+/// `revoke-<64 hex>.json`: the CA-attested revocation artifact this reduction deleted the
+/// producer of.
+///
+/// The files themselves are durable state on any machine whose lab ever revoked one —
+/// written by the previous `ouro fleet join` and by `Ouroboros.Cluster.Revocations` — and
+/// nothing else in the tree reads them any more. Recognizing the shape is what keeps
+/// `ouro fleet leave` able to retire such a machine's identity at all.
+fn retired_revocation_file(name: &str) -> bool {
+    name.strip_prefix("revoke-")
+        .and_then(|rest| rest.strip_suffix(".json"))
+        .is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 fn validate_cluster_directory(path: &Path) -> Result<Vec<PathBuf>> {
@@ -2057,6 +2495,23 @@ fn generated_runtime_files(data_dir: &Path, profile: &Profile) -> Result<(String
     Ok((tls, vm_args))
 }
 
+/// The mutual-TLS policy the Ouroboros before this reduction generated.
+///
+/// Nothing emits this string; it exists so a profile written by that build gets a refusal
+/// that names the repair instead of one that sends its operator round a loop. It is the
+/// current policy plus a `verify_fun` in `Ouroboros.Cluster.Revocations`, the module that
+/// went with the revocation authority.
+fn previous_generated_tls(data_dir: &Path) -> Result<String> {
+    let root = fleet_dir(data_dir);
+    let cert = erl_string(&root.join(NODE_CERT_FILE))?;
+    let key = erl_string(&root.join(NODE_KEY_FILE))?;
+    let ca = erl_string(&root.join(CA_CERT_FILE))?;
+    let policy = erl_string(&root)?;
+    Ok(format!(
+        "[\n  {{server, [{{certfile, \"{cert}\"}}, {{keyfile, \"{key}\"}}, {{cacertfile, \"{ca}\"}}, {{verify, verify_peer}}, {{fail_if_no_peer_cert, true}}, {{secure_renegotiate, true}}, {{reuse_sessions, false}}, {{session_tickets, disabled}}, {{verify_fun, {{fun 'Elixir.Ouroboros.Cluster.Revocations':verify/3, \"{policy}\"}}}}]}},\n  {{client, [{{certfile, \"{cert}\"}}, {{keyfile, \"{key}\"}}, {{cacertfile, \"{ca}\"}}, {{verify, verify_peer}}, {{secure_renegotiate, true}}, {{reuse_sessions, false}}, {{session_tickets, disabled}}, {{verify_fun, {{fun 'Elixir.Ouroboros.Cluster.Revocations':verify/3, \"{policy}\"}}}}]}}\n].\n"
+    ))
+}
+
 fn new_fleet_materials(profile: &Profile, local: &Member) -> Result<Materials> {
     let year = current_utc_year()?;
     let mut ca_params = CertificateParams::default();
@@ -2086,6 +2541,33 @@ fn new_fleet_materials(profile: &Profile, local: &Member) -> Result<Materials> {
         node_cert_pem,
         node_key_pem,
         cookie: random_hex(32)?,
+    })
+}
+
+/// Mint this machine's leaf under a CA that already exists.
+///
+/// This is the same signing step `new_fleet_materials` performs for the first machine's
+/// own leaf, against a CA read out of a copied fleet directory instead of one just
+/// generated. `from_ca_cert_pem` recovers only what signing needs — the CA's subject name
+/// and its subject key identifier — so the issued leaf carries the copied CA's issuer name
+/// and authority key id and verifies against the copied CA bytes, which are what gets
+/// installed. `ca_key_pem` is deliberately `None`: this machine gets the CA certificate,
+/// never the CA key.
+fn joined_fleet_materials(local: &Member, source: &SourceFleet) -> Result<Materials> {
+    let ca_params = CertificateParams::from_ca_cert_pem(&source.ca_cert_pem)
+        .context("reading the copied fleet CA certificate")?;
+    let ca_key =
+        KeyPair::from_pem(&source.ca_key_pem).context("reading the copied fleet CA key")?;
+    let ca_cert = ca_params
+        .self_signed(&ca_key)
+        .context("binding the copied fleet CA certificate to its key for signing")?;
+    let (node_cert_pem, node_key_pem) = signed_node_with(local, &ca_cert, &ca_key)?;
+    Ok(Materials {
+        ca_cert_pem: source.ca_cert_pem.clone(),
+        ca_key_pem: None,
+        node_cert_pem,
+        node_key_pem,
+        cookie: source.cookie.to_string(),
     })
 }
 
@@ -2253,14 +2735,23 @@ fn validate_materials(data_dir: &Path, require_ca_key: bool) -> Result<()> {
     let actual_vm_args = read_private(&root.join(VM_ARGS_FILE), "VM arguments")?;
     let (expected_tls, expected_vm_args) = generated_runtime_files(data_dir, &profile)?;
     if actual_tls != expected_tls {
+        // A file that is exactly the policy the previous build generated is not a
+        // weakened policy, and "restore from a trusted backup" is a loop for it: the
+        // trusted backup is that same file.
+        if actual_tls == previous_generated_tls(data_dir)? {
+            bail!(
+                "{} is the strict generated mutual-TLS policy of an older Ouroboros: it routes verification through `Ouroboros.Cluster.Revocations`, a module this build does not have. Rewrite it from this profile with `ouro fleet create --regenerate` on this stopped machine, which keeps this fleet id, CA, cookie and roster",
+                root.join(TLS_OPTFILE).display()
+            );
+        }
         bail!(
-            "{} does not match the strict generated mutual-TLS policy for this profile; startup is refused. Restore this file from a trusted backup, or rebuild this machine's cluster identity with `ouro fleet leave` and `ouro fleet create`",
+            "{} does not match the strict generated mutual-TLS policy for this profile; startup is refused. Rewrite it from this profile with `ouro fleet create --regenerate`, or restore this file from a trusted backup",
             root.join(TLS_OPTFILE).display()
         );
     }
     if actual_vm_args.as_bytes() != expected_vm_args.as_bytes() {
         bail!(
-            "{} does not match the generated TLS/port policy for this profile; startup is refused. Restore this file from a trusted backup or rebuild/rejoin this fleet profile",
+            "{} does not match the generated TLS/port policy for this profile; startup is refused. Rewrite it from this profile with `ouro fleet create --regenerate`, or restore this file from a trusted backup",
             root.join(VM_ARGS_FILE).display()
         );
     }
@@ -4205,6 +4696,316 @@ mod tests {
         );
     }
 
+    /// What an operator does when they move `<data dir>/fleet/` to the second machine.
+    fn copy_fleet_dir(from: &Path, to: &Path) {
+        fs::DirBuilder::new().mode(0o700).create(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            fs::copy(entry.path(), &target).unwrap();
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
+    fn env_value<'a>(environment: &'a [(String, String)], key: &str) -> &'a str {
+        environment
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.as_str())
+            .unwrap_or_else(|| panic!("{key} is not in the computed runtime environment"))
+    }
+
+    /// Plan §3 D4 keeps the cluster and drops enrollment: "an operator copies the binary
+    /// to each machine and sets the cluster environment by hand". Copying files by hand
+    /// therefore has to be enough to form the two-machine mutual-TLS cluster FLEET.md
+    /// describes — one CA, one cookie, two leaves, two rosters. Nothing below opens a
+    /// socket to another machine or installs anything.
+    #[test]
+    fn a_second_machine_is_created_from_a_private_copy_of_the_first_machines_fleet_directory() {
+        let one = scratch("create-from-one");
+        let two = scratch("create-from-two");
+        let carried = scratch("create-from-carried");
+
+        let first = create(
+            &one,
+            Some("Workshop"),
+            "studio",
+            "127.0.0.1",
+            ephemeral_ports(),
+        )
+        .expect("the first machine mints its own CA");
+        let copy = carried.join("fleet");
+        copy_fleet_dir(&fleet_dir(&one), &copy);
+
+        // An incomplete copy is refused before anything is written.
+        let partial = carried.join("partial");
+        copy_fleet_dir(&fleet_dir(&one), &partial);
+        fs::remove_file(partial.join(CA_KEY_FILE)).unwrap();
+        let error = create_from(&two, &partial, "vps", "127.0.0.1", ephemeral_ports())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not a complete copy"), "{error}");
+        assert!(!fleet_dir(&two).exists(), "a refusal wrote fleet state");
+
+        // A name the copied roster already holds is refused: `--from` mints a machine
+        // that is not in the cluster yet, it does not reissue one that is.
+        let error = create_from(&two, &copy, "studio", "127.0.0.1", ephemeral_ports())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already names machine `studio`"), "{error}");
+        assert!(!fleet_dir(&two).exists(), "a refusal wrote fleet state");
+
+        let second = create_from(&two, &copy, "vps", "127.0.0.1", ephemeral_ports())
+            .expect("the second machine signs its leaf with the copied CA");
+
+        // One cluster: one id, one name, one cookie.
+        assert_eq!(second.fleet_id, first.fleet_id);
+        assert_eq!(second.name, first.name);
+        assert_eq!(
+            read_private(&fleet_dir(&two).join(COOKIE_FILE), "cookie").unwrap(),
+            read_private(&fleet_dir(&one).join(COOKIE_FILE), "cookie").unwrap()
+        );
+        // The signing authority stays on the machine that already holds it.
+        assert!(
+            !fleet_dir(&two).join(CA_KEY_FILE).exists(),
+            "the second machine was given the CA key"
+        );
+
+        // Both leaves chain to the one CA, checked against the first machine's own CA
+        // bytes rather than against a re-encoding of them.
+        let ca = read_private(&fleet_dir(&one).join(CA_CERT_FILE), "CA").unwrap();
+        assert_eq!(
+            ca,
+            read_private(&fleet_dir(&two).join(CA_CERT_FILE), "CA").unwrap()
+        );
+        for (data, machine) in [(&one, "studio"), (&two, "vps")] {
+            validate_tls_identity(
+                &member(machine, "127.0.0.1"),
+                &ca,
+                &read_private(&fleet_dir(data).join(NODE_CERT_FILE), "leaf").unwrap(),
+                &read_private(&fleet_dir(data).join(NODE_KEY_FILE), "leaf key").unwrap(),
+                None,
+                "test",
+            )
+            .unwrap_or_else(|error| {
+                panic!("{machine}'s leaf does not chain to the one CA: {error:#}")
+            });
+        }
+
+        // The second machine already expects both; the first has to be told, locally.
+        assert_eq!(
+            second
+                .members
+                .iter()
+                .map(|member| member.machine.as_str())
+                .collect::<Vec<_>>(),
+            vec!["studio", "vps"]
+        );
+        assert_eq!(first.members.len(), 1);
+        let added = add_member(&one, "vps", "127.0.0.1", Some("ouro-vps@127.0.0.1")).unwrap();
+        assert_eq!(added, member("vps", "127.0.0.1"));
+        let after = load(&one).unwrap().unwrap();
+        assert_eq!(after.members.len(), 2);
+        assert_eq!(after.roster_revision, first.roster_revision + 1);
+        // Idempotent, so a repeated command is not an error and does not move the revision.
+        assert_eq!(add_member(&one, "vps", "127.0.0.1", None).unwrap(), added);
+        assert_eq!(
+            load(&one).unwrap().unwrap().roster_revision,
+            after.roster_revision
+        );
+        let error = add_member(&one, "vps", "127.0.0.2", None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already names vps"), "{error}");
+        let error = add_member(&one, "vps", "127.0.0.1", Some("vps"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("ouro-vps@127.0.0.1"), "{error}");
+
+        // Both machines validate, and both boot with the same two-node seed list.
+        for data in [&one, &two] {
+            let environment = runtime_env(data)
+                .unwrap_or_else(|error| panic!("{} refuses to start: {error:#}", data.display()))
+                .expect("a profile is installed");
+            let hosts = env_value(&environment, "OUROBOROS_CLUSTER_HOSTS");
+            assert!(hosts.contains("ouro-studio@127.0.0.1"), "{hosts}");
+            assert!(hosts.contains("ouro-vps@127.0.0.1"), "{hosts}");
+            assert_eq!(
+                env_value(&environment, "OUROBOROS_FLEET_ID"),
+                first.fleet_id
+            );
+        }
+        assert!(doctor(&one).text.contains("vps"));
+
+        // `members remove` is the counterpart of `leave` on the other machine, and it is
+        // not a tombstone: nothing durable is retired by it.
+        let error = remove_member(&one, "studio").unwrap_err().to_string();
+        assert!(error.contains("`ouro fleet leave`"), "{error}");
+        assert_eq!(remove_member(&one, "vps").unwrap(), added);
+        let after = load(&one).unwrap().unwrap();
+        assert_eq!(after.members, vec![member("studio", "127.0.0.1")]);
+        assert!(after.tombstones.is_empty());
+
+        fs::remove_dir_all(one).ok();
+        fs::remove_dir_all(two).ok();
+        fs::remove_dir_all(carried).ok();
+    }
+
+    /// F1: `revoke-<64 hex>.json` is durable state on any machine whose lab ever revoked
+    /// one, and `leave` is the only command that removes a fleet directory. Recognizing
+    /// the shape is what keeps such a machine retirable; naming everything else is what
+    /// keeps the refusal from being silent.
+    #[test]
+    fn leave_retires_a_directory_holding_a_retired_revocation_and_doctor_names_what_it_cannot() {
+        let data = scratch("leave-revocation");
+        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
+        let artifact = fleet_dir(&data).join(format!("revoke-{}.json", "ab".repeat(32)));
+        write_private_atomic(&artifact, b"{\"schema\":1}").unwrap();
+
+        // The artifact is inert but recognized, so it is not something doctor asks the
+        // operator to move, and it does not make the machine unhealthy.
+        let report = doctor(&data);
+        assert!(report.healthy, "{}", report.text);
+        assert!(!report.text.contains("no Ouroboros command recognizes"));
+
+        // An entry nothing recognizes is still a refusal, and doctor now says which.
+        write_private_atomic(&fleet_dir(&data).join("operator-note"), b"keep me").unwrap();
+        let report = doctor(&data);
+        assert!(!report.healthy);
+        assert!(
+            report.text.contains("[fix]") && report.text.contains("operator-note"),
+            "{}",
+            report.text
+        );
+        let error = leave(&data).unwrap_err().to_string();
+        assert!(error.contains("operator-note"), "{error}");
+        assert!(artifact.exists(), "a refusal removed a file");
+
+        fs::remove_file(fleet_dir(&data).join("operator-note")).unwrap();
+        let removal = leave(&data)
+            .unwrap()
+            .expect("a fleet directory was present");
+        assert!(removal
+            .removed
+            .iter()
+            .any(|name| name.starts_with("revoke-")));
+        assert!(!fleet_dir(&data).exists());
+        fs::remove_dir_all(data).ok();
+    }
+
+    /// F2: a crash between `install_new_profile`'s staging rename and its fsync leaves a
+    /// fleet directory with no `profile.json`. Every surface refuses such a directory, so
+    /// `leave` refusing it too is a total lockout repairable only by hand.
+    #[test]
+    fn leave_clears_a_fleet_directory_whose_profile_never_landed() {
+        let data = scratch("leave-incomplete");
+        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
+        fs::remove_file(profile_path(&data)).unwrap();
+
+        for message in [
+            load(&data).unwrap_err().to_string(),
+            runtime_env(&data).unwrap_err().to_string(),
+            doctor(&data).text,
+        ] {
+            assert!(
+                !message.contains("--discard-incomplete"),
+                "a surface still names a flag that does not parse: {message}"
+            );
+            assert!(message.contains("ouro fleet leave"), "{message}");
+        }
+
+        let removal = leave(&data)
+            .unwrap()
+            .expect("a fleet directory was present");
+        assert!(!removal.profile_readable);
+        assert_eq!(removal.machine, None);
+        assert!(removal.removed.iter().any(|name| name == COOKIE_FILE));
+        assert!(removal.removed.iter().any(|name| name == CA_KEY_FILE));
+        assert!(!fleet_dir(&data).exists());
+        assert!(load(&data).unwrap().is_none());
+        fs::remove_dir_all(data).ok();
+    }
+
+    /// F4: the previous Ouroboros generated a policy that routed verification through a
+    /// module this build deleted. "Restore from a trusted backup" is a loop for that file
+    /// — the backup is the file — and `leave` + `create` mints a new fleet id, CA and
+    /// cookie, which is a rebuild of the trust domain, not a repair.
+    #[test]
+    fn regenerating_repairs_a_generated_policy_written_by_an_older_ouroboros() {
+        let data = scratch("regenerate");
+        let created = create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
+        let root = fleet_dir(&data);
+        let current = fs::read_to_string(root.join(TLS_OPTFILE)).unwrap();
+        let previous = previous_generated_tls(&data).unwrap();
+        assert_ne!(previous, current);
+        write_private_atomic(&root.join(TLS_OPTFILE), previous.as_bytes()).unwrap();
+
+        let error = runtime_env(&data).unwrap_err().to_string();
+        assert!(error.contains("Cluster.Revocations"), "{error}");
+        assert!(error.contains("--regenerate"), "{error}");
+        assert!(
+            !error.contains("trusted backup"),
+            "the loop remedy is still offered for the one file it loops on: {error}"
+        );
+
+        let regenerated = regenerate(&data).unwrap();
+        assert_eq!(regenerated.fleet_id, created.fleet_id);
+        assert_eq!(regenerated.members, created.members);
+        assert_eq!(
+            fs::read_to_string(root.join(TLS_OPTFILE)).unwrap(),
+            current,
+            "regenerate did not restore the current generated policy"
+        );
+        assert!(runtime_env(&data).unwrap().is_some());
+        assert!(doctor(&data).healthy);
+
+        // A policy nobody generated is still a refusal, and it still names the repair.
+        let weakened = current.replace("verify_peer", "verify_none");
+        write_private_atomic(&root.join(TLS_OPTFILE), weakened.as_bytes()).unwrap();
+        let error = runtime_env(&data).unwrap_err().to_string();
+        assert!(error.contains("--regenerate"), "{error}");
+        assert!(error.contains("trusted backup"), "{error}");
+        fs::remove_dir_all(data).ok();
+    }
+
+    /// F5: a client that dies between the tombstone write and the gateway reply leaves a
+    /// silently shrunk roster. It is safe, but it has to be visible and it has to have an
+    /// undo.
+    #[test]
+    fn a_machine_declared_gone_is_named_by_status_and_doctor_and_can_be_restored() {
+        let dir = scratch("tombstone-visible");
+        fs::create_dir(dir.join("fleet")).unwrap();
+        let mut profile = sample_profile("studio");
+        let vps = member("vps", "vps.tailnet.ts.net");
+        profile.members.push(vps.clone());
+        write_profile(&dir, &profile).unwrap();
+
+        forget_machine(&dir, "vps").unwrap();
+        let status = render_status(&dir).unwrap();
+        assert!(status.contains("gone"), "{status}");
+        assert!(status.contains("vps"), "{status}");
+        assert!(status.contains("sessions restore"), "{status}");
+        let report = doctor(&dir);
+        assert!(
+            report.text.contains("gone for good") && report.text.contains("vps"),
+            "{}",
+            report.text
+        );
+
+        // `members add` refuses to quietly undo the operator's statement.
+        let error = add_member(&dir, "vps", "vps.tailnet.ts.net", None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("sessions restore vps"), "{error}");
+
+        restore_machine(&dir, &vps).unwrap();
+        let after = load(&dir).unwrap().unwrap();
+        assert!(after.tombstones.is_empty());
+        assert!(after.members.contains(&vps));
+        assert!(!render_status(&dir).unwrap().contains("gone for good"));
+        fs::remove_dir_all(dir).ok();
+    }
+
     fn sample_profile(machine: &str) -> Profile {
         Profile {
             tags: empty_tags(),
@@ -4896,7 +5697,7 @@ mod tests {
 
         stop.store(true, Ordering::Relaxed);
         server.join().unwrap();
-        assert!(leave(&data).unwrap());
+        assert!(leave(&data).unwrap().is_some());
         assert!(!fleet_dir(&data).exists());
         fs::remove_dir_all(data).ok();
     }
@@ -4936,7 +5737,7 @@ mod tests {
             runtime::pid_alive(owner.pid),
             "the fixture PID must be live"
         );
-        assert!(leave(&data).unwrap());
+        assert!(leave(&data).unwrap().is_some());
         assert!(
             runtime::pid_alive(owner.pid),
             "leave targeted an unrelated PID"
@@ -5025,7 +5826,7 @@ mod tests {
         assert!(profile_path(&data).exists());
         assert!(runtime::pid_alive(pid));
 
-        assert!(leave_with_epmd(&data, &current_program).unwrap());
+        assert!(leave_with_epmd(&data, &current_program).unwrap().is_some());
         assert!(!fleet_dir(&data).exists());
         assert!(!runtime::pid_alive(pid));
         waiter.join().unwrap();
@@ -5310,9 +6111,9 @@ mod tests {
         assert!(fleet_dir(&data).join(COOKIE_FILE).exists());
 
         fs::remove_file(fleet_dir(&data).join("operator-note")).unwrap();
-        assert!(leave(&data).unwrap());
+        assert!(leave(&data).unwrap().is_some());
         assert!(!fleet_dir(&data).exists());
-        assert!(!leave(&data).unwrap());
+        assert!(leave(&data).unwrap().is_none());
         fs::remove_dir_all(data).ok();
     }
 
@@ -5340,7 +6141,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(leave(&data).unwrap());
+        assert!(leave(&data).unwrap().is_some());
         assert!(!fleet_dir(&data).exists());
 
         let unsafe_data = scratch("leave-cluster-directory-symlink");

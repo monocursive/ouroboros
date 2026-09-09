@@ -1474,6 +1474,21 @@ pub enum FleetCommand {
         #[arg(long, value_name = "FLEET")]
         name: Option<String>,
 
+        /// Join the cluster of a privately copied `<data dir>/fleet/` directory instead of
+        /// starting a new one: this machine's certificate is signed by the CA in the copy
+        /// and it inherits that cluster's id, cookie and roster. Nothing is sent anywhere.
+        #[arg(long, value_name = "DIR", conflicts_with = "name")]
+        from: Option<PathBuf>,
+
+        /// Rewrite only this machine's generated `ssl_dist.conf` and `vm.args` from the
+        /// profile it already has, keeping its identity, CA, cookie, roster and
+        /// tombstones. This is the repair for a profile written by an older Ouroboros.
+        #[arg(
+            long,
+            conflicts_with_all = ["name", "from", "machine", "host", "gateway_port", "dist_port"]
+        )]
+        regenerate: bool,
+
         /// A short label people will recognize, such as studio-mini.
         #[arg(long, value_name = "NAME")]
         machine: Option<String>,
@@ -1500,6 +1515,12 @@ pub enum FleetCommand {
     /// Check local security plus live cluster connectivity and compatibility when running.
     Doctor,
 
+    /// Edit this machine's view of which other machines are in the cluster.
+    Members {
+        #[command(subcommand)]
+        command: FleetMembersCommand,
+    },
+
     /// Manage durable knowledge about sessions owned by machines that left the cluster.
     Sessions {
         #[command(subcommand)]
@@ -1508,6 +1529,32 @@ pub enum FleetCommand {
 
     /// Remove this machine's cluster credentials after its runtime is stopped.
     Leave,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum FleetMembersCommand {
+    /// Add a machine to this machine's roster, so it dials it and expects it. The roster
+    /// is not replicated: run this on every machine that should know about the new one.
+    Add {
+        /// The new machine's short name, as it was given to `ouro fleet create`.
+        machine: String,
+
+        /// The address that machine advertises — the `--host` it was created with.
+        #[arg(long, value_name = "HOST")]
+        host: String,
+
+        /// Optional cross-check on the pair above: a node name is always
+        /// `ouro-<machine>@<host>`, and a mismatch is refused.
+        #[arg(long, value_name = "NODE")]
+        node: Option<String>,
+    },
+
+    /// Take a machine out of this machine's roster, after `ouro fleet leave` was run on
+    /// it. This records no tombstone; `ouro fleet sessions forget` does that.
+    Remove {
+        /// The machine to stop dialing and stop expecting.
+        machine: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1525,6 +1572,14 @@ pub enum SessionsCommand {
         /// undiscoverable while their former owner is offline.
         #[arg(long, required = true)]
         accept_state_loss: bool,
+    },
+
+    /// Undo `forget`: put a machine declared gone back into this machine's roster. The
+    /// durable evidence the runtime already retired does not come back — this restores
+    /// the roster entry, so the machine is dialed and expected again.
+    Restore {
+        /// The machine this roster records as gone for good.
+        machine: String,
     },
 }
 
@@ -2362,6 +2417,8 @@ mod tests {
             command:
                 FleetCommand::Create {
                     name,
+                    from,
+                    regenerate,
                     machine,
                     host,
                     gateway_port,
@@ -2382,8 +2439,85 @@ mod tests {
         assert_eq!(machine.as_deref(), Some("studio-mini"));
         assert_eq!(host.as_deref(), Some("studio.tailnet.ts.net"));
         assert_eq!(name, None);
+        assert_eq!(from, None);
+        assert!(!regenerate);
         assert_eq!(gateway_port, None);
         assert_eq!(dist_port, None);
+
+        // The second machine of a two-machine cluster: one option, one local directory.
+        let Some(Command::Fleet {
+            command: FleetCommand::Create { from, machine, .. },
+        }) = parse(&[
+            "fleet",
+            "create",
+            "--from",
+            "/tmp/carried/fleet",
+            "--machine",
+            "vps",
+        ])
+        .command
+        else {
+            panic!("fleet create --from must parse");
+        };
+        assert_eq!(from, Some(PathBuf::from("/tmp/carried/fleet")));
+        assert_eq!(machine.as_deref(), Some("vps"));
+
+        assert!(matches!(
+            parse(&["fleet", "create", "--regenerate"]).command,
+            Some(Command::Fleet {
+                command: FleetCommand::Create {
+                    regenerate: true,
+                    ..
+                }
+            })
+        ));
+        for conflicting in [
+            vec!["fleet", "create", "--regenerate", "--machine", "studio"],
+            vec!["fleet", "create", "--regenerate", "--from", "/tmp/carried"],
+            vec![
+                "fleet",
+                "create",
+                "--from",
+                "/tmp/carried",
+                "--name",
+                "Other",
+            ],
+        ] {
+            assert!(
+                Cli::try_parse_from(std::iter::once("ouro").chain(conflicting.iter().copied()))
+                    .is_err(),
+                "{conflicting:?} names two different jobs and must not parse"
+            );
+        }
+
+        assert!(matches!(
+            parse(&["fleet", "members", "add", "vps", "--host", "vps.tailnet.ts.net"]).command,
+            Some(Command::Fleet {
+                command: FleetCommand::Members {
+                    command: FleetMembersCommand::Add { machine, host, node: None }
+                }
+            }) if machine == "vps" && host == "vps.tailnet.ts.net"
+        ));
+        assert!(
+            Cli::try_parse_from(["ouro", "fleet", "members", "add", "vps"]).is_err(),
+            "a roster entry without an address cannot be built"
+        );
+        assert!(matches!(
+            parse(&["fleet", "members", "remove", "vps"]).command,
+            Some(Command::Fleet {
+                command: FleetCommand::Members {
+                    command: FleetMembersCommand::Remove { machine }
+                }
+            }) if machine == "vps"
+        ));
+        assert!(matches!(
+            parse(&["fleet", "sessions", "restore", "retired-vps"]).command,
+            Some(Command::Fleet {
+                command: FleetCommand::Sessions {
+                    command: SessionsCommand::Restore { machine }
+                }
+            }) if machine == "retired-vps"
+        ));
 
         assert!(matches!(
             parse(&[

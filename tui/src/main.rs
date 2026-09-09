@@ -34,8 +34,9 @@ use rand::TryRngCore;
 use serde_json::{json, Value};
 
 use ouro::cli::{
-    AcpArgs, Cli, Command, DesktopCommand, FleetCommand, FleetTagCommand, ForkArgs, HookCommand,
-    LedgerArgs, McpCommand, ReplayArgs, RunArgs, SessionsCommand, WasmCommand,
+    AcpArgs, Cli, Command, DesktopCommand, FleetCommand, FleetMembersCommand, FleetTagCommand,
+    ForkArgs, HookCommand, LedgerArgs, McpCommand, ReplayArgs, RunArgs, SessionsCommand,
+    WasmCommand,
 };
 use ouro::config::{self, Loaded, StartFlags};
 use ouro::mcp_cli;
@@ -1227,6 +1228,8 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
         }
         FleetCommand::Create {
             name,
+            from,
+            regenerate,
             machine,
             host,
             gateway_port,
@@ -1237,25 +1240,68 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                     "`ouro --dev fleet create` is not supported: secure fleet startup requires the packaged release boot path. Run `ouro fleet create` with the packaged binary; development runtimes should use a separate standalone data directory"
                 );
             }
+            if regenerate {
+                let profile = fleet::regenerate(&paths.data_dir)?;
+                println!(
+                    "Generated policy files rewritten from this machine's profile.\n  fleet        {}\n  machine      {}\n  rewrote      {}, {}\n\nIdentity, CA, cookie, roster and tombstones are unchanged, so every other machine still trusts this one. Next: `ouro fleet doctor`, then `ouro daemon`.",
+                    profile.name,
+                    profile.machine,
+                    fleet::TLS_OPTFILE,
+                    fleet::VM_ARGS_FILE
+                );
+                return Ok(());
+            }
             let identity = fleet::resolve_identity(machine.as_deref(), host.as_deref())?;
-            let profile = fleet::create(
-                &paths.data_dir,
-                name.as_deref(),
-                &identity.machine,
-                &identity.host,
-                fleet::Ports {
-                    gateway: gateway_port,
-                    dist: dist_port,
-                    epmd: None,
-                },
-            )?;
+            let profile = match from.as_deref() {
+                Some(source) => {
+                    let profile = fleet::create_from(
+                        &paths.data_dir,
+                        source,
+                        &identity.machine,
+                        &identity.host,
+                        fleet::Ports {
+                            gateway: gateway_port,
+                            dist: dist_port,
+                            epmd: None,
+                        },
+                    )?;
+                    println!(
+                        "Cluster identity created from {}.\n  fleet        {}\n  machine      {}\n  address      {}\n  members      {}\n\nThis machine's certificate is signed by the copied CA and it shares that cluster's cookie. No CA key was written here, so this machine cannot sign a third one — copy the first machine's `fleet/` directory again for that.\n\nNext:\n  1. Delete your private copy at {}; it holds the cluster's CA key and cookie.\n  2. On every machine already in the cluster, run `ouro fleet members add {} --host {}`.\n  3. Start this machine: `ouro daemon`, then `ouro fleet doctor`.",
+                        source.display(),
+                        profile.name,
+                        profile.machine,
+                        profile.host,
+                        profile
+                            .members
+                            .iter()
+                            .map(|member| member.machine.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        source.display(),
+                        profile.machine,
+                        profile.host
+                    );
+                    return Ok(());
+                }
+                None => fleet::create(
+                    &paths.data_dir,
+                    name.as_deref(),
+                    &identity.machine,
+                    &identity.host,
+                    fleet::Ports {
+                        gateway: gateway_port,
+                        dist: dist_port,
+                        epmd: None,
+                    },
+                )?,
+            };
             let address_note = if fleet::host_is_local_only(&profile.host) {
                 "\n  note         loopback is local-only; use a Tailscale/private IPv4 name on separate machines"
             } else {
                 ""
             };
             println!(
-                "Cluster identity created.\n  fleet        {}\n  machine      {}\n  address      {}{}\n  transport    TLS\n  profile      {}\n\nNext:\n  1. Verify the local interface and credentials: `ouro fleet doctor`\n  2. Start this machine: `ouro daemon`\n  3. Verify the live runtime: `ouro fleet doctor`\n\nAllow TCP {} (this machine\'s EPMD port) and {}..{} only between private cluster addresses; do not open the gateway port, which remains loopback-only. Ouroboros requests the advertised private IPv4 interface for EPMD, pins TLS distribution to it, and doctor checks an incumbent EPMD is not listening on another local IPv4 interface.\n\nThese credentials cannot be reissued from anywhere else. Back up {} securely; nothing protects against disk loss. To join a second machine to this one, see docs/FLEET.md: both runtimes read the same cookie and name each other in OUROBOROS_CLUSTER_HOSTS.",
+                "Cluster identity created.\n  fleet        {}\n  machine      {}\n  address      {}{}\n  transport    TLS\n  profile      {}\n\nNext:\n  1. Verify the local interface and credentials: `ouro fleet doctor`\n  2. Start this machine: `ouro daemon`\n  3. Verify the live runtime: `ouro fleet doctor`\n\nAllow TCP {} (this machine\'s EPMD port) and {}..{} only between private cluster addresses; do not open the gateway port, which remains loopback-only. Ouroboros requests the advertised private IPv4 interface for EPMD, pins TLS distribution to it, and doctor checks an incumbent EPMD is not listening on another local IPv4 interface.\n\nThese credentials cannot be reissued from anywhere else. Back up {} securely; nothing protects against disk loss. To add a second machine: copy this directory to it privately, run `ouro fleet create --from <copy>` there, then `ouro fleet members add` here. docs/FLEET.md has the whole recipe.",
                 profile.name,
                 profile.machine,
                 profile.host,
@@ -1334,7 +1380,50 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                 bail!("fleet doctor found setup problems")
             }
         }
+        FleetCommand::Members { command } => match command {
+            FleetMembersCommand::Add {
+                machine,
+                host,
+                node,
+            } => {
+                let added = fleet::add_member(&paths.data_dir, &machine, &host, node.as_deref())?;
+                println!(
+                    "Roster updated on this machine only.\n  machine      {}\n  node         {}\n\nThis machine dials it on its next reconnect sweep, within about a second; no restart is needed. Run the same command on every other machine in the cluster — the roster is not replicated.",
+                    added.machine, added.node
+                );
+                Ok(())
+            }
+            FleetMembersCommand::Remove { machine } => {
+                let removed = fleet::remove_member(&paths.data_dir, &machine)?;
+                println!(
+                    "Roster updated on this machine only.\n  removed      {}\n  node         {}\n\nThis machine stops dialing it within about a second. No tombstone was written and no session-owner evidence was retired; `ouro fleet sessions forget --machine {} --accept-state-loss` does that. Run the same command on every other machine in the cluster.",
+                    removed.machine, removed.node, removed.machine
+                );
+                Ok(())
+            }
+        },
         FleetCommand::Sessions { command } => match command {
+            SessionsCommand::Restore { machine } => {
+                let profile = fleet::load(&paths.data_dir)?.ok_or_else(|| {
+                    anyhow!("this machine is standalone; there is no cluster roster to restore a member to")
+                })?;
+                let gone = profile
+                    .tombstones
+                    .iter()
+                    .find(|entry| entry.machine == machine || entry.node == machine)
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "this machine's roster does not record {machine} as gone; `ouro fleet status` prints the machines it declares gone"
+                        )
+                    })?;
+                fleet::restore_machine(&paths.data_dir, &gone)?;
+                println!(
+                    "Roster updated on this machine only.\n  machine      {}\n  node         {}\n\n{} is a member again and is dialed on the next reconnect sweep. The durable session-owner evidence a completed `sessions forget` already retired is gone for good; this restores the roster entry, not that evidence.",
+                    gone.machine, gone.node, gone.machine
+                );
+                Ok(())
+            }
             SessionsCommand::Forget {
                 machine,
                 accept_state_loss,
@@ -1436,14 +1525,22 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                 Some(epmd) => fleet::leave_with_epmd(&paths.data_dir, epmd)?,
                 None => fleet::leave(&paths.data_dir)?,
             };
-            if removed {
-                println!(
-                    "Cluster credentials removed from this stopped machine. No other machine was changed.\n\nThis machine is standalone again. To give it a cluster identity, run `ouro fleet create`."
-                );
-            } else {
-                println!(
-                    "This machine is already standalone; there was no fleet profile to remove."
-                );
+            match removed {
+                Some(removal) if removal.profile_readable => {
+                    println!(
+                        "Cluster credentials removed from this stopped machine. No other machine was changed.\n  removed      {}\n\nThis machine is standalone again. To give it a cluster identity, run `ouro fleet create`; to make it a second machine of an existing cluster, see docs/FLEET.md.",
+                        removal.removed.join(", ")
+                    );
+                }
+                Some(removal) => {
+                    println!(
+                        "This machine's fleet directory had no readable profile.json, so it could name no machine; the recognized private files were removed anyway.\n  removed      {}\n\nThis machine is standalone again. Run `ouro fleet create` to give it a cluster identity.",
+                        removal.removed.join(", ")
+                    );
+                }
+                None => println!(
+                    "This machine is already standalone; there was no fleet directory to remove."
+                ),
             }
             Ok(())
         }
