@@ -26,13 +26,14 @@ config :ouroboros,
   upgrade_trust_policy: [allow_unsigned: config_env() != :prod],
   # Which supervision tree this node boots. `:core` runs the full runtime; `:builder`
   # and `:signer` run cluster formation and nothing else, so a host that only compiles
-  # candidate code or only holds a signing seam has no sessions or stores on it to lose. An unrecognized value refuses the boot rather than
-  # falling back to the privileged tree. See `Ouroboros.Cluster`.
+  # candidate code or only holds a signing seam has no sessions or stores on it to lose.
+  # An unrecognized value refuses the boot rather than falling back to the privileged
+  # tree. See `Ouroboros.Cluster`.
   node_role: :core,
   # Refuse to place a mesh agent on a node that is not a connected `:core` node running
-  # this runtime. This is misconfiguration detection — work sent where it
-  # cannot run — and explicitly not a boundary against a hostile connected node, which
-  # has full `:erpc` authority regardless.
+  # this runtime. This is misconfiguration detection — work sent where it cannot run —
+  # and explicitly not a boundary against a hostile connected node, which has full
+  # `:erpc` authority regardless.
   placement_role_check: true,
   # Where forge builds run. `nil` builds on this node. A named node must be connected,
   # running this runtime, and in the `:builder` role; it must also run an identical
