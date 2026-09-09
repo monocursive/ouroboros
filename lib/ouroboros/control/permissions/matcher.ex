@@ -167,6 +167,17 @@ defmodule Ouroboros.Control.Permissions.Matcher do
   defp do_matches?(%Pattern{kind: :forge, spec: %{name: name}}, request, _quantifier),
     do: request.tool == "forge" and context_value(request.context, "forge") == name
 
+  # ── A kind this build no longer has ────────────────────────────────────────────────
+
+  # A rule stored by an older build whose kind the core reduction retired — a
+  # `ComputerUse(…)` rule in a permission checkpoint written before slice C5, say. The
+  # file still decodes, because `Ouroboros.Storage.RetiredAtoms` keeps the name interned;
+  # what it must not do is decide anything. Matching nothing is the narrow answer in both
+  # directions: an `allow` it cannot cover permits nothing, and a `deny` it cannot cover
+  # refuses nothing that a live rule would not refuse anyway. Written out rather than left
+  # to `matches?/3`'s `rescue`, so the answer is a decision this module made.
+  defp do_matches?(%Pattern{}, _request, _quantifier), do: false
+
   # ── helpers ────────────────────────────────────────────────────────────────────────
 
   defp quantify(:any, list, fun), do: Enum.any?(list, fun)

@@ -92,6 +92,12 @@ defmodule Ouroboros.Control.Permissions.Rule do
     }
   end
 
+  # Deliberately not a check of `pattern.kind` against `Pattern.kinds/0`. A rule stored by
+  # an older build whose kind the core reduction retired is still a rule: rejecting it here
+  # would fail the whole checkpoint closed (`Permissions.load/2`) and take every live rule
+  # beside it, which is the outcome `Ouroboros.Storage.RetiredAtoms` exists to prevent. It
+  # is kept, rendered, removable — and matches nothing, which
+  # `Ouroboros.Control.Permissions.Matcher` decides.
   @doc false
   @spec valid?(term()) :: boolean()
   def valid?(%__MODULE__{} = rule) do

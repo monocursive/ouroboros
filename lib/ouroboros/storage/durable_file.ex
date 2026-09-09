@@ -21,6 +21,13 @@ defmodule Ouroboros.Storage.DurableFile do
 
   `:durability_hook` is a deterministic fault-observation seam for tests. A hook
   returning `{:error, reason}` aborts before the named operation.
+
+  Checkpoints are read with `:erlang.binary_to_term(binary, [:safe])`, which refuses to
+  create an atom, so a file naming an atom this build does not have fails to decode
+  entirely. `Ouroboros.Storage.RetiredAtoms` holds the names the core reduction removed
+  that a written checkpoint may still carry; `retired_atoms/0` below compiles that list
+  into this module, so loading the adapter interns them and a store written by an older
+  build reads back.
   """
 
   @behaviour Jido.Storage
@@ -28,6 +35,20 @@ defmodule Ouroboros.Storage.DurableFile do
   # Old enough that no live commit could still be writing it, short enough that an
   # orphan does not outlive the boot that follows the crash which made it.
   @stale_temporary_ms 60_000
+
+  # Read at compile time on purpose: the names land in *this* module's atom table, so they
+  # are interned by the time `get_checkpoint/2` below can run, in a VM that never loaded
+  # `Ouroboros.Storage.RetiredAtoms` itself. See that module for why.
+  @retired_atoms Ouroboros.Storage.RetiredAtoms.all()
+
+  @doc """
+  The atoms `Ouroboros.Storage.RetiredAtoms` keeps alive for `safe_binary_to_term/1`.
+
+  Nothing in the decode path calls this. It exists so the list is a value this module
+  holds rather than a comment claiming it does.
+  """
+  @spec retired_atoms() :: [atom()]
+  def retired_atoms, do: @retired_atoms
 
   @impl true
   def get_checkpoint(key, opts) do
