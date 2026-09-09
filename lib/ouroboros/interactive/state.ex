@@ -271,6 +271,7 @@ defmodule Ouroboros.Interactive.State do
   def new(id, opts) when is_list(opts) do
     if Keyword.keyword?(opts) and unique_keys?(opts) do
       with :ok <- validate_session_options(opts),
+           :ok <- validate_id(id),
            :ok <- validate_parent(Keyword.get(opts, :forked_from)),
            :ok <- validate_parent(Keyword.get(opts, :handed_off_from)),
            {:ok, base} <-
@@ -1098,6 +1099,15 @@ defmodule Ouroboros.Interactive.State do
   end
 
   def loadable?(_state), do: false
+
+  # `loadable?/1` below already requires this of a session it reads back, and every store
+  # write is keyed by it, so a session built with a blank or non-binary id is one that can
+  # acquire a workspace lease and only fail afterwards. `Ouroboros.InteractiveSession.start/1`
+  # is the caller that can still hand one in: it reads `:id` with `Keyword.get_lazy/3`
+  # behind a `valid_options?/1` that checks keyword shape and nothing else.
+  defp validate_id(id) do
+    if valid_id?(id), do: :ok, else: {:error, :invalid_session_id}
+  end
 
   defp validate_parent(nil), do: :ok
   defp validate_parent(parent) when is_binary(parent), do: validate_forked_from(parent)
