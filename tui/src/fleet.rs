@@ -5360,7 +5360,10 @@ mod tests {
         // `fleet_dns_requires_one_canonical_private_ipv4`. Pin each host to the refusal it
         // actually gets rather than accepting either of two.
         for (host, refusal) in [
-            ("2001:db8::1", "IPv6 fleet distribution is not yet supported"),
+            (
+                "2001:db8::1",
+                "IPv6 fleet distribution is not yet supported",
+            ),
             ("host:epmd", "contains `:`"),
         ] {
             let error = create(&data, None, "owner", host, ephemeral_ports())
