@@ -13,7 +13,7 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs sandbox sandbox-linux-test forge-linux-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test dialyzer bench-local self-export golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check bench-self improve-selftest
+.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs sandbox sandbox-linux-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test dialyzer bench-local self-export golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check bench-self improve-selftest
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -43,7 +43,6 @@ help:
 	@echo "make dist-check       install.sh against a local fixture; release.yml structure"
 	@echo "make sandbox          build ouro-sandbox into priv/sandbox/ (Linux sandbox helper)"
 	@echo "make sandbox-linux-test  prove the sandbox helper enforces, in a Linux container"
-	@echo "make forge-linux-test    prove the forge's builder namespace, in a Linux container"
 	@echo "make wasm-linux-test     prove the wasm suites under bubblewrap, in a Linux container"
 	@echo "make wasm             build ouro-wasm into priv/wasm/ (WebAssembly containment helper)"
 	@echo "make wasm-guest       build the lane-W acceptance guest into test/support/wasm/echo.wasm"
@@ -212,13 +211,6 @@ wasm-sdk-cache:
 	cd tui/wasm/guest && CARGO_HOME="$(FORGE_CARGO_HOME)" $(CARGO) fetch --locked
 	@echo "==> wasm-sdk-cache: crates now cached"
 	@find "$(FORGE_CARGO_HOME)/registry/cache" -name '*.crate' | wc -l
-
-# The forge's builder namespace, on a real kernel, from a Mac. `--privileged` is what allows
-# the user namespace bubblewrap needs; the script's header says why that is a fact about
-# Docker rather than about the sandbox.
-forge-linux-test:
-	@echo "==> forge-linux-test: the builder namespace on a Linux kernel"
-	scripts/forge-linux-test.sh
 
 # Lane W under bubblewrap: the backend the hosted CI job runs every wasm suite under, and
 # the one no Mac exercises. `ouro-sandbox` is disabled by name inside the container so

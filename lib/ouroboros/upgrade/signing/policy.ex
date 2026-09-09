@@ -1,33 +1,31 @@
 defmodule Ouroboros.Upgrade.Signing.Policy do
   @moduledoc """
-  The gate a signer node applies to a full artifact *before* any signature exists.
+  The gate a signer node applies to a full manifest *before* any signature exists.
 
   This is the independence the rest of the upgrade lane cannot supply for itself. The
-  forge decides what to build; `Ouroboros.Upgrade.Verifier` decides what a target node
-  will load. Both of those run inside the application an agent can patch. This policy
-  runs in the process that holds the key, on a host whose supervision tree contains
-  nothing else, and it is the only check in the system that happens while refusing is
-  still free — after a signature exists, every later check is arguing with cryptography.
+  forge decides what to build; `Ouroboros.Wasm.Verifier` decides what a target node will
+  load. Both of those run inside the application an agent can reach. This policy runs in
+  the process that holds the key, on a host whose supervision tree contains nothing else,
+  and it is the only check in the system that happens while refusing is still free —
+  after a signature exists, every later check is arguing with cryptography.
 
   ## What a policy is given, and what it trusts
 
-  `evaluate/2` receives the **whole submitted artifact**, not the canonical payload the
-  requester wants signed. That is the entire point: a payload is a hash of a manifest,
-  and a manifest is a set of claims. The shipped policy recomputes every one of those
-  claims from the BEAM bytes actually present — sha256, md5, module name, vsn, and the
-  offline `Ouroboros.Upgrade.Beam.inspect_binary/1` gates — so a requester that
-  precomputed a flattering manifest is refused on arithmetic rather than trusted.
+  `evaluate/2` receives the **whole submitted manifest** and the component bytes it
+  describes, not the canonical payload the requester wants signed. That is the entire
+  point: a payload is a hash of a manifest, and a manifest is a set of claims. The
+  shipped policy recomputes every claim that can be recomputed — the digest and the size,
+  from the bytes actually in hand — so a requester that precomputed a flattering manifest
+  is refused on arithmetic rather than trusted.
 
   It trusts exactly one thing about the requester: nothing.
 
-  ## The namespace rule is structural
+  ## The world rule is structural
 
-  Every module in the artifact must be under `Ouroboros.Capability.`, in either
-  disposition. This is not the verifier's protected-prefix list restated — that list
-  names what may not be *replaced*, and is enforced on the loading node, inside the
-  application. This rule is the complement, enforced here: a signer that will only ever
-  sign capability modules cannot be talked into signing a control-plane patch, whatever
-  the requester's argument, because it has no code path that produces that signature.
+  A component's `world` must be the one its `kind` requires, and there is no
+  configuration that widens that. A world is a linker contract; a signer that could be
+  argued into certifying one this build does not implement would have certified a
+  contract nobody on any loading node can honour.
 
   ## What a signer cannot know
 
@@ -36,14 +34,12 @@ defmodule Ouroboros.Upgrade.Signing.Policy do
 
     * **Epoch ordering.** A signer sees a number. It has no view of any cluster's epoch
       watermark, and asking it to would make it a participant in the deployment it is
-      supposed to be independent of. Only positivity is checked; monotonicity is the
-      target executor's job and survives this signature entirely.
-    * **Pre-image freshness for `:replace`.** Whether `old_sha256` matches what a target
-      is running right now is a statement about that target's VM at load time. The
-      signer checks the pre-image bytes are internally consistent — they hash to what
-      the manifest claims, and carry no on-load, NIF import, or protocol marker — and
-      leaves currency to `Verifier.verify/2` on the node itself.
-    * **Module absence for `:introduce`.** Same reason: absence is a property of a VM.
+      supposed to be independent of. Positivity is checked, and distance from what this
+      node can see (`@max_epoch_distance`); monotonicity is the target register's job and
+      survives this signature entirely.
+    * **What the linker will accept.** The declared imports are provenance and review
+      surface (D5). The boundary is the helper's linker on the loading node, which
+      defines exactly the world's imports and fails instantiation on anything else.
 
   ## Refusals are values
 
@@ -52,35 +48,16 @@ defmodule Ouroboros.Upgrade.Signing.Policy do
   ambiguity, and a signing service must never let "I refuse" and "I do not know what
   happened" look alike.
 
-  ## Two lanes, one gate
-
-  `evaluate/2` is also the gate for lane W (docs/WASM.md §7.5): an
-  `Ouroboros.Wasm.Artifact` is a manifest describing WebAssembly component bytes that
-  travel *beside* it, so the shipped policy dispatches on the struct. Nothing about the
-  BEAM arm changes. What the two arms share is the posture — recompute every claim that
-  can be recomputed, refuse outside a namespace no configuration widens — and what they
-  do not share is the payload space: the two `signing_payload/2` functions carry
-  different tags, so a signature over one can never be replayed as a signature over the
-  other.
-
   ## Configuration
 
     * `config :ouroboros, :signing_policy` — the module implementing this behaviour,
       defaulting to `Ouroboros.Upgrade.Signing.Policy.Default`.
-    * `config :ouroboros, :signing_require_eval` — when true, a BEAM artifact must carry
-      a valid `Ouroboros.Upgrade.Rollout.Evaluation` spec in `metadata.forge.eval`.
-      Mix/test defaults to false so existing unsigned-eval fixtures keep meaning.
-      Production (`config/runtime.exs`) defaults to true; `OUROBOROS_SIGNING_REQUIRE_EVAL=false`
-      is the opt-out. That is the switch that makes "this capability declared how it
-      would be judged" a precondition of a signature rather than a hope.
-    * `config :ouroboros, :signing_require_wasm_eval` — the same switch for lane W, and
-      it defaults to **true**. That asymmetry is deliberate and is D12: the BEAM lane has
-      a build peer that ran ExUnit and a `test_report` to show for it, and lane W has no
-      analogue, so the signed eval spec *is* the test story there. The semantics extend
-      rather than fork — same validator, same refusal — and only the default differs.
+    * `config :ouroboros, :signing_require_wasm_eval` — when true, a manifest must carry
+      a valid evaluation spec in `metadata.eval`, and it defaults to **true** (D12).
+      There is no build peer that ran a test suite here, so the signed eval spec *is* the
+      test story: it is what makes "this capability declared how it would be judged" a
+      precondition of a signature rather than a hope.
   """
-
-  alias Ouroboros.Upgrade.Artifact
 
   @default_rate_limit_window_ms 60_000
   @default_max_requesters 64
@@ -89,7 +66,6 @@ defmodule Ouroboros.Upgrade.Signing.Policy do
   @type context :: %{
           required(:signer_id) => String.t(),
           required(:requester) => node(),
-          required(:require_eval) => boolean(),
           optional(:require_wasm_eval) => boolean(),
           optional(:component_bytes) => binary() | nil,
           optional(:max_artifact_bytes) => pos_integer(),
@@ -102,7 +78,7 @@ defmodule Ouroboros.Upgrade.Signing.Policy do
   `{:ok, findings}` admits it, and the findings are journaled next to the decision as the
   evidence behind it. `{:refused, reason}` is final and typed.
   """
-  @callback evaluate(artifact :: Artifact.t() | struct(), context :: context()) ::
+  @callback evaluate(artifact :: Ouroboros.Wasm.Artifact.t() | struct(), context :: context()) ::
               {:ok, findings :: map()} | {:refused, reason :: term()}
 
   @doc "Returns the configured policy module, defaulting to the shipped one."
@@ -176,48 +152,17 @@ end
 
 defmodule Ouroboros.Upgrade.Signing.Policy.Default do
   @moduledoc """
-  The shipped independent gate: recompute everything, and refuse outside the namespace.
-
-  Five families of check, in the order that refuses soonest and cheapest:
-
-  1. **Shape.** A real `Ouroboros.Upgrade.Artifact` struct with a non-empty id, a
-     positive integer epoch, a non-empty list of distinct `Ouroboros.Upgrade.Beam`
-     structs, and a map for metadata. Anything else is a malformed request, not a
-     policy question.
-  2. **Namespace.** Every module under `Ouroboros.Capability.`, in either disposition.
-     Hard: there is no configuration that widens it.
-  3. **Recomputation.** For every binary in the artifact: `:beam_lib` says which module
-     it is, sha256 and md5 are computed from the bytes present, `vsn` is read from the
-     attributes chunk, and the code server is asked to prepare the batch so an `-on_load`
-     function is detected soundly rather than looked for in a chunk it never appears in.
-     Static `:erlang.load_nif/2` imports and protocol markers are refused. Every one of
-     those is compared against what the manifest claimed, and a mismatch is the refusal.
-     A `:replace` beam's pre-image is held to the same binary-level checks; its
-     *currency* is not, because that is a fact about a target VM.
-  4. **Provenance.** `metadata.forge` must exist and carry a `source_sha256` and a
-     `test_report` in which nothing failed and at least one test passed. A capability
-     whose tests never ran has no provenance to sign.
-  5. **Evaluation criteria**, when `:signing_require_eval` is on: `metadata.forge.eval`
-     must be a spec `Ouroboros.Upgrade.Rollout.Evaluation.validate/1` accepts.
-
-  What this proves is bounded and worth stating plainly: that the bytes in front of the
-  signer are internally consistent, live in the namespace this signer signs for, and
-  arrived with a build report claiming green tests. It does not prove the code is good,
-  that the test report describes those bytes (the forge asserts that link; the signer
-  cannot re-run a build it did not perform), or that the requester is who it says it is.
-
-  ## The lane-W arm
+  The shipped independent gate: recompute everything, and refuse outside the world.
 
   An `Ouroboros.Wasm.Artifact` is checked by seven families, in the order docs/WASM.md §7.5
   states them:
 
   1. **Shape and size.** Non-empty id and name, positive epoch, 64-hex lower-case
-     `component_sha256`, positive `size` within `:signing_max_artifact_bytes` — the same
-     bound the BEAM lane's submissions are held to — a string world, a list of string
-     imports, a plain map for metadata.
+     `component_sha256`, positive `size` within `:signing_max_artifact_bytes`, a string
+     world, a list of string imports, a plain map for metadata.
   2. **World, and the kind it follows from.** `kind` is `:capability` or `:policy`, and
-     `world == Ouroboros.Wasm.world_for(kind)`. This is the namespace rule's analogue and it
-     is just as hard: there is no configuration that widens it. A signer that can be argued
+     `world == Ouroboros.Wasm.world_for(kind)`. This is the hard rule, and it is hard: there
+     is no configuration that widens it. A signer that can be argued
      into signing a component for a world this build does not implement is a signer that has
      certified a linker contract nobody here can honour — and one that signed a `:policy`
      manifest carrying the capability world would have certified a permission engine's
@@ -249,8 +194,8 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
      `Ouroboros.Upgrade.Rollout.Evaluation.validate/1` whenever it is there, and is
      **required by default** (D12, `:signing_require_wasm_eval`). `source_sha256`,
      `language`, and `test_report` are optional and are checked for shape when present:
-     a guest toolchain that produces a test report is welcome to say so, and lane W does
-     not pretend one exists when it does not.
+     a guest toolchain that produces a test report is welcome to say so, and nothing here
+     pretends one exists when it does not.
   A **policy** manifest differs in exactly two more places, and both follow from what a policy
   component is. Its `eval` spec is a list of `{request, expect: {decision}}` cases validated by
   `Ouroboros.Wasm.PolicyEngine.validate_eval/1` rather than a probe spec over agent state — a
@@ -271,28 +216,25 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
 
   @behaviour Ouroboros.Upgrade.Signing.Policy
 
-  alias Ouroboros.Upgrade.{Artifact, Beam}
   alias Ouroboros.Upgrade.Epoch
   alias Ouroboros.Upgrade.Rollout.Evaluation
   alias Ouroboros.Upgrade.Rollout.Registry
   alias Ouroboros.Wasm
 
-  @capability_prefix "Elixir.Ouroboros.Capability."
   @sha256_hex 64
-  @max_reported_modules 25
 
   # v1's world imports exactly one function (docs/WASM.md §7.1). Growth of this set is a
   # signing-policy event, which is why the list is here and not in configuration.
   @world_imports ["log"]
 
-  # The namespace a lane-W durable agent id lives in. `Ouroboros.Wasm.Rollout` writes the
+  # The namespace a durable agent id lives in. `Ouroboros.Wasm.Rollout` writes the
   # registry entry's module as `"wasm/" <> name` for the same reason. The id's own bound is
   # the *name's* bound (`Ouroboros.Wasm.Artifact.name?/1`), because the id is exactly this
   # prefix and that name.
   @start_prefix "wasm/"
   @max_start_config_bytes 16_384
 
-  # How far above what this node has actually seen a lane-W epoch may be.
+  # How far above what this node has actually seen an epoch may be.
   #
   # `Ouroboros.Upgrade.Rollout.Registry` refuses an epoch at or above its plausibility
   # ceiling, and admits one only when it is strictly greater than its watermark. Between
@@ -324,34 +266,6 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
   @default_max_artifact_bytes 16 * 1024 * 1024
 
   @impl true
-  def evaluate(%Artifact{} = artifact, context) when is_map(context) do
-    with :ok <- check_shape(artifact),
-         :ok <- check_namespace(artifact.modules),
-         {:ok, modules} <- recompute(artifact.modules),
-         {:ok, provenance} <- check_provenance(artifact.metadata),
-         {:ok, eval} <- check_eval(artifact.metadata, context) do
-      {:ok,
-       %{
-         epoch: artifact.epoch,
-         namespace: :ouroboros_capability,
-         recomputed: length(modules),
-         modules: Enum.take(modules, @max_reported_modules),
-         provenance: provenance,
-         eval: eval
-       }}
-    end
-  rescue
-    # A malformed binary can make `:beam_lib` unhappy in ways its own error tuples do not
-    # cover. That is a refusal; it must never leave this process as an exception, because
-    # the requester reaches it through `:erpc` and would read a raise as ambiguity.
-    error -> {:refused, {:policy_exception, Exception.message(error)}}
-  catch
-    kind, reason -> {:refused, {:policy_failure, kind, inspect(reason)}}
-  end
-
-  # Lane W. Same posture, different arithmetic: there are no BEAM binaries to inspect and
-  # no module names to namespace, so what is recomputed is the digest and the size of the
-  # component bytes submitted beside the manifest, and the hard rule is the world.
   def evaluate(%Wasm.Artifact{} = artifact, context) when is_map(context) do
     with :ok <- check_wasm_shape(artifact, context),
          :ok <- check_epoch_distance(artifact),
@@ -380,8 +294,8 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
        }}
     end
   rescue
-    # Same reason as the BEAM arm: the requester reaches this through `:erpc`, and a raise
-    # there is indistinguishable from transport ambiguity.
+    # A refusal must never leave this process as an exception: the requester reaches it
+    # through `:erpc`, and a raise there is indistinguishable from transport ambiguity.
     error -> {:refused, {:policy_exception, Exception.message(error)}}
   catch
     kind, reason -> {:refused, {:policy_failure, kind, inspect(reason)}}
@@ -392,291 +306,12 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
 
   def evaluate(_artifact, context), do: {:refused, {:invalid_policy_context, describe(context)}}
 
-  defp check_shape(%Artifact{} = artifact) do
-    modules = artifact.modules
-
-    cond do
-      not is_binary(artifact.id) or artifact.id == "" ->
-        {:refused, :invalid_artifact_id}
-
-      not is_integer(artifact.epoch) or artifact.epoch <= 0 ->
-        {:refused, {:invalid_epoch, describe(artifact.epoch)}}
-
-      not is_list(modules) or modules == [] ->
-        {:refused, :empty_artifact}
-
-      not Enum.all?(modules, &match?(%Beam{}, &1)) ->
-        {:refused, :invalid_artifact_modules}
-
-      modules |> Enum.map(& &1.module) |> Enum.uniq() |> length() != length(modules) ->
-        {:refused, :duplicate_modules}
-
-      not is_map(artifact.metadata) ->
-        {:refused, :invalid_artifact_metadata}
-
-      true ->
-        :ok
-    end
-  end
-
-  # The one rule with no configuration behind it. A signer that can be argued into the
-  # control plane is a signer that adds nothing.
-  defp check_namespace(modules) do
-    Enum.reduce_while(modules, :ok, fn beam, :ok ->
-      if String.starts_with?(Atom.to_string(beam.module), @capability_prefix) do
-        {:cont, :ok}
-      else
-        {:halt, {:refused, {:module_outside_capability_namespace, beam.module}}}
-      end
-    end)
-  end
-
-  defp recompute(modules) do
-    Enum.reduce_while(modules, {:ok, []}, fn beam, {:ok, acc} ->
-      case recompute_module(beam) do
-        {:ok, summary} -> {:cont, {:ok, [summary | acc]}}
-        {:refused, _reason} = refusal -> {:halt, refusal}
-      end
-    end)
-    |> case do
-      {:ok, summaries} -> {:ok, Enum.reverse(summaries)}
-      refusal -> refusal
-    end
-  end
-
-  defp recompute_module(%Beam{disposition: disposition} = beam)
-       when disposition in [:replace, :introduce] do
-    with :ok <- check_disposition_shape(beam),
-         :ok <- check_binary(beam.module, beam.binary, beam.sha256, beam.md5, beam.vsn, :new),
-         :ok <- check_preimage(beam) do
-      {:ok, %{module: beam.module, disposition: disposition, sha256: beam.sha256}}
-    end
-  end
-
-  defp recompute_module(%Beam{} = beam),
-    do: {:refused, {:invalid_disposition, beam.module, describe(beam.disposition)}}
-
-  # An `:introduce` beam has nothing to migrate and nothing to roll back to. A
-  # `:replace` beam must carry the pre-image the manifest describes, or the signature
-  # would cover a rollback path that does not exist.
-  defp check_disposition_shape(%Beam{disposition: :introduce} = beam) do
-    if is_nil(beam.old_binary) and is_nil(beam.old_sha256) and is_nil(beam.old_md5) and
-         is_nil(beam.old_vsn) and is_nil(beam.old_filename) and beam.stateful == false and
-         is_nil(beam.migration_extra) do
-      :ok
-    else
-      {:refused, {:invalid_introduction, beam.module}}
-    end
-  end
-
-  defp check_disposition_shape(%Beam{disposition: :replace} = beam) do
-    cond do
-      not is_binary(beam.old_binary) ->
-        {:refused, {:missing_preimage, beam.module}}
-
-      not is_boolean(beam.stateful) ->
-        {:refused, {:invalid_stateful_declaration, beam.module}}
-
-      not Beam.portable_term?(beam.migration_extra) ->
-        {:refused, {:invalid_migration_extra, beam.module}}
-
-      not beam.stateful and not is_nil(beam.migration_extra) ->
-        {:refused, {:migration_extra_for_stateless_module, beam.module}}
-
-      true ->
-        :ok
-    end
-  end
-
-  defp check_preimage(%Beam{disposition: :introduce}), do: :ok
-
-  defp check_preimage(%Beam{disposition: :replace} = beam) do
-    check_binary(beam.module, beam.old_binary, beam.old_sha256, beam.old_md5, beam.old_vsn, :old)
-  end
-
-  defp check_binary(module, binary, sha256, md5, vsn, which) when is_binary(binary) do
-    case Beam.inspect_binary(binary) do
-      {:ok, info} ->
-        cond do
-          info.module != module ->
-            {:refused, {:module_mismatch, module, info.module, which}}
-
-          Beam.sha256(binary) != sha256 ->
-            {:refused, {:manifest_mismatch, module, :sha256, which}}
-
-          info.md5 != md5 ->
-            {:refused, {:manifest_mismatch, module, :md5, which}}
-
-          info.vsn != vsn ->
-            {:refused, {:manifest_mismatch, module, :vsn, which}}
-
-          info.on_load? ->
-            {:refused, {:forbidden_beam_feature, module, :on_load, which}}
-
-          info.nif? ->
-            {:refused, {:forbidden_beam_feature, module, :nif, which}}
-
-          info.protocol? ->
-            {:refused, {:forbidden_beam_feature, module, :protocol, which}}
-
-          true ->
-            :ok
-        end
-
-      {:error, reason} ->
-        {:refused, {:invalid_beam, module, describe(reason), which}}
-    end
-  end
-
-  defp check_binary(module, _binary, _sha256, _md5, _vsn, which),
-    do: {:refused, {:missing_beam_binary, module, which}}
-
-  defp check_provenance(metadata) do
-    with {:ok, forge} <- fetch_forge(metadata),
-         {:ok, source_sha256} <- fetch_source_sha256(forge),
-         {:ok, tests} <- fetch_test_report(forge) do
-      {:ok,
-       %{
-         source_sha256: source_sha256,
-         author: author(forge),
-         tests: tests
-       }}
-    end
-  end
-
-  defp fetch_forge(metadata) do
-    case Map.get(metadata, :forge) do
-      forge when is_map(forge) and not is_struct(forge) -> {:ok, forge}
-      nil -> {:refused, {:provenance_missing, :forge}}
-      other -> {:refused, {:invalid_provenance, :forge, describe(other)}}
-    end
-  end
-
-  defp fetch_source_sha256(forge) do
-    case Map.get(forge, :source_sha256) do
-      sha when is_binary(sha) and byte_size(sha) == @sha256_hex ->
-        if sha =~ ~r/\A[0-9a-f]{#{@sha256_hex}}\z/ do
-          {:ok, sha}
-        else
-          {:refused, {:invalid_provenance, :source_sha256, describe(sha)}}
-        end
-
-      nil ->
-        {:refused, {:provenance_missing, :source_sha256}}
-
-      other ->
-        {:refused, {:invalid_provenance, :source_sha256, describe(other)}}
-    end
-  end
-
-  # `passed` is derived rather than read: the sandbox reports totals and exclusions, and
-  # a report that "passed" only because every test was excluded is not a green build.
-  defp fetch_test_report(forge) do
-    case Map.get(forge, :test_report) do
-      report when is_map(report) and not is_struct(report) ->
-        total = counter(report, :total)
-        failures = counter(report, :failures)
-        excluded = counter(report, :excluded)
-        skipped = counter(report, :skipped)
-        passed = passed(report, total, failures, excluded, skipped)
-
-        cond do
-          is_nil(total) or is_nil(failures) ->
-            {:refused, {:invalid_provenance, :test_report, describe(report)}}
-
-          failures > 0 ->
-            {:refused, {:tests_failed, failures, total}}
-
-          passed < 1 ->
-            {:refused, {:no_tests_passed, total, passed}}
-
-          true ->
-            {:ok,
-             %{
-               total: total,
-               failures: failures,
-               excluded: excluded || 0,
-               skipped: skipped || 0,
-               passed: passed
-             }}
-        end
-
-      nil ->
-        {:refused, {:provenance_missing, :test_report}}
-
-      other ->
-        {:refused, {:invalid_provenance, :test_report, describe(other)}}
-    end
-  end
-
-  defp passed(report, total, failures, excluded, skipped) do
-    case Map.get(report, :passed) do
-      passed when is_integer(passed) and passed >= 0 ->
-        passed
-
-      _absent ->
-        if is_nil(total) or is_nil(failures) do
-          0
-        else
-          max(total - failures - (excluded || 0) - (skipped || 0), 0)
-        end
-    end
-  end
-
   defp counter(report, key) do
     case Map.get(report, key) do
       value when is_integer(value) and value >= 0 -> value
       _other -> nil
     end
   end
-
-  defp author(forge) do
-    case Map.get(forge, :author) do
-      author when is_binary(author) -> author
-      _other -> nil
-    end
-  end
-
-  defp check_eval(metadata, context) do
-    required? = Map.get(context, :require_eval, false) == true
-    spec = metadata |> Map.get(:forge, %{}) |> eval_spec()
-
-    case {required?, spec} do
-      {false, :absent} ->
-        {:ok, :absent}
-
-      {false, {:present, spec}} ->
-        case Evaluation.validate(spec) do
-          {:ok, _valid} -> {:ok, :present}
-          # `Evaluation.validate/1` already names its failures `{:invalid_eval_spec, _}`;
-          # wrapping them again would only bury the reason one tuple deeper.
-          {:error, reason} -> {:refused, reason}
-        end
-
-      {true, :absent} ->
-        {:refused, :eval_spec_required}
-
-      {true, {:present, spec}} ->
-        case Evaluation.validate(spec) do
-          {:ok, _valid} -> {:ok, :required_and_valid}
-          # `Evaluation.validate/1` already names its failures `{:invalid_eval_spec, _}`;
-          # wrapping them again would only bury the reason one tuple deeper.
-          {:error, reason} -> {:refused, reason}
-        end
-    end
-  end
-
-  defp eval_spec(forge) when is_map(forge) do
-    case Map.fetch(forge, :eval) do
-      {:ok, nil} -> :absent
-      {:ok, spec} -> {:present, spec}
-      :error -> :absent
-    end
-  end
-
-  defp eval_spec(_forge), do: :absent
-
-  ## Lane W
 
   defp check_wasm_shape(%Wasm.Artifact{} = artifact, context) do
     max = max_artifact_bytes(context)
@@ -756,9 +391,8 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
     _kind, _reason -> 0
   end
 
-  # The lane-W analogue of the capability namespace, and hard for the same reason. A world
-  # is a linker contract; certifying one this build does not implement would be certifying
-  # a contract nobody on any loading node can honour.
+  # The hard rule. A world is a linker contract; certifying one this build does not
+  # implement would be certifying a contract nobody on any loading node can honour.
   defp check_world(%Wasm.Artifact{world: world, kind: kind}) do
     # The world a *kind* requires, not merely a world this build implements. Both are supported
     # worlds, so comparing against a set would have signed a `:policy` manifest carrying the
@@ -918,7 +552,7 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
     end
   end
 
-  # Same posture as the BEAM arm — required by default, D12 — with one branch on the kind. A
+  # Required by default (D12), with one branch on the kind. A
   # capability's spec is a probe list over the wrapper agent's state; a policy's is a list of
   # permission requests and the decision this component must reach about each. They are
   # different grammars because they judge different things, and validating one against the

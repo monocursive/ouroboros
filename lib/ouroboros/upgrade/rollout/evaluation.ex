@@ -74,7 +74,7 @@ defmodule Ouroboros.Upgrade.Rollout.Evaluation do
   """
 
   alias Ouroboros.Mesh
-  alias Ouroboros.Upgrade.Beam
+  alias Ouroboros.Upgrade.Wire
 
   @source "ouroboros-rollout-evaluation"
 
@@ -168,10 +168,9 @@ defmodule Ouroboros.Upgrade.Rollout.Evaluation do
   Runs `spec` against `start` on the node this function is executing on.
 
   `start` is a module, or `{module, initial_state}` — the same start spec
-  `Ouroboros.Upgrade.Rollout.Probe.ready?/1` takes, and for the same reason: a lane-W
+  `Ouroboros.Upgrade.Rollout.Probe.ready?/1` takes, and for the same reason: a
   capability is one shipped module standing in for every component, so which capability is
-  being evaluated is a fact about its state (docs/WASM.md §7.2, D7). Lane B passes the bare
-  module and nothing about it changes.
+  being evaluated is a fact about its state (docs/WASM.md §7.2, D7).
 
   Returns `{:ok, report}` whenever the spec was driven to completion, failures included:
   a report is the answer, not the verdict. `{:error, reason}` means the evaluation could
@@ -323,7 +322,7 @@ defmodule Ouroboros.Upgrade.Rollout.Evaluation do
   defp validate_input(probe, index) do
     case Map.fetch(probe, :input) do
       {:ok, input} ->
-        if Beam.portable_term?(input),
+        if Wire.portable_term?(input),
           do: {:ok, input},
           else: reject({:probe_input_not_portable, index})
 
@@ -335,7 +334,7 @@ defmodule Ouroboros.Upgrade.Rollout.Evaluation do
   defp validate_expectation(:any_reply, _index), do: {:ok, :any_reply}
 
   defp validate_expectation({:equals, value} = expect, index) do
-    if Beam.portable_term?(value),
+    if Wire.portable_term?(value),
       do: {:ok, expect},
       else: reject({:expectation_not_portable, index})
   end
@@ -349,7 +348,7 @@ defmodule Ouroboros.Upgrade.Rollout.Evaluation do
   defp validate_expectation({:state_matches, key, value} = expect, index) do
     cond do
       not is_atom(key) or is_nil(key) -> reject({:invalid_state_key, index, describe(key)})
-      not Beam.portable_term?(value) -> reject({:expectation_not_portable, index})
+      not Wire.portable_term?(value) -> reject({:expectation_not_portable, index})
       true -> {:ok, expect}
     end
   end
@@ -378,7 +377,7 @@ defmodule Ouroboros.Upgrade.Rollout.Evaluation do
   defp validate_required(other, _count), do: reject({:invalid_required, describe(other)})
 
   defp validate_initial_state(state) when is_map(state) and not is_struct(state) do
-    if Beam.portable_term?(state),
+    if Wire.portable_term?(state),
       do: {:ok, state},
       else: reject(:initial_state_not_portable)
   end
@@ -656,10 +655,10 @@ defmodule Ouroboros.Upgrade.Rollout.Evaluation do
   defp now_ms, do: System.monotonic_time(:millisecond)
   defp elapsed_since(started), do: max(now_ms() - started, 0)
 
-  # Everything below crosses `:erpc` into a coordinator that writes it to a durable
+  # Everything below crosses `:erpc` into a driver that writes it to a durable
   # registry, so a reason keeps its shape only while it is portable and small.
   defp sanitize(reason) do
-    if Beam.portable_term?(reason) and
+    if Wire.portable_term?(reason) and
          byte_size(:erlang.term_to_binary(reason)) <= @max_reason_bytes do
       reason
     else

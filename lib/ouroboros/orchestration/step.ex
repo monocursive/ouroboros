@@ -15,11 +15,12 @@ defmodule Ouroboros.Orchestration.Step do
   ExUnit tests; omitting it does not bypass the signer's test requirements.
 
   The forge input is deliberately the smallest thing a planner can say. The
-  module name must sit inside the `Ouroboros.Capability.` namespace, mirroring
-  `Ouroboros.Upgrade.Forge.Source`, and the source path must be relative with no
-  traversal, because it is resolved under a workspace root that trusted runtime
-  configuration owns. Everything else a forge needs — which workspace, which
-  nodes, which signer — never appears here.
+  module name must sit inside the `Ouroboros.Capability.` namespace, and the
+  source path must be relative with no traversal, because it is resolved under a
+  workspace root that trusted runtime configuration owns. Everything else a forge
+  needs — which workspace, which nodes, which signer — never appears here. No
+  executor is configured for the kind, so a plan carrying one is refused by the
+  scheduler (docs/proposals/core.md §4 A1).
 
   `:coding` input is the same idea: a planner may name an `objective` and nothing
   that chooses a provider, workspace, worker, or sandbox. Those belong to trusted
@@ -37,8 +38,8 @@ defmodule Ouroboros.Orchestration.Step do
   @states [:pending, :ready, :running, :completed, :failed, :cancelled, :blocked]
   @kinds [:coding, :forge]
 
-  # Mirrors `Ouroboros.Upgrade.Forge.Source`'s namespace policy. A forge step that
-  # names anything else is rejected before it reaches a plan, not after a build.
+  # The capability namespace. A forge step that names anything else is rejected before
+  # it reaches a plan, not after a build.
   @capability_module ~r/^Ouroboros\.Capability\.[A-Z][A-Za-z0-9_]*(\.[A-Z][A-Za-z0-9_]*)*$/
   @max_source_path_bytes 1_024
 

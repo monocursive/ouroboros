@@ -98,35 +98,6 @@ defmodule Ouroboros.Signals.EffectDelegateTask do
     ]
 end
 
-defmodule Ouroboros.Signals.EffectForgeCapability do
-  @moduledoc "Asks an agent to forge a capability from source, if it is granted `:forge`."
-
-  use Jido.Signal,
-    type: "ouroboros.agent.effect.forge",
-    default_source: "/ouroboros/effects",
-    schema: [
-      from: [type: :string, required: true],
-      module: [type: :atom, required: true],
-      source: [type: :string, required: true],
-      test_source: [type: :any, default: nil],
-      nodes: [type: {:list, :atom}, default: []],
-      signer_id: [type: :any, default: nil]
-    ]
-end
-
-defmodule Ouroboros.Signals.EffectDeployCapability do
-  @moduledoc "Asks an agent to deploy a forged artifact, if it is granted `:deploy`."
-
-  use Jido.Signal,
-    type: "ouroboros.agent.effect.deploy",
-    default_source: "/ouroboros/effects",
-    schema: [
-      from: [type: :string, required: true],
-      artifact_id: [type: :string, required: true],
-      nodes: [type: {:list, :atom}, default: []]
-    ]
-end
-
 defmodule Ouroboros.Signals.EffectForgeWasmCapability do
   @moduledoc "Asks an agent to forge a wasm capability from source, if it is granted `:forge`."
 

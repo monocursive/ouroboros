@@ -94,7 +94,7 @@ defmodule Ouroboros.Wasm.Store do
   store wants reboot survival; a store under `/tmp` would be one that quietly is not one.
   """
 
-  alias Ouroboros.Upgrade.Rollout
+  alias Ouroboros.Upgrade.Rollout.Registry, as: RolloutRegistry
   alias Ouroboros.Wasm
   alias Ouroboros.Wasm.Artifact
 
@@ -147,7 +147,7 @@ defmodule Ouroboros.Wasm.Store do
 
   `:root` in `opts` names a different directory, which is how tests get one of their own.
   It is honoured only where `Ouroboros.Wasm.allow_store_root_override?/0` is true — the
-  same gate `Capability`, `PolicyEngine`, `Rollout` and `Boot` already applied — so a
+  same gate `Capability`, `PolicyEngine`, `Wasm.Rollout` and `Boot` already applied — so a
   caller that forgets the gate cannot point this store at an arbitrary directory. A
   seeded root on a node that has not said so is `{:error, :store_root_override_denied}`,
   not a silent fall-through to `:data_dir`.
@@ -554,9 +554,9 @@ defmodule Ouroboros.Wasm.Store do
   """
   @spec protected_shas(keyword()) :: {:ok, MapSet.t(String.t())} | {:error, :registry_unavailable}
   def protected_shas(opts \\ []) do
-    registry = Keyword.get(opts, :registry, Rollout.Registry)
+    registry = Keyword.get(opts, :registry, RolloutRegistry)
 
-    entries = Rollout.Registry.list(registry)
+    entries = RolloutRegistry.list(registry)
 
     protected =
       entries

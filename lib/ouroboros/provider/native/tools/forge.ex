@@ -296,7 +296,7 @@ defmodule Ouroboros.Provider.Native.Tools.Forge do
       `Ouroboros.Provider.Native.Exec` signals the sandboxed process group at. Minutes; every
       other term is seconds.
     * `config :ouroboros, :signing_call_timeout` — the `:erpc` deadline on the signature
-      (`Ouroboros.Upgrade.Forge.Signer`, default 15 s).
+      (`Ouroboros.Wasm.Deploy`, default 15 s).
     * `config :ouroboros, :capability_eval_timeout` — the rollout's per-node `eval_timeout`
       (`Ouroboros.Wasm.Rollout.deploy/4`, default 30 s).
     * the rollout's other three per-node deadlines: `stage_timeout` (60 s),

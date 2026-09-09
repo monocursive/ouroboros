@@ -2,26 +2,23 @@ defmodule Ouroboros.Wasm.Artifact do
   @moduledoc """
   A signed manifest describing one WebAssembly component. The bytes travel beside it.
 
-  This is lane W's answer to `Ouroboros.Upgrade.Artifact`, and the shape of the difference
-  is the shape of the lane (docs/WASM.md §7.5, D2). A BEAM artifact *contains* the modules
-  it deploys, stamped with the OTP/Elixir/architecture triple that decides which nodes may
-  load them. A component is one artifact for every node, forever, so there is no triple
-  here — and the bytes are not in the struct, because they are already content-addressed
+  The shape of it is the shape of the lane (docs/WASM.md §7.5, D2). A component is one
+  artifact for every node, forever, so there is no OTP/Elixir/architecture triple here —
+  and the bytes are not in the struct, because they are already content-addressed
   and already durable in `Ouroboros.Wasm.Store` (§7.4, D6). What is signed is the
   *manifest*: this component's sha256, its size, the world it claims, the imports it
   declares, and its provenance. The bytes are handed to the signer beside the manifest so
   the signer can recompute the sha and the size rather than believe them, and to the
   loading node beside the manifest so it can do the same before staging anything.
 
-  ## The payload tag is different on purpose
+  ## The payload carries its own tag
 
       :erlang.term_to_binary({:ouroboros_wasm_v1, signer, manifest}, [:deterministic])
 
-  `Ouroboros.Upgrade.Artifact.signing_payload/2` uses `:ouroboros_upgrade_v1`. Two lanes
-  sharing one signer and one trusted-key set must not share a payload space: a signature
-  issued over a BEAM artifact could otherwise be replayed as a signature over a component
-  whose manifest happened to serialize to the same bytes, and the cheapest way to make
-  that impossible is for the two payload spaces to be disjoint by construction.
+  The tag is what keeps this payload space disjoint from any other a signer's key might
+  ever be asked for: a signature issued over some other artifact shape cannot be replayed
+  as a signature over a component whose manifest happened to serialize to the same bytes,
+  because the two spaces are disjoint by construction.
 
   ## What `build/2` refuses to be told
 
@@ -37,10 +34,10 @@ defmodule Ouroboros.Wasm.Artifact do
   `author` is required; a component with no author has no provenance to sign. Optional:
   `source_sha256`, `language`, `test_report`, `eval`, and `start`.
 
-    * `eval` is an `Ouroboros.Upgrade.Rollout.Evaluation` spec, and lane W's signer
-      requires one by default (D12): there is no BuildPeer/ExUnit analogue here, so the
+    * `eval` is an `Ouroboros.Upgrade.Rollout.Evaluation` spec, and the signer requires
+      one by default (D12): there is no build peer running a test suite here, so the
       signed eval spec *is* the test story.
-    * `start` is `%{id: binary, config: binary}` and is what makes a lane-W capability
+    * `start` is `%{id: binary, config: binary}` and is what makes a capability
       survive a reboot — `Ouroboros.Wasm.Rollout` starts the durable wrapper agent under
       that id when the rollout reaches `:live`, and the boot-time restart starts it again
       from the persisted manifest. It is part of the signed manifest because "this
@@ -191,9 +188,7 @@ defmodule Ouroboros.Wasm.Artifact do
 
   ## Why the epoch has no default
 
-  `Ouroboros.Upgrade.Artifact.build/2` defaults it to `System.unique_integer/1`, which is
-  harmless there because lane B's monotonicity is enforced per node against what that node
-  committed. Lane W's is enforced against `Ouroboros.Upgrade.Rollout.Registry`, and
+  Monotonicity is enforced against `Ouroboros.Upgrade.Rollout.Registry`, and
   `Ouroboros.Upgrade.Epoch.next/2` — which allocates the real numbers — never reads that
   register. So one artifact built with a VM-local counter, whose value is unrelated to and
   typically far above any allocated epoch, would raise the register's watermark past every
@@ -201,7 +196,7 @@ defmodule Ouroboros.Wasm.Artifact do
   `{:stale_epoch, _, _}`. Recovering means hand-minting above the poisoned number *and*
   re-signing. A default that can do that is not a convenience.
 
-  Allocate it first, the way `Ouroboros.Upgrade.Forge` does:
+  Allocate it first:
 
       {:ok, epoch} = Ouroboros.Upgrade.Epoch.next(nodes)
       {:ok, artifact} = Ouroboros.Wasm.Artifact.build(bytes, name: "greeter", epoch: epoch, ...)
@@ -282,8 +277,8 @@ defmodule Ouroboros.Wasm.Artifact do
   @doc """
   The exact bytes a signature over this manifest covers.
 
-  The tag is `:ouroboros_wasm_v1` and not the BEAM lane's `:ouroboros_upgrade_v1`, so a
-  signature can never be replayed across lanes. See the moduledoc.
+  The tag is `:ouroboros_wasm_v1`, and nothing else is signed under it, so a
+  signature can never be replayed into another payload space. See the moduledoc.
   """
   @spec signing_payload(t(), String.t()) :: binary()
   def signing_payload(%__MODULE__{} = artifact, signer) when is_binary(signer) do
@@ -349,7 +344,7 @@ defmodule Ouroboros.Wasm.Artifact do
   def with_precompiled(artifact, _precompiled),
     do: {:error, {:invalid_artifact, describe(artifact)}}
 
-  @doc "The lower-case hex sha256 of `bytes`, the one identity a lane-W capability has."
+  @doc "The lower-case hex sha256 of `bytes`, the one identity a capability has."
   @spec digest(binary()) :: String.t()
   def digest(bytes) when is_binary(bytes),
     do: :sha256 |> :crypto.hash(bytes) |> Base.encode16(case: :lower)
@@ -371,7 +366,7 @@ defmodule Ouroboros.Wasm.Artifact do
   def name?(_value), do: false
 
   @doc """
-  Whether `value` is one of the two kinds a lane-W component may be (W15).
+  Whether `value` is one of the two kinds a component may be (W15).
 
   A closed set of two atoms, checked rather than pattern-matched at each reader, because the
   kind arrives from a manifest a bundle carried and `:erlang.binary_to_term/2`'s `:safe` refuses

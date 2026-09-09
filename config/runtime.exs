@@ -145,12 +145,6 @@ if config_env() == :prod and is_nil(System.get_env("OUROBOROS_COLLECTOR_CONFIG")
     """
   end
 
-  forge_builder_node =
-    case env_value.("OUROBOROS_FORGE_BUILDER_NODE") do
-      nil -> nil
-      name -> String.to_atom(name)
-    end
-
   # A `:signer` node's whole reason to exist is holding a key this application cannot
   # reach. Checking that here, before any module of this application is guaranteed
   # loadable, means the misconfiguration an operator is most likely to make — deploying
@@ -188,39 +182,10 @@ if config_env() == :prod and is_nil(System.get_env("OUROBOROS_COLLECTOR_CONFIG")
       _other -> raise "OUROBOROS_SIGNING_RATE_LIMIT_PER_MINUTE must be a positive integer"
     end
 
-  # Requiring a signed evaluation spec is the recommended production posture: it makes
-  # "this capability declared, inside the signature, how it would be judged" a
-  # precondition of getting a signature at all. Production defaults to on; an operator
-  # who needs the historical behaviour sets OUROBOROS_SIGNING_REQUIRE_EVAL=false.
-  signing_require_eval =
-    case env_value.("OUROBOROS_SIGNING_REQUIRE_EVAL") do
-      nil ->
-        true
-
-      value when value in ["true", "1"] ->
-        true
-
-      value when value in ["false", "0"] ->
-        false
-
-      other ->
-        raise "OUROBOROS_SIGNING_REQUIRE_EVAL must be true or false, got: #{inspect(other)}"
-    end
-
   signing_node =
     case env_value.("OUROBOROS_SIGNING_NODE") do
       nil -> nil
       name -> String.to_atom(name)
-    end
-
-  # Naming a signer node is the operator action that gives this cluster a signing
-  # capability. Without it the forge keeps the shipped refusal, so a production release
-  # still acquires signing deliberately rather than by default.
-  forge_signer =
-    if is_nil(signing_node) do
-      Ouroboros.Upgrade.Forge.Signer.Deny
-    else
-      {Ouroboros.Upgrade.Forge.Signer.Remote, [node: signing_node, timeout: signing_call_timeout]}
     end
 
   workspace_roots =
@@ -245,50 +210,6 @@ if config_env() == :prod and is_nil(System.get_env("OUROBOROS_COLLECTOR_CONFIG")
     case Integer.parse(System.get_env("OUROBOROS_ORCHESTRATION_CONCURRENCY") || "4") do
       {value, ""} when value > 0 -> value
       _other -> raise "OUROBOROS_ORCHESTRATION_CONCURRENCY must be a positive integer"
-    end
-
-  # The forge lane of the orchestration plane is off unless a workspace is named.
-  # Nodes default to the local node at execution time rather than here, because
-  # distribution may not have started when this file is evaluated.
-  forge_workspace =
-    case System.get_env("OUROBOROS_ORCHESTRATION_FORGE_WORKSPACE") do
-      nil ->
-        nil
-
-      workspace ->
-        if Path.type(workspace) == :absolute do
-          workspace
-        else
-          raise "OUROBOROS_ORCHESTRATION_FORGE_WORKSPACE must be an absolute path"
-        end
-    end
-
-  forge_nodes =
-    case System.get_env("OUROBOROS_ORCHESTRATION_FORGE_NODES") do
-      nil ->
-        []
-
-      nodes ->
-        nodes |> String.split(",", trim: true) |> Enum.map(&String.to_atom(String.trim(&1)))
-    end
-
-  orchestration_forge_options =
-    cond do
-      is_nil(forge_workspace) ->
-        []
-
-      true ->
-        options =
-          if forge_nodes == [] do
-            [workspace: forge_workspace]
-          else
-            [workspace: forge_workspace, nodes: forge_nodes]
-          end
-
-        case env_value.("OUROBOROS_FORGE_SIGNER_ID") do
-          nil -> options
-          signer_id -> Keyword.put(options, :signer_id, signer_id)
-        end
     end
 
   # Letting a planner express a forge step is an explicit operator decision, and
@@ -337,7 +258,6 @@ if config_env() == :prod and is_nil(System.get_env("OUROBOROS_COLLECTOR_CONFIG")
 
   config :ouroboros,
     node_role: node_role,
-    forge_builder_node: forge_builder_node,
     # Acknowledged session, team, and plan transitions must survive the crash that
     # follows them — the same synced write the effect ledger uses.
     coding_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "coding")},
@@ -385,17 +305,14 @@ if config_env() == :prod and is_nil(System.get_env("OUROBOROS_COLLECTOR_CONFIG")
     # what this key has ever approved.
     signing_journal_storage:
       {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "signing-journal")},
-    forge_signer: forge_signer,
     signing_node: signing_node,
     signing_call_timeout: signing_call_timeout,
     signer_id: signer_id,
-    signing_require_eval: signing_require_eval,
     signing_rate_limit_per_minute: signing_rate_limit,
     workspace_allowed_roots: workspace_roots,
     orchestration_max_concurrency: orchestration_concurrency,
     orchestration_team_id: System.get_env("OUROBOROS_ORCHESTRATION_TEAM_ID"),
     orchestration_worker_id: System.get_env("OUROBOROS_ORCHESTRATION_WORKER_ID"),
-    orchestration_forge_options: orchestration_forge_options,
     control_allow_forge_steps: control_allow_forge_steps,
     upgrade_trust_policy: [
       allow_unsigned: false,

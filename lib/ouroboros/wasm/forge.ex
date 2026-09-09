@@ -1,15 +1,13 @@
 defmodule Ouroboros.Wasm.Forge do
   @moduledoc """
-  Turns a Cargo project on the guest SDK into a signed lane-W artifact (docs/WASM.md §7.7).
+  Turns a Cargo project on the guest SDK into a signed artifact (docs/WASM.md §7.7).
 
-  `Ouroboros.Upgrade.Forge` is this module's shape in lane B: validate before you compile,
-  compile somewhere that cannot reach the cluster, hold the product to the rules the
-  loading node will re-check, and only then allocate a number and ask for a signature. What
-  differs is what "somewhere" means. Lane B's build peer is a separate BEAM with no
-  distribution — isolation from the *cluster*, not from the machine — and its own moduledoc
-  says compiling hostile source needs a container around it. A Cargo build is arbitrary code
-  at build time by construction (build scripts, proc macros, `include!`), so this lane does
-  what that sentence asks for: the subprocess runs under `Ouroboros.Provider.Native.Sandbox`,
+  The order is fixed: validate before you compile, compile somewhere that cannot reach the
+  cluster, hold the product to the rules the loading node will re-check, and only then
+  allocate a number and ask for a signature. A Cargo build is arbitrary code
+  at build time by construction (build scripts, proc macros, `include!`), so "somewhere"
+  has to mean an OS boundary and not merely a separate process: the subprocess runs under
+  `Ouroboros.Provider.Native.Sandbox`,
   the same OS sandbox the native agent's shell runs in, with no network, writes confined to a
   scratch directory and the registry cache, and a wall-clock ceiling.
 
@@ -100,8 +98,7 @@ defmodule Ouroboros.Wasm.Forge do
   @default_timeout_ms 300_000
   @max_timeout_ms 300_000
   # What a forwarded forge waits beyond the build's own budget, so the builder's typed refusal
-  # arrives instead of an opaque `:erpc` timeout. `Upgrade.Forge.BuildPeer`'s number, for the
-  # same reason.
+  # arrives instead of an opaque `:erpc` timeout.
   @remote_slack 10_000
 
   @max_output_bytes 64 * 1024
@@ -241,8 +238,8 @@ defmodule Ouroboros.Wasm.Forge do
   # The entry point a **forwarded** forge lands on, and the only one `forward/3` names.
   #
   # Three things are true here and not in `forge/2`. It never asks the placement question with
-  # a setting that could forward, so a builder cannot re-dispatch to a builder —
-  # `Ouroboros.Upgrade.Forge.BuildPeer` is split for exactly that reason. It refuses an input
+  # a setting that could forward, so a builder cannot re-dispatch to a builder. It refuses
+  # an input
   # that names a **path**, because a path is a fact about the origin's filesystem and walking
   # one here would build whatever this machine happens to keep there (D29). And it runs the
   # whole forge — not only cargo — under the deadline the origin set, in a task it can stop,
@@ -313,7 +310,7 @@ defmodule Ouroboros.Wasm.Forge do
   Everything `forge/2` checks before it signs, and a dry build where the toolchain allows one.
 
   Never signs, never allocates an epoch, never writes a bundle. A preview that built is not
-  a prepared deploy — it is the same statement `Ouroboros.Upgrade.Forge.preview/2` makes.
+  a prepared deploy.
 
   `build?: false` stops after validation, which is what a caller asking only "would this be
   accepted" wants and what a node with no toolchain can answer.

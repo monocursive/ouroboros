@@ -1191,29 +1191,6 @@ defmodule Ouroboros.Gateway.Methods.Contract do
       params: {:open, [{"id", :required, :string, "the team id"}]},
       handler: :handle_teams_state
     },
-    "upgrade.history" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params:
-        {:open,
-         [
-           {"module", :required, :string,
-            "a module this node has loaded, with or without the `Elixir.` prefix; an unknown name is `-32602`, never a new atom"}
-         ]},
-      handler: :handle_upgrade_history
-    },
-    "upgrade.rollouts" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params: {:open, []},
-      handler: :handle_upgrade_rollouts
-    },
-    "upgrade.status" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params: {:open, []},
-      handler: :handle_upgrade_status
-    },
     "wasm.deploy" => %{
       scope: :operate,
       timeout: @wasm_deploy_timeout,

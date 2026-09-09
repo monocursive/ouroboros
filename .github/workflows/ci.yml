@@ -416,8 +416,7 @@ jobs:
 
   # The container proofs a Mac cannot run: `wasm-linux-test` is the wasm suites under
   # bubblewrap with `ouro-sandbox` disabled by name (the backend the Elixir job already
-  # uses, in the privileged namespace the scripts exist to provide), `forge-linux-test`
-  # is the forge under the preferred Linux backend (Landlock) inside that same namespace,
+  # uses, in the privileged namespace the scripts exist to provide),
   # and `sandbox-linux-test` is the helper's own kernel enforcement suite (Landlock plus
   # the `fs_filter.c` LD_PRELOAD). The Elixir job on this runner already exercises bwrap;
   # these jobs prove the *scripts* and the Landlock paths, which that job never builds
@@ -431,7 +430,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        proof: [wasm-linux-test, forge-linux-test, sandbox-linux-test]
+        proof: [wasm-linux-test, sandbox-linux-test]
     steps:
       - uses: actions/checkout@v7
 
@@ -458,9 +457,8 @@ jobs:
       # `--privileged` docker; Ubuntu 24.04's AppArmor profile for unprivileged user
       # namespaces denies `/proc/self/setgroups`, which is how both bwrap and
       # ouro-sandbox enter a namespace. `--privileged` does not change that host sysctl.
-      # Without this, wasm-linux-test reports no bwrap backend and forge-linux-test
-      # and sandbox-linux-test fail every wrap with `open /proc/self/setgroups:
-      # Permission denied`.
+      # Without this, wasm-linux-test reports no bwrap backend and sandbox-linux-test
+      # fails every wrap with `open /proc/self/setgroups: Permission denied`.
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - run: make ${{ matrix.proof }}

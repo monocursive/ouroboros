@@ -1,10 +1,9 @@
 defmodule Ouroboros.Wasm.Rollout do
   @moduledoc """
-  Deploys one signed component to explicit nodes behind the same gates lane B uses, with
-  the code-loading half deleted.
+  Deploys one signed component to explicit nodes behind a health gate, and records what
+  happened.
 
-  `Ouroboros.Upgrade.Rollout` is the sentence this module is a variation on, and every
-  discipline in it survives verbatim (docs/WASM.md §7.6, D7):
+  The sequence is fixed (docs/WASM.md §7.6, D7):
 
   1. validate the targets and verify the signature and the digest against the bytes in
      hand — all of it before anything is written;
@@ -15,21 +14,20 @@ defmodule Ouroboros.Wasm.Rollout do
   3. stage on every node: publish the bytes and the manifest into that node's
      `Ouroboros.Wasm.Store`, `load` the component into that node's helper, and cross-check
      the helper's own reading against the signed manifest;
-  4. probe every node with `Ouroboros.Upgrade.Rollout.Probe`, unchanged;
+  4. probe every node with `Ouroboros.Upgrade.Rollout.Probe`;
   5. evaluate every node with `Ouroboros.Upgrade.Rollout.Evaluation` against the **signed**
-     spec, unchanged;
-  6. settle: `:live`, `:rolled_back`, or `:quarantined`, by the same rules.
+     spec;
+  6. settle: `:live`, `:rolled_back`, or `:quarantined`.
 
-  What is gone is `Coordinator` and `NodeExecutor` — the prepare/commit/promote machinery
-  that exists because loading BEAM code is a mutation with a pre-image. Nothing here loads
-  code, so there is no pre-image, nothing to purge, and no `{:introduced_code_in_use, _}`
-  to answer. "Rollback to absence" is literally that: stop the wrapper agent if one is
-  running, and mark the entry.
+  There is no prepare/commit/promote machinery here, because that machinery exists only
+  where loading code is a mutation with a pre-image. Nothing here loads code, so there is
+  no pre-image and nothing to purge. "Rollback to absence" is literally that: stop the
+  wrapper agent if one is running, and mark the entry.
 
   ## The settle table
 
   Every node contributes three outcomes — stage, probe, eval — and the worst one wins, in
-  the order `Ouroboros.Upgrade.Rollout` uses:
+  this order:
 
   | any node's outcome            | rollout state                                |
   |-------------------------------|----------------------------------------------|
@@ -53,26 +51,23 @@ defmodule Ouroboros.Wasm.Rollout do
 
   An epoch is inside the signed manifest, so this module cannot mint one — allocating a
   number here would invalidate the signature it was allocated for. Whoever builds a
-  manifest allocates it first with `Ouroboros.Upgrade.Epoch.next/2`, exactly as
-  `Ouroboros.Upgrade.Forge` does before `Artifact.build/2`. `Ouroboros.Wasm.Artifact.build/2`
-  has no default for it, deliberately: a VM-local counter would eventually mint a number
+  manifest allocates it first with `Ouroboros.Upgrade.Epoch.next/2`.
+  `Ouroboros.Wasm.Artifact.build/2` has no default for it, deliberately: a VM-local
+  counter would eventually mint a number
   far above anything `Epoch.next/2` allocates, and one such entry in the register would
   refuse every properly minted epoch after it, forever.
 
   The other half is enforced by `Ouroboros.Upgrade.Rollout.Registry` itself, atomically:
   the driver spends the epoch in the call that writes `:deploying`, and every target spends
-  it again before staging bytes. Lane B's monotonicity is enforced per node by
-  `Ouroboros.Upgrade.NodeExecutor.prepare/2`; lane W has no node executor, so its node-local
-  register is the durable target-side replay boundary.
+  it again before staging bytes. There is no per-node executor holding that line, so each
+  node's own register is the durable target-side replay boundary.
 
   **A retry is always a new manifest.** The register refuses a duplicate artifact id
   (`{:already_recorded, _}`) and refuses an epoch it has already seen in any state
   (`{:stale_epoch, n, n}`), so re-presenting a manifest that reached `:rolled_back` — or
   one still stuck at `:deploying` — is refused twice over. Retrying means minting a higher
-  epoch, building a new manifest with a new id, and signing it again. That is parity with
-  lane B, whose register refuses `{:already_recorded, _}` for the same reason and whose
-  retry is likewise a re-forge, and it is what keeps "this exact artifact was deployed
-  once" a fact rather than a hope.
+  epoch, building a new manifest with a new id, and signing it again, which is what keeps
+  "this exact artifact was deployed once" a fact rather than a hope.
 
   ## Starting, and reboot survival
 
@@ -121,9 +116,9 @@ defmodule Ouroboros.Wasm.Rollout do
 
   ## Not here
 
-  `compare:` — champion/challenger — is deferred. `Ouroboros.Upgrade.Rollout` accepts a
-  `:replace` artifact only against a measured baseline, and the same argument applies to
-  replacing a live component. It needs a rule for what "the version this displaces" means
+  `compare:` — champion/challenger — is deferred. Replacing a live component should only
+  happen against a measured baseline. It needs a rule for what "the version this displaces"
+  means
   when identity is a digest rather than a module name, and inventing half of one here
   would be worse than not having it. Until then a new component is a new rollout, and the
   register's own supersede rule retires the entry it displaces.
@@ -133,8 +128,8 @@ defmodule Ouroboros.Wasm.Rollout do
 
   alias Ouroboros.Cluster
   alias Ouroboros.Mesh
-  alias Ouroboros.Upgrade.Beam
   alias Ouroboros.Upgrade.Rollout.{Evaluation, Probe, Registry}
+  alias Ouroboros.Upgrade.Wire
   alias Ouroboros.Wasm
   alias Ouroboros.Wasm.{Artifact, Capability, PolicyEngine, Pool, Store, Verifier}
 
@@ -546,8 +541,8 @@ defmodule Ouroboros.Wasm.Rollout do
   # watermark here and checkpointing after would be a read-then-write across two messages,
   # and two concurrent deploys at epochs 70 and 60 would both pass their reads and both
   # record. `Ouroboros.Upgrade.Rollout.Registry` decides it in the same serialized message
-  # that writes the entry, the way `NodeExecutor.prepare/2` does for lane B; the refusal is
-  # lifted out of the recording error here so callers see the reason and not the wrapper.
+  # that writes the entry; the refusal is lifted out of the recording error here so callers
+  # see the reason and not the wrapper.
   defp checkpoint(artifact, nodes, registry) do
     attrs = %{
       artifact_id: artifact.id,
@@ -941,8 +936,8 @@ defmodule Ouroboros.Wasm.Rollout do
     end
   end
 
-  # Exactly the order `Ouroboros.Upgrade.Rollout` settles in: ambiguity outranks failure,
-  # failure outranks success, and "nobody answered" is never success.
+  # Ambiguity outranks failure, failure outranks success, and "nobody answered" is never
+  # success.
   defp verdict(evidence) do
     outcomes =
       Enum.flat_map(evidence, fn {_target, e} ->
@@ -1510,7 +1505,7 @@ defmodule Ouroboros.Wasm.Rollout do
   # way. Small terms keep their shape because a named tuple is worth matching on; anything
   # unportable or oversized becomes bounded text.
   defp bound(term) do
-    if Beam.portable_term?(term) and :erlang.external_size(term) <= 2_048,
+    if Wire.portable_term?(term) and :erlang.external_size(term) <= 2_048,
       do: term,
       else: inspect(term, limit: 10, printable_limit: 200)
   end

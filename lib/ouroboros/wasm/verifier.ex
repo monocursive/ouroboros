@@ -2,8 +2,8 @@ defmodule Ouroboros.Wasm.Verifier do
   @moduledoc """
   What a loading node checks about a component before it stages one byte of it.
 
-  `Ouroboros.Upgrade.Verifier` is the BEAM lane's half of this, and the split is the same
-  (docs/WASM.md §7.5): the signer decides what may exist, and this decides what this node
+  The split is the one docs/WASM.md §7.5 draws: the signer decides what may exist, and
+  this decides what this node
   will admit. The two are not redundant. A signature is a statement made once, somewhere
   else, by a process that saw the bytes it was shown; this runs on the node that is about
   to run them, against the bytes actually on its disk.
@@ -31,20 +31,20 @@ defmodule Ouroboros.Wasm.Verifier do
   something other than the file this node is holding, and the honest thing to say about a
   node in that state is that nobody knows what it has. `Ouroboros.Wasm.Rollout` therefore
   treats every refusal from `cross_check/2` as ambiguity, which quarantines — the same
-  rule the BEAM lane applies to a node that never answered.
+  rule it applies to a node that never answered.
 
-  ## The trust policy is the BEAM lane's, unchanged
+  ## The trust policy
 
-  `trust_policy` is the `config :ouroboros, :upgrade_trust_policy` keyword list: the same
+  `trust_policy` is the `config :ouroboros, :upgrade_trust_policy` keyword list: the
   `:trusted_signers` map (`signer_id => raw 32-byte Ed25519 public key`) that
-  `OUROBOROS_UPGRADE_TRUSTED_SIGNERS` parses into at boot, and the same `:allow_unsigned`
+  `OUROBOROS_UPGRADE_TRUSTED_SIGNERS` parses into at boot, and the `:allow_unsigned`
   escape hatch for a development node. One key set, one format, one operator decision.
-  The signature check itself is `Ouroboros.Upgrade.Verifier.verify_payload_signature/4`;
-  what differs between the lanes is only which payload is derived, and the two payloads
-  carry different tags so a signature cannot cross between them.
+  The signature check itself is
+  `Ouroboros.Upgrade.Signing.Signature.verify_payload/4`, which holds the only copy of
+  the crypto; what this module owns is which payload is derived and under which tag.
   """
 
-  alias Ouroboros.Upgrade.Verifier, as: BeamVerifier
+  alias Ouroboros.Upgrade.Signing.Signature
   alias Ouroboros.Wasm
   alias Ouroboros.Wasm.Artifact
 
@@ -270,12 +270,13 @@ defmodule Ouroboros.Wasm.Verifier do
 
   defp verify_signature(_artifact, _policy), do: {:error, :invalid_signature_envelope}
 
-  # The payload is lane W's — `:ouroboros_wasm_v1` — and the crypto is the BEAM verifier's.
-  # Copying the Ed25519 check would have given this lane its own place for it to be wrong.
+  # The payload is this lane's — `:ouroboros_wasm_v1` — and the crypto lives beside the
+  # signing service. Copying the Ed25519 check would have given this module its own place
+  # for it to be wrong.
   defp verify_trusted_signature(artifact, signer, signature, trusted_signers) do
     artifact
     |> Artifact.signing_payload(signer)
-    |> BeamVerifier.verify_payload_signature(signer, signature, trusted_signers)
+    |> Signature.verify_payload(signer, signature, trusted_signers)
   rescue
     _error -> {:error, {:invalid_signature, signer}}
   catch

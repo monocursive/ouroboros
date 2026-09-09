@@ -35,17 +35,9 @@ config :ouroboros,
   # cannot run — and explicitly not a boundary against a hostile connected node, which
   # has full `:erpc` authority regardless.
   placement_role_check: true,
-  # Where forge builds run. `nil` builds on this node. A named node must be connected,
-  # running this runtime, and in the `:builder` role; it must also run an identical
-  # ERTS/Elixir/architecture, because the verifier checks the artifact's runtime triple
-  # on every loading node.
-  forge_builder_node: nil,
-  # Relaxes only the builder's *role* requirement, for tests that have a real peer but
-  # not a role-shaped fleet. Connectivity and a running runtime are still required.
-  forge_builder_allow_any_role: false,
-  # Lane W's half of the same question, and unlike the two above it is a check rather than
-  # advice (docs/WASM.md D29, contract C14). `:local` — the default — forges where the effect
-  # lands, exactly as lane W always did; `:builder` forwards a forge that landed on a
+  # Where forge builds run, and it is a check rather than advice (docs/WASM.md D29,
+  # contract C14). `:local` — the default — forges where the effect
+  # lands; `:builder` forwards a forge that landed on a
   # non-builder node to a connected `:builder` and refuses by name when there is none, rather
   # than quietly building here. A `:signer` node refuses to forge under **either** setting and
   # is not configurable: a Cargo build is arbitrary code at build time, and it does not run on
@@ -93,14 +85,9 @@ config :ouroboros,
   release_storage: {Jido.Storage.ETS, table: :ouroboros_releases},
   capability_storage: {Jido.Storage.ETS, table: :ouroboros_capabilities},
   epoch_storage: {Jido.Storage.ETS, table: :ouroboros_forge_epochs},
-  # The forge asks this module to sign what it builds. Refusing by default means a
-  # cluster acquires a signing capability only when an operator configures one, and
-  # never because a default was convenient. Key custody belongs outside this
-  # application; see `Ouroboros.Upgrade.Forge.Signer`.
-  forge_signer: Ouroboros.Upgrade.Forge.Signer.Deny,
-  # The `:signer` node `Forge.Signer.Remote` submits artifacts to, and how long it waits.
+  # The `:signer` node a forge submits manifests to, and how long it waits.
   # `nil` means no remote signer is configured, which is what an unconfigured cluster
-  # should mean: the client refuses rather than guessing at a host.
+  # should mean: the forge refuses rather than guessing at a host.
   signing_node: nil,
   signing_call_timeout: 15_000,
   # Everything below is read on the signer node itself, by
@@ -109,14 +96,9 @@ config :ouroboros,
   # defaulted, and a `:signer` node refuses to boot without it; the key itself is never
   # configuration, it is read at boot from OUROBOROS_SIGNER_KEY_PATH.
   signer_id: nil,
-  # The independent gate applied to a full artifact before any signature exists. See
+  # The independent gate applied to a full manifest before any signature exists. See
   # `Ouroboros.Upgrade.Signing.Policy`.
   signing_policy: Ouroboros.Upgrade.Signing.Policy.Default,
-  # Whether an artifact must carry a valid evaluation spec in `metadata.forge.eval` to be
-  # signed at all. False keeps the behaviour that existed before the signing service;
-  # production should set it true, because it is the one switch that makes "this
-  # capability declared how it would be judged" a precondition of a signature.
-  signing_require_eval: false,
   # Admissions per requester per minute, refused beyond. This bounds accidents and retry
   # storms; the requester is self-reported, so it is not a bound on an adversary.
   signing_rate_limit_per_minute: 30,
@@ -129,8 +111,6 @@ config :ouroboros,
   # its journal entry was acknowledged first, so this adapter's durability is the
   # durability of the audit trail.
   signing_journal_storage: {Jido.Storage.ETS, table: :ouroboros_signing_journal},
-  # Overall deadline for one isolated build peer: boot, compile, and capability tests.
-  forge_build_timeout: 60_000,
   # Deadline for one node's evaluation run during a capability rollout. It bounds an
   # `:erpc` into `Ouroboros.Upgrade.Rollout.Evaluation`, which enforces the artifact's
   # own `budget_ms` internally; this is the outer limit on a node that stops answering,
@@ -148,20 +128,12 @@ config :ouroboros,
   # A durable plan is heterogeneous: every step declares a kind and the scheduler
   # resolves one executor per kind. `:orchestration_executors` names them
   # explicitly and overrides what the application derives from
-  # `:orchestration_team_id` (the `:coding` executor) and
-  # `:orchestration_forge_options` (the `:forge` executor). A kind with no
-  # executor is a kind the scheduler refuses to accept plans for, so leaving
-  # forge options empty keeps forge steps unschedulable.
+  # `:orchestration_team_id` (the `:coding` executor). A kind with no executor is
+  # a kind the scheduler refuses to accept plans for.
   orchestration_executors: %{},
-  # Trusted runtime policy for `Ouroboros.Orchestration.ForgeExecutor`: which
-  # workspace source is read from, which nodes receive the capability, and which
-  # signer identity is requested. A forge step supplies only a module name and a
-  # workspace-relative path. Empty means no forge executor.
-  orchestration_forge_options: [],
   # Whether a planner may express a forge step at all. This widens what a model
-  # can *say*, never what it can deploy: the artifact is still signed by
-  # `:forge_signer` (`Signer.Deny` by default) and still verified against each
-  # target node's trusted signers.
+  # can *say*, never what it can deploy: no executor is configured for the kind,
+  # so a forge step is unschedulable.
   control_allow_forge_steps: false,
   # Bound for control-plane session calls (info/replay/subscribe/cancel/steer/
   # respond_approval/interrupt). `await` threads the caller's own timeout instead.

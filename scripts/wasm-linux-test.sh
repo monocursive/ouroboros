@@ -13,7 +13,7 @@
 #
 # It is **not** the Landlock proof. `OUROBOROS_SANDBOX_HELPER` is pointed at a path that
 # is not a file, so detection falls through to bubblewrap, and `make sandbox` is not run.
-# `make forge-linux-test` is the job that builds `ouro-sandbox` and exercises Landlock.
+# `make sandbox-linux-test` is the job that builds `ouro-sandbox` and exercises Landlock.
 # A header that still said this script selected the preferred backend would be describing
 # a different proof.
 #

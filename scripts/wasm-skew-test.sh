@@ -37,10 +37,10 @@ RUST_VERSION="${OURO_SKEW_TEST_RUST:-1.95}"
 # what differs between the two helpers is a version string and nothing structural.
 SKEW_WASMTIME="${OURO_SKEW_WASMTIME:-48.0.0}"
 
-# The same volumes `scripts/forge-linux-test.sh` keeps, and for the same reasons: the toolchain
+# The same volumes `scripts/wasm-linux-test.sh` keeps, and for the same reasons: the toolchain
 # and the registry are expensive to rebuild, and the container's ELF `tui/target` must never
 # land on top of this Mac's Mach-O one. Reused rather than duplicated so a machine that has run
-# the forge suite once already has a warm wasmtime here.
+# the wasm suite once already has a warm wasmtime here.
 VOLUME_CARGO=ouro-forge-cargo
 VOLUME_RUSTUP=ouro-forge-rustup
 VOLUME_TUI_TARGET=ouro-forge-tui-target

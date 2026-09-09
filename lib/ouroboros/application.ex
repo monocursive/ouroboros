@@ -163,7 +163,6 @@ defmodule Ouroboros.Application do
             type: :worker
           },
           Ouroboros.Mesh.Directory,
-          Ouroboros.Upgrade.NodeExecutor,
           Ouroboros.Upgrade.Rollout.Registry,
           Ouroboros.Coding.Store,
           Ouroboros.Interactive.Store,
@@ -331,13 +330,13 @@ defmodule Ouroboros.Application do
     end
   end
 
-  # S4. The one-machine signing posture. A lane-W signature comes from an explicit service, a
+  # S4. The one-machine signing posture. A signature comes from an explicit service, a
   # configured `:signer`-role peer, or **a service registered on this node** — in that order
   # (`Ouroboros.Wasm.Deploy`) — and until now only `children(:signer)` above ever started one.
   # So a single machine could forge and never sign, which is the whole `self` posture's loop.
   #
-  # This is the dev loop `Ouroboros.Upgrade.Forge.Signer`'s moduledoc describes and it is not
-  # custody: the key is a file beside the application, readable by every process this user
+  # This is a dev loop and it is not custody: the key is a file beside the application,
+  # readable by every process this user
   # runs, and anyone holding it signs as this identity. A fleet names `OUROBOROS_SIGNING_NODE`
   # instead — and then this starts nothing, because the peer signs and a second service here
   # would be a second key to look after for no reason.
@@ -547,14 +546,12 @@ defmodule Ouroboros.Application do
   # Each step kind gets its own executor. An explicit `:orchestration_executors`
   # entry wins over the per-kind configuration below, so an operator can name an
   # adapter this application does not know about. A kind with no executor is one
-  # the scheduler refuses to accept plans for, which is why forge dispatch stays
-  # off until `:orchestration_forge_options` says otherwise.
+  # the scheduler refuses to accept plans for.
   defp orchestration_executors do
     configured = Application.get_env(:ouroboros, :orchestration_executors, %{})
 
     %{}
     |> put_executor(:coding, team_executor())
-    |> put_executor(:forge, forge_executor())
     |> Map.merge(if(is_map(configured), do: configured, else: %{}))
   end
 
@@ -573,13 +570,6 @@ defmodule Ouroboros.Application do
 
       _other ->
         nil
-    end
-  end
-
-  defp forge_executor do
-    case Application.get_env(:ouroboros, :orchestration_forge_options, []) do
-      [_ | _] = options -> {Ouroboros.Orchestration.ForgeExecutor, options}
-      _other -> nil
     end
   end
 

@@ -586,8 +586,8 @@ defmodule Ouroboros.Wasm.Surface do
     end
   end
 
-  # A lane-W entry is one that names component bytes; a lane-B entry deployed modules and
-  # belongs to `upgrade.rollouts`, not here.
+  # An entry that names component bytes. An entry the removed BEAM lane wrote names none
+  # (docs/proposals/core.md §4 A1) and is history rather than inventory.
   #
   # `nil` when the register did not answer. It is a `GenServer.call`, so a node that runs no
   # register exits the caller — which the gateway would render as an unavailable plane for

@@ -3,9 +3,9 @@ defmodule Ouroboros.Agent.Effects do
   The actions that let an agent act on the world, and the grant that gates each one.
 
   Every other action in this codebase is a pure state projection: it reads a signal and
-  writes the agent's own state. These eight reach outside — they start and stop mesh
-  agents, message them, delegate real coding work through a team, forge a capability from
-  source in either lane, and deploy that capability onto nodes. They are wired into
+  writes the agent's own state. These six reach outside — they start and stop mesh
+  agents, message them, delegate real coding work through a team, forge a WebAssembly
+  capability from source, and deploy that capability onto nodes. They are wired into
   `Ouroboros.Agent.Worker` as ordinary signal routes, so an agent acts by receiving a
   typed signal, exactly like everything else it does.
 
@@ -37,9 +37,6 @@ defmodule Ouroboros.Agent.Effects do
   alias Ouroboros.Agent.Effects.Runner
   alias Ouroboros.Mesh
   alias Ouroboros.Team
-  alias Ouroboros.Upgrade.Forge
-  alias Ouroboros.Upgrade.Forge.Source
-  alias Ouroboros.Upgrade.Rollout
   alias Ouroboros.Wasm
 
   @doc "Every grant-gated effect action, plus the settlement action that records them."
@@ -50,8 +47,6 @@ defmodule Ouroboros.Agent.Effects do
       __MODULE__.StopAgent,
       __MODULE__.SendMessage,
       __MODULE__.DelegateTask,
-      __MODULE__.ForgeCapability,
-      __MODULE__.DeployCapability,
       __MODULE__.ForgeWasmCapability,
       __MODULE__.DeployWasmCapability,
       __MODULE__.RecordEffect
@@ -66,8 +61,6 @@ defmodule Ouroboros.Agent.Effects do
       {"ouroboros.agent.effect.stop_agent", __MODULE__.StopAgent},
       {"ouroboros.agent.effect.send_message", __MODULE__.SendMessage},
       {"ouroboros.agent.effect.delegate", __MODULE__.DelegateTask},
-      {"ouroboros.agent.effect.forge", __MODULE__.ForgeCapability},
-      {"ouroboros.agent.effect.deploy", __MODULE__.DeployCapability},
       {"ouroboros.agent.effect.forge_wasm", __MODULE__.ForgeWasmCapability},
       {"ouroboros.agent.effect.deploy_wasm", __MODULE__.DeployWasmCapability},
       {"ouroboros.agent.effect.settled", __MODULE__.RecordEffect}
@@ -219,144 +212,6 @@ defmodule Ouroboros.Agent.Effects do
     defp await_timeout, do: max(Runner.timeout() - 5_000, 1_000)
   end
 
-  defmodule ForgeCapability do
-    @moduledoc false
-
-    use Jido.Action,
-      name: "forge_capability",
-      description: "Forge a capability from source, if this agent is granted :forge",
-      schema: [
-        from: [type: :string, required: true],
-        module: [type: :atom, required: true],
-        source: [type: :string, required: true],
-        test_source: [type: :any, default: nil],
-        nodes: [type: {:list, :atom}, default: []],
-        signer_id: [type: :any, default: nil]
-      ]
-
-    @impl true
-    def run(params, context) do
-      Runner.dispatch(:forge, %{module: params.module}, &forge(params, &1), params, context)
-    end
-
-    # The recorded author is the principal, so the provenance inside the signed manifest
-    # names the agent this VM believes acted, not the one the signal claimed to be.
-    defp forge(params, principal) do
-      nodes = nodes(params.nodes)
-
-      with {:ok, source} <- source(params, principal),
-           {:ok, artifact} <- Forge.forge(source, forge_opts(params, nodes)) do
-        {:ok,
-         %{
-           artifact: artifact,
-           artifact_id: artifact.id,
-           module: params.module,
-           epoch: artifact.epoch,
-           signer: artifact.signature.signer,
-           source_sha256: source.sha256,
-           nodes: nodes
-         }}
-      end
-    end
-
-    defp source(params, principal) do
-      Source.new(
-        module: params.module,
-        source: params.source,
-        test_source: params.test_source,
-        author: principal
-      )
-    end
-
-    defp forge_opts(%{signer_id: signer_id}, nodes) when is_binary(signer_id),
-      do: [nodes: nodes, signer_id: signer_id]
-
-    defp forge_opts(_params, nodes), do: [nodes: nodes]
-
-    defp nodes([]), do: [node()]
-    defp nodes(nodes), do: nodes
-  end
-
-  defmodule DeployCapability do
-    @moduledoc false
-
-    use Jido.Action,
-      name: "deploy_capability",
-      description: "Deploy a forged artifact, if this agent is granted :deploy",
-      schema: [
-        from: [type: :string, required: true],
-        artifact_id: [type: :string, required: true],
-        nodes: [type: {:list, :atom}, default: []]
-      ]
-
-    @impl true
-    def run(params, context) do
-      nodes = nodes(params.nodes)
-
-      Runner.dispatch(
-        :deploy,
-        %{nodes: nodes},
-        &deploy(params, forged(context), nodes, &1),
-        params,
-        context
-      )
-    end
-
-    defp forged(%{agent: %{state: %{forged: forged}}}) when is_list(forged), do: forged
-    defp forged(_context), do: []
-
-    # The artifact is resolved from what this agent forged, never from the signal, so a
-    # deploy can only ship bytes that already came back through a granted forge.
-    defp deploy(params, forged, nodes, _principal) do
-      case Enum.find(forged, &(&1.artifact_id == params.artifact_id)) do
-        %{artifact: %Ouroboros.Upgrade.Artifact{} = artifact, module: module} ->
-          artifact |> Rollout.deploy(module, nodes) |> settle(params, module, nodes)
-
-        # One `forged` ring holds both lanes' artifacts, and they are not interchangeable:
-        # a lane-W manifest handed to the BEAM rollout is not a deploy this action can do,
-        # so it is refused by name rather than by whatever fails first downstream.
-        %{artifact: other} ->
-          {:error, {:wrong_lane, params.artifact_id, lane(other)}}
-
-        nil ->
-          {:error, {:unknown_artifact, params.artifact_id}}
-      end
-    end
-
-    defp lane(%Ouroboros.Wasm.Artifact{}), do: :wasm
-    defp lane(_other), do: :unknown
-
-    defp settle({:ok, outcome}, params, module, nodes) do
-      {:ok,
-       %{
-         artifact_id: params.artifact_id,
-         module: module,
-         epoch: outcome.epoch,
-         nodes: nodes,
-         state: outcome.state
-       }}
-    end
-
-    # A deployment receipt carries per-node evidence that belongs in the rollout
-    # registry, which already has it. The trail keeps the verdict and the pointer.
-    defp settle({:error, {state, outcome}}, params, module, nodes) when is_atom(state) do
-      {:error,
-       {:rollout_not_live,
-        %{
-          state: state,
-          artifact_id: params.artifact_id,
-          module: module,
-          nodes: nodes,
-          epoch: Map.get(outcome, :epoch)
-        }}}
-    end
-
-    defp settle({:error, reason}, _params, _module, _nodes), do: {:error, reason}
-
-    defp nodes([]), do: [node()]
-    defp nodes(nodes), do: nodes
-  end
-
   defmodule ForgeWasmCapability do
     @moduledoc false
 
@@ -386,8 +241,8 @@ defmodule Ouroboros.Agent.Effects do
 
     # The grant is asked about `"wasm/<name>"`, which is the same string the rollout register
     # calls this capability's module and the same one a signed `start` block claims. So a
-    # grant narrowed to one capability admits that capability in this lane and nothing in the
-    # other, and `modules: :any` still means what it always meant: forge whatever you like.
+    # grant narrowed to one capability admits that capability and nothing else, and
+    # `modules: :any` still means what it always meant: forge whatever you like.
     defp attempt(%{name: name}) when is_binary(name), do: "wasm/" <> name
     defp attempt(_params), do: nil
 
@@ -479,7 +334,7 @@ defmodule Ouroboros.Agent.Effects do
     defp forged(%{agent: %{state: %{forged: forged}}}) when is_list(forged), do: forged
     defp forged(_context), do: []
 
-    # Same rule as the BEAM lane's: the artifact comes from what this agent forged, never
+    # The artifact comes from what this agent forged, never
     # from the signal, so a deploy can only ship bytes a granted forge already produced —
     # and here the bytes themselves are the bundle this node wrote, re-verified on the way
     # in against the manifest named here.
@@ -488,19 +343,15 @@ defmodule Ouroboros.Agent.Effects do
         %{artifact: %Wasm.Artifact{} = artifact} ->
           artifact |> Wasm.Forge.deploy(nodes) |> settle(params, artifact, nodes)
 
-        %{artifact: _other} ->
-          {:error, {:wrong_lane, params.artifact_id, :beam}}
-
-        nil ->
+        _absent_or_unrecognized ->
           {:error, {:unknown_artifact, params.artifact_id}}
       end
     end
 
     # `Ouroboros.Wasm.Deploy.deploy/3` answers `{:ok, _}` for every rollout that *ran*,
     # because `:rolled_back` and `:quarantined` are outcomes a client renders. An effect
-    # trail is not a client: a deploy that did not go live is a failed effect here, exactly
-    # as it is in the BEAM lane's `DeployCapability`, and the per-node evidence stays in the
-    # rollout register where it already is.
+    # trail is not a client: a deploy that did not go live is a failed effect here, and the
+    # per-node evidence stays in the rollout register where it already is.
     defp settle({:ok, %{state: :live} = outcome}, params, artifact, nodes) do
       {:ok,
        %{

@@ -59,9 +59,9 @@ defmodule Ouroboros.Control.Permissions do
   allowlist plus protected paths rather than a denylist (R3 §8d).
 
   This module lives under `Ouroboros.Control.` for the same reason `Control.Grants` does:
-  the prefix is in `Ouroboros.Upgrade.Verifier`'s protected set, so the fast patch lane
-  refuses an artifact that would replace the engine deciding what code may do. A runtime
-  that can author code must not be able to author its own permissions away.
+  a forged component is reached only through the seams this engine gates, so nothing a
+  runtime forges can replace the engine deciding what code may do. A runtime that can
+  author code must not be able to author its own permissions away.
   """
 
   use GenServer

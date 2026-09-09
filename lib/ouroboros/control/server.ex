@@ -21,10 +21,8 @@ defmodule Ouroboros.Control.Server do
   like any other.
 
   Enabling the flag lets a plan *express* a forge step. It grants no authority to
-  deploy: the forged artifact is still signed by whatever `:forge_signer` names —
-  `Signer.Deny` unless an operator changed it — and still verified against each
-  target node's trusted signers. A scheduler with no forge executor refuses the
-  plan outright.
+  deploy, and nothing dispatches one: no executor is configured for the kind, so a
+  scheduler refuses the plan outright.
   """
 
   use GenServer

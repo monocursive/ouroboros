@@ -2,9 +2,9 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
   @moduledoc """
   The health check a capability rollout runs on every target node.
 
-  `ready?/1` is passed to `Ouroboros.Upgrade.Coordinator.deploy/3` as
-  `health_check: {__MODULE__, :ready?, [module]}` and runs, through `:erpc`, on each node
-  that just committed the code. It starts the freshly introduced module as a throwaway
+  `ready?/1` is passed to a rollout as `health_check: {__MODULE__, :ready?, [module]}`
+  and runs, through `:erpc`, on each node that just staged the component. It starts the
+  wrapper module as a throwaway
   mesh agent under a unique probe id, sends it one synthetic `ouroboros.agent.message`
   signal, checks the answer, and stops it again. A capability that cannot be started, or
   that will not answer a message, never becomes live anywhere: one failing node rolls the
@@ -21,8 +21,8 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
 
   ## Why every path is defended
 
-  The coordinator reads two very different failures from a health check. A *result* it
-  does not consider healthy is a clean failure: every committed node is rolled back and
+  A rollout reads two very different failures from a health check. A *result* it
+  does not consider healthy is a clean failure: every staged node is rolled back and
   the deployment reports `:health_failed` with `recovery: :complete`. A *transport*
   failure — which is what an uncaught exception inside this function becomes once `:erpc`
   is done with it — is ambiguity, and ambiguity is not something a probe should ever
@@ -35,7 +35,7 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
 
   A probe runs under a caller's deadline, and a deadline that fires kills this process.
   `after` does not run for an exit signal from outside, so the agent started here would be
-  left holding a cluster-wide mesh id — and, for a lane-W capability, a helper instance —
+  left holding a cluster-wide mesh id — and a helper instance —
   with nothing linked to it that would ever notice. The cleanup is therefore also held by a
   separate process that monitors this one and stops the id if this one dies. See
   `janitor/1`.
@@ -49,10 +49,10 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
   @visibility_delay_ms 25
 
   @doc """
-  The transport budget a coordinator should allow one `ready?/1` run.
+  The transport budget a rollout should allow one `ready?/1` run.
 
   The probe's own bounded waits — the message call and the visibility loop — already
-  total more than the coordinator's default `:health_timeout`, so a deadline sized
+  total more than a rollout's default `:health_timeout`, so a deadline sized
   below this turns a probe that is still legitimately working into a transport fault,
   and a transport fault during health is recorded as node-state ambiguity. The
   multiplier absorbs the parts that are not individually bounded here (module load,
@@ -67,10 +67,10 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
   @typedoc """
   What to start: a module, or a module and the state to seed it with.
 
-  Lane B passes the bare module and always has. A lane-W capability is one shipped module
-  standing in for every component (docs/WASM.md §7.2, D7), so *which* capability is being
-  probed is a fact about its state — `%{component: sha, config: json, …}` — and not about
-  its name. Both forms start the same way; the second one simply has something to seed.
+  A capability is one shipped module standing in for every component (docs/WASM.md §7.2,
+  D7), so *which* capability is being probed is a fact about its state —
+  `%{component: sha, config: json, …}` — and not about its name. Both forms start the same
+  way; the second one simply has something to seed.
   """
   @type start_spec :: module() | {module(), map()}
 
@@ -112,7 +112,7 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
   # deadline — `Ouroboros.Wasm.Rollout.bounded_call/5` on this node, `:erpc.call/5` from a
   # peer — and a deadline that fires kills this process outright, at which point the block
   # above never runs and the throwaway agent this function started is still holding an id, a
-  # mesh registration, and (for a lane-W capability) a helper instance. Nothing else would
+  # mesh registration, and a helper instance. Nothing else would
   # ever remove it: the agent is supervised, not linked to the prober.
   #
   # So the id's cleanup is also held by a process that is not the one being killed. It
@@ -226,8 +226,8 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
       "-" <> Integer.to_string(System.unique_integer([:positive]))
   end
 
-  # This value is returned across `:erpc` into a coordinator that stores it in a
-  # deployment receipt, so anything whose shape is not guaranteed becomes text.
+  # This value is returned across `:erpc` into a driver that stores it in a durable
+  # rollout record, so anything whose shape is not guaranteed becomes text.
   defp sanitize(reason) do
     if serializable?(reason), do: reason, else: inspect(reason)
   end

@@ -7,9 +7,10 @@ defmodule Ouroboros.Gateway.Methods do
   `Methods.Contract` maps each method *string* to its scope, ceiling, parameters and
   literal handler atom. `invoke/2` validates that contract before dispatching. A client cannot name a function this
   module does not already contain, and no client byte reaches `String.to_atom/1`. The one
-  parameter that is module-shaped — `upgrade.history`'s — is resolved through
-  `String.to_existing_atom/1` inside a rescue, so an unknown name is `-32602` rather than
-  a new atom in a table that is never garbage collected.
+  field that names something outside this module — a capability's own state key, inside a
+  signed eval spec — is resolved through `String.to_existing_atom/1` inside a rescue, so
+  an unknown name is `-32602` rather than a new atom in a table that is never garbage
+  collected.
 
   ## Every upstream call is bounded, because the planes are not
 
@@ -21,8 +22,8 @@ defmodule Ouroboros.Gateway.Methods do
 
   Every upstream call is additionally made in the `safe_call` posture — `try/rescue/catch
   :exit`. Several planes *exit* rather than return an error when they are down:
-  `Upgrade.NodeExecutor.status/0` is a bare `GenServer.call`, and so is
-  `Team.state/1`. A `:noproc` becomes `-32004`, a `:timeout` becomes `-32005`, and
+  `Team.state/1` is a bare `GenServer.call`. A `:noproc` becomes `-32004`, a `:timeout`
+  becomes `-32005`, and
   anything else becomes `-32006` carrying the Wire-encoded reason. None of them become a
   dead connection.
 
@@ -105,8 +106,6 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Provider.Native.Replay
   alias Ouroboros.Runtime.Capabilities
   alias Ouroboros.Team
-  alias Ouroboros.Upgrade.NodeExecutor
-  alias Ouroboros.Upgrade.Rollout.Registry, as: Rollouts
   alias Ouroboros.Upgrade.Signing.Service, as: SigningService
   alias Ouroboros.Wasm.Surface, as: WasmSurface
   alias Ouroboros.Wasm.Artifact, as: WasmArtifact
@@ -1000,26 +999,6 @@ defmodule Ouroboros.Gateway.Methods do
   @doc false
   def handle_control_get(params) do
     with_id(params, fn id -> safe(fn -> reply(Control.get(id)) end) end)
-  end
-
-  @doc false
-  def handle_upgrade_status(_params) do
-    safe(fn -> {:ok, NodeExecutor.status()} end)
-  end
-
-  @doc false
-  def handle_upgrade_rollouts(_params) do
-    safe(fn -> reply(Rollouts.list()) end)
-  end
-
-  @doc false
-  def handle_upgrade_history(params) do
-    with {:ok, name} <- fetch_string(params, "module"),
-         {:ok, module} <- resolve_module(name) do
-      safe(fn -> reply(Rollouts.history(module)) end)
-    else
-      {:invalid, message} -> invalid_params(message)
-    end
   end
 
   @doc false
@@ -3221,7 +3200,7 @@ defmodule Ouroboros.Gateway.Methods do
   # A signed eval spec is the only place in this table where a client's bytes decide an
   # atom, and they do not: every atom below is a literal in this module, and the one field
   # that names something outside it — a capability's own state key — goes through
-  # `String.to_existing_atom/1` in a rescue, exactly as `upgrade.history`'s module does.
+  # `String.to_existing_atom/1` in a rescue.
   #
   # `initial_state` is deliberately not accepted. `Ouroboros.Wasm.Rollout.start_state/2`
   # names the six keys that decide what is being evaluated and a signed spec merges *under*
@@ -3978,25 +3957,6 @@ defmodule Ouroboros.Gateway.Methods do
       _other ->
         {:invalid, "params.limit must be an integer between 1 and #{@replay_limit}"}
     end
-  end
-
-  # A client echoes back the module name this gateway printed, and `Wire` prints module
-  # atoms without their `Elixir.` prefix. Both spellings resolve, and neither creates an
-  # atom: an unknown module is a parameter error, not a new entry in the atom table.
-  defp resolve_module("Elixir." <> _rest = name), do: existing_atom(name, name)
-  defp resolve_module(name), do: existing_atom("Elixir." <> name, name)
-
-  defp existing_atom(preferred, original) do
-    {:ok, String.to_existing_atom(preferred)}
-  rescue
-    ArgumentError ->
-      try do
-        {:ok, String.to_existing_atom(original)}
-      rescue
-        ArgumentError ->
-          {:invalid,
-           "params.module must name a module this node has loaded, got: #{inspect(original)}"}
-      end
   end
 
   @doc false

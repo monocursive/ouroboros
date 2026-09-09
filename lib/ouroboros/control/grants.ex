@@ -10,23 +10,20 @@ defmodule Ouroboros.Control.Grants do
       :stop_agent    agents:  :any | [agent_id]
       :send_message  agents:  :any | [agent_id]
       :delegate      teams:   :any | [team_id]
-      :forge         modules: :any | [module | "wasm/<name>"]
+      :forge         modules: ["wasm/<name>"] | ["wasm/*"]
       :deploy        nodes:   :any | [node]
 
-  A `:forge` allow-list holds atoms — BEAM capability modules — and `"wasm/<name>"` strings,
-  because lane W's capabilities have no module name at all: identity there is the component's
-  digest, and the name a rollout, a `start` block and this allow-list all agree on is
-  `"wasm/" <> Ouroboros.Wasm.Artifact.name?/1`. The two spellings can never match each other,
-  so a grant narrowed to `[Ouroboros.Capability.Echo]` admits no wasm forge and a grant
-  narrowed to `["wasm/counter"]` admits no BEAM one.
+  A forged capability has no module name at all: identity is the component's digest, and
+  the name a rollout, a `start` block and this allow-list all agree on is
+  `"wasm/" <> Ouroboros.Wasm.Artifact.name?/1`.
 
-  **`:any` does not cross the lanes, and this is the important sentence in this moduledoc.**
-  `modules: :any` means what it meant before lane W existed: any BEAM module. A grant an
-  operator wrote — and, worse, a grant they wrote and forgot, sitting in a durable
-  checkpoint — cannot come to mean more than it did on the day it was written because a
-  later release added a second thing the word *forge* can do. Lane W is reached only by an
-  entry that says so: `"wasm/<name>"` for one capability, or `"wasm/*"` for all of them, and
-  the wildcard is the only way to say the broad thing, out loud, on purpose.
+  **`:any` does not reach a forge, and this is the important sentence in this moduledoc.**
+  The `:modules` allow-list is shared with `:start_agent`, where `:any` means any BEAM
+  module and a mesh agent is a module. A grant an operator wrote — and, worse, a grant they
+  wrote and forgot, sitting in a durable checkpoint — cannot come to mean more than it did
+  on the day it was written. A forge is reached only by an entry that says so:
+  `"wasm/<name>"` for one capability, or `"wasm/*"` for all of them, and the wildcard is
+  the only way to say the broad thing, out loud, on purpose.
 
   `granted?/3` is asked about a *concrete attempt*, not about an effect in the abstract,
   so a grant to start `Ouroboros.Capability.Echo` refuses a request to start anything
@@ -53,21 +50,20 @@ defmodule Ouroboros.Control.Grants do
   and constraining it is worth doing. It is not a sandbox, and describing it as one would
   be a lie:
 
-    * Any BEAM the loader accepts runs with full ambient VM authority. Loaded code can
-      call `Ouroboros.Mesh.start_agent/2`, `Ouroboros.Upgrade.Forge.forge/2`, or
-      `grant/3` on this module directly, without passing through an effect action at all.
+    * Any code running in this VM has full ambient VM authority. It can call
+      `Ouroboros.Mesh.start_agent/2`, `Ouroboros.Wasm.Forge.forge/2`, or `grant/3` on
+      this module directly, without passing through an effect action at all.
     * No effect exists for granting, so an agent cannot widen its own authority *through
       this surface*. That is a property of the surface, not of the VM.
     * The boundaries that hold against code that does not cooperate are elsewhere: the
-      verifier's namespace policy, artifact signing (whose production default refuses),
-      and the isolated build peer.
+      component's import list, the signer's policy, and manifest signing (whose production
+      default refuses).
 
-  This module lives under `Ouroboros.Control.` deliberately. That prefix is in
-  `Ouroboros.Upgrade.Verifier`'s protected set, so the fast patch lane refuses to load an
-  artifact that would replace or introduce the authority gating it — a capability an
-  agent forged cannot patch the thing that decided it could forge. What keeps signing
-  approval outside the blast radius is the same reasoning applied one level up, and it
-  belongs outside this application entirely.
+  This module lives under `Ouroboros.Control.` deliberately: a forged component runs
+  inside a WebAssembly world whose imports do not reach it, so a capability an agent
+  forged cannot patch the thing that decided it could forge. What keeps signing approval
+  outside the blast radius is the same reasoning applied one level up, and it belongs
+  outside this application entirely.
 
   Storage comes from `config :ouroboros, :grants_storage`: ETS in development and test,
   a synced `Ouroboros.Storage.DurableFile` in production. ETS means the authority dies
