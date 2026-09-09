@@ -394,12 +394,11 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
     test "says what it cannot do yet instead of pretending", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/")
 
-      # The one filled control now leads to the form's own page, and the presence
-      # dots to the machines page — real links whose pages land with their own
-      # slices and 404 honestly until then.
+      # The one filled control leads to the form's own page. The presence dots are a
+      # readout of cluster connectivity, not a link: there is no page behind them.
       assert html =~ "New session"
       assert html =~ ~s(href="/new")
-      assert html =~ ~s(href="/machines")
+      refute html =~ ~s(href="/machines")
 
       # And the composer names the slice that wires it.
       assert html =~ "ouro-composer" or html =~ "What would you like to make?"

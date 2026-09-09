@@ -2,13 +2,12 @@ defmodule Ouroboros.Web.StylesheetTest do
   @moduledoc """
   What can be asserted about `priv/static/web/app.css` without a browser.
 
-  This file exists because of a defect a passing suite could not see. A W7 merge left
-  `.ouro-new-refusal-detail` without its closing brace and the Machines section's comment
+  This file exists because of a defect a passing suite could not see. A merge left
+  `.ouro-new-refusal-detail` without its closing brace and the following section's comment
   without its opening `/*`, and CSS error recovery answered by swallowing **every rule from
-  that point to the end of the file** as one malformed declaration. The whole Machines
-  stylesheet was dead — which is why the page's back link rendered in the browser's own
-  blue-then-purple — and nothing in 584 passing tests noticed, because every one of them
-  asserted on markup.
+  that point to the end of the file** as one malformed declaration. Everything after that
+  point was dead — links rendered in the browser's own blue-then-purple — and nothing in
+  584 passing tests noticed, because every one of them asserted on markup.
 
   So the first two tests here are structural: braces balance, comments close. They are worth
   more than anything else in the file.
@@ -56,24 +55,21 @@ defmodule Ouroboros.Web.StylesheetTest do
                "swallowed by CSS error recovery and renders as nothing"
     end
 
-    test "the Machines section is a section rather than part of the rule above it" do
-      # The exact regression, named. `.ouro-backlink` is the rule the live pass found
-      # missing, and it is only reachable if the block before it terminated.
+    test "a section is a section rather than part of the rule above it" do
+      # The exact regression, named: a rule after the unterminated one is only reachable
+      # if the block before it terminated.
       assert rule_for(".ouro-new-refusal-detail"),
              ".ouro-new-refusal-detail has no rule of its own"
 
-      assert rule_for(".ouro-backlink"),
-             ".ouro-backlink has no rule; the Machines section is dead"
-
-      assert rule_for(".ouro-member-chip-connected"), "the Machines chips have no rules"
+      assert rule_for(".ouro-new-back"), ".ouro-new-back has no rule of its own"
     end
 
     test "no component class is defined by two different sections" do
-      # The second defect the repair above uncovered. `.ouro-chip` was the composer's queue
-      # count (W4) *and* the machines member chip (W7), and because the machines block came
-      # later in the file it would have quietly restyled the queue count — small-caps, a
-      # larger face, a grid placement — the moment the section became reachable. Nobody had
-      # seen it, because the section had never been reachable.
+      # The second defect the repair above uncovered. `.ouro-chip` was claimed by two
+      # sections at once, and because the later block came later in the file it would have
+      # quietly restyled the earlier component — small-caps, a larger face, a grid
+      # placement — the moment the section became reachable. Nobody had seen it, because
+      # the section had never been reachable.
       #
       # Sharing a class between two components is a decision; arriving at it by accident, in
       # two sections written weeks apart, is this bug.
@@ -138,7 +134,6 @@ defmodule Ouroboros.Web.StylesheetTest do
       for selector <- [
             "a",
             "a:where(:hover)",
-            ".ouro-backlink",
             ".ouro-new-back",
             ".ouro-prose a"
           ] do
@@ -153,7 +148,7 @@ defmodule Ouroboros.Web.StylesheetTest do
       # every single-class rule below it and light a settled rail row back up to full ink.
       assert @css =~ ~r/a:where\(:hover\)/,
              "the global hover rule is not wrapped in :where(); it will outrank " <>
-               ".ouro-row-settled and .ouro-backlink"
+               ".ouro-row-settled and .ouro-new-back"
 
       assert rule_for("a:where(:hover)") =~ "var(--secondary)"
     end

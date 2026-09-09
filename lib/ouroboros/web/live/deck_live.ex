@@ -1483,7 +1483,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
     <header class="ouro-topbar">
       <span class="ouro-wordmark">Ouroboros</span>
 
-      <a class="ouro-presence" aria-label={@machines_label} href="/machines">
+      <span class="ouro-presence" role="img" aria-label={@machines_label}>
         <span class="ouro-presence-label">Machines</span>
         <span
           :for={machine <- @machines}
@@ -1492,7 +1492,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
         >
           <span class="ouro-visually-hidden">{machine.name}</span>
         </span>
-      </a>
+      </span>
 
       <div class="ouro-topbar-right">
         <span :if={@today.tokens} class="ouro-today ouro-mono" title="sessions updated today, UTC">
@@ -1579,7 +1579,6 @@ defmodule Ouroboros.Web.Live.DeckLive do
           scope={@scope}
         />
       </section>
-      <.link navigate="/machines" class="ouro-rail-machines">Machines</.link>
     </nav>
     """
   end

@@ -41,7 +41,6 @@ defmodule Ouroboros.Web.Router do
       live "/s/:plane/:id", Live.DeckLive, :session
       live "/new", Live.NewSessionLive, :index
       live "/settings", Live.SettingsLive, :index
-      live "/machines", Live.MachinesLive, :index
       live "/status", StatusLive, :index
       live "/audit", AuditLive, :index
       live "/audit/:stream", AuditLive, :show

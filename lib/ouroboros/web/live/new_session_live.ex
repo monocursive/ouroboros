@@ -884,7 +884,6 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
           <section class="ouro-new-field" aria-labelledby="machine-label">
             <div class="ouro-new-label-row">
               <label id="machine-label" class="ouro-new-label" for="machine">Computer</label>
-              <a href="/machines" class="ouro-new-aside">Manage computers</a>
             </div>
             <select
               id="machine"
