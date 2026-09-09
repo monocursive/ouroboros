@@ -581,7 +581,7 @@ defmodule Ouroboros.RuntimeOwner do
         if test_environment?() do
           "test:#{pid}:#{System.unique_integer([:positive, :monotonic])}"
         else
-          raise "Ouroboros needs its trusted ouro process-incarnation helper before opening durable state: #{inspect(reason)}. Start this runtime through `ouro` or its generated fleet service."
+          raise "Ouroboros needs its trusted ouro process-incarnation helper before opening durable state: #{inspect(reason)}. Start this runtime through `ouro`, which supplies it."
         end
     end
   end

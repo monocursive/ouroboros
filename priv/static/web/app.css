@@ -478,13 +478,12 @@ body.phx-loading {
   color: var(--ink);
 }
 
-/* A link to /machines, but it reads as a row of dots: the underline the global rule gives
-   every anchor would draw a line under nothing. */
+/* A row of presence dots with a label, read out as one image. It is a span: there is no
+   machines page to navigate to. */
 .ouro-presence {
   display: flex;
   align-items: center;
   gap: 0.35rem;
-  text-decoration: none;
 }
 .ouro-presence-label {
   color: var(--secondary);
