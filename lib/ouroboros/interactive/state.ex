@@ -174,8 +174,6 @@ defmodule Ouroboros.Interactive.State do
           required(:last) => map()
         }
 
-  # Start options that shape the session envelope rather than one harness request.
-  @envelope_options [:id, :workspace, :workspace_mode, :provider, :event_limit, :worktree]
   # Trusted runtime attribution, deliberately absent from public/provider options.
   @request_options [
     :audit_actor_id,
@@ -196,10 +194,6 @@ defmodule Ouroboros.Interactive.State do
     :sandbox_mode,
     :runtime_exposure
   ]
-  # Named so they are refused by name rather than as an unknown option: both are
-  # credentials-adjacent and neither belongs in a durable checkpoint.
-  @rejected_inline_options [:env, :env_mode, :mcp_config]
-  @accepted_options @envelope_options ++ @request_options ++ @rejected_inline_options
 
   # Values for these adapter options are reproducible execution policy, not
   # credentials. Rich settings, arbitrary argv, and toolbox maps belong in the
@@ -329,9 +323,6 @@ defmodule Ouroboros.Interactive.State do
     assembly = assemble_prompt_options(Map.new(opts))
 
     cond do
-      unknown = unknown_option(opts) ->
-        {:error, {:unknown_option, unknown}}
-
       not is_atom(provider) or is_nil(provider) ->
         {:error, :invalid_provider}
 
@@ -427,12 +418,6 @@ defmodule Ouroboros.Interactive.State do
 
   defp put_system_prompt(options, system_prompt),
     do: Map.put(options, :system_prompt, system_prompt)
-
-  defp unknown_option(opts) do
-    opts
-    |> Keyword.keys()
-    |> Enum.find(&(&1 not in @accepted_options))
-  end
 
   defp valid_event_limit?(limit), do: is_integer(limit) and limit > 0 and limit <= 100_000
 
@@ -1154,6 +1139,9 @@ defmodule Ouroboros.Interactive.State do
           :approval_mode,
           :sandbox_mode,
           :runtime_exposure,
+          # Accepted as keys here so `base/2` can refuse them by name rather than as an
+          # unknown option: all three are credentials-adjacent and none belongs in a
+          # durable checkpoint, and a caller told "unknown option" would look for a typo.
           :env,
           :env_mode,
           :mcp_config,
