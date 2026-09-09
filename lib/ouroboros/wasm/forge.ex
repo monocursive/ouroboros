@@ -1998,7 +1998,7 @@ defmodule Ouroboros.Wasm.Forge do
   fires: `Ouroboros.Provider.Native.Exec` signals the sandboxed process group at it, so the
   build stops and the `after` that removes the scratch directory runs. The other belongs to
   whoever called — on the effect path `config :ouroboros, :effect_timeout` bounds the whole
-  effect, and `Ouroboros.Agent.Effects.ForgeWasmCapability` therefore asks for a build budget
+  effect, and a forging caller therefore asks for a build budget
   strictly inside it, because the runner's own deadline is a `brutal_kill` that runs no
   cleanup and would leave a cargo tree, and a compiler, behind (docs/WASM.md D19).
   """

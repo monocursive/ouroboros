@@ -4,8 +4,8 @@
 //! terminal without a tty, for a pipe, and for the thirty seconds where opening a UI to
 //! answer "is anything waiting on me" is thirty seconds too many.
 //!
-//! It answers from `interactive.list` and `coding.list`, which are already fanned out over
-//! every fleet node, and it does **not** subscribe: the grouping is computed from the
+//! It answers from `interactive.list`, which is already fanned out over every fleet node,
+//! and it does **not** subscribe: the grouping is computed from the
 //! declared status of each row and nothing else, so a row's group is a fact the runtime
 //! stated rather than something this command watched for. That is also why the counts here
 //! can differ from the rail's by one: the rail additionally counts approvals it is
@@ -44,20 +44,20 @@ fn row(session: &SessionInfo) -> String {
     // would make the top of the list meaningless — and it says why it might be stale.
     if session.last_known {
         let _ = write!(line, " last-known · owner offline");
-    } else if let Some(objective) = session
-        .objective
+    } else if let Some(title) = session
+        .title
         .as_deref()
         .map(str::trim)
-        .filter(|objective| !objective.is_empty())
+        .filter(|title| !title.is_empty())
     {
-        let _ = write!(line, " {}", cut(objective, 48));
+        let _ = write!(line, " {}", cut(title, 48));
     }
 
     line.trim_end().to_string()
 }
 
 /// Every gateway string this page prints goes through here, which is also where it is
-/// blanked of control characters. The page is written straight to stdout, so an objective
+/// blanked of control characters. The page is written straight to stdout, so a title
 /// carrying an escape sequence would otherwise be a session on another node repainting
 /// this terminal. Blanked before the width is counted, so the column arithmetic measures
 /// what will actually be shown.
@@ -129,7 +129,7 @@ pub fn render_json(rows: &[(Triage, &SessionInfo)]) -> Value {
                     "node": session.node,
                     "provider": session.provider,
                     "workspace": session.workspace,
-                    "objective": session.objective,
+                    "title": session.title,
                     "last_known": session.last_known,
                     "session": session.raw,
                 })
@@ -152,15 +152,11 @@ pub fn render_json(rows: &[(Triage, &SessionInfo)]) -> Value {
     json!({ "counts": counts, "groups": groups })
 }
 
-/// Groups the two lists the gateway answered with, using the same classification the rail
+/// Groups the list the gateway answered with, using the same classification the rail
 /// uses. No approvals are held here, so the pending count is zero for every row.
-pub fn group<'a>(
-    interactive: &'a [SessionInfo],
-    coding: &'a [SessionInfo],
-) -> Vec<(Triage, &'a SessionInfo)> {
+pub fn group(interactive: &[SessionInfo]) -> Vec<(Triage, &SessionInfo)> {
     let mut rows: Vec<(Triage, &SessionInfo)> = interactive
         .iter()
-        .chain(coding.iter())
         .map(|session| (session.triage(0), session))
         .collect();
 
@@ -175,24 +171,21 @@ pub fn group<'a>(
     rows
 }
 
-/// Decodes both list answers, dropping only the rows this build cannot read.
-pub fn decode(interactive: &Value, coding: &Value) -> (Vec<SessionInfo>, Vec<SessionInfo>) {
-    (
-        SessionInfo::decode_list(Plane::Interactive, interactive),
-        SessionInfo::decode_list(Plane::Coding, coding),
-    )
+/// Decodes the list answer, dropping only the rows this build cannot read.
+pub fn decode(interactive: &Value) -> Vec<SessionInfo> {
+    SessionInfo::decode_list(Plane::Interactive, interactive)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn session(plane: Plane, id: &str, status: &str, node: &str) -> Value {
+    fn session(id: &str, status: &str, node: &str) -> Value {
         json!({
             "id": id,
             "status": status,
             "node": node,
-            "provider": if plane == Plane::Interactive { "native" } else { "codex" },
+            "provider": "native",
             "workspace": "/w",
             "updated_at": "2026-01-01T00:00:00.000000Z",
         })
@@ -200,24 +193,16 @@ mod tests {
 
     #[test]
     fn the_groups_are_named_even_when_they_are_empty() {
-        let (interactive, coding) = decode(&json!([]), &json!([]));
-        let rows = group(&interactive, &coding);
+        let interactive = decode(&json!([]));
+        let rows = group(&interactive);
 
         assert_eq!(
             render(&rows),
             "no sessions on any node this runtime can see\n"
         );
 
-        let (interactive, coding) = decode(
-            &json!([session(
-                Plane::Interactive,
-                "s1",
-                "running",
-                "ouroboros@alpha"
-            )]),
-            &json!([]),
-        );
-        let rows = group(&interactive, &coding);
+        let interactive = decode(&json!([session("s1", "running", "ouroboros@alpha")]));
+        let rows = group(&interactive);
         let page = render(&rows);
 
         assert!(page.contains("NEEDS INPUT (0)\n  none\n"), "{page}");
@@ -227,39 +212,33 @@ mod tests {
 
     #[test]
     fn a_session_awaiting_approval_is_first_whatever_its_timestamp() {
-        let (interactive, coding) = decode(
-            &json!([
-                session(Plane::Interactive, "newest", "running", "ouroboros@alpha"),
-                {
-                    "id": "waiting",
-                    "status": "awaiting_approval",
-                    "node": "ouroboros@beta",
-                    "updated_at": "2020-01-01T00:00:00.000000Z"
-                }
-            ]),
-            &json!([]),
-        );
-        let rows = group(&interactive, &coding);
+        let interactive = decode(&json!([
+            session("newest", "running", "ouroboros@alpha"),
+            {
+                "id": "waiting",
+                "status": "awaiting_approval",
+                "node": "ouroboros@beta",
+                "updated_at": "2020-01-01T00:00:00.000000Z"
+            }
+        ]));
+        let rows = group(&interactive);
 
         assert_eq!(rows[0].0, Triage::NeedsInput);
         assert_eq!(rows[0].1.id, "waiting");
     }
 
     /// The page goes to stdout as it stands. A session on another node must not be able
-    /// to move this terminal's cursor by naming its objective after an escape sequence.
+    /// to move this terminal's cursor by naming its title after an escape sequence.
     #[test]
     fn gateway_strings_reach_the_page_without_control_characters() {
-        let (interactive, coding) = decode(
-            &json!([{
-                "id": "s\u{1b}[2Kevil",
-                "status": "running",
-                "node": "core@\u{9b}4m",
-                "objective": "ship it\u{7}\u{1b}]0;pwned\u{7}",
-                "updated_at": "2026-01-01T00:00:00.000000Z",
-            }]),
-            &json!([]),
-        );
-        let page = render(&group(&interactive, &coding));
+        let interactive = decode(&json!([{
+            "id": "s\u{1b}[2Kevil",
+            "status": "running",
+            "node": "core@\u{9b}4m",
+            "title": "ship it\u{7}\u{1b}]0;pwned\u{7}",
+            "updated_at": "2026-01-01T00:00:00.000000Z",
+        }]));
+        let page = render(&group(&interactive));
 
         assert!(!page.contains('\u{1b}'), "{page:?}");
         assert!(!page.contains('\u{9b}'), "{page:?}");
@@ -270,18 +249,18 @@ mod tests {
 
     #[test]
     fn the_json_form_carries_the_counts_and_the_whole_rows() {
-        let (interactive, coding) = decode(
-            &json!([session(Plane::Interactive, "s1", "idle", "ouroboros@alpha")]),
-            &json!([session(Plane::Coding, "t1", "completed", "ouroboros@beta")]),
-        );
-        let rows = group(&interactive, &coding);
+        let interactive = decode(&json!([
+            session("s1", "idle", "ouroboros@alpha"),
+            session("s2", "completed", "ouroboros@beta"),
+        ]));
+        let rows = group(&interactive);
         let value = render_json(&rows);
 
         assert_eq!(value["counts"]["needs_input"], 0);
         assert_eq!(value["counts"]["working"], 0);
         assert_eq!(value["counts"]["done"], 2);
         assert_eq!(value["groups"]["done"][0]["id"], "s1");
-        assert_eq!(value["groups"]["done"][1]["plane"], "coding");
+        assert_eq!(value["groups"]["done"][1]["plane"], "interactive");
         assert_eq!(
             value["groups"]["done"][1]["session"]["node"], "ouroboros@beta",
             "the runtime's own row travels whole"

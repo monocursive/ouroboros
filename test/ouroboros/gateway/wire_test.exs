@@ -1,10 +1,8 @@
 defmodule Ouroboros.Gateway.WireTest do
   use ExUnit.Case, async: true
 
-  alias Ouroboros.Coding.Event, as: CodingEvent
   alias Ouroboros.Gateway.Wire
   alias Ouroboros.Interactive.Event, as: InteractiveEvent
-  alias Ouroboros.Orchestration.Serializable
 
   defmodule Sample do
     @moduledoc false
@@ -27,26 +25,12 @@ defmodule Ouroboros.Gateway.WireTest do
     }
   end
 
-  defp coding_event(payload) do
-    %CodingEvent{
-      id: "evt-2",
-      task_id: "task-1",
-      sequence: 17,
-      type: :file_change,
-      timestamp: @timestamp,
-      payload: payload,
-      provider: :codex
-    }
-  end
-
-  describe "the shape safe/1 would have destroyed" do
+  describe "the shape an all-or-nothing serializer would have destroyed" do
     test "a pid beside readable siblings costs only the pid" do
       # This is `Mesh.list_agents/0`'s exact return shape, which `Ouroboros.status/0`
-      # embeds. `Serializable.safe/1` replaces the whole list with one inspect string;
-      # the dashboard's entire data source would be that string.
+      # embeds. A serializer that refused the whole term for one pid would replace the
+      # dashboard's entire data source with one inspect string.
       agents = [%{id: "a", pid: self(), node: node(), replicas: 1}]
-
-      assert {:unserializable, _rendered} = Serializable.safe(agents)
 
       assert [agent] = roundtrip(agents)
       assert agent["id"] == "a"
@@ -200,15 +184,6 @@ defmodule Ouroboros.Gateway.WireTest do
       assert encoded["timestamp"] == "2026-01-01T00:00:00.000000Z"
       assert encoded["provider"] == "codex"
       assert encoded["_struct"] == "Ouroboros.Interactive.Event"
-    end
-
-    test "the coding plane is capped by the same code as the interactive one" do
-      encoded = roundtrip(coding_event(%{"diff" => @diff}))
-
-      assert %{"_excerpt" => _excerpt, "_bytes" => 5_000_000} = encoded["payload"]["diff"]
-      assert encoded["task_id"] == "task-1"
-      assert encoded["sequence"] == 17
-      assert encoded["_struct"] == "Ouroboros.Coding.Event"
     end
 
     test "an excerpt cut inside a multi-byte character is still valid UTF-8" do

@@ -164,8 +164,6 @@ fn with_open_session() -> App {
         }]),
     );
 
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
-
     app.open_session(
         Plane::Interactive,
         "session-0000000000000000000001".to_string(),
@@ -622,14 +620,10 @@ fn the_dashboard_renders_the_golden_runtime_status() {
     // Every plane in the fixture's matrix, by name.
     for plane in [
         "cluster",
-        "coding",
-        "control",
         "hot_upgrade",
         "interactive",
         "mesh",
-        "orchestration",
         "release",
-        "teams",
         "workspace",
     ] {
         assert!(
@@ -1378,35 +1372,32 @@ fn the_coding_home_carries_the_terminal_logo() {
 }
 
 #[test]
-fn the_sessions_list_merges_both_planes_and_tags_each_row() {
+fn the_sessions_list_tags_each_row_and_orders_by_activity() {
     let mut app = shell(full_hello());
     app.apply(key(KeyCode::Char('2')));
 
     answer(
         &mut app,
         Tag::Sessions(Plane::Interactive),
-        json!([{ "id": "session-1", "status": "awaiting_approval",
-                 "updated_at": "2026-01-01T00:00:02.000000Z" }]),
-    );
-
-    answer(
-        &mut app,
-        Tag::Sessions(Plane::Coding),
-        json!([{ "id": "task-2", "status": "running",
-                 "updated_at": "2026-01-01T00:00:01.000000Z" }]),
+        json!([
+            { "id": "session-1", "status": "awaiting_approval",
+              "updated_at": "2026-01-01T00:00:02.000000Z" },
+            { "id": "session-2", "status": "running",
+              "updated_at": "2026-01-01T00:00:01.000000Z" }
+        ]),
     );
 
     app.overlay = Some(Overlay::SessionPicker { selected: None });
     let screen = render(&mut app, 120, 20);
 
     assert!(screen.row("session-1").contains("int"), "{}", screen.text());
-    assert!(screen.row("task-2").contains("code "));
+    assert!(screen.row("session-2").contains("int"));
     assert!(screen.row("session-1").contains("awaiting_approval"));
 
-    // Newest activity first, so the list does not reshuffle under the cursor.
-    let sessions = screen.rows.iter().position(|r| r.contains("session-1"));
-    let tasks = screen.rows.iter().position(|r| r.contains("task-2"));
-    assert!(sessions < tasks);
+    // What needs a person first, so the list does not reshuffle under the cursor.
+    let first = screen.rows.iter().position(|r| r.contains("session-1"));
+    let second = screen.rows.iter().position(|r| r.contains("session-2"));
+    assert!(first < second);
 }
 
 #[test]
@@ -1424,7 +1415,6 @@ fn an_incomplete_fleet_list_keeps_last_known_session_rows() {
             "updated_at": "2026-01-01T00:00:02.000000Z"
         }]),
     );
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
 
     app.apply(Msg::Answer {
         tag: Tag::Sessions(Plane::Interactive),
@@ -1571,7 +1561,6 @@ fn a_list_poll_does_not_retarget_the_session_picker() {
             }
         ]),
     );
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
 
     app.overlay = Some(Overlay::SessionPicker {
         selected: Some((Plane::Interactive, "older".into())),
@@ -3406,34 +3395,6 @@ fn duplicate_explicit_ids_on_two_owners_are_visible_and_never_routed() {
 }
 
 #[test]
-fn cancelling_a_remote_coding_task_keeps_its_owner_node() {
-    let remote_node = "ouro@workstation.test";
-    let mut app = shell(full_hello());
-    answer(
-        &mut app,
-        Tag::Sessions(Plane::Coding),
-        json!([{
-            "id": "task-remote-1",
-            "node": remote_node,
-            "provider": "codex",
-            "status": "running",
-            "updated_at": "2026-01-01T00:00:00Z"
-        }]),
-    );
-    app.open_session(Plane::Coding, "task-remote-1".into());
-    let _ = app.drain();
-    app.apply(key(KeyCode::Char('x')));
-    app.apply(key(KeyCode::Enter));
-
-    let cancel = app
-        .drain()
-        .into_iter()
-        .find(|call| call.method == "coding.cancel")
-        .expect("a remote task cancellation");
-    assert_eq!(cancel.params["node"], remote_node);
-}
-
-#[test]
 fn a_remote_machine_loss_retains_the_cursor_and_resubscribes_after_reconnect() {
     let remote_id = "session-recover-1";
     let remote_node = "ouro@mini.test";
@@ -4183,7 +4144,6 @@ fn x_in_the_session_switcher_removes_a_terminal_session() {
             }
         ]),
     );
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
 
     apply_leader(&mut app, 'l');
     let _ = app.drain();
@@ -4275,7 +4235,6 @@ fn x_hides_a_last_known_offline_row_without_calling_the_runtime() {
             "updated_at": "2026-01-01T00:00:02.000000Z"
         }]),
     );
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
     answer(
         &mut app,
         Tag::Status,
@@ -4351,32 +4310,6 @@ fn x_hides_a_last_known_offline_row_without_calling_the_runtime() {
         .all(|session| session.id != "late-member-session"));
 }
 
-#[test]
-fn a_coding_task_is_told_it_takes_no_input_rather_than_being_sent_one() {
-    let mut app = shell(full_hello());
-    app.apply(key(KeyCode::Char('2')));
-
-    answer(&mut app, Tag::Sessions(Plane::Interactive), json!([]));
-    answer(
-        &mut app,
-        Tag::Sessions(Plane::Coding),
-        json!([{ "id": "task-2", "status": "running", "objective": "fix the build" }]),
-    );
-
-    app.open_session(Plane::Coding, "task-2".into());
-    let _ = app.drain();
-
-    app.apply(key(KeyCode::Char('i')));
-
-    assert!(
-        app.drain().is_empty(),
-        "the coding plane serves no send_message and none must be sent"
-    );
-
-    let screen = render(&mut app, 120, 24);
-    assert!(screen.contains("takes no input"), "{}", screen.text());
-}
-
 // ----- starting a session -------------------------------------------------------------
 
 /// Which row of the new-session form has focus.
@@ -4408,7 +4341,6 @@ fn ready_to_start() -> App {
 
     app.apply(key(KeyCode::Char('2')));
     answer(&mut app, Tag::Sessions(Plane::Interactive), json!([]));
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
 
     answer(
         &mut app,
@@ -4770,52 +4702,6 @@ fn an_empty_workspace_is_omitted_rather_than_sent_blank() {
 }
 
 #[test]
-fn the_coding_plane_adds_an_objective_row_and_requires_it() {
-    let mut app = ready_to_start();
-    app.apply(key(KeyCode::Char('n')));
-
-    focus(&mut app, NewField::Plane);
-    app.apply(key(KeyCode::Right));
-
-    let screen = render(&mut app, 120, 30);
-
-    assert!(
-        screen.contains("coding — one objective, run to completion"),
-        "{}",
-        screen.text()
-    );
-    assert!(screen.contains("objective"), "{}", screen.text());
-
-    // Straight to start with no objective: refused here, on the form that produced it.
-    focus(&mut app, NewField::Start);
-    app.apply(key(KeyCode::Enter));
-
-    assert!(app.drain().is_empty(), "an invalid form sends nothing");
-
-    let screen = render(&mut app, 120, 30);
-    assert!(
-        screen.contains("a coding task needs an objective"),
-        "{}",
-        screen.text()
-    );
-
-    // Fill it in and the start carries it.
-    focus(&mut app, NewField::Objective);
-    type_text(&mut app, "fix the build");
-    focus(&mut app, NewField::Start);
-    app.apply(key(KeyCode::Enter));
-
-    let call = app
-        .drain()
-        .into_iter()
-        .find(|call| call.method == "coding.start")
-        .expect("a coding start");
-
-    assert_eq!(call.params["objective"], "fix the build");
-    assert_eq!(call.params["provider"], "claude_code");
-}
-
-#[test]
 fn a_refused_start_stays_on_the_form_rather_than_flashing_past_in_a_notice() {
     let mut app = ready_to_start();
     app.apply(key(KeyCode::Char('n')));
@@ -5127,11 +5013,7 @@ fn a_read_listener_is_told_why_it_cannot_start_a_session() {
 }
 
 fn app_without_start() -> App {
-    shell(support::hello(&[
-        "hello",
-        "interactive.list",
-        "coding.list",
-    ]))
+    shell(support::hello(&["hello", "interactive.list"]))
 }
 
 #[test]
@@ -5171,14 +5053,7 @@ fn the_value_tree_names_every_wire_marker() {
 
     answer(
         &mut app,
-        Tag::Agents,
-        json!([{ "id": "reviewer-1", "node": "ouroboros@golden",
-                 "pid": { "_opaque": "#PID<0.123.0>" }, "replicas": 1 }]),
-    );
-
-    answer(
-        &mut app,
-        Tag::AgentState("reviewer-1".into()),
+        Tag::UpgradeStatus,
         json!({
             "_struct": "Ouroboros.Capability.ForgedYesterday",
             "pid": { "_opaque": "#PID<0.123.0>" },
@@ -5209,66 +5084,34 @@ fn the_value_tree_names_every_wire_marker() {
 #[test]
 fn a_tree_node_opens_and_closes_under_the_cursor() {
     let mut app = shell(full_hello());
-    app.apply(key(KeyCode::Char('4')));
+    app.apply(key(KeyCode::Char('3')));
 
     answer(
         &mut app,
-        Tag::Teams,
-        json!([{ "id": "team-alpha", "status": "active", "worker_count": 2,
-                 "delegation_count": 1 }]),
+        Tag::UpgradeStatus,
+        json!({ "operations": { "op1": { "role": "reviewer" } }, "mode": "ready" }),
     );
 
-    answer(
-        &mut app,
-        Tag::TeamState("team-alpha".into()),
-        json!({ "workers": { "w1": { "role": "reviewer" } }, "status": "active" }),
-    );
-
-    // Into the tree, past `status` onto `workers` — keys render sorted — and open it.
+    // Into the tree, past `mode` onto `operations` — keys render sorted — and open it.
     app.apply(key(KeyCode::Right));
     app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Enter));
 
     let screen = render(&mut app, 130, 24);
-    assert!(screen.contains("w1"), "{}", screen.text());
+    assert!(screen.contains("op1"), "{}", screen.text());
 
     app.apply(key(KeyCode::Left));
     let screen = render(&mut app, 130, 24);
-    assert!(!screen.contains("w1"), "{}", screen.text());
+    assert!(!screen.contains("op1"), "{}", screen.text());
 }
 
-// ----- tabs 5 through 7 --------------------------------------------------------------
-
-#[test]
-fn plans_and_control_are_two_lists_on_one_tab() {
-    let mut app = shell(full_hello());
-    app.apply(key(KeyCode::Char('5')));
-
-    answer(
-        &mut app,
-        Tag::Plans,
-        json!([{ "id": "plan-1", "status": "running", "version": 3, "step_count": 4 }]),
-    );
-
-    answer(
-        &mut app,
-        Tag::ControlRuns,
-        json!([{ "id": "run-1", "status": "awaiting_review", "revision": 2 }]),
-    );
-
-    let screen = render(&mut app, 130, 30);
-
-    assert!(screen.contains("plan-1"), "{}", screen.text());
-    assert!(screen.contains("run-1"));
-    assert!(screen.contains("orchestration plans"));
-    assert!(screen.contains("control runs"));
-}
+// ----- the upgrade and logs tabs -----------------------------------------------------
 
 #[test]
 fn the_upgrade_tab_asks_for_a_principal_rather_than_inventing_a_list_all() {
     let mut app = shell(full_hello());
-    app.apply(key(KeyCode::Char('6')));
+    app.apply(key(KeyCode::Char('3')));
 
     // Down to `effect grants`.
     for _ in 0..4 {
@@ -5309,7 +5152,7 @@ fn signing_decisions_are_shown_as_unavailable_when_the_build_does_not_serve_them
         "runtime.status",
         "upgrade.status",
     ]));
-    app.apply(key(KeyCode::Char('6')));
+    app.apply(key(KeyCode::Char('3')));
 
     for _ in 0..3 {
         app.apply(key(KeyCode::Down));
@@ -5334,7 +5177,7 @@ fn the_logs_tab_says_where_logs_are_when_this_client_did_not_start_the_runtime()
     let mut app = App::new(Mode::Attached, "127.0.0.1:4560".into(), full_hello(), None);
     resolve_account(&mut app);
 
-    app.apply(key(KeyCode::Char('7')));
+    app.apply(key(KeyCode::Char('4')));
     let screen = render(&mut app, 120, 20);
 
     assert!(
@@ -5360,7 +5203,7 @@ fn the_logs_tab_shows_the_ring_when_this_client_owns_the_child() {
     );
 
     resolve_account(&mut app);
-    app.apply(key(KeyCode::Char('7')));
+    app.apply(key(KeyCode::Char('4')));
     let screen = render(&mut app, 120, 20);
 
     assert!(screen.contains("[info] up"), "{}", screen.text());
@@ -5372,7 +5215,7 @@ fn the_logs_tab_shows_the_ring_when_this_client_owns_the_child() {
 fn every_tab_draws_without_any_data_at_all() {
     // A gateway that has answered nothing must still produce every secondary panel even
     // though the persistent tab bar has moved behind the command palette.
-    for digit in '1'..='7' {
+    for digit in '1'..='4' {
         let mut app = shell(full_hello());
         app.apply(key(KeyCode::Char(digit)));
 
@@ -5626,10 +5469,8 @@ fn home_polls_machine_status_but_defers_provider_inventory_to_the_dashboard() {
     let methods: Vec<String> = app.drain().into_iter().map(|call| call.method).collect();
 
     assert!(methods.contains(&"interactive.list".to_string()));
-    assert!(methods.contains(&"coding.list".to_string()));
     assert!(methods.contains(&"runtime.status".to_string()));
     assert!(!methods.contains(&"runtime.providers".to_string()));
-    assert!(!methods.contains(&"agents.list".to_string()));
 
     app.apply(key(KeyCode::BackTab));
 

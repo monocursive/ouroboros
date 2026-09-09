@@ -116,7 +116,6 @@ fn opened(pairs: &[(&str, &str)]) -> App {
             "options": { "capabilities": { "transport": "app_server", "interrupt": "native" } },
         }]),
     );
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
     app.open_session(Plane::Interactive, "session-a7".into());
 
     if let Some(subscribe) = app

@@ -6,6 +6,8 @@ defmodule Ouroboros.MeshTest.ForgedAgent do
     description: "Stands in for an agent module forged outside the reserved namespaces",
     schema: [
       role: [type: :string, default: "worker"],
+      objective: [type: :any, default: nil],
+      status: [type: :atom, default: :idle],
       seed: [type: :any, default: nil]
     ]
 end
@@ -55,12 +57,6 @@ defmodule Ouroboros.MeshTest do
 
       assert {:error, {:agent_call_failed, :exit, {:timeout, _call}}} =
                Mesh.send_message("root", id, %{text: "hello"}, timeout: 50)
-
-      assert {:error, {:agent_call_failed, :exit, {:timeout, _call}}} =
-               Mesh.assign_task("root", id, "stall", timeout: 50)
-
-      assert {:error, {:agent_call_failed, :exit, {:timeout, _call}}} =
-               Mesh.complete_task(id, "task-1", :done, timeout: 50)
     end
 
     test "a target that dies mid-call fails the call instead of the caller" do
@@ -95,13 +91,6 @@ defmodule Ouroboros.MeshTest do
       assert Mesh.whereis(id) == pid
       assert {:ok, server_state} = Mesh.state(id)
       assert server_state.agent.state.role == "forged"
-    end
-
-    test "accepts the reserved Ouroboros.Agent namespace by default" do
-      id = unique_id("reserved")
-
-      assert {:ok, _pid} = Mesh.start_agent(id, agent: Ouroboros.Agent.Worker)
-      on_exit(fn -> Mesh.stop_agent(id) end)
     end
 
     test "accepts the WebAssembly wrapper agent, and admits its state as a start spec" do
@@ -161,8 +150,11 @@ defmodule Ouroboros.MeshTest do
     test "merges an explicit map over the extracted trio" do
       id = unique_id("seeded")
 
+      allow_agent_modules([ForgedAgent])
+
       assert {:ok, _pid} =
                Mesh.start_agent(id,
+                 agent: ForgedAgent,
                  role: "extracted",
                  objective: "extracted objective",
                  initial_state: %{role: "explicit", status: :working}
@@ -178,9 +170,10 @@ defmodule Ouroboros.MeshTest do
 
     test "refuses a non-map initial state" do
       id = unique_id("bad-seed")
+      allow_agent_modules([ForgedAgent])
 
       assert {:error, {:invalid_initial_state, :not_a_map}} =
-               Mesh.start_agent(id, initial_state: :not_a_map)
+               Mesh.start_agent(id, agent: ForgedAgent, initial_state: :not_a_map)
 
       assert Mesh.whereis(id) == nil
     end
@@ -189,7 +182,8 @@ defmodule Ouroboros.MeshTest do
   describe "directory restart" do
     test "reconciling after a crash does not double-join a live agent" do
       id = unique_id("reconciled")
-      assert {:ok, pid} = Mesh.start_agent(id, role: "reviewer")
+      allow_agent_modules([ForgedAgent])
+      assert {:ok, pid} = Mesh.start_agent(id, agent: ForgedAgent, role: "reviewer")
       on_exit(fn -> Mesh.stop_agent(id) end)
 
       assert Mesh.members(id) == [pid]
@@ -211,7 +205,7 @@ defmodule Ouroboros.MeshTest do
 
       # The mesh directory is a rest_for_one boundary; let its downstream peers
       # finish restarting before this test hands the runtime to the next one.
-      assert_eventually(fn -> is_pid(Process.whereis(Ouroboros.Orchestration.Scheduler)) end)
+      assert_eventually(fn -> is_pid(Process.whereis(Ouroboros.Interactive.Store)) end)
     end
   end
 

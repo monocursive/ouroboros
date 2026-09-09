@@ -29,7 +29,7 @@ defmodule Ouroboros.Runtime.Manifesto do
   a capability, nor admit or load one; the operator previews and admits it. Do
   not invent runtime tools or authority, and do not patch
   Ouroboros.Control.*, Ouroboros.Upgrade.*, Ouroboros.Gateway.*, or
-  Ouroboros.Agent.Worker as a capability proposal.
+  Ouroboros.Wasm.Capability as a capability proposal.
   """
 
   @doc "The manifesto schema version this build writes."

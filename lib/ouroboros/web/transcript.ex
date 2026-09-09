@@ -26,7 +26,6 @@ defmodule Ouroboros.Web.Transcript do
     ApprovalResolved,
     CommandOutput,
     Compaction,
-    DelegationEvent,
     Failure,
     FileUpdate,
     Hidden,
@@ -504,10 +503,6 @@ defmodule Ouroboros.Web.Transcript do
 
   defp project_event(state, %Compaction{} = report) do
     state |> flush_agent(false) |> push_deduped(compaction_block(report))
-  end
-
-  defp project_event(state, %DelegationEvent{} = delegation) do
-    state |> flush_agent(false) |> push!(delegation_block(delegation))
   end
 
   defp project_event(state, %SubagentEvent{} = event) do
@@ -1334,39 +1329,6 @@ defmodule Ouroboros.Web.Transcript do
       tone: :muted,
       key: report.archive_id
     }
-  end
-
-  @doc "G1. A coding task this conversation delegated, starting or finishing."
-  @spec delegation_block(DelegationEvent.t()) :: Cell.Runtime.t()
-  def delegation_block(%DelegationEvent{} = delegation) do
-    label =
-      case delegation.status do
-        "started" -> "Delegated to a coding task"
-        status when is_binary(status) -> "Delegation #{status}"
-        nil -> "Delegation"
-      end
-
-    facts =
-      []
-      |> then(&if(delegation.task_id, do: &1 ++ ["task #{delegation.task_id}"], else: &1))
-      |> then(&if(delegation.task_node, do: &1 ++ [delegation.task_node], else: &1))
-      # A digest, never the result: the child's own transcript is the record of what it
-      # did, and a parent that quoted it would be presenting a copy as the thing.
-      |> then(
-        &if(delegation.result_digest,
-          do: &1 ++ ["result digest #{delegation.result_digest}"],
-          else: &1
-        )
-      )
-
-    tone =
-      case delegation.status do
-        status when status in ["failed", "cancelled", "lost"] -> :warning
-        "completed" -> :success
-        _running -> :muted
-      end
-
-    %Cell.Runtime{label: label, detail: Enum.join(facts, " · "), tone: tone}
   end
 
   # Folds one child-agent event onto the row that child already owns, or opens one.

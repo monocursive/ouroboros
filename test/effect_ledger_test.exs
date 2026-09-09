@@ -99,7 +99,7 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
 
   test "a denied stable request cannot become a new effect after authority changes" do
     ledger = start_ledger!()
-    denied = attrs("denied-stable", :start_agent, %{module: Ouroboros.Agent.Worker})
+    denied = attrs("denied-stable", :start_agent, %{module: Ouroboros.Wasm.Capability})
 
     assert {:ok, %Entry{status: :denied}, :created} =
              EffectLedger.record_denied(denied, ledger)
@@ -108,7 +108,7 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
       put_in(denied, [:authority], %{
         decision: :granted,
         reason: :granted,
-        constraints: %{modules: [Ouroboros.Agent.Worker]},
+        constraints: %{modules: [Ouroboros.Wasm.Capability]},
         granted_at: "2026-08-22T00:01:00Z"
       })
 
@@ -150,7 +150,7 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
 
   test "retention never evicts in-flight work and settlement advances the query cursor" do
     ledger = start_ledger!(retention_limit: 2)
-    active = attrs("active", :start_agent, %{module: Ouroboros.Agent.Worker})
+    active = attrs("active", :start_agent, %{module: Ouroboros.Wasm.Capability})
     assert {:ok, _entry, :created} = EffectLedger.record_started(active, ledger)
 
     for number <- 1..3 do
@@ -167,7 +167,7 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
                active.id,
                %{
                  status: :ok,
-                 result: %{agent_id: "started", module: Ouroboros.Agent.Worker, node: node()}
+                 result: %{agent_id: "started", module: Ouroboros.Wasm.Capability, node: node()}
                },
                ledger
              )
@@ -243,7 +243,7 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
 
     assert {:error, {:effect_ledger_checkpoint_failed, :storage_offline}} =
              EffectLedger.record_started(
-               attrs("never-admitted", :start_agent, %{module: Ouroboros.Agent.Worker}),
+               attrs("never-admitted", :start_agent, %{module: Ouroboros.Wasm.Capability}),
                ledger
              )
 

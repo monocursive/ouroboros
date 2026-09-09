@@ -199,7 +199,7 @@ pub const BLOCK_TAIL: usize = 6;
 /// reply's block is drawn and the event's is deduped away against `Block::key`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
-    /// The bold first row: `$ mix test`, `Compacted`, `Delegated`.
+    /// The bold first row: `$ mix test`, `Compacted`.
     pub label: String,
     /// One line of facts under it. Empty draws nothing rather than a placeholder.
     pub detail: String,
@@ -1092,10 +1092,6 @@ pub fn project(entries: Vec<Entry<'_>>) -> Vec<Cell> {
                         {
                             cells.push(Cell::Runtime(block));
                         }
-                    }
-                    PresentationEvent::Delegation(delegation) => {
-                        flush_agent(&mut cells, &mut pending, false);
-                        cells.push(Cell::Runtime(delegation_block(&delegation)));
                     }
                     PresentationEvent::Subagent(event) => {
                         flush_agent(&mut cells, &mut pending, false);
@@ -3394,41 +3390,6 @@ pub fn compaction_block(report: &crate::model::native::Compaction) -> Block {
     };
 
     Block::new(label, report.describe(), Tone::Muted).with_key(report.archive_id.clone())
-}
-
-/// G1. A coding task this conversation delegated, starting or finishing.
-pub fn delegation_block(delegation: &crate::model::native::DelegationEvent) -> Block {
-    let started = delegation.status.as_deref() == Some("started");
-
-    let label = match (&delegation.status, started) {
-        (_, true) => "Delegated to a coding task".to_string(),
-        (Some(status), false) => format!("Delegation {status}"),
-        (None, false) => "Delegation".to_string(),
-    };
-
-    let mut facts = Vec::new();
-
-    if let Some(task) = &delegation.task_id {
-        facts.push(format!("task {task}"));
-    }
-
-    if let Some(node) = &delegation.task_node {
-        facts.push(node.clone());
-    }
-
-    // A digest, never the result: the child's own transcript is the record of what it
-    // did, and a parent that quoted it would be presenting a copy as the thing.
-    if let Some(digest) = &delegation.result_digest {
-        facts.push(format!("result digest {digest}"));
-    }
-
-    let tone = match delegation.status.as_deref() {
-        Some("failed" | "cancelled" | "lost") => Tone::Warning,
-        Some("completed") => Tone::Success,
-        _running => Tone::Muted,
-    };
-
-    Block::new(label, facts.join(" · "), tone)
 }
 
 /// Folds one child-agent event onto the row that child already owns, or opens one.

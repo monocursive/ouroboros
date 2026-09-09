@@ -68,11 +68,10 @@ defmodule Ouroboros.Workspace do
   end
 
   @doc false
-  @spec acquire_managed(String.t(), String.t(), :coding | :interactive, keyword()) ::
+  @spec acquire_managed(String.t(), String.t(), :interactive, keyword()) ::
           {:ok, Ouroboros.Workspace.Lease.t(), String.t()} | {:error, term()}
   def acquire_managed(root, task_id, kind, opts \\ []) do
-    with true <-
-           kind in [:coding, :interactive] || {:error, {:invalid_workspace_owner_kind, kind}},
+    with true <- kind == :interactive || {:error, {:invalid_workspace_owner_kind, kind}},
          :ok <- validate_options(opts, [:mode, :server]) do
       mode = Keyword.get(opts, :mode, :exclusive)
       GenServer.call(server(opts), {:acquire, root, task_id, mode, kind})

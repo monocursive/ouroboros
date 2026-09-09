@@ -2,7 +2,7 @@ defmodule Ouroboros.Agent.EffectLedger do
   @moduledoc """
   Durable, content-minimized history for grant-gated agent effects.
 
-  `Ouroboros.Agent.Effects.Runner` records an admitted attempt here before it starts
+  `Ouroboros.Provider.Native.Tools.Forge` records an admitted attempt here before it starts
   the supervised work. The same record is settled after the work finishes. Refusals
   are recorded as terminal entries before they are returned. This ordering makes the
   ledger an authority boundary rather than best-effort telemetry: if the initial

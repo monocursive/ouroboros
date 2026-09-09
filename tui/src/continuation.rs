@@ -549,28 +549,6 @@ mod tests {
     }
 
     #[test]
-    fn a_coding_task_is_not_something_continue_can_open() {
-        let coding = SessionInfo::decode_list(
-            Plane::Coding,
-            &json!([row(
-                "task",
-                "ouroboros@alpha",
-                "/w/project",
-                "running",
-                "2026-02-01T09:00:00.000000Z"
-            )]),
-        );
-
-        let resolution = resolve(&coding, &here());
-
-        assert!(resolution.chosen.is_none());
-        assert_eq!(
-            resolution.seen, 0,
-            "a coding task has nobody to prompt it; it is not counted as a near miss either"
-        );
-    }
-
-    #[test]
     fn the_dot_ouro_run_appends_to_a_workspace_is_the_same_directory() {
         assert!(here().matches("/w/project/."));
         assert!(here().matches("/w/project/"));

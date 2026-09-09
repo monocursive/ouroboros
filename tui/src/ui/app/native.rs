@@ -16,8 +16,7 @@
 use serde_json::{json, Value};
 
 use crate::model::native::{
-    refusal_tag, Compaction, Delegated, DelegationRow, RewindPoint, Rewound, SessionContext,
-    ShellRefusal, ShellResult,
+    refusal_tag, Compaction, RewindPoint, Rewound, SessionContext, ShellRefusal, ShellResult,
 };
 use crate::model::Plane;
 use crate::proto::ErrorCode;
@@ -94,10 +93,6 @@ impl App {
     /// truth — so it is gated on the method alone.
     pub fn context_overlay_offered(&self) -> bool {
         self.sessions.open.is_some() && self.hello.serves("interactive.context")
-    }
-
-    pub fn delegation_offered(&self) -> bool {
-        self.sessions.open.is_some() && self.hello.serves("interactive.delegate")
     }
 
     /// B7. `!` is offered where the runtime serves the verb *and* the session is already
@@ -683,109 +678,6 @@ impl App {
         self.shell_refusal = None;
     }
 
-    // ----- G1: `/delegate <objective>` ------------------------------------------------------
-
-    pub(super) fn delegate(&mut self, objective: &str) {
-        let objective = objective.trim();
-
-        if objective.is_empty() {
-            self.inform(
-                "say what the child should do: /delegate <objective>",
-                NoticeKind::Info,
-            );
-            return;
-        }
-
-        let Some((plane, id)) = self.sessions.open.clone() else {
-            self.inform("open a conversation before delegating", NoticeKind::Info);
-            return;
-        };
-
-        if !self.hello.serves("interactive.delegate") {
-            self.inform(
-                "this gateway does not serve interactive.delegate",
-                NoticeKind::Warn,
-            );
-            return;
-        }
-
-        // Caller-owned for the same reason a start's id is: the verb's ceiling may fire
-        // after the child exists, and a repeat under the same id answers with the same
-        // delegation rather than making a second one.
-        let delegation_id = crate::model::new_session_id();
-
-        let params = self.routed_session_params(
-            plane,
-            &id,
-            json!({ "id": id, "objective": objective, "delegation_id": delegation_id }),
-        );
-
-        self.issue(Call::new(
-            Tag::Delegate {
-                plane,
-                id: id.clone(),
-            },
-            "interactive.delegate",
-            params,
-        ));
-
-        self.delegating = true;
-    }
-
-    pub(super) fn delegated(&mut self, value: &Value) {
-        self.delegating = false;
-
-        let Some(reply) = Delegated::decode(value) else {
-            self.inform(
-                "the runtime answered a delegation this client could not read",
-                NoticeKind::Warn,
-            );
-            return;
-        };
-
-        let child = reply
-            .task_id
-            .clone()
-            .unwrap_or_else(|| "the child".to_string());
-
-        self.inform(
-            match reply.status.as_deref() {
-                Some("existing") => format!("that delegation already exists: {child}"),
-                _started => format!("delegated to {child} — it appears under this session"),
-            },
-            NoticeKind::Info,
-        );
-
-        self.refresh_session_lists();
-    }
-
-    pub(super) fn open_delegations(&mut self) {
-        let Some((plane, id)) = self.sessions.open.clone() else {
-            self.inform("open a conversation first", NoticeKind::Info);
-            return;
-        };
-
-        if !self.hello.serves("interactive.delegations") {
-            self.inform(
-                "this gateway does not serve interactive.delegations",
-                NoticeKind::Warn,
-            );
-            return;
-        }
-
-        let params = self.routed_session_params(plane, &id, json!({ "id": id }));
-
-        self.issue(Call::new(
-            Tag::Delegations {
-                plane,
-                id: id.clone(),
-                show: true,
-            },
-            "interactive.delegations",
-            params,
-        ));
-    }
-
     /// D4. `/mcp`: what MCP servers this session's node runs, and what its loader refused.
     ///
     /// Routed to the node the *session* runs on, because a server runs where its session
@@ -851,92 +743,6 @@ impl App {
         });
     }
 
-    /// The same read without the overlay, for the `Ctrl+T` panel.
-    pub(super) fn read_delegations(&mut self) {
-        let Some((plane, id)) = self.sessions.open.clone() else {
-            return;
-        };
-
-        if !self.hello.serves("interactive.delegations") {
-            return;
-        }
-
-        let params = self.routed_session_params(plane, &id, json!({ "id": id }));
-
-        self.issue(Call::new(
-            Tag::Delegations {
-                plane,
-                id,
-                show: false,
-            },
-            "interactive.delegations",
-            params,
-        ));
-    }
-
-    pub(super) fn delegations_read(&mut self, plane: Plane, id: &str, show: bool, value: &Value) {
-        let rows = DelegationRow::decode_list(value);
-
-        self.delegations = Some((plane, id.to_string(), rows.clone()));
-
-        if !show {
-            return;
-        }
-
-        if rows.is_empty() {
-            self.inform("this conversation has delegated nothing", NoticeKind::Info);
-            return;
-        }
-
-        self.overlay = Some(Overlay::Delegations {
-            plane,
-            id: id.to_string(),
-            rows,
-            choice: 0,
-        });
-    }
-
-    /// Opens the transcript of the child the delegations list has selected.
-    ///
-    /// On the coding plane, because that is what a delegation *is*: a coding task with a
-    /// parent, with its own id, its own transcript and its own durable record. There is
-    /// no way to message it from here — the parent's composer talks to the parent — and
-    /// this client does not pretend otherwise.
-    pub(super) fn open_delegation_child(&mut self) {
-        let Some(Overlay::Delegations { rows, choice, .. }) = self.overlay.as_ref() else {
-            return;
-        };
-
-        let Some(row) = rows.get(*choice) else {
-            return;
-        };
-
-        let Some(task) = row.task_id.clone() else {
-            self.inform(
-                "the runtime named no task for that delegation yet",
-                NoticeKind::Info,
-            );
-            return;
-        };
-
-        let node = row.task_node.clone();
-
-        self.overlay = None;
-        self.open_session_on(Plane::Coding, task, node);
-    }
-
-    /// The delegations this client last read for the open session.
-    pub fn open_delegation_rows(&self) -> &[DelegationRow] {
-        let Some((plane, id)) = self.sessions.open.as_ref() else {
-            return &[];
-        };
-
-        match self.delegations.as_ref() {
-            Some((held_plane, held_id, rows)) if held_plane == plane && held_id == id => rows,
-            _stale => &[],
-        }
-    }
-
     // ----- G2: peek and reply ---------------------------------------------------------
 
     /// `Space`: the last thing this session's agent said, without leaving the list.
@@ -955,8 +761,8 @@ impl App {
         let title = self
             .sessions
             .session(plane, &id)
-            .and_then(|session| session.objective.clone())
-            .filter(|objective| !objective.trim().is_empty())
+            .and_then(|session| session.title.clone())
+            .filter(|title| !title.trim().is_empty())
             .unwrap_or_else(|| id.clone());
 
         self.overlay = Some(Overlay::Peek {

@@ -1,7 +1,6 @@
 defmodule Ouroboros.Runtime.ExposureTest do
   use ExUnit.Case, async: false
 
-  alias Ouroboros.Coding.TaskState
   alias Ouroboros.Runtime.{Exposure, Manifesto}
 
   test "the manifesto is versioned static identity, not a live dump" do
@@ -76,21 +75,28 @@ defmodule Ouroboros.Runtime.ExposureTest do
              Exposure.wrap_prompt_capture("ordinary objective", tampered)
   end
 
-  test "coding tasks reuse their admission snapshot and refuse a damaged one" do
-    assert {:ok, task} =
-             TaskState.new("runtime-snapshot", "build a Rust WebSocket server",
+  test "a session reuses its admission snapshot and refuses a damaged one" do
+    assert {:ok, session} =
+             Ouroboros.Interactive.State.new("runtime-snapshot",
                provider: :native,
                workspace: File.cwd!(),
                sandbox_mode: :read_only
              )
 
-    assert Exposure.valid_capture?(task.runtime_snapshot)
+    assert Exposure.valid_capture?(session.runtime_snapshot)
 
-    assert TaskState.request(task).prompt ==
-             task.runtime_snapshot.envelope <> "\n\nbuild a Rust WebSocket server"
+    assert {:ok, %{prompt: wrapped}} =
+             Exposure.wrap_turn_request_capture(
+               %{prompt: "build a Rust WebSocket server"},
+               session.runtime_snapshot
+             )
 
-    damaged = put_in(task.runtime_snapshot.digest, String.duplicate("0", 64))
-    assert TaskState.unrequestable_reason(damaged) == :invalid_runtime_snapshot
+    assert wrapped == session.runtime_snapshot.envelope <> "\n\nbuild a Rust WebSocket server"
+
+    damaged = put_in(session.runtime_snapshot.digest, String.duplicate("0", 64))
+
+    assert Ouroboros.Interactive.State.unrequestable_reason(damaged) ==
+             :invalid_runtime_snapshot
   end
 
   test "wrapping prefixes user text and refuses reserved delimiters" do

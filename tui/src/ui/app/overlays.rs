@@ -6,7 +6,6 @@ pub enum PromptKind {
     GrantsPrincipal,
     PreviewCapability,
     AdmitCapability,
-    ControlObjective,
     /// Editing the optional reason for an approval already on screen. Carries the
     /// chooser state and the pre-edit reason so submitting or abandoning the prompt
     /// returns to the same chooser instead of dropping the answer.
@@ -111,10 +110,7 @@ pub enum Command {
     CloseSession,
     ConnectChatGpt,
     Runtime,
-    Agents,
-    Teams,
     Nodes,
-    Plans,
     Upgrades,
     ListCapabilities,
     PreviewCapability,
@@ -148,10 +144,6 @@ pub enum Command {
     Context,
     /// D6: the turns this session can go back to.
     Rewind,
-    /// G1: hand a piece of work to a coding task with this conversation as its parent.
-    Delegate,
-    /// G1: the children this conversation started.
-    Delegations,
     /// A10: cycle the palette. The one command that was reachable only as a verb.
     Theme,
     /// B2: toggle plan mode on the open session. `/plan on|off` names the posture it
@@ -170,7 +162,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 47] = [
+    pub const ALL: [Self; 42] = [
         Self::NewSession,
         Self::SwitchSession,
         Self::SessionDetails,
@@ -189,10 +181,7 @@ impl Command {
         Self::WriteAccess,
         Self::ConnectChatGpt,
         Self::Runtime,
-        Self::Agents,
-        Self::Teams,
         Self::Nodes,
-        Self::Plans,
         Self::Upgrades,
         Self::Logs,
         Self::Machines,
@@ -211,8 +200,6 @@ impl Command {
         Self::Handoff,
         Self::Context,
         Self::Rewind,
-        Self::Delegate,
-        Self::Delegations,
         Self::Theme,
         Self::Plan,
         Self::AutoApprove,
@@ -249,8 +236,6 @@ impl Command {
             | Self::Handoff
             | Self::Context
             | Self::Rewind
-            | Self::Delegate
-            | Self::Delegations
             | Self::Theme
             | Self::Plan
             | Self::AutoApprove
@@ -278,10 +263,7 @@ impl Command {
             Self::CloseSession => "End or remove session",
             Self::ConnectChatGpt => "Connect ChatGPT",
             Self::Runtime => "Runtime & distribution",
-            Self::Agents => "Agents",
-            Self::Teams => "Teams",
             Self::Nodes => "Nodes",
-            Self::Plans => "Plans & control",
             Self::Upgrades => "Upgrades",
             Self::ListCapabilities => "List capability proposals",
             Self::PreviewCapability => "Preview a capability",
@@ -302,8 +284,6 @@ impl Command {
             Self::Handoff => "Hand this session's work to a fresh one",
             Self::Context => "Show what fills the context window",
             Self::Rewind => "Rewind to an earlier turn",
-            Self::Delegate => "Delegate work to a coding task",
-            Self::Delegations => "Show this conversation's delegations",
             Self::Theme => "Cycle the colour theme",
             Self::Plan => "Plan without editing anything",
             Self::AutoApprove => "Auto-approve everything this session asks",
@@ -335,10 +315,7 @@ impl Command {
             Self::CloseSession => "ctrl+x x",
             Self::ConnectChatGpt => "/connect",
             Self::Runtime => "/runtime",
-            Self::Agents => "/agents",
-            Self::Teams => "/teams",
             Self::Nodes => "/runtime",
-            Self::Plans => "/plans",
             Self::Upgrades => "/upgrades",
             Self::ListCapabilities => "/capabilities",
             Self::PreviewCapability => "/preview",
@@ -359,8 +336,6 @@ impl Command {
             Self::Handoff => "/handoff",
             Self::Context => "/context",
             Self::Rewind => "/rewind",
-            Self::Delegate => "/delegate",
-            Self::Delegations => "/delegations",
             Self::Theme => "/theme",
             Self::Plan => "/plan",
             Self::AutoApprove => "/auto-approve",
@@ -460,10 +435,6 @@ impl App {
                 }
                 // Answers for every transport, with different amounts of truth.
                 Command::Context => self.context_overlay_offered(),
-                Command::Delegate => self.delegation_offered(),
-                Command::Delegations => {
-                    self.sessions.open.is_some() && self.hello.serves("interactive.delegations")
-                }
                 _always => true,
             })
             .collect::<Vec<_>>();
@@ -646,13 +617,6 @@ pub enum Overlay {
         title: String,
         text: Option<String>,
     },
-    /// G1. The coding tasks this conversation delegated, and a way into each one.
-    Delegations {
-        plane: Plane,
-        id: String,
-        rows: Vec<crate::model::native::DelegationRow>,
-        choice: usize,
-    },
 }
 
 /// The four answers `interactive.respond_approval` accepts, in the order the modal lists
@@ -713,53 +677,6 @@ pub struct ApprovalRule {
 }
 
 impl App {
-    /// `control.submit` from the Plans tab. The objective is the only field the plane
-    /// lets a model-invisible caller choose; revision policy stays runtime configuration.
-    pub(super) fn open_control_submit(&mut self) {
-        if !self.hello.serves("control.submit") {
-            return;
-        }
-        self.overlay = Some(Overlay::Prompt {
-            kind: PromptKind::ControlObjective,
-            label: "objective for the control run".into(),
-            buffer: String::new(),
-        });
-    }
-
-    /// `control.cancel` for the selected run, behind the same confirmation every
-    /// destructive session verb uses.
-    pub(super) fn open_control_cancel(&mut self) {
-        if !self.hello.serves("control.cancel") {
-            return;
-        }
-        let Some(row) = self.control.current() else {
-            return;
-        };
-        let status = row.status.as_deref().unwrap_or_default();
-        if matches!(status, "completed" | "failed" | "cancelled") {
-            self.inform(
-                format!("run {} is already {status}", row.id),
-                NoticeKind::Info,
-            );
-            return;
-        }
-        let id = row.id.clone();
-        let call = Call::new(
-            Tag::ControlCancel(id.clone()),
-            "control.cancel",
-            json!({ "id": id }),
-        );
-        self.overlay = Some(Overlay::Confirm {
-            title: format!("cancel control run {id}?"),
-            detail: "the run stops durably; steps already dispatched may still finish".to_string(),
-            options: vec![
-                ("cancel it".to_string(), Some(call)),
-                ("leave it running".to_string(), None),
-            ],
-            choice: 0,
-        });
-    }
-
     // ----- overlays ------------------------------------------------------------------
 
     /// `?`, always from the top of the table.
@@ -1109,20 +1026,6 @@ impl App {
                     _ => {}
                 }
             }
-            // G1. `Enter` opens the child's own transcript; there is no way to talk to it
-            // from here, because a delegation is a coding task with a parent and not a
-            // sub-conversation.
-            Overlay::Delegations { rows, choice, .. } => {
-                let last = rows.len().saturating_sub(1);
-
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => self.overlay = None,
-                    KeyCode::Char('j') | KeyCode::Down => *choice = (*choice + 1).min(last),
-                    KeyCode::Char('k') | KeyCode::Up => *choice = choice.saturating_sub(1),
-                    KeyCode::Enter => self.open_delegation_child(),
-                    _ => {}
-                }
-            }
             // D4. A reading overlay: there is no `mcp.add` on the wire, by design, so
             // there is nothing here to press Enter on. `r` re-reads, because a server's
             // state is exactly the thing that changes while it is on screen.
@@ -1228,7 +1131,6 @@ impl App {
                     .or_else(|| self.sessions.picker_key(0));
                 self.overlay = Some(Overlay::SessionPicker { selected });
                 self.sessions.interactive.invalidate();
-                self.sessions.coding.invalidate();
                 self.poll();
             }
             Command::SessionDetails => {
@@ -1291,18 +1193,6 @@ impl App {
                 self.overlay = None;
                 self.select_tab(Tab::Dashboard);
             }
-            Command::Agents => {
-                self.overlay = None;
-                self.select_tab(Tab::Agents);
-            }
-            Command::Teams => {
-                self.overlay = None;
-                self.select_tab(Tab::Teams);
-            }
-            Command::Plans => {
-                self.overlay = None;
-                self.select_tab(Tab::Plans);
-            }
             Command::Upgrades => {
                 self.overlay = None;
                 self.select_tab(Tab::Upgrade);
@@ -1359,10 +1249,6 @@ impl App {
                 self.overlay = None;
                 self.prefill_composer("/handoff ");
             }
-            Command::Delegate => {
-                self.overlay = None;
-                self.prefill_composer("/delegate ");
-            }
             Command::Context => {
                 self.overlay = None;
                 self.open_context();
@@ -1370,10 +1256,6 @@ impl App {
             Command::Rewind => {
                 self.overlay = None;
                 self.open_rewind();
-            }
-            Command::Delegations => {
-                self.overlay = None;
-                self.open_delegations();
             }
             Command::Theme => {
                 self.overlay = None;
@@ -1692,9 +1574,6 @@ impl App {
                 self.confirm_admit_capability(&value);
                 return;
             }
-            PromptKind::ControlObjective if value.trim().is_empty() => {
-                return;
-            }
             PromptKind::HistoryModule | PromptKind::GrantsPrincipal if value.is_empty() => {
                 return;
             }
@@ -1727,16 +1606,6 @@ impl App {
                 let _ = follow_up;
                 self.open_approval_with(plane, id, request_id, choice, None, attached);
                 return;
-            }
-            PromptKind::ControlObjective => {
-                let objective = value.trim().to_string();
-                self.issue(Call::new(
-                    Tag::ControlSubmit,
-                    "control.submit",
-                    json!({ "objective": objective }),
-                ));
-                self.control.rows.invalidate();
-                self.inform("control run submitted", NoticeKind::Info);
             }
             PromptKind::HistoryModule => {
                 self.upgrade.history_module = Some(value);

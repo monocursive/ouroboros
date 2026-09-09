@@ -64,18 +64,6 @@ fn node(frame: &mut Frame, area: Rect, app: &App) {
                 "release",
                 status.mode("release").unwrap_or("unknown"),
             ));
-            lines.push(field(
-                "control",
-                &format!(
-                    "{} ({} runs)",
-                    status
-                        .availability
-                        .get("control")
-                        .map(|availability| availability.as_str())
-                        .unwrap_or("unknown"),
-                    status.control.runs.len()
-                ),
-            ));
             lines.push(field("forge", &status.forge_summary()));
         }
         None => {

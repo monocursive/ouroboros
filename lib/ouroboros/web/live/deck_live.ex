@@ -119,7 +119,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   @poll_interval 3_000
   @coalesce 80
-  @planes %{"interactive" => :interactive, "coding" => :coding}
+  @planes %{"interactive" => :interactive}
 
   # A turn state nothing has been read from yet, so the composer has something to draw
   # before a session is open.
@@ -467,13 +467,6 @@ defmodule Ouroboros.Web.Live.DeckLive do
     end
   end
 
-  def handle_info({:ouroboros_coding_event, id, event}, socket) do
-    case resync_if_mailbox_lagged(socket) do
-      {:lagged, socket} -> {:noreply, socket}
-      :ok -> {:noreply, live_event(socket, :coding, id, event)}
-    end
-  end
-
   def handle_info(:flush, socket) do
     case resync_if_mailbox_lagged(socket) do
       {:lagged, socket} -> {:noreply, socket}
@@ -519,13 +512,8 @@ defmodule Ouroboros.Web.Live.DeckLive do
     |> assign_page_title()
   end
 
-  # Both planes, each refused independently: a coding list that failed must not empty a
-  # rail the interactive list answered for.
   defp sessions(scope, session) do
-    {interactive, first} = list(scope, "interactive.list", &Rail.from_interactive/1, session)
-    {coding, second} = list(scope, "coding.list", &Rail.from_coding/1, session)
-
-    {interactive ++ coding, first || second}
+    list(scope, "interactive.list", &Rail.from_interactive/1, session)
   end
 
   defp list(scope, method, to_row, session) do
@@ -550,10 +538,11 @@ defmodule Ouroboros.Web.Live.DeckLive do
   defp refresh_info(%{assigns: %{open: nil}} = socket), do: assign(socket, :info, nil)
 
   defp refresh_info(%{assigns: %{open: {plane, id}}} = socket) do
-    method = if plane == :interactive, do: "interactive.info", else: "coding.info"
     params = session_params(socket, plane, id)
 
-    case Call.call(socket.assigns.scope, method, params, session: socket.assigns[:web_session]) do
+    case Call.call(socket.assigns.scope, "interactive.info", params,
+           session: socket.assigns[:web_session]
+         ) do
       {:ok, info} when is_map(info) -> assign(socket, :info, info)
       _refused -> socket
     end
@@ -769,7 +758,6 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
     case plane do
       :interactive -> Ouroboros.Interactive.Ref.new(id, owner)
-      :coding -> Ouroboros.Coding.TaskRef.new(id, owner)
     end
   end
 
@@ -809,7 +797,6 @@ defmodule Ouroboros.Web.Live.DeckLive do
   defp drop_queued_plane_events do
     receive do
       {:ouroboros_interactive_event, _id, _event} -> drop_queued_plane_events()
-      {:ouroboros_coding_event, _id, _event} -> drop_queued_plane_events()
     after
       0 -> :ok
     end

@@ -55,7 +55,7 @@ defmodule Ouroboros.Web.ArtifactController do
 
   @sha ~r/\A[a-f0-9]{64}\z/
   @method "computer_use.artifact"
-  @planes %{"interactive" => :interactive, "coding" => :coding}
+  @planes %{"interactive" => :interactive}
 
   @doc """
   Serves one staged screenshot by content hash.
@@ -136,9 +136,7 @@ defmodule Ouroboros.Web.ArtifactController do
   # The owner node of one session, from the plane's own list. `nil` where the list refused
   # or does not carry it.
   defp owner(conn, scope, plane, id) do
-    method = if plane == :interactive, do: "interactive.list", else: "coding.list"
-
-    case Call.call(scope, method, %{}, session: session(conn)) do
+    case Call.call(scope, "interactive.list", %{}, session: session(conn)) do
       {:ok, sessions} when is_list(sessions) ->
         Enum.find_value(sessions, fn session ->
           row = row(plane, session)
@@ -151,7 +149,6 @@ defmodule Ouroboros.Web.ArtifactController do
   end
 
   defp row(:interactive, session), do: Rail.from_interactive(session)
-  defp row(:coding, session), do: Rail.from_coding(session)
 
   defp send_artifact(conn, artifact) do
     case Base.decode64(Map.get(artifact, :bytes, "")) do

@@ -8,7 +8,6 @@ defmodule Ouroboros.ProviderCapabilityTest do
 
   use ExUnit.Case, async: true
 
-  alias Ouroboros.Coding.TaskState
   alias Ouroboros.Gateway.Wire
   alias Ouroboros.Interactive.State
   alias Ouroboros.Provider
@@ -63,8 +62,8 @@ defmodule Ouroboros.ProviderCapabilityTest do
     pi: %{transport: :rpc, steer: :native, approvals: false, interrupt: :native}
   }
 
-  # provider => the fields the coding plane refuses at creation under its own defaults.
-  @coding_refusals %{
+  # Every provider this build declares capabilities for.
+  @providers %{
     amp: [:approval_mode, :sandbox_mode],
     claude: [],
     native: [],
@@ -174,7 +173,7 @@ defmodule Ouroboros.ProviderCapabilityTest do
 
       assert Enum.sort(Provider.capability_keys()) == expected
 
-      for provider <- Map.keys(@coding_refusals) do
+      for provider <- Map.keys(@providers) do
         capabilities = Provider.session_capabilities(provider)
         assert capabilities |> Map.keys() |> Enum.sort() == expected
 
@@ -302,14 +301,6 @@ defmodule Ouroboros.ProviderCapabilityTest do
       # be refused by name; this clause does not intercept it.
       assert {:ok, _pi} =
                State.new("capability-pi-stated", provider: :pi, approval_mode: :prompt)
-    end
-
-    test "the coding plane is untouched" do
-      # Claude's coding runs are non-interactive by construction and this refusal is
-      # scoped to `{:interactive, transport}`; the coding plane keeps the behaviour its
-      # own tests pin above.
-      assert {:ok, task} = coding_task(provider: :claude)
-      assert task.options.approval_mode == :prompt
     end
 
     test "an unresolvable provider is still left to the harness" do
@@ -614,83 +605,6 @@ defmodule Ouroboros.ProviderCapabilityTest do
     end
   end
 
-  describe "coding plane defaults" do
-    for {provider, refused} <- @coding_refusals, refused == [] do
-      test "#{provider} keeps the workspace-write default" do
-        assert {:ok, task} = coding_task(provider: unquote(provider))
-        assert task.options.approval_mode == :prompt
-        assert task.options.sandbox_mode == :workspace_write
-      end
-    end
-
-    for {provider, refused} <- @coding_refusals, refused != [] do
-      test "#{provider} refuses rather than downgrading #{inspect(refused)}" do
-        assert {:error, {:unsupported_safety_options, details}} =
-                 coding_task(provider: unquote(provider))
-
-        assert details.plane == :coding
-        assert details.provider == unquote(provider)
-        assert Enum.map(details.options, & &1.field) == unquote(refused)
-        assert Enum.all?(details.options, &(&1.source == :plane_default))
-
-        # The refusal has to be actionable on its own: it names the provider, every
-        # option and value it rejected, and the exact spelling that accepts the
-        # provider's own behavior instead.
-        assert details.message =~ inspect(unquote(provider))
-
-        for field <- unquote(refused) do
-          assert details.message =~ "#{field}: "
-          assert details.override =~ "#{field}: :default"
-        end
-      end
-
-      test "#{provider} starts once the downgrade is stated" do
-        assert {:ok, task} =
-                 coding_task(
-                   provider: unquote(provider),
-                   approval_mode: :default,
-                   sandbox_mode: :default
-                 )
-
-        assert task.options.approval_mode == :default
-        assert task.options.sandbox_mode == :default
-      end
-    end
-
-    test "a stated value the provider cannot enforce is refused as stated, not as a default" do
-      assert {:error, {:unsupported_safety_options, details}} =
-               coding_task(provider: :amp, approval_mode: :default, sandbox_mode: :unrestricted)
-
-      assert [%{field: :sandbox_mode, value: :unrestricted, source: :stated}] = details.options
-      assert details.message =~ ":amp cannot enforce sandbox_mode: :unrestricted"
-    end
-
-    test "pi accepts the approval value its spec allows" do
-      assert {:ok, task} =
-               coding_task(provider: :pi, approval_mode: :auto_approve, sandbox_mode: :read_only)
-
-      assert task.options.approval_mode == :auto_approve
-      assert task.options.sandbox_mode == :read_only
-    end
-
-    test "an unresolvable provider is left to the harness with the defaults intact" do
-      assert {:ok, task} = coding_task(provider: :no_such_provider)
-      assert task.options.approval_mode == :prompt
-      assert task.options.sandbox_mode == :workspace_write
-    end
-
-    test "native execution policy is durable and publicly inspectable" do
-      assert {:ok, task} = coding_task(provider: :native)
-
-      public = TaskState.public(task)
-      assert public.options.provider_execution.transport == :direct
-      assert public.options.provider_execution.interactive_approvals
-      assert public.options.provider_execution.coding_approvals
-      refute Map.has_key?(public.options, :provider_options)
-      assert TaskState.public(public) == public
-    end
-  end
-
   defp interactive_request(opts) do
     id = "capability-#{System.unique_integer([:positive, :monotonic])}"
     assert {:ok, state} = State.new(id, opts)
@@ -709,9 +623,4 @@ defmodule Ouroboros.ProviderCapabilityTest do
   # other truthy declaration means the request moved and the next turn carries it.
   defp expected_applies(:native), do: :now
   defp expected_applies(_declared), do: :next_turn
-
-  defp coding_task(opts) do
-    id = "capability-#{System.unique_integer([:positive, :monotonic])}"
-    TaskState.new(id, "probe provider capability", opts)
-  end
 end

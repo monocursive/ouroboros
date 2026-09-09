@@ -158,7 +158,7 @@ async fn responses_correlate_when_they_come_back_out_of_order() {
 
     let script = tokio::spawn(async move {
         let mut peer = Peer::accept(&server).await;
-        peer.hello(&["hello", "agents.list", "runtime.providers"])
+        peer.hello(&["hello", "interactive.list", "runtime.providers"])
             .await;
 
         let mut requests = Vec::new();
@@ -182,7 +182,7 @@ async fn responses_correlate_when_they_come_back_out_of_order() {
     let calls = [
         tokio::spawn({
             let client = client.clone();
-            async move { client.call("agents.list", json!({})).await }
+            async move { client.call("interactive.list", json!({})).await }
         }),
         tokio::spawn({
             let client = client.clone();
@@ -190,7 +190,7 @@ async fn responses_correlate_when_they_come_back_out_of_order() {
         }),
         tokio::spawn({
             let client = client.clone();
-            async move { client.call("teams.list", json!({})).await }
+            async move { client.call("wasm.list", json!({})).await }
         }),
     ];
 
@@ -210,7 +210,7 @@ async fn responses_correlate_when_they_come_back_out_of_order() {
 
     assert_eq!(
         answered,
-        vec!["agents.list", "runtime.providers", "teams.list"]
+        vec!["interactive.list", "runtime.providers", "wasm.list"]
     );
 
     script.await.expect("the script finished");
@@ -222,7 +222,8 @@ async fn a_typed_method_error_leaves_the_connection_usable() {
 
     let script = tokio::spawn(async move {
         let mut peer = Peer::accept(&server).await;
-        peer.hello(&["hello", "plans.get", "agents.list"]).await;
+        peer.hello(&["hello", "interactive.info", "interactive.list"])
+            .await;
 
         let first = peer.request().await.expect("a first call");
         peer.error(&first["id"], -32007, "no such record on this node", None)
@@ -238,20 +239,20 @@ async fn a_typed_method_error_leaves_the_connection_usable() {
 
     let error = connected
         .client
-        .call("plans.get", json!({ "id": "missing" }))
+        .call("interactive.info", json!({ "id": "missing" }))
         .await
         .expect_err("a refusal");
 
     assert_eq!(error.code(), Some(ErrorCode::NotFound));
     assert!(!error.is_fatal());
 
-    let agents = connected
+    let sessions = connected
         .client
-        .call("agents.list", json!({}))
+        .call("interactive.list", json!({}))
         .await
         .expect("the connection survived the error");
 
-    assert_eq!(agents, json!([]));
+    assert_eq!(sessions, json!([]));
 
     script.await.expect("the script finished");
 }
@@ -333,15 +334,16 @@ async fn a_request_the_gateway_never_answers_times_out_without_poisoning_the_nex
 
     let script = tokio::spawn(async move {
         let mut peer = Peer::accept(&server).await;
-        peer.hello(&["hello", "teams.cancel", "teams.list"]).await;
+        peer.hello(&["hello", "interactive.close", "interactive.list"])
+            .await;
 
         let abandoned = peer.request().await.expect("a call");
 
         let second = peer.request().await.expect("a second call");
-        peer.result(&second["id"], json!(["a-team"])).await;
+        peer.result(&second["id"], json!(["a-session"])).await;
 
         // The abandoned answer arrives late; a client that mixed it up with the second
-        // call would render one team's state under another's id.
+        // call would render one session's state under another's id.
         peer.result(&abandoned["id"], json!(["wrong"])).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
@@ -353,7 +355,7 @@ async fn a_request_the_gateway_never_answers_times_out_without_poisoning_the_nex
     let error = connected
         .client
         .call_with_timeout(
-            "teams.cancel",
+            "interactive.close",
             json!({ "id": "t" }),
             Duration::from_millis(300),
         )
@@ -362,13 +364,13 @@ async fn a_request_the_gateway_never_answers_times_out_without_poisoning_the_nex
 
     assert!(matches!(error, ClientError::Timeout), "got {error}");
 
-    let teams = connected
+    let sessions = connected
         .client
-        .call("teams.list", json!({}))
+        .call("interactive.list", json!({}))
         .await
         .expect("the next call is unaffected");
 
-    assert_eq!(teams, json!(["a-team"]));
+    assert_eq!(sessions, json!(["a-session"]));
 
     script.await.expect("the script finished");
 }
@@ -753,8 +755,11 @@ async fn notifications_past_the_channel_are_counted_rather_than_hidden() {
         peer.hello(&["hello"]).await;
 
         for sequence in 0..64 {
-            peer.notify("coding.event", json!({ "id": "c1", "sequence": sequence }))
-                .await;
+            peer.notify(
+                "interactive.event",
+                json!({ "id": "c1", "sequence": sequence }),
+            )
+            .await;
         }
 
         tokio::time::sleep(Duration::from_secs(1)).await;

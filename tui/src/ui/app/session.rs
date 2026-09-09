@@ -192,7 +192,6 @@ pub(super) struct SessionRecovery {
 #[derive(Debug, Default)]
 pub struct SessionsTab {
     pub interactive: Loadable<Vec<SessionInfo>>,
-    pub coding: Loadable<Vec<SessionInfo>>,
     pub open: Option<(Plane, String)>,
     pub watches: HashMap<(Plane, String), Watch>,
     pub composer: Option<Composer>,
@@ -282,7 +281,6 @@ impl SessionsTab {
             .or_else(|| {
                 let sessions = match plane {
                     Plane::Interactive => self.interactive.value.as_ref()?,
-                    Plane::Coding => self.coding.value.as_ref()?,
                 };
                 sessions
                     .iter()
@@ -353,14 +351,15 @@ impl SessionsTab {
 #[derive(Debug, Clone, Copy)]
 pub struct TriageRow<'a> {
     pub group: Triage,
-    /// `0` for a top-level row, `1` for a coding task its parent conversation delegated.
+    /// Always `0` today; the field stays so a renderer's indent is a fact about the row
+    /// rather than a constant spread over three surfaces.
     pub depth: usize,
     pub session: &'a SessionInfo,
 }
 
 impl SessionsTab {
-    /// Both planes' sessions in one list, across every fleet node, grouped by what each
-    /// one needs (G2) and then ordered so the list does not reshuffle under the cursor
+    /// Every session in one list, across every fleet node, grouped by what each one
+    /// needs (G2) and then ordered so the list does not reshuffle under the cursor
     /// between polls: newest activity first, ties broken by plane then id.
     ///
     /// The grouping is the ordering, not a second pass: every surface that lists sessions
@@ -377,7 +376,6 @@ impl SessionsTab {
             .value
             .iter()
             .flatten()
-            .chain(self.coding.value.iter().flatten())
             .map(|session| (self.triage_of(session), session))
             .collect();
 
@@ -394,57 +392,13 @@ impl SessionsTab {
         let mut seen = HashSet::new();
         rows.retain(|(_group, session)| seen.insert((session.plane, session.id.clone())));
 
-        Self::nest_children(rows)
-    }
-
-    /// G1. Moves each delegated coding task directly under the conversation that started
-    /// it, and marks it as nested.
-    ///
-    /// **Only within a group.** The two orderings this rail carries answer different
-    /// questions — "what needs me" and "who started this" — and where they disagree the
-    /// first one wins, because a child that needs a human must not be buried under a
-    /// parent that does not. A child whose parent sits in another group therefore keeps
-    /// its own place at depth zero, which is the honest answer rather than a tree drawn
-    /// across a heading.
-    fn nest_children(rows: Vec<(Triage, &SessionInfo)>) -> Vec<TriageRow<'_>> {
-        let mut ordered: Vec<TriageRow<'_>> = Vec::with_capacity(rows.len());
-        let mut taken: HashSet<(Plane, String)> = HashSet::new();
-
-        for (group, session) in &rows {
-            if taken.contains(&(session.plane, session.id.clone())) {
-                continue;
-            }
-
-            ordered.push(TriageRow {
-                group: *group,
+        rows.into_iter()
+            .map(|(group, session)| TriageRow {
+                group,
                 depth: 0,
                 session,
-            });
-
-            if session.children.is_empty() {
-                continue;
-            }
-
-            for (child_group, child) in &rows {
-                let claimed = child.plane == Plane::Coding
-                    && (session.children.iter().any(|id| id == &child.id)
-                        || child
-                            .parent
-                            .as_ref()
-                            .is_some_and(|parent| parent.id == session.id));
-
-                if claimed && child_group == group {
-                    taken.insert((child.plane, child.id.clone()));
-                    ordered.push(TriageRow {
-                        group: *child_group,
-                        depth: 1,
-                        session: child,
-                    });
-                }
-            }
-        }
-
-        ordered
+            })
+            .collect()
     }
 
     /// Which group one row belongs to, counting the approvals this client is holding for
@@ -491,7 +445,6 @@ impl SessionsTab {
     pub fn get(&self, plane: Plane, id: &str) -> Option<&SessionInfo> {
         let sessions = match plane {
             Plane::Interactive => self.interactive.value.as_ref()?,
-            Plane::Coding => self.coding.value.as_ref()?,
         };
 
         sessions
@@ -503,7 +456,6 @@ impl SessionsTab {
         self.hidden.insert((plane, id.to_string()));
         let sessions = match plane {
             Plane::Interactive => &mut self.interactive.value,
-            Plane::Coding => &mut self.coding.value,
         };
 
         if let Some(sessions) = sessions {
@@ -527,7 +479,6 @@ impl SessionsTab {
     pub fn session(&self, plane: Plane, id: &str) -> Option<&SessionInfo> {
         let sessions = match plane {
             Plane::Interactive => self.interactive.value.as_ref()?,
-            Plane::Coding => self.coding.value.as_ref()?,
         };
 
         sessions
@@ -618,17 +569,6 @@ impl App {
             );
             return;
         };
-
-        if plane == Plane::Coding {
-            self.inform(
-                format!(
-                    "{id} is a coding task: it runs one objective to completion and takes no \
-                     input. `x` cancels it"
-                ),
-                NoticeKind::Info,
-            );
-            return;
-        }
 
         // X2. Steer is unsupported on every transport but `pi`'s, and the runtime says so
         // per session. Refused here with the reason rather than sent and answered
@@ -835,13 +775,6 @@ impl App {
         }
 
         self.sessions.show_plan = !self.sessions.show_plan;
-
-        // G1. The panel lists this conversation's children beside its plan, so opening it
-        // is what reads them. Only on the way *open*: closing a panel is not a reason to
-        // ask the runtime anything.
-        if self.sessions.show_plan {
-            self.read_delegations();
-        }
     }
 
     pub(super) fn toggle_session_details(&mut self) {
@@ -2399,11 +2332,6 @@ impl App {
             return true;
         }
 
-        if let Some(objective) = slash_arg(trimmed, "/delegate") {
-            self.delegate(objective);
-            return true;
-        }
-
         // B2. `/plan on` and `/plan off` name the posture; anything else after the verb is
         // refused rather than guessed at, because "off" and "of" must not mean the same
         // thing when one of them turns a session's write access back on.
@@ -2480,8 +2408,6 @@ impl App {
             "/handoff" => Some(Command::Handoff),
             "/context" => Some(Command::Context),
             "/rewind" => Some(Command::Rewind),
-            "/delegate" => Some(Command::Delegate),
-            "/delegations" => Some(Command::Delegations),
             "/plan" => Some(Command::Plan),
             "/mcp" => Some(Command::Mcp),
             "/editor" => Some(Command::ExternalEditor),
@@ -2490,9 +2416,6 @@ impl App {
             "/write" => Some(Command::WriteAccess),
             "/connect" => Some(Command::ConnectChatGpt),
             "/runtime" => Some(Command::Runtime),
-            "/agents" => Some(Command::Agents),
-            "/teams" => Some(Command::Teams),
-            "/plans" => Some(Command::Plans),
             "/upgrades" => Some(Command::Upgrades),
             "/capabilities" => Some(Command::ListCapabilities),
             "/logs" => Some(Command::Logs),
@@ -2605,15 +2528,6 @@ impl App {
 
         let (label, method) = match plane {
             Plane::Interactive => ("interrupt", "interactive.interrupt".to_string()),
-            // The coding plane has no interrupt; cancelling is what it offers, and it is
-            // destructive enough to go through the confirmation instead.
-            Plane::Coding => {
-                self.inform(
-                    format!("{id} is a coding task; ctrl+x x cancels it"),
-                    NoticeKind::Info,
-                );
-                return;
-            }
         };
 
         // `interactive.interrupt` defaults to the active turn, which is the only thing a
@@ -2941,21 +2855,6 @@ impl App {
                 ),
                 ("cancel".to_string(), None),
             ],
-            Plane::Coding => vec![
-                (
-                    "cancel the task".to_string(),
-                    Some(Call::new(
-                        Tag::Action {
-                            label: "cancel",
-                            plane,
-                            id: id.clone(),
-                        },
-                        "coding.cancel",
-                        routed,
-                    )),
-                ),
-                ("leave it running".to_string(), None),
-            ],
         };
 
         self.overlay = Some(Overlay::Confirm {
@@ -3012,7 +2911,6 @@ impl App {
 
     pub(super) fn refresh_session_lists(&mut self) {
         self.sessions.interactive.invalidate();
-        self.sessions.coding.invalidate();
         self.poll();
     }
 

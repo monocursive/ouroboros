@@ -123,8 +123,7 @@ defmodule Ouroboros.Application do
   # builder with no pool answered every forwarded forge `{:imports_unreadable,
   # {:pool_unavailable, …}}` — found the first time a forward crossed a real node boundary
   # (W22, §13 W-F31). The pool is lazy and owns nothing durable, so the posture is unchanged:
-  # no teams, stores, schedulers, registries, workspaces, recovery loops, or control plane
-  # exist on that host to be reached.
+  # no stores, registries, workspaces or recovery loops exist on that host to be reached.
   defp children(:builder), do: [Ouroboros.Cluster, Ouroboros.Wasm.Supervisor]
 
   # A `:signer` node is the same posture plus the one process its role names. The service
@@ -165,9 +164,7 @@ defmodule Ouroboros.Application do
           Ouroboros.Mesh.Directory,
           Ouroboros.Upgrade.NodeExecutor,
           Ouroboros.Upgrade.Rollout.Registry,
-          Ouroboros.Coding.Store,
           Ouroboros.Interactive.Store,
-          Ouroboros.Team.Store,
           Ouroboros.Control.Grants,
           # S2. What a signed policy component has earned the right to resolve, beside the
           # authority that says what an agent may do to the cluster and above every session
@@ -204,17 +201,6 @@ defmodule Ouroboros.Application do
             Ouroboros.Session.Supervisor,
             [
               subtree(
-                Ouroboros.Coding.Supervisor,
-                [
-                  {Ouroboros.Application.RegistryOwner,
-                   keys: :unique, name: Ouroboros.Coding.Registry},
-                  {DynamicSupervisor,
-                   strategy: :one_for_one, name: Ouroboros.Coding.TaskSupervisor},
-                  Ouroboros.Coding.Recovery
-                ],
-                :rest_for_one
-              ),
-              subtree(
                 Ouroboros.Interactive.Supervisor,
                 [
                   {Ouroboros.Application.RegistryOwner,
@@ -224,18 +210,8 @@ defmodule Ouroboros.Application do
                   Ouroboros.Interactive.Recovery
                 ],
                 :rest_for_one
-              ),
-              subtree(
-                Ouroboros.Team.RuntimeSupervisor,
-                [
-                  {Ouroboros.Application.RegistryOwner,
-                   keys: :unique, name: Ouroboros.Team.Registry},
-                  {DynamicSupervisor, strategy: :one_for_one, name: Ouroboros.Team.Supervisor},
-                  Ouroboros.Team.Recovery
-                ],
-                :rest_for_one
               )
-            ] ++ automation_children(),
+            ],
             :one_for_one
           )
         ]
@@ -272,26 +248,6 @@ defmodule Ouroboros.Application do
       type: :supervisor,
       shutdown: :infinity
     }
-  end
-
-  # Preserve existing behavior by default. Permission rules and grants remain core when
-  # objective automation is disabled; session and native subagent APIs remain available.
-  defp automation_children do
-    if Application.get_env(:ouroboros, :automation_enabled, true) do
-      [
-        subtree(
-          Ouroboros.Automation.Supervisor,
-          [
-            Ouroboros.Orchestration.Store,
-            Ouroboros.Control.Store,
-            orchestration_scheduler()
-          ] ++ control_children(),
-          :rest_for_one
-        )
-      ]
-    else
-      []
-    end
   end
 
   # The lane-W half of the same idea as `reconcile_worktrees`: a supervised one-shot task,
@@ -533,72 +489,6 @@ defmodule Ouroboros.Application do
 
       [] ->
         []
-    end
-  end
-
-  defp orchestration_scheduler do
-    opts =
-      [
-        max_concurrency: Application.get_env(:ouroboros, :orchestration_max_concurrency, 4),
-        executors: orchestration_executors()
-      ]
-
-    {Ouroboros.Orchestration.Scheduler, opts}
-  end
-
-  # Each step kind gets its own executor. An explicit `:orchestration_executors`
-  # entry wins over the per-kind configuration below, so an operator can name an
-  # adapter this application does not know about. A kind with no executor is one
-  # the scheduler refuses to accept plans for, which is why forge dispatch stays
-  # off until `:orchestration_forge_options` says otherwise.
-  defp orchestration_executors do
-    configured = Application.get_env(:ouroboros, :orchestration_executors, %{})
-
-    %{}
-    |> put_executor(:coding, team_executor())
-    |> put_executor(:forge, forge_executor())
-    |> Map.merge(if(is_map(configured), do: configured, else: %{}))
-  end
-
-  defp put_executor(executors, _kind, nil), do: executors
-  defp put_executor(executors, kind, executor), do: Map.put(executors, kind, executor)
-
-  defp team_executor do
-    case Application.get_env(:ouroboros, :orchestration_team_id) do
-      team_id when is_binary(team_id) and byte_size(team_id) > 0 ->
-        {Ouroboros.Orchestration.TeamExecutor,
-         [
-           team_id: team_id,
-           worker_id: Application.get_env(:ouroboros, :orchestration_worker_id),
-           coding_options: Application.get_env(:ouroboros, :orchestration_coding_options, [])
-         ]}
-
-      _other ->
-        nil
-    end
-  end
-
-  defp forge_executor do
-    case Application.get_env(:ouroboros, :orchestration_forge_options, []) do
-      [_ | _] = options -> {Ouroboros.Orchestration.ForgeExecutor, options}
-      _other -> nil
-    end
-  end
-
-  defp control_children do
-    if Application.get_env(:ouroboros, :control_enabled, false) do
-      [
-        {Ouroboros.Control.Server,
-         [
-           store: Ouroboros.Control.Store,
-           scheduler: Ouroboros.Orchestration.Scheduler,
-           planner: Application.fetch_env!(:ouroboros, :control_planner),
-           evaluator: Application.fetch_env!(:ouroboros, :control_evaluator),
-           poll_interval: Application.get_env(:ouroboros, :control_poll_interval, 1_000)
-         ]}
-      ]
-    else
-      []
     end
   end
 

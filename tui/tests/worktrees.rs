@@ -84,7 +84,6 @@ fn opened(rows: Value) -> App {
     app.apply(key(KeyCode::Char('2')));
 
     answer(&mut app, Tag::Sessions(Plane::Interactive), rows);
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
 
     app.open_session(Plane::Interactive, "session-w".into());
     let subscribe = app
@@ -140,7 +139,6 @@ fn the_new_session_dialog_toggles_the_worktree_row() {
     );
     app.apply(key(KeyCode::Char('2')));
     answer(&mut app, Tag::Sessions(Plane::Interactive), json!([]));
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
 
     // `ctrl+x N` is the dialog with every option on it.
     app.apply(modified(KeyCode::Char('x'), KeyModifiers::CONTROL));

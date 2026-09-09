@@ -106,21 +106,6 @@ impl App {
             return;
         }
 
-        let alt = key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
-        if self.tab == Tab::Plans && !ctrl && !alt {
-            match key.code {
-                KeyCode::Char('s') => {
-                    self.open_control_submit();
-                    return;
-                }
-                KeyCode::Char('c') => {
-                    self.open_control_cancel();
-                    return;
-                }
-                _ => {}
-            }
-        }
-
         // A9: while the normalized ledger is the pane being drawn, its tree navigation
         // claims the keys the composer would otherwise type — but only while the draft is
         // empty, exactly as `?` and `,` do above.
@@ -339,17 +324,6 @@ impl App {
                     }
                 }
             }
-            Tab::Agents => Self::explorer_move(&mut self.agents, delta),
-            Tab::Teams => Self::explorer_move(&mut self.teams, delta),
-            Tab::Plans => {
-                let explorer = if self.plans_on_control {
-                    &mut self.control
-                } else {
-                    &mut self.plans
-                };
-
-                Self::explorer_move(explorer, delta);
-            }
             Tab::Upgrade => match self.upgrade.focus {
                 Pane::List => {
                     let len = UpgradeSection::ALL.len() as isize;
@@ -406,23 +380,6 @@ impl App {
         self.move_by(delta);
     }
 
-    fn explorer_move(explorer: &mut Explorer, delta: isize) {
-        match explorer.focus {
-            Pane::List => explorer.move_by(delta),
-            Pane::Detail => {
-                let rows = explorer
-                    .detail
-                    .value
-                    .as_ref()
-                    .map(|value| TreeView::new("state", value).rows(&explorer.tree))
-                    .map(|rows| rows.len())
-                    .unwrap_or(0);
-
-                explorer.tree.move_by(delta, rows);
-            }
-        }
-    }
-
     fn upgrade_rows(&self) -> usize {
         let section = self.upgrade.current();
 
@@ -441,43 +398,8 @@ impl App {
     fn left(&mut self) {
         match self.tab {
             Tab::Sessions => {}
-            Tab::Agents => Self::explorer_left(&mut self.agents),
-            Tab::Teams => Self::explorer_left(&mut self.teams),
-            Tab::Plans => {
-                let explorer = if self.plans_on_control {
-                    &mut self.control
-                } else {
-                    &mut self.plans
-                };
-
-                if explorer.focus == Pane::List {
-                    self.plans_on_control = false;
-                } else {
-                    Self::explorer_left(explorer);
-                }
-            }
             Tab::Upgrade if self.upgrade.focus == Pane::Detail => self.collapse_upgrade_or_leave(),
             _ => {}
-        }
-    }
-
-    fn explorer_left(explorer: &mut Explorer) {
-        if explorer.focus == Pane::List {
-            return;
-        }
-
-        let Some(value) = explorer.detail.value.as_ref() else {
-            explorer.focus = Pane::List;
-            return;
-        };
-
-        let view = TreeView::new("state", value);
-        let rows = view.rows(&explorer.tree);
-
-        match rows.get(explorer.tree.selected()) {
-            Some(row) if row.expanded => explorer.tree.collapse(&row.path),
-            // Collapsed already: left is how you get back to the list.
-            _ => explorer.focus = Pane::List,
         }
     }
 
@@ -507,23 +429,6 @@ impl App {
     fn right(&mut self) {
         match self.tab {
             Tab::Sessions => {}
-
-            Tab::Agents => self.agents.focus = Pane::Detail,
-            Tab::Teams => self.teams.focus = Pane::Detail,
-            Tab::Plans => {
-                let on_control = self.plans_on_control;
-                let explorer = if on_control {
-                    &mut self.control
-                } else {
-                    &mut self.plans
-                };
-
-                if explorer.focus == Pane::Detail && !on_control {
-                    self.plans_on_control = true;
-                } else {
-                    explorer.focus = Pane::Detail;
-                }
-            }
             Tab::Upgrade => self.upgrade.focus = Pane::Detail,
             _ => {}
         }
@@ -534,42 +439,11 @@ impl App {
             Tab::Sessions if self.sessions.open.is_some() => {
                 self.compose(ComposerVerb::Message);
             }
-            Tab::Agents => Self::explorer_activate(&mut self.agents),
-            Tab::Teams => Self::explorer_activate(&mut self.teams),
-            Tab::Plans => {
-                let explorer = if self.plans_on_control {
-                    &mut self.control
-                } else {
-                    &mut self.plans
-                };
-
-                Self::explorer_activate(explorer);
-            }
             Tab::Upgrade => match self.upgrade.focus {
                 Pane::List => self.activate_upgrade_section(),
                 Pane::Detail => self.toggle_upgrade_row(),
             },
             _ => {}
-        }
-    }
-
-    fn explorer_activate(explorer: &mut Explorer) {
-        if explorer.focus == Pane::List {
-            explorer.focus = Pane::Detail;
-            return;
-        }
-
-        let Some(value) = explorer.detail.value.as_ref() else {
-            return;
-        };
-
-        let view = TreeView::new("state", value);
-        let rows = view.rows(&explorer.tree);
-
-        if let Some(row) = rows.get(explorer.tree.selected()) {
-            if row.expandable {
-                explorer.tree.toggle(&row.path);
-            }
         }
     }
 

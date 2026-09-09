@@ -107,7 +107,6 @@ fn opened_with(hello: ouro::proto::Hello, options: Value) -> App {
         Tag::Sessions(Plane::Interactive),
         session_row(options),
     );
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
 
     app.open_session(Plane::Interactive, SESSION.to_string());
 

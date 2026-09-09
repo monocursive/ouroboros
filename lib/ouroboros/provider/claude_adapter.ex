@@ -81,7 +81,7 @@ defmodule Ouroboros.Provider.ClaudeAdapter do
   ## MCP by reference, which is what D6 asks for
 
   `mcp_config` stays refused *inline* from callers on both planes
-  (`Ouroboros.Coding.TaskState`): a server command inside a durable checkpoint is an
+  (`Ouroboros.Interactive.State`): a server command inside a durable checkpoint is an
   execution vector that outlives the operator who typed it. Nothing changes about that.
   What this adapter composes is not a caller's value: it is derived at dispatch from node
   facts — this node's own binary, its own gateway address, its own token *file* path, and

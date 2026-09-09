@@ -420,8 +420,7 @@ defmodule Ouroboros.CodeIntel.Registry do
   defp session_roots do
     case Application.get_env(:ouroboros, :code_intel_session_source) do
       nil ->
-        source_workspaces(Ouroboros.InteractiveSession) ++
-          source_workspaces(Ouroboros.CodingSession)
+        source_workspaces(Ouroboros.InteractiveSession)
 
       source ->
         source_workspaces(source)

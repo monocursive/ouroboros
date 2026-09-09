@@ -241,62 +241,6 @@ if config_env() == :prod and is_nil(System.get_env("OUROBOROS_COLLECTOR_CONFIG")
 
   _ = File.mkdir_p(Path.join(data_dir, "worktrees"))
 
-  orchestration_concurrency =
-    case Integer.parse(System.get_env("OUROBOROS_ORCHESTRATION_CONCURRENCY") || "4") do
-      {value, ""} when value > 0 -> value
-      _other -> raise "OUROBOROS_ORCHESTRATION_CONCURRENCY must be a positive integer"
-    end
-
-  # The forge lane of the orchestration plane is off unless a workspace is named.
-  # Nodes default to the local node at execution time rather than here, because
-  # distribution may not have started when this file is evaluated.
-  forge_workspace =
-    case System.get_env("OUROBOROS_ORCHESTRATION_FORGE_WORKSPACE") do
-      nil ->
-        nil
-
-      workspace ->
-        if Path.type(workspace) == :absolute do
-          workspace
-        else
-          raise "OUROBOROS_ORCHESTRATION_FORGE_WORKSPACE must be an absolute path"
-        end
-    end
-
-  forge_nodes =
-    case System.get_env("OUROBOROS_ORCHESTRATION_FORGE_NODES") do
-      nil ->
-        []
-
-      nodes ->
-        nodes |> String.split(",", trim: true) |> Enum.map(&String.to_atom(String.trim(&1)))
-    end
-
-  orchestration_forge_options =
-    cond do
-      is_nil(forge_workspace) ->
-        []
-
-      true ->
-        options =
-          if forge_nodes == [] do
-            [workspace: forge_workspace]
-          else
-            [workspace: forge_workspace, nodes: forge_nodes]
-          end
-
-        case env_value.("OUROBOROS_FORGE_SIGNER_ID") do
-          nil -> options
-          signer_id -> Keyword.put(options, :signer_id, signer_id)
-        end
-    end
-
-  # Letting a planner express a forge step is an explicit operator decision, and
-  # still not authority to deploy: signing and per-node signature verification
-  # are unchanged by it.
-  control_allow_forge_steps =
-    System.get_env("OUROBOROS_CONTROL_ALLOW_FORGE_STEPS") == "true"
-
   signer_format =
     "OUROBOROS_UPGRADE_TRUSTED_SIGNERS must be comma-separated " <>
       "\"signer_id:base64_ed25519_public_key\" entries"
@@ -338,15 +282,10 @@ if config_env() == :prod and is_nil(System.get_env("OUROBOROS_COLLECTOR_CONFIG")
   config :ouroboros,
     node_role: node_role,
     forge_builder_node: forge_builder_node,
-    # Acknowledged session, team, and plan transitions must survive the crash that
-    # follows them — the same synced write the effect ledger uses.
-    coding_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "coding")},
+    # Acknowledged session transitions must survive the crash that follows them — the
+    # same synced write the effect ledger uses.
     interactive_storage:
       {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "interactive")},
-    team_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "teams")},
-    orchestration_storage:
-      {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "orchestration")},
-    control_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "control")},
     # The effect authority decides what agents may do to the cluster, so it is held to
     # the same synced write the mutation journals use: a grant that was acknowledged
     # must survive the crash that follows it, and a revocation must too.
@@ -392,11 +331,6 @@ if config_env() == :prod and is_nil(System.get_env("OUROBOROS_COLLECTOR_CONFIG")
     signing_require_eval: signing_require_eval,
     signing_rate_limit_per_minute: signing_rate_limit,
     workspace_allowed_roots: workspace_roots,
-    orchestration_max_concurrency: orchestration_concurrency,
-    orchestration_team_id: System.get_env("OUROBOROS_ORCHESTRATION_TEAM_ID"),
-    orchestration_worker_id: System.get_env("OUROBOROS_ORCHESTRATION_WORKER_ID"),
-    orchestration_forge_options: orchestration_forge_options,
-    control_allow_forge_steps: control_allow_forge_steps,
     upgrade_trust_policy: [
       allow_unsigned: false,
       trusted_signers: trusted_signers

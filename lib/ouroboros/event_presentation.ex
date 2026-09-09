@@ -282,30 +282,6 @@ defmodule Ouroboros.EventPresentation.Compaction do
   defp archive(parts, _id), do: parts
 end
 
-defmodule Ouroboros.EventPresentation.DelegationEvent do
-  @moduledoc "A `delegation` event's payload, as the parent's transcript carries it (G1)."
-
-  defstruct [
-    :delegation_id,
-    :task_id,
-    :task_node,
-    :team_id,
-    :objective_digest,
-    :status,
-    :result_digest
-  ]
-
-  @type t :: %__MODULE__{
-          delegation_id: String.t() | nil,
-          task_id: String.t() | nil,
-          task_node: String.t() | nil,
-          team_id: String.t() | nil,
-          objective_digest: String.t() | nil,
-          status: String.t() | nil,
-          result_digest: String.t() | nil
-        }
-end
-
 defmodule Ouroboros.EventPresentation.SubagentEvent do
   @moduledoc """
   One `provider_event` whose `kind` is `subagent`: a child agent spawning, reporting, or
@@ -652,27 +628,16 @@ defmodule Ouroboros.EventPresentation do
     (`deps/jido_harness/lib/jido_harness/event.ex:138-149`), and the schema declares
     `payload: Zoi.map(Zoi.string(), Zoi.any())` (`event.ex:63`). That is every
     `tool_call`, `tool_result`, `file_change`, `plan_updated`, `usage`,
-    `approval_requested`, `provider_event` and lifecycle event, on both planes.
+    `approval_requested`, `provider_event` and lifecycle event.
   * Every runtime-native interactive emitter builds string keys literally —
-    `%{"kind" => "configured", …}` (`lib/ouroboros/interactive/task.ex:1481`),
-    `%{"kind" => "operator_shell", …}` (`lib/ouroboros/interactive/task/shell.ex:272`),
-    the `delegation` payload (`lib/ouroboros/interactive/task.ex:1868-1877`).
-  * **The exception:** `Ouroboros.Coding.Event.internal/4`
-    (`lib/ouroboros/coding/event.ex:46`) skips that stringification, and all eight of its
-    call sites build **atom**-keyed maps — `%{path: …, reason: …, message: …}`
-    (`lib/ouroboros/coding/task.ex:368-374`), `%{request_id: …, decision: …, scope: …}`
-    (`lib/ouroboros/coding/task.ex:156-162`). `Jido.Harness.Redaction.redact/1` preserves
-    key types (`deps/jido_harness/lib/jido_harness/redaction.ex:23-27`), so they arrive
-    here as atoms.
+    `%{"kind" => "configured", …}` (`lib/ouroboros/interactive/task.ex:1481`) and
+    `%{"kind" => "operator_shell", …}` (`lib/ouroboros/interactive/task/shell.ex:272`).
 
-  The Rust client never sees those atoms: `Ouroboros.Gateway.Wire` stringifies atom keys
-  and atom values on the way out (`lib/ouroboros/gateway/wire.ex:148`, `:292`, `:300-309`),
-  keeping `nil` and booleans as themselves. An in-process reader skips that boundary
-  entirely (`lib/ouroboros/interactive/task.ex:2152`), so `from_event/1` applies exactly
-  that one transform first — see `wire_shape/1`. Doing less would render a coding-plane
-  `worktree_retained` as a bare marker on the web and as a sentence in the TUI; doing more
-  (reading both key types in every field reader) would be a guess in forty places instead
-  of a stated normalization in one.
+  An emitter that builds an atom-keyed payload is still read correctly: `from_event/1`
+  applies exactly one normalization first — see `wire_shape/1` — so a reader here never
+  has to guess a key type. `Ouroboros.Gateway.Wire` performs the same stringification on
+  the way out to the Rust client (`lib/ouroboros/gateway/wire.ex:148`, `:292`,
+  `:300-309`), keeping `nil` and booleans as themselves.
   """
 
   import Bitwise, only: [band: 2]
@@ -683,7 +648,6 @@ defmodule Ouroboros.EventPresentation do
     ApprovalResolved,
     CommandOutput,
     Compaction,
-    DelegationEvent,
     Diff,
     Failure,
     FileChange,
@@ -768,7 +732,6 @@ defmodule Ouroboros.EventPresentation do
           | Interrupted.t()
           | ShellEvent.t()
           | Compaction.t()
-          | DelegationEvent.t()
           | SubagentEvent.t()
           | ProviderNote.t()
           | Hidden.t()
@@ -826,8 +789,7 @@ defmodule Ouroboros.EventPresentation do
   Reads one durable event into a presentation struct.
 
   Accepts an `%Ouroboros.Interactive.Event{}` or any map carrying `:type`, `:payload`,
-  `:timestamp`, `:turn_id` and `:request_id` — the coding plane's event struct has the
-  same five fields.
+  `:timestamp`, `:turn_id` and `:request_id`.
   """
   @spec from_event(map()) :: t()
   def from_event(event) do
@@ -979,12 +941,6 @@ defmodule Ouroboros.EventPresentation do
       kind when kind in [:run_cancelled, :session_cancelled] ->
         %Interrupted{detail: detail(payload)}
 
-      # G1. `delegation` is its own runtime-native event type, not a wrapped provider one:
-      # `emit_runtime_event(runtime, :delegation, …)` puts it in the same sequence space as
-      # everything else (`lib/ouroboros/interactive/task.ex:1880`).
-      :delegation ->
-        decode_delegation(payload)
-
       # A kind this build does not know. It is still an event the runtime recorded, so it
       # reads as one dim line naming itself rather than as nothing at all.
       other ->
@@ -1008,8 +964,8 @@ defmodule Ouroboros.EventPresentation do
   Atom keys and atom values become their strings; `nil` and the booleans stay themselves;
   a module name loses its `Elixir.` prefix. Mirrors `wire.ex:147-148` and `:298-309`
   exactly, and nothing else the wire does — no byte caps, no `_opaque` minting, no
-  struct tagging. This is what makes a coding-plane internal event
-  (`lib/ouroboros/coding/event.ex:46`) read the same in a browser as it does in the TUI.
+  struct tagging. This is what makes an atom-keyed runtime-native payload read the same in
+  a browser as it does in the TUI.
   """
   @spec wire_shape(term()) :: term()
   def wire_shape(value) when is_map(value) and not is_struct(value) do
@@ -1378,18 +1334,6 @@ defmodule Ouroboros.EventPresentation do
       before_tokens: strict_count(payload, "before_tokens"),
       after_tokens: strict_count(payload, "after_tokens"),
       summarised: as_bool(Map.get(payload, "summarised"))
-    }
-  end
-
-  defp decode_delegation(payload) do
-    %DelegationEvent{
-      delegation_id: label_at(payload, "delegation_id"),
-      task_id: label_at(payload, "task_id"),
-      task_node: label_at(payload, "task_node"),
-      team_id: label_at(payload, "team_id"),
-      objective_digest: label_at(payload, "objective_digest"),
-      status: label_at(payload, "status"),
-      result_digest: label_at(payload, "result_digest")
     }
   end
 

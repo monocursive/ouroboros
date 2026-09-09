@@ -51,15 +51,12 @@ pub fn provider_choices(providers: &[ProviderEntry], stored: Option<&str>) -> Ve
 /// One row of the new-session dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NewField {
-    Plane,
     Machine,
     Provider,
     Model,
     Workspace,
     ApprovalMode,
     SandboxMode,
-    /// Only reachable on the coding plane, where the objective is required.
-    Objective,
     /// D7. Whether the session runs in its own `git worktree` rather than the workspace
     /// itself. Offered only where the gateway serves the option, because a toggle that a
     /// runtime silently ignores is worse than no toggle.
@@ -168,27 +165,18 @@ impl NewSession {
         }
     }
 
-    /// The rows this plane has. `objective` exists only where the gateway accepts it.
+    /// The rows this dialog has, in the order it draws them.
     pub fn fields(&self) -> Vec<NewField> {
-        let mut fields = vec![
-            NewField::Plane,
+        vec![
             NewField::Machine,
             NewField::Provider,
             NewField::Model,
-        ];
-
-        if self.request.plane == Plane::Coding {
-            fields.push(NewField::Objective);
-        }
-
-        fields.extend([
             NewField::Workspace,
             NewField::ApprovalMode,
             NewField::SandboxMode,
             NewField::Worktree,
             NewField::Start,
-        ]);
-        fields
+        ]
     }
 
     pub fn approval_mode(&self) -> Option<ApprovalMode> {
@@ -264,18 +252,6 @@ impl NewSession {
 
     fn cycle(&mut self, delta: isize, providers: usize, machines: &[MachineChoice]) {
         match self.field {
-            NewField::Plane => {
-                self.request.plane = match self.request.plane {
-                    Plane::Interactive => Plane::Coding,
-                    Plane::Coding => Plane::Interactive,
-                };
-
-                // The objective row appears and disappears with the plane; the cursor
-                // must not be left pointing at a row that no longer exists.
-                if !self.fields().contains(&self.field) {
-                    self.field = NewField::Provider;
-                }
-            }
             NewField::Provider if providers > 0 => {
                 // The operator is choosing now, so a providers answer still in flight must
                 // not move the cursor out from under them afterwards.
@@ -321,7 +297,6 @@ impl NewSession {
                 Some(&mut self.request.workspace)
             }
             NewField::Model => Some(self.request.model.get_or_insert_with(String::new)),
-            NewField::Objective => Some(&mut self.request.objective),
             _ => None,
         }
     }
@@ -545,7 +520,7 @@ impl App {
 
         let plane = request.plane;
 
-        // `interactive.start` and `coding.start` declare a 120s gateway ceiling: provider
+        // `interactive.start` declares a 120s gateway ceiling: provider
         // readiness is legitimately unbounded upstream and this is the one call that
         // waits for it.
         self.issue(
@@ -578,7 +553,6 @@ impl App {
         // The lists are polled, and waiting up to three seconds for the row to appear
         // under a session the operator is already looking at reads as a bug.
         self.sessions.interactive.invalidate();
-        self.sessions.coding.invalidate();
 
         self.open_session_on(plane, started.id.clone(), started.node.clone());
 

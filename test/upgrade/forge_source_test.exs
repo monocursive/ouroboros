@@ -11,7 +11,7 @@ defmodule Ouroboros.Upgrade.ForgeSourceTest do
     assert {:ok, _nested} =
              validate(Ouroboros.Capability.Text.Summarize, "def summarize(text), do: text")
 
-    for name <- [Ouroboros.Agent.Worker, Ouroboros.Upgrade.Forge, Elixir.Capability, String] do
+    for name <- [Ouroboros.Mesh, Ouroboros.Upgrade.Forge, Elixir.Capability, String] do
       assert {:error, {:invalid_module_name, _printed}} = validate(name, "def hello, do: :world")
     end
 

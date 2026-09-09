@@ -4,11 +4,6 @@ defmodule Ouroboros.Gateway.Methods.Contract do
   alias Ouroboros.CodeIntel
   alias Ouroboros.Gateway.Methods.Browse
   @default_timeout 15000
-  @agent_message_timeout 45000
-  @default_agent_message_timeout_ms 5000
-  @max_agent_message_timeout_ms 30000
-  @max_agent_message_bytes 64 * 1024
-  @max_agent_id_bytes 512
   @code_intel_max_wait_ms 10000
   @wasm_download_timeout 15000
   @wasm_upload_timeout 15000
@@ -19,12 +14,10 @@ defmodule Ouroboros.Gateway.Methods.Contract do
   @default_replay_limit 100
   @start_timeout 120_000
   @approval_prompt_timeout 15 * 60 * 1000
-  @delegate_timeout 90000
   @shell_timeout 10 * 60 * 1000
   @compaction_timeout 120_000
   @forge_timeout 120_000
   @replay_verify_timeout 120_000
-  @team_timeout 60000
   @hello_deadline 10000
   # S2b. `policy.status` reads the whole evidence corpus to count it — at most 10 000 rows or
   # 64 MiB, which is a sequential read and a decode per line rather than a query. `policy.replay`
@@ -128,15 +121,6 @@ defmodule Ouroboros.Gateway.Methods.Contract do
     "plan" => :boolean,
     "mode" => :string
   }
-  @worker_options %{"role" => :string, "node" => :node}
-  @delegation_options %{
-    "id" => :string,
-    "coding_node" => :node,
-    "workspace" => :string,
-    "provider" => :provider
-  }
-  @interactive_delegation_options %{"workspace" => :string, "provider" => :provider}
-  @control_options %{"id" => :string, "max_revisions" => :non_negative_integer}
   @start_option_notes %{
     "id" =>
       "caller-owned; a matching retry adopts the same immutable intent and a conflicting reuse is refused",
@@ -156,34 +140,9 @@ defmodule Ouroboros.Gateway.Methods.Contract do
   @configuration_params (for {name, kind} <- Enum.sort(@configuration_options) do
                            {name, :optional, kind, Map.get(@configuration_option_notes, name)}
                          end)
-  @worker_params (for {name, kind} <- Enum.sort(@worker_options) do
-                    {name, :optional, kind,
-                     if(name == "node") do
-                       "the machine the worker runs on"
-                     else
-                       nil
-                     end}
-                  end)
-  @delegation_params (for {name, kind} <- Enum.sort(@delegation_options) do
-                        {name, :optional, kind,
-                         if(name == "id") do
-                           "caller-owned delegation id"
-                         else
-                           nil
-                         end}
-                      end)
-  @interactive_delegation_params (for {name, kind} <-
-                                        Enum.sort(@interactive_delegation_options) do
-                                    {name, :optional, kind, "defaults to the conversation's own"}
-                                  end)
-  @control_params (for {name, kind} <- Enum.sort(@control_options) do
-                     {name, :optional, kind, nil}
-                   end)
   @session_id {"id", :required, :string, "the interactive session id"}
   @session_node {"node", :optional, :node,
                  "the machine that owns the session; this one by default"}
-  @task_id {"id", :required, :string, "the coding task id"}
-  @task_node {"node", :optional, :node, "the machine that owns the task; this one by default"}
   @authority_node {"node", :optional, :node,
                    "the machine whose authority answers; this one by default"}
   @cursor_param {"cursor", {:optional, 0}, :non_negative_integer,
@@ -359,44 +318,6 @@ defmodule Ouroboros.Gateway.Methods.Contract do
       params: {:closed, []},
       handler: :handle_account_read
     },
-    "agents.list" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params: {:open, []},
-      handler: :handle_agents_list
-    },
-    "agents.message" => %{
-      scope: :operate,
-      timeout: @agent_message_timeout,
-      params:
-        {:closed,
-         [
-           {"to", :required, :string,
-            "the agent id, at most #{@max_agent_id_bytes} bytes; a lane-W capability is `wasm/<name>`"},
-           {"body", :required, :json,
-            "the message body, any JSON value, at most #{@max_agent_message_bytes} bytes encoded"},
-           {"from", :optional, :string,
-            "who the message is from, at most #{@max_agent_id_bytes} bytes; defaults to `gateway`"},
-           {"timeout_ms", :optional, {:integer, 1, @max_agent_message_timeout_ms},
-            "how long to wait for the agent; defaults to #{@default_agent_message_timeout_ms}"}
-         ],
-         "`reply` is the agent's `last_answer` and is **untrusted**: for a lane-W capability it is prose and JSON the component wrote. It is returned whole when it encodes within #{@max_agent_message_bytes} bytes and as a marked, truncated string otherwise, which is what `truncated` distinguishes. A message an agent refused is still a delivered message: this verb says the agent answered nothing, and `agents.state` says why"},
-      handler: :handle_agents_message
-    },
-    "agents.state" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params:
-        {:open, [{"id", :required, :string, "the agent id"}],
-         "for a lane-W capability (`wasm/<name>`) the answer additionally carries `untrusted: true` and `truncated`, and `agent.state.last_answer`/`last_message` are bounded at 64 KiB with an in-band marker: both are written by a component, and this verb is `read`"},
-      handler: :handle_agents_state
-    },
-    "agents.stop" => %{
-      scope: :operate,
-      timeout: @default_timeout,
-      params: {:open, [{"id", :required, :string, "the agent id"}]},
-      handler: :handle_agents_stop
-    },
     "capabilities.admit" => %{
       scope: :operate,
       timeout: @forge_timeout,
@@ -468,76 +389,6 @@ defmodule Ouroboros.Gateway.Methods.Contract do
          ]},
       handler: :handle_code_intel_touch
     },
-    "coding.cancel" => %{
-      scope: :operate,
-      timeout: @default_timeout,
-      params: {:closed, [@task_id, @task_node]},
-      handler: :handle_coding_cancel
-    },
-    "coding.delete" => %{
-      scope: :operate,
-      timeout: @default_timeout,
-      params: {:closed, [@task_id, @task_node], "terminal tasks only"},
-      handler: :handle_coding_delete
-    },
-    "coding.event_detail" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params: {:closed, [@task_id, @sequence_param, @task_node]},
-      handler: :handle_coding_event_detail
-    },
-    "coding.info" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params: {:closed, [@task_id, @task_node]},
-      handler: :handle_coding_info
-    },
-    "coding.list" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params: {:open, []},
-      handler: :handle_coding_list
-    },
-    "coding.replay" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params: {:closed, [@task_id, @cursor_param, @limit_param, @task_node]},
-      handler: :handle_coding_replay
-    },
-    "coding.respond_approval" => %{
-      scope: :operate,
-      timeout: @default_timeout,
-      params:
-        {:closed,
-         [
-           @task_id,
-           {"request_id", :required, :string, "the id the approval_requested event carried"},
-           @approval_response_param,
-           @task_node
-         ]},
-      handler: :handle_coding_respond_approval
-    },
-    "coding.start" => %{
-      scope: :operate,
-      timeout: @start_timeout,
-      outcome: :unknown,
-      params: {:closed, [{"objective", :required, :string, nil} | @start_params]},
-      handler: :handle_coding_start
-    },
-    "coding.subscribe" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params:
-        {:closed, [@task_id, @cursor_param, @task_node],
-         "answered by the connection itself, because the plane registers the calling process"},
-      handler: :connection
-    },
-    "coding.unsubscribe" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params: {:closed, [@task_id, @task_node]},
-      handler: :connection
-    },
     "computer_use.artifact" => %{
       scope: :read,
       timeout: @default_timeout,
@@ -563,30 +414,6 @@ defmodule Ouroboros.Gateway.Methods.Contract do
       timeout: @default_timeout,
       params: {:closed, [@authority_node]},
       handler: :handle_computer_use_status
-    },
-    "control.cancel" => %{
-      scope: :operate,
-      timeout: @default_timeout,
-      params: {:open, [{"id", :required, :string, "the control run id"}]},
-      handler: :handle_control_cancel
-    },
-    "control.get" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params: {:open, [{"id", :required, :string, "the control run id"}]},
-      handler: :handle_control_get
-    },
-    "control.list" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params: {:open, []},
-      handler: :handle_control_list
-    },
-    "control.submit" => %{
-      scope: :operate,
-      timeout: @default_timeout,
-      params: {:closed, [{"objective", :required, :string, nil} | @control_params]},
-      handler: :handle_control_submit
     },
     "credentials.anthropic.set" => %{
       scope: :operate,
@@ -766,27 +593,6 @@ defmodule Ouroboros.Gateway.Methods.Contract do
       timeout: @default_timeout,
       params: {:closed, [@session_id, @session_node]},
       handler: :handle_interactive_context
-    },
-    "interactive.delegate" => %{
-      scope: :operate,
-      timeout: @delegate_timeout,
-      outcome: :unknown,
-      params:
-        {:closed,
-         [
-           @session_id,
-           {"objective", :required, :string, nil},
-           {"delegation_id", :optional, :string,
-            "caller-owned; a repeat under the same id answers with the same delegation rather than a second one"},
-           @session_node | @interactive_delegation_params
-         ]},
-      handler: :handle_interactive_delegate
-    },
-    "interactive.delegations" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params: {:closed, [@session_id, @session_node]},
-      handler: :handle_interactive_delegations
     },
     "interactive.delete" => %{
       scope: :operate,
@@ -1103,18 +909,6 @@ defmodule Ouroboros.Gateway.Methods.Contract do
          ]},
       handler: :handle_permissions_remove
     },
-    "plans.get" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params: {:open, [{"id", :required, :string, "the plan id"}]},
-      handler: :handle_plans_get
-    },
-    "plans.list" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params: {:open, []},
-      handler: :handle_plans_list
-    },
     "policy.clear" => %{
       scope: :operate,
       timeout: @default_timeout,
@@ -1215,60 +1009,6 @@ defmodule Ouroboros.Gateway.Methods.Contract do
       timeout: @default_timeout,
       params: {:open, []},
       handler: :handle_signing_decisions
-    },
-    "teams.add_worker" => %{
-      scope: :operate,
-      timeout: @team_timeout,
-      params:
-        {:closed,
-         [
-           {"team_id", :required, :string, "must name a team running on this node"},
-           {"worker_id", :required, :string, nil} | @worker_params
-         ]},
-      handler: :handle_teams_add_worker
-    },
-    "teams.cancel" => %{
-      scope: :operate,
-      timeout: @team_timeout,
-      outcome: :unknown,
-      params:
-        {:open,
-         [
-           {"team_id", :required, :string, "must name a team running on this node"},
-           {"delegation_id", :required, :string, nil}
-         ]},
-      handler: :handle_teams_cancel
-    },
-    "teams.close" => %{
-      scope: :operate,
-      timeout: @team_timeout,
-      outcome: :unknown,
-      params: {:open, [{"team_id", :required, :string, "must name a team running on this node"}]},
-      handler: :handle_teams_close
-    },
-    "teams.delegate" => %{
-      scope: :operate,
-      timeout: @team_timeout,
-      params:
-        {:closed,
-         [
-           {"team_id", :required, :string, "must name a team running on this node"},
-           {"worker_id", :required, :string, nil},
-           {"objective", :required, :string, nil} | @delegation_params
-         ]},
-      handler: :handle_teams_delegate
-    },
-    "teams.list" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params: {:open, []},
-      handler: :handle_teams_list
-    },
-    "teams.state" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params: {:open, [{"id", :required, :string, "the team id"}]},
-      handler: :handle_teams_state
     },
     "upgrade.history" => %{
       scope: :read,
@@ -1437,15 +1177,8 @@ defmodule Ouroboros.Gateway.Methods.Contract do
   def approval_scopes, do: @approval_scopes
   def code_intel_max_wait_ms, do: @code_intel_max_wait_ms
   def configuration_options, do: @configuration_options
-  def control_options, do: @control_options
-  def default_agent_message_timeout_ms, do: @default_agent_message_timeout_ms
   def default_replay_limit, do: @default_replay_limit
   def default_timeout, do: @default_timeout
-  def delegation_options, do: @delegation_options
-  def interactive_delegation_options, do: @interactive_delegation_options
-  def max_agent_id_bytes, do: @max_agent_id_bytes
-  def max_agent_message_bytes, do: @max_agent_message_bytes
-  def max_agent_message_timeout_ms, do: @max_agent_message_timeout_ms
   def permission_decisions, do: @permission_decisions
   def permission_removable_scopes, do: @permission_removable_scopes
   def permission_rule_scopes, do: @permission_rule_scopes
@@ -1462,7 +1195,6 @@ defmodule Ouroboros.Gateway.Methods.Contract do
   def wasm_rollback_timeout, do: @wasm_rollback_timeout
   def wasm_sign_timeout, do: @wasm_sign_timeout
   def wasm_upload_timeout, do: @wasm_upload_timeout
-  def worker_options, do: @worker_options
 
   # Setup belongs to the computer that will run the work. Keep this list explicit:
   # accepting a machine here must never turn into an arbitrary remote RPC facility.

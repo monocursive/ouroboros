@@ -42,9 +42,7 @@ defmodule Ouroboros.Provider.Native.McpTest do
         Map.new(
           [
             Ouroboros.Cluster,
-            Ouroboros.Coding.TaskSupervisor,
             Ouroboros.Interactive.TaskSupervisor,
-            Ouroboros.Team.Supervisor,
             Ouroboros.CodeIntel.Supervisor,
             Ouroboros.Wasm.Supervisor,
             Ouroboros.Provider.Native.Desktop.Supervisor

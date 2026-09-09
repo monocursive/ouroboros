@@ -523,7 +523,7 @@ defmodule Ouroboros.Upgrade.RolloutTest do
           messages_received: [type: :non_neg_integer, default: 0]
         ],
         signal_routes: [
-          {"ouroboros.agent.message", Ouroboros.Agent.Worker.ReceiveMessage}
+          {"ouroboros.agent.message", Ouroboros.Mesh.ReceiveMessage}
         ]
     end
     """
@@ -560,7 +560,7 @@ defmodule Ouroboros.Upgrade.RolloutTest do
           messages_received: [type: :non_neg_integer, default: 0]
         ],
         signal_routes: [
-          {"ouroboros.agent.message", Ouroboros.Agent.Worker.ReceiveMessage}
+          {"ouroboros.agent.message", Ouroboros.Mesh.ReceiveMessage}
         ]
 
       @impl true
@@ -588,7 +588,7 @@ defmodule Ouroboros.Upgrade.RolloutTest do
           revision: [type: :non_neg_integer, default: 2]
         ],
         signal_routes: [
-          {"ouroboros.agent.message", Ouroboros.Agent.Worker.ReceiveMessage}
+          {"ouroboros.agent.message", Ouroboros.Mesh.ReceiveMessage}
         ]
     end
     """
@@ -609,7 +609,7 @@ defmodule Ouroboros.Upgrade.RolloutTest do
           messages_received: [type: :non_neg_integer, default: 0]
         ],
         signal_routes: [
-          {"ouroboros.agent.message", Ouroboros.Agent.Worker.ReceiveMessage}
+          {"ouroboros.agent.message", Ouroboros.Mesh.ReceiveMessage}
         ]
 
       @impl true

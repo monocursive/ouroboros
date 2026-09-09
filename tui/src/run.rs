@@ -2230,7 +2230,6 @@ pub fn start_plan(
             })?),
         },
         reasoning_effort: None,
-        objective: String::new(),
         // `ouro run` takes no --worktree: a one-shot prompt that provisioned a worktree
         // would leave one behind for a session nobody is going to reopen.
         worktree: false,

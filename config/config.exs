@@ -60,11 +60,7 @@ config :ouroboros,
   # the same posture the Computer Use tools take, so a model is never taught a name it
   # cannot use. Read as exactly `true`: a typo leaves it shut rather than widening it.
   native_forge_tool: false,
-  coding_storage: {Jido.Storage.ETS, table: :ouroboros_coding},
   interactive_storage: {Jido.Storage.ETS, table: :ouroboros_interactive},
-  team_storage: {Jido.Storage.ETS, table: :ouroboros_teams},
-  orchestration_storage: {Jido.Storage.ETS, table: :ouroboros_orchestration},
-  control_storage: {Jido.Storage.ETS, table: :ouroboros_control},
   grants_storage: {Jido.Storage.ETS, table: :ouroboros_grants},
   permissions_storage: {Jido.Storage.ETS, table: :ouroboros_permissions},
   # Operator-authored permission rules, the highest scope `Ouroboros.Control.Permissions`
@@ -140,29 +136,6 @@ config :ouroboros,
   # probe set and still be promoted under `compare: true`. Wall-clock over a handful of
   # probes on a shared VM is noisy; a budget near 1.0 rejects honest challengers.
   capability_eval_regression_budget: 1.2,
-  # Deadline for one agent effect. Effects run off the agent's process, but they still
-  # hold a supervised task and an in-flight audit entry, so every one of them ends.
-  effect_timeout: 120_000,
-  automation_enabled: true,
-  control_enabled: false,
-  # A durable plan is heterogeneous: every step declares a kind and the scheduler
-  # resolves one executor per kind. `:orchestration_executors` names them
-  # explicitly and overrides what the application derives from
-  # `:orchestration_team_id` (the `:coding` executor) and
-  # `:orchestration_forge_options` (the `:forge` executor). A kind with no
-  # executor is a kind the scheduler refuses to accept plans for, so leaving
-  # forge options empty keeps forge steps unschedulable.
-  orchestration_executors: %{},
-  # Trusted runtime policy for `Ouroboros.Orchestration.ForgeExecutor`: which
-  # workspace source is read from, which nodes receive the capability, and which
-  # signer identity is requested. A forge step supplies only a module name and a
-  # workspace-relative path. Empty means no forge executor.
-  orchestration_forge_options: [],
-  # Whether a planner may express a forge step at all. This widens what a model
-  # can *say*, never what it can deploy: the artifact is still signed by
-  # `:forge_signer` (`Signer.Deny` by default) and still verified against each
-  # target node's trusted signers.
-  control_allow_forge_steps: false,
   # Bound for control-plane session calls (info/replay/subscribe/cancel/steer/
   # respond_approval/interrupt). `await` threads the caller's own timeout instead.
   session_call_timeout: 30_000,

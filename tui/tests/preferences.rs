@@ -587,7 +587,6 @@ fn ready_for_n(defaults: Defaults) -> App {
 
     app.tab = Tab::Sessions;
     answer(&mut app, Tag::Sessions(Plane::Interactive), json!([]));
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
     app.open_session(Plane::Interactive, "session-open".into());
     let _ = app.drain();
 
@@ -682,7 +681,6 @@ fn a_provider_list_that_arrives_after_a_dialog_still_places_the_cursor() {
 
     app.tab = Tab::Sessions;
     answer(&mut app, Tag::Sessions(Plane::Interactive), json!([]));
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
     app.open_session(Plane::Interactive, "session-open".into());
     apply_leader(&mut app, 'N');
 

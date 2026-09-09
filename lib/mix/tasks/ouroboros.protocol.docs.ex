@@ -83,7 +83,6 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
     "hello_result" => {:method, "hello"},
     "runtime_status_result" => {:method, "runtime.status"},
     "interactive_event_detail_result" => {:method, "interactive.event_detail"},
-    "coding_event_detail_result" => {:method, "coding.event_detail"},
     "code_intel_diagnostics_result" => {:method, "code_intel.diagnostics"},
     "interactive_journal_result" => {:method, "interactive.journal"},
     "interactive_replay_verify_result" => {:method, "interactive.replay_verify"},
@@ -92,20 +91,17 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
     "mcp_list_result" => {:method, "mcp.list"},
     "wasm_status_result" => {:method, "wasm.status"},
     "wasm_list_result" => {:method, "wasm.list"},
-    "agents_message_result" => {:method, "agents.message"},
     "wasm_upload_result" => {:method, "wasm.upload"},
     "wasm_download_result" => {:method, "wasm.download"},
     "wasm_sign_result" => {:method, "wasm.sign"},
     "wasm_deploy_result" => {:method, "wasm.deploy"},
     "wasm_rollback_result" => {:method, "wasm.rollback"},
-    "agents_message_truncated_result" => {:method, "agents.message"},
     "workspace_browse_result" => {:method, "workspace.browse"},
     "policy_status_result" => {:method, "policy.status"},
     "policy_promote_result" => {:method, "policy.promote"},
     "policy_replay_result" => {:method, "policy.replay"},
     "interactive_event_notification" => {:notification, "interactive.event"},
     "interactive_event_excerpt_notification" => {:notification, "interactive.event"},
-    "coding_event_notification" => {:notification, "coding.event"},
     "stream_lagged_notification" => {:notification, "stream.lagged"},
     "stream_ended_notification" => {:notification, "stream.ended"},
     "error_unauthenticated" => {:error, :unauthenticated},
@@ -137,9 +133,8 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
   # A reading order rather than an alphabet. A band this list does not name is appended
   # alphabetically, so a new band appears in the reference the day it appears in the table.
   @band_order ~w(
-    handshake runtime fleet account agents interactive coding teams
-    plans control permissions policy grants code_intel ledger workspace capabilities
-    upgrade signing wasm
+    handshake runtime fleet account interactive permissions policy grants
+    code_intel ledger workspace capabilities upgrade signing wasm
   )
 
   @impl Mix.Task

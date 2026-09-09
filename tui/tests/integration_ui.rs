@@ -470,7 +470,7 @@ async fn the_ui_draws_a_live_dev_runtime_and_stops_it() {
 
     // ----- the read tabs all draw from live answers ---------------------------------
 
-    for tab in [Tab::Agents, Tab::Teams, Tab::Plans, Tab::Upgrade, Tab::Logs] {
+    for tab in [Tab::Upgrade, Tab::Logs] {
         // Navigation is command-palette driven in the product shell. The palette itself
         // is covered by deterministic interaction tests; here we select each public tab
         // directly so this live-runtime smoke stays focused on decoding and rendering.

@@ -86,10 +86,10 @@ defmodule Ouroboros.Gateway.Methods.Safe do
      %{"reason" => "cursor_pruned", "floor" => floor}}
   end
 
-  # Several planes bound themselves and answer `:timeout` rather than exiting. The request
-  # may still have been accepted durably — `Ouroboros.Team` says so explicitly — so the
-  # answer is the same "the gateway stopped waiting, the runtime did not" that a ceiling
-  # breach gets, and it carries the same admission of not knowing.
+  # A plane that bounds itself answers `:timeout` rather than exiting. The request may
+  # still have been accepted durably, so the answer is the same "the gateway stopped
+  # waiting, the runtime did not" that a ceiling breach gets, and it carries the same
+  # admission of not knowing.
   def reply({:error, :timeout}) do
     {:error, code(:upstream_timeout), "the runtime did not answer in time",
      %{"outcome" => "unknown"}}

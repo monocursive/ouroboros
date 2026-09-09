@@ -3,7 +3,7 @@
 //! Drawing is a pure function of [`App`] plus mutable tree/scroll state, so a `TestBackend`
 //! renders exactly what a terminal does. Nothing here calls the runtime, and nothing here
 //! decides anything: a panel that is empty because a method failed says which method and
-//! why, because "no agents" and "agents.list was refused" are different facts.
+//! why, because "no sessions" and "interactive.list was refused" are different facts.
 
 use ratatui::layout::{Alignment, Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -51,9 +51,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     match app.tab {
         Tab::Dashboard => super::dashboard::draw(frame, rows[1], app),
         Tab::Sessions => super::sessions::draw(frame, rows[1], app),
-        Tab::Agents | Tab::Teams | Tab::Plans | Tab::Upgrade => {
-            super::explorer::draw(frame, rows[1], app)
-        }
+        Tab::Upgrade => super::explorer::draw(frame, rows[1], app),
         Tab::Logs => super::logs::draw(frame, rows[1], app),
     }
 
@@ -1017,9 +1015,6 @@ fn overlay(frame: &mut Frame, area: Rect, app: &App) {
             confirming,
             ..
         } => super::panels::rewind(frame, area, points, *choice, *what, *confirming),
-        Overlay::Delegations { rows, choice, .. } => {
-            super::panels::delegations(frame, area, rows, *choice)
-        }
         Overlay::Mcp { node, list, choice } => {
             super::panels::mcp(frame, area, node.as_deref(), list, *choice)
         }
@@ -1512,7 +1507,7 @@ fn session_picker(frame: &mut Frame, area: Rect, app: &App, selected: Option<&(P
     if sessions.is_empty() {
         frame.render_widget(
             Paragraph::new(Span::styled(
-                if app.sessions.interactive.pending || app.sessions.coding.pending {
+                if app.sessions.interactive.pending {
                     "Listing sessions…"
                 } else {
                     "No sessions yet. Esc closes; use New session from ctrl+p."
@@ -1532,14 +1527,7 @@ fn session_picker(frame: &mut Frame, area: Rect, app: &App, selected: Option<&(P
             let (group, session) = (row.group, row.session);
             let mut spans = vec![
                 Span::styled(
-                    // G1. A delegated task is drawn under the conversation that started
-                    // it, where the two landed in the same group.
-                    format!(
-                        "{}{:<width$}",
-                        if row.depth > 0 { "\u{2514} " } else { "" },
-                        group.label().to_ascii_lowercase(),
-                        width = 12 - 2 * usize::from(row.depth > 0)
-                    ),
+                    format!("{:<12}", group.label().to_ascii_lowercase()),
                     match group {
                         crate::model::Triage::NeedsInput => Style::default().fg(theme::warn()),
                         crate::model::Triage::Working => Style::default().fg(theme::system()),
@@ -1581,8 +1569,8 @@ fn session_picker(frame: &mut Frame, area: Rect, app: &App, selected: Option<&(P
             }
 
             // I2. `tokens · cost`, where the runtime reported one. `interactive.list` does
-            // not carry `usage` on every gateway and never will on `coding.list`; a row
-            // without it shows nothing rather than a zero that reads as a free session.
+            // not carry `usage` on every gateway; a row without it shows nothing rather
+            // than a zero that reads as a free session.
             if let Some(cell) = super::panels::usage_cell(session.usage.as_ref()) {
                 spans.push(Span::styled(
                     format!("  {cell}"),
@@ -2780,16 +2768,6 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
         let focused = *field == dialog.field;
 
         let (label, value, style) = match field {
-            NewField::Plane => (
-                "plane",
-                match dialog.request.plane {
-                    Plane::Interactive => {
-                        "interactive — a conversation you send messages to".to_string()
-                    }
-                    Plane::Coding => "coding — one objective, run to completion".to_string(),
-                },
-                Style::default(),
-            ),
             NewField::Machine => {
                 let selected = dialog.request.machine.trim();
                 if selected.is_empty() {
@@ -2827,11 +2805,6 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
                     hint_style(model),
                 )
             }
-            NewField::Objective => (
-                "objective",
-                text_or_hint(&dialog.request.objective, "required"),
-                hint_style(&dialog.request.objective),
-            ),
             NewField::Workspace => (
                 "workspace",
                 text_or_hint(
@@ -2915,8 +2888,7 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
         ];
 
         // The caret only where typing goes somewhere.
-        if focused && matches!(field, NewField::Workspace | NewField::Objective) && !dialog.pending
-        {
+        if focused && matches!(field, NewField::Workspace) && !dialog.pending {
             spans.push(Span::styled(
                 "_",
                 Style::default().add_modifier(Modifier::SLOW_BLINK),

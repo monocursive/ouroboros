@@ -1,3 +1,26 @@
+defmodule Ouroboros.Capability.ProbeReference do
+  @moduledoc false
+
+  # Lane B's reference shape: a capability that joins the mesh, routes
+  # `ouroboros.agent.message` to the mesh's own answering action, and does nothing else.
+  # It is what `Probe.ready?/1` was written against, so a probe that refuses this refuses
+  # every honest capability.
+
+  use Jido.Agent,
+    name: "ouroboros_capability_probe_reference",
+    description: "A capability that answers the mesh's message convention and nothing more",
+    schema: [
+      inbox: [type: :list, default: []],
+      last_message: [type: :any, default: nil],
+      messages_received: [type: :non_neg_integer, default: 0]
+    ],
+    signal_routes: [
+      {"ouroboros.agent.message", Ouroboros.Mesh.ReceiveMessage}
+    ]
+
+  def actions, do: super() ++ [Ouroboros.Mesh.ReceiveMessage]
+end
+
 defmodule Ouroboros.Capability.ProbeStartSpec do
   @moduledoc false
 
@@ -92,14 +115,14 @@ defmodule Ouroboros.Upgrade.ProbeTest do
   # and `Ouroboros.Mesh` is a singleton.
   use ExUnit.Case, async: false
 
-  alias Ouroboros.Agent.Worker
+  alias Ouroboros.Capability.ProbeReference, as: Reference
   alias Ouroboros.Capability.ProbeStartSpec
   alias Ouroboros.Capability.SlowProbeAnswer
   alias Ouroboros.Upgrade.Rollout.Probe
 
   describe "the bare module form, which is lane B's and always was" do
     test "an agent that starts, answers, and echoes is ready" do
-      assert :ok = Probe.ready?(Worker)
+      assert :ok = Probe.ready?(Reference)
     end
 
     test "a module that cannot be a mesh agent is a named refusal, not an exception" do
@@ -113,7 +136,7 @@ defmodule Ouroboros.Upgrade.ProbeTest do
     test "a term that is not a start spec at all is refused before anything is started" do
       assert {:error, {:invalid_probe_module, _rendered}} = Probe.ready?("not a module")
       assert {:error, {:invalid_probe_module, _rendered}} = Probe.ready?(nil)
-      assert {:error, {:invalid_probe_module, _rendered}} = Probe.ready?({Worker, :not_a_map})
+      assert {:error, {:invalid_probe_module, _rendered}} = Probe.ready?({Reference, :not_a_map})
     end
   end
 
@@ -132,10 +155,10 @@ defmodule Ouroboros.Upgrade.ProbeTest do
     end
 
     test "an empty seed is the bare module, which is what keeps lane B unchanged" do
-      # `Ouroboros.Agent.Worker` is lane B's reference shape and is seeded with nothing by
-      # either form. Both must be `:ok`, and for the same reason.
-      assert :ok = Probe.ready?({Worker, %{}})
-      assert :ok = Probe.ready?(Worker)
+      # `Ouroboros.Capability.ProbeReference` is lane B's reference shape and is seeded
+      # with nothing by either form. Both must be `:ok`, and for the same reason.
+      assert :ok = Probe.ready?({Reference, %{}})
+      assert :ok = Probe.ready?(Reference)
     end
 
     test "each probe gets its own agent, so no seed outlives the run that supplied it" do

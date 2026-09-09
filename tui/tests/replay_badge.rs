@@ -119,7 +119,6 @@ fn railed(open: &str) -> App {
             session_row("s-silent", None),
         ]),
     );
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
 
     app.open_session(Plane::Interactive, open.to_string());
     let subscribe = app
@@ -173,7 +172,6 @@ fn a_card_whose_title_fills_it_drops_the_badge_whole() {
     wordy["objective"] = json!("teach the parser about raw string literals");
 
     answer(&mut app, Tag::Sessions(Plane::Interactive), json!([wordy]));
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
 
     app.open_session(Plane::Interactive, "s-whole".into());
     let subscribe = app

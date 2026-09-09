@@ -6,7 +6,6 @@ impl App {
     pub(super) fn notification(&mut self, notification: Notification) {
         match notification.method.as_str() {
             "interactive.event" => self.event(Plane::Interactive, &notification.params),
-            "coding.event" => self.event(Plane::Coding, &notification.params),
             "stream.lagged" => self.lagged(&notification.params),
             "stream.ended" => self.ended(&notification.params),
             // A notification a newer gateway invented. Counted in the notice line rather
