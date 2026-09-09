@@ -182,78 +182,17 @@ defmodule Ouroboros.Provider.ClaudeAdapterTest do
       assert ClaudeAdapter.prompt_tool() == "mcp__ouroboros__approve"
     end
 
-    test "a bridged session carries the post-edit diagnostics hook and its environment",
-         %{binary: binary, token_file: token_file} do
-      argv = argv_for(interactive_request(approval_mode: :prompt))
-
-      assert %{"hooks" => %{"PostToolUse" => [group]}} =
-               argv |> flag_value("--settings") |> Jason.decode!()
-
-      assert group["matcher"] == "Edit|Write|MultiEdit|NotebookEdit"
-      assert [%{"type" => "command", "command" => command, "timeout" => 15}] = group["hooks"]
-
-      # The bridge environment rides in the command string, quoted and through `env` so
-      # that the operator's shell being fish is not this adapter's problem. It is the same
-      # four values the MCP server definition carries, and the token is a *path* in both.
-      assert String.starts_with?(command, "env OUROBOROS_GATEWAY_ADDR=")
-      assert command =~ "OUROBOROS_GATEWAY_ADDR='127.0.0.1:4599'"
-      assert command =~ "OUROBOROS_GATEWAY_TOKEN_FILE='#{token_file}'"
-      assert command =~ "OUROBOROS_SESSION_ID='session-1'"
-      assert command =~ "OUROBOROS_SESSION_NODE='ouroboros@somewhere'"
-      assert String.ends_with?(command, "'#{binary}' hook post-tool-use")
-      refute command =~ String.duplicate("t", 40)
-    end
-
-    test "an operator's own PostToolUse hooks are kept, not replaced" do
-      argv =
-        argv_for(
-          interactive_request(
-            approval_mode: :prompt,
-            provider_options: %{
-              settings: %{
-                "hooks" => %{
-                  "PostToolUse" => [%{"matcher" => "Bash", "hooks" => [%{"type" => "command"}]}]
-                },
-                "model" => "opus"
-              }
-            }
-          )
-        )
-
-      assert %{"hooks" => %{"PostToolUse" => groups}, "model" => "opus"} =
-               argv |> flag_value("--settings") |> Jason.decode!()
-
-      assert Enum.map(groups, & &1["matcher"]) == ["Bash", "Edit|Write|MultiEdit|NotebookEdit"]
-    end
-
-    test "a settings value this adapter cannot merge leaves the approval bridge standing" do
-      log =
-        ExUnit.CaptureLog.capture_log(fn ->
-          argv =
-            argv_for(
-              interactive_request(
-                approval_mode: :prompt,
-                provider_options: %{settings: ~s({"model": "opus"})}
-              )
-            )
-
-          # The half that asks a human still works; only the diagnostics line is lost.
-          assert "--permission-prompt-tool" in argv
-          assert flag_value(argv, "--settings") == ~s({"model": "opus"})
-        end)
-
-      assert log =~ "unmergeable_settings"
-      assert log =~ "without a diagnostics line"
-    end
-
-    test "an unbridged session is launched with no hook at all" do
-      for mode <- [:auto_edit, :auto_approve] do
+    # The bridge composes an MCP server and a `--permission-prompt-tool`, and nothing
+    # else: `--settings` is the operator's alone. It used to carry a `PostToolUse` hook
+    # that fed the model diagnostics; the plane that answered it is gone
+    # (docs/proposals/core.md §4 A3).
+    test "no session, bridged or not, is launched with a settings block of ours" do
+      for mode <- [:prompt, :auto_edit, :auto_approve] do
         argv = argv_for(interactive_request(approval_mode: mode))
-        refute Enum.any?(argv, &String.contains?(&1, "post-tool-use")), "#{mode} carried a hook"
+        refute "--settings" in argv, "#{mode} carried a settings block"
       end
 
-      argv = argv_for(request(approval_mode: :prompt, metadata: %{}))
-      refute Enum.any?(argv, &String.contains?(&1, "post-tool-use"))
+      refute "--settings" in argv_for(request(approval_mode: :prompt, metadata: %{}))
     end
   end
 
@@ -357,9 +296,9 @@ defmodule Ouroboros.Provider.ClaudeAdapterTest do
     end
   end
 
-  test "with no ouro binary there is no hook to run" do
+  test "with no ouro binary there is no bridge to compose" do
     argv = argv_for(interactive_request(approval_mode: :prompt))
-    refute Enum.any?(argv, &String.contains?(&1, "post-tool-use"))
+    refute "--permission-prompt-tool" in argv
     refute "--settings" in argv
   end
 
