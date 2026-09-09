@@ -363,10 +363,6 @@ defmodule Ouroboros.Web.Transcript do
     state |> flush_agent(false) |> push!(block)
   end
 
-  defp absorb_entry(%Entry.Note{note: {:image, cell}}, state) do
-    state |> flush_agent(false) |> push!(cell)
-  end
-
   defp absorb_entry(%Entry.Note{note: note}, state) do
     state
     |> flush_agent(false)
