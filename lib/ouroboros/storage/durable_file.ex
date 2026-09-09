@@ -29,6 +29,30 @@ defmodule Ouroboros.Storage.DurableFile do
   into this module, so loading the adapter interns them and a store written by an older
   build reads back.
 
+  ## The build, before the first decode
+
+  `[:safe]` asks whether an atom is *interned*, not whether this build spells it. Elixir's
+  default `:interactive` code loading loads a module the first time something calls it, so
+  under `mix run` and `make dev` the atom table at any instant is a function of boot order:
+  the integration fixture measured between 36 and 117 `Ouroboros.*` modules loaded at the
+  effect ledger's first read, run to run, against identical bytes. A checkpoint holding a
+  name whose only speller has not loaded yet then fails to decode — and the store either
+  refuses to boot or, since the fix wave, quarantines the file and starts empty, which is
+  the same data loss without the crash. The shipped release boots in `:embedded` mode with
+  every module already loaded, so this never reached production; every development daemon
+  and every test that boots a data directory has it.
+
+  `ensure_build_loaded/0` closes that: before the first `[:safe]` decode in a VM it loads
+  every module of `:ouroboros` and of the applications it depends on, once, and records
+  that in `:persistent_term`. In embedded mode the modules are already loaded and the call
+  costs a membership check each; in interactive mode it makes a checkpoint's readability a
+  property of the build rather than of the order the boot happened to take.
+
+  The three mechanisms are disjoint and all three are needed. `RetiredAtoms` covers a name
+  **no module of this build spells any more**. The quarantine covers a name **no build can
+  spell**, minted at runtime. This covers a name **this build spells in a module that has
+  not loaded yet**.
+
   ## Quarantine
 
   `get_checkpoint/2` decodes with `[:safe]`, which refuses to *create* an atom. A
@@ -68,6 +92,60 @@ defmodule Ouroboros.Storage.DurableFile do
   """
   @spec retired_atoms() :: [atom()]
   def retired_atoms, do: @retired_atoms
+
+  # Per VM, not per process: the atom table every store decodes against is the VM's.
+  @build_loaded {__MODULE__, :build_loaded}
+
+  @doc """
+  Loads this build's modules once per VM, so a `[:safe]` decode sees the whole build.
+
+  Every module of `:ouroboros` and of every application in its transitive `:applications`
+  closure that the application controller has loaded. An application that is not loaded
+  contributes nothing and is skipped: nothing of it can be running, so nothing of it can
+  have written the checkpoint being read. A module that will not load is not an error
+  here — this is about which names exist, and the modules that do load still intern theirs.
+
+  Idempotent, and cheap after the first call. Two stores decoding at once may both do the
+  work; loading a module twice is the code server's own no-op, so the race costs time and
+  never correctness.
+  """
+  @spec ensure_build_loaded() :: :ok
+  def ensure_build_loaded do
+    if :persistent_term.get(@build_loaded, false) do
+      :ok
+    else
+      _ = load_build()
+      :persistent_term.put(@build_loaded, true)
+      :ok
+    end
+  end
+
+  defp load_build do
+    :ouroboros
+    |> application_closure(MapSet.new())
+    |> Enum.flat_map(&(Application.spec(&1, :modules) || []))
+    |> Code.ensure_all_loaded()
+  rescue
+    # A decode must not become the place a code-path problem is reported. The names that
+    # did get interned still count; the ones that did not were not going to help.
+    error ->
+      Logger.warning("could not preload this build before a checkpoint decode: #{inspect(error)}")
+      :ok
+  end
+
+  defp application_closure(app, seen) do
+    # `nil` is the application controller's answer for an application it has not loaded.
+    case {MapSet.member?(seen, app), Application.spec(app, :applications)} do
+      {true, _applications} ->
+        seen
+
+      {false, nil} ->
+        seen
+
+      {false, applications} ->
+        Enum.reduce(applications, MapSet.put(seen, app), &application_closure/2)
+    end
+  end
 
   @impl true
   def get_checkpoint(key, opts) do
@@ -276,7 +354,10 @@ defmodule Ouroboros.Storage.DurableFile do
     path <> ".tmp-" <> suffix
   end
 
+  # The one call site, immediately before the one decode, so the invariant is local: no
+  # `[:safe]` decode in this module can run against an atom table this build has not filled.
   defp safe_binary_to_term(binary) do
+    ensure_build_loaded()
     {:ok, :erlang.binary_to_term(binary, [:safe])}
   rescue
     ArgumentError -> {:error, :invalid_term}
