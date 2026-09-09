@@ -272,8 +272,8 @@ Every handler runs in a supervised task under a per-method gateway timeout
 (default **15_000ms**; exceptions in the table). Timeout → `-32005`. Every
 upstream call is made in the `safe_call` posture (`try/rescue/catch :exit`) —
 several planes exit rather than error when down (e.g.
-`NodeExecutor.status/1`'s bare `GenServer.call`,
-[node_executor.ex:240](../lib/ouroboros/upgrade/node_executor.ex); `Ouroboros.status/0`
+`Team.Store.list/1`'s bare `GenServer.call`,
+[team/store.ex:30](../lib/ouroboros/team/store.ex); `Ouroboros.status/0`
 itself only survives via its own `safe_value/2`) — a `:noproc`/`:timeout`
 exit becomes `-32004`/`-32005`, never a dead Conn.
 
@@ -857,15 +857,15 @@ exceed 2 MiB by at most one formatted event.
 - The existing `version | "")` exemption arm covers *both* `version` and the
   empty command ([env.sh.eex](../rel/env.sh.eex)) — preserved.
 
-Forge builds keep working: `BuildPeer` runs `:peer` over `standard_io` with
-`-start_epmd false` ([build_peer.ex:177](../lib/ouroboros/upgrade/forge/build_peer.ex)),
-non-distributed by design, and the local deploy path short-circuits on
+Forge builds keep working: a forge is a sandboxed `cargo` build on the node the
+effect landed on ([wasm/forge.ex](../lib/ouroboros/wasm/forge.ex)), which spawns no
+peer and needs no distribution, and the local deploy path short-circuits on
 `target == node()`. **Known risk to test first:** `Upgrade.Epoch` allocates
 under `:global.trans` ([epoch.ex:81](../lib/ouroboros/upgrade/epoch.ex));
 `:global` on a `:nonode@nohost` VM should degrade to the local node but this
 is the single most likely failure point of the dist-off posture.
-**Acceptance test:** the full forge → sign(Local) → deploy → run loop passes
-on a `RELEASE_DISTRIBUTION=none` node. Remote builders/signers and
+**Acceptance test:** the full forge → sign → deploy → run loop passes
+on a `RELEASE_DISTRIBUTION=none` node with a local signing service. Remote builders/signers and
 `start_on/2` placement legitimately require distribution — that's clustering,
 and clustering keeps the existing posture.
 

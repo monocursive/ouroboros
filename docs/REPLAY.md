@@ -242,8 +242,8 @@ run's entries — a hazard the exploration named explicitly.)
 `@checkpoint_version` 1→2 with the `rollout/registry.ex:388-414` migration idiom:
 `@upgradable_versions [1]`, struct-widening `struct(Entry, Map.from_struct(entry))`,
 newer-refused. `@store_key` stays `{:ouroboros, :agent_effect_ledger, 1}` — bumping it
-would hide old evidence behind an empty boot (`node_executor.ex:1201-1205` argues the
-general case). Downstream, mechanically: the `ledger.list` effect enum
+would hide old evidence behind an empty boot: a reader that cannot find the key it
+wrote reports nothing rather than reporting what is there. Downstream, mechanically: the `ledger.list` effect enum
 (`methods.ex:2572`), `mix ouroboros.gateway.golden` + `mix ouroboros.protocol.docs`
 regeneration (both drift-locked by tests), and the retention arithmetic note — a fifth
 kind present shifts the max-min quota to 1000/5; acceptable, because the ledger is the

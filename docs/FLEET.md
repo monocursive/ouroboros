@@ -617,7 +617,10 @@ non-loopback address publishes an actively misleading file today. Fix: add a
 `"host"` field (the bound address), clients prefer it, absent means loopback —
 backward compatible in both directions.
 
-**F5 — A zero-effect deployment records permanent quarantine.** `Rollout.deploy/4`
+**F5 — A zero-effect deployment records permanent quarantine.** *Moot: the code this
+names went with the BEAM forge lane (docs/proposals/core.md §4 A1), and the surviving
+lane already does what the fix asks — `Ouroboros.Wasm.Rollout` validates the target set
+before it checkpoints `:deploying` (`wasm/rollout.ex:8-10,234`).* `Rollout.deploy/4`
 checkpoints `:deploying` (`rollout.ex:191-205`) *before*
 `Coordinator.validate_nodes/1` refuses a disconnected target
 (`coordinator.ex:685-694`). The validation-failed receipt carries deployment
@@ -630,7 +633,9 @@ nothing. Fix: validate the target set (connectivity, shape) *before* the
 registry entry. (Also honest: treat all-`:unchanged` validation receipts as proven
 compensation; but refusing before the checkpoint is the correct primary fix.)
 
-**F6 — The builder-must-match-targets invariant is documented, not enforced.**
+**F6 — The builder-must-match-targets invariant is documented, not enforced.** *Moot:
+a WebAssembly component carries no OTP/Elixir/architecture triple, and the lane that did
+was removed by docs/proposals/core.md §4 A1.*
 `build_peer.ex:36-37` claims the artifact's triple is "whatever the peer observed";
 in fact `Artifact.build/2` stamps the **forging node's** triple
 (`upgrade/artifact.ex:54-56`, called from `forge.ex:150-158` locally), and the
