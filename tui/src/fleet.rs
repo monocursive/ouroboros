@@ -4968,6 +4968,30 @@ mod tests {
         fs::remove_dir_all(data).ok();
     }
 
+    /// The other half of `test/cluster_dist_tls_test.exs`. That test drives `:ssl` with a
+    /// committed copy of this policy and proves what it refuses; this one fails if the
+    /// generator stops emitting exactly that copy. Without the pair, an edit that drops
+    /// `verify_peer` from one half only changes the string the drift test compares to
+    /// itself, and nothing in either language notices.
+    #[test]
+    fn the_generated_policy_is_the_one_the_handshake_test_drives_ssl_with() {
+        let data = scratch("generated-policy-template");
+        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
+        let root = fleet_dir(&data);
+        let generated = fs::read_to_string(root.join(TLS_OPTFILE)).unwrap();
+        let template = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../test/support/fleet_tls/ssl_dist.conf.template"),
+        )
+        .expect("the committed template the Elixir handshake test consults");
+        assert_eq!(
+            generated,
+            template.replace("@FLEET_DIR@", root.to_str().unwrap()),
+            "`generated_runtime_files` no longer emits the policy test/cluster_dist_tls_test.exs proves the behaviour of; regenerate test/support/fleet_tls/ as its README says"
+        );
+        fs::remove_dir_all(data).ok();
+    }
+
     /// F5: a client that dies between the tombstone write and the gateway reply leaves a
     /// silently shrunk roster. It is safe, but it has to be visible and it has to have an
     /// undo.

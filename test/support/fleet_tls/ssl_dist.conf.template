@@ -1,0 +1,4 @@
+[
+  {server, [{certfile, "@FLEET_DIR@/node-cert.pem"}, {keyfile, "@FLEET_DIR@/node-key.pem"}, {cacertfile, "@FLEET_DIR@/ca-cert.pem"}, {verify, verify_peer}, {fail_if_no_peer_cert, true}, {secure_renegotiate, true}, {reuse_sessions, false}, {session_tickets, disabled}]},
+  {client, [{certfile, "@FLEET_DIR@/node-cert.pem"}, {keyfile, "@FLEET_DIR@/node-key.pem"}, {cacertfile, "@FLEET_DIR@/ca-cert.pem"}, {verify, verify_peer}, {secure_renegotiate, true}, {reuse_sessions, false}, {session_tickets, disabled}]}
+].
