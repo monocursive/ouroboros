@@ -1666,7 +1666,7 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
         ),
         Line::from(""),
         Line::from(Span::styled(
-            "machines opens a guided setup; the other rows are this client's session defaults",
+            "the rows below are this client's session defaults",
             theme::label(),
         )),
     ];
