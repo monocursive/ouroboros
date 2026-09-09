@@ -710,7 +710,7 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
 
     **Not a list of the refusals a plane can name.** The per-method "can answer" line is
     derived from the method's table entry and its envelope. A plane's own typed refusals —
-    `unsupported_on_transport`, `shell_refused`, `delegation_failed`, and the rest — travel
+    `unsupported_on_transport`, `shell_refused`, `rewind_refused`, and the rest — travel
     in the `data` of a `-32006` and are documented where they are decided.
     """
   end
