@@ -27,3 +27,42 @@ Regenerating them is not routine — these are a record of what an older node wr
 golden fixture that follows the code. If a store's checkpoint *format* changes so that
 these can no longer be read at all, that is the migration the change owes an answer to,
 and the answer belongs beside it rather than in a rewrite of these bytes.
+
+## Checkpoints this build cannot decode
+
+Captured bytes, not code. Each file is one `:erlang.term_to_binary/1` checkpoint written by
+a VM that held a name this repo's source never contained, so `:erlang.binary_to_term(bytes,
+[:safe])` refuses it on every build — including the one that reads it back in the suite. The
+tests copy a file into a temporary store and assert the owning process boots anyway, with
+the bytes quarantined beside it. They exist so those tests do not quietly depend on the test
+VM never having interned the name.
+
+| file | written by | holds | read back by |
+|---|---|---|---|
+| `grants_forge_capability_atom.checkpoint.term` | `Ouroboros.Control.Grants` v1 | one `:forge` grant whose `constraints.modules` is `Elixir.Ouroboros.Capability.ForgedGrantProbe`, a capability module atom the deleted BEAM forge lane minted at runtime | `test/storage/checkpoint_quarantine_test.exs` |
+| `effect_ledger_forge_capability_atom.checkpoint.term` | `Ouroboros.Agent.EffectLedger` v3 | one settled `forge` entry carrying the same atom in `attempt.module`, `result.module` and `authority.constraints.modules` | `test/storage/checkpoint_quarantine_test.exs` |
+
+Never write that name as a literal — not here, not in a test, not in `test/support`. A
+literal interns it in the beam of whatever compiles it, and the fixture stops being the
+hazard it is here to be. `String.to_atom/1` in a separate VM is how these were made:
+
+```elixir
+# mix run <script> test/support/retired_atoms
+capability = String.to_atom("Elixir.Ouroboros.Capability.ForgedGrantProbe")
+
+%{
+  version: 1,
+  grants: %{
+    {"agent-1", :forge} => %Ouroboros.Control.Grants.Grant{
+      principal: "agent-1",
+      effect: :forge,
+      constraints: %{modules: [capability]},
+      granted_at: "2026-08-20T11:04:07.000000Z"
+    }
+  }
+}
+|> then(&File.write!("test/support/retired_atoms/grants_forge_capability_atom.checkpoint.term", :erlang.term_to_binary(&1)))
+```
+
+The ledger file is the same recipe over one `Ouroboros.Agent.EffectLedger.Entry` struct;
+`test/storage/checkpoint_quarantine_test.exs` names every field it asserts on.

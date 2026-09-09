@@ -28,7 +28,26 @@ defmodule Ouroboros.Storage.DurableFile do
   that a written checkpoint may still carry; `retired_atoms/0` below compiles that list
   into this module, so loading the adapter interns them and a store written by an older
   build reads back.
+
+  ## Quarantine
+
+  `get_checkpoint/2` decodes with `[:safe]`, which refuses to *create* an atom. A
+  checkpoint written by an older build can therefore hold a name this build has never
+  interned — a module it deleted, or, worse, a name that was minted at runtime and was
+  never in anyone's source — and the whole file stops decoding. A store that answers
+  `{:stop, _}` to that turns one unreadable file into a node that does not boot.
+
+  `get_checkpoint_or_quarantine/2` is the same read for a store that would rather keep
+  running: an *undecodable term* moves aside with every byte intact and reads as
+  `:not_found`. This is `Ouroboros.Storage.Records`' doctrine — "quarantine an unreadable
+  individual record, keeping its bytes for inspection" (docs/SIMPLIFICATION.md,
+  "Checkpoint publication") — applied to a store that keeps one aggregate checkpoint
+  rather than a record per id, so the unit of quarantine is the file. Every other failure
+  (I/O, a content-integrity failure, a missing directory) still fails exactly as before,
+  because those say nothing about whether this build can interpret the bytes.
   """
+
+  require Logger
 
   @behaviour Jido.Storage
 
@@ -58,6 +77,33 @@ defmodule Ouroboros.Storage.DurableFile do
         {:error, :enoent} -> :not_found
         {:error, reason} -> {:error, reason}
       end
+    end
+  end
+
+  @doc """
+  `get_checkpoint/2`, except that a checkpoint whose bytes do not decode is quarantined.
+
+  The file is renamed aside as `<name>.quarantined-<unix>.term` — every byte kept, nothing
+  rewritten — one error line is logged naming that path and the reason, and the read
+  answers `:not_found`, which is the caller's "no checkpoint yet" branch. The name keeps
+  its `.term` suffix on purpose: `Ouroboros.Audit.Content.inventory/2` globs
+  `*/checkpoints/*.term`, and a quarantined file that dropped out of the operational
+  content inventory would be bytes on disk nobody is accounting for.
+
+  Only `{:error, :invalid_term}` is quarantined. An unreadable file is otherwise returned
+  as the error it is, and a rename that fails returns the original `:invalid_term` rather
+  than reporting an absent checkpoint while the unreadable one is still standing.
+
+  A caller that uses this instead of `get_checkpoint/2` is saying that an uninterpretable
+  checkpoint should narrow it, not stop it. That is only true of a store whose empty state
+  is the safe one; a store whose empty state would fail open must keep failing closed.
+  """
+  @spec get_checkpoint_or_quarantine(term(), keyword()) ::
+          {:ok, term()} | :not_found | {:error, term()}
+  def get_checkpoint_or_quarantine(key, opts) do
+    case get_checkpoint(key, opts) do
+      {:error, :invalid_term} -> quarantine(key, opts)
+      other -> other
     end
   end
 
@@ -234,6 +280,52 @@ defmodule Ouroboros.Storage.DurableFile do
     {:ok, :erlang.binary_to_term(binary, [:safe])}
   rescue
     ArgumentError -> {:error, :invalid_term}
+  end
+
+  defp quarantine(key, opts) do
+    with {:ok, path} <- checkpoint_path(key, opts) do
+      destination = quarantine_path(path)
+
+      case File.rename(path, destination) do
+        :ok ->
+          Logger.error(
+            "checkpoint #{inspect(key)} at #{path} could not be decoded (:invalid_term); " <>
+              "quarantining it at #{destination} and starting from no checkpoint"
+          )
+
+          :not_found
+
+        {:error, :enoent} ->
+          # Somebody else moved or removed it between the read and the rename. There is no
+          # checkpoint here either way, and no bytes were lost by this process.
+          :not_found
+
+        {:error, reason} ->
+          Logger.error(
+            "checkpoint #{inspect(key)} at #{path} could not be decoded (:invalid_term) and " <>
+              "could not be quarantined (#{inspect(reason)}); it is still standing"
+          )
+
+          {:error, :invalid_term}
+      end
+    end
+  end
+
+  # `.term` is kept as the extension so the file stays inside the operational content
+  # inventory's glob. A second quarantine of the same key in the same second cannot happen
+  # in a single store's lifetime — the first one leaves nothing to read — but two nodes
+  # sharing a data directory is a mistake that must not eat the evidence, so an occupied
+  # destination gets a random discriminator rather than being overwritten.
+  defp quarantine_path(path) do
+    base = Path.rootname(path, ".term")
+    candidate = "#{base}.quarantined-#{System.os_time(:second)}.term"
+
+    if File.exists?(candidate) do
+      suffix = :crypto.strong_rand_bytes(6) |> Base.url_encode64(padding: false)
+      "#{base}.quarantined-#{System.os_time(:second)}-#{suffix}.term"
+    else
+      candidate
+    end
   end
 
   defp remove_if_present(path) do

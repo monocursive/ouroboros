@@ -68,6 +68,30 @@ defmodule Ouroboros.Control.Grants do
   Storage comes from `config :ouroboros, :grants_storage`: ETS in development and test,
   a synced `Ouroboros.Storage.DurableFile` in production. ETS means the authority dies
   with the VM and every principal starts denied, which is the safe direction to fail.
+
+  ## A checkpoint this build cannot decode
+
+  Checkpoints are decoded with `[:safe]`, which refuses to *create* an atom, and this store
+  writes its grants as plain terms. A grant written by an older build can therefore name
+  something this build has never interned — the BEAM forge lane wrote `:modules` entries
+  that were runtime-minted capability module atoms, names that were never in this repo's
+  source and that no build can intern again now that the lane is gone — and the whole file
+  stops decoding.
+
+  Such a file is *quarantined*, not fatal: `Ouroboros.Storage.DurableFile`'s
+  `get_checkpoint_or_quarantine/2` moves it aside with every byte intact, logs one error
+  line naming it, and this store boots with **no grants at all**. That is the deny-by-default
+  posture stated at the top of this moduledoc, reached from the direction that narrows: every
+  principal is denied every effect until an operator grants it again, and the bytes of what
+  they held sit beside the store for them to read. The alternative — refusing to start — takes
+  the whole node down with it, because this is a `:core` child under a `rest_for_one` root.
+
+  A checkpoint that is unreadable for any *other* reason still stops this store:
+  `{:grant_checkpoint_unreadable, reason}` for an I/O or content-integrity failure, and
+  `{:unsupported_grant_checkpoint, version}` for a version this build does not know. Neither
+  says the bytes cannot be interpreted; they say this node could not read them, or should not,
+  and an authority that cannot tell those apart from "written by a build that is gone" would
+  be inventing an empty allow-list out of a broken disk.
   """
 
   use GenServer
@@ -427,8 +451,14 @@ defmodule Ouroboros.Control.Grants do
 
   defp checkpoint(grants), do: %{version: @checkpoint_version, grants: grants}
 
+  # An undecodable checkpoint is quarantined rather than fatal; see the moduledoc. Only the
+  # durable adapter can hold one — an ETS table holds terms, not bytes — so only it is asked
+  # for the quarantining read.
+  defp checkpoint_reader(Ouroboros.Storage.DurableFile), do: :get_checkpoint_or_quarantine
+  defp checkpoint_reader(_adapter), do: :get_checkpoint
+
   defp load(adapter, adapter_opts) do
-    case adapter_call(adapter, :get_checkpoint, [@store_key, adapter_opts]) do
+    case adapter_call(adapter, checkpoint_reader(adapter), [@store_key, adapter_opts]) do
       :not_found ->
         {:ok, %{}}
 
