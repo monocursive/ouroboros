@@ -1,8 +1,8 @@
 defmodule Ouroboros.Provider do
   @moduledoc """
-  What a provider will actually accept for the two options the planes default.
+  What a provider will actually accept for the two options a session defaults.
 
-  Both planes want to start under a usable posture: approvals prompted and the workspace
+  A session wants to start under a usable posture: approvals prompted and the workspace
   writable. Four of the nine bundled providers cannot be told that. Amp declares neither
   option, OpenCode declares no `sandbox_mode`, Kimi declares both but accepts only
   `:default` for each, and Pi refuses `:prompt` approvals. `Jido.Harness` refuses any
@@ -10,24 +10,17 @@ defmodule Ouroboros.Provider do
   did not make those four providers safe — it made them unstartable. A read-only session
   is still available: pass `sandbox_mode: :read_only`.
 
-  The lookup answers per plane because the harness validates the two surfaces against
-  different lists. A run is checked against the adapter's own `normalized_options`
-  (`Jido.Harness.Run.RequestResolver`); a session is checked against the selected
-  transport's `session_options`, which inherit the adapter's list only when the
-  transport declares `:adapter` (`Jido.Harness.SessionManager`). OpenCode is the case
-  that makes the distinction load-bearing: its adapter accepts `approval_mode`, its ACP
-  session transport does not.
+  The lookup names the transport because the harness validates a session against the
+  selected transport's `session_options`, which inherit the adapter's own
+  `normalized_options` only when the transport declares `:adapter`
+  (`Jido.Harness.SessionManager`). OpenCode is the case that makes that load-bearing: its
+  adapter accepts `approval_mode`, its ACP session transport does not.
 
-  What a plane does with the answer is the plane's business, and the two differ:
+  A default the provider cannot take is omitted from the result, which leaves the harness
+  request at `:default` — the provider's own behavior, which is what "the caller said
+  nothing" has always meant.
 
-    * The interactive plane omits a default the provider cannot take, which leaves the
-      harness request at `:default` — the provider's own behavior, which is what "the
-      caller said nothing" has always meant.
-    * The coding plane refuses at creation, because its workspace-write default is a
-      promise the README makes to whoever starts a task, and quietly dropping it would
-      break that promise in the one direction that matters.
-
-  Neither plane rewrites or drops an option the caller stated. A sandbox the provider
+  An option the caller *stated* is never rewritten or dropped. A sandbox the provider
   cannot enforce has to fail loudly rather than quietly become no sandbox at all, so a
   stated value travels to the harness untouched and the harness refuses it by name.
   """
@@ -38,12 +31,12 @@ defmodule Ouroboros.Provider do
   alias Ouroboros.Provider.Session
 
   @typedoc """
-  Which harness surface the options are bound for. An interactive session also carries
-  the transport the caller selected, or `nil` when it takes the adapter's default.
+  Which harness surface the options are bound for, and the transport the caller selected
+  — `nil` when it takes the adapter's default.
   """
-  @type plane :: :coding | {:interactive, atom() | nil}
+  @type plane :: {:interactive, atom() | nil}
 
-  # The default posture, in the order a refusal reports it. Read-only is opt-in.
+  # The default posture. Read-only is opt-in.
   @plane_defaults [approval_mode: :prompt, sandbox_mode: :workspace_write]
 
   # The capabilities a session declares publicly. Deliberately the granular set and not
@@ -156,7 +149,6 @@ defmodule Ouroboros.Provider do
       model: model,
       transport: :direct,
       interactive_approvals: true,
-      coding_approvals: true,
       escalation_behavior: :prompt,
       surface: Keyword.get(opts, :surface)
     }
@@ -205,9 +197,8 @@ defmodule Ouroboros.Provider do
   Returns the `approval_mode` and `sandbox_mode` a request for `provider` may carry.
 
   Options the caller stated in `opts` are returned unchanged. Options the caller left
-  unset take the plane's default when the provider can accept it. On the interactive
-  plane an unacceptable default is omitted from the result; on the coding plane it is
-  refused, and so is a stated value the provider cannot enforce.
+  unset take the plane's default when the provider can accept it, and are omitted from the
+  result when it cannot.
 
   When the provider's spec cannot be resolved — an unregistered atom, or a session
   transport no adapter declares — the defaults are returned as they always were, so the
@@ -217,32 +208,20 @@ defmodule Ouroboros.Provider do
   def safety_options(provider, opts, plane) when is_list(opts) do
     capability = capability(provider, plane)
 
-    # A refusal names every option the provider cannot take, not just the first. Amp and
-    # Kimi can take neither, and answering them one at a time would send the operator
-    # around the loop twice to learn one thing.
-    {taken, unsupported} =
-      Enum.reduce(@plane_defaults, {[], []}, fn {field, plane_default}, {taken, unsupported} ->
+    taken =
+      Enum.reduce(@plane_defaults, [], fn {field, plane_default}, taken ->
         stated? = Keyword.has_key?(opts, field)
         value = Keyword.get(opts, field, plane_default)
 
-        case {plane, evaluate(capability, field, value)} do
-          {{:interactive, _transport}, {:unsupported, _accepted}} when not stated? ->
-            {taken, unsupported}
-
-          {:coding, {:unsupported, accepted}} ->
-            {taken, unsupported ++ [refused(field, value, stated?, accepted)]}
-
-          _supported_or_unresolvable ->
-            {taken ++ [{field, value}], unsupported}
+        case evaluate(capability, field, value) do
+          {:unsupported, _accepted} when not stated? -> taken
+          _supported_stated_or_unresolvable -> taken ++ [{field, value}]
         end
       end)
 
     cond do
       Ouroboros.Audit.admit_provider(provider) != :ok ->
         {:error, "Required audit mode only admits providers with native call recording."}
-
-      unsupported != [] ->
-        {:error, refusal(provider, unsupported)}
 
       refused = unanswerable_prompt(provider, plane, taken, capability) ->
         {:error, refused}
@@ -987,8 +966,6 @@ defmodule Ouroboros.Provider do
     end
   end
 
-  defp unanswerable_prompt(_provider, :coding, _taken, _capability), do: nil
-
   defp unanswerable(provider, capabilities, capability) do
     supported = answerable_modes(capability)
 
@@ -1049,9 +1026,6 @@ defmodule Ouroboros.Provider do
     end
   end
 
-  # A run is validated against the adapter's own list and nothing else.
-  defp normalized_options(spec, :coding), do: {:ok, spec.normalized_options}
-
   # A session is validated against the transport the manager will select, which inherits
   # the adapter's list only when it declares `:adapter`. A transport name no adapter
   # declares is left unresolved on purpose: the harness refuses it by name, and that is a
@@ -1074,48 +1048,6 @@ defmodule Ouroboros.Provider do
       [transport | _rest] -> transport.name
       [] -> :managed
     end
-  end
-
-  defp refused(field, value, stated?, accepted) do
-    %{
-      field: field,
-      value: value,
-      source: if(stated?, do: :stated, else: :plane_default),
-      accepted_values: accepted
-    }
-  end
-
-  defp refusal(provider, unsupported) do
-    override = Enum.map_join(unsupported, ", ", &"#{&1.field}: :default")
-
-    {:unsupported_safety_options,
-     %{
-       plane: :coding,
-       provider: provider,
-       options: unsupported,
-       override: override,
-       message: message(provider, unsupported, override)
-     }}
-  end
-
-  # The message is the whole point of refusing here rather than letting the harness say
-  # "provider does not support normalized option": it names the plane that chose the
-  # value, and the one spelling that accepts the provider's own behavior instead.
-  defp message(provider, unsupported, override) do
-    Enum.map_join(unsupported, " ", &clause(provider, &1)) <>
-      " The coding plane refuses rather than silently downgrading a policy it promised," <>
-      " so the downgrade has to be typed out: pass #{override} to accept " <>
-      "#{inspect(provider)}'s own behavior."
-  end
-
-  defp clause(provider, %{source: :plane_default} = refused) do
-    "#{inspect(provider)} cannot enforce the coding plane's default #{refused.field}: " <>
-      "#{inspect(refused.value)}; it accepts #{inspect(refused.accepted_values)}."
-  end
-
-  defp clause(provider, %{source: :stated} = refused) do
-    "#{inspect(provider)} cannot enforce #{refused.field}: #{inspect(refused.value)}; " <>
-      "it accepts #{inspect(refused.accepted_values)}."
   end
 end
 

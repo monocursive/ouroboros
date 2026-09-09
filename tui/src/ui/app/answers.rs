@@ -152,26 +152,16 @@ impl App {
                     }
                     let panel = match plane {
                         Plane::Interactive => &mut self.sessions.interactive,
-                        Plane::Coding => &mut self.sessions.coding,
                     };
                     panel.ok(sessions, ticks, LIST_TICKS)
                 }
                 Err(error) => {
                     let panel = match plane {
                         Plane::Interactive => &mut self.sessions.interactive,
-                        Plane::Coding => &mut self.sessions.coding,
                     };
                     panel.failed(error.to_string(), ticks, LIST_TICKS)
                 }
             },
-            Tag::Agents => Self::fill_rows(&mut self.agents, result, ticks, project_agent),
-            Tag::Teams => Self::fill_rows(&mut self.teams, result, ticks, project_team),
-            Tag::Plans => Self::fill_rows(&mut self.plans, result, ticks, project_plan),
-            Tag::ControlRuns => Self::fill_rows(&mut self.control, result, ticks, project_run),
-            Tag::AgentState(_) => Self::fill_detail(&mut self.agents, result, ticks),
-            Tag::TeamState(_) => Self::fill_detail(&mut self.teams, result, ticks),
-            Tag::Plan(_) => Self::fill_detail(&mut self.plans, result, ticks),
-            Tag::ControlRun(_) => Self::fill_detail(&mut self.control, result, ticks),
             Tag::Signing => {
                 Self::fill_value(&mut self.upgrade.signing, result, ticks, UPGRADE_TICKS)
             }
@@ -381,19 +371,6 @@ impl App {
                 Ok(value) => self.shell_finished(plane, &id, &command, &value),
                 Err(error) => self.shell_refused(&error),
             },
-            Tag::Delegate { plane: _, id } => {
-                self.delegating = false;
-
-                match result {
-                    Ok(value) => self.delegated(&value),
-                    Err(error) => self.action_failed("delegate", Plane::Interactive, &id, error),
-                }
-            }
-            Tag::Delegations { plane, id, show } => match result {
-                Ok(value) => self.delegations_read(plane, &id, show, &value),
-                Err(error) if show => self.action_failed("delegations", plane, &id, error),
-                Err(_quiet) => {}
-            },
             Tag::Action {
                 label, plane, id, ..
             } => match result {
@@ -418,46 +395,6 @@ impl App {
                     self.action_failed(label, plane, &id, error);
                     self.resume_picker_if_requested();
                 }
-            },
-            Tag::ControlSubmit => match result {
-                Ok(value) => {
-                    let id = value
-                        .get("id")
-                        .map(model::compact)
-                        .unwrap_or_else(|| "unknown".to_string());
-                    self.inform(format!("control run {id} submitted"), NoticeKind::Info);
-                    self.control.rows.invalidate();
-                    self.control.detail.invalidate();
-                }
-                Err(ClientError::Rpc(rpc)) => self.inform(
-                    format!("control submit was refused: {}", model::refusal(&rpc)),
-                    NoticeKind::Error,
-                ),
-                Err(error) => self.inform(
-                    format!("control submit was refused: {error}"),
-                    NoticeKind::Error,
-                ),
-            },
-            Tag::ControlCancel(id) => match result {
-                Ok(_) => {
-                    self.inform(
-                        format!("cancel accepted for control run {id}"),
-                        NoticeKind::Info,
-                    );
-                    self.control.rows.invalidate();
-                    self.control.detail.invalidate();
-                }
-                Err(ClientError::Rpc(rpc)) => self.inform(
-                    format!(
-                        "cancel of control run {id} was refused: {}",
-                        model::refusal(&rpc)
-                    ),
-                    NoticeKind::Error,
-                ),
-                Err(error) => self.inform(
-                    format!("cancel of control run {id} was refused: {error}"),
-                    NoticeKind::Error,
-                ),
             },
             Tag::EventDetail {
                 plane,
@@ -740,38 +677,6 @@ impl App {
         }
     }
 
-    fn fill_rows(
-        explorer: &mut Explorer,
-        result: Result<Value, ClientError>,
-        ticks: u64,
-        project: fn(&Value) -> Option<Row>,
-    ) {
-        match result {
-            Ok(value) => {
-                let rows: Vec<Row> = value
-                    .as_array()
-                    .map(|items| items.iter().filter_map(project).collect())
-                    .unwrap_or_default();
-
-                if explorer.selected >= rows.len() {
-                    explorer.selected = rows.len().saturating_sub(1);
-                }
-
-                explorer.rows.ok(rows, ticks, LIST_TICKS);
-            }
-            Err(error) => explorer.rows.failed(error.to_string(), ticks, LIST_TICKS),
-        }
-    }
-
-    fn fill_detail(explorer: &mut Explorer, result: Result<Value, ClientError>, ticks: u64) {
-        match result {
-            Ok(value) => explorer.detail.ok(value, ticks, DETAIL_TICKS),
-            Err(error) => explorer
-                .detail
-                .failed(error.to_string(), ticks, DETAIL_TICKS),
-        }
-    }
-
     fn fill_value(
         panel: &mut Loadable<Value>,
         result: Result<Value, ClientError>,
@@ -1020,43 +925,6 @@ impl App {
     }
 }
 
-fn project_agent(value: &Value) -> Option<Row> {
-    let id = value.get("id").map(model::compact)?;
-
-    Some(Row {
-        label: format!(
-            "{id}  {}",
-            value.get("node").map(model::compact).unwrap_or_default()
-        ),
-        status: value
-            .get("replicas")
-            .map(|replicas| format!("{} replicas", model::compact(replicas))),
-        id,
-        raw: value.clone(),
-    })
-}
-
-fn project_team(value: &Value) -> Option<Row> {
-    let id = value.get("id").map(model::compact)?;
-
-    Some(Row {
-        label: format!(
-            "{id}  {} workers  {} delegations",
-            value
-                .get("worker_count")
-                .map(model::compact)
-                .unwrap_or_default(),
-            value
-                .get("delegation_count")
-                .map(model::compact)
-                .unwrap_or_default()
-        ),
-        status: value.get("status").map(model::compact),
-        id,
-        raw: value.clone(),
-    })
-}
-
 /// The one `interactive.configure {sandbox_mode}` refusal worth rendering as itself.
 ///
 /// The runtime's typed answers name `field: "sandbox_mode"` and say, in their own words,
@@ -1105,35 +973,4 @@ fn sandbox_refusal(error: &ClientError) -> Option<String> {
     Some(format!(
         "this session's provider takes only {accepted} for sandbox_mode ({reason})"
     ))
-}
-
-fn project_plan(value: &Value) -> Option<Row> {
-    let id = value.get("id").map(model::compact)?;
-
-    Some(Row {
-        label: format!(
-            "{id}  v{}",
-            value.get("version").map(model::compact).unwrap_or_default()
-        ),
-        status: value.get("status").map(model::compact),
-        id,
-        raw: value.clone(),
-    })
-}
-
-fn project_run(value: &Value) -> Option<Row> {
-    let id = value.get("id").map(model::compact)?;
-
-    Some(Row {
-        label: format!(
-            "{id}  rev {}",
-            value
-                .get("revision")
-                .map(model::compact)
-                .unwrap_or_default()
-        ),
-        status: value.get("status").map(model::compact),
-        id,
-        raw: value.clone(),
-    })
 }

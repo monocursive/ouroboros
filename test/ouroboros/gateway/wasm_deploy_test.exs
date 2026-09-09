@@ -455,7 +455,7 @@ defmodule Ouroboros.Gateway.WasmDeployTest do
       # And the refusal says what a probe *does* take. `only_keys/2`'s sentence — "params
       # contains unsupported fields: message" — is right for a method's own envelope and
       # useless two levels down in a spec somebody is writing for the first time: the author
-      # of W11's guide spelled the body `message`, because that is what `agents.message`
+      # of W11's guide spelled the body `message`, because that is what a mesh message
       # calls it, and the refusal named the mistake without naming the fix. Restore
       # `only_keys/2` here and this is red.
       assert {:error, code, message} =

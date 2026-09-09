@@ -10,12 +10,16 @@ defmodule Ouroboros.Storage.DurableFilePreloadTest do
   first. The integration fixture measured between 36 and 117 `Ouroboros.*` modules loaded
   at the effect ledger's first read, run to run, against identical bytes.
 
-  `Ouroboros.Agent.EffectLedger` is `Ouroboros.Application`'s child at `application.ex:150`
-  and the atoms it stores in a refusal — `:unidentified_principal`,
-  `:missing_effect_state`, `:missing_agent_state` — are spelled in exactly one module of
-  this build, `Ouroboros.Agent.Effects.Runner`, which nothing loads before the ledger
-  reads. The ledger quarantines a checkpoint it cannot decode and starts empty, so the
-  cost is not a crash: it is the whole ledger, silently.
+  `Ouroboros.Agent.EffectLedger` is a supervised child of `Ouroboros.Application`, above
+  every module a forge refusal's vocabulary comes from. The atoms below —
+  `:forged_bundle_mismatch`, `:wasm_forge_timeout`, `:scratch_unwritable` — are spelled in
+  exactly one module of this build, `Ouroboros.Wasm.Forge`, which nothing loads before the
+  ledger reads. The ledger quarantines a checkpoint it cannot decode and starts empty, so
+  the cost is not a crash: it is the whole ledger, silently.
+
+  They are deliberately names `Ouroboros.Storage.RetiredAtoms` does **not** hold: this
+  build spells all three, and the only question is whether the module that spells them has
+  loaded yet. That is the case the retired list cannot cover and this preload is for.
 
   Each boot below is a `:peer` node — a VM that has never interned those names — with
   `:ouroboros` loaded and not started, which is the state `mix run --no-start` and a
@@ -24,8 +28,8 @@ defmodule Ouroboros.Storage.DurableFilePreloadTest do
   otherwise poison the boots after it.
 
   Nothing here spells the three atoms as literals: they are read out of the module that
-  owns them. If a later slice deletes `Runner`, this test fails at `Code.ensure_loaded!/1`
-  rather than quietly becoming their only speller, which is what
+  owns them. If a later slice deletes `Ouroboros.Wasm.Forge`, this test fails at
+  `Code.ensure_loaded!/1` rather than quietly becoming their only speller, which is what
   `Ouroboros.Storage.RetiredAtoms` exists to decide.
   """
 
@@ -35,14 +39,14 @@ defmodule Ouroboros.Storage.DurableFilePreloadTest do
   alias Ouroboros.Storage.DurableFile
 
   @boots 10
-  @speller Ouroboros.Agent.Effects.Runner
-  @refusals ~w(unidentified_principal missing_effect_state missing_agent_state)
+  @speller Ouroboros.Wasm.Forge
+  @refusals ~w(forged_bundle_mismatch wasm_forge_timeout scratch_unwritable)
 
   @tag timeout: 600_000
   test "the effect ledger loads intact on ten fresh boots that have never interned its atoms" do
     ensure_distributed!()
     source = written_ledger!()
-    expected = Enum.map(@refusals, &{:effect_denied, :delegate, String.to_existing_atom(&1)})
+    expected = Enum.map(@refusals, &String.to_existing_atom/1)
 
     outcomes =
       for boot <- 1..@boots do
@@ -80,7 +84,7 @@ defmodule Ouroboros.Storage.DurableFilePreloadTest do
 
   # The three refusal reasons, taken from the module that spells them rather than written
   # here. `Code.ensure_loaded!/1` is what makes `to_existing_atom/1` answerable in a test
-  # VM that may not have loaded the runner yet — the same interning this fix is about.
+  # VM that may not have loaded the forge yet — the same interning this fix is about.
   defp refusal_reasons do
     Code.ensure_loaded!(@speller)
     Enum.map(@refusals, &String.to_existing_atom/1)
@@ -103,21 +107,25 @@ defmodule Ouroboros.Storage.DurableFilePreloadTest do
     directory
   end
 
+  # `sanitize_error/1` stores `classify(error)`, which returns an atom as itself, so the
+  # bare reason is what lands in the checkpoint — and it is the only thing in this entry
+  # that a fresh VM has not already interned. `attempt.module` is the lane-W string
+  # (`"wasm/<name>"`), never an atom.
   defp refused(index, reason) do
     %{
       id: "preload-denied-#{index}",
-      effect: :delegate,
+      effect: :forge,
       principal: "session:preload",
       claimed_from: "session:preload",
-      attempt: %{team: "preload"},
+      attempt: %{module: "wasm/preload-#{index}"},
       authority: %{
         decision: :denied,
         reason: :not_granted,
         constraints: %{},
         granted_at: "2026-09-09T00:00:00Z"
       },
-      cause: %{signal_id: "signal-preload-#{index}", signal_type: "effect.delegate"},
-      error: {:effect_denied, :delegate, reason}
+      cause: %{signal_id: "signal-preload-#{index}", signal_type: "effect.forge"},
+      error: reason
     }
   end
 

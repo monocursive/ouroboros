@@ -57,7 +57,7 @@ defmodule Ouroboros.Upgrade.Rollout.Evaluation do
 
   `{:equals, value}` and `{:contains, substring}` are matched against the capability's
   *answer*: the `:last_answer` key of its post-exchange state when it declares one — the
-  key `Ouroboros.Agent.Worker` already uses for a result — and otherwise the whole state
+  key `Ouroboros.Wasm.Capability` already uses for a result — and otherwise the whole state
   map. A capability that wants `{:equals, _}` to mean "it answered this" must publish an
   answer; one that does not is better gated with `{:state_matches, key, value}`, which
   reads a named key out of the agent's state through `Ouroboros.Mesh.state/1`.

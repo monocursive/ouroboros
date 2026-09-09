@@ -76,8 +76,8 @@ defmodule Ouroboros.Upgrade.RuntimeConfigTest do
 
     assert get_in(config, [:ouroboros, :data_dir]) == data_dir
 
-    assert {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "coding")} ==
-             get_in(config, [:ouroboros, :coding_storage])
+    assert {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "interactive")} ==
+             get_in(config, [:ouroboros, :interactive_storage])
 
     assert {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "capabilities")} ==
              get_in(config, [:ouroboros, :capability_storage])

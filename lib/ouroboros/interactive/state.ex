@@ -1,9 +1,12 @@
 defmodule Ouroboros.Interactive.State do
   @moduledoc "Serializable domain state for one interactive coding session."
 
-  alias Ouroboros.Coding.TaskState
+  alias Ouroboros.AgentProfile
   alias Ouroboros.Interactive.Event
+  alias Ouroboros.Prompt.Assembler
   alias Ouroboros.Prompt.Trace
+  alias Ouroboros.Provider
+  alias Ouroboros.Runtime.Exposure
 
   @session_options [
     :transport,
@@ -59,11 +62,8 @@ defmodule Ouroboros.Interactive.State do
                 :handed_off_from,
                 title_source: nil,
                 forks: 0,
-                # G1. What this conversation delegated, keyed by delegation id. Bounded
-                # by construction: a picker draws these, and a session that delegated
-                # five hundred times is a session whose rail row must still fit.
-                delegations: %{},
-                # D7. Mirrors `Ouroboros.Coding.TaskState`: the request, then the record.
+                # D7. The request, then the record: `worktree_requested` is the start
+                # option and `worktree` is what admission actually provisioned.
                 worktree_requested: false,
                 worktree: nil,
                 cursor: 0,
@@ -142,7 +142,6 @@ defmodule Ouroboros.Interactive.State do
           forked_from: String.t() | nil,
           handed_off_from: String.t() | nil,
           forks: non_neg_integer(),
-          delegations: %{optional(String.t()) => delegation()},
           cursor: non_neg_integer(),
           sequence_offset: non_neg_integer(),
           resumes: non_neg_integer(),
@@ -175,30 +174,89 @@ defmodule Ouroboros.Interactive.State do
           required(:last) => map()
         }
 
-  @typedoc """
-  One delegation this conversation started.
+  # Trusted runtime attribution, deliberately absent from public/provider options.
+  @request_options [
+    :audit_actor_id,
+    :model,
+    :provider_session_id,
+    :max_turns,
+    :runtime_timeout_ms,
+    :idle_timeout_ms,
+    :system_prompt,
+    :agent_profile,
+    :allowed_tools,
+    :disallowed_tools,
+    :add_dirs,
+    :attachments,
+    :reasoning_effort,
+    :provider_options,
+    :approval_mode,
+    :sandbox_mode,
+    :runtime_exposure
+  ]
 
-  Ids and a status, and never the objective's text: the objective is the child task's own
-  durable record, and copying it here would put one plane's content in the other's
-  checkpoint. `status` is a hint that follows the team's own record — `interactive.delegations`
-  reads the authority, and this is what a rail row can draw without asking.
-  """
-  @type delegation :: %{
-          required(:id) => String.t(),
-          required(:team_id) => String.t(),
-          required(:task_id) => String.t(),
-          required(:task_node) => node(),
-          required(:objective_digest) => String.t(),
-          required(:status) => atom(),
-          required(:created_at) => String.t(),
-          required(:updated_at) => String.t(),
-          optional(:result_digest) => String.t() | nil
-        }
-
-  # One conversation's delegations, bounded where they are written. A session that
-  # delegated past this is refused a new one rather than silently forgetting an old one:
-  # dropping the oldest would lose the link to a child task that is still running.
-  @max_delegations 100
+  # Values for these adapter options are reproducible execution policy, not
+  # credentials. Rich settings, arbitrary argv, and toolbox maps belong in the
+  # node's provider configuration and never in a durable session checkpoint.
+  @durable_provider_options [
+    :agent,
+    :allowed_mcp_server_names,
+    :api_timeout_ms,
+    :attach,
+    :base_url,
+    :betas,
+    :cli_path,
+    :continue,
+    :dangerously_allow_all,
+    :debug,
+    :extensions,
+    :fallback_model,
+    :fork,
+    :fork_session,
+    # R3. A turn id or ordinal naming where a native fork branches. Reproducible execution
+    # policy in exactly the sense this list means: it is the branch point a child was
+    # started at, it is worth nothing without `fork_session`, and it carries no secret.
+    :fork_to_turn,
+    :log_file,
+    :log_level,
+    :max_budget_usd,
+    :model_provider,
+    :max_iterations,
+    :model_reasoning_summary,
+    :network_access_enabled,
+    :no_color,
+    :no_context_files,
+    :no_extensions,
+    :no_ide,
+    :no_jetbrains,
+    :no_notifications,
+    :no_session,
+    :no_skills,
+    :offline,
+    # B2. `plan` is execution policy in the plainest sense — a read-only posture with an
+    # exit approval attached — and it is durable for the same reason `approval_mode` is: a
+    # session resumed from a checkpoint must come back in the posture it was running in.
+    :plan,
+    :event_limit,
+    :project_trust,
+    :resume_last,
+    :session_dir,
+    :session_name,
+    :skip_git_repo_check,
+    :skills,
+    :skills_dirs,
+    # G3. The two halves of subagent policy an operator may state at a start: which model
+    # children run on, and how long one may run. A child's depth, parent and task id are
+    # deliberately *not* here: this runtime sets them when it opens a child, and a request
+    # that could name them would be a request that could forge a lineage.
+    :subagent_deadline_ms,
+    :subagent_model,
+    :tool_timeout_ms,
+    :thinking,
+    :title,
+    :visibility,
+    :web_search_enabled
+  ]
 
   @terminal_statuses [:closed, :failed, :cancelled, :lost]
   @terminal_turn_statuses [:completed, :failed, :interrupted, :ambiguous]
@@ -207,12 +265,11 @@ defmodule Ouroboros.Interactive.State do
   def new(id, opts) when is_list(opts) do
     if Keyword.keyword?(opts) and unique_keys?(opts) do
       with :ok <- validate_session_options(opts),
+           :ok <- validate_id(id),
            :ok <- validate_parent(Keyword.get(opts, :forked_from)),
            :ok <- validate_parent(Keyword.get(opts, :handed_off_from)),
            {:ok, base} <-
-             TaskState.new(
-               id,
-               "interactive coding session",
+             base(
                Keyword.drop(opts, @session_options ++ @struct_options),
                # The transport decides which normalized options a session may carry, so
                # the capability lookup needs the one this session will select. It is a
@@ -251,6 +308,183 @@ defmodule Ouroboros.Interactive.State do
   end
 
   def new(_id, _opts), do: {:error, :invalid_options}
+
+  # The workspace, provider and option envelope a session starts with, validated once and
+  # normalized into what `request/1` will hand a harness. Every refusal here is about the
+  # *start options*, which is why it answers a bare map rather than a struct: the session
+  # struct is built by `new/2` from it.
+  defp base(opts, plane) do
+    workspace_option = Keyword.get(opts, :workspace, File.cwd!())
+    provider = Keyword.get(opts, :provider, :native)
+    sandbox_mode = Keyword.get(opts, :sandbox_mode, :workspace_write)
+    workspace_mode = Keyword.get(opts, :workspace_mode, default_workspace_mode(sandbox_mode))
+    worktree = Keyword.get(opts, :worktree, false)
+    safety = Provider.safety_options(provider, opts, plane)
+    assembly = assemble_prompt_options(Map.new(opts))
+
+    cond do
+      not is_atom(provider) or is_nil(provider) ->
+        {:error, :invalid_provider}
+
+      provider == :codex ->
+        {:error,
+         {:provider_removed, :codex,
+          "Codex CLI execution was removed; use provider :native with an openai: or openai_codex: model"}}
+
+      not is_binary(workspace_option) ->
+        {:error, {:invalid_workspace, workspace_option}}
+
+      not valid_workspace_mode?(workspace_mode) ->
+        {:error, {:invalid_workspace_mode, workspace_mode}}
+
+      not is_boolean(worktree) ->
+        {:error, {:invalid_worktree, worktree}}
+
+      inline_environment?(opts) ->
+        {:error, :inline_environment_not_persisted}
+
+      inline_mcp_config?(opts) ->
+        {:error, :inline_mcp_config_not_persisted}
+
+      not valid_system_prompt?(Keyword.get(opts, :system_prompt)) ->
+        {:error, :invalid_system_prompt}
+
+      not valid_agent_profile?(Keyword.get(opts, :agent_profile)) ->
+        {:error, :invalid_agent_profile}
+
+      # The assembler's reason is the whole diagnosis: which option, which delimiter,
+      # which empty profile. Collapsing it to one atom sent callers to look at the
+      # profile when the fault was in `allowed_tools`.
+      match?({:error, _reason}, assembly) ->
+        {:error, {:invalid_agent_profile_options, elem(assembly, 1)}}
+
+      not valid_runtime_exposure?(Keyword.get(opts, :runtime_exposure, true)) ->
+        {:error, :invalid_runtime_exposure}
+
+      not valid_provider_options?(provider, Keyword.get(opts, :provider_options, %{})) ->
+        {:error, {:unsafe_provider_options, provider}}
+
+      not File.dir?(Path.expand(workspace_option)) ->
+        {:error, {:invalid_workspace, Path.expand(workspace_option)}}
+
+      not valid_event_limit?(Keyword.get(opts, :event_limit, 10_000)) ->
+        {:error, :invalid_event_limit}
+
+      match?({:error, _reason}, safety) ->
+        safety
+
+      true ->
+        {:ok, safety_options} = safety
+        {:ok, prompt_assembly} = assembly
+        options = request_options(provider, opts, safety_options, prompt_assembly)
+
+        {:ok,
+         %{
+           provider: provider,
+           workspace: Path.expand(workspace_option),
+           workspace_mode: workspace_mode,
+           worktree_requested: worktree,
+           event_limit: Keyword.get(opts, :event_limit, 10_000),
+           prompt_trace: Assembler.trace(prompt_assembly),
+           runtime_snapshot: capture_runtime(options),
+           options: options
+         }}
+    end
+  end
+
+  # `Ouroboros.Provider` has already decided what the two safety options may be, stated
+  # values included, so they are dropped here and merged back rather than defaulted a
+  # second time. An option it omitted must be absent from the request, not present as
+  # `nil`: absent is what leaves the harness request at `:default`.
+  defp request_options(provider, opts, safety_options, assembly) do
+    opts
+    |> Keyword.take(@request_options)
+    |> Keyword.drop([:approval_mode, :sandbox_mode, :agent_profile])
+    |> Keyword.merge(safety_options)
+    |> Map.new()
+    |> put_provider_execution_defaults(provider)
+    |> put_system_prompt(assembly.system_prompt)
+    |> Map.put(:runtime_exposure, Keyword.get(opts, :runtime_exposure, true))
+  end
+
+  defp put_provider_execution_defaults(options, provider) do
+    case Provider.execution_options(provider, Map.get(options, :provider_options)) do
+      nil -> Map.delete(options, :provider_options)
+      provider_options -> Map.put(options, :provider_options, provider_options)
+    end
+  end
+
+  defp put_system_prompt(options, nil), do: Map.delete(options, :system_prompt)
+
+  defp put_system_prompt(options, system_prompt),
+    do: Map.put(options, :system_prompt, system_prompt)
+
+  defp valid_event_limit?(limit), do: is_integer(limit) and limit > 0 and limit <= 100_000
+
+  defp default_workspace_mode(:read_only), do: :shared_read
+  defp default_workspace_mode(_sandbox_mode), do: :exclusive
+
+  defp valid_workspace_mode?(mode), do: mode in [:shared_read, :exclusive]
+
+  defp inline_environment?(opts) do
+    Keyword.has_key?(opts, :env) or Keyword.has_key?(opts, :env_mode)
+  end
+
+  defp inline_mcp_config?(opts), do: Keyword.has_key?(opts, :mcp_config)
+
+  defp valid_provider_options?(_provider, options) when options in [nil, %{}], do: true
+
+  defp valid_provider_options?(provider, options) when is_map(options) do
+    allowed_by_adapter =
+      case Jido.Harness.Registry.spec(provider) do
+        {:ok, spec} -> spec.provider_options
+        {:error, _reason} -> []
+      end
+
+    Enum.all?(options, fn {key, value} ->
+      atom_key = normalize_provider_option_key(key, allowed_by_adapter)
+
+      atom_key in @durable_provider_options and
+        atom_key in allowed_by_adapter and
+        Jido.Harness.Redaction.redact(value) == value
+    end)
+  end
+
+  defp valid_provider_options?(_provider, _options), do: false
+
+  defp normalize_provider_option_key(key, _allowed) when is_atom(key), do: key
+
+  defp normalize_provider_option_key(key, allowed) when is_binary(key) do
+    Enum.find(allowed, &(Atom.to_string(&1) == key))
+  end
+
+  defp normalize_provider_option_key(_key, _allowed), do: nil
+
+  defp valid_agent_profile?(nil), do: true
+  defp valid_agent_profile?(%AgentProfile{} = profile), do: AgentProfile.valid?(profile)
+  defp valid_agent_profile?(_profile), do: false
+
+  defp valid_runtime_exposure?(value), do: is_boolean(value)
+
+  defp assemble_prompt_options(options) do
+    Assembler.assemble(Map.get(options, :agent_profile),
+      system_prompt: Map.get(options, :system_prompt),
+      allowed_tools: Map.get(options, :allowed_tools),
+      disallowed_tools: Map.get(options, :disallowed_tools),
+      runtime: profile_runtime(options)
+    )
+  end
+
+  defp profile_runtime(options) do
+    Map.get(options, :runtime_exposure, true) == true and
+      match?(%AgentProfile{}, options[:agent_profile])
+  end
+
+  defp capture_runtime(%{runtime_exposure: true} = options) do
+    Exposure.capture(sandbox_mode: Map.get(options, :sandbox_mode))
+  end
+
+  defp capture_runtime(_options), do: nil
 
   @spec terminal?(t()) :: boolean()
   def terminal?(%__MODULE__{status: status}), do: status in @terminal_statuses
@@ -520,46 +754,6 @@ defmodule Ouroboros.Interactive.State do
   @spec forks(t()) :: non_neg_integer()
   def forks(%__MODULE__{} = state), do: Map.get(state, :forks, 0) || 0
 
-  @doc """
-  Every delegation this conversation started, keyed by delegation id.
-
-  Read through `Map.get/3` so a checkpoint written before delegations existed projects as
-  a session that delegated nothing rather than a missing key.
-  """
-  @spec delegations(t()) :: %{optional(String.t()) => delegation()}
-  def delegations(%__MODULE__{} = state), do: Map.get(state, :delegations) || %{}
-
-  @doc "The bound on how many delegations one conversation may hold."
-  @spec max_delegations() :: pos_integer()
-  def max_delegations, do: @max_delegations
-
-  @doc """
-  Records or updates one delegation.
-
-  Refused with `:delegation_limit_reached` for a *new* delegation past the bound; an
-  update to one already recorded always lands, because a terminal status arriving for a
-  child that is running is exactly the news this map exists to carry.
-  """
-  @spec put_delegation(t(), delegation()) :: {:ok, t()} | {:error, term()}
-  def put_delegation(%__MODULE__{} = state, %{id: id} = delegation) when is_binary(id) do
-    existing = delegations(state)
-
-    if not Map.has_key?(existing, id) and map_size(existing) >= @max_delegations do
-      {:error, {:delegation_limit_reached, @max_delegations}}
-    else
-      {:ok, %{state | delegations: Map.put(existing, id, delegation)}}
-    end
-  end
-
-  def put_delegation(%__MODULE__{}, delegation),
-    do: {:error, {:invalid_delegation, delegation}}
-
-  @doc "The child task ids this conversation started, sorted, for a nesting client."
-  @spec children(t()) :: [String.t()]
-  def children(%__MODULE__{} = state) do
-    state |> delegations() |> Enum.map(fn {_id, record} -> record.task_id end) |> Enum.sort()
-  end
-
   @doc false
   @spec count_fork(t()) :: t()
   def count_fork(%__MODULE__{} = state), do: %{state | forks: forks(state) + 1}
@@ -671,7 +865,6 @@ defmodule Ouroboros.Interactive.State do
     |> Map.put(:forked_from, forked_from(state))
     |> Map.put(:handed_off_from, handed_off_from(state))
     |> Map.put(:forks, forks(state))
-    |> Map.put(:delegations, delegations(state))
   end
 
   @doc """
@@ -698,10 +891,6 @@ defmodule Ouroboros.Interactive.State do
     |> Map.put(:events, [])
     |> Map.put(:turns, %{})
     |> Map.put(:usage, usage_summary(state))
-    # Ids, not records: a rail row nests its children by id and fetches the rest from
-    # `coding.info`, exactly as it does for everything else a row drops.
-    |> Map.put(:delegations, %{})
-    |> Map.put(:children, children(state))
   end
 
   @doc """
@@ -877,7 +1066,6 @@ defmodule Ouroboros.Interactive.State do
       optional_id?(state.workspace_lease_id) and optional_id?(state.harness_session_id) and
       optional_id?(state.provider_session_id) and valid_title?(state) and
       optional_id?(forked_from(state)) and optional_id?(handed_off_from(state)) and
-      valid_delegations?(state) and
       is_integer(forks(state)) and forks(state) >= 0 and
       is_integer(state.cursor) and state.cursor >= 0 and
       is_integer(sequence_offset(state)) and sequence_offset(state) >= 0 and
@@ -897,28 +1085,21 @@ defmodule Ouroboros.Interactive.State do
 
   def loadable?(_state), do: false
 
+  # `loadable?/1` below already requires this of a session it reads back, and every store
+  # write is keyed by it, so a session built with a blank or non-binary id is one that can
+  # acquire a workspace lease and only fail afterwards. `Ouroboros.InteractiveSession.start/1`
+  # is the caller that can still hand one in: it reads `:id` with `Keyword.get_lazy/3`
+  # behind a `valid_options?/1` that checks keyword shape and nothing else.
+  defp validate_id(id) do
+    if valid_id?(id), do: :ok, else: {:error, :invalid_session_id}
+  end
+
   defp validate_parent(nil), do: :ok
   defp validate_parent(parent) when is_binary(parent), do: validate_forked_from(parent)
   defp validate_parent(parent), do: {:error, {:invalid_parent_session, parent}}
 
   defp validate_forked_from(parent) do
     if valid_id?(parent), do: :ok, else: {:error, {:invalid_parent_session, parent}}
-  end
-
-  # D7's durable half, held to the same rule as everything else here: shape and
-  # serializability. A worktree record is a map of strings, or it is `nil`.
-  defp valid_delegations?(state) do
-    delegations = Map.get(state, :delegations)
-
-    (is_nil(delegations) or is_map(delegations)) and
-      Enum.all?(delegations || %{}, fn
-        {id, %{id: id, team_id: team, task_id: task, task_node: owner, status: status}} ->
-          valid_id?(id) and valid_id?(team) and valid_id?(task) and is_atom(owner) and
-            not is_nil(owner) and is_atom(status)
-
-        _other ->
-          false
-      end)
   end
 
   defp valid_worktree?(state) do
@@ -958,6 +1139,9 @@ defmodule Ouroboros.Interactive.State do
           :approval_mode,
           :sandbox_mode,
           :runtime_exposure,
+          # Accepted as keys here so `base/2` can refuse them by name rather than as an
+          # unknown option: all three are credentials-adjacent and none belongs in a
+          # durable checkpoint, and a caller told "unknown option" would look for a typo.
           :env,
           :env_mode,
           :mcp_config,

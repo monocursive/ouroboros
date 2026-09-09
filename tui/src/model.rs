@@ -50,19 +50,17 @@ static SESSION_ID_FALLBACK_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 pub mod native;
 pub mod transcript;
 
-/// Which plane an id belongs to. The two have separate id spaces, so a session is only
-/// addressable as a pair.
+/// Which plane an id belongs to. One plane today; the pair is still how a session is
+/// addressed, so a future one costs a variant rather than a signature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Plane {
     Interactive,
-    Coding,
 }
 
 impl Plane {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Interactive => "interactive",
-            Self::Coding => "coding",
         }
     }
 
@@ -70,14 +68,12 @@ impl Plane {
     pub fn tag(self) -> &'static str {
         match self {
             Self::Interactive => "int",
-            Self::Coding => "code",
         }
     }
 
     pub fn parse(name: &str) -> Option<Self> {
         match name {
             "interactive" => Some(Self::Interactive),
-            "coding" => Some(Self::Coding),
             _ => None,
         }
     }
@@ -847,19 +843,17 @@ impl SessionUsage {
     }
 }
 
-/// One entry of `interactive.list`/`coding.list`, and of `info`.
+/// One entry of `interactive.list`, and of `interactive.info`.
 ///
-/// `interactive.list` answers `Interactive.State.public/1` structs and `coding.list`
-/// answers `Coding.TaskState.public/1` structs; the fields below are the ones both carry
-/// under the same names. Everything else — turns, options, the retained event window —
-/// stays in `raw` for the tree widget, because a session's own shape is exactly what a
-/// forged plane is free to change.
+/// `interactive.list` answers `Interactive.State.public/1` structs; the fields below are
+/// the ones this client reads by name. Everything else — turns, options, the retained
+/// event window — stays in `raw` for the tree widget, because a session's own shape is
+/// exactly what the runtime is free to extend.
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
     pub plane: Plane,
     pub id: String,
-    /// A human or runtime-generated title for interactive sessions. Coding tasks keep
-    /// using their objective; older gateways omit this field entirely.
+    /// A human or runtime-generated title. Older gateways omit this field entirely.
     pub title: Option<String>,
     pub status: SessionStatus,
     pub provider: Option<String>,
@@ -867,7 +861,6 @@ pub struct SessionInfo {
     pub workspace: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
-    pub objective: Option<String>,
     pub struct_tag: Option<String>,
     /// `options.model`, as the session was started. `None` where the start did not name
     /// one — the provider then chose, and the transcript's `run_started` is the only
@@ -893,13 +886,6 @@ pub struct SessionInfo {
     pub capabilities: Capabilities,
     /// What the provider reported spending, folded by the runtime.
     pub usage: Option<SessionUsage>,
-    /// G1. The coding task ids this conversation delegated — ids only, which is what the
-    /// row carries. Empty where it delegated nothing *and* where the gateway predates the
-    /// key: both are "this client knows of no children", and the rail nests nothing
-    /// either way rather than drawing an empty branch.
-    pub children: Vec<String>,
-    /// G1, the other half. Coding rows only: the conversation that delegated this task.
-    pub parent: Option<native::Parent>,
     /// D7. The `git worktree` this session was given, where it asked for one.
     pub worktree: Option<native::Worktree>,
     /// D7. Whether the start asked for a worktree. Kept beside `worktree` because a
@@ -934,9 +920,6 @@ struct RawSession {
     created_at: Option<String>,
     #[serde(default)]
     updated_at: Option<String>,
-    /// Coding tasks only.
-    #[serde(default)]
-    objective: Option<String>,
     #[serde(rename = "_struct", default)]
     struct_tag: Option<String>,
 }
@@ -982,7 +965,6 @@ impl SessionInfo {
             workspace: raw.workspace,
             created_at: raw.created_at,
             updated_at: raw.updated_at,
-            objective: raw.objective,
             struct_tag: raw.struct_tag,
             model: option("model"),
             approval_mode: option("approval_mode"),
@@ -997,24 +979,9 @@ impl SessionInfo {
             ),
             usage: SessionUsage::decode(value.get("usage")),
             // Read tolerantly out of the raw tree for the same reason `options` is: these
-            // five keys arrived with D7/D9/G1, an older gateway sends none of them, and a
-            // strict field here would be the one place this client refuses a session
-            // because its runtime is a build behind.
-            children: value
-                .get("children")
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .take(native::MAX_ROWS)
-                        .filter_map(Value::as_str)
-                        .map(str::trim)
-                        .filter(|id| !id.is_empty())
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default(),
-            parent: native::Parent::decode(value.get("parent")),
+            // keys arrived with D7/D9, an older gateway sends none of them, and a strict
+            // field here would be the one place this client refuses a session because its
+            // runtime is a build behind.
             worktree: native::Worktree::decode(value.get("worktree")),
             worktree_requested: value
                 .get("worktree_requested")
@@ -1065,26 +1032,12 @@ pub struct RuntimeStatus {
     #[serde(default)]
     pub agents: Vec<Value>,
     #[serde(default)]
-    pub coding_tasks: Vec<Value>,
-    #[serde(default)]
     pub interactive_sessions: Vec<Value>,
-    #[serde(default)]
-    pub teams: Vec<Value>,
-    #[serde(default)]
-    pub orchestration_plans: Vec<Value>,
-    #[serde(default)]
-    pub control: ControlStatus,
     #[serde(default)]
     pub release: Value,
     /// Signer posture and live capability count. Absent on older gateways.
     #[serde(default)]
     pub forge: Value,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct ControlStatus {
-    #[serde(default)]
-    pub runs: Vec<Value>,
 }
 
 impl RuntimeStatus {
@@ -2045,7 +1998,7 @@ impl ApprovalScope {
     }
 }
 
-/// The four values `interactive.start` and `coding.start` accept for `approval_mode`.
+/// The four values `interactive.start` accepts for `approval_mode`.
 ///
 /// `Jido.Harness.RunRequest`'s enum, transcribed from `Gateway.Methods` `@approval_modes`
 /// rather than inferred. The gateway matches a client's string against those literal terms
@@ -2091,7 +2044,7 @@ impl ApprovalMode {
     }
 }
 
-/// The four values `interactive.start` and `coding.start` accept for `sandbox_mode`.
+/// The four values `interactive.start` accepts for `sandbox_mode`.
 ///
 /// Transcribed from `Gateway.Methods` `@sandbox_modes`. Sending anything else is `-32602`
 /// naming the parameter. The TUI default is to omit this field so the plane can apply
@@ -2230,10 +2183,6 @@ pub enum StartError {
     /// decide. This client will not: a terminal that silently picked a provider would be
     /// choosing which vendor runs the operator's code.
     NoProvider,
-    /// `coding.start` takes `objective` as a required nonempty string.
-    NoObjective,
-    /// `objective` is not in the interactive allowlist, so sending it would be `-32602`.
-    ObjectiveOnInteractive,
     /// A remote runtime must never inherit the packaged release's working directory.
     NoRemoteWorkspace,
     /// Relative paths are relative to the destination runtime, not this terminal.
@@ -2251,12 +2200,6 @@ impl StartError {
             Self::NoProvider => "choose a provider: this client will not let the node pick \
                                  which vendor runs your code"
                 .to_string(),
-            Self::NoObjective => {
-                "a coding task needs an objective; it runs that one thing to completion".to_string()
-            }
-            Self::ObjectiveOnInteractive => {
-                "an interactive session takes no objective — it takes messages".to_string()
-            }
             Self::NoRemoteWorkspace => "choose an absolute workspace path on the destination \
                                         machine; remote sessions never guess from this terminal"
                 .to_string(),
@@ -2310,8 +2253,6 @@ pub struct StartRequest {
     pub approval_mode: Option<ApprovalMode>,
     pub sandbox_mode: Option<SandboxMode>,
     pub reasoning_effort: Option<Effort>,
-    /// Required on the coding plane, refused on the interactive one.
-    pub objective: String,
     /// D7. Run in a `git worktree` under the runtime's data directory instead of the
     /// workspace itself, so two sessions on one repository do not fight over its lease.
     ///
@@ -2341,7 +2282,6 @@ impl StartRequest {
             approval_mode: None,
             sandbox_mode: None,
             reasoning_effort: None,
-            objective: String::new(),
             worktree: false,
             plan: false,
         }
@@ -2382,19 +2322,6 @@ impl StartRequest {
 
         if !machine.is_empty() {
             params.insert("machine".into(), Value::String(machine.to_string()));
-        }
-
-        let objective = self.objective.trim();
-
-        match self.plane {
-            Plane::Coding if objective.is_empty() => return Err(StartError::NoObjective),
-            Plane::Coding => {
-                params.insert("objective".into(), Value::String(objective.to_string()));
-            }
-            Plane::Interactive if !objective.is_empty() => {
-                return Err(StartError::ObjectiveOnInteractive)
-            }
-            Plane::Interactive => {}
         }
 
         let workspace = self.workspace.trim();
@@ -2474,7 +2401,7 @@ pub fn new_session_id() -> String {
     )
 }
 
-/// What a start answers: `Ouroboros.Interactive.Ref` / `Ouroboros.Coding.TaskRef`,
+/// What a start answers: an `Ouroboros.Interactive.Ref`,
 /// Wire-encoded — `{id, node}` plus the struct tag — or the same stable identity with a
 /// typed post-checkpoint readiness failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4220,7 +4147,6 @@ mod tests {
         assert_eq!(hello.role, "core");
         assert!(hello.operates());
         assert!(hello.serves("interactive.delete"));
-        assert!(hello.serves("coding.delete"));
         assert!(hello.serves("interactive.respond_approval"));
         assert!(hello.serves("runtime.shutdown"));
         assert!(hello.serves("capabilities.preview"));
@@ -4242,10 +4168,6 @@ mod tests {
             Some(&Availability::Available)
         );
         assert_eq!(
-            status.availability.get("control"),
-            Some(&Availability::Disabled)
-        );
-        assert_eq!(
             status.availability.get("workspace"),
             Some(&Availability::Disabled)
         );
@@ -4255,8 +4177,6 @@ mod tests {
         );
 
         assert_eq!(status.mode("release"), Some("ready"));
-        assert_eq!(status.mode("upgrade"), None);
-        assert!(status.control.runs.is_empty());
         assert_eq!(status.cluster_summary(), "strategy=none  distributed=false");
         assert_eq!(status.forge_summary(), "signer=deny live=0 admit=no");
     }
@@ -4290,16 +4210,6 @@ mod tests {
             Triage::Done,
             "idle interactive is settled, not needs-input"
         );
-
-        let tasks = status
-            .coding_tasks
-            .iter()
-            .filter_map(|value| SessionInfo::decode(Plane::Coding, value).ok())
-            .collect::<Vec<_>>();
-
-        assert_eq!(tasks[0].status, SessionStatus::Running);
-        assert!(tasks[0].status.busy());
-        assert!(!tasks[0].status.terminal());
     }
 
     #[test]
@@ -4339,7 +4249,6 @@ mod tests {
             session_row(Plane::Interactive, "idle").triage(0),
             Triage::Done
         );
-        assert_eq!(session_row(Plane::Coding, "idle").triage(0), Triage::Done);
         assert_eq!(
             session_row(Plane::Interactive, "awaiting_approval").triage(0),
             Triage::NeedsInput
@@ -4395,25 +4304,6 @@ mod tests {
         assert_eq!(event.request_id, None);
         assert_eq!(event.summary(), "the workspace is clean");
         assert_eq!(event.payload["token"], "[REDACTED]");
-    }
-
-    #[test]
-    fn a_coding_event_notification_decodes_through_the_same_type() {
-        let notification = notification("coding_event_notification");
-
-        assert_eq!(notification.method, "coding.event");
-        assert_eq!(notification.params["id"], "task-0000000000000000000000002");
-
-        let event = Event::decode(&notification.params["event"]).expect("an event");
-
-        assert_eq!(event.sequence, 17);
-        assert_eq!(event.kind, EventType::RunCompleted);
-        assert_eq!(event.struct_tag.as_deref(), Some("Ouroboros.Coding.Event"));
-        // The coding struct keys on `task_id` and carries no turn; both are absent rather
-        // than defaulted to something that looks like an answer.
-        assert_eq!(event.turn_id, None);
-        assert_eq!(event.raw["task_id"], "task-0000000000000000000000002");
-        assert_eq!(event.summary(), "objective satisfied");
     }
 
     #[test]
@@ -4669,10 +4559,6 @@ mod tests {
         assert_eq!(
             found,
             vec![
-                "agents_message_result",
-                "agents_message_truncated_result",
-                "coding_event_detail_result",
-                "coding_event_notification",
                 "error_cursor_pruned",
                 "error_invalid_request",
                 "error_not_found",
@@ -4687,7 +4573,6 @@ mod tests {
                 "event_approval_requested_subagent",
                 "event_approval_resolved",
                 "event_command_output_delta",
-                "event_delegation",
                 "event_file_change",
                 "event_input_accepted",
                 "event_input_accepted_steer",
@@ -5239,61 +5124,6 @@ mod tests {
         assert!(component.mtime.is_some());
     }
 
-    /// W13's `agents.message`: one message into one mesh agent, and the reply back.
-    ///
-    /// There is no typed model for it here on purpose — a client sends a body and reads a
-    /// reply, and both are whatever the agent's own contract says. What this pins is the
-    /// envelope around them, which is the part a client must not get wrong: `untrusted` is
-    /// always present and always true, because a reply from a lane-W capability is prose a
-    /// component wrote and drawing it beside the operator's own words unlabelled is the
-    /// injection this lane exists to bound. `truncated` is the other half: it says whether
-    /// what arrived is the reply or a prefix of one, which is the difference between JSON a
-    /// client can parse and JSON it cannot.
-    #[test]
-    fn the_agents_message_fixture_labels_the_reply_it_carries() {
-        let result = &fixture("agents_message_result")["result"];
-
-        assert_eq!(result["to"], "wasm/vet");
-        assert_eq!(result["from"], "gateway");
-
-        // Not `is_truthy`, not "present": exactly `true`. A client that read this key as
-        // optional would render an unlabelled component's words the first time a node
-        // omitted it.
-        assert_eq!(result["untrusted"], true);
-        assert_eq!(result["truncated"], false);
-
-        // Untruncated, so the reply is the structure the agent answered with rather than a
-        // string holding an encoding of it.
-        assert!(result["reply"].is_object());
-        assert_eq!(result["reply"]["checked"], 12);
-        assert!(result["reply"]["findings"].as_array().unwrap().is_empty());
-    }
-
-    /// The same verb when the reply did not fit. This is the case a client gets wrong by
-    /// treating `truncated` as decoration: `reply` stops being the structure the agent
-    /// answered with and becomes a **string** holding a prefix of its encoding, and the
-    /// marker inside that string is the only thing in the value itself that says so. A
-    /// client that parsed it as JSON would report a syntax error the user cannot act on.
-    #[test]
-    fn a_truncated_agents_message_reply_is_a_marked_string_not_a_document() {
-        let result = &fixture("agents_message_truncated_result")["result"];
-
-        assert_eq!(result["untrusted"], true);
-        assert_eq!(result["truncated"], true);
-
-        let reply = result["reply"]
-            .as_str()
-            .expect("a truncated reply is a string");
-        assert!(
-            !result["reply"].is_object(),
-            "a cut document is not a document"
-        );
-        assert!(
-            reply.ends_with("truncated at 65536 bytes."),
-            "nothing in the value said it was cut: {reply}"
-        );
-    }
-
     #[test]
     fn an_empty_wasm_list_decodes_to_an_empty_listing() {
         let empty = WasmList::decode(&serde_json::json!({}));
@@ -5703,23 +5533,18 @@ mod tests {
     }
 
     #[test]
-    fn an_event_detail_result_decodes_as_one_bare_event_on_both_planes() {
-        for name in [
-            "interactive_event_detail_result",
-            "coding_event_detail_result",
-        ] {
-            let frame = fixture(name);
-            let event = Event::decode(&frame["result"]).expect("a bare event object");
-            assert_eq!(
-                Some(event.sequence),
-                frame["result"]["sequence"].as_u64(),
-                "{name} keeps its sequence"
-            );
-            assert!(
-                event.payload.get("diff").is_some(),
-                "{name} keeps its payload whole"
-            );
-        }
+    fn an_event_detail_result_decodes_as_one_bare_event() {
+        let frame = fixture("interactive_event_detail_result");
+        let event = Event::decode(&frame["result"]).expect("a bare event object");
+        assert_eq!(
+            Some(event.sequence),
+            frame["result"]["sequence"].as_u64(),
+            "the detail result keeps its sequence"
+        );
+        assert!(
+            event.payload.get("diff").is_some(),
+            "the detail result keeps its payload whole"
+        );
     }
 
     #[test]
@@ -6174,7 +5999,6 @@ mod tests {
         assert!(!fields.contains_key("approval_mode"));
         assert!(!fields.contains_key("sandbox_mode"));
         assert!(!fields.contains_key("reasoning_effort"));
-        assert!(!fields.contains_key("objective"));
         assert_eq!(fields["id"], request.id);
         assert_eq!(fields.len(), 2);
 
@@ -6186,30 +6010,6 @@ mod tests {
             .as_object()
             .unwrap()
             .contains_key("workspace"));
-    }
-
-    #[test]
-    fn the_two_planes_disagree_about_objective_and_both_are_enforced_here() {
-        let mut coding = StartRequest::new(Plane::Coding);
-        coding.provider = "codex".into();
-
-        assert_eq!(coding.params(), Err(StartError::NoObjective));
-
-        coding.objective = "fix the build".into();
-        let params = coding.params().expect("a valid coding start");
-        assert_eq!(params["objective"], "fix the build");
-        assert_eq!(coding.method(), "coding.start");
-
-        // `objective` is not in the interactive allowlist, so sending it would be -32602.
-        let mut interactive = StartRequest::new(Plane::Interactive);
-        interactive.provider = "codex".into();
-        interactive.objective = "fix the build".into();
-
-        assert_eq!(
-            interactive.params(),
-            Err(StartError::ObjectiveOnInteractive)
-        );
-        assert_eq!(interactive.method(), "interactive.start");
     }
 
     #[test]
@@ -6687,11 +6487,12 @@ mod tests {
 
     #[test]
     fn a_plane_round_trips_through_its_wire_name() {
-        for plane in [Plane::Interactive, Plane::Coding] {
-            assert_eq!(Plane::parse(plane.as_str()), Some(plane));
-        }
+        assert_eq!(
+            Plane::parse(Plane::Interactive.as_str()),
+            Some(Plane::Interactive)
+        );
 
-        assert_eq!(Plane::parse("teams"), None);
-        assert_eq!(Plane::Coding.method("replay"), "coding.replay");
+        assert_eq!(Plane::parse("coding"), None);
+        assert_eq!(Plane::Interactive.method("replay"), "interactive.replay");
     }
 }

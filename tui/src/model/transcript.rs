@@ -106,10 +106,6 @@ pub enum PresentationEvent {
     /// numbers in it — what was archived, and where — are the only record a reader has of
     /// history that is no longer in front of them.
     Compaction(Box<crate::model::native::Compaction>),
-    /// G1. A coding task this conversation delegated, starting or ending. Two per child
-    /// and no more; the terminal one carries a digest of the result, never the result,
-    /// because that is the child's own record.
-    Delegation(Box<crate::model::native::DelegationEvent>),
     /// A child agent this session spawned, at one moment of its life: spawned, reporting
     /// progress, or settled. Unlike a delegation there may be many of these per child —
     /// the runtime sends up to sixty-four progress reports — so the cell layer folds them
@@ -455,12 +451,6 @@ impl PresentationEvent {
                 detail: lifecycle_detail(&event.payload),
             },
             EventType::ProviderEvent => provider_note(&event.payload),
-            // G1. `delegation` is its own runtime-native event type, not a wrapped
-            // provider one: `emit_runtime_event(runtime, :delegation, …)` puts it in the
-            // same sequence space as everything else, so it arrives here as `Other`.
-            EventType::Other(ref kind) if kind == "delegation" => Self::Delegation(Box::new(
-                crate::model::native::DelegationEvent::decode(&event.payload),
-            )),
             // A kind this build does not know. It is still an event the runtime recorded,
             // so it reads as one dim line naming itself rather than as nothing at all.
             EventType::Other(ref kind) => Self::ProviderNote {

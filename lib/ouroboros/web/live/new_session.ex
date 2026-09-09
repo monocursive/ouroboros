@@ -543,8 +543,8 @@ defmodule Ouroboros.Web.Live.NewSession do
   end
 
   # The shared catalogue also contains embedding, image, audio, moderation and realtime
-  # lanes. They cannot run an interactive coding turn, so offering them here creates a
-  # choice whose only outcome is a provider refusal.
+  # lanes. They cannot run an agent turn, so offering them here creates a choice whose
+  # only outcome is a provider refusal.
   defp agent_model?(model, default) do
     id = model |> Map.get(:id) |> to_string()
 
@@ -1039,10 +1039,10 @@ defmodule Ouroboros.Web.Live.NewSession do
   What a refused call says, in the runtime's own words.
 
   The gateway's sentence first, and then — where the plane typed its refusal — the plane's
-  own `message` out of `data`. `unsupported_safety_options` and
-  `unsupported_approval_mode` both carry one, and it is the only text that names which
-  option was refused and what the provider would accept instead; dropping it would leave
-  an operator reading "the runtime refused the call" with no way to act.
+  own `message` out of `data`. `unsupported_approval_mode` carries one, and it is the only
+  text that names which option was refused and what the provider would accept instead;
+  dropping it would leave an operator reading "the runtime refused the call" with no way
+  to act.
   """
   @spec refusal(term()) :: %{message: String.t(), detail: String.t() | nil} | nil
   def refusal({:error, _code, message}) when is_binary(message),

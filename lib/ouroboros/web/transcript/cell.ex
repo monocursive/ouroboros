@@ -174,9 +174,9 @@ end
 defmodule Ouroboros.Web.Transcript.Cell.Runtime do
   @moduledoc """
   Something *this runtime* did, rather than the provider: a fold of the conversation, a
-  rewind, a delegation, a command the operator ran themselves (D9, D6, G1, B7).
+  rewind, a command the operator ran themselves (D9, D6, B7).
 
-  One cell for all four because they are the same kind of claim — Ouroboros recording its
+  One cell for all three because they are the same kind of claim — Ouroboros recording its
   own act in the conversation it changed (`tui/src/ui/transcript_cells.rs:193-213`).
   """
   defstruct label: "", detail: "", body: [], tone: :muted, key: nil

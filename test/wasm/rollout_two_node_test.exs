@@ -369,7 +369,6 @@ defmodule Ouroboros.Wasm.RolloutTwoNodeTest do
 
     put_env!(peer_node, :data_dir, data_dir)
     put_env!(peer_node, :wasm, helper_path: Wasm.helper_path())
-    put_env!(peer_node, :coding_storage, {Jido.Storage.ETS, table: peer_name})
 
     # A durable data directory is what makes each peer's component store the production
     # one — `Ouroboros.Wasm.Store.root/1` deriving it rather than a test handing one in.

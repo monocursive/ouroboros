@@ -41,9 +41,7 @@ defmodule Ouroboros.Provider.Native.McpTest do
         Map.new(
           [
             Ouroboros.Cluster,
-            Ouroboros.Coding.TaskSupervisor,
             Ouroboros.Interactive.TaskSupervisor,
-            Ouroboros.Team.Supervisor,
             Ouroboros.Wasm.Supervisor
           ],
           &{&1, Process.whereis(&1)}

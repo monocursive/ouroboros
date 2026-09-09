@@ -2,17 +2,16 @@ defmodule Ouroboros.Gateway.Wire do
   @moduledoc """
   Runtime terms rendered as self-describing JSON trees. Lossy on purpose, and it says so.
 
-  ## Why `Orchestration.Serializable.safe/1` cannot be the mechanism
+  ## Why the substitution happens at the leaf
 
-  `Ouroboros.Orchestration.Serializable.safe/1` is all-or-nothing at the top level: one
-  pid anywhere in a term replaces the *entire* term with a truncated inspect string. Pids
-  are everywhere by construction — `Ouroboros.Mesh.list_agents/0` returns
-  `%{id: .., pid: .., node: .., replicas: ..}` maps, `Ouroboros.status/0` embeds those,
-  and `Mesh.state/1` returns a `Jido.AgentServer.State` dense with pids, refs, `:queue`
-  tuples, and functions. Applied to any of them, `safe/1` would answer one opaque string
-  where the client needed a table. So this module walks the tree and substitutes at the
-  *leaf*: the sibling keys stay readable, and only the thing that genuinely has no JSON
-  shape becomes a marker.
+  An all-or-nothing serializer replaces the *entire* term the moment one pid appears
+  anywhere in it. Pids are everywhere by construction — `Ouroboros.Mesh.list_agents/0`
+  returns `%{id: .., pid: .., node: .., replicas: ..}` maps, `Ouroboros.status/0` embeds
+  those, and `Mesh.state/1` returns a `Jido.AgentServer.State` dense with pids, refs,
+  `:queue` tuples, and functions. Applied to any of them, that rule would answer one
+  opaque string where the client needed a table. So this module walks the tree and
+  substitutes at the *leaf*: the sibling keys stay readable, and only the thing that
+  genuinely has no JSON shape becomes a marker.
 
   ## The substitutions
 
@@ -52,9 +51,8 @@ defmodule Ouroboros.Gateway.Wire do
   Depth and node counts do not bound *bytes*. Fifty thousand nodes is a cheap tree; one
   node holding a five-megabyte diff is not, and that one node used to be framed whole on
   every notification, every `replay` result, and every `subscribe` backlog. So a binary
-  leaf inside the `payload` of an `Ouroboros.Interactive.Event` or an
-  `Ouroboros.Coding.Event` is bounded here, in the one function all three of those paths
-  reach, so the three cannot drift apart.
+  leaf inside an `Ouroboros.Interactive.Event`'s `payload` is bounded here, in the one
+  function all three of those paths reach, so the three cannot drift apart.
 
   The rule, whole:
 
@@ -85,7 +83,6 @@ defmodule Ouroboros.Gateway.Wire do
   which is the shape a diff, a tool result, and a file read all have.
   """
 
-  alias Ouroboros.Coding.Event, as: CodingEvent
   alias Ouroboros.Gateway.Config
   alias Ouroboros.Interactive.Event, as: InteractiveEvent
 
@@ -166,12 +163,11 @@ defmodule Ouroboros.Gateway.Wire do
   defp walk(%Date{} = term, _depth, ctx), do: {Date.to_iso8601(term), tick(ctx)}
   defp walk(%Time{} = term, _depth, ctx), do: {Time.to_iso8601(term), tick(ctx)}
 
-  # The two structs whose `payload` is byte-capped, and the only two. Every event on this
-  # wire is one of them, whichever direction it arrived from — a live notification, a
-  # `replay` result, or a `subscribe` backlog — which is what makes this the one place the
-  # cap has to exist for all three to obey it.
+  # The one struct whose `payload` is byte-capped. Every event on this wire is one of
+  # them, whichever direction it arrived from — a live notification, a `replay` result, or
+  # a `subscribe` backlog — which is what makes this the one place the cap has to exist
+  # for all three to obey it.
   defp walk(%InteractiveEvent{} = term, depth, ctx), do: walk_event(term, depth, ctx)
-  defp walk(%CodingEvent{} = term, depth, ctx), do: walk_event(term, depth, ctx)
 
   defp walk(%module{} = term, depth, ctx) do
     {map, ctx} = walk_map(Map.from_struct(term), depth, tick(ctx))

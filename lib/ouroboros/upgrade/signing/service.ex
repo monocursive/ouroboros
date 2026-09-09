@@ -37,8 +37,7 @@ defmodule Ouroboros.Upgrade.Signing.Service do
   @moduledoc """
   The signing authority: a key, an independent policy, and a durable record, on a node
   whose supervision tree contains this service, cluster formation, and — when a data
-  directory is configured — the durable-directory owner, and nothing that holds sessions
-  or teams.
+  directory is configured — the durable-directory owner, and nothing that holds sessions.
 
   `Ouroboros.Wasm.Deploy` describes the seam from the other side. The forge asks; this
   process decides, and it decides *before* a signature exists — which is the only moment
@@ -52,7 +51,7 @@ defmodule Ouroboros.Upgrade.Signing.Service do
       the file named by `OUROBOROS_SIGNER_KEY_PATH`, on a `:signer`-role node, and lives
       in this process's state. A one-machine posture runs this same service beside the
       node that asks it, which is a dev loop and not custody; a fleet moves the key to a
-      host with no teams, no stores, no sessions, no scheduler, and no control plane on it.
+      host with no stores and no sessions on it.
     * **The policy sees the whole manifest and the bytes, not the payload.** A payload is
       a hash of claims. `Ouroboros.Upgrade.Signing.Policy` recomputes those claims from
       the component bytes actually submitted and refuses a world its `kind` does not

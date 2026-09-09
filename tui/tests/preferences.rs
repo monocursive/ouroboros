@@ -153,7 +153,7 @@ fn with_providers(defaults: Defaults) -> App {
 #[test]
 fn settings_open_from_anywhere_and_keep_the_two_kinds_of_fact_apart() {
     // Every tab but the coding home, whose composer owns printable keys by design.
-    for tab in ['1', '3', '4', '5', '6', '7'] {
+    for tab in ['1', '3', '4'] {
         let mut app = with_providers(Defaults::default());
 
         app.apply(key(KeyCode::Char(tab)));
@@ -587,7 +587,6 @@ fn ready_for_n(defaults: Defaults) -> App {
 
     app.tab = Tab::Sessions;
     answer(&mut app, Tag::Sessions(Plane::Interactive), json!([]));
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
     app.open_session(Plane::Interactive, "session-open".into());
     let _ = app.drain();
 
@@ -682,7 +681,6 @@ fn a_provider_list_that_arrives_after_a_dialog_still_places_the_cursor() {
 
     app.tab = Tab::Sessions;
     answer(&mut app, Tag::Sessions(Plane::Interactive), json!([]));
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
     app.open_session(Plane::Interactive, "session-open".into());
     apply_leader(&mut app, 'N');
 

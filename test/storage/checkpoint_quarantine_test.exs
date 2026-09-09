@@ -59,7 +59,11 @@ defmodule Ouroboros.Storage.CheckpointQuarantineTest do
       # the forge grant holds nothing, and neither does anybody else.
       assert Grants.list("agent-1", name) == []
       refute Grants.granted?("agent-1", :forge, %{module: "wasm/probe"}, name)
-      refute Grants.granted?("agent-1", :start_agent, %{module: Ouroboros.Agent.Worker}, name)
+      # A live module, deliberately: the obvious sample here used to be
+      # `Ouroboros.Agent.Worker`, which the core reduction retired, and spelling a name on
+      # `Ouroboros.Storage.RetiredAtoms` in a test file would make that file a second
+      # reason the name exists.
+      refute Grants.granted?("agent-1", :start_agent, %{module: Ouroboros.Mesh}, name)
 
       assert_quarantined!(directory, path, bytes, log, Grants.checkpoint_key())
 

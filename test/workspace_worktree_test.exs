@@ -3,7 +3,6 @@ defmodule Ouroboros.WorkspaceWorktreeTest do
 
   @moduletag :capture_log
 
-  alias Ouroboros.Coding.TaskState
   alias Ouroboros.Interactive.State
   alias Ouroboros.Workspace
   alias Ouroboros.Workspace.Worktree
@@ -360,28 +359,10 @@ defmodule Ouroboros.WorkspaceWorktreeTest do
 
   # ---------------------------------------------------------------- planes
 
-  describe "the start option on both planes" do
-    test "TaskState.new/4 accepts worktree: true and records the request", context do
-      assert {:ok, task} =
-               TaskState.new(
-                 "t1",
-                 "do a thing",
-                 [workspace: context.repo, worktree: true],
-                 :coding
-               )
-
-      assert task.worktree_requested
-      assert task.worktree == nil
-    end
-
-    test "TaskState defaults to no worktree", context do
-      {:ok, task} = TaskState.new("t1", "do a thing", [workspace: context.repo], :coding)
-      refute task.worktree_requested
-    end
-
-    test "TaskState refuses a non-boolean", context do
+  describe "the start option" do
+    test "State.new/2 refuses a non-boolean", context do
       assert {:error, {:invalid_worktree, "yes"}} =
-               TaskState.new("t1", "x", [workspace: context.repo, worktree: "yes"], :coding)
+               State.new("s1", workspace: context.repo, worktree: "yes")
     end
 
     test "State.new/2 carries the option through the interactive plane", context do

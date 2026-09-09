@@ -983,20 +983,8 @@ fn an_answer_rewrites_the_row_that_asked() {
 }
 
 // ---------------------------------------------------------------------------
-// The two envelope fixtures that also carry a renderable payload
+// The envelope fixture that also carries a renderable payload
 // ---------------------------------------------------------------------------
-
-/// `run_completed` gets no `event_*` frame of its own because it already has one: the
-/// coding notification that has pinned the second plane's envelope since the corpus
-/// existed. The kind is still a kind a client renders, so its words are asserted here
-/// rather than left to the fixture that happens to carry them.
-#[test]
-fn the_coding_notification_is_a_finished_run_and_reads_as_one() {
-    assert_eq!(
-        chat_note(&cell("coding_event_notification")),
-        "run finished · objective satisfied"
-    );
-}
 
 /// The gateway replaces an oversized leaf with `{"_excerpt", "_bytes"}`, and a patch that
 /// arrived as one is still worth colouring — but its `+`/`-` counts describe the prefix
@@ -1144,25 +1132,6 @@ fn an_unmodelled_provider_event_is_a_line_that_names_both_halves_of_its_kind() {
 // The types this runtime mints itself
 // ---------------------------------------------------------------------------
 
-/// A delegation is a fact about work this session caused, so the parent's transcript draws
-/// it — with a digest of the result and never the result, which is the child's own record.
-#[test]
-fn a_settled_delegation_is_a_block_with_a_digest_and_no_result() {
-    let projected = cell("event_delegation");
-    let block = runtime_block(&projected);
-
-    assert_eq!(block.label, "Delegation completed");
-    assert_eq!(
-        block.detail,
-        "task task-0000000000000000000000002 · ouroboros@worker · result digest b7e40aa1"
-    );
-    assert_eq!(block.tone, Tone::Success);
-    assert_eq!(
-        block.key, None,
-        "nothing local ever drew this, so there is nothing to dedupe against"
-    );
-}
-
 /// `status` is Ouroboros's own type and no client models it, so it takes the same
 /// named-note path an unrecognised provider kind does.
 #[test]
@@ -1191,7 +1160,6 @@ fn every_transcript_fixture_renders_something_a_reader_can_see() {
         "event_approval_requested_subagent",
         "event_approval_resolved",
         "event_command_output_delta",
-        "event_delegation",
         "event_file_change",
         "event_input_accepted",
         "event_input_accepted_steer",

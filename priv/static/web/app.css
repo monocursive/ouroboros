@@ -704,10 +704,6 @@ body.phx-loading {
   border-left-color: var(--border-strong);
 }
 
-.ouro-row-nested {
-  padding-left: calc(var(--gutter) + 1.25rem);
-}
-
 /* A needs-you row is a card, because it is the one row a person is meant to act on. */
 .ouro-row-needs_you {
   background: var(--card);
@@ -2901,10 +2897,6 @@ body .ouro-row-needs_you {
   padding: 0.55rem 0.65rem;
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
-}
-
-body .ouro-row-nested {
-  margin-left: 1rem;
 }
 
 body .ouro-row-actions {

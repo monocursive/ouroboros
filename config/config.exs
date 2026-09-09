@@ -26,14 +26,14 @@ config :ouroboros,
   upgrade_trust_policy: [allow_unsigned: config_env() != :prod],
   # Which supervision tree this node boots. `:core` runs the full runtime; `:builder`
   # and `:signer` run cluster formation and nothing else, so a host that only compiles
-  # candidate code or only holds a signing seam has no teams, sessions, schedulers, or
-  # control plane on it to lose. An unrecognized value refuses the boot rather than
-  # falling back to the privileged tree. See `Ouroboros.Cluster`.
+  # candidate code or only holds a signing seam has no sessions or stores on it to lose.
+  # An unrecognized value refuses the boot rather than falling back to the privileged
+  # tree. See `Ouroboros.Cluster`.
   node_role: :core,
-  # Refuse to place agents and team workers on a node that is not a connected `:core`
-  # node running this runtime. This is misconfiguration detection — work sent where it
-  # cannot run — and explicitly not a boundary against a hostile connected node, which
-  # has full `:erpc` authority regardless.
+  # Refuse to place a mesh agent on a node that is not a connected `:core` node running
+  # this runtime. This is misconfiguration detection — work sent where it cannot run —
+  # and explicitly not a boundary against a hostile connected node, which has full
+  # `:erpc` authority regardless.
   placement_role_check: true,
   # Where forge builds run, and it is a check rather than advice (docs/WASM.md D29,
   # contract C14). `:local` — the default — forges where the effect
@@ -52,11 +52,7 @@ config :ouroboros,
   # the same posture the Computer Use tools take, so a model is never taught a name it
   # cannot use. Read as exactly `true`: a typo leaves it shut rather than widening it.
   native_forge_tool: false,
-  coding_storage: {Jido.Storage.ETS, table: :ouroboros_coding},
   interactive_storage: {Jido.Storage.ETS, table: :ouroboros_interactive},
-  team_storage: {Jido.Storage.ETS, table: :ouroboros_teams},
-  orchestration_storage: {Jido.Storage.ETS, table: :ouroboros_orchestration},
-  control_storage: {Jido.Storage.ETS, table: :ouroboros_control},
   grants_storage: {Jido.Storage.ETS, table: :ouroboros_grants},
   permissions_storage: {Jido.Storage.ETS, table: :ouroboros_permissions},
   # Operator-authored permission rules, the highest scope `Ouroboros.Control.Permissions`
@@ -115,21 +111,6 @@ config :ouroboros,
   # own `budget_ms` internally; this is the outer limit on a node that stops answering,
   # and exceeding it is ambiguity, so it must be comfortably above any spec's budget.
   capability_eval_timeout: 30_000,
-  # Deadline for one agent effect. Effects run off the agent's process, but they still
-  # hold a supervised task and an in-flight audit entry, so every one of them ends.
-  effect_timeout: 120_000,
-  automation_enabled: true,
-  control_enabled: false,
-  # A durable plan is heterogeneous: every step declares a kind and the scheduler
-  # resolves one executor per kind. `:orchestration_executors` names them
-  # explicitly and overrides what the application derives from
-  # `:orchestration_team_id` (the `:coding` executor). A kind with no executor is
-  # a kind the scheduler refuses to accept plans for.
-  orchestration_executors: %{},
-  # Whether a planner may express a forge step at all. This widens what a model
-  # can *say*, never what it can deploy: no executor is configured for the kind,
-  # so a forge step is unschedulable.
-  control_allow_forge_steps: false,
   # Bound for control-plane session calls (info/replay/subscribe/cancel/steer/
   # respond_approval/interrupt). `await` threads the caller's own timeout instead.
   session_call_timeout: 30_000,
@@ -163,8 +144,8 @@ config :ouroboros,
   # `ANTHROPIC_WORKSPACE_ID`. Direct Anthropic and xAI lanes are API-key-only; managed
   # Grok subscription access stays in the first-party CLI.
   native_model: "openai_codex:gpt-5.6-sol",
-  # How long a terminal coding task or interactive session is retained before the
-  # recovery sweep deletes it. `nil` disables the sweep and keeps everything.
+  # How long a terminal interactive session is retained before the recovery sweep
+  # deletes it. `nil` disables the sweep and keeps everything.
   terminal_retention_ms: 7 * 24 * 60 * 60 * 1_000,
   # How long a closed provider session may keep a dispatched turn unresolved before
   # the turn is settled as ambiguous so the session can reach its terminal state.

@@ -197,8 +197,8 @@ defmodule Ouroboros.Provider.Native.Loop do
     :disallowed_tools,
     # The tool definitions exactly as `Ouroboros.Provider.Native.Context` laid them out,
     # so the prefix the fingerprint describes is the prefix the model is sent. `nil`
-    # falls back to deriving them here, which is what the coding plane and the older
-    # tests do.
+    # falls back to deriving them here, which is what a finite run and the older tests
+    # do.
     # The model's context window, for the meter merged into every `usage` event. `nil`
     # means this node could not resolve one, and the meter says so by omitting the key
     # rather than by inventing a denominator.

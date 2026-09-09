@@ -7,7 +7,6 @@ defmodule Ouroboros.Gateway.Methods.Placement do
   # `not_dispatched`, never a silent local fallback.
 
   alias Ouroboros.Cluster
-  alias Ouroboros.CodingSession
   alias Ouroboros.Gateway.Methods.Safe
   alias Ouroboros.Gateway.Wire
   alias Ouroboros.InteractiveSession
@@ -20,16 +19,6 @@ defmodule Ouroboros.Gateway.Methods.Placement do
         :interactive,
         "interactive session",
         &InteractiveSession.start_for_gateway_on(&1, opts)
-      )
-
-  def start_coding(owner, objective, opts),
-    do:
-      start(
-        owner,
-        opts,
-        :coding,
-        "coding task",
-        &CodingSession.start_for_gateway_on(&1, objective, opts)
       )
 
   defp start(owner, opts, plane, label, start) do
@@ -146,17 +135,6 @@ defmodule Ouroboros.Gateway.Methods.Placement do
      "session id #{inspect(id)} already belongs to different immutable start options",
      %{
        "reason" => "session_id_conflict",
-       "id" => id,
-       "outcome" => "not_dispatched",
-       "error" => Wire.to_json(reason)
-     }}
-  end
-
-  defp start_reply({:error, {:task_id_conflict, id} = reason}) do
-    {:error, Ouroboros.Gateway.Methods.code(:upstream_error),
-     "coding task id #{inspect(id)} already belongs to a different immutable request",
-     %{
-       "reason" => "task_id_conflict",
        "id" => id,
        "outcome" => "not_dispatched",
        "error" => Wire.to_json(reason)

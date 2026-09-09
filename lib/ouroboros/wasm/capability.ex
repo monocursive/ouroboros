@@ -585,7 +585,7 @@ defmodule Ouroboros.Wasm.Capability do
     action's result into agent state *deeply* (`Jido.Agent.State.merge/2`), and `:last_answer`
     is whatever a guest decided to send: deep-merging two replies would leave keys from the
     previous one standing inside the current one, which is a lie about what the capability
-    just answered. `Ouroboros.Agent.Worker` dodges the same merge by choosing data shapes;
+    just answered. A schema of plain data shapes dodges the same merge;
     this action cannot choose the guest's.
     """
 

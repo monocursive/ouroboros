@@ -8,7 +8,7 @@ defmodule Ouroboros.Gateway.IntegrationTest do
   alias Ouroboros.Gateway.Config
   alias Ouroboros.Gateway.Listener
   alias Ouroboros.Mesh
-  alias Ouroboros.Team.Store, as: TeamStore
+  alias Ouroboros.Interactive.Store, as: InteractiveStore
 
   @token String.duplicate("g", 48)
   @receive_timeout 5_000
@@ -273,7 +273,13 @@ defmodule Ouroboros.Gateway.IntegrationTest do
 
   test "hello then runtime.status returns a tree, not an opaque blob", %{client: client} do
     id = "agent-#{System.unique_integer([:positive])}"
-    assert {:ok, _pid} = Mesh.start_agent(id, role: "reviewer")
+
+    assert {:ok, _pid} =
+             Mesh.start_agent(id,
+               agent: Ouroboros.Capability.DistributionReference,
+               role: "reviewer"
+             )
+
     on_exit(fn -> Mesh.stop_agent(id) end)
 
     assert hello(client)["result"]["protocol"] == 1
@@ -284,53 +290,55 @@ defmodule Ouroboros.Gateway.IntegrationTest do
     assert status["role"] == "core"
 
     # The whole point of the per-leaf walk: `status` embeds `Mesh.list_agents/0`, whose
-    # maps carry pids. `Serializable.safe/1` would have replaced this entire tree with
-    # one string.
+    # maps carry pids. An all-or-nothing serializer would have replaced this entire tree
+    # with one string.
     refute Map.has_key?(status, "_opaque")
     assert is_map(status["availability"])
     assert status["availability"]["mesh"] == "available"
 
     # Availability is tri-state, and the client renders all three; what matters here is
     # that it arrives as a word rather than as an inspect string.
-    assert status["availability"]["control"] in ["available", "unavailable", "disabled"]
+    assert status["availability"]["workspace"] in ["available", "unavailable", "disabled"]
 
     assert agent = Enum.find(status["agents"], &(&1["id"] == id))
     assert agent["node"] == Atom.to_string(node())
     assert agent["replicas"] == 1
     assert agent["pid"]["_opaque"] =~ "#PID<"
 
-    assert is_list(status["coding_tasks"])
     assert is_list(status["interactive_sessions"])
-    assert is_list(status["teams"])
   end
 
   test "a plane that is not running is -32004 and the connection survives it", %{client: client} do
     assert hello(client)["result"]
 
-    assert is_list(call(client, "teams.list")["result"])
+    # An id nothing owns: the store answers, and the answer is that it holds no such
+    # record. That is the healthy shape the refusal below is contrasted against — the
+    # difference between "asked and told no" and "nobody was there to ask".
+    absent = %{"id" => "no-such-session"}
+    assert call(client, "interactive.info", absent)["error"]["code"] == -32007
 
-    store = Process.whereis(TeamStore)
+    store = Process.whereis(InteractiveStore)
 
-    # `Team.Store.list/1` is a bare `GenServer.call`, so an absent store *exits* the
+    # `Interactive.Store.get/2` is a bare `GenServer.call`, so an absent store *exits* the
     # caller. Unregistering the name reproduces that precisely without terminating a
     # supervised child and triggering the rest_for_one restarts below it.
-    Process.unregister(TeamStore)
+    Process.unregister(InteractiveStore)
 
     on_exit(fn ->
-      if is_nil(Process.whereis(TeamStore)), do: Process.register(store, TeamStore)
+      if is_nil(Process.whereis(InteractiveStore)), do: Process.register(store, InteractiveStore)
     end)
 
-    response = call(client, "teams.list")
+    response = call(client, "interactive.info", absent)
     assert response["error"]["code"] == -32004
 
     # The exit reason survives as data rather than as a message a client has to parse.
     assert ["noproc", ["GenServer", "call", _arguments]] = response["error"]["data"]
 
-    Process.register(store, TeamStore)
+    Process.register(store, InteractiveStore)
 
     # Same connection, immediately afterwards.
-    assert is_list(call(client, "teams.list")["result"])
-    assert is_list(call(client, "agents.list")["result"])
+    assert call(client, "interactive.info", absent)["error"]["code"] == -32007
+    assert is_list(call(client, "interactive.list")["result"])
   end
 
   test "two clients are independent", %{port: port, client: client} do
@@ -359,8 +367,8 @@ defmodule Ouroboros.Gateway.IntegrationTest do
 
     # Both surviving connections still answer. What they answer is whatever the shared
     # runtime holds at this moment, which the rest of the suite is free to change.
-    assert is_list(call(client, "agents.list")["result"])
-    assert is_list(call(other, "teams.list")["result"])
+    assert is_list(call(client, "interactive.list")["result"])
+    assert is_list(call(other, "runtime.providers")["result"])
   end
 
   @documented_codes [

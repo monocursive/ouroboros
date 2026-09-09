@@ -771,7 +771,7 @@ defmodule Ouroboros.Web.Live.NewSessionLiveTest do
 
     test "a typed refusal keeps the plane's own message out of data" do
       data = %{
-        "reason" => "unsupported_safety_options",
+        "reason" => "unsupported_approval_mode",
         "message" => "claude reaches an interactive session over the acp transport"
       }
 

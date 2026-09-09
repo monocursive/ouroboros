@@ -30,18 +30,16 @@ defmodule Ouroboros.Gateway.Conn do
   `OUROBOROS_GATEWAY_QUEUE_LIMIT` governs the *outbound* event queue below, and one
   variable naming two different queues would be a variable an operator cannot reason
   about. Responses correlate by `id` and are written in completion order, so a slow
-  `runtime.providers` never delays a fast `agents.list` behind it.
+  `runtime.providers` never delays a fast `interactive.list` behind it.
 
   A request that outlives its ceiling is killed and answered `-32005`. That answer is
   honest about the gateway and silent about the plane: killing the task does not cancel
-  work already in flight upstream, and for the `:infinity` verbs — `teams.cancel`,
-  `teams.close` — it provably cannot, so those two carry `"outcome": "unknown"` in the
-  timeout's `data` and the client reconciles by reading `teams.state`.
+  work already in flight upstream.
 
   ## Subscriptions live in this process
 
-  Both planes register `self()` as the subscriber and monitor it
-  ([interactive/task.ex](../lib/ouroboros/interactive/task.ex)), so the four subscribe
+  The plane registers `self()` as the subscriber and monitors it
+  ([interactive/task.ex](../lib/ouroboros/interactive/task.ex)), so the two subscribe
   verbs are answered here rather than in a dispatch task — a task's `self()` is the wrong
   process and would die with the request. The cost is stated rather than hidden: those
   calls block this process for as long as the plane's own control-plane bound allows
@@ -59,8 +57,8 @@ defmodule Ouroboros.Gateway.Conn do
       `stream.ended`. That monitor is the honest half of a promise this connection cannot
       otherwise keep.
 
-  Cleanup after an abnormal death needs nothing from here: both planes monitor the
-  subscriber pid and drop it on `:DOWN`. A graceful close still unsubscribes explicitly,
+  Cleanup after an abnormal death needs nothing from here: the plane monitors the
+  subscriber pid and drops it on `:DOWN`. A graceful close still unsubscribes explicitly,
   under a total budget, because releasing a registration you are about to abandon is
   cheap and the budget is what keeps a wedged coordinator from delaying the exit.
 
@@ -96,7 +94,6 @@ defmodule Ouroboros.Gateway.Conn do
   require Logger
 
   alias Ouroboros.Cluster
-  alias Ouroboros.Coding.Event, as: CodingEvent
   alias Ouroboros.Gateway.Methods
   alias Ouroboros.Gateway.Wire
   alias Ouroboros.Gateway.Writer
@@ -117,8 +114,8 @@ defmodule Ouroboros.Gateway.Conn do
   @response_headroom @max_in_flight + @max_pending
 
   # One terminal watches a handful of sessions. This is the ceiling on what a connection
-  # can register itself with across the planes, so "bounded everything" covers the thing a
-  # client can ask other processes to remember about it.
+  # can register itself with, so "bounded everything" covers the thing a client can ask
+  # other processes to remember about it.
   @max_subscriptions 64
 
   @send_timeout 15_000
@@ -128,7 +125,7 @@ defmodule Ouroboros.Gateway.Conn do
   # the socket closes either way.
   @flush_timeout 1_000
 
-  # The whole budget for releasing subscriptions on a graceful close. The planes' own
+  # The whole budget for releasing subscriptions on a graceful close. The plane's own
   # subscriber monitors are what make this optional; if a coordinator is wedged, the
   # supervisor's 5s shutdown kills this process and the monitor does the release.
   @unsubscribe_budget_ms 1_000
@@ -137,14 +134,12 @@ defmodule Ouroboros.Gateway.Conn do
   # a client is told the deadline is. One number, in the place a client can see it.
   @hello_timeout Methods.table() |> Map.fetch!("hello") |> Map.fetch!(:timeout)
 
-  # Answered by this process instead of by a dispatch task: the four subscription verbs
+  # Answered by this process instead of by a dispatch task: the two subscription verbs
   # because the plane registers `self()`, and `runtime.shutdown` because it needs the
   # listener configuration this process holds and the socket it owns.
   @conn_methods %{
     "interactive.subscribe" => {:subscribe, :interactive},
     "interactive.unsubscribe" => {:unsubscribe, :interactive},
-    "coding.subscribe" => {:subscribe, :coding},
-    "coding.unsubscribe" => {:unsubscribe, :coding},
     "runtime.shutdown" => {:shutdown, nil}
   }
 
@@ -310,12 +305,6 @@ defmodule Ouroboros.Gateway.Conn do
   def handle_info({:ouroboros_interactive_event, id, %InteractiveEvent{} = event}, state) do
     state
     |> stream_event({:interactive, id}, "interactive.event", id, event)
-    |> maybe_stop()
-  end
-
-  def handle_info({:ouroboros_coding_event, id, %CodingEvent{} = event}, state) do
-    state
-    |> stream_event({:coding, id}, "coding.event", id, event)
     |> maybe_stop()
   end
 

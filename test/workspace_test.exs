@@ -193,7 +193,7 @@ defmodule Ouroboros.WorkspaceTest do
     manager: manager,
     allowed: allowed
   } do
-    task_id = "reserved-coding-task"
+    task_id = "interactive:reserved-session"
 
     lease = %Ouroboros.Workspace.Lease{
       id: "reserved-lease",
@@ -205,78 +205,18 @@ defmodule Ouroboros.WorkspaceTest do
     }
 
     :sys.replace_state(manager, fn state ->
-      reservation = %Ouroboros.Workspace.Manager.Reservation{kind: :coding, lease: lease}
-      %{state | reservations: %{{:coding, task_id} => reservation}}
+      reservation = %Ouroboros.Workspace.Manager.Reservation{kind: :interactive, lease: lease}
+      %{state | reservations: %{{:interactive, "reserved-session"} => reservation}}
     end)
 
     assert {:error, {:workspace_recovery_owner_mismatch, ^task_id}} =
-             Workspace.acquire_managed(allowed, task_id, :coding,
+             Workspace.acquire_managed(allowed, task_id, :interactive,
                server: manager,
                mode: :exclusive
              )
 
     assert {:error, {:workspace_conflict, [%{id: "reserved-lease", task_id: ^task_id}]}} =
              Workspace.acquire(allowed, "other-task", server: manager, mode: :exclusive)
-  end
-
-  test "coding and interactive recovery identities cannot collide through rendered ids", %{
-    manager: manager,
-    allowed: allowed
-  } do
-    rendered_id = "interactive:shared-id"
-
-    coding = %Ouroboros.Workspace.Lease{
-      id: "coding-reservation",
-      root: allowed,
-      task_id: rendered_id,
-      mode: :shared_read,
-      owner: %{id: "coding-owner", node: node(), type: :local_process},
-      acquired_at: DateTime.utc_now() |> DateTime.to_iso8601()
-    }
-
-    interactive = %{
-      coding
-      | id: "interactive-reservation",
-        owner: %{coding.owner | id: "interactive-owner"}
-    }
-
-    :sys.replace_state(manager, fn state ->
-      reservations = %{
-        {:coding, rendered_id} => %Ouroboros.Workspace.Manager.Reservation{
-          kind: :coding,
-          lease: coding
-        },
-        {:interactive, "shared-id"} => %Ouroboros.Workspace.Manager.Reservation{
-          kind: :interactive,
-          lease: interactive
-        }
-      }
-
-      %{state | reservations: reservations}
-    end)
-
-    assert %{recovery_reservation_count: 2} = Workspace.summary(server: manager)
-
-    assert Enum.sort(Enum.map(Workspace.list(server: manager), & &1.id)) == [
-             "coding-reservation",
-             "interactive-reservation"
-           ]
-
-    assert {:error, {:workspace_recovery_owner_mismatch, ^rendered_id}} =
-             Workspace.acquire_managed(allowed, rendered_id, :coding,
-               server: manager,
-               mode: :shared_read
-             )
-
-    assert %{recovery_reservation_count: 2} = Workspace.summary(server: manager)
-
-    assert {:error, {:workspace_conflict, conflicts}} =
-             Workspace.acquire(allowed, rendered_id, server: manager, mode: :exclusive)
-
-    assert Enum.sort(Enum.map(conflicts, & &1.id)) == [
-             "coding-reservation",
-             "interactive-reservation"
-           ]
   end
 
   test "public API rejects malformed options and lease handles without raising", %{

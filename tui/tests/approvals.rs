@@ -72,7 +72,6 @@ fn opened(hello: ouro::proto::Hello) -> App {
             "updated_at": "2026-01-01T00:00:00.000000Z"
         }]),
     );
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
 
     app.open_session(Plane::Interactive, SESSION.to_string());
 
@@ -418,7 +417,6 @@ fn the_fifth_answer_is_absent_and_says_why_when_the_gateway_cannot_save_a_rule()
     let mut app = opened(support::hello(&[
         "hello",
         "interactive.list",
-        "coding.list",
         "interactive.subscribe",
         "interactive.replay",
         "interactive.respond_approval",

@@ -29,10 +29,7 @@ defmodule Ouroboros.Web.Live.CellsTest do
   alias Ouroboros.Web.Transcript.Cell
   alias Ouroboros.Web.Transcript.Entry
 
-  @types Map.new(
-           Presentation.canonical_types() ++ [:delegation, :status],
-           &{Atom.to_string(&1), &1}
-         )
+  @types Map.new(Presentation.canonical_types() ++ [:status], &{Atom.to_string(&1), &1})
 
   @providers %{"claude_code" => :claude_code, "native" => :native}
 
@@ -456,12 +453,6 @@ defmodule Ouroboros.Web.Live.CellsTest do
       html = draw(["event_provider_event_operator_shell"])
 
       assert html =~ "ouro-runtime"
-    end
-
-    test "a delegation is a runtime block, not a message" do
-      html = draw(["event_delegation"])
-
-      assert html =~ "ouro-runtime" or html =~ "ouro-subagent"
     end
   end
 

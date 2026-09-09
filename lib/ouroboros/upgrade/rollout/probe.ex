@@ -188,7 +188,7 @@ defmodule Ouroboros.Upgrade.Rollout.Probe do
   end
 
   # The floor is an agent that survived the signal and still has inspectable state. If it
-  # keeps a `:last_message` the way `Ouroboros.Agent.Worker` does, that message must be
+  # keeps a `:last_message` the way `Ouroboros.Wasm.Capability` does, that message must be
   # the one just sent — an agent that answers while ignoring its input is not ready.
   defp sane_reply?(agent, body) do
     state = if is_struct(agent), do: Map.get(agent, :state), else: nil

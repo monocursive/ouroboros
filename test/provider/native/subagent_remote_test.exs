@@ -934,8 +934,6 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
 
     on_exit(fn -> stop_peer(peer) end)
 
-    put_peer_env!(peer_node, :coding_storage, {Jido.Storage.ETS, table: peer_table(peer_node)})
-
     {:ok, _applications} =
       :erpc.call(peer_node, Application, :ensure_all_started, [:ouroboros], 60_000)
 

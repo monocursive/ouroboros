@@ -70,7 +70,6 @@ fn opened_with(hello: ouro::proto::Hello, options: Value) -> App {
         Tag::Sessions(Plane::Interactive),
         session_row(options),
     );
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
 
     app.open_session(Plane::Interactive, SESSION.to_string());
 
@@ -498,7 +497,6 @@ fn the_new_session_dialog_offers_full_access_and_says_what_it_costs() {
     );
     app.apply(key(KeyCode::Char('2')));
     answer(&mut app, Tag::Sessions(Plane::Interactive), json!([]));
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
     // Printable shortcuts belong to the operator dashboard; home is a task composer.
     app.tab = ouro::ui::app::Tab::Dashboard;
     app.apply(key(KeyCode::Char('n')));

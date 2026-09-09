@@ -3,7 +3,7 @@ defmodule Ouroboros.Control.Grants do
   The durable, deny-by-default authority for agent effects.
 
   A grant is one triple — principal, effect, constraints — where the principal is a
-  logical mesh agent ID, the effect is something `Ouroboros.Agent.Effects` can do to the
+  logical mesh agent ID, the effect is something an agent can do to the
   world, and the constraints are the single allow-list that effect is checked against:
 
       :start_agent   modules: :any | [module]
@@ -46,7 +46,7 @@ defmodule Ouroboros.Control.Grants do
   ## What this actually gates, and what it does not
 
   Grants gate the *action layer*: the typed signals an agent handles through
-  `Ouroboros.Agent.Effects`. That is the layer well-behaved agent flows travel through,
+  the agent-effect layer. That is the layer well-behaved agent flows travel through,
   and constraining it is worth doing. It is not a sandbox, and describing it as one would
   be a lie:
 

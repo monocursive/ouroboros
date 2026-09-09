@@ -52,13 +52,6 @@ defmodule Ouroboros.Gateway.MachineSetupTest do
     on_exit(fn -> File.rm_rf!(dir) end)
 
     :ok =
-      :erpc.call(peer_node, Application, :put_env, [
-        :ouroboros,
-        :coding_storage,
-        {Jido.Storage.ETS, table: :machine_setup_storage}
-      ])
-
-    :ok =
       :erpc.call(peer_node, Application, :put_env, [:ouroboros, :workspace_allowed_roots, [dir]])
 
     assert {:ok, _} = :erpc.call(peer_node, Application, :ensure_all_started, [:ouroboros])

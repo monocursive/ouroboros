@@ -129,7 +129,6 @@ fn opened(status: &str, options: Value, usage: Value, events: Vec<Value>) -> App
         Tag::Sessions(Plane::Interactive),
         json!([session(status, options, usage)]),
     );
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
 
     app.open_session(Plane::Interactive, "session-a7".into());
 

@@ -30,10 +30,8 @@ Design invariants, in the codebase's own idiom:
    [config/runtime.exs](../config/runtime.exs).
 3. **Bounded everything.** The planes are *not* uniformly bounded upstream —
    `InteractiveSession.start/1` waits `:infinity` for provider readiness
-   ([interactive_session.ex:37](../lib/ouroboros/interactive_session.ex)),
-   `Team.cancel/2` and `close/1` call at `:infinity`
-   ([team.ex:92](../lib/ouroboros/team.ex)), `add_worker`/`delegate` bound at
-   60s. So the gateway imposes its own per-method ceiling on every call it
+   ([interactive_session.ex:37](../lib/ouroboros/interactive_session.ex)).
+   So the gateway imposes its own per-method ceiling on every call it
    makes (§2.4), runs each request in a supervised task, and answers
    `-32005` when the ceiling passes. Every per-connection queue is bounded
    with an explicit overflow behavior. No `:infinity` escapes onto the wire.
@@ -101,7 +99,7 @@ New files under `lib/ouroboros/gateway/`:
 | `gateway/listener.ex` | `Gateway.Listener` | `:gen_tcp` listen + accept loop; hands sockets to ConnSupervisor |
 | `gateway/conn.ex` | `Gateway.Conn` | per-connection GenServer: framing, auth, dispatch, subscriptions, outbound queue. Requests dispatch to supervised tasks (≤ 8 in flight, ≤ 64 waiting, per connection); responses correlate by id and may return out of order, so one slow method never blocks the event stream or other requests |
 | `gateway/writer.ex` | `Gateway.Writer` | the socket's single writer: a process spawned and linked by its `Conn` whose only job is the blocking `:gen_tcp.send/2` the `Conn` must not make (§2.6) |
-| `gateway/wire.ex` | `Gateway.Wire` | term → JSON-safe encoding (builds on `Orchestration.Serializable`) |
+| `gateway/wire.ex` | `Gateway.Wire` | term → JSON-safe encoding, substituting at the leaf |
 | `gateway/methods.ex` | `Gateway.Methods` | method table: name → {scope, handler, timeout} |
 
 Started only in `children(:core)`
@@ -133,7 +131,7 @@ existing file) because nobody named a source there to have gotten wrong.
 | `OUROBOROS_GATEWAY_QUEUE_LIMIT` | `1000` | per-connection **outbound** frame cap (see §2.6). The inbound bound — requests accepted and not yet dispatched — is a fixed constant (64) in `Gateway.Conn`, not this variable: one name for two queues is a name an operator cannot reason about |
 | `OUROBOROS_GATEWAY_EVENT_LEAF_BYTES` | `131072` | most bytes one string inside an event `payload` may put on the wire; beyond it the string is excerpted (§2.7). Floor 1024 |
 | `OUROBOROS_GATEWAY_EVENT_PAYLOAD_BYTES` | `524288` | most bytes *all* of one event's payload strings may put on the wire together, per event (§2.7). Floor 1024 |
-| `OUROBOROS_GATEWAY_DETAIL_LEAF_BYTES` | `8388608` | the per-string cap `interactive.event_detail` / `coding.event_detail` encode under (§2.4). Floor 1024 |
+| `OUROBOROS_GATEWAY_DETAIL_LEAF_BYTES` | `8388608` | the per-string cap `interactive.event_detail` encodes under (§2.4). Floor 1024 |
 
 Two placement facts the implementation must respect:
 
@@ -277,11 +275,10 @@ several planes exit rather than error when down (e.g.
 itself only survives via its own `safe_value/2`) — a `:noproc`/`:timeout`
 exit becomes `-32004`/`-32005`, never a dead Conn.
 
-For verbs whose upstream call is `:infinity` (`teams.cancel`, `teams.close`),
-a gateway timeout does **not** cancel the upstream operation — it may still
-complete. The response says so (`"outcome": "unknown"`), and the verbs are
-observable after the fact via `teams.state`, so the client reconciles by
-reading.
+For verbs whose upstream call is unbounded (`interactive.start` waits `:infinity` for
+provider readiness), a gateway timeout does **not** cancel the upstream operation — it
+may still complete. The response says so (`"outcome": "unknown"`), and the verbs are
+observable after the fact via `interactive.info`, so the client reconciles by reading.
 
 **`read` scope**
 
@@ -291,24 +288,16 @@ reading.
 | `runtime.providers` | `Ouroboros.providers/0` + per-provider `provider_status/1`, each probed under its own bounded task. The `native` entry's `details` carries **`sandbox`** (C5) — `"sandbox-exec"`, `"bwrap"`, or `"none"`, the OS sandbox backend the owning node actually detected — plus `sandbox_notes` (why, including Apple's deprecation of `sandbox-exec` and bubblewrap's missing seccomp) and `enforced`, a sentence naming what each mode holds. It is a string and never a boolean: "sandboxed" is not a fact, `"sandbox-exec"` is. **A footer may say "no OS sandbox" for a native session only when this reads `none`** — never inferred from the provider's name, and never from the absence of the key, which means "this runtime did not say" |
 | `runtime.models` | `Ouroboros.Models.list/0` — the packaged `llm_db` catalogue. Native combines its OpenAI, Anthropic, and xAI lanes and carries full ReqLLM specs such as `openai_codex:gpt-5.6-sol`, `anthropic:claude-sonnet-5`, and `xai:grok-4.6`, the configured direct default, context/output limits and public token pricing; non-secret credential readiness is reported separately by `runtime.providers`. |
 | `account.read` `{}` | `OpenAIAuth.read/1` — non-secret API-key/OAuth readiness, ChatGPT identity claims, and managed-login state. Tokens remain only in the runtime's private OAuth file and never cross the gateway. |
-| `agents.list` | `Mesh.list_agents/0` |
-| `agents.state` `{id}` | `Mesh.state/1`. For a lane-W capability (`wasm/<name>`) the answer additionally carries `untrusted: true` and `truncated`, and `agent.state.last_answer`/`last_message` are bounded at 64 KiB with the same in-band marker: both are written by a component, this verb is `read`, and a read-only listener must not be the way around the label `agents.message` carries (docs/WASM.md §7.7) |
-| `interactive.list` / `coding.list` | `InteractiveSession.list/0` / `CodingSession.list/0`. Interactive rows are **rows**, not whole sessions (`State.summary/1`): same struct, same `_struct` tag, same field names, with `events` emptied, `turns` emptied, and `usage` reduced to `{total_tokens, cost_usd}`. They carry `title`, `title_source`, `cursor` (the contiguous high-water mark, previously readable only by fetching an entire `info` window), `forked_from`, `handed_off_from`, `forks`, `worktree_requested`, `worktree` (the record `Workspace.Worktree` made: `path`, `root`, `branch`, `base_commit`, `repository`, and `retired` once it was removed or kept), `children` (the coding task ids this conversation delegated — **ids only**, the records being one `interactive.delegations` away), and `options.capabilities`. Coding rows carry `parent` for the other half of that nesting. This list is fanned out over `:erpc` to every fleet node and then across the socket on every refresh, which is why it is bounded; anything a row drops is one `interactive.info` away. This list is fanned out over `:erpc` to every fleet node and then across the socket on every refresh, which is why it is bounded; anything a row drops is one `interactive.info` away |
+| `interactive.list` | `InteractiveSession.list/0`. Rows are **rows**, not whole sessions (`State.summary/1`): same struct, same `_struct` tag, same field names, with `events` emptied, `turns` emptied, and `usage` reduced to `{total_tokens, cost_usd}`. They carry `title`, `title_source`, `cursor` (the contiguous high-water mark, previously readable only by fetching an entire `info` window), `forked_from`, `handed_off_from`, `forks`, `worktree_requested`, `worktree` (the record `Workspace.Worktree` made: `path`, `root`, `branch`, `base_commit`, `repository`, and `retired` once it was removed or kept), and `options.capabilities`. This list is fanned out over `:erpc` to every fleet node and then across the socket on every refresh, which is why it is bounded; anything a row drops is one `interactive.info` away |
 | `interactive.info` `{id}` | `InteractiveSession.info/1`. `options.approval_mode`/`options.sandbox_mode` are `null` when the plane omitted an unenforceable default — the provider's own behavior governs — where they previously always echoed the plane default. Also carries `options.capabilities` and `usage`, described below |
 | `interactive.replay` `{id, cursor, limit}` | `InteractiveSession.replay/2` (cursor exclusive, limit ≤ 500) |
 | `interactive.event_detail` `{id, sequence, node}` | The one event at `sequence`, whole — `replay` with `cursor: sequence - 1, limit: 1`, same owner routing and the same 15s ceiling. Answers a **bare event object**, not the single-element array `replay` would give. It exists because streamed and replayed events are byte-capped (§2.7), so this is where a client fetches the leaf an `_excerpt` named: the answer is encoded under `detail_leaf_bytes` (8 MiB) rather than `event_leaf_bytes` (128 KiB), and a leaf past even *that* carries the same `_excerpt` marker. Below the retained floor → `-32006` `{"reason": "cursor_pruned", "floor": N}`, the same shape `replay`/`subscribe` answer with; above the high-water mark, or inside a sequence gap, → `-32007` (a window of one starting in a gap returns the *next* event that exists, and answering with an event nobody asked for would be a worse lie than not finding it) |
 | `interactive.journal` `{id, since_seq?, limit?, node?}` | `InteractiveSession.journal/2` (R1) — a window of the native session's **turn journal**, the append-only hash-chained record beside its conversation. Distinct from `interactive.replay` on purpose: that verb serves the event stream a client *renders*, this one serves what the session **was** — the model calls with their provenance digests, the chunk lists that came back (thinking included), each tool result exactly as it entered the conversation, every injected message and approval decision, and the settled turn's conversation digest. `since_seq` is exclusive and `limit` is ≤ 500, the same cursor discipline `replay` uses over a different sequence space. The answer is `records` plus the four fields that bound what it means: `head` (the chain head), `head_seq`, `verified_through` (below `head_seq` means the chain broke there and everything after it is unverified — reported rather than raised, because a caller needs the prefix), and `truncated_through` (`null`, or the sequence the byte budget dropped through). Native only, refused by the same two shapes `compact` uses |
 | `interactive.replay_verify` `{id, node?}` | `InteractiveSession.replay_verify/1` (R2) — **verified replay**: the recorded turns re-run through the real turn loop, with the model answering from the journal's chunk lists, the tools answering from the recorded results, control fed at its recorded positions and the hook configuration preset empty. Nothing is dispatched, nothing is spent and nothing is written; the verb is `operate` rather than `read` only because it starts a process. Answers `{verified, turns, records, head, divergence}`. `turns` is how many verified, which is the number that matters when `verified` is `false`: the record was good as far as it went. `divergence` is `null`, or one object told apart by `kind` — `"diverged"` with `field`, `expected_sha256`, `got_sha256` and `seq` (the loop no longer re-derives what was recorded, at that record and in that field), or `"boundary"` with `reason`, `detail` and `seq` (verification stops there honestly: a `gap`, a `truncated` prefix, a turn that never settled, a `model_call` with no `model_result`, a conversation that predates the journal, a compaction or rewind, an injection this runtime cannot reproduce). Reads the journal *file*, so unlike every other native verb here it needs no live transport — a session whose runtime died last week still verifies where its directory is. Native only, refused by the same two shapes `compact` uses |
 | `interactive.context` `{id, node}` | `InteractiveSession.context/1` (D9) — what a session can honestly say about its own context window, and `source` says which of two answers you are reading. `"native"` is a `native` session reporting facts it counted itself: `prefix_fingerprint` (the cached prefix's digest, which rotates only where `configure` or a compaction changed it), `context_window`, `context_used` (the last request's size as the *provider* counted it, `0` until a turn has spent one), `compact_at`, `keep_recent_tokens`, `messages`, `compaction_thrashing`, `compactions` (the full report per fold), `archive_ids` (ids only — the archive bodies are the conversation that was just folded away, and returning them would undo the fold), `instruction_files`, `instruction_files_dropped`, `instruction_bytes`, `tools`, `handed_off_to`. `"usage"` is every other transport, carrying only what its `usage` events reported — `context_window` and `context_used` where the provider named them and `null` where it did not, plus `total_tokens`, `model`, `provider_session_id` and `transport`. Never a guess and never a padded shape: a provider that reported no window reports none, and the absent keys are absent rather than `null` |
-| `interactive.delegations` `{id, node}` | `InteractiveSession.delegations/1` (G1) — this conversation's delegations, oldest first. Each row is `delegation_id`, `team_id`, `task_id`, `task_node`, `plane` (always `"coding"`), `objective_digest`, `status`, `result_digest`, `created_at`, `updated_at`, and `source`. The session's own copy of a status is a hint that follows the team's record — a terminal note the parent was not running to receive is simply missing from it — so this reads the team that owns the delegation and says `source: "team"`; where that team is not reachable it answers from the session's copy and says `source: "session"` rather than pretending the two are the same thing |
 | `interactive.rewind_points` `{id, node}` | `InteractiveSession.rewind_points/1` (D6) — the turns this session can be returned to, oldest first, in the shape a menu renders: `turn_id`, `at`, `files`, `paths` (the first twenty), `commands`, `restorable` (how many of `files` still have prior content in the checkpoint store), `dropped_turns`. `commands` and the gap between `restorable` and `files` are the two facts that make a turn only *partly* undoable, and they are handed back **before** anything is chosen for exactly that reason. Native only, refused by the same two shapes `compact` uses |
 | `interactive.subscribe` `{id, cursor}` | `InteractiveSession.subscribe/2` **called from the Conn process** so `{:ouroboros_interactive_event, id, event}` lands in its mailbox; returns backlog after cursor atomically |
 | `interactive.unsubscribe` `{id}` | `InteractiveSession.unsubscribe/1` |
-| `coding.info/replay/subscribe/unsubscribe/event_detail` | `CodingSession` equivalents (`{:ouroboros_coding_event, id, event}`); `coding.event_detail` `{id, sequence, node}` is the coding-plane twin of the row above, refusals and all |
-| `teams.list` | `Team.Store.list/0`, projected as in `status/0` |
-| `teams.state` `{id}` | `Team.state/1` via `Team.whereis/1` |
-| `plans.list` / `plans.get` `{id}` | `Orchestration.Scheduler.list/0` / `Scheduler.get/2` (server is the *first* arg with a default; bare `:not_found` → `-32007`) |
-| `control.list` / `control.get` `{id}` | `Ouroboros.Control.list/0`, `get/1` |
 | `signing.decisions` | bounded `:erpc.call(signing_node, Signing.Service, :decisions, [])` — requires `OUROBOROS_SIGNING_NODE` configured **and** `Node.alive?()` (a `OUROBOROS_DIST=none` daemon cannot erpc), else `-32004`. Upstream failure shape is `{:error, {:signing_service_unavailable, _}}`, a nested tuple |
 | `grants.list` `{principal}` | `Control.Grants.list/1` (per-principal by design — there is no list-all, and the gateway does not add one). `Grants.list/1` swallows `:exit` into `[]` ([grants.ex:159](../lib/ouroboros/control/grants.ex)), so the handler pre-checks `Process.whereis(Grants)` to answer `-32004` instead of a false empty |
 | `permissions.list` `{scope?, workspace?, node?}` | `Control.Permissions.list/1` on the named machine (local by default; a remote one is a bounded `:erpc`, so an unreachable machine is reported as unreachable rather than as a gateway timeout). Returns the `:node` rules read from `config :ouroboros, :permissions` alongside the stored `:user`/`:workspace`/`:session` ones, each with `id`, `pattern`, `kind`, `decision`, `scope`, `workspace`, `session_id`, `created_at`, and `fragile` — the last true for an argument-constraining `Bash` pattern, which is accepted but easy to route around |
@@ -347,14 +336,13 @@ reading.
 | `interactive.compact` `{id, focus?, node}` | `InteractiveSession.compact/2` (D9) — folds an open session's conversation *now*, optionally focused, and answers with the same report the automatic path produces: `trigger` (`"manual"`), `turn`, `archived_messages`, `archive_id`, `elided_tool_results`, `summary_tokens`, `before_tokens`, `after_tokens`, `summarised`. **Native only, and refused by capability everywhere else** with `["unsupported_on_transport", {transport, verb, provider, message}]`: only there does this runtime hold the conversation to fold, and a summary invented for a transcript Ouroboros never had would be a claim nothing supports. A vendor's own compaction is surfaced as an event when it reports one, never imitated. A `native` session whose transport is not up is a *different* refusal, `["native_transport_unavailable", {verb, reason, message}]`, because that one is worth retrying and a capability refusal is not. Also refused mid-turn (`busy`) and after two folds in three turns (`compaction_thrashing`, the permanent latch — the operator's own `/compact` is exempt because they were told what happened). The ceiling is **120s**, not 15: a compaction that has to summarise makes one model call on the session's own model |
 | `interactive.rewind` `{id, to_turn, what?, node}` | `InteractiveSession.rewind/3` (D6) — returns the session to `to_turn`, undoing everything after it. `what` is `files`, `conversation`, or `both` (the default). The answer is `restored` (each entry a `path` and whether it was rewritten or `deleted`), **`unrestorable`** — each entry naming a path, or a whole turn and the shell commands that ran in it, with the reason — `turns` (the ids being undone) and `messages` (what the conversation was truncated to). `unrestorable` is the point of the return value: the two lists together account for every file the manifest says was touched, and Claude Code #18516 is the rewind that silently restored fewer. Native only, refused by the same two shapes `compact` uses, and the ceiling is **120s**. **Honest limit:** the parameter contract admits a turn id *or* a 1-based ordinal, but `InteractiveSession.rewind/3` guards `is_integer`, so a binary `to_turn` is refused with `["invalid_rewind", …]` before it reaches the session — clients send the ordinal `rewind_points` hands them |
 | `interactive.handoff` `{id, prompt?, handoff_id?, node}` | `InteractiveSession.handoff/3` (D9) — a **new** session seeded with a curated packet rather than a folded conversation: the five-heading summary, every file the parent touched with its hash as of now, the open plan, and whatever the operator typed as `prompt`. Answers in `interactive.start`'s shape with the same 120s ceiling and the same `outcome: unknown` admission, and `handoff_id` is caller-owned for the same reason `fork_id` is. The child carries `handed_off_from` — held apart from `forked_from` because the two are different claims, a fork carrying the parent's conversation and a handoff carrying a packet *about* it — and the parent records `handed_off_to`, which `interactive.context` surfaces. The parent is not interrupted and not closed: a handoff is not a close, and ending the parent is the operator's decision. Native only, refused by the same two shapes `compact` uses; a `prompt` that forges the `<ouroboros-runtime>` delimiters is `["invalid_handoff_prompt", {reason: "reserved_delimiter"}]` rather than escaped. **Honest limit:** workspace admission is unchanged, so handing off from a live session holding an exclusive lease is refused by the lease exactly as a fork is — starting the parent with `worktree: true` is the composable fix |
-| `interactive.delegate` `{id, objective, delegation_id?, provider?, workspace?, node}` | `InteractiveSession.delegate/3` (G1) — a **coding task with a parent**, not a sub-conversation. The child runs on the coding plane with its own id, its own transcript and its own durable record; what makes it this session's is `parent: {plane: "interactive", id}` on that record, which is durable, immutable, and in the coding plane's idempotency fingerprint. The team is the workspace's *default* one — one per canonical workspace root per node, id `<node>:workspace-team:<digest>`, created lazily, durable through the same checkpoint every other team uses, and listed by `teams.list` like any other — and one worker per conversation, which serialises a conversation's delegations: `Team.Server` accepts one active delegation per worker, so while a child is running a second delegation from the same session is **refused** — `["delegation_failed", {"worker_busy", worker_id, delegation_id}]` — rather than queued or fanned out. One conversation, one child at a time, and the operator is told which child is holding the slot. `workspace` and `provider` default to the conversation's own. The reply is `{delegation_id, team_id, task_id, task_node, plane, status}`. The parent's transcript gains a runtime-native `delegation` event with `status: "started"` and a second one carrying the terminal status and a bounded `result_digest` when the child ends — a digest, never the result, because that is the child's own record. Ceiling **90s** and `outcome: unknown`: this verb may make two 60s-bounded team calls, and a ceiling that fires cannot prove the child was not created, which is why `delegation_id` is caller-owned and a repeat under it answers with the same delegation rather than a second one. Refusals: `["session_not_delegable", {status}]`, `["invalid_objective", …]`, `["delegation_limit_reached", {limit}]` (100 per conversation, refused rather than evicting — dropping the oldest would lose the link to a child that is still running) |
 | `workspace.exec` `{id, command, node}` | `InteractiveSession.exec/2` (B7) — one command through `/bin/sh -c` in the session's admitted workspace on its owner node, as **the operator's explicit act**. Not a tool: no model asks for it, no provider is told about it, and it is permitted only where the session's effective `approval_mode` is `auto_approve` or `Control.Permissions.evaluate/1` answers `{:allow, _}` for `tool: "bash"` with that command under the session principal. Everything else — an unreadable rule store included — is `["shell_refused", {reason, session_id, workspace, approval_mode, denied_by, suggested_rule, message}]`, where `suggested_rule` is the pattern in the engine's own language that `permissions.add` would take verbatim. Recorded in the effect ledger as an `:operator_shell` effect **before** it runs, carrying the command's digest and working directory and never its text, and settled after; a ledger that cannot record refuses the command, because a command nobody can account for afterwards is exactly what this verb exists not to be. Output is bounded at 30 KiB inline (20 KiB head, 10 KiB tail, the middle elided) with the whole of it spilled to a `0600` file under the session's data directory and named in the reply. The reply is `{effect_id, command_digest, cwd, exit_status, timed_out, duration_ms, output, output_bytes, excerpt, spilled, spill_error}`. The command appears on the session's own log as a runtime-native `provider_event` `kind: "operator_shell"` `{command_digest, exit_status, output_excerpt}`, and the next turn's `<ouroboros-runtime>` envelope carries the last **three** commands' excerpts, 512 bytes each, redacted and stripped of control characters. Ceiling **10 min**, the same number the runner stops at, because a lower one would kill the gateway task while the command kept running and leave an entry nobody settles. **Honest limit:** a process that detaches from its own group can outlive the timeout — the timeout terminates the shell this runtime started |
 | `workspace.browse` `{path?}` | `Gateway.Methods.Browse.browse/1` (D11, [docs/WEB.md §7](WEB.md)) — one directory listing, so a client choosing a workspace before it starts a session never needs a second channel to the disk. Answers `{path, parent, roots, entries, truncated}`: `path` is the **canonical** absolute directory (every symlink already resolved, so the answer names where the client really is), `parent` is the directory above it or `null` at a root boundary, `roots` is every directory this node browses, `entries` is `{name, dir}` rows, and `truncated` says whether the list was cut. Rooted at `$HOME` plus `:workspace_allowed_roots`, each canonicalized; a root that does not resolve to a directory is dropped rather than advertised. **Directories only, dotfiles excluded, name-sorted by byte order, bounded at 500** — and an entry that is a symlink out of the roots is left out, because a row the very next call refuses is a lie a picker tells. `:operate` although it writes nothing: it exists to start sessions, and a listener held at `read` scope is one that was not trusted to. Refusals are typed in `data.reason`: `outside_roots` (`-32602`, carrying `roots`), `relative_path` (`-32602` — nothing is resolved against the daemon's working directory), `not_a_directory` (`-32602`), `no_such_directory` (`-32007`), `unreadable` (`-32006`), and `no_browse_roots` (`-32004`, `$HOME` unset and no configured root resolves). **`outside_roots` says only that.** Whether the path exists, what a symlink resolved to, and which root it was nearest are all withheld, and a path that does not resolve at all is classified from its nearest *existing* ancestor rather than from the failure — so `/etc/nope` and `<root>/link-to-etc/nope` are the same refusal, and a directory picker cannot be used as a filesystem probe |
 | `subagent.spawn` `{id, node?, request_id, input}` | Runs the native `agent` tool on behalf of this interactive session. The live owner supplies principal, workspace, posture and tools; `input` cannot replace them. A stable request ID reconciles a retry without launching twice. Native transports reuse their child registry; vendor transports use a session-owned native sidecar. |
 | `subagent.result` `{id, node?, request_id, input}` | Runs `agent_result` against this session's children, with `task_id`, `wait_ms?` and `stop?`. Running or returning work stays collectable. |
 | `subagent.stop` `{id, node?, request_id, task_id}` | Stops this session's child through the same native result path. An unfinished return remains observable until settlement. |
 | `interactive.request_approval` `{id, request, node?}` | The other direction: something outside Harness asking this runtime for a decision. The coordinator checkpoints an `approval_requested`, consults the permission engine, and otherwise blocks until `interactive.respond_approval` names the id. |
-| `interactive.respond_approval` / `coding.respond_approval` `{id, request_id, response}` | `response` is approve/deny plus the bounded Harness scope/reason shape. Interactive and finite Native coding runs persist the answer before forwarding it to the in-process loop; `actor` records human/headless/automation and no token or provider option is admitted except the existing plan-exit choice. |
+| `interactive.respond_approval` `{id, request_id, response}` | `response` is approve/deny plus the bounded Harness scope/reason shape. The answer is persisted before it is forwarded to the in-process loop; `actor` records human/headless/automation and no token or provider option is admitted except the existing plan-exit choice. |
 | `policy.replay` `{name, since?}` | `Wasm.PolicyEngine.replay/2` (docs/SELF.md §S2) — asks a live lane-W `policy` component every human answer in this node's corpus, dry, and counts what it said against what the human said. Per tool: `decisions`, `agreements`, `contradictions` (`allow` where the human denied), `would_resolve` (`allow` where the human approved — the prompts a promotion would remove), `stricter`, `asks`, `unreadable`, and up to twenty `contradiction_rows` carrying a `fingerprint`, a `session_id` and an `at` and **never a document**. And per **shape** (`per_shape`, at most 200 shapes per tool), where a promotion is actually decided: the same seven plus `distinct_fingerprints`, `distinct_sessions` and `human_denies` over definite verdicts only. The report also carries `thresholds`, the five numbers a promotion has to clear, inside its own seal — a report is read months later and the bar it was measured against is part of what it says. Sealed with `report_sha256` over the canonical JSON of everything but that key and `replayed_at`, so two replays of one corpus produce one digest; the digest binds the file to its own contents and nothing else. `operate` rather than `read` because it stands a component up, but it decides nothing: a dry instance under its own name, no `:permission` entry, no evidence row, and the live instance untouched. `since` is an ISO 8601 instant, **parsed at the contract** and refused as `-32602` otherwise, because the corpus reads an instant it cannot parse as no filter at all. `administrator`. Node-local (plan §0 row 9: a fleet replay is not in v1) |
 | `policy.promote` `{name, tool, shape, report}` | `Wasm.PolicyEngine.promote/6` — the one way a component's `allow` is honoured that is not an operator typing a tool name into `policy_allowable_tools`. A promotion is per **`(tool, shape)`** (S-D27): `shape` is a `bash` command prefix, `bash` is the only promotable tool and every other name is refused as `tool_not_promotable`. Four gates: the report must name the bytes this node would evaluate and hash to its own `report_sha256`; the node **re-runs the replay itself**, because a report is evidence that a replay happened and not that it is still true; the re-run must show zero contradictions across the whole tool; and on this shape's definite verdicts, no unreadable verdict, ≥20 distinct requests, ≥2 distinct sessions and ≥1 call it would have resolved. The re-run's numbers go into the record with the submitted report's digest beside them as `report_sha256_as_submitted` — the digest is keyless, so it says the file was not edited and nothing about who produced it, and the re-run is the gate. The actor is the connection's principal (`Audit.Identity.actor/0`) and never a parameter — an unattributed caller is refused `-32003` with `reason: unattributed_actor` rather than recorded as one — and the verb needs `administrator` under required audit, because this is `permissions.add` with a component in place of the pattern. Answers the record, in `policy.status`'s shape. `outcome: unknown` on a ceiling: the replay and the checkpoint do not stop because this socket did |
 | `policy.demote` `{name, tool, shape, reason}` | `Control.PolicyPromotion.demote/5` — narrowing, and idempotent: a shape that is not promoted, or a name this record does not hold, is `:ok` with no write. Narrowing is per shape too, so demoting `mix test` leaves `mix` standing. `reason` is at most 512 bytes and is **echoed, not stored**: the record's `reason` is an enumerated atom (`operator_demotion` here, `human_contradiction` for the engine's canary), because a checkpoint fsynced on every write is not where free text belongs. It takes the same **attributed actor** `promote` and `clear` do, and that actor is the demotion's ledger principal: narrowing is safe, but an audit trail that says `runtime` about a thing a person did is not, and it is the trail an investigation reads to find out who un-did the canary's work. `administrator`. Answers the record |
@@ -381,12 +369,6 @@ the new `account.*` methods are feature-detectable
 through `hello.methods`, but the envelope tightening and the structured-`input` capability
 are not — the compatibility bet, stated plainly, is that the only deployed client ships in
 this repository and moves in lockstep.
-| `coding.start` `{objective, opts}` / `coding.cancel` `{id}` / `coding.delete` `{id}` | same start identity, fleet routing, remote-workspace rule, immutable-intent reconciliation, and outcome-unknown 120s ceiling as `interactive.start`. `coding.delete` is the coding-plane twin of `interactive.delete` (terminal `completed`/`failed`/`cancelled`/`lost` only) |
-| `teams.add_worker` `{team_id, worker_id, opts?}` / `teams.delegate` `{team_id, worker_id, objective, opts?}` | upstream bound is 60s (`control_call/2`), gateway ceiling 60s. Worker opts: `role`, `node`; delegation opts: `id`, `coding_node`, `workspace`, `provider`. Node names are matched by string against `[node() | Node.list()]` — never converted |
-| `teams.cancel` `{team_id, delegation_id}` / `teams.close` `{team_id}` | upstream is `:infinity` — gateway ceiling 60s, and the timeout answers `-32005` with `data` `{"outcome": "unknown"}` (§2.4 intro) |
-| `control.submit` `{objective, opts}` / `control.cancel` `{id}` | control opts: `id`, `max_revisions` |
-| `agents.stop` `{id}` | `Mesh.stop_agent/1` |
-| `agents.message` `{to, body, from?, timeout_ms?}` | `Mesh.send_message/4` — the scriptable way to reach a deployed lane-W capability at `wasm/<name>` (docs/WASM.md §7.7), and any other mesh agent besides. `operate` rather than `read` twice over: it changes the agent's state by definition, and for a capability it *runs a component*, starting the containment helper that `wasm.status` and `wasm.list` are `read` precisely because they never do. Not node-routed — `:pg` already resolves an agent wherever in the cluster it lives, so this verb reaches a peer's capability and the boundary that makes that safe is the helper's linker, not the scope table. `to` and `from` are bounded at 512 bytes, `body` at 64 KiB *encoded*, and `timeout_ms` at 30s under a 45s gateway ceiling so the gateway is never the thing that gives up first. Answers `{to, from, untrusted: true, truncated, reply}`, where `reply` is the agent's `last_answer`: **untrusted** — for a capability it is prose and JSON a component wrote — returned whole when it encodes within the bound and as a truncated *string* carrying an in-band `… truncated at N bytes.` marker otherwise, which is what `truncated` distinguishes. A message an agent refused is still a delivered message: this verb reports that the agent answered nothing, and `agents.state` says why |
 | `runtime.shutdown` | `System.stop/0` — **also** requires `OUROBOROS_GATEWAY_ALLOW_SHUTDOWN=1`, else `-32003`. Answered by the `Conn` rather than a task: the acknowledgement is written *and flushed to the socket* before the stop is called, because the client that asked is owed the ack |
 
 Every option a plane accepts is an atom, and none of them are built from client bytes:
@@ -397,7 +379,7 @@ a `sandboxMode` that was ignored would run the session under a policy nobody cho
 
 Two spec corrections found while implementing, recorded rather than quietly dropped:
 `metadata` is *not* an option `InteractiveSession.start/1` accepts — the durable
-checkpoint rejects it ([coding/task_state.ex](../lib/ouroboros/coding/task_state.ex)
+checkpoint rejects it ([interactive/state.ex](../lib/ouroboros/interactive/state.ex)
 `@accepted_options`) and the plane sets its own session metadata — so the allowlist above
 replaces it with options the plane really takes; and `env`, `mcp_config`, and
 `provider_options` stay out entirely, because the checkpoint refuses inline environment
@@ -462,17 +444,16 @@ adapters still accept the option, so it used to travel through and do nothing:
 `claude --print --permission-mode default` is never given a `--permission-prompt-tool`
 and denies every permission-needing tool silently. `interactive.start` now answers
 `-32006` with `data` `["unsupported_approval_mode", {provider, transport, requested,
-supported, reason: "no_approval_channel", message, plane}]` — the same `[tag, map]` shape
-as `unsupported_safety_options`, so `model::refusal` renders it as one sentence — whether
-`:prompt` was stated or injected by the plane default. `supported` names the modes that
-work. Codex on app-server, the ACP providers, `pi`, `amp`, and the whole coding plane are
-untouched. This stands until the Claude approval bridge (AGENT_EXPERIENCE Track C2) makes
+supported, reason: "no_approval_channel", message, plane}]` — a `[tag, map]` shape whose
+`message` `model::refusal` renders as one sentence — whether `:prompt` was stated or
+injected by the plane default. `supported` names the modes that
+work. Codex on app-server, the ACP providers, `pi` and `amp` are untouched. This stands until the Claude approval bridge (AGENT_EXPERIENCE Track C2) makes
 `:prompt` true for those providers.
 
 Deliberately absent from v1: `agents.start` (arbitrary module start is a
 bigger authority than a TUI needs; revisit with an allowlisted spec registry),
-`mesh.send_message` (its `from` is caller-supplied — the effects plane made
-principals non-spoofable and the gateway won't reintroduce spoofing),
+`mesh.send_message` (its `from` would be caller-supplied, and a gateway that let a
+caller name the principal would be a gateway that let it name someone else's),
 upgrade `prepare/commit/promote/rollback` (stay in the remote console where
 they belong).
 
@@ -497,15 +478,11 @@ locally. Named organization roles apply in addition to the listener scope.
 
 ### 2.5 Event streaming
 
-On `interactive.subscribe` / `coding.subscribe`, the Conn process becomes the
-subscriber. Each arriving `{:ouroboros_interactive_event, id, %Interactive.Event{}}`
-(delivered at [interactive/task.ex:1003](../lib/ouroboros/interactive/task.ex)) /
-`{:ouroboros_coding_event, id, %Coding.Event{}}`
-([coding/task.ex:520](../lib/ouroboros/coding/task.ex)) is Wire-encoded and
-emitted as notification `interactive.event` / `coding.event` with params
-`{id, event}` (`id` is the session/task id; note the coding struct's own
-field is `task_id`, not `session_id`). Both event structs carry `sequence` —
-the resync cursor.
+On `interactive.subscribe`, the Conn process becomes the subscriber. Each arriving
+`{:ouroboros_interactive_event, id, %Interactive.Event{}}` (delivered at
+[interactive/task.ex:1003](../lib/ouroboros/interactive/task.ex)) is Wire-encoded and
+emitted as notification `interactive.event` with params `{id, event}`. The event struct
+carries `sequence` — the resync cursor.
 
 **Event payloads are byte-capped, and the three paths to an event share one cap.**
 A live notification, a `replay` result, and a `subscribe` backlog all reach the same
@@ -644,8 +621,7 @@ Three upstream behaviors the Conn must handle explicitly:
 
 - **Terminal sessions don't register subscribers.** `subscribe` on a terminal
   session returns the backlog but silently skips registration
-  ([interactive/task.ex:100](../lib/ouroboros/interactive/task.ex); the coding plane
-  mirrors it at [coding/task.ex:82](../lib/ouroboros/coding/task.ex)). After a
+  ([interactive/task.ex:100](../lib/ouroboros/interactive/task.ex)). After a
   successful subscribe the Conn checks the session's status; if terminal, it
   emits `stream.ended {id, plane, status}` after the backlog so the client renders a
   finished session instead of waiting forever.
@@ -653,8 +629,8 @@ Three upstream behaviors the Conn must handle explicitly:
   terminal session, and a crash restarts it *without* the subscription. So the Conn
   monitors that process and emits `stream.ended {id, plane, status: "unknown"}` on its
   `:DOWN`. Without it the events would simply stop with nothing said. (`plane` is
-  `"interactive"` or `"coding"`; it is on both stream notifications because their method
-  names, unlike `interactive.event`/`coding.event`, do not carry it.)
+  `"interactive"`; it is on both stream notifications because their method names, unlike
+  `interactive.event`, do not carry it.)
 - **`{:error, {:cursor_pruned, floor}}`** is a real return of both `subscribe`
   and `replay` ([interactive/task.ex:1069](../lib/ouroboros/interactive/task.ex))
   — sessions retain a bounded event window. The gateway forwards it as
@@ -662,10 +638,9 @@ Three upstream behaviors the Conn must handle explicitly:
   `data` a client branches on rather than displays. Resync behavior is the client's
   (§3.3), and the shape is pinned by a golden fixture.
 
-**Subscriber cleanup needs nothing from the gateway on abnormal death.** Both planes
-`Process.monitor` the subscriber pid and drop it on `:DOWN`
-([interactive/task.ex:1087](../lib/ouroboros/interactive/task.ex),
-[coding/task.ex:554](../lib/ouroboros/coding/task.ex)), so a `Conn` that crashes is
+**Subscriber cleanup needs nothing from the gateway on abnormal death.** The plane
+`Process.monitor`s the subscriber pid and drops it on `:DOWN`
+([interactive/task.ex:1087](../lib/ouroboros/interactive/task.ex)), so a `Conn` that crashes is
 released by the plane itself. A graceful close still unsubscribes explicitly, under a
 total budget of 1s across all of a connection's subscriptions; the budget is what keeps
 a wedged coordinator from delaying an exit that the monitor would have handled anyway.
@@ -713,16 +688,15 @@ discipline applied everywhere else in the runtime after the 2026-08 review.
 
 Rendering-oriented, lossy by design, documented as such.
 
-**`Orchestration.Serializable.safe/1` cannot be the mechanism.** It is
-all-or-nothing at the top level
-([serializable.ex:26](../lib/ouroboros/orchestration/serializable.ex)): one
-pid anywhere in a tree replaces the *entire* term with a 20-element-truncated
-inspect string. And pids are everywhere by construction —
-`Mesh.list_agents/0` returns `%{id, pid, node, replicas}` maps
+**An all-or-nothing serializer cannot be the mechanism.** A rule that replaces
+the *entire* term the moment one pid appears anywhere in it answers one opaque
+inspect string, and pids are everywhere by construction — `Mesh.list_agents/0`
+returns `%{id, pid, node, replicas}` maps
 ([mesh.ex:118](../lib/ouroboros/mesh.ex)), which `Ouroboros.status/0` embeds,
 and `Mesh.state/1` returns a `%Jido.AgentServer.State{}` dense with pids,
-refs, `:queue` tuples, and functions. `safe/1` applied naively would reduce
-`runtime.status` — the Dashboard's whole data source — to one opaque string.
+refs, `:queue` tuples, and functions. Applied to `runtime.status` — the
+Dashboard's whole data source — it would answer one string where the client
+needed a table ([wire.ex:5-14](../lib/ouroboros/gateway/wire.ex)).
 
 So `Gateway.Wire` implements its own recursive walk, replacing at the leaf:
 
@@ -760,8 +734,8 @@ Three things the rule deliberately does not do:
   is bounded by the node cap, exactly as it was before — this cap is aimed at the leaf
   that is large by itself, which is the shape a diff, a tool result, and a file read all
   have.
-- **Nothing outside an event payload changed.** `runtime.status`, `agents.state`, and
-  every error's `data` are bounded by depth and node count alone, as before.
+- **Nothing outside an event payload changed.** `runtime.status` and every error's
+  `data` are bounded by depth and node count alone, as before.
 
 The excerpt is cut at a UTF-8 boundary — `binary_part/3` can land inside a multi-byte
 character and a client decoding a frame is owed valid UTF-8, so the cut retreats to the
@@ -770,8 +744,7 @@ the `_b64` spelling it already had and gains the same `_bytes` key; the budget c
 *source* bytes retained, and base64 costs four wire bytes for every three of them.
 
 `interactive_event_excerpt_notification.json` pins the marker's shape for the Rust side,
-and `interactive_event_detail_result.json` / `coding_event_detail_result.json` pin what
-`event_detail` answers with. The excerpt fixture states 48- and 96-byte caps rather than
+and `interactive_event_detail_result.json` pins what `event_detail` answers with. The excerpt fixture states 48- and 96-byte caps rather than
 the 128 KiB default so the contract file stays a diff a person can read; the arithmetic
 is asserted in `Ouroboros.Gateway.WireTest`.
 
@@ -890,8 +863,8 @@ and clustering keeps the existing posture.
   the floor; a non-positive-integer `sequence` and an unknown param are `-32602`; a fresh
   `hello` lists both new methods.
 - **Integration (real TCP, ephemeral port):** hello→status; subscribe→ live
-  event notifications from a real interactive session (deterministic test adapter) and
-  from a real coding task; lag: the connection's writer is suspended so frames pile up
+  event notifications from a real interactive session (deterministic test adapter);
+  lag: the connection's writer is suspended so frames pile up
   unacknowledged → event frames are dropped → `stream.lagged` → backlog + notifications
   + replay(cursor) reconciles to the exact contiguous history. Suspending the writer
   rather than relying on an unread socket is deliberate: it makes overflow a decision
@@ -900,7 +873,7 @@ and clustering keeps the existing posture.
   cursor below the retained floor → `cursor_pruned` surfaces with the floor and
   resubscribing at the floor works; subscribe to a terminal session →
   backlog then `stream.ended`; killing the coordinator under a live subscription →
-  `stream.ended`; `teams.list` with the team store stopped →
+  `stream.ended`; `interactive.info` with the interactive store stopped →
   `-32004`, connection alive; two clients, one slow, fast one unaffected;
   gateway.json appears with the bound port, 0600.
 - **Operate scope:** every method the table marks `:operate` is refused `-32003` on a
@@ -914,12 +887,12 @@ and clustering keeps the existing posture.
 - **Golden fixtures:** `mix ouroboros.gateway.golden` regenerates
   `test/support/gateway_golden/*.json` from static, deterministic terms — no clock, no
   random ids, no live plane, so a regeneration on another machine writes the same bytes.
-  Sixteen frames: `hello_result`, `runtime_status_result`,
-  `interactive_event_notification`, `coding_event_notification`,
+  The envelope frames: `hello_result`, `runtime_status_result`,
+  `interactive_event_notification`,
   `interactive_event_excerpt_notification` (the `_excerpt`/`_bytes` marker, at stated
   48/96-byte caps so the file is a diff a person can read),
-  `interactive_event_detail_result` and `coding_event_detail_result` (one bare event, not
-  an array, encoded under `detail_leaf_bytes`),
+  `interactive_event_detail_result` (one bare event, not an array, encoded under
+  `detail_leaf_bytes`),
   `stream_lagged_notification`, `stream_ended_notification`, and the error frames
   `error_unauthenticated` (−32001), `error_protocol_mismatch` (−32002),
   `error_scope_denied` (−32003), `error_upstream_timeout_unknown` (−32005 with
@@ -1246,8 +1219,8 @@ rather than preceding it, because a `session/update` names a session the editor 
 have learned about from that answer. The gateway has no parameter to carry them for any
 transport today: `Dialect.ACP` can put `mcpServers` on its own `session/new`, but
 Ouroboros's own API refuses `mcp_config` before any dialect is reached
-([task_state.ex](../lib/ouroboros/coding/task_state.ex), AGENT_EXPERIENCE F4/D4), so an
-ACP-transport session is no exception.
+([interactive/state.ex](../lib/ouroboros/interactive/state.ex), AGENT_EXPERIENCE F4/D4),
+so an ACP-transport session is no exception.
 
 *The editor's own services are acknowledged and unused.* An ACP client may offer
 `fs/read_text_file`, `fs/write_text_file` and `terminal/*` so the agent can work through the
@@ -1354,7 +1327,7 @@ that has seen the result may stop rendering updates for that turn.
 *What is not served, and why.* `session/load` (bounded retention, above). `authenticate`
 (nothing is advertised to authenticate with). `terminal/*` and `fs/*` as a *client* (above).
 Subagent tool calls have no ACP kind — ACP 1.2 has no standard one, as the Claude Code
-adapter also notes — so a delegation appears as an `other`-kind tool call.
+adapter also notes — so a subagent spawn appears as an `other`-kind tool call.
 
 *Registering it with an editor.* Zed and JetBrains AI Assistant both use an `agent_servers`
 map — Zed in `settings.json`, JetBrains in `~/.jetbrains/acp.json`. Other clients differ;
@@ -1680,10 +1653,9 @@ rule already buys it. `runtime_status_result.json` pins the successful shape.
 
 Tabs (build order within §5): **1 Dashboard** (node/role, availability
 matrix from `status.availability`, connected nodes, providers), **2 Sessions**
-(interactive + coding lists; focused session = conversation-first scrollback via replay +
-live tail, input box, approval modal), **3 Agents** (list + state tree +
-`last_effects` if present), **4 Teams**, **5 Plans/Control**, **6 Upgrade**
-(rollouts, history, signing decisions, grants-by-principal prompt), **7 Logs**
+(the interactive list; focused session = conversation-first scrollback via replay +
+live tail, input box, approval modal), **3 Upgrade**
+(rollouts, history, signing decisions, grants-by-principal prompt), **4 Logs**
 (spawn mode only; attach mode shows "logs live with the spawner").
 
 The focused session opens as **Agent chat**. It renders durable `input_accepted` text as
@@ -2279,22 +2251,12 @@ session's workspace — offered only where the engine suggested one, this gatewa
 it does not. Every other refusal shape reaches the ordinary renderer and grows no
 permissions offer.
 
-### Delegation and the fleet (G1, G2)
+### The fleet rail (G2)
 
-`/delegate <objective>` sends `interactive.delegate {id, objective, delegation_id}` with a
-caller-owned id, and shows a `delegating…` chip while the 90-second call is in flight. The
-runtime's `delegation` events — its own event type, not a wrapped `provider_event` — are
-drawn as blocks in the parent's transcript: one when the child starts, one carrying the
-terminal status and a bounded `result_digest`. A digest, never the result: the child's own
-transcript is the record of what it did.
-
-`ctrl+t` reads `interactive.delegations` and lists the children beside the plan;
-`/delegations` opens the same list as a surface with a cursor, where `Enter` opens the
-child's transcript **on the coding plane** — a delegation is a coding task with a parent,
-not a sub-conversation, and there is no way to message it from the parent's composer. Each
-row says whether its status came from the team (`source: "team"`) or from the
-conversation's own remembered copy (`source: "session"`), because a parent that was not
-running when its child finished holds a stale one.
+> `/delegate` and `/delegations` were deleted with the team plane in September 2026; see
+> [the core reduction](proposals/core.md) §3 D3. A session hands work to a child through
+> the native `agent` tool instead, and the child's progress arrives as `subagent`
+> provider events in the parent's own transcript.
 
 **The rail groups every node's sessions by what they need**, in this order:
 
@@ -2302,7 +2264,7 @@ running when its child finished holds a stale one.
 |---|---|
 | **needs input** | a pending approval this client is holding, or `awaiting_approval` |
 | **working** | `running`, `starting`, `closing` |
-| **done** | every terminal status, and idle on either plane — between turns, waiting on nobody |
+| **done** | every terminal status, and idle — between turns, waiting on nobody |
 
 The group comes from **declared state and nothing else**. A row whose owner went offline
 keeps whichever group its last complete observation put it in, and keeps the `last-known`
@@ -2311,9 +2273,7 @@ not a claim that it needs you, and a client that promoted every unreachable sess
 top would make the top of the list meaningless.
 
 Each card names its machine — dropped whole rather than clipped where the card is too
-narrow — and a delegated coding task is drawn under the conversation that started it,
-indented, with a tree glyph in place of the status signal. **Only within a group:** the
-two orderings answer different questions, and where they disagree the triage one wins.
+narrow.
 
 The footer states the fleet's own `N waiting · N working` beside the open session's
 approvals. The picker (`ctrl+x l`) labels every row with its group and its node, `Space`
@@ -2714,8 +2674,8 @@ accounts side by side, and they are allowed to disagree:
   measurement presented as a fact.
 
 The session picker and the session rail carry a compact `tokens · cost` cell for every row
-where the runtime reported one. `interactive.list` does not carry `usage` on every gateway
-and `coding.list` never will, so a row without it draws **nothing** rather than a zero. The
+where the runtime reported one. `interactive.list` does not carry `usage` on every
+gateway, so a row without it draws **nothing** rather than a zero. The
 rail's card is twenty columns wide: it drops the token count and keeps the cost when both
 do not fit, and drops the cell entirely when neither does — the footer's rule, because a
 half-drawn `42.5k · $0.4` is a fact rendered as noise.
@@ -2934,27 +2894,24 @@ rediscovered:
 - **`h`/`l` and the arrows** move between the panes of a tab and collapse/expand a tree
   node; `Esc` unwinds one level at a time (composer, then transcript, then the session);
   `ctrl+x x` or `/close` ends the open session, or the highlighted row in the session
-  switcher (`ctrl+x l`), behind a confirmation. Live interactive sessions offer close or
-  kill; a live coding task offers cancel. A terminal session (`failed`/`lost`/`closed`/
-  `completed`/`cancelled`) is removed via `interactive.delete`/`coding.delete` so it
-  leaves the list instead of lingering until the seven-day retention sweep. An offline
-  last-known row is hidden in this client only; `x` in the switcher is the key because
-  the composer owns printable characters. `r` refreshes the visible tab now.
-- **`Ctrl-C` on the coding plane is refused rather than translated.** That plane has no
-  interrupt — cancelling is what it offers, and cancelling is destructive enough to go
-  through the confirmation instead.
+  switcher (`ctrl+x l`), behind a confirmation. A live session offers close or kill. A
+  terminal session (`failed`/`lost`/`closed`/`cancelled`) is removed via
+  `interactive.delete` so it leaves the list instead of lingering until the seven-day
+  retention sweep. An offline last-known row is hidden in this client only; `x` in the
+  switcher is the key because the composer owns printable characters. `r` refreshes the
+  visible tab now.
 - **The approval modal offers exactly four answers** — `approve`/`deny` × `once`/`session`
   — because that is `Jido.Harness.ApprovalResponse`'s two enums crossed. `r` on that
   chooser attaches the optional `reason` the gateway accepts. Interactive Codex sandbox
   escalations (`git commit` writing `.git`, extra writable dirs, network) use this same
   modal over app-server. Deny-for-session is still `decline` — Codex has no persistent
-  deny-for-session. Coding `exec --json` never opens it.
+  deny-for-session.
 - **Advanced session creation states its choices.** `/options` on the coding home
-  opens a form carrying plane, provider, workspace and approval mode;
+  opens a form carrying provider, workspace and approval mode;
   `ouro new` is the same request from a shell. Both build their parameters through one
   `model::StartRequest`, which emits a strict subset of `Gateway.Methods`
-  `@start_options` — `provider`, `workspace`, `approval_mode`, `sandbox_mode`, and
-  `objective` on the coding plane — omits anything unanswered (an empty workspace box is
+  `@start_options` — `provider`, `workspace`, `approval_mode`, `sandbox_mode` — omits
+  anything unanswered (an empty workspace box is
   *no* workspace, not `""`, which `option_value(_, :string, _)` would refuse), and never
   sends `id`. The plane defaults to workspace write where the provider can take it;
   `--sandbox-mode read_only` and the settings/files row launch a session that cannot
@@ -2963,8 +2920,7 @@ rediscovered:
   the refusal: a start with no provider from any source is refused here, because letting
   the node's default decide would be a terminal choosing which vendor runs the operator's
   code — the config file's `[defaults] provider` satisfies this by being a choice the
-  operator made once, explicitly, and the form it prefills stays editable; and
-  `objective` is required on the coding plane and refused on the interactive one.
+  operator made once, explicitly, and the form it prefills stays editable.
 - **The transcript-first coding home is the front door.** `ouro` lands on the Sessions
   tab instead of an onboarding/provider-picker modal. The composer accepts typing and paste
   immediately, before sign-in. F2/F3/F4 insert editable project exploration, change review,

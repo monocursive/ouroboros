@@ -1,9 +1,9 @@
 defmodule Ouroboros.Workspace do
   @moduledoc """
-  Safe, node-local workspace admission for coding tasks.
+  Safe, node-local workspace admission for sessions and subagents.
 
   Configure one or more existing `:allowed_roots`, then acquire either an
-  `:exclusive` or `:shared_read` lease before starting a coding run. All roots
+  `:exclusive` or `:shared_read` lease before starting work in one. All roots
   are resolved component-by-component, including symbolic links, before the
   allow-list and conflict checks are applied.
 
@@ -68,11 +68,10 @@ defmodule Ouroboros.Workspace do
   end
 
   @doc false
-  @spec acquire_managed(String.t(), String.t(), :coding | :interactive, keyword()) ::
+  @spec acquire_managed(String.t(), String.t(), :interactive, keyword()) ::
           {:ok, Ouroboros.Workspace.Lease.t(), String.t()} | {:error, term()}
   def acquire_managed(root, task_id, kind, opts \\ []) do
-    with true <-
-           kind in [:coding, :interactive] || {:error, {:invalid_workspace_owner_kind, kind}},
+    with true <- kind == :interactive || {:error, {:invalid_workspace_owner_kind, kind}},
          :ok <- validate_options(opts, [:mode, :server]) do
       mode = Keyword.get(opts, :mode, :exclusive)
       GenServer.call(server(opts), {:acquire, root, task_id, mode, kind})

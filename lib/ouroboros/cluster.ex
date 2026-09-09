@@ -74,8 +74,7 @@ defmodule Ouroboros.Cluster.Monitor do
     {:reply, render(state, now), state}
   end
 
-  def handle_call({:session_owners, plane}, _from, state)
-      when plane in [:interactive, :coding] do
+  def handle_call({:session_owners, plane}, _from, state) when plane in [:interactive] do
     reply =
       case Map.get(state, :session_owner_evidence, :reliable) do
         :reliable -> {:ok, state |> session_owners() |> Map.fetch!(plane)}
@@ -85,14 +84,14 @@ defmodule Ouroboros.Cluster.Monitor do
     {:reply, reply, state}
   end
 
-  # An observation is evidence about one plane, never a repair of the journal that makes
-  # every plane's list complete. While that journal is unreadable the in-memory baseline is
-  # empty, so recording here would persist the whole map derived from it — erasing the other
-  # plane's durable owners — and then declare the result reliable. `forget_session_owner/2`
-  # and `migrate_local_session_owners/2` already refuse for the same reason, and the same
-  # refusal shape lets a start fail closed instead of recovering evidence as a side effect.
+  # An observation is evidence, never a repair of the journal it is recorded into. While
+  # that journal is unreadable the in-memory baseline is empty, so recording here would
+  # persist the whole map derived from it — erasing the durable owners — and then declare
+  # the result reliable. `forget_session_owner/2` and `migrate_local_session_owners/2`
+  # already refuse for the same reason, and the same refusal shape lets a start fail closed
+  # instead of recovering evidence as a side effect.
   def handle_call({:record_session_snapshot, plane, observations}, _from, state)
-      when plane in [:interactive, :coding] and is_list(observations) do
+      when plane in [:interactive] and is_list(observations) do
     case Map.get(state, :session_owner_evidence, :reliable) do
       :reliable ->
         record_session_snapshot(state, plane, observations)
@@ -145,12 +144,7 @@ defmodule Ouroboros.Cluster.Monitor do
     do: {:noreply, observe_leave(state, left, :unknown)}
 
   def handle_info({:refresh_connected, connected}, state) do
-    state =
-      Enum.reduce(connected, state, fn target, acc ->
-        acc = observe_up(acc, target, timestamp())
-        notify_teams(:nodeup, target)
-        acc
-      end)
+    state = Enum.reduce(connected, state, &observe_up(&2, &1, timestamp()))
 
     {:noreply, %{state | refreshing?: false}}
   end
@@ -241,7 +235,6 @@ defmodule Ouroboros.Cluster.Monitor do
         "role=#{inspect(machine.role)}"
     )
 
-    notify_teams(:nodeup, joined)
     state
   end
 
@@ -379,7 +372,6 @@ defmodule Ouroboros.Cluster.Monitor do
     }
 
     Logger.warning("cluster nodedown #{inspect(left)} reason=#{inspect(reason)}")
-    notify_teams(:nodedown, left)
     put_machine(state, machine)
   end
 
@@ -561,7 +553,7 @@ defmodule Ouroboros.Cluster.Monitor do
   # The fallback supports a monitor upgraded in place from a revision whose state
   # predated session-owner evidence. A normal fresh boot always initializes this field.
   defp session_owners(state),
-    do: Map.get(state, :session_owners, %{interactive: MapSet.new(), coding: MapSet.new()})
+    do: Map.get(state, :session_owners, %{interactive: MapSet.new()})
 
   defp load_session_owners do
     case fleet_profile_storage() do
@@ -701,10 +693,7 @@ defmodule Ouroboros.Cluster.Monitor do
     else
       current = session_owners(state)
 
-      updated = %{
-        interactive: MapSet.delete(current.interactive, owner),
-        coding: MapSet.delete(current.coding, owner)
-      }
+      updated = %{interactive: MapSet.delete(current.interactive, owner)}
 
       with :ok <- validate_session_owners(updated),
            :ok <- write_session_owner_checkpoint(updated, fleet_id, opts) do
@@ -731,8 +720,7 @@ defmodule Ouroboros.Cluster.Monitor do
     checkpoint = %{
       version: @session_owner_checkpoint_version,
       fleet_id: fleet_id,
-      interactive: owners.interactive |> Enum.sort(),
-      coding: owners.coding |> Enum.sort()
+      interactive: owners.interactive |> Enum.sort()
     }
 
     DurableFile.put_checkpoint(@session_owner_checkpoint, checkpoint, opts)
@@ -742,14 +730,12 @@ defmodule Ouroboros.Cluster.Monitor do
          %{
            version: @session_owner_checkpoint_version,
            fleet_id: fleet_id,
-           interactive: interactive,
-           coding: coding
+           interactive: interactive
          },
          fleet_id
        ) do
     with {:ok, interactive} <- decode_owner_list(:interactive, interactive),
-         {:ok, coding} <- decode_owner_list(:coding, coding),
-         do: {:ok, %{interactive: interactive, coding: coding}}
+         do: {:ok, %{interactive: interactive}}
   end
 
   defp decode_session_owner_checkpoint(
@@ -765,11 +751,8 @@ defmodule Ouroboros.Cluster.Monitor do
   defp decode_session_owner_checkpoint(_invalid, _fleet_id),
     do: {:error, :invalid_session_owner_checkpoint}
 
-  defp validate_session_owners(%{interactive: interactive, coding: coding}) do
-    with :ok <- validate_owner_set(:interactive, interactive),
-         :ok <- validate_owner_set(:coding, coding),
-         do: :ok
-  end
+  defp validate_session_owners(%{interactive: interactive}),
+    do: validate_owner_set(:interactive, interactive)
 
   defp validate_session_owners(_invalid), do: {:error, :invalid_session_owner_checkpoint}
 
@@ -1044,28 +1027,7 @@ defmodule Ouroboros.Cluster.Monitor do
   defp valid_fleet_id?(fleet_id),
     do: is_binary(fleet_id) and Regex.match?(~r/\A[0-9a-f]{24}\z/, fleet_id)
 
-  defp empty_session_owners,
-    do: %{interactive: MapSet.new(), coding: MapSet.new()}
-
-  defp notify_teams(event, target) do
-    case Process.whereis(Ouroboros.Team.Supervisor) do
-      supervisor when is_pid(supervisor) ->
-        supervisor
-        |> DynamicSupervisor.which_children()
-        |> Enum.each(fn
-          {_id, pid, _type, _modules} when is_pid(pid) ->
-            send(pid, {:ouroboros_cluster, event, target})
-
-          _child ->
-            :ok
-        end)
-
-      _absent ->
-        :ok
-    end
-  catch
-    :exit, _reason -> :ok
-  end
+  defp empty_session_owners, do: %{interactive: MapSet.new()}
 
   defp bounded_reason(reason),
     do: reason |> inspect(limit: 20, printable_limit: 200) |> String.slice(0, 500)
@@ -1091,9 +1053,8 @@ defmodule Ouroboros.Cluster do
   imports through this node's helper pool) and nothing that holds durable work; a
   `:signer` runs the durable-directory owner when configured, `Upgrade.Signing.Service`,
   and this supervisor. That is not a sandbox — see "Limits" below — it is a
-  least-privilege posture: a builder host has no team store, no scheduler, no control
-  plane, and no coding sessions to lose, so compromising it yields a compiler, not a
-  fleet.
+  least-privilege posture: a builder host has no session store and no durable work to
+  lose, so compromising it yields a compiler, not a fleet.
 
   An unrecognized `:node_role` refuses the boot rather than defaulting to the most
   privileged role.
@@ -1134,7 +1095,7 @@ defmodule Ouroboros.Cluster do
 
   @roles [:core, :builder, :signer]
   @strategies [:none, :epmd, :gossip, :dns]
-  @session_planes [:interactive, :coding]
+  @session_planes [:interactive]
   @role_key {__MODULE__, :node_role}
   @formation_name __MODULE__.Formation
   @membership_cache {__MODULE__, :membership_hosts}
@@ -1305,8 +1266,7 @@ defmodule Ouroboros.Cluster do
   end
 
   @doc false
-  @spec session_owners(:interactive | :coding) ::
-          {:ok, MapSet.t(String.t())} | {:error, term()}
+  @spec session_owners(:interactive) :: {:ok, MapSet.t(String.t())} | {:error, term()}
   def session_owners(plane) when plane in @session_planes do
     case Process.whereis(__MODULE__.Monitor) do
       monitor when is_pid(monitor) ->
@@ -1320,8 +1280,7 @@ defmodule Ouroboros.Cluster do
   end
 
   @doc false
-  @spec record_session_snapshot(:interactive | :coding, [{node(), [term()]}]) ::
-          :ok | {:error, term()}
+  @spec record_session_snapshot(:interactive, [{node(), [term()]}]) :: :ok | {:error, term()}
   def record_session_snapshot(plane, observations)
       when plane in @session_planes and is_list(observations) do
     case Process.whereis(__MODULE__.Monitor) do
@@ -1650,8 +1609,8 @@ defmodule Ouroboros.Cluster do
   Asserts that agents and workers may be placed on `target`.
 
   Placement requires a connected `:core` node running a compatible version of this
-  runtime, because that is the only role whose tree contains the teams, stores, and
-  schedulers a placed worker will reach for. Compatibility is the Ouroboros application
+  runtime, because that is the only role whose tree contains the stores and session
+  supervisors a placed worker will reach for. Compatibility is the Ouroboros application
   contract, explicit fleet protocol revision, and OTP release; CPU architecture is
   inventory only and is deliberately not a placement fence. `config :ouroboros,
   :placement_role_check` (default `true`) disables the check for setups that place onto

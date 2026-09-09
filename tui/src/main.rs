@@ -417,7 +417,6 @@ async fn new_session(
             })?),
         },
         reasoning_effort: None,
-        objective: String::new(),
         worktree: start.worktree,
         plan: start.plan,
     };
@@ -2591,38 +2590,29 @@ async fn agents_page(
     let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
     let Connected { client, hello, .. } = attach_with(address, token, false, None, hook).await?;
 
-    // `hello.methods` is the gate here as everywhere: a gateway that serves neither list
-    // is told apart from one whose lists are empty, because those are different answers.
-    let mut missing = Vec::new();
+    // `hello.methods` is the gate here as everywhere: a gateway that does not serve the
+    // list is told apart from one whose list is empty, because those are different answers.
+    let served = hello.serves("interactive.list");
 
-    let interactive = if hello.serves("interactive.list") {
+    let interactive = if served {
         client
             .call("interactive.list", json!({}))
             .await
             .context("calling interactive.list")?
     } else {
-        missing.push("interactive.list");
-        json!([])
-    };
-
-    let coding = if hello.serves("coding.list") {
-        client
-            .call("coding.list", json!({}))
-            .await
-            .context("calling coding.list")?
-    } else {
-        missing.push("coding.list");
         json!([])
     };
 
     client.stop().await;
 
-    for method in &missing {
-        eprintln!("ouro agents: this gateway does not serve {method}; its rows are missing");
+    if !served {
+        eprintln!(
+            "ouro agents: this gateway does not serve interactive.list; its rows are missing"
+        );
     }
 
-    let (interactive, coding) = ouro::agents::decode(&interactive, &coding);
-    let rows = ouro::agents::group(&interactive, &coding);
+    let interactive = ouro::agents::decode(&interactive);
+    let rows = ouro::agents::group(&interactive);
 
     if json_output {
         println!("{}", ouro::agents::render_json(&rows));
@@ -3954,7 +3944,6 @@ mod tests {
             approval_mode: None,
             sandbox_mode: None,
             reasoning_effort: None,
-            objective: String::new(),
             worktree: false,
             plan: false,
         }

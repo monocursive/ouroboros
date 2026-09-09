@@ -7,12 +7,10 @@ defmodule Ouroboros.Gateway.Methods.Present do
 
   alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.Cluster
-  alias Ouroboros.CodingSession
   alias Ouroboros.Gateway.Methods.Encode
   alias Ouroboros.Gateway.Methods.Safe
   alias Ouroboros.Gateway.Wire
   alias Ouroboros.InteractiveSession
-  alias Ouroboros.Team
 
   # One provider probe shells out to check an installed executable, so the fan-out is
   # bounded well inside the method ceiling: a provider that never answers costs the
@@ -52,8 +50,8 @@ defmodule Ouroboros.Gateway.Methods.Present do
   # backward-compatible and honest. A seed with no positive evidence does not freeze an
   # otherwise useful list during an ordinary outage. Sessions created exclusively through
   # another gateway remain owner-local until journals themselves are replicated.
-  def fleet_sessions(module) when module in [InteractiveSession, CodingSession] do
-    query_fleet_sessions(module, session_plane(module))
+  def fleet_sessions(InteractiveSession = module) do
+    query_fleet_sessions(module, :interactive)
   end
 
   defp query_fleet_sessions(module, plane) do
@@ -111,9 +109,6 @@ defmodule Ouroboros.Gateway.Methods.Present do
         end
     end
   end
-
-  defp session_plane(InteractiveSession), do: :interactive
-  defp session_plane(CodingSession), do: :coding
 
   # Builders and signers deliberately run no session stores. Asking every distributed
   # node made a healthy mixed-role fleet look incomplete, so only connected, compatible
@@ -187,21 +182,6 @@ defmodule Ouroboros.Gateway.Methods.Present do
       {:ok, status} -> %{provider: spec.provider, spec: spec, status: status, error: nil}
       {:error, reason} -> %{provider: spec.provider, spec: spec, status: nil, error: reason}
     end
-  end
-
-  # Projected exactly as `Ouroboros.status/0` projects it, so a client reading both sees
-  # one shape for a team rather than two.
-  def teams do
-    Team.Store.list()
-    |> Enum.map(fn team ->
-      %{
-        id: team.id,
-        status: team.status,
-        worker_count: map_size(team.workers),
-        delegation_count: map_size(team.delegations),
-        updated_at: team.updated_at
-      }
-    end)
   end
 
   def ledger_local_list(target, filters) do

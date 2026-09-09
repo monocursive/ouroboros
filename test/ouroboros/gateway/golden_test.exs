@@ -54,10 +54,7 @@ defmodule Ouroboros.Gateway.GoldenTest do
     assert lagged["params"]["dropped"] == 128
     assert lagged["params"]["last_sequence"] == 512
 
-    # The two event notifications differ in one field name, and a client that assumed
-    # `session_id` on both would silently drop every coding event.
     assert fixture("interactive_event_notification")["params"]["event"]["session_id"]
-    assert fixture("coding_event_notification")["params"]["event"]["task_id"]
 
     # A struct is self-describing on the wire; that tag is what lets a generic tree widget
     # label a payload it has never seen before.
@@ -106,19 +103,12 @@ defmodule Ouroboros.Gateway.GoldenTest do
     # reason the method exists.
     assert detail["payload"]["diff"] == String.duplicate("a", 600)
     assert detail["payload"]["tail"] == String.duplicate("z", 700)
-
-    coding = fixture("coding_event_detail_result")["result"]
-
-    assert coding["_struct"] == "Ouroboros.Coding.Event"
-    assert coding["task_id"]
-    assert coding["payload"]["diff"] == String.duplicate("b", 600)
   end
 
-  test "the two detail methods are advertised" do
+  test "the detail method is advertised" do
     methods = fixture("hello_result")["result"]["methods"]
 
     assert "interactive.event_detail" in methods
-    assert "coding.event_detail" in methods
   end
 
   test "the hello fixture lists exactly the methods this build serves" do
@@ -132,7 +122,7 @@ defmodule Ouroboros.Gateway.GoldenTest do
     assert agent["pid"] == %{"_opaque" => "#PID<0.123.0>"}
     assert agent["id"] == "reviewer-1"
 
-    assert status["availability"]["control"] == "disabled"
+    assert status["availability"]["workspace"] == "disabled"
     assert status["availability"]["mesh"] == "available"
     assert status["forge"]["signer"] == "deny"
     assert status["forge"]["admit_possible?"] == false

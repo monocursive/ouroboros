@@ -15,27 +15,21 @@ defmodule Ouroboros.Gateway.Methods do
   ## Every upstream call is bounded, because the planes are not
 
   The runtime is deliberately not uniformly bounded: `InteractiveSession.start/1` waits
-  `:infinity` for provider readiness, `Team.cancel/2` and `close/1` call at `:infinity`,
-  and `Team.state/1` is an uncaught 5s `GenServer.call`. So the ceiling lives here, in
-  `table/0`, and `Ouroboros.Gateway.Conn` runs each handler in a supervised task under
-  it. A handler that outlives its entry is killed and answered `-32005`.
+  `:infinity` for provider readiness. So the ceiling lives here, in `table/0`, and
+  `Ouroboros.Gateway.Conn` runs each handler in a supervised task under it. A handler that
+  outlives its entry is killed and answered `-32005`.
 
   Every upstream call is additionally made in the `safe_call` posture — `try/rescue/catch
-  :exit`. Several planes *exit* rather than return an error when they are down:
-  `Team.state/1` is a bare `GenServer.call`. A `:noproc` becomes `-32004`, a `:timeout`
-  becomes `-32005`, and
-  anything else becomes `-32006` carrying the Wire-encoded reason. None of them become a
-  dead connection.
+  :exit`. Some planes *exit* rather than return an error when they are down:
+  `Interactive.Store.get/2` is a bare `GenServer.call`, so `interactive.info` on a node
+  whose session store is gone exits rather than answering. A `:noproc` becomes `-32004`, a
+  `:timeout` becomes `-32005`, and anything else becomes `-32006` carrying the Wire-encoded
+  reason. None of them become a dead connection.
 
-  Two upstream shapes are answered specially because a generic mapping would lie about
-  them:
-
-    * `Control.Grants.list/1` swallows `:exit` into `[]`, so a missing authority would
-      read as "this principal holds no grants". The handler checks the process first and
-      answers `-32004` instead of a false empty.
-    * `Orchestration.Scheduler.get/2` returns a bare `:not_found`, not an error tuple, and
-      its *server* is the first argument with a default — so the call is written out in
-      full rather than left to look like `get(id)`.
+  One upstream shape is answered specially because a generic mapping would lie about it:
+  `Control.Grants.list/1` swallows `:exit` into `[]`, so a missing authority would read as
+  "this principal holds no grants". The handler checks the process first and answers
+  `-32004` instead of a false empty.
 
   ## Scope
 
@@ -60,8 +54,8 @@ defmodule Ouroboros.Gateway.Methods do
 
   ## Subscriptions are not invoked here
 
-  `interactive.subscribe` and its three siblings are in `table/0` — a client has to find
-  them in `hello` — but they are answered by `Ouroboros.Gateway.Conn` itself rather than by
+  `interactive.subscribe` and `interactive.unsubscribe` are in `table/0` — a client has to
+  find them in `hello` — but they are answered by `Ouroboros.Gateway.Conn` itself rather than by
   `invoke/2`, because the plane registers `self()` as the subscriber and a dispatch task is
   the wrong `self()`. `subscribe/3`, `unsubscribe/2`, `session/2`, and `coordinator/2` are
   the pieces that connection calls; they are here so that the knowledge of which plane
@@ -75,12 +69,7 @@ defmodule Ouroboros.Gateway.Methods do
   """
 
   alias Ouroboros.Agent.EffectLedger
-  alias Ouroboros.Coding.Task, as: CodingTask
-  alias Ouroboros.Coding.TaskRef
-  alias Ouroboros.Coding.TaskState
-  alias Ouroboros.CodingSession
   alias Ouroboros.Cluster
-  alias Ouroboros.Control
   alias Ouroboros.Control.Grants
   alias Ouroboros.Control.Permissions
   alias Ouroboros.Control.PolicyEvidence
@@ -96,8 +85,6 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Interactive.Ref, as: InteractiveRef
   alias Ouroboros.Interactive.Task, as: InteractiveTask
   alias Ouroboros.InteractiveSession
-  alias Ouroboros.Mesh
-  alias Ouroboros.Orchestration.Scheduler
   alias Ouroboros.Provider.AnthropicKey
   alias Ouroboros.Provider.GrokAuth
   alias Ouroboros.Provider.OpenAIAuth
@@ -105,7 +92,6 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Provider.Native.Mcp
   alias Ouroboros.Provider.Native.Replay
   alias Ouroboros.Runtime.Capabilities
-  alias Ouroboros.Team
   alias Ouroboros.Upgrade.Signing.Service, as: SigningService
   alias Ouroboros.Wasm.Surface, as: WasmSurface
   alias Ouroboros.Wasm.Artifact, as: WasmArtifact
@@ -134,31 +120,6 @@ defmodule Ouroboros.Gateway.Methods do
 
   # Permissions, MCP, and ledger get share this bound on owner-routed `:erpc`.
   @fleet_query_timeout 5_000
-
-  # W13. `agents.message` waits on an agent, and for a lane-W capability that agent is
-  # waiting on a component under its own deadline. The caller's `timeout_ms` is capped at
-  # `@max_agent_message_timeout_ms` and this ceiling sits above it, so the gateway is never
-  # the thing that gives up first: a client that asked for thirty seconds and got a
-  # gateway timeout at fifteen would have no way to tell a slow capability from a wedged
-  # one.
-
-  @default_agent_message_timeout_ms Contract.default_agent_message_timeout_ms()
-  @max_agent_message_timeout_ms Contract.max_agent_message_timeout_ms()
-
-  # What may cross into an agent, and what may come back. Both are the same number because
-  # both are a message body — one written by a gateway client, one written by whatever the
-  # agent is. The reply is additionally *marked* when it is cut, because a JSON document
-  # that was silently truncated is a JSON document a client will try to parse.
-  @max_agent_message_bytes Contract.max_agent_message_bytes()
-
-  # A mesh agent id. Long enough for the `"wasm/" <> name` a rollout mints and for the
-  # opaque ids the forge does, short enough that a refused lookup costs nothing.
-  @max_agent_id_bytes Contract.max_agent_id_bytes()
-
-  # The id prefix a lane-W capability runs under. `Ouroboros.Wasm.Rollout` mints it; it is
-  # restated here rather than imported because this module must not depend on the wasm plane
-  # to answer a verb about the mesh, and it is one short literal.
-  @wasm_agent_prefix "wasm/"
 
   # E2/E3. Code intelligence is the one read whose upstream is a foreign OS process, and
   # its own defaults are generous on purpose: `initialize_timeout_ms` is 45s because
@@ -212,11 +173,6 @@ defmodule Ouroboros.Gateway.Methods do
   # ceiling: long enough that stepping away from the terminal is not a denial, short
   # enough that a forgotten prompt does not hold a gateway task open for a shift.
 
-  # G1. One `interactive.delegate` may make two team calls, each bounded at 60s by
-  # `Team.control_call/2`, plus the parent's own checkpoint. Below the sum on purpose: a
-  # delegation that has taken this long has a team that is not answering, and the caller
-  # learns which from `teams.state` rather than by waiting out both bounds.
-
   # B7. One operator command, and the same number `Ouroboros.Workspace.Exec` stops it at.
   # A ceiling below the runner's would kill the gateway task while the command kept
   # running, and the entry it started would be settled by nobody.
@@ -236,11 +192,6 @@ defmodule Ouroboros.Gateway.Methods do
   # above what any session an operator would ask about takes, and well below a ceiling that
   # would let one call hold a gateway task for a shift. A session too long to verify inside
   # it is a real answer — that session needs an offline verifier, not a longer socket.
-
-  # `Team.add_worker/3` and `delegate/4` bound themselves at 60s; `cancel/2` and `close/1`
-  # call at `:infinity`. Both land here as 60s, and for the two `:infinity` verbs the
-  # timeout answer says what it can honestly say: the gateway stopped waiting, the runtime
-  # did not stop working, and `teams.state` is where the outcome shows up.
 
   # `hello`'s entry does not describe a task ceiling — the handshake is answered by the
   # connection itself and never runs in a task. It describes the deadline by which the
@@ -297,10 +248,10 @@ defmodule Ouroboros.Gateway.Methods do
 
   @permission_decisions Contract.permission_decisions()
 
-  # What a client may set when it starts a session or a coding run. Everything here is
-  # durable, provider-neutral execution intent. Deliberately absent: `env`, `mcp_config`,
-  # and `provider_options` — the durable checkpoint refuses inline environment and MCP
-  # configuration outright ([coding/task_state.ex]), and provider knobs are node
+  # What a client may set when it starts a session. Everything here is durable,
+  # provider-neutral execution intent. Deliberately absent: `env`, `mcp_config`, and
+  # `provider_options` — the durable checkpoint refuses inline environment and MCP
+  # configuration outright ([interactive/state.ex]), and provider knobs are node
   # configuration rather than something a terminal hands over per run.
   @start_options Contract.start_options()
 
@@ -317,18 +268,6 @@ defmodule Ouroboros.Gateway.Methods do
   # the allowed values belong to the agent, not to this table — and every transport whose
   # dialect declares no modes refuses it by name.
   @configuration_options Contract.configuration_options()
-
-  # `Ouroboros.Team.Server` accepts exactly these two for a worker.
-  @worker_options Contract.worker_options()
-
-  @delegation_options Contract.delegation_options()
-
-  # What `interactive.delegate` may name. A strict subset of `@delegation_options`:
-  # `coding_node` is absent because the child runs where the conversation does, and the
-  # delegation's own `id` is a positional argument rather than an option.
-  @interactive_delegation_options Contract.interactive_delegation_options()
-
-  @control_options Contract.control_options()
 
   # ---------------------------------------------------------------------------------
   # H3. The parameter contract, as data.
@@ -369,7 +308,7 @@ defmodule Ouroboros.Gateway.Methods do
         }
 
   @typedoc "Which plane a session id belongs to. The two have separate id spaces."
-  @type plane :: :interactive | :coding
+  @type plane :: :interactive
 
   @typedoc """
   What a handler answers. `{:ok, term}` is Wire-encoded into `result`; the error shapes
@@ -446,7 +385,7 @@ defmodule Ouroboros.Gateway.Methods do
   still belongs beside every other parameter rule rather than in the socket handler.
   """
   @spec subscription_params(plane(), map()) ::
-          {:ok, InteractiveRef.t() | TaskRef.t(), non_neg_integer()} | {:invalid, String.t()}
+          {:ok, InteractiveRef.t(), non_neg_integer()} | {:invalid, String.t()}
   def subscription_params(plane, params) do
     with :ok <- Contract.validate("#{plane}.subscribe", params),
          {:ok, session} <- session_target(plane, params),
@@ -456,8 +395,7 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   @doc "Validates the one parameter an unsubscribe call carries."
-  @spec session_param(plane(), map()) ::
-          {:ok, InteractiveRef.t() | TaskRef.t()} | {:invalid, String.t()}
+  @spec session_param(plane(), map()) :: {:ok, InteractiveRef.t()} | {:invalid, String.t()}
   def session_param(plane, params) do
     with :ok <- Contract.validate("#{plane}.unsubscribe", params),
          do: session_target(plane, params)
@@ -466,12 +404,12 @@ defmodule Ouroboros.Gateway.Methods do
   @doc """
   Subscribes the **calling process** to a session and returns the backlog after `cursor`.
 
-  Must be called from the process that wants the events: both planes register `self()` and
-  monitor it. `Ouroboros.Gateway.Conn` therefore calls this inline instead of dispatching
+  Must be called from the process that wants the events: the plane registers `self()` and
+  monitors it. `Ouroboros.Gateway.Conn` therefore calls this inline instead of dispatching
   it to a task, and accepts that the call is bounded by the plane's own control-plane
   timeout rather than by a gateway ceiling it could enforce on a task it owns.
   """
-  @spec subscribe(plane(), InteractiveRef.t() | TaskRef.t(), non_neg_integer()) :: result()
+  @spec subscribe(plane(), InteractiveRef.t(), non_neg_integer()) :: result()
   def subscribe(:interactive, session, cursor) do
     if Ouroboros.Audit.Identity.permits?(
          Ouroboros.Audit.Identity.current(),
@@ -482,22 +420,10 @@ defmodule Ouroboros.Gateway.Methods do
        else: {:error, code(:scope_denied), "This identity may not read session events."}
   end
 
-  def subscribe(:coding, session, cursor) do
-    if Ouroboros.Audit.Identity.permits?(
-         Ouroboros.Audit.Identity.current(),
-         "coding.subscribe",
-         :read
-       ),
-       do: safe(fn -> reply(CodingSession.subscribe(session, cursor: cursor)) end),
-       else: {:error, code(:scope_denied), "This identity may not read session events."}
-  end
-
   @doc "Stops event delivery to the calling process. Same `self()` rule as `subscribe/3`."
-  @spec unsubscribe(plane(), InteractiveRef.t() | TaskRef.t()) :: result()
+  @spec unsubscribe(plane(), InteractiveRef.t()) :: result()
   def unsubscribe(:interactive, session),
     do: safe(fn -> reply(InteractiveSession.unsubscribe(session)) end)
-
-  def unsubscribe(:coding, session), do: safe(fn -> reply(CodingSession.unsubscribe(session)) end)
 
   @doc """
   The session's durable status and whether it is terminal.
@@ -507,17 +433,10 @@ defmodule Ouroboros.Gateway.Methods do
   ([interactive/task.ex:100](../lib/ouroboros/interactive/task.ex)). Without this check a
   client would sit forever waiting for live events from a session that had already ended.
   """
-  @spec session(plane(), InteractiveRef.t() | TaskRef.t()) :: {:ok, atom(), boolean()} | :error
+  @spec session(plane(), InteractiveRef.t()) :: {:ok, atom(), boolean()} | :error
   def session(:interactive, session) do
     case safe(fn -> InteractiveSession.info(session) end) do
       {:ok, %InteractiveState{} = state} -> {:ok, state.status, InteractiveState.terminal?(state)}
-      _other -> :error
-    end
-  end
-
-  def session(:coding, session) do
-    case safe(fn -> CodingSession.info(session) end) do
-      {:ok, %TaskState{} = task} -> {:ok, task.status, TaskState.terminal?(task)}
       _other -> :error
     end
   end
@@ -530,12 +449,9 @@ defmodule Ouroboros.Gateway.Methods do
   further events arrive. The connection monitors what this returns so it can say so
   instead of leaving a client waiting on a stream that ended.
   """
-  @spec coordinator(plane(), InteractiveRef.t() | TaskRef.t()) :: pid() | nil
+  @spec coordinator(plane(), InteractiveRef.t()) :: pid() | nil
   def coordinator(:interactive, %InteractiveRef{id: id, node: owner}),
     do: coordinator_on(owner, InteractiveTask, id)
-
-  def coordinator(:coding, %TaskRef{id: id, node: owner}),
-    do: coordinator_on(owner, CodingTask, id)
 
   @doc """
   Runs one method's handler. Called inside a supervised task, never in the connection.
@@ -872,23 +788,6 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   @doc false
-  def handle_agents_list(_params) do
-    safe(fn -> reply(Mesh.list_agents()) end)
-  end
-
-  # W13/F4. `agents.state` is `:read` and hands back an agent's whole state. For a lane-W
-  # capability that state holds `last_answer` and `last_message` — a component's own prose,
-  # unbounded, through the one verb a read-only listener may call. So for a `wasm/` agent
-  # the two fields are bounded exactly as `agents.message`'s reply is and the answer carries
-  # `untrusted: true` beside them, which is the same label its sibling verb carries and for
-  # the same reason. Every other agent is answered unchanged: this is a statement about who
-  # wrote the content, not a general cap on introspection.
-  @doc false
-  def handle_agents_state(params) do
-    with_id(params, fn id -> safe(fn -> reply(bounded_agent_state(id, Mesh.state(id))) end) end)
-  end
-
-  @doc false
   def handle_interactive_list(_params) do
     safe(fn -> Present.fleet_sessions(InteractiveSession) end)
   end
@@ -940,65 +839,6 @@ defmodule Ouroboros.Gateway.Methods do
         end
       end)
     end)
-  end
-
-  @doc false
-  def handle_coding_list(_params) do
-    safe(fn -> Present.fleet_sessions(CodingSession) end)
-  end
-
-  @doc false
-  def handle_coding_info(params) do
-    with_session(params, :coding, fn session ->
-      safe(fn -> reply(CodingSession.info(session)) end)
-    end)
-  end
-
-  @doc false
-  def handle_coding_replay(params) do
-    with_replay(params, :coding, fn session, opts -> CodingSession.replay(session, opts) end)
-  end
-
-  @doc false
-  def handle_coding_event_detail(params) do
-    with_event_detail(params, :coding, fn session, opts ->
-      CodingSession.replay(session, opts)
-    end)
-  end
-
-  @doc false
-  def handle_teams_list(_params) do
-    safe(fn -> {:ok, Present.teams()} end)
-  end
-
-  @doc false
-  def handle_teams_state(params) do
-    with_id(params, fn id ->
-      case Team.whereis(id) do
-        pid when is_pid(pid) -> safe(fn -> reply(Team.state(pid)) end)
-        nil -> not_found("no team #{inspect(id)} is running on this node")
-      end
-    end)
-  end
-
-  @doc false
-  def handle_plans_list(_params) do
-    safe(fn -> reply(Scheduler.list(Scheduler)) end)
-  end
-
-  @doc false
-  def handle_plans_get(params) do
-    with_id(params, fn id -> safe(fn -> reply(Scheduler.get(Scheduler, id)) end) end)
-  end
-
-  @doc false
-  def handle_control_list(_params) do
-    safe(fn -> reply(Control.list()) end)
-  end
-
-  @doc false
-  def handle_control_get(params) do
-    with_id(params, fn id -> safe(fn -> reply(Control.get(id)) end) end)
   end
 
   @doc false
@@ -2036,49 +1876,6 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
-  # G1. Three optional fields and no more: a delegation inherits this conversation's
-  # workspace and provider unless told otherwise, and everything else about the child —
-  # its team, its worker, its parent link, its coding node — is the runtime's to decide.
-  # `delegation_id` is caller-owned for the reason `fork_id` is: this verb's ceiling
-  # answers `outcome: unknown`, and a client that had to mint a second id to find out
-  # would delegate the same objective twice.
-  @doc false
-  def handle_interactive_delegate(params) do
-    safe(fn ->
-      with {:ok, session} <- session_target(:interactive, params),
-           {:ok, objective} <- fetch_string(params, "objective"),
-           {:ok, delegation_id} <- fetch_optional_string(params, "delegation_id"),
-           {:ok, opts} <-
-             options(params, @interactive_delegation_options, [
-               "id",
-               "objective",
-               "delegation_id",
-               "node"
-             ]) do
-        opts =
-          if delegation_id do
-            Keyword.put(opts, :id, delegation_id)
-          else
-            opts
-          end
-
-        reply(InteractiveSession.delegate(session, objective, opts))
-      else
-        {:invalid, message} -> invalid_params(message)
-      end
-    end)
-  end
-
-  # Read scope: `source` on each row says whether the status came from the team that owns
-  # the delegation or from the conversation's own copy of it, so a client can tell a live
-  # answer from a remembered one.
-  @doc false
-  def handle_interactive_delegations(params) do
-    with_session(params, :interactive, fn session ->
-      safe(fn -> reply(InteractiveSession.delegations(session)) end)
-    end)
-  end
-
   @doc false
   def handle_interactive_respond_approval(params) do
     safe(fn ->
@@ -2122,154 +1919,6 @@ defmodule Ouroboros.Gateway.Methods do
   def handle_interactive_delete(params) do
     with_session(params, :interactive, fn session ->
       safe(fn -> reply(InteractiveSession.delete(session)) end)
-    end)
-  end
-
-  @doc false
-  def handle_coding_start(params) do
-    safe(fn ->
-      with {:ok, objective} <- fetch_string(params, "objective"),
-           {:ok, opts} <- options(params, @start_options, ["objective"]) do
-        {owner, opts} = Keyword.pop(opts, :node, node())
-
-        with :ok <- Ouroboros.Audit.admit_remote(owner),
-             do: Placement.start_coding(owner, objective, audit_actor_options(opts))
-      else
-        {:invalid, message} -> invalid_params(message)
-      end
-    end)
-  end
-
-  @doc false
-  def handle_coding_respond_approval(params) do
-    safe(fn ->
-      with {:ok, task} <- session_target(:coding, params),
-           {:ok, request_id} <- fetch_string(params, "request_id"),
-           {:ok, response} <- approval_response(params) do
-        reply(CodingSession.respond_approval(task, request_id, response))
-      else
-        {:invalid, message} -> invalid_params(message)
-      end
-    end)
-  end
-
-  @doc false
-  def handle_coding_cancel(params) do
-    with_session(params, :coding, fn session ->
-      safe(fn -> reply(CodingSession.cancel(session)) end)
-    end)
-  end
-
-  @doc false
-  def handle_coding_delete(params) do
-    with_session(params, :coding, fn session ->
-      safe(fn -> reply(CodingSession.delete(session)) end)
-    end)
-  end
-
-  @doc false
-  def handle_teams_add_worker(params) do
-    safe(fn ->
-      with {:ok, worker_id} <- fetch_string(params, "worker_id"),
-           {:ok, opts} <- options(params, @worker_options, ["team_id", "worker_id"]),
-           {:ok, team} <- team(params) do
-        reply(Team.add_worker(team, worker_id, opts))
-      else
-        {:invalid, message} -> invalid_params(message)
-        {:missing, message} -> not_found(message)
-      end
-    end)
-  end
-
-  @doc false
-  def handle_teams_delegate(params) do
-    safe(fn ->
-      with {:ok, worker_id} <- fetch_string(params, "worker_id"),
-           {:ok, objective} <- fetch_string(params, "objective"),
-           {:ok, opts} <-
-             options(params, @delegation_options, ["team_id", "worker_id", "objective"]),
-           {:ok, team} <- team(params) do
-        reply(Team.delegate(team, worker_id, objective, opts))
-      else
-        {:invalid, message} -> invalid_params(message)
-        {:missing, message} -> not_found(message)
-      end
-    end)
-  end
-
-  @doc false
-  def handle_teams_cancel(params) do
-    safe(fn ->
-      with {:ok, delegation_id} <- fetch_string(params, "delegation_id"),
-           {:ok, team} <- team(params) do
-        reply(Team.cancel(team, delegation_id))
-      else
-        {:invalid, message} -> invalid_params(message)
-        {:missing, message} -> not_found(message)
-      end
-    end)
-  end
-
-  @doc false
-  def handle_teams_close(params) do
-    safe(fn ->
-      case team(params) do
-        {:ok, team} -> reply(Team.close(team))
-        {:invalid, message} -> invalid_params(message)
-        {:missing, message} -> not_found(message)
-      end
-    end)
-  end
-
-  @doc false
-  def handle_control_submit(params) do
-    safe(fn ->
-      with {:ok, objective} <- fetch_string(params, "objective"),
-           {:ok, opts} <- options(params, @control_options, ["objective"]) do
-        reply(Control.submit(objective, opts))
-      else
-        {:invalid, message} -> invalid_params(message)
-      end
-    end)
-  end
-
-  @doc false
-  def handle_control_cancel(params) do
-    with_id(params, fn id -> safe(fn -> reply(Control.cancel(id)) end) end)
-  end
-
-  @doc false
-  def handle_agents_stop(params) do
-    with_id(params, fn id -> safe(fn -> reply(Mesh.stop_agent(id)) end) end)
-  end
-
-  # ---------------------------------------------------------------------------
-  # W13 — one message into one mesh agent
-  #
-  # The scriptable half of §7.7: `ouro` and anything else holding an `:operate` listener
-  # can now reach a deployed capability the way the native `capability` tool does, without
-  # a model and without an IEx shell. Every bound is settled here, before the mesh is
-  # touched, because the parameters arrive over a socket: an id longer than any this
-  # runtime mints, a body larger than a message, and a timeout past this verb's own
-  # ceiling are all refused rather than clamped — a client that asked for something this
-  # node will not do should be told so, not quietly given something else.
-  #
-  # The reply is the agent's `last_answer` and is untrusted by construction. It is
-  # returned whole when it encodes small and as a marked truncated string when it does
-  # not, and `untrusted: true` rides beside it so a client rendering it has no excuse.
-  # ---------------------------------------------------------------------------
-
-  @doc false
-  def handle_agents_message(params) do
-    safe(fn ->
-      with {:ok, to} <- agent_id(params, "to"),
-           {:ok, from} <- agent_from(params),
-           {:ok, body} <- agent_message_body(params),
-           {:ok, timeout} <- agent_message_timeout(params) do
-        reply(send_agent_message(from, to, body, timeout))
-      else
-        {:invalid, message} -> invalid_params(message)
-      end
     end)
   end
 
@@ -2399,13 +2048,6 @@ defmodule Ouroboros.Gateway.Methods do
     )
   end
 
-  defp with_id(params, fun) do
-    case fetch_string(params, "id") do
-      {:ok, id} -> fun.(id)
-      {:invalid, message} -> invalid_params(message)
-    end
-  end
-
   # A turn id supplied by the caller is what makes dispatch idempotent: resending the same
   # `{id, input, turn_id}` after a lost response returns the same turn instead of starting
   # a second one. `input` keeps accepting the original string shape and additionally accepts
@@ -2422,19 +2064,6 @@ defmodule Ouroboros.Gateway.Methods do
         {:invalid, message} -> invalid_params(message)
       end
     end)
-  end
-
-  defp team(params) do
-    case fetch_string(params, "team_id") do
-      {:ok, team_id} ->
-        case Team.whereis(team_id) do
-          pid when is_pid(pid) -> {:ok, pid}
-          nil -> {:missing, "no team #{inspect(team_id)} is running on this node"}
-        end
-
-      {:invalid, message} ->
-        {:invalid, message}
-    end
   end
 
   # Every atom an option key can become, in one literal table. A client string that is not
@@ -2454,11 +2083,8 @@ defmodule Ouroboros.Gateway.Methods do
     "worktree" => :worktree,
     "plan" => :plan,
     "mode" => :mode,
-    "role" => :role,
     "machine" => :node,
-    "node" => :node,
-    "coding_node" => :coding_node,
-    "max_revisions" => :max_revisions
+    "node" => :node
   }
 
   # An option outside the allowlist is refused rather than dropped. Silently ignoring
@@ -2788,156 +2414,6 @@ defmodule Ouroboros.Gateway.Methods do
     else
       {:invalid, message} -> invalid_params(message)
     end
-  end
-
-  # W13 ------------------------------------------------------------------------------
-  defp bounded_agent_state(@wasm_agent_prefix <> _name, {:ok, %{agent: %{state: state}} = server})
-       when is_map(state) do
-    {answer, answer_truncated?} = bounded_answer(Map.get(state, :last_answer))
-    {message, message_truncated?} = bounded_answer(Map.get(state, :last_message))
-
-    bounded =
-      state
-      |> Map.replace(:last_answer, answer)
-      |> Map.replace(:last_message, message)
-
-    {:ok,
-     server
-     |> Map.put(:agent, Map.put(server.agent, :state, bounded))
-     |> Map.put(:untrusted, true)
-     |> Map.put(:truncated, answer_truncated? or message_truncated?)}
-  end
-
-  defp bounded_agent_state(_id, result), do: result
-
-  defp agent_id(params, key) do
-    case Map.get(params, key) do
-      value when is_binary(value) and value != "" ->
-        if byte_size(value) <= @max_agent_id_bytes,
-          do: {:ok, value},
-          else: {:invalid, "params.#{key} must be at most #{@max_agent_id_bytes} bytes"}
-
-      _other ->
-        {:invalid, "params.#{key} must be a nonempty string"}
-    end
-  end
-
-  # A `from` is a label on the message, and an absent one is not an error: the caller is a
-  # gateway client, and saying so is more honest than making every script invent an
-  # identity the mesh does not check anyway.
-  defp agent_from(params) do
-    case Map.get(params, "from") do
-      nil -> {:ok, "gateway"}
-      _present -> agent_id(params, "from")
-    end
-  end
-
-  # Bounded by what it costs on the wire into the agent, not by what the decoded term costs
-  # here: the number in the contract is the number a client can measure. Measured by
-  # encoding, and an unencodable body is refused rather than carried to an agent that would
-  # have to refuse it later with less to say about why.
-  defp agent_message_body(params) do
-    case Map.fetch(params, "body") do
-      :error ->
-        {:invalid, "params.body is required and may be any JSON value"}
-
-      {:ok, body} ->
-        case encoded_bytes(body) do
-          {:ok, size} when size <= @max_agent_message_bytes ->
-            {:ok, body}
-
-          {:ok, size} ->
-            {:invalid,
-             "params.body encodes to #{size} bytes; the bound is #{@max_agent_message_bytes}"}
-
-          :error ->
-            {:invalid, "params.body must be a JSON value"}
-        end
-    end
-  end
-
-  defp encoded_bytes(term) do
-    {:ok, byte_size(JSON.encode!(term))}
-  rescue
-    _error -> :error
-  end
-
-  defp agent_message_timeout(params) do
-    case Map.get(params, "timeout_ms") do
-      nil ->
-        {:ok, @default_agent_message_timeout_ms}
-
-      value when is_integer(value) and value >= 1 and value <= @max_agent_message_timeout_ms ->
-        {:ok, value}
-
-      _other ->
-        {:invalid,
-         "params.timeout_ms must be an integer between 1 and #{@max_agent_message_timeout_ms}"}
-    end
-  end
-
-  defp send_agent_message(from, to, body, timeout) do
-    case Mesh.send_message(from, to, body, timeout: timeout) do
-      {:ok, agent} -> {:ok, agent_message_result(from, to, agent)}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp agent_message_result(from, to, agent) do
-    {answer, truncated?} = bounded_answer(agent_answer(agent, to))
-
-    %{
-      to: to,
-      from: from,
-      # Stated in the result and not only in the reference. Every path a component's words
-      # take to a reader carries this label (docs/WASM.md D17), and a client that drew this
-      # into a transcript beside the operator's own text without it would be the one place
-      # the rule was not enforced.
-      untrusted: true,
-      truncated: truncated?,
-      reply: answer
-    }
-  end
-
-  # `Jido.AgentServer.call/3` answers with the agent as it stands after the signal, which
-  # is where `Ouroboros.Mesh`'s whole message convention puts a reply. A shape this build
-  # does not recognise falls back to the directory rather than to a guess.
-  defp agent_answer(%{state: %{last_answer: answer}}, _to), do: answer
-
-  defp agent_answer(_agent, to) do
-    case Mesh.state(to) do
-      {:ok, %{agent: %{state: %{last_answer: answer}}}} -> answer
-      _unreadable -> nil
-    end
-  end
-
-  # Whole when it fits, and a marked string when it does not — never a silently cut JSON
-  # document, which is a document a client will try to parse and fail on with no idea why.
-  defp bounded_answer(answer) do
-    case encoded_bytes(answer) do
-      {:ok, size} when size <= @max_agent_message_bytes ->
-        {answer, false}
-
-      {:ok, _size} ->
-        {truncate(JSON.encode!(answer)), true}
-
-      :error ->
-        {truncate(inspect(answer, limit: 200, printable_limit: @max_agent_message_bytes)), true}
-    end
-  end
-
-  defp truncate(text) when byte_size(text) <= @max_agent_message_bytes, do: text
-
-  # In band, and by design. A client holding a JSON document that was silently cut has a
-  # document it will try to parse and fail on with no idea why; the marker is the only thing
-  # in the value itself that says what happened, and it is the same sentence the native
-  # `capability` tool appends for the same reason. Room is made for it *inside* the bound,
-  # so a truncated reply is never larger than an untruncated one may be.
-  defp truncate(text) do
-    marker = "… truncated at #{@max_agent_message_bytes} bytes."
-    keep = @max_agent_message_bytes - byte_size(marker)
-
-    text |> binary_part(0, max(keep, 0)) |> valid_prefix() |> Kernel.<>(marker)
   end
 
   # The cut is by bytes and walked back to a whole character: half a codepoint is a string
@@ -3599,7 +3075,7 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  # `replay` with a window of one. Both planes take an *exclusive* cursor
+  # `replay` with a window of one. The plane takes an *exclusive* cursor
   # ([interactive/task.ex:1419](../interactive/task.ex)), so the event at `sequence` is the
   # one after `sequence - 1`, and the two refusals a client has to tell apart come out of
   # that call unchanged: below the retained floor the plane answers `{:cursor_pruned,
@@ -3660,7 +3136,6 @@ defmodule Ouroboros.Gateway.Methods do
 
       case plane do
         :interactive -> {:ok, InteractiveRef.new(id, owner)}
-        :coding -> {:ok, TaskRef.new(id, owner)}
       end
     end
   end

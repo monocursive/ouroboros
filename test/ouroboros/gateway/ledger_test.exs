@@ -335,13 +335,6 @@ defmodule Ouroboros.Gateway.LedgerTest do
 
     table = peer_node |> Atom.to_string() |> String.replace(~r/[^a-zA-Z0-9]/, "_")
 
-    :ok =
-      :erpc.call(peer_node, Application, :put_env, [
-        :ouroboros,
-        :coding_storage,
-        {Jido.Storage.ETS, table: String.to_atom(table)}
-      ])
-
     {:ok, _applications} = :erpc.call(peer_node, Application, :ensure_all_started, [:ouroboros])
     peer_node
   end

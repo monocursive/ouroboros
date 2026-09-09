@@ -1,12 +1,10 @@
 defmodule Ouroboros.SessionTransportBoundsTest do
   use ExUnit.Case, async: false
 
-  alias Ouroboros.Coding.{Store, TaskRef, TaskState}
-  alias Ouroboros.CodingSession
   alias Ouroboros.Interactive.{Ref, State}
   alias Ouroboros.Interactive.Store, as: InteractiveStore
   alias Ouroboros.InteractiveSession
-  alias Ouroboros.Test.{StubRun, StubSession}
+  alias Ouroboros.Test.StubSession
 
   @provider :ouroboros_test
   @timeout_key :session_call_timeout
@@ -24,21 +22,6 @@ defmodule Ouroboros.SessionTransportBoundsTest do
     end)
 
     :ok
-  end
-
-  test "a wedged coding coordinator times out the caller instead of blocking forever" do
-    id = unique_id("wedged-transport-task")
-    run_id = unique_id("stub-run")
-
-    start_supervised!({StubRun, run_id: run_id, provider: @provider, delay_ms: @wedged_ms})
-
-    {:ok, task} =
-      TaskState.new(id, "wedged transport", provider: @provider, workspace: File.cwd!())
-
-    assert :ok = Store.create(%{task | status: :running, harness_run_id: run_id})
-    on_exit(fn -> retire_task(id) end)
-
-    assert {:error, :timeout} = timed(fn -> CodingSession.info(TaskRef.new(id)) end)
   end
 
   test "a wedged interactive coordinator times out the caller instead of blocking forever" do
@@ -70,17 +53,6 @@ defmodule Ouroboros.SessionTransportBoundsTest do
     elapsed = System.monotonic_time(:millisecond) - started
     assert elapsed < @wedged_ms
     result
-  end
-
-  defp retire_task(id) do
-    case Store.get(id) do
-      {:ok, task} ->
-        _ = Store.put(%{task | status: :cancelled})
-        _ = Store.delete(id)
-
-      _other ->
-        :ok
-    end
   end
 
   defp retire_session(id) do

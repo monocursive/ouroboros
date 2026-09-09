@@ -22,12 +22,6 @@ impl App {
             json!({}),
             LIST_TICKS,
         );
-        self.issue_if_due(
-            Tag::Sessions(Plane::Coding),
-            "coding.list",
-            json!({}),
-            LIST_TICKS,
-        );
         if self.open_machines_on_start {
             self.open_machines_on_start = false;
             self.open_machines();
@@ -330,7 +324,6 @@ impl App {
                 approval_mode: self.config.defaults.approval_mode(),
                 sandbox_mode: self.config.defaults.sandbox_mode(),
                 reasoning_effort: None,
-                objective: String::new(),
                 // The quick start is the shortest path there is; a worktree and plan mode
                 // are choices, and they are made in the `n` dialog or on the command line.
                 worktree: false,
@@ -497,7 +490,6 @@ impl App {
             approval_mode: self.config.defaults.approval_mode(),
             sandbox_mode: Some(SandboxMode::WorkspaceWrite),
             reasoning_effort: None,
-            objective: String::new(),
             worktree: false,
             // `/write` is the verb for "let it edit"; starting it planning would be the
             // opposite of what was asked for.

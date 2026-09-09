@@ -99,7 +99,6 @@ fn opened(rows: Vec<Value>, events: Vec<Value>) -> App {
     app.apply(key(KeyCode::Char('2')));
 
     answer(&mut app, Tag::Sessions(Plane::Interactive), json!(rows));
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
     app.open_session(Plane::Interactive, "session-a7".into());
 
     if let Some(subscribe) = app

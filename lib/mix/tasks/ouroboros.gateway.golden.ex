@@ -48,7 +48,6 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
   use Mix.Task
 
   alias Ouroboros.Agent.EffectLedger
-  alias Ouroboros.Coding.Event, as: CodingEvent
   alias Ouroboros.Gateway.Conn
   alias Ouroboros.Gateway.Methods
   alias Ouroboros.Interactive.Event, as: InteractiveEvent
@@ -57,7 +56,6 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
 
   @node "ouroboros@golden"
   @session_id "session-0000000000000000000001"
-  @task_id "task-0000000000000000000000002"
   @timestamp "2026-01-01T00:00:00.000000Z"
 
   # Ninety seconds after `@timestamp`, and the only other instant in this file. A turn's
@@ -128,20 +126,16 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       {"hello_result", hello_result()},
       {"runtime_status_result", runtime_status_result()},
       {"interactive_event_notification", interactive_event_notification()},
-      {"coding_event_notification", coding_event_notification()},
       {"interactive_event_excerpt_notification", interactive_event_excerpt_notification()},
       {"interactive_event_detail_result", interactive_event_detail_result()},
-      {"coding_event_detail_result", coding_event_detail_result()},
       {"mcp_list_result", mcp_list_result()},
       {"wasm_status_result", wasm_status_result()},
       {"wasm_list_result", wasm_list_result()},
-      {"agents_message_result", agents_message_result()},
       {"wasm_upload_result", wasm_upload_result()},
       {"wasm_download_result", wasm_download_result()},
       {"wasm_sign_result", wasm_sign_result()},
       {"wasm_deploy_result", wasm_deploy_result()},
       {"wasm_rollback_result", wasm_rollback_result()},
-      {"agents_message_truncated_result", agents_message_truncated_result()},
       {"workspace_browse_result", workspace_browse_result()},
       {"policy_status_result", policy_status_result()},
       {"policy_promote_result", policy_promote_result()},
@@ -185,16 +179,14 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
   here is a shape invented for a test.
 
   The same static discipline as everything else in this file: literal ids, two literal
-  timestamps, literal sequences. The `run_*` kinds ride the coding envelope because that
-  is the plane that emits them, and everything else rides the interactive one.
+  timestamps, literal sequences.
 
   Each entry is `{name, gloss, plane, sequence, type, payload, fields}`. The gloss is what
   `mix ouroboros.protocol.docs` prints beside the file, so "what this fixture pins" is
   written once, here, next to the payload it describes.
   """
   @spec transcript_corpus() :: [
-          {String.t(), String.t(), :interactive | :coding, pos_integer(), atom(), map(),
-           keyword()}
+          {String.t(), String.t(), :interactive, pos_integer(), atom(), map(), keyword()}
         ]
   def transcript_corpus do
     [
@@ -399,21 +391,21 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       {"event_session_cancelled", "a session killed from outside", :interactive, 128,
        :session_cancelled, %{"reason" => "killed"}, []},
 
-      # -- the run (the coding plane's own lifecycle) --------------------------
+      # -- the run (the harness run worker's own lifecycle) --------------------
       {"event_run_started",
-       "the Claude `init` record: the only place in the stream that names the model", :coding,
-       129, :run_started,
+       "the Claude `init` record: the only place in the stream that names the model",
+       :interactive, 129, :run_started,
        %{
          "cwd" => "/srv/repo",
          "model" => "claude-sonnet-4-5-20260514",
          "tools" => ["Bash", "Read", "Edit", "Grep", "Glob"]
        }, []},
-      {"event_run_failed", "a run that ended on a failure", :coding, 130, :run_failed,
+      {"event_run_failed", "a run that ended on a failure", :interactive, 130, :run_failed,
        %{
          "error" => "the CLI exited before the run completed",
          "subtype" => "error_during_execution"
        }, []},
-      {"event_run_cancelled", "a run stopped from outside", :coding, 131, :run_cancelled,
+      {"event_run_cancelled", "a run stopped from outside", :interactive, 131, :run_cancelled,
        %{"reason" => "cancelled"}, []},
 
       # -- approvals, all five shapes ------------------------------------------
@@ -584,18 +576,6 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
        }, []},
 
       # -- the runtime's own types ---------------------------------------------
-      {"event_delegation",
-       "a coding task this conversation delegated, settling — a digest, never the result",
-       :interactive, 143, :delegation,
-       %{
-         "delegation_id" => "delegation-00000000000001",
-         "team_id" => "team-alpha",
-         "task_id" => @task_id,
-         "task_node" => "ouroboros@worker",
-         "objective_digest" => "3f9a1c2b",
-         "status" => "completed",
-         "result_digest" => "b7e40aa1"
-       }, []},
       {"event_status_resumed",
        "a fact no provider reports: this session was resumed onto a fresh Harness session",
        :interactive, 144, :status,
@@ -628,23 +608,6 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         provider_session_id: @provider_session_id,
         turn_id: @turn_id,
         request_id: Keyword.get(fields, :request_id)
-      }
-    })
-  end
-
-  defp transcript_frame(:coding, sequence, type, payload, fields) do
-    Conn.notification_frame("coding.event", %{
-      "id" => @task_id,
-      "event" => %CodingEvent{
-        id: event_id(sequence),
-        task_id: @task_id,
-        sequence: sequence,
-        type: type,
-        timestamp: Keyword.get(fields, :timestamp, @timestamp),
-        payload: payload,
-        provider: :native,
-        provider_session_id: "provider-0000000000000002",
-        harness_sequence: sequence
       }
     })
   end
@@ -761,11 +724,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       availability: %{
         cluster: :available,
         mesh: :available,
-        coding: :available,
         interactive: :available,
-        teams: :available,
-        orchestration: :available,
-        control: :disabled,
         effect_ledger: :available,
         workspace: :disabled,
         release: :available
@@ -778,16 +737,6 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
           replicas: 1
         }
       ],
-      coding_tasks: [
-        %{
-          id: @task_id,
-          node: :ouroboros@golden,
-          provider: :native,
-          status: :running,
-          created_at: @timestamp,
-          updated_at: @timestamp
-        }
-      ],
       interactive_sessions: [
         %{
           id: @session_id,
@@ -798,17 +747,6 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
           updated_at: @timestamp
         }
       ],
-      teams: [
-        %{
-          id: "team-alpha",
-          status: :active,
-          worker_count: 2,
-          delegation_count: 1,
-          updated_at: @timestamp
-        }
-      ],
-      orchestration_plans: [],
-      control: %{runs: []},
       effect_ledger: %{
         durability: :synced_checkpoint,
         retained: 3,
@@ -845,26 +783,6 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
     })
   end
 
-  # The coding struct names its session `task_id`, not `session_id`, while the
-  # notification's own `id` parameter is the same value under the name every other method
-  # uses. Both spellings are in this fixture on purpose.
-  defp coding_event_notification do
-    Conn.notification_frame("coding.event", %{
-      "id" => @task_id,
-      "event" => %CodingEvent{
-        id: "evt-0000000000000000000000002",
-        task_id: @task_id,
-        sequence: 17,
-        type: :run_completed,
-        timestamp: @timestamp,
-        payload: %{"text" => "objective satisfied"},
-        provider: :native,
-        provider_session_id: "provider-0000000000000002",
-        harness_sequence: 31
-      }
-    })
-  end
-
   # One `file_change` payload, four rules at once. The caps are stated at 48 and 96 bytes
   # rather than left at the 128 KiB and 512 KiB defaults, so this file pins the *shape* —
   # `_excerpt` beside `_bytes` — in bytes a reviewer can read:
@@ -895,25 +813,6 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
   # by side and see the excerpts become the leaves they came from.
   defp interactive_event_detail_result do
     Conn.result_frame(7, excerpted_event(),
-      event_leaf_bytes: 8_388_608,
-      event_payload_bytes: 8_388_608
-    )
-  end
-
-  defp coding_event_detail_result do
-    Conn.result_frame(
-      8,
-      %CodingEvent{
-        id: "evt-0000000000000000000000004",
-        task_id: @task_id,
-        sequence: 18,
-        type: :file_change,
-        timestamp: @timestamp,
-        payload: %{"diff" => String.duplicate("b", 600)},
-        provider: :native,
-        provider_session_id: "provider-0000000000000002",
-        harness_sequence: 32
-      },
       event_leaf_bytes: 8_388_608,
       event_payload_bytes: 8_388_608
     )
@@ -983,14 +882,15 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
     )
   end
 
-  # The `:infinity` verbs. A gateway ceiling stops the waiting, not the work, so the
-  # answer says which of the two it is: the client reconciles by reading `teams.state`.
+  # The verbs whose upstream is unbounded. A gateway ceiling stops the waiting, not the
+  # work, so the answer says which of the two it is: the client reconciles by reading
+  # `interactive.info`.
   defp error_upstream_timeout_unknown do
     Conn.error_frame(
       4,
       Methods.code(:upstream_timeout),
-      "teams.close exceeded the gateway ceiling of 60000ms; the runtime may still be " <>
-        "working on it",
+      "interactive.start exceeded the gateway ceiling of 120000ms; the runtime may still " <>
+        "be working on it",
       %{"outcome" => "unknown"}
     )
   end
@@ -1367,24 +1267,6 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
     })
   end
 
-  # W13. One message into a lane-W capability and the reply back out.
-  #
-  # The fixture is a capability on purpose. `agents.message` reaches any mesh agent, but the
-  # capability case is the one where the reply is a *component's* words, and pinning it here
-  # is what pins the two facts a client has to carry with it: `untrusted` beside the reply,
-  # and `truncated` saying whether what it is holding is the reply or a prefix of one. The
-  # reply keeps string keys because that is what the wrapper decodes a guest's JSON into and
-  # nothing on this path ever mints an atom from the wire.
-  defp agents_message_result do
-    Conn.result_frame(18, %{
-      to: "wasm/vet",
-      from: "gateway",
-      untrusted: true,
-      truncated: false,
-      reply: %{"findings" => [], "checked" => 12}
-    })
-  end
-
   # W12. The four operator verbs, in the shapes `Ouroboros.Wasm.Upload`,
   # `Ouroboros.Wasm.Deploy` and `Ouroboros.Wasm.Surface` produce.
   #
@@ -1587,22 +1469,6 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         "ouroboros@golden" => :rolled_back,
         "ouroboros@peer" => :not_needed
       }
-    })
-  end
-
-  # W13. The same verb when the reply did not fit, which is a different shape and not a
-  # smaller one: `reply` is a **string** rather than the structure the agent answered with,
-  # and the marker inside it is the only thing that says so. A client that read `reply` as
-  # JSON whenever it was a string, or that trusted `truncated` without looking at the value,
-  # would parse a prefix and report a syntax error the user cannot act on. The fixture keeps
-  # a short body because what is pinned is the envelope, not the ceiling.
-  defp agents_message_truncated_result do
-    Conn.result_frame(19, %{
-      to: "wasm/vet",
-      from: "gateway",
-      untrusted: true,
-      truncated: true,
-      reply: "{\"findings\":[{\"file\":\"lib/a.ex\"… truncated at 65536 bytes."
     })
   end
 

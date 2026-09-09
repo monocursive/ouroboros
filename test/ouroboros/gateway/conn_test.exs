@@ -70,7 +70,7 @@ defmodule Ouroboros.Gateway.ConnTest do
           5_000 -> {:ok, []}
         end
 
-      "agents.list", _params ->
+      "interactive.list", _params ->
         send(test, :fast_request_finished)
         {:ok, []}
 
@@ -178,7 +178,7 @@ defmodule Ouroboros.Gateway.ConnTest do
       assert hello(client)["result"]
 
       send(conn, :hello_timeout)
-      send_frame(client, %{"jsonrpc" => "2.0", "id" => 1, "method" => "agents.list"})
+      send_frame(client, %{"jsonrpc" => "2.0", "id" => 1, "method" => "interactive.list"})
 
       assert recv_frame(client)["id"] == 1
       assert Process.alive?(conn)
@@ -197,7 +197,7 @@ defmodule Ouroboros.Gateway.ConnTest do
       assert error_code(recv_frame(client)) == -32700
 
       # Still usable.
-      send_frame(client, %{"jsonrpc" => "2.0", "id" => 2, "method" => "agents.list"})
+      send_frame(client, %{"jsonrpc" => "2.0", "id" => 2, "method" => "interactive.list"})
       assert recv_frame(client)["id"] == 2
     end
 
@@ -208,7 +208,7 @@ defmodule Ouroboros.Gateway.ConnTest do
     end
 
     test "a request without an id has nowhere to be answered, and says so", %{client: client} do
-      send_frame(client, %{"jsonrpc" => "2.0", "method" => "agents.list"})
+      send_frame(client, %{"jsonrpc" => "2.0", "method" => "interactive.list"})
 
       response = recv_frame(client)
       assert response["id"] == nil
@@ -219,7 +219,7 @@ defmodule Ouroboros.Gateway.ConnTest do
       send_frame(client, %{
         "jsonrpc" => "2.0",
         "id" => 3,
-        "method" => "agents.state",
+        "method" => "interactive.info",
         "params" => ["a"]
       })
 
@@ -241,7 +241,7 @@ defmodule Ouroboros.Gateway.ConnTest do
       send_frame(client, %{
         "jsonrpc" => "2.0",
         "id" => 5,
-        "method" => "agents.state",
+        "method" => "interactive.info",
         "params" => %{"id" => ""}
       })
 
@@ -270,7 +270,7 @@ defmodule Ouroboros.Gateway.ConnTest do
       JSON.encode!(%{
         "jsonrpc" => "2.0",
         "id" => 9,
-        "method" => "agents.state",
+        "method" => "interactive.info",
         "params" => %{"id" => String.duplicate("z", 4_000)}
       })
 
@@ -290,7 +290,7 @@ defmodule Ouroboros.Gateway.ConnTest do
     # real methods depend on which provider executables the machine has installed and do
     # not prove that the connection actually dispatched them concurrently.
     send_frame(client, %{"jsonrpc" => "2.0", "id" => "slow", "method" => "runtime.providers"})
-    send_frame(client, %{"jsonrpc" => "2.0", "id" => "fast", "method" => "agents.list"})
+    send_frame(client, %{"jsonrpc" => "2.0", "id" => "fast", "method" => "interactive.list"})
 
     assert_receive {:slow_request_started, slow_request}, 1_000
     assert_receive :fast_request_finished, 1_000

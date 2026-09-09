@@ -62,7 +62,7 @@ defmodule Ouroboros.Provider.Native.Tools.Forge do
 
   **The ledger is the gate, not the log, and an entry is never left to nobody.** A `:forge`
   or `:deploy` entry is written under the session principal *before* the effect and settled
-  after, exactly as `Ouroboros.Agent.Effects.Runner` does it, and a ledger that cannot
+  after, and a ledger that cannot
   record refuses the operation. The three ways a settle can fail to run are closed the way
   the runner closes them: a raise or a throw settles `:failed` with the class and is
   re-raised; a brutal kill at the loop's tool timeout is caught by the ledger's own runner

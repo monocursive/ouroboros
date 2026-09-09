@@ -1991,12 +1991,11 @@ defmodule Ouroboros.Wasm.Forge do
   @doc """
   The wall-clock ceiling one build runs under, which is never more than five minutes.
 
-  Two ceilings, and the smaller one wins. This one is the forge's, and it is the one that
-  fires: `Ouroboros.Provider.Native.Exec` signals the sandboxed process group at it, so the
-  build stops and the `after` that removes the scratch directory runs. The other belongs to
-  whoever called — on the effect path `config :ouroboros, :effect_timeout` bounds the whole
-  effect, and `Ouroboros.Agent.Effects.ForgeWasmCapability` therefore asks for a build budget
-  strictly inside it, because the runner's own deadline is a `brutal_kill` that runs no
+  Two ceilings where a caller has one of its own, and the smaller one wins. This one is the
+  forge's, and it is the one that should fire: `Ouroboros.Provider.Native.Exec` signals the
+  sandboxed process group at it, so the build stops and the `after` that removes the scratch
+  directory runs. A caller that bounds a forge therefore asks for a build budget strictly
+  inside its own deadline, because a caller's deadline is typically a kill that runs no
   cleanup and would leave a cargo tree, and a compiler, behind (docs/WASM.md D19).
   """
   @spec build_timeout(keyword()) :: pos_integer()

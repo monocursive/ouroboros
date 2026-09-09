@@ -8,8 +8,6 @@ defmodule Ouroboros.Gateway.OperateTest do
   alias Ouroboros.Gateway.Config
   alias Ouroboros.Gateway.Conn
   alias Ouroboros.Gateway.Methods
-  alias Ouroboros.Coding.Store, as: CodingStore
-  alias Ouroboros.Coding.Task, as: CodingTask
   alias Ouroboros.InteractiveSession
   alias Ouroboros.Interactive.Ref, as: InteractiveRef
   alias Ouroboros.Interactive.Store, as: InteractiveStore
@@ -117,7 +115,7 @@ defmodule Ouroboros.Gateway.OperateTest do
       end
 
       # The connection survives every refusal.
-      assert is_list(call(client, "agents.list")["result"])
+      assert is_list(call(client, "interactive.list")["result"])
     end
 
     test "a refused operate call never reaches a handler", %{client: client} do
@@ -155,8 +153,7 @@ defmodule Ouroboros.Gateway.OperateTest do
              ]
 
       assert call(client, "interactive.send_message", %{"id" => "x"})["error"]["code"] == -32602
-      assert call(client, "teams.close", %{})["error"]["code"] == -32602
-      assert call(client, "coding.start", %{})["error"]["code"] == -32602
+      assert call(client, "interactive.start", %{"provider" => 7})["error"]["code"] == -32602
     end
 
     test "a post-dispatch checkpoint failure is outcome-unknown, not a refusal" do
@@ -206,7 +203,6 @@ defmodule Ouroboros.Gateway.OperateTest do
       assert Methods.table()["interactive.send_message"].outcome == :unknown
       assert Methods.table()["interactive.follow_up"].outcome == :unknown
       assert Methods.table()["interactive.start"].outcome == :unknown
-      assert Methods.table()["coding.start"].outcome == :unknown
     end
 
     test "structured turn input is closed and validated before dispatch", %{client: client} do
@@ -331,7 +327,7 @@ defmodule Ouroboros.Gateway.OperateTest do
     test "an enum value outside the schema is refused", %{client: client} do
       assert hello(client)["result"]
 
-      response = call(client, "coding.start", %{"objective" => "x", "sandbox_mode" => "yolo"})
+      response = call(client, "interactive.start", %{"sandbox_mode" => "yolo"})
 
       assert response["error"]["code"] == -32602
       assert response["error"]["message"] =~ "workspace_write"
@@ -364,33 +360,6 @@ defmodule Ouroboros.Gateway.OperateTest do
 
       assert call(client, "interactive.delete", %{"id" => "no-such-session"})["error"]["code"] ==
                -32007
-
-      coding_live = "gateway-coding-delete-live-#{System.unique_integer([:positive, :monotonic])}"
-      coding_dead = "gateway-coding-delete-dead-#{System.unique_integer([:positive, :monotonic])}"
-
-      {:ok, coding_live_task} =
-        Ouroboros.Coding.TaskState.new(coding_live, "still running",
-          provider: :native,
-          workspace: File.cwd!()
-        )
-
-      {:ok, coding_dead_task} =
-        Ouroboros.Coding.TaskState.new(coding_dead, "already failed",
-          provider: :native,
-          workspace: File.cwd!()
-        )
-
-      assert :ok = CodingStore.create(coding_live_task)
-      assert :ok = CodingStore.create(%{coding_dead_task | status: :failed, error: :boom})
-
-      coding_live_error = call(client, "coding.delete", %{"id" => coding_live})["error"]
-      assert coding_live_error["code"] == -32006
-      assert coding_live_error["data"]["reason"] == "task_not_terminal"
-      assert :ok = CodingStore.put(%{coding_live_task | status: :cancelled})
-      assert :ok = CodingStore.delete(coding_live)
-
-      assert call(client, "coding.delete", %{"id" => coding_dead})["result"] == "ok"
-      assert :not_found = CodingStore.get(coding_dead)
     end
 
     test "durable failed starts return their stable reference and mismatches are definite", %{
@@ -429,13 +398,11 @@ defmodule Ouroboros.Gateway.OperateTest do
 
       holder_id = "gateway-workspace-holder-#{suffix}"
       interactive_id = "gateway-failed-interactive-#{suffix}"
-      coding_id = "gateway-failed-coding-#{suffix}"
 
       on_exit(fn ->
         for {task, supervisor, id} <- [
               {InteractiveTask, Ouroboros.Interactive.TaskSupervisor, holder_id},
-              {InteractiveTask, Ouroboros.Interactive.TaskSupervisor, interactive_id},
-              {CodingTask, Ouroboros.Coding.TaskSupervisor, coding_id}
+              {InteractiveTask, Ouroboros.Interactive.TaskSupervisor, interactive_id}
             ],
             pid = task.whereis(id),
             is_pid(pid) do
@@ -458,8 +425,6 @@ defmodule Ouroboros.Gateway.OperateTest do
               :ok
           end
         end
-
-        _ = CodingStore.delete(coding_id)
 
         if is_nil(previous_providers),
           do: Application.delete_env(:jido_harness, :providers),
@@ -505,31 +470,6 @@ defmodule Ouroboros.Gateway.OperateTest do
 
       assert interactive_conflict["data"]["reason"] == "session_id_conflict"
       assert interactive_conflict["data"]["outcome"] == "not_dispatched"
-
-      coding_params = %{
-        "id" => coding_id,
-        "objective" => "cannot acquire the held workspace",
-        "provider" => "ouroboros_test",
-        "workspace" => workspace
-      }
-
-      coding = call(client, "coding.start", coding_params)["result"]
-      assert coding["id"] == coding_id
-      assert coding["outcome"] == "created"
-      assert coding["ready"] == false
-      assert coding["error"]
-
-      coding_retry = call(client, "coding.start", coding_params)["result"]
-      assert coding_retry["id"] == coding_id
-      assert coding_retry["outcome"] == "created"
-
-      coding_conflict =
-        call(client, "coding.start", Map.put(coding_params, "objective", "different request"))[
-          "error"
-        ]
-
-      assert coding_conflict["data"]["reason"] == "task_id_conflict"
-      assert coding_conflict["data"]["outcome"] == "not_dispatched"
 
       assert :ok = InteractiveSession.close(InteractiveRef.new(holder_id))
     end
@@ -606,24 +546,25 @@ defmodule Ouroboros.Gateway.OperateTest do
 
       log =
         capture_log(fn ->
-          assert call(client, "control.submit", %{
-                   "objective" => "a secret objective nobody should read in a log"
+          assert call(client, "interactive.send_message", %{
+                   "id" => "no-such-session",
+                   "input" => "a secret prompt nobody should read in a log"
                  })
         end)
 
       lines = log |> String.split("\n") |> Enum.filter(&(&1 =~ "gateway operate"))
 
       assert [line] = lines
-      assert line =~ "control.submit"
+      assert line =~ "interactive.send_message"
       assert line =~ "peer=127.0.0.1:"
       assert line =~ ~r/params=[0-9a-f]{16}/
-      refute line =~ "a secret objective"
+      refute line =~ "a secret prompt"
     end
 
     test "read methods leave no audit line", %{client: client} do
       assert hello(client)["result"]
 
-      log = capture_log(fn -> assert call(client, "agents.list")["result"] end)
+      log = capture_log(fn -> assert call(client, "interactive.list")["result"] end)
 
       refute log =~ "gateway operate"
     end

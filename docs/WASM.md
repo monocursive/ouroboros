@@ -157,17 +157,16 @@ since landed; treat §7, §8, §11 and §14 as current.
 - Namespace enforcement points (all six): source regex (`source.ex:51,121-129`),
   verifier introduce-prefix (`verifier.ex:68,247-253`), verifier protected set
   (`verifier.ex:40-67,283-291`), signer policy (`policy.ex:196,260-268`), mesh start
-  allow-list (`mesh.ex:30`: `["Elixir.Ouroboros.Agent.", "Elixir.Ouroboros.Capability."]`),
-  operator entry-point regexes (`runtime/capabilities.ex:258-268`,
-  `orchestration/step.ex:152-158`).
+  allow-list (`mesh.ex:30`: `["Elixir.Ouroboros.Capability."]`), operator entry-point
+  regex (`runtime/capabilities.ex:258-268`).
 - Identity: `Upgrade.ModuleName` exists solely because forged atoms don't survive
   reboot (`upgrade/module_name.ex:1-19`). Content addressing is pervasive (source
   sha256, BEAM sha256/md5, deterministic signing payload
   `artifact.ex:75-77`).
-- Effects lane: `ForgeCapability`/`DeployCapability` under `Control.Grants`
-  deny-by-default; the principal is server-owned `context.agent.id`, never the
-  signal's claim (`agent/effects/runner.ex:126`); a deploy can only ship an artifact
-  the same agent's granted forge returned (`agent/effects.ex:304-313`).
+- Admission: forge and deploy sit under `Control.Grants` deny-by-default; the principal
+  is server-owned — the session or the operator behind the call — and never a name the
+  request supplies; a deploy can only ship an artifact a granted forge returned. The
+  typed-signal effects lane that first held this was deleted in September 2026.
 
 ### 4.2 The helper-on-a-pipe pattern (the Rust template)
 
@@ -261,7 +260,7 @@ template `ouro-wasm` was built from, not code that still ships.
   allowlist ("external network is on or off, never 'these hosts'",
   `sandbox.ex:96-98`).
 - Lease rule: any non-`read_only` sandbox mode takes an exclusive workspace lease by
-  default (`coding/task_state.ex:477-478`). Worktrees are provisioned idempotently on
+  default (`interactive/state.ex`, `default_workspace_mode/1`). Worktrees are provisioned idempotently on
   every admission (`workspace/worktree.ex:141-142`); "The provider never learns any of
   this. It receives a `cwd`" (`worktree.ex:137-138`).
 - Fleet facts: `local_fleet_posture/0` = `%{node, role, running, machine, runtime}`
@@ -1013,16 +1012,17 @@ bounded to the newest eight, and `deploy/3` reads it back and holds it to the ar
 asked for before staging a byte — it is this node's own output, but it is a file, and a file
 is what somebody else can replace.
 
-**The two effects.** `ForgeWasmCapability` and `DeployWasmCapability` go through
-`Runner.dispatch(:forge, …)` and `(:deploy, …)` exactly as the BEAM lane's do: the acting
-principal is `context.agent.id`, the signal's `from` is recorded as `claimed_from` and
-authorizes nothing (`runner.ex:126`), and the author written into the signed manifest is the
-principal. The `:forge` grant is asked about `"wasm/<name>"` — the same string the rollout
-register calls the module and a signed `start` block claims — so `modules: ["wasm/counter"]`
-is a grant to forge that capability and nothing else. A deploy resolves its artifact from the
-agent's own `forged` ring and never from the signal, and one ring now holds both lanes'
-manifests, so each deploy action refuses the other lane's by name rather than by whatever
-would have failed first downstream.
+**Who may forge.** The acting principal is server-side state — the session behind
+`Ouroboros.Provider.Native.Tools.Forge`, or the operator behind the gateway — never a name
+the request supplies, and it is the author written into the signed manifest. The `:forge`
+grant is asked about `"wasm/<name>"` — the same string the rollout register calls the module
+and a signed `start` block claims — so `modules: ["wasm/counter"]` is a grant to forge that
+capability and nothing else. A deploy resolves its artifact from the `forged` ring and never
+from the request, and one ring holds both lanes' manifests, so a deploy refuses the other
+lane's by name rather than by whatever would have failed first downstream. The typed-signal
+effects that used to carry this — `ForgeWasmCapability` and `DeployWasmCapability` through
+`Runner.dispatch/5` — were deleted in September 2026 (proposals/core.md §3 D3); the grant,
+the ring and the authorship rule are what outlived them.
 
 **The operator's half is the same code.** A proposal directory under
 `.ouroboros/capabilities/` that holds a `Cargo.toml` is a lane-W proposal;
@@ -1971,16 +1971,15 @@ machinery — it is a backend, not a lane (D9).
   with `config :ouroboros, :wasm_forge_cargo_home`. A node with no data directory has nowhere
   to keep a cache and says so rather than falling back to somebody's.
 
-  **Two ceilings, and the smaller one has to be the forge's.** The forge's own is five
-  minutes and is enforced by `Ouroboros.Provider.Native.Exec`, which signals the sandboxed
-  process group and lets the `after` that removes the scratch tree run. The effect surface
-  has a second one, `config :ouroboros, :effect_timeout`, and it is not a deadline of the
-  same kind: the runner ends an overrunning effect with `Task.shutdown(task, :brutal_kill)`,
-  and a killed process runs no `after`. A forge cut there left its build tree on disk and a
-  cargo process group still compiling inside it — which is why
-  `Ouroboros.Agent.Effects.ForgeWasmCapability` asks for a build budget strictly inside the
-  effect's, the same idiom `DelegateTask` uses against the same deadline, and why the test
-  for it asserts `pgrep` finds nothing rather than only that the refusal has the right name.
+  **The ceiling has to be the forge's own.** It is five minutes and is enforced by
+  `Ouroboros.Provider.Native.Exec`, which signals the sandboxed process group and lets the
+  `after` that removes the scratch tree run. A caller's deadline is not a deadline of the
+  same kind: a caller that gives up first leaves its build tree on disk and a cargo process
+  group still compiling inside it, so a caller that bounds a forge asks for a build budget
+  strictly inside its own — which is why the test for it asserts `pgrep` finds nothing
+  rather than only that the refusal has the right name. The typed-signal effect runner that
+  used to own the outer deadline, and `config :ouroboros, :effect_timeout` with it, was
+  deleted in September 2026 (proposals/core.md §3 D3).
 
   **`:any` does not cross the lanes.** `Ouroboros.Control.Grants` holds `"wasm/<name>"` in a
   `:forge` allow-list, and it would have been easy to let `modules: :any` cover those too —
@@ -3529,12 +3528,13 @@ Each slice is PR-sized, lands green, and is useful alone.
   missing a crate is a refusal naming it in 8 ms, not a fetch.
 
   The node then reads the product's imports with its own helper, which D18 argues is exactly
-  the case D15 does not cover: it built these bytes. Two effects — `ForgeWasmCapability` and
-  `DeployWasmCapability` — reach it through `Runner.dispatch/5` with the server-owned
-  principal as the signed manifest's author, the `:forge` grant asked about
-  `"wasm/<name>"` so one narrow grant admits one capability, and the deploy resolving its
-  artifact from the agent's own `forged` ring; that ring now holds both lanes, so each deploy
-  action refuses the other lane's manifest by name. `Control.Grants` learned to hold a
+  the case D15 does not cover: it built these bytes. What reaches it is a session's tool and
+  the operator's gateway, each with the server-owned principal as the signed manifest's
+  author, the `:forge` grant asked about `"wasm/<name>"` so one narrow grant admits one
+  capability, and the deploy resolving its artifact from the `forged` ring; that ring holds
+  both lanes, so a deploy refuses the other lane's manifest by name. (The two typed-signal
+  effects that first carried this were deleted in September 2026.) `Control.Grants` learned
+  to hold a
   `"wasm/<name>"` in a `:forge` allow-list for that, which is the one widening this slice
   makes explicit: `modules: :any` now reaches both lanes. The operator's half is the same
   code — a proposal directory holding a `Cargo.toml` is lane W, `capabilities.preview` reports

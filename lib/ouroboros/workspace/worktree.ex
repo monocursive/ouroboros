@@ -168,8 +168,8 @@ defmodule Ouroboros.Workspace.Worktree do
   Provisions a worktree for a session or task record that asked for one.
 
   Takes any map carrying `:workspace`, `:worktree_requested` and `:worktree` — the shape
-  both `Ouroboros.Interactive.State` and `Ouroboros.Coding.TaskState` have — and returns
-  it with `:workspace` pointing at the worktree and `:worktree` recording what was made.
+  `Ouroboros.Interactive.State` has — and returns it with `:workspace` pointing at the
+  worktree and `:worktree` recording what was made.
   A record that did not ask, or that already has one, is returned unchanged: this runs on
   every admission, including the one after a restart, and re-provisioning there would
   strand the directory the session was already working in.

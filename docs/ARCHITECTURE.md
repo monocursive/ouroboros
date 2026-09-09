@@ -62,8 +62,8 @@ Role (`:core`, `:builder`, `:signer`) is resolved once, at application start, be
 child is supervised — an unrecognized role raises rather than booting the privileged
 tree. `:core` starts the full runtime. `:builder` starts formation and
 `Ouroboros.Wasm.Supervisor` — the helper pool a forwarded lane-W forge needs in order to
-read imports (W22) — and nothing that holds durable work: no teams, stores, sessions,
-schedulers, or control plane. A BEAM forge build is still `:peer.start/1` plus a call.
+read imports (W22) — and nothing that holds durable work: no stores and no sessions.
+A BEAM forge build is still `:peer.start/1` plus a call.
 `:signer` starts the durable-directory owner when a data directory is configured, then
 one process: `Upgrade.Signing.Service`, which holds the key, applies the signing policy,
 and journals every decision, then formation. That process leads the role-specific
@@ -81,103 +81,47 @@ remote role also requires the target to be connected and running this runtime, a
 answer is only ever an observation about a cooperative cluster — see "Safety
 boundaries".
 
-### Team plane
+### Mesh
 
 `Ouroboros.Mesh` owns logical IDs and placement. Each member is a real
 `Jido.AgentServer` under `Ouroboros.Jido` supervision. A local directory monitors the
 PID and joins it to `{:ouroboros_agent, logical_id}` in a named `:pg` scope.
 
-Typed Jido signals are the team protocol. Cross-node calls work because Erlang PIDs
-and monitors are distribution-native. `:erpc` is used when an operation must execute
-inside a selected node's ownership boundary.
+Typed Jido signals are the protocol. Cross-node calls work because Erlang PIDs and
+monitors are distribution-native. `:erpc` is used when an operation must execute inside
+a selected node's ownership boundary.
 
-Invariant: a PID is an observation, not durable identity. Callers retain logical IDs
-or coding task references, never persist PIDs.
+Invariant: a PID is an observation, not durable identity. Callers retain logical IDs or
+session references, never persist PIDs.
 
-`Ouroboros.Team.Server` owns one inspectable Jido coordinator, local Jido children,
-explicit remote Mesh members, and delivery of persisted coding results. Remote worker
-relationships are marked `:mesh_remote` because Jido 2.3.3's child-adoption liveness
-check is local-only. One worker has at most one active delegation. Team state remains
-in a serializable `Team.Snapshot` checkpoint containing logical IDs, nodes, task
-references, cursors, and results—but never runtime PIDs. A crashed server rebuilds or
-adopts agent projections, atomically resubscribes each in-flight coding task, and
-retries terminal delivery. Public delegation IDs are scoped to their team; an internal
-SHA-256 identity over team and delegation names the CodingSession, while a private
-random origin digest proves the task was created by that delegation before adoption or
-cancellation. Coordinator startup is a serialized claim in the Jido agent, and every
-adoption, signal, and cleanup path rechecks the exact module/team/coordinator owner.
-The coordinator is monitored. Deliberate closure moves through a durable `:closing`
-state that retries cancellation and terminal delivery before cleanup.
+`Ouroboros.Mesh.ReceiveMessage` is the action every mesh agent routes
+`ouroboros.agent.message` to. It bounds the inbox by count and by bytes, so a
+remote-reachable send cannot grow an agent's state without limit, and it is what makes
+`last_message` the field the rest of this runtime reads.
 
-Above teams, `Ouroboros.Orchestration.Scheduler` owns a durable dependency graph.
-It persists claims before invoking an executor, caps cluster-local concurrency,
-unlocks fan-out/fan-in, and propagates failure and cancellation. An execution token
-identifies one attempt: it survives the *owner* process dying so a waiter can reattach,
-and a scheduler restart *clears* it so a stale owner cannot complete the new attempt.
-`TeamExecutor` therefore names the team delegation from `{plan_id, step_id}`, not from
-the token — a second offer of the same step reattaches to the same coding task instead
-of launching a duplicate provider run. This closes the local checkpoint/start retry
-window while the same Harness journal is queryable; it is not provider-side exactly-once
-billing across a full VM or host loss.
+> The coordination stack that used to sit here — teams, a durable orchestration DAG, and
+> an objective-level control loop with a planner and evaluator — was deleted in September
+> 2026. See [the core reduction](proposals/core.md) §3 D3 for why: native subagents run
+> cross-node through `Interactive.Task`, `Workspace.Worktree` and `Cluster.Facts`, and
+> never used any of it.
 
-A plan is heterogeneous. Each step declares a kind — `:coding`, or `:forge` for one
-compile-and-deploy of a capability module — and the scheduler resolves one executor per
-kind. Per-kind input schemas are enforced in `Plan`, so a forge step carries a
-capability-namespaced module name, a contained relative source path, and an optional
-`test_path` for candidate ExUnit tests. It cannot choose a workspace, a node, or a
-signer. Omitting tests does not bypass the signing policy's passing-test requirement.
-`submit/2` refuses a plan naming a kind
-this scheduler cannot execute before the plan is persisted; a scheduler with no
-executors is manual mode and accepts any kind because the caller drives every step.
-Snapshots written before kinds existed load as `:coding`, and a kind this build does not
-know is refused rather than coerced.
-
-`Ouroboros.Control.Server` owns the objective-level loop. It checkpoints deterministic
-planning/evaluation request IDs, the candidate plan, revision history, and cancellation
-intent. Provider callbacks run outside the server so one slow inference does not block
-inspection or cancellation of other runs. Generated plans may contain only execution
-objectives and graph dependencies; trusted runtime configuration supplies worker,
-provider, workspace, sandbox, and approval policy. Jido.AI is the production adapter,
-but is opt-in and disabled at application startup by default. Cancellation remains
-pending until the scheduler has durable per-step callback evidence; that evidence says
-whether no execution existed, a request was accepted, or provider termination remains
-unconfirmed. It never equates request acceptance with an observed provider exit.
-
-A terminal evaluator may additionally return a versioned `Control.EvidenceContract`.
-The contract maps acceptance-criterion IDs and claim IDs to typed evidence references,
-classifies claims as observed/inferred/assumed, and preserves unknown, ambiguous, and
-unverified outcomes rather than coercing them to success. Control checkpoints contain
-only transport-safe IDs, enums, timestamps, and SHA-256 digests—not command output,
-model prose, file content, or credentials. Decisive criterion and claim statuses require
-at least one evidence reference; unknown statuses may honestly carry none. Older
-evaluators remain valid and complete runs with `evidence_contract: nil`.
-
-`:control_allow_forge_steps` (default false) widens what a plan may express by exactly
-one shape: a step of kind `forge` whose input is a capability module name and a
-workspace-relative source path. The coding-step schema is unchanged by the flag, both
-planner branches refuse unrecognized keys, and the server re-validates the accepted plan
-against the same per-kind rules `Plan` applies. Enabling it grants no deployment
-authority and nothing dispatches one: no executor is configured for the kind, so a
-scheduler refuses the plan outright.
-
-### Coding execution plane
+### Session execution plane
 
 `Jido.Harness` owns provider processes, provider-specific argv/protocol mapping,
-normalized events, cancellation, and short-lived retained journals. Ouroboros does
-not wrap those CLIs in a second tool loop.
+normalized events, cancellation, and short-lived retained journals.
 
-`Ouroboros.CodingSession` owns domain truth:
+`Ouroboros.InteractiveSession` owns domain truth:
 
-- the objective, workspace, provider, owner node, and normalized request policy;
-- the Harness run ID and provider resume ID;
+- the workspace, provider, owner node, and normalized request policy;
+- the Harness session ID and provider resume ID;
 - a durable exclusive Harness cursor and a separate Ouroboros event sequence;
-- bounded redacted replay, terminal result, and explicit loss state; and
-- node-aware info/replay/subscribe/await/cancel routing.
+- bounded redacted replay, per-turn outcomes, and explicit loss state; and
+- node-aware info/replay/subscribe/await/close routing.
 
-One `Ouroboros.Coding.Task` GenServer serializes transitions for a task. It explicitly
-polls `Jido.Harness.Run.replay/2`, persists cursor plus projected events in one
-checkpoint, and only then broadcasts them. `subscribe/2` registers and snapshots the
-backlog in that same process, eliminating the replay-then-subscribe race.
+One `Ouroboros.Interactive.Task` GenServer serializes transitions for a session. It
+persists cursor plus projected events in one checkpoint and only then broadcasts them.
+`subscribe/2` registers and snapshots the backlog in that same process, eliminating the
+replay-then-subscribe race.
 
 When workspace roots are configured, that same coordinator owns a symlink-resolved
 lease before it inspects or starts Harness. Read-only work shares a root; write work
@@ -187,25 +131,25 @@ before reattachment. Durable nonterminal owners become fail-closed recovery
 reservations across manager or downstream-registry restart; only the exact registered
 coordinator can claim one. This authority is node-local.
 
-The coordinator scans live Harness metadata before starting a missing run. That
-closes the crash window between `Run.start/2` and saving the returned run ID, where an
+The coordinator scans live Harness metadata before starting a missing session. That
+closes the crash window between a start and saving the returned id, where an
 unconditional retry could otherwise launch duplicate billable work.
 
 #### Worktrees
 
-`worktree: true` on either plane provisions a `git worktree` before the lease is taken,
+`worktree: true` provisions a `git worktree` before the lease is taken,
 and the lease is taken on the worktree rather than on the repository. `Ouroboros.Workspace.Worktree`
 runs `git` as an argv list — never a shell string, and the exact list is asserted through
 an injectable runner — canonicalises the created path through `Ouroboros.Workspace.Path`,
 and hands *that* to the existing admission machinery, so every containment check the
 runtime already performs now describes the worktree. A workspace that is not a git
 repository is refused; a subdirectory of one gets the same subdirectory inside the
-worktree. Both planes record the result as `worktree: %{path, root, branch, base_commit,
-repository}` on their durable state, and the provider is told nothing beyond `cwd`.
+worktree. The session records the result as `worktree: %{path, root, branch, base_commit,
+repository}` on its durable state, and the provider is told nothing beyond `cwd`.
 
 Provisioning is idempotent, because admission runs again after every restart: a record
 that already holds a worktree is returned unchanged rather than stranding the directory
-its session was working in. Cleanup runs only when the session or task is *terminal* —
+its session was working in. Cleanup runs only when the session is *terminal* —
 `terminate/2` fires on a supervisor restart too — and removes the directory only when
 `git status --porcelain` inside it is empty, untracked files included. A worktree holding
 uncommitted work is left where it is and named in the terminal event. A marker file under
@@ -356,9 +300,8 @@ limits where an operator will read them.
 The `capability` tool reaches a deployed WebAssembly capability — the `:live` lane-W
 rollouts that name this node, and nothing else on the mesh. It is gated by `Capability(<name>)`
 rules, ledgered with the component's sha256, and everything a component says back to the
-model is bounded and labelled untrusted; `agents.message` is the same reach for a script,
-at gateway `:operate` scope. docs/WASM.md §7.7 and D17 are the whole story, including what
-labelling does and does not buy.
+model is bounded and labelled untrusted. docs/WASM.md §7.7 and D17 are the whole story,
+including what labelling does and does not buy.
 
 Harness run ownership is node-local. A disconnected remote owner is unavailable; a
 run becomes lost only when its confirmed owner reports `:not_found`.
@@ -412,6 +355,19 @@ is `:quarantined`, which has no automatic exit. The register also holds the epoc
 decided inside the same serialized message that writes the entry, because a caller
 reading the watermark and then checkpointing would be a read-then-write across two
 messages.
+
+The durable lane is separate. `Release.Metadata` builds and validates `.rel`, `.appup`,
+and `relup` terms; `RelupBuilder` invokes `:systools.make_relup` without writing;
+`Release.Artifact` validates a completed archive offline. `Release.Runtime` then gates
+`unpack_release`, `check_install_release`, `install_release`, and `make_permanent`
+behind ephemeral external authorization and a durable write-ahead journal. The default
+authorizer denies mutation. Unpack publishes the exact verified bytes under a synced,
+content-addressed name and gives OTP a same-inode alias matching the archive's validated
+top-level `.rel`; operating-system ownership of that directory is part of the trust
+boundary. The release journal syncs both checkpoint file and parent directory
+before acknowledging success. Tests use real tar archives and a deterministic adapter;
+they do not execute a live embedded-release upgrade or reboot. Only that externally
+rehearsed lane can prove restart persistence or an ERTS change.
 
 ### Signing plane
 
@@ -507,57 +463,24 @@ Quarantine is a refusal, not a warning: it has no automatic exit, and clearing i
 inspecting the nodes themselves and deciding, as an operator, what the cluster is
 actually running.
 
-### Agent effect plane
+### The effect ledger
 
-`Ouroboros.Agent.Effects` is the layer at which an agent acts rather than projects. Six
-Jido actions — start agent, stop agent, send message, delegate, forge, deploy — are
-routed from typed signals on `Ouroboros.Agent.Worker` and call the same public APIs an
-operator would. Everything else the agent does remains a pure state projection.
+`Ouroboros.Agent.EffectLedger` is the durable record of what this runtime attempted and
+what came of it. An admitted attempt is checkpointed *before* it starts and settled
+after, so a restart can tell an unfinished acknowledged attempt from one that was never
+requested. `Ouroboros.Provider.Native.Tools.Forge` and the permission engine are its
+writers today; `ledger.list` and `ledger.export` are its readers.
 
-Each effect run is the same four steps, owned by `Ouroboros.Agent.Effects.Runner`:
+`Ouroboros.Control.Grants` is the deny-by-default authority over what an agent may do to
+the cluster. It is asked about a concrete attempt — this module, these nodes — and no
+entry, an attempt outside the allow-list, a malformed call, and an unreachable authority
+are all refusals. Grants are checkpointed before they are acknowledged, and a revocation
+whose write fails leaves the grant standing rather than forgetting something it could not
+durably forget.
 
-1. The principal is `context.agent.id`, read from the agent struct the agent server
-   owns. Jido drops `:agent`, `:state`, `:signal`, and `:agent_server_pid` from any
-   caller-supplied action context, so the identity cannot be supplied by the sender. The
-   signal's `from` is recorded as `claimed_from` and authorizes nothing.
-2. `Ouroboros.Control.Grants.granted?/3` is asked about the concrete attempt — this
-   module, this team, these nodes. It is deny-by-default: no entry, an attempt outside
-   the allow-list, an attempt that does not name what the allow-list reads, a malformed
-   call, and an unreachable authority are all refusals. Grants are checkpointed before
-   they are acknowledged, and a revocation whose write fails leaves the grant standing
-   rather than forgetting something it could not durably forget.
-3. The work runs in a supervised task bounded by `:ouroboros, :effect_timeout`, never on
-   the agent's own process. A forge runs a sandboxed cargo build; that is far longer than
-   an agent server should block and longer than Jido's own action deadline, so the forge
-   carries its own ceiling and the runner's kill is the outer one.
-4. The outcome settles back as `Ouroboros.Signals.EffectSettled`. Delivering it as a
-   call is what orders it: a call arriving while the requesting call is still in flight
-   queues behind it, so the in-flight registration written by the request's return value
-   is always applied before the outcome that settles it. Refusals never start a runner
-   and are cast instead, because a nested call would queue behind the very call it is
-   inside.
-
-Grants live under `Ouroboros.Control.` deliberately: a forged component runs inside a
-WebAssembly world whose imports do not reach it, so a capability an agent forged cannot
-patch the thing that decided it could forge.
-
-`state.forged` is what a `:deploy` resolves, and it is written only by settling an
-in-flight effect this agent minted. A deploy therefore cannot ship bytes that arrived
-any other way — and even then the artifact is re-verified and its signature re-checked
-on every loading node.
-
-The durable lane is separate. `Release.Metadata` builds and validates `.rel`, `.appup`,
-and `relup` terms; `RelupBuilder` invokes `:systools.make_relup` without writing;
-`Release.Artifact` validates a completed archive offline. `Release.Runtime` then gates
-`unpack_release`, `check_install_release`, `install_release`, and `make_permanent`
-behind ephemeral external authorization and a durable write-ahead journal. The default
-authorizer denies mutation. Unpack publishes the exact verified bytes under a synced,
-content-addressed name and gives OTP a same-inode alias matching the archive's validated
-top-level `.rel`; operating-system ownership of that directory is part of the trust
-boundary. The release journal syncs both checkpoint file and parent directory
-before acknowledging success. Tests use real tar archives and a deterministic adapter;
-they do not execute a live embedded-release upgrade or reboot. Only that externally
-rehearsed lane can prove restart persistence or an ERTS change.
+> The typed-signal effect runner that used to sit between an agent and these two —
+> `Ouroboros.Agent.Effects` and its six Jido actions — was deleted in September 2026.
+> See [the core reduction](proposals/core.md) §3 D3.
 
 ### Permission plane
 
@@ -593,15 +516,16 @@ human answer through `respond_approval`, is written to `Agent.EffectLedger` as a
 of the command line and paths, never their text. An `allow` whose ledger entry cannot be
 written is downgraded to `ask`.
 
-The engine's namespace rides the same `Ouroboros.Control.` prefix as grants, so the fast
-patch lane refuses an artifact that would replace the module deciding what code may do.
+The engine sits under the same `Ouroboros.Control.` prefix as grants, and for the same
+reason: the only lane that deploys agent-authored code is lane W, whose components run
+inside a world whose imports do not reach the BEAM, so nothing an agent forges can
+replace the module deciding what code may do.
 
 ## Failure model
 
 | Failure | Current behavior | Required next behavior |
 | --- | --- | --- |
-| Starting caller exits | Harness run and coding coordinator continue | Done |
-| Coding coordinator crashes | Supervisor restarts it; durable cursor reattaches | Done |
+| Starting caller exits | Harness session and its coordinator continue | Done |
 | Interactive coordinator crashes | Reattaches to live Harness session and turn IDs | Done |
 | Harness/BEAM/host restarts | Task checkpoint remains; missing local run becomes `:lost` | Explicit resume/retry policy |
 | Remote owner disconnects | Returns `owner_unavailable`; does not corrupt state | Retry/backoff and operator view |
@@ -622,14 +546,8 @@ patch lane refuses an artifact that would replace the module deciding what code 
 | Forge crashes between allocating an epoch and using it | The number is durably spent and never reissued | Done |
 | Build peer boot, compile, or tests hang | One deadline covers all three; the callback is killed and the peer stopped | Done |
 | Build peer compiles hostile source | The peer cannot reach the cluster; it can still reach the build host | Container/VM boundary with resource and network limits |
-| Ungranted agent requests an effect | Refused as `{:effect_denied, effect, reason}` and recorded; the agent stays alive and nothing reaches the world | Done |
-| Effect signal claims another agent's identity | The principal comes from server-side agent state; the claim is recorded as `claimed_from` and buys nothing | Done |
-| Effect outruns its deadline | The work is killed at `:effect_timeout` and settles as a failure; the agent's process was never blocked | Done |
 | Grant checkpoint write fails | A pre-rename failure is a definite refusal; a post-rename durability failure is `commit_outcome_unknown` and restarts the authority for reconciliation | Operator reconciliation tooling |
 | Effect authority is unreachable | Every attempt is refused; there is no path that fails open | Replicated policy authority |
-| Team process crashes | Snapshot recovery adopts agents/tasks and resumes delivery | Done on one owner node |
-| Scheduler or executor owner crashes | Same token is offered again for idempotent reattachment | Done on one owner node |
-| Control process crashes | Durable request/plan/cancel intent is reconciled; stable IDs reused | Provider billing can still duplicate after response-before-checkpoint loss |
 | Release mutation result is ambiguous | Journal enters quarantine; no false success | Operator reconciliation and deployment rehearsal |
 
 ## Safety boundaries
@@ -683,12 +601,11 @@ patch lane refuses an artifact that would replace the module deciding what code 
   an existing one — evicting a `deny` to admit an `allow` would be a storage limit that
   widens authority. A pre-commit rule-write failure leaves the previous state standing;
   post-rename ambiguity restarts the authority instead of continuing with divergent memory.
-- Coding requests default to workspace write and prompt approval where the provider can
-  enforce it; a provider that cannot is refused at creation rather than silently
-  downgraded, and the downgrade has to be typed out (`sandbox_mode: :default`).
-  Read-only is explicit (`sandbox_mode: :read_only`). Interactive sessions instead omit
-  an unenforceable default and run under the provider's own behavior.
-- Provider flags do not replace an OS sandbox. Untrusted coding work needs a separate
+- A session omits an unenforceable safety default rather than claiming one: where the
+  provider cannot enforce `sandbox_mode`/`approval_mode`, the option is left off the
+  request and the session runs under the provider's own behavior. Read-only is explicit
+  (`sandbox_mode: :read_only`).
+- Provider flags do not replace an OS sandbox. Untrusted work needs a separate
   worktree/container/VM boundary with resource and network limits.
 - A worktree (`worktree: true`) is *containment scoping*, not isolation. It narrows what
   the runtime's own path checks and the native agent's tools consider in-bounds — the
@@ -735,8 +652,8 @@ patch lane refuses an artifact that would replace the module deciding what code 
   above that fact, in exactly the same sense as the `Ouroboros.Capability.` namespace
   policy. A hostile connected node never calls those functions at all.
 - Node role narrows blast radius rather than containing a compromise. A `:builder` node
-  boots cluster formation and the WASM helper pool, and nothing that holds teams,
-  sessions, journals, grants, or a control plane; a `:signer` node adds the signing
+  boots cluster formation and the WASM helper pool, and nothing that holds sessions,
+  journals or grants; a `:signer` node adds the signing
   service (and `RuntimeOwner` when a data directory is configured). Both remain fully
   authorized members of the cluster. Containment requires the build and signing hosts
   outside the cluster's trust domain, reached through something narrower than Erlang
@@ -760,17 +677,15 @@ patch lane refuses an artifact that would replace the module deciding what code 
 Stop condition: repeated crash/reattach/timeout/cancel tests show no duplicate run,
 lost acknowledged event, leaked OS process, or ambiguous terminal state.
 
-### Milestone 2: durable teams
+### Milestone 2: withdrawn
 
-- planner/evaluator policy above coordinator, workers, and correlated delivery
-  (implemented as an explicit opt-in control plane);
-- durable team DAG, dependencies, fan-out/fan-in, cancellation propagation, and
-  result provenance (implemented with stable execution/delegation identities);
-- capability-aware scheduling across nodes (bounded local scheduling is implemented);
-- consensus-backed ownership leases for partition behavior.
+This milestone was a durable team DAG with a planner and evaluator above it. It was
+built, and it was deleted in September 2026 — see [the core reduction](proposals/core.md)
+§3 D3. What survives of the claim is the one shape that earns it: a native session
+spawning subagents across machines, each holding its own worktree lease.
 
-Stop condition: multi-node fault injection proves deterministic ownership and replay
-through worker, coordinator, and network failures.
+Consensus-backed ownership leases for partition behavior remain unbuilt, and remain the
+honest limit on every ownership statement in this document.
 
 ### Milestone 3: safe self-improvement
 
@@ -800,18 +715,18 @@ Implemented:
 - declarative, signed evaluation gates before a rollout settles (`Rollout.Evaluation`):
   a probe set that lives inside the signed manifest, is run on every target, and decides
   live, rollback, or — on any ambiguous answer — quarantine;
-- an agent-reachable effect surface for all of the above (`Agent.Effects`), gated by a
-  durable deny-by-default authority (`Control.Grants`) that is checked against the
-  concrete attempt, identifies the actor from server-side state rather than the signal,
-  bounds every effect, and records each one. `Agent.EffectLedger` checkpoints a
-  content-minimized intent and exact grant snapshot before execution, durably settles
-  outcomes and refusals, exposes bounded cursor queries, and recovers unfinished work as
-  ambiguous without retaining prompts, message bodies, source, provider output, or BEAM
-  binaries. An agent driven only by signals can forge a capability, deploy it, start it,
-  and message it — and can be refused at any of those steps without dying;
+- a durable deny-by-default authority over all of the above (`Control.Grants`), checked
+  against the concrete attempt, identifying the actor from server-side state rather than
+  from the request, bounding what it admits and recording each admission. The path that
+  reaches it is a session's tool (`Provider.Native.Tools.Forge`) and the operator's
+  gateway, not a typed signal; the effect runner that used to sit in front of both was
+  deleted in September 2026. `Agent.EffectLedger` checkpoints a content-minimized intent
+  and exact grant snapshot before execution, durably settles outcomes and refusals,
+  exposes bounded cursor queries, and recovers unfinished work as ambiguous without
+  retaining prompts, message bodies, source, provider output, or BEAM binaries;
 - least-privileged builder and signer nodes (`Ouroboros.Cluster`): one release, one
   runtime, three roles. A `:builder` node boots cluster formation and the WASM helper
-  pool, and nothing that holds teams, sessions, stores, scheduler, or control plane; a
+  pool, and nothing that holds sessions or stores; a
   `:signer` node adds the signing service (and `RuntimeOwner` when a data directory is
   configured). `:wasm_forge_placement` relocates a forge onto a builder without changing
   anything about the build. A component is one artifact for every node, forever, so a
@@ -873,19 +788,19 @@ rollback proof, and a reboot-persistent release.
 ### Milestone 4: product differentiation
 
 The BEAM advantage is not “another prompt loop.” It is long-lived, inspectable,
-fault-contained teams: live process topology, typed event provenance, supervision,
-node placement, resumable multi-provider sessions, and controlled behavior evolution.
-Compared with a conventional single-process coding CLI, Ouroboros can keep several
-logical workers and workflows alive, route them across connected nodes, recover each
-plane from its own durable checkpoint, and evolve behavior through separately gated
-component and release lanes. The product surface should expose those properties
+fault-contained sessions: live process topology, typed event provenance, supervision,
+node placement, resumable sessions, and controlled behavior evolution. Compared with a
+conventional single-process coding CLI, Ouroboros can keep several sessions and their
+subagents alive, route them across connected nodes, recover each from its own durable
+checkpoint, and evolve behavior through separately gated component and release lanes.
+The product surface should expose those properties
 directly through a terminal UI and API rather than hiding them behind one opaque chat
 transcript.
 
 That architecture creates promising future capabilities:
 
 - live topology and fault-domain views instead of one transcript;
-- long-running specialist teams that retain independent cursors and provenance;
+- long-running specialist subagents that retain independent cursors and provenance;
 - canary or cohort rollout of a behavior patch with health gates and retained rollback;
 - evaluator-driven repair loops whose execution identity survives coordinator churn;
 - heterogeneous provider workers selected by capability or policy; and

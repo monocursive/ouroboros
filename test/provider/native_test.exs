@@ -160,10 +160,7 @@ defmodule Ouroboros.Provider.NativeTest do
   end
 
   describe "safety_options/3" do
-    test "accepts both plane defaults on both planes" do
-      assert {:ok, [approval_mode: :prompt, sandbox_mode: :workspace_write]} =
-               Provider.safety_options(:native, [], :coding)
-
+    test "accepts both plane defaults" do
       assert {:ok, [approval_mode: :prompt, sandbox_mode: :workspace_write]} =
                Provider.safety_options(:native, [], {:interactive, nil})
     end
@@ -175,18 +172,28 @@ defmodule Ouroboros.Provider.NativeTest do
       assert Keyword.get(options, :approval_mode) == :prompt
     end
 
-    test "refuses a sandbox mode it cannot enforce, by name" do
-      assert {:error, {:unsupported_safety_options, detail}} =
-               Provider.safety_options(:native, [sandbox_mode: :nonsense], :coding)
+    # A stated value is never rewritten or dropped here. A sandbox mode this provider
+    # cannot enforce travels to the harness untouched, which refuses it by name; silently
+    # downgrading it to the provider's own behavior is the one answer that would turn a
+    # policy the caller asked for into no policy at all.
+    test "passes a sandbox mode it cannot enforce through for the harness to refuse" do
+      assert {:ok, options} =
+               Provider.safety_options(:native, [sandbox_mode: :nonsense], {:interactive, nil})
 
-      assert detail.provider == :native
-      assert detail.message =~ "cannot enforce sandbox_mode: :nonsense"
-      assert detail.message =~ ":workspace_write"
+      assert Keyword.get(options, :sandbox_mode) == :nonsense
+    end
+
+    # The other direction: a default nobody asked for is dropped rather than sent, so a
+    # provider that cannot take it stays startable at `:default`.
+    test "drops a plane default the provider cannot take" do
+      assert {:ok, options} = Provider.safety_options(:amp, [], {:interactive, nil})
+      refute Keyword.has_key?(options, :approval_mode)
+      refute Keyword.has_key?(options, :sandbox_mode)
     end
 
     test "accepts read_only" do
       assert {:ok, options} =
-               Provider.safety_options(:native, [sandbox_mode: :read_only], :coding)
+               Provider.safety_options(:native, [sandbox_mode: :read_only], {:interactive, nil})
 
       assert Keyword.get(options, :sandbox_mode) == :read_only
     end
@@ -205,12 +212,7 @@ defmodule Ouroboros.Provider.NativeTest do
       assert session.workspace_mode == :exclusive
     end
 
-    test "accepts unrestricted on both planes, because it is now a mode this provider has" do
-      assert {:ok, coding} =
-               Provider.safety_options(:native, [sandbox_mode: :unrestricted], :coding)
-
-      assert Keyword.get(coding, :sandbox_mode) == :unrestricted
-
+    test "accepts unrestricted, because it is now a mode this provider has" do
       assert {:ok, interactive} =
                Provider.safety_options(
                  :native,

@@ -54,7 +54,7 @@ defmodule Ouroboros.Audit.IdentityExecutionTest do
       start_supervised!({Store, config: config})
       subject = Map.take(identity, ["id", "token_sha256"])
 
-      for method <- ["interactive.start", "coding.start"] do
+      for _round <- 1..2 do
         {model, script} = NativeModelScript.start([[{:text, "done"}, {:finish, :stop}]])
         id = "audit-start-#{System.unique_integer([:positive])}"
 
@@ -67,30 +67,18 @@ defmodule Ouroboros.Audit.IdentityExecutionTest do
           "runtime_exposure" => false
         }
 
-        params =
-          if method == "coding.start", do: Map.put(params, "objective", "say done"), else: params
+        assert {:ok, _} = Methods.invoke_as(subject, "interactive.start", params)
 
-        assert {:ok, _} = Methods.invoke_as(subject, method, params)
-
-        if method == "coding.start" do
-          on_exit(fn -> Ouroboros.CodingSession.cancel(id) end)
-          assert {:ok, task} = Ouroboros.CodingSession.await(id, 5000)
-          assert task.status == :completed
-          assert length(NativeModelScript.requests(script)) == 1
-          assert {:ok, task} = Ouroboros.Coding.Store.get(id)
-          assert task.options.audit_actor_id == "alice"
-          assert Ouroboros.Audit.actor_id(Ouroboros.Coding.TaskState.request(task)) == "alice"
-        else
-          on_exit(fn -> Ouroboros.InteractiveSession.close(id) end)
-          turn_id = "audit-turn"
-          assert {:ok, _} = Ouroboros.InteractiveSession.send_message(id, "say done", id: turn_id)
-          assert {:ok, turn} = Ouroboros.InteractiveSession.await(id, turn_id, 5000)
-          assert turn.status == :completed
-          assert length(NativeModelScript.requests(script)) == 1
-          assert {:ok, state} = Ouroboros.Interactive.Store.get(id)
-          assert Ouroboros.Audit.actor_id(Ouroboros.Interactive.State.request(state)) == "alice"
-          assert :ok = Ouroboros.InteractiveSession.close(id)
-        end
+        on_exit(fn -> Ouroboros.InteractiveSession.close(id) end)
+        turn_id = "audit-turn"
+        assert {:ok, _} = Ouroboros.InteractiveSession.send_message(id, "say done", id: turn_id)
+        assert {:ok, turn} = Ouroboros.InteractiveSession.await(id, turn_id, 5000)
+        assert turn.status == :completed
+        assert length(NativeModelScript.requests(script)) == 1
+        assert {:ok, state} = Ouroboros.Interactive.Store.get(id)
+        assert state.options.audit_actor_id == "alice"
+        assert Ouroboros.Audit.actor_id(Ouroboros.Interactive.State.request(state)) == "alice"
+        assert :ok = Ouroboros.InteractiveSession.close(id)
       end
 
       {:ok, rows} = Ouroboros.Audit.Query.events(config.root)

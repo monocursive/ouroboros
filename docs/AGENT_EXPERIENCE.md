@@ -7,6 +7,13 @@ claim about the field cites a report in [research/agent-ux-2026/](research/agent
 and every claim about this codebase was re-read in the source. Companion to
 [ARCHITECTURE.md](ARCHITECTURE.md), [TUI.md](TUI.md), and [FLEET.md](FLEET.md).
 
+> **Superseded in part, September 2026.** Everything this document records about teams,
+> delegation (G1), the orchestration DAG and the control planner describes a plane that
+> was deleted; see [the core reduction](proposals/core.md) §3 D3. The rows are left as
+> the dated record they are. A session hands work to a child through the native `agent`
+> tool now, and the child's progress arrives as `subagent` events in its parent's
+> transcript.
+
 ## 0. Summary
 
 **The bar.** By mid-2026 the top five developer coding agents by use are Claude Code
@@ -747,7 +754,7 @@ product look worse than it is.
 
 | # | Defect | Where | Fix |
 |---|---|---|---|
-| X1 | A Claude session at the plane default `approval_mode: :prompt` has permission-needing tools silently denied by `claude --print`; nothing tells the user. | [claude.ex:161-163](../deps/jido_harness/lib/jido_harness/adapters/claude.ex), plane defaults [provider.ex:46](../lib/ouroboros/provider.ex) | Until the bridge (Track C2) lands: on managed transports, `interactive.start` with `:prompt` answers with a typed refusal naming the provider and the two modes that work, exactly like `unsupported_safety_options` does on the coding plane; the `n` dialog greys the choice using the capability data it already receives. |
+| X1 | A Claude session at the plane default `approval_mode: :prompt` has permission-needing tools silently denied by `claude --print`; nothing tells the user. | [claude.ex:161-163](../deps/jido_harness/lib/jido_harness/adapters/claude.ex), plane defaults [provider.ex:46](../lib/ouroboros/provider.ex) | Until the bridge (Track C2) lands: on managed transports, `interactive.start` with `:prompt` answers with a typed refusal naming the provider and the two modes that work; the `n` dialog greys the choice using the capability data it already receives. |
 | X2 | `s`/`/steer` are offered on every session; `steer/3` is `{:error, :unsupported}` on every provider but `pi`. | [acp.ex:107](../lib/ouroboros/provider/session/dialect/acp.ex), [codex.ex:101](../lib/ouroboros/provider/session/dialect/codex.ex), palette [app.rs:1812](../tui/src/ui/app/) | Advertise `steer` from `interactive.info.transport.capabilities`; the composer's Steer verb is shown only where it is true; where it is false, Enter-while-busy becomes a visible queued follow-up (Track B3). |
 | X3 | TUI.md documents `Ctrl-E` for event details; the code binds `Ctrl-O` and `Ctrl-E` opens `$EDITOR`. | [TUI.md §3.4](TUI.md), [app.rs:5929](../tui/src/ui/app/) | Fix the doc; `?` already is the authority. |
 | X4 | Mouse capture disables native text selection and consumes only the wheel; no hint, no opt-out. | [mod.rs:213,451-459](../tui/src/ui/mod.rs) | One-time hint line; `[terminal] mouse = false` in config.toml; `/raw` later (Track A9). |

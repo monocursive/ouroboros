@@ -223,7 +223,7 @@ fn session_rail(frame: &mut Frame, area: Rect, app: &App) {
         };
         let card_width = rows[1].width;
         let label = session
-            .objective
+            .title
             .as_deref()
             .filter(|value| !value.trim().is_empty())
             .map(|value| super::tree::truncate(value, card_width.saturating_sub(6) as usize))
@@ -988,35 +988,20 @@ fn plan_panel_height(app: &App, area: Rect) -> u16 {
         return 0;
     }
 
-    let plan = app.sessions.open_watch().and_then(Watch::latest_plan);
-    // G1. The panel draws whichever of the two the session has. A conversation that
-    // delegated work but published no plan still has something to show here, and one that
-    // has neither draws nothing at all rather than an empty frame.
-    let children = app.open_delegation_rows().len() as u16;
-
-    if plan.is_none() && children == 0 {
+    let Some(plan) = app.sessions.open_watch().and_then(Watch::latest_plan) else {
         return 0;
-    }
+    };
 
     // Heading, the explanation's first wrapped rows, one row per step, and the borders.
-    let steps = plan.map_or(0, |plan| {
-        1 + plan.steps.len() as u16 + u16::from(plan.explanation.is_some())
-    });
-    let delegations = if children > 0 { children + 1 } else { 0 };
+    let steps = 1 + plan.steps.len() as u16 + u16::from(plan.explanation.is_some());
 
-    steps
-        .saturating_add(delegations)
-        .saturating_add(2)
-        .min(PLAN_PANEL_ROWS)
+    steps.saturating_add(2).min(PLAN_PANEL_ROWS)
 }
 
 fn plan_panel(frame: &mut Frame, area: Rect, app: &App) {
-    let plan = app.sessions.open_watch().and_then(Watch::latest_plan);
-    let children = app.open_delegation_rows();
-
-    if plan.is_none() && children.is_empty() {
+    let Some(plan) = app.sessions.open_watch().and_then(Watch::latest_plan) else {
         return;
-    }
+    };
 
     let block = Block::default()
         .borders(access::borders(Borders::TOP))
@@ -1026,24 +1011,12 @@ fn plan_panel(frame: &mut Frame, area: Rect, app: &App) {
 
     let mut lines = Vec::new();
 
-    if let Some(plan) = plan {
-        transcript_cells::render_plan(
-            &mut lines,
-            plan,
-            inner.width.max(8) as usize,
-            &format!("Plan  {}", app.keymap.label(Action::PlanPanel)),
-        );
-    }
-
-    // G1. Beside the plan, not instead of it: a delegation is work this conversation
-    // handed to a child, and the plan is work it kept.
-    if !children.is_empty() {
-        lines.push(Line::from(Span::styled(
-            format!("Delegations  {}  /delegations opens one", children.len()),
-            theme::label(),
-        )));
-        lines.extend(super::panels::delegation_lines(children, None));
-    }
+    transcript_cells::render_plan(
+        &mut lines,
+        plan,
+        inner.width.max(8) as usize,
+        &format!("Plan  {}", app.keymap.label(Action::PlanPanel)),
+    );
 
     // The newest rows are the ones being worked on, so a plan longer than the panel keeps
     // its tail rather than its head.
@@ -1206,8 +1179,8 @@ fn transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     let conversation_title = app
         .sessions
         .open_info()
-        .and_then(|session| session.objective.as_deref())
-        .filter(|objective| !objective.trim().is_empty())
+        .and_then(|session| session.title.as_deref())
+        .filter(|title| !title.trim().is_empty())
         .map(str::to_uppercase)
         .unwrap_or_else(|| "AGENT CHAT".to_string());
     let conversation_provider = app
@@ -2152,7 +2125,6 @@ fn chip_rows(app: &App) -> u16 {
     let chips = u16::from(
         !composer.attachments.is_empty()
             || composer.reasoning_effort.is_some()
-            || app.delegating
             || composer.editor.text().starts_with('!'),
     );
 
@@ -2184,11 +2156,7 @@ fn render_chips(frame: &mut Frame, area: Rect, app: &App) {
     let mut lines = Vec::new();
     let shell_draft = composer.editor.text().starts_with('!');
 
-    if !composer.attachments.is_empty()
-        || composer.reasoning_effort.is_some()
-        || app.delegating
-        || shell_draft
-    {
+    if !composer.attachments.is_empty() || composer.reasoning_effort.is_some() || shell_draft {
         let mut spans = Vec::new();
 
         for attachment in &composer.attachments {
@@ -2210,17 +2178,6 @@ fn render_chips(frame: &mut Frame, area: Rect, app: &App) {
         if let Some(effort) = composer.reasoning_effort {
             spans.push(Span::styled(
                 format!(" effort {} ", effort.as_str()),
-                Style::default().fg(theme::accent()),
-            ));
-            spans.push(Span::raw(" "));
-        }
-
-        // G1. A delegation is two bounded team calls behind a ninety-second ceiling, so
-        // it is worth saying that something is in flight rather than leaving the composer
-        // looking idle.
-        if app.delegating {
-            spans.push(Span::styled(
-                " delegating… ",
                 Style::default().fg(theme::accent()),
             ));
             spans.push(Span::raw(" "));

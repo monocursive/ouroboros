@@ -93,7 +93,6 @@ fn start_plan(prompt: &str) -> Plan {
         approval_mode: None,
         sandbox_mode: None,
         reasoning_effort: None,
-        objective: String::new(),
         worktree: false,
         plan: false,
     };
@@ -120,7 +119,6 @@ fn planning_start(prompt: &str) -> Plan {
         approval_mode: None,
         sandbox_mode: None,
         reasoning_effort: None,
-        objective: String::new(),
         worktree: false,
         plan: true,
     };
