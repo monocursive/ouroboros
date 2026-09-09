@@ -770,17 +770,6 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   @doc false
-  def handle_fleet_revoke(params) do
-    with {:ok, artifact} <- fetch_string(params, "artifact"),
-         true <- byte_size(artifact) <= 16384 do
-      safe(fn -> Cluster.Revocations.distribute(artifact) end)
-    else
-      {:invalid, message} -> invalid_params(message)
-      _ -> invalid_params("artifact must be a signed revocation of at most 16 KiB")
-    end
-  end
-
-  @doc false
   def handle_fleet_forget_session_owner(params) do
     safe(fn ->
       with {:ok, machine} <- fetch_string(params, "machine"),

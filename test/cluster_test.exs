@@ -506,7 +506,7 @@ defmodule Ouroboros.ClusterTest do
           refute late_node in Cluster.expected_nodes()
 
           # The roster grows while the runtime is up: no restart, no environment
-          # change — only the saved profile moves, exactly what `ouro fleet add` does.
+          # change — only the saved profile moves, exactly what a roster edit does.
           write_test_fleet_profile!(fleet_dir, fleet_id,
             local: owner,
             members: [owner, late],
@@ -625,7 +625,7 @@ defmodule Ouroboros.ClusterTest do
       Process.sleep(600)
       refute late_name in :peer.call(owner, Node, :list, [])
 
-      # `ouro fleet add` while the owner runtime is up: only the saved profile changes.
+      # A roster grown while the owner runtime is up: only the saved profile changes.
       write_test_fleet_profile!(fleet_dir, fleet_id,
         local: owner_member,
         members: [owner_member, late_member],
@@ -879,7 +879,7 @@ defmodule Ouroboros.ClusterTest do
         sweep_now!(strategy)
         assert dials(table) == 4
 
-        # `ouro fleet invite cancel` while the runtime is up: only the roster moves.
+        # A machine removed from the roster while the runtime is up: only the roster moves.
         System.put_env("OUROBOROS_CLUSTER_HOSTS", "")
         sweep_now!(strategy)
         assert dials(table) == 4

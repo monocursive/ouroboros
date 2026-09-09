@@ -629,13 +629,6 @@ defmodule Ouroboros.Gateway.Methods.Contract do
          ]},
       handler: :handle_fleet_forget_session_owner
     },
-    "fleet.revoke" => %{
-      scope: :operate,
-      timeout: 15000,
-      params:
-        {:closed, [{"artifact", :required, :string, "CA-attested revocation, at most 16 KiB"}]},
-      handler: :handle_fleet_revoke
-    },
     "fleet.tags" => %{
       scope: :operate,
       timeout: 15000,

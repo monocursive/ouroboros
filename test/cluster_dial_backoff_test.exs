@@ -155,7 +155,7 @@ defmodule Ouroboros.Cluster.DialBackoffTest do
     test "a host that leaves membership and returns is dialed on the sweep it returns" do
       # This is the bug `RosterEpmd` was written to kill, in a new costume: an operator who
       # re-adds a member must not wait out a window earned by whatever held that name
-      # before. `ouro fleet add` after a cancel, and a fresh invite, are the same shape.
+      # before. A machine removed from the roster and added back is the same shape.
       {_sweeps, backoff} = run_sweeps(DialBackoff.new(), [@dead], 8, failing: [@dead])
 
       # Mid-window, and it would still be waiting if it had stayed in the roster.

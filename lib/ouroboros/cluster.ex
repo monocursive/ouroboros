@@ -490,7 +490,7 @@ defmodule Ouroboros.Cluster.Monitor do
         {state_order(machine.state), Atom.to_string(machine.node)}
       end)
 
-    # An early joiner may only have its invitation seeds in static configuration and
+    # An early peer may only have its boot seeds in static configuration and
     # learn later machines through BEAM transitive connectivity. "expected 2 / connected
     # 3" reads like corrupt state to an operator, so the summary is the union of configured
     # peers and the last-known directory. Per-machine `expected?` still identifies the
@@ -1107,8 +1107,8 @@ defmodule Ouroboros.Cluster do
     * `epmd` — a list of node names, retried on an interval so boot order does not
       matter. `OUROBOROS_CLUSTER_HOSTS` (comma-separated) seeds the list at boot; when
       this node runs from a saved fleet profile, every retry re-resolves membership
-      from that profile (`membership_hosts/0`), so `ouro fleet add` and `ouro fleet
-      invite cancel` reach a running node's dialer without a restart.
+      from that profile (`membership_hosts/0`), so a roster edited while the runtime is
+      up reaches its dialer without a restart.
     * `gossip` — libcluster's multicast gossip, optionally keyed by
       `OUROBOROS_CLUSTER_GOSSIP_SECRET`.
     * `dns` — poll the A records of `OUROBOROS_CLUSTER_DNS_QUERY` and connect
@@ -1389,10 +1389,10 @@ defmodule Ouroboros.Cluster do
   Returns the node names formation should currently dial.
 
   When this node runs from a saved fleet profile, membership is re-read from that
-  profile on every call, so a roster change made while the runtime is up — `ouro fleet
-  add`, `ouro fleet invite cancel` — reaches both the dialer and the expected-machine
-  directory without a restart. `OUROBOROS_CLUSTER_HOSTS` remains the boot seed, and the
-  whole answer for a topology configured by environment alone.
+  profile on every call, so a roster change made while the runtime is up reaches both
+  the dialer and the expected-machine directory without a restart.
+  `OUROBOROS_CLUSTER_HOSTS` remains the boot seed, and the whole answer for a topology
+  configured by environment alone.
 
   A profile that turns unreadable keeps the last membership this node successfully
   read, with one warning per distinct failure, rather than silently shrinking back to

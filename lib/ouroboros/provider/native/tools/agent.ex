@@ -598,8 +598,8 @@ defmodule Ouroboros.Provider.Native.Tools.Agent do
   defp not_distributed_refusal(name),
     do:
       "Refused: `machine: \"#{name}\"` asks for another machine, and this node is not part " <>
-        "of a fleet — it runs without distribution, so there is no other machine to reach. " <>
-        "Create a fleet with `ouro fleet create`, then connect a machine with `ouro fleet add user@host` (see docs/FLEET.md). " <>
+        "of a cluster — it runs without distribution, so there is no other machine to reach. " <>
+        "See docs/FLEET.md for the environment a second machine needs. " <>
         "Omit `machine:` to run the child here."
 
   defp unknown_machine_refusal(name, candidates) do

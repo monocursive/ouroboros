@@ -123,7 +123,6 @@ runs them. [WASM.md](docs/WASM.md) is the design behind it.
 - [Computer use](docs/COMPUTER_USE.md)
 - [WebAssembly components](docs/WASM_GUIDE.md)
 - [Protocol reference](docs/PROTOCOL.md)
-- [Distribution](docs/DISTRIBUTION.md)
 
 ## Contributing
 

@@ -51,7 +51,6 @@
       "credentials.xai.set",
       "fleet.doctor",
       "fleet.forget_session_owner",
-      "fleet.revoke",
       "fleet.status",
       "fleet.tags",
       "grants.list",
