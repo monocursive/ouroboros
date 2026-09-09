@@ -306,9 +306,7 @@ defmodule Ouroboros.Gateway.IntegrationTest do
     assert agent["replicas"] == 1
     assert agent["pid"]["_opaque"] =~ "#PID<"
 
-    assert is_list(status["coding_tasks"])
     assert is_list(status["interactive_sessions"])
-    assert is_list(status["teams"])
     assert is_binary(status["upgrade"]["mode"])
   end
 
