@@ -1195,12 +1195,6 @@ ouro hook post-tool-use
                       hidden. Answers Claude Code's PostToolUse hook with the
                       diagnostics one edit added. Reads JSON on stdin, writes JSON
                       on stdout, exits 0 whatever happened
-ouro update [--check] [--from URL] [--allow-downgrade]
-                      replace this binary with a signed release, or refuse and
-                      say why. Needs the release public key compiled in; a build
-                      without it refuses rather than installing something it cannot
-                      check. --check prints versions and exits 10 if an update
-                      exists; --from names a mirror
 ouro version          client version, embedded release version+sha, protocol
 ouro --dev            spawn `mix run --no-halt` in cwd with gateway env (no embed);
                       defaults to an isolated ouroboros-dev data directory
@@ -3295,7 +3289,7 @@ dependency this repository already has and a second build tool is a worse tax
 than a plainer syntax. Same verbs: `dev` (deps if absent + `cargo run -- --dev`),
 `test` (mix test; cargo test/fmt/clippy, *twice* — `embed` is off by default, so
 one pass never compiles the extractor at all), `golden` (regen + `git diff
---exit-code`), `release-tarball`, `ouro`, `dist`. Recipes compute the version and
+--exit-code`), `release-tarball`, `ouro`. Recipes compute the version and
 target triple in the shell, so the file needs no GNU extensions and the version of
 record stays the name `mix release` gave the tarball.
 
@@ -3327,20 +3321,13 @@ so the GC's "newest two" means most recently *started*, not most recently
 unpacked — otherwise the release a daemon is running out of ages out from under
 it after two upgrades.
 
-- **CI matrix** builds per target — the release must be built on the exact OS/arch
-  because ERTS is not cross-compiled: `macos-15` (aarch64-apple-darwin),
-  `macos-15-intel` (x86_64-apple-darwin), `ubuntu-24.04` (x86_64-unknown-linux-gnu),
-  `ubuntu-24.04-arm` (aarch64-unknown-linux-gnu). Artifact:
-  `dist/ouro-<version>-<triple>`, e.g. `ouro-0.1.0-aarch64-apple-darwin`, produced
-  by `make dist` so CI and a laptop cannot drift. This is the same ERTS/arch
-  identity constraint the forge verifier already enforces for artifacts
-  ([mix.exs](../mix.exs) release comment).
-  The release workflow downloads the complete matrix, verifies every target,
-  writes `SHA256SUMS`, and creates or updates the tag's GitHub Release. **Status:
-  written, never executed.** The configured repository remote is not a public GitHub
-  release channel, and no tag has reached this workflow. Local builds are evidence about
-  the commands, not evidence that downloadable assets already exist. `.gitignore`
-  covers `*.tar.gz`, `/tui/target/`, and `/dist/`.
+- **No publishing lane.** `ouro` must be built on the exact OS/arch it runs on,
+  because ERTS is not cross-compiled; that constraint is the same one the forge
+  verifier enforces for artifacts ([mix.exs](../mix.exs) release comment). The signed
+  cross-target release pipeline, the `dist*` make targets and the `ouro update`
+  self-updater that consumed them were deleted by
+  [proposals/core.md](proposals/core.md) §3 D4: `make ouro` is the whole build, and an
+  operator copies the binary it produces to each machine.
 - The supported deployment artifact is `ouro`. A plain release tarball or raw-release
   container remains unsupported until it ships the trusted native process-incarnation
   and recovery-lock helper too.
