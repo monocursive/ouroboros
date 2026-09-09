@@ -225,8 +225,8 @@ defmodule Ouroboros.Gateway.Methods do
   # model with no tools. That is provider latency, not control-plane latency, so it gets
   # a ceiling of its own — well above the default and well below a start's.
 
-  # Preview and admit run the forge build peer (60s default) and, for admit, a rollout.
-  # Keep the gateway ceiling above that so a named forge refusal wins over -32005.
+  # Preview and admit run a sandboxed cargo build and, for admit, a signature and a
+  # rollout. Keep the gateway ceiling above that so a named forge refusal wins over -32005.
 
   # R2. Verified replay re-derives a whole session: one `Loop.run_turn/2` per recorded turn,
   # each rebuilding the cached prefix from the workspace (instruction files, the tool

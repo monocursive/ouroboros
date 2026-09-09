@@ -20,9 +20,10 @@ defmodule Ouroboros.Agent.Effects.Runner do
      an error directive: the agent logs it and stays alive.
   3. **Bound the work.** The closure runs in a supervised task, off the agent's own
      process, under `config :ouroboros, :effect_timeout` (120s by default). A forge that
-     boots a build peer, compiles, and runs a capability's tests takes far longer than
-     the agent server should ever sit still, and far longer than Jido's own action
-     deadline. A closure that outlives its budget is killed and recorded as a timeout.
+     runs a sandboxed cargo build takes far longer than the agent server should ever sit
+     still, and far longer than Jido's own action deadline — so it carries its own
+     ceiling, and this one is the outer bound. A closure that outlives its budget is
+     killed and recorded as a timeout.
   4. **Record what happened.** The admitted attempt is checkpointed in
      `Ouroboros.Agent.EffectLedger` before the runner starts. The requesting action also
      returns a `:started` projection in `last_effects`. When the runner finishes it
