@@ -2404,7 +2404,7 @@ pub fn new_session_id() -> String {
     )
 }
 
-/// What a start answers: `Ouroboros.Interactive.Ref` / `Ouroboros.Coding.TaskRef`,
+/// What a start answers: an `Ouroboros.Interactive.Ref`,
 /// Wire-encoded — `{id, node}` plus the struct tag — or the same stable identity with a
 /// typed post-checkpoint readiness failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
