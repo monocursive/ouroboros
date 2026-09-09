@@ -624,7 +624,6 @@ fn the_dashboard_renders_the_golden_runtime_status() {
         "cluster",
         "coding",
         "control",
-        "hot_upgrade",
         "interactive",
         "mesh",
         "orchestration",
