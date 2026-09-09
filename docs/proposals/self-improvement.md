@@ -232,9 +232,9 @@ sessions, producing pull requests with the corpus delta in the body.
 - A change under `lib/ouroboros/control/`, `upgrade/`, or `storage/` flags the PR for
   human review of that hunk regardless of the review's verdict: the namespaces the verifier
   protects at runtime stay protected at the source level too.
-- v1 is a script. Encoding it as a durable orchestration plan
-  ([`plan.ex`](../../lib/ouroboros/orchestration/plan.ex), `:coding` steps through a team)
-  is v2, after the script has produced three merged PRs and the shape is known.
+- v1 is a script. Encoding it as a durable orchestration plan was v2 — the orchestration
+  and team planes it named were deleted by the core reduction
+  ([`core.md`](core.md) §3 D3), so whatever v2 becomes stands on what survived.
 
 **Acceptance.** One merged PR authored inside Ouroboros, review included, with the corpus
 delta in the body. Then three.

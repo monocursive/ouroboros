@@ -41,10 +41,8 @@ defmodule Ouroboros.Provider.ClaudeAdapter do
 
     * **Interactive sessions only.** The bridge is attached when the run carries an
       `ouroboros_session_id` in its metadata, which is the interactive plane's marker
-      (`Ouroboros.Interactive.State.request/1`); the coding plane sets
-      `ouroboros_task_id` instead and is left exactly as it was. There is no human loop
-      on the coding plane — a `coding.start` is a caller handing over a whole objective —
-      so a permission prompt there would block on somebody who is not watching.
+      (`Ouroboros.Interactive.State.request/1`). A run without one is a run nobody is
+      watching, and a permission prompt there would block on a person who is not there.
     * **Every interactive posture gets the MCP tools.** `:auto_edit` and `:auto_approve`
       retain their permission mode without a permission prompt override. `:prompt` is the mode that
       promises a person is asked, so it is the mode that gets one; `:default` is Claude's

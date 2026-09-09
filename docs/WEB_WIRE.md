@@ -135,11 +135,12 @@ slice.
 
 ### 1.3 The byte-cap asymmetry — the one that decides §6.3
 
-- **The caps live in exactly one place and apply to exactly two structs.**
-  `Gateway.Wire.walk/3` byte-caps the `payload` of `%InteractiveEvent{}` and
-  `%CodingEvent{}` and nothing else, and its own comment says why this is the one place:
-  the cap must cover "a live notification, a `replay` result, or a `subscribe` backlog"
-  alike (`lib/ouroboros/gateway/wire.ex:169-175`, `:237-242`).
+- **The caps live in exactly one place and apply to exactly one struct.**
+  `Gateway.Wire.walk/3` byte-caps the `payload` of `%InteractiveEvent{}` and nothing
+  else — the coding plane's twin went with the plane (`docs/proposals/core.md` §3 D3) —
+  and its own comment says why this is the one place: the cap must cover "a live
+  notification, a `replay` result, or a `subscribe` backlog" alike
+  (`lib/ouroboros/gateway/wire.ex:165-170`).
 - **The numbers.** `event_leaf_bytes` 128 KiB per string leaf, `event_payload_bytes`
   512 KiB per event across all its leaves, `detail_leaf_bytes` 4 MiB for
   `*.event_detail`'s override (`config.ex:56-60`, `:142-144`). The per-event budget is

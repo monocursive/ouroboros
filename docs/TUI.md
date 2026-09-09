@@ -698,16 +698,15 @@ discipline applied everywhere else in the runtime after the 2026-08 review.
 
 Rendering-oriented, lossy by design, documented as such.
 
-**`Orchestration.Serializable.safe/1` cannot be the mechanism.** It is
-all-or-nothing at the top level
-([serializable.ex:26](../lib/ouroboros/orchestration/serializable.ex)): one
-pid anywhere in a tree replaces the *entire* term with a 20-element-truncated
-inspect string. And pids are everywhere by construction —
-`Mesh.list_agents/0` returns `%{id, pid, node, replicas}` maps
+**An all-or-nothing serializer cannot be the mechanism.** A rule that replaces
+the *entire* term the moment one pid appears anywhere in it answers one opaque
+inspect string, and pids are everywhere by construction — `Mesh.list_agents/0`
+returns `%{id, pid, node, replicas}` maps
 ([mesh.ex:118](../lib/ouroboros/mesh.ex)), which `Ouroboros.status/0` embeds,
 and `Mesh.state/1` returns a `%Jido.AgentServer.State{}` dense with pids,
-refs, `:queue` tuples, and functions. `safe/1` applied naively would reduce
-`runtime.status` — the Dashboard's whole data source — to one opaque string.
+refs, `:queue` tuples, and functions. Applied to `runtime.status` — the
+Dashboard's whole data source — it would answer one string where the client
+needed a table ([wire.ex:5-14](../lib/ouroboros/gateway/wire.ex)).
 
 So `Gateway.Wire` implements its own recursive walk, replacing at the leaf:
 
