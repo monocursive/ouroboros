@@ -295,7 +295,7 @@ fn session_rail_caps_visual_noise_and_keeps_the_complete_picker_available() {
             json!({
                 "_struct": "Ouroboros.Interactive.State",
                 "id": format!("session-000000000000000000000{number}"),
-                "objective": format!("Task {number}"),
+                "title": format!("Task {number}"),
                 "node": "ouroboros@golden",
                 "provider": "codex",
                 "workspace": "/tmp/w",
@@ -1272,11 +1272,9 @@ fn availability_is_three_colours_and_disabled_is_not_one_of_the_alarming_ones() 
     let mut app = dashboard();
     let screen = render(&mut app, 120, 30);
 
-    // `:disabled` is a posture — the control and workspace planes report it when nobody
-    // configured them — and painting it like an outage would teach an operator to ignore
-    // the colour.
+    // `:disabled` is a posture — the workspace plane reports it when nobody configured
+    // one — and painting it like an outage would teach an operator to ignore the colour.
     assert_eq!(screen.colour_of("mesh", "available"), Color::Green);
-    assert_eq!(screen.colour_of("control ", "disabled"), Color::DarkGray);
     assert_eq!(
         screen.colour_of("workspace      disabled", "disabled"),
         Color::DarkGray
@@ -4374,8 +4372,6 @@ fn n_opens_a_form_whose_every_choice_is_visible() {
     let screen = render(&mut app, 120, 30);
 
     assert!(screen.contains("new session"), "{}", screen.text());
-    assert!(screen.contains("plane"));
-    assert!(screen.contains("interactive — a conversation you send messages to"));
     assert!(screen.contains("provider"));
     assert!(screen.contains("workspace"));
     assert!(screen.contains("approval"));

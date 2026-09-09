@@ -63,7 +63,7 @@ fn the_badge_is_raised_only_where_the_runtime_declared_it() {
     assert_eq!(posture(Some(json!("native"))), Some(ReplayPosture::Whole));
 }
 
-/// One rail row. The short `objective` is not decoration: the card is 24 columns wide
+/// One rail row. The short `title` is not decoration: the card is 24 columns wide
 /// whatever the terminal is, and D7's rule is that a badge is drawn whole or not at all —
 /// so a card whose title already fills it wears no badge, worktree or replay. These rows
 /// leave the room a badge needs, which is the case worth asserting about.
@@ -75,7 +75,7 @@ fn session_row(id: &str, replay: Option<Value>) -> Value {
         "provider": "native",
         "node": "ouroboros@alpha",
         "workspace": "/w",
-        "objective": id.trim_start_matches("s-"),
+        "title": id.trim_start_matches("s-"),
         "updated_at": "2026-01-01T00:00:00.000000Z",
         "options": {"capabilities": capabilities(replay)}
     })
@@ -169,7 +169,7 @@ fn a_card_whose_title_fills_it_drops_the_badge_whole() {
     app.apply(key(KeyCode::Char('2')));
 
     let mut wordy = session_row("s-whole", Some(json!(true)));
-    wordy["objective"] = json!("teach the parser about raw string literals");
+    wordy["title"] = json!("teach the parser about raw string literals");
 
     answer(&mut app, Tag::Sessions(Plane::Interactive), json!([wordy]));
 
