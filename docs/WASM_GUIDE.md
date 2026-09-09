@@ -1636,10 +1636,10 @@ you say "any component", out loud.
   })
 ```
 
-A forge is bounded twice: five minutes of wall clock in the forge itself, and
-`config :ouroboros, :effect_timeout` around the whole effect. The effect asks for a build
-budget strictly inside the second, so a build that runs long is stopped by the forge — which
-signals the compiler and removes its tree — rather than by the runner, which would not.
+A forge is bounded by five minutes of wall clock in the forge itself. A caller that
+bounds it too asks for a build budget strictly inside its own, so a build that runs long is
+stopped by the forge — which signals the compiler and removes its tree — rather than by the
+caller, which would not.
 
 `eval` is not optional in practice: lane W requires a signed evaluation spec (D12), because
 there is no build peer running your tests here — the spec *is* the test story, and the

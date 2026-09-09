@@ -988,7 +988,8 @@ is no read half of this tool.
 
 **S-D16. The ledger is the gate, not the log.** `EffectLedger.record_started` writes the
 `:forge` or `:deploy` entry under the session principal *before* the effect and settles it
-after, mirroring `Ouroboros.Agent.Effects.Runner`; a ledger that cannot record refuses the
+after, the same shape the deleted `Ouroboros.Agent.Effects.Runner` wrote; a ledger that
+cannot record refuses the
 operation rather than proceeding unrecorded. Bytes never enter it: a `:forge` attempt names
 `wasm/<name>` and its result names the artifact id, module, epoch, signer, source digest and
 nodes — the fields the runner already writes. `preview` has no entry of its own, because

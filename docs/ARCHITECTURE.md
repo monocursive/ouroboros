@@ -787,15 +787,15 @@ Implemented:
   on any ambiguous answer — quarantine; plus champion/challenger comparison for
   capability upgrades, holding a replacement to the pass count and total time of the
   version it displaces;
-- an agent-reachable effect surface for all of the above (`Agent.Effects`), gated by a
-  durable deny-by-default authority (`Control.Grants`) that is checked against the
-  concrete attempt, identifies the actor from server-side state rather than the signal,
-  bounds every effect, and records each one. `Agent.EffectLedger` checkpoints a
-  content-minimized intent and exact grant snapshot before execution, durably settles
-  outcomes and refusals, exposes bounded cursor queries, and recovers unfinished work as
-  ambiguous without retaining prompts, message bodies, source, provider output, or BEAM
-  binaries. An agent driven only by signals can forge a capability, deploy it, start it,
-  and message it — and can be refused at any of those steps without dying;
+- a durable deny-by-default authority over all of the above (`Control.Grants`), checked
+  against the concrete attempt, identifying the actor from server-side state rather than
+  from the request, bounding what it admits and recording each admission. The path that
+  reaches it is a session's tool (`Provider.Native.Tools.Forge`) and the operator's
+  gateway, not a typed signal; the effect runner that used to sit in front of both was
+  deleted in September 2026. `Agent.EffectLedger` checkpoints a content-minimized intent
+  and exact grant snapshot before execution, durably settles outcomes and refusals,
+  exposes bounded cursor queries, and recovers unfinished work as ambiguous without
+  retaining prompts, message bodies, source, provider output, or BEAM binaries;
 - least-privileged builder and signer nodes (`Ouroboros.Cluster`): one release, one
   runtime, three roles. A `:builder` node boots cluster formation and the WASM helper
   pool, and nothing that holds sessions or stores; a
