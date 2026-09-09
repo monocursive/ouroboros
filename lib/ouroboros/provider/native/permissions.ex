@@ -150,9 +150,7 @@ defmodule Ouroboros.Provider.Native.Permissions do
   never writes the rule language itself.
 
   The argument is the same request `evaluate/1` takes, so the suggestion is derived from
-  the mode, the domains and the context the engine was asked about — including the
-  resolved `context.app` a Computer Use ask carries, which is where
-  `ComputerUse(app:…)` comes from.
+  the mode, the domains and the context the engine was asked about.
   """
   @spec suggested_rule(map()) :: String.t() | nil
   def suggested_rule(request), do: Engine.suggest(request)

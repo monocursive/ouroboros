@@ -250,14 +250,12 @@ defmodule Ouroboros.Application do
           [Ouroboros.Cluster, Ouroboros.Provider.OpenAIAuth, Ouroboros.Provider.GrokAuth] ++
             gateway_children() ++
             [
-              Ouroboros.CodeIntel.Supervisor,
               subtree(
                 Ouroboros.Wasm.RuntimeSupervisor,
                 [Ouroboros.Wasm.Supervisor] ++
                   boot_restart_children(),
                 :rest_for_one
               ),
-              Ouroboros.Provider.Native.Desktop.Supervisor,
               Ouroboros.Provider.Native.Mcp.Supervisor
             ] ++ web_children(),
           :one_for_one

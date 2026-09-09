@@ -74,7 +74,6 @@ defmodule Ouroboros.Gateway.Methods do
   """
 
   alias Ouroboros.Agent.EffectLedger
-  alias Ouroboros.CodeIntel
   alias Ouroboros.Coding.Task, as: CodingTask
   alias Ouroboros.Coding.TaskRef
   alias Ouroboros.Coding.TaskState
@@ -102,7 +101,6 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Provider.GrokAuth
   alias Ouroboros.Provider.OpenAIAuth
   alias Ouroboros.Provider.XAIKey
-  alias Ouroboros.Provider.Native.Desktop
   alias Ouroboros.Provider.Native.Mcp
   alias Ouroboros.Provider.Native.Replay
   alias Ouroboros.Runtime.Capabilities
@@ -169,10 +167,6 @@ defmodule Ouroboros.Gateway.Methods do
   # that long, so these three numbers replace the pool's defaults on every gateway call
   # and are chosen to sum below the 15s ceiling — a cold server is answered "not ready
   # yet", which is an honest answer a caller can retry, rather than a killed task.
-  @code_intel_wait_ready_ms 5_000
-  @code_intel_request_timeout_ms 8_000
-  @code_intel_max_wait_ms Contract.code_intel_max_wait_ms()
-  @code_intel_erpc_timeout 14_000
 
   # Kept below the method ceiling on purpose. An `:erpc` that outlives the gateway task
   # would be reported as `-32005 upstream_timeout` with no detail; letting `:erpc` decide
@@ -1640,59 +1634,12 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  @doc false
-  def handle_computer_use_status(params) do
-    with {:ok, target} <- permissions_node(params) do
-      safe(fn ->
-        if target == node() do
-          {:ok, Desktop.status()}
-        else
-          {:ok, :erpc.call(target, Desktop, :status, [], @fleet_query_timeout)}
-        end
-      end)
-    else
-      {:invalid, message} -> invalid_params(message)
-    end
-  end
-
-  @doc false
-  def handle_computer_use_probe(params) do
-    with {:ok, target} <- permissions_node(params) do
-      safe(fn ->
-        if target == node() do
-          {:ok, Desktop.probe()}
-        else
-          {:ok, :erpc.call(target, Desktop, :probe, [], @fleet_query_timeout)}
-        end
-      end)
-    else
-      {:invalid, message} -> invalid_params(message)
-    end
-  end
-
-  @doc false
-  def handle_computer_use_artifact(params) do
-    with {:ok, sha} <- fetch_string(params, "sha256"),
-         {:ok, session_id} <- fetch_optional_string(params, "session_id"),
-         {:ok, target} <- permissions_node(params) do
-      safe(fn ->
-        if target == node() do
-          reply(Desktop.artifact(sha, session_id))
-        else
-          reply(:erpc.call(target, Desktop, :artifact, [sha, session_id], @fleet_query_timeout))
-        end
-      end)
-    else
-      {:invalid, message} -> invalid_params(message)
-    end
-  end
-
   # ---------------------------------------------------------------------------
   # W5 — lane W on the wire
   #
   # Both start nothing: `Surface` reads a pool process that already exists rather than
   # asking for one, so `ouro wasm doctor` against a node that has never built the helper is
-  # a report and not a spawn. The remote branch is the `computer_use.status` one — a
+  # a report and not a spawn. The remote branch is a
   # bounded `:erpc` to the machine whose helper is being described, so an unreachable node
   # reads as unreachable instead of as a gateway ceiling with no detail.
   # ---------------------------------------------------------------------------
@@ -1837,64 +1784,6 @@ defmodule Ouroboros.Gateway.Methods do
         [download, offset, []],
         @wasm_download_timeout - @wasm_erpc_slack
       )
-    else
-      {:invalid, message} -> invalid_params(message)
-    end
-  end
-
-  # ---------------------------------------------------------------------------
-  # E2/E3 — code intelligence on the wire
-  # ---------------------------------------------------------------------------
-
-  @doc false
-  def handle_runtime_lsp_status(_params) do
-    safe(fn -> {:ok, CodeIntel.status()} end)
-  end
-
-  @doc false
-  def handle_code_intel_request(params) do
-    with {:ok, workspace} <- code_intel_workspace(params),
-         {:ok, operation} <- code_intel_operation(params),
-         {:ok, path} <- fetch_string(params, "path"),
-         {:ok, line} <- code_intel_position(params, "line"),
-         {:ok, character} <- code_intel_position(params, "character"),
-         {:ok, query} <- fetch_optional_string(params, "query"),
-         {:ok, target} <- permissions_node(params) do
-      location = %{path: path, line: line, character: character, query: query}
-
-      code_intel_call(target, :request, [
-        operation,
-        location,
-        code_intel_opts(workspace, query: query)
-      ])
-    else
-      {:invalid, message} -> invalid_params(message)
-    end
-  end
-
-  @doc false
-  def handle_code_intel_diagnostics(params) do
-    with {:ok, workspace} <- code_intel_workspace(params),
-         {:ok, path} <- fetch_string(params, "path"),
-         {:ok, wait_ms} <- code_intel_wait_ms(params),
-         {:ok, target} <- permissions_node(params) do
-      code_intel_call(target, :diagnostics, [path, code_intel_opts(workspace, wait_ms: wait_ms)])
-    else
-      {:invalid, message} -> invalid_params(message)
-    end
-  end
-
-  # `:operate`, and answered with the pre-touch baseline. An external tool that has just
-  # written a file needs both halves of the new-only rule — what the server said about the
-  # old text, and the version the new text was assigned — and reading the baseline in the
-  # same gateway call is the only ordering in which nothing can arrive between them.
-  @doc false
-  def handle_code_intel_touch(params) do
-    with {:ok, workspace} <- code_intel_workspace(params),
-         {:ok, path} <- fetch_string(params, "path"),
-         {:ok, action} <- code_intel_action(params),
-         {:ok, target} <- permissions_node(params) do
-      code_intel_call(target, :touch_with_baseline, [path, action, code_intel_opts(workspace)])
     else
       {:invalid, message} -> invalid_params(message)
     end
@@ -3602,7 +3491,7 @@ defmodule Ouroboros.Gateway.Methods do
   defp wasm_put(map, _key, nil), do: map
   defp wasm_put(map, key, value), do: Map.put(map, key, value)
 
-  # Same posture as `permissions_call/3` and `code_intel_call/3`, and for the same
+  # Same posture as `permissions_call/3`, and for the same
   # reason: an MCP server runs on the machine whose session asked for it, so a session
   # on another host is described by that host's pool or not at all.
   # `Ouroboros.Provider.Native.Mcp.status/1` raises nothing and blocks on nothing without
@@ -3615,90 +3504,6 @@ defmodule Ouroboros.Gateway.Methods do
         {:ok, :erpc.call(target, Mcp, :status, [opts], @fleet_query_timeout)}
       end
     end)
-  end
-
-  # ---------------------------------------------------------------------------
-  # Code intelligence (E2/E3)
-  # ---------------------------------------------------------------------------
-
-  # Same posture as `permissions_call/3` and for the same reason: the pool runs where the
-  # files are, so a session on another machine is answered by that machine's pool or not
-  # at all. `Ouroboros.CodeIntel` raises nothing and blocks on nothing without a deadline,
-  # so what crosses `:erpc` is always an ordinary tuple.
-  defp code_intel_call(target, function, arguments) do
-    safe(fn ->
-      if target == node() do
-        Encode.code_intel_reply(apply(CodeIntel, function, arguments))
-      else
-        Encode.code_intel_reply(
-          :erpc.call(target, CodeIntel, function, arguments, @code_intel_erpc_timeout)
-        )
-      end
-    end)
-  end
-
-  # The pool's own defaults are longer than a gateway method may wait, so every gateway
-  # call states its bounds rather than inheriting them.
-  defp code_intel_opts(workspace, extra \\ []) do
-    [
-      workspace_root: workspace,
-      wait_ready_ms: @code_intel_wait_ready_ms,
-      request_timeout_ms: @code_intel_request_timeout_ms
-    ] ++ Enum.reject(extra, fn {_key, value} -> is_nil(value) end)
-  end
-
-  # Carried as the caller typed it and canonicalised on the *target* node, because a path
-  # is only meaningful where the files are. It narrows the marker walk and can never widen
-  # it: `CodeIntel.Registry` holds an explicit workspace to the same admitted-roots check
-  # as an implicit one, so naming `/` here is refused rather than obeyed.
-  defp code_intel_workspace(params), do: fetch_string(params, "workspace")
-
-  defp code_intel_operation(params) do
-    case Map.get(params, "operation") do
-      value when is_binary(value) ->
-        case Enum.find(CodeIntel.operations(), &(Atom.to_string(&1) == value)) do
-          nil -> {:invalid, code_intel_operation_message()}
-          operation -> {:ok, operation}
-        end
-
-      _other ->
-        {:invalid, code_intel_operation_message()}
-    end
-  end
-
-  defp code_intel_operation_message do
-    "params.operation must be one of " <>
-      (CodeIntel.operations() |> Enum.map(&Atom.to_string/1) |> Enum.sort() |> Enum.join(", "))
-  end
-
-  defp code_intel_action(params) do
-    case Map.get(params, "action") do
-      "open" -> {:ok, :open}
-      "ensure_open" -> {:ok, :ensure_open}
-      "changed" -> {:ok, :changed}
-      "closed" -> {:ok, :closed}
-      _other -> {:invalid, "params.action must be one of changed, closed, ensure_open, open"}
-    end
-  end
-
-  defp code_intel_position(params, key) do
-    case Map.get(params, key, 0) do
-      value when is_integer(value) and value >= 0 -> {:ok, value}
-      _other -> {:invalid, "params.#{key} must be a non-negative integer"}
-    end
-  end
-
-  defp code_intel_wait_ms(params) do
-    case Map.get(params, "wait_ms") do
-      nil ->
-        {:ok, nil}
-
-      value when is_integer(value) and value >= 0 and value <= @code_intel_max_wait_ms ->
-        {:ok, value}
-
-      _other ->
-        {:invalid, "params.wait_ms must be an integer between 0 and #{@code_intel_max_wait_ms}"}
-    end
   end
 
   # ---------------------------------------------------------------------------

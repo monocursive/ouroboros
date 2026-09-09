@@ -4,13 +4,13 @@ defmodule Ouroboros.Wasm.Supervisor do
   a builder reads the imports off the component it just built through this pool
   (`Ouroboros.Wasm.Forge`, docs/WASM.md D18), and without one it cannot finish a forge.
 
-  The same tail posture as `Ouroboros.Provider.Native.Desktop.Supervisor` and
-  `Ouroboros.Provider.Native.Mcp.Supervisor`: somebody else's program on the end of a pipe,
+  The same tail posture as `Ouroboros.Provider.Native.Mcp.Supervisor`: somebody else's
+  program on the end of a pipe,
   spawned lazily, downstream of the gateway. It is unconditional because it is lazy — no
   helper exists until a request needs one, and a node that never built one never spawns one.
 
   Its runtime parent restarts the boot recovery task after this supervisor is replaced.
-  Unrelated language-server, desktop, MCP, and web failures leave guest instances alive.
+  Unrelated MCP and web failures leave guest instances alive.
 
   Tests start their own named `Pool` and never touch this supervisor.
   """

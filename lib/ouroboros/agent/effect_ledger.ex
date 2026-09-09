@@ -105,7 +105,7 @@ defmodule Ouroboros.Agent.EffectLedger do
     # I1. One tool call the native agent was admitted to make, checkpointed before the
     # tool runs. `subject` is what the call is *about* — the paths it names, a digest of
     # the command line, the hosts it would reach, the MCP server and tool behind an
-    # `mcp__*` name, the Computer Use app and window — and never what any of them contain.
+    # `mcp__*` name — and never what any of them contain.
     # `sanitize_subject/1` below is what makes that true here rather than at the call
     # site's discretion.
     tool_call: [
@@ -739,9 +739,6 @@ defmodule Ouroboros.Agent.EffectLedger do
     |> put_if(:hosts, subject_list(Map.get(subject, :hosts), @subject_hosts))
     |> put_if(:mcp_server, subject_name(Map.get(subject, :mcp_server)))
     |> put_if(:mcp_tool, subject_name(Map.get(subject, :mcp_tool)))
-    |> put_if(:app, subject_name(Map.get(subject, :app)))
-    |> put_if(:desktop_action, subject_name(Map.get(subject, :desktop_action)))
-    |> put_if(:window_id, subject_name(Map.get(subject, :window_id)))
     # W13. Lane W's two identities for one tool call: the name the rollout register holds,
     # and the sha256 of the component bytes a signature bound. The digest goes through
     # `subject_digest/1` like a command's, so a value that is not 64 lower-case hex is

@@ -1546,18 +1546,7 @@ impl<'a> Run<'a> {
             return;
         }
 
-        let desktop = event
-            .payload
-            .pointer("/tool_call/name")
-            .and_then(Value::as_str)
-            .is_some_and(|name| name == "desktop_state" || name == "desktop_act");
-
-        let (decision, reason) = if desktop {
-            (
-                ApprovalDecision::Deny,
-                Some("headless will not grant Computer Use; add a ComputerUse(app:…) rule"),
-            )
-        } else if self.options.approve_all {
+        let (decision, reason) = if self.options.approve_all {
             (ApprovalDecision::Approve, None)
         } else {
             (ApprovalDecision::Deny, Some(HEADLESS_DENY_REASON))

@@ -6,9 +6,6 @@ defmodule Ouroboros.Provider.Native.Mcp.Config do
   There is no `:infinity` and none is accepted — a non-positive or non-integer setting
   falls back to the shipped default rather than removing the bound, because a mistyped
   operator value must never widen what a stranger's program may consume on this node.
-  This is deliberately the same posture, and nearly the same code, as
-  `Ouroboros.CodeIntel.Config`: an MCP server and a language server are the same kind of
-  hazard — somebody else's process, spawned by us, reading and writing a pipe.
   """
 
   @defaults [

@@ -65,7 +65,7 @@ defmodule Ouroboros.Web.Live.ApprovalCard do
   @doc """
   Whether this request can be answered from a rail row.
 
-  A question, a plan exit, and a Computer Use ask all need the card — a yes/no from a
+  A question and a plan exit both need the card — a yes/no from a
   one-line row would be answering something the row never showed. `Approval.question?/1`
   is the single decision, shared with auto-approve so the two surfaces cannot disagree
   about what a permission is.

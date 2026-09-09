@@ -35,9 +35,8 @@ use rand::TryRngCore;
 use serde_json::{json, Value};
 
 use ouro::cli::{
-    AcpArgs, Cli, Command, DesktopCommand, FleetCommand, FleetTagCommand, ForkArgs, HookCommand,
-    InviteCommand, LedgerArgs, McpCommand, ReplayArgs, RunArgs, ServiceCommand, SessionsCommand,
-    SyncCommand, WasmCommand,
+    AcpArgs, Cli, Command, FleetCommand, FleetTagCommand, ForkArgs, InviteCommand, LedgerArgs,
+    McpCommand, ReplayArgs, RunArgs, ServiceCommand, SessionsCommand, SyncCommand, WasmCommand,
 };
 use ouro::config::{self, Loaded, StartFlags};
 use ouro::fleet_add;
@@ -87,15 +86,6 @@ async fn run(cli: Cli) -> Result<()> {
     // data directory, parses a config file, or decides what to do with a terminal.
     if matches!(cli.command, Some(Command::McpServe)) {
         return ouro::mcp_serve::serve().await;
-    }
-
-    // A hook is answered here for the same reason and one more: it runs inside somebody
-    // else's turn, on a five-second budget, and a data directory it cannot discover must
-    // not turn into a failure the vendor reads as a refused edit.
-    if let Some(Command::Hook { command }) = &cli.command {
-        return match command {
-            HookCommand::PostToolUse => ouro::hook::post_tool_use().await,
-        };
     }
 
     let paths = Paths::discover(cli.dev)?;
@@ -217,16 +207,12 @@ async fn run(cli: Cli) -> Result<()> {
         Some(Command::Audit(args)) => audit(&paths, args).await,
         Some(Command::Replay(args)) => replay(&paths, args).await,
         Some(Command::Fork(args)) => fork(&paths, args).await,
-        Some(Command::Desktop { command }) => desktop(&paths, command).await,
         Some(Command::Wasm { command }) => wasm(&paths, command).await,
         Some(Command::Fleet { command }) => fleet_command(&paths, cli.dev, command).await,
         Some(Command::ServiceRun) => service_run(&paths, cli.dev).await,
         // Answered at the top of this function, before the terminal existed as far as
         // this process is concerned. The arms keep the match total.
         Some(Command::McpServe) => ouro::mcp_serve::serve().await,
-        Some(Command::Hook {
-            command: HookCommand::PostToolUse,
-        }) => ouro::hook::post_tool_use().await,
         Some(Command::ProcessBirth { pid }) => {
             let birth = runtime::process_birth(pid)?
                 .ok_or_else(|| anyhow!("process pid {pid} is not alive"))?;
@@ -2884,21 +2870,6 @@ async fn fork(paths: &Paths, args: ForkArgs) -> Result<()> {
     let mut err = std::io::stderr().lock();
 
     ouro::replay_cli::fork(&connected.client, &options, &mut out, &mut err).await
-}
-
-/// `ouro desktop` — the Computer Use operator surface. Reporting only; the model tools and
-/// enabling the feature live elsewhere.
-async fn desktop(paths: &Paths, command: DesktopCommand) -> Result<()> {
-    match command {
-        DesktopCommand::Doctor(args) => {
-            let (address, token) = remote_endpoint(paths, args.addr, args.token_file).await?;
-            let hook: Arc<dyn ReconnectHook> = Arc::new(NoReconnectHook);
-            let connected = attach_with(address, token, false, None, hook).await?;
-
-            let mut out = std::io::stdout().lock();
-            ouro::desktop_cli::doctor(&connected.client, args.json, args.probe, &mut out).await
-        }
-    }
 }
 
 /// `ouro wasm` — the WebAssembly containment operator surface and the component author's local

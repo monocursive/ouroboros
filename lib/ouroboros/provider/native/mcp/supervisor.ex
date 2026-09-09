@@ -14,9 +14,8 @@ defmodule Ouroboros.Provider.Native.Mcp.Supervisor do
   under a different name so they can shorten idle windows and point at a fake server
   without touching the node's.
 
-  The restart intensity is deliberately generous, for the same reason
-  `Ouroboros.CodeIntel.Supervisor`'s is: server failures are states inside the pool,
-  never crashes of it. Exhausting this subtree's budget replaces only this subtree
+  The restart intensity is deliberately generous: server failures are states inside the
+  pool, never crashes of it. Exhausting this subtree's budget replaces only this subtree
   under the independent surface supervisor.
   """
 

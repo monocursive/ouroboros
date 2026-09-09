@@ -2,10 +2,9 @@ defmodule Ouroboros.Wasm.Pool do
   @moduledoc """
   Owns the one `ouro-wasm` helper process this node runs, and speaks its six methods.
 
-  There is exactly one helper on a node, for the reason `Ouroboros.Provider.Native.Desktop.Pool`
-  has exactly one: the expensive thing — here a wasmtime engine, its epoch ticker, and the
-  compiled-component cache — is per-binary, not per-caller, and a second helper pid would
-  buy nothing but a second copy of all of it. This GenServer is that single owner. It spawns
+  There is exactly one helper on a node: the expensive thing — a wasmtime engine, its epoch
+  ticker, and the compiled-component cache — is per-binary, not per-caller, and a second
+  helper pid would buy nothing but a second copy of all of it. This GenServer is that single owner. It spawns
   the resolved helper with the `serve` subcommand, speaks the newline-delimited JSON-RPC of
   `Ouroboros.Wasm.Codec` over its stdio, keeps at most one request in flight, and hands
   every request a hard deadline.
@@ -26,8 +25,8 @@ defmodule Ouroboros.Wasm.Pool do
   waiting, and the window keeps a helper that fails on every spawn from being respawned on
   every request. A request after the window reconnects.
 
-  A **timeout is broken**, unlike the desktop pool's abandon-and-recover path, and that is a
-  fact about this helper rather than a stricter policy: `ouro-wasm` runs every guest under a
+  A **timeout is broken**, and that is a fact about this helper rather than a stricter
+  policy: `ouro-wasm` runs every guest under a
   fuel budget, an epoch deadline, and a memory ceiling, so a request that outlives its own
   deadline plus the transport's margin is not slow work — it is a helper wedged somewhere no
   deadline reaches, and a wedged helper answers nothing ever again. The child is killed by

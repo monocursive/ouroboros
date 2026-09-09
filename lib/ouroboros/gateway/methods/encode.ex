@@ -5,9 +5,7 @@ defmodule Ouroboros.Gateway.Methods.Encode do
   # AST path. Client bytes never become atoms here; enum strings are literals.
 
   alias Ouroboros.Agent.EffectLedger
-  alias Ouroboros.CodeIntel
   alias Ouroboros.Gateway.Config, as: GatewayConfig
-  alias Ouroboros.Gateway.Methods.Safe
   alias Ouroboros.Gateway.Wire
 
   # Where `ledger.export`'s hash chain starts. A fixed, published seed rather than a random
@@ -34,120 +32,6 @@ defmodule Ouroboros.Gateway.Methods.Encode do
   defp approval_source(:caller_gone), do: "caller_gone"
   defp approval_source(:coordinator_restart), do: "coordinator_restart"
   defp approval_source(_other), do: "runtime"
-
-  def code_intel_reply({:ok, %{items: items} = answer}) when is_list(items) do
-    {:ok, answer |> Map.put(:status, :ok) |> Map.put(:items, code_intel_items(items))}
-  end
-
-  def code_intel_reply({:ok, value}), do: {:ok, value}
-
-  # Not an error: the server has not answered for this version of the document yet. A
-  # caller that treated "no data yet" as a failure of whatever produced the edit is
-  # exactly the regression R4 §2 records against stale diagnostics, so it arrives as an
-  # ordinary result carrying no items at all — there is nothing to mistake for "clean".
-  def code_intel_reply({:pending, version}), do: {:ok, %{status: :pending, version: version}}
-
-  def code_intel_reply({:error, {:server_unavailable, server_id, hint}}) do
-    {:error, Ouroboros.Gateway.Methods.code(:unavailable),
-     "no language server is available for that file: #{hint}",
-     %{"reason" => "server_unavailable", "server" => server_id, "hint" => hint}}
-  end
-
-  def code_intel_reply({:error, {:outside_workspace, path}}) do
-    {:error, Ouroboros.Gateway.Methods.code(:invalid_params),
-     "that path is not inside a workspace root this node admits",
-     %{"reason" => "outside_workspace", "path" => to_string(path)}}
-  end
-
-  def code_intel_reply({:error, {:no_project_root, language, markers}}) do
-    {:error, Ouroboros.Gateway.Methods.code(:unavailable),
-     "no project root for that #{language} file; expected one of #{Enum.join(markers, ", ")}",
-     %{"reason" => "no_project_root", "language" => to_string(language), "markers" => markers}}
-  end
-
-  # A path that cannot be canonicalised is a path, not an upstream failure: it is missing,
-  # it is a directory, it is a symlink that goes nowhere, or it was relative to a directory
-  # that means nothing here. Saying `-32006 the runtime failed the call` about any of those
-  # sends a caller looking for a fault in the runtime.
-  def code_intel_reply({:error, {tag, path, reason}})
-      when tag in [:workspace_path_error, :path_unavailable, :symbolic_link_unreadable] do
-    unreadable_path(path, reason)
-  end
-
-  def code_intel_reply({:error, {tag, path}})
-      when tag in [:not_a_directory, :symbolic_link_cycle] do
-    unreadable_path(path, tag)
-  end
-
-  def code_intel_reply({:error, :too_many_symbolic_links}) do
-    unreadable_path("that path", :too_many_symbolic_links)
-  end
-
-  def code_intel_reply({:error, {:not_a_regular_file, path}}) do
-    {:error, Ouroboros.Gateway.Methods.code(:invalid_params), "params.path is not a regular file",
-     %{"reason" => "not_a_regular_file", "path" => to_string(path)}}
-  end
-
-  def code_intel_reply({:error, {:invalid_attachment_path, path}}) do
-    {:error, Ouroboros.Gateway.Methods.code(:invalid_params),
-     "params.path must be a nonempty string",
-     %{"reason" => "invalid_path", "path" => inspect(path)}}
-  end
-
-  def code_intel_reply({:error, {:unsupported_language, extension}}) do
-    {:error, Ouroboros.Gateway.Methods.code(:invalid_params),
-     "no language server is registered for #{extension} files",
-     %{"reason" => "unsupported_language", "extension" => extension}}
-  end
-
-  def code_intel_reply({:error, {:unknown_operation, operation, allowed}}) do
-    Safe.invalid_params(
-      "params.operation must be one of " <>
-        (allowed |> Enum.map(&to_string/1) |> Enum.sort() |> Enum.join(", ")) <>
-        ", got: #{inspect(operation)}"
-    )
-  end
-
-  def code_intel_reply({:error, :disabled}) do
-    {:error, Ouroboros.Gateway.Methods.code(:unavailable),
-     "code intelligence is disabled on this node", %{"reason" => "disabled"}}
-  end
-
-  def code_intel_reply({:error, :broken}) do
-    {:error, Ouroboros.Gateway.Methods.code(:unavailable),
-     "that language server failed too often and is not being respawned for now",
-     %{"reason" => "broken"}}
-  end
-
-  def code_intel_reply({:error, :document_not_open}) do
-    {:error, Ouroboros.Gateway.Methods.code(:unavailable),
-     "no language server holds that document; announce the edit with code_intel.touch first",
-     %{"reason" => "document_not_open"}}
-  end
-
-  def code_intel_reply({:error, reason}), do: Safe.upstream_error(reason)
-  def code_intel_reply(other), do: {:ok, other}
-
-  defp unreadable_path(path, reason) do
-    {:error, Ouroboros.Gateway.Methods.code(:invalid_params),
-     "params.path could not be read as a file (#{inspect(reason)}); name it absolutely, " <>
-       "because a relative path here is expanded against the runtime's own working " <>
-       "directory rather than against the workspace",
-     %{"reason" => "unreadable_path", "path" => to_string(path)}}
-  end
-
-  # Every diagnostic that crosses the wire carries the identity its caller needs to tell a
-  # new finding from one that was already there. Navigation items have no severity and are
-  # left exactly as the pool returned them.
-  defp code_intel_items(items) do
-    Enum.map(items, fn
-      %{severity: _severity, message: _message, range: _range} = item ->
-        Map.put(item, :signature, CodeIntel.Diagnostics.signature(item))
-
-      item ->
-        item
-    end)
-  end
 
   @spec chain([EffectLedger.Entry.t()]) :: map()
   def chain(entries) when is_list(entries) do

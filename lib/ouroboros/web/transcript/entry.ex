@@ -19,7 +19,6 @@ defmodule Ouroboros.Web.Transcript.Entry.Note do
   * `:reconnected` — the subscription was re-established here.
   * `{:local, %Cell.Runtime{}}` — what one of the operator's *own* verbs answered, at the
     point in the conversation where they asked.
-  * `{:image, %Cell.Image{}}` — an image that entered the conversation here.
   """
 
   alias Ouroboros.Web.Transcript.Cell
@@ -31,7 +30,6 @@ defmodule Ouroboros.Web.Transcript.Entry.Note do
           | :client_dropped
           | :reconnected
           | {:local, Cell.Runtime.t()}
-          | {:image, Cell.Image.t()}
 
   @type t :: %__MODULE__{note: note()}
 
@@ -42,7 +40,6 @@ defmodule Ouroboros.Web.Transcript.Entry.Note do
   def text(:client_dropped), do: "this client could not take some event frames here"
   def text(:reconnected), do: "the connection was re-established here"
   def text({:local, block}), do: Cell.Runtime.text(block)
-  def text({:image, cell}), do: Cell.Image.label(cell)
 end
 
 defmodule Ouroboros.Web.Transcript.Entry.Event do

@@ -894,20 +894,8 @@ defmodule Ouroboros.Web.Transcript do
     end
   end
 
-  # Taken before the result is consumed so the tool cell and its image cells are the same
-  # two-step every surface reads: the tool row, then the picture it produced. The
-  # fs-free contract holds because these artifacts arrive on the event and are minted from
-  # it — nothing here stats a file or reads a clock.
   defp project_tool_result(state, %ToolResult{} = result) do
-    artifacts = result.artifacts
-
-    state
-    |> merge_or_push_tool_result(%{result | artifacts: []})
-    |> then(fn state ->
-      Enum.reduce(artifacts, state, fn artifact, state ->
-        push!(state, Cell.Image.from_artifact(artifact))
-      end)
-    end)
+    merge_or_push_tool_result(state, result)
   end
 
   defp merge_or_push_tool_result(state, %ToolResult{} = result) do

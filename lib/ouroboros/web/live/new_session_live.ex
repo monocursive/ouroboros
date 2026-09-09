@@ -6,7 +6,7 @@ defmodule Ouroboros.Web.Live.NewSessionLive do
   W9 and this page is now the only surface with the form, so the parity map in
   `docs/WEB.md` §4 is the record of what was ported. What was ported is the *semantics*:
   which controls exist, what each of them may honestly claim, and — above all — which
-  fields end up in the request. In particular the defaulting rule, which `docs/DESKTOP.md`
+  fields end up in the request. In particular the defaulting rule, which the removed `docs/DESKTOP.md`
   keeps as the one rule that outlived that client: what the config file supplies is where
   a control *starts*, never what gets sent — a stored default is sendable, and only the
   absence of one leaves the field off the request. The pixels are the deck's own tokens.

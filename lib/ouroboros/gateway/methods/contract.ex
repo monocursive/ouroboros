@@ -1,7 +1,6 @@
 defmodule Ouroboros.Gateway.Methods.Contract do
   @moduledoc "Wire method metadata, parameter envelopes and dispatch targets, defined together."
   alias Ouroboros.Agent.EffectLedger
-  alias Ouroboros.CodeIntel
   alias Ouroboros.Gateway.Methods.Browse
   @default_timeout 15000
   @agent_message_timeout 45000
@@ -9,7 +8,6 @@ defmodule Ouroboros.Gateway.Methods.Contract do
   @max_agent_message_timeout_ms 30000
   @max_agent_message_bytes 64 * 1024
   @max_agent_id_bytes 512
-  @code_intel_max_wait_ms 10000
   @wasm_download_timeout 15000
   @wasm_upload_timeout 15000
   @wasm_sign_timeout 60000
@@ -423,51 +421,6 @@ defmodule Ouroboros.Gateway.Methods.Contract do
         {:closed, [{"workspace", :required, :string, nil}, {"path", :required, :string, nil}]},
       handler: :handle_capabilities_preview
     },
-    "code_intel.diagnostics" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params:
-        {:closed,
-         [
-           {"workspace", :required, :string, nil},
-           {"path", :required, :string, nil},
-           {"wait_ms", :optional, {:integer, 0, @code_intel_max_wait_ms},
-            "how long to wait for the cache to describe the file's current content"},
-           @authority_node
-         ]},
-      handler: :handle_code_intel_diagnostics
-    },
-    "code_intel.request" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params:
-        {:closed,
-         [
-           {"workspace", :required, :string,
-            "narrows the marker walk and can never widen it; `/` is refused rather than obeyed"},
-           {"operation", :required, {:enum_mfa, {CodeIntel, :operations, []}}, nil},
-           {"path", :required, :string, nil},
-           {"line", {:optional, 0}, :non_negative_integer, "0-based, as the protocol reports it"},
-           {"character", {:optional, 0}, :non_negative_integer, "0-based"},
-           {"query", :optional, :string, "for the two symbol searches"},
-           @authority_node
-         ]},
-      handler: :handle_code_intel_request
-    },
-    "code_intel.touch" => %{
-      scope: :operate,
-      timeout: @default_timeout,
-      params:
-        {:closed,
-         [
-           {"workspace", :required, :string, nil},
-           {"path", :required, :string, nil},
-           {"action", :required, {:enum, ["changed", "closed", "ensure_open", "open"]},
-            "`ensure_open` is the one to reach for when asking about a file; `open` re-reads it and assigns a new version"},
-           @authority_node
-         ]},
-      handler: :handle_code_intel_touch
-    },
     "coding.cancel" => %{
       scope: :operate,
       timeout: @default_timeout,
@@ -537,32 +490,6 @@ defmodule Ouroboros.Gateway.Methods.Contract do
       timeout: @default_timeout,
       params: {:closed, [@task_id, @task_node]},
       handler: :connection
-    },
-    "computer_use.artifact" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params:
-        {:closed,
-         [
-           {"sha256", :required, :string,
-            "the content hash of a staged screenshot from a tool_result artifact; served as base64 from this node only"},
-           {"session_id", :optional, :string,
-            "native provider session id whose desktop/ dir to search; omitted, only the live helper pool's session dirs are searched"},
-           @authority_node
-         ]},
-      handler: :handle_computer_use_artifact
-    },
-    "computer_use.probe" => %{
-      scope: :operate,
-      timeout: @default_timeout,
-      params: {:closed, [@authority_node]},
-      handler: :handle_computer_use_probe
-    },
-    "computer_use.status" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params: {:closed, [@authority_node]},
-      handler: :handle_computer_use_status
     },
     "control.cancel" => %{
       scope: :operate,
@@ -1167,7 +1094,7 @@ defmodule Ouroboros.Gateway.Methods.Contract do
            {"since", :optional, :string,
             "an ISO 8601 instant; only human answers recorded at or after it are replayed. Parsed here and refused as `-32602` when it is not one, because the corpus reads an unparseable instant as *no* filter — a typo would otherwise replay the whole corpus and the sealed report would state the typo as though it had narrowed it"}
          ],
-         "`operate` rather than `read` because it stands a component up, the same split `computer_use.status` and `computer_use.probe` make. It decides nothing: the instance is a dry one under its own name, no `:permission` entry and no evidence row is written, and the live instance is untouched"},
+         "`operate` rather than `read` because it stands a component up. It decides nothing: the instance is a dry one under its own name, no `:permission` entry and no evidence row is written, and the live instance is untouched"},
       handler: :handle_policy_replay
     },
     "policy.status" => %{
@@ -1177,12 +1104,6 @@ defmodule Ouroboros.Gateway.Methods.Contract do
         {:closed, [],
          "node-local by construction and therefore without a `node` parameter: the promotion record and the corpus are where the decisions were made, so this asks the machine rather than routing to it. `tools` is one row per promoted `(tool, shape)` with `allowed` beside it, because a shape can be promoted and withdrawn and both facts are the answer. `evidence` is `Ouroboros.Control.PolicyEvidence.count/0`, bounded: a total, the two degraded counts, the **32 busiest tools** by count, and `other_tools`/`other_records` for the rest — the corpus is bounded by rows rather than by how many distinct tools those rows name. No verb serves a row of it: the corpus holds the exact request a policy component would have been shown, command lines and paths included. `durability` is how the record is kept — `ephemeral_checkpoint`, `synced_checkpoint`, `durable_checkpoint`, or `unavailable` when the authority itself did not answer, which is a different fact from an empty record and is why it is a value rather than a missing key"},
       handler: :handle_policy_status
-    },
-    "runtime.lsp.status" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params: {:open, []},
-      handler: :handle_runtime_lsp_status
     },
     "runtime.models" => %{
       scope: :read,
@@ -1435,7 +1356,6 @@ defmodule Ouroboros.Gateway.Methods.Contract do
   }
   def approval_decisions, do: @approval_decisions
   def approval_scopes, do: @approval_scopes
-  def code_intel_max_wait_ms, do: @code_intel_max_wait_ms
   def configuration_options, do: @configuration_options
   def control_options, do: @control_options
   def default_agent_message_timeout_ms, do: @default_agent_message_timeout_ms

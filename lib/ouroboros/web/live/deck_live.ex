@@ -75,7 +75,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   The toggle lives in socket state and is never written down: a preference that survived a
   reload would be a standing grant nobody remembers making. While it is on, every pending
-  request that is **not** a question, a plan exit, or a Computer Use ask is answered
+  request that is **not** a question or a plan exit is answered
   `{approve, once, actor: "automation"}` — the terminal client's exact carve-outs, read
   through the one predicate both surfaces share. Answered request ids are remembered so a
   replay after a repair cannot answer the same request twice.
@@ -1068,7 +1068,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   defp detail_of(nil), do: nil
   defp detail_of(%Approval{} = request), do: Approval.detail(request)
 
-  # Every pending request that is not a question, a plan exit, or a Computer Use ask.
+  # Every pending request that is not a question or a plan exit.
   # `Transcript.question?/1` is the whole carve-out and it is the locked module's, so the
   # rail's inline answers and this cannot disagree about what a permission is.
   defp auto_answer(%{assigns: %{auto_approve?: true, open: {_plane, _id}}} = socket) do
@@ -1194,16 +1194,13 @@ defmodule Ouroboros.Web.Live.DeckLive do
     end
   end
 
-  # Computer Use remember is user-scoped by design (D4): the grant is "this app, from this
-  # operator", which is not a fact about a directory. `Capability(…)` joins it for the same
-  # reason (W13): a capability is deployed to a node by the rollout plane, and a session
-  # that has not chosen a project folder could otherwise never remember an answer about one.
-  # Every other pattern is scoped to the workspace the gate already proved this session
-  # names.
+  # A `Capability(…)` remember is user-scoped by design (W13): a capability is deployed to
+  # a node by the rollout plane, and a session that has not chosen a project folder could
+  # otherwise never remember an answer about one. Every other pattern is scoped to the
+  # workspace the gate already proved this session names.
   defp add_rule(%{assigns: %{open: {plane, id}}} = socket, %Approval.Rule{} = rule) do
     params =
-      if String.starts_with?(rule.pattern, "ComputerUse(") or
-           String.starts_with?(rule.pattern, "Capability(") do
+      if String.starts_with?(rule.pattern, "Capability(") do
         %{"scope" => "user", "pattern" => rule.pattern, "decision" => "allow"}
       else
         %{
@@ -1718,8 +1715,8 @@ defmodule Ouroboros.Web.Live.DeckLive do
     """
   end
 
-  # Two buttons on a row, for a plain permission and nothing else. A question, a plan exit
-  # and a Computer Use ask carry a decision a one-line row never showed, so those rows stay
+  # Two buttons on a row, for a plain permission and nothing else. A question and a plan
+  # exit carry a decision a one-line row never showed, so those rows stay
   # a link into the session — `Approval.question?/1` draws that line, once, for both
   # surfaces. Outside the link element on purpose: a button inside an anchor is markup no
   # browser agrees about.

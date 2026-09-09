@@ -25,18 +25,6 @@ defmodule Ouroboros.Provider.ClaudeAdapter do
   there, which is what lifts the X1 refusal — the capability is read from the spec, so
   nothing else has to learn about this.
 
-  ## What rides along with it (E2/E3)
-
-  That same MCP server also carries three tools the *model* may call — `code_intel`,
-  `diagnostics`, `touch` — so a bridged session reaches this node's language-server pool
-  without another line here. And because a Claude session has no other way to be handed a
-  diagnostic, this adapter additionally composes a `PostToolUse` hook into the `--settings`
-  JSON: matched on `Edit|Write|MultiEdit|NotebookEdit`, running `ouro hook post-tool-use`,
-  which announces the edit, waits at most five seconds, and prints the new diagnostics as
-  `additionalContext`. That hook can never refuse an edit; a `PostToolUse` hook runs after
-  the tool has already succeeded, so blocking there only sends a model back to redo work
-  that worked (OpenCode #9102).
-
   ## Where it applies, and where it deliberately does not
 
     * **Interactive sessions only.** The bridge is attached when the run carries an
@@ -100,11 +88,6 @@ defmodule Ouroboros.Provider.ClaudeAdapter do
   did before this adapter existed. A map merges cleanly and the `ouroboros` key is this
   adapter's.
 
-  `settings` is held to exactly the same rule, with one difference in the consequence: a
-  string costs the session its diagnostics hook and nothing else, because the approval
-  bridge does not depend on it. A map merges, and an operator's own `PostToolUse` groups
-  are appended to rather than replaced.
-
   ## Coupling worth stating
 
   Upstream's `run/2` is a private assembly of `build_argv/2`, `Helpers.merge_env/2`,
@@ -129,16 +112,6 @@ defmodule Ouroboros.Provider.ClaudeAdapter do
   @server "ouroboros"
   @prompt_tool "mcp__ouroboros__approve"
   @subcommand "mcp-serve"
-
-  # E2's vendor path. The event name, the matcher, and the subcommand are the three halves
-  # of a contract with Claude Code and with `ouro hook post-tool-use`; the timeout is in
-  # seconds, which is what Claude Code's hook configuration counts in, and is above the
-  # hook's own five-second budget so that the hook decides when to give up rather than
-  # being killed mid-answer.
-  @hook_event "PostToolUse"
-  @hook_matcher "Edit|Write|MultiEdit|NotebookEdit"
-  @hook_subcommand ["hook", "post-tool-use"]
-  @hook_timeout_seconds 15
 
   @helper_env "OUROBOROS_PROCESS_ID_HELPER"
 
@@ -276,10 +249,7 @@ defmodule Ouroboros.Provider.ClaudeAdapter do
   defp composed_run(request, context, bridge, planning?) do
     prompt_bridge = if request.approval_mode in [:prompt, :default], do: bridge
 
-    options =
-      request.provider_options
-      |> Helpers.provider_options(@provider_options)
-      |> with_hooks(prompt_bridge)
+    options = Helpers.provider_options(request.provider_options, @provider_options)
 
     request = if bridge, do: %{request | mcp_config: bridge.servers}, else: request
 
@@ -359,109 +329,6 @@ defmodule Ouroboros.Provider.ClaudeAdapter do
       nil -> :absent
       index -> {:ok, List.replace_at(argv, index + 1, @plan_mode)}
     end
-  end
-
-  # ---------------------------------------------------------------------------
-  # Post-edit diagnostics (E2, the vendor path)
-  # ---------------------------------------------------------------------------
-
-  # Claude Code runs `PostToolUse` hooks after a tool has already succeeded and reads
-  # `hookSpecificOutput.additionalContext` off their stdout, which is the one place a
-  # runtime with no tool loop of its own can put a diagnostic in front of the model. So a
-  # bridged session is launched with one: matched on the four edit tools, running
-  # `ouro hook post-tool-use`, bounded at fifteen seconds, and unable to refuse anything.
-  #
-  # The environment rides in the command string rather than in Claude's own environment.
-  # Both are visible to `ps` — the MCP server definition already puts the same four values
-  # in argv — but only the second would also be readable by the model's own `Bash` tool as
-  # `env`, and the gateway token *file* it names is operate scope on this runtime.
-  # No bridge, no hook. `ouro hook post-tool-use` talks to this node's gateway with the
-  # session id the bridge computed; a planning run that was not bridged has neither, and a
-  # hook command built from `nil` would be a crashed run rather than a missing diagnostic.
-  defp with_hooks(options, nil), do: options
-
-  defp with_hooks(options, bridge) do
-    case settings_object(Map.get(options, :settings)) do
-      {:ok, base} ->
-        case merge_hooks(base, post_tool_use_hook(bridge)) do
-          {:ok, settings} -> Map.put(options, :settings, Jason.encode!(settings))
-          {:error, reason} -> without_hooks(bridge, reason, options)
-        end
-
-      {:error, reason} ->
-        without_hooks(bridge, reason, options)
-    end
-  end
-
-  defp without_hooks(bridge, reason, options) do
-    # Said once, because the session still works and still asks a human: what it loses is
-    # the diagnostics line after an edit, and a lost feature nobody was told about is the
-    # thing this codebase refuses to ship.
-    Logger.warning(
-      "claude session #{bridge.session_id} is bridged for approvals but this node cannot " <>
-        "compose its post-edit diagnostics hook (#{inspect(reason)}); edits will apply " <>
-        "without a diagnostics line"
-    )
-
-    options
-  end
-
-  # The same posture `servers/1` takes toward `mcp_config`, and for the same reason: a
-  # node-level settings value that arrives as a *string* is a JSON blob or a file path, and
-  # merging into it would mean this module parsing and rewriting somebody else's
-  # configuration. It refuses instead, and says so.
-  defp settings_object(nil), do: {:ok, %{}}
-  defp settings_object(settings) when is_map(settings), do: {:ok, settings}
-  defp settings_object(_string_or_path), do: {:error, :unmergeable_settings}
-
-  # Appended, never assigned over: an operator's own `PostToolUse` hooks keep running.
-  defp merge_hooks(base, block) do
-    hooks = Map.get(base, "hooks", %{})
-    existing = if is_map(hooks), do: Map.get(hooks, @hook_event, []), else: :unmergeable
-
-    cond do
-      not is_map(hooks) -> {:error, :unmergeable_hooks}
-      not is_list(existing) -> {:error, :unmergeable_hooks}
-      true -> {:ok, Map.put(base, "hooks", Map.put(hooks, @hook_event, existing ++ [block]))}
-    end
-  end
-
-  defp post_tool_use_hook(bridge) do
-    %{
-      "matcher" => @hook_matcher,
-      "hooks" => [
-        %{
-          "type" => "command",
-          "command" => hook_command(bridge),
-          "timeout" => @hook_timeout_seconds
-        }
-      ]
-    }
-  end
-
-  defp hook_command(bridge) do
-    assignments =
-      Enum.map(
-        [
-          {"OUROBOROS_GATEWAY_ADDR", bridge.gateway.addr},
-          {"OUROBOROS_GATEWAY_TOKEN_FILE", bridge.gateway.token_file},
-          {"OUROBOROS_SESSION_ID", bridge.session_id},
-          {"OUROBOROS_SESSION_NODE", bridge.session_node}
-        ],
-        fn {name, value} -> "#{name}=#{shell_quote(value)}" end
-      )
-
-    # `env` rather than a bare `VAR=value prog` prefix: a command hook is a shell string
-    # and the shell is the operator's, and `VAR=value prog` is a syntax error in fish.
-    Enum.join(["env" | assignments] ++ [shell_quote(bridge.binary) | @hook_subcommand], " ")
-  end
-
-  # A command hook is a shell string, so every value this module puts in one is quoted.
-  # None of these are caller input — they are this node's own address, its own token file
-  # path, and the session id — but a data directory with a space in it is ordinary, and a
-  # path is not a place to discover that argument splitting exists.
-  defp shell_quote(value) do
-    "'" <> String.replace(to_string(value), "'", "'\\''") <> "'"
   end
 
   defp server(binary, gateway, session_id, session_node) do

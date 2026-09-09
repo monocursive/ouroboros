@@ -64,9 +64,7 @@ ouroboros-*.tar
 !/dist/homebrew/
 !/dist/docker/
 
-
-# Built Computer Use helper; never a source artifact.
-/priv/computer-use/
+# Built helpers; never source artifacts.
 /priv/sandbox/
 /priv/wasm/
 

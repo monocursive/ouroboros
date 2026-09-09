@@ -57,9 +57,9 @@ defmodule Ouroboros.Provider.Native.Tools.Capability do
 
   The name a rule is matched against is **resolved before the engine is asked**:
   `Ouroboros.Provider.Native.Tools.classify/3` puts it in the request context only when it
-  names a live lane-W entry on this node. That is what makes an *allow* on it honest, and
-  it is the same distinction `ComputerUse(app:…)` draws against `Tool(<name>:<param>=…)` —
-  a fact the node resolved, not a parameter the model reported.
+  names a live lane-W entry on this node. That is what makes an *allow* on it honest, and it
+  is the distinction `Capability(…)` draws against `Tool(<name>:<param>=…)` — a fact the
+  node resolved, not a parameter the model reported.
   """
 
   alias Ouroboros.Mesh

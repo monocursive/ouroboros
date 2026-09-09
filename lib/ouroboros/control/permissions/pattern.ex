@@ -18,10 +18,6 @@ defmodule Ouroboros.Control.Permissions.Pattern do
                                 (`Tool(capability)`, `Tool(forge)`: deny and ask only —
                                 see `decisions/1`)
       Tool(<name>:<param>=<v>)  that tool with that parameter — deny and ask only
-      ComputerUse(observe)      the desktop_state tool
-      ComputerUse(act)          the desktop_act tool
-      ComputerUse(app:<id>)     either desktop tool, when the node resolved that app
-      ComputerUse(app:*)        either desktop tool, when the node resolved any app
       Capability(<name>)        the capability tool, for one live lane-W capability
       Capability(*)             the capability tool, for any live lane-W capability
       Forge(<name>)             the forge tool, building one named capability
@@ -59,7 +55,6 @@ defmodule Ouroboros.Control.Permissions.Pattern do
     :mcp,
     :tool,
     :tool_param,
-    :computer_use,
     :capability,
     :forge
   ]
@@ -67,10 +62,6 @@ defmodule Ouroboros.Control.Permissions.Pattern do
   @wrapped %{"Bash" => :bash, "Read" => :read, "Edit" => :edit, "Write" => :write}
 
   @max_pattern_bytes 512
-
-  # A resolved app id: `com.apple.Calculator`, `org.mozilla.firefox`. Bounded so a rule
-  # cannot smuggle a pattern-length attack past `@max_pattern_bytes` through the app slot.
-  @computer_use_app ~r/\A[A-Za-z0-9._-]{1,128}\z/
 
   # A lane-W capability name, the charset `Ouroboros.Wasm.Artifact.name?/1` holds a rollout
   # to. Restated rather than imported because this module is pure and depends on nothing —
@@ -94,7 +85,6 @@ defmodule Ouroboros.Control.Permissions.Pattern do
           | :mcp
           | :tool
           | :tool_param
-          | :computer_use
           | :capability
           | :forge
   @type t :: %__MODULE__{
@@ -145,12 +135,10 @@ defmodule Ouroboros.Control.Permissions.Pattern do
   Which decisions this pattern may carry.
 
   `:any` for everything except `Tool(<name>:<param>=<value>)`, which is
-  `:deny_or_ask_only`. `ComputerUse(app:…)` is `:any` — an app allow is honest —
-  because the app is a fact the node resolved from the live window before `evaluate/1`,
-  not a parameter the provider merely reported (the `Tool(…:param=)` distinction).
-  `Capability(…)` is `:any` for exactly that reason too: the name it matches is put in the
-  request context only when it resolves to a `:live` lane-W rollout on this node, so it is
-  a register's answer and not a string the model wrote.
+  `:deny_or_ask_only`. `Capability(…)` is `:any` and not that, because the name it matches
+  is put in the request context only when it resolves to a `:live` lane-W rollout on this
+  node, so it is a register's answer and not a parameter the provider merely reported (the
+  `Tool(…:param=)` distinction).
 
   `Tool(capability)` is the second `:deny_or_ask_only`, and it is a different argument.
   The pattern is perfectly precise — it names one tool — but that tool's authority is not
@@ -249,32 +237,6 @@ defmodule Ouroboros.Control.Permissions.Pattern do
 
       [name, constraint] ->
         parse_tool_param(raw, String.trim(name), String.trim(constraint))
-    end
-  end
-
-  # `app:*` is the explicit any-app form; `app:<id>` an exact resolved id. A bare
-  # `ComputerUse` never reaches here — the wrapping regex requires `Name(inner)` — and an
-  # empty or unrecognised inner is a parse error, so there is no permissive arm.
-  defp parse_named("ComputerUse", inner, raw) do
-    case String.trim(inner) do
-      "observe" ->
-        {:ok,
-         %__MODULE__{raw: raw, kind: :computer_use, spec: %{form: :observe}, fragile?: false}}
-
-      "act" ->
-        {:ok, %__MODULE__{raw: raw, kind: :computer_use, spec: %{form: :act}, fragile?: false}}
-
-      "app:*" ->
-        {:ok, %__MODULE__{raw: raw, kind: :computer_use, spec: %{app: :any}, fragile?: false}}
-
-      "app:" <> id ->
-        if Regex.match?(@computer_use_app, id),
-          do:
-            {:ok, %__MODULE__{raw: raw, kind: :computer_use, spec: %{app: id}, fragile?: false}},
-          else: {:error, {:invalid_computer_use_app, id}}
-
-      other ->
-        {:error, {:invalid_computer_use_pattern, other}}
     end
   end
 

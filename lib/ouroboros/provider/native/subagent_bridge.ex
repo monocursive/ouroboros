@@ -332,8 +332,7 @@ defmodule Ouroboros.Provider.Native.SubagentBridge do
   end
 
   defp translate_tools(names, :allow) when names in [nil, []],
-    do:
-      ~w(read write edit bash grep glob ls web_fetch code_intel ask_user agent agent_result fleet plan)
+    do: ~w(read write edit bash grep glob ls web_fetch ask_user agent agent_result fleet plan)
 
   defp translate_tools(names, :deny) when names in [nil, []], do: []
 

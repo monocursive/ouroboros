@@ -13,7 +13,7 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test forge-linux-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test dialyzer bench-local self-export golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check bench-self improve-selftest
+.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs sandbox sandbox-linux-test forge-linux-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test dialyzer bench-local self-export golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check bench-self improve-selftest
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -41,7 +41,6 @@ help:
 	@echo "make dist-linux       the same, for x86_64-unknown-linux-gnu, built in Docker"
 	@echo "make dist-linux-clean drop the dist-linux image and its cache volumes"
 	@echo "make dist-check       install.sh against a local fixture; release.yml structure"
-	@echo "make computer-use     build ouro-computer-use into priv/computer-use/"
 	@echo "make sandbox          build ouro-sandbox into priv/sandbox/ (Linux sandbox helper)"
 	@echo "make sandbox-linux-test  prove the sandbox helper enforces, in a Linux container"
 	@echo "make forge-linux-test    prove the forge's builder namespace, in a Linux container"
@@ -86,21 +85,6 @@ reset:
 
 logs:
 	@sh scripts/dev.sh logs
-
-computer-use:
-	@echo "==> computer-use: release helper into priv/computer-use/"
-	cd tui && $(CARGO) build --release -p ouro-computer-use
-	mkdir -p priv/computer-use
-	cp tui/target/release/ouro-computer-use priv/computer-use/ouro-computer-use
-	chmod 0755 priv/computer-use/ouro-computer-use
-	@for env in dev test prod; do \
-	  dest="_build/$$env/lib/ouroboros/priv/computer-use"; \
-	  if [ -d "_build/$$env/lib/ouroboros/priv" ]; then \
-	    mkdir -p "$$dest"; \
-	    cp priv/computer-use/ouro-computer-use "$$dest/ouro-computer-use"; \
-	    chmod 0755 "$$dest/ouro-computer-use"; \
-	  fi; \
-	done
 
 # The sandbox helper only enforces on Linux, so building it on a Mac produces a binary
 # whose `doctor` reports `"usable": false` and which `Sandbox.Helper.probe/1` therefore
@@ -252,23 +236,6 @@ wasm-skew-test:
 	@echo "==> wasm-skew-test: a precompiled artifact from another toolchain, refused by name"
 	scripts/wasm-skew-test.sh
 
-computer-use-debug:
-	@echo "==> computer-use-debug: debug helper into priv/computer-use/"
-	cd tui && $(CARGO) build -p ouro-computer-use
-	mkdir -p priv/computer-use
-	cp tui/target/debug/ouro-computer-use priv/computer-use/ouro-computer-use
-	chmod 0755 priv/computer-use/ouro-computer-use
-	@for env in dev test prod; do \
-	  dest="_build/$$env/lib/ouroboros/priv/computer-use"; \
-	  if [ -d "_build/$$env/lib/ouroboros/priv" ]; then \
-	    mkdir -p "$$dest"; \
-	    cp priv/computer-use/ouro-computer-use "$$dest/ouro-computer-use"; \
-	    chmod 0755 "$$dest/ouro-computer-use"; \
-	  fi; \
-	done
-
-
-
 # The Rust suite runs twice on purpose. `embed` is off by default so that iterating on the
 # client never waits on a release, which also means the extractor is not compiled — and an
 # extractor nobody compiled is an extractor nobody tested.
@@ -351,7 +318,7 @@ protocol-docs: golden
 	$(MIX) ouroboros.protocol.docs
 	git diff --exit-code docs/PROTOCOL.md
 
-release-tarball: computer-use sandbox wasm
+release-tarball: sandbox wasm
 	@echo "==> release-tarball: MIX_ENV=prod mix release"
 	MIX_ENV=prod $(MIX) release --overwrite
 	@ls _build/prod/$(RELEASE)-*.tar.gz

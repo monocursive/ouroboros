@@ -212,22 +212,10 @@ config :ouroboros,
       do: Ouroboros.Test.GrokAccountAdapter,
       else: Ouroboros.Provider.GrokAuth
     ),
-  # Language servers, owned by this node rather than by any session. Everything here is a
-  # bound; `Ouroboros.CodeIntel.Config` documents each one and refuses a value that would
-  # remove it. Nothing is installed by this runtime — a server absent from the user's PATH
-  # and from the project's own bin directories resolves to an error carrying an install
-  # hint, and that is the end of it.
-  code_intel: [
-    enabled: true,
-    # Operator additions and overrides, merged over the built-in registry by language:
-    #   [%{language: :elixir, extensions: [".ex"], root_markers: ["mix.exs"],
-    #      candidates: [%{server_id: "expert", command: "expert", args: []}]}]
-    servers: []
-  ],
-  # MCP servers the native agent may call (D4). Same posture as `:code_intel` above and
-  # for the same reason — somebody else's program on the end of a pipe — so everything
-  # here is a bound and `Ouroboros.Provider.Native.Mcp.Config` refuses a value that would
-  # remove one. Empty by default: nothing is spawned that an operator did not name.
+  # MCP servers the native agent may call (D4). Somebody else's program on the end of a
+  # pipe, so everything here is a bound and `Ouroboros.Provider.Native.Mcp.Config`
+  # refuses a value that would remove one. Empty by default: nothing is spawned that an
+  # operator did not name.
   mcp: [enabled: true],
   # Node-scope server definitions, in the Claude-compatible shape and highest precedence
   # of the three sources (node, then `~/.config/ouroboros/mcp.json`, then a *trusted*
@@ -235,60 +223,15 @@ config :ouroboros,
   #   %{"github" => %{command: "npx", args: ["-y", "@modelcontextprotocol/server-github"],
   #                   env: %{"GITHUB_TOKEN" => System.get_env("GITHUB_TOKEN")}}}
   mcp_servers: %{},
-  # The LiveView operator surface (docs/WEB.md). The opposite default to `:code_intel`
-  # and `:mcp`, and deliberately: those two are bounds on things this runtime already
+  # The LiveView operator surface (docs/WEB.md). The opposite default to `:mcp`, and
+  # deliberately: that one is a bound on something this runtime already
   # does, while this one is a port a stranger can reach, so absent configuration has to
   # mean no endpoint at all rather than a disabled one. `config/runtime.exs` is the only
   # thing that turns it on, and every other value — a bind, a port, a token path — is a
   # decision that belongs to the machine rather than to the build. Their defaults and the
   # refusals that go with them live in `Ouroboros.Web.Config`.
   web: [enabled: false],
-  # Computer Use (docs/COMPUTER_USE.md §4). Tools appear when the helper is on disk
-  # unless `OUROBOROS_COMPUTER_USE=0`. A helper is the operator opt-in (they built it).
-  # Same hardening as `:mcp` / `:code_intel`: a typo never widens a bound.
-  computer_use: [
-    enabled: true,
-    # Phase 2 ships `desktop_act`. Set false for observe-only.
-    act_enabled: true,
-    # `:bundled` resolves priv/, checkout priv/, or a sibling of `ouro`.
-    # `OUROBOROS_COMPUTER_USE_HELPER=/path` overrides it.
-    helper_path: :bundled,
-    handshake_timeout_ms: 5_000,
-    state_timeout_ms: 5_000,
-    act_timeout_ms: 10_000,
-    shutdown_grace_ms: 2_000,
-    max_frame_bytes: 8 * 1024 * 1024,
-    max_image_bytes: 2 * 1024 * 1024,
-    max_image_width: 1920,
-    max_image_height: 1920,
-    max_nodes: 1_000,
-    max_depth: 32,
-    max_snapshots_per_session: 8,
-    jpeg_quality: 80,
-    # Node deny, not remember-able (D12). The bundle ids Computer Use never drives: this
-    # runtime's own surfaces, every terminal it could shell out of, the panes that draw
-    # OS auth and secrets. `Native.Desktop.denied_app_ids/0` unions this with a baked
-    # floor, so an operator may add to it but a typo can never remove ouro or a terminal.
-    denied_app_ids: [
-      "dev.ouroboros.desktop",
-      "com.ouroboros.desktop",
-      "com.apple.Terminal",
-      "com.googlecode.iterm2",
-      "com.mitchellh.ghostty",
-      "net.kovidgoyal.kitty",
-      "com.apple.systempreferences",
-      "com.apple.loginwindow",
-      "dev.warp.Warp-Stable",
-      "org.alacritty",
-      "com.github.wez.wezterm",
-      "co.zeit.hyper",
-      "org.tabby",
-      "com.1password.1password",
-      "com.apple.keychainaccess",
-      "com.apple.SecurityAgent"
-    ]
-  ],
-  # WebAssembly containment (docs/WASM.md §7). Same posture as `:computer_use`: the helper
+  # WebAssembly containment (docs/WASM.md §7). The helper
   # on disk is the operator opt-in — `make wasm` builds it, nothing else does — and
   # everything here is a bound, so a typo falls back to the default rather than widening
   # one. `OUROBOROS_WASM_HELPER=/path` overrides `:bundled`, which resolves the application's

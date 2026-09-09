@@ -339,17 +339,8 @@ defmodule Ouroboros.Web.Transcript.Approval do
   (`tui/src/ui/transcript.rs:441-446`).
   """
   @spec question?(t()) :: boolean()
-  def question?(%__MODULE__{payload: payload} = request) do
-    text(payload, "kind") in ["plan_exit", "question"] or computer_use?(request)
-  end
-
-  @doc "Computer Use observe/act. Auto-approve must not invent an app allow."
-  @spec computer_use?(t()) :: boolean()
-  def computer_use?(%__MODULE__{payload: payload}) do
-    case payload do
-      %{"tool_call" => %{"name" => name}} -> name in ["desktop_state", "desktop_act"]
-      _otherwise -> false
-    end
+  def question?(%__MODULE__{payload: payload}) do
+    text(payload, "kind") in ["plan_exit", "question"]
   end
 
   @doc """
@@ -440,8 +431,8 @@ defmodule Ouroboros.Web.Transcript.Approval do
   the runtime must have suggested a pattern (only `Control.Permissions` knows the rule
   language, and this surface never invents one), the serving runtime must offer
   `permissions.add`, and the session must name the workspace the rule is scoped to —
-  `permissions.add` refuses a `workspace` rule without one. Computer Use remember is
-  user-scoped (D4), so a missing workspace does not hide the offer
+  `permissions.add` refuses a `workspace` rule without one. A `Capability(…)` remember is
+  user-scoped (W13), so a missing workspace does not hide the offer
   (`tui/src/ui/app/streaming.rs:783`).
 
   `methods` is the serving runtime's method list; `workspace` is the session's own.
@@ -467,12 +458,11 @@ defmodule Ouroboros.Web.Transcript.Approval do
       "permissions.add" not in methods ->
         {nil, "This Ouroboros node cannot save approval rules."}
 
-      # Both of these are facts about a *node*, not about a directory. A Computer Use grant
-      # is "this app, from this operator"; a `Capability(…)` grant is "this component, which
-      # the rollout plane deployed to this machine" (docs/WASM.md §7.7). Requiring a
-      # workspace for either meant a session that had not chosen a project folder could
-      # never remember the answer it had just given.
-      String.starts_with?(pattern, "ComputerUse(") or String.starts_with?(pattern, "Capability(") ->
+      # A fact about a *node*, not about a directory: a `Capability(…)` grant is "this
+      # component, which the rollout plane deployed to this machine" (docs/WASM.md §7.7).
+      # Requiring a workspace for it meant a session that had not chosen a project folder
+      # could never remember the answer it had just given.
+      String.starts_with?(pattern, "Capability(") ->
         {%Rule{pattern: pattern, workspace: workspace || ""}, nil}
 
       is_binary(workspace) ->

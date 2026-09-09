@@ -152,9 +152,7 @@ defmodule Ouroboros.Provider.Native.Loop do
   alias Ouroboros.Provider.Native.Checkpoint
   alias Ouroboros.Provider.Native.Context.Instructions
   alias Ouroboros.Provider.Native.Context.Window
-  alias Ouroboros.Provider.Native.CodeIntel
   alias Ouroboros.Provider.Native.Cost
-  alias Ouroboros.Provider.Native.Desktop
 
   alias Ouroboros.Provider.Native.Hooks
   alias Ouroboros.Provider.Native.Inference
@@ -235,10 +233,6 @@ defmodule Ouroboros.Provider.Native.Loop do
     # turn. Loading it per tool call would read and parse `ouroboros.toml` on every
     # dispatch, and would let a hook edit its own configuration mid-turn.
     hooks: nil,
-    # Injected 3-arity helper (`method, params, timeout`) for Computer Use. Production
-    # leaves this nil and `Desktop` uses the pool; tests stub a failing or canned act
-    # without starting the live helper.
-    desktop_runner: nil,
     # The tool schemas, built once at the start of the turn. Two reasons, and the second
     # is the important one: building thirteen JSON Schemas per model call is measurable,
     # and a tool list that could change between two calls of one turn is a changed cached
@@ -862,12 +856,8 @@ defmodule Ouroboros.Provider.Native.Loop do
             {:ok, input} ->
               call = %{call | input: input}
 
-              # Classified once, here, and handed to the gate: re-deriving it would run
-              # `code_intel`'s rename preview a second time for nothing.
-              classified =
-                call.name
-                |> Tools.classify(call.input, state.scope)
-                |> Desktop.enrich_classified(state.session_dir)
+              # Classified once, here, and handed to the gate.
+              classified = Tools.classify(call.name, call.input, state.scope)
 
               effect_id = tool_effect_id(state, call)
               emit_tool_call(state, call, effect_id)
@@ -925,33 +915,8 @@ defmodule Ouroboros.Provider.Native.Loop do
        ) do
     case gate(state, call, classified) do
       {:allow, state, call, classified, hook_context, authority} ->
-        case confirm_desktop_act(state, call, classified, hook_context, authority) do
-          {:allow, state, call, classified, hook_context, authority} ->
-            attempt = ToolAttempt.authorize(attempt, call, classified, hook_context, authority)
-            admit_and_run(state, attempt)
-
-          {:deny, state, message, classified, authority} ->
-            refuse_tool_effect(state, call, classified, effect_id, authority)
-
-            {:continue,
-             tool_result(state, call, %{output: message, is_error: true}, ledger_ref: effect_id)}
-
-          {:interrupted, state, classified} ->
-            refuse_tool_effect(state, call, classified, effect_id, interrupted_authority())
-            {:interrupted, state}
-
-          {:error, message} ->
-            refuse_tool_effect(
-              state,
-              call,
-              classified,
-              effect_id,
-              authority(:deny, "runtime", :once, :runtime, {:desktop, :unresolved}, nil)
-            )
-
-            {:continue,
-             tool_result(state, call, %{output: message, is_error: true}, ledger_ref: effect_id)}
-        end
+        attempt = ToolAttempt.authorize(attempt, call, classified, hook_context, authority)
+        admit_and_run(state, attempt)
 
       {:deny, state, message, classified, authority} ->
         refuse_tool_effect(state, call, classified, effect_id, authority)
@@ -1008,69 +973,6 @@ defmodule Ouroboros.Provider.Native.Loop do
     end
   end
 
-  # §6.3: if the last state (or a focus retarget) resolved a different app than the one
-  # first evaluated, evaluate again. Never inject first. Sensitive acts still ask once.
-  defp confirm_desktop_act(state, call, classified, hook_context, authority) do
-    if classified.tool != "desktop_act" do
-      {:allow, state, call, classified, hook_context, authority}
-    else
-      claimed = classified.context[:app]
-
-      case Desktop.resolve_act(call.input, state.session_dir) do
-        {:error, message} ->
-          {:error, message}
-
-        {:ok, resolved} ->
-          classified = put_in(classified.context[:app], resolved)
-
-          allowed =
-            if claimed != nil and Desktop.same_app?(claimed, resolved) do
-              {:allow, state, call, classified, hook_context, authority}
-            else
-              reevaluate_desktop(state, call, classified, hook_context)
-            end
-
-          case allowed do
-            {:allow, state, call, classified, hook_context, authority} ->
-              maybe_ask_sensitive(state, call, classified, hook_context, authority)
-
-            other ->
-              other
-          end
-      end
-    end
-  end
-
-  defp reevaluate_desktop(state, call, classified, hook_context) do
-    case Permissions.evaluate(permission_request(state, classified)) do
-      {:allow, rule} ->
-        {:allow, state, call, classified, hook_context,
-         authority(
-           :allow,
-           "rule",
-           :once,
-           :rule,
-           rule,
-           record(state, :approve, :once, :rule, rule)
-         )}
-
-      {:deny, rule} ->
-        {:deny, state, Permissions.deny_message(call.name, rule), classified,
-         authority(:deny, "rule", :once, :rule, rule, record(state, :deny, :once, :rule, rule))}
-
-      {:ask, reason} ->
-        ask(state, call, classified, reason, hook_context)
-    end
-  end
-
-  defp maybe_ask_sensitive(state, call, classified, hook_context, authority) do
-    if Desktop.sensitive_act?(call.input, state.session_dir) do
-      ask(state, call, classified, :sensitive_desktop_act, hook_context)
-    else
-      {:allow, state, call, classified, hook_context, authority}
-    end
-  end
-
   defp execute(
          state,
          %ToolAttempt{call: call, module: module, classified: classified, effect_id: effect_id} =
@@ -1107,23 +1009,19 @@ defmodule Ouroboros.Provider.Native.Loop do
         # `Tools.Forge` puts it in `cause.signal_id`; the second hop is that entry's own
         # `attempt.permission_entry_id`.
         ledger_effect_id: effect_id,
-        # S1/Q-B. What the permission engine resolved this call's artifact id to, handed back
-        # the way `desktop_evaluated_app` is: `Tools.Forge` re-reads the bundle and refuses to
-        # deploy one whose name is no longer the name the decision was about.
+        # S1/Q-B. What the permission engine resolved this call's artifact id to, handed
+        # back to the tool: `Tools.Forge` re-reads the bundle and refuses to deploy one
+        # whose name is no longer the name the decision was about.
         forge_evaluated_name: classified.context[:forge],
         # G3. `agent_result` collects a child the *session* holds, not one this turn owns,
         # so it is handed two closures over the session rather than a pid to call: the tool
         # never learns which process tracks what, and a run with no session gets `nil` and
         # says so instead of failing obscurely.
-        subagents: subagent_handles(state),
-        desktop_evaluated_app: classified.context[:app]
+        subagents: subagent_handles(state)
       }
-      |> maybe_desktop_runner(state)
 
-    # Checkpoint before write, always, and before the language server is asked anything:
-    # the baseline is a convenience and the snapshot is the thing a rewind depends on.
+    # Checkpoint before write, always: the snapshot is the thing a rewind depends on.
     state = snapshot_before(state, classified.write_paths)
-    baselines = CodeIntel.baseline(classified.write_paths, root: state.scope.root)
 
     started = System.monotonic_time(:millisecond)
 
@@ -1143,21 +1041,11 @@ defmodule Ouroboros.Provider.Native.Loop do
         "is_error" => result.is_error
       })
 
-    state =
-      if classified.tool == "desktop_act", do: flush_interrupt(state), else: state
-
     if state.interrupted? do
       settle_tool_effect(state, effect_id, %{output: "interrupted", is_error: true}, elapsed)
       {:interrupted, state}
     else
-      finish_execute(
-        state,
-        attempt,
-        result,
-        elapsed,
-        context,
-        baselines
-      )
+      finish_execute(state, attempt, result, elapsed, context)
     end
   end
 
@@ -1172,8 +1060,7 @@ defmodule Ouroboros.Provider.Native.Loop do
          },
          result,
          elapsed,
-         context,
-         baselines
+         context
        ) do
     {state, result, elapsed} =
       escalate(state, %{
@@ -1194,15 +1081,13 @@ defmodule Ouroboros.Provider.Native.Loop do
     state = snapshot_after(state, changed)
     state = record_command(state, classified)
 
-    result = append_diagnostics(result, changed, baselines, root: state.scope.root)
-
     result =
       append_context(
         result,
         Hooks.post_tool_use(
           state.hooks,
           classified.tool,
-          redact_desktop_input(classified.tool, call.input),
+          call.input,
           %{"output" => result.output, "is_error" => result.is_error},
           hook_base(state)
         ) ++ hook_context
@@ -1215,9 +1100,6 @@ defmodule Ouroboros.Provider.Native.Loop do
 
     {:continue, state}
   end
-
-  defp execute_timeout(state, %{tool: "desktop_act"}, _input),
-    do: max(state.tool_timeout_ms, Desktop.config(:act_timeout_ms))
 
   # W13. A capability's own deadline plus the pool's call margin can exceed the ordinary
   # tool timeout, and a loop that killed the task first would report a timeout for a
@@ -1250,19 +1132,6 @@ defmodule Ouroboros.Provider.Native.Loop do
     do: Map.new(options || %{})
 
   defp provider_options(_state), do: %{}
-
-  defp maybe_desktop_runner(context, %{desktop_runner: fun}) when is_function(fun, 3),
-    do: Map.put(context, :desktop_runner, fun)
-
-  defp maybe_desktop_runner(context, _state), do: context
-
-  defp flush_interrupt(state) do
-    receive do
-      :native_interrupt -> %{state | interrupted?: true}
-    after
-      0 -> state
-    end
-  end
 
   # D3's lazy half. A `.agents/rules/*.md` whose front-matter `paths:` matches the file
   # this tool just touched is appended to the *conversation*, once, right after the tool
@@ -1304,19 +1173,6 @@ defmodule Ouroboros.Provider.Native.Loop do
   end
 
   defp inject_rules(state, _reads), do: state
-  # The diagnostics report is appended only to a successful write. A failed edit has no
-  # new state to describe, and appending anything after a failure is how a model comes to
-  # read diagnostics as the failure itself (OpenCode #9102).
-  defp append_diagnostics(%{is_error: true} = result, _changed, _baselines, _opts), do: result
-  defp append_diagnostics(result, [], _baselines, _opts), do: result
-
-  defp append_diagnostics(result, changed, baselines, opts) do
-    case CodeIntel.feedback(changed, baselines, opts) do
-      "" -> result
-      feedback -> %{result | output: result.output <> "\n" <> feedback}
-    end
-  end
-
   defp append_context(result, []), do: result
 
   defp append_context(result, lines) do
@@ -1429,20 +1285,18 @@ defmodule Ouroboros.Provider.Native.Loop do
   end
 
   defp tool_result(state, call, result, opts \\ []) do
-    images = Map.get(result, :images, [])
-
-    emit(state, :tool_result, tool_result_event(call, result, images))
+    emit(state, :tool_result, tool_result_event(call, result))
 
     message = %{
       role: :tool,
       tool_call_id: call.id,
       name: call.name,
-      content: tool_result_content(result.output, images),
+      content: result.output,
       is_error: result.is_error
     }
 
     # Recorded here rather than at the dispatch sites, and after every append the result
-    # picks up on the way — diagnostics, `PostToolUse` context, an LSP report — because
+    # picks up on the way — `PostToolUse` context, for one — because
     # what replay has to reproduce is what entered `messages`, not what the tool returned.
     # It is also the copy compaction's in-place elision can no longer destroy.
     state =
@@ -1453,50 +1307,19 @@ defmodule Ouroboros.Provider.Native.Loop do
         "content" => Journal.jsonable(message.content),
         "is_error" => result.is_error == true,
         "duration_ms" => Keyword.get(opts, :duration_ms),
-        "output_bytes" => byte_size(to_string(Map.get(result, :output, ""))) + image_bytes(result)
+        "output_bytes" => byte_size(to_string(Map.get(result, :output, "")))
       })
 
     %{state | messages: state.messages ++ [message]}
   end
 
-  # A tool result carrying staged images (`desktop_state`, §8.2) becomes a multimodal tool
-  # message: the text output plus one `:image` part per screenshot, which `Model.ReqLLM`
-  # encodes for a vision model and degrades to a marker otherwise. A tool with no images
-  # keeps the plain string content, so the cached prefix for every existing tool is
-  # byte-for-byte unchanged.
-  defp tool_result_content(output, []), do: output
-
-  defp tool_result_content(output, images),
-    do: [%{type: :text, text: output} | Enum.map(images, &Map.put(&1, :type, :image))]
-
-  # Clients never receive pixels on the event — they get the sha to fetch through
-  # `computer_use.artifact` (§8.5). `bytes` is the staged size; width/height are bounded,
-  # advisory capture metadata that lets a client reserve layout before the fetch.
-  defp tool_result_event(call, result, []) do
+  defp tool_result_event(call, result) do
     %{
       "name" => call.name,
       "call_id" => call.id,
       "output" => result.output,
       "is_error" => result.is_error
     }
-  end
-
-  defp tool_result_event(call, result, images) do
-    artifacts =
-      Enum.map(images, fn image ->
-        %{
-          "kind" => "image",
-          "sha256" => image.sha256,
-          "media_type" => image.media_type,
-          "bytes" => image.size
-        }
-        |> put_nonempty("width", Map.get(image, :width))
-        |> put_nonempty("height", Map.get(image, :height))
-      end)
-
-    call
-    |> tool_result_event(result, [])
-    |> Map.put("artifacts", artifacts)
   end
 
   defp unknown_tool(name, state) do
@@ -1554,7 +1377,7 @@ defmodule Ouroboros.Provider.Native.Loop do
       case Hooks.pre_tool_use(
              state.hooks,
              classified.tool,
-             redact_desktop_input(classified.tool, call.input),
+             call.input,
              hook_base(state)
            ) do
         {:deny, hook_reason} ->
@@ -1631,16 +1454,12 @@ defmodule Ouroboros.Provider.Native.Loop do
          authority
        ) do
     if not rewritten? or input == call.input do
-      # Unchanged arguments keep the classification already computed: re-deriving it
-      # would run `code_intel`'s rename preview a second time for nothing.
+      # Unchanged arguments keep the classification already computed.
       proceed(state, call, classified, verdict, reason, context, authority)
     else
       call = %{call | input: input}
 
-      classified =
-        call.name
-        |> Tools.classify(input, state.scope)
-        |> Desktop.enrich_classified(state.session_dir)
+      classified = Tools.classify(call.name, input, state.scope)
 
       case Permissions.evaluate(permission_request(state, classified)) do
         {:deny, rule} ->
@@ -1699,9 +1518,6 @@ defmodule Ouroboros.Provider.Native.Loop do
            record(state, :approve, :session, :human, ref)
          )}
 
-      desktop_tool?(classified.tool) ->
-        ask(state, call, classified, reason, context)
-
       classified.mode == :read ->
         {:allow, state, call, classified, context,
          authority(:allow, "read", :once, :runtime, {:mode, :read}, nil)}
@@ -1736,50 +1552,6 @@ defmodule Ouroboros.Provider.Native.Loop do
         ask(state, call, classified, reason, context)
     end
   end
-
-  defp desktop_tool?(name) when name in ["desktop_state", "desktop_act"], do: true
-  defp desktop_tool?(_name), do: false
-
-  defp redact_desktop_input("desktop_act", input) when is_map(input) do
-    input
-    |> redact_desktop_text()
-    |> redact_desktop_long_key()
-  end
-
-  defp redact_desktop_input(_name, input), do: input
-
-  defp redact_desktop_text(input) do
-    text = Map.get(input, "text") || Map.get(input, :text)
-
-    if is_binary(text) do
-      input
-      |> Map.drop(["text", :text])
-      |> Map.put("text_bytes", byte_size(text))
-    else
-      input
-    end
-  end
-
-  defp redact_desktop_long_key(input) do
-    key = Map.get(input, "key") || Map.get(input, :key)
-
-    if is_binary(key) and byte_size(key) > 32 do
-      input
-      |> Map.drop(["key", :key])
-      |> Map.put("key_bytes", byte_size(key))
-    else
-      input
-    end
-  end
-
-  defp image_bytes(%{images: images}) when is_list(images) do
-    Enum.reduce(images, 0, fn
-      %{size: size}, acc when is_integer(size) and size > 0 -> acc + size
-      _part, acc -> acc
-    end)
-  end
-
-  defp image_bytes(_result), do: 0
 
   # `auto_edit` is edits inside the workspace, and only those. A write whose path
   # resolved into a declared `add_dirs` root is still a write outside the repository the
@@ -2438,25 +2210,13 @@ defmodule Ouroboros.Provider.Native.Loop do
   defp new_request_id,
     do: "napp_" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
 
-  defp grant(state, classified, :session) do
-    if desktop_tool?(classified.tool) and not is_binary(classified.context[:app]) do
-      # A session grant keyed on a missing app would cover every later window_id-only
-      # observe. Ask again instead.
-      state
-    else
-      %{state | session_grants: MapSet.put(state.session_grants, grant_key(classified))}
-    end
-  end
+  defp grant(state, classified, :session),
+    do: %{state | session_grants: MapSet.put(state.session_grants, grant_key(classified))}
 
   defp grant(state, _classified, _once), do: state
 
-  defp grant_key(classified) do
-    if desktop_tool?(classified.tool) do
-      {classified.tool, classified.context[:app]}
-    else
-      {classified.tool, classified.command, Enum.sort(classified.paths)}
-    end
-  end
+  defp grant_key(classified),
+    do: {classified.tool, classified.command, Enum.sort(classified.paths)}
 
   # Returns the id of the `:permission` entry this decision was written under, or `nil`
   # when there was no engine to write it into. A `:tool_call` entry links to that id
@@ -2518,12 +2278,9 @@ defmodule Ouroboros.Provider.Native.Loop do
       paths: classified.paths,
       mode: classified.mode,
       domains: Map.get(classified, :domains, []),
-      # A tool may contribute context the engine matches on — Computer Use puts the
-      # resolved `:app`/`:desktop_action` here so a `ComputerUse(app:…)` rule can allow on
-      # the app this node measured. The loop's own keys are merged SECOND so they always
-      # win: a classifier can add facts but never spoof the approval mode, sandbox posture,
-      # workspace, or turn. `classify/3` returns `%{}` for every non-Computer-Use tool, so
-      # this is a no-op for them.
+      # A tool may contribute context the engine matches on. The loop's own keys are merged
+      # SECOND so they always win: a classifier can add facts but never spoof the approval
+      # mode, sandbox posture, workspace, or turn.
       context:
         Map.merge(Map.get(classified, :context, %{}), %{
           approval_mode: state.approval_mode,
@@ -2534,7 +2291,6 @@ defmodule Ouroboros.Provider.Native.Loop do
     }
   end
 
-  defp persist_grant?(:sensitive_desktop_act), do: false
   defp persist_grant?(_reason), do: true
 
   defp approval_kind("bash"), do: "command"
@@ -2548,9 +2304,6 @@ defmodule Ouroboros.Provider.Native.Loop do
     do: "the permission engine could not decide (#{message}), so this is being asked"
 
   defp reason_text(reason) when is_binary(reason), do: reason
-
-  defp reason_text(:sensitive_desktop_act),
-    do: "this desktop_act targets a password field or looks like a secret; it asks every time"
 
   defp reason_text(reason), do: inspect(reason)
 
@@ -3105,7 +2858,7 @@ defmodule Ouroboros.Provider.Native.Loop do
       %{
         "name" => call.name,
         "call_id" => call.id,
-        "input" => redact_desktop_input(call.name, call.input),
+        "input" => call.input,
         "ledger_ref" => effect_id && ledger_ref(effect_id)
       }
       |> Map.merge(Sandbox.tool_call_marker(call.name, state.scope))
@@ -3205,9 +2958,6 @@ defmodule Ouroboros.Provider.Native.Loop do
     |> put_subject(:paths, Enum.filter(classified.paths, &is_binary/1))
     |> put_subject(:command_sha256, command_digest(classified.command))
     |> put_subject(:hosts, Map.get(classified, :domains, []))
-    |> put_subject(:app, context[:app])
-    |> put_subject(:desktop_action, context[:desktop_action])
-    |> put_subject(:window_id, context[:window_id])
     # W13. Which capability, and which bytes. The name is the register's, and the sha256 is
     # what a signature bound to them: D11 says a mesh message is not itself ledgered, so
     # this tool entry is the only place the fact that a model reached a component is
@@ -3248,7 +2998,7 @@ defmodule Ouroboros.Provider.Native.Loop do
        do: :ok
 
   defp settle_tool_effect(state, effect_id, result, elapsed) when is_map(result) do
-    bytes = byte_size(to_string(Map.get(result, :output, ""))) + image_bytes(result)
+    bytes = byte_size(to_string(Map.get(result, :output, "")))
 
     status =
       cond do

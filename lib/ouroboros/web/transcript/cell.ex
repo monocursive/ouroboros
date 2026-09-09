@@ -120,86 +120,6 @@ defmodule Ouroboros.Web.Transcript.Cell.File do
   @type t :: %__MODULE__{path: String.t() | nil, kind: String.t() | nil}
 end
 
-defmodule Ouroboros.Web.Transcript.Cell.Image do
-  @moduledoc """
-  An image in the conversation, drawn as a labelled placeholder.
-
-  Everything a renderer needs is decided **before** the cell exists, because projection is
-  clock-free and filesystem-free by contract: a cell that stat'd a file would make the
-  export snapshot depend on what happened to be on disk
-  (`tui/src/ui/transcript_cells.rs:631-669`).
-  """
-
-  alias Ouroboros.EventPresentation.ImageArtifact
-
-  defstruct [:pixels, :format, :note, :sha, :media_type, named: ""]
-
-  @type t :: %__MODULE__{
-          named: String.t(),
-          pixels: {non_neg_integer(), non_neg_integer()} | nil,
-          format: String.t() | nil,
-          note: String.t() | nil,
-          sha: String.t() | nil,
-          media_type: String.t() | nil
-        }
-
-  @doc """
-  A desktop screenshot artifact as a conversation image.
-
-  Minted from the metadata a `tool_result` carried — there is no path on the wire, so it
-  is named by a short form of its digest rather than a file
-  (`tui/src/ui/transcript_cells.rs:708`).
-  """
-  @spec from_artifact(ImageArtifact.t()) :: t()
-  def from_artifact(%ImageArtifact{} = artifact) do
-    %__MODULE__{
-      named: "desktop capture · #{String.slice(artifact.sha256, 0, 12)}",
-      pixels:
-        if(is_integer(artifact.width) and is_integer(artifact.height),
-          do: {artifact.width, artifact.height}
-        ),
-      format: media_type_format(artifact.media_type),
-      note: nil,
-      sha: artifact.sha256,
-      media_type: artifact.media_type
-    }
-  end
-
-  @doc "The one line every surface draws, so no two word the same image differently."
-  @spec label(t()) :: String.t()
-  def label(%__MODULE__{} = image) do
-    size =
-      case {image.pixels, image.format} do
-        {{width, height}, format} when is_binary(format) -> "#{width}×#{height} #{format}"
-        _unknown -> "size unknown"
-      end
-
-    note =
-      case image.note do
-        note when is_binary(note) ->
-          if String.trim(note) == "", do: "", else: " · #{String.trim(note)}"
-
-        _absent ->
-          ""
-      end
-
-    "[image " <> size <> " · " <> image.named <> note <> "]"
-  end
-
-  defp media_type_format(media_type) when is_binary(media_type) do
-    case media_type |> String.trim() |> String.downcase(:ascii) do
-      "image/png" -> "png"
-      "image/jpeg" -> "jpeg"
-      "image/jpg" -> "jpeg"
-      "image/gif" -> "gif"
-      "image/webp" -> "webp"
-      _other -> nil
-    end
-  end
-
-  defp media_type_format(_media_type), do: nil
-end
-
 defmodule Ouroboros.Web.Transcript.Cell.Diff do
   @moduledoc """
   One unified diff, parsed once at projection time.
@@ -605,7 +525,6 @@ defmodule Ouroboros.Web.Transcript.Cell do
           | Cell.Exploration.t()
           | Cell.CommandOutput.t()
           | Cell.File.t()
-          | Cell.Image.t()
           | Cell.Diff.t()
           | Cell.DiffStat.t()
           | Cell.Status.t()

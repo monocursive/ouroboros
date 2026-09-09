@@ -99,7 +99,7 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
 
   An absolute `OUROBOROS_SANDBOX_HELPER` wins, then a configured absolute path, then the first existing
   candidate — the application's own `priv/`, or a sibling of `ouro`. The same precedence the
-  Computer Use helper uses, for the same reason: an operator testing a build needs a way to
+  WebAssembly helper uses, for the same reason: an operator testing a build needs a way to
   point the runtime at it without a release.
 
   No candidate is derived from the working directory (F1). This helper applies namespaces,

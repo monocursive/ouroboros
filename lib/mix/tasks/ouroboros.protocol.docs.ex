@@ -32,8 +32,8 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
 
   Regenerating on another machine on another day writes the same bytes: the task reads no
   clock, no node name, and no configured value. The dynamic vocabularies it does read —
-  `Ouroboros.CodeIntel.operations/0`, `Ouroboros.Agent.EffectLedger.effects/0` and
-  `statuses/0`, and the ledger's own query bounds — are static per build, and reading them
+  `Ouroboros.Agent.EffectLedger.effects/0` and `statuses/0`, and the ledger's own query
+  bounds — are static per build, and reading them
   is the point: a document that stated a narrower vocabulary than the runtime accepts
   would be a document a client could be refused for believing.
 
@@ -84,7 +84,6 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
     "runtime_status_result" => {:method, "runtime.status"},
     "interactive_event_detail_result" => {:method, "interactive.event_detail"},
     "coding_event_detail_result" => {:method, "coding.event_detail"},
-    "code_intel_diagnostics_result" => {:method, "code_intel.diagnostics"},
     "interactive_journal_result" => {:method, "interactive.journal"},
     "interactive_replay_verify_result" => {:method, "interactive.replay_verify"},
     "ledger_list_result" => {:method, "ledger.list"},
@@ -138,7 +137,7 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
   # alphabetically, so a new band appears in the reference the day it appears in the table.
   @band_order ~w(
     handshake runtime fleet account agents interactive coding teams
-    plans control permissions policy grants code_intel ledger workspace capabilities
+    plans control permissions policy grants ledger workspace capabilities
     upgrade signing wasm
   )
 

@@ -147,13 +147,11 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
 
   # R1. The same two builders `stream/2` runs, rendered as plain data for a digest. It is
   # the *projected* request rather than the loop's message list because this translation is
-  # lossy on purpose — an assistant message with neither text nor calls never leaves, a
-  # staged image a non-vision model cannot read is dropped, a missing screenshot degrades
-  # to a marker — and a digest that ignored all of that would say two different requests
-  # were the same one.
+  # lossy on purpose — an assistant message with neither text nor calls never leaves — and
+  # a digest that ignored that would say two different requests were the same one.
   #
   # Nothing here is meant to be read back. Image bytes become a digest of themselves
-  # rather than base64, so a screenshot changes the request digest without putting a
+  # rather than base64, so an attachment changes the request digest without putting a
   # megabyte in a journal record; the tool callback is omitted because it is a function.
   @impl true
   def project(request) do
@@ -281,11 +279,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
   def unused_callback(_args), do: {:error, :tools_execute_in_the_native_loop}
 
   defp build_context(request) do
-    vision? = vision?(request.model)
-
-    messages =
-      request.messages
-      |> Enum.flat_map(&to_messages(&1, vision?))
+    messages = Enum.flat_map(request.messages, &to_messages/1)
 
     messages =
       case request[:system] do
@@ -301,16 +295,16 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     error -> {:error, {:invalid_context, Exception.message(error)}}
   end
 
-  defp to_messages(%{role: :user, content: content}, _vision?) when is_binary(content),
+  defp to_messages(%{role: :user, content: content}) when is_binary(content),
     do: [ReqLLM.Context.user(content)]
 
-  defp to_messages(%{role: :user, content: content}, _vision?) when is_list(content),
+  defp to_messages(%{role: :user, content: content}) when is_list(content),
     do: [ReqLLM.Context.user(Enum.map(content, &content_part/1))]
 
-  defp to_messages(%{role: :system, content: content}, _vision?),
+  defp to_messages(%{role: :system, content: content}),
     do: [ReqLLM.Context.system(content)]
 
-  defp to_messages(%{role: :assistant} = message, _vision?) do
+  defp to_messages(%{role: :assistant} = message) do
     text = message[:content] || ""
     calls = message[:tool_calls] || []
     details = Enum.map(message[:reasoning_details] || [], &reasoning_detail/1)
@@ -331,24 +325,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     end
   end
 
-  # §8.2. A tool result whose content is a list of parts (`desktop_state` with a screenshot)
-  # is mapped through the same content-part vocabulary as a user attachment, but with two
-  # differences: a non-vision model has its image parts dropped (the operator still has the
-  # event and the staged file — the model just gets the tree, and the turn does not fail),
-  # and a staged image that has gone missing degrades to a text marker rather than raising
-  # (Δ2), because eviction can outrun compaction and a lost screenshot must not kill a turn.
-  defp to_messages(%{role: :tool, content: content} = message, vision?) when is_list(content) do
-    [
-      ReqLLM.Context.tool_result_message(
-        message.name,
-        message.tool_call_id,
-        tool_result_parts(content, vision?),
-        %{is_error: message[:is_error] == true}
-      )
-    ]
-  end
-
-  defp to_messages(%{role: :tool} = message, _vision?) do
+  defp to_messages(%{role: :tool} = message) do
     [
       ReqLLM.Context.tool_result_message(
         message.name,
@@ -359,7 +336,7 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
     ]
   end
 
-  defp to_messages(_other, _vision?), do: []
+  defp to_messages(_other), do: []
 
   defp normalize(%ReqLLM.StreamResponse{stream: stream}, specs) do
     normalize(stream, specs)
@@ -682,78 +659,6 @@ defmodule Ouroboros.Provider.Native.Model.ReqLLM do
 
   defp value(map, key) when is_map(map),
     do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
-
-  @doc """
-  Whether `model_spec` accepts image input, best-effort from `llm_db`.
-
-  Returns `true` only when `llm_db` lists `:image` in the model's input modalities.
-  Unknown models and an absent `llm_db` default to `false`: sending a screenshot to a
-  coder model that cannot see it is a context-window tax, not a feature.
-  """
-  def vision?(model_spec) when is_binary(model_spec) and model_spec != "" do
-    with true <- Code.ensure_loaded?(LLMDB),
-         {:ok, model} <- LLMDB.model(model_spec),
-         modalities when is_map(modalities) <- Map.get(model, :modalities),
-         input when is_list(input) <- Map.get(modalities, :input) do
-      :image in input
-    else
-      _unknown -> false
-    end
-  rescue
-    _error -> false
-  catch
-    :exit, _reason -> false
-  end
-
-  def vision?(_model_spec), do: false
-
-  # Encodes a tool result's list content (§8.2) into `ReqLLM` content parts. Public with
-  # `@doc false` — the loop's tool-result seam, exposed for the test that asserts a
-  # non-vision model drops image parts and a vision model keeps them.
-  @doc false
-  @spec tool_result_parts([map()], boolean()) :: [ReqLLM.Message.ContentPart.t()]
-  def tool_result_parts(content, vision?) when is_list(content),
-    do: Enum.flat_map(content, &tool_content_part(&1, vision?))
-
-  # A tool-result content part (§8.2). Text passes through; an image is included only for a
-  # vision model, and a missing or changed staged file degrades to a marker rather than
-  # raising — the honesty seam that lets `Ouroboros.Provider.Native.Desktop` evict simply.
-  defp tool_content_part(part, vision?) when is_map(part) do
-    case value(part, :type) do
-      type when type in [:text, "text"] ->
-        [ReqLLM.Message.ContentPart.text(value(part, :text) || "")]
-
-      type when type in [:image, "image"] ->
-        if vision?, do: tool_image_part(part), else: []
-
-      _other ->
-        []
-    end
-  end
-
-  defp tool_content_part(_part, _vision?), do: []
-
-  defp tool_image_part(part) do
-    path = value(part, :path)
-    expected = value(part, :sha256)
-    media_type = value(part, :media_type) || "application/octet-stream"
-
-    with true <- is_binary(path),
-         {:ok, bytes} <- Ouroboros.Audit.Content.read(path),
-         true <- digest(bytes) == expected do
-      [ReqLLM.Message.ContentPart.image(bytes, media_type)]
-    else
-      _missing_or_changed ->
-        [
-          ReqLLM.Message.ContentPart.text(
-            "[screenshot #{sha_hint(expected)} is no longer available — call desktop_state again]"
-          )
-        ]
-    end
-  end
-
-  defp sha_hint(sha) when is_binary(sha), do: String.slice(sha, 0, 12)
-  defp sha_hint(_sha), do: "(unknown)"
 
   defp content_part(part) when is_map(part) do
     case value(part, :type) do

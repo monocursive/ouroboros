@@ -28,8 +28,8 @@ use serde_json::Value;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::model::transcript::{
-    leaf_text, Diff, FileChange, ImageArtifact, Lifecycle, PlanStatus, PlanUpdate,
-    PresentationEvent, ToolCall, ToolResult, TurnOutcome, UsageReport,
+    leaf_text, Diff, FileChange, Lifecycle, PlanStatus, PlanUpdate, PresentationEvent, ToolCall,
+    ToolResult, TurnOutcome, UsageReport,
 };
 
 use super::markdown;
@@ -683,37 +683,15 @@ pub struct ImageCell {
     /// The path exactly as it was named — workspace-relative for an attachment this
     /// client wrote. Never the absolute path it resolved to, which is a fact about this
     /// machine rather than about the conversation, and which would put a home directory
-    /// into an `/export` shared with someone else. For a desktop screenshot artifact, which
-    /// has no path on the wire, this is a short honest label rather than a file name.
+    /// into an `/export` shared with someone else.
     pub named: String,
-    /// The pixel size and format, where the file was inside the workspace and readable — or,
-    /// for a desktop artifact, the size the gateway stated (§8.5).
+    /// The pixel size and format, where the file was inside the workspace and readable.
     pub pixels: Option<(u32, u32)>,
     pub format: Option<String>,
     /// Why there is no size, where there is none. Never a bare absence: a placeholder that
     /// did not say why it was a placeholder leaves a reader unsure whether the picture is
     /// missing or the client is broken.
     pub note: Option<String>,
-    /// The sha that names a desktop screenshot artifact (§8.5, A11), where this image is one.
-    /// `None` for a composer attachment, which is named by its path rather than a digest.
-    /// It is the only key `computer_use.artifact` and containment accept, so a surface that
-    /// can draw pixels fetches by it.
-    pub sha: Option<String>,
-    /// The media type the gateway stated for a desktop artifact (`image/jpeg`, `image/png`).
-    pub media_type: Option<String>,
-    /// The decoded bytes, once a surface that can draw pixels has fetched them by sha.
-    ///
-    /// The drawable the projection carries so a renderer never stats a file: the fs-free
-    /// contract is kept because bytes arrive decoded, handed in by whoever fetched them,
-    /// rather than read from disk during projection.
-    ///
-    /// **Nothing fills this today.** The terminal draws the placeholder below and never
-    /// needs the pixels, and the web surface fetches artifacts in-process rather than
-    /// through this projection. It is the seam an inline-pixel pass would fill (see the
-    /// note on [`Cell::Image`]'s rendering), kept because the sha beside it is meaningless
-    /// without somewhere for the answer to land. `Arc` so the per-frame projection clone
-    /// stays a refcount rather than a copy of a screenshot.
-    pub bytes: Option<std::sync::Arc<Vec<u8>>>,
 }
 
 impl ImageCell {
@@ -745,47 +723,6 @@ impl ImageCell {
         text.push(']');
         text
     }
-
-    /// A desktop screenshot artifact as a conversation image (§8.5, A11).
-    ///
-    /// Minted from the metadata a `tool_result` carried — the pixel bytes are fetched later
-    /// by sha and handed back through [`Self::bytes`] — so the cell states real dimensions
-    /// from the moment the event arrives and gains a drawable once a surface that can render
-    /// pixels has fetched it. There is no path on the wire, so it is named by a short form of
-    /// its digest rather than a file.
-    pub fn from_artifact(artifact: &ImageArtifact) -> Self {
-        Self {
-            named: format!("desktop capture · {}", short_sha(&artifact.sha256)),
-            pixels: artifact.width.zip(artifact.height),
-            format: artifact.media_type.as_deref().and_then(media_type_format),
-            note: None,
-            sha: Some(artifact.sha256.clone()),
-            media_type: artifact.media_type.clone(),
-            bytes: None,
-        }
-    }
-}
-
-/// The leading twelve characters of a digest, enough to tell two screenshots apart in a
-/// label without spelling out all sixty-four.
-fn short_sha(sha: &str) -> String {
-    sha.chars().take(12).collect()
-}
-
-/// The short format word for a media type, or `None` for one this client does not draw.
-///
-/// Mirrors [`crate::images::format_of`], but from the media type the gateway stated rather
-/// than a filename, because a desktop artifact has no name to read an extension from.
-fn media_type_format(media_type: &str) -> Option<String> {
-    let word = match media_type.trim().to_ascii_lowercase().as_str() {
-        "image/png" => "png",
-        "image/jpeg" | "image/jpg" => "jpeg",
-        "image/gif" => "gif",
-        "image/webp" => "webp",
-        _other => return None,
-    };
-
-    Some(word.to_string())
 }
 
 /// What a divider terminates. Turn boundaries are the ones `/diff` counts turns by, so
@@ -2279,19 +2216,9 @@ fn group_exploration(
 fn project_tool_result(
     cells: &mut Vec<Cell>,
     tools: &mut BTreeMap<String, ToolSlot>,
-    mut result: ToolResult,
+    result: ToolResult,
 ) {
-    // Taken before the result is consumed so the tool cell and its image cells are the same
-    // two-step every surface reads: the tool row, then the picture it produced (§8.6). The
-    // fs-free contract holds because these artifacts arrive on the event and are minted from
-    // it — nothing here stats a file or reads a clock.
-    let artifacts = std::mem::take(&mut result.artifacts);
-
     merge_or_push_tool_result(cells, tools, result);
-
-    for artifact in &artifacts {
-        cells.push(Cell::Image(ImageCell::from_artifact(artifact)));
-    }
 }
 
 fn merge_or_push_tool_result(
@@ -3167,9 +3094,8 @@ fn render_file(lines: &mut Vec<Line<'static>>, file: &FileCell, width: usize) {
 /// that writes raw bytes to the terminal — a cursor-positioned placement pass over the
 /// backend, which is an operator-surface concern outside this projection.
 ///
-/// So the honest thing on this surface is the label, with real dimensions from the artifact
-/// where it is one. The bytes the cell may carry are the drawable for those other surfaces,
-/// not for a line of cells.
+/// So the honest thing on this surface is the label, with the real dimensions the header
+/// gave when the image entered the conversation.
 fn render_image(lines: &mut Vec<Line<'static>>, image: &ImageCell, width: usize) {
     let label = super::tree::truncate(&image.label(), width.saturating_sub(4).max(8));
 
@@ -4642,55 +4568,6 @@ mod tests {
             !text.contains("c1"),
             "correlation ids belong in details: {text}"
         );
-    }
-
-    #[test]
-    fn a_desktop_state_result_projects_a_tool_cell_and_an_image_cell() {
-        let sha = "a".repeat(64);
-        let call = event(
-            1,
-            "tool_call",
-            json!({"call_id": "d1", "name": "desktop_state", "input": {"app": "Calculator"}}),
-        );
-        let result = event(
-            2,
-            "tool_result",
-            json!({
-                "call_id": "d1",
-                "output": {"text": "Calculator is frontmost"},
-                "is_error": false,
-                "artifacts": [{
-                    "kind": "image",
-                    "sha256": sha,
-                    "media_type": "image/jpeg",
-                    "bytes": 81234,
-                    "width": 480,
-                    "height": 640
-                }]
-            }),
-        );
-
-        let cells = project(vec![Entry::Event(&call), Entry::Event(&result)]);
-
-        // The tool row, then the picture it produced — §8.6's two-step, in that order.
-        assert_eq!(cells.len(), 2, "a tool cell and an image cell");
-        assert!(matches!(cells[0], Cell::Tool(_)), "the tool row is first");
-
-        let Cell::Image(image) = &cells[1] else {
-            panic!("expected an image cell after the tool cell")
-        };
-        assert_eq!(image.sha.as_deref(), Some(sha.as_str()));
-        assert_eq!(image.pixels, Some((480, 640)));
-        assert_eq!(image.format.as_deref(), Some("jpeg"));
-        assert_eq!(image.media_type.as_deref(), Some("image/jpeg"));
-        // No bytes on the wire, so the cell is a placeholder-with-real-dimensions until a
-        // surface fetches the pixels by sha.
-        assert!(image.bytes.is_none());
-
-        // The label the transcript draws states the real size and the digest short form.
-        let text = plain(&render_cells(&cells, 80));
-        assert!(text.contains("480×640 jpeg"), "{text}");
-        assert!(text.contains(&sha[..12]), "{text}");
     }
 
     #[test]

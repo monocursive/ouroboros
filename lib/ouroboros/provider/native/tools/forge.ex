@@ -50,8 +50,8 @@ defmodule Ouroboros.Provider.Native.Tools.Forge do
   somebody answering that prompt meant, and what it does *not* cover is anything else that
   id might resolve to: `deploy/3` re-reads the same bundle, re-verifies it, and refuses
   unless the kind, the author and the name all still hold — the name against what the
-  engine was actually shown, which the loop hands back as `forge_evaluated_name` the way it
-  hands `desktop_evaluated_app` to the desktop tools. A `status` names nothing.
+  engine was actually shown, which the loop hands back to the tool as
+  `forge_evaluated_name`. A `status` names nothing.
 
   **`path` is the session's own workspace, and it is declared.** Resolved through
   `Ouroboros.Provider.Native.Paths.resolve/2` with the session's scope, the same
@@ -89,8 +89,8 @@ defmodule Ouroboros.Provider.Native.Tools.Forge do
 
   The spec and the lookup exist only while `config :ouroboros, :native_forge_tool` is
   `true` (default `false`, set by the `self` posture). Off, the model is not taught the
-  name and `Tools.lookup/3` answers `:unknown_tool` — the posture the desktop tools and
-  `capability` already take, for the same reason: a name a model is taught and cannot use
+  name and `Tools.lookup/3` answers `:unknown_tool` — the posture `capability` already
+  takes, for the same reason: a name a model is taught and cannot use
   costs a call to discover. `Ouroboros.Audit.tool_supported?/1` does not list `forge`, so a
   node under required audit refuses it by omission.
 
@@ -585,8 +585,8 @@ defmodule Ouroboros.Provider.Native.Tools.Forge do
   # What the permission engine was actually shown (Q-B). `Tools.classify/3` resolves the
   # artifact id against the ring, verifies the manifest and puts the *resolved name* in the
   # request context; the loop hands that name back on the tool context as
-  # `forge_evaluated_name`, exactly as it hands `desktop_evaluated_app` back to the desktop
-  # tools. So `Forge(vet)` allowing a deploy is a sentence about deploying `vet`, and a
+  # `forge_evaluated_name`. So `Forge(vet)` allowing a deploy is a sentence about deploying
+  # `vet`, and a
   # bundle swapped at that id between the decision and this moment is refused by name rather
   # than shipped under somebody else's allow.
   #

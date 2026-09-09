@@ -27,7 +27,7 @@ defmodule Ouroboros.Web.Live.NewSession do
   ## What a stored default is, and what it is not
 
   `new/1` seeds this struct from `Ouroboros.Web.Prefs`, and the semantics are the
-  **desktop's**, which `docs/DESKTOP.md` states in one sentence: "What the file supplies is
+  **desktop's**, which the removed `docs/DESKTOP.md` states in one sentence: "What the file supplies is
   where the control *starts*; an explicit pick is what gets sent, and an untouched panel
   with no stored default states no posture at all, leaving the plane to decide."
 

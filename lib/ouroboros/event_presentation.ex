@@ -103,26 +103,6 @@ defmodule Ouroboros.EventPresentation.PlanStep do
         }
 end
 
-defmodule Ouroboros.EventPresentation.ImageArtifact do
-  @moduledoc """
-  One image a tool result staged, described but not carried.
-
-  Metadata only: the sha that names it, the media type, the staged byte count, and the
-  pixel dimensions. The bytes never travel on the event
-  (`tui/src/model/transcript.rs:311-332`).
-  """
-
-  defstruct [:sha256, :media_type, :size, :width, :height]
-
-  @type t :: %__MODULE__{
-          sha256: String.t(),
-          media_type: String.t() | nil,
-          size: non_neg_integer() | nil,
-          width: non_neg_integer() | nil,
-          height: non_neg_integer() | nil
-        }
-end
-
 defmodule Ouroboros.EventPresentation.Diff do
   @moduledoc """
   One unified diff as the presentation holds it.
@@ -459,11 +439,9 @@ defmodule Ouroboros.EventPresentation.ToolCall do
 end
 
 defmodule Ouroboros.EventPresentation.ToolResult do
-  @moduledoc "One normalized tool result, with any image artifacts it staged."
+  @moduledoc "One normalized tool result."
 
-  alias Ouroboros.EventPresentation.ImageArtifact
-
-  defstruct [:call_id, :name, :kind, :output, :at, is_error: false, artifacts: []]
+  defstruct [:call_id, :name, :kind, :output, :at, is_error: false]
 
   @type t :: %__MODULE__{
           call_id: String.t() | nil,
@@ -471,8 +449,7 @@ defmodule Ouroboros.EventPresentation.ToolResult do
           kind: String.t() | nil,
           output: term(),
           is_error: boolean(),
-          at: integer() | nil,
-          artifacts: [ImageArtifact.t()]
+          at: integer() | nil
         }
 end
 
@@ -689,7 +666,6 @@ defmodule Ouroboros.EventPresentation do
     FileChange,
     FileUpdate,
     Hidden,
-    ImageArtifact,
     Interrupted,
     Lifecycle,
     PlanStatus,
@@ -726,8 +702,6 @@ defmodule Ouroboros.EventPresentation do
   @plan_steps 64
   # How many tool names a `run_started` header fact keeps.
   @run_tools 128
-  # How many image artifacts one tool result mints cells for.
-  @max_artifacts 16
   # How long a label from a runtime-native payload may be before it stops being a label.
   @label_bytes 256
 
@@ -890,8 +864,7 @@ defmodule Ouroboros.EventPresentation do
               :error -> nil
             end,
           is_error: error_result?(payload),
-          at: epoch_millis(Map.get(event, :timestamp)),
-          artifacts: image_artifacts(payload)
+          at: epoch_millis(Map.get(event, :timestamp))
         }
 
       :command_output_delta ->
@@ -1541,53 +1514,6 @@ defmodule Ouroboros.EventPresentation do
         text(payload, ["status"]) in ["error", "failed", "declined"]
     end
   end
-
-  # The image artifacts a tool result carried (§8.5), read defensively.
-  #
-  # An entry with an unknown `kind` is skipped rather than guessed at, and unknown fields
-  # are ignored rather than rejected. The one hard requirement is a `sha256`: it is the
-  # only key that can fetch the bytes or be checked by containment. A missing `kind` is
-  # taken as an image, because that is the only artifact kind the contract defines.
-  defp image_artifacts(payload) do
-    payload
-    |> array("artifacts")
-    |> Enum.filter(fn entry ->
-      case text(entry, ["kind"]) do
-        nil -> true
-        kind -> kind == "image"
-      end
-    end)
-    |> Enum.map(&image_artifact/1)
-    |> Enum.reject(&is_nil/1)
-    |> Enum.take(@max_artifacts)
-  end
-
-  defp image_artifact(entry) do
-    with sha256 when is_binary(sha256) <- text(entry, ["sha256", "sha", "digest"]),
-         true <- byte_size(sha256) == 64,
-         true <- hex?(sha256) do
-      %ImageArtifact{
-        sha256: String.downcase(sha256, :ascii),
-        media_type: text(entry, ["media_type", "mediaType", "content_type"]),
-        size: number(entry, ["bytes", "size"]),
-        width: clamp_u32(number(entry, ["width"])),
-        height: clamp_u32(number(entry, ["height"]))
-      }
-    else
-      _otherwise -> nil
-    end
-  end
-
-  defp hex?(text) do
-    text
-    |> :binary.bin_to_list()
-    |> Enum.all?(fn byte ->
-      byte in ?0..?9 or byte in ?a..?f or byte in ?A..?F
-    end)
-  end
-
-  defp clamp_u32(nil), do: nil
-  defp clamp_u32(value), do: min(value, 4_294_967_295)
 
   defp detail(payload) do
     text(payload, ["error", "reason", "message", "text"]) || bounded_compact(payload)

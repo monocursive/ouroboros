@@ -27,8 +27,7 @@ defmodule Ouroboros.Provider.Native.Tools.Grep do
     description:
       "Search file contents for a regular expression, in the workspace. Returns " <>
         "matching lines with their paths and line numbers, newest-modified files " <>
-        "first. Bounded to 200 matches. Use this for text; use `code_intel` for " <>
-        "references, definitions, and renames.",
+        "first. Bounded to 200 matches.",
     schema: [
       pattern: [type: :string, required: true, doc: "The regular expression to search for."],
       path: [

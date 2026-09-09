@@ -52,7 +52,6 @@ rsync -a --delete \
     --exclude 'tmp/' \
     --exclude '.elixir_ls/' \
     --exclude 'tui/target/' \
-    --exclude 'priv/computer-use/' \
     --exclude 'priv/sandbox/' \
     --exclude '/dist/ouro-*' \
     --exclude '/dist/.ouro-dist-linux-artifact' \
@@ -68,10 +67,9 @@ mix local.rebar --force >/dev/null
 say "mix deps.get"
 mix deps.get
 
-# The same verb a laptop runs (Makefile `dist`): computer-use helper, MIX_ENV=prod
-# mix release, cargo --release --features embed with OUROBOROS_RELEASE_TARBALL, then the
-# copy to dist/ouro-<version>-<host triple>. On Linux the Computer Use helper compiles its
-# honest "unsupported platform" stub — the same thing the release runner produces.
+# The same verb a laptop runs (Makefile `dist`): MIX_ENV=prod mix release, cargo --release
+# --features embed with OUROBOROS_RELEASE_TARBALL, then the copy to
+# dist/ouro-<version>-<host triple>.
 say "make dist"
 make dist
 

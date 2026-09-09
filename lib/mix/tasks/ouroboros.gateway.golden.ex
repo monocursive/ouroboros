@@ -48,7 +48,6 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
   use Mix.Task
 
   alias Ouroboros.Agent.EffectLedger
-  alias Ouroboros.CodeIntel.Diagnostics
   alias Ouroboros.Coding.Event, as: CodingEvent
   alias Ouroboros.Gateway.Conn
   alias Ouroboros.Gateway.Methods
@@ -80,15 +79,6 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
     distinct_fingerprints: 20,
     distinct_sessions: 2,
     would_resolve: 1
-  }
-
-  @diagnostic %{
-    range: %{start: %{line: 11, character: 4}, end: %{line: 11, character: 12}},
-    severity: :error,
-    code: "E0425",
-    source: "fake",
-    message: "cannot find value `widget` in this scope",
-    tags: []
   }
 
   @impl Mix.Task
@@ -142,7 +132,6 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       {"interactive_event_excerpt_notification", interactive_event_excerpt_notification()},
       {"interactive_event_detail_result", interactive_event_detail_result()},
       {"coding_event_detail_result", coding_event_detail_result()},
-      {"code_intel_diagnostics_result", code_intel_diagnostics_result()},
       {"mcp_list_result", mcp_list_result()},
       {"wasm_status_result", wasm_status_result()},
       {"wasm_list_result", wasm_list_result()},
@@ -315,25 +304,6 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
                "type" => "text",
                "text" => "Applied 1 edit to lib/ouroboros/web/transcript.ex"
              }
-           }
-         ]
-       }, []},
-      {"event_tool_result_computer_use",
-       "a Computer Use result: metadata-only image artifacts, sha-addressed, no pixels",
-       :interactive, 113, :tool_result,
-       %{
-         "name" => "desktop_state",
-         "call_id" => "toolu_01Desktop00000000001",
-         "output" => "Captured the frontmost window of Calculator.",
-         "is_error" => false,
-         "artifacts" => [
-           %{
-             "kind" => "image",
-             "sha256" => String.duplicate("ab", 32),
-             "media_type" => "image/png",
-             "bytes" => 184_320,
-             "width" => 1512,
-             "height" => 982
            }
          ]
        }, []},
@@ -1044,22 +1014,6 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       "the session no longer retains events at or below that cursor; replay from 96",
       %{"reason" => "cursor_pruned", "floor" => 96}
     )
-  end
-
-  # E2. One diagnostics answer, with the field that makes the new-only rule work across a
-  # process boundary: `signature` is derived here through the live
-  # `CodeIntel.Diagnostics.signature/1`, so a change to what "the same diagnostic" means
-  # is a diff in this file rather than a hook that silently starts re-reporting fixed
-  # errors. Positions stay 0-based, exactly as the protocol reports them.
-  defp code_intel_diagnostics_result do
-    Conn.result_frame(9, %{
-      status: :ok,
-      version: 4,
-      source: "fake",
-      truncated: 0,
-      counts: %{error: 1, warning: 0, information: 0, hint: 0, unknown: 0},
-      items: Enum.map([@diagnostic], &Map.put(&1, :signature, Diagnostics.signature(&1)))
-    })
   end
 
   # D4. Every state a client has to render at once: a running server with its tools, one

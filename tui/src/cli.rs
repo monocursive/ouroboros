@@ -258,12 +258,6 @@ pub enum Command {
     /// `invalid_params` it was given.
     Fork(ForkArgs),
 
-    /// Computer Use operator surface. `ouro desktop doctor` reports node readiness.
-    Desktop {
-        #[command(subcommand)]
-        command: DesktopCommand,
-    },
-
     /// WebAssembly containment operator surface. `ouro wasm doctor` reports node readiness.
     Wasm {
         #[command(subcommand)]
@@ -302,20 +296,6 @@ pub enum Command {
     /// approval is denied with a message saying so.
     #[command(hide = true)]
     McpServe,
-
-    /// Answer a vendor agent's own hook event.
-    ///
-    /// Never run by hand either. `Ouroboros.Provider.ClaudeAdapter` composes the hook into
-    /// the `--settings` JSON a bridged Claude session is launched with, and Claude Code
-    /// runs it with the same four `OUROBOROS_*` variables the MCP bridge gets. Every
-    /// subcommand here reads one JSON object on stdin, writes one on stdout, and exits 0
-    /// whatever happened: a hook that refuses is a hook that can send a model back to redo
-    /// an edit that already succeeded.
-    #[command(hide = true)]
-    Hook {
-        #[command(subcommand)]
-        command: HookCommand,
-    },
 
     /// Print the exact kernel incarnation of one process for the BEAM ownership protocol.
     #[command(hide = true)]
@@ -695,36 +675,6 @@ pub struct ForkArgs {
     /// A file holding the gateway token. Omitted, the token beside gateway.json is used.
     #[arg(long, value_name = "PATH")]
     pub token_file: Option<PathBuf>,
-}
-
-/// `ouro desktop`'s subcommands. One so far.
-#[derive(Debug, Subcommand)]
-pub enum DesktopCommand {
-    /// Report Computer Use readiness on the node — helper presence, permissions, and
-    /// capabilities. Asks `computer_use.status` by default (starts nothing). `--probe`
-    /// starts the helper so TCC is visible.
-    Doctor(DesktopArgs),
-}
-
-/// `ouro desktop doctor`'s flags.
-#[derive(Debug, Args)]
-pub struct DesktopArgs {
-    /// Emit the raw status JSON instead of a readable summary.
-    #[arg(long)]
-    pub json: bool,
-
-    /// Where the gateway listens. Omitted, the local gateway.json is read instead.
-    #[arg(long, value_name = "HOST:PORT")]
-    pub addr: Option<String>,
-
-    /// A file holding the gateway token. Omitted, the token beside gateway.json is used.
-    #[arg(long, value_name = "PATH")]
-    pub token_file: Option<PathBuf>,
-
-    /// Start the helper and report live TCC (`computer_use.probe`). Default is
-    /// start-nothing `computer_use.status`.
-    #[arg(long)]
-    pub probe: bool,
 }
 
 /// `ouro wasm`'s subcommands: one that asks a node, and five that ask a local helper.
@@ -1250,14 +1200,6 @@ pub struct UpdateArgs {
     /// rollback is a thing to mean rather than a thing to be handed.
     #[arg(long)]
     pub allow_downgrade: bool,
-}
-
-/// The vendor hook events this build answers. One so far.
-#[derive(Debug, Subcommand)]
-pub enum HookCommand {
-    /// Claude Code's `PostToolUse`: announce the edit to the runtime's language server,
-    /// wait up to five seconds, and print the new diagnostics as `additionalContext`.
-    PostToolUse,
 }
 
 /// `ouro run`'s flags, in one struct so the dispatch stays one line.

@@ -104,7 +104,6 @@ defmodule Ouroboros.Provider.Native.Prompt do
     #{posture(sandbox_decision, approval_mode)}
     #{fleet_section(Keyword.get(opts, :fleet))}
     #{plan_section(approval_mode)}
-    #{computer_use_section(tools)}
     ## Rules
 
     1. **Read before you edit.** `edit` refuses a file this session has not read, and
@@ -176,9 +175,6 @@ defmodule Ouroboros.Provider.Native.Prompt do
         if(search_tools != [],
           do: "Use #{tool_names(search_tools)} for discovery instead of shell pipelines."
         ),
-        if("code_intel" in names,
-          do: "Use `code_intel` for symbol-aware navigation, references, and diagnostics."
-        ),
         if("edit" in names,
           do: "Use `edit` for one exact, uniquely matched replacement in a file."
         ),
@@ -234,8 +230,8 @@ defmodule Ouroboros.Provider.Native.Prompt do
 
   defp posture({:sandboxed, label, %{mode: :read_only} = policy}, approval_mode) do
     """
-    This session is **read-only**. `write`, `edit`, `apply_patch`, and writing
-    `code_intel` operations are refused. `bash` runs inside the #{label} OS sandbox; it
+    This session is **read-only**. `write`, `edit`, and `apply_patch` are refused.
+    `bash` runs inside the #{label} OS sandbox; it
     may write only to a private scratch directory, and #{network_posture(policy)}
     Investigate and report; if the task needs a change, say what change you would
     make.#{approvals(approval_mode)}
@@ -343,40 +339,15 @@ defmodule Ouroboros.Provider.Native.Prompt do
        when your turn ends, and they choose whether the work runs with edits auto-accepted,
        with each change approved by hand, or not yet.
 
-    `write`, `edit`, `apply_patch`, `bash` and the writing `code_intel` operations are
-    refused for the whole of this mode, whatever a permission rule says. If the task turns
-    out to need no change, say that instead of planning one.
+    `write`, `edit`, `apply_patch` and `bash` are refused for the whole of this mode,
+    whatever a permission rule says. If the task turns out to need no change, say that
+    instead of planning one.
     """
     |> String.trim_trailing()
     |> Kernel.<>("\n")
   end
 
   defp plan_section(_other), do: ""
-
-  defp computer_use_section(tools) do
-    if desktop_tools?(tools) do
-      act =
-        if Enum.any?(tools, &(&1.name == "desktop_act")) do
-          " Computer Use is available as desktop_state and desktop_act. Call desktop_state before every desktop_act."
-        else
-          " Computer Use is available as desktop_state."
-        end
-
-      """
-
-      ## Computer Use
-      #{act} Prefer workspace tools and MCP. Use desktop_state when the fact you need exists only in a GUI. Name the app or window; untargeted capture is refused. Do not operate Terminal, ouro, ouro-desktop, or system permission dialogs. If desktop_state reports a denied app or missing OS permission, tell the operator — do not retry around it.
-      """
-      |> String.trim_trailing()
-      |> Kernel.<>("\n")
-    else
-      ""
-    end
-  end
-
-  defp desktop_tools?(tools) do
-    Enum.any?(tools, &(&1.name == "desktop_state"))
-  end
 
   defp approvals(:plan),
     do:

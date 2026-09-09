@@ -2,8 +2,8 @@ defmodule Ouroboros.Provider.Native.ToolAttempt do
   @moduledoc """
   One validated tool attempt, carried through classification, authorization and execution.
 
-  Hook rewrites and Desktop target confirmation replace the call and classification
-  together before ledger admission. The effect id remains stable throughout the attempt.
+  Hook rewrites replace the call and classification together before ledger admission.
+  The effect id remains stable throughout the attempt.
   Replay never constructs this value: it substitutes recorded results before live lookup.
   """
   @enforce_keys [:call, :module, :classified, :effect_id]
