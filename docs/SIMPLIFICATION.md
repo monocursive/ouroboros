@@ -109,8 +109,8 @@ cell tests separately pin local rendering behavior.
 - The CLI's `RuntimeConnection` and `Ownership` distinguish attached runtimes from owned
   children. Explicit asynchronous error cleanup and exit handling act only on owned
   children; detach relinquishes ownership. Spawn locks and process-birth checks remain
-  in the existing startup path. Fleet service installation and identity checks live in
-  `fleet/service.rs`, behind the existing public facade.
+  in the existing startup path. Fleet service installation was deleted with the rest of
+  the enrollment product (`proposals/core.md` §3).
 
 The separate BEAM and WASM upgrade engines remain supported. Removing an extension
 lane, merging batch and interactive persistence schemas, or replacing the effect ledger
