@@ -30,11 +30,11 @@ defmodule Ouroboros.Storage.DurableFile do
   @stale_temporary_ms 60_000
 
   # `[:safe]` refuses to create an atom, so a checkpoint naming one this build no longer
-  # spells would fail to decode — and a store is one file, so that loses the store rather
+  # spells would fail to decode — and for a single-file store that loses the store rather
   # than the record. Holding the list as a literal here interns those names in the module
   # that does the decoding, which is the one module guaranteed to be loaded when it
   # matters. See `Ouroboros.Storage.RetiredAtoms` for what is in it and why.
-  @retired_atoms Ouroboros.Storage.RetiredAtoms.retired()
+  @retired_atoms Ouroboros.Storage.RetiredAtoms.all()
 
   @doc """
   The atoms this module interns on behalf of older checkpoints.
