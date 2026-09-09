@@ -81,7 +81,6 @@ config :ouroboros,
   # Terminal entries retained per node. In-flight entries are never evicted, and every
   # read has its own smaller bound in `Ouroboros.Agent.EffectLedger`.
   effect_ledger_limit: 1_000,
-  upgrade_storage: {Jido.Storage.ETS, table: :ouroboros_upgrades},
   release_storage: {Jido.Storage.ETS, table: :ouroboros_releases},
   capability_storage: {Jido.Storage.ETS, table: :ouroboros_capabilities},
   epoch_storage: {Jido.Storage.ETS, table: :ouroboros_forge_epochs},
@@ -116,10 +115,6 @@ config :ouroboros,
   # own `budget_ms` internally; this is the outer limit on a node that stops answering,
   # and exceeding it is ambiguity, so it must be comfortably above any spec's budget.
   capability_eval_timeout: 30_000,
-  # How much slower than the version it replaces a challenger capability may run its
-  # probe set and still be promoted under `compare: true`. Wall-clock over a handful of
-  # probes on a shared VM is noisy; a budget near 1.0 rejects honest challengers.
-  capability_eval_regression_budget: 1.2,
   # Deadline for one agent effect. Effects run off the agent's process, but they still
   # hold a supervised task and an in-flight audit entry, so every one of them ends.
   effect_timeout: 120_000,

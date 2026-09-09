@@ -292,7 +292,6 @@ if config_env() == :prod and is_nil(System.get_env("OUROBOROS_COLLECTOR_CONFIG")
     # unfinished acknowledged attempt from one that was never requested.
     effect_ledger_storage:
       {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "effect-ledger")},
-    upgrade_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "upgrades")},
     release_storage:
       {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "release-journal")},
     capability_storage:

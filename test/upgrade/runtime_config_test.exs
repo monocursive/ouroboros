@@ -79,8 +79,8 @@ defmodule Ouroboros.Upgrade.RuntimeConfigTest do
     assert {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "coding")} ==
              get_in(config, [:ouroboros, :coding_storage])
 
-    assert {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "upgrades")} ==
-             get_in(config, [:ouroboros, :upgrade_storage])
+    assert {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "capabilities")} ==
+             get_in(config, [:ouroboros, :capability_storage])
   end
 
   test "a blank production override still derives the XDG default", %{data_dir: scratch} do
