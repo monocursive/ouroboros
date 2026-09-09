@@ -391,7 +391,7 @@ defmodule Ouroboros.Gateway.Methods do
   still belongs beside every other parameter rule rather than in the socket handler.
   """
   @spec subscription_params(plane(), map()) ::
-          {:ok, InteractiveRef.t() | TaskRef.t(), non_neg_integer()} | {:invalid, String.t()}
+          {:ok, InteractiveRef.t(), non_neg_integer()} | {:invalid, String.t()}
   def subscription_params(plane, params) do
     with :ok <- Contract.validate("#{plane}.subscribe", params),
          {:ok, session} <- session_target(plane, params),
@@ -401,8 +401,7 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   @doc "Validates the one parameter an unsubscribe call carries."
-  @spec session_param(plane(), map()) ::
-          {:ok, InteractiveRef.t() | TaskRef.t()} | {:invalid, String.t()}
+  @spec session_param(plane(), map()) :: {:ok, InteractiveRef.t()} | {:invalid, String.t()}
   def session_param(plane, params) do
     with :ok <- Contract.validate("#{plane}.unsubscribe", params),
          do: session_target(plane, params)
