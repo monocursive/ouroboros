@@ -903,7 +903,13 @@ defmodule Ouroboros.ClusterTest do
       bare = start_bare_peer!()
 
       accepted = unique_id("placed")
-      assert {:ok, pid} = Mesh.start_agent_on(core, accepted, role: "remote reviewer")
+
+      assert {:ok, pid} =
+               Mesh.start_agent_on(core, accepted,
+                 agent: Ouroboros.Capability.DistributionReference,
+                 role: "remote reviewer"
+               )
+
       assert node(pid) == core
       on_exit(fn -> Mesh.stop_agent(accepted) end)
 
