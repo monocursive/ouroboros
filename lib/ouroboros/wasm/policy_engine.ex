@@ -1895,8 +1895,9 @@ defmodule Ouroboros.Wasm.PolicyEngine do
         budget_ms: 5_000
       }
 
-  D12 applies here exactly as it does to a capability: there is no build peer behind lane W, so
-  the signed spec *is* the test story, and the signer requires one.
+  D12 applies here exactly as it does to a capability: nothing in this runtime runs a
+  component's own test suite before the signature, so the signed spec *is* the test story,
+  and the signer requires one.
   """
   @spec validate_eval(term()) :: {:ok, map()} | {:error, term()}
   def validate_eval(spec) when is_map(spec) and not is_struct(spec) do

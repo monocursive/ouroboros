@@ -170,8 +170,9 @@ defmodule Ouroboros.Wasm.DeployTest do
     test "the whole signing policy applies, and a refusal is journalled too", context do
       upload = upload!(context, "\0asm\x01\x00\x00\x00 component")
 
-      # D12: lane W's signer requires an eval spec by default, because there is no
-      # BuildPeer behind a component and the signed spec is the test story.
+      # D12: the signer requires an eval spec by default, because nothing in this runtime
+      # ran the component's own tests before the signature and the signed spec is the
+      # test story.
       assert {:error, {:signing_refused, :eval_spec_required}} =
                sign(context, upload, eval: nil)
 
@@ -744,11 +745,12 @@ defmodule Ouroboros.Wasm.DeployTest do
       assert entry.state == :quarantined
     end
 
-    # M6/M29. The old version of this seeded a lane-B entry whose *module* was an atom, so
+    # M6/M29. Historically, the register held entries from a second lane whose *module* was
+    # an atom (docs/proposals/core.md §4 A1); the old version of this test seeded one, so
     # `Registry.history/2`'s name match already excluded it and `lane_w?/1` was never
     # reached — deleting the filter left the test green. This one seeds an entry the module
     # match *does* find: the module is literally `"wasm/<name>"`, and the only thing that
-    # makes it lane B is the absence of a component sha, which is exactly what `lane_w?/1`
+    # disqualifies it is the absence of a component sha, which is exactly what `lane_w?/1`
     # reads. Delete `lane_w?(&1)` from `live_entry/2` and this goes red.
     test "an entry under a lane-W name with no component is still not a lane-W rollout",
          context do

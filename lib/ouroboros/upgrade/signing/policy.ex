@@ -54,9 +54,10 @@ defmodule Ouroboros.Upgrade.Signing.Policy do
       defaulting to `Ouroboros.Upgrade.Signing.Policy.Default`.
     * `config :ouroboros, :signing_require_wasm_eval` — when true, a manifest must carry
       a valid evaluation spec in `metadata.eval`, and it defaults to **true** (D12).
-      There is no build peer that ran a test suite here, so the signed eval spec *is* the
-      test story: it is what makes "this capability declared how it would be judged" a
-      precondition of a signature rather than a hope.
+      Nothing in this runtime compiles a capability and runs its own test suite before a
+      signature, so the signed eval spec *is* the test story: it is what makes "this
+      capability declared how it would be judged" a precondition of a signature rather
+      than a hope.
   """
 
   @default_rate_limit_window_ms 60_000
@@ -532,9 +533,10 @@ defmodule Ouroboros.Upgrade.Signing.Policy.Default do
     end
   end
 
-  # Optional on purpose (D12): there is no BuildPeer here, so a guest toolchain's report is
-  # provenance when it exists and never a precondition. What is checked is that a report
-  # which *does* exist is not a report of failures.
+  # Optional on purpose (D12): the toolchain that produced the component ran somewhere this
+  # runtime does not control, so its test report is provenance when it exists and never a
+  # precondition. What is checked is that a report which *does* exist is not a report of
+  # failures.
   defp fetch_optional_tests(metadata) do
     case Map.get(metadata, :test_report) do
       nil ->

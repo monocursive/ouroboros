@@ -15,10 +15,11 @@ defmodule Ouroboros.Wasm.RolloutTwoNodeTest do
   alias Ouroboros.Wasm.Rollout
   alias Ouroboros.Wasm.Store
 
-  # The claim W3 exists to make: **one artifact deploys on both nodes**. Lane B cannot say
-  # that — a BEAM artifact is loadable on exactly one OTP/Elixir/architecture triple
-  # (docs/WASM.md §3.3) — and this is the test that says it, against the real helper and a
-  # real `wasm32-wasip2` component rather than a scripted reply.
+  # The claim W3 exists to make: **one artifact deploys on both nodes**. Historically this
+  # was the argument for the lane: the BEAM lane it replaced could not say it, because a
+  # BEAM artifact is loadable on exactly one OTP/Elixir/architecture triple (docs/WASM.md
+  # §3.3). This is the test that says it, against the real helper and a real
+  # `wasm32-wasip2` component rather than a scripted reply.
   @guest Path.expand("../support/wasm/echo.wasm", __DIR__)
   @signer "wasm-two-node-key"
   @config ~s({"greeting":"hello"})

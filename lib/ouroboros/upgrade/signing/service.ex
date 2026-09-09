@@ -917,8 +917,8 @@ defmodule Ouroboros.Upgrade.Signing.Service do
     end
   end
 
-  # Defaults to true: there is no build peer and no ExUnit run behind a component, so the
-  # signed eval spec is the test story (docs/WASM.md D12). The comparison
+  # Defaults to true: nothing in this runtime compiles a component or runs its tests before
+  # the signature, so the signed eval spec is the test story (docs/WASM.md D12). The comparison
   # is against `false` rather than `true` so an unusable configured value keeps the strict
   # default instead of relaxing it.
   defp require_wasm_eval(opts) do

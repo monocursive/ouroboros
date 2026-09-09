@@ -216,10 +216,11 @@ defmodule Ouroboros.Wasm.RolloutTest do
     end
 
     test "a stale epoch is refused against what this register already deployed", context do
-      # A live lane-W entry at epoch 50 is the watermark this plane enforces; lane B's
-      # monotonicity is the node executor's, and lane W has none. The check itself lives
-      # inside `Registry.deploying/2` so it cannot be raced; what this asserts is that a
-      # caller still sees the reason and not the recording wrapper around it.
+      # A live entry at epoch 50 is the watermark this plane enforces, and the register is
+      # the only thing that enforces it — there is no second monotonicity anywhere else in
+      # the tree. The check itself lives inside `Registry.deploying/2` so it cannot be
+      # raced; what this asserts is that a caller still sees the reason and not the
+      # recording wrapper around it.
       seed_live!(context, 50)
 
       assert {:error, {:stale_epoch, 50, 50}} =
@@ -296,8 +297,8 @@ defmodule Ouroboros.Wasm.RolloutTest do
 
     test "a manifest that reached a terminal state cannot be re-deployed", context do
       # A retry is always a new manifest: the register refuses the duplicate id, and a new
-      # id at the same epoch is refused for the number. Parity with lane B, whose register
-      # refuses `{:already_recorded, _}` and whose retry is a re-forge.
+      # id at the same epoch is refused for the number. Both refusals are the register's,
+      # which is why they survived the removal of the other lane that used to share it.
       artifact = artifact!(context, epoch: 42_000)
 
       assert {:error, {:rolled_back, _outcome}} = deploy(artifact, [node()], context)

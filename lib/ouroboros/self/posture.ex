@@ -261,9 +261,9 @@ defmodule Ouroboros.Self.Posture do
       require_eval != true ->
         {:error,
          "#{@posture_env}=#{@self} requires `config :ouroboros, :signing_require_wasm_eval` " <>
-           "to be true — the default — and this build has #{inspect(require_eval)}. Lane W " <>
-           "has no build peer behind it, so the signed evaluation spec is the whole test " <>
-           "story for what a session forges."}
+           "to be true — the default — and this build has #{inspect(require_eval)}. Nothing " <>
+           "here runs a component's own tests before the signature, so the signed " <>
+           "evaluation spec is the whole test story for what a session forges."}
 
       true ->
         :ok

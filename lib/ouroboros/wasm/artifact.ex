@@ -35,8 +35,8 @@ defmodule Ouroboros.Wasm.Artifact do
   `source_sha256`, `language`, `test_report`, `eval`, and `start`.
 
     * `eval` is an `Ouroboros.Upgrade.Rollout.Evaluation` spec, and the signer requires
-      one by default (D12): there is no build peer running a test suite here, so the
-      signed eval spec *is* the test story.
+      one by default (D12): nothing in this runtime runs a component's own test suite
+      before the signature, so the signed eval spec *is* the test story.
     * `start` is `%{id: binary, config: binary}` and is what makes a capability
       survive a reboot — `Ouroboros.Wasm.Rollout` starts the durable wrapper agent under
       that id when the rollout reaches `:live`, and the boot-time restart starts it again
