@@ -1,0 +1,17 @@
+{
+  "id": "06-provider-read-the-native-agent-s",
+  "base_sha": "17d02c4072ea845cb7a772d210ea61ad270f8885",
+  "commit_sha": "0f365f4f9363088cccf8ce82ecb0749009920b1c",
+  "subject": "fix(provider): read the native agent's permission engine from node configuration",
+  "instruction": "fix(provider): read the native agent's permission engine from node configuration\n\nD1 was written beside C1; once both are on one tree the durable engine is\nalways loaded, so the native provider's three no-engine tests described a\nnode that no longer exists. The engine is now read through the same\n:permissions_engine key the interactive plane uses for external approvals,\nthe no-engine tests configure it away explicitly, and a new test pins that\na request with no rule asks in the engine's own words.\n\nAcceptance. These tests are restored into the worktree after the session ends and must pass:\n  - emits the full sequence in order\n  - carries the system prompt and the tool schemas into every model call\n  - a `plan` call becomes a plan_updated event\n  - stops on the third identical call and names the doom loop\n  - fails the turn by name at max_iterations\n  - a model error fails the turn rather than crashing it\n  - an unknown tool answers in-band with the tools that do exist\n  - asks before a write under :prompt and runs it when approved\n  - a denial becomes an error tool result and the file is not written\n  - an unanswered approval is denied at the timeout\n  - a session-scope approval is not asked again in the same turn\n  - :auto_approve skips the ask entirely\n\nRules. Files that already exist under `test/` must not be modified or deleted — the change is graded against tests restored from the history after the session ends, applied to a fresh checkout of the starting commit. New test files of your own are allowed and are left in place, but they are yours: they are not copied into the tree the grade runs in. The change is collected as a diff over `lib/`, `assets/`, `priv/`, `config/`, `docs/` and `README.md`; a change to any other path — `mix.exs` and `.formatter.exs` included — is refused rather than graded. Work only inside this worktree.",
+  "instruction_kind": "full",
+  "hidden_tests": [
+    "test/provider/native/loop_test.exs",
+    "test/provider/native/permissions_test.exs"
+  ],
+  "solution_files": [
+    "lib/ouroboros/provider/native/permissions.ex"
+  ],
+  "timeout_secs": 600,
+  "measured": {"compile_ms": 51419, "diff_lines": 13, "test_ms": 14257}
+}

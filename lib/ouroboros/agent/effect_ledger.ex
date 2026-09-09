@@ -49,6 +49,14 @@ defmodule Ouroboros.Agent.EffectLedger do
   acceptable because this ledger is the *authority* record and the session's turn journal
   (`Ouroboros.Provider.Native.Journal`) is the replay substrate: what an evicted
   `:inference` entry costs is the accountability row, not the recording of the call.
+
+  S2 adds a sixth, `:policy_promotion`, and it moves the quota again — 1000/5 to 1000/6 on a
+  node that has ever promoted a tool. It is the *lowest*-volume kind in here by a wide margin
+  (a promotion is a human act, a handful in a node's life) and max-min fairness is what makes
+  that matter: a kind that writes six entries keeps all six however many tool calls follow it,
+  which is the property this arithmetic exists for. What it costs is a hundred and sixty-odd
+  slots of the high-volume kinds' quota on such a node, and that is the right trade for the
+  only durable record of what widened this node's permission surface.
   """
 
   use GenServer
@@ -58,15 +66,16 @@ defmodule Ouroboros.Agent.EffectLedger do
   alias Ouroboros.Control.Grants
 
   @store_key {:ouroboros, :agent_effect_ledger, 1}
-  @checkpoint_version 2
-  # A version-1 checkpoint is read as-is: the `Entry` struct did not change when
-  # `:inference` was added, so there is nothing to widen. What the bump buys is the other
-  # direction — an *older* build reading a checkpoint that contains `:inference` entries
-  # would fail `valid_entry?/1` on `effect in effects()` and discard the whole file as
+  @checkpoint_version 3
+  # A version-1 or version-2 checkpoint is read as-is: the `Entry` struct did not change when
+  # `:inference` was added, and it did not change when `:policy_promotion` was, so there is
+  # nothing to widen. What each bump buys is the other direction — an *older* build reading a
+  # checkpoint that contains entries of a kind it has never heard of would fail
+  # `valid_entry?/1` on `effect in effects()` and discard the whole file as
   # `:invalid_effect_ledger_checkpoint`, losing every entry rather than refusing cleanly.
   # With the version stamped, that build says `:unsupported_effect_ledger_checkpoint` and
   # stops, which is the difference between "I cannot read this" and "this is garbage".
-  @upgradable_versions [1]
+  @upgradable_versions [1, 2]
   @default_retention_limit 1_000
   @default_query_limit 100
   @max_query_limit 500
@@ -83,6 +92,11 @@ defmodule Ouroboros.Agent.EffectLedger do
     # `fingerprint` is a digest of the command line, paths, and domains; the text of any
     # of them is exactly the content this ledger exists to keep out.
     permission: [:tool, :mode, :provider, :fingerprint],
+    # The `actor` this entry's *result* carries is `Ouroboros.Control.Permissions.actor/0`:
+    # `:human`, `:rule`, `:classifier`, and — since S2's fix wave — `:automation` for a client
+    # that answered with nobody at the keyboard and `:runtime` for this node answering its own
+    # unanswered question. They are stored as they arrive; the honesty is the caller's, and
+    # `Interactive.Task.Approvals` is where it now happens.
     # B7. A command an operator ran in a session's workspace, recorded before it runs.
     # `command_digest` is a digest of the command line and `cwd` is the directory it ran
     # in; the command text is exactly the content this ledger exists to keep out, and a
@@ -126,7 +140,17 @@ defmodule Ouroboros.Agent.EffectLedger do
     # iteration-mutated system suffix and the final round's empty tool list. It is an
     # unvalidated string, the `operator_shell.command_digest` precedent: a digest is an
     # identity, and the prompt it names is exactly the content this ledger keeps out.
-    inference: [:session_id, :turn_id, :iteration, :model, :provider, :prompt_sha256, :node]
+    inference: [:session_id, :turn_id, :iteration, :model, :provider, :prompt_sha256, :node],
+    # S2. One change to what a policy component is allowed to resolve on this node:
+    # `:promote`, `:demote` or `:clear`. `component_sha256` is the bytes the promotion is
+    # *for* — a re-deployed policy with new bytes is a different policy and is not promoted —
+    # `tool` is the one tool the action names and `shape` the one command prefix within it
+    # (both `nil` for a `:clear`). A shape is a *rule*, the thing an operator would have typed
+    # as `Bash(mix test *)`, and it is here for the reason `operator_shell.cwd` is: an audit of
+    # what widened this node's permission surface that did not say what it widened would be
+    # unreadable. It is drawn from the redacted document the component was shown, never from a
+    # raw command line.
+    policy_promotion: [:policy_name, :tool, :shape, :action, :component_sha256, :actor, :node]
   }
   @result_fields %{
     start_agent: [:agent_id, :module, :node],
@@ -150,6 +174,23 @@ defmodule Ouroboros.Agent.EffectLedger do
       :journal_seq,
       :input_tokens,
       :output_tokens
+    ],
+    # S2. The numbers the promotion was earned on: how many corpus rows the replay covered for
+    # this shape, how many of them the component contradicted anywhere in the tool, how many
+    # distinct requests and sessions it answered *definitely*, how many prompts the promotion
+    # removes, and the digest of the report they came out of. A demotion carries `reason` and
+    # the `fingerprint` of the human answer that contradicted the component — the digest, never
+    # the command.
+    policy_promotion: [
+      :decisions,
+      :contradictions,
+      :distinct_fingerprints,
+      :distinct_sessions,
+      :would_resolve,
+      :report_sha256,
+      :reason,
+      :fingerprint,
+      :session_id
     ]
   }
 
@@ -189,7 +230,19 @@ defmodule Ouroboros.Agent.EffectLedger do
   # `{:inference_unrecordable, reason}` rather than running a model call nobody can account
   # for. It is the highest-volume kind in here, which the retention arithmetic above
   # absorbs by construction rather than by raising the limit.
-  @ledger_only_effects [:permission, :operator_shell, :tool_call, :approval, :inference]
+  # `:policy_promotion` (S2) is the newest and the rarest: one entry per change to what a
+  # signed policy component may resolve without asking a human. It is gated like the rest —
+  # `Ouroboros.Control.PolicyPromotion` writes it before it acknowledges, and a ledger that
+  # refuses refuses the promotion — because a widening nobody can account for afterwards is
+  # exactly the thing this lane exists to prevent.
+  @ledger_only_effects [
+    :permission,
+    :operator_shell,
+    :tool_call,
+    :approval,
+    :inference,
+    :policy_promotion
+  ]
 
   defmodule Entry do
     @moduledoc "One durable, content-minimized agent-effect attempt and its outcome."

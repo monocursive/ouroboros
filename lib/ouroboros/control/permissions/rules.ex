@@ -33,6 +33,8 @@ defmodule Ouroboros.Control.Permissions.Rules do
 
     * any path with a `.git` segment — the repository's own history and hooks
     * any path with a `.ouroboros` segment — a workspace's runtime state
+    * any file named `ouroboros.toml`, at any depth — the workspace hook manifest
+      `Ouroboros.Provider.Native.Hooks` reads to decide what runs around a tool call
     * the node's data directory and everything beneath it — sessions, journals, the
       permission store itself, the effect ledger
     * `$XDG_CONFIG_HOME/ouroboros/**`, or `~/.config/ouroboros/**` when that is unset
@@ -46,6 +48,18 @@ defmodule Ouroboros.Control.Permissions.Rules do
 
   @protected_segments [".git", ".ouroboros"]
 
+  # S1. The workspace hook manifest (`Ouroboros.Provider.Native.Hooks`, hooks.ex:285): the
+  # file that says which programs this runtime runs before and after a tool call, and with
+  # what. It is a *file* rather than a segment, so it is matched on the final component
+  # only — a directory that happens to be called `ouroboros.toml` is not the manifest, and
+  # a path beneath one is not it either.
+  #
+  # It joins the list for the reason the list exists: a session that could rewrite this file
+  # could give itself a hook, and a hook is a program this runtime runs. The engine's own
+  # rules and the ledger are already fenced; the hooks were reachable through an ordinary
+  # `write` in an ordinary workspace, which is where a self-improving session lives.
+  @protected_files ["ouroboros.toml"]
+
   @rank %{deny: 0, ask: 1, allow: 2}
   @scope_rank %{node: 0, user: 1, workspace: 2, session: 3}
 
@@ -57,6 +71,7 @@ defmodule Ouroboros.Control.Permissions.Rules do
   @spec protected_paths() :: [String.t()]
   def protected_paths do
     Enum.map(@protected_segments, &("**/" <> &1 <> "/**")) ++
+      Enum.map(@protected_files, &("**/" <> &1)) ++
       Enum.map(protected_roots(), &(&1 <> "/**"))
   end
 
@@ -67,6 +82,7 @@ defmodule Ouroboros.Control.Permissions.Rules do
   def protected_write?(path) when is_binary(path) do
     not Ouroboros.Workspace.Access.delivery_write?(path) and
       (Enum.any?(@protected_segments, &protected_segment?(path, &1)) or
+         protected_file?(path) or
          (Enum.any?(protected_roots(), &Paths.within?(path, &1)) and not worktree_write?(path)))
   end
 
@@ -78,6 +94,13 @@ defmodule Ouroboros.Control.Permissions.Rules do
   # sandbox, so on those paths this list is the only guard there is.
   defp protected_segment?(path, segment),
     do: Paths.has_segment?(path, segment, case: :insensitive)
+
+  # The final component only, and case-folded for `protected_segment?/2`'s reason: on APFS
+  # and NTFS `Ouroboros.TOML` *is* `ouroboros.toml`, and the hook loader will read it.
+  defp protected_file?(path) do
+    basename = path |> Path.basename() |> String.downcase()
+    basename in @protected_files
+  end
 
   # D7 keeps the workspaces it provisions under `<data_dir>/worktrees`: a workspace a
   # session was given to write in, not runtime state, and the one place beneath the data
@@ -179,6 +202,7 @@ defmodule Ouroboros.Control.Permissions.Rules do
     cond do
       protected_segment?(target, ".git") -> "**/.git/**"
       protected_segment?(target, ".ouroboros") -> "**/.ouroboros/**"
+      protected_file?(target) -> "**/" <> String.downcase(Path.basename(target))
       true -> (Enum.find(protected_roots(), &Paths.within?(target, &1)) || "") <> "/**"
     end
   end

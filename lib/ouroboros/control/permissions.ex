@@ -69,6 +69,7 @@ defmodule Ouroboros.Control.Permissions do
   require Logger
 
   alias Ouroboros.Agent.EffectLedger
+  alias Ouroboros.Control.PolicyEvidence
   alias Ouroboros.Control.Permissions.{Paths, Pattern, Request, Rule, Rules, Shell}
 
   @store_key {:ouroboros, :control_permissions, 1}
@@ -77,9 +78,32 @@ defmodule Ouroboros.Control.Permissions do
   @stored_scopes [:user, :workspace, :session]
   @call_timeout 5_000
 
+  # S1. The charset `Forge(<name>)` parses, restated here for
+  # `Ouroboros.Control.Permissions.Pattern`'s own reason: this module is the permission engine
+  # and a rule's meaning must not change because another plane changed its mind about what a
+  # capability may be called. `suggest/1` is the only reader — a suggestion nobody can parse
+  # is a rule saved dead.
+  @forge_name ~r/\A[a-z0-9][a-z0-9._-]{0,63}\z/
+
   @type server :: GenServer.server()
   @type rule_ref :: %{scope: atom(), id: String.t(), pattern: String.t()}
   @type outcome :: {:allow, rule_ref()} | {:deny, rule_ref()} | {:ask, atom()}
+  @typedoc """
+  Who made an answer, and it is not a courtesy field: `Ouroboros.Control.PolicyEvidence` reads
+  exactly this to decide whether an answer becomes decision evidence (S2, S-D20).
+
+    * `:human` — a person answered. The only actor whose answers are evidence.
+    * `:rule` — a rule an operator wrote decided.
+    * `:classifier` — a policy component decided (`Ouroboros.Wasm.PolicyEngine`).
+    * `:automation` — a client answered with nobody at the keyboard and said so:
+      `ouro run --approve-all`, the TUI's auto-approve toggle.
+    * `:runtime` — this node answered its own unanswered question: an approval that timed out,
+      one whose caller went away.
+
+  The last two were `:human` until S2's fix wave, which is how a headless run's approvals
+  became human decisions in the corpus a promotion is measured against.
+  """
+  @type actor :: :rule | :human | :classifier | :automation | :runtime
   # `:request` and `:principal` are read by `answered_request/1` below, which is the whole
   # reason a recorded answer can name the call it answered. They were missing here, and a
   # map type lists every key it admits — so every real caller "broke the contract", and
@@ -89,7 +113,7 @@ defmodule Ouroboros.Control.Permissions do
   @type answer :: %{
           required(:decision) => :approve | :deny,
           optional(:scope) => :once | :session | :always,
-          optional(:actor) => :rule | :human | :classifier,
+          optional(:actor) => actor(),
           optional(:rule_ref) => term(),
           optional(:reason) => String.t() | nil,
           optional(:request) => Request.t() | map(),
@@ -156,11 +180,42 @@ defmodule Ouroboros.Control.Permissions do
   map `evaluate/1` took, and `:principal` on its own when the call is all that is left.
   Without either, the entry is recorded against `"unattributed"` rather than not at all —
   an audit that drops what it cannot attribute is worse than one that says so.
+
+  ## The decision corpus (S2, S-D20)
+
+  An answer that **says** `actor: :human` and carries a `:request` also leaves one row
+  in `Ouroboros.Control.PolicyEvidence`: the request in the exact form
+  `Ouroboros.Wasm.PolicyEngine.document/1` would hand a policy component, beside what the
+  human decided. That is the corpus `Ouroboros.Wasm.PolicyEngine.replay/2` measures a
+  candidate policy against, and this is the one seam where the full request and a human's
+  answer are both in scope — the ledger holds a fingerprint of the request and nothing more,
+  by design.
+
+  The corpus is written **after** the ledger and never instead of it: a corpus write that
+  fails is logged once and the answer stands, because the ledger is the authority and this is
+  evidence. `permission_entry_id` is carried only where the ledger accepted the entry, so the
+  row never names a `:permission` entry that does not exist.
+
+  `:actor` has no default in the corpus: an answer that does not say who made it is not
+  evidence that a human made it. The ledger entry beside it still defaults to `:human`, which is
+  the older contract and the one every caller in this repository states explicitly — the two
+  differ deliberately, because a ledger row that over-attributes is a record a person can
+  correct and a corpus row that over-attributes is a promotion nobody can.
   """
   @spec record(String.t(), answer()) :: :ok | {:error, term()}
   def record(decision_id, answer)
       when is_binary(decision_id) and decision_id != "" and is_map(answer) do
-    ledger_write(decision_id, answer, answered_request(answer))
+    request = answered_request(answer)
+    written = ledger_write(decision_id, answer, request)
+
+    # Only an answer that carried a `:request`. `answered_request/1` also builds one out of a
+    # bare `:principal` so the ledger row is attributable, and that request has no tool, no
+    # command and no paths — a document built from it would be evidence of nothing.
+    _ =
+      if is_map(Map.get(answer, :request)),
+        do: PolicyEvidence.write(if(written == :ok, do: decision_id), answer, request)
+
+    written
   end
 
   def record(_decision_id, _answer), do: {:error, :invalid_permission_record}
@@ -293,10 +348,14 @@ defmodule Ouroboros.Control.Permissions do
   def suggest(%Request{} = request) do
     computer_use = computer_use_app(request)
     capability = capability_name(request)
+    forge = forge_name(request)
 
     cond do
       is_binary(capability) ->
         "Capability(#{capability})"
+
+      is_binary(forge) ->
+        "Forge(#{forge})"
 
       is_binary(computer_use) ->
         "ComputerUse(app:#{computer_use})"
@@ -553,9 +612,19 @@ defmodule Ouroboros.Control.Permissions do
 
   defp attempt(_request), do: %{tool: "unknown", mode: :write, provider: nil, fingerprint: nil}
 
-  # The command line and the paths never reach the ledger. Their digest does, which is
-  # enough to prove two entries were the same decision and nothing else.
-  defp fingerprint(%Request{} = request) do
+  @doc """
+  The digest of what one request was about: its command line, its paths and its domains.
+
+  The command line and the paths never reach the ledger. This does, which is enough to prove
+  two entries were the same decision and nothing else.
+
+  Public because `Ouroboros.Control.PolicyEvidence` writes the same value beside the same
+  answer, and two implementations of one digest are two digests: a corpus row and the
+  `:permission` entry it names have to agree on what "the same request" means, or a
+  contradiction found by a replay could not be traced back to the ledger row that recorded it.
+  """
+  @spec fingerprint(Request.t()) :: %{sha256: String.t(), bytes: non_neg_integer()}
+  def fingerprint(%Request{} = request) do
     material = [request.command || "" | request.paths ++ request.domains] |> Enum.join("\n")
 
     %{
@@ -785,4 +854,28 @@ defmodule Ouroboros.Control.Permissions do
   end
 
   defp capability_name(_request), do: nil
+
+  # S1. The rule an operator would write for a forge keys on what is being built, never on
+  # the tool: `Tool(forge)` is "let this session add any capability to this runtime, now and
+  # later", which is not what somebody answering one prompt about `vet` meant to say, and
+  # `Pattern.decisions/1` refuses to let it carry an allow at all. The name is the one the
+  # forge will be *held* to, so `nil` here is a call — a deploy, a status, a name outside
+  # the charset — that nothing honest can be suggested for.
+  # And it is held to the charset a `Forge(<name>)` pattern parses, here rather than trusted
+  # to have been checked upstream: `suggest/1` takes a `Request` a caller built, and a
+  # suggestion is a rule an operator is about to *persist* through the "don't ask again"
+  # modal. Offering `Forge(Not A Name)` is offering a string `Pattern.parse/1` refuses — a
+  # dead rule saved under a decision somebody thought they made.
+  #
+  # The regex is restated locally exactly as `Pattern` restates it, and for the same reason:
+  # this module is the permission engine and must not depend on the WebAssembly plane for
+  # what a capability name is.
+  defp forge_name(%Request{tool: "forge", context: context}) when is_map(context) do
+    case Map.get(context, :forge) || Map.get(context, "forge") do
+      name when is_binary(name) -> if Regex.match?(@forge_name, name), do: name
+      _other -> nil
+    end
+  end
+
+  defp forge_name(_request), do: nil
 end

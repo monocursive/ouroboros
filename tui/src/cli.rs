@@ -213,6 +213,21 @@ pub enum Command {
     /// a clean stream for a pipe.
     Ledger(LedgerArgs),
 
+    /// Earned widening: what this node's policy component has been allowed to resolve, and
+    /// the replay that earned it (docs/SELF.md §S2).
+    ///
+    /// A signed policy component may only ever narrow — an `allow` it returns is honoured
+    /// only for a tool an operator listed in `policy_allowable_tools`, and read as `ask`
+    /// otherwise. This is the other way in: replay the component against decisions humans
+    /// already made on the node, and promote a tool only where it contradicted none of them.
+    ///
+    /// `replay --out report.json` writes the evidence file `promote --evidence` hands back.
+    /// The node re-runs the replay itself before it writes anything, so the file is a record
+    /// of what was decided on rather than the decision.
+    ///
+    /// Reads a runtime that is already running; it never starts one.
+    Policy(PolicyArgs),
+
     /// Investigate retained evidence, or verify an exported bundle entirely offline.
     Audit(AuditArgs),
 
@@ -401,6 +416,121 @@ pub struct LedgerArgs {
     /// A file holding the gateway token. Omitted, the token beside gateway.json is used.
     #[arg(long, value_name = "PATH")]
     pub token_file: Option<PathBuf>,
+}
+
+/// `ouro policy`'s flags. `--addr`, `--token-file` and `--json` are global, so they may be
+/// typed before or after the subcommand.
+#[derive(Debug, Args)]
+pub struct PolicyArgs {
+    #[command(subcommand)]
+    pub command: PolicyCommand,
+
+    /// The whole answer as JSON on stdout instead of a table. Remarks — where a report was
+    /// written, what a demotion was recorded against — go to stderr either way.
+    #[arg(long, global = true)]
+    pub json: bool,
+
+    /// Where the gateway listens. Omitted, the local gateway.json is read instead.
+    #[arg(long, global = true, value_name = "HOST:PORT")]
+    pub addr: Option<String>,
+
+    /// A file holding the gateway token. Omitted, the token beside gateway.json is used.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub token_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PolicyCommand {
+    /// The promotion record: the policy it is bound to, every tool promoted under it and
+    /// whether a later demotion withdrew it, this node's thresholds, and the size of the
+    /// decision corpus.
+    ///
+    /// The corpus holds the exact request a component would have been shown for every
+    /// permission a human answered, so what this prints of it is counts and nothing else.
+    /// There is no verb that serves a row.
+    Status,
+
+    /// Replay a policy component against the decisions humans made on this node, and print
+    /// what it would have said about each of them.
+    ///
+    /// Decides nothing: the component is stood up under its own dry instance, no permission
+    /// is recorded, and the instance deciding this node's live permissions is untouched.
+    Replay(PolicyReplayArgs),
+
+    /// Promote one command shape of one tool for one policy, on a report `replay --out`
+    /// wrote.
+    ///
+    /// The node checks the report names the bytes it would evaluate and hashes to its own
+    /// digest — a keyless sha256 over the file's own contents, so that says the file was not
+    /// edited and nothing about who produced it — and then **re-runs the replay itself** and
+    /// refuses unless the re-run clears its thresholds. Who promoted is the identity this
+    /// client authenticated as; there is no flag for it.
+    Promote(PolicyPromoteArgs),
+
+    /// Withdraw one shape's promotion. Narrowing, and idempotent.
+    Demote(PolicyDemoteArgs),
+
+    /// Forget the whole record — the policy name, the bytes, and every tool promoted under
+    /// them. The one way to point this node's record at a different policy or at
+    /// re-deployed bytes, and deliberately a separate act.
+    Clear,
+}
+
+/// `ouro policy replay`'s flags.
+#[derive(Debug, Args)]
+pub struct PolicyReplayArgs {
+    /// The live lane-W policy to replay, by the name it was deployed under.
+    pub name: String,
+
+    /// Replay only answers recorded at or after this ISO 8601 instant.
+    #[arg(long, value_name = "ISO8601")]
+    pub since: Option<String>,
+
+    /// Write the report here, for `ouro policy promote --evidence` to hand back.
+    #[arg(long, value_name = "PATH")]
+    pub out: Option<PathBuf>,
+}
+
+/// `ouro policy promote`'s flags.
+#[derive(Debug, Args)]
+pub struct PolicyPromoteArgs {
+    /// The policy the report is about.
+    pub name: String,
+
+    /// The one tool this promotion is about. `bash` is the only promotable tool in v1.
+    #[arg(long, value_name = "TOOL")]
+    pub tool: String,
+
+    /// The command prefix this promotion is about — `mix`, `mix test`. A promotion is per
+    /// `(tool, shape)`, always: a request is covered when every one of its sub-commands
+    /// matches `Bash(<shape> *)`, and `ouro policy replay` names every shape it found.
+    #[arg(long, value_name = "PREFIX")]
+    pub shape: String,
+
+    /// The report file `ouro policy replay --out` wrote.
+    #[arg(long, value_name = "PATH")]
+    pub evidence: PathBuf,
+}
+
+/// `ouro policy demote`'s flags.
+#[derive(Debug, Args)]
+pub struct PolicyDemoteArgs {
+    /// The promoted policy. Another name narrows nothing.
+    pub name: String,
+
+    /// The tool whose promotion is withdrawn.
+    #[arg(long, value_name = "TOOL")]
+    pub tool: String,
+
+    /// The command prefix whose promotion is withdrawn. Narrowing is per shape too:
+    /// demoting `mix test` leaves `mix` standing, and `ouro policy status` names both.
+    #[arg(long, value_name = "PREFIX")]
+    pub shape: String,
+
+    /// Why. The runtime echoes it and stores an enumerated term instead, so this is a note
+    /// for the person reading the reply rather than a field in the record.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: String,
 }
 
 #[derive(Debug, Args)]
@@ -1240,9 +1370,19 @@ pub enum McpCommand {
 
 #[derive(Debug, Args)]
 pub struct RunArgs {
-    /// The prompt to run.
-    #[arg(value_name = "PROMPT")]
-    pub prompt: String,
+    /// The prompt to run. Omitted only when `--prompt-file` names one instead.
+    #[arg(value_name = "PROMPT", required_unless_present = "prompt_file")]
+    pub prompt: Option<String>,
+
+    /// Read the prompt from this file instead of from the command line.
+    ///
+    /// Linux caps one `execve` argument at 128 KiB, so a brief past that cannot be typed as
+    /// an argument at all — the shell refuses with `E2BIG` before this program starts. A file
+    /// has no such ceiling; this one refuses over a mebibyte, which is a very long brief.
+    /// Refused together with a positional prompt: two prompts is a question about which one
+    /// was meant, and a command that silently picked would be answering it.
+    #[arg(long, value_name = "PATH", conflicts_with = "prompt")]
+    pub prompt_file: Option<PathBuf>,
 
     /// Send the prompt into a session that already exists instead of starting one. The
     /// start options are refused with it: that session's provider and workspace were
@@ -2308,12 +2448,36 @@ mod tests {
             panic!("`ouro run \"fix the tests\"` must parse as Run");
         };
 
-        assert_eq!(args.prompt, "fix the tests");
+        assert_eq!(args.prompt.as_deref(), Some("fix the tests"));
+        assert_eq!(args.prompt_file, None);
         assert_eq!(args.resume, None);
         // The one number with a default, because a headless run that never ends is the
         // failure this command exists to prevent.
         assert_eq!(args.timeout, 600);
         assert!(!args.json && !args.stream_json && !args.approve_all && !args.verbose);
+    }
+
+    /// S2b. A brief that does not fit in an argument. Linux caps one `execve` argument at
+    /// 128 KiB, so `ouro run "<100 KiB brief>"` fails in the shell before this program starts;
+    /// `bench/self/improve.sh` hands a session exactly that, and this is the way in.
+    #[test]
+    fn ouro_run_takes_a_prompt_file_instead_of_a_prompt_but_never_both() {
+        let Some(Command::Run(args)) = parse(&["run", "--prompt-file", "brief.md"]).command else {
+            panic!("`ouro run --prompt-file brief.md` must parse as Run");
+        };
+
+        assert_eq!(args.prompt, None);
+        assert_eq!(args.prompt_file, Some(PathBuf::from("brief.md")));
+
+        // Two prompts is a question about which one was meant, and a command that picked
+        // silently would be answering it.
+        assert!(
+            Cli::try_parse_from(["ouro", "run", "hi", "--prompt-file", "brief.md"]).is_err(),
+            "a positional prompt and --prompt-file are one prompt too many"
+        );
+
+        // And neither is not a run at all.
+        assert!(Cli::try_parse_from(["ouro", "run"]).is_err());
     }
 
     #[test]

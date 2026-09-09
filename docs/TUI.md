@@ -315,6 +315,7 @@ reading.
 | `signing.decisions` | bounded `:erpc.call(signing_node, Signing.Service, :decisions, [])` — requires `OUROBOROS_SIGNING_NODE` configured **and** `Node.alive?()` (a `OUROBOROS_DIST=none` daemon cannot erpc), else `-32004`. Upstream failure shape is `{:error, {:signing_service_unavailable, _}}`, a nested tuple |
 | `grants.list` `{principal}` | `Control.Grants.list/1` (per-principal by design — there is no list-all, and the gateway does not add one). `Grants.list/1` swallows `:exit` into `[]` ([grants.ex:159](../lib/ouroboros/control/grants.ex)), so the handler pre-checks `Process.whereis(Grants)` to answer `-32004` instead of a false empty |
 | `permissions.list` `{scope?, workspace?, node?}` | `Control.Permissions.list/1` on the named machine (local by default; a remote one is a bounded `:erpc`, so an unreachable machine is reported as unreachable rather than as a gateway timeout). Returns the `:node` rules read from `config :ouroboros, :permissions` alongside the stored `:user`/`:workspace`/`:session` ones, each with `id`, `pattern`, `kind`, `decision`, `scope`, `workspace`, `session_id`, `created_at`, and `fragile` — the last true for an argument-constraining `Bash` pattern, which is accepted but easy to route around |
+| `policy.status` `{}` | `Control.PolicyPromotion.status/0` beside `Control.PolicyEvidence.count/0` (docs/SELF.md §S2) — this node's earned-widening record: `policy` (`{name, component_sha256}` or `null`), one `tools` row per promoted **`(tool, shape)`** with `allowed` beside it and the actor and the re-run's numbers each was promoted on, the newest twenty `demotions` (each naming the shape it withdrew and, for one an operator made, the actor who made it), `allowable` (`%{tool => [shape]}`) and its summary `allowable_tools`, the record's `durability`, the promotion `thresholds` and `shadow_every`, and `evidence`. A promoted row's digest is `report_sha256_as_submitted` under the name of what it is: a keyless sha256 over the submitted report's own contents, which says the file was not edited and nothing about who produced the numbers beside it. **`evidence` is the whole of what this protocol says about the corpus**: `records`, `without_document`, `unreadable`, the busiest **32** tools in `by_tool`, and `other_tools`/`other_records` for the rest — counts and never a row, bounded because the corpus's own ceiling is rows and bytes rather than distinct tool names. The corpus holds the exact document a policy component would have been shown for every request a human answered, command lines and paths included, and there is no verb that serves one. `administrator` under required audit, like every `policy.*` verb that widens (this one is `:read` and an operator keeps it). No `node` parameter: the record is a checkpoint on this machine and the corpus is a file on it, so this asks a machine rather than routing to one |
 | `fleet.status` | `Cluster.fleet_status/0` — expected/connected/offline machines, compatibility, TLS posture, optional OS/arch/tags/toolchains |
 | `fleet.tags` | Operator-scoped add/remove/list of advisory tags on a connected machine; target-owned atomic profile writer |
 | `fleet.revoke` `{artifact}` | Operate scope. Verify and durably import a CA-signed revocation, close connections authenticated by that credential, and return surviving machines' acknowledgements plus offline/pending holders. The CLI exposes this through `fleet revoke` and `fleet import-revocation`. |
@@ -362,6 +363,10 @@ reading.
 | `subagent.stop` `{id, node?, request_id, task_id}` | Stops this session's child through the same native result path. An unfinished return remains observable until settlement. |
 | `interactive.request_approval` `{id, request, node?}` | The other direction: something outside Harness asking this runtime for a decision. The coordinator checkpoints an `approval_requested`, consults the permission engine, and otherwise blocks until `interactive.respond_approval` names the id. |
 | `interactive.respond_approval` / `coding.respond_approval` `{id, request_id, response}` | `response` is approve/deny plus the bounded Harness scope/reason shape. Interactive and finite Native coding runs persist the answer before forwarding it to the in-process loop; `actor` records human/headless/automation and no token or provider option is admitted except the existing plan-exit choice. |
+| `policy.replay` `{name, since?}` | `Wasm.PolicyEngine.replay/2` (docs/SELF.md §S2) — asks a live lane-W `policy` component every human answer in this node's corpus, dry, and counts what it said against what the human said. Per tool: `decisions`, `agreements`, `contradictions` (`allow` where the human denied), `would_resolve` (`allow` where the human approved — the prompts a promotion would remove), `stricter`, `asks`, `unreadable`, and up to twenty `contradiction_rows` carrying a `fingerprint`, a `session_id` and an `at` and **never a document**. And per **shape** (`per_shape`, at most 200 shapes per tool), where a promotion is actually decided: the same seven plus `distinct_fingerprints`, `distinct_sessions` and `human_denies` over definite verdicts only. The report also carries `thresholds`, the five numbers a promotion has to clear, inside its own seal — a report is read months later and the bar it was measured against is part of what it says. Sealed with `report_sha256` over the canonical JSON of everything but that key and `replayed_at`, so two replays of one corpus produce one digest; the digest binds the file to its own contents and nothing else. `operate` rather than `read` because it stands a component up — the `computer_use.status`/`probe` split — but it decides nothing: a dry instance under its own name, no `:permission` entry, no evidence row, and the live instance untouched. `since` is an ISO 8601 instant, **parsed at the contract** and refused as `-32602` otherwise, because the corpus reads an instant it cannot parse as no filter at all. `administrator`. Node-local (plan §0 row 9: a fleet replay is not in v1) |
+| `policy.promote` `{name, tool, shape, report}` | `Wasm.PolicyEngine.promote/6` — the one way a component's `allow` is honoured that is not an operator typing a tool name into `policy_allowable_tools`. A promotion is per **`(tool, shape)`** (S-D27): `shape` is a `bash` command prefix, `bash` is the only promotable tool and every other name is refused as `tool_not_promotable`. Four gates: the report must name the bytes this node would evaluate and hash to its own `report_sha256`; the node **re-runs the replay itself**, because a report is evidence that a replay happened and not that it is still true; the re-run must show zero contradictions across the whole tool; and on this shape's definite verdicts, no unreadable verdict, ≥20 distinct requests, ≥2 distinct sessions and ≥1 call it would have resolved. The re-run's numbers go into the record with the submitted report's digest beside them as `report_sha256_as_submitted` — the digest is keyless, so it says the file was not edited and nothing about who produced it, and the re-run is the gate. The actor is the connection's principal (`Audit.Identity.actor/0`) and never a parameter — an unattributed caller is refused `-32003` with `reason: unattributed_actor` rather than recorded as one — and the verb needs `administrator` under required audit, because this is `permissions.add` with a component in place of the pattern. Answers the record, in `policy.status`'s shape. `outcome: unknown` on a ceiling: the replay and the checkpoint do not stop because this socket did |
+| `policy.demote` `{name, tool, shape, reason}` | `Control.PolicyPromotion.demote/5` — narrowing, and idempotent: a shape that is not promoted, or a name this record does not hold, is `:ok` with no write. Narrowing is per shape too, so demoting `mix test` leaves `mix` standing. `reason` is at most 512 bytes and is **echoed, not stored**: the record's `reason` is an enumerated atom (`operator_demotion` here, `human_contradiction` for the engine's canary), because a checkpoint fsynced on every write is not where free text belongs. It takes the same **attributed actor** `promote` and `clear` do, and that actor is the demotion's ledger principal: narrowing is safe, but an audit trail that says `runtime` about a thing a person did is not, and it is the trail an investigation reads to find out who un-did the canary's work. `administrator`. Answers the record |
+| `policy.clear` `{}` | `Control.PolicyPromotion.clear/1` — forgets the policy name, the bytes, and every shape promoted under them. The one way to point this node's record at a different policy or at re-deployed bytes, and deliberately a separate act: no parameters, `administrator`, and the same named-actor requirement `policy.promote` has. Answers the record |
 | `permissions.add` `{scope, pattern, decision, workspace?, node?}` | `Control.Permissions.add/1`. `scope` is `"user"` or `"workspace"` (a `"workspace"` rule requires `workspace`, and is stored in the data directory keyed by canonical root — never in the repository); `decision` is `"allow"`, `"deny"`, or `"ask"`; `pattern` is validated by `Control.Permissions.Pattern` and by nothing else, so `Bash(command:…)` and an `allow` on `Tool(name:param=value)` are refused. `"node"` scope is refused outright — those rules come from `config :ouroboros, :permissions`. Ids are derived from the rule, so adding the same rule twice returns the same rule |
 | `permissions.remove` `{scope, id, node?}` | `Control.Permissions.remove/2`, `scope` one of `"user"`, `"workspace"`, `"session"`. Unknown id → `-32007`. A definite pre-commit failure leaves the rule standing; post-rename durability ambiguity restarts the authority and requires reconciliation |
 | `interactive.interrupt` `{id, turn_id?}` | `interrupt/2` (`:active` default) |
@@ -969,7 +974,8 @@ ouro new [--provider NAME] [--workspace PATH] [--approval-mode MODE]
                       is refused, naming both places. --plan (B2) starts it
                       planning: it reads and reasons but edits nothing, and at
                       the end of a planning turn asks whether to build the plan
-ouro run "PROMPT" [--provider NAME] [--workspace PATH] [--approval-mode MODE]
+ouro run ("PROMPT" | --prompt-file PATH)
+         [--provider NAME] [--workspace PATH] [--approval-mode MODE]
          [--sandbox-mode MODE] [--machine NAME] [--resume SESSION-ID]
          [--continue [--or-new]] [--plan]
          [--json | --stream-json] [--approve-all] [--timeout SECS] [-v]
@@ -981,7 +987,42 @@ ouro run "PROMPT" [--provider NAME] [--workspace PATH] [--approval-mode MODE]
                       --resume, which names one instead of looking one up.
                       --plan (B2) starts it planning and reports the plan in
                       the result object as `plan`; the plan-exit question is
-                      answered keep_planning, including under --approve-all
+                      answered keep_planning, including under --approve-all.
+                      --prompt-file reads the prompt from a file instead of
+                      from the command line, for the briefs that do not fit in
+                      one: Linux caps a single execve argument at 128 KiB, so
+                      `ouro run "<100 KiB brief>"` fails in the shell before
+                      this program starts, and bench/self/improve.sh hands a
+                      session exactly that. Read before a runtime is started,
+                      refused over 1 MiB, refused when the open handle is not
+                      a regular file, and refused together with a positional
+                      prompt — two prompts is a question about which one was
+                      meant, and picking silently would be answering it
+ouro policy status [--json] [--addr HOST:PORT] [--token-file PATH]
+ouro policy replay NAME [--since ISO8601] [--out PATH] [--json]
+ouro policy promote NAME --tool bash --shape "PREFIX" --evidence PATH [--json]
+ouro policy demote NAME --tool bash --shape "PREFIX" --reason TEXT [--json]
+ouro policy clear [--json]
+                      earned widening, from a terminal (docs/SELF.md §S2).
+                      `status` prints the promotion record — one row per
+                      promoted (tool, shape) with `allowed` beside it — this
+                      node's thresholds and how often it samples a promoted
+                      shape, and counts of the decision corpus and never a row
+                      of it. `replay` asks the component every human answer on
+                      this node, dry, and prints the per-tool counts and a
+                      per-shape table with a `needs` row taken from the
+                      report's own thresholds, so an operator reads down a
+                      column and sees which shapes clear the bar; --out writes
+                      the report file `promote --evidence` hands back. The
+                      runtime re-runs the replay before it writes anything, so
+                      that file is a record of what was decided on rather than
+                      the decision. Who promoted is the identity this client
+                      authenticated as; there is no flag for it. A table for a
+                      person and --json for a pipe, and stdout carries only the
+                      answer: where a report was written and the sentence a
+                      demotion was recorded against go to stderr. Every string
+                      the node sends is blanked of control characters, cut at
+                      4 KiB, and printed in a column capped at 64 characters
 ouro agents [--json] [--addr HOST:PORT] [--token-file PATH]
                       every session this runtime can see, grouped as the
                       Sessions rail groups them (needs input, working, done);

@@ -1,0 +1,88 @@
+{
+  "id": 25,
+  "jsonrpc": "2.0",
+  "result": {
+    "allowable": {
+      "bash": [
+        "mix test"
+      ]
+    },
+    "allowable_tools": [
+      "bash"
+    ],
+    "demotions": [
+      {
+        "actor": null,
+        "at": "2026-01-01T00:01:30.000000Z",
+        "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "reason": "human_contradiction",
+        "seq": 4,
+        "session_id": "session-0000000000000000000001",
+        "shape": "curl",
+        "tool": "bash"
+      }
+    ],
+    "durability": "synced_checkpoint",
+    "evidence": {
+      "by_tool": {
+        "bash": 214,
+        "read": 63
+      },
+      "error": null,
+      "other_records": 0,
+      "other_tools": 0,
+      "records": 277,
+      "unreadable": 0,
+      "without_document": 0
+    },
+    "node": "ouroboros@golden",
+    "policy": {
+      "component_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "name": "no-network-shell"
+    },
+    "shadow_every": 10,
+    "thresholds": {
+      "contradictions": 0,
+      "distinct_fingerprints": 20,
+      "distinct_sessions": 2,
+      "unreadable": 0,
+      "would_resolve": 1
+    },
+    "tools": [
+      {
+        "actor": "operator:ana",
+        "allowed": false,
+        "evidence": {
+          "contradictions": 0,
+          "decisions": 214,
+          "distinct_fingerprints": 31,
+          "distinct_sessions": 4,
+          "replayed_at": "2026-01-01T00:00:00.000000Z",
+          "report_sha256_as_submitted": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "would_resolve": 24
+        },
+        "promoted_at": "2026-01-01T00:00:00.000000Z",
+        "seq": 1,
+        "shape": "curl",
+        "tool": "bash"
+      },
+      {
+        "actor": "operator:ana",
+        "allowed": true,
+        "evidence": {
+          "contradictions": 0,
+          "decisions": 63,
+          "distinct_fingerprints": 22,
+          "distinct_sessions": 2,
+          "replayed_at": "2026-01-01T00:01:30.000000Z",
+          "report_sha256_as_submitted": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "would_resolve": 41
+        },
+        "promoted_at": "2026-01-01T00:01:30.000000Z",
+        "seq": 3,
+        "shape": "mix test",
+        "tool": "bash"
+      }
+    ]
+  }
+}

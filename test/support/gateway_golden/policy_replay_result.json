@@ -1,0 +1,89 @@
+{
+  "id": 24,
+  "jsonrpc": "2.0",
+  "result": {
+    "component_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "corpus_size": 277,
+    "per_shape": {
+      "bash": {
+        "curl": {
+          "agreements": 26,
+          "asks": 1,
+          "contradiction_rows": [
+            {
+              "at": "2026-01-01T00:00:00.000000Z",
+              "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "session_id": "session-0000000000000000000001"
+            }
+          ],
+          "contradictions": 2,
+          "decisions": 34,
+          "distinct_fingerprints": 12,
+          "distinct_sessions": 1,
+          "human_denies": 7,
+          "stricter": 5,
+          "unreadable": 0,
+          "would_resolve": 3
+        },
+        "mix test": {
+          "agreements": 90,
+          "asks": 4,
+          "contradiction_rows": [],
+          "contradictions": 0,
+          "decisions": 96,
+          "distinct_fingerprints": 41,
+          "distinct_sessions": 6,
+          "human_denies": 2,
+          "stricter": 2,
+          "unreadable": 0,
+          "would_resolve": 74
+        }
+      }
+    },
+    "per_tool": {
+      "bash": {
+        "agreements": 180,
+        "asks": 23,
+        "contradiction_rows": [
+          {
+            "at": "2026-01-01T00:00:00.000000Z",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "session_id": "session-0000000000000000000001"
+          },
+          {
+            "at": "2026-01-01T00:01:30.000000Z",
+            "fingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "session_id": "session-0000000000000000000001"
+          }
+        ],
+        "contradictions": 2,
+        "decisions": 214,
+        "stricter": 9,
+        "unreadable": 0,
+        "would_resolve": 24
+      },
+      "read": {
+        "agreements": 57,
+        "asks": 2,
+        "contradiction_rows": [],
+        "contradictions": 0,
+        "decisions": 63,
+        "stricter": 4,
+        "unreadable": 0,
+        "would_resolve": 41
+      }
+    },
+    "policy_name": "no-network-shell",
+    "replayed_at": "2026-01-01T00:00:00.000000Z",
+    "report_sha256": "ffcbb5565bf3352534addad314b37de814439fada835d181872199125b9a3c8c",
+    "since": null,
+    "thresholds": {
+      "contradictions": 0,
+      "distinct_fingerprints": 20,
+      "distinct_sessions": 2,
+      "unreadable": 0,
+      "would_resolve": 1
+    },
+    "unreadable": 0
+  }
+}

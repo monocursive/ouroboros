@@ -53,6 +53,7 @@ defmodule Ouroboros.Provider.Native.Tools do
   alias Ouroboros.Provider.Native.Tools.DesktopState
   alias Ouroboros.Provider.Native.Tools.Edit
   alias Ouroboros.Provider.Native.Tools.Fleet
+  alias Ouroboros.Provider.Native.Tools.Forge
   alias Ouroboros.Provider.Native.Tools.Glob
   alias Ouroboros.Provider.Native.Tools.Grep
   alias Ouroboros.Provider.Native.Tools.Ls
@@ -144,7 +145,8 @@ defmodule Ouroboros.Provider.Native.Tools do
       else:
         static ++
           desktop_specs(allowed, disallowed, opts) ++
-          capability_specs(allowed, disallowed, opts) ++ mcp_specs(allowed, disallowed, opts)
+          capability_specs(allowed, disallowed, opts) ++
+          forge_specs(allowed, disallowed, opts) ++ mcp_specs(allowed, disallowed, opts)
   end
 
   @doc """
@@ -201,6 +203,20 @@ defmodule Ouroboros.Provider.Native.Tools do
          Capability.live() != [],
        do: [spec(Capability, opts)],
        else: []
+  end
+
+  # S1. `forge` is shown only while `config :ouroboros, :native_forge_tool` is `true` — the
+  # `self` posture sets it and nothing else does. Same posture as the desktop tools and
+  # `capability` (D9): a model taught a name it cannot use spends a call discovering that.
+  # It is deliberately not gated on a workspace here; the tool refuses a call whose context
+  # carries no scope, because a project directory is a fact about a workspace and a session
+  # without one has no directory to name.
+  defp forge_specs(allowed, disallowed, opts) do
+    name = Forge.name()
+
+    if Forge.enabled?() and name not in disallowed and (allowed == [] or name in allowed),
+      do: [spec(Forge, opts)],
+      else: []
   end
 
   # The filters apply to an MCP tool exactly as they apply to a static one, on its full
@@ -289,6 +305,7 @@ defmodule Ouroboros.Provider.Native.Tools do
       module = Enum.find(modules(), &(&1.name() == name)) -> module
       module = desktop_module(name) -> module
       module = capability_module(name) -> module
+      module = forge_module(name) -> module
       Mcp.advertised?(name) -> {McpTool, name}
       true -> nil
     end
@@ -308,6 +325,13 @@ defmodule Ouroboros.Provider.Native.Tools do
   # by omission.
   defp capability_module(name) do
     if name == Capability.name() and Capability.live() != [], do: Capability
+  end
+
+  # S1. Resolved on the same condition `specs/3` lists it on, so a node with the switch off
+  # answers `:unknown_tool` — the truthful answer, and the one the model was already given
+  # by omission.
+  defp forge_module(name) do
+    if name == Forge.name() and Forge.enabled?(), do: Forge
   end
 
   @doc "The name a tool name resolves to after aliases."
@@ -505,6 +529,12 @@ defmodule Ouroboros.Provider.Native.Tools do
     if operation(input) == "call", do: :execute, else: :read
   end
 
+  # S1. Every forge operation is an execute, `preview` and `status` included. A preview
+  # runs a real cargo build inside this node's OS sandbox — the whole point of it is that
+  # the answer costs what the forge costs — and a `status` reads bundles this node signed.
+  # Classifying any of them as a read would be plan mode permitting a compile.
+  defp mode("forge", _input), do: :execute
+
   defp mode("agent", _input), do: :execute
   defp mode("web_fetch", _input), do: :network
   defp mode(name, _input) when name in ["write", "edit", "apply_patch"], do: :write
@@ -519,6 +549,25 @@ defmodule Ouroboros.Provider.Native.Tools do
     case Map.get(input, "path") do
       path when is_binary(path) and path != "" -> [resolve(path, scope)]
       _absent -> []
+    end
+  end
+
+  # S1. A `preview` and a `forge` read every file in the project directory — that is the
+  # first thing `Ouroboros.Wasm.Forge` does with one — so the directory is declared, resolved
+  # through the session's own scope exactly as `read`'s path is. Declaring nothing was the
+  # hole: an operator's `Deny Read(<ws>/secret/**)` said nothing about a forge pointed at
+  # `secret`, because the engine had no path to match. `deploy` and `status` read this node's
+  # forged ring, which is inside the data directory and is not a workspace path a rule is
+  # written in; they declare nothing, as before.
+  defp paths("forge", input, scope) do
+    operation = Forge.operation(input)
+
+    case Map.get(input, "path") || Map.get(input, :path) do
+      path when is_binary(path) and path != "" and operation in ["preview", "forge"] ->
+        [resolve(path, scope)]
+
+      _absent ->
+        []
     end
   end
 
@@ -596,6 +645,20 @@ defmodule Ouroboros.Provider.Native.Tools do
       nil -> %{}
     end
   end
+
+  # S1/§S1. The name a `Forge(<name>)` rule matches. For a `preview` and a `forge` it is the
+  # `name` parameter, exact bytes, and the same string `Tools.Forge` hands
+  # `Ouroboros.Wasm.Forge` a moment later — which refuses a project whose Cargo package is
+  # called anything else. That is what makes the allow honest: a capability being forged has
+  # no register entry to resolve against, so the fact is not a lookup but the forge being
+  # *held* to the name the engine was shown. For a `deploy` it is the name the artifact id
+  # resolves to in this node's forged ring, with the bundle decoded and its manifest verified
+  # first (Q-B) — a fact about this node, like `Capability(…)`'s. A `status` names nothing.
+  #
+  # `Tools.Forge.request_context/1` and not a reading of the input here: the classifier and
+  # the tool must agree about which key spelling wins and about what a name is, and the way
+  # to guarantee that is one function (LOW-6).
+  defp context("forge", input), do: Forge.request_context(input)
 
   defp context(_name, _input), do: %{}
 

@@ -1075,6 +1075,21 @@ is `:read` and returns a capability's whole state, so for a `wasm/` agent it car
 same in-band marker: the sibling verb labels those two fields, and a read-only listener
 must not be the way around the label.
 
+**The other half of the seam: `forge`.** A second native tool,
+`Ouroboros.Provider.Native.Tools.Forge`, lets a model session *produce* a capability rather
+than only reach one — validate a Cargo project in its workspace, build it, sign it through
+`Ouroboros.Upgrade.Signing.Service`, and deploy the bundle it forged to this node. It adds
+nothing to this lane: C9, the sandboxed offline build, the signature, the trust policy, the
+evaluation and the rollout are all the ones described above, reached with a session principal
+as the manifest's `author`. It is off unless `config :ouroboros, :native_forge_tool` is
+`true`, its permission language is `Forge(<name>)` / `Forge(*)` beside `Capability(<name>)`,
+and `Tool(forge)` is deny-and-ask only for `Tool(capability)`'s reason. A `deploy` is covered
+by the same `Forge(<name>)` rule as the build: the artifact id is resolved against this node's
+forged ring and its manifest verified — the check `Ouroboros.Wasm.PolicyEngine` makes before
+loading a byte — before any name reaches the engine, and the tool re-reads and re-verifies the
+same bundle before shipping it. It is documented where the claim it serves is:
+[SELF.md §S1](SELF.md) and its decisions S-D10..S-D19.
+
 ## 8. Lane H: hooks and policy as components
 
 ### 8.1 Wasm hooks
@@ -1293,6 +1308,35 @@ a vendor process.
 A model-backed classifier (the original C6 sketch) remains possible *behind* the same engine
 interface; the wasm module is the deterministic, offline-testable version, and it is the one
 that landed.
+
+**`:policy_allowable_tools` is no longer the only input to what an `allow` may resolve** (S2).
+It is still the only one an operator writes, and it is still empty by default. Beside it there
+is now a durable, node-local *promotion record* — `Ouroboros.Control.PolicyPromotion` — holding
+one policy name at one component sha256 and the **shapes** that name has earned the right to
+resolve. A shape is a `bash` command prefix, the thing an operator would have written as
+`Bash(mix test *)`, and it is what an earned `allow` reaches: promotion is per
+`(policy, tool, shape)`, `bash` is the only promotable tool in v1, and a promoted shape covers a
+request only when every one of its sub-commands matches it.
+
+Earned means: the component was replayed, dry, against a corpus of decisions humans actually
+made on this node (`Ouroboros.Control.PolicyEvidence`, one row per human answer, holding exactly
+the bytes `PolicyEngine.document/1` would have handed it), and on the re-run it contradicted no
+human anywhere in that tool, left no verdict unreadable on the shape, answered **definitely** —
+an `ask` is an abstention and counts for nothing — across at least twenty distinct requests from
+at least two sessions, and would have resolved at least one call a human was actually asked
+about. The counted-rows version of that sentence, "contradicted none of them across at least
+fifty", was the one the adversarial review broke: a component that answers `allow` to everything
+clears it on fifty harmless approvals, because a corpus with no human `deny` in it has zero
+contradictions whatever the component says.
+
+`settle/6` honours an earned `allow` only when the record's name *and* sha match the row about
+to answer, so a re-deployed policy has earned nothing. Every tenth honoured allow inside a shape
+(`config :ouroboros, :policy_shadow_every`) is put to a human anyway, which is what keeps the
+demotion canary able to see: a human `deny` for a call a promoted shape covers, that the
+promoted bytes would have allowed, demotes every shape that covered it. The dry path
+(`PolicyEngine.evaluate_with/3`) verifies provenance exactly as the live path does, stands the
+component under `wasm/policy/dry/<sha>` rather than `wasm/policy/<sha>`, and records nothing.
+Full statement, decisions S-D20 through S-D29, and what is not in it: [SELF.md §S2](SELF.md).
 
 ## 9. Deferred lanes
 

@@ -48,11 +48,17 @@ defmodule Bench.Exec do
         :hide,
         args: ["-c", command],
         cd: cd,
-        env: Enum.map(env, fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)
+        env: Enum.map(env, &variable/1)
       ])
 
     collect(port, [], System.monotonic_time(:millisecond) + deadline_ms)
   end
+
+  # `:erlang.open_port`'s `env` option *extends* the caller's environment: a variable left
+  # out of the list is still inherited by the child. Removing one is `{name, false}`, and
+  # nothing else — which is why this clause exists at all.
+  defp variable({key, false}), do: {String.to_charlist(key), false}
+  defp variable({key, value}), do: {String.to_charlist(key), String.to_charlist(value)}
 
   defp collect(port, chunks, deadline) do
     remaining = deadline - System.monotonic_time(:millisecond)
@@ -427,6 +433,7 @@ defmodule Bench.Runner do
 
   defp start_daemon(config, scripts, data, config_home) do
     say("daemon  starting `ouro --dev daemon` on a scratch data dir")
+    assert_dropped(daemon_env(scripts, data, config_home))
 
     case Bench.Exec.run(config[:ouro], ["--dev", "daemon"],
            cd: config[:repo],
@@ -448,29 +455,71 @@ defmodule Bench.Runner do
   end
 
   defp daemon_env(scripts, data, config_home) do
-    base_env() ++
-      [
-        {"OUROBOROS_DATA_DIR", data},
-        {"XDG_CONFIG_HOME", config_home},
-        {"OUROBOROS_NATIVE_MODEL", "bench-script:" <> scripts},
-        {"ELIXIR_ERL_OPTIONS",
-         "-ouroboros native_model_module 'Elixir.Ouroboros.Bench.ScriptModel'"}
-      ]
+    env([
+      {"OUROBOROS_DATA_DIR", data},
+      {"XDG_CONFIG_HOME", config_home},
+      {"OUROBOROS_NATIVE_MODEL", "bench-script:" <> scripts},
+      {"ELIXIR_ERL_OPTIONS", "-ouroboros native_model_module 'Elixir.Ouroboros.Bench.ScriptModel'"}
+    ])
   end
 
   # The corpus must not read a key even by accident. Nothing here needs one, the scripted
   # model never makes a request, and a variable that is not passed cannot be spent.
-  @dropped ~w(
+  @secrets ~w(
     ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY GROQ_API_KEY
     OPENROUTER_API_KEY XAI_API_KEY MISTRAL_API_KEY DEEPSEEK_API_KEY TOGETHER_API_KEY
     CEREBRAS_API_KEY PERPLEXITY_API_KEY ZAI_API_KEY AWS_SECRET_ACCESS_KEY
-    OUROBOROS_NATIVE_MODEL OUROBOROS_DATA_DIR XDG_CONFIG_HOME ELIXIR_ERL_OPTIONS
   )
 
-  defp base_env do
-    System.get_env()
-    |> Enum.reject(fn {key, _value} -> key in @dropped end)
-    |> Enum.sort()
+  # Set per call rather than inherited: whatever the operator's shell says about them is
+  # not what this run means by them.
+  @scoped ~w(OUROBOROS_NATIVE_MODEL OUROBOROS_DATA_DIR XDG_CONFIG_HOME ELIXIR_ERL_OPTIONS)
+
+  @dropped @secrets ++ @scoped
+
+  # The environment for one child: `overrides` set, everything in `@dropped` the caller did
+  # not set REMOVED.
+  #
+  # This used to filter a copy of `System.get_env/0` and pass the remainder, which removed
+  # nothing at all: `Port.open`'s `env` option extends the caller's environment rather than
+  # replacing it, so a variable merely left out of the list is still inherited. The README
+  # said the keys were removed from the environment; they were sitting in every child. A
+  # removal is `{name, false}`, and `assert_dropped/1` proves it against a real child
+  # rather than against this list.
+  defp env(overrides) do
+    set = Enum.map(overrides, fn {name, _value} -> name end)
+
+    Enum.map(@dropped -- set, &{&1, false}) ++ overrides
+  end
+
+  # Spawned through the very environment a child is about to get, because the mistake this
+  # exists to catch is one that reading the list cannot show. Called before the daemon
+  # starts: a corpus that cannot spend must not be one that merely believes it cannot.
+  defp assert_dropped(env) do
+    case Bench.Exec.run(System.find_executable("env") || "/usr/bin/env", [],
+           cd: File.cwd!(),
+           timeout_ms: 30_000,
+           env: env
+         ) do
+      {:ok, 0, out} ->
+        case Enum.filter(@secrets, &Regex.match?(~r/^#{Regex.escape(&1)}=/m, out)) do
+          [] ->
+            :ok
+
+          present ->
+            die(
+              "the environment this run would hand the daemon still carries " <>
+                Enum.join(present, ", ") <>
+                ". `Port.open`'s env option extends rather than replaces; a removal is {name, false}."
+            )
+        end
+
+      {:ok, code, _out} ->
+        die("could not read back the daemon's environment: `env` exited #{code}")
+
+      {:timeout, _out} ->
+        die("could not read back the daemon's environment: `env` timed out")
+    end
   end
 
   defp run_one(task, config, data, config_home) do
@@ -508,7 +557,7 @@ defmodule Bench.Runner do
         # A client that ignored its own `--timeout` still must not hang the corpus.
         timeout_ms: (task.timeout_secs + 30) * 1000,
         stderr: Path.join(logs, "ouro.stderr"),
-        env: base_env() ++ [{"OUROBOROS_DATA_DIR", data}, {"XDG_CONFIG_HOME", config_home}]
+        env: env([{"OUROBOROS_DATA_DIR", data}, {"XDG_CONFIG_HOME", config_home}])
       )
 
     wall = System.monotonic_time(:millisecond) - started
@@ -601,12 +650,7 @@ defmodule Bench.Runner do
     case Bench.Exec.run(script, [],
            cd: task.dir,
            timeout_ms: @check_timeout_ms,
-           env:
-             base_env() ++
-               [
-                 {"BENCH_FACTS", facts_path},
-                 {"BENCH_LIB", Path.join(config[:root], "lib")}
-               ]
+           env: env([{"BENCH_FACTS", facts_path}, {"BENCH_LIB", Path.join(config[:root], "lib")}])
          ) do
       {:ok, 0, _out} -> {true, ""}
       {:ok, _code, out} -> {false, String.trim(out)}
@@ -625,7 +669,7 @@ defmodule Bench.Runner do
              cd: File.cwd!(),
              timeout_ms: 60_000,
              stderr: Path.join(scratch, "stop.stderr"),
-             env: base_env() ++ [{"OUROBOROS_DATA_DIR", data}]
+             env: env([{"OUROBOROS_DATA_DIR", data}])
            ) do
         {:ok, 0, _out} -> say("daemon  stopped")
         {:ok, code, out} -> say("daemon  `ouro stop` exited #{code}: #{String.trim(out)}")

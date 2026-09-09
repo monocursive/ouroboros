@@ -169,6 +169,7 @@ defmodule Ouroboros.Provider.Native.Loop do
   alias Ouroboros.Provider.Native.ToolAttempt
   alias Ouroboros.Provider.Native.Tools.AskUser
   alias Ouroboros.Provider.Native.Tools.Capability, as: CapabilityTool
+  alias Ouroboros.Provider.Native.Tools.Forge, as: ForgeTool
   alias Ouroboros.Wasm.Pool, as: WasmPool
 
   @default_max_iterations 100
@@ -1093,6 +1094,23 @@ defmodule Ouroboros.Provider.Native.Loop do
             }
           ),
         reads: state.reads,
+        # S1. Who this session *is*, as one string, for the one tool whose output is signed
+        # under an identity: `Tools.Forge` records it as a forged capability's `author` and
+        # compares it against a bundle's before deploying one. The loop derives it (nothing
+        # else may), the tool reads it and nothing else, and it is deliberately not a
+        # parameter — see `Tools.Forge`'s moduledoc.
+        principal: principal(state),
+        # S1/Q-A. The `:tool_call` ledger entry this call *is*, named plainly and not only
+        # inside `audit` above: that entry is written on every admitted call whether or not
+        # this node's audit stream is on, so the chain from a `:forge` entry back to the
+        # `:permission` entry that admitted it must not depend on audit being on either.
+        # `Tools.Forge` puts it in `cause.signal_id`; the second hop is that entry's own
+        # `attempt.permission_entry_id`.
+        ledger_effect_id: effect_id,
+        # S1/Q-B. What the permission engine resolved this call's artifact id to, handed back
+        # the way `desktop_evaluated_app` is: `Tools.Forge` re-reads the bundle and refuses to
+        # deploy one whose name is no longer the name the decision was about.
+        forge_evaluated_name: classified.context[:forge],
         # G3. `agent_result` collects a child the *session* holds, not one this turn owns,
         # so it is handed two closures over the session rather than a pid to call: the tool
         # never learns which process tracks what, and a run with no session gets `nil` and
@@ -1208,6 +1226,14 @@ defmodule Ouroboros.Provider.Native.Loop do
   # that fires.
   defp execute_timeout(state, %{tool: "capability"}, _input),
     do: max(state.tool_timeout_ms, CapabilityTool.max_timeout_ms())
+
+  # S1. A forge is a cargo build under an OS sandbox, and its ceiling is minutes rather than
+  # the ordinary tool timeout's seconds. `Ouroboros.Wasm.Forge` stops its own build at that
+  # ceiling and runs the `after` that removes the scratch tree; a loop that killed the task
+  # first would leave a compiler running and report a timeout for a build still inside the
+  # bound it was given.
+  defp execute_timeout(state, %{tool: "forge"}, _input),
+    do: max(state.tool_timeout_ms, ForgeTool.max_timeout_ms())
 
   defp execute_timeout(state, %{tool: "bash"}, input) do
     options = provider_options(state)
@@ -1837,34 +1863,54 @@ defmodule Ouroboros.Provider.Native.Loop do
     receive do
       {:native_approval, ^request_id, %ApprovalResponse{decision: :approve} = response} ->
         state = if persist?, do: grant(state, classified, response.scope), else: state
-        entry_id = record(state, :approve, response.scope, :human, nil)
+        actor = answer_actor(response)
+
+        entry_id =
+          record(
+            state,
+            :approve,
+            response.scope,
+            actor,
+            nil,
+            permission_request(state, classified)
+          )
 
         state =
           journal_approval(state, request_id, call.id, question, %{
             "decision" => "approve",
             "scope" => response.scope,
-            "actor" => "human",
+            "actor" => to_string(actor),
             "permission_entry_id" => entry_id
           })
 
         {:allow, state, call, classified, context,
-         authority(:allow, "human", response.scope, :human, nil, entry_id, request_id)}
+         authority(:allow, to_string(actor), response.scope, actor, nil, entry_id, request_id)}
 
       {:native_approval, ^request_id, %ApprovalResponse{} = response} ->
-        entry_id = record(state, :deny, response.scope, :human, nil)
+        actor = answer_actor(response)
+
+        entry_id =
+          record(
+            state,
+            :deny,
+            response.scope,
+            actor,
+            nil,
+            permission_request(state, classified)
+          )
 
         state =
           journal_approval(state, request_id, call.id, question, %{
             "decision" => "deny",
             "scope" => response.scope,
-            "actor" => "human",
+            "actor" => to_string(actor),
             "permission_entry_id" => entry_id
           })
 
         {:deny, state,
          "Refused: the operator denied this #{classified.tool} call" <>
            reason_suffix(response.reason) <> ".", classified,
-         authority(:deny, "human", response.scope, :human, nil, entry_id, request_id)}
+         authority(:deny, to_string(actor), response.scope, actor, nil, entry_id, request_id)}
 
       {:native_approval, _other_id, _response} ->
         wait_for_approval(
@@ -2176,12 +2222,34 @@ defmodule Ouroboros.Provider.Native.Loop do
     receive do
       {:native_approval, ^request_id, %ApprovalResponse{decision: :approve} = response} ->
         state = grant_escalation(state, pending.classified, response.scope)
-        _ = record(state, :approve, response.scope, :human, escalation_ref(nil))
-        rerun(state, pending, "human", request_id)
+        actor = answer_actor(response)
+
+        _ =
+          record(
+            state,
+            :approve,
+            response.scope,
+            actor,
+            escalation_ref(nil),
+            permission_request(state, pending.classified)
+          )
+
+        rerun(state, pending, to_string(actor), request_id)
 
       {:native_approval, ^request_id, %ApprovalResponse{} = response} ->
-        _ = record(state, :deny, response.scope, :human, escalation_ref(nil))
-        declined(state, pending, :human, response.reason, request_id)
+        actor = answer_actor(response)
+
+        _ =
+          record(
+            state,
+            :deny,
+            response.scope,
+            actor,
+            escalation_ref(nil),
+            permission_request(state, pending.classified)
+          )
+
+        declined(state, pending, actor, response.reason, request_id)
 
       {:native_approval, _other_id, _response} ->
         wait_for_escalation(state, pending, request_id, deadline)
@@ -2287,6 +2355,16 @@ defmodule Ouroboros.Provider.Native.Loop do
         "profile and " <>
         "declined" <> reason_suffix(reason) <> ". Do not ask for it again for this command."
 
+  # A client that answered with nobody at the keyboard (S2's fix wave). The sentence matters:
+  # telling the model "the operator declined" when no operator was asked is the same untruth
+  # in the transcript that labelling the ledger entry `:human` was in the audit.
+  defp decline_text(:automation, reason),
+    do:
+      "The client answering this session's approvals declined the fenced escalation re-run" <>
+        reason_suffix(reason) <>
+        ", with nobody at the keyboard. Do not ask for it again for " <>
+        "this command."
+
   defp decline_text(:rule, rule),
     do:
       "A permission rule (#{inspect(rule)}) refuses the fenced escalation re-run, so the " <>
@@ -2383,19 +2461,50 @@ defmodule Ouroboros.Provider.Native.Loop do
   # Returns the id of the `:permission` entry this decision was written under, or `nil`
   # when there was no engine to write it into. A `:tool_call` entry links to that id
   # rather than restating the decision, so the two records cannot drift.
-  defp record(state, decision, scope, actor, rule_ref) do
+  # `request` is the call the answer was about, and it is passed at exactly the four sites where
+  # a *human* answered: `Ouroboros.Control.Permissions` writes a decision-evidence row for those
+  # and only those (S2, S-D20), and a rule's or a hook's answer is not evidence of a human's
+  # judgement. Optional, so the other eleven call sites are unchanged.
+  # Who answered an approval this loop was waiting on (S2's fix wave).
+  #
+  # `Jido.Harness.ApprovalResponse` has four fields and none of them is the actor, so a client
+  # that answered with nobody at the keyboard — `ouro run --approve-all`, the TUI's auto-approve
+  # toggle — reached here indistinguishable from a person, and every one of those answers was
+  # recorded as a human decision and became evidence a policy promotion is measured against
+  # (S2, S-D20). The gateway now puts the fact in `provider_options`, which is the one field
+  # the struct has that carries anything, and this reads it.
+  #
+  # An **absent** actor is `:human`, and deliberately: an interactive client that never says
+  # anything is a person at a terminal, which is what every client in this repository except
+  # the two headless ones is. The fact has to be *said* to be believed in either direction, and
+  # the direction that costs is this one — an unstated automation writes a corpus row.
+  defp answer_actor(%ApprovalResponse{provider_options: options}) when is_map(options) do
+    case Map.get(options, "actor") || Map.get(options, :actor) do
+      "human" -> :human
+      declared when is_binary(declared) and declared != "" -> :automation
+      _unstated -> :human
+    end
+  end
+
+  defp answer_actor(_response), do: :human
+
+  defp record(state, decision, scope, actor, rule_ref, request \\ nil) do
     decision_id =
       "ndec_" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
 
-    case Permissions.record(decision_id, %{
-           decision: decision,
-           scope: scope,
-           actor: actor,
-           rule_ref: rule_ref,
-           reason: nil,
-           session_id: state.session_id,
-           provider: :native
-         }) do
+    answer = %{
+      decision: decision,
+      scope: scope,
+      actor: actor,
+      rule_ref: rule_ref,
+      reason: nil,
+      session_id: state.session_id,
+      provider: :native
+    }
+
+    answer = if is_map(request), do: Map.put(answer, :request, request), else: answer
+
+    case Permissions.record(decision_id, answer) do
       :ok -> decision_id
       {:error, _no_engine_or_refused} -> nil
     end

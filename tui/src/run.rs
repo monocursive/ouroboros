@@ -37,9 +37,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::io::Write;
+use std::io::{Read as _, Write};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
+use anyhow::{Context as _, Result};
 use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -141,6 +143,67 @@ impl Default for Options {
             verbose: false,
         }
     }
+}
+
+/// The most a `--prompt-file` may hold.
+///
+/// A brief is prose, and a mebibyte of it is a very long brief; a file past this is either a
+/// mistake or something that was never meant to be a prompt, and a runtime that took it would
+/// spend a turn's budget finding that out. Stated here rather than left to the gateway so the
+/// refusal names the file the operator typed.
+pub const MAX_PROMPT_FILE_BYTES: u64 = 1024 * 1024;
+
+/// The prompt in a file, for the prompts that do not fit in an argument.
+///
+/// Linux caps a single `execve` argument at 128 KiB (`MAX_ARG_STRLEN`), so a brief past that
+/// cannot be typed as `ouro run "<brief>"` at all — the shell fails with `E2BIG` before this
+/// program starts. `bench/self/improve.sh` hands a session a brief of exactly that shape, and
+/// this is how.
+///
+/// Two rules, and they are `policy_cli::read_report`'s for the same reasons. The type check is
+/// on the **open handle**: a `stat` answers about whatever the name pointed at when it was
+/// asked, and `File::metadata` is an `fstat` on the descriptor already held. And the bound is
+/// on what a read returns rather than on what a stat claims, because `/dev/zero` and a growing
+/// file both report a length that has nothing to do with what comes back.
+pub fn read_prompt_file(path: &Path) -> Result<String> {
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("reading the prompt at {}", path.display()))?;
+
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("reading the prompt at {}", path.display()))?;
+
+    if !metadata.file_type().is_file() {
+        anyhow::bail!(
+            "{} is not a regular file, so it is not a prompt",
+            path.display()
+        );
+    }
+
+    let mut buffer = Vec::new();
+
+    file.take(MAX_PROMPT_FILE_BYTES + 1)
+        .read_to_end(&mut buffer)
+        .with_context(|| format!("reading the prompt at {}", path.display()))?;
+
+    if buffer.len() as u64 > MAX_PROMPT_FILE_BYTES {
+        anyhow::bail!(
+            "{} is larger than {MAX_PROMPT_FILE_BYTES} bytes; --prompt-file carries a brief,              not a corpus",
+            path.display()
+        );
+    }
+
+    let prompt = String::from_utf8(buffer)
+        .with_context(|| format!("{} is not UTF-8, so it is not a prompt", path.display()))?;
+
+    if prompt.trim().is_empty() {
+        anyhow::bail!(
+            "{} is empty; `ouro run` has nothing to send",
+            path.display()
+        );
+    }
+
+    Ok(prompt.trim().to_string())
 }
 
 /// What this run does once it has a connection.

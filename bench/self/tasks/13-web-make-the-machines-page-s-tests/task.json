@@ -1,0 +1,16 @@
+{
+  "id": "13-web-make-the-machines-page-s-tests",
+  "base_sha": "98efe1bc89be607a3187f6b3ddce52174d878310",
+  "commit_sha": "e6b2d4c8da01c49bbff4edba1141f7a100816869",
+  "subject": "fix(web): make the machines page's tests independent of what else the suite started",
+  "instruction": "fix(web): make the machines page's tests independent of what else the suite started\n\nBoth branches of this page were being decided by ambient cluster state. A full `mix test`\nrun starts dozens of distributed nodes, and `Ouroboros.Cluster`'s directory remembers every\none of them, so `fleet.status` on the suite host answers a 44-machine roster rather than the\nno-fleet shape it answers when this file runs alone. The page was right both times — it\nrendered the roster the runtime gave it, with the correct chips — but three tests asserted\nthe empty state and failed the moment they ran after anything else.\n\nSo the empty state is rendered as a component, which is the only way to reach that branch\non a host that happens to be clustered, and the live page instead asserts the thing that is\ntrue either way: its verdict is the runtime's own, computed by the predicate `fleet.doctor`\nuses for the same question (`cluster.ex:1771`). The doctor assertion moves off \"healthy\" —\na verdict that depends on those same leftover nodes — onto the headline's own words and the\nfirst check's id.\n\nAlso drops the backticks from the empty state's prose in favour of `<code>`, which is what\nthe rest of this surface marks a command up as.\n\nAcceptance. These tests are restored into the worktree after the session ends and must pass:\n  - the page shows whichever branch fleet.status actually put it in\n  - no page state offers an add control\n  - refresh re-reads fleet.status and asks the doctor nothing\n\nRules. Files that already exist under `test/` must not be modified or deleted — the change is graded against tests restored from the history after the session ends, applied to a fresh checkout of the starting commit. New test files of your own are allowed and are left in place, but they are yours: they are not copied into the tree the grade runs in. The change is collected as a diff over `lib/`, `assets/`, `priv/`, `config/`, `docs/` and `README.md`; a change to any other path — `mix.exs` and `.formatter.exs` included — is refused rather than graded. Work only inside this worktree.",
+  "instruction_kind": "full",
+  "hidden_tests": [
+    "test/ouroboros/web/live/machines_live_test.exs"
+  ],
+  "solution_files": [
+    "lib/ouroboros/web/live/machines_live.ex"
+  ],
+  "timeout_secs": 600,
+  "measured": {"compile_ms": 51120, "diff_lines": 31, "test_ms": 13870}
+}

@@ -38,6 +38,9 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
     * `--ro-bind <scratch> <path>` for each protected segment that does not exist yet.
       The empty scratch directory is a read-only placeholder at that destination, so a
       command cannot create `.git` or `.ouroboros` after admission.
+    * `--ro-bind <path> <path>` for each protected *file* that exists, and
+      `--ro-bind /dev/null <path>` for each that does not (S1). That is the workspace hook
+      manifest: one path per writable root, denied whether or not it is there.
     * `--tmpfs <scratch>` — a fresh, private, in-memory `$TMPDIR` for this one command,
       at the same path the macOS backend makes writable, so both backends give the
       shell the same `$TMPDIR` contract.
@@ -68,6 +71,16 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
   mkdir/open/rename of any path component named in the policy's protected segments.
   Static binaries that never call libc are outside that net; ordinary `mkdir`, `git`,
   and `/bin/sh` are not.
+
+  ## Protected files (S1)
+
+  A protected *file* is a bind rather than a filter, and unlike a protected segment it needs
+  no `LD_PRELOAD` half: the path is known before the namespace is set up, so the destination
+  can be created and made read-only whether or not anything is there. `/dev/null` is the
+  source for the absent case — a read-only character device is a mount point a create cannot
+  overwrite, a rename cannot replace and an unlink cannot remove, and it reads back as an
+  empty file rather than as the `EISDIR` an empty directory would give. Verified live by
+  `scripts/sandbox-linux-test.sh`.
   """
 
   # The walk is bounded twice: a repository with a deep `node_modules` must not turn
@@ -181,7 +194,9 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
       Enum.flat_map(on_disk(policy.protected), &["--ro-bind", &1, &1]) ++
       Enum.flat_map(writable(policy), &["--bind", &1, &1]) ++
       protected_segment_binds(policy) ++
+      protected_file_binds(policy) ++
       exception_binds(policy) ++
+      hidden_file_binds(policy) ++
       ["--tmpfs", policy.scratch] ++
       network(policy, unshare_net) ++
       chdir(scope)
@@ -190,7 +205,14 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
   # The filter is argv of `wrap/4`, not of `options/2`: the options half is pinned
   # byte-for-byte and must not grow when a `.so` happens to be on disk.
   defp filter_env(policy) do
-    segments = List.wrap(policy.protected_segments)
+    # The segment names the filter has always refused, then the protected files' basenames
+    # (S1): the filter denies any path *component* in the list, so `ouroboros.toml` here is
+    # what refuses a create of the hook manifest beneath a writable root, where no root-level
+    # bind reaches.
+    segments =
+      (List.wrap(policy.protected_segments) ++
+         Enum.map(Map.get(policy, :protected_files, []), &String.downcase(Path.basename(&1))))
+      |> Enum.uniq()
 
     case {segments, filter_library()} do
       {[_ | _] = names, path} when is_binary(path) ->
@@ -234,6 +256,129 @@ defmodule Ouroboros.Provider.Native.Sandbox.Bwrap do
     for root <- writable(policy),
         segment <- policy.protected_segments,
         do: Path.join(root, segment)
+  end
+
+  @doc """
+  The destinations bubblewrap has to *create* as mount points for this policy — and leaves
+  behind on the host when the command exits.
+
+  Two binds above name a path that may not exist yet: `--ro-bind <scratch> <file>` for an
+  absent hook manifest (`protected_file_binds/1`) and `--ro-bind <scratch> <dir>` for an
+  absent `.git`/`.ouroboros` under a writable root (`protected_segment_binds/1`). bubblewrap
+  makes the mount point inside the writable bind, which *is* the host's directory, and its
+  teardown unmounts but never unlinks. Measured with bubblewrap 0.8.0 in a
+  `debian:bookworm-slim` container: after the command, `/ws/ouroboros.toml` and `/ws/.git`
+  are both still there on the host as empty directories. CI's ubuntu-24.04 job failed the
+  "present or absent" test on exactly such a leftover (a zero-byte file, in the first cut).
+
+  So the caller that spawned the command clears these afterwards with
+  `clear_mount_point_stubs/1`, and only where the path is still the stub — an empty
+  directory, or a zero-byte regular file. Anything else there was not bubblewrap's and is
+  left alone. This is computed from the same `File.exists?/1` answers `options/3` reads, at
+  the same moment, so the argv and this list agree.
+  """
+  @spec mount_point_stubs(Ouroboros.Provider.Native.Sandbox.policy()) :: [String.t()]
+  def mount_point_stubs(policy) do
+    files = policy |> Map.get(:protected_files, []) |> Enum.reject(&File.exists?/1)
+    dirs = policy |> segment_dirs() |> Enum.reject(&File.exists?/1)
+    Enum.uniq(files ++ dirs)
+  end
+
+  @doc """
+  Removes the stubs `mount_point_stubs/1` named, where each is still a stub. Total: a path
+  holding bytes, a directory with entries, a symlink, or nothing at all is left as it is.
+  """
+  @spec clear_mount_point_stubs([String.t()]) :: :ok
+  def clear_mount_point_stubs(paths) when is_list(paths) do
+    Enum.each(paths, &clear_stub/1)
+    :ok
+  end
+
+  def clear_mount_point_stubs(_none), do: :ok
+
+  defp clear_stub(path) when is_binary(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :regular, size: 0}} -> _ = File.rm(path)
+      # `rmdir` refuses a directory with entries, which is the point: only the empty
+      # placeholder goes.
+      {:ok, %File.Stat{type: :directory}} -> _ = File.rmdir(path)
+      _other -> :ok
+    end
+
+    :ok
+  rescue
+    _error -> :ok
+  end
+
+  defp clear_stub(_other), do: :ok
+
+  # S1. The workspace hook manifest, one bind per writable root, after the writable binds
+  # and before the delivery exceptions — the same place the Seatbelt profile puts its
+  # `literal` deny, and the same order `Rules.protected_write?/1` reads the policy in.
+  #
+  # Two cases. **The file exists**: a read-only bind of it over itself, exactly as an
+  # existing `.git` is handled — a write is `EROFS`, a rename over it or an unlink of it is
+  # `EBUSY`. **The file does not exist**: the empty scratch *directory* bound read-only onto
+  # the path, exactly as an absent `.git` is handled. The first cut bound `/dev/null` there,
+  # and CI showed why that is wrong: the namespace then holds a character device called
+  # `ouroboros.toml`, and `git add -A` refuses the whole tree ("can only add regular files,
+  # symbolic links or git-directories") — a session's ordinary commit failed in the fenced
+  # profile. An empty directory is what git ignores by design, and the kernel does the
+  # refusing: measured with bubblewrap 0.8.0 in a `debian:bookworm-slim` container, `cp` and
+  # `mv` into it are `EROFS`, `tee` and a `>` redirect are `EISDIR`, `sed -i` "not a regular
+  # file", `rm -rf` of it `EBUSY`, and `git add -A && git commit` in the same tree succeeds.
+  # `Ouroboros.Provider.Native.Hooks` reads the manifest as a file, so a directory at that
+  # path is no manifest at all — and the directory is gone from the host again once the bash
+  # tool clears the stubs (`mount_point_stubs/1`). The name also joins `OUROBOROS_FS_DENY`
+  # (`filter_env/1`), so a create *beneath* a writable root — `sub/ouroboros.toml`, which no
+  # root-level bind covers — is refused by the same libc filter that refuses a new `.git`.
+  defp protected_file_binds(policy) do
+    policy
+    |> Map.get(:protected_files, [])
+    |> Enum.flat_map(fn destination ->
+      source = if File.exists?(destination), do: destination, else: policy.scratch
+      ["--ro-bind", source, destination]
+    end)
+  end
+
+  # S4. This node's own credentials — the signing seed, the gateway and web tokens, the web
+  # cookie secret — hidden from a **read**, which is what `protected_file_binds/1` above
+  # cannot do: it binds the file over itself, so the bytes are still there to `cat`.
+  #
+  # `/dev/null` over the path is the mask. bubblewrap resolves the source in the host root it
+  # keeps open for exactly this, so `--dev /dev` earlier in the argv does not take it away,
+  # and it creates the mount point when the destination is absent — which is the case worth
+  # having: a token file written by a daemon *after* this namespace was built is written to
+  # an inode outside it and stays invisible here. The shell sees a zero-length character
+  # device, not an `EPERM`; that is a weaker signal than Seatbelt's and the same containment.
+  #
+  # Emitted last, after the delivery re-allows, for the reason the Seatbelt profile puts its
+  # deny last: later binds overlay earlier ones and this one must be the one on top.
+  #
+  # **Only where the file is actually there**, and that is not a nicety — it is what keeps
+  # this from breaking every command on a Linux node. Measured, in a privileged
+  # `debian:bookworm-slim` container with bubblewrap 0.8.0:
+  #
+  #     bwrap --ro-bind / / --ro-bind $DATA $DATA --ro-bind /dev/null $DATA/gateway.token
+  #       -> starts; `cat` of the token is `Permission denied` and the bytes never appear,
+  #          a write to it is denied, and the host's file is unchanged.
+  #     bwrap ... --ro-bind /dev/null $DATA/web.secret   (with no such file)
+  #       -> "bwrap: Can't create file at /tmp/data/web.secret: Read-only file system",
+  #          and the command does not run at all.
+  #
+  # The difference from `protected_file_binds/1` above, which does bind `/dev/null` onto a
+  # path that is not there: the hook manifest sits under a *writable* root, where bubblewrap
+  # can make the mount point. A credential sits under the node's data directory, which this
+  # very argv has already bound read-only. So an absent credential is left out, and the gap
+  # is the honest one: a file created after this namespace was built. These are written when
+  # the node boots, before any session has a command to run, and the *next* command builds a
+  # new namespace in which the file exists and is masked. Seatbelt has no such gap — a
+  # `literal` deny needs no mount point.
+  defp hidden_file_binds(policy) do
+    policy
+    |> Map.get(:hidden_files, [])
+    |> Enum.filter(&File.regular?/1)
+    |> Enum.flat_map(&["--ro-bind", "/dev/null", &1])
   end
 
   defp protected_segment_binds(policy) do

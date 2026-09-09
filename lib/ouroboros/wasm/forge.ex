@@ -28,7 +28,9 @@ defmodule Ouroboros.Wasm.Forge do
       mebibyte in total, every path
       relative and free of `..`, no symlinks, and no `build.rs` — checked by name *and* by
       refusing the `[package] build` key that would give one power, because `src/build.rs`
-      is otherwise a file the allow-list admits.
+      is otherwise a file the allow-list admits. The name is checked **before the file is
+      opened** (S1): a directory somebody points a `preview` at is not necessarily a project,
+      and a file this list does not admit is refused by its name and never read.
     * **The sandbox.** A `Sandbox.builder_policy/1`: deny-by-default on **reads** as well as
       on writes, so a build reads the toolchain, the SDK, the `wit` world file and its own
       directories and nothing else — `include_str!` of anything else fails at compile time,
@@ -799,11 +801,29 @@ defmodule Ouroboros.Wasm.Forge do
       true ->
         case File.lstat(absolute) do
           {:ok, %File.Stat{type: :directory}} -> walk(root, path, acc, depth + 1)
-          {:ok, %File.Stat{type: :regular}} -> read_entry(absolute, path, acc)
+          {:ok, %File.Stat{type: :regular}} -> admit_entry(absolute, path, acc)
           {:ok, %File.Stat{type: :symlink}} -> {:error, {:symlink_refused, path}}
           {:ok, %File.Stat{type: type}} -> {:error, {:irregular_file, path, type}}
           {:error, reason} -> {:error, {:forge_input_unreadable, path, reason}}
         end
+    end
+  end
+
+  # S1/MEDIUM-2. The name is judged before the bytes are touched. A directory a caller may
+  # point this at is *their own* directory — the model's workspace, the operator's project —
+  # but it is not necessarily a capability project, and `preview` was reading every file in
+  # it into memory and only then refusing the ones the allow-list does not name. The refusal
+  # is unchanged and still names the file, because naming it is the answer somebody pointing
+  # a forge at the wrong directory needs; what changes is that `secrets/id_rsa` is refused
+  # by its name and never opened.
+  #
+  # The count, the depth and the symlink refusal already came first (`walk_entry/5` above);
+  # this puts the allow-list beside them. `validate/2` still runs the same judgement over the
+  # whole map afterwards, which is what covers a `%{files: …}` input that no walk produced.
+  defp admit_entry(absolute, path, acc) do
+    case admissible(path) do
+      :ok -> read_entry(absolute, path, acc)
+      {:error, _reason} = error -> error
     end
   end
 
@@ -867,35 +887,45 @@ defmodule Ouroboros.Wasm.Forge do
   # Path first, then the allow-list. An escaping path is refused for escaping rather than
   # for not being on the list, because those are two different things to tell somebody.
   defp validate_path({path, _contents}, :ok) do
+    case admissible(path) do
+      :ok -> {:cont, :ok}
+      {:error, _reason} = error -> {:halt, error}
+    end
+  end
+
+  # Whether a project *may* contain this path, from the path alone. The contents are not a
+  # parameter and must not become one: `admit_entry/3` calls this before a file is opened
+  # (S1/MEDIUM-2), and `validate_path/2` calls it again over whatever a caller handed in.
+  defp admissible(path) do
     segments = String.split(path, "/")
 
     cond do
       byte_size(path) > @max_path_bytes ->
-        {:halt, {:error, {:path_too_long, describe(path)}}}
+        {:error, {:path_too_long, describe(path)}}
 
       String.contains?(path, "\0") ->
-        {:halt, {:error, {:invalid_path, describe(path)}}}
+        {:error, {:invalid_path, describe(path)}}
 
       String.contains?(path, "\\") ->
-        {:halt, {:error, {:invalid_path, describe(path)}}}
+        {:error, {:invalid_path, describe(path)}}
 
       Path.type(path) != :relative ->
-        {:halt, {:error, {:absolute_path, describe(path)}}}
+        {:error, {:absolute_path, describe(path)}}
 
       Enum.any?(segments, &(&1 in ["", ".", ".."])) ->
-        {:halt, {:error, {:path_escape, describe(path)}}}
+        {:error, {:path_escape, describe(path)}}
 
       length(segments) > @max_depth ->
-        {:halt, {:error, {:path_too_deep, describe(path)}}}
+        {:error, {:path_too_deep, describe(path)}}
 
       Path.basename(path) == "build.rs" ->
-        {:halt, {:error, {:build_script_refused, path}}}
+        {:error, {:build_script_refused, path}}
 
       allowed?(path, segments) ->
-        {:cont, :ok}
+        :ok
 
       true ->
-        {:halt, {:error, {:file_not_allowed, path}}}
+        {:error, {:file_not_allowed, path}}
     end
   end
 

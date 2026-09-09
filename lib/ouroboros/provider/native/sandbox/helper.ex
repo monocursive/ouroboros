@@ -240,6 +240,28 @@ defmodule Ouroboros.Provider.Native.Sandbox.Helper do
   this function makes for it: the read allow-set is a field the helper fences with Landlock
   and refuses under any other mode, so emitting it for a shell would be a request the helper
   rejects rather than a shell with a narrower fence.
+
+  **`protected_files` is deliberately not sent (S1).** A policy's protected files are exact
+  paths that must be unwritable whether or not they exist — the workspace hook manifest is
+  one — and this wire format has no field for them. Adding one here would be a request this
+  helper's plan parser does not know, and inventing a meaning by folding the path into
+  `protected` would claim a fence Landlock cannot give: a rule is attached to an inode, so a
+  path that does not exist yet cannot carry one, and the `LD_PRELOAD` name filter beside it
+  is a libc filter that a static binary walks past. So this backend sends nothing, and
+  `Ouroboros.Provider.Native.Sandbox.protects_files?/1` answers `false` for it — which is
+  what makes `Ouroboros.Provider.Native.Hooks.trusted?/2` decline a workspace's shell hooks
+  on this backend rather than trust a fence that is not there. Giving the helper a real
+  per-path deny is the change that fixes this; a field in this map is not.
+
+  **`hidden_files` is not sent either (S4), and it matters more.** That field is the node's
+  own credentials — the signing seed, the gateway token — denied for *read*, and this wire
+  format has no way to say it: the Landlock plan carries a read **allow**-set, so the only
+  expression of "everything but this one file" would be an enumeration of the filesystem,
+  and a shell fenced by allow-list is a different sandbox than the one this backend is.
+  `Ouroboros.Provider.Native.Sandbox.hides_files?/1` therefore answers `false` for it,
+  `detect/0`'s notes say so where `capabilities.preview` shows them, and
+  `Ouroboros.Application.self_signing_children/0` starts no local signing service on such a
+  node unless `OUROBOROS_SELF_UNFENCED_KEY=1` accepts that every session can read the seed.
   """
   @spec request(Ouroboros.Provider.Native.Sandbox.policy(), map()) :: map()
   def request(policy, scope) do

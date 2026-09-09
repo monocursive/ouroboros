@@ -67,6 +67,20 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
   called `mygit` are unaffected — the expression anchors on a slash and on the end of
   the segment.
 
+  The workspace hook manifest (S1, `policy.protected_files`) is the opposite shape and for
+  the opposite reason: it is one file rather than a name at any depth, so it is one
+  `(deny file-write* (literal (param "OURO_PROTECTED_FILE_n")))` per writable root. A
+  `literal` denies the path whether or not a file is there — creating one is a write to it —
+  which is what makes `cp template ouroboros.toml` a refusal without the sandbox having to
+  understand `cp`.
+
+  `policy.hidden_files` (S4) is the same shape one line further down and the opposite
+  operation: `(deny file-read* (literal (param "OURO_HIDDEN_FILE_n")))` beside the write
+  deny, for this node's signing seed and its gateway credentials. It is emitted **last**,
+  after the delivery re-allows, because this profile opens with a blanket
+  `(allow file-read*)` and last match wins. `(deny network*)` and its loopback exception are
+  unchanged: what is fenced is the credential, not the socket.
+
   ## Denials, as they actually appear
 
   Seatbelt returns `EPERM`, so a denied write surfaces as the program's own
@@ -174,7 +188,9 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
     |> Enum.concat(protected_rules(policy))
     |> Enum.concat(reallow_rules(policy))
     |> Enum.concat(segment_rules(policy))
+    |> Enum.concat(protected_file_rules(policy))
     |> Enum.concat(exception_rules(policy))
+    |> Enum.concat(hidden_file_rules(policy))
     |> Enum.concat(network_rules(policy))
     |> Enum.join("\n")
     |> Kernel.<>("\n")
@@ -198,6 +214,8 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
   def parameters(policy) do
     named(policy.writable, "OURO_WRITABLE") ++
       named(policy.protected, "OURO_PROTECTED") ++
+      named(protected_files(policy), "OURO_PROTECTED_FILE") ++
+      named(hidden_files(policy), "OURO_HIDDEN_FILE") ++
       named(Map.get(policy, :write_exceptions, []), "OURO_EXCEPTION") ++
       named(
         Enum.map(Map.get(policy, :write_exceptions, []), fn path ->
@@ -379,6 +397,41 @@ defmodule Ouroboros.Provider.Native.Sandbox.SandboxExec do
       "(deny file-write* (regex #\"/#{escape(segment)}($|/)\"))"
     end)
   end
+
+  # S1. One `literal` per protected file, and `literal` rather than `subpath` because the
+  # thing being denied is one path and not a tree: a directory that happened to be called
+  # `ouroboros.toml` would have its *contents* denied by a `subpath`, which is a different
+  # sentence than the one this rule means.
+  #
+  # A literal denies the path whether or not anything is there. That is the half `protected`
+  # and `protected_segments` cannot say — SBPL matches the path the kernel resolves, and
+  # creating a file is a write to that path — so `cp`, `mv`, `tee`, `sed -i`, `dd` and a
+  # Python `open(…, "w")` are all one rule, with no redirect for anything upstream to parse.
+  #
+  # After `segment_rules/1` and before `exception_rules/1`, which is the order the permission
+  # engine reads the same policy in (`Rules.protected_write?/1` exempts a delivery write
+  # first): SBPL is last-match-wins, so a delivery root's own manifest stays writable and the
+  # workspace root's — which is never inside a delivery root — does not.
+  defp protected_file_rules(policy),
+    do: literal_rules(protected_files(policy), "deny file-write*", "OURO_PROTECTED_FILE")
+
+  defp protected_files(policy), do: Map.get(policy, :protected_files, [])
+
+  # S4. The node's own credentials, denied for **read** as well as for write, and emitted
+  # last of all the file rules — after `exception_rules/1`'s delivery re-allows and after
+  # everything else — because SBPL is last-match-wins and the base profile for a shell opens
+  # with a blanket `(allow file-read*)`. A rule written any earlier would be a fence the very
+  # next line took away.
+  #
+  # `literal` and not `subpath`, for `protected_file_rules/1`'s reason: the thing being
+  # denied is one path. Both operations, because a seed a session may not read is a seed it
+  # may not replace either — a key it wrote is a key it knows.
+  defp hidden_file_rules(policy) do
+    literal_rules(hidden_files(policy), "deny file-read*", "OURO_HIDDEN_FILE") ++
+      literal_rules(hidden_files(policy), "deny file-write*", "OURO_HIDDEN_FILE")
+  end
+
+  defp hidden_files(policy), do: Map.get(policy, :hidden_files, [])
 
   @regex_metacharacters [".", "^", "$", "*", "+", "?", "(", ")", "[", "]", "{", "}", "|", "\\"]
 

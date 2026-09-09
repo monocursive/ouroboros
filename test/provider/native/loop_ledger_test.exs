@@ -58,13 +58,25 @@ defmodule Ouroboros.Provider.Native.LoopLedgerTest do
 
   @moduletag :capture_log
 
+  alias Jido.Harness.ApprovalResponse
   alias Ouroboros.Agent.EffectLedger
+  alias Ouroboros.Control.Permissions.Request
+  alias Ouroboros.Control.PolicyEvidence
   alias Ouroboros.Provider.Native.Loop
   alias Ouroboros.Provider.Native.LoopLedgerTest.RefusingStorage
   alias Ouroboros.Provider.Native.Paths
   alias Ouroboros.Test.NativeModelScript
+  alias Ouroboros.Wasm.PolicyEngine
 
   @secret "sk-live-do-not-record-me"
+
+  # The fenced escalation only exists where an OS sandbox can refuse something. Without one
+  # `workspace_write` refuses `bash` outright and there is no denial to escalate — the same
+  # gate `test/provider/native/sandbox_escalation_test.exs` uses, and for its reason.
+  @needs_sandbox (case Ouroboros.Provider.Native.Sandbox.detect().backend do
+                    :none -> [skip: "no OS sandbox on this node, so nothing can be escalated"]
+                    _present -> []
+                  end)
 
   setup do
     root = Path.join(System.tmp_dir!(), "native-ledger-#{System.unique_integer([:positive])}")
@@ -355,7 +367,246 @@ defmodule Ouroboros.Provider.Native.LoopLedgerTest do
     end
   end
 
+  describe "a human answer leaves the decision corpus S2 replays (S-D20)" do
+    test "one row, holding exactly the document the engine would have handed a policy",
+         context do
+      # `:policy_evidence_root` is the test seam `Control.PolicyEvidence` derives its path from;
+      # with no data directory, a bare `mix test` has nowhere to write and every write is
+      # skipped, which is why this has to be named here.
+      root = Path.join(context.root, "policy")
+      Application.put_env(:ouroboros, :policy_evidence_root, root)
+      on_exit(fn -> Application.delete_env(:ouroboros, :policy_evidence_root) end)
+
+      command = "printf hello"
+
+      {loop, _agent} =
+        start_loop(
+          context,
+          [
+            [{:tool_call, %{id: "c1", name: "bash", input: %{"command" => command}}}],
+            [{:text, "refused"}, {:finish, :stop}]
+          ],
+          approval_mode: :prompt,
+          approval_timeout_ms: 10_000
+        )
+
+      pid = run(loop)
+
+      assert_receive {:event, %{type: :approval_requested} = ask}, 30_000
+
+      send(
+        pid,
+        {:native_approval, ask.request_id, %ApprovalResponse{decision: :deny, scope: :once}}
+      )
+
+      collect()
+
+      assert [{:ok, row}] = Enum.to_list(PolicyEvidence.stream())
+      assert row["tool"] == "bash"
+      assert row["decision"] == "deny"
+      assert row["scope"] == "once"
+      assert row["session_id"] == context.session_id
+
+      # The exact bytes a policy component would have been shown for this call. The four
+      # human-answer sites in the loop pass `request:` for precisely this: without it
+      # `answered_request/1` finds nothing and there is no document to write.
+      assert {:ok, expected} =
+               PolicyEngine.document(
+                 Request.new(%{
+                   principal: %{
+                     session_id: context.session_id,
+                     provider: :native,
+                     node: node()
+                   },
+                   tool: "bash",
+                   command: command,
+                   paths: [],
+                   mode: :execute,
+                   domains: [],
+                   context: %{
+                     approval_mode: :prompt,
+                     sandbox_mode: context.scope.sandbox_mode,
+                     workspace: context.scope.root,
+                     turn_id: "turn-1"
+                   }
+                 })
+               )
+
+      assert row["document"] == expected
+
+      # And it names the `:permission` entry the same answer wrote, so a replay's contradiction
+      # can be traced back to the ledger row that recorded it.
+      {:ok, permissions} = EffectLedger.list(principal: context.session_id, effect: :permission)
+      assert Enum.any?(permissions, &(&1.id == row["permission_entry_id"]))
+    end
+
+    test "an approve at the same site writes the row the deny does (P3)", context do
+      # The mutation this exists for: drop `permission_request(state, classified)` from the
+      # *approve* branch of `wait_for_approval/8` and every prompt a person said yes to stops
+      # being evidence — which is exactly half the corpus, and the half a promotion is made of.
+      root = Path.join(context.root, "policy")
+      Application.put_env(:ouroboros, :policy_evidence_root, root)
+      on_exit(fn -> Application.delete_env(:ouroboros, :policy_evidence_root) end)
+
+      command = "printf approved"
+
+      {loop, _agent} =
+        start_loop(
+          context,
+          [
+            [{:tool_call, %{id: "c1", name: "bash", input: %{"command" => command}}}],
+            [{:text, "done"}, {:finish, :stop}]
+          ],
+          approval_mode: :prompt,
+          approval_timeout_ms: 10_000
+        )
+
+      pid = run(loop)
+      assert_receive {:event, %{type: :approval_requested} = ask}, 30_000
+
+      send(
+        pid,
+        {:native_approval, ask.request_id, %ApprovalResponse{decision: :approve, scope: :once}}
+      )
+
+      collect()
+
+      assert [{:ok, row}] = Enum.to_list(PolicyEvidence.stream())
+      assert row["decision"] == "approve"
+      assert row["tool"] == "bash"
+      assert is_binary(row["document"])
+      assert row["document"] =~ "printf approved"
+    end
+
+    test "a client that answered as `headless` leaves no row, and says so in the ledger",
+         context do
+      # H4. `ouro run --approve-all` sends `actor: "headless"`, which the gateway carries to
+      # this loop in `provider_options` because `ApprovalResponse` has no field for it. Before
+      # the fix every one of those answers was recorded `actor: :human` and became evidence a
+      # promotion is measured against — a corpus of decisions no human made.
+      root = Path.join(context.root, "policy")
+      Application.put_env(:ouroboros, :policy_evidence_root, root)
+      on_exit(fn -> Application.delete_env(:ouroboros, :policy_evidence_root) end)
+
+      {loop, _agent} =
+        start_loop(
+          context,
+          [
+            [{:tool_call, %{id: "c1", name: "bash", input: %{"command" => "printf headless"}}}],
+            [{:text, "done"}, {:finish, :stop}]
+          ],
+          approval_mode: :prompt,
+          approval_timeout_ms: 10_000
+        )
+
+      pid = run(loop)
+      assert_receive {:event, %{type: :approval_requested} = ask}, 30_000
+
+      send(
+        pid,
+        {:native_approval, ask.request_id,
+         %ApprovalResponse{
+           decision: :approve,
+           scope: :once,
+           provider_options: %{"actor" => "headless"}
+         }}
+      )
+
+      collect()
+
+      # Nothing in the corpus.
+      assert Enum.to_list(PolicyEvidence.stream()) == []
+
+      # And the `:permission` entry beside it is honest about who answered.
+      {:ok, permissions} = EffectLedger.list(principal: context.session_id, effect: :permission)
+      assert [permission] = permissions
+      assert permission.result.actor == :automation
+    end
+
+    test "a call the rules never asked a human about leaves nothing", context do
+      root = Path.join(context.root, "policy")
+      Application.put_env(:ouroboros, :policy_evidence_root, root)
+      on_exit(fn -> Application.delete_env(:ouroboros, :policy_evidence_root) end)
+
+      # `:auto_approve` is a *rule* answering, and a rule's answer is the rule. A corpus filled
+      # with them would make a replay measure the node's own configuration.
+      {loop, _agent} =
+        start_loop(context, [
+          [{:tool_call, %{id: "c1", name: "bash", input: %{"command" => "printf hi"}}}],
+          [{:text, "done"}, {:finish, :stop}]
+        ])
+
+      run(loop)
+      collect()
+
+      assert Enum.to_list(PolicyEvidence.stream()) == []
+    end
+  end
+
+  # M9. The other two human-answer sites in the loop are the fenced-escalation ones, and they
+  # are only reachable behind a real OS sandbox denial — `test/provider/native/
+  # sandbox_escalation_test.exs`' fixture, in the one shape this file needs it.
+  describe "the escalation sites are human answers too (S-D20)" do
+    @describetag @needs_sandbox
+
+    test "an approved escalation writes the row", context do
+      assert %{"decision" => "approve", "tool" => "bash", "document" => document} =
+               escalation_answer(context, :approve)
+
+      assert document =~ "escalated.txt"
+    end
+
+    test "a declined escalation writes the row", context do
+      assert %{"decision" => "deny", "tool" => "bash"} = escalation_answer(context, :deny)
+    end
+  end
+
   # ------------------------------------------------------------------ helpers
+
+  # One escalation, answered by a human, with the corpus row it left. The command writes into
+  # `.git`, which is inside the workspace and deliberately read-only in the ordinary profile,
+  # so the sandbox refuses it and the loop puts the escalation to the operator.
+  defp escalation_answer(context, decision) do
+    File.mkdir_p!(Path.join(context.workspace, ".git"))
+    root = Path.join(context.root, "policy")
+    Application.put_env(:ouroboros, :policy_evidence_root, root)
+    on_exit(fn -> Application.delete_env(:ouroboros, :policy_evidence_root) end)
+
+    {loop, _agent} =
+      start_loop(
+        context,
+        [
+          [
+            {:tool_call,
+             %{
+               id: "c1",
+               name: "bash",
+               input: %{
+                 "command" =>
+                   "dir=$(printf '\\056git'); echo escaped > \"$PWD/$dir/escalated.txt\""
+               }
+             }}
+          ],
+          [{:text, "done"}, {:finish, :stop}]
+        ],
+        approval_mode: :auto_approve,
+        approval_timeout_ms: :infinity
+      )
+
+    pid = run(loop)
+    assert_receive {:event, %{type: :approval_requested} = ask}, 30_000
+    assert ask.payload["kind"] == "sandbox_escalation"
+
+    send(
+      pid,
+      {:native_approval, ask.request_id, %ApprovalResponse{decision: decision, scope: :once}}
+    )
+
+    collect()
+
+    assert [{:ok, row}] = Enum.to_list(PolicyEvidence.stream())
+    row
+  end
 
   defp start_loop(context, script, overrides \\ []) do
     {model_spec, agent} = NativeModelScript.start(script)

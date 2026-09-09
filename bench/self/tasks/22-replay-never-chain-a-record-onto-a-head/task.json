@@ -1,0 +1,16 @@
+{
+  "id": "22-replay-never-chain-a-record-onto-a-head",
+  "base_sha": "5e506ed220b037a62dbde58c56cd672432b80b61",
+  "commit_sha": "ff8e32984e69ae36480f50a4791d6fe07efc9c38",
+  "subject": "fix(replay): never chain a record onto a head we cannot name",
+  "instruction": "fix(replay): never chain a record onto a head we cannot name\n\n`sync/1`'s comment promised the journal would refuse to append onto a file\nwhose tail it could not read; the code appended anyway, which would have\nproduced a record that looks chained and is not — worse than a stated gap,\nbecause a verifier would report it as tampering rather than as loss.\n\nA handle now carries `synced?`, and an append on an unsynced handle retries\nthe tail read first (the failure may have been transient) and stages a gap\nwithout writing if it still cannot name the head. `sync/1` keeps clearing\n`degraded?` because that is what opens a writing window, but the internal\nresync does not, so an append that recovers mid-turn cannot un-announce a\ndegradation the caller already reported.\n\nAlso drops the unused `kinds/0` vocabulary accessor rather than shipping\npublic surface nothing consumes.\n\nAcceptance. These tests are restored into the worktree after the session ends and must pass:\n  - a handle whose tail cannot be read stages a gap instead of forging a link\n\nRules. Files that already exist under `test/` must not be modified or deleted — the change is graded against tests restored from the history after the session ends, applied to a fresh checkout of the starting commit. New test files of your own are allowed and are left in place, but they are yours: they are not copied into the tree the grade runs in. The change is collected as a diff over `lib/`, `assets/`, `priv/`, `config/`, `docs/` and `README.md`; a change to any other path — `mix.exs` and `.formatter.exs` included — is refused rather than graded. Work only inside this worktree.",
+  "instruction_kind": "full",
+  "hidden_tests": [
+    "test/provider/native/journal_test.exs"
+  ],
+  "solution_files": [
+    "lib/ouroboros/provider/native/journal.ex"
+  ],
+  "timeout_secs": 600,
+  "measured": {"compile_ms": 75254, "diff_lines": 65, "test_ms": 8397}
+}

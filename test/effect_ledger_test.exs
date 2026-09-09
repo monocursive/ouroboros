@@ -705,12 +705,13 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
     end
   end
 
-  describe "the version-2 checkpoint (R1)" do
+  describe "the version-3 checkpoint (R1, S2)" do
     test "a version-1 checkpoint is upgraded on read rather than refused" do
       table = unique_name("v1_storage")
       storage = {Jido.Storage.ETS, table: table}
 
-      # Written the way a build that predates `:inference` would have written it.
+      # Written the way a build that predates `:inference` and `:policy_promotion` would have
+      # written it.
       entry = %Entry{
         sequence: 1,
         started_sequence: 1,
@@ -755,25 +756,147 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
                  name
                )
 
-      assert {:ok, %{version: 2}} =
+      assert {:ok, %{version: 3}} =
                Jido.Storage.ETS.get_checkpoint(EffectLedger.checkpoint_key(), table: table)
     end
 
+    test "a version-2 checkpoint is upgraded on read too" do
+      # S2 bumped 2 to 3 for `:policy_promotion`, and the `Entry` struct did not change then
+      # either — so a checkpoint written before this node had ever promoted a tool is read as
+      # it stands rather than refused.
+      table = unique_name("v2_storage")
+      storage = {Jido.Storage.ETS, table: table}
+
+      entry = %Entry{
+        sequence: 1,
+        started_sequence: 1,
+        id: "inference-legacy",
+        effect: :inference,
+        principal: "session:s1",
+        attempt: %{session_id: "s1", turn_id: "t1", iteration: 1},
+        authority: %{decision: :allow},
+        cause: %{signal_id: "sig-1"},
+        status: :ok,
+        result: %{status: :completed},
+        error: nil,
+        started_at: "2026-08-22T00:00:00Z",
+        settled_at: "2026-08-22T00:00:01Z",
+        origin_node: node()
+      }
+
+      assert :ok =
+               Jido.Storage.ETS.put_checkpoint(
+                 EffectLedger.checkpoint_key(),
+                 %{version: 2, entries: [entry], next_sequence: 2},
+                 table: table
+               )
+
+      name = unique_name("v2_ledger")
+      start_supervised!({EffectLedger, name: name, storage: storage}, id: name)
+
+      assert {:ok, %Entry{id: "inference-legacy", status: :ok}} =
+               EffectLedger.get("inference-legacy", name)
+    end
+
     test "a checkpoint from a version this build does not know is still refused" do
-      table = unique_name("v3_storage")
+      table = unique_name("v4_storage")
       storage = {Jido.Storage.ETS, table: table}
 
       assert :ok =
                Jido.Storage.ETS.put_checkpoint(
                  EffectLedger.checkpoint_key(),
-                 %{version: 3, entries: [], next_sequence: 1},
+                 %{version: 4, entries: [], next_sequence: 1},
                  table: table
                )
 
-      name = unique_name("v3_ledger")
+      name = unique_name("v4_ledger")
 
-      assert {:error, {{:unsupported_effect_ledger_checkpoint, 3}, _child_spec}} =
+      assert {:error, {{:unsupported_effect_ledger_checkpoint, 4}, _child_spec}} =
                start_supervised({EffectLedger, name: name, storage: storage}, id: name)
+    end
+  end
+
+  describe "the :policy_promotion effect kind (S2)" do
+    test "is a ledger-only kind no agent effect can ask for" do
+      assert :policy_promotion in EffectLedger.effects()
+      refute :policy_promotion in Ouroboros.Control.Grants.effects()
+    end
+
+    test "records the policy, the tool, the bytes and the numbers, and nothing else" do
+      ledger = start_ledger!()
+
+      assert {:ok, entry, :created} =
+               EffectLedger.record_settled(
+                 %{
+                   id: "promo-1",
+                   effect: :policy_promotion,
+                   principal: "operator:ana",
+                   attempt: %{
+                     policy_name: "no-network-shell",
+                     tool: "bash",
+                     action: :promote,
+                     component_sha256: String.duplicate("a", 64),
+                     actor: "operator:ana",
+                     node: node(),
+                     # The kind names its own fields; anything else is dropped rather than
+                     # stored, which is what keeps a caller from putting a command line in an
+                     # attempt map nobody validates.
+                     command: "curl https://example.test"
+                   },
+                   authority: %{decision: :promote, reason: nil},
+                   cause: %{signal_id: "promote", signal_type: "policy_promotion"},
+                   result: %{
+                     decisions: 61,
+                     contradictions: 0,
+                     report_sha256: String.duplicate("b", 64),
+                     corpus: "every command line in the corpus"
+                   }
+                 },
+                 ledger
+               )
+
+      assert entry.status == :ok
+      assert entry.attempt.policy_name == "no-network-shell"
+      assert entry.attempt.action == :promote
+      assert entry.attempt.tool == "bash"
+      assert entry.result.decisions == 61
+      assert entry.result.contradictions == 0
+
+      refute Map.has_key?(entry.attempt, :command)
+      refute Map.has_key?(entry.result, :corpus)
+      refute inspect(entry) =~ "curl"
+      refute inspect(entry) =~ "every command line"
+    end
+
+    test "a demotion carries the digest of the answer that caused it" do
+      ledger = start_ledger!()
+
+      assert {:ok, entry, :created} =
+               EffectLedger.record_settled(
+                 %{
+                   id: "promo-2",
+                   effect: :policy_promotion,
+                   principal: "session:s-9",
+                   attempt: %{
+                     policy_name: "no-network-shell",
+                     tool: "bash",
+                     action: :demote,
+                     component_sha256: String.duplicate("a", 64)
+                   },
+                   authority: %{decision: :demote, reason: nil},
+                   cause: %{signal_id: "demote", signal_type: "policy_promotion"},
+                   result: %{
+                     reason: :human_contradiction,
+                     fingerprint: String.duplicate("c", 64),
+                     session_id: "s-9"
+                   }
+                 },
+                 ledger
+               )
+
+      assert entry.result.reason == :human_contradiction
+      assert entry.result.fingerprint == String.duplicate("c", 64)
+      assert entry.result.session_id == "s-9"
     end
   end
 

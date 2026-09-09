@@ -47,8 +47,13 @@ defmodule Ouroboros.Control.Permissions.Seam do
   all, and this seam adds no gate of its own on top of it. That is deliberate rather
   than an omission — a second gate here would be a rule an operator cannot see in either
   place — and it is why the bound that matters lives in the engine: `PolicyEngine` honours
-  a component's `allow` only for the tools named in `:policy_allowable_tools`, empty by
-  default (D20).
+  a component's `allow` only for a tool it has been given, and there are exactly two ways
+  to give it one. `:policy_allowable_tools`, empty by default, is an operator typing a tool
+  name (D20). `Ouroboros.Control.PolicyPromotion`'s record is the other, and it is scoped to
+  the policy name and the component bytes it was earned at: a tool goes in when the
+  component was replayed against decisions humans made on this node and contradicted none of
+  them, and comes out the moment a human contradicts it once (docs/SELF.md §S2, S-D22). An
+  `allow` for a tool in neither is still read as `ask`.
 
   `remember/4` and `forget_session/1` stay on `Control.Permissions` whatever engine is
   named: they are rule-store operations rather than decisions. C13 asks an engine for
@@ -211,7 +216,7 @@ defmodule Ouroboros.Control.Permissions.Seam do
       record(decision_id, %{
         decision: response.decision,
         scope: response.scope,
-        actor: :human,
+        actor: answer_actor(response),
         rule_ref: nil,
         reason: response.reason,
         request: request
@@ -223,6 +228,29 @@ defmodule Ouroboros.Control.Permissions.Seam do
     _error -> :ok
   catch
     _kind, _reason -> :ok
+  end
+
+  # Who answered (S2, S-D20). This lane's answer arrives as the same
+  # `Jido.Harness.ApprovalResponse` the native loop reads, and a client that answered with
+  # nobody at the keyboard — `ouro run --approve-all` — declares it in `provider_options`, the
+  # one field that struct has which carries anything. `:human` was hard-coded here, and that
+  # field is exactly what `Ouroboros.Control.PolicyEvidence` reads to decide whether an answer
+  # becomes the corpus a policy promotion is measured against.
+  #
+  # An **absent** actor is `:human`, deliberately: a client that says nothing is a person at a
+  # terminal, which is what every client of this lane but the headless one is.
+  defp answer_actor(response) do
+    case Map.get(response, :provider_options) do
+      options when is_map(options) ->
+        case Map.get(options, "actor") || Map.get(options, :actor) do
+          "human" -> :human
+          declared when is_binary(declared) and declared != "" -> :automation
+          _unstated -> :human
+        end
+
+      _absent ->
+        :human
+    end
   end
 
   @doc """

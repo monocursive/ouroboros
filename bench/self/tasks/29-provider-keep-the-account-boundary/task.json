@@ -1,0 +1,20 @@
+{
+  "id": "29-provider-keep-the-account-boundary",
+  "base_sha": "0c662fd3d87453f082f4e93c6942c29cb5101a5f",
+  "commit_sha": "553b884c4c49abb278885357181c7487ca63e8fb",
+  "subject": "fix(provider): keep the account boundary honest at its edges",
+  "instruction": "fix(provider): keep the account boundary honest at its edges\n\nThe Codex account connection queued requests behind a slow initialize\nwith no caller-liveness check, so a caller whose ceiling expired still\nhad its request dispatched upstream — a real logout nobody was waiting\nfor — and was answered into a corpse. flush now skips queued entries\nwhose caller has exited and keeps draining; the surviving request is\nproven to be the only one on the wire, under its own id.\n\nA response carrying a non-integer id could never match anything here,\nand fell through silently: the caller burned its whole timeout learning\nnothing. Such frames are named in a warning now.\n\nAlso, three smaller edges the review turned up:\n\n- capability module names are bounded to eight dotted segments before\n  Module.concat interns them; the atom table has no collector;\n- the cache-policy watchdog sleeps whole POSIX seconds instead of\n  relying on GNU/BSD float extensions of /bin/sleep;\n- DataDir creates its own missing parent components at 0700 rather\n  than under the ambient umask, while leaving pre-existing parents\n  exactly as their owner made them.\n\nHarnessEventProjection's moduledoc now states which lane carries\nprovider-env secret redaction and what callers projecting events from\noutside that lane owe.\n\nAcceptance. These tests are restored into the worktree after the session ends and must pass:\n  - a request whose caller exits while initialization is pending is dropped, not dispatched\n\nRules. Files that already exist under `test/` must not be modified or deleted — the change is graded against tests restored from the history after the session ends, applied to a fresh checkout of the starting commit. New test files of your own are allowed and are left in place, but they are yours: they are not copied into the tree the grade runs in. The change is collected as a diff over `lib/`, `assets/`, `priv/`, `config/`, `docs/` and `README.md`; a change to any other path — `mix.exs` and `.formatter.exs` included — is refused rather than graded. Work only inside this worktree.",
+  "instruction_kind": "full",
+  "hidden_tests": [
+    "test/provider/codex_app_server_test.exs"
+  ],
+  "solution_files": [
+    "lib/ouroboros/data_dir.ex",
+    "lib/ouroboros/harness_event_projection.ex",
+    "lib/ouroboros/provider.ex",
+    "lib/ouroboros/provider/codex_app_server.ex",
+    "lib/ouroboros/runtime/capabilities.ex"
+  ],
+  "timeout_secs": 600,
+  "measured": {"compile_ms": 47762, "diff_lines": 146, "test_ms": 14557}
+}

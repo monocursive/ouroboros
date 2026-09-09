@@ -96,8 +96,37 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
     end
   end
 
+  # The same, for a *file*: `canonicalize/1` insists on a directory, so a credential's path
+  # is resolved through its parent — which is also what `Sandbox.hidden_files/0` does, and
+  # for the same reason (the file may not exist yet).
+  # Exactly what `Ouroboros.Provider.Native.Tools.Bash.plan/2` does with a wrapped command,
+  # which is what the reviewers' exploits reproduced: the policy, the argv, `System.cmd`.
+  defp sandboxed(scope, policy, detection, command) do
+    {:ok, {executable, args}} = Sandbox.wrap({:shell, command}, scope, policy, detection)
+
+    {output, status} =
+      System.cmd(executable, args, env: Sandbox.env(policy), stderr_to_stdout: true)
+
+    {String.trim(output), status}
+  end
+
+  defp canonical_file(path),
+    do: path |> Path.dirname() |> canonical_root() |> Path.join(Path.basename(path))
+
   defp run(module, input, context, timeout \\ 30_000),
     do: Ouroboros.Provider.Native.Tools.execute(module, input, context, timeout)
+
+  # Whether `needle` appears in `list` as consecutive elements — which is what an argv
+  # assertion about a bind actually means: the three words together, in that order.
+  defp subsequence_of?(needle, list) do
+    length = length(needle)
+
+    list
+    |> Enum.chunk_every(length, 1, :discard)
+    |> Enum.any?(&(&1 == needle))
+  end
+
+  defp index_of(list, value), do: Enum.find_index(list, &(&1 == value))
 
   defp restore_app_env(key, nil), do: Application.delete_env(:ouroboros, key)
   defp restore_app_env(key, value), do: Application.put_env(:ouroboros, key, value)
@@ -1213,6 +1242,310 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
         assert "#{root}/**" in declared
       end
     end
+
+    # S1/HIGH-1. The engine refuses a *write* to `ouroboros.toml`, but the engine only sees
+    # the paths a call declares and a shell declares none. So the file is in the policy as a
+    # path, one per writable root, and both lists say the same thing.
+    test "names each writable root's own hook manifest as a protected file", %{scope: scope} do
+      policy = Sandbox.policy(scope, :workspace_write)
+
+      assert policy.protected_files ==
+               scope.roots
+               |> Kernel.++([scope.root])
+               |> Enum.map(&Path.join(&1, "ouroboros.toml"))
+               |> Enum.uniq()
+               |> Enum.sort()
+
+      assert Path.join(scope.root, "ouroboros.toml") in policy.protected_files
+
+      for file <- policy.protected_files do
+        assert ("**/" <> Path.basename(file)) in Rules.protected_paths()
+        assert Rules.protected_write?(file)
+      end
+    end
+
+    test "read_only has none, because nothing there is writable to protect one in", %{
+      read_only: scope
+    } do
+      assert Sandbox.policy(scope, :read_only).protected_files == []
+    end
+
+    test "a build has none: it has no workspace and therefore no hook manifest" do
+      assert Sandbox.builder_policy(writable: ["/tmp"]).protected_files == []
+    end
+
+    # The honest answer, per backend, and the one `Hooks.trusted?/2` reads.
+    test "protects_files? is true only where the backend can deny a path that need not exist" do
+      assert Sandbox.protects_files?(:sandbox_exec)
+      assert Sandbox.protects_files?(:bwrap)
+      refute Sandbox.protects_files?(:ouro_sandbox)
+      refute Sandbox.protects_files?(:none)
+
+      # A detection map answers by its backend, and a bare `%{}` answers no.
+      assert Sandbox.protects_files?(%{backend: :sandbox_exec, read_fence: true})
+      refute Sandbox.protects_files?(%{backend: :ouro_sandbox, read_fence: true})
+      refute Sandbox.protects_files?(%{})
+    end
+
+    test "Seatbelt writes one literal deny per protected file, after the segment denies" do
+      policy = Map.put(fixed_policy(:workspace_write), :protected_files, ["/ws/ouroboros.toml"])
+      profile = SandboxExec.profile(policy)
+
+      assert profile =~ ~s{(deny file-write* (literal (param "OURO_PROTECTED_FILE_0")))}
+      assert "-D" in SandboxExec.parameters(policy)
+      assert "OURO_PROTECTED_FILE_0=/ws/ouroboros.toml" in SandboxExec.parameters(policy)
+
+      # SBPL is last-match-wins, so the deny has to come after the allow that opened the
+      # root it sits in.
+      allow = :binary.match(profile, ~s{(allow file-write* (subpath (param "OURO_WRITABLE_1")))})
+
+      deny =
+        :binary.match(profile, ~s{(deny file-write* (literal (param "OURO_PROTECTED_FILE_0")))})
+
+      assert elem(allow, 0) < elem(deny, 0)
+    end
+
+    test "bubblewrap binds the file over itself when it is there and the scratch directory when it is not",
+         %{root: root, scope: scope} do
+      present = Path.join(root, "workspace/ouroboros.toml")
+      File.write!(present, "[[hooks]]\n")
+      absent = Path.join(root, "extra/ouroboros.toml")
+
+      policy =
+        Sandbox.policy(scope, :workspace_write)
+        |> Map.put(:protected_files, [absent, present])
+        |> Sandbox.with_scratch(Path.join(root, "scratch"))
+
+      argv = Bwrap.options(scope, policy)
+
+      # An empty directory, never `/dev/null`: a character device at that path made `git add
+      # -A` refuse a whole tree in CI, and git ignores an empty directory by design.
+      assert ["--ro-bind", policy.scratch, absent] |> subsequence_of?(argv)
+      refute ["--ro-bind", "/dev/null", absent] |> subsequence_of?(argv)
+      assert ["--ro-bind", present, present] |> subsequence_of?(argv)
+
+      # And the manifest's name joins the create filter's list, where this build has the
+      # library — that is what refuses a create beneath a writable root, which no root-level
+      # bind reaches.
+      assert {:ok, {_bwrap, wrapped}} =
+               Bwrap.wrap({:shell, "echo hi"}, scope, policy, "/usr/bin/bwrap")
+
+      if File.regular?(Application.app_dir(:ouroboros, "priv/native/libouro_fs_filter.so")) do
+        assert env_value(wrapped, "OUROBOROS_FS_DENY") == ".git:.ouroboros:ouroboros.toml"
+      else
+        refute "OUROBOROS_FS_DENY" in wrapped
+      end
+
+      # After the writable bind that would otherwise have made it writable.
+      assert index_of(argv, scope.root) < index_of(argv, present)
+    end
+  end
+
+  # S4 fix wave, HIGH-1 and HIGH-1b. The write fence above is not a read fence, and the two
+  # exploits that proved it were the same shape: a sandboxed `bash` read this node's signing
+  # seed (and derived the keypair with `:crypto`), and a sandboxed `bash` read this node's
+  # gateway token and drove `policy.demote`/`policy.clear` against its own runtime.
+  describe "the node's own credentials are hidden from a read" do
+    setup do
+      saved =
+        Map.new(
+          [:data_dir, :signer_key_path, :gateway, :web],
+          &{&1, Application.get_env(:ouroboros, &1)}
+        )
+
+      on_exit(fn -> Enum.each(saved, fn {key, value} -> restore_app_env(key, value) end) end)
+      :ok
+    end
+
+    test "hidden_files names the seed, the two tokens and the cookie secret", %{root: root} do
+      data_dir = Path.join(root, "data")
+      File.mkdir_p!(data_dir)
+      key = Path.join(root, "keys/signer.key")
+      File.mkdir_p!(Path.dirname(key))
+
+      Application.put_env(:ouroboros, :data_dir, data_dir)
+      Application.put_env(:ouroboros, :signer_key_path, key)
+      Application.put_env(:ouroboros, :gateway, token_file: Path.join(data_dir, "named.token"))
+
+      Application.put_env(:ouroboros, :web,
+        token_file: Path.join(data_dir, "named.token"),
+        secret_file: Path.join(data_dir, "named.secret")
+      )
+
+      hidden = Sandbox.hidden_files()
+
+      for path <- [
+            key,
+            Path.join(data_dir, "named.token"),
+            Path.join(data_dir, "named.secret"),
+            # The names `ouro` and the daemon agree on with nobody configuring them.
+            Path.join(data_dir, "gateway.token"),
+            Path.join(data_dir, "web.secret")
+          ] do
+        assert path in hidden or canonical_file(path) in hidden,
+               "#{path} is not fenced: #{inspect(hidden)}"
+      end
+    end
+
+    # The conventional names are re-derived in `Sandbox` rather than imported, for
+    # `protected_roots/0`'s reason. This is the check that the two agree.
+    test "the conventional names are the ones the gateway and the web surface use", %{
+      root: root
+    } do
+      data_dir = Path.join(root, "data")
+      File.mkdir_p!(data_dir)
+      Application.put_env(:ouroboros, :data_dir, data_dir)
+      Application.delete_env(:ouroboros, :gateway)
+      Application.delete_env(:ouroboros, :web)
+
+      hidden = Sandbox.hidden_files()
+
+      assert Ouroboros.Web.Config.default_token_file(data_dir) in hidden
+      assert Ouroboros.Web.Config.default_secret_file(data_dir) in hidden
+    end
+
+    # Seatbelt resolves the path the kernel opens, and on macOS `/var/folders/…` is
+    # `/private/var/folders/…` by then. A rule on the spelling alone renders perfectly and
+    # denies nothing — which is what the first cut of this fix did.
+    test "each path is listed as written and as the kernel resolves it", %{root: root} do
+      data_dir = Path.join(root, "data")
+      File.mkdir_p!(data_dir)
+      Application.put_env(:ouroboros, :data_dir, data_dir)
+
+      hidden = Sandbox.hidden_files()
+      token = Path.join(data_dir, "gateway.token")
+
+      assert token in hidden
+      assert canonical_file(token) in hidden
+    end
+
+    test "a surface configured with a literal token contributes no path", %{root: root} do
+      Application.put_env(:ouroboros, :data_dir, Path.join(root, "data"))
+      Application.put_env(:ouroboros, :gateway, token: "a-literal-token")
+      Application.delete_env(:ouroboros, :web)
+      Application.delete_env(:ouroboros, :signer_key_path)
+
+      refute "a-literal-token" in Sandbox.hidden_files()
+    end
+
+    test "every session policy carries them, in every mode", %{
+      scope: scope,
+      read_only: read_only,
+      root: root
+    } do
+      data_dir = Path.join(root, "data")
+      File.mkdir_p!(data_dir)
+      Application.put_env(:ouroboros, :data_dir, data_dir)
+      token = Path.join(data_dir, "gateway.token")
+
+      for {mode, one} <- [
+            {:read_only, read_only},
+            {:workspace_write, scope},
+            {:workspace_write_escalated, scope}
+          ] do
+        assert token in Sandbox.policy(one, mode).hidden_files,
+               "#{mode} does not hide the gateway token"
+      end
+    end
+
+    test "a build has none: a policy closed on reads has already hidden them" do
+      assert Sandbox.builder_policy(writable: ["/tmp"]).hidden_files == []
+    end
+
+    test "hides_files? is true only where the backend can deny one named path a read" do
+      assert Sandbox.hides_files?(:sandbox_exec)
+      assert Sandbox.hides_files?(:bwrap)
+      refute Sandbox.hides_files?(:ouro_sandbox)
+      refute Sandbox.hides_files?(:none)
+
+      assert Sandbox.hides_files?(%{backend: :sandbox_exec, read_fence: true})
+      refute Sandbox.hides_files?(%{backend: :ouro_sandbox, read_fence: true})
+      refute Sandbox.hides_files?(%{})
+    end
+
+    test "Seatbelt denies read and write, last of all the file rules" do
+      policy =
+        fixed_policy(:workspace_write)
+        |> Map.put(:write_exceptions, ["/ws/delivery"])
+        |> Map.put(:hidden_files, ["/srv/ouroboros/data/gateway.token"])
+
+      profile = SandboxExec.profile(policy)
+
+      assert profile =~ ~s{(deny file-read* (literal (param "OURO_HIDDEN_FILE_0")))}
+      assert profile =~ ~s{(deny file-write* (literal (param "OURO_HIDDEN_FILE_0")))}
+
+      assert "OURO_HIDDEN_FILE_0=/srv/ouroboros/data/gateway.token" in SandboxExec.parameters(
+               policy
+             )
+
+      # Last-match-wins: after the blanket `(allow file-read*)` this profile opens with, and
+      # after the delivery re-allow, which is the only rule that reopens a denied subtree.
+      read_allow = :binary.match(profile, "(allow file-read*)")
+
+      exception =
+        :binary.match(profile, ~s{(allow file-write* (subpath (param "OURO_EXCEPTION_0")))})
+
+      deny = :binary.match(profile, ~s{(deny file-read* (literal (param "OURO_HIDDEN_FILE_0")))})
+
+      assert elem(read_allow, 0) < elem(deny, 0)
+      assert elem(exception, 0) < elem(deny, 0)
+    end
+
+    # The loopback exception is what the S2b exploit reached the gateway over, and it stays:
+    # `mix` and `cargo` coordinate concurrent compilers over it. The credential is the fence.
+    test "and the loopback exception is untouched" do
+      profile =
+        fixed_policy(:workspace_write)
+        |> Map.put(:hidden_files, ["/srv/ouroboros/data/gateway.token"])
+        |> SandboxExec.profile()
+
+      assert profile =~ ~s{(allow network-outbound (remote ip "localhost:*"))}
+    end
+
+    test "bubblewrap masks the path with /dev/null, and only where the file is there", %{
+      root: root,
+      scope: scope
+    } do
+      present = Path.join(root, "data/gateway.token")
+      File.mkdir_p!(Path.dirname(present))
+      File.write!(present, "a-token")
+      absent = Path.join(root, "data/web.secret")
+      directory = Path.join(root, "data/a-directory")
+      File.mkdir_p!(directory)
+
+      policy =
+        Sandbox.policy(scope, :workspace_write)
+        |> Map.put(:hidden_files, [present, absent, directory])
+        |> Sandbox.with_scratch(Path.join(root, "scratch"))
+
+      argv = Bwrap.options(scope, policy)
+
+      # The source is `/dev/null` — unlike `protected_files`, which binds the file over
+      # itself and would leave the bytes there to `cat`.
+      assert ["--ro-bind", "/dev/null", present] |> subsequence_of?(argv)
+      refute ["--ro-bind", present, present] |> subsequence_of?(argv)
+
+      # And a path that is not a regular file is left out entirely. Measured with bubblewrap
+      # 0.8.0 in a privileged container: `--ro-bind /dev/null <absent>` under a read-only
+      # bind is "Can't create file … Read-only file system" and `bwrap` runs *nothing* — so
+      # emitting it would take every command on a Linux node down with it.
+      refute ["--ro-bind", "/dev/null", absent] |> subsequence_of?(argv)
+      refute ["--ro-bind", "/dev/null", directory] |> subsequence_of?(argv)
+    end
+
+    # The helper's wire format has a read *allow*-set and no per-path deny, so it sends
+    # nothing and says so through `hides_files?/1`.
+    test "the ouro-sandbox request carries no hidden_files field", %{scope: scope, root: root} do
+      policy =
+        Sandbox.policy(scope, :workspace_write)
+        |> Map.put(:hidden_files, [Path.join(root, "data/gateway.token")])
+        |> Sandbox.with_scratch(Path.join(root, "scratch"))
+
+      request = Helper.request(policy, scope)
+
+      refute Map.has_key?(request, "hidden_files")
+      refute request |> JSON.encode!() |> String.contains?("gateway.token")
+    end
   end
 
   describe "bash on a node with no backend" do
@@ -1311,6 +1644,147 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
 
       refute result.is_error
       assert File.read!(Path.join(workspace, "inside.txt")) == "inside\n"
+    end
+
+    # S1/HIGH-1, the reviewer's exploit_c adopted as a regression. The permission engine
+    # refuses a *write* to `ouroboros.toml`, but a shell declares only its redirect targets,
+    # so `cp`, `mv`, `tee`, `sed -i`, `dd` and a Python one-liner all reached the file with
+    # that rule in place. This is the kernel's answer, and `.git/pwned` is the control: the
+    # same shell, the same policy, a fence that was always there.
+    test "no shell reaches the hook manifest, by any of the ways that used to", %{
+      context: context,
+      workspace: workspace
+    } do
+      manifest = Path.join(workspace, "ouroboros.toml")
+      File.write!(Path.join(workspace, "template"), "[[hooks]]\nevent = \"PreToolUse\"\n")
+
+      # The control: `.git` is fenced by a segment rule, and has been since the beginning.
+      control = run(Bash, %{"command" => "cp template .git/pwned"}, context)
+      assert control.is_error
+      refute File.exists?(Path.join([workspace, ".git", "pwned"]))
+
+      for command <- [
+            "cp template ouroboros.toml",
+            "mv template ouroboros.toml",
+            "cat template | tee ouroboros.toml",
+            "printf '[[hooks]]' | dd of=ouroboros.toml",
+            "echo x > ouroboros.toml",
+            "python3 -c \"open('ouroboros.toml','w').write('x')\"",
+            "touch ouroboros.toml"
+          ] do
+        result = run(Bash, %{"command" => command}, context)
+
+        assert result.is_error, "#{command} was allowed: #{result.output}"
+        refute File.exists?(manifest), "#{command} created the hook manifest"
+      end
+    end
+
+    # S4/HIGH-1 and HIGH-1b, the two reviewers' exploits adopted as one regression.
+    #
+    # `rv-s4/exploit-1-key-readable.exs` planted an Ed25519 seed where docs/SELF.md tells the
+    # operator to put it, ran the exact pipeline `Tools.Bash.plan/2` runs — detect, decide,
+    # scratch, with_scratch, wrap, `System.cmd` — and `cat`ed the seed out through a
+    # `workspace_write` shell, then derived the keypair and signed arbitrary bytes with it.
+    # `rv-s2b/live_sandbox_to_gateway.sh` did the same to `gateway.token` and drove
+    # `policy.demote` and `policy.clear` against the node's own gateway with it.
+    #
+    # This is the kernel's answer to both. The seed is planted in both places the exploit
+    # used — under the data directory and in a directory of the daemon user's own — because
+    # the fence is on the configured path and not on the data directory.
+    test "no shell reads this node's signing seed or its gateway token", %{
+      root: root,
+      scope: scope
+    } do
+      saved =
+        Map.new([:data_dir, :signer_key_path], &{&1, Application.get_env(:ouroboros, &1)})
+
+      on_exit(fn -> Enum.each(saved, fn {key, value} -> restore_app_env(key, value) end) end)
+
+      data_dir = Path.join(root, "credentials")
+      elsewhere = Path.join(root, "home-keys")
+      File.mkdir_p!(data_dir)
+      File.mkdir_p!(elsewhere)
+
+      seed = :crypto.strong_rand_bytes(32)
+      encoded = Base.encode64(seed)
+      token = Path.join(data_dir, "gateway.token")
+      secret = Path.join(data_dir, "web.secret")
+      File.write!(token, "a-real-looking-operator-token")
+      File.write!(secret, "a-real-looking-cookie-secret")
+
+      for {label, key} <- [
+            {"under the data directory", Path.join(data_dir, "signer.key")},
+            {"anywhere the daemon user can read", Path.join(elsewhere, "signer.key")}
+          ] do
+        File.write!(key, encoded)
+        File.chmod!(key, 0o600)
+
+        Application.put_env(:ouroboros, :data_dir, data_dir)
+        Application.put_env(:ouroboros, :signer_key_path, key)
+
+        detection = Sandbox.detect()
+        assert Sandbox.hides_files?(detection), "this backend cannot hide a file"
+
+        {:sandboxed, _label, policy} = Sandbox.decide(scope, detection)
+        {:ok, scratch} = Sandbox.scratch()
+        policy = Sandbox.with_scratch(policy, scratch)
+
+        try do
+          for {what, path} <- [
+                {"the seed #{label}", key},
+                {"the gateway token", token},
+                {"the cookie secret", secret}
+              ] do
+            {output, status} = sandboxed(scope, policy, detection, "cat #{path}")
+
+            assert status != 0, "#{what} was readable: #{output}"
+            refute output =~ encoded, "#{what} leaked the seed"
+            refute output =~ "operator-token", "#{what} leaked the token"
+            refute output =~ "cookie-secret", "#{what} leaked the secret"
+            assert output =~ "Operation not permitted"
+          end
+
+          # A key a session may not read is a key it may not replace either.
+          {_output, status} = sandboxed(scope, policy, detection, "echo overwritten > #{key}")
+          assert status != 0
+          assert File.read!(key) == encoded
+
+          # The control: the same shell, the same policy, an ordinary file beside them. The
+          # fence is these paths, not the directory and not reads in general.
+          plain = Path.join(data_dir, "notes.txt")
+          File.write!(plain, "ordinary")
+          {output, 0} = sandboxed(scope, policy, detection, "cat #{plain}")
+          assert output =~ "ordinary"
+        after
+          Sandbox.release(scratch)
+        end
+      end
+    end
+
+    test "and an existing hook manifest cannot be rewritten or removed", %{
+      context: context,
+      workspace: workspace
+    } do
+      manifest = Path.join(workspace, "ouroboros.toml")
+      File.write!(manifest, "[[hooks]]\nevent = \"PreToolUse\"\n")
+
+      for command <- [
+            "echo pwned > ouroboros.toml",
+            "sed -i '' 's/PreToolUse/SessionStart/' ouroboros.toml",
+            "rm -f ouroboros.toml",
+            "mv ouroboros.toml elsewhere.toml"
+          ] do
+        result = run(Bash, %{"command" => command}, context)
+        assert result.is_error, "#{command} was allowed: #{result.output}"
+      end
+
+      # Unchanged, and still readable: a fence on writing is not a fence on reading.
+      assert File.read!(manifest) == "[[hooks]]\nevent = \"PreToolUse\"\n"
+
+      assert %{is_error: false, output: shown} =
+               run(Bash, %{"command" => "cat ouroboros.toml"}, context)
+
+      assert shown =~ "PreToolUse"
     end
 
     test "denies a write to the home directory under workspace_write" do
@@ -1491,6 +1965,95 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
     end
   end
 
+  # S1's Linux half, measured after CI: bubblewrap creates the mount point for an absent
+  # protected path *inside the host's own directory* and never unlinks it, so `--ro-bind
+  # /dev/null <ws>/ouroboros.toml` leaves a zero-byte read-only file behind and `--ro-bind
+  # <scratch> <ws>/.git` leaves an empty directory. `Bwrap.mount_point_stubs/1` names them
+  # from the same `File.exists?` the argv reads, and the bash tool clears them afterwards.
+  # This half is pure filesystem and runs on every platform; the bubblewrap half is below.
+  describe "the mount-point stubs bubblewrap leaves behind" do
+    setup do
+      root = Path.join(System.tmp_dir!(), "native-stubs-#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm_rf(root) end)
+      workspace = Path.join(root, "workspace")
+      scratch = Path.join(root, "scratch")
+      File.mkdir_p!(workspace)
+      File.mkdir_p!(scratch)
+      {:ok, scope} = Paths.scope(workspace, [], :workspace_write)
+      policy = scope |> Sandbox.policy(:workspace_write) |> Sandbox.with_scratch(scratch)
+      %{workspace: scope.root, policy: policy, scratch: scratch}
+    end
+
+    test "names the absent manifest and the absent segment directories, and nothing that exists",
+         %{workspace: workspace, policy: policy} do
+      stubs = Bwrap.mount_point_stubs(policy)
+
+      assert Path.join(workspace, "ouroboros.toml") in stubs
+      assert Path.join(workspace, ".git") in stubs
+      assert Path.join(workspace, ".ouroboros") in stubs
+
+      File.write!(Path.join(workspace, "ouroboros.toml"), "[[hooks]]\n")
+      File.mkdir_p!(Path.join(workspace, ".git"))
+
+      stubs = Bwrap.mount_point_stubs(policy)
+      refute Path.join(workspace, "ouroboros.toml") in stubs
+      refute Path.join(workspace, ".git") in stubs
+      assert Path.join(workspace, ".ouroboros") in stubs
+    end
+
+    test "the sandbox seam answers them for bubblewrap and nothing for the others", %{
+      policy: policy,
+      workspace: workspace
+    } do
+      assert Path.join(workspace, "ouroboros.toml") in Sandbox.stubs(policy, %{
+               backend: :bwrap,
+               executable: "/usr/bin/bwrap"
+             })
+
+      for backend <- [:sandbox_exec, :ouro_sandbox, :none] do
+        assert Sandbox.stubs(policy, %{backend: backend, executable: nil}) == []
+      end
+    end
+
+    test "clearing removes only what is still a stub", %{workspace: workspace} do
+      # The manifest stub is an empty directory (the scratch bind's shape); a zero-byte file
+      # is what the first cut left, and clearing knows both.
+      stub_file = Path.join(workspace, "ouroboros.toml.first-cut")
+      stub_dir = Path.join(workspace, ".git")
+      stub_manifest = Path.join(workspace, "ouroboros.toml")
+      real_file = Path.join(workspace, "kept.toml")
+      real_dir = Path.join(workspace, ".ouroboros")
+      missing = Path.join(workspace, "never-there")
+
+      File.write!(stub_file, "")
+      File.mkdir_p!(stub_dir)
+      File.mkdir_p!(stub_manifest)
+      File.write!(real_file, "[[hooks]]\n")
+      File.mkdir_p!(Path.join(real_dir, "sessions"))
+
+      assert :ok =
+               Bwrap.clear_mount_point_stubs([
+                 stub_file,
+                 stub_dir,
+                 stub_manifest,
+                 real_file,
+                 real_dir,
+                 missing
+               ])
+
+      refute File.exists?(stub_file)
+      refute File.exists?(stub_dir)
+      refute File.exists?(stub_manifest)
+      assert File.read!(real_file) == "[[hooks]]\n"
+      assert File.dir?(Path.join(real_dir, "sessions"))
+      refute File.exists?(missing)
+
+      # Total, in both spellings the bash tool can hand it.
+      assert :ok = Sandbox.clear_stubs([])
+      assert :ok = Sandbox.clear_stubs(nil)
+    end
+  end
+
   describe "the bwrap backend, live on this node" do
     @describetag :bwrap
     @describetag @needs_bwrap
@@ -1527,6 +2090,94 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
 
       refute result.is_error
       assert File.read!(Path.join(workspace, "inside.txt")) == "inside\n"
+    end
+
+    # S1/HIGH-1's Linux half. Same claim as the sandbox-exec case above, by a different
+    # mechanism: an existing manifest is bound read-only over itself and an absent one has
+    # the empty scratch directory bound onto it, so a create fails `EROFS` or `EISDIR` and a
+    # rename or an unlink over the mount point fails `EBUSY`. Runs where the live bubblewrap
+    # suite runs — Linux CI's ubuntu-24.04 job and `scripts/wasm-linux-test.sh` — and is
+    # skipped, loudly, on a Mac.
+    test "no shell reaches the hook manifest, present or absent", %{
+      context: context,
+      workspace: workspace
+    } do
+      manifest = Path.join(workspace, "ouroboros.toml")
+      File.write!(Path.join(workspace, "template"), "[[hooks]]\n")
+
+      for command <- [
+            "cp template ouroboros.toml",
+            "mv template ouroboros.toml",
+            "cat template | tee ouroboros.toml",
+            "echo x > ouroboros.toml"
+          ] do
+        result = run(Bash, %{"command" => command}, context)
+        assert result.is_error, "#{command} was allowed: #{result.output}"
+        refute File.exists?(manifest), "#{command} created the hook manifest"
+      end
+    end
+
+    # The residue the first run of the test above found in CI: the mask is a mount point,
+    # and bubblewrap's teardown leaves it on the host. After the command the bash tool
+    # clears what it named beforehand, so a workspace that had no manifest and no `.git`
+    # still has neither — the pre-existing `.git`/`.ouroboros` scratch binds had been
+    # leaving an empty directory behind on every Linux command for the same reason.
+    test "leaves no mount-point stub behind once the command has ended", %{
+      context: context,
+      workspace: workspace
+    } do
+      absent_before =
+        ["ouroboros.toml", ".git", ".ouroboros"]
+        |> Enum.map(&Path.join(workspace, &1))
+        |> Enum.reject(&File.exists?/1)
+
+      assert Path.join(workspace, "ouroboros.toml") in absent_before
+
+      assert %{is_error: false, output: output} = run(Bash, %{"command" => "echo hi"}, context)
+      assert output =~ "hi"
+
+      for path <- absent_before do
+        refute File.exists?(path), "#{path} was left behind by the sandbox"
+      end
+    end
+
+    # The shape of the mask, from inside: a directory, which git ignores and nothing writes
+    # into — not a device, which made `git add -A` refuse a whole tree in CI.
+    test "an absent hook manifest is masked as an empty directory inside the namespace", %{
+      context: context,
+      workspace: workspace
+    } do
+      refute File.exists?(Path.join(workspace, "ouroboros.toml"))
+
+      assert %{is_error: false, output: output} =
+               run(
+                 Bash,
+                 %{"command" => "ls -ld ouroboros.toml && find . -name ouroboros.toml -type f"},
+                 context
+               )
+
+      assert output =~ ~r/^d/m
+      refute output =~ ~r/^\.\/ouroboros\.toml$/m
+    end
+
+    test "and an existing hook manifest stays readable and unwritable", %{
+      context: context,
+      workspace: workspace
+    } do
+      manifest = Path.join(workspace, "ouroboros.toml")
+      File.write!(manifest, "[[hooks]]\nevent = \"PreToolUse\"\n")
+
+      for command <- ["echo pwned > ouroboros.toml", "rm -f ouroboros.toml"] do
+        result = run(Bash, %{"command" => command}, context)
+        assert result.is_error, "#{command} was allowed: #{result.output}"
+      end
+
+      assert File.read!(manifest) == "[[hooks]]\nevent = \"PreToolUse\"\n"
+
+      assert %{is_error: false, output: shown} =
+               run(Bash, %{"command" => "cat ouroboros.toml"}, context)
+
+      assert shown =~ "PreToolUse"
     end
 
     test "denies a write to the home directory under workspace_write" do

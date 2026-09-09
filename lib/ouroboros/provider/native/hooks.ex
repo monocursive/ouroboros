@@ -88,6 +88,14 @@ defmodule Ouroboros.Provider.Native.Hooks do
   backend does not run at all — it is logged and ignored — so it is not a second ambient
   path. Operator configuration lives outside both authorities.
 
+  Nor can it come from operator configuration **alone** (S1). `ouroboros.toml` is a file in
+  a workspace the session may write, so trusting it means trusting whatever the session
+  writes into it next unless the kernel is holding that one path shut. `trusted?/2`
+  therefore also asks `Ouroboros.Provider.Native.Sandbox.protects_files?/1` whether the
+  backend this node detected can fence the manifest, and answers `false` where it cannot —
+  Seatbelt and bubblewrap can, `ouro-sandbox` cannot express a deny for a path that need not
+  exist yet. Component hooks are unaffected, for D8's reason below.
+
   Untrusted is not silent: `load/2` reports `trusted?: false` together with how many
   hooks it declined to load, so a session can say why the repository's hooks did nothing.
 
@@ -864,12 +872,46 @@ defmodule Ouroboros.Provider.Native.Hooks do
   defp check_text(%{trusted: true}, text), do: text
   defp check_text(_untrusted, text), do: labelled(text)
 
-  @doc "Whether operator configuration trusts a workspace for repository commands."
+  @doc """
+  Whether operator configuration trusts a workspace for repository commands.
+
+  Two conditions, and both have to hold.
+
+  **The operator named it.** `config :ouroboros, :trusted_workspaces` lists the workspace,
+  compared canonically so one directory has one answer however it was spelled. That has
+  always been the whole of it.
+
+  **And the OS sandbox can keep the session out of `#{@project_file}` (S1).** This file is
+  the list of programs the runtime runs around every tool call, so trusting it is trusting
+  whatever it says next — and a session with a sandboxed shell in that workspace can write
+  it unless the *kernel* stops it. The permission engine refuses a write
+  (`Ouroboros.Control.Permissions.Rules.protected_write?/1`), but the engine only ever sees
+  the paths a call declares and a shell declares none: `cp`, `mv`, `tee`, `sed -i`, `dd` and
+  `python3 -c` all reach the file without a redirect for the engine to read. So the fence
+  that matters is `Ouroboros.Provider.Native.Sandbox`'s `protected_files`, and this asks
+  `Sandbox.protects_files?/1` whether the backend this node actually detected can apply it.
+  Seatbelt and bubblewrap can; `ouro-sandbox` cannot express a deny for a path that may not
+  exist yet, and says so rather than pretending.
+
+  On a node where it cannot, this answers `false` and the workspace's **shell** hooks and
+  checks are declined and counted exactly as an untrusted workspace's are — one warning,
+  naming the backend. Component hooks are unaffected: they run inside the WebAssembly pool,
+  can only narrow a decision, and are admitted from an untrusted workspace already (D8).
+
+  `opts` takes `:trusted_workspaces` and, for tests, `:sandbox_detection` — the detection
+  map to judge the backend by, defaulting to this node's own `Sandbox.detect/0`.
+  """
   @spec trusted?(String.t() | nil, keyword()) :: boolean()
   def trusted?(workspace_root, opts \\ [])
   def trusted?(nil, _opts), do: false
 
   def trusted?(root, opts) when is_binary(root) do
+    configured?(root, opts) and fenced?(root, opts)
+  end
+
+  def trusted?(_root, _opts), do: false
+
+  defp configured?(root, opts) do
     canonical =
       case Ouroboros.Workspace.Path.canonicalize(root) do
         {:ok, path} -> path
@@ -891,7 +933,27 @@ defmodule Ouroboros.Provider.Native.Hooks do
     end)
   end
 
-  def trusted?(_root, _opts), do: false
+  # Warned rather than silent, and only on the path where the answer *changed*: an operator
+  # who listed this workspace and gets no shell hooks is owed the reason, and a workspace
+  # nobody listed was never going to run them anyway. `load/2` is called once per session,
+  # so this is one line per session on an affected node and not one per tool call.
+  defp fenced?(root, opts) do
+    detection = Keyword.get_lazy(opts, :sandbox_detection, &Sandbox.detect/0)
+
+    if Sandbox.protects_files?(detection) do
+      true
+    else
+      Logger.warning(
+        "#{root} is a trusted workspace, but this node's OS sandbox " <>
+          "(#{inspect(Map.get(detection, :backend))}) cannot keep a shell out of " <>
+          "#{Path.join(root, @project_file)}: a session could write the hook manifest that " <>
+          "decides what runs around its own tool calls. Its shell hooks and checks are " <>
+          "declined; its component hooks are unaffected."
+      )
+
+      false
+    end
+  end
 
   # ---------------------------------------------------------------- invoking
 

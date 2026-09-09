@@ -23,7 +23,7 @@ defmodule Ouroboros.Control.PermissionsTest do
 
   alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.Control.Permissions
-  alias Ouroboros.Control.Permissions.{Matcher, Pattern, Request}
+  alias Ouroboros.Control.Permissions.{Matcher, Pattern, Request, Rule}
   alias Ouroboros.Control.PermissionsTest.RefusingStorage
   alias Ouroboros.Upgrade.{Artifact, Verifier}
 
@@ -607,6 +607,137 @@ defmodule Ouroboros.Control.PermissionsTest do
 
       # No resolved app: nothing to key an app rule on, so fall back rather than invent one.
       assert Permissions.suggest(%{tool: "desktop_state", mode: :read}) == "Tool(desktop_state)"
+    end
+  end
+
+  # S1. `Forge(<name>)` and `Forge(*)` are the rule language's half of "a session may change
+  # the runtime it runs in". The corpus here is the whole specification of what one means;
+  # `test/provider/native/forge_tool_test.exs` is what proves the tool asks in those terms.
+  describe "Forge" do
+    test "parses the two forms and holds a name to a rollout's charset" do
+      assert %Pattern{kind: :forge, spec: %{name: "vet"}} = Pattern.parse!("Forge(vet)")
+      assert %Pattern{kind: :forge, spec: %{name: :any}} = Pattern.parse!("Forge(*)")
+
+      for good <- ["vet", "a", "vet.2", "vet-2", "vet_2", String.duplicate("a", 64)] do
+        assert {:ok, %{kind: :forge}} = Pattern.parse("Forge(#{good})"), "#{good} was refused"
+      end
+
+      # Without the charset check any prose is a rule, and a rule that cannot name a
+      # capability is one an operator thinks they wrote.
+      for bad <- ["Vet", "vet/../x", "a b", "*x", "", " ", String.duplicate("a", 65), "-vet"] do
+        assert {:error, _reason} = Pattern.parse("Forge(#{bad})"), "#{inspect(bad)} parsed"
+      end
+
+      assert {:error, {:unrecognized_pattern, _}} = Pattern.parse("Forge")
+      refute Pattern.fragile?(Pattern.parse!("Forge(*)"))
+    end
+
+    test "a forge allow is admissible; an allow on the tool is not" do
+      # The name in `context.forge` is the one `Ouroboros.Wasm.Forge` will refuse the
+      # project against, so an allow keyed on it is a statement that is made true
+      # downstream — the `ComputerUse(app:…)` distinction, one step earlier.
+      assert Pattern.decisions(Pattern.parse!("Forge(vet)")) == :any
+      assert Pattern.decisions(Pattern.parse!("Forge(*)")) == :any
+
+      assert {:ok, %{decision: :allow}} =
+               Permissions.add(
+                 %{scope: :user, decision: :allow, pattern: "Forge(vet)"},
+                 start_engine!()
+               )
+
+      # `Tool(forge)` is deny-and-ask only, for `Tool(capability)`'s reason one step
+      # earlier: an allow on the tool is an allow to add any capability to this runtime,
+      # under any name, now and later.
+      assert Pattern.decisions(Pattern.parse!("Tool(forge)")) == :deny_or_ask_only
+      assert Pattern.decisions(Pattern.parse!("Tool(FORGE)")) == :deny_or_ask_only
+
+      assert {:error, {:pattern_cannot_allow, "Tool(forge)"}} =
+               Rule.new(%{scope: :node, decision: :allow, pattern: "Tool(forge)"})
+
+      # Every other tool is unaffected: this is a statement about forges, not about the
+      # `Tool(...)` form.
+      assert Pattern.decisions(Pattern.parse!("Tool(read)")) == :any
+    end
+
+    test "the matcher reads the tool and the resolved name, and never one alone" do
+      exact = Pattern.parse!("Forge(vet)")
+      any = Pattern.parse!("Forge(*)")
+
+      forging = Request.new(%{tool: "forge", mode: :execute, context: %{forge: "vet"}})
+
+      assert Matcher.matches?(exact, forging, :all)
+      assert Matcher.matches?(any, forging, :all)
+
+      # A string key is tolerated the way the desktop tools' is.
+      assert Matcher.matches?(
+               exact,
+               Request.new(%{tool: "forge", mode: :execute, context: %{"forge" => "vet"}}),
+               :all
+             )
+
+      # Another capability's name is another rule's business.
+      refute Matcher.matches?(
+               exact,
+               Request.new(%{tool: "forge", mode: :execute, context: %{forge: "lint"}}),
+               :all
+             )
+
+      # An allow on `*` must not cover "we could not tell what this would build" — which is
+      # every deploy, every status, and every name outside the charset.
+      refute Matcher.matches?(any, Request.new(%{tool: "forge", mode: :execute}), :all)
+
+      refute Matcher.matches?(
+               any,
+               Request.new(%{tool: "forge", mode: :execute, context: %{forge: ""}}),
+               :all
+             )
+
+      # Another tool could carry a `forge` context key. A pattern that matched on the
+      # context alone would judge a call it was never written about.
+      elsewhere =
+        Request.new(%{
+          tool: "bash",
+          command: "echo hi",
+          mode: :execute,
+          context: %{forge: "vet"}
+        })
+
+      refute Matcher.matches?(exact, elsewhere, :all)
+      refute Matcher.matches?(any, elsewhere, :all)
+    end
+
+    test "suggest offers the forge rule, and only when there is a name to key it on" do
+      assert Permissions.suggest(%{tool: "forge", mode: :execute, context: %{forge: "vet"}}) ==
+               "Forge(vet)"
+
+      assert Permissions.suggest(%{tool: "forge", mode: :execute, context: %{"forge" => "vet"}}) ==
+               "Forge(vet)"
+
+      # No resolved name — a deploy, a status — falls back to the narrowing form rather
+      # than inventing one. `Tool(forge)` cannot carry an allow, so the modal that offers
+      # it can only remember a deny or an ask, which is the honest set of answers here.
+      assert Permissions.suggest(%{tool: "forge", mode: :execute}) == "Tool(forge)"
+    end
+
+    # LOW-7. A suggestion is a rule the "don't ask again" modal is about to *persist*, so it
+    # is held to the charset `Forge(<name>)` parses. `suggest/1` takes a request a caller
+    # built, and a context key that never came through `Tools.classify/3` can hold anything.
+    test "a forge context that is not a name is never offered as a rule" do
+      for bad <- ["Not A Name", "Vet", "wasm/vet", "vet ", "", String.duplicate("a", 65), 42] do
+        suggestion =
+          Permissions.suggest(%{tool: "forge", mode: :execute, context: %{forge: bad}})
+
+        assert suggestion == "Tool(forge)",
+               "#{inspect(bad)} was offered as #{inspect(suggestion)}"
+      end
+
+      # The property behind it: every suggestion this function makes parses.
+      for name <- ["vet", "a.b-c_d", "0", String.duplicate("z", 64)] do
+        suggestion =
+          Permissions.suggest(%{tool: "forge", mode: :execute, context: %{forge: name}})
+
+        assert {:ok, _pattern} = Pattern.parse(suggestion)
+      end
     end
   end
 

@@ -52,6 +52,14 @@ config :ouroboros,
   # the machine holding the key. Anything but these two words is refused, not read as the
   # default — a typo asked for a forge not to run here.
   wasm_forge_placement: :local,
+  # Whether a model session is shown the `forge` tool at all (docs/SELF.md §S1). `false` is
+  # the default and the posture: a session that can forge can change the runtime it is
+  # running in, which is the whole claim of self-improvement and not a thing to have on by
+  # accident. `OUROBOROS_POSTURE=self` sets it true; nothing else does. Off, the name is
+  # absent from every session's tool list and `Tools.lookup/3` answers `:unknown_tool` —
+  # the same posture the Computer Use tools take, so a model is never taught a name it
+  # cannot use. Read as exactly `true`: a typo leaves it shut rather than widening it.
+  native_forge_tool: false,
   coding_storage: {Jido.Storage.ETS, table: :ouroboros_coding},
   interactive_storage: {Jido.Storage.ETS, table: :ouroboros_interactive},
   team_storage: {Jido.Storage.ETS, table: :ouroboros_teams},
@@ -348,11 +356,43 @@ config :ouroboros,
 #     margin. On expiry the answer is `ask` and the instance is dropped; only the refusal that
 #     means "the instance I remember is gone" is retried, because any other retry doubles what
 #     a wedged helper costs. Five seconds, and a value outside 1..60_000 falls back to it.
+#
+# S2 adds four more, and none of them widens anything by existing:
+#
+#   * `:policy_promotion_storage` is where `Ouroboros.Control.PolicyPromotion` keeps the record
+#     of which `(tool, shape)` pairs a component has *earned* the right to resolve — the second
+#     and only other input to what an `allow` may resolve. ETS here, so the record dies with
+#     the VM and every shape starts unpromoted. Production names a synced
+#     `Ouroboros.Storage.DurableFile`; that line lives in `config/runtime.exs` beside
+#     `:grants_storage`'s and is S4's to write, because a promotion that was acknowledged must
+#     survive the crash that follows it.
+#   * `:policy_evidence_root` is where `Ouroboros.Control.PolicyEvidence` writes the corpus a
+#     replay measures a candidate against. `nil` — the default — derives it as
+#     `<data_dir>/policy`. Naming it is a **test seam**, the same kind as `:wasm_policy_opts`'
+#     `:store_root` and `:permissions_ledger`: it is what lets a test write a corpus it
+#     controls and read it back, and it is not a setting an operator has any reason to move.
+#   * `:policy_evidence_enabled` turns the corpus off. `true` here, and `false` writes nothing
+#     at all — no directory, no file, no row — for a node whose operator does not want human
+#     command lines on its disk at any bound. Left on, the bounds are the module's: 10 000 rows
+#     or 64 MiB, whichever comes first, past which the oldest are dropped by one rewrite to 90%
+#     of the bound, in a directory this runtime creates `0700` around a file it creates `0600`.
+#     Turning it off means no promotion can ever be earned again; the ones already recorded
+#     stand until they are demoted or cleared.
+#   * `:policy_shadow_every` is how often an `allow` a promotion would resolve is put to a
+#     human anyway: every 10th, per `(tool, shape)`. It is not a safety margin, it is what
+#     makes the demotion canary *able to see* — a promoted shape otherwise resolves its calls
+#     with nobody in the loop, so nobody is ever asked about the calls a promotion removed and
+#     no contradiction can ever be observed. `0` disables it, is honoured, and is documented in
+#     S-D24 and S-D29 as blinding the canary; a value outside 1..1_000 falls back to 10.
 config :ouroboros,
   permissions_engine: Ouroboros.Control.Permissions,
   wasm_policy: nil,
   policy_allowable_tools: [],
-  policy_decision_timeout_ms: 5_000
+  policy_decision_timeout_ms: 5_000,
+  policy_promotion_storage: {Jido.Storage.ETS, table: :ouroboros_policy_promotion},
+  policy_evidence_root: nil,
+  policy_evidence_enabled: true,
+  policy_shadow_every: 10
 
 # The two facts about the web endpoint that are genuinely compile-time, and no others.
 # Everything runtime — the bind, the port, the cookie key, the origin policy — is handed

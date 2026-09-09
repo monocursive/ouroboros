@@ -204,23 +204,56 @@ defmodule Ouroboros.Runtime.Capabilities do
   # weaker copy of its file allow-list in this module would be a second place for it to be
   # wrong. What is read here is the operator's own manifest beside it.
   defp read_wasm(directory, relative, manifest) do
+    with {:ok, fields} <- wasm_manifest(manifest) do
+      {:ok, Map.merge(fields, %{lane: :wasm, path: relative, directory: directory})}
+    end
+  end
+
+  @doc """
+  One lane-W `manifest.json`, validated: `%{name, description, eval, start}`.
+
+  Extracted from `read_wasm/3` for S1, so that the operator's `capabilities.admit` and the
+  model's `forge` tool read one proposal format through one validator rather than two
+  readings of the same file that could disagree about what an evaluation spec is.
+
+  The whole of it: the four keys and no others, a name in
+  `Ouroboros.Wasm.Artifact.name?/1`'s charset, a non-empty description, an `eval` that
+  `Ouroboros.Upgrade.Rollout.Evaluation.validate/1` accepts after atomisation, and a
+  `start` carrying only a `config` string bounded at #{@max_start_config_bytes} bytes.
+  """
+  @spec wasm_manifest(term()) :: {:ok, map()} | {:error, term()}
+  def wasm_manifest(manifest) when is_map(manifest) and not is_struct(manifest) do
     with :ok <- ensure_manifest_keys(manifest, @wasm_manifest_keys),
          {:ok, name} <- capability_name(manifest["name"]),
          {:ok, description} <- required_string(manifest, "description"),
          {:ok, eval} <- optional_eval(manifest),
          {:ok, start} <- optional_wasm_start(manifest) do
-      {:ok,
-       %{
-         lane: :wasm,
-         path: relative,
-         directory: directory,
-         name: name,
-         description: description,
-         eval: eval,
-         start: start
-       }}
+      {:ok, %{name: name, description: description, eval: eval, start: start}}
     end
   end
+
+  def wasm_manifest(other), do: {:error, {:invalid_manifest, inspect(other, limit: 5)}}
+
+  @doc """
+  One evaluation spec as JSON, atomised and validated. `nil` passes through.
+
+  The same conversion and the same validator `wasm_manifest/1` applies to a manifest's
+  `eval` block, exposed for S1's `forge` tool, whose `eval` parameter is the same JSON in
+  the same shape and must be held to the same reading of it.
+  """
+  @spec wasm_eval(term()) :: {:ok, map() | nil} | {:error, term()}
+  def wasm_eval(nil), do: {:ok, nil}
+  def wasm_eval(spec), do: Evaluation.validate(atomize_eval(spec))
+
+  @doc """
+  One `start.config` string, bounded exactly as a manifest's own is.
+
+  Exposed for S1's `forge` tool for `wasm_eval/1`'s reason: the parameter and the file are
+  the same value, and one of them being checked by a second copy of this bound is how the
+  two come to disagree.
+  """
+  @spec wasm_start_config(term()) :: {:ok, String.t()} | {:error, term()}
+  def wasm_start_config(value), do: start_config(%{"config" => value})
 
   defp capability_name(name) do
     if Wasm.Artifact.name?(name),
@@ -457,8 +490,7 @@ defmodule Ouroboros.Runtime.Capabilities do
   defp optional_eval(manifest) do
     case Map.fetch(manifest, "eval") do
       :error -> {:ok, nil}
-      {:ok, nil} -> {:ok, nil}
-      {:ok, spec} -> Evaluation.validate(atomize_eval(spec))
+      {:ok, spec} -> wasm_eval(spec)
     end
   end
 

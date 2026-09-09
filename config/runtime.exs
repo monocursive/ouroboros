@@ -351,6 +351,16 @@ if config_env() == :prod and is_nil(System.get_env("OUROBOROS_COLLECTOR_CONFIG")
     # the same synced write the mutation journals use: a grant that was acknowledged
     # must survive the crash that follows it, and a revocation must too.
     grants_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "grants")},
+    # S2's record of what a signed policy component has *earned* the right to resolve is the
+    # second input to what an `allow` from that component may widen, so it is held to the
+    # same synced write the grant authority is: a promotion that was acknowledged must
+    # survive the crash that follows it, and so must the demotion that withdrew it.
+    # `config/config.exs` leaves this on ETS, which is the right default for a laptop and
+    # the wrong one for a node an operator promoted a tool on — without this line a
+    # production node forgets every promotion at restart, which is the safe direction and
+    # still not the one anybody asked for.
+    policy_promotion_storage:
+      {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "policy-promotion")},
     # Permission rules decide what a provider may do before a human is asked, so an
     # acknowledged rule has to survive the crash that follows it — the same synced write
     # the grant authority uses. This path is also why workspace rules live here rather
@@ -484,6 +494,35 @@ gateway_data_dir =
 if gateway_data_dir do
   Ouroboros.DataDir.ensure_private!(gateway_data_dir)
   config :ouroboros, :data_dir, gateway_data_dir
+end
+
+# S4. `OUROBOROS_POSTURE=self`, the one switch that lets a model session change the runtime
+# it is running in (docs/SELF.md §2). Read here rather than in the production block above,
+# because the development daemon is the loop this posture is for and a posture that only
+# existed in a release would be a different runtime than the one it was developed on.
+#
+# `Ouroboros.Self.Posture` is the second and last module of this application that a config
+# provider calls, and it earns it the same way `Ouroboros.DataDir` does: it depends on
+# nothing — no application environment, no process, no other module of this application —
+# so it is loadable and callable before the supervision tree it is deciding about exists.
+# Everything it can refuse is a unit test in `test/self/posture_test.exs` rather than a
+# virtual machine per case, which is the whole reason it is a function.
+#
+# The two settings handed to it are read rather than written: this posture depends on
+# `wasm_forge_placement` being `:local` and `signing_require_wasm_eval` being `true`, both
+# already the shipped defaults, and refuses rather than silently running under a build that
+# weakened either. `Application.get_env/3` here reads compile-time configuration — this
+# file's own `config/2` calls are not visible to it — which is exactly the value being
+# asserted about.
+case Ouroboros.Self.Posture.configure(
+       Map.new(Ouroboros.Self.Posture.variables(), &{&1, System.get_env(&1)}),
+       wasm_forge_placement: Application.get_env(:ouroboros, :wasm_forge_placement, :local),
+       signing_require_wasm_eval:
+         Application.get_env(:ouroboros, :signing_require_wasm_eval, true)
+     ) do
+  :off -> :ok
+  {:ok, settings} -> config :ouroboros, settings
+  {:error, message} -> raise message
 end
 
 # Language servers are a liability as much as an asset — OpenCode turned theirs off by

@@ -15,7 +15,8 @@ defmodule Ouroboros.Control.Permissions.Pattern do
       mcp__<server>__<tool>     one MCP tool
       mcp__<server>__*          every tool on one MCP server
       Tool(<name>)              one tool by the name the provider calls it
-                                (`Tool(capability)`: deny and ask only — see `decisions/1`)
+                                (`Tool(capability)`, `Tool(forge)`: deny and ask only —
+                                see `decisions/1`)
       Tool(<name>:<param>=<v>)  that tool with that parameter — deny and ask only
       ComputerUse(observe)      the desktop_state tool
       ComputerUse(act)          the desktop_act tool
@@ -23,6 +24,8 @@ defmodule Ouroboros.Control.Permissions.Pattern do
       ComputerUse(app:*)        either desktop tool, when the node resolved any app
       Capability(<name>)        the capability tool, for one live lane-W capability
       Capability(*)             the capability tool, for any live lane-W capability
+      Forge(<name>)             the forge tool, building one named capability
+      Forge(*)                  the forge tool, building any capability
 
   ## The two refusals
 
@@ -57,7 +60,8 @@ defmodule Ouroboros.Control.Permissions.Pattern do
     :tool,
     :tool_param,
     :computer_use,
-    :capability
+    :capability,
+    :forge
   ]
 
   @wrapped %{"Bash" => :bash, "Read" => :read, "Edit" => :edit, "Write" => :write}
@@ -71,11 +75,12 @@ defmodule Ouroboros.Control.Permissions.Pattern do
   # A lane-W capability name, the charset `Ouroboros.Wasm.Artifact.name?/1` holds a rollout
   # to. Restated rather than imported because this module is pure and depends on nothing —
   # it is the whole specification of the rule language, and a rule's meaning must not
-  # change because another plane changed its mind.
+  # change because another plane changed its mind. `Forge(<name>)` uses the same charset,
+  # because it names the same thing one step earlier: what the component will be called.
   @capability_name ~r/\A[a-z0-9][a-z0-9._-]{0,63}\z/
 
-  # The one tool whose `Tool(<name>)` form may not carry an allow. See `decisions/1`.
-  @per_target_tool "capability"
+  # The tools whose `Tool(<name>)` form may not carry an allow. See `decisions/1`.
+  @per_target_tools ["capability", "forge"]
 
   @enforce_keys [:raw, :kind, :spec, :fragile?]
   defstruct @enforce_keys
@@ -91,6 +96,7 @@ defmodule Ouroboros.Control.Permissions.Pattern do
           | :tool_param
           | :computer_use
           | :capability
+          | :forge
   @type t :: %__MODULE__{
           raw: String.t(),
           kind: kind(),
@@ -154,12 +160,19 @@ defmodule Ouroboros.Control.Permissions.Pattern do
   a prompt about `vet` meant to say (docs/WASM.md §7.7). Denying and asking on the tool
   stay available, because both are narrowing. `Capability(<name>)` and `Capability(*)` are
   how an allow is written, and the second one says the broad thing out loud.
+
+  `Tool(forge)` is the third, by the same argument one step earlier (docs/SELF.md §S1). A
+  forge builds and signs a component this node will then run, so an allow on the tool is an
+  allow to add *any* capability to the runtime, under any name, now and later — including
+  the ones a later turn thinks of. `Forge(<name>)` and `Forge(*)` are how an allow is
+  written; `Forge(*)` says the broad thing out loud, and it still does not cover a `deploy`,
+  which carries no name for a rule to key on.
   """
   @spec decisions(t()) :: :any | :deny_or_ask_only
   def decisions(%__MODULE__{kind: :tool_param}), do: :deny_or_ask_only
 
   def decisions(%__MODULE__{kind: :tool, spec: %{name: name}}) do
-    if String.downcase(name) == @per_target_tool, do: :deny_or_ask_only, else: :any
+    if String.downcase(name) in @per_target_tools, do: :deny_or_ask_only, else: :any
   end
 
   def decisions(%__MODULE__{}), do: :any
@@ -282,6 +295,24 @@ defmodule Ouroboros.Control.Permissions.Pattern do
           do:
             {:ok, %__MODULE__{raw: raw, kind: :capability, spec: %{name: name}, fragile?: false}},
           else: {:error, {:invalid_capability_name, name}}
+    end
+  end
+
+  # S1. The same two forms one step earlier in a capability's life, and the same charset:
+  # what `Forge(<name>)` names is what the component will be called, and the forge is held
+  # to it. No permissive arm, for `Capability(…)`'s reason.
+  defp parse_named("Forge", inner, raw) do
+    case String.trim(inner) do
+      "" ->
+        {:error, :empty_forge_pattern}
+
+      "*" ->
+        {:ok, %__MODULE__{raw: raw, kind: :forge, spec: %{name: :any}, fragile?: false}}
+
+      name ->
+        if Regex.match?(@capability_name, name),
+          do: {:ok, %__MODULE__{raw: raw, kind: :forge, spec: %{name: name}, fragile?: false}},
+          else: {:error, {:invalid_forge_name, name}}
     end
   end
 

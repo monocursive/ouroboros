@@ -1,0 +1,16 @@
+{
+  "id": "01-interactive-let-a-turn-id-reach-the",
+  "base_sha": "90e89f660830cc5f75ffafa9a338d3c0ab0d1c77",
+  "commit_sha": "7f9d816676f67528ca854cc52628d6ccb1f42457",
+  "subject": "fix(interactive): let a turn id reach the session's rewind, not only an ordinal",
+  "instruction": "fix(interactive): let a turn id reach the session's rewind, not only an ordinal\n\n`rewind_points` hands a client turn ids and the wire admits them, but the session facade guarded `rewind/3` on `is_integer(to_turn)`, so every id became `invalid_rewind` before the native session — which accepts both — ever saw it. The facade now admits a non-empty id or a non-negative ordinal, exactly what `interactive.rewind` admits.\n\nFound by the W4-CLIENT agent while wiring `/rewind`; the client had been sending the ordinal to work around it.\n\nAcceptance. These tests are restored into the worktree after the session ends and must pass:\n  - a turn id string reaches the session instead of dying at the facade\n\nRules. Files that already exist under `test/` must not be modified or deleted — the change is graded against tests restored from the history after the session ends, applied to a fresh checkout of the starting commit. New test files of your own are allowed and are left in place, but they are yours: they are not copied into the tree the grade runs in. The change is collected as a diff over `lib/`, `assets/`, `priv/`, `config/`, `docs/` and `README.md`; a change to any other path — `mix.exs` and `.formatter.exs` included — is refused rather than graded. Work only inside this worktree.",
+  "instruction_kind": "full",
+  "hidden_tests": [
+    "test/ouroboros/gateway/session_context_test.exs"
+  ],
+  "solution_files": [
+    "lib/ouroboros/interactive_session.ex"
+  ],
+  "timeout_secs": 600,
+  "measured": {"compile_ms": 66233, "diff_lines": 3, "test_ms": 21107}
+}
