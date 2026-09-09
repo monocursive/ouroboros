@@ -273,7 +273,13 @@ defmodule Ouroboros.Gateway.IntegrationTest do
 
   test "hello then runtime.status returns a tree, not an opaque blob", %{client: client} do
     id = "agent-#{System.unique_integer([:positive])}"
-    assert {:ok, _pid} = Mesh.start_agent(id, role: "reviewer")
+
+    assert {:ok, _pid} =
+             Mesh.start_agent(id,
+               agent: Ouroboros.Capability.DistributionReference,
+               role: "reviewer"
+             )
+
     on_exit(fn -> Mesh.stop_agent(id) end)
 
     assert hello(client)["result"]["protocol"] == 1
@@ -284,8 +290,8 @@ defmodule Ouroboros.Gateway.IntegrationTest do
     assert status["role"] == "core"
 
     # The whole point of the per-leaf walk: `status` embeds `Mesh.list_agents/0`, whose
-    # maps carry pids. `Serializable.safe/1` would have replaced this entire tree with
-    # one string.
+    # maps carry pids. An all-or-nothing serializer would have replaced this entire tree
+    # with one string.
     refute Map.has_key?(status, "_opaque")
     assert is_map(status["availability"])
     assert status["availability"]["mesh"] == "available"
@@ -293,7 +299,7 @@ defmodule Ouroboros.Gateway.IntegrationTest do
 
     # Availability is tri-state, and the client renders all three; what matters here is
     # that it arrives as a word rather than as an inspect string.
-    assert status["availability"]["control"] in ["available", "unavailable", "disabled"]
+    assert status["availability"]["workspace"] in ["available", "unavailable", "disabled"]
 
     assert agent = Enum.find(status["agents"], &(&1["id"] == id))
     assert agent["node"] == Atom.to_string(node())
