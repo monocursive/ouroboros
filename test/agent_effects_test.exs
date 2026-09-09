@@ -17,7 +17,6 @@ defmodule Ouroboros.AgentEffectsTest do
 
   alias Ouroboros.Team
   alias Ouroboros.Test.HarnessAdapter
-  alias Ouroboros.Upgrade.Rollout.Registry
   alias Ouroboros.Upgrade.Signing.Service
   alias Ouroboros.Wasm
   alias Ouroboros.Wasm.ForgeFixture

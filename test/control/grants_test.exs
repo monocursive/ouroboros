@@ -324,6 +324,4 @@ defmodule Ouroboros.Control.GrantsTest do
 
   defp unique_table,
     do: String.to_atom("grants_storage_#{System.unique_integer([:positive, :monotonic])}")
-
-  defp unique_epoch, do: System.unique_integer([:positive, :monotonic])
 end
