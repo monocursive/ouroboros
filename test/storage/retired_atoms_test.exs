@@ -14,6 +14,7 @@ defmodule Ouroboros.Storage.RetiredAtomsTest do
   alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.Control.Permissions
   alias Ouroboros.Control.Permissions.{Matcher, Request, Rule}
+  alias Ouroboros.Gateway.Methods
   alias Ouroboros.Storage.{DurableFile, RetiredAtoms}
 
   @fixtures Path.expand("../support/retired_atoms", __DIR__)
@@ -92,6 +93,17 @@ defmodule Ouroboros.Storage.RetiredAtomsTest do
       assert keys == ["app", "desktop_action", "window_id"]
 
       assert %{retained: 1, next_sequence: 2} = EffectLedger.status(ledger)
+    end
+
+    test "exports through the hash chain, with the retired keys as ordinary strings" do
+      ledger = start_ledger!()
+      assert {:ok, entries} = EffectLedger.list([], ledger)
+
+      # What `ledger.export` answers: `Present.ledger_export/2` is this over the same list.
+      assert %{count: 1, lines: [%{line: line, hash: hash}]} = Methods.chain(entries)
+      assert line =~ ~s("desktop_action":"click")
+      assert line =~ ~s("window_id":"42")
+      assert String.match?(hash, ~r/\A[0-9a-f]{64}\z/)
     end
   end
 
