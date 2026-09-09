@@ -296,7 +296,7 @@ async fn an_inbound_line_past_the_ceiling_fails_the_call_rather_than_the_process
 
     let script = tokio::spawn(async move {
         let mut peer = Peer::accept(&server).await;
-        peer.hello(&["hello", "agents.state"]).await;
+        peer.hello(&["hello", "interactive.info"]).await;
 
         let _request = peer.request().await.expect("a call");
 
@@ -314,7 +314,9 @@ async fn an_inbound_line_past_the_ceiling_fails_the_call_rather_than_the_process
 
     let error = tokio::time::timeout(
         PATIENCE,
-        connected.client.call("agents.state", json!({ "id": "a" })),
+        connected
+            .client
+            .call("interactive.info", json!({ "id": "a" })),
     )
     .await
     .expect("an answer in time")
@@ -381,7 +383,7 @@ async fn an_uncorrelatable_error_frame_ends_the_connection() {
 
     let script = tokio::spawn(async move {
         let mut peer = Peer::accept(&server).await;
-        peer.hello(&["hello", "agents.list"]).await;
+        peer.hello(&["hello", "interactive.list"]).await;
 
         let _request = peer.request().await.expect("a call");
 
@@ -395,10 +397,13 @@ async fn an_uncorrelatable_error_frame_ends_the_connection() {
         .await
         .expect("a handshake");
 
-    let error = tokio::time::timeout(PATIENCE, connected.client.call("agents.list", json!({})))
-        .await
-        .expect("an answer in time")
-        .expect_err("a failure");
+    let error = tokio::time::timeout(
+        PATIENCE,
+        connected.client.call("interactive.list", json!({})),
+    )
+    .await
+    .expect("an answer in time")
+    .expect_err("a failure");
 
     assert_eq!(error.code(), Some(ErrorCode::ParseError));
 

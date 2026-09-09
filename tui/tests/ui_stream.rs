@@ -62,7 +62,6 @@ const METHODS: &[&str] = &[
     "runtime.status",
     "runtime.providers",
     "interactive.list",
-    "coding.list",
     "interactive.replay",
     "interactive.start",
     "interactive.send_message",
@@ -483,9 +482,7 @@ async fn stream_ended_stops_the_client_expecting_more() {
         // refreshes, but fail if the client subscribes to or replays the ended stream.
         while let Some(request) = peer.request().await {
             match request["method"].as_str() {
-                Some("interactive.list" | "coding.list") => {
-                    peer.result(&request["id"], json!([])).await
-                }
+                Some("interactive.list") => peer.result(&request["id"], json!([])).await,
                 _ => panic!("a finished stream must not be asked about again: {request}"),
             }
         }
