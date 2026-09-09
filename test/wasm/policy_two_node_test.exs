@@ -234,7 +234,6 @@ defmodule Ouroboros.Wasm.PolicyTwoNodeTest do
 
     put_env!(peer_node, :data_dir, data_dir)
     put_env!(peer_node, :wasm, helper_path: Wasm.helper_path())
-    put_env!(peer_node, :coding_storage, {Jido.Storage.ETS, table: peer_name})
 
     {:ok, _mix} = :erpc.call(peer_node, Application, :ensure_all_started, [:mix])
     :ok = :erpc.call(peer_node, Mix, :env, [:test])

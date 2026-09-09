@@ -185,13 +185,6 @@ defmodule Ouroboros.Upgrade.EpochTest do
         [allow_unsigned: true]
       ])
 
-    :ok =
-      :erpc.call(peer_node, Application, :put_env, [
-        :ouroboros,
-        :coding_storage,
-        {Jido.Storage.ETS, table: peer_name}
-      ])
-
     {:ok, _applications} = :erpc.call(peer_node, Application, :ensure_all_started, [:ouroboros])
     peer_node
   end

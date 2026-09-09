@@ -95,7 +95,6 @@ defmodule Ouroboros.Upgrade.DistOffForgeTest do
       trusted_signers: %{@signer => public_key}
     )
 
-    put_env!(peer, :coding_storage, {Jido.Storage.ETS, table: unique_atom("dist_off_coding")})
     put_env!(peer, :forge_signer, {Signer.Local, private_key: private_key})
     put_env!(peer, :forge_signer_id, @signer)
 

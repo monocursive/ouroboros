@@ -1226,13 +1226,6 @@ defmodule Ouroboros.InteractiveSessionTest do
     :ok =
       :erpc.call(peer_node, Application, :put_env, [
         :ouroboros,
-        :coding_storage,
-        {Jido.Storage.ETS, table: String.to_atom("#{peer_name}_coding")}
-      ])
-
-    :ok =
-      :erpc.call(peer_node, Application, :put_env, [
-        :ouroboros,
         :interactive_storage,
         {Jido.Storage.ETS, table: String.to_atom("#{peer_name}_interactive")}
       ])

@@ -15,9 +15,6 @@ defmodule Ouroboros.Upgrade.CoordinatorTest do
 
     on_exit(fn -> :peer.stop(peer) end)
 
-    storage = {Jido.Storage.ETS, table: peer_name}
-    :ok = :erpc.call(peer_node, Application, :put_env, [:ouroboros, :coding_storage, storage])
-
     :ok =
       :erpc.call(peer_node, Application, :put_env, [
         :ouroboros,
