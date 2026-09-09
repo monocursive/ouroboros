@@ -43,7 +43,7 @@ from ouroboros_agent.result import parse_stream
 from ouroboros_agent.trajectory import build_trajectory
 
 #: Where the dist artifact comes from. Never built here: ERTS does not cross-compile, so
-#: a Linux `ouro` is built on Linux — `make dist` on a Linux host or in CI — and handed
+#: a Linux `ouro` is built on Linux — `make ouro` on a Linux host or in CI — and handed
 #: over as a path. A task image is not a build host and a benchmark is not the place to
 #: discover that it isn't.
 DIST_ENV = "OURO_LINUX_DIST"
@@ -109,7 +109,7 @@ class OuroborosAgent(BaseInstalledAgent):
         """
         if not self._dist_path:
             raise RuntimeError(
-                f"{DIST_ENV} is unset. Build a Linux client with `make dist` on a Linux "
+                f"{DIST_ENV} is unset. Build a Linux client with `make ouro` on a Linux "
                 "host (ERTS does not cross-compile) and point this at the artifact, or "
                 "pass --ak dist_path=/path/to/ouro"
             )

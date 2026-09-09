@@ -71,7 +71,7 @@ The adapter is [`bench/terminal_bench/`](../bench/terminal_bench/README.md):
 prebuilt Linux `ouro`, starts the packaged daemon, and runs one headless turn.
 
 ```sh
-export OURO_LINUX_DIST=/path/to/ouro-<version>-x86_64-unknown-linux-gnu   # `make dist` on Linux
+export OURO_LINUX_DIST=/path/to/ouro   # `make ouro` on a Linux host
 export ANTHROPIC_API_KEY=...
 
 cd bench/terminal_bench
@@ -91,7 +91,7 @@ bench/terminal_bench/run_tests.sh     # 64 tests: no docker, no key, no harbor i
 
 Three things this repository does not have on the machine where the adapter was written:
 
-1. **A Linux `ouro`.** ERTS does not cross-compile. `make dist` produces a client for the
+1. **A Linux `ouro`.** ERTS does not cross-compile. `make ouro` produces a client for the
    host that built it, so a Linux artifact is built on a Linux host or in CI. This is the
    hard prerequisite, and it is the same one `AGENT_EXPERIENCE.md` §10 names for releases.
 2. **A model key, and a budget.** 89 tasks × 5 attempts is 445 transcripts against a
