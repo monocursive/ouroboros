@@ -5016,6 +5016,25 @@ mod tests {
             report.text
         );
 
+        // The live projection comes from a runtime that never heard of the machine
+        // either, so without this the tombstone is invisible on the surface an operator
+        // with a running daemon actually sees.
+        let live = serde_json::json!({
+            "summary": {"expected": 1, "connected": 1, "offline": 0, "incompatible": 0},
+            "machines": [{
+                "machine": "studio",
+                "node": "ouro-studio@studio.tailnet.ts.net",
+                "state": "local",
+                "role": "core"
+            }]
+        });
+        let rendered = render_live_status(&dir, &live).expect("a live projection");
+        assert!(
+            rendered.contains("ouro-vps@vps.tailnet.ts.net"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("sessions restore"), "{rendered}");
+
         // `members add` refuses to quietly undo the operator's statement.
         let error = add_member(&dir, "vps", "vps.tailnet.ts.net", None)
             .unwrap_err()
