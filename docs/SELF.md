@@ -485,7 +485,7 @@ table out to its own length.
 The file is read before a runtime is started, refused over a mebibyte, refused when it is not a
 regular file by the open handle's own metadata, and refused together with a positional prompt.
 
-Proved in `test/ouroboros/gateway/policy_test.exs`, `test/provider/native/coding_approval_test.exs`,
+Proved in `test/ouroboros/gateway/policy_test.exs`, `test/interactive_approval_ledger_test.exs`,
 `tui/src/policy_cli.rs`'s own tests, `tui/tests/policy_cli.rs` and `tui/tests/run.rs` against the
 scripted gateway with the golden frames, and
 `test/support/gateway_golden/policy_{status,promote,replay}_result.json` with the sections

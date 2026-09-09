@@ -147,9 +147,8 @@ since landed; treat §7, §8, §11 and §14 as current.
 - Namespace enforcement points (all six): source regex (`source.ex:51,121-129`),
   verifier introduce-prefix (`verifier.ex:68,247-253`), verifier protected set
   (`verifier.ex:40-67,283-291`), signer policy (`policy.ex:196,260-268`), mesh start
-  allow-list (`mesh.ex:30`: `["Elixir.Ouroboros.Agent.", "Elixir.Ouroboros.Capability."]`),
-  operator entry-point regexes (`runtime/capabilities.ex:258-268`,
-  `orchestration/step.ex:152-158`).
+  allow-list (`mesh.ex:30`: `["Elixir.Ouroboros.Capability."]`), operator entry-point
+  regex (`runtime/capabilities.ex:258-268`).
 - Identity: `Upgrade.ModuleName` exists solely because forged atoms don't survive
   reboot (`upgrade/module_name.ex:1-19`). Content addressing is pervasive (source
   sha256, BEAM sha256/md5, deterministic signing payload
@@ -248,7 +247,7 @@ Two variants exist; `ouro-wasm` copies the **server-shaped** one.
   allowlist ("external network is on or off, never 'these hosts'",
   `sandbox.ex:96-98`).
 - Lease rule: any non-`read_only` sandbox mode takes an exclusive workspace lease by
-  default (`coding/task_state.ex:477-478`). Worktrees are provisioned idempotently on
+  default (`interactive/state.ex`, `default_workspace_mode/1`). Worktrees are provisioned idempotently on
   every admission (`workspace/worktree.ex:141-142`); "The provider never learns any of
   this. It receives a `cwd`" (`worktree.ex:137-138`).
 - Fleet facts: `local_fleet_posture/0` = `%{node, role, running, machine, runtime}`
