@@ -415,8 +415,8 @@ defmodule Ouroboros.Audit.SystemTest do
     assert {:error, :migration_requires_stopped_runtime_and_key} =
              Content.migrate(ctx.root, config)
 
-    migrate_offline(ctx.root, config, 3)
-    assert Content.inventory(ctx.root, config).encrypted == 3
+    migrate_offline(ctx.root, config, 2)
+    assert Content.inventory(ctx.root, config).encrypted == 2
 
     rotated = %{
       config
@@ -424,7 +424,7 @@ defmodule Ouroboros.Audit.SystemTest do
         encryption_keys: Map.put(config.encryption_keys, "new", :binary.copy(<<3>>, 32))
     }
 
-    migrate_offline(ctx.root, rotated, 3)
+    migrate_offline(ctx.root, rotated, 2)
     new_only = %{rotated | encryption_keys: Map.take(rotated.encryption_keys, ["new"])}
 
     for {file, bytes} <- files do
