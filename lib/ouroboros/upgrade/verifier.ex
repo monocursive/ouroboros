@@ -6,8 +6,7 @@ defmodule Ouroboros.Upgrade.Verifier do
   lane's own guarantees, the surfaces that trigger it, on-load code, or consolidated
   protocols. The protected set is every `Ouroboros.Upgrade.*` module (verifier,
   executor, coordinator), every `Ouroboros.Storage.*` module (the synced journal
-  writer a patch could turn into a silent no-op), every `Ouroboros.Release.*` module
-  (the durable lane's authorizer and journal), every `Ouroboros.Control.*` module
+  writer a patch could turn into a silent no-op), every `Ouroboros.Control.*` module
   (which decides what is patched at all), every `Ouroboros.Gateway.*` module (the
   operator surface, where an auth check that can be hot-patched is no auth at all),
   every `Ouroboros.Agent.Effects.*` module and every `Ouroboros.Orchestration.*`
@@ -52,7 +51,6 @@ defmodule Ouroboros.Upgrade.Verifier do
   ]
   @protected_prefixes [
     "Elixir.Ouroboros.Upgrade.",
-    "Elixir.Ouroboros.Release.",
     "Elixir.Ouroboros.Storage.",
     "Elixir.Ouroboros.Control.",
     "Elixir.Ouroboros.Gateway.",

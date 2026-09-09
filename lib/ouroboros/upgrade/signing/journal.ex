@@ -21,8 +21,8 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
 
   Entries are bounded. Reasons and findings are admitted only while they stay portable
   and small, because a durable log an attacker can grow by choosing its inputs is not a
-  log. History is trimmed oldest-first like `Ouroboros.Release.Journal`; an operator who
-  needs unbounded retention ships these entries somewhere that has it.
+  log. History is trimmed oldest-first; an operator who needs unbounded retention ships
+  these entries somewhere that has it.
 
   A findings map is bounded **field by field** when it does not fit as a whole. One
   requester-chosen value inside a verdict — a guest toolchain's `test_report`, which a

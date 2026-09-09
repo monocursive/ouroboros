@@ -21,7 +21,6 @@
       "interactive": "available",
       "mesh": "available",
       "orchestration": "available",
-      "release": "available",
       "teams": "available",
       "workspace": "disabled"
     },
@@ -88,11 +87,6 @@
     ],
     "node": "ouroboros@golden",
     "orchestration_plans": [],
-    "release": {
-      "ephemeral_capability_count": 0,
-      "handler_releases": [],
-      "mode": "ready"
-    },
     "role": "core",
     "teams": [
       {

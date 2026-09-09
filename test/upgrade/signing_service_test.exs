@@ -588,7 +588,6 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
             Ouroboros.Team.Store,
             Ouroboros.Orchestration.Scheduler,
             Ouroboros.Control.Store,
-            Ouroboros.Release.Runtime,
             Ouroboros.Upgrade.NodeExecutor,
             Ouroboros.Upgrade.Rollout.Registry
           ] do

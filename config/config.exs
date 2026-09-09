@@ -90,7 +90,6 @@ config :ouroboros,
   # read has its own smaller bound in `Ouroboros.Agent.EffectLedger`.
   effect_ledger_limit: 1_000,
   upgrade_storage: {Jido.Storage.ETS, table: :ouroboros_upgrades},
-  release_storage: {Jido.Storage.ETS, table: :ouroboros_releases},
   capability_storage: {Jido.Storage.ETS, table: :ouroboros_capabilities},
   epoch_storage: {Jido.Storage.ETS, table: :ouroboros_forge_epochs},
   # The forge asks this module to sign what it builds. Refusing by default means a

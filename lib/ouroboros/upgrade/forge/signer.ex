@@ -83,10 +83,8 @@ defmodule Ouroboros.Upgrade.Forge.Signer.Deny do
   @moduledoc """
   The default signer: it signs nothing.
 
-  Refusing by default is the same posture the durable release lane takes with
-  `Ouroboros.Release.Authorizer.Deny`. A deployment that needs a signature must be given
-  a signer deliberately, by configuration an operator wrote, and not acquire one because
-  a default was convenient.
+  A deployment that needs a signature must be given a signer deliberately, by
+  configuration an operator wrote, and not acquire one because a default was convenient.
   """
 
   @behaviour Ouroboros.Upgrade.Forge.Signer

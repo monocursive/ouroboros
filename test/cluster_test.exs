@@ -2010,7 +2010,6 @@ defmodule Ouroboros.ClusterTest do
             Ouroboros.Orchestration.Scheduler,
             Ouroboros.Control.Store,
             Ouroboros.Control.Grants,
-            Ouroboros.Release.Runtime,
             Ouroboros.Upgrade.NodeExecutor,
             Ouroboros.Upgrade.Rollout.Registry
           ] do

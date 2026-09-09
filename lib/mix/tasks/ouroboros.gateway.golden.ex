@@ -798,8 +798,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         control: :disabled,
         effect_ledger: :available,
         workspace: :disabled,
-        hot_upgrade: :available,
-        release: :available
+        hot_upgrade: :available
       },
       agents: [
         %{
@@ -857,7 +856,6 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         rollback_receipts: [],
         operations: []
       },
-      release: %{mode: :ready, handler_releases: [], ephemeral_capability_count: 0},
       forge: %{signer: :deny, admit_possible?: false, live_count: 0, live: []}
     })
   end

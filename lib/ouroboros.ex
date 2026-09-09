@@ -78,7 +78,6 @@ defmodule Ouroboros do
           }
         ),
       upgrade: safe_value(&Ouroboros.Upgrade.NodeExecutor.status/0, %{mode: :unavailable}),
-      release: safe_value(&Ouroboros.Release.Runtime.status/0, %{mode: :unavailable}),
       forge:
         safe_value(
           &Ouroboros.Runtime.Exposure.forge_status/0,
@@ -178,8 +177,7 @@ defmodule Ouroboros do
           do: :disabled,
           else: process_group_state([Ouroboros.Workspace.Manager])
         ),
-      hot_upgrade: process_group_state([Ouroboros.Upgrade.NodeExecutor]),
-      release: process_group_state([Ouroboros.Release.Runtime])
+      hot_upgrade: process_group_state([Ouroboros.Upgrade.NodeExecutor])
     }
   end
 
