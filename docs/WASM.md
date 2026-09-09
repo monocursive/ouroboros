@@ -21,8 +21,8 @@ ARCHITECTURE.md — into a sentence about one lane instead of the whole system.
 
 This is not a portability project and not a rewrite. The BEAM lane stays, for
 everything that must be OTP (supervision, stores, live control-plane evolution). The
-native loop is not ported to wasm (see §9.2 for why). The workspace — `bash`, git, LSP
-— is a different axis entirely; §10 covers the microVM tier for it, deliberately last.
+native loop is not ported to wasm (see §9.2 for why). The workspace — `bash`, git — is a
+different axis entirely; §10 covers the microVM tier for it, deliberately last.
 
 Goals, in the user's words: agents that are **secure** (containment, not name policy),
 **auditable** (an artifact whose maximum authority is statically legible, signed and
@@ -161,7 +161,10 @@ since landed; treat §7, §8, §11 and §14 as current.
 
 ### 4.2 The helper-on-a-pipe pattern (the Rust template)
 
-Two variants exist; `ouro-wasm` copies the **server-shaped** one.
+Two variants existed when this survey was written; `ouro-wasm` copies the
+**server-shaped** one. `ouro-computer-use` and its Elixir owner were deleted by the core
+reduction ([proposals/core.md](proposals/core.md) §4 A4); the paragraphs below record the
+template `ouro-wasm` was built from, not code that still ships.
 
 - Workspace: `tui/Cargo.toml` members `[".", "computer-use", "sandbox"]`; helpers are
   isolated members, never dependencies of `ouro`, each with hand-rolled argv parsing
@@ -519,7 +522,7 @@ name-shaped deny-list missed `RELEASE_COOKIE`, `AWS_ACCESS_KEY_ID`, `SSH_AUTH_SO
 → `:code.priv_dir/1` → sibling of `ouro` and **nothing derived from the working
 directory** (a parent walk let a cloned repository supply the containment boundary
 itself; the same walk was removed from the desktop and sandbox helper resolvers),
-`make wasm`, `/priv/wasm/` gitignored, `release-tarball: computer-use sandbox wasm`.
+`make wasm`, `/priv/wasm/` gitignored, `release-tarball: sandbox wasm`.
 Every per-instance limit is range-checked against the helper's own maxima before a frame
 is built, and against the connected helper's `doctor.limits` when they are narrower;
 every interval the pool hands a timer is clamped to a module constant, because
@@ -1358,7 +1361,7 @@ A `world ouroboros:agent` (`step(state, event) -> effects` with host-bound
 brains in any language §1's boundary admits, structurally contained, signed and placed
 with machinery that exists. It is **not** a migration target for the native loop. The
 2026-08-30 rewrite assessment applies with equal force here: the loop's value is its integration surface
-(permissions, hooks, checkpoints, subagents, compaction, computer use), all of which
+(permissions, hooks, checkpoints, subagents, compaction), all of which
 are host-side services either way; and record/replay at the effect seams — shipped in
 REPLAY.md — already delivers replay, divergence detection, and forking without giving
 up the BEAM.
@@ -1373,8 +1376,8 @@ answering novel calls. Useful, cheaper than a full run, and much smaller than
 
 ## 10. The microVM tier (separate axis: the hands, not the brain)
 
-Wasm contains forged logic and policy; it does nothing for `bash`, git, or LSP
-servers. The next tier there is a microVM backend behind the **existing** sandbox
+Wasm contains forged logic and policy; it does nothing for `bash` or git. The next tier
+there is a microVM backend behind the **existing** sandbox
 machinery — it is a backend, not a lane (D9).
 
 - **Slots** (all verified): a probe clause ahead of `probe_linux`'s helper check
@@ -2848,7 +2851,7 @@ Stated once, so nobody reads more into the lane than is there:
   `helper_readable` is a widening knob, though a vetted one: `/`, a non-directory, and any
   ancestor of the data directory are refused, and one bad entry rejects the list.
 
-- **The workspace.** §10 is the axis for `bash`/git/LSP; nothing in lanes W/H/T
+- **The workspace.** §10 is the axis for `bash`/git; nothing in lanes W/H/T
   touches it.
 - **Signer custody, and what W8 added to it.** A signer is still a cluster member reachable by
   `:erpc`; `Control.Grants` is still one process per node. Those are unchanged by this spec and
@@ -4244,5 +4247,4 @@ Each slice is PR-sized, lands green, and is useful alone.
   https://component-model.bytecodealliance.org. wasmex (fallback path):
   https://hexdocs.pm/wasmex — `Wasmex.Components`, 0.15.1.
 - In-repo: ARCHITECTURE.md (milestone 3, "Still external"), FLEET.md (§6 tags, F6),
-  REPLAY.md (the record/replay kernel lane A defers to), COMPUTER_USE.md §12/§18 (the
-  helper doctrine this spec's host copies), AGENT_EXPERIENCE.md (C5/C6 rows).
+  REPLAY.md (the record/replay kernel lane A defers to), AGENT_EXPERIENCE.md (C5/C6 rows).

@@ -265,7 +265,7 @@ the correct reading of a `preview`: it is a cargo build, not a look.
 
 **Off by default.** `config :ouroboros, :native_forge_tool` is `false`; the `self` posture
 sets it. Off, the name is in no session's tool list and `Tools.lookup/3` answers
-`:unknown_tool` — the posture the Computer Use tools take. It is read as exactly `true`, so a
+`:unknown_tool` — the same posture `capability` takes. It is read as exactly `true`, so a
 typo leaves it shut. `Ouroboros.Audit.tool_supported?/1` does not name it, so a node under
 required audit refuses it by omission.
 
@@ -904,8 +904,7 @@ still reads from the repository, which is where it always read from.
 
 **S-D10. The tool exists only under a switch, and the switch is read as exactly `true`.**
 `config :ouroboros, :native_forge_tool` gates both the spec list and `Tools.lookup/3`, the
-way `Native.Desktop.enabled?/0` gates the Computer Use tools and a live rollout gates
-`capability` (docs/WASM.md D9). A name a model is taught and cannot use costs a call to
+way a live rollout gates `capability` (docs/WASM.md D9). A name a model is taught and cannot use costs a call to
 discover. `== true` rather than truthiness, because the misconfigured reading of a switch
 that widens what a session may do is the one that leaves it shut.
 
@@ -963,9 +962,8 @@ half of the thing it allowed. What it protected against instead — an unverifie
 itself into a decision — is answered by the verification rather than by silence. The tool
 then re-reads the same bundle, re-verifies it, and refuses unless the kind is `:capability`,
 the author is this session, and the name is still the one the decision was about (the loop
-hands that back as `forge_evaluated_name`, the way it hands `desktop_evaluated_app` to the
-desktop tools). A bundle swapped at that id between the decision and the deploy is refused by
-name.
+hands that back as `forge_evaluated_name`). A bundle swapped at that id between the
+decision and the deploy is refused by name.
 
 `status` carries nothing and declares nothing. It names nothing and builds nothing.
 
@@ -1291,7 +1289,7 @@ separators blanked, and `data.name` no longer mirrors a half-megabyte parameter 
 **S-D29b. Node-local, `:operate`, and one decode contract for everything the client prints.**
 The promotion record is a checkpoint on this machine and the corpus is a file on it, so there is
 nothing to route to and none of the five takes a `node`; a client asks the machine that made the
-decisions. `replay` is `:operate` rather than `:read` for the reason `computer_use.probe` is — it
+decisions. `replay` is `:operate` rather than `:read` because it
 stands a component up — even though it decides nothing, records nothing and never touches the
 live instance. `promote` additionally admits `outcome: :unknown`, the admission `wasm.deploy`
 makes: the replay it re-runs and the checkpoint it writes do not stop because a socket's ceiling

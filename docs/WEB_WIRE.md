@@ -306,7 +306,7 @@ is born.
 
 **The cost that decides it.** The GPUI desktop was deleted seven days ago, and the first
 reason given was that it had **no headless test story** — "Nothing here has been verified
-by eye" (`WEB.md:26-36`, quoting `docs/DESKTOP.md:189-192`) — while
+by eye" (`WEB.md:26-36`, quoting the removed `docs/DESKTOP.md`) — while
 "`Phoenix.LiveViewTest` is fully headless, which changes the economics of every future
 surface slice" (`WEB.md:35-36`). Option B's honest answer to "what is the headless test
 story now" still requires a Node/Bun test runner for the TS projection against the corpus.

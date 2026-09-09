@@ -131,7 +131,7 @@ was *already observed* by the live run (recorded, never re-read on replay — D9
 | `prompt` | the user message as appended (text + attachment pointers `{sha256, media_type, size}`) | after `UserPromptSubmit` hook fold (loop.ex:234-236) — i.e. the bytes that actually entered the conversation |
 | `model_call` | `iteration`, `request_sha256`, `system_sha256`, `message_count`, `tools_sha256`, `ledger_effect_id` | before `Model.stream` (loop.ex:340) |
 | `model_result` | `iteration`, `chunks` (the retained chunk list, in order: `text` deltas, `thinking` deltas, `tool_call`s, `reasoning_details`, `provider_metadata`, `usage`, `finish`), `duration_ms` | stream consumed |
-| `tool_result` | `call_id`, `tool`, `ledger_ref`, `content` (the final `%{role: :tool}` message content — post hook-append, post LSP-append, i.e. exactly what entered `state.messages` at loop.ex:940-959), `is_error`, `duration_ms`, `output_bytes` | per tool, in dispatch order |
+| `tool_result` | `call_id`, `tool`, `ledger_ref`, `content` (the final `%{role: :tool}` message content — post hook-append, i.e. exactly what entered `state.messages`), `is_error`, `duration_ms`, `output_bytes` | per tool, in dispatch order |
 | `injected` | `origin` (`rule` \| `steer` \| `stop_hook` \| `checks` \| `session_start`), `content`, `after_call_id?` | any non-prompt user message appended mid-turn or at settle |
 | `approval` | `request_id`, `call_id`, `question_sha256`, `decision`, `scope`, `actor`, `rule_id?`, `permission_entry_id?` | on answer/timeout/interrupt — the decision metadata; the resulting tool message is its own `tool_result`/`injected` record |
 | `configure` | `key`, `value` | each applied `configure_one` (session.ex:996-1060) |
@@ -262,7 +262,7 @@ a simulation — with every nondeterminism source substituted by the record:
   (`model.ex:99`), and the loop takes `state.model_module`.
 - **Tools**: the `Loop` struct gains a `tool_source` field (default `:live`). In replay
   it returns the recorded `tool_result` content for `(call_id)` instead of dispatching —
-  admission, hooks, sandbox, LSP, MCP, desktop are never invoked, because their outputs
+  admission, hooks, sandbox, MCP are never invoked, because their outputs
   are already baked into the recorded content (the inventory's items 2.39–2.46 all land
   inside recorded messages). The ledger gate is bypassed with the same field (replay
   accounts for nothing because it executes nothing).
@@ -354,9 +354,8 @@ fetch, built by `Plane::method("replay")` — `model.rs:85`):
   `methods.ex:210-212` et al.): it reads one file. Windowing mirrors
   `interactive.replay`'s cursor discipline.
 - **`interactive.replay_verify`** — `:operate`. `{id, node?}` → `{verified, turns,
-  records, head, divergence: null | {…}}`. Operate because it starts a process — the
-  `computer_use.status`/`probe` split is the exact precedent (`methods.ex:285-286`),
-  even though it spends no tokens. Own timeout ceiling (long sessions re-derive many
+  records, head, divergence: null | {…}}`. Operate because it starts a process, even
+  though it spends no tokens. Own timeout ceiling (long sessions re-derive many
   turns).
 
 Both get `@params` entries, `@fixture_owners` placement, golden fixtures, and PROTOCOL

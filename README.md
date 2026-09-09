@@ -120,7 +120,6 @@ runs them. [WASM.md](docs/WASM.md) is the design behind it.
 - [Web interface](docs/WEB.md)
 - [Traceability and audit](docs/AUDIT.md)
 - [Fleet setup](docs/FLEET.md)
-- [Computer use](docs/COMPUTER_USE.md)
 - [WebAssembly components](docs/WASM_GUIDE.md)
 - [Protocol reference](docs/PROTOCOL.md)
 - [Distribution](docs/DISTRIBUTION.md)

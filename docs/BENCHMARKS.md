@@ -160,7 +160,7 @@ task                      chk   run         duration  tokens  exercises
 09-bash-timeout           ok    completed    2544 ms     218  bash,bounded output
 10-grep                   ok    completed      50 ms     199  grep
 11-glob-ls                ok    completed      54 ms     261  glob,ls
-12-code-intel-no-server   ok    completed      52 ms     296  code_intel
+12-grep-bad-pattern       ok    completed      52 ms     296  grep
 13-ask-user-declined      ok    completed      36 ms     237  ask_user,approval
 14-ask-user-acknowledged  ok    completed      33 ms     240  ask_user,approval
 15-plan                   ok    completed      32 ms     234  plan
@@ -187,14 +187,11 @@ The corpus pins both behaviours so they cannot regress silently.
   count at 2 and says why; the Terminal-Bench adapter deduplicates before telling Harbor,
   because Harbor only ever sees a count and reporting two files would be reporting a file
   that does not exist.
-- **`code_intel` without a language server is a bounded in-band refusal.**
-  `Ouroboros.CodeIntel.Registry.resolve/2` admits a path under configured
-  `:workspace_allowed_roots` **or** the workspace of an interactive or coding session
-  this node holds. A default install with no roots and no live session still judges
-  every path `{:outside_workspace, …}` before a language is considered. With a
-  session (or configured roots) and no server installed, the answer is
-  `{:server_unavailable, …}` — in band, bounded, non-fatal. `12-code-intel-no-server`
-  asserts that contract, not the message.
+- **A tool that cannot answer is a bounded in-band refusal.** `12-grep-bad-pattern`
+  sends `grep` a pattern that does not compile: the turn survives, the failure is a tool
+  result the model reads, and the agent routes around it with `read`. The task asserts
+  that contract — in band, bounded, non-fatal — and the two strings this runtime writes
+  itself, not the regex engine's words for what it did not like.
 
 ### Where it runs
 

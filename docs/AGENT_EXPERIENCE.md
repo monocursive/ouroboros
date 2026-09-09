@@ -49,6 +49,14 @@ nobody holds.
 
 ## 0a. Status as of 2026-08-23
 
+> **Removed by the core reduction (2026-09).** Code intelligence — the LSP pool, the
+> `code_intel` tool, the `code_intel.*` and `runtime.lsp.status` verbs, the diagnostics
+> appended to edit results, the `mcp-serve` code-intelligence tools and
+> `ouro hook post-tool-use` — and desktop automation — `desktop_state`, `desktop_act`,
+> the `computer_use.*` verbs and the helper — no longer exist. Every E1/E2/E3 and
+> Computer Use line below, and row 13 of both scorecards, is a record of what was built,
+> not of what ships. See [docs/proposals/core.md](proposals/core.md) §4 A3 and A4.
+
 Everything below §1 is the plan as written on 2026-08-22 and is left as the baseline it
 was. This section records what the implementation waves of 2026-08-22/23 delivered on
 `review-fixes`, slice by slice, with the evidence. Gates at the time of writing: the
@@ -141,11 +149,11 @@ exposed that `ouro run` reported `files_changed: []` for that edit, fixed the sa
 | D6 | landed | content-addressed pre-write snapshots, `rewind`/`rewind_points` (+ `interactive.rewind` on the wire); client `/rewind` as a menu with per-row warnings then a three-way `what` chooser, `Esc Esc` offers `r` where checkpoints exist; the facade now admits turn-id strings, not only ordinals |
 | D7 | landed | `Workspace.Worktree`, `worktree: true` on both planes and on the wire. Until 2026-08-23 no session could write inside a worktree on a node with a data directory — worktrees live under `<data_dir>/worktrees` and the protected-path rule denied the whole data directory; neither D7 test wrote through a session's tools. The rule now exempts the worktree root (its `.git`/`.ouroboros` stay protected) and both OS-sandbox backends re-allow a writable root nested in a protected one |
 | D8 | landed | Terminal-Bench adapter (`bench/terminal-bench/`, needs Linux + docker + a key for a number) and the local corpus (`make bench-local`: 17 scripted-model tasks through a real daemon and the real `ouro run`, 17 / 17); the corpus caught a stale-binary resolver bug and a `files_changed` double count |
-| E1 | landed | per-node LSP pool, versioned sync, freshness-gated diagnostics, nine ops; placed after the gateway |
-| E2 | landed | diagnostics after edit in the native loop; for bridged Claude sessions a `PostToolUse` hook (`ouro hook post-tool-use`, three fixed output shapes, exit 0 on every path) composed into `--settings` — **live-verified**; Codex has no hook (its app-server transport has no config plumbing — recorded as a gap, not guessed) |
-| E3 | landed | `code_intel` tool (eleven ops, rename gated); `runtime.lsp.status`, `code_intel.{request,diagnostics,touch}` on the wire (node-routed, typed refusals, `pending` never reads as clean); `mcp-serve` serves `code_intel`/`diagnostics`/`touch` to Claude beside `approve`; `Diagnostics.signature/1` gives one definition of "the same diagnostic"; admission = configured roots **plus the workspace of every session the node holds** (a default install had none before 2026-08-23) |
-| E4 | pending | `@symbol`, jump-to-definition |
-| E5 | pending | structural index |
+| E1 | removed | was: a per-node LSP pool, versioned sync, freshness-gated diagnostics, nine ops. Deleted by the core reduction (§4 A3 of [core.md](proposals/core.md)) |
+| E2 | removed | was: diagnostics after edit in the native loop, and a `PostToolUse` hook for bridged Claude sessions. Deleted by the core reduction |
+| E3 | removed | was: the `code_intel` tool, the `code_intel.*` wire verbs, and three `mcp-serve` tools for Claude. Deleted by the core reduction |
+| E4 | dropped | `@symbol`, jump-to-definition — the plane it would have been built on is gone |
+| E5 | dropped | structural index — same |
 | F1 | landed | resume after restart |
 | F2 | landed | `ouro --continue` and `ouro run --continue`: one fleet-fanned `interactive.list`, the newest non-terminal session whose workspace is this directory (by `updated_at`, ties by `created_at` then id), on any machine; no match refuses and creates nothing (`ouro run` exits 64) unless `--or-new`, which says so; `--continue` with `--resume` or with start options refused by name; a gateway that cannot answer the list is a failure, never an empty answer — **live-verified** (same session id on resume, a fresh turn subscribed from the session's cursor, nothing created on a miss). Workspace comparison is lexical across machines |
 | F3 | landed | usage accounting, `runtime.models` from `llm_db` |
@@ -184,7 +192,7 @@ what a user of `ouro` on `review-fixes` gets today.
 | 10 | Permission model | 1 | 2 (rule engine with scopes, ledgered decisions, mid-session configure) |
 | 11 | Sandboxing / isolation | 1 | 3 (worktrees on both planes; native `bash` under `sandbox-exec` on macOS with `.git` and the runtime's own config read-only and network off by default; `bwrap` argv pinned but unverified; no seccomp, no domain allowlist; command hooks and checks sandboxed when a backend exists, ignored otherwise) |
 | 12 | MCP & tool ecosystem | 0 | 2 (native agent consumes stdio MCP servers by name with bounds and permissions; Ouroboros also *serves* MCP to Claude; hooks and skills landed; no HTTP/OAuth, no `ouro mcp add`) |
-| 13 | LSP / semantic navigation | 0 | 3 (pool, native tool, the wire, MCP tools and a post-edit hook for Claude — live-verified end to end; no `@symbol` input or structural index yet) |
+| 13 | LSP / semantic navigation | 0 | 0 (built to 3, then deleted by the core reduction: [core.md](proposals/core.md) §4 A3) |
 | 14 | Git-native flow | 0 | 1 (worktrees) |
 | 15 | Persistence & resume | 2 | 3 (resume across BEAM/host restart for every resumable transport, from any fleet gateway; `ouro --continue` finds this directory's newest session on any machine) |
 | 16 | Context management | 0 | 2 (meter for all, native compaction with a retained archive, handoff) |
@@ -210,18 +218,9 @@ what a user of `ouro` on `review-fixes` gets today.
   Harness changes how Claude is started, the bridged path must follow.
 - A delegation is a coding task with a parent, not a sub-conversation (G3/G4 pending).
 - `workspace.exec` is one command, one process; a detached grandchild outlives its timeout.
-- The LSP pool inherits language-server stderr; ElixirLS/Expert cold starts are unmeasured
-  against the 45 s initialize ceiling.
 - Worktrees scope containment; `bash` still runs with the operator's privileges and the
   worktree shares the repository's object store.
 - Test peers in `cluster_test.exs` never receive this repo's provider overrides.
-- Code-intelligence admission follows sessions: a node admits its configured roots plus
-  the workspace of every interactive **and coding** session it holds, nothing else. Until 2026-08-23 a
-  default install (no configured roots) had no code intelligence at all, and every
-  code-intel test configured roots, so the suites never saw it — the local corpus, which
-  runs a daemon with no roots, is where such defaults get caught now. Coding-task
-  workspaces were added to the same admission set after a later review found they were
-  still missing.
 - The ledger export chain is computed over the answer and stored nowhere: it catches a
   copy altered after export, not a node that rewrote its own checkpoint first. The ledger
   is not replicated; `--fleet` asks every owner.
@@ -272,7 +271,7 @@ Harness and polled it, and Ouroboros could not add a diagnostic, veto a command,
 offer a first-party tool. That is no longer true for `:native`.
 
 `Ouroboros.Provider.Native` is an in-process agent with its own tool loop — read, edit,
-bash, grep, code intel, MCP, computer-use, approvals, sandbox. Vendor sessions still
+bash, grep, MCP, approvals, sandbox. Vendor sessions still
 run their tools inside the vendor CLI; Native does not wrap those CLIs in a second
 loop. See [docs/REPLAY.md](REPLAY.md) §11 and `lib/ouroboros/provider/native.ex`.
 ACP fs/terminal methods exist beside that loop. Historical F1 remains the constraint
@@ -510,7 +509,7 @@ the four open-slot rows (15, 16, 20, 24) average 1.5 with two of them already at
 the inverse of every incumbent, which is exactly the shape of an opportunity.
 
 > **Client surface note (W9).** The GPUI desktop client was removed
-> ([`WEB.md` §10](WEB.md#10-gpui-removal-d13), [`DESKTOP.md`](DESKTOP.md)); the client
+> ([`WEB.md` §10](WEB.md#10-gpui-removal-d13)); the client
 > rows above are retired to the TUI and the web surface that replaces it. **The scores
 > have not been re-run** — they date from the 2026-08 wave and are read against the
 > client of that day. Row 19's "No phone/web surface" is the one line this removal is

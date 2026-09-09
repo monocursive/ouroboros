@@ -19,12 +19,11 @@ reads their checkpoints to reconstruct reservations before admitting work.
 | Coding registry | Coding task supervisor and recovery | Workspace reservations, interactive sessions, scheduler |
 | Interactive registry | Interactive task supervisor and recovery | Coding sessions and workspace reservations |
 | Automation store | Later automation owners | Session planes and permission authorities |
-| CodeIntel supervisor after exhausting its restart budget | Its language-server pool | WASM, Desktop, MCP and session owners |
-| WASM supervisor | Its pool, then boot recovery | Desktop, MCP, CodeIntel and web |
+| WASM supervisor | Its pool, then boot recovery | MCP and web |
 | Gateway or web | Its own connections | Durable owners and unrelated helpers |
 
-`ApplicationRecoveryTest` injects authority and registry failures and exhausts the
-CodeIntel restart budget. `McpTest` exhausts the MCP budget and checks surviving peers. The WASM
+`ApplicationRecoveryTest` injects authority and registry failures.
+`McpTest` exhausts the MCP budget and checks surviving peers. The WASM
 boot task remains transient and follows the WASM supervisor in its own `rest_for_one`
 subtree. This is different from the temporary worktree reconciliation task.
 
@@ -83,20 +82,19 @@ cell tests separately pin local rendering behavior.
 
 ## Other shared mechanisms
 
-- `ProcessEnvironment` applies credential checks and explicit Port unsets. Exec, WASM,
-  and Desktop retain separate allowlists. Desktop inherits only execution/locale paths;
-  macOS bootstrap-session identity is an OS property, not arbitrary environment data.
+- `ProcessEnvironment` applies credential checks and explicit Port unsets. Exec and WASM
+  retain separate allowlists.
 - `Transport.JsonLines` owns bounded incremental framing; each pipe retains its limits,
-  buffer, noise budget, and protocol-specific encoders. LSP framing remains separate.
+  buffer, noise budget, and protocol-specific encoders.
 - `Session.Recovery`, `Session.Routing`, and `Workspace.Admission` own the common sweep,
   routing budgets, and bounded retry for the same owner's stale lease.
 - `Control.Permissions.Engine` maps missing/failed/malformed engines to asks. Native
   plan-mode refusal and transport-specific approval delivery remain separate. An engine
   failure does not supply a persistent-rule suggestion.
 - `ToolAttempt` carries the validated call, classification, effect id, hook context and
-  authority together through live admission and execution. Rewrites and Desktop target
-  confirmation replace the call and subject together. Replay substitutes recorded
-  results before constructing a live attempt.
+  authority together through live admission and execution. A hook rewrite replaces the
+  call and subject together. Replay substitutes recorded results before constructing a
+  live attempt.
 - The repetition guard bounds consecutive equivalent calls, permitting intervening
   edits; the turn iteration budget still bounds alternating calls.
 - `Gateway.Methods.Contract` declares metadata, parameter envelopes, requirements, and

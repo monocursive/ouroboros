@@ -92,8 +92,8 @@ Restrict those separately, and use the existing gateway and web transport protec
 The standard/local single-user fallback remains available only when no identities are
 configured. Required environment configuration rejects missing identities or encryption.
 
-Required recording supports the native provider. Vendor agents, MCP, desktop automation,
-code-intelligence subprocesses, WASM capabilities and component hooks do not currently
+Required recording supports the native provider. Vendor agents, MCP,
+WASM capabilities and component hooks do not currently
 meet its full recording/containment contract and cannot execute through that profile.
 Native reads, writes, edits, patches, shell, search, web fetch, questions, plans, skills
 and supported native subagents retain runtime-boundary evidence. Shells require an OS

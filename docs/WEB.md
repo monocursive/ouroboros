@@ -26,10 +26,10 @@ model. Its recurring costs are structural: exact-pinned pre-1.0 frameworks
 compile two different framework APIs into one binary", `tui/Cargo.toml:24-33`), a
 workaround-grade component bug already absorbed into our state model
 (`tui/src/desktop.rs:517-532`), and **no headless test story** — "Nothing here has been
-verified by eye" (`docs/DESKTOP.md:189-192`); every visual claim needs a human or
-computer-use driving a live window. A browser surface is strictly better at the two things
-the desktop uniquely provided — real pixels (computer-use screenshots) and a graphical
-composer — and adds what gpui structurally never could: access from the Linux laptop, the
+verified by eye" (the removed `docs/DESKTOP.md`); every visual claim needs a human or
+a person driving a live window. A browser surface is strictly better at the thing
+the desktop uniquely provided — a graphical composer — and adds what gpui structurally
+never could: access from the Linux laptop, the
 VPS, a phone over the tailnet, and multiple simultaneous viewers. The daemon is Elixir;
 in-process the whole client-connection defect class (stale-token reconnect loops, chip
 task_d2fd4c2d) collapses into browser-refresh semantics. `Phoenix.LiveViewTest` is fully
@@ -68,8 +68,7 @@ Facts the design stands on, each checked in the tree:
 - **Supervision tail.** `:rest_for_one`; the gateway sits at the end because "its crash
   must restart nothing, and it must be the first thing to stop … It is also the only child
   here that a stranger can reach" (`lib/ouroboros/application.ex:205-210`); tail order is
-  `Cluster, OpenAIAuth, gateway_children(), CodeIntel.Supervisor, Desktop.Supervisor,
-  Mcp.Supervisor` (`application.ex:235-242`). Absent gateway config means no child at all
+  `Cluster, OpenAIAuth, gateway_children(), Wasm.RuntimeSupervisor, Mcp.Supervisor`. Absent gateway config means no child at all
   (`application.ex:273-279`).
 - **Config split.** `config/runtime.exs` lines 3–418 are prod-only; everything below runs
   in every environment "because the gateway is how a laptop attaches to a runtime it
@@ -118,7 +117,7 @@ Facts the design stands on, each checked in the tree:
 New modules live under `Ouroboros.Web.*`. The supervisor `Ouroboros.Web` is appended as
 the **final** child of the `:core` tail, after `Mcp.Supervisor`: under `:rest_for_one` its
 crash then restarts nothing, and it is the second child a stranger can reach, so it sits
-downstream of everything — the same argument the gateway and the LSP pool already carry
+downstream of everything — the same argument the gateway already carries
 (`application.ex:199-234`). Gating copies `gateway_children/0` exactly: a
 `web_children/0` returning `[Ouroboros.Web]` iff `Ouroboros.Web.Config.enabled?()`;
 absent configuration means no endpoint at all, so tests, `:builder`, and `:signer` never
@@ -272,7 +271,7 @@ acceptance journeys:
   compile. The hand-written `app.js` wires the LiveSocket and browser hooks; Playwright
   loads it exactly as the release serves it.
 - CSS: hand-authored. `tui/src/desktop_design.rs` is already a token system (paired
-  dark/light palettes, layer order, semantic tones — `docs/DESKTOP.md:211-227`); it ports
+  dark/light palettes, layer order, semantic tones — the removed `docs/DESKTOP.md`); it ports
   to CSS custom properties nearly one-to-one, and the design rules it encodes (semantic
   tones never the action accent, hairline separation, scarce primary actions) carry over
   as written.
@@ -303,17 +302,16 @@ mechanism.
 
 **The parity target is the GPUI desktop surface, not the seven-tab TUI.** The TUI remains
 the full-surface client; the web starts where the desktop stopped and can grow later.
-Inventory source: `docs/DESKTOP.md` and the verified feature map of `tui/src/desktop.rs`.
+Inventory source: the removed `docs/DESKTOP.md` and the verified feature map of `tui/src/desktop.rs`.
 
 | Desktop feature (today) | Web treatment |
 |---|---|
 | Session rail: triage-ordered rows, presence, context menu, rename/delete dialogs with gating ("Finish session to delete") | LiveView list over `interactive.list` + `coding.list` polled at the TUI's ~3 s cadence while mounted; triage/sort/nesting rules ported from `tui/src/ui/app/session.rs:380` (`triaged()`); delete gating recomputed server-side by the same rule (`terminal? or last_known`, and only if the verb exists) |
 | Transcript: markdown messages, thinking, tool cells with collapse, diffs, plan, subagent rows, dividers, streaming spinner | the Elixir projection (§5) rendered as LiveView streams; tool-output collapse keeps the desktop's 12-line/head-7/tail-4 budget; folded child rows show elapsed time, last activity, returned refs, deliveries and retained-work errors |
-| Computer-use screenshots (`gpui::img`) | `<img src="/artifact/<plane>/<id>/<sha>">` served by an authenticated controller that calls `Methods.invoke("computer_use.artifact", …)` — same surface, same node routing; sha-addressed so browser caching is safe |
 | Composer: quick-start, three placeholder states, send/stop, queue | same reducer semantics, one Elixir implementation: quick-start issues `interactive.start` + first message; turn envelope stays "plain string unless structured" (`tui/src/model.rs:2823-2868`) |
-| Auto-approve dropdown + approval-card switch | client-side-of-the-server: the LiveView answers `approve, once, actor: "automation"` per request, never `plan_exit`/`question`/computer-use (`ui/transcript.rs:441-449`), idempotent against replay — the TUI's exact carve-outs, asserted by shared fixtures (§6) |
+| Auto-approve dropdown + approval-card switch | client-side-of-the-server: the LiveView answers `approve, once, actor: "automation"` per request, never `plan_exit`/`question` (`ui/transcript.rs:441-449`), idempotent against replay — the TUI's exact carve-outs, asserted by shared fixtures (§6) |
 | Approval card: kinds, choices, provider options, suggested rule, subagent attribution, diff excerpt | one card, optional sections, rendered from the same payload contract (`ui/transcript.rs:309-482`); respond params keep the closed envelope incl. the vendor-option decision table (`ui/transcript.rs:284`) and the plan-choice fallback mapping (`model.rs:2673`) |
-| Sandbox picker, thinking picker — "absent, not defaulted, when the runtime said nothing" | identical rule; `interactive.configure {sandbox_mode}` / `{reasoning_effort}`; label follows the session row after re-list, exactly as `docs/DESKTOP.md:63-69` states it |
+| Sandbox picker, thinking picker — "absent, not defaulted, when the runtime said nothing" | identical rule; `interactive.configure {sandbox_mode}` / `{reasoning_effort}`; label follows the session row after re-list, exactly as the removed `docs/DESKTOP.md` states it |
 | New-session form: provider/model pickers with search, workspace + Browse…, sandbox, effort | `runtime.providers` / `runtime.models` (fetched on form open, never on cadence — `mod.rs:107`); a `<select>`/combobox has none of the gpui-component filtered-cache pathology, so the authoritative-choice workaround dies with gpui; **Browse… becomes `workspace.browse`** (§7) — the native picker browsed the *client's* filesystem, which was only ever correct when client and daemon shared a machine |
 | ChatGPT / Grok account and API-key cards | ChatGPT uses `account.read` / `account.login.*`. Managed Grok uses `grok.account.*` and the first-party CLI's device flow; direct xAI calls use `credentials.xai.set`. Authorization URLs are plain HTTPS links, API keys cross one operate-scope write and are never returned, and subscription tokens stay in their owning auth module/CLI. |
 | Settings | `/settings` groups the five editable new-session defaults first, subscription and direct API connections second, the detected provider/model catalogue third, and read-only boot/runtime facts last. Secret values never enter LiveView state; environment-owned configuration is shown as read-only rather than rendered as a control that cannot take effect. |
@@ -347,7 +345,7 @@ Inventory source: `docs/DESKTOP.md` and the verified feature map of `tui/src/des
     same work, and leaving them out would have made the file a partial memory of a form
     somebody had just filled in.
   - **A stored default is sendable**, and this is the one semantic here worth arguing
-    about. `docs/DESKTOP.md`'s new-session paragraph reads "What the file supplies is where
+    about. the removed `docs/DESKTOP.md`'s new-session paragraph reads "What the file supplies is where
     the control *starts*; an explicit pick is what gets sent, and an untouched panel with
     **no stored default** states no posture at all" — and the desktop implements exactly
     what that last clause forces: `self.new_sandbox.or(configured_sandbox)`, under the
@@ -543,7 +541,7 @@ PR-sized, each green before the next; W1–W2 are deliberately before any transc
 - **W4 — composer.** ✅ **Landed.** Quick-start, send/follow-up/steer with the queue rules,
   turn envelope, interrupt, connection pill.
 - **W5 — approvals.** ✅ **Landed.** Card with all optional sections, provider options,
-  plan-exit, auto-approve with the question/computer-use carve-outs, suggested-rule row
+  plan-exit, auto-approve with the question carve-outs, suggested-rule row
   (`permissions.add`).
 - **W6 — new-session form.** ✅ **Landed.** Pickers from providers/models,
   `workspace.browse` (method first, then the UI), sandbox + effort, ChatGPT and SpaceXAI
@@ -560,7 +558,8 @@ PR-sized, each green before the next; W1–W2 are deliberately before any transc
   documented rather than papered over; **W8 retained the name** (`Cluster.fleet_name/0`,
   `fleet_status.fleet_name`, `nil` for a runtime in no named fleet).
 - **W8 — polish to the removal checklist.** ✅ **Landed.** Notifications, theme, prefs file,
-  docs (this as-built pass, README, the `DESKTOP.md` freeze note).
+  docs (this as-built pass, README, the `DESKTOP.md` freeze note; that file has since been
+  deleted with the rest of the desktop-automation plane).
 
   **As built**, four notes:
 
@@ -593,13 +592,13 @@ PR-sized, each green before the next; W1–W2 are deliberately before any transc
     paints, it flashes. See D10's as-built note.
 - **W9 — gpui removal** (§10), only after the checklist below is checked live. **Not
   started.** Nothing in this slice or its predecessors removed anything from the desktop;
-  `docs/DESKTOP.md` carries the feature-freeze note that §10 calls for and is otherwise
+  the removed `docs/DESKTOP.md` carries the feature-freeze note that §10 calls for and is otherwise
   intact, because it is the inventory §4's parity map was built from.
 
 **Removal checklist** (all verified in a real browser against a live daemon, plus one
 tailnet-proxied session): quick-start → real session → reply renders; approval answered
 each way incl. sandbox escalation + auto-approve carve-outs; resync survives daemon
-restart mid-stream; screenshot renders; rename/delete gating; machines presence flips on
+restart mid-stream; rename/delete gating; machines presence flips on
 member up/down; two concurrent browsers; `read`-scope endpoint refuses every operate
 control it hides.
 
@@ -619,7 +618,7 @@ notification arrives while the tab is hidden and focuses it when clicked**. Both
 
 ## 10. GPUI removal (D13)
 
-**Executed at W9.** Everything below is done as written; `docs/DESKTOP.md` is now a
+**Executed at W9.** Everything below is done as written; the removed `docs/DESKTOP.md` is now a
 tombstone. Two things went beyond this plan, both because the seam's last caller left with
 the desktop: `App::configure_reasoning_effort` (the native picker's session-default write;
 the TUI's per-turn `/think` is untouched) and the whole client-side `runtime.models`
@@ -643,12 +642,12 @@ packages and gained nothing; no surviving crate moved versions.
 - **Deleted only after W2:** the `desktop_cell` projection + `DesktopCell*` types and
   `tui/tests/surface_contract.rs` — their lock transfers to the golden corpus, so corpus
   first, deletion second.
-- **Kept:** `tui/src/desktop_cli.rs` (`ouro desktop doctor` is computer-use tooling,
-  ungated — `tui/src/lib.rs:17`); `fleet_add.rs` and the TUI Machines stepper;
+- **Kept:** `tui/src/desktop_cli.rs` (`ouro desktop doctor`, since deleted with the
+  computer-use plane); `fleet_add.rs` and the TUI Machines stepper;
   `sorted_fields`/`sorted_json` and the `BTreeMap` availability field — the gpui
   `preserve_order` motivation dies, the determinism argument stands; the comments get
   rewritten to say so.
-- **Docs:** `DESKTOP.md` replaced by a tombstone pointing here; README's client matrix
+- **Docs:** `DESKTOP.md` replaced by a tombstone pointing here, since deleted; README's client matrix
   updated; `AGENT_EXPERIENCE.md` client rows re-scored.
 
 ## 11. Risks and open questions
