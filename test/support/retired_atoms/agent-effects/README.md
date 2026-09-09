@@ -29,12 +29,13 @@ The five, newest first:
 The shapes are `765bd88`'s — the commit slice C1 was cut from, the last one whose code could
 produce them. Each entry was written against that commit's own sources rather than invented:
 `sanitize_error/1` stores `%{classification: classify(error), fingerprint: …}`
-(`effect_ledger.ex:833` here, unchanged from there), `classify/1` returns an atom as itself
+(`effect_ledger.ex:835` here, unchanged from there), `classify/1` returns an atom as itself
 and walks a tuple element by element, and `@attempt_fields.start_agent` /
 `@result_fields.start_agent` / `@result_fields.delegate` are the same lists on both commits.
 The error terms are the runner's verbatim: `principal/2` at
-`765bd88:agent/effects/runner.ex:130`, `settlement/3` at `:288`, and the team server's
-`fail_durable_delegation/4` stage atoms at `:1746`, `:1783`, `:1873`, `:1877`.
+`765bd88:lib/ouroboros/agent/effects/runner.ex:131`, `settlement/3` at `:288`, and the team
+server's `fail_durable_delegation/4` stage atoms at
+`765bd88:lib/ouroboros/team/server.ex:1554`, `:1591`, `:1681`, `:1685`.
 
 The bytes were written by `DurableFile.put_checkpoint/3` in this worktree, with every
 retired atom created by `String.to_atom/1`: `:erlang.term_to_binary/1` does not record which
