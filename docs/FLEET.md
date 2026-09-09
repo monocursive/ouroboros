@@ -125,11 +125,17 @@ ouro fleet doctor     # local security and, when running, live connectivity and 
 ouro new --machine vps --provider native --workspace /absolute/path/on/vps/project
 ```
 
-Both TLS certificates must chain to a CA both nodes trust. The simplest arrangement is
-to copy the whole `fleet/` directory from the first machine and edit only `profile.json`'s
-`machine`, `host` and `node` — or to point `OUROBOROS_DIST_TLS_OPTFILE` at certificates
-an operator manages themselves. Ports: allow the EPMD port and the distribution range
-between the private addresses only. The gateway port stays loopback-only.
+Both TLS certificates must chain to a CA both nodes trust, so the second machine needs
+either a node certificate signed by the first machine's CA or a CA of its own that both
+`ssl_dist.conf` files trust — `ouro fleet doctor` refuses a mismatch rather than falling
+back to cleartext. A profile is validated as a whole: `machine`, `host` and `node` must
+agree (`node` is `ouro-<machine>@<host>`), and `members` must contain this machine's own
+node, so a copied `fleet/` directory needs `members` edited too, on both sides. An
+operator who manages certificates themselves can skip the profile entirely and set
+`OUROBOROS_DIST_TLS_OPTFILE` and the variables above directly.
+
+Ports: allow the EPMD port and the distribution range between the private addresses only.
+The gateway port stays loopback-only.
 
 ## Facts, tags and placement
 
