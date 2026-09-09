@@ -1,12 +1,19 @@
 defmodule Ouroboros.Runtime.CapabilitiesTest do
+  @moduledoc """
+  The operator surface around a workspace proposal: what it lists, what it refuses to
+  read, and what the gateway verbs in front of it accept.
+
+  What a *successful* preview and admit do — the C9 validation, the sandboxed build, the
+  signature and the rollout — belongs to `test/wasm/forge_test.exs`, which has a real
+  Cargo project and a helper to do it with. This file is about the reading.
+  """
+
   use ExUnit.Case, async: false
 
   alias Ouroboros.Gateway.Methods
   alias Ouroboros.Runtime.Capabilities
-  alias Ouroboros.Upgrade.Forge.Signer
 
-  @module Ouroboros.Capability.WorkspaceEcho
-  @moduletag timeout: 300_000
+  @name "workspace-echo"
 
   setup do
     suffix = System.unique_integer([:positive])
@@ -14,13 +21,9 @@ defmodule Ouroboros.Runtime.CapabilitiesTest do
     proposal = Path.join(workspace, ".ouroboros/capabilities/Echo")
     File.mkdir_p!(proposal)
     File.write!(Path.join(proposal, "manifest.json"), manifest())
-    File.write!(Path.join(proposal, "source.ex"), capability_source())
-    File.write!(Path.join(proposal, "test.exs"), capability_test_source())
+    File.write!(Path.join(proposal, "Cargo.toml"), cargo_manifest())
 
-    on_exit(fn ->
-      File.rm_rf!(workspace)
-      unload(@module)
-    end)
+    on_exit(fn -> File.rm_rf!(workspace) end)
 
     %{workspace: workspace, path: ".ouroboros/capabilities/Echo"}
   end
@@ -29,21 +32,26 @@ defmodule Ouroboros.Runtime.CapabilitiesTest do
     broken = Path.join(workspace, ".ouroboros/capabilities/Broken")
     File.mkdir_p!(broken)
     File.write!(Path.join(broken, "manifest.json"), "{}")
+    File.write!(Path.join(broken, "Cargo.toml"), cargo_manifest())
 
     assert {:ok, [broken_summary, echo]} = Capabilities.list(workspace)
     assert echo.path == ".ouroboros/capabilities/Echo"
-    assert echo.module == inspect(@module)
+    assert echo.lane == :wasm
+    assert echo.module == "wasm/" <> @name
     assert echo.readable?
     refute broken_summary.readable?
   end
 
-  test "preview compiles in the peer and does not load the module", context do
-    assert {:ok, result} = Capabilities.preview(context.workspace, context.path)
-    assert result.module == inspect(@module)
-    assert result.loaded? == false
-    assert result.test_report.failures == 0
-    assert result.test_report.total == 1
-    assert :code.which(@module) == :non_existing
+  # The `Cargo.toml` is what makes a directory a proposal. A directory without one is
+  # refused rather than read as something else: there is one lane and one project shape.
+  test "a proposal with no Cargo manifest is refused rather than guessed at", context do
+    File.rm!(Path.join([context.workspace, context.path, "Cargo.toml"]))
+
+    assert {:error, {:missing_proposal_file, "Cargo.toml"}} =
+             Capabilities.preview(context.workspace, context.path)
+
+    assert {:error, {:missing_proposal_file, "Cargo.toml"}} =
+             Capabilities.admit(context.workspace, context.path)
   end
 
   test "contained-path refusals do not read outside the workspace", %{workspace: workspace} do
@@ -55,19 +63,6 @@ defmodule Ouroboros.Runtime.CapabilitiesTest do
 
     assert {:error, {:source_outside_workspace, _}} =
              Capabilities.admit(workspace, "..")
-  end
-
-  test "admit with the shipped Deny signer fails and loads nothing", context do
-    assert {Signer.Deny, _} = Signer.configured()
-
-    assert {:error, {:signing_failed, reason}} =
-             Capabilities.admit(context.workspace, context.path, author: "session:test")
-
-    # Deny without a configured `forge_signer_id` stops at `:signer_id_required`;
-    # Deny with an id returns `:signing_denied`. Both leave the module unloaded.
-    assert reason in [:signing_denied, :signer_id_required]
-
-    assert :code.which(@module) == :non_existing
   end
 
   test "gateway methods are operate-scoped and refuse extra keys", context do
@@ -113,47 +108,19 @@ defmodule Ouroboros.Runtime.CapabilitiesTest do
 
   defp manifest do
     JSON.encode!(%{
-      "module" => inspect(@module),
+      "name" => @name,
       "description" => "An echo capability authored in a workspace proposal"
     })
   end
 
-  defp capability_source do
+  # Never read by this module — `Ouroboros.Wasm.Forge` owns C9 — but its presence is what
+  # says "this directory is a proposal".
+  defp cargo_manifest do
     """
-    defmodule #{inspect(@module)} do
-      @vsn 1
-
-      use Jido.Agent,
-        name: "workspace_echo",
-        description: "A capability authored as a workspace proposal",
-        schema: [
-          role: [type: :string, default: "capability"],
-          inbox: [type: :list, default: []],
-          last_message: [type: :any, default: nil],
-          messages_received: [type: :non_neg_integer, default: 0]
-        ],
-        signal_routes: [
-          {"ouroboros.agent.message", Ouroboros.Agent.Worker.ReceiveMessage}
-        ]
-    end
+    [package]
+    name = "#{@name}"
+    version = "0.1.0"
+    edition = "2021"
     """
-  end
-
-  defp capability_test_source do
-    """
-    defmodule Ouroboros.Capability.WorkspaceEchoTest do
-      use ExUnit.Case, async: false
-
-      test "the capability compiled" do
-        assert to_string(Ouroboros.Capability.WorkspaceEcho) =~ "WorkspaceEcho"
-      end
-    end
-    """
-  end
-
-  defp unload(module) do
-    :code.delete(module)
-    :code.soft_purge(module)
-    :ok
   end
 end

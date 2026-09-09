@@ -2,8 +2,7 @@ defmodule Ouroboros.Wasm.VerifierTest do
   # Async: no application environment, no named process, no disk.
   use ExUnit.Case, async: true
 
-  alias Ouroboros.Upgrade.Artifact, as: BeamArtifact
-  alias Ouroboros.Upgrade.Verifier, as: BeamVerifier
+  alias Ouroboros.Upgrade.Signing.Signature
   alias Ouroboros.Wasm
   alias Ouroboros.Wasm.Artifact
   alias Ouroboros.Wasm.Verifier
@@ -81,24 +80,24 @@ defmodule Ouroboros.Wasm.VerifierTest do
                Verifier.verify(moved, @bytes, context.policy)
     end
 
-    test "a signature from the BEAM lane cannot be replayed onto a component", context do
-      # The same key and the same signer id, over a BEAM artifact's payload. If the two
-      # lanes shared a payload space this would be the attack; the tags are what stop it.
-      {module, binary} = beam_binary()
-      {:ok, beam} = BeamArtifact.build([{module, binary, disposition: :introduce}], epoch: 1)
-      beam = BeamArtifact.sign(beam, @signer, context.secret)
+    test "a signature from another payload space cannot be replayed onto a component",
+         context do
+      # The same key and the same signer id, over a payload under a different tag. If the
+      # two shared a payload space this would be the attack; the tags are what stop it.
+      {:ouroboros_wasm_v1, signer, manifest} =
+        build!() |> Artifact.signing_payload(@signer) |> :erlang.binary_to_term()
 
-      # It is a genuinely good signature in its own lane — the same helper this module's
+      elsewhere =
+        :erlang.term_to_binary({:some_other_lane_v1, signer, manifest}, [:deterministic])
+
+      value = :crypto.sign(:eddsa, :none, elsewhere, [context.secret, :ed25519])
+
+      # It is a genuinely good signature over those bytes — the same helper this module's
       # signature check calls says so.
       assert :ok =
-               BeamVerifier.verify_payload_signature(
-                 BeamArtifact.signing_payload(beam, @signer),
-                 @signer,
-                 beam.signature.value,
-                 %{@signer => context.public}
-               )
+               Signature.verify_payload(elsewhere, @signer, value, %{@signer => context.public})
 
-      {:ok, replayed} = Artifact.with_signature(build!(), beam.signature)
+      {:ok, replayed} = Artifact.with_signature(build!(), %{signer: @signer, value: value})
 
       assert {:error, {:invalid_signature, @signer}} =
                Verifier.verify(replayed, @bytes, context.policy)
@@ -261,10 +260,5 @@ defmodule Ouroboros.Wasm.VerifierTest do
     value = :crypto.sign(:eddsa, :none, payload, [secret, :ed25519])
     {:ok, signed} = Artifact.with_signature(artifact, %{signer: @signer, value: value})
     signed
-  end
-
-  defp beam_binary do
-    {module, binary, _filename} = :code.get_object_code(Ouroboros.Wasm.Verifier)
-    {module, binary}
   end
 end

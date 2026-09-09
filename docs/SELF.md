@@ -54,10 +54,9 @@ reachable from an environment variable.
 in `children(:signer)`, so a single machine could forge and never sign. Under the posture, on a
 `:core` node with a key path configured and no `OUROBOROS_SIGNING_NODE`, the application starts
 it directly after the durable authority above it — the ledger, grants, the promotion record and
-permissions — and before anything that can forge. This is the dev loop
-`Ouroboros.Upgrade.Forge.Signer`'s moduledoc describes and it is **not custody**: the key is a
-file beside the application, and what keeps the model's own shell out of it is one thing — the
-OS sandbox's read fence.
+permissions — and before anything that can forge. This is a dev loop and it is **not
+custody**: the key is a file beside the application, and what keeps the model's own shell
+out of it is one thing — the OS sandbox's read fence.
 
 **Say that plainly, because it is the whole of the one-machine posture's security.** The seed
 sits on the same disk as the session that may forge. The permission engine cannot help: a shell

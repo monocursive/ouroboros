@@ -868,10 +868,9 @@ artifact of every placement remains a `node()`.
 | `Orchestration` steps | `step.metadata[:placement][:tags]` — metadata already reaches executors (`scheduler.ex:635-647`, precedent `team_executor.ex:84-93`); `TeamExecutor` resolves at claim time | step failure `{:placement_unsatisfiable, step_id, tags}` |
 | Gateway | `"tags"` validator (list of strings matching the tag grammar, no atom minting — beside the `:node` validator at `methods.ex:942-955`) on `teams.add_worker`, `teams.delegate`; `interactive.start`/`coding.start` gain **both** `"node"` and `"tags"` (§10) | `invalid_params` naming the grammar; `-32007`-style refusal carrying the unsatisfiable selector |
 
-Not tag-gated, deliberately: `Upgrade.Coordinator.validate_nodes/1` (deploy targets
-are code-custody, named explicitly), `Signer.Remote` (custody is a role), and
-`Forge.BuildPeer` (builder selection is by *triple*, §11 — a stricter predicate than
-any tag).
+Not tag-gated, deliberately: rollout target validation (deploy targets are
+code-custody, named explicitly), the signing service (custody is a role), and builder
+selection (`:wasm_forge_placement` — a role, §11).
 
 The planner schema stays closed: model-authored steps still cannot name nodes — and
 now also cannot name tags — without the operator widening the schema; placement
@@ -1002,30 +1001,13 @@ spawns a remote runtime.
 
 ## 11. Forge and rollout across a heterogeneous fleet
 
-Per D8, targets group by triple; the verifier (`verifier.ex:115-124`) is untouched.
-
-- **Triple advertisement.** In the posture (§6): `runtime: %{otp, elixir, arch}`.
-- **Builder selection.** `config :ouroboros, :forge_builder_nodes` — a map
-  `%{"aarch64-apple-darwin" => :"ouroboros@mac...", ...}` beside the existing scalar
-  (which keeps meaning "the builder for my own triple"). `BuildPeer.builder_node/1`
-  (`build_peer.ex:124-136`) resolves per requested triple; `check_builder/1` gains
-  the F6 assertion generalized: the chosen builder's advertised triple must equal
-  the target group's, refusal `{:builder_triple_mismatch, builder, expected, actual}`.
-- **Grouped forging.** `Runtime.Capabilities.admit/3` and
-  `Orchestration.ForgeExecutor` partition their node list by advertised triple and
-  run one forge per group — N artifacts from one source, each signed and
-  epoch-stamped independently (the signer is deliberately triple-blind,
-  `signing/policy.ex:200-224`, and needs no change). A group whose triple has no
-  configured builder and no local match refuses
-  `{:no_builder_for_triple, triple, nodes}` before any build starts.
-- **Registry.** `Rollout.Registry.Entry` gains a `platform` field (checkpoint v3 via
-  the established widen-on-read pattern, `registry.ex:364-379`); `deployed?/3`'s
-  exact-node-set idempotency check becomes per-group so re-admitting the same
-  source to the same per-platform sets reattaches instead of reforging.
-- **Operator surface.** `capabilities.admit` accepts `"nodes"` / `"tags"`
-  (`gateway/methods.ex:692-702` currently pins `[node()]` via
-  `capabilities.ex:418-423`); tags resolve through the directory, then group by
-  triple as above.
+**Moot as designed.** This section was written for the BEAM forge lane, where an
+artifact carried an OTP/Elixir/architecture triple and a builder therefore had to be
+runtime-identical to its targets. That lane was removed by docs/proposals/core.md §4 A1.
+A WebAssembly component is one artifact for every node, forever, so there is nothing to
+group by and no per-triple builder to select: `:wasm_forge_placement` names *where* a
+forge runs (here, or a connected `:builder`), and a `:signer` node refuses to forge under
+either setting.
 
 Registries remain per-driving-node journals (`registry.ex:5-7,90-93`);
 reconciliation across them is deferred (§15) and `fleet.status` at least makes the

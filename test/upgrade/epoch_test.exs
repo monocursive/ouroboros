@@ -1,36 +1,33 @@
 defmodule Ouroboros.Upgrade.EpochTest do
   use ExUnit.Case, async: false
 
-  alias Ouroboros.Upgrade.{Artifact, Epoch, NodeExecutor}
+  alias Ouroboros.Upgrade.Epoch
   alias Ouroboros.Upgrade.Rollout.Registry
-
-  @module Ouroboros.Capability.EpochProbe
 
   setup do
     ensure_distributed!()
-    on_exit(fn -> unload(@module) end)
     :ok
   end
 
   test "allocates above the highest epoch any target node reports" do
     peer_node = start_app_peer!()
-    binary = compile_capability!()
 
-    # "Any target node reports" is both planes since lane W: `Epoch.next/2` reads a node's
-    # last committed epoch *and* the highest epoch its rollout register holds for a wasm
-    # component, so the peer has to be moved ahead of whichever is higher here — a lane-W
-    # suite that ran earlier leaves its live epochs in this node's register (W22's CI run).
-    local = max(NodeExecutor.status().last_epoch, Registry.wasm_epoch())
-    peer_epoch = local + 1_000
+    # `Epoch.next/2` reads the highest epoch each target's rollout register has admitted,
+    # so the peer has to be moved ahead of this node's own register — a suite that ran
+    # earlier leaves its live epochs there (W22's CI run).
+    peer_epoch = Registry.wasm_epoch() + 1_000
 
-    # Move one node's journal well ahead of the other's. The forge has to notice.
-    assert {:ok, token} =
-             :erpc.call(peer_node, NodeExecutor, :prepare, [
-               introduce_artifact!(binary, peer_epoch)
+    # Move one node's register well ahead of the other's. The forge has to notice.
+    assert :ok =
+             :erpc.call(peer_node, Registry, :admit_wasm_epoch, [
+               %{
+                 artifact_id: "epoch-probe",
+                 epoch: peer_epoch,
+                 component_sha256: String.duplicate("a", 64)
+               }
              ])
 
-    assert {:ok, receipt} = :erpc.call(peer_node, NodeExecutor, :commit, [token])
-    assert :erpc.call(peer_node, NodeExecutor, :status, []).last_epoch == peer_epoch
+    assert :erpc.call(peer_node, Registry, :wasm_epoch, []) == peer_epoch
 
     storage = ets_storage()
 
@@ -43,8 +40,6 @@ defmodule Ouroboros.Upgrade.EpochTest do
     assert {:ok, next} = Epoch.next([node(), peer_node], storage: storage)
     assert next == allocated + 1
     assert {:ok, ^next} = Epoch.watermark(storage: storage)
-
-    assert :ok = :erpc.call(peer_node, NodeExecutor, :rollback, [receipt])
   end
 
   test "a node whose status cannot be read is a refusal, not a zero" do
@@ -63,7 +58,7 @@ defmodule Ouroboros.Upgrade.EpochTest do
     assert {:error, {:invalid_nodes, []}} = Epoch.next([], storage: storage)
   end
 
-  test "allocates above a target's lane-W watermark when the driver changes" do
+  test "allocates above a target's watermark when the driver changes" do
     name = String.to_atom("epoch_target_registry_#{System.unique_integer([:positive])}")
 
     {:ok, registry} =
@@ -124,36 +119,6 @@ defmodule Ouroboros.Upgrade.EpochTest do
   end
 
   defp epoch_key, do: {:ouroboros, :forge_epoch, 1}
-
-  defp introduce_artifact!(binary, epoch) do
-    {:ok, artifact} =
-      Artifact.build([{@module, binary, disposition: :introduce}], epoch: epoch)
-
-    artifact
-  end
-
-  defp compile_capability! do
-    source = """
-    defmodule #{inspect(@module)} do
-      @vsn 1
-      def hello, do: :world
-    end
-    """
-
-    previous = Code.get_compiler_option(:ignore_module_conflict)
-    Code.put_compiler_option(:ignore_module_conflict, true)
-    [{@module, binary}] = Code.compile_string(source, "epoch_capability.ex")
-    Code.put_compiler_option(:ignore_module_conflict, previous)
-
-    unload(@module)
-    binary
-  end
-
-  defp unload(module) do
-    :code.delete(module)
-    :code.soft_purge(module)
-    :ok
-  end
 
   defp ets_storage do
     {Jido.Storage.ETS, table: String.to_atom("epoch_test_#{System.unique_integer([:positive])}")}

@@ -57,10 +57,6 @@ fn node(frame: &mut Frame, area: Rect, app: &App) {
             lines.push(field("role", &blank(&status.role)));
             lines.push(field("cluster", &status.cluster_summary()));
             lines.push(field(
-                "upgrade",
-                status.mode("upgrade").unwrap_or("unknown"),
-            ));
-            lines.push(field(
                 "release",
                 status.mode("release").unwrap_or("unknown"),
             ));

@@ -12,9 +12,7 @@ defmodule Ouroboros.ClusterTest do
   alias Ouroboros.Mesh
   alias Ouroboros.Team
   alias Ouroboros.Team.Server
-  alias Ouroboros.Upgrade.Forge.BuildPeer
 
-  @capability Ouroboros.Capability.RemotelyBuilt
   @formation_cookie :ouroboros_formation_test
 
   describe "node role" do
@@ -1897,96 +1895,6 @@ defmodule Ouroboros.ClusterTest do
     end
   end
 
-  describe "remote builds" do
-    @tag timeout: 300_000
-    test "a builder node compiles the capability and this node never loads it" do
-      builder = start_app_peer!(node_role: :builder)
-
-      previous = Application.get_env(:ouroboros, :forge_builder_node)
-      Application.put_env(:ouroboros, :forge_builder_node, builder)
-
-      on_exit(fn ->
-        Application.put_env(:ouroboros, :forge_builder_node, previous)
-        unload(@capability)
-      end)
-
-      assert {:ok, build} =
-               BuildPeer.build(@capability, capability_source(), capability_test_source())
-
-      assert build.module == @capability
-      assert is_binary(build.binary)
-      assert build.test_report.failures == 0
-      assert build.test_report.total == 1
-
-      # The compile happened inside a peer of the builder: not distributed, and not this
-      # VM. Mirrors forge_build_peer_test — the module name is still unknown here.
-      assert build.peer_runtime.distributed == false
-      assert build.peer_runtime.node == :nonode@nohost
-      assert :code.which(@capability) == :non_existing
-      assert :code.get_object_code(@capability) == :error
-      refute Code.ensure_loaded?(@capability)
-
-      # Nor did the builder itself load it: it too only held the binary.
-      assert :erpc.call(builder, :code, :which, [@capability]) == :non_existing
-
-      # The artifact's runtime triple is the builder's, which is exactly why a builder
-      # must be a role of the same release: the verifier compares it to every target.
-      assert build.peer_runtime.otp_release == to_string(:erlang.system_info(:otp_release))
-
-      assert build.peer_runtime.system_architecture ==
-               to_string(:erlang.system_info(:system_architecture))
-    end
-
-    @tag timeout: 180_000
-    test "a builder that is mis-rolled or unreachable is a typed refusal, not a build" do
-      core = start_app_peer!()
-
-      previous = Application.get_env(:ouroboros, :forge_builder_node)
-      on_exit(fn -> Application.put_env(:ouroboros, :forge_builder_node, previous) end)
-
-      Application.put_env(:ouroboros, :forge_builder_node, core)
-
-      assert BuildPeer.build(@capability, capability_source(), nil) ==
-               {:error, {:forge_builder_refused, core, {:role, :core, :builder}}}
-
-      absent = :"ouroboros-absent@127.0.0.1"
-      Application.put_env(:ouroboros, :forge_builder_node, absent)
-
-      assert BuildPeer.build(@capability, capability_source(), nil) ==
-               {:error, {:forge_builder_refused, absent, :node_not_connected}}
-
-      Application.put_env(:ouroboros, :forge_builder_node, "not-a-node")
-
-      assert BuildPeer.build(@capability, capability_source(), nil) ==
-               {:error, {:invalid_forge_builder_node, "not-a-node"}}
-
-      # The escape hatch relaxes the role and nothing else: the target must still be a
-      # connected node running this runtime.
-      allow_previous = Application.get_env(:ouroboros, :forge_builder_allow_any_role)
-      Application.put_env(:ouroboros, :forge_builder_allow_any_role, true)
-
-      on_exit(fn ->
-        Application.put_env(:ouroboros, :forge_builder_allow_any_role, allow_previous)
-      end)
-
-      Application.put_env(:ouroboros, :forge_builder_node, absent)
-
-      assert BuildPeer.build(@capability, capability_source(), nil) ==
-               {:error, {:forge_builder_refused, absent, :node_not_connected}}
-    end
-
-    test "an unset builder leaves the local build path untouched" do
-      assert Application.get_env(:ouroboros, :forge_builder_node) == nil
-
-      assert {:ok, observed} =
-               BuildPeer.with_peer(fn peer ->
-                 {:ok, BuildPeer.call(peer, :erlang, :node, [])}
-               end)
-
-      assert observed == :nonode@nohost
-    end
-  end
-
   describe "least-privileged trees" do
     @tag timeout: 180_000
     test "a :builder node starts cluster formation and nothing else" do
@@ -2011,7 +1919,6 @@ defmodule Ouroboros.ClusterTest do
             Ouroboros.Control.Store,
             Ouroboros.Control.Grants,
             Ouroboros.Release.Runtime,
-            Ouroboros.Upgrade.NodeExecutor,
             Ouroboros.Upgrade.Rollout.Registry
           ] do
         assert :erpc.call(builder, Process, :whereis, [name]) == nil,
@@ -2218,7 +2125,6 @@ defmodule Ouroboros.ClusterTest do
         "OUROBOROS_CLUSTER_HOSTS",
         "OUROBOROS_ALLOW_INSECURE_DIST",
         "OUROBOROS_COOKIE_FILE",
-        "OUROBOROS_FORGE_BUILDER_NODE",
         "OUROBOROS_UPGRADE_TRUSTED_SIGNERS"
       ]
 
@@ -2254,13 +2160,11 @@ defmodule Ouroboros.ClusterTest do
       assert prod_config()[:ouroboros][:node_role] == :core
     end
 
-    test "role and builder are read from the environment and refused when unrecognized" do
+    test "the role is read from the environment and refused when unrecognized" do
       System.put_env("OUROBOROS_NODE_ROLE", "builder")
-      System.put_env("OUROBOROS_FORGE_BUILDER_NODE", "builder-1@10.0.0.20")
 
       config = prod_config()[:ouroboros]
       assert config[:node_role] == :builder
-      assert config[:forge_builder_node] == :"builder-1@10.0.0.20"
 
       System.put_env("OUROBOROS_NODE_ROLE", "root")
       assert_raise RuntimeError, ~r/OUROBOROS_NODE_ROLE/, fn -> prod_config() end
@@ -2669,34 +2573,6 @@ defmodule Ouroboros.ClusterTest do
     File.mkdir_p!(dir)
     on_exit(fn -> File.rm_rf(dir) end)
     dir
-  end
-
-  defp unload(module) do
-    :code.delete(module)
-    :code.soft_purge(module)
-    :ok
-  end
-
-  defp capability_source do
-    """
-    defmodule #{inspect(@capability)} do
-      @vsn 1
-
-      def double(n) when is_integer(n), do: n * 2
-    end
-    """
-  end
-
-  defp capability_test_source do
-    """
-    defmodule Ouroboros.Capability.RemotelyBuiltTest do
-      use ExUnit.Case, async: false
-
-      test "doubles" do
-        assert #{inspect(@capability)}.double(21) == 42
-      end
-    end
-    """
   end
 
   defp unique_id(prefix), do: "#{prefix}-#{System.unique_integer([:positive])}"

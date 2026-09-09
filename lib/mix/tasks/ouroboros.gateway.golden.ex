@@ -768,7 +768,6 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         control: :disabled,
         effect_ledger: :available,
         workspace: :disabled,
-        hot_upgrade: :available,
         release: :available
       },
       agents: [
@@ -817,15 +816,6 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         ambiguous: 0,
         retention_limit: 1_000,
         next_sequence: 5
-      },
-      upgrade: %{
-        node: :ouroboros@golden,
-        mode: :ready,
-        quarantine_reason: nil,
-        last_epoch: 7,
-        prepared: [],
-        rollback_receipts: [],
-        operations: []
       },
       release: %{mode: :ready, handler_releases: [], ephemeral_capability_count: 0},
       forge: %{signer: :deny, admit_possible?: false, live_count: 0, live: []}

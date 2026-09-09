@@ -1,8 +1,6 @@
 defmodule Ouroboros.Upgrade.RolloutRegistryTest do
   use ExUnit.Case, async: false
 
-  alias Ouroboros.Upgrade.Coordinator.{DeploymentReceipt, NodeReceipt}
-  alias Ouroboros.Upgrade.Rollout
   alias Ouroboros.Upgrade.Rollout.Registry
 
   @module Ouroboros.Capability.Recorded
@@ -821,38 +819,6 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
     GenServer.stop(second)
   end
 
-  test "ambiguity is never recorded as a rollback" do
-    proven =
-      deployment(%{
-        a@host: %NodeReceipt{node: :a@host, recovery: :rolled_back},
-        b@host: %NodeReceipt{node: :b@host, recovery: :aborted}
-      })
-
-    assert {:rolled_back, detail} = Rollout.settled_state(proven)
-    assert detail.nodes == %{a@host: :rolled_back, b@host: :aborted}
-
-    # One node that never proved anything outranks every node that did.
-    ambiguous =
-      deployment(%{
-        a@host: %NodeReceipt{node: :a@host, recovery: :rolled_back},
-        b@host: %NodeReceipt{node: :b@host, recovery: :quarantined}
-      })
-
-    assert {:quarantined, _detail} = Rollout.settled_state(%{ambiguous | recovery: :quarantined})
-
-    # Even with every node reporting a proven recovery, a deployment whose own recovery
-    # is not complete is not a proven rollback.
-    assert {:quarantined, _detail} = Rollout.settled_state(%{proven | recovery: :incomplete})
-    assert {:quarantined, _detail} = Rollout.settled_state(%{proven | recovery: :quarantined})
-
-    # A recovery state this build does not recognize is treated as ambiguity, not as
-    # success: an unknown answer is not a proof.
-    unknown =
-      deployment(%{a@host: %NodeReceipt{node: :a@host, recovery: :something_new_and_unclear}})
-
-    assert {:quarantined, _detail} = Rollout.settled_state(unknown)
-  end
-
   test "a rollout whose id spells a word is still that rollout after a restart" do
     directory = temporary_directory!()
     storage = {Ouroboros.Storage.DurableFile, path: directory}
@@ -922,19 +888,6 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
       "eval_report" => nil,
       "created_at" => "x",
       "updated_at" => "x"
-    }
-  end
-
-  defp deployment(node_receipts) do
-    %DeploymentReceipt{
-      id: "deployment-#{System.unique_integer([:positive])}",
-      artifact_id: "artifact-#{System.unique_integer([:positive])}",
-      epoch: 1,
-      nodes: Map.keys(node_receipts),
-      node_receipts: node_receipts,
-      outcome: :health_failed,
-      recovery: :complete,
-      started_at: DateTime.utc_now() |> DateTime.to_iso8601()
     }
   end
 

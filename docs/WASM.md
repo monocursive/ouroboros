@@ -7,6 +7,16 @@ the as-built record. Every file:line claim below was verified against the tree a
 the time it was written; if you are reading this much later, re-verify before
 building.
 
+**Lane B is gone.** docs/proposals/core.md §4 A1 removed the BEAM forge lane —
+`upgrade/forge/`, `beam.ex`, `node_executor.ex`, `coordinator.ex`, `artifact.ex`,
+`module_name.ex`, `verifier.ex`, `rollout.ex` and `scripts/forge-linux-test.sh` — for the
+reason §1 below gives: a forged BEAM runs with ambient VM authority, and no name policy
+changes that. Lane W is the forge. Everything below that describes lane B, compares
+against it, or reports a proof run under `scripts/forge-linux-test.sh` is the record of
+how this lane was designed and built, not a description of the tree. What lane W stands
+on — `upgrade/signing/`, `upgrade/rollout/`, `epoch.ex`, `wire.ex` — is unchanged, and
+the routing rule in §6 now has one destination.
+
 ## 1. Purpose
 
 Ouroboros has one place left where admission is hygiene rather than containment: code.
@@ -714,9 +724,8 @@ The `Signer` behaviour is reused unchanged — `sign_artifact/2` already takes
    sorted list against the helper's own sorted reading, which can never repeat an import.
    `["log", "log"]` was a manifest signed into a permanent quarantine;
 5. provenance: author present; `eval` spec validated when present, **required** by
-   default for lane W (D12) — there is no BuildPeer/ExUnit analogue here, so the
-   signed eval spec *is* the test story; `:signing_require_eval` semantics extend
-   rather than fork;
+   default (D12, `:signing_require_wasm_eval`) — there is no build peer running a test
+   suite here, so the signed eval spec *is* the test story;
 6. **precompiled block** (W8, D22). `precompiled` is absent, or exactly
    `%{wasmtime, target, sha256, size}`: a 64-hex digest that is *not* the component's own,
    a positive size within the same multiple of the artifact ceiling a bundle admits, and two

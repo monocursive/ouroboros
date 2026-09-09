@@ -222,7 +222,6 @@ defmodule Ouroboros.Wasm.ForgeTwoNodeTest do
       |> Enum.sort()
 
     assert ids == [Cluster, Wasm.Supervisor]
-    assert call(builder.node, Process, :whereis, [Ouroboros.Upgrade.NodeExecutor]) == nil
     assert call(builder.node, Process, :whereis, [Registry]) == nil
   end
 

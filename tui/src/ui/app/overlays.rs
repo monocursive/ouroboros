@@ -2,7 +2,6 @@ use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptKind {
-    HistoryModule,
     GrantsPrincipal,
     PreviewCapability,
     AdmitCapability,
@@ -1695,7 +1694,7 @@ impl App {
             PromptKind::ControlObjective if value.trim().is_empty() => {
                 return;
             }
-            PromptKind::HistoryModule | PromptKind::GrantsPrincipal if value.is_empty() => {
+            PromptKind::GrantsPrincipal if value.is_empty() => {
                 return;
             }
             PromptKind::ApprovalReason {
@@ -1737,11 +1736,6 @@ impl App {
                 ));
                 self.control.rows.invalidate();
                 self.inform("control run submitted", NoticeKind::Info);
-            }
-            PromptKind::HistoryModule => {
-                self.upgrade.history_module = Some(value);
-                self.upgrade.history = Loadable::default();
-                self.upgrade.tree.reset();
             }
             PromptKind::GrantsPrincipal => {
                 self.upgrade.grants_principal = Some(value);

@@ -2,21 +2,12 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
   use ExUnit.Case, async: false
 
   alias Ouroboros.Storage.DurableFile
-  alias Ouroboros.Upgrade.Forge
-  alias Ouroboros.Upgrade.Forge.{Signer, Source}
   alias Ouroboros.Upgrade.Signing.{Journal, Policy, Service}
-  alias Ouroboros.Upgrade.{Artifact, Beam, Verifier}
+  alias Ouroboros.Wasm.Artifact
+  alias Ouroboros.Wasm.Verifier
 
-  @capability Ouroboros.Capability.SignedByService
-  @outsider Ouroboros.SigningOutsiderCapability
-  @forged Ouroboros.Capability.ForgedByRemoteSigner
+  @bytes "\0asm\x01\x00\x00\x00 pretend this is a component"
   @signer_id "release-key"
-  @absent :"ouroboros-absent-signer@127.0.0.1"
-
-  setup do
-    on_exit(fn -> Enum.each([@capability, @outsider, @forged], &unload/1) end)
-    :ok
-  end
 
   describe "key custody" do
     test "a signer with no key, an unreadable key, or a garbage key refuses to start" do
@@ -111,116 +102,15 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
       assert {:ok, %{public_key: public_key}} = Service.public_info(service)
       signed = %{artifact | signature: %{signer: @signer_id, value: signature}}
 
-      assert :ok = Verifier.verify(signed, trusted_signers: %{@signer_id => public_key})
+      assert :ok = Verifier.verify(signed, @bytes, trusted_signers: %{@signer_id => public_key})
 
       # The signature is over the service's own derivation of the payload, which is the
-      # same canonical bytes the verifier reconstructs. Nothing about the artifact may
+      # same canonical bytes the verifier reconstructs. Nothing about the manifest may
       # move afterwards.
       assert {:error, {:invalid_signature, @signer_id}} =
-               Verifier.verify(%{signed | epoch: signed.epoch + 1},
+               Verifier.verify(%{signed | epoch: signed.epoch + 1}, @bytes,
                  trusted_signers: %{@signer_id => public_key}
                )
-    end
-
-    test "a module outside the capability namespace is structurally unsignable" do
-      service = start_service!()
-
-      assert {:refused, {:module_outside_capability_namespace, @outsider}} =
-               sign(service, outsider_artifact!())
-
-      # Not a configuration this deployment happens to have: there is no policy option,
-      # signer id, or requester that produces a signature for a control-plane module.
-      relaxed = start_service!(require_eval: false, rate_limit_per_minute: 1_000)
-
-      assert {:refused, {:module_outside_capability_namespace, @outsider}} =
-               sign(relaxed, outsider_artifact!(), signer_id: @signer_id)
-    end
-
-    test "the signer recomputes the manifest and refuses anything it cannot reproduce" do
-      service = start_service!()
-      artifact = artifact!()
-      [beam] = artifact.modules
-
-      # A requester that precomputed a flattering hash is refused on arithmetic.
-      rewritten = %{artifact | modules: [%{beam | sha256: Beam.sha256("something else")}]}
-
-      assert {:refused, {:manifest_mismatch, @capability, :sha256, :new}} =
-               sign(service, rewritten)
-
-      assert {:refused, {:manifest_mismatch, @capability, :md5, :new}} =
-               sign(service, %{artifact | modules: [%{beam | md5: :crypto.hash(:md5, "no")}]})
-
-      assert {:refused, {:manifest_mismatch, @capability, :vsn, :new}} =
-               sign(service, %{artifact | modules: [%{beam | vsn: 99}]})
-
-      # And a byte flipped in the bytes themselves, after the artifact was built, cannot
-      # survive the recomputation either — whether it breaks the hash or the BEAM.
-      tampered = %{artifact | modules: [%{beam | binary: flip_byte(beam.binary)}]}
-
-      assert {:refused, reason} = sign(service, tampered)
-      assert elem(reason, 0) in [:manifest_mismatch, :invalid_beam, :module_mismatch]
-
-      # An `:introduce` that smuggles in rollback material is not an introduction.
-      assert {:refused, {:invalid_introduction, @capability}} =
-               sign(service, %{artifact | modules: [%{beam | old_sha256: beam.sha256}]})
-
-      # An epoch is only checked for sanity here; ordering belongs to the target.
-      assert {:refused, {:invalid_epoch, "0"}} = sign(service, %{artifact | epoch: 0})
-      assert {:refused, :empty_artifact} = sign(service, %{artifact | modules: []})
-    end
-
-    test "provenance is required, and a red build is not provenance" do
-      service = start_service!()
-
-      assert {:refused, {:provenance_missing, :forge}} =
-               sign(service, artifact!(metadata: %{}))
-
-      assert {:refused, {:provenance_missing, :source_sha256}} =
-               sign(service, artifact!(metadata: %{forge: %{test_report: report()}}))
-
-      assert {:refused, {:provenance_missing, :test_report}} =
-               sign(service, artifact!(metadata: %{forge: %{source_sha256: source_sha256()}}))
-
-      assert {:refused, {:tests_failed, 1, 2}} =
-               sign(service, artifact!(metadata: forge_metadata(report(total: 2, failures: 1))))
-
-      # Nothing ran, so nothing passed. A capability whose tests were never executed has
-      # no provenance for a signer to rely on.
-      assert {:refused, {:no_tests_passed, 0, 0}} =
-               sign(service, artifact!(metadata: forge_metadata(report(total: 0))))
-
-      # Green only because everything was skipped is the same refusal.
-      assert {:refused, {:no_tests_passed, 3, 0}} =
-               sign(service, artifact!(metadata: forge_metadata(report(total: 3, skipped: 3))))
-
-      assert {:refused, {:invalid_provenance, :source_sha256, _}} =
-               sign(service, artifact!(metadata: forge_metadata(report(), "not-a-digest")))
-    end
-
-    test "require_eval makes a declared evaluation spec a precondition of a signature" do
-      relaxed = start_service!()
-      strict = start_service!(require_eval: true)
-
-      without = artifact!()
-      with_spec = artifact!(metadata: forge_metadata(report(), source_sha256(), eval_spec()))
-
-      # Off by default: exactly the behaviour that existed before this service.
-      assert {:ok, _signature} = sign(relaxed, without)
-      assert {:ok, _signature} = sign(relaxed, with_spec)
-
-      assert {:refused, :eval_spec_required} = sign(strict, without)
-      assert {:ok, signature} = sign(strict, with_spec)
-      assert byte_size(signature) == 64
-
-      # A spec that could never run is refused whether or not one was required, because
-      # a signature over unrunnable criteria is worse than one over none.
-      broken = artifact!(metadata: forge_metadata(report(), source_sha256(), %{probes: []}))
-
-      assert {:refused, {:invalid_eval_spec, :probes_required}} =
-               sign(strict, broken)
-
-      assert {:refused, {:invalid_eval_spec, :probes_required}} =
-               sign(relaxed, broken)
     end
 
     test "the requested identity and the advisory payload are both cross-checked" do
@@ -233,7 +123,13 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
       # The payload is advisory: the service signs what it derives. A disagreement is
       # version skew between a core node and its signer, and skew stops the deployment.
       assert {:refused, {:payload_mismatch, expected, given}} =
-               sign(service, artifact, request: %{requester: node(), payload: "not the payload"})
+               sign(service, artifact,
+                 request: %{
+                   requester: node(),
+                   component_bytes: @bytes,
+                   payload: "not the payload"
+                 }
+               )
 
       assert byte_size(expected) == 64
       assert expected != given
@@ -243,6 +139,7 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
                sign(service, artifact,
                  request: %{
                    requester: node(),
+                   component_bytes: @bytes,
                    payload: Artifact.signing_payload(artifact, @signer_id)
                  }
                )
@@ -252,28 +149,6 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
 
       assert {:refused, {:invalid_artifact, _}} = sign(service, :not_an_artifact)
     end
-
-    test "the policy is a pure function of the artifact and refuses rather than raising" do
-      context = %{signer_id: @signer_id, requester: node(), require_eval: false}
-
-      assert {:ok, findings} = Policy.Default.evaluate(artifact!(), context)
-      assert findings.namespace == :ouroboros_capability
-      assert findings.recomputed == 1
-      assert [%{module: @capability, disposition: :introduce}] = findings.modules
-
-      assert findings.provenance.tests == %{
-               total: 1,
-               failures: 0,
-               excluded: 0,
-               skipped: 0,
-               passed: 1
-             }
-
-      assert findings.eval == :absent
-
-      assert {:refused, {:invalid_artifact, _}} = Policy.Default.evaluate(%{}, context)
-      assert Policy.configured() == Policy.Default
-    end
   end
 
   describe "the decision journal" do
@@ -282,7 +157,7 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
       artifact = artifact!()
 
       assert {:ok, _signature} = sign(service, artifact)
-      assert {:refused, _reason} = sign(service, outsider_artifact!())
+      assert {:refused, _reason} = sign(service, unsignable!())
 
       assert {:ok, [issued, refused]} = Service.decisions(service)
 
@@ -293,14 +168,14 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
       assert issued.requester == node()
       assert issued.signer_id == @signer_id
       assert issued.reason == nil
-      assert [%{module: @capability, disposition: :introduce}] = issued.modules
-      assert issued.findings.provenance.source_sha256 == source_sha256()
+      assert [%{module: "wasm/greeter", disposition: :component}] = issued.modules
+      assert issued.findings.provenance.author == "test-agent"
       assert is_binary(issued.at)
 
       assert refused.decision == :refused
       assert refused.sequence == 2
-      assert refused.reason == {:module_outside_capability_namespace, @outsider}
-      assert [%{module: @outsider}] = refused.modules
+      assert refused.reason == {:world_not_supported, "no-such-world"}
+      assert [%{module: "wasm/greeter"}] = refused.modules
 
       # A refusal is a decision, so it counts.
       assert {:ok, status} = Service.status(service)
@@ -428,7 +303,7 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
       for findings <- [
             %{lane: :wasm, provenance: %{test_report: %{notes: fat(200_000)}}},
             %{lane: :wasm, noise: Map.new(1..4_000, fn n -> {"k#{n}", fat(64)} end)},
-            %{lane: :beam, epoch: 1, modules: List.duplicate(fat(512), 500)}
+            %{lane: :wasm, epoch: 1, modules: List.duplicate(fat(512), 500)}
           ] do
         entry = recorded(findings)
         assert byte_size(:erlang.term_to_binary(entry.findings)) <= 8_192
@@ -463,8 +338,7 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
 
       assert {:ok, _signature} = sign(service, artifact!())
 
-      assert {:refused, {:module_outside_capability_namespace, _}} =
-               sign(service, outsider_artifact!())
+      assert {:refused, {:world_not_supported, _}} = sign(service, unsignable!())
 
       assert {:refused, {:rate_limited, requester, 2, 2}} = sign(service, artifact!())
       assert requester == node()
@@ -472,7 +346,9 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
       # A different requester has its own window. The requester is self-reported, which
       # is exactly why this bounds accidents rather than adversaries.
       assert {:ok, _signature} =
-               sign(service, artifact!(), request: %{requester: :"other@127.0.0.1"})
+               sign(service, artifact!(),
+                 request: %{requester: :"other@127.0.0.1", component_bytes: @bytes}
+               )
 
       assert {:ok, status} = Service.status(service)
       assert status.tracked_requesters == 2
@@ -482,7 +358,7 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
     test "every refusal below the limiter still costs the requester its window" do
       # The limiter used to run *after* the size check, the signer-id check and the
       # component-bytes check, so each of those refusals was free and unlimited — and each
-      # one costs this process a `term_to_binary` over an artifact the caller chose the
+      # one costs this process a `term_to_binary` over a manifest the caller chose the
       # size of, plus a journal write. A refusal an attacker can generate at will is the
       # one outcome that must not be cheaper than an issuance.
       service = start_service!(rate_limit_per_minute: 2, max_artifact_bytes: 128)
@@ -510,64 +386,18 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
 
     test "a service that is not running is a refusal, never a raise" do
       assert {:refused, {:signing_service_unavailable, _reason}} =
-               Service.sign_artifact(artifact!(), @signer_id, %{requester: node()}, :no_such_name)
+               Service.sign_artifact(
+                 artifact!(),
+                 @signer_id,
+                 %{requester: node(), component_bytes: @bytes},
+                 :no_such_name
+               )
 
       assert {:error, {:signing_service_unavailable, _reason}} =
                Service.public_info(:no_such_name)
 
       assert {:refused, {:invalid_signing_request, _}} =
                Service.sign_artifact(artifact!(), "", %{requester: node()})
-    end
-  end
-
-  describe "the remote signer client" do
-    test "a target that is not a :signer node is a typed refusal, not a submission" do
-      artifact = artifact!()
-
-      # This node is `:core`. Being connected, running, and reachable is not enough.
-      assert {:error, {:remote_signer_refused, target, {:role, :core, :signer}}} =
-               Signer.Remote.sign_artifact(artifact, @signer_id, node: node())
-
-      assert target == node()
-
-      assert {:error, {:remote_signer_refused, @absent, :node_not_connected}} =
-               Signer.Remote.sign_artifact(artifact, @signer_id, node: @absent)
-
-      assert {:error, {:remote_signer_unconfigured, :node}} =
-               Signer.Remote.sign_artifact(artifact, @signer_id, [])
-
-      assert {:error, {:invalid_signer_node, "signer@host"}} =
-               Signer.Remote.sign_artifact(artifact, @signer_id, node: "signer@host")
-
-      assert {:error, :invalid_signing_request} =
-               Signer.Remote.sign_artifact(artifact, "", node: node())
-    end
-
-    test "the forge prefers a whole-artifact signer and leaves the others untouched" do
-      assert Signer.artifact_signer?(Signer.Remote)
-      refute Signer.artifact_signer?(Signer.Deny)
-      assert Signer.artifact_signer?(Signer.Local)
-      refute Signer.artifact_signer?(:not_a_module)
-
-      # `Remote` cannot answer the payload-only callback at all: a signer whose whole
-      # purpose is inspecting the artifact must not silently sign a hash of one.
-      assert Signer.Remote.sign("payload", @signer_id) ==
-               {:error, :remote_signer_requires_artifact}
-
-      # And the shipped signers are exactly what they were.
-      assert Signer.Deny.sign("payload", @signer_id) == {:error, :signing_denied}
-      assert Signer.Local.sign("payload", @signer_id) == {:error, :private_key_not_configured}
-    end
-
-    test "a configured remote signer is what the forge asks, and its refusal is the forge's" do
-      previous = Application.get_env(:ouroboros, :forge_signer)
-      Application.put_env(:ouroboros, :forge_signer, {Signer.Remote, node: @absent})
-      on_exit(fn -> restore(:forge_signer, previous) end)
-
-      assert {Signer.Remote, node: @absent} = Signer.configured()
-
-      assert Signer.Remote.sign_artifact(artifact!(), @signer_id) ==
-               {:error, {:remote_signer_refused, @absent, :node_not_connected}}
     end
   end
 
@@ -589,7 +419,6 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
             Ouroboros.Orchestration.Scheduler,
             Ouroboros.Control.Store,
             Ouroboros.Release.Runtime,
-            Ouroboros.Upgrade.NodeExecutor,
             Ouroboros.Upgrade.Rollout.Registry
           ] do
         assert :erpc.call(signer, Process, :whereis, [name]) == nil,
@@ -663,57 +492,20 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
       assert {:error, _reason} = :erpc.call(peer, Application, :ensure_all_started, [:ouroboros])
     end
 
-    @tag timeout: 300_000
-    test "signs a forged artifact this node then verifies with the signer's own public key" do
-      signer = start_signer_peer!()
-      assert {:ok, info} = :erpc.call(signer, Service, :public_info, [])
-
-      configure_remote_signer!(signer)
-      on_exit(fn -> unload(@forged) end)
-
-      # A real forge: parse-only hygiene, an isolated build peer, an allocated epoch, and
-      # then a signature this node cannot produce for itself.
-      assert {:ok, signed} =
-               Forge.forge(forge_source!(),
-                 nodes: [node()],
-                 signer_id: @signer_id,
-                 storage: ets_storage()
-               )
-
-      assert signed.signature.signer == @signer_id
-      assert byte_size(signed.signature.value) == 64
-
-      # The key that signed it is the key the signer node published, and nothing about
-      # the artifact moved between the two.
-      assert :ok = Verifier.verify(signed, trusted_signers: %{@signer_id => info.public_key})
-
-      assert {:error, {:invalid_signature, @signer_id}} =
-               Verifier.verify(%{signed | epoch: signed.epoch + 1},
-                 trusted_signers: %{@signer_id => info.public_key}
-               )
-
-      # And the signer node holds the record of having approved exactly this artifact.
-      assert {:ok, decisions} = :erpc.call(signer, Service, :decisions, [])
-      assert entry = Enum.find(decisions, &(&1.artifact_id == signed.id))
-      assert entry.decision == :issued
-      assert entry.requester == node()
-      assert entry.signer_id == @signer_id
-      assert [%{module: @forged, disposition: :introduce}] = entry.modules
-    end
-
     @tag timeout: 180_000
-    test "refuses a control-plane patch over the wire, whoever is asking" do
+    test "refuses a manifest it will not sign over the wire, whoever is asking" do
       signer = start_signer_peer!()
+      request = %{requester: node(), component_bytes: @bytes}
 
-      assert {:error, {:signing_refused, {:module_outside_capability_namespace, @outsider}}} =
-               Signer.Remote.sign_artifact(outsider_artifact!(), @signer_id, node: signer)
+      assert {:refused, {:world_not_supported, "no-such-world"}} =
+               remote_sign(signer, unsignable!(), @signer_id, request)
 
-      assert {:error, {:signing_refused, {:unknown_signer_id, "not-this-signer"}}} =
-               Signer.Remote.sign_artifact(artifact!(), "not-this-signer", node: signer)
+      assert {:refused, {:unknown_signer_id, "not-this-signer"}} =
+               remote_sign(signer, artifact!(), "not-this-signer", request)
 
-      # A capability artifact from the same requester is signed, so the refusals above
+      # A well-formed manifest from the same requester is signed, so the refusals above
       # are the policy speaking rather than the transport failing.
-      assert {:ok, signature} = Signer.Remote.sign_artifact(artifact!(), @signer_id, node: signer)
+      assert {:ok, signature} = remote_sign(signer, artifact!(), @signer_id, request)
       assert byte_size(signature) == 64
 
       assert {:ok, decisions} = :erpc.call(signer, Service, :decisions, [])
@@ -736,7 +528,6 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
         "OUROBOROS_SIGNER_KEY_PATH",
         "OUROBOROS_SIGNER_ID",
         "OUROBOROS_SIGNING_NODE",
-        "OUROBOROS_SIGNING_REQUIRE_EVAL",
         "OUROBOROS_SIGNING_RATE_LIMIT_PER_MINUTE",
         "OUROBOROS_SIGNING_CALL_TIMEOUT_MS"
       ]
@@ -783,36 +574,18 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
       assert prod_config()[:ouroboros][:node_role] == :core
     end
 
-    test "production requires a signed eval spec unless the operator opts out" do
-      assert prod_config()[:ouroboros][:signing_require_eval] == true
-
-      System.put_env("OUROBOROS_SIGNING_REQUIRE_EVAL", "false")
-      assert prod_config()[:ouroboros][:signing_require_eval] == false
-
-      System.put_env("OUROBOROS_SIGNING_REQUIRE_EVAL", "maybe")
-
-      assert_raise RuntimeError, ~r/OUROBOROS_SIGNING_REQUIRE_EVAL/, fn ->
-        prod_config()
-      end
-    end
-
     test "naming a signer node is what configures the remote signer, and nothing else does" do
-      # Unset, production keeps the shipped refusal rather than acquiring a signer.
-      assert prod_config()[:ouroboros][:forge_signer] == Signer.Deny
+      # Unset, production names no signer node rather than guessing at a host.
+      assert prod_config()[:ouroboros][:signing_node] == nil
 
       System.put_env("OUROBOROS_SIGNING_NODE", "signer-1@10.0.0.30")
       System.put_env("OUROBOROS_SIGNING_CALL_TIMEOUT_MS", "9000")
-      System.put_env("OUROBOROS_SIGNING_REQUIRE_EVAL", "true")
       System.put_env("OUROBOROS_SIGNING_RATE_LIMIT_PER_MINUTE", "5")
 
       config = prod_config()[:ouroboros]
 
-      assert config[:forge_signer] ==
-               {Signer.Remote, node: :"signer-1@10.0.0.30", timeout: 9_000}
-
       assert config[:signing_node] == :"signer-1@10.0.0.30"
       assert config[:signing_call_timeout] == 9_000
-      assert config[:signing_require_eval] == true
       assert config[:signing_rate_limit_per_minute] == 5
 
       # A bound that cannot be parsed stops the boot rather than silently defaulting.
@@ -845,109 +618,39 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
     Service.sign_artifact(
       artifact,
       Keyword.get(opts, :signer_id, @signer_id),
-      Keyword.get(opts, :request, %{requester: node()}),
+      Keyword.get(opts, :request, %{requester: node(), component_bytes: @bytes}),
       service
     )
   end
 
-  # ## Artifact helpers
+  # ## Manifest helpers
 
-  defp artifact!(opts \\ []) do
-    metadata = Keyword.get_lazy(opts, :metadata, fn -> forge_metadata(report()) end)
-    build!(@capability, compile!(@capability), metadata)
-  end
-
-  defp outsider_artifact! do
-    build!(@outsider, compile!(@outsider), forge_metadata(report()))
-  end
-
-  defp build!(module, binary, metadata) do
+  defp artifact!(attrs \\ []) do
     {:ok, artifact} =
-      Artifact.build([{module, binary, disposition: :introduce}],
-        epoch: System.unique_integer([:positive, :monotonic]),
-        metadata: metadata
+      Artifact.build(
+        @bytes,
+        Keyword.merge(
+          [
+            name: "greeter",
+            imports: ["log"],
+            author: "test-agent",
+            source_sha256: String.duplicate("b", 64),
+            epoch: System.unique_integer([:positive, :monotonic]),
+            eval: %{probes: [%{input: %{"n" => 1}, expect: :any_reply}], budget_ms: 1_000}
+          ],
+          attrs
+        )
       )
 
-    unload(module)
     artifact
   end
 
-  defp forge_metadata(report, sha256 \\ nil, eval \\ nil) do
-    forge = %{
-      source_id: "forge-source-1",
-      source_sha256: sha256 || source_sha256(),
-      author: "test-agent",
-      created_at: DateTime.utc_now() |> DateTime.to_iso8601(),
-      test_report: report,
-      peer_runtime: %{}
-    }
+  # A manifest no configuration can talk this signer into signing: the world is not one
+  # this build implements, and there is no option that widens that.
+  defp unsignable!, do: %{artifact!() | world: "no-such-world"}
 
-    %{forge: if(is_nil(eval), do: forge, else: Map.put(forge, :eval, eval))}
-  end
-
-  defp report(opts \\ []) do
-    %{
-      total: Keyword.get(opts, :total, 1),
-      failures: Keyword.get(opts, :failures, 0),
-      excluded: Keyword.get(opts, :excluded, 0),
-      skipped: Keyword.get(opts, :skipped, 0),
-      ran: true
-    }
-  end
-
-  defp eval_spec do
-    %{probes: [%{input: %{op: "ping"}, expect: :any_reply}], budget_ms: 2_000, required: :all}
-  end
-
-  defp source_sha256, do: Beam.sha256("capability source")
-
-  defp compile!(module) do
-    source = """
-    defmodule #{inspect(module)} do
-      @vsn 1
-      def hello, do: :world
-    end
-    """
-
-    previous = Code.get_compiler_option(:ignore_module_conflict)
-    Code.put_compiler_option(:ignore_module_conflict, true)
-    [{^module, binary}] = Code.compile_string(source, "signing_service_capability.ex")
-    Code.put_compiler_option(:ignore_module_conflict, previous)
-
-    unload(module)
-    binary
-  end
-
-  defp forge_source! do
-    {:ok, source} =
-      Source.new(
-        module: @forged,
-        author: "test-agent",
-        source: """
-        defmodule #{inspect(@forged)} do
-          @vsn 1
-
-          def double(n) when is_integer(n), do: n * 2
-        end
-        """,
-        test_source: """
-        defmodule #{inspect(@forged)}Test do
-          use ExUnit.Case, async: false
-
-          test "doubles" do
-            assert #{inspect(@forged)}.double(21) == 42
-          end
-        end
-        """
-      )
-
-    source
-  end
-
-  defp flip_byte(binary) do
-    offset = div(byte_size(binary), 2)
-    <<prefix::binary-size(^offset), byte, suffix::binary>> = binary
-    <<prefix::binary, Bitwise.bxor(byte, 1), suffix::binary>>
+  defp remote_sign(signer, artifact, signer_id, request) do
+    :erpc.call(signer, Service, :sign_artifact, [artifact, signer_id, request], 30_000)
   end
 
   # ## Peer helpers
@@ -989,12 +692,6 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
     :ok = :erpc.call(peer, System, :put_env, [%{"OUROBOROS_SIGNER_KEY_PATH" => path}])
   end
 
-  defp configure_remote_signer!(signer) do
-    previous = Application.get_env(:ouroboros, :forge_signer)
-    Application.put_env(:ouroboros, :forge_signer, {Signer.Remote, node: signer})
-    on_exit(fn -> restore(:forge_signer, previous) end)
-  end
-
   defp ensure_distributed! do
     unless Node.alive?() do
       name = String.to_atom("ouroboros_signing_root_#{System.unique_integer([:positive])}")
@@ -1027,14 +724,5 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
   defp ets_storage do
     {Jido.Storage.ETS,
      table: String.to_atom("signing_journal_#{System.unique_integer([:positive])}")}
-  end
-
-  defp restore(key, nil), do: Application.delete_env(:ouroboros, key)
-  defp restore(key, value), do: Application.put_env(:ouroboros, key, value)
-
-  defp unload(module) do
-    :code.delete(module)
-    :code.soft_purge(module)
-    :ok
   end
 end

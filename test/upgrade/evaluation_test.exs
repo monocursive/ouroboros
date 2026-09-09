@@ -1,21 +1,16 @@
 defmodule Ouroboros.Upgrade.EvaluationTest do
   use ExUnit.Case, async: false
 
-  alias Ouroboros.Upgrade.Forge.Signer
   alias Ouroboros.Upgrade.Rollout.Evaluation
-  alias Ouroboros.Upgrade.{Artifact, Verifier}
 
   @echo Ouroboros.Capability.EvalEcho
   @answering Ouroboros.Capability.EvalAnswering
   @faulty Ouroboros.Capability.EvalFaulty
   @slow Ouroboros.Capability.EvalSlow
-  @signed Ouroboros.Capability.EvalSigned
-
-  @signer "evaluation-test-signer"
 
   setup do
     on_exit(fn ->
-      for module <- [@echo, @answering, @faulty, @slow, @signed], do: unload(module)
+      for module <- [@echo, @answering, @faulty, @slow], do: unload(module)
     end)
 
     :ok
@@ -410,7 +405,7 @@ defmodule Ouroboros.Upgrade.EvaluationTest do
 
       assert Evaluation.passed?(merged)
 
-      # The spec alone still seeds what it always did: nothing about lane B changed.
+      # The spec alone still seeds what it always did.
       assert {:ok, spec_only} =
                Evaluation.run(
                  @echo,
@@ -430,52 +425,6 @@ defmodule Ouroboros.Upgrade.EvaluationTest do
 
       assert {:error, {:invalid_eval_module, _rendered}} = Evaluation.run({nil, %{}}, spec)
       assert {:error, {:invalid_eval_module, _rendered}} = Evaluation.run({@echo, %{}, %{}}, spec)
-    end
-  end
-
-  describe "signed criteria" do
-    test "a spec rewritten after signing invalidates the artifact it came in" do
-      {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
-
-      {:ok, spec} =
-        Evaluation.validate(%{
-          probes: [%{input: "ping", expect: {:contains, "ping"}}],
-          budget_ms: 1_000,
-          required: :all
-        })
-
-      binary = compile!(@signed, echo_source(@signed))
-      unload(@signed)
-
-      {:ok, artifact} =
-        Artifact.build([{@signed, binary, disposition: :introduce}],
-          epoch: System.unique_integer([:positive, :monotonic]),
-          metadata: %{forge: %{eval: spec}}
-        )
-
-      signed = Artifact.sign(artifact, @signer, private_key)
-      policy = [trusted_signers: %{@signer => public_key}]
-
-      assert :ok = Verifier.verify(signed, policy)
-
-      # Loosening the gate is the interesting tamper: the bytes are untouched, the module
-      # is untouched, and only the criteria by which it would be judged have changed.
-      loosened = put_in(signed.metadata.forge.eval.required, {:at_least, 1})
-      assert loosened.modules == signed.modules
-
-      assert {:error, {tag, @signer}} = Verifier.verify(loosened, policy)
-      assert tag in [:invalid_signature, :untrusted_signer]
-
-      # So is deleting them outright.
-      stripped = %{signed | metadata: %{forge: %{}}}
-      assert {:error, {:invalid_signature, @signer}} = Verifier.verify(stripped, policy)
-
-      # And an unsigned artifact carrying gates proves nothing about who chose them:
-      # criteria are only evidence when somebody's key stands behind them.
-      assert {:error, :signature_required} = Verifier.verify(artifact, [])
-
-      assert Signer.Deny.sign(Artifact.signing_payload(artifact, @signer), @signer) ==
-               {:error, :signing_denied}
     end
   end
 

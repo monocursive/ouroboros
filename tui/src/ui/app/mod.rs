@@ -256,9 +256,6 @@ pub enum Tag {
     Plan(String),
     ControlRuns,
     ControlRun(String),
-    UpgradeStatus,
-    Rollouts,
-    History(String),
     Signing,
     Grants(String),
     /// `control.submit`. The answer carries the id of a run that did not exist before.
@@ -666,27 +663,15 @@ impl Explorer {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpgradeSection {
-    Status,
-    Rollouts,
-    History,
     Signing,
     Grants,
 }
 
 impl UpgradeSection {
-    pub const ALL: [UpgradeSection; 5] = [
-        UpgradeSection::Status,
-        UpgradeSection::Rollouts,
-        UpgradeSection::History,
-        UpgradeSection::Signing,
-        UpgradeSection::Grants,
-    ];
+    pub const ALL: [UpgradeSection; 2] = [UpgradeSection::Signing, UpgradeSection::Grants];
 
     pub fn title(self) -> &'static str {
         match self {
-            Self::Status => "node executor",
-            Self::Rollouts => "rollouts",
-            Self::History => "module history",
             Self::Signing => "signing decisions",
             Self::Grants => "effect grants",
         }
@@ -694,9 +679,6 @@ impl UpgradeSection {
 
     pub fn method(self) -> &'static str {
         match self {
-            Self::Status => "upgrade.status",
-            Self::Rollouts => "upgrade.rollouts",
-            Self::History => "upgrade.history",
             Self::Signing => "signing.decisions",
             Self::Grants => "grants.list",
         }
@@ -706,10 +688,6 @@ impl UpgradeSection {
 #[derive(Debug)]
 pub struct UpgradeTab {
     pub section: usize,
-    pub status: Loadable<Value>,
-    pub rollouts: Loadable<Value>,
-    pub history: Loadable<Value>,
-    pub history_module: Option<String>,
     pub signing: Loadable<Value>,
     pub grants: Loadable<Value>,
     pub grants_principal: Option<String>,
@@ -721,10 +699,6 @@ impl Default for UpgradeTab {
     fn default() -> Self {
         Self {
             section: 0,
-            status: Loadable::default(),
-            rollouts: Loadable::default(),
-            history: Loadable::default(),
-            history_module: None,
             signing: Loadable::default(),
             grants: Loadable::default(),
             grants_principal: None,
@@ -743,9 +717,6 @@ impl UpgradeTab {
 
     pub fn panel(&self, section: UpgradeSection) -> &Loadable<Value> {
         match section {
-            UpgradeSection::Status => &self.status,
-            UpgradeSection::Rollouts => &self.rollouts,
-            UpgradeSection::History => &self.history,
             UpgradeSection::Signing => &self.signing,
             UpgradeSection::Grants => &self.grants,
         }
@@ -753,9 +724,6 @@ impl UpgradeTab {
 
     fn panel_mut(&mut self, section: UpgradeSection) -> &mut Loadable<Value> {
         match section {
-            UpgradeSection::Status => &mut self.status,
-            UpgradeSection::Rollouts => &mut self.rollouts,
-            UpgradeSection::History => &mut self.history,
             UpgradeSection::Signing => &mut self.signing,
             UpgradeSection::Grants => &mut self.grants,
         }
@@ -2310,16 +2278,7 @@ impl App {
                 self.issue_if_due(Tag::ControlRuns, "control.list", json!({}), LIST_TICKS);
                 self.poll_detail(Tab::Plans);
             }
-            Tab::Upgrade => {
-                self.issue_if_due(
-                    Tag::UpgradeStatus,
-                    "upgrade.status",
-                    json!({}),
-                    UPGRADE_TICKS,
-                );
-                self.issue_if_due(Tag::Rollouts, "upgrade.rollouts", json!({}), UPGRADE_TICKS);
-                self.poll_upgrade_section();
-            }
+            Tab::Upgrade => self.poll_upgrade_section(),
             // The ring is local. There is nothing to ask anyone for.
             Tab::Logs => {}
         }
@@ -2417,19 +2376,6 @@ impl App {
         let section = self.upgrade.current();
 
         let (tag, method, params) = match section {
-            // Already polled unconditionally above.
-            UpgradeSection::Status | UpgradeSection::Rollouts => return,
-            UpgradeSection::History => {
-                let Some(module) = self.upgrade.history_module.clone() else {
-                    return;
-                };
-
-                (
-                    Tag::History(module.clone()),
-                    "upgrade.history",
-                    json!({ "module": module }),
-                )
-            }
             UpgradeSection::Signing => (Tag::Signing, "signing.decisions", json!({})),
             UpgradeSection::Grants => {
                 let Some(principal) = self.upgrade.grants_principal.clone() else {
@@ -2463,8 +2409,6 @@ impl App {
             Tag::Teams => self.teams.rows.due(self.ticks),
             Tag::Plans => self.plans.rows.due(self.ticks),
             Tag::ControlRuns => self.control.rows.due(self.ticks),
-            Tag::UpgradeStatus => self.upgrade.status.due(self.ticks),
-            Tag::Rollouts => self.upgrade.rollouts.due(self.ticks),
             _ => true,
         };
 
@@ -2482,8 +2426,6 @@ impl App {
             Tag::Teams => self.teams.rows.started(),
             Tag::Plans => self.plans.rows.started(),
             Tag::ControlRuns => self.control.rows.started(),
-            Tag::UpgradeStatus => self.upgrade.status.started(),
-            Tag::Rollouts => self.upgrade.rollouts.started(),
             _ => {}
         }
 
@@ -2557,8 +2499,6 @@ impl App {
                 self.control.detail.invalidate();
             }
             Tab::Upgrade => {
-                self.upgrade.status.invalidate();
-                self.upgrade.rollouts.invalidate();
                 let section = self.upgrade.current();
                 self.upgrade.panel_mut(section).invalidate();
             }

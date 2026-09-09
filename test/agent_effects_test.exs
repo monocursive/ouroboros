@@ -8,9 +8,7 @@ defmodule Ouroboros.AgentEffectsTest do
 
   alias Ouroboros.Signals.{
     EffectDelegateTask,
-    EffectDeployCapability,
     EffectDeployWasmCapability,
-    EffectForgeCapability,
     EffectForgeWasmCapability,
     EffectSendMessage,
     EffectStartAgent,
@@ -19,14 +17,12 @@ defmodule Ouroboros.AgentEffectsTest do
 
   alias Ouroboros.Team
   alias Ouroboros.Test.HarnessAdapter
-  alias Ouroboros.Upgrade.Forge.Signer
   alias Ouroboros.Upgrade.Rollout.Registry
   alias Ouroboros.Upgrade.Signing.Service
   alias Ouroboros.Wasm
   alias Ouroboros.Wasm.ForgeFixture
 
   @provider :ouroboros_test
-  @capability Ouroboros.Capability.EffectLoop
   @signer "effect-surface-signer"
   @needs_build ForgeFixture.tag()
 
@@ -60,10 +56,10 @@ defmodule Ouroboros.AgentEffectsTest do
         objective: "do something expensive"
       })
 
-      signal!(pid, EffectForgeCapability, %{
+      signal!(pid, EffectForgeWasmCapability, %{
         from: actor,
-        module: @capability,
-        source: capability_source()
+        name: "never-forged",
+        files: ForgeFixture.project()
       })
 
       for effect <- [:start_agent, :delegate, :forge] do
@@ -76,7 +72,6 @@ defmodule Ouroboros.AgentEffectsTest do
       # Refusal is an error directive, not a crash, and nothing reached the world.
       assert Process.alive?(pid)
       assert Mesh.whereis(target) == nil
-      assert :code.which(@capability) == :non_existing
       assert agent_state(pid).forged == []
       assert agent_state(pid).effects_in_flight == []
     end
@@ -361,132 +356,6 @@ defmodule Ouroboros.AgentEffectsTest do
     assert :ok = Team.close(team)
   end
 
-  @tag timeout: 300_000
-  test "an agent forges, deploys, starts, and messages a capability, driven only by signals" do
-    ensure_distributed!()
-    {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
-
-    # The whole loop happens on one node, which is what makes it a loop: the agent that
-    # forges the capability is the agent that deploys it, starts it, and talks to it.
-    # That node is a peer rather than this VM only because a node executor reads its
-    # trusted signers once, at boot, and this VM booted before the key existed.
-    target = start_app_peer!(public_key)
-    configure_signer!(target, {Signer.Local, private_key: private_key})
-
-    actor = unique_id("self-improver")
-    capability_agent = unique_id("forged-echo")
-    assert {:ok, pid} = Mesh.start_agent_on(target, actor)
-
-    grant!(target, actor, :forge, modules: [@capability])
-    grant!(target, actor, :deploy, nodes: [target])
-    grant!(target, actor, :start_agent, modules: [@capability])
-    grant!(target, actor, :send_message, agents: [capability_agent])
-
-    assert absent?(target, @capability)
-
-    # 1. Source in, signed artifact out. The recorded author is the acting principal,
-    #    which is the identity the agent server holds and not the one the signal claimed.
-    signal!(pid, EffectForgeCapability, %{
-      from: "some-other-agent",
-      module: @capability,
-      source: capability_source(),
-      test_source: capability_test_source(),
-      nodes: [target],
-      signer_id: @signer
-    })
-
-    forged = await_effect!(pid, :forge, 2_400)
-    assert forged.status == :ok, "forge failed: #{inspect(forged.error)}"
-    assert forged.result.module == @capability
-    assert forged.result.signer == @signer
-
-    artifact_id = forged.result.artifact_id
-
-    assert [%{artifact_id: ^artifact_id, artifact: artifact, module: @capability}] =
-             agent_state(pid).forged
-
-    assert artifact.metadata.forge.author == actor
-    assert artifact.metadata.forge.test_report.failures == 0
-
-    # The trail keeps a summary; the BEAM stays out of the audit line, and nothing is
-    # loaded anywhere yet.
-    refute Map.has_key?(forged.result, :artifact)
-    assert absent?(target, @capability)
-
-    # 2. Health-gated deploy of the artifact this agent forged, admitted by its
-    #    signature rather than by a permissive development policy.
-    signal!(pid, EffectDeployCapability, %{
-      from: actor,
-      artifact_id: artifact_id,
-      nodes: [target]
-    })
-
-    deployed = await_effect!(pid, :deploy, 1_200)
-    assert deployed.status == :ok, "deploy failed: #{inspect(deployed.error)}"
-
-    assert deployed.result == %{
-             artifact_id: artifact_id,
-             module: @capability,
-             epoch: artifact.epoch,
-             nodes: [target],
-             state: :live
-           }
-
-    assert {:ok, record} = :erpc.call(target, Registry, :get, [artifact_id])
-    assert record.state == :live
-    assert record.module == @capability
-
-    assert :erpc.call(target, :code, :which, [@capability]) ==
-             ~c"ouroboros://capability/#{inspect(@capability)}"
-
-    # 3. Start the module that did not exist a moment ago as a real mesh agent.
-    signal!(pid, EffectStartAgent, %{
-      from: actor,
-      agent_id: capability_agent,
-      module: @capability
-    })
-
-    started = await_effect!(pid, :start_agent)
-    assert started.status == :ok, "start failed: #{inspect(started.error)}"
-    assert started.result == %{agent_id: capability_agent, module: @capability, node: target}
-
-    # 4. Message it, and have it answer.
-    signal!(pid, EffectSendMessage, %{from: actor, to: capability_agent, body: "hello, self"})
-
-    messaged = await_effect!(pid, :send_message)
-    assert messaged.status == :ok, "message failed: #{inspect(messaged.error)}"
-    assert messaged.result == %{to: capability_agent, from: actor, messages_received: 1}
-
-    assert {:ok, capability_state} = :erpc.call(target, Mesh, :state, [capability_agent])
-    assert capability_state.agent.state.last_message.body == "hello, self"
-    assert capability_state.agent.state.last_message.from == actor
-
-    # Every step of the loop is on the record, in order, as this agent's own doing.
-    trail = agent_state(pid).last_effects
-    assert Enum.map(trail, & &1.effect) == [:send_message, :start_agent, :deploy, :forge]
-    assert Enum.all?(trail, &(&1.status == :ok and &1.principal == actor))
-    assert Enum.all?(trail, &is_binary(&1.settled_at))
-    assert agent_state(pid).effects_in_flight == []
-
-    # The same flow under the shipped production signer stops at the signature, which is
-    # the gate that is supposed to stand between an agent and its own new code.
-    configure_signer!(target, Signer.Deny)
-
-    signal!(pid, EffectForgeCapability, %{
-      from: actor,
-      module: @capability,
-      source: capability_source(),
-      test_source: capability_test_source(),
-      nodes: [target],
-      signer_id: @signer
-    })
-
-    refused = await_effect!(pid, :forge, 2_400)
-    assert refused.status == :failed
-    assert refused.error == {:effect_failed, :forge, {:signing_failed, :signing_denied}}
-    assert length(agent_state(pid).forged) == 1
-  end
-
   @tag @needs_build
   @tag timeout: 900_000
   test "an agent forges a wasm capability, deploys it, and the author is the principal" do
@@ -556,14 +425,6 @@ defmodule Ouroboros.AgentEffectsTest do
     assert is_pid(Mesh.whereis(id))
     assert {:ok, _agent} = Mesh.send_message("effects-test", id, %{"add" => 4})
     assert %{"count" => 4} = local_state(id).last_answer
-
-    # 4. An artifact from the other lane is not deployable through this action, and the
-    #    reverse holds too: one `forged` ring, two lanes, no crossing.
-    signal!(pid, EffectDeployCapability, %{from: actor, artifact_id: artifact_id, nodes: [node()]})
-
-    crossed = await_effect!(pid, :deploy, 1_200, [deployed])
-    assert crossed.status == :failed
-    assert {:effect_failed, :deploy, {:wrong_lane, ^artifact_id, :wasm}} = crossed.error
 
     assert {:ok, _rolled} = Ouroboros.Wasm.Deploy.rollback(name)
   end
@@ -726,56 +587,6 @@ defmodule Ouroboros.AgentEffectsTest do
     end
   end
 
-  defp grant!(target, principal, effect, constraints) do
-    assert {:ok, _grant} =
-             :erpc.call(target, Grants, :grant, [principal, effect, constraints])
-  end
-
-  defp configure_signer!(target, signer) do
-    :ok = :erpc.call(target, Application, :put_env, [:ouroboros, :forge_signer, signer])
-    :ok = :erpc.call(target, Application, :put_env, [:ouroboros, :forge_signer_id, @signer])
-  end
-
-  defp absent?(target, module) do
-    :erpc.call(target, :code, :which, [module]) == :non_existing and
-      :erpc.call(target, :code, :get_object_code, [module]) == :error and
-      :code.which(module) == :non_existing
-  end
-
-  # A peer that trusts exactly one signer and nothing unsigned, configured the way an
-  # operator configures a node: before it boots.
-  defp start_app_peer!(public_key) do
-    peer_name = String.to_atom("ouroboros_effect_peer_#{System.unique_integer([:positive])}")
-    args = Enum.flat_map(:code.get_path(), &[~c"-pa", &1])
-
-    {:ok, peer, peer_node} = :peer.start(%{name: peer_name, args: args, wait_boot: 20_000})
-    on_exit(fn -> :peer.stop(peer) end)
-
-    :ok =
-      :erpc.call(peer_node, Application, :put_env, [
-        :ouroboros,
-        :upgrade_trust_policy,
-        [allow_unsigned: false, trusted_signers: %{@signer => public_key}]
-      ])
-
-    :ok =
-      :erpc.call(peer_node, Application, :put_env, [
-        :ouroboros,
-        :coding_storage,
-        {Jido.Storage.ETS, table: peer_name}
-      ])
-
-    {:ok, _applications} = :erpc.call(peer_node, Application, :ensure_all_started, [:ouroboros])
-    peer_node
-  end
-
-  defp ensure_distributed! do
-    unless Node.alive?() do
-      name = String.to_atom("ouroboros_effects_root_#{System.unique_integer([:positive])}")
-      assert {:ok, _pid} = :net_kernel.start([name, :shortnames])
-    end
-  end
-
   defp harness! do
     cleanup_test_runs()
     previous_providers = Application.get_env(:jido_harness, :providers)
@@ -816,41 +627,6 @@ defmodule Ouroboros.AgentEffectsTest do
 
       _ = Run.prune(info.run_id)
     end)
-  end
-
-  defp capability_source do
-    """
-    defmodule #{inspect(@capability)} do
-      @vsn 1
-
-      use Jido.Agent,
-        name: "ouroboros_capability_effect_loop",
-        description: "A capability agent forged through the agent effect surface",
-        schema: [
-          role: [type: :string, default: "capability"],
-          inbox: [type: :list, default: []],
-          last_message: [type: :any, default: nil],
-          messages_received: [type: :non_neg_integer, default: 0]
-        ],
-        signal_routes: [
-          {"ouroboros.agent.message", Ouroboros.Agent.Worker.ReceiveMessage}
-        ]
-    end
-    """
-  end
-
-  defp capability_test_source do
-    """
-    defmodule Ouroboros.Capability.EffectLoopTest do
-      use ExUnit.Case, async: false
-
-      test "starts empty and declares its identity" do
-        agent = #{inspect(@capability)}.new()
-        assert agent.name == "ouroboros_capability_effect_loop"
-        assert agent.state.messages_received == 0
-      end
-    end
-    """
   end
 
   defp map_or_empty(nil), do: %{}

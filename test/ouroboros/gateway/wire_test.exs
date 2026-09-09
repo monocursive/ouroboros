@@ -81,8 +81,8 @@ defmodule Ouroboros.Gateway.WireTest do
     end
 
     test "module atoms render the way a person writes them" do
-      # The client echoes this string back to `upgrade.history`, so what it reads has to
-      # be what `String.to_existing_atom/1` can resolve on the other side.
+      # A client reads and echoes these strings, so what it reads has to be what
+      # `String.to_existing_atom/1` can resolve on the other side.
       assert roundtrip(Ouroboros.Gateway.Wire) == "Ouroboros.Gateway.Wire"
       assert roundtrip([:ok, nil, true, false]) == ["ok", nil, true, false]
     end

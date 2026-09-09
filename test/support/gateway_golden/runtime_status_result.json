@@ -17,7 +17,6 @@
       "coding": "available",
       "control": "disabled",
       "effect_ledger": "available",
-      "hot_upgrade": "available",
       "interactive": "available",
       "mesh": "available",
       "orchestration": "available",
@@ -102,15 +101,6 @@
         "updated_at": "2026-01-01T00:00:00.000000Z",
         "worker_count": 2
       }
-    ],
-    "upgrade": {
-      "last_epoch": 7,
-      "mode": "ready",
-      "node": "ouroboros@golden",
-      "operations": [],
-      "prepared": [],
-      "quarantine_reason": null,
-      "rollback_receipts": []
-    }
+    ]
   }
 }

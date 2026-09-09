@@ -8,7 +8,7 @@ defmodule Ouroboros.Gateway.IntegrationTest do
   alias Ouroboros.Gateway.Config
   alias Ouroboros.Gateway.Listener
   alias Ouroboros.Mesh
-  alias Ouroboros.Upgrade.NodeExecutor
+  alias Ouroboros.Team.Store, as: TeamStore
 
   @token String.duplicate("g", 48)
   @receive_timeout 5_000
@@ -289,7 +289,6 @@ defmodule Ouroboros.Gateway.IntegrationTest do
     refute Map.has_key?(status, "_opaque")
     assert is_map(status["availability"])
     assert status["availability"]["mesh"] == "available"
-    assert status["availability"]["hot_upgrade"] == "available"
 
     # Availability is tri-state, and the client renders all three; what matters here is
     # that it arrives as a word rather than as an inspect string.
@@ -303,35 +302,34 @@ defmodule Ouroboros.Gateway.IntegrationTest do
     assert is_list(status["coding_tasks"])
     assert is_list(status["interactive_sessions"])
     assert is_list(status["teams"])
-    assert is_binary(status["upgrade"]["mode"])
   end
 
   test "a plane that is not running is -32004 and the connection survives it", %{client: client} do
     assert hello(client)["result"]
 
-    assert is_binary(call(client, "upgrade.status")["result"]["mode"])
+    assert is_list(call(client, "teams.list")["result"])
 
-    executor = Process.whereis(NodeExecutor)
+    store = Process.whereis(TeamStore)
 
-    # `NodeExecutor.status/0` is a bare `GenServer.call`, so an absent executor *exits*
-    # the caller. Unregistering the name reproduces that precisely without terminating a
+    # `Team.Store.list/1` is a bare `GenServer.call`, so an absent store *exits* the
+    # caller. Unregistering the name reproduces that precisely without terminating a
     # supervised child and triggering the rest_for_one restarts below it.
-    Process.unregister(NodeExecutor)
+    Process.unregister(TeamStore)
 
     on_exit(fn ->
-      if is_nil(Process.whereis(NodeExecutor)), do: Process.register(executor, NodeExecutor)
+      if is_nil(Process.whereis(TeamStore)), do: Process.register(store, TeamStore)
     end)
 
-    response = call(client, "upgrade.status")
+    response = call(client, "teams.list")
     assert response["error"]["code"] == -32004
 
     # The exit reason survives as data rather than as a message a client has to parse.
     assert ["noproc", ["GenServer", "call", _arguments]] = response["error"]["data"]
 
-    Process.register(executor, NodeExecutor)
+    Process.register(store, TeamStore)
 
     # Same connection, immediately afterwards.
-    assert is_binary(call(client, "upgrade.status")["result"]["mode"])
+    assert is_list(call(client, "teams.list")["result"])
     assert is_list(call(client, "agents.list")["result"])
   end
 

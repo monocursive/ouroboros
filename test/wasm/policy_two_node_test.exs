@@ -32,7 +32,6 @@ defmodule Ouroboros.Wasm.PolicyTwoNodeTest do
 
   alias Ouroboros.Provider.Native.Permissions, as: NativePermissions
   alias Ouroboros.Upgrade.Epoch
-  alias Ouroboros.Upgrade.Forge.Signer
   alias Ouroboros.Wasm
   alias Ouroboros.Wasm.Artifact
   alias Ouroboros.Wasm.PolicyEngine
@@ -207,7 +206,7 @@ defmodule Ouroboros.Wasm.PolicyTwoNodeTest do
       )
 
     payload = Artifact.signing_payload(artifact, @signer)
-    {:ok, value} = Signer.Local.sign(payload, @signer, private_key: context.secret)
+    value = :crypto.sign(:eddsa, :none, payload, [context.secret, :ed25519])
     {:ok, signed} = Artifact.with_signature(artifact, %{signer: @signer, value: value})
     signed
   end

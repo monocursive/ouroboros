@@ -267,13 +267,13 @@ defmodule Ouroboros.Provider.Native.Sandbox do
     "/Applications/Xcode.app"
   ]
 
-  # Observed under both Linux backends on kernel 7.0.14, but no longer by the same run:
-  # `scripts/forge-linux-test.sh` proved the bubblewrap form in W14 and, since W17 builds
-  # `ouro-sandbox` in that container, now proves the `ouro-sandbox` form instead — because
-  # detection prefers the helper once it is installed. bubblewrap's half is CI's ubuntu-24.04
-  # job, which installs `bwrap` and does not build the helper. Either way the escape tests —
-  # `include_str!` of a planted secret, a `#[path]` module outside the project — are red
-  # without the fence, with the honest fixture building beside them.
+  # Observed under both Linux backends on kernel 7.0.14. The script that proved it
+  # (`scripts/forge-linux-test.sh`) went with the BEAM forge lane in
+  # docs/proposals/core.md §4 A1; `scripts/sandbox-linux-test.sh` is the helper's own
+  # enforcement suite and `scripts/wasm-linux-test.sh` runs lane W's under bubblewrap.
+  # Either way the forge's escape tests — `include_str!` of a planted secret, a `#[path]`
+  # module outside the project — are red without the fence, with the honest fixture
+  # building beside them.
   #
   # Two things this list does not fence, on any backend, and both are D26's to state: `/etc`
   # is in it, so an operator's secrets under `/etc` are readable by build-time code; and a

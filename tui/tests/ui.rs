@@ -5271,9 +5271,7 @@ fn the_upgrade_tab_asks_for_a_principal_rather_than_inventing_a_list_all() {
     app.apply(key(KeyCode::Char('6')));
 
     // Down to `effect grants`.
-    for _ in 0..4 {
-        app.apply(key(KeyCode::Down));
-    }
+    app.apply(key(KeyCode::Down));
 
     let screen = render(&mut app, 130, 24);
     assert!(
@@ -5304,16 +5302,8 @@ fn the_upgrade_tab_asks_for_a_principal_rather_than_inventing_a_list_all() {
 
 #[test]
 fn signing_decisions_are_shown_as_unavailable_when_the_build_does_not_serve_them() {
-    let mut app = shell(support::hello(&[
-        "hello",
-        "runtime.status",
-        "upgrade.status",
-    ]));
+    let mut app = shell(support::hello(&["hello", "runtime.status"]));
     app.apply(key(KeyCode::Char('6')));
-
-    for _ in 0..3 {
-        app.apply(key(KeyCode::Down));
-    }
 
     let screen = render(&mut app, 130, 24);
 

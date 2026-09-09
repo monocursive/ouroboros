@@ -1,13 +1,15 @@
 defmodule Ouroboros.Upgrade.CheckpointModuleNameTest do
   @moduledoc """
-  What a capability module's name looks like on disk, and who can read it back.
+  What a capability's name looks like on disk, and who can read it back.
 
   Production storage is `Ouroboros.Storage.DurableFile`, which decodes with
-  `binary_to_term/2` in `[:safe]` mode. A module the forge compiled at runtime is an atom
-  in the VM that loaded its code and nowhere else, so a checkpoint holding that atom
-  cannot be decoded by the VM that has to read it after a restart — the store reports
-  corruption for a name it has simply never heard of, and a registry or signer that
-  refuses to boot takes the node with it.
+  `binary_to_term/2` in `[:safe]` mode. A name that is an atom in the VM that wrote a
+  checkpoint and nowhere else cannot be decoded by the VM that has to read it after a
+  restart — the store reports corruption for a name it has simply never heard of, and a
+  registry or signer that refuses to boot takes the node with it. The register and the
+  signing journal both still hold such names: a rollout the removed BEAM lane recorded
+  (docs/proposals/core.md §4 A1) names a module atom, and reading one back must stay a
+  fact rather than a corruption report.
 
   In-process tests cannot catch this: unloading code does not remove its name from the
   atom table, so this VM can always read back a name it once created. The peer test below
@@ -20,7 +22,7 @@ defmodule Ouroboros.Upgrade.CheckpointModuleNameTest do
   alias Ouroboros.Storage.DurableFile
   alias Ouroboros.Upgrade.Rollout.Registry
   alias Ouroboros.Upgrade.Signing.{Journal, Service}
-  alias Ouroboros.Upgrade.{Artifact, NodeExecutor, Wire}
+  alias Ouroboros.Upgrade.Wire
 
   @probe "Elixir.Ouroboros.Capability.RestartProbe"
   @signer_id "checkpoint-probe-key"
@@ -61,66 +63,19 @@ defmodule Ouroboros.Upgrade.CheckpointModuleNameTest do
       module = forged_module!()
       directory = tmp_dir!()
       storage = {DurableFile, path: directory}
-      service = start_signer!(storage)
 
-      # Issued or refused, the decision is journaled with the module it names.
-      _decision =
-        Service.sign_artifact(artifact!(module), @signer_id, %{requester: node()}, service)
-
-      assert {:ok, [%{modules: [%{module: ^module}]}]} = Service.decisions(service)
+      write_signing_journal!(storage, module)
 
       assert {:ok, wire} =
                DurableFile.get_checkpoint(Service.checkpoint_key(), path: directory)
 
       # The file itself carries the name as a binary. This VM still knows it, so
-      # `from_wire/1` resolves the atom the signer used.
+      # `from_wire/1` resolves the atom the journal was written with.
       assert dumped_signing_module(wire) == @probe
       assert %Journal{decisions: [%{modules: [%{module: ^module}]}]} = Journal.from_wire(wire)
-    end
 
-    test "a node executor journal stores module names as binaries and resolves them back" do
-      module = forged_module!()
-      directory = tmp_dir!()
-      storage = {DurableFile, path: directory}
-      server = unique_name()
-
-      {:ok, first} =
-        NodeExecutor.start_link(
-          name: server,
-          storage: storage,
-          trust_policy: [allow_unsigned: true]
-        )
-
-      Process.unlink(first)
-      artifact = artifact!(module)
-      assert {:ok, token} = NodeExecutor.prepare(artifact, server: server)
-      assert {:ok, receipt} = NodeExecutor.commit(token, server: server)
-      GenServer.stop(first)
-
-      assert {:ok, wire} =
-               DurableFile.get_checkpoint(
-                 {:ouroboros, :upgrade_node_executor, node()},
-                 path: directory
-               )
-
-      journal = Wire.load(wire)
-      assert Map.keys(wire["expected_modules"]) == [@probe]
-      assert Map.keys(journal.expected_modules) == [module]
-      assert [stored] = Map.values(journal.receipts)
-      assert [%{module: @probe}] = stored.artifact.modules
-
-      # Same VM, so the names resolve and the receipt is the capability it was.
-      {:ok, second} =
-        NodeExecutor.start_link(
-          name: server,
-          storage: storage,
-          trust_policy: [allow_unsigned: true]
-        )
-
-      Process.unlink(second)
-      assert %{mode: :ready} = NodeExecutor.status(server: server)
-      assert {:ok, ^receipt} = NodeExecutor.receipt(receipt.id, server: server)
-      GenServer.stop(second)
+      service = start_signer!(storage)
+      assert {:ok, [%{modules: [%{module: ^module}]}]} = Service.decisions(service)
     end
   end
 
@@ -136,7 +91,6 @@ defmodule Ouroboros.Upgrade.CheckpointModuleNameTest do
 
     write_rollout!(storage, module)
     write_signing_journal!(storage, module)
-    write_executor_journal!(storage, module)
 
     peer = start_peer!()
 
@@ -163,20 +117,6 @@ defmodule Ouroboros.Upgrade.CheckpointModuleNameTest do
     assert is_map(signing_wire)
     refute is_struct(signing_wire)
 
-    assert {:ok, journal_wire} =
-             :erpc.call(peer, DurableFile, :get_checkpoint, [
-               {:ouroboros, :upgrade_node_executor, node()},
-               [path: directory]
-             ])
-
-    assert is_map(journal_wire)
-    refute is_struct(journal_wire)
-
-    expected =
-      Map.get(journal_wire, "expected_modules") || Map.get(journal_wire, :expected_modules)
-
-    assert Map.keys(expected) == [@probe]
-
     # Starting the owners loads their modules and resolves the dumped term. The forged
     # name stays a binary: there is no compiled `#{@probe}` on this peer's code path.
     assert {:ok, registry} =
@@ -202,10 +142,6 @@ defmodule Ouroboros.Upgrade.CheckpointModuleNameTest do
              :erpc.call(peer, Service, :decisions, [:checkpoint_probe_signer])
 
     assert :ok = :erpc.call(peer, GenServer, :stop, [signer])
-
-    # The node executor journals under a key naming the node that wrote it, so this peer
-    # cannot start against this one. Decode without its module was the check above: a
-    # raised `[:safe]` decode is what turns this journal into `:invalid_checkpoint`.
 
     # Reading the checkpoints resolved nothing into the peer's atom table, which is the
     # other half of the promise: an unresolvable name is carried, not interned.
@@ -244,55 +180,13 @@ defmodule Ouroboros.Upgrade.CheckpointModuleNameTest do
     :ok = adapter.put_checkpoint(Service.checkpoint_key(), Journal.to_wire(journal), adapter_opts)
   end
 
-  defp write_executor_journal!(storage, module) do
-    server = unique_name()
-
-    {:ok, executor} =
-      NodeExecutor.start_link(
-        name: server,
-        storage: storage,
-        trust_policy: [allow_unsigned: true]
-      )
-
-    Process.unlink(executor)
-    {:ok, token} = NodeExecutor.prepare(artifact!(module), server: server)
-    {:ok, _receipt} = NodeExecutor.commit(token, server: server)
-    GenServer.stop(executor)
-  end
-
-  # The forged name, created the way the forge creates it: at runtime, in this VM only.
+  # A name created at runtime, in this VM only — the shape a checkpoint the removed BEAM
+  # lane wrote carries.
   defp forged_module! do
     module = String.to_atom(@probe)
     on_exit(fn -> unload(module) end)
     unload(module)
     module
-  end
-
-  defp compile!(module) do
-    source = """
-    defmodule #{inspect(module)} do
-      @vsn 1
-      def hello, do: :world
-    end
-    """
-
-    previous = Code.get_compiler_option(:ignore_module_conflict)
-    Code.put_compiler_option(:ignore_module_conflict, true)
-    [{^module, binary}] = Code.compile_string(source, "checkpoint_probe.ex")
-    Code.put_compiler_option(:ignore_module_conflict, previous)
-
-    # Compiling loads, and an introduction is only an introduction if the name is free.
-    unload(module)
-    binary
-  end
-
-  defp artifact!(module) do
-    {:ok, artifact} =
-      Artifact.build([{module, compile!(module), disposition: :introduce}],
-        epoch: System.unique_integer([:positive, :monotonic])
-      )
-
-    artifact
   end
 
   defp start_signer!(storage) do

@@ -21,10 +21,9 @@ defmodule Ouroboros.Wasm.EpochNodesTest do
     required: :all
   }
 
-  # The two processes `Ouroboros.Upgrade.Epoch.next/2` needs on every node it is handed:
-  # the executor it reads `last_epoch` from, and the register it reads the lane-W watermark
-  # from. A node running neither answers neither, which is the whole defect.
-  @plane [Ouroboros.Upgrade.Rollout.Registry, Ouroboros.Upgrade.NodeExecutor]
+  # The process `Ouroboros.Upgrade.Epoch.next/2` needs on every node it is handed: the
+  # register it reads the watermark from. A node not running one does not answer, which is
+  # the whole defect.
 
   setup do
     ensure_distributed!()
@@ -57,8 +56,8 @@ defmodule Ouroboros.Wasm.EpochNodesTest do
   end
 
   describe "which nodes an epoch is allocated over" do
-    # The defect W11 proved live. `Epoch.next/2` asks every node it is handed for
-    # `NodeExecutor.status/0` and for its lane-W register, so handing it every *connected*
+    # The defect W11 proved live. `Epoch.next/2` asks every node it is handed for its
+    # register's watermark, so handing it every *connected*
     # node made signing impossible on the one topology D15 prescribes: the key on a
     # `:signer`-role node, whose supervision tree is the signing service and cluster
     # formation and nothing else. `wasm.sign` refused with
@@ -74,21 +73,6 @@ defmodule Ouroboros.Wasm.EpochNodesTest do
 
       assert {:ok, receipt} = sign(context, epoch_nodes: [node(), signer_peer])
       assert is_integer(receipt.epoch) and receipt.epoch > 0
-    end
-
-    # Half a plane is not a node that admits nothing: a register with no executor may hold
-    # a watermark above the number about to be minted, and the executor that would report it
-    # is not there. Excluding it would mint a stale epoch; asking it would fail anyway. It is
-    # the unreachable answer. Make `classify_plane/1` return `:absent` for a partial plane
-    # and this is red.
-    test "a candidate with a register but no executor fails the allocation closed", context do
-      half_peer = start_bare_peer!()
-      plant!(half_peer, [Ouroboros.Upgrade.Rollout.Registry])
-
-      assert {:error, {:epoch_not_allocated, {:candidates_unreachable, faults}}} =
-               sign(context, epoch_nodes: [node(), half_peer])
-
-      assert %{^half_peer => {:partial_plane, [Ouroboros.Upgrade.NodeExecutor]}} = faults
     end
 
     # The floor comes from the nodes that hold a register, not from the one doing the
@@ -139,14 +123,14 @@ defmodule Ouroboros.Wasm.EpochNodesTest do
     # epoch minted below it is one that node refuses at stage time. "No plane" and "no
     # answer" look alike from here, so only the first one narrows the set.
     #
-    # Change `rollout_plane/2`'s `catch` to answer `:absent` and this is red: the peer is
-    # dropped and the signature succeeds over a floor nobody checked.
-    test "a plane-running peer that does not answer in time fails the allocation closed",
+    # Change `registry_presence/2`'s `catch` to answer `:absent` and this is red: the peer
+    # is dropped and the signature succeeds over a floor nobody checked.
+    test "a register-running peer that does not answer in time fails the allocation closed",
          context do
       peer = start_bare_peer!()
-      plant!(peer, @plane)
+      plant!(peer, [Registry])
 
-      # It genuinely holds the plane: the probe would classify it `:holds` given time.
+      # It genuinely holds the register: the probe would classify it `:holds` given time.
       assert is_pid(:erpc.call(peer, :erlang, :whereis, [Registry], 5_000))
 
       assert {:error, {:epoch_not_allocated, {:candidates_unreachable, unreachable}}} =
@@ -157,7 +141,7 @@ defmodule Ouroboros.Wasm.EpochNodesTest do
 
     test "a candidate that has gone away fails the allocation closed", context do
       {peer, peer_node} = start_bare_peer!(:with_handle)
-      plant!(peer_node, @plane)
+      plant!(peer_node, [Registry])
 
       :peer.stop(peer)
       await_disconnected!(peer_node)

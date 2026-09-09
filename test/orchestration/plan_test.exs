@@ -134,7 +134,7 @@ defmodule Ouroboros.Orchestration.PlanTest do
     assert keys == [:module, :nodes, :source_path]
 
     for module <- [
-          "Ouroboros.Upgrade.Forge.Sneak",
+          "Ouroboros.Wasm.Forge.Sneak",
           "Ouroboros.Control.Server",
           "Elixir.Ouroboros.Capability.X",
           "Ouroboros.Capability",

@@ -414,15 +414,13 @@ defmodule Ouroboros.InteractiveSessionTest do
   end
 
   test "runtime exposure is pinned at session admission across later runtime changes", %{id: id} do
-    previous_signer = Application.get_env(:ouroboros, :forge_signer)
-    deny = Ouroboros.Upgrade.Forge.Signer.Deny
-    local = Ouroboros.Upgrade.Forge.Signer.Local
-    Application.put_env(:ouroboros, :forge_signer, deny)
+    previous_signer = Application.get_env(:ouroboros, :signing_node)
+    Application.delete_env(:ouroboros, :signing_node)
 
     on_exit(fn ->
       if is_nil(previous_signer),
-        do: Application.delete_env(:ouroboros, :forge_signer),
-        else: Application.put_env(:ouroboros, :forge_signer, previous_signer)
+        do: Application.delete_env(:ouroboros, :signing_node),
+        else: Application.put_env(:ouroboros, :signing_node, previous_signer)
     end)
 
     assert {:ok, ref} =
@@ -432,7 +430,7 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert Ouroboros.Runtime.Exposure.valid_capture?(admitted.runtime_snapshot)
     assert admitted.runtime_snapshot.envelope =~ "\nsigner: deny\n"
 
-    Application.put_env(:ouroboros, :forge_signer, local)
+    Application.put_env(:ouroboros, :signing_node, :"signer-1@127.0.0.1")
     turn_id = unique_id("pinned-runtime")
 
     assert {:ok, _turn} =
@@ -444,7 +442,7 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert prompt ==
              admitted.runtime_snapshot.envelope <> "\n\nbuild a Rust WebSocket server"
 
-    refute prompt =~ "\nsigner: local\n"
+    refute prompt =~ "\nsigner: remote\n"
     assert :ok = HarnessAdapter.finish(adapter)
     assert :ok = InteractiveSession.close(ref)
   end

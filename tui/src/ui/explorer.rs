@@ -252,13 +252,9 @@ fn upgrade(frame: &mut Frame, area: Rect, app: &mut App) {
         focused,
     );
 
-    // Two sections need a parameter the client has to be told, because the runtime has no
-    // list-all for either: `upgrade.history` takes a module, and `Control.Grants.list/1`
-    // is per-principal by design.
+    // One section needs a parameter the client has to be told, because the runtime has no
+    // list-all for it: `Control.Grants.list/1` is per-principal by design.
     let hint: Option<&str> = match section {
-        UpgradeSection::History if app.upgrade.history_module.is_none() => {
-            Some("press Enter to name a module; upgrade.history has no list-all")
-        }
         UpgradeSection::Grants if app.upgrade.grants_principal.is_none() => Some(
             "press Enter to name a principal; Control.Grants.list/1 is per-principal by \
                   design and the gateway did not add a list-all",
@@ -311,11 +307,6 @@ fn upgrade(frame: &mut Frame, area: Rect, app: &mut App) {
 
 fn root_label(app: &App, section: UpgradeSection) -> String {
     match section {
-        UpgradeSection::History => app
-            .upgrade
-            .history_module
-            .clone()
-            .unwrap_or_else(|| section.title().to_string()),
         UpgradeSection::Grants => app
             .upgrade
             .grants_principal

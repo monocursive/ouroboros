@@ -9,7 +9,6 @@ defmodule Ouroboros.Wasm.RolloutTwoNodeTest do
   @moduletag timeout: 180_000
 
   alias Ouroboros.Upgrade.Epoch
-  alias Ouroboros.Upgrade.Forge.Signer
   alias Ouroboros.Upgrade.Rollout.Registry
   alias Ouroboros.Wasm
   alias Ouroboros.Wasm.Artifact
@@ -284,7 +283,7 @@ defmodule Ouroboros.Wasm.RolloutTwoNodeTest do
     )
   end
 
-  # The epoch is allocated the way `Ouroboros.Upgrade.Forge` allocates one — before the
+  # The epoch is allocated before the manifest is built — before the
   # manifest exists, from the cluster the manifest will be deployed to — because it is
   # inside what gets signed.
   defp artifact!(context, attrs \\ []) do
@@ -328,11 +327,11 @@ defmodule Ouroboros.Wasm.RolloutTwoNodeTest do
     }
   end
 
-  # The shipped dev signer, through the generic `sign/2` payload path. Lane W needs no new
-  # signer callback: the payload it hands over is bytes like any other.
+  # A detached Ed25519 signature over this lane's payload, which is what the signing
+  # service issues and what `Ouroboros.Wasm.Verifier` checks.
   defp sign!(artifact, secret) do
     payload = Artifact.signing_payload(artifact, @signer)
-    {:ok, value} = Signer.Local.sign(payload, @signer, private_key: secret)
+    value = :crypto.sign(:eddsa, :none, payload, [secret, :ed25519])
     {:ok, signed} = Artifact.with_signature(artifact, %{signer: @signer, value: value})
     signed
   end

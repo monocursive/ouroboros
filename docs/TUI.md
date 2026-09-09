@@ -309,9 +309,6 @@ reading.
 | `teams.state` `{id}` | `Team.state/1` via `Team.whereis/1` |
 | `plans.list` / `plans.get` `{id}` | `Orchestration.Scheduler.list/0` / `Scheduler.get/2` (server is the *first* arg with a default; bare `:not_found` → `-32007`) |
 | `control.list` / `control.get` `{id}` | `Ouroboros.Control.list/0`, `get/1` |
-| `upgrade.status` | `Upgrade.NodeExecutor.status/0` (exits when the executor is down — safe_call wrapper mandatory) |
-| `upgrade.rollouts` | `Upgrade.Rollout.Registry.list/0` |
-| `upgrade.history` `{module}` | `Registry.history/1` — module resolved via `String.to_existing_atom` inside a rescue; unknown → `-32602` |
 | `signing.decisions` | bounded `:erpc.call(signing_node, Signing.Service, :decisions, [])` — requires `OUROBOROS_SIGNING_NODE` configured **and** `Node.alive?()` (a `OUROBOROS_DIST=none` daemon cannot erpc), else `-32004`. Upstream failure shape is `{:error, {:signing_service_unavailable, _}}`, a nested tuple |
 | `grants.list` `{principal}` | `Control.Grants.list/1` (per-principal by design — there is no list-all, and the gateway does not add one). `Grants.list/1` swallows `:exit` into `[]` ([grants.ex:159](../lib/ouroboros/control/grants.ex)), so the handler pre-checks `Process.whereis(Grants)` to answer `-32004` instead of a false empty |
 | `permissions.list` `{scope?, workspace?, node?}` | `Control.Permissions.list/1` on the named machine (local by default; a remote one is a bounded `:erpc`, so an unreachable machine is reported as unreachable rather than as a gateway timeout). Returns the `:node` rules read from `config :ouroboros, :permissions` alongside the stored `:user`/`:workspace`/`:session` ones, each with `id`, `pattern`, `kind`, `decision`, `scope`, `workspace`, `session_id`, `created_at`, and `fragile` — the last true for an argument-constraining `Bash` pattern, which is accepted but easy to route around |
@@ -903,7 +900,7 @@ and clustering keeps the existing posture.
   cursor below the retained floor → `cursor_pruned` surfaces with the floor and
   resubscribing at the floor works; subscribe to a terminal session →
   backlog then `stream.ended`; killing the coordinator under a live subscription →
-  `stream.ended`; `upgrade.status` with the executor stopped →
+  `stream.ended`; `teams.list` with the team store stopped →
   `-32004`, connection alive; two clients, one slow, fast one unaffected;
   gateway.json appears with the bound port, 0600.
 - **Operate scope:** every method the table marks `:operate` is refused `-32003` on a

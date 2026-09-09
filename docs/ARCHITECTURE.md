@@ -12,18 +12,17 @@ This slice is complete when all of the following are executable and tested:
 2. A provider-neutral coding request can outlive its caller, emit durable ordered
    events, be replayed without gaps, survive its Ouroboros coordinator crashing, and
    resolve to explicit completed/failed/cancelled/lost state.
-3. A compatible BEAM module can be loaded with an explicit state migration and rolled
-   back in place, while policy-protected control modules reject self-patching.
+3. *(Withdrawn with the BEAM hot-patch lane; see docs/proposals/core.md §4 A1.)*
 4. A durable DAG and opt-in planner/evaluator can dispatch through a supervised team,
    revise within a fixed budget, and preserve cancellation intent across restart.
 5. A complete OTP upgrade archive can be inspected and its `:release_handler`
    lifecycle can be gated and journaled through an injected deterministic adapter.
-6. Agent-authored source for a new capability module can be validated without being
-   evaluated, compiled and tested in an isolated non-distributed build peer, signed
-   through a seam the forge cannot satisfy itself, stamped with a durably allocated
-   epoch, deployed behind a per-node health probe, held to a declarative evaluation spec
-   carried inside its own signature, and — when the probe or that spec fails — rolled
-   back to absence on every node, or quarantined when the evidence is ambiguous.
+6. An agent-authored Cargo project can be validated without being built, compiled to a
+   WebAssembly component under an OS sandbox with no network, signed through a seam the
+   forge cannot satisfy itself, stamped with a durably allocated epoch, deployed behind a
+   per-node health probe, held to a declarative evaluation spec carried inside its own
+   signature, and — when the probe or that spec fails — rolled back to absence on every
+   node, or quarantined when the evidence is ambiguous.
 7. An agent driven only by typed signals can do all of that itself — start and stop mesh
    agents, message them, delegate through a team, forge a capability and deploy it —
    with every attempt authorized against a durable deny-by-default grant for the
@@ -133,18 +132,6 @@ executors is manual mode and accepts any kind because the caller drives every st
 Snapshots written before kinds existed load as `:coding`, and a kind this build does not
 know is refused rather than coerced.
 
-`Ouroboros.Orchestration.ForgeExecutor` runs forge steps through `Upgrade.Forge` and
-`Upgrade.Rollout`, reading source and tests under one shared-read workspace lease.
-Both paths use the same containment and regular-file checks; tests run inside the
-isolated build peer and must pass before signing and deployment. Forging is not
-naturally idempotent, so the durable rollout registry is the reattachment anchor: a
-module already `:live` with the same source digest on the same nodes completes the step
-without a second build or epoch, and a `:deploying` record — ambiguity — fails the
-attempt with a retryable error rather than deploying twice. The check is not atomic with
-the build that follows it; what makes a lost race explicit rather than silent is
-underneath, in monotonic epochs and a node's refusal to introduce a module it already
-has.
-
 `Ouroboros.Control.Server` owns the objective-level loop. It checkpoints deterministic
 planning/evaluation request IDs, the candidate plan, revision history, and cancellation
 intent. Provider callbacks run outside the server so one slow inference does not block
@@ -170,10 +157,8 @@ one shape: a step of kind `forge` whose input is a capability module name and a
 workspace-relative source path. The coding-step schema is unchanged by the flag, both
 planner branches refuse unrecognized keys, and the server re-validates the accepted plan
 against the same per-kind rules `Plan` applies. Enabling it grants no deployment
-authority: the forged artifact is still signed by whatever `:forge_signer` names —
-`Signer.Deny` in production unless an operator changed it — and still verified against
-each target node's trusted signers, and a scheduler with no forge executor refuses the
-plan outright.
+authority and nothing dispatches one: no executor is configured for the kind, so a
+scheduler refuses the plan outright.
 
 ### Coding execution plane
 
@@ -387,123 +372,46 @@ Harness/BEAM restart cannot reconstruct the provider process and resolves to `:l
 
 ### Evolution plane
 
-`Ouroboros.Upgrade.NodeExecutor` is a policy-protected node-local authority. It accepts
-signed, content-addressed bundles of already compiled BEAMs and their exact
-preimages. Compilation and tests belong in an isolated build peer, never inside the
-production loader.
+The BEAM hot-patch lane was removed by docs/proposals/core.md §4 A1. A forged BEAM ran
+with the whole VM's ambient authority, and the lane structurally could not introduce a
+module without that being true, which is the opposite of what containment is for. What
+replaced it is lane W: a forged capability is a WebAssembly component whose authority is
+its import list, signed and content-addressed, deployed and rolled back without a
+rebuild. docs/WASM.md is that lane's document; what follows here is the half of the old
+lane that outlived it.
 
-Fast-lane transaction:
+`Ouroboros.Wasm.Forge` owns the path from an agent-authored Cargo project to a signed
+manifest, and `Ouroboros.Wasm.Rollout` owns the path from that manifest to a live,
+health-gated capability. The stages, each with its own named refusal:
 
-1. Verify runtime, signature, exact base hashes, policy, epoch, and module features.
-2. Ask the code server to prepare the complete batch.
-3. Suspend only declared stateful processes.
-4. Atomically finish loading the batch.
-5. Invoke explicit `code_change/3` migrations and resume.
-6. Run health checks through the cluster coordinator.
-7. Promote with soft purge, or downgrade state and restore preimages.
+1. Contract C9 is checked before anything is compiled: `Cargo.toml`, `Cargo.lock`,
+   `src/**.rs` and an optional `README.md` and `manifest.json`, at most 32 files and a
+   mebibyte, no `build.rs`, no symlink followed, and the lock pinned byte-for-byte to
+   the guest SDK's. Nothing is evaluated, so a rejected project has built nothing.
+2. The cargo build runs under `Ouroboros.Provider.Native.Sandbox` — the same OS sandbox
+   the native agent's shell runs in — with no network, writes confined to a scratch
+   directory and the registry cache, and a wall-clock ceiling. A build script and a proc
+   macro are arbitrary code at build time by construction, so "somewhere that cannot
+   reach the cluster" has to mean an OS boundary and not merely a separate process.
+3. `Upgrade.Epoch.next/2` reads the highest epoch every target's rollout register has
+   admitted, allocates above the maximum, and persists the allocation durably *before*
+   returning it, so a crash between allocation and use burns a number rather than
+   reissuing one. An unreadable node is a refusal, not a zero. `:global.trans/4`
+   serializes allocations in a connected cluster; it is not partition-safe, and the
+   defence that does not depend on coordination is the target register's own
+   monotonicity check.
+4. The signature comes from `Upgrade.Signing.Service` — an explicit service, a configured
+   `:signer`-role peer, or a service running on this node — and never from a key the
+   forge holds. That seam is the next section.
 
-Never brutal-purge. If retired code remains on a process stack, quarantine the node
-and retain rollback material. Retention is literal: when a commit fails at or after the
-point where code became visible and compensation cannot finish, the terminal journal
-record keeps the artifact and its migration targets rather than clearing the only
-durable copy of the preimages.
-
-Each module in an artifact carries a disposition. `:replace` is the transaction above.
-`:introduce` loads a module that has never existed in this VM: no preimage is captured,
-step 7 inverts to an unload (`:code.delete/1` then soft purge), and the identity the
-node then expects for that module is `:non_existing` — a checked expectation, so a name
-that reappears fails closed like a wrong hash would. Introduced modules cannot be
-declared stateful, because a module nothing is running has no state to migrate, and the
-retained rollback material for one is only its name: there are no preimage bytes to
-keep when the way back is an unload. Unloading is not exempt from the no-brutal-purge
-rule, so a process still executing introduced code yields
-`{:introduced_code_in_use, module}` and quarantine. A single artifact may mix both
-dispositions and commits or rolls back as one transition.
-
-An introduction is additionally required to be absent — unloaded, unreachable on the
-code path, and not already expected by the journal — and to be named under
-`Ouroboros.Capability.`, the namespace `Ouroboros.Mesh` reserves for agents forged at
-runtime. Neither rule makes introducing a module safer than replacing one. Any accepted
-BEAM has full ambient VM authority however it arrived; the namespace gate only prevents
-a new module from silently occupying an existing name.
-
-Policy protects the modules that make these guarantees enforceable, not just the loader:
-`Ouroboros.Upgrade.*`, `Ouroboros.Storage.*` (a patched journal writer makes every
-write a silent no-op), `Ouroboros.Release.*` (the durable lane's authorizer),
-`Ouroboros.Control.*` (which decides what gets patched), `Ouroboros.Gateway.*` (an
-auth check that can be hot-patched is no auth at all), `Ouroboros.Agent.Effects*` and
-`Ouroboros.Orchestration.*` (the forge and deploy entry points), `Ouroboros.Mesh` and
-`Ouroboros.Mesh.*` (where deployed capabilities start), `Ouroboros.Runtime.Capabilities`,
-`Ouroboros.Provider.Native` and `Ouroboros.Provider.Native.*` (path containment,
-SafeWrite, and the OS sandbox), `Ouroboros.Workspace` and `Ouroboros.Workspace.*`
-(the admission lease the file tools sit on), plus the application root and its
-registry owner. On-load functions are detected by preparing the batch, because
-`-on_load` lives in the Code chunk and never appears among a module's attributes; the
-preimage is probed too, since rollback loads it with `:code.load_binary/3`.
-
-The coordinator performs parallel prepare/commit, compensating abort/rollback,
-optional health checks, promotion, and status across explicit connected nodes. It is
-best-effort rather than atomic: ambiguous transport outcomes are quarantined. A
-single executor preparation is reserved at a time, commit revalidates policy/base and
-epoch, stateful declarations require migrations, and epoch monotonicity survives
-rollback and executor restart.
-
-This is not a security boundary against malicious loaded code. Any accepted BEAM has
-ambient VM authority and can call the code server or mutate processes. NIF loading is
-detected as a static import of `:erlang.load_nif/2` only; a runtime-resolved call is
-not detected, and the import check is a policy gate rather than a proof. Independent
-signing/authorization belongs outside the patchable application, preferably on a
-separate least-privileged loader node.
-
-The node executor durably journals write-ahead operations, monotonic epoch, retained
-rollback receipts, expected loaded hashes, and quarantine. The journal key is not
-versioned, so a checkpoint this build cannot interpret is read and quarantined with its
-evidence preserved instead of disappearing behind a `:not_found` while the node's code is
-already patched. Opaque OTP prepared-code
-terms are intentionally not persisted and become `lost_on_restart`. A reservation whose
-prepare reply was lost can be released by artifact id, so an ambiguous prepare does not
-wedge the node; status reports the reservation's artifact, epoch, and prepare time.
-Restart verifies loaded module identities and migration-process liveness; mismatches
-fail closed. For an interrupted commit, the verified artifact and migration targets in
-the write-ahead record let restart resume matching live callback processes before
-retaining the incomplete operation in quarantine. Post-mutation journal failures trigger
-immediate compensation where possible and otherwise leave an explicit
-reconciliation-required quarantine.
-
-Above the coordinator, `Ouroboros.Upgrade.Forge` owns the path from agent-authored
-source to a signed artifact, and `Ouroboros.Upgrade.Rollout` owns the path from that
-artifact to a live, health-gated capability. Both live under `Ouroboros.Upgrade.*` and
-are therefore inside the protected set: what the forge produces can never patch the
-forge.
-
-Forge stages, each with its own named refusal:
-
-1. `Forge.Source.validate/1` is parse-only. It checks the `Ouroboros.Capability.` name,
-   parses source and tests with `Code.string_to_quoted/1`, requires exactly one
-   top-level module matching the declared one, and walks both ASTs for `@on_load`,
-   protocol definitions, `Code.*`, `:code.*`, `File.*`, `:file.*`, `System.cmd/shell`,
-   `Port`, `:os.cmd`, `Node.*`, `:erpc`, `:rpc`, `Application.put_env`,
-   `:persistent_term`, `:ets.give_away`, `:erlang.load_nif`, and node-explicit spawns.
-   Nothing is evaluated, so a rejected source has defined nothing.
-2. `Forge.BuildPeer` compiles and runs the candidate's own tests inside an OTP `:peer`
-   started with `connection: :standard_io` and `-start_epmd false`. That peer is not
-   distributed, so generated code has no distribution with which to reach the cluster.
-   One deadline covers boot, compile, and tests; the peer is stopped in an `after` block
-   on every path. `Forge.Sandbox` runs inside it and returns only plain serializable
-   terms.
-3. `Upgrade.Epoch.next/2` reads `last_epoch` from every target, allocates above the
-   maximum, and persists the allocation durably *before* returning it, so a crash
-   between allocation and use burns a number rather than reissuing one. An unreadable
-   node is a refusal, not a zero. `:global.trans/4` serializes allocations in a
-   connected cluster; it is not partition-safe, and the defence that does not depend on
-   coordination is the target's own epoch monotonicity check.
-4. `Forge.Signer` is the seam the agent cannot supply for itself. The forge never holds
-   a key; it asks the configured module and the default refuses everything. The
-   behaviour has two callbacks: `sign/2` takes the canonical payload, and the optional
-   `sign_artifact/2` takes the whole artifact. The forge prefers the second whenever a
-   signer exports it, because a payload is a hash of a manifest and a signer holding
-   only the hash cannot check the manifest against the bytes it describes.
-   `Forge.Signer.Remote` implements it; `Deny` and `Local` do not and are unchanged.
+`Ouroboros.Upgrade.Rollout.Registry` is the durable record of what a rollout intended and
+what became of it: five states, and the difference between `:rolled_back` and
+`:quarantined` is the whole point. A `:deploying` checkpoint is durable before a byte is
+staged anywhere; a node that proved compensation earns `:rolled_back`; anything ambiguous
+is `:quarantined`, which has no automatic exit. The register also holds the epoch gate,
+decided inside the same serialized message that writes the entry, because a caller
+reading the watermark and then checkpointing would be a read-then-write across two
+messages.
 
 ### Signing plane
 
@@ -511,60 +419,59 @@ Forge stages, each with its own named refusal:
 does not: on a `:signer`-role node whose supervision tree contains this process and
 cluster formation. Three properties make it independent rather than merely remote.
 
-**The key is outside the patchable application.** It is read at `init/1` from the file
+**The key is outside the requesting application.** It is read at `init/1` from the file
 named by `OUROBOROS_SIGNER_KEY_PATH` (32 raw bytes or their base64), derived into an
 Ed25519 keypair, and held in process state wrapped in a struct whose `Inspect`
 implementation redacts it — so a crash report, a logged state, or an interpolated
 exception cannot print it. `public_info/0` publishes the public half and renders the
 exact `OUROBOROS_UPGRADE_TRUSTED_SIGNERS` entry a core node needs; there is no accessor
-for the private half anywhere. `Forge.Signer.Local`, still shipped for dev loops, reads
-its key from the configuration of the application it authorizes, which is precisely the
-arrangement this replaces.
+for the private half anywhere. A one-machine posture runs this same service beside the
+node that asks it, which is a dev loop and not custody.
 
-**The policy sees the whole artifact.** `Signing.Policy.Default` recomputes every
-manifest claim from the BEAM bytes submitted — module name, sha256, md5, `vsn`, the
-`:code.prepare_loading/1` on-load probe, static `:erlang.load_nif/2` imports, protocol
-markers — for the new binary and, on a `:replace`, its pre-image. It requires every
-module to be under `Ouroboros.Capability.`, with no configuration that widens that; it
-requires `metadata.forge` to carry a `source_sha256` and a test report with no failures
-and at least one pass; and under `:signing_require_eval` it requires a
-`Rollout.Evaluation` spec it can validate. What it deliberately does *not* check is
-anything only a target VM knows: epoch ordering (a signer has no view of any cluster's
-watermark), pre-image currency, and module absence. Those stay with the executor and
-survive the signature entirely. Every failure is `{:refused, reason}`; nothing raises
-across the boundary, because an exception reaching the caller through `:erpc` would be
-indistinguishable from transport ambiguity.
+**The policy sees the whole manifest and the bytes.** `Signing.Policy.Default`
+recomputes every claim that can be recomputed — the component's sha256 and size, from
+the bytes submitted beside the manifest — and refuses a world its `kind` does not
+require, with no configuration that widens that. It requires `metadata.author`, and by
+default (`:signing_require_wasm_eval`) a `Rollout.Evaluation` spec it can validate,
+because there is no build peer running a test suite here and the signed eval spec *is*
+the test story. What it deliberately does *not* check is anything only a target node
+knows: epoch ordering beyond a plausibility distance, and what the linker will actually
+accept — the boundary there is the helper's own linker, which defines exactly the
+world's imports and fails instantiation on anything else. Every failure is
+`{:refused, reason}`; nothing raises across the boundary, because an exception reaching
+the caller through `:erpc` would be indistinguishable from transport ambiguity.
 
 **Every decision is journaled before it is answered.** `Signing.Journal` is a bounded
-record of issuances *and* refusals — artifact id, epoch, modules and dispositions,
-requester, decision, reason, findings — checkpointed through
+record of issuances *and* refusals — artifact id, epoch, the component it would have
+loaded, requester, decision, reason, findings — checkpointed through
 `:signing_journal_storage` (`Storage.DurableFile` in production) before the reply is
 sent. A journal that will not accept the entry is a refusal to sign. The one asymmetry
 is deliberate: the journal may record an issuance whose reply was lost, never a
 signature that was returned without a record.
 
-`Forge.Signer.Remote` is the client. It resolves the target from `:node` or
-`:signing_node`, requires `Cluster.ensure_role(node, :signer)` before submitting, sends
-the artifact plus an advisory payload over a bounded `:erpc`, and converts every
-transport outcome into a typed error. The advisory payload is cross-checked and
-discarded: the signature is always over bytes the service derives itself, so a
-disagreement means version skew and stops the deployment rather than producing a
-signature over bytes the requester did not expect.
+`Ouroboros.Wasm.Deploy` is the client. It resolves the target from `:signing_node` or a
+service running on this node, sends the manifest and the component bytes plus an
+advisory payload over a bounded `:erpc`, and converts every transport outcome into a
+typed error. The advisory payload is cross-checked and discarded: the signature is
+always over bytes the service derives itself, so a disagreement means version skew and
+stops the deployment rather than producing a signature over bytes the requester did not
+expect.
 
 Admission control sits in front of all of it: a per-requester sliding-window rate limit
-and a maximum submitted artifact size. The requester is self-reported and journaled as a
-claim, so the limit bounds accidents and retry storms rather than adversaries — see
-"Safety boundaries" for what a connected node can do regardless.
+and a maximum submitted size, and a separate `admit/4` round trip that charges the
+limiter *before* the signing node spends a compile on a component it may refuse. The
+requester is self-reported and journaled as a claim, so the limit bounds accidents and
+retry storms rather than adversaries — see "Safety boundaries" for what a connected node
+can do regardless.
 
-`Rollout.deploy/4` checkpoints `:deploying` in the durable `Rollout.Registry` before any
-node is mutated, deploys with `health_check: {Rollout.Probe, :ready?, [module]}`,
-promotes on success, and classifies failure from the deployment's own recovery evidence.
-The probe starts the introduced module as a throwaway mesh agent, sends one synthetic
-signal, checks the answer, and stops it — and converts every exception, exit, and throw
-into a health *result*, because an uncaught error would reach the coordinator as
-transport ambiguity and quarantine a node the probe merely failed to satisfy. Only a
-deployment whose every node proved compensation is recorded `:rolled_back`; anything
-ambiguous is `:quarantined`, which has no automatic exit.
+`Wasm.Rollout.deploy/3` checkpoints `:deploying` in the durable `Rollout.Registry`
+before any node is staged, probes with `{Rollout.Probe, :ready?, [spec]}`, and
+classifies failure from each node's own evidence. The probe starts the wrapper module as
+a throwaway mesh agent, sends one synthetic signal, checks the answer, and stops it — and
+converts every exception, exit, and throw into a health *result*, because an uncaught
+error would reach the driver as transport ambiguity and quarantine a node the probe
+merely failed to satisfy. Only a rollout whose every node proved compensation is recorded
+`:rolled_back`; anything ambiguous is `:quarantined`, which has no automatic exit.
 
 ### Evaluation gates
 
@@ -588,29 +495,17 @@ ambiguous — attempting compensation either way, but never recording an unevalu
 rollout as cleanly withdrawn. The registry entry carries a bounded `eval_report`: counts,
 timings, and the first few failures per node, with an oversized or unportable report
 replaced by a marker rather than truncated into something that reads like evidence. That
-field is why the registry checkpoint is version 2; a version-1 checkpoint is widened on
-read (absent report becomes `nil`) and anything else is still refused.
+field is why the registry checkpoint is version 3; an older checkpoint is widened on
+read (absent fields become `nil`) and anything newer is still refused.
 
-`compare: true` extends this to capability *upgrades*. A `:replace` beam for a live
-module is admitted through this path and no other: the same spec runs against the current
-version on every target first, and the challenger is promoted only if it passes at least
-as many probes within `:capability_eval_regression_budget` of the champion's total time.
-Both reports are recorded. This measures the declared probe set, twice, on a shared VM —
-not production behaviour, not cost, and not with enough samples for the timing half to
-mean much.
+Champion/challenger comparison is deferred, and deliberately: it needs a rule for what
+"the version this displaces" means when identity is a digest rather than a name, and half
+of one would be worse than none. Until then a new component is a new rollout and the
+register's own supersede rule retires the entry it displaces.
 
-The isolation here is process-level and policy-level, never OS-level. The build peer
-shares the host's user, filesystem, and network; the deny list is defeated by any macro,
-`apply/3`, or runtime-built module name; and a forged capability that reaches a node runs
-with the same ambient authority as every other module on it.
-
-Quarantine is a refusal, not a warning: prepare, commit, rollback, and promote are all
-gated on it, so a node whose loaded code provably disagrees with its journal cannot be
-mutated further or have its preimages discarded by a promote.
-`reconcile_quarantine/1` is the only exit and replays the same startup checks against
-current state, journaling the transition when everything matches and returning
-diagnostics when it does not. The operations log is bounded, except for pending
-write-ahead records and records still carrying rollback material.
+Quarantine is a refusal, not a warning: it has no automatic exit, and clearing it means
+inspecting the nodes themselves and deciding, as an operator, what the cluster is
+actually running.
 
 ### Agent effect plane
 
@@ -632,9 +527,9 @@ Each effect run is the same four steps, owned by `Ouroboros.Agent.Effects.Runner
    they are acknowledged, and a revocation whose write fails leaves the grant standing
    rather than forgetting something it could not durably forget.
 3. The work runs in a supervised task bounded by `:ouroboros, :effect_timeout`, never on
-   the agent's own process. A forge boots a build peer, compiles, and runs a
-   capability's tests; that is far longer than an agent server should block and longer
-   than Jido's own action deadline.
+   the agent's own process. A forge runs a sandboxed cargo build; that is far longer than
+   an agent server should block and longer than Jido's own action deadline, so the forge
+   carries its own ceiling and the runner's kill is the outer one.
 4. The outcome settles back as `Ouroboros.Signals.EffectSettled`. Delivering it as a
    call is what orders it: a call arriving while the requesting call is still in flight
    queues behind it, so the in-flight registration written by the request's return value
@@ -642,10 +537,9 @@ Each effect run is the same four steps, owned by `Ouroboros.Agent.Effects.Runner
    and are cast instead, because a nested call would queue behind the very call it is
    inside.
 
-Grants live under `Ouroboros.Control.` deliberately. That prefix is in the verifier's
-protected set, so the fast lane refuses an artifact that would replace or introduce the
-authority gating it: a capability an agent forged cannot patch the thing that decided it
-could forge.
+Grants live under `Ouroboros.Control.` deliberately: a forged component runs inside a
+WebAssembly world whose imports do not reach it, so a capability an agent forged cannot
+patch the thing that decided it could forge.
 
 `state.forged` is what a `:deploy` resolves, and it is written only by settling an
 in-flight effect this agent minted. A deploy therefore cannot ship bytes that arrived
@@ -660,7 +554,7 @@ behind ephemeral external authorization and a durable write-ahead journal. The d
 authorizer denies mutation. Unpack publishes the exact verified bytes under a synced,
 content-addressed name and gives OTP a same-inode alias matching the archive's validated
 top-level `.rel`; operating-system ownership of that directory is part of the trust
-boundary. Release and fast-patch journals sync both checkpoint file and parent directory
+boundary. The release journal syncs both checkpoint file and parent directory
 before acknowledging success. Tests use real tar archives and a deterministic adapter;
 they do not execute a live embedded-release upgrade or reboot. Only that externally
 rehearsed lane can prove restart persistence or an ERTS change.
@@ -736,7 +630,6 @@ patch lane refuses an artifact that would replace the module deciding what code 
 | Team process crashes | Snapshot recovery adopts agents/tasks and resumes delivery | Done on one owner node |
 | Scheduler or executor owner crashes | Same token is offered again for idempotent reattachment | Done on one owner node |
 | Control process crashes | Durable request/plan/cancel intent is reconciled; stable IDs reused | Provider billing can still duplicate after response-before-checkpoint loss |
-| Node restarts after fast patch | Original release boots | Build and rehearse the implemented OTP release lane |
 | Release mutation result is ambiguous | Journal enters quarantine; no false success | Operator reconciliation and deployment rehearsal |
 
 ## Safety boundaries
@@ -744,41 +637,35 @@ patch lane refuses an artifact that would replace the module deciding what code 
 - Development/test permits unsigned local patch tests. Production never does. Trusted
   keys arrive through `OUROBOROS_UPGRADE_TRUSTED_SIGNERS`; boot fails on a malformed
   entry and an unset variable trusts nobody.
-- Upgrade policy rejects the upgrade, storage, release, control, gateway, effect,
-  orchestration, mesh, native-provider, and workspace namespaces, the application root
-  and its registry owner, on-load code, consolidated protocols, and sticky modules. It
-  rejects statically imported `:erlang.load_nif/2`, which a runtime-resolved call
-  evades. Loaded code remains VM-privileged.
-- Newly introduced modules must be absent and named under `Ouroboros.Capability.`. Both
-  rules are policy about names, not a sandbox: an introduced module is exactly as
-  privileged as a replacement, and the gate only stops a new module from taking a name
-  that already means something.
-- Forge source validation is parse-only hygiene against accidents, not a sandbox. Macro
-  expansion, `apply/3`, and runtime-built module names all defeat it by construction. The
-  build peer is isolated from the cluster, not from the build host.
-- The forge holds no signing key and constructs no signature. `:forge_signer` defaults to
-  a module that refuses, and a signer whose key lives in this application's configuration
-  (`Signer.Local`) lets the agent approve its own code. `Signing.Service` on a `:signer`
-  node moves the key onto a host the patchable application does not run on, applies an
-  independent policy to the full artifact before a signature exists, and journals every
-  decision durably before answering. That is a narrower blast radius, not custody: the
-  signer node is a connected cluster member, so any node that completes the distribution
-  handshake can call the same service the forge calls. What such a node gets is a policy
-  decision — the `Ouroboros.Capability.` namespace rule has no bypass for any caller,
+- A forged capability's authority is its component's import list, enforced by the
+  helper's linker on the loading node: it defines exactly the world's imports and fails
+  instantiation on anything undeclared. The declared list in a manifest is provenance and
+  review surface, not the enforcement mechanism.
+- Forge project validation (contract C9) is a file allow-list and a lock pin, not a
+  reading of the code. What makes a build safe is where it runs: under the OS sandbox,
+  with no network and writes confined to a scratch directory.
+- The forge holds no signing key and constructs no signature. Without a configured
+  `:signing_node` or a service on this node it cannot sign at all, and a service running
+  beside the node that asks it is a dev loop rather than custody. `Signing.Service` on a
+  `:signer` node moves the key onto a host the requesting application does not run on,
+  applies an independent policy to the full manifest and the bytes before a signature
+  exists, and journals every decision durably before answering. That is a narrower blast
+  radius, not custody: the signer node is a connected cluster member, so any node that
+  completes the distribution handshake can call the same service the forge calls. What
+  such a node gets is a policy decision — the world rule has no bypass for any caller,
   and the per-requester rate limit is keyed on a self-reported claim. Custody outside the
   distribution trust domain remains external.
 - Agent effect grants gate the *action layer* — the typed signals a well-behaved agent
   flow travels through — and are deny-by-default, durable, and checked against the
-  concrete attempt. They are not a sandbox and not a capability system. Any loaded BEAM
-  can call `Ouroboros.Mesh.start_agent/2`, `Ouroboros.Upgrade.Forge.forge/2`, or
+  concrete attempt. They are not a sandbox and not a capability system. Any code running
+  in this VM can call `Ouroboros.Mesh.start_agent/2`, `Ouroboros.Wasm.Forge.forge/2`, or
   `Ouroboros.Control.Grants.grant/3` directly without passing an effect action at all,
-  because it retains full ambient VM authority. The hard boundaries remain the verifier's
-  namespace policy, artifact signing whose production default refuses, and the isolated
-  build peer.
+  because it retains full ambient VM authority. The hard boundaries remain the
+  component's import list, the signer's policy, and manifest signing whose production
+  default refuses.
 - No effect exists for granting, so an agent cannot widen its own authority through this
-  surface. That is a property of the surface, not of the VM, which is why the authority
-  itself is fast-patch-protected and why signing approval belongs outside this
-  application.
+  surface. That is a property of the surface, not of the VM, which is why signing
+  approval belongs outside this application.
 - The authority is node-local: one `Grants` process per node over that node's own
   checkpoint. An agent granted an effect on one node is not granted it on another, and
   nothing replicates or reconciles the two.
@@ -889,33 +776,30 @@ through worker, coordinator, and network failures.
 
 Implemented:
 
-- isolated build peers that compile and test candidate source changes
-  (`Forge.BuildPeer` + `Forge.Sandbox`: a non-distributed `:peer` with a bounded overall
-  deadline, always stopped, returning only serializable terms);
-- a signing seam the forge cannot satisfy for itself (`Forge.Signer`, defaulting to
-  `Deny`), with the artifact re-verified against trusted keys on every loading node;
-- a signing *service* on the other side of that seam (`Upgrade.Signing.Service` on a
-  `:signer` node, reached by `Forge.Signer.Remote`): the key read at boot from a file
-  that node mounts and never leaves its process, an independent policy that recomputes
-  the whole submitted artifact and structurally refuses anything outside
-  `Ouroboros.Capability.`, an optional requirement that the artifact declare a valid
-  evaluation spec, a per-requester rate limit, and a durable journal of every decision
-  that must be acknowledged before a signature is returned. A signer node with no
-  readable key refuses to boot;
-- durable, crash-safe epoch allocation above every target node's journal
+- sandboxed builds of candidate source changes (`Wasm.Forge`: contract C9's file
+  allow-list and lock pin, then a cargo build under `Provider.Native.Sandbox` with no
+  network, writes confined to a scratch directory, and a wall-clock ceiling);
+- a signing seam the forge cannot satisfy for itself, with the manifest re-verified
+  against trusted keys on every loading node;
+- a signing *service* on the other side of that seam (`Upgrade.Signing.Service`, on a
+  `:signer` node for a fleet): the key read at boot from a file that node mounts and
+  never leaves its process, an independent policy that recomputes the digest and the size
+  from the submitted bytes and structurally refuses a world the `kind` does not require,
+  a requirement (on by default) that the manifest declare a valid evaluation spec, a
+  per-requester rate limit charged before a compile is spent, and a durable journal of
+  every decision that must be acknowledged before a signature is returned. A signer node
+  with no readable key refuses to boot;
+- durable, crash-safe epoch allocation above every target node's register
   (`Upgrade.Epoch`);
-- a durable deployment-level cluster journal above the durable node executors
-  (`Rollout.Registry`), checkpointed before any mutation, which never records ambiguity
-  as a rollback;
-- health-gated rollout with real rollback proof (`Rollout` + `Rollout.Probe`): a forged
-  capability starts as a mesh agent and answers a signal on every target, or the whole
-  deployment is compensated and the module is absent again everywhere;
-- declarative, signed evaluation gates between commit and promotion
-  (`Rollout.Evaluation`): a probe set that lives inside the signed manifest, is run on
-  every target while rollback material still exists, and decides promote, rollback, or —
-  on any ambiguous answer — quarantine; plus champion/challenger comparison for
-  capability upgrades, holding a replacement to the pass count and total time of the
-  version it displaces;
+- a durable deployment-level cluster journal (`Rollout.Registry`), checkpointed before
+  any mutation, which never records ambiguity as a rollback and which decides the epoch
+  gate in the same serialized message that writes the entry;
+- health-gated rollout with real rollback proof (`Wasm.Rollout` + `Rollout.Probe`): a
+  forged capability starts as a mesh agent and answers a signal on every target, or the
+  whole rollout is compensated and the capability is absent again everywhere;
+- declarative, signed evaluation gates before a rollout settles (`Rollout.Evaluation`):
+  a probe set that lives inside the signed manifest, is run on every target, and decides
+  live, rollback, or — on any ambiguous answer — quarantine;
 - an agent-reachable effect surface for all of the above (`Agent.Effects`), gated by a
   durable deny-by-default authority (`Control.Grants`) that is checked against the
   concrete attempt, identifies the actor from server-side state rather than the signal,
@@ -929,11 +813,10 @@ Implemented:
   runtime, three roles. A `:builder` node boots cluster formation and the WASM helper
   pool, and nothing that holds teams, sessions, stores, scheduler, or control plane; a
   `:signer` node adds the signing service (and `RuntimeOwner` when a data directory is
-  configured). `:forge_builder_node` relocates the build peer onto a builder without
-  changing anything about the build. The builder must be runtime-identical to its targets,
-  because the verifier checks the artifact's OTP/Elixir/architecture triple on every
-  loading node; that constraint is *why* a builder is a role of the same release rather
-  than a separate service;
+  configured). `:wasm_forge_placement` relocates a forge onto a builder without changing
+  anything about the build. A component is one artifact for every node, forever, so a
+  builder need not be runtime-identical to its targets — which is exactly the property
+  the removed BEAM lane could not have;
 - formation itself (libcluster: static epmd, gossip, DNS polling), off by default, plus
   a release whose distribution posture is explicit: long names, a refused blank
   node/cookie, optional TLS distribution baked into `vm.args`, and a boot that fails
@@ -949,10 +832,11 @@ Still external:
 
 - **signing custody outside the distribution trust domain.** The service now exists and
   is real: the key lives on a `:signer` node, in one process, read from a file that node
-  mounts, and an independent policy decides on the full artifact before any signature is
-  produced. An agent that patches a core node cannot read that key, and cannot obtain a
-  signature for a control-plane module at any price, because no code path on the signer
-  produces one. What remains external is the rest of custody. A signer node is still a
+  mounts, and an independent policy decides on the full manifest before any signature is
+  produced. An agent on a core node cannot read that key, and cannot obtain a signature
+  for a component in a world this build does not implement at any price, because no code
+  path on the signer produces one. What remains external is the rest of custody. A signer
+  node is still a
   connected cluster member: a node that completes the distribution handshake can call
   the signing service directly, and can also do everything else `:erpc` allows on that
   host. Role isolation and TLS distribution narrow that surface; they do not close it.
@@ -961,29 +845,26 @@ Still external:
   patchable application, not independent of the cluster. An HSM, a review queue, or a
   signing host reached over something narrower than Erlang distribution are all still
   outside this codebase.
-- **real OS sandboxing.** The build peer is isolated from the *cluster*, not from the
-  *host*: same user, same filesystem, same network. A `:builder` node moves that host
-  off the production path, which is worth doing and is not containment — the builder
-  remains inside the distribution trust domain. Compiling untrusted source safely needs
-  a container or VM boundary with resource and network limits. The source deny list is
-  hygiene against accidents and is defeated by any macro expansion, `apply/3`, or
-  runtime-constructed module name.
+- **a VM boundary around the build and the shell.** The cargo build runs under the OS
+  sandbox with no network, which is a real boundary and not a container: same kernel,
+  same user. A `:builder` node moves the host off the production path, which is worth
+  doing and is not containment — the builder remains inside the distribution trust
+  domain. docs/proposals/core.md §7 names the VM backend that would close this.
 - **partition behavior.** Formation connects nodes; it does not fence them. There is no
   quorum, no partition policy, and no reconciliation for a node that returns with stale
   state. Role and placement checks are observations about a *connected* cluster.
 - **evaluation beyond the declared spec.** The gate that exists runs criteria somebody
   wrote and signed, on a throwaway instance, on each target, once. It decides promotion
-  automatically and compares a challenger to its champion, which is real. What it is not
-  is a measurement of production behaviour: there is no cost model, no canary cohort on
-  real traffic, no repetition, and wall-clock over a handful of probes carries little
-  signal, which is why the regression budget is deliberately loose. An artifact that
-  declares no spec is still promoted on liveness alone — unless the signer was
-  configured with `:signing_require_eval`, which refuses to sign one at all. That switch
-  exists and defaults to off; what does not exist is any judgement about whether a
+  automatically, which is real. What it is not is a measurement of production behaviour:
+  there is no cost model, no canary cohort on real traffic, no repetition, and no
+  champion/challenger comparison at all. A manifest that
+  declares no spec is refused a signature outright by default
+  (`:signing_require_wasm_eval`); what does not exist is any judgement about whether a
   declared spec is a *good* spec.
 - **package assembly and reboot rehearsal** around the implemented `.appup`/`.relup`
-  metadata/inspection lane. A forged capability lives in the running VM only; a restart
-  boots the original release without it.
+  metadata/inspection lane. A forged component *does* survive a restart — the store is
+  content-addressed on disk and `Wasm.Boot` restarts what the register says is live — but
+  a change to the runtime itself still needs a release.
 
 Stop condition: the agent can propose a change, but cannot authorize its own patch;
 every rollout has a reproducible artifact, independent approval, canary evidence,
@@ -997,7 +878,7 @@ node placement, resumable multi-provider sessions, and controlled behavior evolu
 Compared with a conventional single-process coding CLI, Ouroboros can keep several
 logical workers and workflows alive, route them across connected nodes, recover each
 plane from its own durable checkpoint, and evolve behavior through separately gated
-fast-patch and release lanes. The product surface should expose those properties
+component and release lanes. The product surface should expose those properties
 directly through a terminal UI and API rather than hiding them behind one opaque chat
 transcript.
 

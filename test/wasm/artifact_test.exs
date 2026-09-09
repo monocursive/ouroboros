@@ -2,7 +2,6 @@ defmodule Ouroboros.Wasm.ArtifactTest do
   # Async: nothing here reads application environment or a named process.
   use ExUnit.Case, async: true
 
-  alias Ouroboros.Upgrade.Artifact, as: BeamArtifact
   alias Ouroboros.Wasm
   alias Ouroboros.Wasm.Artifact
 
@@ -76,9 +75,7 @@ defmodule Ouroboros.Wasm.ArtifactTest do
     end
 
     test "has no default epoch, because a VM-local one poisons the rollout register" do
-      # `Ouroboros.Upgrade.Artifact.build/2` defaults this to `System.unique_integer/1`,
-      # which is safe there because lane B checks monotonicity per node against what that
-      # node committed. Lane W checks it against `Rollout.Registry`, and
+      # Monotonicity is checked against `Rollout.Registry`, and
       # `Ouroboros.Upgrade.Epoch.next/2` never reads that register — so one artifact built
       # with a VM-local counter raises the watermark past every epoch `Epoch.next/2` will
       # mint for a long time, and recovering means hand-minting *and* re-signing.
@@ -202,16 +199,16 @@ defmodule Ouroboros.Wasm.ArtifactTest do
       refute Artifact.signing_payload(artifact, "another-signer") == payload
     end
 
-    test "carries a different tag from the BEAM lane's, so a signature cannot cross" do
+    test "carries its own tag, so nothing signed under another one can cross into it" do
       wasm = Artifact.signing_payload(build!(), @signer)
 
-      {module, binary} = beam_binary()
-      {:ok, beam} = BeamArtifact.build([{module, binary, disposition: :introduce}], epoch: 1)
-      beam = BeamArtifact.signing_payload(beam, @signer)
-
       assert {:ouroboros_wasm_v1, _signer, _manifest} = :erlang.binary_to_term(wasm)
-      assert {:ouroboros_upgrade_v1, _signer, _manifest} = :erlang.binary_to_term(beam)
-      refute wasm == beam
+
+      # A payload built under any other tag over the same manifest is different bytes, so
+      # a signature over one is not a signature over the other.
+      {:ouroboros_wasm_v1, signer, manifest} = :erlang.binary_to_term(wasm)
+      other = :erlang.term_to_binary({:some_other_lane_v1, signer, manifest}, [:deterministic])
+      refute wasm == other
     end
 
     test "is deterministic across two builds of the same manifest" do
@@ -345,10 +342,4 @@ defmodule Ouroboros.Wasm.ArtifactTest do
   defp signature, do: :binary.copy(<<7>>, 64)
 
   defp sha256(bytes), do: :sha256 |> :crypto.hash(bytes) |> Base.encode16(case: :lower)
-
-  # Any real BEAM binary will do: this test is about the payload tag, not about the module.
-  defp beam_binary do
-    {module, binary, _filename} = :code.get_object_code(Ouroboros.Wasm.Artifact)
-    {module, binary}
-  end
 end

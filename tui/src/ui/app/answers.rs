@@ -172,15 +172,6 @@ impl App {
             Tag::TeamState(_) => Self::fill_detail(&mut self.teams, result, ticks),
             Tag::Plan(_) => Self::fill_detail(&mut self.plans, result, ticks),
             Tag::ControlRun(_) => Self::fill_detail(&mut self.control, result, ticks),
-            Tag::UpgradeStatus => {
-                Self::fill_value(&mut self.upgrade.status, result, ticks, UPGRADE_TICKS)
-            }
-            Tag::Rollouts => {
-                Self::fill_value(&mut self.upgrade.rollouts, result, ticks, UPGRADE_TICKS)
-            }
-            Tag::History(_) => {
-                Self::fill_value(&mut self.upgrade.history, result, ticks, UPGRADE_TICKS)
-            }
             Tag::Signing => {
                 Self::fill_value(&mut self.upgrade.signing, result, ticks, UPGRADE_TICKS)
             }

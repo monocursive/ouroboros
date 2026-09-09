@@ -575,13 +575,6 @@ impl App {
 
     fn activate_upgrade_section(&mut self) {
         match self.upgrade.current() {
-            UpgradeSection::History => {
-                self.overlay = Some(Overlay::Prompt {
-                    kind: PromptKind::HistoryModule,
-                    label: "module (e.g. Ouroboros.Capability.Example)".into(),
-                    buffer: self.upgrade.history_module.clone().unwrap_or_default(),
-                })
-            }
             UpgradeSection::Grants => {
                 self.overlay = Some(Overlay::Prompt {
                     kind: PromptKind::GrantsPrincipal,
