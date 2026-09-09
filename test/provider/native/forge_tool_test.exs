@@ -1259,8 +1259,7 @@ defmodule Ouroboros.Provider.Native.ForgeToolTest do
 
     test "is settled :ambiguous when the tool task is killed where it stands", context do
       # `Tools.execute/4` brutal-kills the task at the timeout, so no line of the tool runs.
-      # The ledger's own runner monitor is what closes the entry, exactly as it does for
-      # `Ouroboros.Agent.Effects.Runner`.
+      # The ledger's own runner monitor is what closes the entry.
       project = project(context, "counter-a")
       FakeForge.answer(:forge, fn -> Process.sleep(5_000) end)
 

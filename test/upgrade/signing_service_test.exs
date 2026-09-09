@@ -584,10 +584,9 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
             Ouroboros.Jido,
             Ouroboros.Agent.EffectLedger,
             Ouroboros.Mesh.Directory,
-            Ouroboros.Coding.Store,
-            Ouroboros.Team.Store,
-            Ouroboros.Orchestration.Scheduler,
-            Ouroboros.Control.Store,
+            Ouroboros.Interactive.Store,
+            Ouroboros.Control.Grants,
+            Ouroboros.Control.Permissions,
             Ouroboros.Release.Runtime,
             Ouroboros.Upgrade.NodeExecutor,
             Ouroboros.Upgrade.Rollout.Registry
