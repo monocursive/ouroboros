@@ -49,14 +49,13 @@ Facts the design stands on, each checked in the tree:
   two public functions (`Methods.fetch/1`, `Methods.permits?/2` —
   `methods.ex:996-998`); the `Conn` calls `invoke/2` inside a supervised task with the
   table's per-method timeout (`lib/ouroboros/gateway/conn.ex:936-955`). The test suite
-  already calls `Methods.invoke/2` directly (`test/team_test.exs:1078`).
-- **Six methods are connection-answered, not dispatched**: `hello`, the four
+  already calls `Methods.invoke/2` directly.
+- **Four methods are connection-answered, not dispatched**: `hello`, the two
   subscribe/unsubscribe verbs, and `runtime.shutdown` (`conn.ex:143-149`,
   `lib/mix/tasks/ouroboros.protocol.docs.ex:64-71`).
-- **Subscriptions register the calling process.** "Both planes register `self()` and
-  monitor it" (`methods.ex:1069-1084`); events arrive as
-  `{:ouroboros_interactive_event, id, %Event{}}` /
-  `{:ouroboros_coding_event, id, %Event{}}` sent only after the durable checkpoint
+- **Subscriptions register the calling process.** "The plane registers `self()` and
+  monitors it" (`methods.ex:1069-1084`); events arrive as
+  `{:ouroboros_interactive_event, id, %Event{}}` sent only after the durable checkpoint
   (`lib/ouroboros/interactive/task.ex:2149-2154`). A terminal session answers the backlog
   but silently declines registration (`interactive/task.ex:142-155`). There is no
   per-session subscriber cap.
@@ -106,7 +105,7 @@ Facts the design stands on, each checked in the tree:
   `fleet.forget_session_owner` (`methods.ex:212-213,292`). There is no Elixir enrolment
   path.
 - **Two corrections to prior internal notes**: `fleet.sessions` does not exist
-  (fleet-wide lists are `interactive.list`/`coding.list` fanning out over `:erpc`,
+  (the fleet-wide list is `interactive.list` fanning out over `:erpc`,
   `lib/ouroboros/gateway/methods/present.ex:55-113`), and `OUROBOROS_DIST_TAILNET` is
   spec-only in `docs/FLEET.md` — not implemented. This document mirrors the *pattern* of
   the implemented refusals, not that flag.
@@ -307,7 +306,7 @@ Inventory source: `docs/DESKTOP.md` and the verified feature map of `tui/src/des
 
 | Desktop feature (today) | Web treatment |
 |---|---|
-| Session rail: triage-ordered rows, presence, context menu, rename/delete dialogs with gating ("Finish session to delete") | LiveView list over `interactive.list` + `coding.list` polled at the TUI's ~3 s cadence while mounted; triage/sort/nesting rules ported from `tui/src/ui/app/session.rs:380` (`triaged()`); delete gating recomputed server-side by the same rule (`terminal? or last_known`, and only if the verb exists) |
+| Session rail: triage-ordered rows, presence, context menu, rename/delete dialogs with gating ("Finish session to delete") | LiveView list over `interactive.list` polled at the TUI's ~3 s cadence while mounted; triage/sort rules ported from `tui/src/ui/app/session.rs` (`triaged()`); delete gating recomputed server-side by the same rule (`terminal? or last_known`, and only if the verb exists) |
 | Transcript: markdown messages, thinking, tool cells with collapse, diffs, plan, subagent rows, dividers, streaming spinner | the Elixir projection (§5) rendered as LiveView streams; tool-output collapse keeps the desktop's 12-line/head-7/tail-4 budget; folded child rows show elapsed time, last activity, returned refs, deliveries and retained-work errors |
 | Computer-use screenshots (`gpui::img`) | `<img src="/artifact/<plane>/<id>/<sha>">` served by an authenticated controller that calls `Methods.invoke("computer_use.artifact", …)` — same surface, same node routing; sha-addressed so browser caching is safe |
 | Composer: quick-start, three placeholder states, send/stop, queue | same reducer semantics, one Elixir implementation: quick-start issues `interactive.start` + first message; turn envelope stays "plain string unless structured" (`tui/src/model.rs:2823-2868`) |
@@ -329,7 +328,7 @@ Inventory source: `docs/DESKTOP.md` and the verified feature map of `tui/src/des
   design (a `fleet.add` verb streaming typed events — the `AddEvent` contract is already
   renderer-agnostic), but it is its own spec, not a port. v1 web renders membership and
   points at `ouro fleet add` / the TUI stepper.
-- **`runtime.shutdown`, ledger/upgrade/teams/plans/control tabs, `workspace.exec`, /raw
+- **`runtime.shutdown`, the ledger and upgrade tabs, `workspace.exec`, /raw
   and /export, statusline.** TUI-only today or TUI-appropriate; none existed on the
   desktop. `[statusline]` in particular must never be ported naively — it runs a shell
   command on the client's machine, which server-side would mean shell execution on the
@@ -385,8 +384,8 @@ modules, both pure:
   (`transcript.rs:7`). Display ceilings
   applied here, not at render, with the same numbers (64 KiB text/value, 2,048 nodes,
   depth 32, 128 KiB diff, 256 file changes, 64 plan steps — `transcript.rs:22`). Input is
-  the in-process `%Ouroboros.Interactive.Event{}` / coding struct — uncapped, so these
-  ceilings are load-bearing, not decorative.
+  the in-process `%Ouroboros.Interactive.Event{}` — uncapped, so these ceilings are
+  load-bearing, not decorative.
 - `Ouroboros.Web.Transcript` — port of `project()`
   (`tui/src/ui/transcript_cells.rs:841`): delta accumulation into one message cell per
   turn, thinking 3-state, tool call/result correlation by `call_id`, exploration folding,

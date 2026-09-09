@@ -1642,7 +1642,6 @@ defmodule Ouroboros.Web.Live.DeckLive do
         class={[
           "ouro-row",
           "ouro-row-#{@entry.group}",
-          @entry.depth == 1 && "ouro-row-nested",
           @selected? && "ouro-row-open",
           (@entry.group == :settled and Rail.failed?(@row)) && "ouro-row-failed"
         ]}

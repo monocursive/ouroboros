@@ -132,7 +132,7 @@ defmodule Ouroboros.Gateway.ProtocolDocsTest do
   # ---------------------------------------------------------------------------
 
   # Every method `docs/TUI.md` §2.4's two tables name in their first column. A cell may
-  # write a family as `coding.info/replay/subscribe` or as `interactive.send_message` /
+  # write a family as `interactive.info/replay/subscribe` or as `interactive.send_message` /
   # `follow_up`, so a bare word inherits the band of the last dotted name beside it.
   defp catalog do
     @tui

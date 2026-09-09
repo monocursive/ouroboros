@@ -7,6 +7,13 @@ claim about the field cites a report in [research/agent-ux-2026/](research/agent
 and every claim about this codebase was re-read in the source. Companion to
 [ARCHITECTURE.md](ARCHITECTURE.md), [TUI.md](TUI.md), and [FLEET.md](FLEET.md).
 
+> **Superseded in part, September 2026.** Everything this document records about teams,
+> delegation (G1), the orchestration DAG and the control planner describes a plane that
+> was deleted; see [the core reduction](proposals/core.md) §3 D3. The rows are left as
+> the dated record they are. A session hands work to a child through the native `agent`
+> tool now, and the child's progress arrives as `subagent` events in its parent's
+> transcript.
+
 ## 0. Summary
 
 **The bar.** By mid-2026 the top five developer coding agents by use are Claude Code

@@ -818,10 +818,8 @@ defmodule Ouroboros.Web.Live.DeckLiveTest do
     test "is detected immediately and draws the ended divider", %{conn: conn} do
       id = session_id()
       # `:closed`, not `:completed`: the interactive plane's terminal statuses are
-      # `[:closed, :failed, :cancelled, :lost]` (`interactive/state.ex:201`) and
-      # `:completed` belongs to the coding plane. The rail's `terminal?/1` carries the
-      # union of both because it draws both — but a test of *this* plane has to use this
-      # plane's vocabulary or it proves nothing.
+      # `[:closed, :failed, :cancelled, :lost]`, and this test has to use that vocabulary
+      # or it proves nothing.
       _plane = plane(id: id, status: :closed, backlogs: [{:ok, [said(1, "all done")]}])
 
       {:ok, _view, html} = live(conn, "/s/interactive/#{id}")

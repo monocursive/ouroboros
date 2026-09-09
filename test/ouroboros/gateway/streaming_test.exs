@@ -275,33 +275,6 @@ defmodule Ouroboros.Gateway.StreamingTest do
     end
   end
 
-  describe "the coding plane streams through the same machinery" do
-    test "its events arrive as coding.event and name the task the way its struct does", %{
-      client: client
-    } do
-      {ref, id} = start_coding_task()
-
-      backlog = call(client, "coding.subscribe", %{"id" => id, "cursor" => 0})["result"]
-      assert is_list(backlog)
-
-      assert_receive {:ouroboros_test_adapter_started, _run, _request, adapter}, @receive_timeout
-      assert :ok = HarnessAdapter.emit(adapter, :output_text_final, %{"text" => "objective met"})
-
-      event = await_event(client, "coding.event", "output_text_final")
-
-      # The notification's `id` is the task, under the name every other method uses; the
-      # struct inside it calls the same value `task_id`. A client decoding these needs
-      # both spellings, which is why the golden fixture carries them.
-      assert event["params"]["id"] == id
-      assert event["params"]["event"]["task_id"] == id
-      assert event["params"]["event"]["_struct"] == "Ouroboros.Coding.Event"
-
-      assert call(client, "coding.unsubscribe", %{"id" => id})["result"] == "ok"
-      assert :ok = HarnessAdapter.finish(adapter)
-      _ = ref
-    end
-  end
-
   describe "a stream that has already ended" do
     test "a terminal session answers the backlog and then stream.ended", %{client: client} do
       {ref, id} = start_session()
@@ -504,36 +477,7 @@ defmodule Ouroboros.Gateway.StreamingTest do
       assert unknown["error"]["code"] == -32602
     end
 
-    test "the coding plane excerpts and details through the same code", %{client: client} do
-      {_ref, id} = start_coding_task()
-
-      assert is_list(call(client, "coding.subscribe", %{"id" => id, "cursor" => 0})["result"])
-
-      assert_receive {:ouroboros_test_adapter_started, _run, _request, adapter}, @receive_timeout
-      assert :ok = HarnessAdapter.emit(adapter, :file_change, %{"diff" => @diff})
-
-      event = await_event(client, "coding.event", "file_change")["params"]["event"]
-
-      assert event["payload"]["diff"]["_bytes"] == byte_size(@diff)
-      assert byte_size(event["payload"]["diff"]["_excerpt"]) == 131_072
-      assert event["task_id"] == id
-      assert event["_struct"] == "Ouroboros.Coding.Event"
-
-      detail =
-        call(
-          client,
-          "coding.event_detail",
-          %{"id" => id, "sequence" => event["sequence"]},
-          @detail_buffer
-        )["result"]
-
-      assert detail["payload"]["diff"] == @diff
-      assert detail["task_id"] == id
-
-      assert :ok = HarnessAdapter.finish(adapter)
-    end
-
-    test "both detail methods are advertised, so a client can feature-detect them" do
+    test "the detail method is advertised, so a client can feature-detect it" do
       # A fresh connection: `hello` is answered once, and the one this file's setup made is
       # already past its handshake.
       {:ok, second} =
@@ -544,7 +488,6 @@ defmodule Ouroboros.Gateway.StreamingTest do
       methods = hello(second)["result"]["methods"]
 
       assert "interactive.event_detail" in methods
-      assert "coding.event_detail" in methods
     end
   end
 
@@ -795,19 +738,6 @@ defmodule Ouroboros.Gateway.StreamingTest do
     {ref, id}
   end
 
-  defp start_coding_task do
-    id = "gateway-coding-#{System.unique_integer([:positive, :monotonic])}"
-
-    assert {:ok, ref} =
-             Ouroboros.CodingSession.start("inspect the workspace",
-               id: id,
-               provider: @provider,
-               workspace: File.cwd!()
-             )
-
-    {ref, id}
-  end
-
   defp send_message(ref, input) do
     assert {:ok, _turn} = InteractiveSession.send_message(ref, input)
 
@@ -974,46 +904,6 @@ defmodule Ouroboros.Gateway.StreamingTest do
       await_retired(session.id)
       _ = Ouroboros.Interactive.Store.delete(session.id)
     end)
-
-    Enum.each(Ouroboros.Coding.Store.list(), fn task ->
-      unless Ouroboros.Coding.TaskState.terminal?(task) do
-        _ = Ouroboros.CodingSession.cancel(task.id)
-        await_coding_terminal(task.id)
-      end
-
-      await_coding_retired(task.id)
-      _ = Ouroboros.Coding.Store.delete(task.id)
-    end)
-  end
-
-  defp await_coding_terminal(id, attempts \\ 200)
-  defp await_coding_terminal(_id, 0), do: flunk("the coding task never reached a terminal status")
-
-  defp await_coding_terminal(id, attempts) do
-    case Ouroboros.Coding.Store.get(id) do
-      {:ok, task} ->
-        if Ouroboros.Coding.TaskState.terminal?(task) do
-          :ok
-        else
-          Process.sleep(10)
-          await_coding_terminal(id, attempts - 1)
-        end
-
-      _other ->
-        :ok
-    end
-  end
-
-  defp await_coding_retired(id, attempts \\ 200)
-  defp await_coding_retired(_id, 0), do: flunk("the coding coordinator never retired")
-
-  defp await_coding_retired(id, attempts) do
-    if is_nil(Ouroboros.Coding.Task.whereis(id)) do
-      :ok
-    else
-      Process.sleep(10)
-      await_coding_retired(id, attempts - 1)
-    end
   end
 
   # Polls the plane's durable record until the whole turn is there: every output the

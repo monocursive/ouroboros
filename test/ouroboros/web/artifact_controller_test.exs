@@ -112,10 +112,9 @@ defmodule Ouroboros.Web.ArtifactControllerTest do
   end
 
   describe "the plane" do
-    test "only the two that exist are addressable", %{cookie: cookie} do
+    test "only the one that exists is addressable", %{cookie: cookie} do
       assert fetch(cookie, "/artifact/interactive/s1/#{@sha}").status == 404
       assert fetch(cookie, "/artifact/coding/s1/#{@sha}").status == 404
-      assert fetch(cookie, "/artifact/teams/s1/#{@sha}").status == 404
       assert fetch(cookie, "/artifact/Interactive/s1/#{@sha}").status == 404
     end
   end

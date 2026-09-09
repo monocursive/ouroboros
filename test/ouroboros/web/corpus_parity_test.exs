@@ -19,14 +19,11 @@ defmodule Ouroboros.Web.CorpusParityTest do
     UserSteer
   }
 
-  # The event types this corpus carries, as the runtime spells them. `delegation` (G1) and
-  # `status` (D6) are Ouroboros's own and so are not in `canonical_types/0`. Spelled out
-  # rather than derived with `String.to_existing_atom/1` so a fixture carrying a type this
-  # build does not know fails loudly here instead of decoding into something plausible.
-  @types Map.new(
-           Presentation.canonical_types() ++ [:delegation, :status],
-           &{Atom.to_string(&1), &1}
-         )
+  # The event types this corpus carries, as the runtime spells them. `status` (D6) is
+  # Ouroboros's own and so is not in `canonical_types/0`. Spelled out rather than derived
+  # with `String.to_existing_atom/1` so a fixture carrying a type this build does not know
+  # fails loudly here instead of decoding into something plausible.
+  @types Map.new(Presentation.canonical_types() ++ [:status], &{Atom.to_string(&1), &1})
 
   # `Ouroboros.Gateway.Wire` writes the provider as its string; the in-process subscriber
   # holds the atom the runtime minted.
@@ -38,8 +35,6 @@ defmodule Ouroboros.Web.CorpusParityTest do
 
   # Mirrors `presentation_corpus.rs`'s own `event/1`: the same file, the same
   # `params.event` object, rebuilt into the struct an in-process reader would be holding.
-  # A coding-plane frame names its subject `task_id` rather than `session_id`; nothing in
-  # either module reads that field, and carrying it keeps the struct honest anyway.
   defp event(name) do
     frame = name |> Golden.path() |> File.read!() |> JSON.decode!()
     fields = get_in(frame, ["params", "event"])
@@ -758,19 +753,10 @@ defmodule Ouroboros.Web.CorpusParityTest do
   end
 
   # ------------------------------------------------------------------------------------
-  # The two envelope fixtures that also carry a renderable payload
+  # The envelope fixture that also carries a renderable payload
   # ------------------------------------------------------------------------------------
 
-  describe "the envelope fixtures that also carry a renderable payload" do
-    # Mirrors `the_coding_notification_is_a_finished_run_and_reads_as_one`. `run_completed`
-    # gets no `event_*` frame of its own because it already has one: the coding
-    # notification that has pinned the second plane's envelope since the corpus existed.
-    # The kind is still a kind a client renders, so its words are asserted here rather than
-    # left to the fixture that happens to carry them.
-    test "the_coding_notification_is_a_finished_run_and_reads_as_one" do
-      assert chat_note(cell("coding_event_notification")) == "run finished · objective satisfied"
-    end
-
+  describe "the envelope fixture that also carries a renderable payload" do
     # Mirrors `an_excerpted_patch_is_drawn_and_says_its_counts_are_only_the_prefix`. The
     # gateway replaces an oversized leaf with `{"_excerpt", "_bytes"}`, and a patch that
     # arrived as one is still worth colouring — but its `+`/`-` counts describe the prefix
@@ -883,23 +869,6 @@ defmodule Ouroboros.Web.CorpusParityTest do
   # ------------------------------------------------------------------------------------
 
   describe "the types this runtime mints itself" do
-    # Mirrors `a_settled_delegation_is_a_block_with_a_digest_and_no_result`. A delegation
-    # is a fact about work this session caused, so the parent's transcript draws it — with
-    # a digest of the result and never the result, which is the child's own record.
-    test "a_settled_delegation_is_a_block_with_a_digest_and_no_result" do
-      block = runtime_block(cell("event_delegation"))
-
-      assert block.label == "Delegation completed"
-
-      assert block.detail ==
-               "task task-0000000000000000000000002 · ouroboros@worker · result digest b7e40aa1"
-
-      assert block.tone == :success
-
-      assert block.key == nil,
-             "nothing local ever drew this, so there is nothing to dedupe against"
-    end
-
     # Mirrors `a_runtime_status_event_reads_as_a_named_note`. `status` is Ouroboros's own
     # type and no client models it, so it takes the same named-note path an unrecognised
     # provider kind does.
@@ -927,7 +896,6 @@ defmodule Ouroboros.Web.CorpusParityTest do
         "event_approval_requested_subagent",
         "event_approval_resolved",
         "event_command_output_delta",
-        "event_delegation",
         "event_file_change",
         "event_input_accepted",
         "event_input_accepted_steer",
@@ -991,8 +959,7 @@ defmodule Ouroboros.Web.CorpusParityTest do
     end
 
     # The one transform `from_event/1` applies before reading is `wire_shape/1`
-    # (`presentation.ex:953`), which flattens the atoms an in-process coding-plane payload
-    # can carry. A fixture payload has already been through `Ouroboros.Gateway.Wire`, so
+    # (`presentation.ex:953`), which flattens the atoms an in-process payload can carry. A fixture payload has already been through `Ouroboros.Gateway.Wire`, so
     # applying it again must change nothing — otherwise every literal above would be
     # asserting the words of a payload no reader ever holds.
     test "wire_shape is the identity over a payload the wire already encoded" do

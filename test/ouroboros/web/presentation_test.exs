@@ -18,7 +18,6 @@ defmodule Ouroboros.EventPresentationTest do
     ApprovalResolved,
     CommandOutput,
     Compaction,
-    DelegationEvent,
     Diff,
     Failure,
     FileChange,
@@ -539,25 +538,6 @@ defmodule Ouroboros.EventPresentationTest do
 
       assert %SubagentEvent{phase: {:other, ""}} =
                Presentation.from_event(event(:provider_event, %{"kind" => "subagent"}))
-    end
-
-    test "a delegation is its own runtime-native type in the same sequence space" do
-      assert %DelegationEvent{
-               delegation_id: "del-1",
-               task_id: "task-2",
-               task_node: "coder@host",
-               status: "completed",
-               result_digest: "sha-9"
-             } =
-               Presentation.from_event(
-                 event(:delegation, %{
-                   "delegation_id" => "del-1",
-                   "task_id" => "task-2",
-                   "task_node" => "coder@host",
-                   "status" => "completed",
-                   "result_digest" => "sha-9"
-                 })
-               )
     end
   end
 

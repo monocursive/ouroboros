@@ -1262,27 +1262,6 @@ defmodule Ouroboros.Web.TranscriptTest do
 
       assert detail == "archived 1 message · archive arch-7"
     end
-
-    test "a delegation block carries a digest and never the child's result" do
-      cells =
-        project([
-          event(
-            :delegation,
-            %{
-              "task_id" => "task-2",
-              "task_node" => "coder@host",
-              "status" => "completed",
-              "result_digest" => "sha-9"
-            },
-            sequence: 1
-          )
-        ])
-
-      assert [%Cell.Runtime{label: "Delegation completed", detail: detail, tone: :success}] =
-               cells
-
-      assert detail == "task task-2 · coder@host · result digest sha-9"
-    end
   end
 
   describe "lifecycle, queue and provider notes" do
@@ -1660,7 +1639,6 @@ defmodule Ouroboros.Web.TranscriptTest do
         {:provider_event, %{"kind" => "operator_shell", "command_digest" => "d"}},
         {:provider_event, %{"kind" => "compaction", "trigger" => "manual"}},
         {:provider_event, %{"kind" => "subagent", "phase" => "spawned", "task_id" => "t"}},
-        {:delegation, %{"task_id" => "t", "status" => "started"}},
         {:a_kind_no_build_knows, %{"reason" => "novel"}}
       ]
 

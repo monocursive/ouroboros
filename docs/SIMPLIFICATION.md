@@ -1,24 +1,25 @@
 # Runtime simplification, September 2026
 
-The audit led to shared mechanisms at existing boundaries. Batch tasks, interactive
-sessions, native subagents, durable teams, and BEAM/WASM upgrades retain their distinct
-lifetimes and APIs.
+The audit led to shared mechanisms at existing boundaries. Interactive sessions, native
+subagents, and BEAM/WASM upgrades retain their distinct lifetimes and APIs.
+
+> The coding, team, orchestration and control planes this document also covered were
+> deleted in September 2026; see [the core reduction](proposals/core.md) §3 D3. The
+> merge of the interactive and coding persistence schemas it once proposed is moot.
 
 ## Ownership and restart matrix
 
 The root remains `rest_for_one`. Its durable directory owner, effect ledger, model
 admission, permission authorities, stores, and workspace manager are upstream of their
-consumers. Coding/interactive/team stores remain above the workspace manager because it
-reads their checkpoints to reconstruct reservations before admitting work.
+consumers. The interactive store remains above the workspace manager because it reads
+its checkpoints to reconstruct reservations before admitting work.
 
 | Replaced owner | Must restart | Must survive |
 |---|---|---|
 | Durable directory owner or effect ledger | All execution consumers | No consumer may retain stale authority |
 | Model admission | Jido and downstream execution consumers | Effect ledger |
 | Workspace manager | Session coordinators and downstream surfaces | Durable stores |
-| Coding registry | Coding task supervisor and recovery | Workspace reservations, interactive sessions, scheduler |
-| Interactive registry | Interactive task supervisor and recovery | Coding sessions and workspace reservations |
-| Automation store | Later automation owners | Session planes and permission authorities |
+| Interactive registry | Interactive task supervisor and recovery | Workspace reservations |
 | CodeIntel supervisor after exhausting its restart budget | Its language-server pool | WASM, Desktop, MCP and session owners |
 | WASM supervisor | Its pool, then boot recovery | Desktop, MCP, CodeIntel and web |
 | Gateway or web | Its own connections | Durable owners and unrelated helpers |
@@ -37,15 +38,9 @@ boundary. Its linked acceptor waits for the runtime application to finish starti
 before handling requests. An immediate `runtime.shutdown` therefore cannot interrupt
 application startup and bypass removal of the gateway and runtime-owner markers.
 
-`config :ouroboros, automation_enabled: false` omits the orchestration/Control stores,
-scheduler and optional Control server. The default is `true`, preserving existing
-behavior. Permission rules and grants, native subagents, coding, interactive sessions,
-and teams remain available. Status reports orchestration as disabled. Disabling this
-setting does not delete saved plans or runs; re-enabling loads their checkpoints.
-
 ## Checkpoint publication
 
-`Storage.Records` is shared by Coding, Interactive, Team, Orchestration, and Control.
+`Storage.Records` is the shared record store; Interactive is its remaining owner today.
 Owners retain validation, version checks, and domain transitions. Updating an existing
 record writes only that record, including its own retained history.
 

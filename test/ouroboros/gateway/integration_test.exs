@@ -332,7 +332,7 @@ defmodule Ouroboros.Gateway.IntegrationTest do
 
     # Same connection, immediately afterwards.
     assert is_binary(call(client, "upgrade.status")["result"]["mode"])
-    assert is_list(call(client, "agents.list")["result"])
+    assert is_list(call(client, "interactive.list")["result"])
   end
 
   test "two clients are independent", %{port: port, client: client} do
@@ -361,8 +361,8 @@ defmodule Ouroboros.Gateway.IntegrationTest do
 
     # Both surviving connections still answer. What they answer is whatever the shared
     # runtime holds at this moment, which the rest of the suite is free to change.
-    assert is_list(call(client, "agents.list")["result"])
-    assert is_list(call(other, "teams.list")["result"])
+    assert is_list(call(client, "interactive.list")["result"])
+    assert is_list(call(other, "runtime.providers")["result"])
   end
 
   @documented_codes [
