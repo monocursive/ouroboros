@@ -1022,7 +1022,7 @@ fn ctrl_p_opens_a_searchable_palette_with_coding_and_distribution_groups() {
     let screen = render(&mut app, 120, 34);
     assert!(screen.contains("Coding"), "{}", screen.text());
     assert!(screen.contains("Runtime & distribution"));
-    assert!(screen.contains("Agents"));
+    assert!(screen.contains("Nodes"));
 
     type_text(&mut app, "settings");
     let screen = render(&mut app, 120, 34);

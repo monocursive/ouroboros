@@ -181,8 +181,9 @@ fn an_approval_this_client_is_holding_moves_its_row_into_needs_input() {
 fn an_offline_owners_rows_stay_in_their_group_and_keep_the_unavailable_mark() {
     let mut app = fleet();
 
-    // The owner drops off the fleet: `runtime.status` no longer reports it, so the row is
-    // retained from the previous complete list rather than deleted.
+    // The owner drops off the fleet: `fleet.status` calls it offline, and the next
+    // complete list omits its rows. They are retained from the previous one rather than
+    // deleted.
     answer(
         &mut app,
         Tag::Status,
@@ -190,25 +191,52 @@ fn an_offline_owners_rows_stay_in_their_group_and_keep_the_unavailable_mark() {
             "node": "ouroboros@alpha",
             "role": "core",
             "connected_nodes": ["ouroboros@beta"],
-            "availability": {}
+            "availability": {},
+            "cluster": {
+                "fleet": {
+                    "machines": [{
+                        "node": "ouroboros@gamma",
+                        "machine": "gamma",
+                        "state": "offline",
+                        "role": "core",
+                        "compatibility": "compatible"
+                    }]
+                }
+            }
         }),
     );
+
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!(interactive_rows()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["id"] != "session-offline")
+            .cloned()
+            .collect::<Vec<_>>()),
+    );
+
     app.apply(Msg::Tick);
 
     let rows = app.sessions.triaged();
-    let offline = rows.iter().find(|row| row.session.id == "session-offline");
 
-    if let Some(row) = offline {
-        assert!(
-            row.session.last_known,
-            "a retained row says it is a retained row"
-        );
-        assert_eq!(
-            row.group,
-            Triage::Working,
-            "unreachable is not the same claim as needs-input"
-        );
-    }
+    let offline = rows
+        .iter()
+        .find(|row| row.session.id == "session-offline")
+        .expect("a row whose owner went offline is retained, not deleted");
+
+    assert!(
+        offline.session.last_known,
+        "a retained row says it is a retained row"
+    );
+
+    assert_eq!(
+        offline.group,
+        Triage::Working,
+        "unreachable is not the same claim as needs-input"
+    );
 }
 
 // ---------------------------------------------------------------------------------------
