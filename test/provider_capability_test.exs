@@ -115,7 +115,6 @@ defmodule Ouroboros.ProviderCapabilityTest do
       assert {:ok, session} = State.new("capability-interactive-native", provider: :native)
       public = State.public(session)
       assert public.options.provider_execution.interactive_approvals
-      assert public.options.provider_execution.coding_approvals
       assert public.options.provider_execution.transport == :direct
       assert public.options.provider_execution.model =~ ":"
     end

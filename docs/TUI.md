@@ -454,9 +454,9 @@ adapters still accept the option, so it used to travel through and do nothing:
 `claude --print --permission-mode default` is never given a `--permission-prompt-tool`
 and denies every permission-needing tool silently. `interactive.start` now answers
 `-32006` with `data` `["unsupported_approval_mode", {provider, transport, requested,
-supported, reason: "no_approval_channel", message, plane}]` — the same `[tag, map]` shape
-as `unsupported_safety_options`, so `model::refusal` renders it as one sentence — whether
-`:prompt` was stated or injected by the plane default. `supported` names the modes that
+supported, reason: "no_approval_channel", message, plane}]` — a `[tag, map]` shape whose
+`message` `model::refusal` renders as one sentence — whether `:prompt` was stated or
+injected by the plane default. `supported` names the modes that
 work. Codex on app-server, the ACP providers, `pi` and `amp` are untouched. This stands until the Claude approval bridge (AGENT_EXPERIENCE Track C2) makes
 `:prompt` true for those providers.
 
