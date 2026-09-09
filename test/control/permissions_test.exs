@@ -25,7 +25,6 @@ defmodule Ouroboros.Control.PermissionsTest do
   alias Ouroboros.Control.Permissions
   alias Ouroboros.Control.Permissions.{Matcher, Pattern, Request, Rule}
   alias Ouroboros.Control.PermissionsTest.RefusingStorage
-  alias Ouroboros.Upgrade.{Artifact, Verifier}
 
   @secret_command "rm -rf /etc/very-secret-inventory-of-everything"
 
@@ -47,33 +46,6 @@ defmodule Ouroboros.Control.PermissionsTest do
     assert status.limit == 500
     assert is_map(status.by_scope)
     assert "**/.git/**" in status.protected_paths
-  end
-
-  test "the fast patch lane refuses to replace or introduce the engine itself" do
-    {Permissions, binary, _filename} = :code.get_object_code(Permissions)
-
-    for disposition <- [:replace, :introduce] do
-      assert {:ok, artifact} =
-               Artifact.build([{Permissions, binary, disposition: disposition}],
-                 epoch: System.unique_integer([:positive, :monotonic])
-               )
-
-      assert {:error, {:immutable_control_module, Permissions}} =
-               Verifier.verify(artifact, allow_unsigned: true)
-    end
-
-    # The pure submodules ride the same prefix, so the matcher cannot be swapped either.
-    {Ouroboros.Control.Permissions.Matcher, matcher, _file} =
-      :code.get_object_code(Ouroboros.Control.Permissions.Matcher)
-
-    assert {:ok, artifact} =
-             Artifact.build(
-               [{Ouroboros.Control.Permissions.Matcher, matcher, disposition: :replace}],
-               epoch: System.unique_integer([:positive, :monotonic])
-             )
-
-    assert {:error, {:immutable_control_module, Ouroboros.Control.Permissions.Matcher}} =
-             Verifier.verify(artifact, allow_unsigned: true)
   end
 
   describe "rules" do

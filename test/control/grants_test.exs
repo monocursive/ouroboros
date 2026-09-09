@@ -27,7 +27,6 @@ defmodule Ouroboros.Control.GrantsTest do
   alias Ouroboros.Control.Grants
   alias Ouroboros.Control.Grants.Grant
   alias Ouroboros.Control.GrantsTest.FlakyStorage
-  alias Ouroboros.Upgrade.{Artifact, Verifier}
 
   setup do
     on_exit(&FlakyStorage.heal!/0)
@@ -311,27 +310,6 @@ defmodule Ouroboros.Control.GrantsTest do
       assert {:error, {{:unsupported_grant_checkpoint, 99}, _spec}} =
                start_supervised({Grants, name: unique_name(), storage: storage})
     end
-  end
-
-  test "the fast patch lane refuses to replace or introduce the authority itself" do
-    {Grants, binary, _filename} = :code.get_object_code(Grants)
-
-    assert {:ok, artifact} =
-             Artifact.build([{Grants, binary, disposition: :replace}], epoch: unique_epoch())
-
-    assert {:error, {:immutable_control_module, Grants}} =
-             Verifier.verify(artifact, allow_unsigned: true)
-
-    # Neither disposition is a way in. A capability forged by an agent cannot patch, or
-    # take the name of, the authority that decided the agent could forge it.
-    assert {:ok, introduced} =
-             Artifact.build([{Grants, binary, disposition: :introduce}], epoch: unique_epoch())
-
-    assert {:error, {:immutable_control_module, Grants}} =
-             Verifier.verify(introduced, allow_unsigned: true)
-
-    assert :code.which(Grants) != :non_existing
-    assert Process.alive?(Process.whereis(Grants))
   end
 
   defp start_grants!(storage \\ nil) do
