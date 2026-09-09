@@ -134,6 +134,11 @@ node, so a copied `fleet/` directory needs `members` edited too, on both sides. 
 operator who manages certificates themselves can skip the profile entirely and set
 `OUROBOROS_DIST_TLS_OPTFILE` and the variables above directly.
 
+A machine leaves the same way it arrived, by hand: run `ouro fleet leave` on the machine
+itself to retire its own identity and owned EPMD, and take it out of `members` in every
+remaining machine's `fleet/profile.json` — there is no revocation authority and no signed
+roster to distribute.
+
 Ports: allow the EPMD port and the distribution range between the private addresses only.
 The gateway port stays loopback-only.
 

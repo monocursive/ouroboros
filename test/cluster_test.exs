@@ -235,8 +235,8 @@ defmodule Ouroboros.ClusterTest do
                  &(&1.id == {:machine_connectivity, peer})
                )
 
-      assert roster_guidance =~ "latest signed roster"
-      assert roster_guidance =~ "rotate the fleet"
+      assert roster_guidance =~ "add it to this machine's roster in fleet/profile.json"
+      assert roster_guidance =~ "treat the credential as exposed"
 
       # This fixture deliberately substitutes directory facts, rather than changing
       # the peer's actual CPU or protocol. Keep background probes from replacing those
