@@ -8,7 +8,8 @@ types to bring a second machine up.
 There is no enrollment product. Nothing here copies a binary to another machine, opens
 an SSH connection, mints an invitation, or installs a service. An operator builds `ouro`
 on each machine (`make ouro`), copies the binary the way they copy any other binary, and
-sets the environment below by hand. `docs/proposals/core.md` §3 records that decision.
+then either copies one cluster-identity directory between the machines or sets the
+environment below by hand. `docs/proposals/core.md` §3 records that decision.
 
 ## Roles
 
@@ -33,7 +34,9 @@ that check off for setups that place onto unlabelled nodes deliberately.
 
 ## Environment
 
-Read by `rel/env.sh.eex`, `config/runtime.exs` and `Ouroboros.Cluster`:
+Read by `rel/env.sh.eex`, `config/runtime.exs` and `Ouroboros.Cluster`, except the two
+`ERL_EPMD_*` variables, which no Ouroboros code reads: ERTS consumes them, and
+`fleet::runtime_env` is what sets them.
 
 | Variable | Meaning |
 |---|---|
@@ -86,35 +89,42 @@ silently trusted.
 
 ## Two machines, by hand
 
-`ouro fleet create` gives one machine a cluster identity in `<data dir>/fleet/`: a node
-name, a private 64-hex cookie at mode 0600, a self-signed CA and node certificate for
-TLS distribution, a private EPMD port, and generated `ssl_dist.conf` and `vm.args`. The
-packaged launcher owns that EPMD for the life of the runtime and retires it on
+Nothing below contacts a machine. An operator copies one directory, types four commands,
+and the two runtimes find each other.
+
+`ouro fleet create` gives the first machine a cluster identity in `<data dir>/fleet/`: a
+fleet id, a node name, a private 64-hex cookie at mode 0600, a self-signed CA, a node
+certificate signed by it, a private EPMD port, and generated `ssl_dist.conf` and `vm.args`.
+The packaged launcher owns that EPMD for the life of the runtime and retires it on
 `ouro fleet leave`.
 
-Two machines cluster when they read the *same* cookie and name each other. Copy the
-cookie file privately to the second machine (mode 0600, same user), then start both:
+**The profile is what the launcher trusts, not your environment.** When `<data dir>/fleet/`
+holds a profile, `ouro daemon` computes the whole cluster environment from it and *removes*
+the caller's — `apply_spawn_environment` (`tui/src/runtime.rs:1828-1866`) strips every
+`OUROBOROS_*` variable the operator exported, plus `ERL_AFLAGS`, `ERL_FLAGS`, `ERL_INETRC`,
+`ERL_LIBS`, `ERL_ZFLAGS`, `ELIXIR_ERL_OPTIONS` and every `RELEASE_*`, then applies the
+profile's. Exporting `OUROBOROS_CLUSTER_HOSTS` beside a profile therefore does nothing at
+all, silently. Edit the roster instead, with the commands below.
 
 ```sh
-# studio.example-tailnet.ts.net
-OUROBOROS_DIST=name \
-OUROBOROS_NODE=ouro-studio@studio.example-tailnet.ts.net \
-OUROBOROS_COOKIE_FILE=/Users/me/.ouroboros/fleet/cookie \
-OUROBOROS_MACHINE_NAME=studio \
-OUROBOROS_CLUSTER_STRATEGY=epmd \
-OUROBOROS_CLUSTER_HOSTS=ouro-vps@vps.example-tailnet.ts.net \
-OUROBOROS_DIST_TLS=1 OUROBOROS_DIST_TLS_OPTFILE=/Users/me/.ouroboros/fleet/ssl_dist.conf \
-  ouro daemon
+# 1. On the first machine.
+ouro fleet create --machine studio --host studio.example-tailnet.ts.net
 
-# vps.example-tailnet.ts.net — same cookie file contents, the other name in HOSTS
-OUROBOROS_DIST=name \
-OUROBOROS_NODE=ouro-vps@vps.example-tailnet.ts.net \
-OUROBOROS_COOKIE_FILE=/home/me/.ouroboros/fleet/cookie \
-OUROBOROS_MACHINE_NAME=vps \
-OUROBOROS_CLUSTER_STRATEGY=epmd \
-OUROBOROS_CLUSTER_HOSTS=ouro-studio@studio.example-tailnet.ts.net \
-OUROBOROS_DIST_TLS=1 OUROBOROS_DIST_TLS_OPTFILE=/home/me/.ouroboros/fleet/ssl_dist.conf \
-  ouro daemon
+# 2. Copy the whole directory to the second machine, privately: it holds the cluster's
+#    CA key and its cookie. Any private transport will do; scp is one.
+scp -rp ~/.ouroboros/fleet me@vps.example-tailnet.ts.net:/home/me/carried-fleet
+
+# 3. On the second machine. This signs *its* certificate with the copied CA, and takes
+#    the fleet id, the cookie and the roster from the copy. Then delete the copy.
+ouro fleet create --from /home/me/carried-fleet \
+  --machine vps --host vps.example-tailnet.ts.net
+rm -rf /home/me/carried-fleet
+
+# 4. Back on the first machine: tell it about the second.
+ouro fleet members add vps --host vps.example-tailnet.ts.net
+
+# 5. Start both.
+ouro daemon
 ```
 
 Then, from either machine:
@@ -125,19 +135,44 @@ ouro fleet doctor     # local security and, when running, live connectivity and 
 ouro new --machine vps --provider native --workspace /absolute/path/on/vps/project
 ```
 
-Both TLS certificates must chain to a CA both nodes trust, so the second machine needs
-either a node certificate signed by the first machine's CA or a CA of its own that both
-`ssl_dist.conf` files trust — `ouro fleet doctor` refuses a mismatch rather than falling
-back to cleartext. A profile is validated as a whole: `machine`, `host` and `node` must
-agree (`node` is `ouro-<machine>@<host>`), and `members` must contain this machine's own
-node, so a copied `fleet/` directory needs `members` edited too, on both sides. An
-operator who manages certificates themselves can skip the profile entirely and set
-`OUROBOROS_DIST_TLS_OPTFILE` and the variables above directly.
+`create --from` refuses a directory that is not a complete copy of a fleet directory, and
+refuses a `--machine` name the copied roster already holds. It writes no `ca-key.pem` on the
+second machine: the authority to sign a third machine stays where the key already is, so a
+third machine is another copy of the *first* machine's directory. Both machines end up with
+one CA, one cookie, one fleet id, and a certificate whose common name is
+`ouro-<machine>@<host>` with the host in a subject alternative name —
+`ouro fleet doctor` refuses a mismatch rather than falling back to cleartext.
 
-A machine leaves the same way it arrived, by hand: run `ouro fleet leave` on the machine
-itself to retire its own identity and owned EPMD, and take it out of `members` in every
-remaining machine's `fleet/profile.json` — there is no revocation authority and no signed
-roster to distribute.
+The roster is not replicated and there is no membership consensus. `ouro fleet members add`
+and `ouro fleet members remove` edit *this* machine's `fleet/profile.json`, under the same
+lock and validation `ouro fleet tag` uses, so nobody hand-edits that file; run them once per
+machine. A running node re-reads the profile on every reconnect sweep
+(`OUROBOROS_CLUSTER_RECONNECT_MS`, 1000 ms from a profile), so a roster edit reaches the
+live dialer within about a second, with no restart.
+
+A machine leaves the same way it arrived, by hand: `ouro fleet leave` on the machine itself
+retires its own identity and owned EPMD, and `ouro fleet members remove NAME` on every
+remaining machine takes it out of their rosters. There is no revocation authority and no
+signed roster to distribute; a machine whose credentials leaked is answered by re-creating
+the cluster, or by the network ACLs under "Trust".
+
+A profile written by an older Ouroboros can carry a generated `ssl_dist.conf` this build no
+longer emits, and startup refuses it by name. `ouro fleet create --regenerate` rewrites only
+`ssl_dist.conf` and `vm.args` from the profile, in place, keeping the fleet id, CA, cookie,
+roster and tombstones — which `ouro fleet leave` plus `ouro fleet create` would all destroy.
+
+**The alternative: manage the certificates yourself.** With *no* profile in
+`<data dir>/fleet/`, none of the above applies and the variables in the table are read
+exactly as set, so an operator with their own CA can set `OUROBOROS_NODE`,
+`OUROBOROS_COOKIE_FILE`, `OUROBOROS_CLUSTER_STRATEGY=epmd`, `OUROBOROS_CLUSTER_HOSTS`,
+`OUROBOROS_DIST_TLS=1` and `OUROBOROS_DIST_TLS_OPTFILE` by hand and cluster without
+`ouro fleet` at all. What it costs is stated plainly: there is no `OUROBOROS_FLEET_ID`, so
+there is no durable session-owner directory under `<data dir>/fleet/cluster-directory/`
+(`Cluster.Monitor.fleet_profile_storage/0`, `lib/ouroboros/cluster.ex:819-836`), session ownership is in-memory only, and
+`ouro fleet sessions forget` has nothing to retire. `ouro fleet status` and
+`ouro fleet doctor` also have no profile to read. Nothing checks that the optfile you
+supply is a mutual-TLS policy either; that check belongs to the profile the launcher
+computes from.
 
 Ports: allow the EPMD port and the distribution range between the private addresses only.
 The gateway port stays loopback-only.
@@ -183,10 +218,28 @@ roster revision advances — and only then asks the runtime, which refuses witho
 tombstone. Nothing infers one from a disconnect, so a partitioned owner that comes back is
 still a member and still owns its sessions.
 
+**The roster edit reaches the live dialer before the gateway is asked.**
+`Cluster.membership_hosts/0` (`lib/ouroboros/cluster.ex:1392`) re-reads the profile on
+every reconnect sweep, so this machine stops dialing the named
+machine within about a second of the write — while the gateway call is still in flight, and
+whatever the gateway answers. That is safe (removal from the seed list stops dialing; it
+disconnects nothing that is already connected) but it is the opposite order from the way the
+command reads.
+
 The runtime also refuses while that node is connected, and the roster edit is rolled back
-if it does. On success it syncs the checkpoint before reporting, and is irreversible per
-machine. It changes local discoverability evidence only: it deletes no files on the lost
-machine.
+if it does. On success it syncs the checkpoint before reporting, and the *evidence* loss is
+irreversible per machine. The roster half is not: a client that dies between the write and
+the reply leaves a tombstone with nothing retired, so
+
+```sh
+ouro fleet status                       # names every machine this roster calls gone
+ouro fleet sessions restore NAME        # puts one back into `members`
+```
+
+`ouro fleet status` and `ouro fleet doctor` both print declared-gone machines — they are out
+of `members`, so nothing else would mention them at all — and `restore` is the undo.
+`ouro fleet members add` refuses a name this roster records as gone, and names `restore`.
+Nothing here deletes a file on the lost machine.
 
 ## Gateway methods
 

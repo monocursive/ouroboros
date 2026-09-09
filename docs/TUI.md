@@ -341,7 +341,7 @@ reading.
 
 | method | maps to |
 |---|---|
-| `fleet.forget_session_owner` `{machine, accept_state_loss: true}` | Explicit local retirement of both durable session-owner evidence planes. Requires the exact machine in the validated local profile's roster *tombstones*, which `ouro fleet sessions forget --accept-state-loss` writes on this machine immediately before calling — the operator's statement that the machine is gone, never inferred from a disconnect. Refuses a connected node (the client then puts the member back), and syncs the checkpoint before success. This removes local discoverability evidence, not remote files or credentials. |
+| `fleet.forget_session_owner` `{machine, accept_state_loss: true}` | Explicit local retirement of both durable session-owner evidence planes. Requires the exact machine in the validated local profile's roster *tombstones*, which `ouro fleet sessions forget --accept-state-loss` writes on this machine immediately before calling — the operator's statement that the machine is gone, never inferred from a disconnect. Refuses a connected node (the client then puts the member back), and syncs the checkpoint before success. A client that dies between the two leaves the tombstone standing; `ouro fleet status` and `ouro fleet doctor` name it and `ouro fleet sessions restore NAME` undoes it. This removes local discoverability evidence, not remote files or credentials. |
 | `interactive.start` `{opts}` | `InteractiveSession.start/1` — opts allowlisted (`id`, `provider`, `workspace`, `model`, `system_prompt`, `max_turns`, `event_limit`, `approval_mode`, `sandbox_mode`, `reasoning_effort`, `runtime_exposure`, `worktree`, `plan`, plus fleet `machine`/`node`). `worktree` (D7) is a boolean on **both** planes: both already carried `worktree_requested` durably and provision a `git worktree` under the data directory *before* the lease is taken, so the lease and every containment check apply to the worktree rather than the repository — only the wire could not ask for one, which is what `ouro new --worktree` needed. It is deliberately not in `interactive.configure`'s set: a workspace that has been admitted and leased cannot be moved underneath a running session. The caller-generated `id` is the durable reconciliation key; a matching retry adopts the same immutable intent and a conflicting reuse is refused. Upstream readiness wait is `:infinity` by design ([interactive_session.ex:37](../lib/ouroboros/interactive_session.ex)); this method's gateway ceiling is **120s**, answers timeout with `outcome: unknown`, and runs in its own task so it never blocks the connection. A remote owner additionally requires an explicit absolute destination `workspace`. |
 | `interactive.send_message` / `follow_up` `{id, input, turn_id?}` | idempotent via caller-supplied `turn_id`; `input` remains a legacy nonempty string or a closed `{prompt, attachments?, reasoning_effort?}` object (at most 32 nonempty attachment paths; reasoning `low`/`medium`/`high`). The session canonicalizes every attachment and accepts only an existing regular file contained by its leased workspace; traversal, absolute escape, and symlink escape are refused before Harness dispatch. Two containment limits are inherent to this layer and stated rather than implied away: a hard link inside the workspace to an outside file passes (only symlinks are resolved), and the check races the provider's eventual read (authorize-then-dispatch, no lock) |
 | `interactive.retry_turn` `{id, source_turn_id, node?}` | Retries the latest failed turn from its private checkpoint, preserving attachments and reasoning effort. Operate scope only; a stable retry id per source deduplicates repeated calls. Refuses a new retry while busy or after newer work; the original request is never reconstructed from redacted transcript text. Bounded `last_turn` outcomes in session rows keep failures visible between turns. |
@@ -1058,15 +1058,37 @@ ouro fork SESSION [--node NAME] [--at TURN] [--model SPEC]
                       child. --at / --model make it an experiment, not a copy
 ouro fleet create     give this machine a cluster identity: node name, private
                       cookie, TLS materials, and a private EPMD port
+ouro fleet create --from DIR [--machine NAME] [--host HOST]
+                      make this machine the second (or third) of an existing
+                      cluster, from a privately copied `<data dir>/fleet/`: its
+                      leaf is signed by the CA in the copy and it inherits that
+                      fleet id, cookie and roster. Nothing is sent anywhere and
+                      no CA key is written here
+ouro fleet create --regenerate
+                      rewrite only this machine's generated ssl_dist.conf and
+                      vm.args from the profile it already has. The repair for a
+                      profile written by an older Ouroboros, where leave+create
+                      would mint a new fleet id, CA and cookie instead
+ouro fleet members add NAME --host HOST [--node NODE]
+ouro fleet members remove NAME
+                      edit this machine's roster, under the same lock and
+                      validation as `tag`. Not replicated: run it on each
+                      machine. A live runtime picks it up within a second
 ouro fleet sessions forget --machine NAME --accept-state-loss
                       irreversibly retire this gateway/data-dir's offline
                       session-owner evidence for a machine that is gone
+ouro fleet sessions restore NAME
+                      put a machine this roster declares gone back into it. The
+                      retired evidence does not come back; the member does
 ouro fleet tag add|remove TAG [--machine NAME]
 ouro fleet tag list [--machine NAME]
                       edit local or connected target tags; visible next probe
-ouro fleet status     expected/connected/offline machines, OS/arch, tags and TLS posture
-ouro fleet doctor     actionable profile/network/runtime checks
-ouro fleet leave      remove this stopped machine's cluster credentials safely
+ouro fleet status     expected/connected/offline machines, OS/arch, tags and TLS
+                      posture, and the machines this roster declares gone
+ouro fleet doctor     actionable profile/network/runtime checks, including any
+                      fleet-directory entry `leave` would refuse to remove
+ouro fleet leave      remove this stopped machine's cluster credentials safely,
+                      including a directory whose profile.json never landed
 ouro wasm doctor [--json] [--addr HOST:PORT] [--token-file PATH]
                       WebAssembly containment readiness on a node: helper presence
                       and phase, the world and bounds, the hook-component budget,

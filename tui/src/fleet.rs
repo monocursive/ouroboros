@@ -5354,14 +5354,19 @@ mod tests {
         assert!(error.contains("resolving fleet host"), "{error}");
         assert!(!fleet_dir(&data).exists());
 
-        for host in ["2001:db8::1", "host:epmd"] {
+        // `create` refuses both of these in `validate_host`, before any resolution is
+        // attempted, so neither reaches the "resolving to IPv4" branch the deleted
+        // `invite` arm used to exercise here; that branch is covered by
+        // `fleet_dns_requires_one_canonical_private_ipv4`. Pin each host to the refusal it
+        // actually gets rather than accepting either of two.
+        for (host, refusal) in [
+            ("2001:db8::1", "IPv6 fleet distribution is not yet supported"),
+            ("host:epmd", "contains `:`"),
+        ] {
             let error = create(&data, None, "owner", host, ephemeral_ports())
                 .unwrap_err()
                 .to_string();
-            assert!(
-                error.contains("resolving to IPv4") || error.contains("not yet supported"),
-                "{error}"
-            );
+            assert!(error.contains(refusal), "{error}");
             assert!(!fleet_dir(&data).exists());
         }
 
