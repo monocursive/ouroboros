@@ -407,15 +407,16 @@ defmodule Ouroboros.Prompt.AssemblerTest do
                runtime_exposure: false
              )
 
+    # No capture is taken, so the turn path never asks for one: `expose_turn_request/2`
+    # reads `runtime_exposure` first and hands the request through untouched
+    # (`interactive/task/turns.ex:198-204`). Asking anyway is a refusal, which is the
+    # honest answer to "wrap this in an envelope that was never captured".
     assert silent.runtime_snapshot == nil
 
-    assert {:ok, %{prompt: unwrapped}} =
+    assert {:error, :invalid_runtime_capture} =
              Exposure.wrap_turn_request_capture(
                %{prompt: "untrusted objective"},
                silent.runtime_snapshot
              )
-
-    assert unwrapped == "untrusted objective"
-    refute unwrapped =~ "<ouroboros-runtime"
   end
 end

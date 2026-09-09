@@ -125,7 +125,7 @@ defmodule Ouroboros.Gateway.GoldenTest do
     assert agent["pid"] == %{"_opaque" => "#PID<0.123.0>"}
     assert agent["id"] == "reviewer-1"
 
-    assert status["availability"]["control"] == "disabled"
+    assert status["availability"]["workspace"] == "disabled"
     assert status["availability"]["mesh"] == "available"
     assert status["forge"]["signer"] == "deny"
     assert status["forge"]["admit_possible?"] == false

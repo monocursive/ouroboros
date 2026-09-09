@@ -55,18 +55,16 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
 
   @path "docs/PROTOCOL.md"
 
-  # The five verbs `invoke/2` never sees: the four subscription verbs, because both planes
-  # register the *calling* process as the subscriber, and `runtime.shutdown`, because it
+  # The three verbs `invoke/2` never sees: the two subscription verbs, because the plane
+  # registers the *calling* process as the subscriber, and `runtime.shutdown`, because it
   # needs the listener configuration and the socket the acknowledgement must reach.
-  # `hello` is a sixth for the same reason — it owns the socket a failed handshake closes.
+  # `hello` is a fourth for the same reason — it owns the socket a failed handshake closes.
   # `Ouroboros.Gateway.ProtocolDocsTest` proves this list is exactly the set of table
   # methods with no `invoke/2` clause.
   @connection_answered ~w(
     hello
     interactive.subscribe
     interactive.unsubscribe
-    coding.subscribe
-    coding.unsubscribe
     runtime.shutdown
   )
 
