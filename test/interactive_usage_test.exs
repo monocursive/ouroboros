@@ -81,8 +81,8 @@ defmodule Ouroboros.InteractiveUsageTest do
     end
 
     test "a turn that reports repeatedly is a running total, not three turns" do
-      # `thread/tokenUsage/updated` is a value being updated. Adding each notification
-      # would multiply a Codex session's tokens by however often it reported.
+      # A turn's repeated reports are running totals, not deltas. Adding each one would
+      # multiply the turn's tokens by however often it reported.
       usage =
         fold([
           usage_event("turn-1", %{"input_tokens" => 10, "total_tokens" => 10}),
@@ -121,7 +121,7 @@ defmodule Ouroboros.InteractiveUsageTest do
     end
 
     test "cost arrives on the run terminator and is nil until a provider prices the work" do
-      # Claude puts `cost_usd` on `run_completed`, never on the `usage` event.
+      # `Cost.payload/2` puts `cost_usd` on `run_completed`, never on the `usage` event.
       assert fold([usage_event("turn-1", %{"input_tokens" => 3})]).cost_usd == nil
 
       usage =
