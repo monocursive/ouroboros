@@ -21,7 +21,15 @@ make test
 CI also runs Dialyzer, the suites with `OUROBOROS_REQUIRE_WASM` (a missing helper fails
 rather than skips), golden fixture drift, protocol-docs drift, browser journeys, and the
 Linux container proof for the wasm suites under bubblewrap. Run `make dialyzer` locally
-if you touched specs or types. If a Dialyzer failure looks garbled locally, use the
+if you touched specs or types. Run the browser journeys locally if you touched anything
+the web renders — they are the only test that drives the pages in a browser, and nothing
+in `make test` does:
+
+```sh
+npm ci && npx playwright install chromium   # once
+npm run test:browser                        # about thirty seconds, both viewports
+```
+ If a Dialyzer failure looks garbled locally, use the
 default formatter — see the note in `.github/workflows/ci.yml`.
 
 `dialyzer.ignore-warnings` pins each accepted warning by file *and line*, so adding or
