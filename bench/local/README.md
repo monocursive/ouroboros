@@ -28,7 +28,7 @@ for what each of the two measures and what neither does.
    scratch `XDG_CONFIG_HOME`, so nothing in the operator's config or data can change the
    result, and with every known model-provider API key **removed from the environment**.
 4. For each task: copies the fixture workspace to scratch, runs
-   `ouro run "<instruction>" --provider native --workspace … --approval-mode … --stream-json --timeout …`,
+   `ouro run "<instruction>" --workspace … --approval-mode … --stream-json --timeout …`,
    saves the NDJSON trajectory and the result object, then runs the task's `check.sh`.
 5. Prints the table, stops the daemon, removes the scratch directory, and exits non-zero
    on any failure.

@@ -297,7 +297,7 @@ while [ $# -gt 0 ]; do
       resume=$2
       shift 2
       ;;
-    --provider | --model | --approval-mode | --sandbox-mode | --machine | --timeout)
+    --model | --approval-mode | --sandbox-mode | --machine | --timeout)
       shift 2
       ;;
     --approve-all | --stream-json | --json | --plan | --verbose | -v)

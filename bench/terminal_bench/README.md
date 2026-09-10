@@ -98,7 +98,7 @@ The exact turn:
 
 ```sh
 OUROBOROS_DATA_DIR=/opt/ouroboros/data /opt/ouroboros/ouro run '<instruction>' \
-  --provider native --approve-all --stream-json --workspace /app --timeout 900
+  --approve-all --stream-json --workspace /app --timeout 900
 ```
 
 Six decisions worth knowing:
