@@ -668,7 +668,7 @@ fn file_stem(id: &str) -> String {
 /// The rule the fifth answer would write, named in full before it is written.
 ///
 /// `pattern` is the runtime's own `suggested_rule` — this client never invents one, which
-/// is the point of computing it server-side in `Control.Permissions.Seam`.
+/// is the point of computing it server-side in the runtime's permission engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalRule {
     pub pattern: String,

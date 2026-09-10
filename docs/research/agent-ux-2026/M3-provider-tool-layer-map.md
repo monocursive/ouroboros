@@ -3,9 +3,14 @@
 **Superseded in part (2026-09).** This map described a runtime that drove external
 agent CLIs and ran no tool loop of its own. `Ouroboros.Provider.Native` now owns an
 in-process tool loop; see [docs/REPLAY.md](../../REPLAY.md) §11 and
-`lib/ouroboros/provider/native.ex`. Vendor planes (Claude, Codex, …) still match
-§1: they hand a request to Harness and poll it. Read the sections below as the
-vendor/Harness map plus the historical constraint Native removed.
+`lib/ouroboros/provider/native.ex`.
+
+> **And further, September 2026.** The core reduction then deleted the vendor planes
+> this map still describes as live: the nine wrapped adapters, `ProcessDriver`, the ACP
+> client (`Dialect.ACP`, `Session.Jsonl`, `acp_update`) and the per-provider capability
+> matrix are gone, and `:native` is the only provider. See
+> [the core reduction](../../proposals/core.md) §3 D2. Read every section below that names
+> a vendor adapter or transport as the historical vendor/Harness map, not as what ships.
 
 Repo: `/Users/monocursive/code/ouroboros`, branch `review-fixes`. All paths absolute-relative
 to that root. Harness pinned at `mix.exs:59-60`

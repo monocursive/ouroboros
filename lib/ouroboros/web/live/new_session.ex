@@ -525,9 +525,9 @@ defmodule Ouroboros.Web.Live.NewSession do
   @doc """
   Whether `choice` is something this field can actually offer.
 
-  Asked whenever the provider changes: a model picked under the previous provider is not
-  necessarily a row under the new one, and a choice with no row would leave the form
-  claiming a model the control cannot show.
+  Asked whenever the model rows change: a choice with no row would leave the form claiming
+  a model the control cannot show. (There is no provider picker to change under it any
+  more; `:native` is the only provider — see docs/proposals/core.md §3 D2.)
   """
   @spec offers?(model_field(), model_choice()) :: boolean()
   def offers?({:rows, rows, _total}, choice), do: Enum.any?(rows, &(&1.choice == choice))

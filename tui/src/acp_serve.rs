@@ -199,7 +199,7 @@ pub struct Mode {
 ///
 /// * the approval modes are offered only where the session's own
 ///   `options.capabilities.dynamic_configuration` is truthy — the exact gate
-///   `Ouroboros.Provider.session_configuration/3` applies before anything else;
+///   `Ouroboros.Provider.session_configuration/1` applies before anything else;
 /// * `prompt` is additionally gated on `capabilities.approvals`, because
 ///   `interactive.start`/`configure` answer `["unsupported_approval_mode", …]` where no
 ///   transport can carry a question to a person;

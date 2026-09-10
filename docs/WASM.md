@@ -2387,7 +2387,11 @@ machinery — it is a backend, not a lane (D9).
   costs a node its forge; failing open would cost it the fence the forge's claim rests on.
 
 - **D27 — one setting names the permission engine for every seam, and no engine failure
-  widens anything.** `config :ouroboros, :permissions_engine` was read by the native loop, by
+  widens anything.** (As built, September 2026: the core reduction deleted the ACP lane —
+  `Ouroboros.Control.Permissions.Seam` and the whole `provider/session/` client — so this
+  setting now has **three** readers, not four; see docs/proposals/core.md §3 D2. The rest
+  of this decision stands and the paragraph is left as the dated record it is.)
+  `config :ouroboros, :permissions_engine` was read by the native loop, by
   the interactive plane's external approvals and by the interactive shell (which asks
   `Approvals.permissions_engine/2` for it). `Ouroboros.Control.Permissions.Seam` — the ACP lane,
   which is both the `session/request_permission` a vendor process sends and the
@@ -2433,7 +2437,10 @@ machinery — it is a backend, not a lane (D9).
   one is a frame a client draws and the other is a tool result a model reads; what is the same
   is the rule they name.
 
-  **What is still not covered.** Nothing on this lane by dialect:
+  **What is still not covered.** (As built, September 2026: the core reduction deleted the
+  ACP lane this paragraph is about — `Ouroboros.Provider.Session.Dialect`, `Dialect.ACP`
+  and `Session.Service` are gone; see docs/proposals/core.md §3 D2. The gap it names went
+  with the lane. Left as the dated record it is.) Nothing on this lane by dialect:
   `Ouroboros.Provider.Session.Dialect` has exactly one implementation, `Dialect.ACP`, and a
   second would reach the same three functions. Two residuals are older than this slice and are
   restated rather than removed. `fs/read_text_file` is not gated on ACP at all —
@@ -3864,7 +3871,11 @@ Each slice is PR-sized, lands green, and is useful alone.
   helper refuses it now, so the sentence is true from both ends. A symlinked `readable` root
   was granting its target: canonicalised on the daemon, refused by the helper, both tested.
 
-- **W18 — every permission seam reads one setting.** `Control.Permissions.Seam` — the ACP lane,
+- **W18 — every permission seam reads one setting.** (As built, September 2026: the core
+  reduction deleted `Control.Permissions.Seam` with the ACP lane, so that setting now has
+  **three** readers — the native loop, the interactive plane's external approvals, and the
+  interactive shell — not four; see docs/proposals/core.md §3 D2. Left as the dated record
+  it is.) `Control.Permissions.Seam` — the ACP lane,
   and the last seam that called `Control.Permissions` by name — now evaluates, records and
   suggests through the module `config :ouroboros, :permissions_engine` names, so a node given
   `Wasm.PolicyEngine` has a policy component on all four of that setting's readers rather than

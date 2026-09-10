@@ -46,11 +46,12 @@ defmodule Ouroboros.Gateway.Methods do
   literal atoms in this module, chosen by matching the client's string against an
   allowlist. Option *values* that are enums come from a literal map of the exact terms the
   upstream schema declares (`Jido.Harness.RunRequest`'s approval and sandbox modes,
-  `ApprovalResponse`'s decisions). A provider name is matched against the providers this
-  node actually serves, and a node name against `[node() | Node.list()]` — by string
-  comparison against atoms that already exist, never by conversion. An option this module
-  does not list is `-32602` naming it rather than silently dropped, the same posture the
-  planes take toward their own callers.
+  `ApprovalResponse`'s decisions). A node name is matched against `[node() | Node.list()]`
+  — by string comparison against atoms that already exist, never by conversion. (Provider
+  is no longer an option: `:native` is the only provider, so `interactive.start` has no
+  such parameter; see docs/proposals/core.md §3 D2.) An option this module does not list is
+  `-32602` naming it rather than silently dropped, the same posture the planes take toward
+  their own callers.
 
   ## Subscriptions are not invoked here
 
@@ -166,10 +167,6 @@ defmodule Ouroboros.Gateway.Methods do
   # provider that has to be installed, authenticated, or woken up legitimately takes
   # minutes on a first run. The gateway still refuses to hold a request open forever, so
   # this is the one ceiling measured in provider time rather than in control-plane time.
-
-  # `interactive.request_approval` waits for a person. Fifteen minutes is the stated
-  # ceiling: long enough that stepping away from the terminal is not a denial, short
-  # enough that a forgotten prompt does not hold a gateway task open for a shift.
 
   # B7. One operator command, and the same number `Ouroboros.Workspace.Exec` stops it at.
   # A ceiling below the runner's would kill the gateway task while the command kept
@@ -2121,11 +2118,10 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  # Matched against the providers this build actually serves, by string, so an unknown
-  # name is a parameter error rather than a new atom or a session that fails at start.
-  # Node names are compared as strings against atoms that already exist. A node this one
-  # is not connected to could not be placed on anyway, so refusing here is the same answer
-  # the placement check would give, arrived at without minting an atom.
+  # Node names are compared as strings against atoms that already exist, so an unknown name
+  # is a parameter error rather than a new atom or a session that fails at start. A node
+  # this one is not connected to could not be placed on anyway, so refusing here is the
+  # same answer the placement check would give, arrived at without minting an atom.
   defp option_value(key, :node, value) do
     case Cluster.resolve_machine(value) do
       {:error, _reason} ->

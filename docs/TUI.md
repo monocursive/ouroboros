@@ -329,7 +329,7 @@ observable after the fact via `interactive.info`, so the client reconciles by re
 | `interactive.retry_turn` `{id, source_turn_id, node?}` | Retries the latest failed turn from its private checkpoint, preserving attachments and reasoning effort. Operate scope only; a stable retry id per source deduplicates repeated calls. Refuses a new retry while busy or after newer work; the original request is never reconstructed from redacted transcript text. Bounded `last_turn` outcomes in session rows keep failures visible between turns. |
 | `interactive.steer` `{id, input}` | `steer/3` through a closed envelope (unknown params refused, structured `input` accepted). Attachment paths pass the same canonical workspace-containment gate as `send_message` before the Harness sees them, whichever public API spelling supplied them. Steering injects into the running turn and is not durably keyed by the plane: Harness mints the request id inside its worker, so it has no idempotency, and a lost acknowledgement is unreconcilable — the TUI preserves the steer for inspection (restoring it when the editor is empty, otherwise retaining the newer draft and the steer in composer history) and tells the operator to check provider/transcript state before deliberately sending it again. What *is* durable since the steer-text enrichment: the session coordinator remembers the prompt keyed by that request id and writes it, redacted, into the projected `input_accepted(kind=steer)` event, so the transcript quotes every accepted steer in replay exactly once. |
 | `interactive.configure` `{id, approval_mode?, sandbox_mode?, model?, reasoning_effort?}` | `InteractiveSession.configure/2` — moves an open session's posture instead of making the operator start a second one. Exactly four fields, a strict subset of `interactive.start`'s: everything else there is immutable start intent. Validated against what the transport declares (`Ouroboros.Provider.session_configuration/1`): the option list a start is held to, and the adapter's `normalized_values` allowlists. The reply is `{options, applies, changed}`, and `applies` is `"now"`: the one transport carries the change to a live session process rather than to the next re-execution of a CLI. The field stays on the wire because a footer has to be able to state when a change lands rather than imply it. Refusals: `["unconfigurable_session", {reason, …}]` with `reason` one of `option_not_configurable`, `value_not_accepted`, `unknown_provider`; and `["invalid_configuration", {reason, …}]` for `no_changes` and `unknown_field`. The change is durable in `State` (so a resume rebuilds the request from the options the session is actually running with) and is a runtime-native `status` event with `kind: "configured"`, the changed keys, and `applies`. **`plan` is deliberately not a fifth field** and takes its own path: it is not a Harness configuration key, so the native session is told directly (`applies: now`) through a live process call, and a session that has not opened its transport is refused as `["native_transport_unavailable", {verb: "plan", …}]`. A plan exit the session applies is folded back into the record, so `interactive.info` reports the posture the session runs under. |
-| plan mode (B2) — **not on the wire yet** | Plan mode is declared by `Ouroboros.Provider.plan_mode/2` and applied per transport, but it is *not* an `interactive.configure` key and cannot become one on the pinned harness: `Jido.Harness.Session.RequestValidator.normalize_configuration/1` refuses any key outside `model`/`reasoning_effort`/`approval_mode`/`sandbox_mode` before the transport is consulted, and `SessionRequest`'s `approval_mode` is a four-member `Zoi.enum` with no room for `:plan`. Adding the field here would advertise a key the next call rejects. Today it is reachable as `Ouroboros.Provider.Native.Session.plan_mode/2` (the same registry-by-name seam `compact`/`handoff`/`rewind` use) and as `provider_options: %{plan: true}` at start. Per transport: **native** `applies: now`, settable any time, durable across a resume; **claude** `applies: next_turn`, settable at start via `provider_options` (`--permission-mode plan`), because `claude --print` runs one process per turn; **codex** refused with `reason: pending` — the dialect could carry a planning posture and slice C3 has not wired one; **everything else** refused with `["unsupported_configuration", {provider, transport, field: "plan", reason: "transport_cannot_plan", message}]`, never accepted and ignored |
+| plan mode (B2) — **not on the wire yet** | Plan mode is *not* an `interactive.configure` key and cannot become one on the pinned harness: `Jido.Harness.Session.RequestValidator.normalize_configuration/1` refuses any key outside `model`/`reasoning_effort`/`approval_mode`/`sandbox_mode` before the transport is consulted, and `SessionRequest`'s `approval_mode` is a four-member `Zoi.enum` with no room for `:plan`. Adding the field here would advertise a key the next call rejects. It is reachable as `Ouroboros.Provider.Native.Session.plan_mode/2` (the same registry-by-name seam `compact`/`handoff`/`rewind` use) and as `provider_options: %{plan: true}` at start. There is one transport now — the native session: `applies: now`, settable any time, durable across a resume. (The per-transport matrix this row used to carry — Claude `next_turn`, Codex `pending`, and an `["unsupported_configuration", …]` refusal for the rest — went with the wrapped vendor providers; see [proposals/core.md](proposals/core.md) §3 D2.) |
 | the plan-exit approval | A planning turn that produced a plan holds its terminal event and emits an ordinary `approval_requested` with `kind: "plan_exit"`, the plan (`plan_source` of `"plan_tool"` or `"message"`), and three `options`: `auto_edit` / `prompt` / `keep_planning`, carrying ACP `kind`s `allow_always` / `allow_once` / `reject_once`. Held rather than emitted-then-asked because `Jido.Harness.Session.Lifecycle` denies any approval whose turn is no longer the worker's active one. **The three-choice modal has landed** ([view.rs `plan_exit`](../tui/src/ui/view.rs), §3): a `plan_exit` question gets its own modal whose rows are the payload's own `options` — each row's words are that option's `name` and each row sends that option's `optionId` in `provider_options["choice"]` — plus the optional `follow_up` composer. The `kind`s above still matter, because they are what a client that has *never heard of plan mode* falls back to: the ordinary four-answer overlay reaches all three answers through them (approve+session → `auto_edit`, approve+once → `prompt`, deny → `keep_planning`), and that is also the mapping `plan_exit_choice/1` applies when no explicit `choice` reached it. So a client that sends `provider_options` to a gateway too old to admit it can resend `decision`/`scope` alone and settle the session identically — losing only the follow-up, which the TUI says out loud once |
 | `interactive.rename` `{id, title}` | `InteractiveSession.rename/2` — a durable session title. Trimmed, at most **120 graphemes**, and **refused** (never silently stripped) if it contains a control character, because it is drawn into one line of every `interactive.list` row. Allowed on a terminal session: a finished conversation is exactly what someone is trying to find again. A session nobody has named takes an auto-title from the first accepted user input — the prompt's first line, at most 60 graphemes with an ellipsis, stored as `title_source: "auto"`. A rename sets `title_source: "human"`, which nothing this runtime does overwrites; an auto-title writes only where nothing has named the session, so a second prompt never renames a conversation the first one described |
 | `interactive.fork` `{id, fork_id?}` | `InteractiveSession.fork/2` — a new session carrying the parent's Native checkpoint. The parent is untouched; Native copies the durable conversation to a fresh provider-session ID before the child opens, and advertises `fork: native` from its adapter declaration. |
@@ -398,10 +398,9 @@ ten from `Ouroboros.Provider.Native`'s own `fork_option/0`. `sandbox`
 (C5) is the other derived key, and it is node-local by nature: a native session projected
 on the node that owns it says which OS sandbox its shell runs under — `sandbox-exec`,
 `bwrap`, or `none`, a string rather than a boolean — and a row projected anywhere else
-carries no `sandbox` key, which a client reads as unknown rather than as "none". Vendor
-providers run their tools behind their own boundaries and say nothing here; a native
+carries no `sandbox` key, which a client reads as unknown rather than as "none". A native
 `bash` `tool_call` event carries the same string per command. The whole
-map is `null` when neither the provider nor the transport resolves — an absent claim rather
+map is `null` when the session's sandbox does not resolve — an absent claim rather
 than a false one.
 
 **`sandbox` is not one of the eleven, and a client must not read it as absent-means-no.**
@@ -1471,8 +1470,7 @@ are therefore two workspaces to `--continue`.
 The scriptable half of `ouro new`. It resolves the runtime the same way — adopt the
 publication in this data directory, else spawn one, or attach when `--addr`/`--token-file`
 name a listener — and starts the session through the same `StartRequest` and the same
-`config::resolve_start` precedence, so a provider neither the flag nor `[defaults]` names
-is the same refusal `ouro new` makes, in the same words. A runtime this command spawned is
+`config::resolve_start` precedence for model, workspace and posture. A runtime this command spawned is
 **left running** on exit, with `the runtime is still running (pid …)` on **stderr**: a
 script that calls `ouro run` in a loop should pay one cold start, not one per prompt.
 
@@ -1532,7 +1530,10 @@ coming back; a closed connection is instead an immediately observable `lost`.
 
 Client-side preferences live in `$XDG_CONFIG_HOME/ouroboros/config.toml`
 (else `~/.config/ouroboros/config.toml`): `[defaults]`
-provider/workspace/approval_mode and `[onboarding] welcomed`. Loading is
+workspace/approval_mode/sandbox_mode and `[onboarding] welcomed`. (There is no
+`[defaults] provider`: `:native` is the only provider — see
+[proposals/core.md](proposals/core.md) §3 D2 — and a `provider` key left in an older
+file is ignored on read.) Loading is
 total — a parse failure yields defaults plus a Notice naming the file, never
 a crash; unknown keys are ignored on read (and **not** preserved through a
 save, stated in the file's own header); saves are temp+fsync+rename at 0600.
@@ -2350,10 +2351,9 @@ not "reconfigure the session"; and `ask_user`'s `kind: "question"`, because a ro
 question without giving an answer" — the one outcome the tool exists to prevent. Both
 keep their modal, still count as waiting, and still ring the needs-input bell.
 
-Client-side deliberately. The runtime's `approval_mode` is a start-time posture that
-providers renegotiate unevenly (native applies it now, Claude only at start, ACP refuses
-by declaration), while an answering robot works identically on every transport, on both
-planes, and leaves a per-request trail. The runtime's mode badge is therefore untouched;
+Client-side deliberately. The runtime's `approval_mode` is a start-time posture the native
+session applies immediately, while an answering robot works identically whatever the
+session and leaves a per-request trail. The runtime's mode badge is therefore untouched;
 the footer wears a warn-coloured `AUTO-APPROVE` badge — ranked with `PLANNING`, because
 both supersede the approval-mode badge below them — for as long as the mode is on.
 
@@ -2892,22 +2892,20 @@ rediscovered:
   modal over app-server. Deny-for-session is still `decline` — Codex has no persistent
   deny-for-session.
 - **Advanced session creation states its choices.** `/options` on the coding home
-  opens a form carrying provider, workspace and approval mode;
+  opens a form carrying model, workspace and approval mode;
   `ouro new` is the same request from a shell. Both build their parameters through one
   `model::StartRequest`, which emits a strict subset of `Gateway.Methods`
-  `@start_options` — `provider`, `workspace`, `approval_mode`, `sandbox_mode` — omits
+  `@start_options` — `model`, `workspace`, `approval_mode`, `sandbox_mode` — omits
   anything unanswered (an empty workspace box is
   *no* workspace, not `""`, which `option_value(_, :string, _)` would refuse), and never
-  sends `id`. The plane defaults to workspace write where the provider can take it;
+  sends `id`. The plane defaults to workspace write where the session can take it;
   `--sandbox-mode read_only` and the settings/files row launch a session that cannot
   edit. `/write` (ctrl+x w) starts a new session with `workspace_write` when the open
-  one cannot edit. Two places the client is stricter than the gateway, both stated in
-  the refusal: a start with no provider from any source is refused here, because letting
-  the node's default decide would be a terminal choosing which vendor runs the operator's
-  code — the config file's `[defaults] provider` satisfies this by being a choice the
-  operator made once, explicitly, and the form it prefills stays editable.
+  one cannot edit. (The client no longer requires a provider from any source: `:native`
+  is the only provider — see [proposals/core.md](proposals/core.md) §3 D2 — so there is no
+  provider choice to state or refuse.)
 - **The transcript-first coding home is the front door.** `ouro` lands on the Sessions
-  tab instead of an onboarding/provider-picker modal. The composer accepts typing and paste
+  tab instead of an onboarding modal. The composer accepts typing and paste
   immediately, before sign-in. F2/F3/F4 insert editable project exploration, change review,
   or improvement prompts without sending them. The folder, model, file access, and approval
   policy sit beside the task; `/options` exposes advanced setup.
@@ -2962,8 +2960,9 @@ rediscovered:
   identify themselves in `TERM_PROGRAM` — and an unidentified terminal is told all three
   rather than the wrong one.
 - **`,` opens settings.** Runtime facts labeled as the runtime reports them, beside
-  this client's own `[defaults]` — provider picker over the same probed list the `n`
-  dialog uses, workspace, approval mode, and sandbox mode — with an explicit
+  this client's own `[defaults]` — workspace, approval mode, and sandbox mode (there is no
+  provider picker: `:native` is the only provider, see [proposals/core.md](proposals/core.md)
+  §3 D2) — with an explicit
   `[ save ]` row (the `[ start ]` idiom) and "changed, and not written yet" stated
   until it is.
 - **Machines is a runnable fleet menu.** `/machines` (also `,` → machines) lists known

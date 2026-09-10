@@ -1,5 +1,13 @@
 # M2 — Interaction Model Map (`ouro` TUI ⇄ Ouroboros gateway)
 
+> **Superseded in part, September 2026.** This is a dated research map of a runtime that
+> drove nine wrapped vendor CLIs over several transports. The core reduction made `:native`
+> the only provider and deleted the ACP client, the per-provider capability matrix, the
+> provider picker and the `--provider` flag; see [the core reduction](../../proposals/core.md)
+> §3 D2. Any interaction below that names a provider choice, a transport choice, or an
+> `interactive.request_approval` / `grok.account.*` call describes a plane that is gone.
+> The map is left as the record it is.
+
 Repo `/Users/monocursive/code/ouroboros`, branch `review-fixes`. All citations are `file:line`.
 Scope: what a user can actually *drive* today, and through which gateway call.
 
