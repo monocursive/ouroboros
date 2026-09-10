@@ -64,9 +64,6 @@ fn shot() -> ImageCell {
         pixels: Some((1280, 720)),
         format: Some("png".into()),
         note: None,
-        sha: None,
-        media_type: None,
-        bytes: None,
     }
 }
 
@@ -131,9 +128,6 @@ fn a_placeholder_says_why_it_is_a_placeholder() {
             pixels: None,
             format: None,
             note: Some(note.into()),
-            sha: None,
-            media_type: None,
-            bytes: None,
         };
 
         let rows = draw(Cell::Image(cell), 120);
@@ -181,9 +175,6 @@ fn a_path_outside_the_workspace_is_drawn_as_text_and_never_read() {
         pixels: None,
         format: None,
         note: described.note.clone(),
-        sha: None,
-        media_type: None,
-        bytes: None,
     };
     let rows = draw(Cell::Image(cell), 200);
 
@@ -236,10 +227,9 @@ fn an_export_carries_the_path_and_never_the_picture() {
     assert!(label.contains(".ouroboros/images/image-7.png"), "{label}");
     assert!(label.contains("1280×720 png"), "{label}");
 
-    // A desktop artifact cell may hold decoded bytes (the drawable for a real image
-    // renderer), but the export is `label()`, and `label()` reaches only the path, two
-    // numbers, and a format name — never the bytes. That is what makes the export rule
-    // structural rather than a discipline someone has to remember.
+    // The export is `label()`, and `label()` reaches only the path, two numbers, and a
+    // format name — never the bytes. That is what makes the export rule structural rather
+    // than a discipline someone has to remember.
     let encoded = images::kitty(b"pretend this is a picture", 10, 4);
     assert!(
         !label.contains(&encoded),
@@ -248,22 +238,6 @@ fn an_export_carries_the_path_and_never_the_picture() {
     assert!(
         !label.contains("base64") && !label.contains('\u{1b}'),
         "and never an escape sequence: {label}"
-    );
-
-    // And the same holds for a desktop artifact that really is carrying pixels: the export is
-    // still its label, and its label still reaches no bytes.
-    let with_pixels = ImageCell {
-        sha: Some("a".repeat(64)),
-        media_type: Some("image/png".into()),
-        bytes: Some(std::sync::Arc::new(
-            b"\x89PNG\r\n\x1a\nnot really a picture".to_vec(),
-        )),
-        ..shot()
-    };
-    let drawable_label = with_pixels.label();
-    assert!(
-        !drawable_label.contains('\u{1b}') && !drawable_label.contains("PNG"),
-        "a cell that holds bytes still exports only its label: {drawable_label}"
     );
 }
 

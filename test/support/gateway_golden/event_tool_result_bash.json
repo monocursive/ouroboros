@@ -12,12 +12,11 @@
         "name": "Bash",
         "output": "412 tests, 0 failures\n"
       },
-      "provider": "claude_code",
+      "provider": "native",
       "provider_session_id": "provider-0000000000000001",
       "request_id": null,
       "semantic": {
         "data": {
-          "artifacts": [],
           "at": 1767225600000,
           "call_id": "toolu_01Bash000000000000001",
           "is_error": false,

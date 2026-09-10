@@ -4,9 +4,9 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
 
   A signature is evidence that a key was applied to some bytes. It is not evidence of
   *why*, of who asked, or of what the signer was shown when it agreed. This journal is
-  that half: one entry per request that reached policy, carrying the artifact's identity,
-  the modules and dispositions it would have loaded, the node that claimed to ask, the
-  decision, and the policy findings behind it.
+  that half: one entry per request that reached policy, carrying the manifest's identity,
+  the component it would have loaded, the node that claimed to ask, the decision, and the
+  policy findings behind it.
 
   Refusals are journaled for the same reason issuances are. A signing service whose log
   contains only successes cannot distinguish "nobody asked" from "something asked two
@@ -21,8 +21,8 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
 
   Entries are bounded. Reasons and findings are admitted only while they stay portable
   and small, because a durable log an attacker can grow by choosing its inputs is not a
-  log. History is trimmed oldest-first like `Ouroboros.Release.Journal`; an operator who
-  needs unbounded retention ships these entries somewhere that has it.
+  log. History is trimmed oldest-first; an operator who needs unbounded retention ships
+  these entries somewhere that has it.
 
   A findings map is bounded **field by field** when it does not fit as a whole. One
   requester-chosen value inside a verdict — a guest toolchain's `test_report`, which a
@@ -34,10 +34,10 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
   (or any other) already loaded in the reading VM.
   """
 
-  alias Ouroboros.Upgrade.{Beam, ModuleName, Wire}
+  alias Ouroboros.Upgrade.Wire
 
   @version 1
-  # W8. `:admitted` is the first half of a two-phase lane-W signing: the rate limit was
+  # W8. `:admitted` is the first half of a two-phase signing: the rate limit was
   # charged and the policy accepted the *source* manifest, and only then did the signing node
   # spend a compile on it (docs/WASM.md D15, D23). It is journaled as its own decision because
   # an admission is a real thing this signer did — it committed a rate-limit slot and a policy
@@ -53,9 +53,10 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
   # Small enough that every top-level key survives beside every other one.
   @max_finding_bytes 256
 
-  # What a decision was *about*, kept even when the shape of the verdict is hostile. Lane
-  # W's identity is the sha, the world, the imports and the start id; lane B's epoch and
-  # namespace are the same question asked of the other lane.
+  # What a decision was *about*, kept even when the shape of the verdict is hostile: the
+  # sha, the world, the imports and the start id. `:namespace` is an identity field the
+  # removed BEAM lane wrote (docs/proposals/core.md §4 A1) and is kept so a journal that
+  # holds one still reads back with it.
   @identity_findings [
     :lane,
     :epoch,
@@ -77,8 +78,9 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
   @typedoc """
   Which signing lane a decision was about.
 
-  `:beam` is `Ouroboros.Upgrade.Artifact`, `:wasm` is `Ouroboros.Wasm.Artifact`, and
-  `:unknown` is anything this build did not recognize as either — which is a decision
+  `:wasm` is `Ouroboros.Wasm.Artifact` and is the only lane this build signs. `:beam` is
+  the lane removed by docs/proposals/core.md §4 A1, still accepted on read so an existing
+  journal loads. `:unknown` is anything this build did not recognize — which is a decision
   worth recording rather than one worth dropping.
   """
   @type lane :: :beam | :wasm | :unknown
@@ -152,13 +154,13 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
   @doc "The journal as it is written to storage: no atoms a rebooted VM would have to intern."
   @spec to_wire(t()) :: term()
   def to_wire(%__MODULE__{} = journal),
-    do: journal |> map_module_names(&ModuleName.to_wire/1) |> Wire.dump()
+    do: journal |> map_module_names(&Wire.module_to_wire/1) |> Wire.dump()
 
   @doc "The journal as it is read from storage, resolving names this VM still knows."
   @spec from_wire(term()) :: t() | term()
   def from_wire(term) do
     case Wire.load(term) do
-      %__MODULE__{} = journal -> map_module_names(journal, &ModuleName.from_wire/1)
+      %__MODULE__{} = journal -> map_module_names(journal, &Wire.module_from_wire/1)
       other -> other
     end
   end
@@ -258,7 +260,7 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
   # to survive it. The result is still held to the entry's own budget, and if even that does
   # not fit, the identity keys are kept and everything else becomes a marker.
   defp findings(findings) when is_map(findings) and not is_struct(findings) do
-    if Beam.portable_term?(findings) and fits?(findings),
+    if Wire.portable_term?(findings) and fits?(findings),
       do: findings,
       else: per_field(findings)
   end
@@ -273,7 +275,7 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
 
   defp finding(value, depth) do
     cond do
-      Beam.portable_term?(value) and
+      Wire.portable_term?(value) and
           byte_size(:erlang.term_to_binary(value)) <= @max_finding_bytes ->
         value
 
@@ -283,7 +285,7 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
       depth > 0 and is_map(value) and not is_struct(value) ->
         Map.new(value, fn {key, inner} -> {scalar(key), finding(inner, depth - 1)} end)
 
-      not Beam.portable_term?(value) ->
+      not Wire.portable_term?(value) ->
         %{unportable: render(value)}
 
       true ->
@@ -311,7 +313,7 @@ defmodule Ouroboros.Upgrade.Signing.Journal do
 
   defp bound(term) do
     cond do
-      not Beam.portable_term?(term) -> %{unportable: render(term)}
+      not Wire.portable_term?(term) -> %{unportable: render(term)}
       byte_size(:erlang.term_to_binary(term)) > @max_detail_bytes -> %{too_large: render(term)}
       true -> term
     end

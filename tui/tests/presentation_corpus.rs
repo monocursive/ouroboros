@@ -427,74 +427,6 @@ fn a_read_folds_into_the_exploration_cell_and_counts_its_lines() {
     }
 }
 
-/// The ACP dialect names a call in prose and says what it *is* only in `kind`. The
-/// summariser reads both: the title is the row's name, the kind is what picks the verb.
-#[test]
-fn an_acp_edit_reads_as_an_edit_with_the_lines_the_call_carried() {
-    let projected = cell("event_tool_call_acp_edit");
-    let edit = tool(&projected);
-
-    assert_eq!(edit.name, "Edit lib/ouroboros/web/transcript.ex");
-    assert_eq!(edit.kind.as_deref(), Some("edit"));
-
-    assert_eq!(
-        summary(&projected),
-        (
-            "Edit".to_string(),
-            "lib/ouroboros/web/transcript.ex (+4 −3)".to_string(),
-            String::new()
-        )
-    );
-}
-
-#[test]
-fn an_acp_status_of_completed_settles_the_edit_without_an_is_error_field() {
-    let projected = cells(&["event_tool_call_acp_edit", "event_tool_result_acp_edit"]);
-
-    assert_eq!(projected.len(), 1, "{projected:?}");
-    assert_eq!(tool(&projected[0]).state, ToolState::Completed);
-    assert_eq!(
-        summary(&projected[0]),
-        (
-            "Edit".to_string(),
-            "lib/ouroboros/web/transcript.ex (+4 −3)".to_string(),
-            String::new()
-        )
-    );
-}
-
-/// A Computer Use result is two cells in a fixed order: the tool row, then the picture it
-/// produced. The image carries the sha and the size the gateway stated and no bytes — the
-/// pixels are fetched by sha through `computer_use.artifact`.
-#[test]
-fn a_computer_use_result_is_a_tool_row_and_then_a_labelled_image() {
-    let projected = cells(&["event_tool_result_computer_use"]);
-
-    assert_eq!(projected.len(), 2, "{projected:?}");
-    assert_eq!(tool(&projected[0]).name, "desktop_state");
-    assert_eq!(tool(&projected[0]).state, ToolState::Completed);
-    assert_eq!(
-        summary(&projected[0]),
-        ("desktop state".to_string(), String::new(), String::new())
-    );
-
-    match &projected[1] {
-        Cell::Image(image) => {
-            assert_eq!(image.named, "desktop capture · abababababab");
-            assert_eq!(image.pixels, Some((1512, 982)));
-            assert_eq!(image.format.as_deref(), Some("png"));
-            assert_eq!(image.media_type.as_deref(), Some("image/png"));
-            assert_eq!(image.sha.as_deref(), Some(&"ab".repeat(32)[..]));
-            assert_eq!(image.note, None);
-            assert_eq!(
-                image.label(),
-                "[image 1512×982 png · desktop capture · abababababab]"
-            );
-        }
-        other => panic!("not an image cell: {other:?}"),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // What changed
 // ---------------------------------------------------------------------------
@@ -695,7 +627,7 @@ fn the_session_lifecycle_reads_as_one_line_each() {
     // working directory, which is not a sentence worth a line.
     assert_eq!(
         chat_note(&cell("event_session_ready")),
-        "session ready · acp · stable"
+        "session ready · native · stable"
     );
 
     assert_eq!(chat_note(&cell("event_session_idle")), "session idle");
@@ -769,7 +701,6 @@ fn an_ordinary_permission_asks_with_the_command_the_reason_and_the_rule_that_wou
     let request = approval("event_approval_requested_permission");
 
     assert!(!request.question(), "a command is not a question");
-    assert!(!request.computer_use());
     assert_eq!(
         request.subject(),
         "git push --force origin main — no permission rule engine is configured on this \
@@ -1016,20 +947,8 @@ fn an_answer_rewrites_the_row_that_asked() {
 }
 
 // ---------------------------------------------------------------------------
-// The two envelope fixtures that also carry a renderable payload
+// The envelope fixture that also carries a renderable payload
 // ---------------------------------------------------------------------------
-
-/// `run_completed` gets no `event_*` frame of its own because it already has one: the
-/// coding notification that has pinned the second plane's envelope since the corpus
-/// existed. The kind is still a kind a client renders, so its words are asserted here
-/// rather than left to the fixture that happens to carry them.
-#[test]
-fn the_coding_notification_is_a_finished_run_and_reads_as_one() {
-    assert_eq!(
-        chat_note(&cell("coding_event_notification")),
-        "run finished · objective satisfied"
-    );
-}
 
 /// The gateway replaces an oversized leaf with `{"_excerpt", "_bytes"}`, and a patch that
 /// arrived as one is still worth colouring — but its `+`/`-` counts describe the prefix
@@ -1154,47 +1073,28 @@ fn the_runtimes_plan_exit_record_reads_as_a_named_provider_note() {
     );
 }
 
-/// The must-render case. ACP wraps every update it does not map in
-/// `{"kind": "acp_update", "update": …}`, and the update's own `sessionUpdate` type is the
-/// informative half — so it is lifted out and both halves are named.
+/// The must-render case. A `provider_event` this build does not model is still a line: its
+/// `kind` names what happened and whatever message it carried is the detail, because an
+/// event rendered as nothing is an event the operator was not told about.
 #[test]
-fn an_unmodelled_provider_event_is_a_line_that_names_both_halves_of_its_kind() {
+fn an_unmodelled_provider_event_is_a_line_that_names_its_kind_and_message() {
     assert_eq!(
         presentation("event_provider_event_unknown"),
         PresentationEvent::ProviderNote {
-            kind: "acp_update · terminal_output".into(),
-            detail: String::new(),
+            kind: "terminal_output".into(),
+            detail: "waiting for the container to come up".into(),
         }
     );
 
     assert_eq!(
         chat_note(&cell("event_provider_event_unknown")),
-        "provider event · acp_update · terminal_output"
+        "provider event · terminal_output — waiting for the container to come up"
     );
 }
 
 // ---------------------------------------------------------------------------
 // The types this runtime mints itself
 // ---------------------------------------------------------------------------
-
-/// A delegation is a fact about work this session caused, so the parent's transcript draws
-/// it — with a digest of the result and never the result, which is the child's own record.
-#[test]
-fn a_settled_delegation_is_a_block_with_a_digest_and_no_result() {
-    let projected = cell("event_delegation");
-    let block = runtime_block(&projected);
-
-    assert_eq!(block.label, "Delegation completed");
-    assert_eq!(
-        block.detail,
-        "task task-0000000000000000000000002 · ouroboros@worker · result digest b7e40aa1"
-    );
-    assert_eq!(block.tone, Tone::Success);
-    assert_eq!(
-        block.key, None,
-        "nothing local ever drew this, so there is nothing to dedupe against"
-    );
-}
 
 /// `status` is Ouroboros's own type and no client models it, so it takes the same
 /// named-note path an unrecognised provider kind does.
@@ -1224,7 +1124,6 @@ fn every_transcript_fixture_renders_something_a_reader_can_see() {
         "event_approval_requested_subagent",
         "event_approval_resolved",
         "event_command_output_delta",
-        "event_delegation",
         "event_file_change",
         "event_input_accepted",
         "event_input_accepted_steer",
@@ -1250,12 +1149,9 @@ fn every_transcript_fixture_renders_something_a_reader_can_see() {
         "event_session_started",
         "event_status_resumed",
         "event_thinking_delta",
-        "event_tool_call_acp_edit",
         "event_tool_call_bash",
         "event_tool_call_read",
-        "event_tool_result_acp_edit",
         "event_tool_result_bash",
-        "event_tool_result_computer_use",
         "event_tool_result_read",
         "event_turn_completed",
         "event_turn_failed",

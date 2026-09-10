@@ -1,12 +1,14 @@
 defmodule Ouroboros.Interactive.State do
   @moduledoc "Serializable domain state for one interactive coding session."
 
-  alias Ouroboros.Coding.TaskState
+  alias Ouroboros.AgentProfile
   alias Ouroboros.Interactive.Event
+  alias Ouroboros.Prompt.Assembler
   alias Ouroboros.Prompt.Trace
+  alias Ouroboros.Provider
+  alias Ouroboros.Runtime.Exposure
 
   @session_options [
-    :transport,
     :turn_runtime_timeout_ms,
     :turn_idle_timeout_ms,
     :session_idle_timeout_ms,
@@ -59,11 +61,8 @@ defmodule Ouroboros.Interactive.State do
                 :handed_off_from,
                 title_source: nil,
                 forks: 0,
-                # G1. What this conversation delegated, keyed by delegation id. Bounded
-                # by construction: a picker draws these, and a session that delegated
-                # five hundred times is a session whose rail row must still fit.
-                delegations: %{},
-                # D7. Mirrors `Ouroboros.Coding.TaskState`: the request, then the record.
+                # D7. The request, then the record: `worktree_requested` is the start
+                # option and `worktree` is what admission actually provisioned.
                 worktree_requested: false,
                 worktree: nil,
                 cursor: 0,
@@ -142,7 +141,6 @@ defmodule Ouroboros.Interactive.State do
           forked_from: String.t() | nil,
           handed_off_from: String.t() | nil,
           forks: non_neg_integer(),
-          delegations: %{optional(String.t()) => delegation()},
           cursor: non_neg_integer(),
           sequence_offset: non_neg_integer(),
           resumes: non_neg_integer(),
@@ -175,30 +173,57 @@ defmodule Ouroboros.Interactive.State do
           required(:last) => map()
         }
 
-  @typedoc """
-  One delegation this conversation started.
+  # Trusted runtime attribution, deliberately absent from public/provider options.
+  @request_options [
+    :audit_actor_id,
+    :model,
+    :provider_session_id,
+    :max_turns,
+    :runtime_timeout_ms,
+    :idle_timeout_ms,
+    :system_prompt,
+    :agent_profile,
+    :allowed_tools,
+    :disallowed_tools,
+    :add_dirs,
+    :attachments,
+    :reasoning_effort,
+    :provider_options,
+    :approval_mode,
+    :sandbox_mode,
+    :runtime_exposure
+  ]
 
-  Ids and a status, and never the objective's text: the objective is the child task's own
-  durable record, and copying it here would put one plane's content in the other's
-  checkpoint. `status` is a hint that follows the team's own record — `interactive.delegations`
-  reads the authority, and this is what a rail row can draw without asking.
-  """
-  @type delegation :: %{
-          required(:id) => String.t(),
-          required(:team_id) => String.t(),
-          required(:task_id) => String.t(),
-          required(:task_node) => node(),
-          required(:objective_digest) => String.t(),
-          required(:status) => atom(),
-          required(:created_at) => String.t(),
-          required(:updated_at) => String.t(),
-          optional(:result_digest) => String.t() | nil
-        }
-
-  # One conversation's delegations, bounded where they are written. A session that
-  # delegated past this is refused a new one rather than silently forgetting an old one:
-  # dropping the oldest would lose the link to a child task that is still running.
-  @max_delegations 100
+  # Values for these adapter options are reproducible execution policy, not
+  # credentials. Rich settings, arbitrary argv, and toolbox maps belong in the
+  # node's provider configuration and never in a durable session checkpoint.
+  #
+  # Deliberately a literal rather than a read of `Ouroboros.Provider.Native.spec/0`: this
+  # is the storage rule, and it holds even if the adapter's declaration is ever wrong.
+  # `valid_provider_options?/1` requires membership in both. Forty further names lived here
+  # for the wrapped vendor CLIs — `cli_path`, `betas`, `no_jetbrains` and the rest — and
+  # went with them; they are in `Ouroboros.Storage.RetiredAtoms` because a session record
+  # written before the reduction still has them as keys.
+  @durable_provider_options [
+    :event_limit,
+    :fork_session,
+    # R3. A turn id or ordinal naming where a native fork branches. Reproducible execution
+    # policy in exactly the sense this list means: it is the branch point a child was
+    # started at, it is worth nothing without `fork_session`, and it carries no secret.
+    :fork_to_turn,
+    :max_iterations,
+    # B2. `plan` is execution policy in the plainest sense — a read-only posture with an
+    # exit approval attached — and it is durable for the same reason `approval_mode` is: a
+    # session resumed from a checkpoint must come back in the posture it was running in.
+    :plan,
+    # G3. The two halves of subagent policy an operator may state at a start: which model
+    # children run on, and how long one may run. A child's depth, parent and task id are
+    # deliberately *not* here: this runtime sets them when it opens a child, and a request
+    # that could name them would be a request that could forge a lineage.
+    :subagent_deadline_ms,
+    :subagent_model,
+    :tool_timeout_ms
+  ]
 
   @terminal_statuses [:closed, :failed, :cancelled, :lost]
   @terminal_turn_statuses [:completed, :failed, :interrupted, :ambiguous]
@@ -207,18 +232,10 @@ defmodule Ouroboros.Interactive.State do
   def new(id, opts) when is_list(opts) do
     if Keyword.keyword?(opts) and unique_keys?(opts) do
       with :ok <- validate_session_options(opts),
+           :ok <- validate_id(id),
            :ok <- validate_parent(Keyword.get(opts, :forked_from)),
            :ok <- validate_parent(Keyword.get(opts, :handed_off_from)),
-           {:ok, base} <-
-             TaskState.new(
-               id,
-               "interactive coding session",
-               Keyword.drop(opts, @session_options ++ @struct_options),
-               # The transport decides which normalized options a session may carry, so
-               # the capability lookup needs the one this session will select. It is a
-               # session option and therefore dropped from the base's own options.
-               {:interactive, Keyword.get(opts, :transport)}
-             ),
+           {:ok, base} <- base(Keyword.drop(opts, @session_options ++ @struct_options)),
            :ok <- validate_serializable_options(opts) do
         now = timestamp()
 
@@ -252,6 +269,181 @@ defmodule Ouroboros.Interactive.State do
 
   def new(_id, _opts), do: {:error, :invalid_options}
 
+  # The workspace, provider and option envelope a session starts with, validated once and
+  # normalized into what `request/1` will hand a harness. Every refusal here is about the
+  # *start options*, which is why it answers a bare map rather than a struct: the session
+  # struct is built by `new/2` from it.
+  defp base(opts) do
+    workspace_option = Keyword.get(opts, :workspace, File.cwd!())
+    provider = Keyword.get(opts, :provider, :native)
+    sandbox_mode = Keyword.get(opts, :sandbox_mode, :workspace_write)
+    workspace_mode = Keyword.get(opts, :workspace_mode, default_workspace_mode(sandbox_mode))
+    worktree = Keyword.get(opts, :worktree, false)
+    safety = Provider.safety_options(opts)
+    assembly = assemble_prompt_options(Map.new(opts))
+
+    cond do
+      not is_atom(provider) or is_nil(provider) ->
+        {:error, :invalid_provider}
+
+      provider != :native ->
+        {:error, {:provider_removed, provider, provider_removed_message(provider)}}
+
+      not is_binary(workspace_option) ->
+        {:error, {:invalid_workspace, workspace_option}}
+
+      not valid_workspace_mode?(workspace_mode) ->
+        {:error, {:invalid_workspace_mode, workspace_mode}}
+
+      not is_boolean(worktree) ->
+        {:error, {:invalid_worktree, worktree}}
+
+      inline_environment?(opts) ->
+        {:error, :inline_environment_not_persisted}
+
+      inline_mcp_config?(opts) ->
+        {:error, :inline_mcp_config_not_persisted}
+
+      not valid_system_prompt?(Keyword.get(opts, :system_prompt)) ->
+        {:error, :invalid_system_prompt}
+
+      not valid_agent_profile?(Keyword.get(opts, :agent_profile)) ->
+        {:error, :invalid_agent_profile}
+
+      # The assembler's reason is the whole diagnosis: which option, which delimiter,
+      # which empty profile. Collapsing it to one atom sent callers to look at the
+      # profile when the fault was in `allowed_tools`.
+      match?({:error, _reason}, assembly) ->
+        {:error, {:invalid_agent_profile_options, elem(assembly, 1)}}
+
+      not valid_runtime_exposure?(Keyword.get(opts, :runtime_exposure, true)) ->
+        {:error, :invalid_runtime_exposure}
+
+      not valid_provider_options?(Keyword.get(opts, :provider_options, %{})) ->
+        {:error, {:unsafe_provider_options, provider}}
+
+      not File.dir?(Path.expand(workspace_option)) ->
+        {:error, {:invalid_workspace, Path.expand(workspace_option)}}
+
+      not valid_event_limit?(Keyword.get(opts, :event_limit, 10_000)) ->
+        {:error, :invalid_event_limit}
+
+      true ->
+        {:ok, safety_options} = safety
+        {:ok, prompt_assembly} = assembly
+        options = request_options(opts, safety_options, prompt_assembly)
+
+        {:ok,
+         %{
+           provider: provider,
+           workspace: Path.expand(workspace_option),
+           workspace_mode: workspace_mode,
+           worktree_requested: worktree,
+           event_limit: Keyword.get(opts, :event_limit, 10_000),
+           prompt_trace: Assembler.trace(prompt_assembly),
+           runtime_snapshot: capture_runtime(options),
+           options: options
+         }}
+    end
+  end
+
+  # `Ouroboros.Provider` has already decided what the two safety options may be, stated
+  # values included, so they are dropped here and merged back rather than defaulted a
+  # second time. An option it omitted must be absent from the request, not present as
+  # `nil`: absent is what leaves the harness request at `:default`.
+  defp request_options(opts, safety_options, assembly) do
+    opts
+    |> Keyword.take(@request_options)
+    |> Keyword.drop([:approval_mode, :sandbox_mode, :agent_profile])
+    |> Keyword.merge(safety_options)
+    |> Map.new()
+    |> put_system_prompt(assembly.system_prompt)
+    |> Map.put(:runtime_exposure, Keyword.get(opts, :runtime_exposure, true))
+  end
+
+  defp put_system_prompt(options, nil), do: Map.delete(options, :system_prompt)
+
+  defp put_system_prompt(options, system_prompt),
+    do: Map.put(options, :system_prompt, system_prompt)
+
+  # The boundary. `Jido.Harness.Registry` merges `config :jido_harness, :providers` over
+  # nine bundled vendor-CLI adapters, so a name this build no longer serves still resolves
+  # to an upstream adapter and would start a wrapped CLI. Refusing here, by name, is what
+  # makes `native` the only provider rather than the only *configured* one — and it is
+  # refused before a workspace lease is taken, so nothing is half-started.
+  defp provider_removed_message(provider) do
+    "provider #{inspect(provider)} was removed; `:native` is the only provider. " <>
+      "A vendor model is reachable as a native model — `anthropic:`, `openai:`, " <>
+      "`openai_codex:`, `xai:` — through OUROBOROS_NATIVE_MODEL or the `model` option."
+  end
+
+  defp valid_event_limit?(limit), do: is_integer(limit) and limit > 0 and limit <= 100_000
+
+  defp default_workspace_mode(:read_only), do: :shared_read
+  defp default_workspace_mode(_sandbox_mode), do: :exclusive
+
+  defp valid_workspace_mode?(mode), do: mode in [:shared_read, :exclusive]
+
+  defp inline_environment?(opts) do
+    Keyword.has_key?(opts, :env) or Keyword.has_key?(opts, :env_mode)
+  end
+
+  defp inline_mcp_config?(opts), do: Keyword.has_key?(opts, :mcp_config)
+
+  defp valid_provider_options?(options) when options in [nil, %{}], do: true
+
+  defp valid_provider_options?(options) when is_map(options) do
+    allowed_by_adapter =
+      case Jido.Harness.Registry.spec(:native) do
+        {:ok, spec} -> spec.provider_options
+        {:error, _reason} -> []
+      end
+
+    Enum.all?(options, fn {key, value} ->
+      atom_key = normalize_provider_option_key(key, allowed_by_adapter)
+
+      atom_key in @durable_provider_options and
+        atom_key in allowed_by_adapter and
+        Jido.Harness.Redaction.redact(value) == value
+    end)
+  end
+
+  defp valid_provider_options?(_options), do: false
+
+  defp normalize_provider_option_key(key, _allowed) when is_atom(key), do: key
+
+  defp normalize_provider_option_key(key, allowed) when is_binary(key) do
+    Enum.find(allowed, &(Atom.to_string(&1) == key))
+  end
+
+  defp normalize_provider_option_key(_key, _allowed), do: nil
+
+  defp valid_agent_profile?(nil), do: true
+  defp valid_agent_profile?(%AgentProfile{} = profile), do: AgentProfile.valid?(profile)
+  defp valid_agent_profile?(_profile), do: false
+
+  defp valid_runtime_exposure?(value), do: is_boolean(value)
+
+  defp assemble_prompt_options(options) do
+    Assembler.assemble(Map.get(options, :agent_profile),
+      system_prompt: Map.get(options, :system_prompt),
+      allowed_tools: Map.get(options, :allowed_tools),
+      disallowed_tools: Map.get(options, :disallowed_tools),
+      runtime: profile_runtime(options)
+    )
+  end
+
+  defp profile_runtime(options) do
+    Map.get(options, :runtime_exposure, true) == true and
+      match?(%AgentProfile{}, options[:agent_profile])
+  end
+
+  defp capture_runtime(%{runtime_exposure: true} = options) do
+    Exposure.capture(sandbox_mode: Map.get(options, :sandbox_mode))
+  end
+
+  defp capture_runtime(_options), do: nil
+
   @spec terminal?(t()) :: boolean()
   def terminal?(%__MODULE__{status: status}), do: status in @terminal_statuses
 
@@ -284,15 +476,13 @@ defmodule Ouroboros.Interactive.State do
     })
     |> put_provider_session_id(state.provider_session_id)
     |> reject_nil_values()
-    |> Ouroboros.Provider.apply_runtime_provider_policy(state.provider)
-    |> Ouroboros.Provider.apply_execution_directories(state.provider, :session)
   end
 
   # B2. `plan` is a session option on the wire and a provider option underneath: the
-  # native session and the Claude adapter read `provider_options.plan`, and the pinned
-  # Harness request has no field of its own for it (a fifth `approval_mode` is refused by
-  # the dependency). A session started planning therefore carries it where the adapters
-  # look; one that is not carries nothing, so the request stays byte-identical to before.
+  # native session reads `provider_options.plan`, and the pinned Harness request has no
+  # field of its own for it (a fifth `approval_mode` is refused by the dependency). A
+  # session started planning therefore carries it where the native session looks; one that
+  # is not carries nothing, so the request stays byte-identical to before.
   defp fold_plan_option(%{plan: true} = request) do
     provider_options = Map.get(request, :provider_options) || %{}
 
@@ -520,46 +710,6 @@ defmodule Ouroboros.Interactive.State do
   @spec forks(t()) :: non_neg_integer()
   def forks(%__MODULE__{} = state), do: Map.get(state, :forks, 0) || 0
 
-  @doc """
-  Every delegation this conversation started, keyed by delegation id.
-
-  Read through `Map.get/3` so a checkpoint written before delegations existed projects as
-  a session that delegated nothing rather than a missing key.
-  """
-  @spec delegations(t()) :: %{optional(String.t()) => delegation()}
-  def delegations(%__MODULE__{} = state), do: Map.get(state, :delegations) || %{}
-
-  @doc "The bound on how many delegations one conversation may hold."
-  @spec max_delegations() :: pos_integer()
-  def max_delegations, do: @max_delegations
-
-  @doc """
-  Records or updates one delegation.
-
-  Refused with `:delegation_limit_reached` for a *new* delegation past the bound; an
-  update to one already recorded always lands, because a terminal status arriving for a
-  child that is running is exactly the news this map exists to carry.
-  """
-  @spec put_delegation(t(), delegation()) :: {:ok, t()} | {:error, term()}
-  def put_delegation(%__MODULE__{} = state, %{id: id} = delegation) when is_binary(id) do
-    existing = delegations(state)
-
-    if not Map.has_key?(existing, id) and map_size(existing) >= @max_delegations do
-      {:error, {:delegation_limit_reached, @max_delegations}}
-    else
-      {:ok, %{state | delegations: Map.put(existing, id, delegation)}}
-    end
-  end
-
-  def put_delegation(%__MODULE__{}, delegation),
-    do: {:error, {:invalid_delegation, delegation}}
-
-  @doc "The child task ids this conversation started, sorted, for a nesting client."
-  @spec children(t()) :: [String.t()]
-  def children(%__MODULE__{} = state) do
-    state |> delegations() |> Enum.map(fn {_id, record} -> record.task_id end) |> Enum.sort()
-  end
-
   @doc false
   @spec count_fork(t()) :: t()
   def count_fork(%__MODULE__{} = state), do: %{state | forks: forks(state) + 1}
@@ -583,11 +733,10 @@ defmodule Ouroboros.Interactive.State do
     }
   end
 
-  # C5. Which OS sandbox a native session's shell runs under is a fact about the node
-  # that owns the session, so it is answered only where that node is this one — a row
-  # projected elsewhere carries no `sandbox` key, which a client reads as unknown rather
-  # than as "none". Vendor providers run their own tools behind their own boundaries and
-  # say nothing here.
+  # C5. Which OS sandbox a session's shell runs under is a fact about the node that owns
+  # the session, so it is answered only where that node is this one — a row projected
+  # elsewhere carries no `sandbox` key, which a client reads as unknown rather than as
+  # "none".
   defp put_sandbox_capability(capabilities, %__MODULE__{provider: :native, node: owner})
        when is_map(capabilities) do
     if owner == node() do
@@ -613,7 +762,6 @@ defmodule Ouroboros.Interactive.State do
         sandbox_mode: Map.get(state.options, :sandbox_mode),
         model: Map.get(state.options, :model),
         reasoning_effort: Map.get(state.options, :reasoning_effort),
-        transport: Map.get(state.options, :transport),
         has_system_prompt:
           projected(
             state.options,
@@ -633,26 +781,13 @@ defmodule Ouroboros.Interactive.State do
           projected(
             state.options,
             :provider_execution,
-            Ouroboros.Provider.public_execution_policy(
-              state.provider,
-              state.options,
-              surface: :interactive,
-              transport: Map.get(state.options, :transport)
-            )
+            Ouroboros.Provider.public_execution_policy(state.options, surface: :interactive)
           ),
         # Derived from the provider spec at projection time rather than stored, so a
         # session listed after a restart declares what its transport can do without a
-        # coordinator being up to ask. `nil` where the provider or transport does not
-        # resolve — an absent claim rather than a false one.
+        # coordinator being up to ask.
         capabilities:
-          projected(
-            state.options,
-            :capabilities,
-            Ouroboros.Provider.session_capabilities(
-              state.provider,
-              Map.get(state.options, :transport)
-            )
-          )
+          projected(state.options, :capabilities, Ouroboros.Provider.session_capabilities())
           |> put_sandbox_capability(state)
       }
       |> Trace.put(prompt_trace)
@@ -671,7 +806,6 @@ defmodule Ouroboros.Interactive.State do
     |> Map.put(:forked_from, forked_from(state))
     |> Map.put(:handed_off_from, handed_off_from(state))
     |> Map.put(:forks, forks(state))
-    |> Map.put(:delegations, delegations(state))
   end
 
   @doc """
@@ -698,10 +832,6 @@ defmodule Ouroboros.Interactive.State do
     |> Map.put(:events, [])
     |> Map.put(:turns, %{})
     |> Map.put(:usage, usage_summary(state))
-    # Ids, not records: a rail row nests its children by id and fetches the rest from
-    # `coding.info`, exactly as it does for everything else a row drops.
-    |> Map.put(:delegations, %{})
-    |> Map.put(:children, children(state))
   end
 
   @doc """
@@ -770,21 +900,21 @@ defmodule Ouroboros.Interactive.State do
   Folds what a provider reported spending into the session's durable usage account.
 
   Reads `:usage` events for token counters and `:run_completed` for `cost_usd`, which is
-  the only event any bundled provider puts a cost on (`claude_stream.ex:61-71`). Provider
-  key spellings vary — `input_tokens`, `inputTokens`, `input`, `prompt_tokens` all mean
-  the same number — so each counter is looked up through a list of known variants and a
-  payload that carries none of them contributes nothing at all rather than a zero.
+  the event the native loop puts a cost on (`Ouroboros.Provider.Native.Cost.payload/2`).
+  That function is the one producer of these payloads now and emits a fixed set of
+  snake_case keys, so each counter is looked up through a one-entry list and a payload that
+  carries none of them contributes nothing at all rather than a zero. The list shape is
+  kept so a future producer can add a spelling without changing the fold.
 
   ## Why a turn's reports replace rather than add
 
-  Transports disagree about what a usage event means. Claude emits one per turn holding
-  that turn's totals; Codex app-server sends `thread/tokenUsage/updated` repeatedly, and
-  the name says it is a value being updated rather than a delta. Adding both shapes would
-  multiply the Codex numbers by however many times it happened to report. So within one
-  `turn_id` each counter keeps the **largest** figure that turn reported, and only
-  distinct turns are added together. This cannot inflate a total past the provider's own
-  largest claim for that turn; it would under-count only a transport that reported true
-  per-turn deltas, which none of the bundled ones does.
+  A turn can report usage more than once — a mid-turn `:usage` and the terminal
+  `:run_completed`, or a summary after a tool round — and those are the same turn's running
+  totals rather than deltas to sum. Adding them would multiply a turn's numbers by however
+  many times it reported. So within one `turn_id` each counter keeps the **largest** figure
+  that turn reported, and only distinct turns are added together. This cannot inflate a
+  total past the largest claim for that turn; it would under-count only a producer that
+  reported true per-turn deltas, which the native loop does not.
 
   Bounded: one map, whatever the turn count. Durable through the caller's checkpoint.
   """
@@ -809,14 +939,21 @@ defmodule Ouroboros.Interactive.State do
   Separate from `valid?/1` so a session whose durable prompt this build cannot honour
   fails as itself, at the moment it would be handed to the provider, rather than
   condemning every session that shares its checkpoint.
+
+  A record whose `provider` this build no longer has is exactly that case, and it is the
+  reason the check lives here rather than in `loadable?/1`: the session loads, lists, and
+  shows its history, and only a verb that would hand it to a provider —
+  `interactive.send`, `interactive.retry_turn`, a resume — is refused, by name, with the
+  provider it names. Quarantining it instead would delete a transcript to avoid running
+  something nobody asked to run.
   """
   @spec unrequestable_reason(term()) :: term() | nil
   def unrequestable_reason(%__MODULE__{options: options} = state) when is_map(options) do
     system_prompt = Map.get(options, :system_prompt)
 
     cond do
-      state.provider == :codex ->
-        {:legacy_transport_unavailable, :codex}
+      state.provider != :native ->
+        {:legacy_transport_unavailable, state.provider}
 
       Map.has_key?(options, :agent_profile) ->
         :agent_profile_in_durable_options
@@ -840,6 +977,25 @@ defmodule Ouroboros.Interactive.State do
   end
 
   def unrequestable_reason(_state), do: :invalid_session_state
+
+  @doc """
+  Returns the provider a record names that this build no longer serves, or `nil`.
+
+  The one question `Ouroboros.Interactive.Task` asks before it takes a workspace lease, so
+  a session written by a build that still had wrapped vendor CLIs is held exactly as the
+  store handed it over rather than started, failed, or quarantined.
+  """
+  @spec removed_provider(term()) :: atom() | nil
+  def removed_provider(%__MODULE__{provider: provider})
+      when is_atom(provider) and not is_nil(provider) and provider != :native,
+      do: provider
+
+  def removed_provider(_state), do: nil
+
+  @doc "The refusal a verb answers with when a record names a provider this build lost."
+  @spec provider_removed_error(atom()) :: {:provider_removed, atom(), String.t()}
+  def provider_removed_error(provider),
+    do: {:provider_removed, provider, provider_removed_message(provider)}
 
   @doc "Returns whether a reconstructed session can safely build a Harness request."
   @spec requestable?(term()) :: boolean()
@@ -877,7 +1033,6 @@ defmodule Ouroboros.Interactive.State do
       optional_id?(state.workspace_lease_id) and optional_id?(state.harness_session_id) and
       optional_id?(state.provider_session_id) and valid_title?(state) and
       optional_id?(forked_from(state)) and optional_id?(handed_off_from(state)) and
-      valid_delegations?(state) and
       is_integer(forks(state)) and forks(state) >= 0 and
       is_integer(state.cursor) and state.cursor >= 0 and
       is_integer(sequence_offset(state)) and sequence_offset(state) >= 0 and
@@ -897,28 +1052,21 @@ defmodule Ouroboros.Interactive.State do
 
   def loadable?(_state), do: false
 
+  # `loadable?/1` below already requires this of a session it reads back, and every store
+  # write is keyed by it, so a session built with a blank or non-binary id is one that can
+  # acquire a workspace lease and only fail afterwards. `Ouroboros.InteractiveSession.start/1`
+  # is the caller that can still hand one in: it reads `:id` with `Keyword.get_lazy/3`
+  # behind a `valid_options?/1` that checks keyword shape and nothing else.
+  defp validate_id(id) do
+    if valid_id?(id), do: :ok, else: {:error, :invalid_session_id}
+  end
+
   defp validate_parent(nil), do: :ok
   defp validate_parent(parent) when is_binary(parent), do: validate_forked_from(parent)
   defp validate_parent(parent), do: {:error, {:invalid_parent_session, parent}}
 
   defp validate_forked_from(parent) do
     if valid_id?(parent), do: :ok, else: {:error, {:invalid_parent_session, parent}}
-  end
-
-  # D7's durable half, held to the same rule as everything else here: shape and
-  # serializability. A worktree record is a map of strings, or it is `nil`.
-  defp valid_delegations?(state) do
-    delegations = Map.get(state, :delegations)
-
-    (is_nil(delegations) or is_map(delegations)) and
-      Enum.all?(delegations || %{}, fn
-        {id, %{id: id, team_id: team, task_id: task, task_node: owner, status: status}} ->
-          valid_id?(id) and valid_id?(team) and valid_id?(task) and is_atom(owner) and
-            not is_nil(owner) and is_atom(status)
-
-        _other ->
-          false
-      end)
   end
 
   defp valid_worktree?(state) do
@@ -958,6 +1106,9 @@ defmodule Ouroboros.Interactive.State do
           :approval_mode,
           :sandbox_mode,
           :runtime_exposure,
+          # Accepted as keys here so `base/2` can refuse them by name rather than as an
+          # unknown option: all three are credentials-adjacent and none belongs in a
+          # durable checkpoint, and a caller told "unknown option" would look for a typo.
           :env,
           :env_mode,
           :mcp_config,
@@ -1121,23 +1272,24 @@ defmodule Ouroboros.Interactive.State do
   defp reject_nil_values(map), do: Map.reject(map, fn {_key, value} -> is_nil(value) end)
   defp present?(value), do: value not in [nil, "", [], %{}]
 
-  # The counters a session accounts for, each with the spellings a provider may use.
-  # Claude sends `input_tokens` and `cache_read_input_tokens`; the Codex app-server and
-  # ACP payloads are their server's own map passed through untouched; Harness's own
-  # adapter fixtures carry `input` and `totalTokens`. So each counter is a list of keys,
-  # not a key, and the first one present wins.
+  # The counters a session accounts for. There is one producer of a `:usage` /
+  # `:run_completed` payload now — `Ouroboros.Provider.Native.Cost.payload/2` — and it emits
+  # exactly these snake_case string keys. The vendor spellings this table used to carry
+  # (`inputTokens`, `prompt_tokens`, `cache_read_input_tokens`, `totalTokens`, …) were the
+  # nine wrapped CLIs' shapes, and `Ouroboros.EventPresentation.usage_report/1` — the other
+  # projection of the same payload — already lost them (§1.1). The list-of-keys shape is
+  # kept for one key each so the fold below is unchanged and a later producer can add a
+  # spelling in one place. See docs/proposals/core.md §3 D2.
   @usage_counters [
-    input_tokens: ~w(input_tokens inputTokens input prompt_tokens promptTokens),
-    output_tokens: ~w(output_tokens outputTokens output completion_tokens completionTokens),
-    cache_read_tokens:
-      ~w(cache_read_tokens cache_read_input_tokens cacheReadTokens cacheReadInputTokens cached_input_tokens cachedInputTokens),
-    cache_creation_tokens:
-      ~w(cache_creation_tokens cache_creation_input_tokens cacheCreationTokens cacheCreationInputTokens),
-    total_tokens: ~w(total_tokens totalTokens total)
+    input_tokens: ~w(input_tokens),
+    output_tokens: ~w(output_tokens),
+    cache_read_tokens: ~w(cache_read_tokens),
+    cache_creation_tokens: ~w(cache_creation_tokens),
+    total_tokens: ~w(total_tokens)
   ]
 
   @usage_counter_fields Keyword.keys(@usage_counters)
-  @usage_cost_keys ~w(cost_usd costUsd total_cost_usd totalCostUsd)
+  @usage_cost_keys ~w(cost_usd)
 
   # Not counters. The model's context window and the size of the last request are facts
   # about one request, so the newest report replaces the previous one rather than being
@@ -1164,8 +1316,8 @@ defmodule Ouroboros.Interactive.State do
     last: %{}
   }
 
-  # `:run_completed` is here for one field: no bundled provider puts a cost on a `:usage`
-  # event, and Claude's arrives as `cost_usd` on the run's terminator. Reading only
+  # `:run_completed` is here for one field: the native loop's `:usage` events carry token
+  # counts, and `Cost.payload/2` places `cost_usd` on the run's terminator. Reading only
   # `:usage` would ship a `cost_usd` that is structurally always `nil`.
   defp fold_usage_event(%Event{type: type, payload: payload, turn_id: turn_id}, state)
        when type in [:usage, :run_completed] and is_map(payload) do

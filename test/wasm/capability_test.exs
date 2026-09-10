@@ -31,7 +31,7 @@ defmodule Ouroboros.Wasm.CapabilityTest do
 
       state = state(id)
 
-      # `:last_message` is the shape `Ouroboros.Agent.Worker.ReceiveMessage` writes, which is
+      # `:last_message` is the shape `Ouroboros.Mesh.ReceiveMessage` writes, which is
       # what makes `Rollout.Probe`'s echo check work against a wasm capability unchanged.
       assert state.last_message == %{
                from: "tester",

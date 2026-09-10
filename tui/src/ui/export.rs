@@ -882,10 +882,10 @@ mod tests {
 
     #[test]
     fn an_empty_session_exports_a_sentence_rather_than_a_header_and_nothing() {
-        let watch = Watch::new(Plane::Coding, "sess-empty".into());
+        let watch = Watch::new(Plane::Interactive, "sess-empty".into());
         let text = transcript(&watch, 80);
 
-        assert!(text.contains("coding · 0 events held"), "{text}");
+        assert!(text.contains("interactive · 0 events held"), "{text}");
         assert!(
             text.contains("Nothing has happened in this session yet."),
             "{text}"

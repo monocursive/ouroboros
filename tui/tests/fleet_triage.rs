@@ -41,8 +41,8 @@ fn answer(app: &mut App, tag: Tag, value: Value) {
     });
 }
 
-/// Two nodes, four sessions: one waiting on an approval, one working, one done, and one
-/// whose owner is offline.
+/// Three nodes, four sessions: one waiting on an approval, one working, one done, and
+/// one whose owner is offline.
 fn interactive_rows() -> Value {
     json!([
         {
@@ -52,42 +52,37 @@ fn interactive_rows() -> Value {
             "provider": "native",
             "node": "ouroboros@beta",
             "workspace": "/w/two",
-            "objective": "Waiting on a write",
+            "title": "Waiting on a write",
             "updated_at": "2020-01-01T00:00:00.000000Z"
         },
         {
             "_struct": "Ouroboros.Interactive.State",
             "id": "session-working",
             "status": "running",
-            "provider": "codex",
+            "provider": "native",
             "node": "ouroboros@alpha",
             "workspace": "/w/one",
-            "objective": "Porting the auth module",
+            "title": "Porting the auth module",
             "updated_at": "2026-01-01T00:00:09.000000Z"
         },
         {
             "_struct": "Ouroboros.Interactive.State",
             "id": "session-done",
             "status": "completed",
-            "provider": "codex",
+            "provider": "native",
             "node": "ouroboros@alpha",
             "workspace": "/w/one",
-            "objective": "Yesterday's fix",
+            "title": "Yesterday's fix",
             "updated_at": "2026-01-01T00:00:08.000000Z"
-        }
-    ])
-}
-
-fn coding_rows() -> Value {
-    json!([
+        },
         {
-            "_struct": "Ouroboros.Coding.TaskState",
-            "id": "task-offline",
+            "_struct": "Ouroboros.Interactive.State",
+            "id": "session-offline",
             "status": "running",
-            "provider": "codex",
+            "provider": "native",
             "node": "ouroboros@gamma",
             "workspace": "/w/three",
-            "objective": "On a machine nobody can reach",
+            "title": "On a machine nobody can reach",
             "updated_at": "2026-01-01T00:00:07.000000Z"
         }
     ])
@@ -108,7 +103,6 @@ fn fleet() -> App {
         Tag::Sessions(Plane::Interactive),
         interactive_rows(),
     );
-    answer(&mut app, Tag::Sessions(Plane::Coding), coding_rows());
     app.apply(Msg::Tick);
 
     app
@@ -166,7 +160,7 @@ fn an_approval_this_client_is_holding_moves_its_row_into_needs_input() {
             "timestamp": "2026-01-01T00:00:00.000000Z",
             "payload": {"tool": "write", "command": "write lib/a.ex"},
             "request_id": "req-1",
-            "provider": "codex"
+            "provider": "native"
         }]),
     );
     app.apply(Msg::Tick);
@@ -187,8 +181,9 @@ fn an_approval_this_client_is_holding_moves_its_row_into_needs_input() {
 fn an_offline_owners_rows_stay_in_their_group_and_keep_the_unavailable_mark() {
     let mut app = fleet();
 
-    // The owner drops off the fleet: `runtime.status` no longer reports it, so the row is
-    // retained from the previous complete list rather than deleted.
+    // The owner drops off the fleet: `fleet.status` calls it offline, and the next
+    // complete list omits its rows. They are retained from the previous one rather than
+    // deleted.
     answer(
         &mut app,
         Tag::Status,
@@ -196,26 +191,52 @@ fn an_offline_owners_rows_stay_in_their_group_and_keep_the_unavailable_mark() {
             "node": "ouroboros@alpha",
             "role": "core",
             "connected_nodes": ["ouroboros@beta"],
-            "availability": {}
+            "availability": {},
+            "cluster": {
+                "fleet": {
+                    "machines": [{
+                        "node": "ouroboros@gamma",
+                        "machine": "gamma",
+                        "state": "offline",
+                        "role": "core",
+                        "compatibility": "compatible"
+                    }]
+                }
+            }
         }),
     );
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
+
+    answer(
+        &mut app,
+        Tag::Sessions(Plane::Interactive),
+        json!(interactive_rows()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["id"] != "session-offline")
+            .cloned()
+            .collect::<Vec<_>>()),
+    );
+
     app.apply(Msg::Tick);
 
     let rows = app.sessions.triaged();
-    let offline = rows.iter().find(|row| row.session.id == "task-offline");
 
-    if let Some(row) = offline {
-        assert!(
-            row.session.last_known,
-            "a retained row says it is a retained row"
-        );
-        assert_eq!(
-            row.group,
-            Triage::Working,
-            "unreachable is not the same claim as needs-input"
-        );
-    }
+    let offline = rows
+        .iter()
+        .find(|row| row.session.id == "session-offline")
+        .expect("a row whose owner went offline is retained, not deleted");
+
+    assert!(
+        offline.session.last_known,
+        "a retained row says it is a retained row"
+    );
+
+    assert_eq!(
+        offline.group,
+        Triage::Working,
+        "unreachable is not the same claim as needs-input"
+    );
 }
 
 // ---------------------------------------------------------------------------------------
@@ -240,7 +261,7 @@ fn the_rail_draws_the_groups_in_order_with_their_counts() {
 
     // The node each row is on, because the rail lists every machine's sessions — and
     // dropped whole rather than clipped where a card is too narrow to hold it.
-    assert!(text.contains("RUNNING · codex · alpha"), "{text}");
+    assert!(text.contains("RUNNING · native · alpha"), "{text}");
 }
 
 #[test]
@@ -279,7 +300,7 @@ fn space_peeks_the_last_agent_message_and_r_replies_on_that_session() {
             "timestamp": "2026-01-01T00:00:00.000000Z",
             "payload": {"text": "I have finished the first half and need a decision."},
             "turn_id": "turn-1",
-            "provider": "codex"
+            "provider": "native"
         }]),
     );
     app.apply(Msg::Tick);
@@ -363,14 +384,14 @@ fn the_picker_labels_every_row_with_its_group_and_its_node() {
 // `ouro agents`
 // ---------------------------------------------------------------------------------------
 
-fn agents_rows() -> (Vec<SessionInfo>, Vec<SessionInfo>) {
-    agents::decode(&interactive_rows(), &coding_rows())
+fn agents_rows() -> Vec<SessionInfo> {
+    agents::decode(&interactive_rows())
 }
 
 #[test]
 fn ouro_agents_prints_the_same_grouping_byte_for_byte() {
-    let (interactive, coding) = agents_rows();
-    let rows = agents::group(&interactive, &coding);
+    let interactive = agents_rows();
+    let rows = agents::group(&interactive);
 
     assert_eq!(
         agents::render(&rows),
@@ -380,7 +401,7 @@ fn ouro_agents_prints_the_same_grouping_byte_for_byte() {
             "\n",
             "WORKING (2)\n",
             "  int    session-working                    running            ouroboros@alpha          Porting the auth module\n",
-            "  code   task-offline                       running            ouroboros@gamma          On a machine nobody can reach\n",
+            "  int    session-offline                    running            ouroboros@gamma          On a machine nobody can reach\n",
             "\n",
             "DONE (1)\n",
             "  int    session-done                       completed          ouroboros@alpha          Yesterday's fix\n",
@@ -391,8 +412,8 @@ fn ouro_agents_prints_the_same_grouping_byte_for_byte() {
 
 #[test]
 fn ouro_agents_json_carries_the_counts_and_the_runtimes_own_rows() {
-    let (interactive, coding) = agents_rows();
-    let value = agents::render_json(&agents::group(&interactive, &coding));
+    let interactive = agents_rows();
+    let value = agents::render_json(&agents::group(&interactive));
 
     assert_eq!(value["counts"]["needs_input"], 1);
     assert_eq!(value["counts"]["working"], 2);
@@ -400,7 +421,7 @@ fn ouro_agents_json_carries_the_counts_and_the_runtimes_own_rows() {
 
     assert_eq!(value["groups"]["needs_input"][0]["id"], "session-waiting");
     assert_eq!(value["groups"]["needs_input"][0]["node"], "ouroboros@beta");
-    assert_eq!(value["groups"]["working"][1]["plane"], "coding");
+    assert_eq!(value["groups"]["working"][1]["plane"], "interactive");
     assert_eq!(
         value["groups"]["done"][0]["session"]["_struct"], "Ouroboros.Interactive.State",
         "the runtime's own row travels whole"
@@ -409,10 +430,10 @@ fn ouro_agents_json_carries_the_counts_and_the_runtimes_own_rows() {
 
 #[test]
 fn ouro_agents_says_so_when_there_is_nothing_to_report() {
-    let (interactive, coding) = agents::decode(&json!([]), &json!([]));
+    let interactive = agents::decode(&json!([]));
 
     assert_eq!(
-        agents::render(&agents::group(&interactive, &coding)),
+        agents::render(&agents::group(&interactive)),
         "no sessions on any node this runtime can see\n"
     );
 }

@@ -1,7 +1,7 @@
 //! The helper's stdio framing: one JSON object per `\n`-delimited line, UTF-8, no embedded
 //! newlines, bounded by `max_frame_bytes`.
 //!
-//! This is `ouro-computer-use`'s codec, kept deliberately identical: the two helpers are on the
+//! This is the now-deleted `ouro-computer-use`'s codec, kept identical: the helpers were on the
 //! same kind of pipe, owned by the same kind of pool, and a second framing dialect would be a
 //! second set of edge cases for the Elixir side to get right. It owns *framing only* — turning
 //! a byte stream into lines and classifying each line as blank, noise, or a JSON object. What

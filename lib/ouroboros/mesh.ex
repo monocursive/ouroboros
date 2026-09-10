@@ -20,19 +20,16 @@ defmodule Ouroboros.Mesh do
 
   `start_agent/2` is a remote-reachable start surface: `:erpc` from any connected node
   can invoke it and choose the `:agent` module. Startable modules are therefore limited
-  to the `Ouroboros.Agent.` and `Ouroboros.Capability.` namespaces — the latter reserved
-  for agents forged at runtime — plus the single named module `Ouroboros.Wasm.Capability`,
-  plus whatever `:mesh_allowed_agent_modules` names in application config.
+  to the `Ouroboros.Capability.` namespace — reserved for agents forged at runtime — plus
+  the single named module `Ouroboros.Wasm.Capability`, plus whatever
+  `:mesh_allowed_agent_modules` names in application config.
   """
 
   alias Ouroboros.Mesh.Directory
-  alias Ouroboros.Signals.{AgentMessage, TaskAssigned, TaskCompleted}
+  alias Ouroboros.Signals.AgentMessage
 
   @scope Ouroboros.Mesh.Scope
-  @agent_module_prefixes [
-    "Elixir.Ouroboros.Agent.",
-    "Elixir.Ouroboros.Capability."
-  ]
+  @agent_module_prefixes ["Elixir.Ouroboros.Capability."]
 
   # Lane W adds exactly one startable module, not a namespace (F5).
   # `Ouroboros.Wasm.Capability` is the static wrapper every WebAssembly capability runs
@@ -55,13 +52,15 @@ defmodule Ouroboros.Mesh do
   @doc """
   Starts a logical agent on the local node.
 
-  `:role`, `:objective`, and `:parent_id` seed agent state. An explicit `:initial_state`
-  map is merged over that trio and wins on conflict, so a runtime-defined agent can seed
-  schema keys this module does not know about.
+  `:agent` names the module to start and carries no default: this runtime defines no
+  general-purpose agent, and a caller that named none is asking for something no node can
+  answer. `:role`, `:objective`, and `:parent_id` seed agent state. An explicit
+  `:initial_state` map is merged over that trio and wins on conflict, so a runtime-defined
+  agent can seed schema keys this module does not know about.
   """
   @spec start_agent(agent_id(), keyword()) :: {:ok, pid()} | {:error, term()}
   def start_agent(id, opts \\ []) when is_binary(id) and is_list(opts) do
-    agent_module = Keyword.get(opts, :agent, Ouroboros.Agent.Worker)
+    agent_module = Keyword.get(opts, :agent)
 
     # Both checks are pure input validation on a remote-reachable surface, so settle
     # them before taking a cluster-wide lock.
@@ -80,7 +79,7 @@ defmodule Ouroboros.Mesh do
 
   The target is checked before anything is placed on it: it must be connected and must
   be running this runtime in the `:core` role, because a `:builder` or `:signer` node
-  has no team, store, or scheduler for a placed agent to reach. The check is an
+  runs none of the runtime a placed agent reaches. The check is an
   observation about configuration, not a security boundary — see `Ouroboros.Cluster` —
   and `config :ouroboros, :placement_role_check` turns it off for callers that place
   onto nodes this runtime cannot introspect.
@@ -185,46 +184,6 @@ defmodule Ouroboros.Mesh do
              subject: to,
              source: source_for(from)
            ) do
-      call_agent(pid, signal, Keyword.get(opts, :timeout, 5_000))
-    else
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  @doc "Assigns a task through the same typed message path used across nodes."
-  @spec assign_task(agent_id(), agent_id(), String.t(), keyword()) ::
-          {:ok, String.t(), Jido.Agent.t()} | {:error, term()}
-  def assign_task(from, to, objective, opts \\ [])
-      when is_binary(from) and is_binary(to) and is_binary(objective) and is_list(opts) do
-    task_id = Keyword.get_lazy(opts, :task_id, &Jido.Signal.ID.generate!/0)
-    correlation_id = Keyword.get_lazy(opts, :correlation_id, &Jido.Signal.ID.generate!/0)
-
-    with {:ok, pid} <- locate(to),
-         {:ok, signal} <-
-           TaskAssigned.new(
-             %{
-               from: from,
-               task_id: task_id,
-               objective: objective,
-               correlation_id: correlation_id
-             },
-             subject: to,
-             source: source_for(from)
-           ),
-         {:ok, agent} <- call_agent(pid, signal, Keyword.get(opts, :timeout, 5_000)) do
-      {:ok, task_id, agent}
-    else
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  @doc "Marks a task complete on its owning agent."
-  @spec complete_task(agent_id(), String.t(), term(), keyword()) ::
-          {:ok, Jido.Agent.t()} | {:error, term()}
-  def complete_task(id, task_id, result, opts \\ [])
-      when is_binary(id) and is_binary(task_id) and is_list(opts) do
-    with {:ok, pid} <- locate(id),
-         {:ok, signal} <- TaskCompleted.new(%{task_id: task_id, result: result}, subject: id) do
       call_agent(pid, signal, Keyword.get(opts, :timeout, 5_000))
     else
       {:error, reason} -> {:error, reason}

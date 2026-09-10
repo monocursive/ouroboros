@@ -82,30 +82,10 @@ pub fn render_status(status: &Value) -> String {
     for (label, key) in [
         ("agents", "agents"),
         ("interactive", "interactive_sessions"),
-        ("coding", "coding_tasks"),
-        ("teams", "teams"),
-        ("plans", "orchestration_plans"),
     ] {
         let _ = writeln!(page, "  {label:<12} {}", count(status, key));
     }
 
-    let control = status.get("control");
-    let posture = status
-        .get("availability")
-        .and_then(Value::as_object)
-        .and_then(|availability| availability.get("control"))
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let runs = control
-        .and_then(|control| control.get("runs"))
-        .and_then(Value::as_array)
-        .map(|runs| runs.len())
-        .unwrap_or(0);
-
-    let _ = writeln!(page, "  control      {posture} ({runs} runs)");
-
-    let _ = writeln!(page, "  upgrade      {}", mode(status, "upgrade"));
-    let _ = writeln!(page, "  release      {}", mode(status, "release"));
     let _ = writeln!(page, "  forge        {}", forge(status));
 
     page
@@ -131,14 +111,6 @@ fn count(status: &Value, key: &str) -> String {
         Some(items) => items.len().to_string(),
         None => "-".into(),
     }
-}
-
-fn mode(status: &Value, key: &str) -> String {
-    status
-        .get(key)
-        .and_then(|value| value.get("mode"))
-        .map(render_value)
-        .unwrap_or_else(|| "-".into())
 }
 
 fn forge(status: &Value) -> String {
@@ -257,22 +229,20 @@ mod tests {
 
     #[test]
     fn counts_come_from_list_lengths() {
-        let status = json!({
+        let page = render_status(&json!({
             "agents": [{ "id": "a" }, { "id": "b" }],
-            "interactive_sessions": [],
-            "availability": { "control": "available" },
-            "control": { "runs": [{ "id": "r" }] }
-        });
-
-        let page = render_status(&status);
+            "interactive_sessions": []
+        }));
 
         assert!(page.contains("agents       2"), "{page}");
         assert!(page.contains("interactive  0"), "{page}");
-        assert!(
-            page.contains("coding       -"),
-            "an absent list is not a zero"
-        );
-        assert!(page.contains("available (1 runs)"));
+
+        // An absent list is not an empty one: the runtime did not say how many there are,
+        // and a zero would be this client inventing the answer.
+        let absent = render_status(&json!({}));
+
+        assert!(absent.contains("agents       -"), "{absent}");
+        assert!(absent.contains("interactive  -"), "{absent}");
     }
 
     #[test]

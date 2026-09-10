@@ -3,30 +3,27 @@ defmodule Ouroboros.Control.Grants do
   The durable, deny-by-default authority for agent effects.
 
   A grant is one triple — principal, effect, constraints — where the principal is a
-  logical mesh agent ID, the effect is something `Ouroboros.Agent.Effects` can do to the
+  logical mesh agent ID, the effect is something an agent can do to the
   world, and the constraints are the single allow-list that effect is checked against:
 
       :start_agent   modules: :any | [module]
       :stop_agent    agents:  :any | [agent_id]
       :send_message  agents:  :any | [agent_id]
       :delegate      teams:   :any | [team_id]
-      :forge         modules: :any | [module | "wasm/<name>"]
+      :forge         modules: ["wasm/<name>"] | ["wasm/*"]
       :deploy        nodes:   :any | [node]
 
-  A `:forge` allow-list holds atoms — BEAM capability modules — and `"wasm/<name>"` strings,
-  because lane W's capabilities have no module name at all: identity there is the component's
-  digest, and the name a rollout, a `start` block and this allow-list all agree on is
-  `"wasm/" <> Ouroboros.Wasm.Artifact.name?/1`. The two spellings can never match each other,
-  so a grant narrowed to `[Ouroboros.Capability.Echo]` admits no wasm forge and a grant
-  narrowed to `["wasm/counter"]` admits no BEAM one.
+  A forged capability has no module name at all: identity is the component's digest, and
+  the name a rollout, a `start` block and this allow-list all agree on is
+  `"wasm/" <> Ouroboros.Wasm.Artifact.name?/1`.
 
-  **`:any` does not cross the lanes, and this is the important sentence in this moduledoc.**
-  `modules: :any` means what it meant before lane W existed: any BEAM module. A grant an
-  operator wrote — and, worse, a grant they wrote and forgot, sitting in a durable
-  checkpoint — cannot come to mean more than it did on the day it was written because a
-  later release added a second thing the word *forge* can do. Lane W is reached only by an
-  entry that says so: `"wasm/<name>"` for one capability, or `"wasm/*"` for all of them, and
-  the wildcard is the only way to say the broad thing, out loud, on purpose.
+  **`:any` does not reach a forge, and this is the important sentence in this moduledoc.**
+  The `:modules` allow-list is shared with `:start_agent`, where `:any` means any BEAM
+  module and a mesh agent is a module. A grant an operator wrote — and, worse, a grant they
+  wrote and forgot, sitting in a durable checkpoint — cannot come to mean more than it did
+  on the day it was written. A forge is reached only by an entry that says so:
+  `"wasm/<name>"` for one capability, or `"wasm/*"` for all of them, and the wildcard is
+  the only way to say the broad thing, out loud, on purpose.
 
   `granted?/3` is asked about a *concrete attempt*, not about an effect in the abstract,
   so a grant to start `Ouroboros.Capability.Echo` refuses a request to start anything
@@ -49,29 +46,52 @@ defmodule Ouroboros.Control.Grants do
   ## What this actually gates, and what it does not
 
   Grants gate the *action layer*: the typed signals an agent handles through
-  `Ouroboros.Agent.Effects`. That is the layer well-behaved agent flows travel through,
+  the agent-effect layer. That is the layer well-behaved agent flows travel through,
   and constraining it is worth doing. It is not a sandbox, and describing it as one would
   be a lie:
 
-    * Any BEAM the loader accepts runs with full ambient VM authority. Loaded code can
-      call `Ouroboros.Mesh.start_agent/2`, `Ouroboros.Upgrade.Forge.forge/2`, or
-      `grant/3` on this module directly, without passing through an effect action at all.
+    * Any code running in this VM has full ambient VM authority. It can call
+      `Ouroboros.Mesh.start_agent/2`, `Ouroboros.Wasm.Forge.forge/2`, or `grant/3` on
+      this module directly, without passing through an effect action at all.
     * No effect exists for granting, so an agent cannot widen its own authority *through
       this surface*. That is a property of the surface, not of the VM.
     * The boundaries that hold against code that does not cooperate are elsewhere: the
-      verifier's namespace policy, artifact signing (whose production default refuses),
-      and the isolated build peer.
+      component's import list, the signer's policy, and manifest signing (whose production
+      default refuses).
 
-  This module lives under `Ouroboros.Control.` deliberately. That prefix is in
-  `Ouroboros.Upgrade.Verifier`'s protected set, so the fast patch lane refuses to load an
-  artifact that would replace or introduce the authority gating it — a capability an
-  agent forged cannot patch the thing that decided it could forge. What keeps signing
-  approval outside the blast radius is the same reasoning applied one level up, and it
-  belongs outside this application entirely.
+  This module lives under `Ouroboros.Control.` deliberately: a forged component runs
+  inside a WebAssembly world whose imports do not reach it, so a capability an agent
+  forged cannot patch the thing that decided it could forge. What keeps signing approval
+  outside the blast radius is the same reasoning applied one level up, and it belongs
+  outside this application entirely.
 
   Storage comes from `config :ouroboros, :grants_storage`: ETS in development and test,
   a synced `Ouroboros.Storage.DurableFile` in production. ETS means the authority dies
   with the VM and every principal starts denied, which is the safe direction to fail.
+
+  ## A checkpoint this build cannot decode
+
+  Checkpoints are decoded with `[:safe]`, which refuses to *create* an atom, and this store
+  writes its grants as plain terms. A grant written by an older build can therefore name
+  something this build has never interned — the BEAM forge lane wrote `:modules` entries
+  that were runtime-minted capability module atoms, names that were never in this repo's
+  source and that no build can intern again now that the lane is gone — and the whole file
+  stops decoding.
+
+  Such a file is *quarantined*, not fatal: `Ouroboros.Storage.DurableFile`'s
+  `get_checkpoint_or_quarantine/2` moves it aside with every byte intact, logs one error
+  line naming it, and this store boots with **no grants at all**. That is the deny-by-default
+  posture stated at the top of this moduledoc, reached from the direction that narrows: every
+  principal is denied every effect until an operator grants it again, and the bytes of what
+  they held sit beside the store for them to read. The alternative — refusing to start — takes
+  the whole node down with it, because this is a `:core` child under a `rest_for_one` root.
+
+  A checkpoint that is unreadable for any *other* reason still stops this store:
+  `{:grant_checkpoint_unreadable, reason}` for an I/O or content-integrity failure, and
+  `{:unsupported_grant_checkpoint, version}` for a version this build does not know. Neither
+  says the bytes cannot be interpreted; they say this node could not read them, or should not,
+  and an authority that cannot tell those apart from "written by a build that is gone" would
+  be inventing an empty allow-list out of a broken disk.
   """
 
   use GenServer
@@ -431,8 +451,14 @@ defmodule Ouroboros.Control.Grants do
 
   defp checkpoint(grants), do: %{version: @checkpoint_version, grants: grants}
 
+  # An undecodable checkpoint is quarantined rather than fatal; see the moduledoc. Only the
+  # durable adapter can hold one — an ETS table holds terms, not bytes — so only it is asked
+  # for the quarantining read.
+  defp checkpoint_reader(Ouroboros.Storage.DurableFile), do: :get_checkpoint_or_quarantine
+  defp checkpoint_reader(_adapter), do: :get_checkpoint
+
   defp load(adapter, adapter_opts) do
-    case adapter_call(adapter, :get_checkpoint, [@store_key, adapter_opts]) do
+    case adapter_call(adapter, checkpoint_reader(adapter), [@store_key, adapter_opts]) do
       :not_found ->
         {:ok, %{}}
 

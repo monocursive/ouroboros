@@ -1,7 +1,10 @@
 defmodule Ouroboros.ModelsTest do
   @moduledoc """
-  What the runtime can vouch for about a model: the window, the price, and which
+  What the runtime can vouch for about a model: the window, the price, and which model
   provider's catalogue it came from.
+
+  One row, because `:native` is the only provider — but three catalogues under it, one per
+  model lane the in-process transport can reach.
 
   These read the packaged `llm_db` snapshot the build ships with, so a snapshot bump that
   changed a shape — a missing `limits.context`, a pricing component that stopped being
@@ -35,13 +38,18 @@ defmodule Ouroboros.ModelsTest do
       assert Models.list() == catalogue
     end
 
+    # Asked of the Anthropic lane, which is where the claim was asked before the native row
+    # absorbed every catalogue: the packaged xAI snapshot carries image and quality models
+    # that state no output ceiling, and this is a claim about the snapshot's shape for the
+    # models a context meter is drawn for.
     test "a model carries the two numbers a context meter needs" do
-      row = provider_row(:claude)
+      row = provider_row(:native)
+      anthropic = Enum.filter(row.models, &String.starts_with?(&1.id, "anthropic:"))
 
-      assert row.catalog == :anthropic
       assert row.total > 0
+      assert anthropic != []
 
-      for model <- row.models do
+      for model <- anthropic do
         assert is_binary(model.id) and model.id != ""
         assert is_integer(model.context_window) and model.context_window > 0
         assert is_integer(model.max_output_tokens) and model.max_output_tokens > 0
@@ -60,7 +68,7 @@ defmodule Ouroboros.ModelsTest do
         assert Enum.all?(model.reasoning_efforts, &(&1 in Ouroboros.ReasoningEffort.names()))
       end
 
-      assert Models.reasoning_efforts(:native, "anthropic:claude-opus-5") == [
+      assert Models.reasoning_efforts("anthropic:claude-opus-5") == [
                "low",
                "medium",
                "high",
@@ -70,10 +78,10 @@ defmodule Ouroboros.ModelsTest do
     end
 
     test "pricing is normalised to one million tokens, in the currency it was stated in" do
-      row = provider_row(:claude)
+      row = provider_row(:native)
       model = Enum.find(row.models, &(&1.pricing != nil))
 
-      assert model, "the packaged snapshot priced no Anthropic model"
+      assert model, "the packaged snapshot priced no model in any native lane"
       assert model.pricing.currency == "USD"
       assert is_number(model.pricing.input_per_mtok) and model.pricing.input_per_mtok > 0
       assert is_number(model.pricing.output_per_mtok) and model.pricing.output_per_mtok > 0
@@ -87,89 +95,29 @@ defmodule Ouroboros.ModelsTest do
       refute Map.has_key?(model.pricing, :web_search)
     end
 
-    test "a provider with no catalogue says so rather than guessing one" do
-      # Amp normalizes no model at all, and Pi routes to whatever `model_provider` names.
-      assert %{catalog: nil, models: [], total: 0, model_option: false} = provider_row(:amp)
-      assert %{catalog: nil, models: [], total: 0} = provider_row(:pi)
-    end
-
-    test "the catalogue mapping is a default a node can correct" do
-      assert Models.catalog(:claude) == :anthropic
+    # `@catalogs` — the per-provider table that said which vendor's models each CLI ran,
+    # and the `config :ouroboros, model_catalogs` override beside it — went with the
+    # wrapped vendor CLIs. A lane is a model prefix now, not a CLI, and the mapping it
+    # needs is the two-line one below.
+    test "the native row carries one catalogue per model lane it can reach" do
       assert Models.catalog(:native) == :openai
-      assert Models.catalog(:gemini) == :google
-      assert Models.catalog(:grok) == :xai
-      assert Models.catalog(:kimi) == :moonshotai
 
       native = provider_row(:native)
       assert native.catalogs == [:openai, :anthropic, :xai]
       assert Enum.any?(native.models, &String.starts_with?(&1.id, "openai_codex:"))
       assert Enum.any?(native.models, &String.starts_with?(&1.id, "anthropic:"))
       assert Enum.any?(native.models, &String.starts_with?(&1.id, "xai:"))
-
-      # A provider whose atom is itself an llm_db provider id needs no entry.
-      assert Models.catalog(:zai) == :zai
-      assert Models.catalog(:opencode) == :opencode
-      assert Models.catalog(:amp) == nil
-
-      previous = Application.get_env(:ouroboros, :model_catalogs)
-      Application.put_env(:ouroboros, :model_catalogs, %{amp: :anthropic})
-
-      try do
-        assert Models.catalog(:amp) == :anthropic
-        assert provider_row(:amp).catalog == :anthropic
-        assert provider_row(:amp).total > 0
-      after
-        restore(:model_catalogs, previous)
-      end
     end
 
     test "the default model is the one the node configured, not one chosen here" do
-      assert Models.default_model(:claude) == nil
-
-      previous = Application.get_env(:jido_harness, :provider_config)
-
-      Application.put_env(
-        :jido_harness,
-        :provider_config,
-        Map.put(Map.new(previous || %{}), :claude, %{session_defaults: %{model: "claude-opus-5"}})
-      )
+      previous = Application.get_env(:ouroboros, :native_model)
+      Application.delete_env(:ouroboros, :native_model)
 
       try do
-        assert Models.default_model(:claude) == "claude-opus-5"
-        assert provider_row(:claude).default == "claude-opus-5"
+        assert Models.default_model(:native) ==
+                 Ouroboros.Provider.Native.Model.configured_model()
       after
-        restore_harness(:provider_config, previous)
-      end
-    end
-
-    test "a coding-only node's request default is read too, with session first" do
-      previous = Application.get_env(:jido_harness, :provider_config)
-
-      Application.put_env(
-        :jido_harness,
-        :provider_config,
-        Map.put(Map.new(previous || %{}), :claude, %{request_defaults: %{model: "from-coding"}})
-      )
-
-      try do
-        assert Models.default_model(:claude) == "from-coding"
-      after
-        restore_harness(:provider_config, previous)
-      end
-
-      Application.put_env(
-        :jido_harness,
-        :provider_config,
-        Map.put(Map.new(previous || %{}), :claude, %{
-          request_defaults: %{model: "from-coding"},
-          session_defaults: %{model: "from-sessions"}
-        })
-      )
-
-      try do
-        assert Models.default_model(:claude) == "from-sessions"
-      after
-        restore_harness(:provider_config, previous)
+        restore(:native_model, previous)
       end
     end
 
@@ -189,7 +137,4 @@ defmodule Ouroboros.ModelsTest do
 
   defp restore(key, nil), do: Application.delete_env(:ouroboros, key)
   defp restore(key, value), do: Application.put_env(:ouroboros, key, value)
-
-  defp restore_harness(key, nil), do: Application.delete_env(:jido_harness, key)
-  defp restore_harness(key, value), do: Application.put_env(:jido_harness, key, value)
 end

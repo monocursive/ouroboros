@@ -122,8 +122,8 @@ defmodule Ouroboros.Wasm.Deploy do
   ## The epoch is not a parameter
 
   It is allocated with `Ouroboros.Upgrade.Epoch.next/2` over the **connected cluster**,
-  exactly as `Ouroboros.Upgrade.Forge` allocates before building a manifest. It used to be
-  an optional client parameter with no ceiling, and that was a one-call, unrecoverable
+  before a manifest is built. It used to be an optional client parameter with no ceiling,
+  and that was a one-call, unrecoverable
   wedge: `Ouroboros.Upgrade.Rollout.Registry` admits an epoch only above its watermark and
   refuses one at its plausibility ceiling, so a single deploy *at* the ceiling left no
   number that was both, on every lane-W capability on that node, durably. Allocating over
@@ -167,11 +167,11 @@ defmodule Ouroboros.Wasm.Deploy do
   # own default rather than inventing a second one.
   @default_gateway_max_frame 1_048_576
 
-  # The two processes that make a node able to hold a lane-W rollout, and therefore able to
-  # call an epoch stale: the register that records one and the executor `Ouroboros.Upgrade.
-  # Epoch.next/2` reads a node's last committed epoch from. A node running neither is a node
-  # no epoch can be too small for.
-  @rollout_plane [Ouroboros.Upgrade.Rollout.Registry, Ouroboros.Upgrade.NodeExecutor]
+  # The process that makes a node able to hold a rollout, and therefore able to call an
+  # epoch stale: the register that records one and holds the watermark
+  # `Ouroboros.Upgrade.Epoch.next/2` reads. A node not running it is a node no epoch can be
+  # too small for.
+  @rollout_registry Ouroboros.Upgrade.Rollout.Registry
 
   # One bounded question per candidate, per process. Well under `wasm.sign`'s own ceiling,
   # because this runs before the signing round trip rather than instead of it.
@@ -441,9 +441,8 @@ defmodule Ouroboros.Wasm.Deploy do
   defp issue(server, artifact, signer_id, bytes, ticket) do
     request = %{
       requester: node(),
-      # Advisory and cross-checked, exactly as `Ouroboros.Upgrade.Forge.Signer.Remote`
-      # sends it: the service signs its own derivation and a disagreement is version skew
-      # worth stopping at.
+      # Advisory and cross-checked: the service signs its own derivation and a
+      # disagreement is version skew worth stopping at.
       payload: Artifact.signing_payload(artifact, signer_id),
       component_bytes: bytes,
       # The ticket the admission issued. It spends no second rate-limit slot, and it is
@@ -820,10 +819,10 @@ defmodule Ouroboros.Wasm.Deploy do
   # Over the nodes that could make this epoch stale, which is not the same set as the nodes
   # that are connected.
   #
-  # `Ouroboros.Upgrade.Epoch.next/2` asks every node it is given for
-  # `Ouroboros.Upgrade.NodeExecutor.status/0` and for its lane-W register's watermark, and a
-  # node that runs neither answers neither: the call exits `:noproc` and the whole allocation
-  # fails. Handing it `[node() | Node.list()]` therefore made signing impossible on exactly
+  # `Ouroboros.Upgrade.Epoch.next/2` asks every node it is given for its register's
+  # watermark, and a node that does not run one does not answer: the call exits `:noproc`
+  # and the whole allocation fails. Handing it `[node() | Node.list()]` therefore made
+  # signing impossible on exactly
   # the topology D15 prescribes — the key on a `:signer`-role node, whose supervision tree is
   # the signing service and cluster formation and nothing else — and on any `:builder` or
   # bare client node that happens to be connected. It was proved live: `wasm.sign` on a core
@@ -835,7 +834,7 @@ defmodule Ouroboros.Wasm.Deploy do
   # calls one stale. A node with no register admits nothing, holds no watermark, and cannot
   # refuse anything later — so asking it is not merely useless, it is the failure. The
   # candidates are still every connected node; what is allocated over is the subset that runs
-  # the rollout plane.
+  # the register.
   #
   # The probe distinguishes the two answers that look alike from here. A node that answers
   # "no such process" is a node with no plane and is excluded. A node that does not answer at
@@ -865,7 +864,7 @@ defmodule Ouroboros.Wasm.Deploy do
     end
   end
 
-  # The connected nodes that run the rollout plane, or the ones that could not be asked.
+  # The connected nodes that run the register, or the ones that could not be asked.
   defp epoch_nodes(opts) do
     candidates =
       Keyword.get_lazy(opts, :epoch_nodes, fn -> Enum.uniq([node() | Node.list()]) end)
@@ -874,7 +873,7 @@ defmodule Ouroboros.Wasm.Deploy do
 
     {held, unreachable} =
       candidates
-      |> Task.async_stream(&{&1, rollout_plane(&1, timeout)},
+      |> Task.async_stream(&{&1, registry_presence(&1, timeout)},
         ordered: true,
         max_concurrency: max(1, length(candidates)),
         timeout: :infinity
@@ -898,41 +897,22 @@ defmodule Ouroboros.Wasm.Deploy do
       else: {:error, unreachable}
   end
 
-  # `:erlang.whereis/1` and nothing of ours, so a node too old to hold these modules answers
+  # `:erlang.whereis/1` and nothing of ours, so a node too old to hold this module answers
   # `:undefined` rather than failing to find a function. The local branch does not go through
   # `:erpc` at all: a node cannot be unreachable from itself, and rendering it as such would
   # make the one case a lone signer needs — "I have no register either" — a hard failure.
-  # A partial plane on the local node still fails closed, for the reason `classify_plane/1`
-  # gives.
-  defp rollout_plane(target, _timeout) when target == node() do
-    classify_plane(Enum.map(@rollout_plane, &{&1, is_pid(Process.whereis(&1))}))
+  defp registry_presence(target, _timeout) when target == node() do
+    if is_pid(Process.whereis(@rollout_registry)), do: :holds, else: :absent
   end
 
-  defp rollout_plane(target, timeout) do
-    @rollout_plane
-    |> Enum.map(fn name ->
-      case :erpc.call(target, :erlang, :whereis, [name], timeout) do
-        pid when is_pid(pid) -> {name, true}
-        :undefined -> {name, false}
-        other -> throw({:unexpected, describe(other)})
-      end
-    end)
-    |> classify_plane()
-  catch
-    :throw, why -> {:unreachable, why}
-    kind, reason -> {:unreachable, {kind, describe(reason)}}
-  end
-
-  # The whole plane is a holder; none of it is a node that admits nothing. Part of it — a
-  # register with no executor, or an executor mid-restart — is neither: its register may hold
-  # a watermark above the number about to be minted, and the executor `Epoch.next/2` would
-  # ask is not there to say so. That is the unreachable answer, whatever node gave it.
-  defp classify_plane(presence) do
-    case Enum.split_with(presence, fn {_name, present?} -> present? end) do
-      {_held, []} -> :holds
-      {[], _missing} -> :absent
-      {_held, missing} -> {:unreachable, {:partial_plane, Enum.map(missing, &elem(&1, 0))}}
+  defp registry_presence(target, timeout) do
+    case :erpc.call(target, :erlang, :whereis, [@rollout_registry], timeout) do
+      pid when is_pid(pid) -> :holds
+      :undefined -> :absent
+      other -> {:unreachable, {:unexpected, describe(other)}}
     end
+  catch
+    kind, reason -> {:unreachable, {kind, describe(reason)}}
   end
 
   defp build(bytes, attrs, imports, epoch) do

@@ -3,6 +3,12 @@
 Status: **proposal**, 2026-09-08. Written against `dev` at `160ca08`; every file cited
 below was read at that ref. This document proposes work. Nothing in it is implemented.
 
+> *A record, as of September 2026.* This proposal names `Ouroboros.Agent.Effects.Runner`
+> and the BEAM fast-patch lane, and its recipes pass `--provider native`; all three went
+> with [the core reduction](core.md) (§3 D3, §4 A1, §3 D2). What was built is in
+> [docs/SELF.md](../SELF.md), and the plan it was built to is
+> [self-improvement-plan.md](self-improvement-plan.md).
+
 ## 0. The claim this plan builds toward
 
 Ouroboros self-improves when a session running inside it produces a change to its own
@@ -128,8 +134,7 @@ through the fences that already exist, under a permission rule an operator can w
   `Wasm.Forge.forge/2`; `deploy` → `Wasm.Forge.deploy/3` to `[node()]`; `status`. The
   project files are read from a directory inside the workspace the model wrote with its
   ordinary tools, through the workspace containment `read` uses, and handed to the forge
-  as the `files` map [`ForgeWasmCapability`](../../lib/ouroboros/agent/effects.ex) already
-  hands it. C9's allow-list, the lock pin, and the builder sandbox apply unchanged.
+  as the `files` map the forge takes. C9's allow-list, the lock pin, and the builder sandbox apply unchanged.
 - `author` in the signed manifest is `"session:" <> session_id`, taken from the same
   server-owned principal the permission engine already receives
   ([`permissions.ex:104-112`](../../lib/ouroboros/control/permissions.ex)). It is never a
@@ -233,9 +238,9 @@ sessions, producing pull requests with the corpus delta in the body.
 - A change under `lib/ouroboros/control/`, `upgrade/`, or `storage/` flags the PR for
   human review of that hunk regardless of the review's verdict: the namespaces the verifier
   protects at runtime stay protected at the source level too.
-- v1 is a script. Encoding it as a durable orchestration plan
-  ([`plan.ex`](../../lib/ouroboros/orchestration/plan.ex), `:coding` steps through a team)
-  is v2, after the script has produced three merged PRs and the shape is known.
+- v1 is a script. Encoding it as a durable orchestration plan was v2 — the orchestration
+  and team planes it named were deleted by the core reduction
+  ([`core.md`](core.md) §3 D3), so whatever v2 becomes stands on what survived.
 
 **Acceptance.** One merged PR authored inside Ouroboros, review included, with the corpus
 delta in the body. Then three.

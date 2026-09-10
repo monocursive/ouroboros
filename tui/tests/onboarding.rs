@@ -12,7 +12,7 @@ use serde_json::json;
 use ouro::model::Plane;
 use ouro::proto::{ErrorCode, RpcError};
 use ouro::transport::ClientError;
-use ouro::ui::app::{App, Mode, Msg, Overlay, PromptKind, Tab, Tag};
+use ouro::ui::app::{App, Mode, Msg, Overlay, Tab, Tag};
 
 use support::{app, full_hello, render};
 
@@ -212,10 +212,12 @@ fn an_existing_chatgpt_subscription_goes_straight_to_the_workspace_composer() {
     assert!(screen.contains("Files: can edit"), "{}", screen.text());
 }
 
+/// The ChatGPT gate is about the *model*, not about a vendor: a model that a
+/// subscription does not pay for starts without one being connected.
 #[test]
-fn a_configured_non_codex_provider_is_not_blocked_by_chatgpt_auth() {
+fn a_configured_non_chatgpt_model_is_not_blocked_by_chatgpt_auth() {
     let mut app = harness(false);
-    app.config.defaults.provider = Some("claude".into());
+    app.config.defaults.model = Some("anthropic:claude-sonnet-5".into());
     app.config.defaults.workspace = Some("/srv/agent-work".into());
 
     let screen = render(&mut app, 120, 34);
@@ -224,8 +226,16 @@ fn a_configured_non_codex_provider_is_not_blocked_by_chatgpt_auth() {
         "{}",
         screen.text()
     );
-    assert!(screen.contains("Using claude"), "{}", screen.text());
-    assert!(screen.contains("Provider claude"), "{}", screen.text());
+    assert!(
+        screen.contains("Using claude-sonnet-5"),
+        "{}",
+        screen.text()
+    );
+    assert!(
+        screen.contains("Model anthropic:claude-sonnet-5"),
+        "{}",
+        screen.text()
+    );
     assert!(
         !screen.contains("ChatGPT not connected") && !screen.contains("ChatGPT unavailable"),
         "{}",
@@ -236,7 +246,6 @@ fn a_configured_non_codex_provider_is_not_blocked_by_chatgpt_auth() {
         "{}",
         screen.text()
     );
-    assert!(screen.contains("Folder: /srv/agent-work"));
 
     type_text(&mut app, "review the current diff");
     app.apply(key(KeyCode::Enter));
@@ -245,8 +254,8 @@ fn a_configured_non_codex_provider_is_not_blocked_by_chatgpt_auth() {
     let start = calls
         .iter()
         .find(|call| call.method == "interactive.start")
-        .expect("the configured provider starts directly");
-    assert_eq!(start.params["provider"], "claude");
+        .expect("the configured model starts directly");
+    assert_eq!(start.params["model"], "anthropic:claude-sonnet-5");
     assert_eq!(start.params["workspace"], "/srv/agent-work");
     assert!(calls
         .iter()
@@ -591,7 +600,11 @@ fn typing_and_enter_start_native_in_the_current_folder_then_send_the_first_messa
         .find(|call| call.method == "interactive.start")
         .expect("a session start");
 
-    assert_eq!(start.params["provider"], "native");
+    assert!(
+        start.params.get("provider").is_none(),
+        "`provider` is not a start option and sending it would be -32602: {}",
+        start.params
+    );
     assert_eq!(start.params["model"], "openai_codex:gpt-5.6-sol");
     assert_eq!(start.params["workspace"], "/work/ouroboros");
     let start_id = start.params["id"]
@@ -1022,7 +1035,7 @@ fn ctrl_p_opens_a_searchable_palette_with_coding_and_distribution_groups() {
     let screen = render(&mut app, 120, 34);
     assert!(screen.contains("Coding"), "{}", screen.text());
     assert!(screen.contains("Runtime & distribution"));
-    assert!(screen.contains("Agents"));
+    assert!(screen.contains("Nodes"));
 
     type_text(&mut app, "settings");
     let screen = render(&mut app, 120, 34);
@@ -1094,12 +1107,11 @@ fn switch_session_stays_inside_the_palette_flow() {
         json!([{
             "_struct": "Ouroboros.Interactive.State",
             "id": "recent-session",
-            "provider": "codex",
+            "provider": "native",
             "status": "idle",
             "updated_at": "2026-08-14T10:00:00Z"
         }]),
     );
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
 
     app.apply(ctrl('p'));
     app.apply(key(KeyCode::Down));
@@ -1117,9 +1129,9 @@ fn switch_session_stays_inside_the_palette_flow() {
 fn secondary_operator_panels_return_to_coding_with_escape() {
     let mut app = harness(true);
     app.apply(ctrl('p'));
-    type_text(&mut app, "agents");
+    type_text(&mut app, "upgrades");
     app.apply(key(KeyCode::Enter));
-    assert_eq!(app.tab, Tab::Agents);
+    assert_eq!(app.tab, Tab::Upgrade);
 
     app.apply(key(KeyCode::Esc));
     assert_eq!(app.tab, Tab::Sessions);
@@ -1136,7 +1148,6 @@ fn account_completion_closes_the_gate_without_restarting_the_client() {
 
     assert!(app.chatgpt_connected());
     assert!(app.overlay.is_none());
-    assert_eq!(app.config.defaults.provider.as_deref(), Some("native"));
     assert_eq!(
         app.config.defaults.model.as_deref(),
         Some("openai_codex:gpt-5.6-sol")
@@ -1194,82 +1205,6 @@ fn a_successful_cli_first_message_makes_the_next_input_a_queued_follow_up() {
     assert_eq!(
         follow_up.params["input"],
         "keep going with the implementation"
-    );
-}
-
-#[test]
-fn plans_tab_submits_a_control_run_and_cancels_one_behind_confirmation() {
-    let mut app = harness(false);
-    app.tab = Tab::Plans;
-    app.plans_on_control = true;
-    let _ = app.drain();
-    answer(
-        &mut app,
-        Tag::ControlRuns,
-        json!([{
-            "id": "run-1",
-            "revision": 0,
-            "status": "executing",
-            "objective": "repair the failing tests"
-        }]),
-    );
-
-    app.apply(key(KeyCode::Char('s')));
-    assert!(matches!(
-        app.overlay,
-        Some(Overlay::Prompt {
-            kind: PromptKind::ControlObjective,
-            ..
-        })
-    ));
-    type_text(&mut app, "repair the failing tests");
-    app.apply(key(KeyCode::Enter));
-
-    let submit = app
-        .drain()
-        .into_iter()
-        .find(|call| call.method == "control.submit")
-        .expect("the submit call");
-    assert_eq!(submit.params["objective"], "repair the failing tests");
-
-    app.apply(key(KeyCode::Char('c')));
-    let title = match &app.overlay {
-        Some(Overlay::Confirm { title, .. }) => title.clone(),
-        other => panic!("expected a cancel confirmation, got {other:?}"),
-    };
-    assert!(title.contains("cancel control run run-1"), "{title}");
-
-    app.apply(key(KeyCode::Enter));
-    let cancel = app
-        .drain()
-        .into_iter()
-        .find(|call| call.method == "control.cancel")
-        .expect("the confirmed cancel call");
-    assert_eq!(cancel.params["id"], "run-1");
-}
-
-#[test]
-fn a_terminal_control_run_refuses_cancellation_with_a_said_so_notice() {
-    let mut app = harness(false);
-    app.tab = Tab::Plans;
-    app.plans_on_control = true;
-    let _ = app.drain();
-    answer(
-        &mut app,
-        Tag::ControlRuns,
-        json!([{ "id": "run-9", "revision": 2, "status": "completed" }]),
-    );
-
-    app.apply(key(KeyCode::Char('c')));
-    assert!(app.overlay.is_none(), "no confirmation for a finished run");
-
-    let notice = app.notice.as_ref().map(|notice| notice.text.clone());
-    let Some(text) = &notice else {
-        panic!("the refusal was said, not silent: {notice:?}");
-    };
-    assert!(
-        text.contains("run-9") && text.contains("completed"),
-        "the refusal names the run and its state: {text}"
     );
 }
 

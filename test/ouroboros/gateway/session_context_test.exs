@@ -19,10 +19,9 @@ defmodule Ouroboros.Gateway.SessionContextTest do
   alias Ouroboros.Gateway.Methods
   alias Ouroboros.Interactive.{State, Store, Task}
   alias Ouroboros.InteractiveSession
-  alias Ouroboros.Test.HarnessAdapter
   alias Ouroboros.Test.NativeModelScript
 
-  @provider :ouroboros_test
+  @provider :native
 
   setup do
     cleanup_sessions()
@@ -42,12 +41,6 @@ defmodule Ouroboros.Gateway.SessionContextTest do
     previous_native_model = Application.get_env(:ouroboros, :native_model_module)
     Application.put_env(:ouroboros, :native_data_dir, data_dir)
     Application.put_env(:ouroboros, :native_model_module, NativeModelScript)
-
-    Application.put_env(
-      :jido_harness,
-      :providers,
-      Map.put(map_or_empty(previous_providers), @provider, HarnessAdapter)
-    )
 
     Application.put_env(
       :jido_harness,
@@ -137,7 +130,7 @@ defmodule Ouroboros.Gateway.SessionContextTest do
     end
   end
 
-  describe "refusal by capability" do
+  describe "the parameter contract past the facade" do
     test "rewind is operate, rewind_points is read, and both are advertised" do
       table = Methods.table()
       assert table["interactive.rewind"].scope == :operate
@@ -151,27 +144,12 @@ defmodule Ouroboros.Gateway.SessionContextTest do
     test "a turn id string reaches the session instead of dying at the facade", %{id: id} do
       # `rewind_points` hands out turn ids and the wire admits them; a facade guard that only
       # let integers through turned every id into `invalid_rewind` before the session saw it.
+      # The refusal past the facade is a liveness one now: one transport, not yet asked.
       start_session(id)
 
-      assert {:error, -32_006, _message, ["unsupported_on_transport", details]} =
+      assert {:error, -32_006, _message, ["rewind_refused", ["unknown_turn", "turn_abc"]]} =
                Methods.invoke("interactive.rewind", %{"id" => id, "to_turn" => "turn_abc"})
 
-      assert details["verb"] == "rewind"
-      retire_session(id)
-    end
-
-    test "rewind on a non-native transport is refused by transport, as wire data", %{id: id} do
-      start_session(id)
-
-      assert {:error, -32_006, _message, ["unsupported_on_transport", details]} =
-               Methods.invoke("interactive.rewind", %{"id" => id, "to_turn" => 0})
-
-      assert details["verb"] == "rewind"
-
-      assert {:error, -32_006, _message, ["unsupported_on_transport", points]} =
-               Methods.invoke("interactive.rewind_points", %{"id" => id})
-
-      assert points["verb"] == "rewind_points"
       retire_session(id)
     end
 
@@ -186,56 +164,6 @@ defmodule Ouroboros.Gateway.SessionContextTest do
 
       retire_session(id)
     end
-
-    test "compact on a non-native transport travels as wire data naming the transport",
-         %{id: id} do
-      start_session(id)
-
-      assert {:error, -32_006, message, data} =
-               Methods.invoke("interactive.compact", %{"id" => id})
-
-      assert message =~ "refused the call"
-      assert ["unsupported_on_transport", details] = data
-      assert details["verb"] == "compact"
-      assert details["transport"] == "managed"
-      assert details["provider"] == "ouroboros_test"
-      assert details["message"] =~ "native"
-
-      retire_session(id)
-    end
-
-    test "handoff on a non-native transport is refused the same way", %{id: id} do
-      start_session(id)
-
-      assert {:error, -32_006, _message, data} =
-               Methods.invoke("interactive.handoff", %{"id" => id, "prompt" => "carry on"})
-
-      assert ["unsupported_on_transport", details] = data
-      assert details["verb"] == "handoff"
-
-      retire_session(id)
-    end
-
-    test "context answers for a non-native transport with the subset it knows", %{id: id} do
-      start_session(id)
-
-      assert {:ok, context} = Methods.invoke("interactive.context", %{"id" => id})
-
-      # `source` is what keeps this honest: these figures are what the provider reported,
-      # and nothing here claims to have measured a prefix it never held.
-      assert context.source == :usage
-      assert context.provider == @provider
-      assert context.transport == :managed
-      assert context.session_id == id
-      refute Map.has_key?(context, :prefix_fingerprint)
-      refute Map.has_key?(context, :archive_ids)
-
-      # A session that has spent no turn reports no window rather than a zero.
-      assert context.context_window == nil
-      assert context.context_used == nil
-
-      retire_session(id)
-    end
   end
 
   describe "the worktree start option" do
@@ -245,7 +173,6 @@ defmodule Ouroboros.Gateway.SessionContextTest do
       assert {:ok, _result} =
                Methods.invoke("interactive.start", %{
                  "id" => id,
-                 "provider" => Atom.to_string(@provider),
                  "workspace" => root,
                  "worktree" => false
                })
@@ -257,29 +184,6 @@ defmodule Ouroboros.Gateway.SessionContextTest do
       retire_session(id)
     end
 
-    # `false` rather than `true` on purpose: what is under test is that the *option*
-    # travels and lands on the durable field, not that `git worktree add` works — that is
-    # `test/workspace_worktree_test.exs`, and provisioning one here would need a real
-    # repository and would make this a slow test of somebody else's component.
-    test "it reaches worktree_requested on the coding plane", %{workspace: root} do
-      id = unique_id("gateway-worktree-coding")
-
-      assert {:ok, _result} =
-               Methods.invoke("coding.start", %{
-                 "id" => id,
-                 "objective" => "check the worktree option travels",
-                 "provider" => Atom.to_string(@provider),
-                 "workspace" => root,
-                 "worktree" => false
-               })
-
-      assert {:ok, task} = Methods.invoke("coding.info", %{"id" => id})
-      assert task.worktree_requested == false
-      assert task.worktree == nil
-
-      retire_coding_task(id)
-    end
-
     test "a non-boolean worktree is a parameter error naming the field" do
       assert {:error, -32_602, message} =
                Methods.invoke("interactive.start", %{"id" => "x", "worktree" => "yes"})
@@ -288,7 +192,7 @@ defmodule Ouroboros.Gateway.SessionContextTest do
       assert message =~ "boolean"
 
       assert {:error, -32_602, message} =
-               Methods.invoke("coding.start", %{"objective" => "x", "worktree" => 1})
+               Methods.invoke("interactive.start", %{"id" => "x", "worktree" => 1})
 
       assert message =~ "worktree"
     end
@@ -468,6 +372,37 @@ defmodule Ouroboros.Gateway.SessionContextTest do
 
       retire_session(id)
     end
+
+    test "rewind with no live transport refuses as wire data, naming the verb", context do
+      id = unique_id("native-rewind-unstarted")
+
+      {:ok, session} =
+        InteractiveSession.start(
+          id: id,
+          provider: :native,
+          workspace: context.workspace,
+          model: elem(NativeModelScript.start([[{:text, "hi"}, {:finish, :stop}]]), 0),
+          workspace_mode: :shared_read,
+          approval_mode: :auto_approve
+        )
+
+      {:ok, %State{provider_session_id: provider_session_id}} = InteractiveSession.info(session)
+
+      if pid = Ouroboros.Provider.Native.Session.whereis(provider_session_id || "") do
+        Process.exit(pid, :kill)
+
+        wait_until(fn ->
+          Ouroboros.Provider.Native.Session.whereis(provider_session_id) == nil
+        end)
+      end
+
+      assert {:error, -32_006, _message, ["native_transport_unavailable", details]} =
+               Methods.invoke("interactive.rewind", %{"id" => id, "to_turn" => 0})
+
+      assert details["verb"] == "rewind"
+
+      retire_session(id)
+    end
   end
 
   # The model script that makes a compaction possible: enough conversation to fold, and a
@@ -526,7 +461,7 @@ defmodule Ouroboros.Gateway.SessionContextTest do
   end
 
   defp start_session(id, opts \\ []) do
-    opts = Keyword.merge([id: id, provider: @provider, workspace: File.cwd!()], opts)
+    opts = Keyword.merge([id: id, workspace: File.cwd!()], opts)
     assert {:ok, ref} = InteractiveSession.start(opts)
     ref
   end
@@ -544,27 +479,6 @@ defmodule Ouroboros.Gateway.SessionContextTest do
       {:ok, session} ->
         _ = Store.put(%{session | status: :cancelled})
         _ = Store.delete(id)
-
-      _absent ->
-        :ok
-    end
-
-    :ok
-  end
-
-  defp retire_coding_task(id) do
-    case Ouroboros.Coding.Task.whereis(id) do
-      pid when is_pid(pid) ->
-        DynamicSupervisor.terminate_child(Ouroboros.Coding.TaskSupervisor, pid)
-
-      _absent ->
-        :ok
-    end
-
-    case Ouroboros.Coding.Store.get(id) do
-      {:ok, task} ->
-        _ = Ouroboros.Coding.Store.put(%{task | status: :cancelled})
-        _ = Ouroboros.Coding.Store.delete(id)
 
       _absent ->
         :ok
@@ -650,7 +564,6 @@ defmodule Ouroboros.Gateway.SessionContextTest do
       # C5. The owner node names the OS sandbox its shell runs under, as a string.
       assert State.public(session).options.capabilities.sandbox in [
                "sandbox-exec",
-               "ouro-sandbox",
                "bwrap",
                "none"
              ]
@@ -711,17 +624,6 @@ defmodule Ouroboros.Gateway.SessionContextTest do
                Methods.invoke("interactive.configure", %{"id" => id, "plan" => false})
 
       assert result.options.plan == false
-    end
-
-    test "a transport that cannot be told to plan refuses by declaration, as wire data",
-         %{id: id} do
-      start_session(id)
-
-      assert {:error, _code, _message, ["unsupported_configuration", details]} =
-               Methods.invoke("interactive.configure", %{"id" => id, "plan" => true})
-
-      assert details["field"] == "plan"
-      retire_session(id)
     end
   end
 end

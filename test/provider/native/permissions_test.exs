@@ -65,11 +65,11 @@ defmodule Ouroboros.Provider.Native.PermissionsTest do
 
     assert Permissions.suggested_rule(%{
              @request
-             | tool: "desktop_act",
+             | tool: "capability",
                command: nil,
                mode: :execute,
-               context: %{app: "com.apple.calculator"}
-           }) == "ComputerUse(app:com.apple.calculator)"
+               context: %{capability: "vet"}
+           }) == "Capability(vet)"
   end
 
   test "every suggestion it offers is one permissions.add would accept" do

@@ -5,6 +5,11 @@ proposal) against `dev` at `160ca08`. Every file and line cited below was read a
 This document is the contract the implementing agents work to, the review protocol each slice
 runs under, and the record of where the plan departs from the proposal and why.
 
+*One mechanism below has since been deleted:* `priv/sandbox/` held the `ouro-sandbox` helper,
+which [`core.md`](core.md) §4 A2 removed along with the second Linux backend. §2 rule 5 and §6's
+`improve.sh` steps name it; a graded worktree is seeded with `priv/wasm/` alone now, which is
+what `Bench.Self.Support.seeded/0` and `bench/self/improve.sh` do.
+
 The proposal's claim (§0) stands unchanged. What changes is mechanism, in the ten places
 where the source disagreed with the proposal's reading of it.
 

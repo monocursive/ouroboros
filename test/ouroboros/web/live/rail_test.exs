@@ -28,28 +28,11 @@ defmodule Ouroboros.Web.Live.RailTest do
         node: :core@one,
         status: :idle,
         updated_at: "2026-08-29T12:00:00Z",
-        provider: :claude_code,
+        provider: :native,
         workspace: "/w",
         title: nil,
         options: %{},
-        usage: %{},
-        children: []
-      })
-    )
-  end
-
-  defp coding(id, fields \\ []) do
-    Rail.from_coding(
-      Enum.into(fields, %{
-        id: id,
-        node: :core@one,
-        status: :running,
-        updated_at: "2026-08-29T12:00:00Z",
-        provider: :claude_code,
-        workspace: "/w",
-        objective: "do the thing",
-        options: %{},
-        parent: nil
+        usage: %{}
       })
     )
   end
@@ -88,11 +71,10 @@ defmodule Ouroboros.Web.Live.RailTest do
       assert Rail.triage_of(interactive("a", status: :awaiting_approval), 0) == :needs_you
     end
 
-    test "an idle session settles, on either plane, and is never NEEDS YOU" do
+    test "an idle session settles and is never NEEDS YOU" do
       # Same rule as `SessionInfo::triage` in `tui/src/model.rs`: idle is between turns,
       # not blocked on a human. The green eye is for a real ask and nothing else.
       assert Rail.triage_of(interactive("a", status: :idle), 0) == :settled
-      assert Rail.triage_of(coding("t", status: :idle), 0) == :settled
     end
 
     test "but an idle session holding an unanswered approval still needs a person" do
@@ -118,21 +100,18 @@ defmodule Ouroboros.Web.Live.RailTest do
         :something_new
       ]
 
-      for status <- statuses, plane <- [:interactive, :coding] do
-        row =
-          if plane == :interactive,
-            do: interactive("a", status: status),
-            else: coding("a", status: status)
+      for status <- statuses do
+        row = interactive("a", status: status)
 
         if status == :awaiting_approval do
           assert Rail.triage_of(row, 0) == :needs_you
         else
           refute Rail.triage_of(row, 0) == :needs_you,
-                 "#{plane} #{status} reached NEEDS YOU without an ask"
+                 "#{status} reached NEEDS YOU without an ask"
         end
 
         assert Rail.triage_of(row, 1) == :needs_you,
-               "#{plane} #{status} ignored an unanswered approval"
+               "#{status} ignored an unanswered approval"
       end
     end
 
@@ -185,26 +164,20 @@ defmodule Ouroboros.Web.Live.RailTest do
       assert Enum.map(groups(rows), &elem(&1, 1)) == ["new", "mid", "old"]
     end
 
-    test "then plane, then id — so the list does not reshuffle under a reader's cursor" do
+    test "then id — so the list does not reshuffle under a reader's cursor" do
       at = "2026-08-29T12:00:00Z"
 
       rows = [
-        coding("b", status: :running, updated_at: at),
+        interactive("c", status: :running, updated_at: at),
         interactive("b", status: :running, updated_at: at),
-        coding("a", status: :running, updated_at: at),
         interactive("a", status: :running, updated_at: at)
       ]
 
       assert Enum.map(groups(rows), &{elem(&1, 0), elem(&1, 1)}) == [
                {:at_work, "a"},
                {:at_work, "b"},
-               {:at_work, "a"},
-               {:at_work, "b"}
+               {:at_work, "c"}
              ]
-
-      # Interactive before coding, and the same order every time it is asked.
-      assert Rail.triaged(rows) |> Enum.map(& &1.row.plane) ==
-               [:interactive, :interactive, :coding, :coding]
 
       assert Rail.triaged(rows) == Rail.triaged(Enum.shuffle(rows))
     end
@@ -228,50 +201,6 @@ defmodule Ouroboros.Web.Live.RailTest do
 
       assert length(Rail.triaged(rows)) == 1
     end
-
-    test "the same id on two planes is two rows, because they are two streams" do
-      rows = [interactive("x", status: :running), coding("x", status: :running)]
-
-      assert length(Rail.triaged(rows)) == 2
-    end
-  end
-
-  describe "nesting" do
-    test "a delegated task is drawn under the conversation that started it" do
-      rows = [
-        interactive("parent", status: :running, children: ["child"]),
-        coding("child", status: :running, parent: %{plane: :interactive, id: "parent"})
-      ]
-
-      assert groups(rows) == [{:at_work, "parent", 0}, {:at_work, "child", 1}]
-    end
-
-    test "but only within a group — a child that needs a person is never buried" do
-      rows = [
-        interactive("parent", status: :running, children: ["child"]),
-        coding("child", status: :awaiting_approval, parent: %{plane: :interactive, id: "parent"})
-      ]
-
-      # The child keeps its own place at depth zero, above its parent, because the two
-      # orderings disagree and "what needs me" wins.
-      assert groups(rows) == [{:needs_you, "child", 0}, {:at_work, "parent", 0}]
-    end
-
-    test "a child claimed only by its own parent pointer still nests" do
-      rows = [
-        # The parent's delegation list is stale; the child names the parent anyway.
-        interactive("parent", status: :running, children: ["someone-else"]),
-        coding("child", status: :running, parent: %{plane: :interactive, id: "parent"})
-      ]
-
-      assert groups(rows) == [{:at_work, "parent", 0}, {:at_work, "child", 1}]
-    end
-
-    test "a parent with no children nests nothing, whatever else is in the list" do
-      rows = [interactive("a", status: :running), coding("b", status: :running)]
-
-      assert Enum.all?(Rail.triaged(rows), &(&1.depth == 0))
-    end
   end
 
   describe "counts and words" do
@@ -290,7 +219,6 @@ defmodule Ouroboros.Web.Live.RailTest do
       assert Rail.title(interactive("abc", title: nil)) =~ "New conversation"
       assert Rail.title(interactive("abc", title: "   ")) =~ "New conversation"
       assert Rail.title(interactive("abc", title: " Named ")) == "Named"
-      assert Rail.title(coding("t1")) == "do the thing"
     end
 
     test "an outcome word is read off the status and never invented" do
@@ -362,7 +290,7 @@ defmodule Ouroboros.Web.Live.RailTest do
     test "an at-work row says provider and machine when nothing is watching it" do
       html = render_rail([interactive("w", status: :running)])
 
-      assert html =~ "claude_code · core@one"
+      assert html =~ "native · core@one"
       assert html =~ "ouro-glyph-work"
     end
 
@@ -378,7 +306,7 @@ defmodule Ouroboros.Web.Live.RailTest do
         )
 
       assert html =~ "Read lib/thing.ex"
-      refute html =~ "claude_code · core@one"
+      refute html =~ "native · core@one"
     end
 
     test "an idle session is drawn in the third group, reading 'idle · <age>'" do
@@ -431,15 +359,6 @@ defmodule Ouroboros.Web.Live.RailTest do
       assert html =~ "ouro-row-failed"
       assert html =~ "ouro-glyph-failed"
       assert html =~ "failed"
-    end
-
-    test "a nested child is drawn as one" do
-      rows = [
-        interactive("parent", status: :running, children: ["child"]),
-        coding("child", status: :running, parent: %{plane: :interactive, id: "parent"})
-      ]
-
-      assert render_rail(rows) =~ "ouro-row-nested"
     end
 
     test "every row is a link to its own session" do

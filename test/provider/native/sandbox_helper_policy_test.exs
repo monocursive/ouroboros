@@ -5,7 +5,7 @@ defmodule Ouroboros.Provider.Native.SandboxHelperPolicyTest do
 
   Contract C10 says this is `builder_policy/1`'s shape with the scratch attached, and that it
   adds **no backend arm** — `:builder` is this module's vocabulary for "closed by default on
-  reads" and all three backends already implement it. What W21 added is a *field*, `process`,
+  reads" and both backends already implement it. What W21 added is a *field*, `process`,
   the way W16 added `loopback`: the Seatbelt profile is a function of the policy's fields, so
   sealing the helper's process cost no fourth profile. So what is pinned here is the shape and
   the mode, the sealed profile's whole text beside the builder's, and then — where a claim is
@@ -13,16 +13,18 @@ defmodule Ouroboros.Provider.Native.SandboxHelperPolicyTest do
   the builder policy as the other half of every pair so that a denial is a fence and not a
   broken command.
 
-  The kernel tests are Seatbelt's and skip elsewhere with the reason: the two Linux backends
-  render a sealed policy exactly as they render an open one, which is pinned below as a
-  property of the pure functions, and what proves the Linux read fence is CI's ubuntu job.
+  The kernel tests are Seatbelt's and skip elsewhere with the reason: bubblewrap renders a
+  sealed policy exactly as it renders an open one, which is pinned below as a property of the
+  pure functions, and what proves the Linux read fence is CI's ubuntu job.
+
+  The name is the `ouro-wasm` helper's, and has been since W16 — not the `ouro-sandbox`
+  backend, which was deleted by docs/proposals/core.md §4 A2 and never rendered this policy.
   """
 
   use ExUnit.Case, async: true
 
   alias Ouroboros.Provider.Native.Sandbox
   alias Ouroboros.Provider.Native.Sandbox.Bwrap
-  alias Ouroboros.Provider.Native.Sandbox.Helper
   alias Ouroboros.Provider.Native.Sandbox.SandboxExec
 
   # Seatbelt is the one backend that seals a process, so the kernel-level claims about the
@@ -130,10 +132,9 @@ defmodule Ouroboros.Provider.Native.SandboxHelperPolicyTest do
   end
 
   describe "which backend seals a process (W21)" do
-    test "Seatbelt does; the Linux backends do not, and neither does no backend" do
+    test "Seatbelt does; bubblewrap does not, and neither does no backend" do
       assert Sandbox.seals_process?(:sandbox_exec)
       refute Sandbox.seals_process?(:bwrap)
-      refute Sandbox.seals_process?(:ouro_sandbox)
       refute Sandbox.seals_process?(:none)
 
       # Answered by backend, off a detection map exactly as `fences_reads?/1` is.
@@ -151,7 +152,7 @@ defmodule Ouroboros.Provider.Native.SandboxHelperPolicyTest do
 
       assert Sandbox.process_posture(sealed, :sandbox_exec) == :sealed
       assert Sandbox.process_posture(sealed, :bwrap) == :open
-      assert Sandbox.process_posture(sealed, :ouro_sandbox) == :open
+      assert Sandbox.process_posture(sealed, :none) == :open
       assert Sandbox.process_posture(open, :sandbox_exec) == :open
       assert Sandbox.process_posture(Sandbox.builder_policy([]), :sandbox_exec) == :open
     end
@@ -453,22 +454,15 @@ defmodule Ouroboros.Provider.Native.SandboxHelperPolicyTest do
       refute ["--bind", here, here] in binds, "a readable root must not be writable"
     end
 
-    test "the two Linux backends render a sealed policy exactly as an open one (W21)", %{
-      policy: sealed
-    } do
-      # Neither can express the seal: bubblewrap's namespace has `/usr/bin` readable and
-      # executable, and Landlock fences neither `execve` nor `stat`. So the honest rendering is
-      # the builder's, byte for byte, and the pool's status is what says `open` on such a
-      # node rather than a profile that claimed otherwise.
+    test "bubblewrap renders a sealed policy exactly as an open one (W21)", %{policy: sealed} do
+      # It cannot express the seal: its namespace has `/usr/bin` readable and executable. So
+      # the honest rendering is the builder's, byte for byte, and the pool's status is what
+      # says `open` on such a node rather than a profile that claimed otherwise.
       open = %{sealed | process: :open}
       assert sealed.process == :sealed
 
       assert Bwrap.options(%{}, sealed, true) == Bwrap.options(%{}, open, true)
       assert Bwrap.options(%{}, sealed, false) == Bwrap.options(%{}, open, false)
-      assert Helper.request(sealed, %{}) == Helper.request(open, %{})
-
-      # And the request carries no field the helper would refuse as unknown.
-      refute Map.has_key?(Helper.request(sealed, %{}), "process")
     end
   end
 

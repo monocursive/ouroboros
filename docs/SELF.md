@@ -38,7 +38,7 @@ alone — the second and last module a config provider calls, and it earns that 
 | `OUROBOROS_SIGNING_NODE`, **or** `OUROBOROS_SIGNER_KEY_PATH` **and** `OUROBOROS_SIGNER_ID` | A lane-W signature comes from a `:signer` peer or from a service on this node, in that order (`Ouroboros.Wasm.Deploy`). | Refused, naming all three. |
 | `OUROBOROS_UPGRADE_TRUSTED_SIGNERS`, non-empty | `config/config.exs` sets `allow_unsigned: true` outside production; the posture closes that and needs a listed key for anything to deploy. | Refused. A malformed entry or a duplicate id is refused too, never a quietly narrowed set. |
 | `config :ouroboros, :wasm_forge_placement` is `:local` | The posture forges where the effect lands. | Refused, naming the setting. |
-| `config :ouroboros, :signing_require_wasm_eval` is `true` | Lane W has no build peer behind it, so the signed eval spec is the whole test story. | Refused, naming the setting. |
+| `config :ouroboros, :signing_require_wasm_eval` is `true` | Nothing in this runtime compiles a component or runs its tests before the signature, so the signed eval spec is the whole test story. | Refused, naming the setting. |
 
 **What it sets.** `native_forge_tool: true` (S1's tool becomes visible), `permissions_engine:
 Ouroboros.Wasm.PolicyEngine` (S2's engine, and the only engine a promotion record means
@@ -54,10 +54,9 @@ reachable from an environment variable.
 in `children(:signer)`, so a single machine could forge and never sign. Under the posture, on a
 `:core` node with a key path configured and no `OUROBOROS_SIGNING_NODE`, the application starts
 it directly after the durable authority above it — the ledger, grants, the promotion record and
-permissions — and before anything that can forge. This is the dev loop
-`Ouroboros.Upgrade.Forge.Signer`'s moduledoc describes and it is **not custody**: the key is a
-file beside the application, and what keeps the model's own shell out of it is one thing — the
-OS sandbox's read fence.
+permissions — and before anything that can forge. This is a dev loop and it is **not
+custody**: the key is a file beside the application, and what keeps the model's own shell
+out of it is one thing — the OS sandbox's read fence.
 
 **Say that plainly, because it is the whole of the one-machine posture's security.** The seed
 sits on the same disk as the session that may forge. The permission engine cannot help: a shell
@@ -71,10 +70,17 @@ eval-spec requirement is only as strong as that fence**. The same list carries t
 `gateway.token`: a session that can read it speaks to its own runtime's gateway as the operator,
 and the sandbox deliberately keeps loopback open for build tools.
 
-Two of the three backends can render that fence. `ouro-sandbox` cannot, says so through
-`Sandbox.hides_files?/1`, and on such a node the application starts **no** local signing service
-at all — a forge there ends at `:no_signing_service` — unless `OUROBOROS_SELF_UNFENCED_KEY=1`
-says the operator accepts that any session can read the seed and sign in its name.
+Both backends render that fence — Seatbelt with `(deny file-read* (literal …))`, bubblewrap by
+binding `/dev/null` read-only over the path, and only where the file is there (an absent one is
+left out, because binding `/dev/null` onto a path under a read-only bind aborts the command;
+`Bwrap.hidden_file_binds/1` has the measurement). So the application no longer asks *which*
+backend a node has before it starts the local signing service. It still asks whether the node
+has one: **no backend, no service.** A `:none` node renders no fence at all, so it logs one
+error naming `OUROBOROS_SIGNING_NODE` — or installing a backend — and starts nothing, and a
+forge there ends at `:no_signing_service`. There used to be a third backend that could not
+render the fence, a `hides_files?/1` question in front of this decision, and an
+`OUROBOROS_SELF_UNFENCED_KEY=1` escape from it; all three went with docs/proposals/core.md §4
+A2, and nothing replaced the escape.
 
 **On a fleet, name a `:signer` node.** `OUROBOROS_SIGNING_NODE` puts the key on another host,
 this node starts no service, and none of the above applies: the seed is not on the machine the
@@ -265,7 +271,7 @@ the correct reading of a `preview`: it is a cargo build, not a look.
 
 **Off by default.** `config :ouroboros, :native_forge_tool` is `false`; the `self` posture
 sets it. Off, the name is in no session's tool list and `Tools.lookup/3` answers
-`:unknown_tool` — the posture the Computer Use tools take. It is read as exactly `true`, so a
+`:unknown_tool` — the same posture `capability` takes. It is read as exactly `true`, so a
 typo leaves it shut. `Ouroboros.Audit.tool_supported?/1` does not name it, so a node under
 required audit refuses it by omission.
 
@@ -485,7 +491,7 @@ table out to its own length.
 The file is read before a runtime is started, refused over a mebibyte, refused when it is not a
 regular file by the open handle's own metadata, and refused together with a positional prompt.
 
-Proved in `test/ouroboros/gateway/policy_test.exs`, `test/provider/native/coding_approval_test.exs`,
+Proved in `test/ouroboros/gateway/policy_test.exs`, `test/interactive_approval_ledger_test.exs`,
 `tui/src/policy_cli.rs`'s own tests, `tui/tests/policy_cli.rs` and `tui/tests/run.rs` against the
 scripted gateway with the golden frames, and
 `test/support/gateway_golden/policy_{status,promote,replay}_result.json` with the sections
@@ -707,17 +713,20 @@ checkout — is an empty report and no log line.
   directory, and an empty one, are skipped by type; a `promotions.json` outside the size bound
   or of the wrong type is not parsed. And the tree starts **one** task, whose function is
   `Self.Boot.run_after_wasm/0`, with the lane-W half proved to run first.
-- `boot_test.exs`, the posture's key — on a node whose sandbox reports `hides_files?: false`
-  (`native_sandbox: :none` is the seam) `self_signing_children/0` returns `[]` and logs the
-  sentence naming the consequence and both ways out; with `OUROBOROS_SELF_UNFENCED_KEY=1` it
-  returns the service *and* logs what was accepted; a `signing_node` posture is unaffected.
+- `boot_test.exs`, the posture's key — the posture with a key beside the application starts one
+  service carrying that key path; a `signing_node` posture starts none, with or without a real
+  key file on this host; no posture and no key each start none; and a node with **no sandbox
+  backend** starts none and logs one error naming a `:signer` peer or a backend as the remedy.
+  (The `hides_files?/1` question that stood in front of this decision, and the
+  `OUROBOROS_SELF_UNFENCED_KEY` escape from it, went with the third backend,
+  docs/proposals/core.md §4 A2. The refusal on a backend-less node did not.)
 - `sandbox_test.exs` — `hidden_files/0` names the seed, both tokens and the cookie secret, in
   the spelling they are configured with and in the one the kernel resolves, and agrees with
   `Ouroboros.Web.Config`'s own defaults; every session policy carries them in all three modes
   and a builder policy does not; the Seatbelt profile denies read *and* write last of all the
   file rules and leaves the loopback exception alone; bubblewrap masks the path with
-  `/dev/null` and skips one whose parent is not there; the `ouro-sandbox` request carries no
-  such field. **Live on this machine** (Seatbelt): the reviewers' two exploits, adopted — a
+  `/dev/null` and skips one whose parent is not there. **Live on this machine** (Seatbelt): the
+  reviewers' two exploits, adopted — a
   sandboxed `bash` `cat` of the seed (under the data directory *and* in a directory of the
   daemon user's own), of `gateway.token` and of `web.secret` is `Operation not permitted` and
   leaks no bytes, a write to the seed fails and leaves it unchanged, and an ordinary file
@@ -764,10 +773,10 @@ measured once by hand — `bwrap` 0.8.0 in a privileged `debian:bookworm-slim` c
 argv this module emits, typed out rather than generated by it — which is what established both
 that the mask works and that binding it onto an absent path refuses the command; the Elixir
 side of that is an argv assertion. No Linux host has run a session through this module from
-this worktree; CI's ubuntu-24.04 job is where that claim gets made. `ouro-sandbox` claims
-nothing: it reports `hides_files?: false` and the posture refuses to hold a key there. That
-`false` reaching `capabilities.preview` through `detect/0`'s notes is likewise unverified here
-— this machine's backend is Seatbelt, so no `ouro-sandbox` detection was built.
+this worktree; CI's ubuntu-24.04 job is where that claim gets made. The third backend that
+claimed nothing here — `ouro-sandbox`, and the `hides_files?/1` question that existed for it —
+is gone (docs/proposals/core.md §4 A2), so the two backends left both render the fence and the
+Linux half remains the unverified one.
 
 ## 4. Decisions
 
@@ -904,8 +913,7 @@ still reads from the repository, which is where it always read from.
 
 **S-D10. The tool exists only under a switch, and the switch is read as exactly `true`.**
 `config :ouroboros, :native_forge_tool` gates both the spec list and `Tools.lookup/3`, the
-way `Native.Desktop.enabled?/0` gates the Computer Use tools and a live rollout gates
-`capability` (docs/WASM.md D9). A name a model is taught and cannot use costs a call to
+way a live rollout gates `capability` (docs/WASM.md D9). A name a model is taught and cannot use costs a call to
 discover. `== true` rather than truthiness, because the misconfigured reading of a switch
 that widens what a session may do is the one that leaves it shut.
 
@@ -963,9 +971,8 @@ half of the thing it allowed. What it protected against instead — an unverifie
 itself into a decision — is answered by the verification rather than by silence. The tool
 then re-reads the same bundle, re-verifies it, and refuses unless the kind is `:capability`,
 the author is this session, and the name is still the one the decision was about (the loop
-hands that back as `forge_evaluated_name`, the way it hands `desktop_evaluated_app` to the
-desktop tools). A bundle swapped at that id between the decision and the deploy is refused by
-name.
+hands that back as `forge_evaluated_name`). A bundle swapped at that id between the
+decision and the deploy is refused by name.
 
 `status` carries nothing and declares nothing. It names nothing and builds nothing.
 
@@ -988,7 +995,8 @@ is no read half of this tool.
 
 **S-D16. The ledger is the gate, not the log.** `EffectLedger.record_started` writes the
 `:forge` or `:deploy` entry under the session principal *before* the effect and settles it
-after, mirroring `Ouroboros.Agent.Effects.Runner`; a ledger that cannot record refuses the
+after, the same shape the deleted `Ouroboros.Agent.Effects.Runner` wrote; a ledger that
+cannot record refuses the
 operation rather than proceeding unrecorded. Bytes never enter it: a `:forge` attempt names
 `wasm/<name>` and its result names the artifact id, module, epoch, signer, source digest and
 nodes — the fields the runner already writes. `preview` has no entry of its own, because
@@ -1061,9 +1069,8 @@ absent `.git` — so the destination is present, read-only and busy, and a creat
 `EISDIR`. The first cut bound `/dev/null` there, and CI showed why that is wrong: a character
 device named `ouroboros.toml` made `git add -A` refuse the whole tree in the fenced profile
 (measured, bubblewrap 0.8.0: an empty directory refuses `cp`, `mv`, `tee`, a redirect, `sed -i`
-and `rm -rf`, and `git add -A && git commit` succeeds beside it). The manifest's basename also
-joins the `LD_PRELOAD` name filter's list, so a create beneath a writable root is refused by
-the same libc filter that refuses a new `.git`. Either mount point outlives the namespace on
+and `rm -rf`, and `git add -A && git commit` succeeds beside it). Either mount point outlives
+the namespace on
 the host — bubblewrap creates it inside the host's own directory and never unlinks it — so the
 bash tool names every stub the argv will have to create (`Bwrap.mount_point_stubs/1`, read from
 the same `File.exists?` the argv reads) and clears what is still a stub once the command has
@@ -1073,16 +1080,13 @@ live on this machine: a sandboxed `Tools.Bash.run/2` doing
 `cp template ouroboros.toml` exits non-zero and the file does not exist afterwards, with
 `.git/pwned` as the control.
 
-*And where it cannot.* `ouro-sandbox` cannot express it — Landlock attaches rights to inodes,
-so a path that need not exist cannot carry a rule, and the `LD_PRELOAD` name filter that
-carries the equivalent `.git` case is a libc filter a static binary walks past. It reports
-`Sandbox.protects_files?/1` as `false` rather than pretending, and `Hooks.trusted?/2` then
-answers `false` for every workspace on that node: the workspace's **shell** hooks and checks
-are declined and counted exactly as an untrusted workspace's are, with one warning naming the
-backend. Component hooks are unaffected — they run in the WebAssembly pool, can only narrow a
-decision, and are admitted from an untrusted workspace already (D8). Trusting a file the
-session can rewrite is trusting whatever it writes next; a node that cannot hold that one
-path shut does not get to call a workspace trusted.
+*Superseded in part by docs/proposals/core.md §4 A2.* This decision also gave `Hooks.trusted?/2`
+a second condition — `Sandbox.protects_files?/1`, asked because the `ouro-sandbox` backend could
+not express a deny for a path that need not exist yet — and had that backend fall back on the
+`LD_PRELOAD` name filter for a create *beneath* a writable root. The backend, the filter and the
+second condition are all deleted. What stands is the rule above it: the manifest is fenced by
+the kernel on both remaining backends, and operator configuration alone trusts a workspace only
+because that fence is always there.
 
 
 <!-- S2-decisions -->
@@ -1291,7 +1295,7 @@ separators blanked, and `data.name` no longer mirrors a half-megabyte parameter 
 **S-D29b. Node-local, `:operate`, and one decode contract for everything the client prints.**
 The promotion record is a checkpoint on this machine and the corpus is a file on it, so there is
 nothing to route to and none of the five takes a `node`; a client asks the machine that made the
-decisions. `replay` is `:operate` rather than `:read` for the reason `computer_use.probe` is — it
+decisions. `replay` is `:operate` rather than `:read` because it
 stands a component up — even though it decides nothing, records nothing and never touches the
 live instance. `promote` additionally admits `outcome: :unknown`, the admission `wasm.deploy`
 makes: the replay it re-runs and the checkpoint it writes do not stop because a socket's ceiling
@@ -1537,15 +1541,15 @@ session that wants to know what its runtime is doing has the tools and the trans
 already being driven through. An operator's own terminal is unaffected — the fence is on
 sandboxed children, not on this user.
 
-`ouro-sandbox` cannot express it — Landlock attaches rights to inodes and the helper's wire
-format carries a read *allow*-set, so "everything but this one file" would be an enumeration of
-the filesystem — and it says so: `Sandbox.hides_files?/1` is `false`, `detect/0`'s notes carry
-the sentence, and that is what `capabilities.preview` shows. On such a node
-`Ouroboros.Application.self_signing_children/0` starts **no** local signing service: a key this
-node cannot fence is a key it declines to hold, and a forge there ends at
-`:no_signing_service`. `OUROBOROS_SELF_UNFENCED_KEY=1` is the operator accepting the
-consequence, logged in the sentence that names it. A fleet posture is unaffected —
-`OUROBOROS_SIGNING_NODE` puts the key on another host.
+*Superseded in part by docs/proposals/core.md §4 A2.* This decision also carried a refusal for a
+backend that could not render the deny: `ouro-sandbox` reported `Sandbox.hides_files?/1` as
+`false`, `Ouroboros.Application.self_signing_children/0` then started no local signing service,
+and `OUROBOROS_SELF_UNFENCED_KEY=1` was the operator accepting the consequence. That backend,
+that question and that variable are deleted; both remaining backends render the deny, so there
+is no backend left to ask about. **The refusal itself is not deleted**: a node with *no*
+backend renders no fence, and `self_signing_children/0` still starts nothing there and logs why.
+No backend, no service — and no variable that lifts it. A fleet posture is unaffected either
+way: `OUROBOROS_SIGNING_NODE` puts the key on another host.
 
 **S-D50. An export replaces `priv/self`'s files and removes every bundle it did not write.**
 `Ouroboros.Self.Boot` globs `priv/self/*.ouro-wasm`, so a policy renamed between two exports

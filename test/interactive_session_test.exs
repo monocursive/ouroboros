@@ -7,7 +7,7 @@ defmodule Ouroboros.InteractiveSessionTest do
   alias Ouroboros.Test.HarnessAdapter
   alias Ouroboros.Test.StubSession
 
-  @provider :ouroboros_test
+  @provider :native
 
   defmodule StorageFixture do
     @moduledoc false
@@ -355,7 +355,19 @@ defmodule Ouroboros.InteractiveSessionTest do
   test "gateway start exposes a durable failed session and keeps same-id conflicts definite", %{
     id: id
   } do
-    opts = [id: id, provider: :ouroboros_missing_test_provider, workspace: File.cwd!()]
+    # A start that gets past `Interactive.State.new/2` and then fails at the provider, so
+    # the record exists to be failed durably. A provider *name* this build does not serve
+    # is refused at the boundary before any record exists (`interactive_state_test.exs`),
+    # which is a different claim; this one is about the checkpoint.
+    HarnessAdapter.accept_resume([])
+    on_exit(&HarnessAdapter.reset_resume/0)
+
+    opts = [
+      id: id,
+      provider: @provider,
+      workspace: File.cwd!(),
+      provider_session_id: "a-thread-this-provider-forgot"
+    ]
 
     assert {:created, %Ref{id: ^id} = ref, {:session_start_failed, _reason}} =
              InteractiveSession.start_for_gateway(opts)
@@ -414,15 +426,13 @@ defmodule Ouroboros.InteractiveSessionTest do
   end
 
   test "runtime exposure is pinned at session admission across later runtime changes", %{id: id} do
-    previous_signer = Application.get_env(:ouroboros, :forge_signer)
-    deny = Ouroboros.Upgrade.Forge.Signer.Deny
-    local = Ouroboros.Upgrade.Forge.Signer.Local
-    Application.put_env(:ouroboros, :forge_signer, deny)
+    previous_signer = Application.get_env(:ouroboros, :signing_node)
+    Application.delete_env(:ouroboros, :signing_node)
 
     on_exit(fn ->
       if is_nil(previous_signer),
-        do: Application.delete_env(:ouroboros, :forge_signer),
-        else: Application.put_env(:ouroboros, :forge_signer, previous_signer)
+        do: Application.delete_env(:ouroboros, :signing_node),
+        else: Application.put_env(:ouroboros, :signing_node, previous_signer)
     end)
 
     assert {:ok, ref} =
@@ -432,7 +442,7 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert Ouroboros.Runtime.Exposure.valid_capture?(admitted.runtime_snapshot)
     assert admitted.runtime_snapshot.envelope =~ "\nsigner: deny\n"
 
-    Application.put_env(:ouroboros, :forge_signer, local)
+    Application.put_env(:ouroboros, :signing_node, :"signer-1@127.0.0.1")
     turn_id = unique_id("pinned-runtime")
 
     assert {:ok, _turn} =
@@ -444,7 +454,7 @@ defmodule Ouroboros.InteractiveSessionTest do
     assert prompt ==
              admitted.runtime_snapshot.envelope <> "\n\nbuild a Rust WebSocket server"
 
-    refute prompt =~ "\nsigner: local\n"
+    refute prompt =~ "\nsigner: remote\n"
     assert :ok = HarnessAdapter.finish(adapter)
     assert :ok = InteractiveSession.close(ref)
   end
@@ -1226,13 +1236,6 @@ defmodule Ouroboros.InteractiveSessionTest do
     :ok =
       :erpc.call(peer_node, Application, :put_env, [
         :ouroboros,
-        :coding_storage,
-        {Jido.Storage.ETS, table: String.to_atom("#{peer_name}_coding")}
-      ])
-
-    :ok =
-      :erpc.call(peer_node, Application, :put_env, [
-        :ouroboros,
         :interactive_storage,
         {Jido.Storage.ETS, table: String.to_atom("#{peer_name}_interactive")}
       ])
@@ -1308,7 +1311,7 @@ defmodule Ouroboros.InteractiveSessionTest do
              HarnessAdapter.emit(adapter, :usage, %{
                "input_tokens" => 12,
                "output_tokens" => 3,
-               "cache_read_input_tokens" => 40,
+               "cache_read_tokens" => 40,
                "total_tokens" => 15
              })
 

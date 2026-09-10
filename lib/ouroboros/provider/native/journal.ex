@@ -202,8 +202,8 @@ defmodule Ouroboros.Provider.Native.Journal do
 
   Never raises and never returns an error. A failed append marks the handle `degraded?`
   and stages a `gap` for the next successful write; the caller's effect proceeds either
-  way. `nil` in, `nil` out, which is what makes journaling optional for the coding plane
-  and for tests that have no session directory.
+  way. `nil` in, `nil` out, which is what makes journaling optional for a finite run and
+  for tests that have no session directory.
 
   A handle whose tail could not be read does not append at all. Writing onto a file whose
   head this process cannot name would produce a record that *looks* chained and is not,

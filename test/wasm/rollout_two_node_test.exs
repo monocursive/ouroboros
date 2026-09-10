@@ -9,17 +9,17 @@ defmodule Ouroboros.Wasm.RolloutTwoNodeTest do
   @moduletag timeout: 180_000
 
   alias Ouroboros.Upgrade.Epoch
-  alias Ouroboros.Upgrade.Forge.Signer
   alias Ouroboros.Upgrade.Rollout.Registry
   alias Ouroboros.Wasm
   alias Ouroboros.Wasm.Artifact
   alias Ouroboros.Wasm.Rollout
   alias Ouroboros.Wasm.Store
 
-  # The claim W3 exists to make: **one artifact deploys on both nodes**. Lane B cannot say
-  # that — a BEAM artifact is loadable on exactly one OTP/Elixir/architecture triple
-  # (docs/WASM.md §3.3) — and this is the test that says it, against the real helper and a
-  # real `wasm32-wasip2` component rather than a scripted reply.
+  # The claim W3 exists to make: **one artifact deploys on both nodes**. Historically this
+  # was the argument for the lane: the BEAM lane it replaced could not say it, because a
+  # BEAM artifact is loadable on exactly one OTP/Elixir/architecture triple (docs/WASM.md
+  # §3.3). This is the test that says it, against the real helper and a real
+  # `wasm32-wasip2` component rather than a scripted reply.
   @guest Path.expand("../support/wasm/echo.wasm", __DIR__)
   @signer "wasm-two-node-key"
   @config ~s({"greeting":"hello"})
@@ -65,7 +65,15 @@ defmodule Ouroboros.Wasm.RolloutTwoNodeTest do
     artifact = artifact!(context, name: name, start: %{id: id, config: @config})
 
     # Snapshotted before the deploy so the assertion afterwards is about what this rollout
-    # loaded, not about what a peer happened to boot with.
+    # loaded, not about what a peer happened to boot with. The build is loaded first on
+    # every node, because `DurableFile` does exactly that lazily at its first safe decode
+    # — which the deploy itself may be the first to trigger — and a snapshot taken before
+    # it would count the whole application, including the test build's own
+    # `Ouroboros.Capability.DistributionReference`, as something the deploy introduced.
+    for target <- context.nodes do
+      :ok = call(target, Ouroboros.Storage.DurableFile, :ensure_build_loaded, [])
+    end
+
     loaded_before = Map.new(context.nodes, &{&1, loaded_modules(&1)})
 
     assert {:ok, outcome} = deploy(artifact, context)
@@ -143,10 +151,16 @@ defmodule Ouroboros.Wasm.RolloutTwoNodeTest do
     # nothing about the artifact named a module. Asserted against what each peer's code
     # server actually holds, before and after — the whole point of lane W is that this
     # deployment is a file and a checkpoint, not a `:code.load_binary/3`.
+    #
+    # The claim is the *difference*, not the absolute set. The test build's `ebin` holds
+    # `Ouroboros.Capability.DistributionReference`, a mesh-agent fixture that has to live
+    # under the capability prefix because the mesh admits nothing else, and
+    # `Ouroboros.Storage.DurableFile.ensure_build_loaded/0` loads every module of the
+    # application before the first safe decode — so a booted node already has that one
+    # module loaded before any deploy. What lane W promises is that the deploy adds none.
     for target <- context.nodes do
       after_deploy = loaded_modules(target)
 
-      assert capability_modules(after_deploy) == []
       assert capability_modules(MapSet.difference(after_deploy, loaded_before[target])) == []
     end
   end
@@ -284,7 +298,7 @@ defmodule Ouroboros.Wasm.RolloutTwoNodeTest do
     )
   end
 
-  # The epoch is allocated the way `Ouroboros.Upgrade.Forge` allocates one — before the
+  # The epoch is allocated before the manifest is built — before the
   # manifest exists, from the cluster the manifest will be deployed to — because it is
   # inside what gets signed.
   defp artifact!(context, attrs \\ []) do
@@ -328,11 +342,11 @@ defmodule Ouroboros.Wasm.RolloutTwoNodeTest do
     }
   end
 
-  # The shipped dev signer, through the generic `sign/2` payload path. Lane W needs no new
-  # signer callback: the payload it hands over is bytes like any other.
+  # A detached Ed25519 signature over this lane's payload, which is what the signing
+  # service issues and what `Ouroboros.Wasm.Verifier` checks.
   defp sign!(artifact, secret) do
     payload = Artifact.signing_payload(artifact, @signer)
-    {:ok, value} = Signer.Local.sign(payload, @signer, private_key: secret)
+    value = :crypto.sign(:eddsa, :none, payload, [secret, :ed25519])
     {:ok, signed} = Artifact.with_signature(artifact, %{signer: @signer, value: value})
     signed
   end
@@ -369,7 +383,6 @@ defmodule Ouroboros.Wasm.RolloutTwoNodeTest do
 
     put_env!(peer_node, :data_dir, data_dir)
     put_env!(peer_node, :wasm, helper_path: Wasm.helper_path())
-    put_env!(peer_node, :coding_storage, {Jido.Storage.ETS, table: peer_name})
 
     # A durable data directory is what makes each peer's component store the production
     # one — `Ouroboros.Wasm.Store.root/1` deriving it rather than a test handing one in.

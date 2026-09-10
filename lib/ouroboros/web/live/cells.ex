@@ -65,7 +65,6 @@ defmodule Ouroboros.Web.Live.Cells do
   def cell(%{cell: %Cell.Exploration{}} = assigns), do: exploration(assigns)
   def cell(%{cell: %Cell.CommandOutput{}} = assigns), do: command_output(assigns)
   def cell(%{cell: %Cell.File{}} = assigns), do: file(assigns)
-  def cell(%{cell: %Cell.Image{}} = assigns), do: image(assigns)
   def cell(%{cell: %Cell.Diff{}} = assigns), do: diff(assigns)
   def cell(%{cell: %Cell.DiffStat{}} = assigns), do: diffstat(assigns)
   def cell(%{cell: %Cell.Status{}} = assigns), do: status(assigns)
@@ -296,25 +295,6 @@ defmodule Ouroboros.Web.Live.Cells do
     """
   end
 
-  # The picture where there is a digest to fetch it by, and the projection's own label
-  # where there is not. Never both: a caption under a screenshot the reader can see is
-  # noise, and the label exists precisely for the case where they cannot.
-  defp image(assigns) do
-    ~H"""
-    <figure class="ouro-cell ouro-image">
-      <img
-        :if={@cell.sha}
-        src={Ouroboros.Web.Route.artifact(@plane, @session_id, @cell.sha)}
-        alt={Cell.Image.label(@cell)}
-        loading="lazy"
-        width={@cell.pixels && elem(@cell.pixels, 0)}
-        height={@cell.pixels && elem(@cell.pixels, 1)}
-      />
-      <figcaption :if={is_nil(@cell.sha)} class="ouro-quiet">{Cell.Image.label(@cell)}</figcaption>
-    </figure>
-    """
-  end
-
   # ------------------------------------------------------------------------------------
   # Diffs
   # ------------------------------------------------------------------------------------
@@ -522,7 +502,6 @@ defmodule Ouroboros.Web.Live.Cells do
         <li :for={step <- @cell.plan.steps} class={"ouro-step-#{step.status}"}>
           <span class="ouro-step-glyph" aria-hidden="true">{step_glyph(step.status)}</span>
           <span class="ouro-step-text">{step.text}</span>
-          <span :if={step.priority} class="ouro-quiet">{step.priority}</span>
         </li>
       </ol>
       <p :if={@cell.plan.step_count > length(@cell.plan.steps)} class="ouro-quiet">

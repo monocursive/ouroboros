@@ -50,19 +50,17 @@ static SESSION_ID_FALLBACK_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 pub mod native;
 pub mod transcript;
 
-/// Which plane an id belongs to. The two have separate id spaces, so a session is only
-/// addressable as a pair.
+/// Which plane an id belongs to. One plane today; the pair is still how a session is
+/// addressed, so a future one costs a variant rather than a signature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Plane {
     Interactive,
-    Coding,
 }
 
 impl Plane {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Interactive => "interactive",
-            Self::Coding => "coding",
         }
     }
 
@@ -70,14 +68,12 @@ impl Plane {
     pub fn tag(self) -> &'static str {
         match self {
             Self::Interactive => "int",
-            Self::Coding => "code",
         }
     }
 
     pub fn parse(name: &str) -> Option<Self> {
         match name {
             "interactive" => Some(Self::Interactive),
-            "coding" => Some(Self::Coding),
             _ => None,
         }
     }
@@ -847,19 +843,17 @@ impl SessionUsage {
     }
 }
 
-/// One entry of `interactive.list`/`coding.list`, and of `info`.
+/// One entry of `interactive.list`, and of `interactive.info`.
 ///
-/// `interactive.list` answers `Interactive.State.public/1` structs and `coding.list`
-/// answers `Coding.TaskState.public/1` structs; the fields below are the ones both carry
-/// under the same names. Everything else — turns, options, the retained event window —
-/// stays in `raw` for the tree widget, because a session's own shape is exactly what a
-/// forged plane is free to change.
+/// `interactive.list` answers `Interactive.State.public/1` structs; the fields below are
+/// the ones this client reads by name. Everything else — turns, options, the retained
+/// event window — stays in `raw` for the tree widget, because a session's own shape is
+/// exactly what the runtime is free to extend.
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
     pub plane: Plane,
     pub id: String,
-    /// A human or runtime-generated title for interactive sessions. Coding tasks keep
-    /// using their objective; older gateways omit this field entirely.
+    /// A human or runtime-generated title. Older gateways omit this field entirely.
     pub title: Option<String>,
     pub status: SessionStatus,
     pub provider: Option<String>,
@@ -867,7 +861,6 @@ pub struct SessionInfo {
     pub workspace: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
-    pub objective: Option<String>,
     pub struct_tag: Option<String>,
     /// `options.model`, as the session was started. `None` where the start did not name
     /// one — the provider then chose, and the transcript's `run_started` is the only
@@ -893,13 +886,6 @@ pub struct SessionInfo {
     pub capabilities: Capabilities,
     /// What the provider reported spending, folded by the runtime.
     pub usage: Option<SessionUsage>,
-    /// G1. The coding task ids this conversation delegated — ids only, which is what the
-    /// row carries. Empty where it delegated nothing *and* where the gateway predates the
-    /// key: both are "this client knows of no children", and the rail nests nothing
-    /// either way rather than drawing an empty branch.
-    pub children: Vec<String>,
-    /// G1, the other half. Coding rows only: the conversation that delegated this task.
-    pub parent: Option<native::Parent>,
     /// D7. The `git worktree` this session was given, where it asked for one.
     pub worktree: Option<native::Worktree>,
     /// D7. Whether the start asked for a worktree. Kept beside `worktree` because a
@@ -934,9 +920,6 @@ struct RawSession {
     created_at: Option<String>,
     #[serde(default)]
     updated_at: Option<String>,
-    /// Coding tasks only.
-    #[serde(default)]
-    objective: Option<String>,
     #[serde(rename = "_struct", default)]
     struct_tag: Option<String>,
 }
@@ -982,7 +965,6 @@ impl SessionInfo {
             workspace: raw.workspace,
             created_at: raw.created_at,
             updated_at: raw.updated_at,
-            objective: raw.objective,
             struct_tag: raw.struct_tag,
             model: option("model"),
             approval_mode: option("approval_mode"),
@@ -997,24 +979,9 @@ impl SessionInfo {
             ),
             usage: SessionUsage::decode(value.get("usage")),
             // Read tolerantly out of the raw tree for the same reason `options` is: these
-            // five keys arrived with D7/D9/G1, an older gateway sends none of them, and a
-            // strict field here would be the one place this client refuses a session
-            // because its runtime is a build behind.
-            children: value
-                .get("children")
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .take(native::MAX_ROWS)
-                        .filter_map(Value::as_str)
-                        .map(str::trim)
-                        .filter(|id| !id.is_empty())
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default(),
-            parent: native::Parent::decode(value.get("parent")),
+            // keys arrived with D7/D9, an older gateway sends none of them, and a strict
+            // field here would be the one place this client refuses a session because its
+            // runtime is a build behind.
             worktree: native::Worktree::decode(value.get("worktree")),
             worktree_requested: value
                 .get("worktree_requested")
@@ -1065,44 +1032,15 @@ pub struct RuntimeStatus {
     #[serde(default)]
     pub agents: Vec<Value>,
     #[serde(default)]
-    pub coding_tasks: Vec<Value>,
-    #[serde(default)]
     pub interactive_sessions: Vec<Value>,
-    #[serde(default)]
-    pub teams: Vec<Value>,
-    #[serde(default)]
-    pub orchestration_plans: Vec<Value>,
-    #[serde(default)]
-    pub control: ControlStatus,
-    #[serde(default)]
-    pub upgrade: Value,
-    #[serde(default)]
-    pub release: Value,
     /// Signer posture and live capability count. Absent on older gateways.
     #[serde(default)]
     pub forge: Value,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct ControlStatus {
-    #[serde(default)]
-    pub runs: Vec<Value>,
-}
-
 impl RuntimeStatus {
     pub fn decode(value: &Value) -> Result<Self, serde_json::Error> {
         serde_json::from_value(value.clone())
-    }
-
-    /// What `mode` a sub-map reports, for the two that have one.
-    pub fn mode(&self, section: &str) -> Option<&str> {
-        let value = match section {
-            "upgrade" => &self.upgrade,
-            "release" => &self.release,
-            _ => return None,
-        };
-
-        value.get("mode").and_then(Value::as_str)
     }
 
     /// The cluster line, assembled from whichever of the two shapes arrived.
@@ -2048,7 +1986,7 @@ impl ApprovalScope {
     }
 }
 
-/// The four values `interactive.start` and `coding.start` accept for `approval_mode`.
+/// The four values `interactive.start` accepts for `approval_mode`.
 ///
 /// `Jido.Harness.RunRequest`'s enum, transcribed from `Gateway.Methods` `@approval_modes`
 /// rather than inferred. The gateway matches a client's string against those literal terms
@@ -2094,7 +2032,7 @@ impl ApprovalMode {
     }
 }
 
-/// The four values `interactive.start` and `coding.start` accept for `sandbox_mode`.
+/// The four values `interactive.start` accepts for `sandbox_mode`.
 ///
 /// Transcribed from `Gateway.Methods` `@sandbox_modes`. Sending anything else is `-32602`
 /// naming the parameter. The TUI default is to omit this field so the plane can apply
@@ -2229,14 +2167,6 @@ pub enum StartError {
     /// without one makes a timeout indistinguishable from permission to bill a second
     /// provider session.
     NoId,
-    /// The gateway would accept a start with no provider and let the node's default
-    /// decide. This client will not: a terminal that silently picked a provider would be
-    /// choosing which vendor runs the operator's code.
-    NoProvider,
-    /// `coding.start` takes `objective` as a required nonempty string.
-    NoObjective,
-    /// `objective` is not in the interactive allowlist, so sending it would be `-32602`.
-    ObjectiveOnInteractive,
     /// A remote runtime must never inherit the packaged release's working directory.
     NoRemoteWorkspace,
     /// Relative paths are relative to the destination runtime, not this terminal.
@@ -2250,15 +2180,6 @@ impl StartError {
         match self {
             Self::NoId => {
                 "the client did not assign this start a retry-safe session id".to_string()
-            }
-            Self::NoProvider => "choose a provider: this client will not let the node pick \
-                                 which vendor runs your code"
-                .to_string(),
-            Self::NoObjective => {
-                "a coding task needs an objective; it runs that one thing to completion".to_string()
-            }
-            Self::ObjectiveOnInteractive => {
-                "an interactive session takes no objective — it takes messages".to_string()
             }
             Self::NoRemoteWorkspace => "choose an absolute workspace path on the destination \
                                         machine; remote sessions never guess from this terminal"
@@ -2304,7 +2225,6 @@ impl StartError {
 pub struct StartRequest {
     pub id: String,
     pub plane: Plane,
-    pub provider: String,
     pub model: Option<String>,
     /// A friendly fleet machine name. Blank means this machine, which is the safe and
     /// backwards-compatible default.
@@ -2313,8 +2233,6 @@ pub struct StartRequest {
     pub approval_mode: Option<ApprovalMode>,
     pub sandbox_mode: Option<SandboxMode>,
     pub reasoning_effort: Option<Effort>,
-    /// Required on the coding plane, refused on the interactive one.
-    pub objective: String,
     /// D7. Run in a `git worktree` under the runtime's data directory instead of the
     /// workspace itself, so two sessions on one repository do not fight over its lease.
     ///
@@ -2337,14 +2255,12 @@ impl StartRequest {
         Self {
             id: new_session_id(),
             plane,
-            provider: String::new(),
             model: None,
             machine: String::new(),
             workspace: String::new(),
             approval_mode: None,
             sandbox_mode: None,
             reasoning_effort: None,
-            objective: String::new(),
             worktree: false,
             plan: false,
         }
@@ -2362,15 +2278,8 @@ impl StartRequest {
             return Err(StartError::NoId);
         }
 
-        let provider = self.provider.trim();
-
-        if provider.is_empty() {
-            return Err(StartError::NoProvider);
-        }
-
         let mut params = serde_json::Map::new();
         params.insert("id".into(), Value::String(id.to_string()));
-        params.insert("provider".into(), Value::String(provider.to_string()));
 
         if let Some(model) = self
             .model
@@ -2385,19 +2294,6 @@ impl StartRequest {
 
         if !machine.is_empty() {
             params.insert("machine".into(), Value::String(machine.to_string()));
-        }
-
-        let objective = self.objective.trim();
-
-        match self.plane {
-            Plane::Coding if objective.is_empty() => return Err(StartError::NoObjective),
-            Plane::Coding => {
-                params.insert("objective".into(), Value::String(objective.to_string()));
-            }
-            Plane::Interactive if !objective.is_empty() => {
-                return Err(StartError::ObjectiveOnInteractive)
-            }
-            Plane::Interactive => {}
         }
 
         let workspace = self.workspace.trim();
@@ -2477,7 +2373,7 @@ pub fn new_session_id() -> String {
     )
 }
 
-/// What a start answers: `Ouroboros.Interactive.Ref` / `Ouroboros.Coding.TaskRef`,
+/// What a start answers: an `Ouroboros.Interactive.Ref`,
 /// Wire-encoded — `{id, node}` plus the struct tag — or the same stable identity with a
 /// typed post-checkpoint readiness failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2586,132 +2482,6 @@ pub fn respond_approval_params_with_reason(
         "request_id": request_id,
         "response": response,
     })
-}
-
-/// The read-scope gateway method that returns one staged desktop screenshot by sha (§8.5).
-///
-/// Node-routed, like `mcp.list`: the bytes are a fact about the node whose
-/// `session_dir/desktop/` staged them, so the fetch is answered there or `404`s. A single
-/// image, already size-capped upstream at `max_image_bytes`; the client decodes it into
-/// memory and never writes the workspace.
-pub const ARTIFACT_METHOD: &str = "computer_use.artifact";
-
-/// The params for [`ARTIFACT_METHOD`]: the sha, and nothing else.
-///
-/// No path — "the path is a fact about this node" — and the sha is the whole request because
-/// it is the only key the node's containment ([`crate::images::session_desktop`]) will honour.
-pub fn artifact_params(sha256: &str) -> Value {
-    serde_json::json!({ "sha256": sha256 })
-}
-
-/// Why an artifact the gateway returned could not honestly be put on the screen.
-///
-/// Each variant is a sentence a surface can show in place of the picture, because a
-/// placeholder that did not say *why* it was a placeholder is the exact fault the images
-/// module exists to avoid.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ArtifactError {
-    /// The result carried no base64 field this client recognises.
-    Missing,
-    /// The base64 did not decode.
-    NotBase64,
-    /// Decoded, but larger than [`crate::images::MAX_BYTES`] — the same ceiling a paste and a
-    /// transcript file are held to.
-    TooLarge { bytes: usize },
-    /// The bytes are not a raster format this client reads, so drawing them would be putting
-    /// something unknown on the operator's screen.
-    NotAnImage,
-    /// The bytes did not hash to the sha that was asked for. A node answering the wrong file
-    /// is a fetch this client refuses rather than one it draws.
-    ShaMismatch,
-}
-
-impl fmt::Display for ArtifactError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing => write!(formatter, "no artifact bytes in the reply"),
-            Self::NotBase64 => write!(formatter, "artifact bytes were not valid base64"),
-            Self::TooLarge { bytes } => write!(
-                formatter,
-                "{bytes} bytes, over this client's {} MiB ceiling",
-                crate::images::MAX_BYTES / (1024 * 1024)
-            ),
-            Self::NotAnImage => write!(formatter, "not a format this client reads"),
-            Self::ShaMismatch => write!(formatter, "artifact did not match the sha requested"),
-        }
-    }
-}
-
-/// Decodes a `computer_use.artifact` reply into image bytes, or says why it could not.
-///
-/// This is the whole client half of the artifact transfer (§8.5): base64 in the JSON result,
-/// one image, decoded into memory. Everything it checks is a thing it refuses to draw rather
-/// than a thing it trusts —
-///
-/// 1. the bytes decode from base64,
-/// 2. they are within [`crate::images::MAX_BYTES`] (`max_image_bytes` is the upstream cap;
-///    this is the client's own, so a gateway that forgot to cap cannot make this client
-///    allocate a gigabyte),
-/// 3. they are a raster format [`crate::images::header`] recognises, and
-/// 4. they hash to the sha that was requested.
-///
-/// (4) is the one that makes the fetch trustworthy: the sha is the request, so a node that
-/// answered a different file — by bug or by substitution — is caught here rather than put on
-/// the screen. It never writes the file anywhere; the workspace is not touched.
-pub fn decode_artifact(result: &Value, expected_sha: &str) -> Result<Vec<u8>, ArtifactError> {
-    use base64::engine::general_purpose::STANDARD as BASE64;
-    use base64::Engine as _;
-
-    // The reply is either `{sha256, bytes: "<base64>"}` or a bare base64 string; both are the
-    // "base64 in the JSON result" the decision settled on. The field name is read tolerantly
-    // because the golden fixture is the integrator's to write and this client should decode
-    // the obvious spellings rather than pin one before the server half exists.
-    let encoded = result
-        .get("bytes")
-        .or_else(|| result.get("base64"))
-        .or_else(|| result.get("data"))
-        .or(Some(result))
-        .and_then(Value::as_str)
-        .ok_or(ArtifactError::Missing)?;
-
-    // Refuse before allocating: base64 expands 4→3, so a huge envelope cannot make this
-    // client decode a gigabyte then notice it was over the ceiling.
-    let decoded_bound = encoded.len().saturating_mul(3) / 4;
-    if decoded_bound as u64 > crate::images::MAX_BYTES {
-        return Err(ArtifactError::TooLarge {
-            bytes: decoded_bound,
-        });
-    }
-
-    let bytes = BASE64
-        .decode(encoded.trim())
-        .map_err(|_error| ArtifactError::NotBase64)?;
-
-    if bytes.len() as u64 > crate::images::MAX_BYTES {
-        return Err(ArtifactError::TooLarge { bytes: bytes.len() });
-    }
-
-    if crate::images::header(&bytes).is_none() {
-        return Err(ArtifactError::NotAnImage);
-    }
-
-    if !sha256_hex(&bytes).eq_ignore_ascii_case(expected_sha.trim()) {
-        return Err(ArtifactError::ShaMismatch);
-    }
-
-    Ok(bytes)
-}
-
-/// The lowercase hex sha256 of some bytes, through `ring` — already in the tree for Ed25519,
-/// so no new dependency to hash the one thing this client verifies.
-fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
-    let mut hex = String::with_capacity(digest.as_ref().len() * 2);
-    for byte in digest.as_ref() {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
 }
 
 /// B2. The three answers a `plan_exit` approval admits, in the order the modal lists them.
@@ -3018,8 +2788,8 @@ pub fn attachment_refusal(diagnostic: &str) -> bool {
 
 /// The exact `params` for the durable half of a "don't ask again" answer.
 ///
-/// `scope` is `"workspace"` for repository rules and `"user"` for `ComputerUse(app:…)`.
-/// Computer Use remember is account-wide (D4): a workspace-scoped app allow would not
+/// `scope` is `"workspace"` for repository rules and `"user"` for `Capability(…)`.
+/// A capability remember is account-wide (W13): a workspace-scoped grant would not
 /// cover the next folder the operator opens. `decision` is `"allow"` because this is
 /// only ever reached from an approve answer — the deny side of "don't ask again" is
 /// `permissions.add` with `deny`, which belongs to a rules editor and not to a modal
@@ -3030,11 +2800,10 @@ pub fn attachment_refusal(diagnostic: &str) -> bool {
 /// `Control.Permissions.Pattern` validates it, and an unvalidatable pattern comes back as
 /// `-32602` naming itself rather than as a rule that matches nothing.
 pub fn permission_add_params(pattern: &str, workspace: &str) -> Value {
-    // Node facts, not directory facts: a Computer Use grant names an app and this operator,
-    // and a `Capability(…)` grant names a component the rollout plane deployed to this
-    // machine (docs/WASM.md §7.7). Either one scoped to a workspace would be unrememberable
-    // from a session that never chose one.
-    if pattern.starts_with("ComputerUse(") || pattern.starts_with("Capability(") {
+    // A node fact, not a directory fact: a `Capability(…)` grant names a component the
+    // rollout plane deployed to this machine (docs/WASM.md §7.7). Scoped to a workspace it
+    // would be unrememberable from a session that never chose one.
+    if pattern.starts_with("Capability(") {
         return serde_json::json!({
             "scope": "user",
             "pattern": pattern,
@@ -3563,7 +3332,7 @@ impl WasmHelper {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WasmSandbox {
     pub posture: Option<String>,
-    /// `sandbox-exec`, `bwrap`, `ouro-sandbox`, or `none`.
+    /// `sandbox-exec`, `bwrap`, or `none`.
     pub backend: Option<String>,
     /// Why a `refused` node refused, in the runtime's words. `None` when nothing went wrong.
     pub reason: Option<String>,
@@ -4350,7 +4119,6 @@ mod tests {
         assert_eq!(hello.role, "core");
         assert!(hello.operates());
         assert!(hello.serves("interactive.delete"));
-        assert!(hello.serves("coding.delete"));
         assert!(hello.serves("interactive.respond_approval"));
         assert!(hello.serves("runtime.shutdown"));
         assert!(hello.serves("capabilities.preview"));
@@ -4372,10 +4140,6 @@ mod tests {
             Some(&Availability::Available)
         );
         assert_eq!(
-            status.availability.get("control"),
-            Some(&Availability::Disabled)
-        );
-        assert_eq!(
             status.availability.get("workspace"),
             Some(&Availability::Disabled)
         );
@@ -4384,9 +4148,6 @@ mod tests {
             Some(&Availability::Available)
         );
 
-        assert_eq!(status.mode("upgrade"), Some("ready"));
-        assert_eq!(status.mode("release"), Some("ready"));
-        assert!(status.control.runs.is_empty());
         assert_eq!(status.cluster_summary(), "strategy=none  distributed=false");
         assert_eq!(status.forge_summary(), "signer=deny live=0 admit=no");
     }
@@ -4414,22 +4175,12 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "session-0000000000000000000001");
         assert_eq!(sessions[0].status, SessionStatus::Idle);
-        assert_eq!(sessions[0].provider.as_deref(), Some("claude_code"));
+        assert_eq!(sessions[0].provider.as_deref(), Some("native"));
         assert_eq!(
             sessions[0].triage(0),
             Triage::Done,
             "idle interactive is settled, not needs-input"
         );
-
-        let tasks = status
-            .coding_tasks
-            .iter()
-            .filter_map(|value| SessionInfo::decode(Plane::Coding, value).ok())
-            .collect::<Vec<_>>();
-
-        assert_eq!(tasks[0].status, SessionStatus::Running);
-        assert!(tasks[0].status.busy());
-        assert!(!tasks[0].status.terminal());
     }
 
     #[test]
@@ -4469,7 +4220,6 @@ mod tests {
             session_row(Plane::Interactive, "idle").triage(0),
             Triage::Done
         );
-        assert_eq!(session_row(Plane::Coding, "idle").triage(0), Triage::Done);
         assert_eq!(
             session_row(Plane::Interactive, "awaiting_approval").triage(0),
             Triage::NeedsInput
@@ -4525,25 +4275,6 @@ mod tests {
         assert_eq!(event.request_id, None);
         assert_eq!(event.summary(), "the workspace is clean");
         assert_eq!(event.payload["token"], "[REDACTED]");
-    }
-
-    #[test]
-    fn a_coding_event_notification_decodes_through_the_same_type() {
-        let notification = notification("coding_event_notification");
-
-        assert_eq!(notification.method, "coding.event");
-        assert_eq!(notification.params["id"], "task-0000000000000000000000002");
-
-        let event = Event::decode(&notification.params["event"]).expect("an event");
-
-        assert_eq!(event.sequence, 17);
-        assert_eq!(event.kind, EventType::RunCompleted);
-        assert_eq!(event.struct_tag.as_deref(), Some("Ouroboros.Coding.Event"));
-        // The coding struct keys on `task_id` and carries no turn; both are absent rather
-        // than defaulted to something that looks like an answer.
-        assert_eq!(event.turn_id, None);
-        assert_eq!(event.raw["task_id"], "task-0000000000000000000000002");
-        assert_eq!(event.summary(), "objective satisfied");
     }
 
     #[test]
@@ -4799,11 +4530,6 @@ mod tests {
         assert_eq!(
             found,
             vec![
-                "agents_message_result",
-                "agents_message_truncated_result",
-                "code_intel_diagnostics_result",
-                "coding_event_detail_result",
-                "coding_event_notification",
                 "error_cursor_pruned",
                 "error_invalid_request",
                 "error_not_found",
@@ -4818,7 +4544,6 @@ mod tests {
                 "event_approval_requested_subagent",
                 "event_approval_resolved",
                 "event_command_output_delta",
-                "event_delegation",
                 "event_file_change",
                 "event_input_accepted",
                 "event_input_accepted_steer",
@@ -4844,12 +4569,9 @@ mod tests {
                 "event_session_started",
                 "event_status_resumed",
                 "event_thinking_delta",
-                "event_tool_call_acp_edit",
                 "event_tool_call_bash",
                 "event_tool_call_read",
-                "event_tool_result_acp_edit",
                 "event_tool_result_bash",
-                "event_tool_result_computer_use",
                 "event_tool_result_read",
                 "event_turn_completed",
                 "event_turn_failed",
@@ -5270,17 +4992,24 @@ mod tests {
     /// fence off. `refused` is the one that means there is no helper on that node.
     #[test]
     fn a_refused_and_a_disabled_wasm_sandbox_decode_as_themselves() {
+        // The backend name is one no runtime ships: both backends this tree has fence reads,
+        // so `{:cannot_fence_reads, _}` can only ever name a backend the runtime does not
+        // recognise. The Elixir side plants the same `:some_future_backend` for the same
+        // reason (`test/wasm/pool_test.exs`, `test/wasm/forge_test.exs`).
         let refused = WasmStatus::decode(&serde_json::json!({
             "sandbox": {
                 "posture": "refused",
-                "backend": "ouro-sandbox",
-                "reason": "{:cannot_fence_reads, :ouro_sandbox}"
+                "backend": "some-future-backend",
+                "reason": "{:cannot_fence_reads, :some_future_backend}"
             }
         }));
 
         assert!(refused.sandbox.refused());
         assert!(!refused.sandbox.sandboxed());
-        assert_eq!(refused.sandbox.backend.as_deref(), Some("ouro-sandbox"));
+        assert_eq!(
+            refused.sandbox.backend.as_deref(),
+            Some("some-future-backend")
+        );
         assert!(refused.sandbox.reason.is_some(), "a refusal says why");
         assert!(
             refused.sandbox.readable.is_empty(),
@@ -5369,61 +5098,6 @@ mod tests {
         assert_eq!(component.sha256, "a".repeat(64));
         assert_eq!(component.size, 2_097_152);
         assert!(component.mtime.is_some());
-    }
-
-    /// W13's `agents.message`: one message into one mesh agent, and the reply back.
-    ///
-    /// There is no typed model for it here on purpose — a client sends a body and reads a
-    /// reply, and both are whatever the agent's own contract says. What this pins is the
-    /// envelope around them, which is the part a client must not get wrong: `untrusted` is
-    /// always present and always true, because a reply from a lane-W capability is prose a
-    /// component wrote and drawing it beside the operator's own words unlabelled is the
-    /// injection this lane exists to bound. `truncated` is the other half: it says whether
-    /// what arrived is the reply or a prefix of one, which is the difference between JSON a
-    /// client can parse and JSON it cannot.
-    #[test]
-    fn the_agents_message_fixture_labels_the_reply_it_carries() {
-        let result = &fixture("agents_message_result")["result"];
-
-        assert_eq!(result["to"], "wasm/vet");
-        assert_eq!(result["from"], "gateway");
-
-        // Not `is_truthy`, not "present": exactly `true`. A client that read this key as
-        // optional would render an unlabelled component's words the first time a node
-        // omitted it.
-        assert_eq!(result["untrusted"], true);
-        assert_eq!(result["truncated"], false);
-
-        // Untruncated, so the reply is the structure the agent answered with rather than a
-        // string holding an encoding of it.
-        assert!(result["reply"].is_object());
-        assert_eq!(result["reply"]["checked"], 12);
-        assert!(result["reply"]["findings"].as_array().unwrap().is_empty());
-    }
-
-    /// The same verb when the reply did not fit. This is the case a client gets wrong by
-    /// treating `truncated` as decoration: `reply` stops being the structure the agent
-    /// answered with and becomes a **string** holding a prefix of its encoding, and the
-    /// marker inside that string is the only thing in the value itself that says so. A
-    /// client that parsed it as JSON would report a syntax error the user cannot act on.
-    #[test]
-    fn a_truncated_agents_message_reply_is_a_marked_string_not_a_document() {
-        let result = &fixture("agents_message_truncated_result")["result"];
-
-        assert_eq!(result["untrusted"], true);
-        assert_eq!(result["truncated"], true);
-
-        let reply = result["reply"]
-            .as_str()
-            .expect("a truncated reply is a string");
-        assert!(
-            !result["reply"].is_object(),
-            "a cut document is not a document"
-        );
-        assert!(
-            reply.ends_with("truncated at 65536 bytes."),
-            "nothing in the value said it was cut: {reply}"
-        );
     }
 
     #[test]
@@ -5553,28 +5227,11 @@ mod tests {
         assert_eq!(nameless.servers[0].name, "real");
     }
 
-    /// The three fixtures this slice added, decoded for the fields a client branches on.
-    /// Named here rather than only listed above, because "accounted for" has to mean
-    /// something was read out of the bytes.
+    /// The ledger fixtures, decoded for the fields a client branches on. Named here rather
+    /// than only listed above, because "accounted for" has to mean something was read out
+    /// of the bytes.
     #[test]
-    fn the_code_intelligence_and_ledger_fixtures_carry_what_a_client_reads() {
-        let diagnostics = &fixture("code_intel_diagnostics_result")["result"];
-
-        // The discriminator first: `pending` is a different answer from an empty list.
-        assert_eq!(diagnostics["status"], "ok");
-        assert_eq!(diagnostics["counts"]["error"], 1);
-
-        let item = &diagnostics["items"][0];
-        assert_eq!(item["severity"], "error");
-        // 0-based, as the protocol reports them.
-        assert_eq!(item["range"]["start"]["line"], 11);
-        // The identity that makes the new-only rule possible outside the runtime.
-        assert_eq!(
-            item["signature"].as_str().expect("a signature").len(),
-            16,
-            "{item}"
-        );
-
+    fn the_ledger_fixtures_carry_what_a_client_reads() {
         let list = &fixture("ledger_list_result")["result"];
         assert_eq!(list["entries"][0]["origin_node"], "ouroboros@golden");
         assert_eq!(list["entries"][0]["effect"], "permission");
@@ -5852,23 +5509,18 @@ mod tests {
     }
 
     #[test]
-    fn an_event_detail_result_decodes_as_one_bare_event_on_both_planes() {
-        for name in [
-            "interactive_event_detail_result",
-            "coding_event_detail_result",
-        ] {
-            let frame = fixture(name);
-            let event = Event::decode(&frame["result"]).expect("a bare event object");
-            assert_eq!(
-                Some(event.sequence),
-                frame["result"]["sequence"].as_u64(),
-                "{name} keeps its sequence"
-            );
-            assert!(
-                event.payload.get("diff").is_some(),
-                "{name} keeps its payload whole"
-            );
-        }
+    fn an_event_detail_result_decodes_as_one_bare_event() {
+        let frame = fixture("interactive_event_detail_result");
+        let event = Event::decode(&frame["result"]).expect("a bare event object");
+        assert_eq!(
+            Some(event.sequence),
+            frame["result"]["sequence"].as_u64(),
+            "the detail result keeps its sequence"
+        );
+        assert!(
+            event.payload.get("diff").is_some(),
+            "the detail result keeps its payload whole"
+        );
     }
 
     #[test]
@@ -6094,15 +5746,15 @@ mod tests {
     fn provider_entries_separate_a_failed_probe_from_a_missing_provider() {
         let providers = ProviderEntry::decode_list(&serde_json::json!([
             {
-                "provider": "claude_code",
-                "spec": { "provider": "claude_code" },
+                "provider": "native",
+                "spec": { "provider": "native" },
                 "status": {
                     "installed": true, "compatible": true, "authenticated": "unknown",
-                    "smoke_ready": false, "version": "1.2.3", "executable": "/usr/bin/claude"
+                    "smoke_ready": false, "version": "1.2.3", "executable": "/usr/bin/ouro"
                 },
                 "error": null
             },
-            { "provider": "codex", "spec": {}, "status": null, "error": "probe_timeout" }
+            { "provider": "native", "spec": {}, "status": null, "error": "probe_timeout" }
         ]));
 
         assert_eq!(providers.len(), 2);
@@ -6278,7 +5930,6 @@ mod tests {
     #[test]
     fn a_start_sends_only_options_the_gateway_allowlists() {
         let mut request = StartRequest::new(Plane::Interactive);
-        request.provider = "claude_code".into();
         request.workspace = "/work".into();
         request.approval_mode = Some(ApprovalMode::Prompt);
 
@@ -6286,12 +5937,15 @@ mod tests {
         let fields = params.as_object().expect("an object");
 
         assert_eq!(fields["id"], request.id);
-        assert_eq!(fields["provider"], "claude_code");
         assert_eq!(fields["workspace"], "/work");
         assert_eq!(fields["approval_mode"], "prompt");
+        assert!(
+            !fields.contains_key("provider"),
+            "`provider` is no longer a start option and sending it is -32602: {fields:?}"
+        );
         assert_eq!(
             fields.len(),
-            4,
+            3,
             "an option outside @start_options is -32602 naming it, so none is invented: \
              {fields:?}"
         );
@@ -6306,13 +5960,12 @@ mod tests {
             .clone();
         assert_eq!(fields["sandbox_mode"], "read_only");
         assert_eq!(fields["reasoning_effort"], "high");
-        assert_eq!(fields.len(), 6);
+        assert_eq!(fields.len(), 5);
     }
 
     #[test]
     fn an_unanswered_field_is_omitted_rather_than_sent_empty() {
         let mut request = StartRequest::new(Plane::Interactive);
-        request.provider = "codex".into();
 
         let params = request.params().expect("a valid start");
         let fields = params.as_object().expect("an object");
@@ -6323,9 +5976,8 @@ mod tests {
         assert!(!fields.contains_key("approval_mode"));
         assert!(!fields.contains_key("sandbox_mode"));
         assert!(!fields.contains_key("reasoning_effort"));
-        assert!(!fields.contains_key("objective"));
         assert_eq!(fields["id"], request.id);
-        assert_eq!(fields.len(), 2);
+        assert_eq!(fields.len(), 1);
 
         // Whitespace is not an answer either.
         request.workspace = "   ".into();
@@ -6338,38 +5990,6 @@ mod tests {
     }
 
     #[test]
-    fn the_two_planes_disagree_about_objective_and_both_are_enforced_here() {
-        let mut coding = StartRequest::new(Plane::Coding);
-        coding.provider = "codex".into();
-
-        assert_eq!(coding.params(), Err(StartError::NoObjective));
-
-        coding.objective = "fix the build".into();
-        let params = coding.params().expect("a valid coding start");
-        assert_eq!(params["objective"], "fix the build");
-        assert_eq!(coding.method(), "coding.start");
-
-        // `objective` is not in the interactive allowlist, so sending it would be -32602.
-        let mut interactive = StartRequest::new(Plane::Interactive);
-        interactive.provider = "codex".into();
-        interactive.objective = "fix the build".into();
-
-        assert_eq!(
-            interactive.params(),
-            Err(StartError::ObjectiveOnInteractive)
-        );
-        assert_eq!(interactive.method(), "interactive.start");
-    }
-
-    #[test]
-    fn a_start_without_a_provider_is_refused_here_rather_than_guessed() {
-        let request = StartRequest::new(Plane::Interactive);
-
-        assert_eq!(request.params(), Err(StartError::NoProvider));
-        assert!(StartError::NoProvider.message().contains("which vendor"));
-    }
-
-    #[test]
     fn every_start_has_a_client_owned_retry_identity() {
         let request = StartRequest::new(Plane::Interactive);
 
@@ -6377,14 +5997,12 @@ mod tests {
 
         let mut invalid = request;
         invalid.id.clear();
-        invalid.provider = "codex".into();
         assert_eq!(invalid.params(), Err(StartError::NoId));
     }
 
     #[test]
     fn a_remote_start_requires_an_absolute_destination_workspace() {
         let mut request = StartRequest::new(Plane::Interactive);
-        request.provider = "codex".into();
         request.machine = "mini".into();
 
         assert_eq!(request.params(), Err(StartError::NoRemoteWorkspace));
@@ -6402,14 +6020,14 @@ mod tests {
     }
 
     #[test]
-    fn computer_use_remember_is_user_scoped() {
-        let params = permission_add_params("ComputerUse(app:com.apple.Safari)", "/tmp/w");
+    fn capability_remember_is_user_scoped() {
+        let params = permission_add_params("Capability(vet)", "/tmp/w");
         assert_eq!(params["scope"], "user");
-        assert_eq!(params["pattern"], "ComputerUse(app:com.apple.Safari)");
+        assert_eq!(params["pattern"], "Capability(vet)");
         assert_eq!(params["decision"], "allow");
         assert!(
             params.get("workspace").is_none(),
-            "a user-scoped Computer Use rule is not tied to one folder: {params}"
+            "a user-scoped capability rule is not tied to one folder: {params}"
         );
 
         let bash = permission_add_params("Bash(cargo test *)", "/tmp/w");
@@ -6836,91 +6454,12 @@ mod tests {
 
     #[test]
     fn a_plane_round_trips_through_its_wire_name() {
-        for plane in [Plane::Interactive, Plane::Coding] {
-            assert_eq!(Plane::parse(plane.as_str()), Some(plane));
-        }
-
-        assert_eq!(Plane::parse("teams"), None);
-        assert_eq!(Plane::Coding.method("replay"), "coding.replay");
-    }
-
-    /// A minimal but valid PNG header — signature plus IHDR — which is all
-    /// [`crate::images::header`] reads. Not a real picture, and not claimed to be: this test
-    /// is about the *transfer*, not a capture.
-    fn png_header_bytes() -> Vec<u8> {
-        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
-        bytes.extend_from_slice(&13u32.to_be_bytes());
-        bytes.extend_from_slice(b"IHDR");
-        bytes.extend_from_slice(&8u32.to_be_bytes());
-        bytes.extend_from_slice(&8u32.to_be_bytes());
-        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
-        bytes
-    }
-
-    #[test]
-    fn the_artifact_request_carries_the_sha_and_nothing_else() {
         assert_eq!(
-            artifact_params("abc123"),
-            serde_json::json!({ "sha256": "abc123" })
-        );
-    }
-
-    #[test]
-    fn an_artifact_is_decoded_only_when_it_is_an_image_that_matches_its_sha() {
-        use base64::engine::general_purpose::STANDARD as BASE64;
-        use base64::Engine as _;
-
-        let bytes = png_header_bytes();
-        let sha = super::sha256_hex(&bytes);
-        let encoded = BASE64.encode(&bytes);
-
-        // The reply the decision settled on: base64 in the JSON result.
-        assert_eq!(
-            decode_artifact(
-                &serde_json::json!({ "sha256": sha, "bytes": encoded }),
-                &sha
-            ),
-            Ok(bytes.clone()),
+            Plane::parse(Plane::Interactive.as_str()),
+            Some(Plane::Interactive)
         );
 
-        // A bare base64 string is accepted too, so a binary-frame reply that lands as a
-        // string still decodes.
-        assert_eq!(
-            decode_artifact(&Value::String(BASE64.encode(&bytes)), &sha),
-            Ok(bytes.clone()),
-        );
-
-        // Every refusal is a sentence, not a silence.
-        assert_eq!(
-            decode_artifact(&serde_json::json!({ "note": "no bytes" }), &sha),
-            Err(ArtifactError::Missing),
-        );
-        assert_eq!(
-            decode_artifact(&serde_json::json!({ "bytes": "not base64 !!!" }), &sha),
-            Err(ArtifactError::NotBase64),
-        );
-        assert_eq!(
-            decode_artifact(
-                &serde_json::json!({ "bytes": BASE64.encode(b"plain text, not an image") }),
-                &sha,
-            ),
-            Err(ArtifactError::NotAnImage),
-        );
-        // The bytes are a real image, but not the one that was asked for.
-        assert_eq!(
-            decode_artifact(&serde_json::json!({ "bytes": encoded }), &"f".repeat(64),),
-            Err(ArtifactError::ShaMismatch),
-        );
-
-        // Every error renders to something a placeholder can show.
-        for error in [
-            ArtifactError::Missing,
-            ArtifactError::NotBase64,
-            ArtifactError::TooLarge { bytes: 1 },
-            ArtifactError::NotAnImage,
-            ArtifactError::ShaMismatch,
-        ] {
-            assert!(!error.to_string().is_empty());
-        }
+        assert_eq!(Plane::parse("coding"), None);
+        assert_eq!(Plane::Interactive.method("replay"), "interactive.replay");
     }
 }

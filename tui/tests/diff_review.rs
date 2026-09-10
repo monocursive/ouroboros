@@ -106,7 +106,7 @@ fn reviewed() -> App {
             "_struct": "Ouroboros.Interactive.State",
             "id": SESSION,
             "node": "ouroboros@golden",
-            "provider": "claude_code",
+            "provider": "native",
             "workspace": "/tmp/w",
             "status": "running",
             "options": { "approval_mode": "auto_edit", "sandbox_mode": null },
@@ -114,12 +114,6 @@ fn reviewed() -> App {
             "updated_at": "2026-01-01T00:00:00.000000Z"
         }]),
     );
-    answer(
-        &mut app,
-        ouro::ui::app::Tag::Sessions(Plane::Coding),
-        json!([]),
-    );
-
     app.open_session(Plane::Interactive, SESSION.to_string());
 
     let call = app

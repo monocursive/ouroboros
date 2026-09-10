@@ -495,15 +495,16 @@ defmodule Ouroboros.Wasm.PoolTest do
 
     @tag :capture_log
     test "`:required` on a backend that cannot fence reads refuses too (C11)" do
-      # `ouro-sandbox` has writable roots and no read allow-set until W17, so a node whose
-      # only backend is that helper is a node with half a fence — and half a fence is what
-      # `fences_reads?/1` exists to refuse. Planted straight into the detection cache,
-      # because this Mac has Seatbelt and cannot be made to have Landlock.
+      # A backend that bounds writes and not reads is half a fence, and half a fence is what
+      # `fences_reads?/1` exists to refuse. Both backends this build has answer yes by name —
+      # the one that did not, `ouro-sandbox` before its W17 read allow-set, went with
+      # docs/proposals/core.md §4 A2 — so the detection is planted straight into the cache,
+      # which is also what keeps this test off whichever backend the machine actually has.
       :persistent_term.put(
         {Ouroboros.Provider.Native.Sandbox, :detection},
         %{
-          backend: :ouro_sandbox,
-          executable: "/nonexistent/ouro-sandbox",
+          backend: :some_future_backend,
+          executable: "/nonexistent/backend",
           version: "0.0.0",
           notes: "planted"
         }
@@ -517,8 +518,9 @@ defmodule Ouroboros.Wasm.PoolTest do
 
       assert %{
                phase: :broken,
-               broken_reason: {:helper_sandbox_unavailable, {:cannot_fence_reads, :ouro_sandbox}},
-               sandbox: %{posture: :refused, backend: "ouro-sandbox"}
+               broken_reason:
+                 {:helper_sandbox_unavailable, {:cannot_fence_reads, :some_future_backend}},
+               sandbox: %{posture: :refused, backend: "some_future_backend"}
              } = Pool.status(pool)
     end
 
@@ -1726,8 +1728,7 @@ defmodule Ouroboros.Wasm.PoolTest do
 
   ## Fake helpers
   #
-  # Shell scripts standing in for `ouro-wasm`, the same technique
-  # `Ouroboros.Provider.Native.Desktop.PoolTest` uses: `awk` reads a line at a time and
+  # Shell scripts standing in for `ouro-wasm`: `awk` reads a line at a time and
   # `fflush()` puts each answer on the pipe immediately, which is the one portable way to
   # keep a shell's stdout buffering out of the handshake.
 

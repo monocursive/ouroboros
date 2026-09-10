@@ -123,12 +123,12 @@ defmodule Ouroboros.Provider.Native.PromptTest do
   end
 
   test "tool guidance names only tools visible in this session" do
-    tools = Tools.specs(~w(read grep code_intel), nil)
+    tools = Tools.specs(~w(read grep edit), nil)
     prompt = Prompt.base(Keyword.put(@opts, :tools, tools))
 
     assert prompt =~ "Use `read`, not `bash`, to inspect file contents"
     assert prompt =~ "Use `grep` for discovery instead of shell pipelines"
-    assert prompt =~ "Use `code_intel` for symbol-aware navigation"
+    assert prompt =~ "Use `edit` for one exact, uniquely matched replacement"
     refute prompt =~ "Use `write` only"
     refute prompt =~ "Use `glob`"
     assert prompt =~ "include every required argument"

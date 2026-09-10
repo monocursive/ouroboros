@@ -16,8 +16,7 @@ use ouro::model::Plane;
 use ouro::proto::{ErrorCode, RpcError};
 use ouro::transport::ClientError;
 use ouro::ui::app::{
-    App, Call, ComposerVerb, FleetJob, MachineCandidate, Mode, Msg, NewField, NoticeKind, Overlay,
-    Tab, Tag,
+    App, Call, ComposerVerb, MachineSecurity, Mode, Msg, NewField, NoticeKind, Overlay, Tab, Tag,
 };
 use ouro::ui::theme;
 
@@ -50,8 +49,8 @@ fn fleet_profile() -> Profile {
                 node: "ouro@workstation.test".into(),
             },
         ],
-        roster_revision: 1,
         tombstones: Vec::new(),
+        roster_revision: 1,
         gateway_port: 47_123,
         epmd_port: 14_123,
         dist_port_min: 43_700,
@@ -152,7 +151,7 @@ fn with_open_session() -> App {
             "_struct": "Ouroboros.Interactive.State",
             "id": "session-0000000000000000000001",
             "node": "ouroboros@golden",
-            "provider": "claude_code",
+            "provider": "native",
             "workspace": "/tmp/w",
             "status": "running",
             "options": {
@@ -163,8 +162,6 @@ fn with_open_session() -> App {
             "updated_at": "2026-01-01T00:00:00.000000Z"
         }]),
     );
-
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
 
     app.open_session(
         Plane::Interactive,
@@ -297,9 +294,9 @@ fn session_rail_caps_visual_noise_and_keeps_the_complete_picker_available() {
             json!({
                 "_struct": "Ouroboros.Interactive.State",
                 "id": format!("session-000000000000000000000{number}"),
-                "objective": format!("Task {number}"),
+                "title": format!("Task {number}"),
                 "node": "ouroboros@golden",
-                "provider": "codex",
+                "provider": "native",
                 "workspace": "/tmp/w",
                 "status": if number == 1 { "running" } else { "lost" },
                 "options": {
@@ -473,7 +470,7 @@ fn the_conversation_header_names_the_model_the_run_reported() {
 
     let before = render(&mut app, 120, 24);
     assert!(
-        before.contains("interactive \u{b7} claude_code"),
+        before.contains("interactive \u{b7} native"),
         "{}",
         before.text()
     );
@@ -490,7 +487,7 @@ fn the_conversation_header_names_the_model_the_run_reported() {
 
     let after = render(&mut app, 120, 24);
     assert!(
-        after.contains("interactive \u{b7} claude_code \u{b7} claude-sonnet-5"),
+        after.contains("interactive \u{b7} native \u{b7} claude-sonnet-5"),
         "{}",
         after.text()
     );
@@ -620,18 +617,7 @@ fn the_dashboard_renders_the_golden_runtime_status() {
     assert!(screen.contains("distributed=false"));
 
     // Every plane in the fixture's matrix, by name.
-    for plane in [
-        "cluster",
-        "coding",
-        "control",
-        "hot_upgrade",
-        "interactive",
-        "mesh",
-        "orchestration",
-        "release",
-        "teams",
-        "workspace",
-    ] {
+    for plane in ["cluster", "interactive", "mesh", "workspace"] {
         assert!(
             screen.contains(plane),
             "{plane} is missing:\n{}",
@@ -644,66 +630,10 @@ fn the_dashboard_renders_the_golden_runtime_status() {
     assert!(screen.contains("admit=no"), "{}", screen.text());
 }
 
-fn open_machines(app: &mut App) {
-    app.apply(ctrl('p'));
-    type_text(app, "machines");
-    app.apply(key(KeyCode::Enter));
-    assert!(matches!(app.overlay, Some(Overlay::Machines(_))));
-}
-
+/// The cluster readout survives the machines overlay: it is `runtime.status` plus the
+/// local profile, and it is what Settings, the dashboard and the session lists draw.
 #[test]
-fn settings_makes_standalone_machine_setup_discoverable() {
-    let mut app = dashboard();
-    app.apply(key(KeyCode::Char(',')));
-
-    let settings = render(&mut app, 120, 34);
-    assert!(settings.contains("machines"), "{}", settings.text());
-    assert!(
-        settings.contains("standalone · open to create or join a fleet"),
-        "{}",
-        settings.text()
-    );
-
-    app.apply(key(KeyCode::Enter));
-    let machines = render(&mut app, 120, 34);
-    assert!(machines.contains("Standalone"), "{}", machines.text());
-    assert!(machines.contains("Known 1 · Connected 1 · Offline 0"));
-    assert!(
-        machines.contains("Add a reachable machine"),
-        "{}",
-        machines.text()
-    );
-    assert!(
-        machines.contains("I'll set it up myself"),
-        "{}",
-        machines.text()
-    );
-    assert!(machines.contains("Create a fleet"), "{}", machines.text());
-    assert!(
-        machines.contains("Join with an invitation"),
-        "{}",
-        machines.text()
-    );
-    assert!(
-        machines.contains("Check the machines"),
-        "{}",
-        machines.text()
-    );
-    assert!(
-        machines.contains("Diagnose a connection"),
-        "{}",
-        machines.text()
-    );
-    assert!(
-        machines.contains("Enter runs the selected action"),
-        "{}",
-        machines.text()
-    );
-    assert!(machines.contains("ouro fleet add"), "{}", machines.text());
-}
-
-#[test]
-fn a_healthy_three_machine_fleet_is_plain_and_secure() {
+fn a_healthy_three_machine_cluster_is_plain_and_secure() {
     let mut app = shell(full_hello());
     app.fleet_profile = Some(fleet_profile());
     answer(
@@ -727,17 +657,19 @@ fn a_healthy_three_machine_fleet_is_plain_and_secure() {
             }
         }),
     );
-    open_machines(&mut app);
 
-    let screen = render(&mut app, 120, 34);
-    assert!(screen.contains("Studio fleet"), "{}", screen.text());
-    assert!(screen.contains("studio at studio.test"));
-    assert!(screen.contains("Known 3 · Connected 3 · Offline 0"));
-    assert!(screen.contains("encrypted and authenticated (TLS)"));
-    assert!(screen.contains("All known machines are connected"));
-    assert!(screen.contains("live provider work does not migrate"));
-    assert!(screen.contains("after a full host"), "{}", screen.text());
-    assert!(screen.contains("loss."));
+    let summary = app.machine_summary();
+    assert_eq!(summary.mode, "Fleet");
+    assert_eq!(summary.fleet.as_deref(), Some("Studio fleet"));
+    assert_eq!(summary.machine, "studio");
+    assert_eq!(summary.host.as_deref(), Some("studio.test"));
+    assert_eq!(summary.expected, Some(3));
+    assert_eq!(summary.connected, 3);
+    assert_eq!(summary.offline, Some(0));
+    assert_eq!(summary.security, MachineSecurity::Secure);
+    assert!(summary
+        .recovery
+        .contains("All known machines are connected"));
 }
 
 #[test]
@@ -767,15 +699,17 @@ fn an_early_joiner_counts_later_machines_learned_from_beam() {
             }
         }),
     );
-    open_machines(&mut app);
 
-    let screen = render(&mut app, 120, 34);
-    assert!(screen.contains("Known 3 · Connected 3 · Offline 0"));
-    assert!(!screen.contains("Known 2 · Connected 3"));
+    // The saved profile knows two machines; the runtime observed three. The larger,
+    // live answer wins rather than the impossible "expected 2, connected 3".
+    let summary = app.machine_summary();
+    assert_eq!(summary.expected, Some(3));
+    assert_eq!(summary.connected, 3);
+    assert_eq!(summary.offline, Some(0));
 }
 
 #[test]
-fn newly_invited_profile_members_count_offline_before_the_live_runtime_learns_them() {
+fn profile_members_the_live_runtime_has_not_learned_count_offline() {
     let mut app = shell(full_hello());
     app.fleet_profile = Some(fleet_profile());
     answer(
@@ -797,19 +731,12 @@ fn newly_invited_profile_members_count_offline_before_the_live_runtime_learns_th
             }
         }),
     );
-    open_machines(&mut app);
 
-    let screen = render(&mut app, 120, 34);
-    assert!(
-        screen.contains("Known 3 · Connected 1 · Offline 2"),
-        "{}",
-        screen.text()
-    );
-    assert!(
-        screen.contains("Offline: mini, workstation"),
-        "{}",
-        screen.text()
-    );
+    let summary = app.machine_summary();
+    assert_eq!(summary.expected, Some(3));
+    assert_eq!(summary.connected, 1);
+    assert_eq!(summary.offline, Some(2));
+    assert_eq!(summary.offline_names, vec!["mini", "workstation"]);
 }
 
 #[test]
@@ -830,16 +757,13 @@ fn an_offline_machine_is_named_retried_and_then_recovers() {
             }
         }),
     );
-    open_machines(&mut app);
 
-    let partial = render(&mut app, 120, 34);
-    assert!(partial.contains("Known 3 · Connected 2 · Offline 1"));
-    assert!(
-        partial.contains("Offline: workstation"),
-        "{}",
-        partial.text()
-    );
-    assert!(partial.contains("running daemons keep retrying membership"));
+    let partial = app.machine_summary();
+    assert_eq!(partial.expected, Some(3));
+    assert_eq!(partial.connected, 2);
+    assert_eq!(partial.offline, Some(1));
+    assert_eq!(partial.offline_names, vec!["workstation"]);
+    assert!(partial.recovery.contains("keep retrying membership"));
 
     answer(
         &mut app,
@@ -855,14 +779,17 @@ fn an_offline_machine_is_named_retried_and_then_recovers() {
             }
         }),
     );
-    let recovered = render(&mut app, 120, 34);
-    assert!(recovered.contains("Known 3 · Connected 3 · Offline 0"));
-    assert!(recovered.contains("retry membership after network interruptions"));
-    assert!(!recovered.contains("Offline: workstation"));
+
+    let recovered = app.machine_summary();
+    assert_eq!(recovered.offline, Some(0));
+    assert!(recovered.offline_names.is_empty());
+    assert!(recovered
+        .recovery
+        .contains("retry membership after network interruptions"));
 }
 
 #[test]
-fn machines_calls_out_insecure_and_mismatched_runtime_states() {
+fn the_cluster_readout_calls_out_insecure_and_mismatched_runtime_states() {
     let mut insecure = shell(full_hello());
     answer(
         &mut insecure,
@@ -878,9 +805,10 @@ fn machines_calls_out_insecure_and_mismatched_runtime_states() {
             }
         }),
     );
-    open_machines(&mut insecure);
-    let insecure_screen = render(&mut insecure, 120, 34);
-    assert!(insecure_screen.contains("insecure: machine traffic is not using TLS"));
+    assert_eq!(
+        insecure.machine_summary().security,
+        MachineSecurity::Insecure
+    );
 
     let mut mismatch = shell(full_hello());
     mismatch.fleet_profile = Some(fleet_profile());
@@ -897,380 +825,64 @@ fn machines_calls_out_insecure_and_mismatched_runtime_states() {
             }
         }),
     );
-    open_machines(&mut mismatch);
-    let mismatch_screen = render(&mut mismatch, 120, 34);
-    assert!(mismatch_screen.contains("configuration mismatch"));
-    assert!(mismatch_screen.contains("Known 3 · Connected 1 · Offline 2"));
+    let summary = mismatch.machine_summary();
+    assert_eq!(summary.security, MachineSecurity::Mismatch);
+    assert_eq!(summary.expected, Some(3));
+    assert_eq!(summary.connected, 1);
+    assert_eq!(summary.offline, Some(2));
 }
 
 #[test]
-fn machines_create_join_and_service_open_runnable_forms() {
-    let mut app = dashboard();
-    open_machines(&mut app);
-    assert!(app
-        .drain()
-        .iter()
-        .all(|call| !call.method.starts_with("fleet.")));
-
-    app.apply(key(KeyCode::Down));
-    app.apply(key(KeyCode::Down));
-    app.apply(key(KeyCode::Enter));
-    let create = render(&mut app, 120, 34);
-    assert!(
-        create.contains("Create a fleet on this Mac"),
-        "{}",
-        create.text()
+fn a_standalone_client_offers_only_this_machine_as_a_destination() {
+    let mut app = shell(full_hello());
+    answer(
+        &mut app,
+        Tag::Status,
+        json!({
+            "node": "ouro@studio.test",
+            "connected_nodes": [],
+            "cluster": { "distributed": false, "formation": { "strategy": "none" } }
+        }),
     );
-    assert!(create.contains("machine"), "{}", create.text());
-    assert!(create.contains("host"), "{}", create.text());
-    assert!(app.take_fleet_intent().is_none());
-    assert!(app.quit.is_none());
 
-    app.apply(key(KeyCode::Esc));
-    app.apply(key(KeyCode::Down));
-    app.apply(key(KeyCode::Enter));
-    let join = render(&mut app, 120, 34);
-    assert!(join.contains("Join with an invitation"), "{}", join.text());
-    assert!(join.contains("invitation"), "{}", join.text());
-    assert!(join.contains("delete after join"), "{}", join.text());
-    assert!(app.take_join_intent().is_none());
-    assert!(app
-        .drain()
-        .iter()
-        .all(|call| !call.method.starts_with("fleet.")));
+    let summary = app.machine_summary();
+    assert_eq!(summary.mode, "Standalone");
+    assert_eq!(summary.security, MachineSecurity::Standalone);
+    assert_eq!(app.machine_choices().len(), 1);
+    assert!(app.machine_choices()[0].wire_name().is_none());
 }
 
 #[test]
-fn machines_service_confirms_before_writing_a_unit() {
-    let mut app = dashboard();
+fn only_connected_compatible_core_peers_are_offered_as_destinations() {
+    let mut app = shell(full_hello());
     app.fleet_profile = Some(fleet_profile());
-    app.can_invite = true;
-    open_machines(&mut app);
+    answer(
+        &mut app,
+        Tag::Status,
+        json!({
+            "node": "ouro@studio.test",
+            "connected_nodes": ["ouro@mini.test"],
+            "cluster": {
+                "distributed": true,
+                "formation": { "strategy": "epmd" },
+                "security": { "tls": true },
+                "fleet": {
+                    "machines": [
+                        { "machine": "studio", "node": "ouro@studio.test", "role": "core", "state": "local" },
+                        { "machine": "mini", "node": "ouro@mini.test", "role": "core", "state": "connected" },
+                        { "machine": "workstation", "node": "ouro@workstation.test", "role": "core", "state": "offline" }
+                    ]
+                }
+            }
+        }),
+    );
 
-    for _ in 0..3 {
-        app.apply(key(KeyCode::Down));
-    }
-    app.apply(key(KeyCode::Enter));
-    let service = render(&mut app, 120, 34);
-    assert!(
-        service.contains("Keep this machine running"),
-        "{}",
-        service.text()
-    );
-    assert!(
-        service.contains("Installs and starts automatic recovery"),
-        "{}",
-        service.text()
-    );
-    assert!(
-        service.contains("checks it is enabled"),
-        "{}",
-        service.text()
-    );
-    assert!(app.take_fleet_job().is_none());
-    assert!(app
-        .drain()
+    let offered = app
+        .machine_choices()
         .iter()
-        .all(|call| !call.method.starts_with("fleet.")));
-}
-
-#[test]
-fn machines_copies_the_selected_command_without_running_it() {
-    let mut app = dashboard();
-    open_machines(&mut app);
-
-    let overview = render(&mut app, 120, 34);
-    assert!(overview.contains("y copy CLI"), "{}", overview.text());
-
-    app.apply(key(KeyCode::Char('y')));
-    assert_eq!(
-        app.take_copy().as_deref(),
-        Some("ouro fleet add user@host --machine NAME --host HOST")
-    );
-    assert!(app
-        .drain()
-        .iter()
-        .all(|call| !call.method.starts_with("fleet.")));
-
-    app.apply(key(KeyCode::Down));
-    app.apply(key(KeyCode::Down));
-    app.apply(key(KeyCode::Down));
-    app.apply(key(KeyCode::Char('y')));
-    assert_eq!(
-        app.take_copy().as_deref(),
-        Some("ouro fleet enroll INVITE.ouro --delete")
-    );
-    assert!(app.take_join_intent().is_none());
-    assert!(app
-        .drain()
-        .iter()
-        .all(|call| !call.method.starts_with("fleet.")));
-}
-
-#[test]
-fn machines_create_restarts_this_mac_as_the_owner() {
-    let mut app = dashboard();
-    app.mode = ouro::ui::app::Mode::Spawned { pid: 7 };
-    open_machines(&mut app);
-
-    app.apply(key(KeyCode::Down));
-    app.apply(key(KeyCode::Down));
-    app.apply(key(KeyCode::Enter));
-    type_text(&mut app, "studio");
-    app.apply(key(KeyCode::Tab));
-    type_text(&mut app, "studio.tailnet.ts.net");
-    app.apply(key(KeyCode::Enter));
-    app.apply(key(KeyCode::Enter));
-
-    let intent = app.take_fleet_intent().expect("a create-only plan");
-    assert!(intent.add.is_none());
-    assert_eq!(intent.owner_machine, "studio");
-    assert_eq!(intent.owner_host, "studio.tailnet.ts.net");
-    assert_eq!(app.quit, Some(ouro::ui::Quit::ApplyFleetIntent));
-}
-
-#[test]
-fn machines_status_and_doctor_run_from_the_menu() {
-    let mut app = dashboard();
-    app.data_dir = Some("/tmp/ouro-machines-test".into());
-    open_machines(&mut app);
-
-    for _ in 0..4 {
-        app.apply(key(KeyCode::Down));
-    }
-    app.apply(key(KeyCode::Enter));
-    assert!(matches!(app.take_fleet_job(), Some(FleetJob::Status)));
-    let report = render(&mut app, 120, 34);
-    assert!(report.contains("Check the machines"), "{}", report.text());
-    assert!(report.contains("Working"), "{}", report.text());
-
-    app.apply(Msg::FleetJobFinished {
-        log: vec!["Studio fleet".into(), "  machine      studio".into()],
-        result: Ok(String::new()),
-    });
-    let done = render(&mut app, 120, 34);
-    assert!(done.contains("Studio fleet"), "{}", done.text());
-    assert!(done.contains("studio"), "{}", done.text());
-}
-
-#[test]
-fn machines_add_flow_reviews_a_plan_then_requests_a_fleet_restart() {
-    let mut app = dashboard();
-    app.mode = ouro::ui::app::Mode::Spawned { pid: 7 };
-    open_machines(&mut app);
-
-    app.apply(key(KeyCode::Down));
-    app.apply(key(KeyCode::Enter));
-    let form = render(&mut app, 120, 34);
-    assert!(
-        form.contains("I'll set it up myself") || form.contains("machine"),
-        "{}",
-        form.text()
-    );
-    assert!(form.contains("Private address"), "{}", form.text());
-
-    type_text(&mut app, "linux-laptop");
-    app.apply(key(KeyCode::Tab));
-    type_text(&mut app, "linux-laptop.tailnet.ts.net");
-    app.apply(key(KeyCode::Tab));
-    type_text(&mut app, "studio");
-    app.apply(key(KeyCode::Tab));
-    type_text(&mut app, "studio.tailnet.ts.net");
-    app.apply(key(KeyCode::Enter));
-
-    let confirm = render(&mut app, 120, 34);
-    assert!(confirm.contains("restart once"), "{}", confirm.text());
-    assert!(
-        confirm.contains("ouro fleet add --print-script --machine linux-laptop"),
-        "{}",
-        confirm.text()
-    );
-    assert!(confirm.contains("--init"), "{}", confirm.text());
-    assert!(
-        confirm.contains("--owner-host studio.tailnet.ts.net"),
-        "{}",
-        confirm.text()
-    );
-
-    app.apply(key(KeyCode::Enter));
-    let intent = app.take_fleet_intent().expect("a saved add plan");
-    assert_eq!(intent.add.as_ref().unwrap().machine, "linux-laptop");
-    assert_eq!(intent.owner_host, "studio.tailnet.ts.net");
-    assert_eq!(app.quit, Some(ouro::ui::Quit::ApplyFleetIntent));
-    assert!(app
-        .drain()
-        .iter()
-        .all(|call| !call.method.starts_with("fleet.")));
-}
-
-#[test]
-fn machines_add_picks_a_known_tailscale_host_and_prefills_this_mac() {
-    let mut app = dashboard();
-    open_machines(&mut app);
-    app.apply(Msg::MachineCandidates {
-        candidates: vec![
-            MachineCandidate {
-                label: "vps".into(),
-                target: "vps.tailnet.ts.net".into(),
-                host: Some("vps.tailnet.ts.net".into()),
-                detail: "tailscale linux online".into(),
-                tailscale: true,
-            },
-            MachineCandidate {
-                label: "linux-laptop".into(),
-                target: "linux-laptop.tailnet.ts.net".into(),
-                host: Some("linux-laptop.tailnet.ts.net".into()),
-                detail: "tailscale linux offline".into(),
-                tailscale: true,
-            },
-        ],
-        local_machine: Some("studio".into()),
-        local_host: Some("studio.tailnet.ts.net".into()),
-    });
-
-    let menu = render(&mut app, 120, 34);
-    assert!(menu.contains("Add vps"), "{}", menu.text());
-    assert!(menu.contains("Add linux-laptop"), "{}", menu.text());
-    assert!(
-        menu.contains("linux-laptop.tailnet.ts.net"),
-        "{}",
-        menu.text()
-    );
-
-    app.apply(key(KeyCode::Down));
-    app.apply(key(KeyCode::Enter));
-    let form = render(&mut app, 120, 34);
-    assert!(form.contains("linux-laptop"), "{}", form.text());
-    assert!(
-        form.contains("linux-laptop.tailnet.ts.net"),
-        "{}",
-        form.text()
-    );
-    assert!(form.contains("studio.tailnet.ts.net"), "{}", form.text());
-    assert!(form.contains("F6 advanced options"), "{}", form.text());
-    assert!(
-        form.contains("This computer's name    studio"),
-        "{}",
-        form.text()
-    );
-    app.apply(key(KeyCode::F(6)));
-    let advanced = render(&mut app, 120, 34);
-    assert!(advanced.contains("tailscale"), "{}", advanced.text());
-    assert!(
-        advanced.contains("A Mac binary will not run on Linux"),
-        "{}",
-        advanced.text()
-    );
-}
-
-#[test]
-fn machines_add_on_a_live_owner_runs_without_restarting() {
-    let mut app = dashboard();
-    app.fleet_profile = Some(fleet_profile());
-    app.can_invite = true;
-    open_machines(&mut app);
-
-    app.apply(key(KeyCode::Enter));
-    type_text(&mut app, "op@vps");
-    app.apply(key(KeyCode::Tab));
-    type_text(&mut app, "vps");
-    app.apply(key(KeyCode::Tab));
-    type_text(&mut app, "vps.tailnet.ts.net");
-    app.apply(key(KeyCode::Enter));
-    app.apply(key(KeyCode::Enter));
-
-    let job = app.take_fleet_job().expect("a live owner add");
-    match job {
-        FleetJob::Add {
-            prepare,
-            target,
-            machine,
-            ..
-        } => {
-            assert_eq!(target.as_deref(), Some("op@vps"));
-            assert_eq!(machine, "vps");
-            assert!(!prepare);
-        }
-        other => panic!("expected an add job, got {other:?}"),
-    }
-    assert!(app.quit.is_none());
-    assert!(app
-        .drain()
-        .iter()
-        .all(|call| !call.method.starts_with("fleet.")));
-}
-
-#[test]
-fn machines_add_refuses_an_attached_standalone_client() {
-    let mut app = dashboard();
-    app.mode = Mode::Attached;
-    open_machines(&mut app);
-
-    app.apply(key(KeyCode::Down));
-    app.apply(key(KeyCode::Enter));
-    type_text(&mut app, "linux-laptop");
-    app.apply(key(KeyCode::Tab));
-    type_text(&mut app, "linux-laptop.tailnet.ts.net");
-    app.apply(key(KeyCode::Tab));
-    type_text(&mut app, "studio");
-    app.apply(key(KeyCode::Tab));
-    type_text(&mut app, "studio.tailnet.ts.net");
-    app.apply(key(KeyCode::Enter));
-    app.apply(key(KeyCode::Enter));
-
-    let screen = render(&mut app, 120, 34);
-    assert!(screen.contains("attached"), "{}", screen.text());
-    assert!(app.quit.is_none());
-    assert!(app.take_fleet_intent().is_none());
-    assert!(app.take_fleet_job().is_none());
-}
-
-#[test]
-fn machines_reopens_the_add_result_after_a_fleet_restart() {
-    let mut app = dashboard();
-    app.open_machines_on_start = true;
-    app.resume_add_log = vec!["wrote a private invitation for laptop".into()];
-    app.resume_add_recipe = Some("ouro fleet enroll laptop.ouro --delete".into());
-    app.open_home();
-
-    let screen = render(&mut app, 120, 34);
-    assert!(
-        screen.contains("wrote a private invitation for laptop"),
-        "{}",
-        screen.text()
-    );
-    assert!(
-        screen.contains("ouro fleet enroll laptop.ouro --delete"),
-        "{}",
-        screen.text()
-    );
-    assert!(
-        screen.contains("Provider sign-in is still on that machine"),
-        "{}",
-        screen.text()
-    );
-}
-
-#[test]
-fn machines_explains_signed_membership_updates_and_non_revocation() {
-    let mut app = dashboard();
-    app.fleet_profile = Some(fleet_profile());
-    app.can_invite = true;
-    open_machines(&mut app);
-
-    for _ in 0..6 {
-        app.apply(key(KeyCode::Down));
-    }
-    app.apply(key(KeyCode::Enter));
-
-    let sync = render(&mut app, 120, 34);
-    assert!(sync.contains("Export saved membership"), "{}", sync.text());
-    assert!(sync.contains("roster"), "{}", sync.text());
-    assert!(app.take_fleet_job().is_none());
-    assert!(app
-        .drain()
-        .iter()
-        .all(|call| !call.method.starts_with("fleet.")));
+        .filter_map(|choice| choice.wire_name().map(str::to_string))
+        .collect::<Vec<_>>();
+    assert_eq!(offered, vec!["mini".to_string()]);
 }
 
 #[test]
@@ -1278,11 +890,9 @@ fn availability_is_three_colours_and_disabled_is_not_one_of_the_alarming_ones() 
     let mut app = dashboard();
     let screen = render(&mut app, 120, 30);
 
-    // `:disabled` is a posture — the control and workspace planes report it when nobody
-    // configured them — and painting it like an outage would teach an operator to ignore
-    // the colour.
+    // `:disabled` is a posture — the workspace plane reports it when nobody configured
+    // one — and painting it like an outage would teach an operator to ignore the colour.
     assert_eq!(screen.colour_of("mesh", "available"), Color::Green);
-    assert_eq!(screen.colour_of("control ", "disabled"), Color::DarkGray);
     assert_eq!(
         screen.colour_of("workspace      disabled", "disabled"),
         Color::DarkGray
@@ -1313,21 +923,22 @@ fn a_provider_probe_that_failed_is_not_reported_as_a_missing_provider() {
         &mut app,
         Tag::Providers,
         json!([
-            {
-                "provider": "claude_code",
-                "spec": {},
-                "status": { "installed": true, "compatible": true, "authenticated": "unknown" },
-                "error": null
-            },
-            { "provider": "codex", "spec": {}, "status": null, "error": "probe_timeout" }
+            { "provider": "native", "spec": {}, "status": null, "error": "probe_timeout" }
         ]),
     );
 
     let screen = render(&mut app, 120, 30);
 
-    assert!(screen.contains("claude_code"));
-    assert!(screen.row("claude_code").contains("installed"));
-    assert!(screen.row("codex").contains("probe failed: probe_timeout"));
+    assert!(
+        screen.row("native").contains("probe failed: probe_timeout"),
+        "a probe that failed is a different fact from a provider that is not there: {}",
+        screen.text()
+    );
+    assert!(
+        !screen.row("native").contains("not installed"),
+        "{}",
+        screen.text()
+    );
 }
 
 #[test]
@@ -1378,35 +989,32 @@ fn the_coding_home_carries_the_terminal_logo() {
 }
 
 #[test]
-fn the_sessions_list_merges_both_planes_and_tags_each_row() {
+fn the_sessions_list_tags_each_row_and_orders_by_activity() {
     let mut app = shell(full_hello());
     app.apply(key(KeyCode::Char('2')));
 
     answer(
         &mut app,
         Tag::Sessions(Plane::Interactive),
-        json!([{ "id": "session-1", "status": "awaiting_approval",
-                 "updated_at": "2026-01-01T00:00:02.000000Z" }]),
-    );
-
-    answer(
-        &mut app,
-        Tag::Sessions(Plane::Coding),
-        json!([{ "id": "task-2", "status": "running",
-                 "updated_at": "2026-01-01T00:00:01.000000Z" }]),
+        json!([
+            { "id": "session-1", "status": "awaiting_approval",
+              "updated_at": "2026-01-01T00:00:02.000000Z" },
+            { "id": "session-2", "status": "running",
+              "updated_at": "2026-01-01T00:00:01.000000Z" }
+        ]),
     );
 
     app.overlay = Some(Overlay::SessionPicker { selected: None });
     let screen = render(&mut app, 120, 20);
 
     assert!(screen.row("session-1").contains("int"), "{}", screen.text());
-    assert!(screen.row("task-2").contains("code "));
+    assert!(screen.row("session-2").contains("int"));
     assert!(screen.row("session-1").contains("awaiting_approval"));
 
-    // Newest activity first, so the list does not reshuffle under the cursor.
-    let sessions = screen.rows.iter().position(|r| r.contains("session-1"));
-    let tasks = screen.rows.iter().position(|r| r.contains("task-2"));
-    assert!(sessions < tasks);
+    // What needs a person first, so the list does not reshuffle under the cursor.
+    let first = screen.rows.iter().position(|r| r.contains("session-1"));
+    let second = screen.rows.iter().position(|r| r.contains("session-2"));
+    assert!(first < second);
 }
 
 #[test]
@@ -1424,7 +1032,6 @@ fn an_incomplete_fleet_list_keeps_last_known_session_rows() {
             "updated_at": "2026-01-01T00:00:02.000000Z"
         }]),
     );
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
 
     app.apply(Msg::Answer {
         tag: Tag::Sessions(Plane::Interactive),
@@ -1571,7 +1178,6 @@ fn a_list_poll_does_not_retarget_the_session_picker() {
             }
         ]),
     );
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
 
     app.overlay = Some(Overlay::SessionPicker {
         selected: Some((Plane::Interactive, "older".into())),
@@ -2682,7 +2288,7 @@ fn the_composer_advertises_shift_enter_only_where_the_terminal_reports_it() {
     // The same rule on the home composer, whose Enter starts rather than sends.
     let mut home = shell(full_hello());
     home.open_home();
-    home.config.defaults.provider = Some("claude".into());
+    home.config.defaults.model = Some("anthropic:claude-sonnet-5".into());
 
     let plain = render(&mut home, 120, 30);
     assert!(
@@ -3202,7 +2808,7 @@ fn every_remote_session_verb_keeps_the_owner_node_from_the_reference() {
         json!([{
             "id": remote_id,
             "node": remote_node,
-            "provider": "codex",
+            "provider": "native",
             "status": "running",
             "updated_at": "2026-01-01T00:00:00Z"
         }]),
@@ -3312,7 +2918,7 @@ fn duplicate_explicit_ids_on_two_owners_are_visible_and_never_routed() {
         json!([{
             "id": id,
             "node": first_owner,
-            "provider": "codex",
+            "provider": "native",
             "status": "running",
             "updated_at": "2026-01-01T00:00:00Z"
         }]),
@@ -3332,14 +2938,14 @@ fn duplicate_explicit_ids_on_two_owners_are_visible_and_never_routed() {
             {
                 "id": id,
                 "node": first_owner,
-                "provider": "codex",
+                "provider": "native",
                 "status": "running",
                 "updated_at": "2026-01-01T00:00:00Z"
             },
             {
                 "id": id,
                 "node": second_owner,
-                "provider": "codex",
+                "provider": "native",
                 "status": "running",
                 "updated_at": "2026-01-01T00:00:01Z"
             }
@@ -3366,7 +2972,7 @@ fn duplicate_explicit_ids_on_two_owners_are_visible_and_never_routed() {
         json!([{
             "id": id,
             "node": first_owner,
-            "provider": "codex",
+            "provider": "native",
             "status": "running",
             "updated_at": "2026-01-01T00:00:02Z"
         }]),
@@ -3406,34 +3012,6 @@ fn duplicate_explicit_ids_on_two_owners_are_visible_and_never_routed() {
 }
 
 #[test]
-fn cancelling_a_remote_coding_task_keeps_its_owner_node() {
-    let remote_node = "ouro@workstation.test";
-    let mut app = shell(full_hello());
-    answer(
-        &mut app,
-        Tag::Sessions(Plane::Coding),
-        json!([{
-            "id": "task-remote-1",
-            "node": remote_node,
-            "provider": "codex",
-            "status": "running",
-            "updated_at": "2026-01-01T00:00:00Z"
-        }]),
-    );
-    app.open_session(Plane::Coding, "task-remote-1".into());
-    let _ = app.drain();
-    app.apply(key(KeyCode::Char('x')));
-    app.apply(key(KeyCode::Enter));
-
-    let cancel = app
-        .drain()
-        .into_iter()
-        .find(|call| call.method == "coding.cancel")
-        .expect("a remote task cancellation");
-    assert_eq!(cancel.params["node"], remote_node);
-}
-
-#[test]
 fn a_remote_machine_loss_retains_the_cursor_and_resubscribes_after_reconnect() {
     let remote_id = "session-recover-1";
     let remote_node = "ouro@mini.test";
@@ -3444,7 +3022,7 @@ fn a_remote_machine_loss_retains_the_cursor_and_resubscribes_after_reconnect() {
         json!([{
             "id": remote_id,
             "node": remote_node,
-            "provider": "codex",
+            "provider": "native",
             "status": "running"
         }]),
     );
@@ -3633,7 +3211,7 @@ fn a_local_gateway_reconnect_waits_for_an_offline_remote_owner_then_resumes() {
         json!([{
             "id": remote_id,
             "node": remote_node,
-            "provider": "codex",
+            "provider": "native",
             "status": "running"
         }]),
     );
@@ -3796,7 +3374,7 @@ fn an_indeterminate_transport_failure_opening_a_remote_stream_enters_recovery() 
         json!([{
             "id": id,
             "node": owner,
-            "provider": "codex",
+            "provider": "native",
             "status": "running"
         }]),
     );
@@ -3893,7 +3471,7 @@ fn the_open_composer_names_the_provider_and_serializes_later_requests() {
     let mut app = with_open_session();
 
     let screen = render(&mut app, 180, 30);
-    assert!(screen.contains("claude_code"), "{}", screen.text());
+    assert!(screen.contains("native"), "{}", screen.text());
     assert!(!screen.contains("PROVIDER Codex"), "{}", screen.text());
     assert!(screen.contains("workspace /tmp/w"), "{}", screen.text());
     assert!(screen.contains("APPROVAL auto_edit"), "{}", screen.text());
@@ -3941,9 +3519,9 @@ fn the_open_composer_names_the_provider_and_serializes_later_requests() {
 }
 
 #[test]
-fn an_open_session_never_borrows_client_workspace_or_provider_defaults() {
+fn an_open_session_never_borrows_client_workspace_or_model_defaults() {
     let mut app = with_open_session();
-    app.config.defaults.provider = Some("codex".into());
+    app.config.defaults.model = Some("openai_codex:gpt-5.6-sol".into());
     app.config.defaults.workspace = Some("/wrong/client-default".into());
     app.launch_dir = Some("/wrong/local-cwd".into());
 
@@ -3957,7 +3535,7 @@ fn an_open_session_never_borrows_client_workspace_or_provider_defaults() {
         "{}",
         screen.text()
     );
-    assert!(screen.contains("Provider unknown"), "{}", screen.text());
+    assert!(screen.contains("Model unknown"), "{}", screen.text());
     assert!(
         !screen.contains("/wrong/client-default"),
         "{}",
@@ -4178,12 +3756,11 @@ fn x_in_the_session_switcher_removes_a_terminal_session() {
             {
                 "id": "session-dead",
                 "status": "lost",
-                "provider": "codex",
+                "provider": "native",
                 "updated_at": "2026-01-01T00:00:01.000000Z"
             }
         ]),
     );
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
 
     apply_leader(&mut app, 'l');
     let _ = app.drain();
@@ -4275,7 +3852,6 @@ fn x_hides_a_last_known_offline_row_without_calling_the_runtime() {
             "updated_at": "2026-01-01T00:00:02.000000Z"
         }]),
     );
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
     answer(
         &mut app,
         Tag::Status,
@@ -4351,32 +3927,6 @@ fn x_hides_a_last_known_offline_row_without_calling_the_runtime() {
         .all(|session| session.id != "late-member-session"));
 }
 
-#[test]
-fn a_coding_task_is_told_it_takes_no_input_rather_than_being_sent_one() {
-    let mut app = shell(full_hello());
-    app.apply(key(KeyCode::Char('2')));
-
-    answer(&mut app, Tag::Sessions(Plane::Interactive), json!([]));
-    answer(
-        &mut app,
-        Tag::Sessions(Plane::Coding),
-        json!([{ "id": "task-2", "status": "running", "objective": "fix the build" }]),
-    );
-
-    app.open_session(Plane::Coding, "task-2".into());
-    let _ = app.drain();
-
-    app.apply(key(KeyCode::Char('i')));
-
-    assert!(
-        app.drain().is_empty(),
-        "the coding plane serves no send_message and none must be sent"
-    );
-
-    let screen = render(&mut app, 120, 24);
-    assert!(screen.contains("takes no input"), "{}", screen.text());
-}
-
 // ----- starting a session -------------------------------------------------------------
 
 /// Which row of the new-session form has focus.
@@ -4408,22 +3958,15 @@ fn ready_to_start() -> App {
 
     app.apply(key(KeyCode::Char('2')));
     answer(&mut app, Tag::Sessions(Plane::Interactive), json!([]));
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
 
     answer(
         &mut app,
         Tag::Providers,
         json!([
             {
-                "provider": "claude_code",
+                "provider": "native",
                 "spec": {},
                 "status": { "installed": true, "compatible": true, "authenticated": true },
-                "error": null
-            },
-            {
-                "provider": "gemini",
-                "spec": {},
-                "status": { "installed": false, "compatible": false, "authenticated": "unknown" },
                 "error": null
             }
         ]),
@@ -4442,9 +3985,7 @@ fn n_opens_a_form_whose_every_choice_is_visible() {
     let screen = render(&mut app, 120, 30);
 
     assert!(screen.contains("new session"), "{}", screen.text());
-    assert!(screen.contains("plane"));
-    assert!(screen.contains("interactive — a conversation you send messages to"));
-    assert!(screen.contains("provider"));
+    assert!(screen.contains("model"));
     assert!(screen.contains("workspace"));
     assert!(screen.contains("approval"));
     assert!(screen.contains("[ start ]"));
@@ -4497,42 +4038,20 @@ fn new_session_can_choose_a_connected_machine_by_friendly_name() {
     );
     assert!(!form.contains("workstation — connected"));
     assert!(form.contains("Connected checks reachability, not provider readiness"));
-    assert!(form.contains("fleet invites never copy credentials"));
+    assert!(form.contains("no credential is ever copied between machines"));
     assert!(
-        form.contains("claude_code — readiness unknown on destination"),
+        form.contains("Workspace paths are resolved on that destination machine"),
         "{}",
         form.text()
-    );
-    assert!(
-        !form.contains("claude_code (1/2)"),
-        "the local provider's green-ready label must not describe a remote machine: {}",
-        form.text()
-    );
-    assert_eq!(
-        form.colour_of("claude_code", "claude_code"),
-        Color::LightYellow,
-        "remote readiness is unknown even when the gateway has this provider"
     );
 
-    focus(&mut app, NewField::Provider);
-    app.apply(key(KeyCode::Right));
-    let remote_missing_locally = render(&mut app, 120, 30);
+    // The local probe is not evidence about the destination, and with a machine selected
+    // the form says so rather than repeating what it found here.
     assert!(
-        remote_missing_locally.contains("gemini — readiness unknown on destination"),
-        "{}",
-        remote_missing_locally.text()
+        !form.contains("no executable was found for it"),
+        "a local probe must not describe a remote machine: {}",
+        form.text()
     );
-    assert!(
-        !remote_missing_locally.contains("gemini — not installed"),
-        "the gateway's missing executable is not evidence about the destination: {}",
-        remote_missing_locally.text()
-    );
-    assert_eq!(
-        remote_missing_locally.colour_of("gemini", "gemini"),
-        Color::LightYellow,
-        "remote readiness is unknown even when the gateway lacks this provider"
-    );
-    app.apply(key(KeyCode::Left));
 
     focus(&mut app, NewField::Start);
     app.apply(key(KeyCode::Enter));
@@ -4596,47 +4115,48 @@ fn an_incompatible_connected_machine_is_not_offered_for_paid_work() {
     assert!(form.contains("This machine"), "{}", form.text());
 }
 
+/// A probe that found no executable is said, and it stops no start: "installed" means a
+/// file exists, and the runtime is the authority on whether a session can begin.
 #[test]
-fn the_provider_list_greys_an_uninstalled_provider_and_still_offers_it() {
+fn an_uninstalled_provider_is_said_and_still_starts() {
     let mut app = ready_to_start();
+    answer(
+        &mut app,
+        Tag::Providers,
+        json!([
+            {
+                "provider": "native",
+                "spec": {},
+                "status": { "installed": false, "compatible": false, "authenticated": "unknown" },
+                "error": null
+            }
+        ]),
+    );
     app.apply(key(KeyCode::Char('n')));
 
     let screen = render(&mut app, 120, 30);
 
     assert!(
-        screen.row("claude_code").contains("(1/2)"),
+        screen.contains("no executable was found for it"),
         "{}",
         screen.text()
     );
-    assert_eq!(screen.colour_of("claude_code", "claude_code"), Color::Green);
-
-    // Right moves to the uninstalled one, which is drawn dim and says why.
-    app.apply(key(KeyCode::Right));
-    let screen = render(&mut app, 120, 30);
-
-    assert!(
-        screen.row("gemini").contains("not installed"),
-        "{}",
-        screen.text()
-    );
-    assert_eq!(screen.colour_of("gemini", "gemini"), Color::DarkGray);
     assert!(
         screen.contains("the runtime decides, not this probe"),
         "an installed-probe is a heuristic and the runtime is the authority:\n{}",
         screen.text()
     );
 
-    // Selectable anyway: this client does not overrule the runtime on a probe.
+    // Startable anyway: this client does not overrule the runtime on a probe.
     focus(&mut app, NewField::Start);
     app.apply(key(KeyCode::Enter));
 
-    let call = app
-        .drain()
-        .into_iter()
-        .find(|call| call.method == "interactive.start")
-        .expect("an uninstalled provider is still the operator's to try");
-
-    assert_eq!(call.params["provider"], "gemini");
+    assert!(
+        app.drain()
+            .into_iter()
+            .any(|call| call.method == "interactive.start"),
+        "a probe is not a veto"
+    );
 }
 
 #[test]
@@ -4644,7 +4164,7 @@ fn the_form_produces_exactly_the_options_the_gateway_allowlists() {
     let mut app = ready_to_start();
     app.apply(key(KeyCode::Char('n')));
 
-    // provider stays claude_code; retype the workspace; pick `prompt`; start.
+    // retype the workspace; pick `prompt`; start.
     focus(&mut app, NewField::Workspace);
     for _ in 0..40 {
         app.apply(key(KeyCode::Backspace));
@@ -4671,7 +4191,11 @@ fn the_form_produces_exactly_the_options_the_gateway_allowlists() {
         .find(|call| call.method == "interactive.start")
         .expect("a start");
 
-    assert_eq!(call.params["provider"], "claude_code");
+    assert!(
+        call.params.get("provider").is_none(),
+        "`provider` is not a start option and sending it would be -32602: {}",
+        call.params
+    );
     assert_eq!(call.params["workspace"], "/srv/work");
     assert_eq!(call.params["approval_mode"], "prompt");
     assert_eq!(
@@ -4728,7 +4252,11 @@ fn write_starts_a_session_that_can_edit_when_this_one_cannot() {
         .expect("a writable start");
 
     assert_eq!(call.params["sandbox_mode"], "workspace_write");
-    assert_eq!(call.params["provider"], "claude_code");
+    assert!(
+        call.params.get("provider").is_none(),
+        "`provider` is not a start option and sending it would be -32602: {}",
+        call.params
+    );
     assert_eq!(call.params["workspace"], "/tmp/w");
 }
 
@@ -4767,52 +4295,6 @@ fn an_empty_workspace_is_omitted_rather_than_sent_blank() {
     assert!(!fields.contains_key("approval_mode"));
     assert!(fields.contains_key("id"));
     assert_eq!(fields.len(), 2);
-}
-
-#[test]
-fn the_coding_plane_adds_an_objective_row_and_requires_it() {
-    let mut app = ready_to_start();
-    app.apply(key(KeyCode::Char('n')));
-
-    focus(&mut app, NewField::Plane);
-    app.apply(key(KeyCode::Right));
-
-    let screen = render(&mut app, 120, 30);
-
-    assert!(
-        screen.contains("coding — one objective, run to completion"),
-        "{}",
-        screen.text()
-    );
-    assert!(screen.contains("objective"), "{}", screen.text());
-
-    // Straight to start with no objective: refused here, on the form that produced it.
-    focus(&mut app, NewField::Start);
-    app.apply(key(KeyCode::Enter));
-
-    assert!(app.drain().is_empty(), "an invalid form sends nothing");
-
-    let screen = render(&mut app, 120, 30);
-    assert!(
-        screen.contains("a coding task needs an objective"),
-        "{}",
-        screen.text()
-    );
-
-    // Fill it in and the start carries it.
-    focus(&mut app, NewField::Objective);
-    type_text(&mut app, "fix the build");
-    focus(&mut app, NewField::Start);
-    app.apply(key(KeyCode::Enter));
-
-    let call = app
-        .drain()
-        .into_iter()
-        .find(|call| call.method == "coding.start")
-        .expect("a coding start");
-
-    assert_eq!(call.params["objective"], "fix the build");
-    assert_eq!(call.params["provider"], "claude_code");
 }
 
 #[test]
@@ -4942,7 +4424,7 @@ fn a_generic_runtime_start_failure_reconciles_instead_of_minting_a_duplicate() {
 fn a_durable_failed_home_start_opens_the_session_without_dispatching_the_draft() {
     let mut app = shell(full_hello());
     app.open_home();
-    app.config.defaults.provider = Some("claude_code".into());
+    app.config.defaults.model = Some("anthropic:claude-sonnet-5".into());
     let input = "keep this prompt until the provider is repaired";
 
     type_text(&mut app, input);
@@ -5127,11 +4609,7 @@ fn a_read_listener_is_told_why_it_cannot_start_a_session() {
 }
 
 fn app_without_start() -> App {
-    shell(support::hello(&[
-        "hello",
-        "interactive.list",
-        "coding.list",
-    ]))
+    shell(support::hello(&["hello", "interactive.list"]))
 }
 
 #[test]
@@ -5171,14 +4649,7 @@ fn the_value_tree_names_every_wire_marker() {
 
     answer(
         &mut app,
-        Tag::Agents,
-        json!([{ "id": "reviewer-1", "node": "ouroboros@golden",
-                 "pid": { "_opaque": "#PID<0.123.0>" }, "replicas": 1 }]),
-    );
-
-    answer(
-        &mut app,
-        Tag::AgentState("reviewer-1".into()),
+        Tag::Signing,
         json!({
             "_struct": "Ouroboros.Capability.ForgedYesterday",
             "pid": { "_opaque": "#PID<0.123.0>" },
@@ -5209,71 +4680,37 @@ fn the_value_tree_names_every_wire_marker() {
 #[test]
 fn a_tree_node_opens_and_closes_under_the_cursor() {
     let mut app = shell(full_hello());
-    app.apply(key(KeyCode::Char('4')));
+    app.apply(key(KeyCode::Char('3')));
 
     answer(
         &mut app,
-        Tag::Teams,
-        json!([{ "id": "team-alpha", "status": "active", "worker_count": 2,
-                 "delegation_count": 1 }]),
+        Tag::Signing,
+        json!({ "operations": { "op1": { "role": "reviewer" } }, "mode": "ready" }),
     );
 
-    answer(
-        &mut app,
-        Tag::TeamState("team-alpha".into()),
-        json!({ "workers": { "w1": { "role": "reviewer" } }, "status": "active" }),
-    );
-
-    // Into the tree, past `status` onto `workers` — keys render sorted — and open it.
+    // Into the tree, past `mode` onto `operations` — keys render sorted — and open it.
     app.apply(key(KeyCode::Right));
     app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Enter));
 
     let screen = render(&mut app, 130, 24);
-    assert!(screen.contains("w1"), "{}", screen.text());
+    assert!(screen.contains("op1"), "{}", screen.text());
 
     app.apply(key(KeyCode::Left));
     let screen = render(&mut app, 130, 24);
-    assert!(!screen.contains("w1"), "{}", screen.text());
+    assert!(!screen.contains("op1"), "{}", screen.text());
 }
 
-// ----- tabs 5 through 7 --------------------------------------------------------------
-
-#[test]
-fn plans_and_control_are_two_lists_on_one_tab() {
-    let mut app = shell(full_hello());
-    app.apply(key(KeyCode::Char('5')));
-
-    answer(
-        &mut app,
-        Tag::Plans,
-        json!([{ "id": "plan-1", "status": "running", "version": 3, "step_count": 4 }]),
-    );
-
-    answer(
-        &mut app,
-        Tag::ControlRuns,
-        json!([{ "id": "run-1", "status": "awaiting_review", "revision": 2 }]),
-    );
-
-    let screen = render(&mut app, 130, 30);
-
-    assert!(screen.contains("plan-1"), "{}", screen.text());
-    assert!(screen.contains("run-1"));
-    assert!(screen.contains("orchestration plans"));
-    assert!(screen.contains("control runs"));
-}
+// ----- the upgrade and logs tabs -----------------------------------------------------
 
 #[test]
 fn the_upgrade_tab_asks_for_a_principal_rather_than_inventing_a_list_all() {
     let mut app = shell(full_hello());
-    app.apply(key(KeyCode::Char('6')));
+    app.apply(key(KeyCode::Char('3')));
 
     // Down to `effect grants`.
-    for _ in 0..4 {
-        app.apply(key(KeyCode::Down));
-    }
+    app.apply(key(KeyCode::Down));
 
     let screen = render(&mut app, 130, 24);
     assert!(
@@ -5304,16 +4741,8 @@ fn the_upgrade_tab_asks_for_a_principal_rather_than_inventing_a_list_all() {
 
 #[test]
 fn signing_decisions_are_shown_as_unavailable_when_the_build_does_not_serve_them() {
-    let mut app = shell(support::hello(&[
-        "hello",
-        "runtime.status",
-        "upgrade.status",
-    ]));
-    app.apply(key(KeyCode::Char('6')));
-
-    for _ in 0..3 {
-        app.apply(key(KeyCode::Down));
-    }
+    let mut app = shell(support::hello(&["hello", "runtime.status"]));
+    app.apply(key(KeyCode::Char('3')));
 
     let screen = render(&mut app, 130, 24);
 
@@ -5334,7 +4763,7 @@ fn the_logs_tab_says_where_logs_are_when_this_client_did_not_start_the_runtime()
     let mut app = App::new(Mode::Attached, "127.0.0.1:4560".into(), full_hello(), None);
     resolve_account(&mut app);
 
-    app.apply(key(KeyCode::Char('7')));
+    app.apply(key(KeyCode::Char('4')));
     let screen = render(&mut app, 120, 20);
 
     assert!(
@@ -5360,7 +4789,7 @@ fn the_logs_tab_shows_the_ring_when_this_client_owns_the_child() {
     );
 
     resolve_account(&mut app);
-    app.apply(key(KeyCode::Char('7')));
+    app.apply(key(KeyCode::Char('4')));
     let screen = render(&mut app, 120, 20);
 
     assert!(screen.contains("[info] up"), "{}", screen.text());
@@ -5372,7 +4801,7 @@ fn the_logs_tab_shows_the_ring_when_this_client_owns_the_child() {
 fn every_tab_draws_without_any_data_at_all() {
     // A gateway that has answered nothing must still produce every secondary panel even
     // though the persistent tab bar has moved behind the command palette.
-    for digit in '1'..='7' {
+    for digit in '1'..='4' {
         let mut app = shell(full_hello());
         app.apply(key(KeyCode::Char(digit)));
 
@@ -5626,10 +5055,8 @@ fn home_polls_machine_status_but_defers_provider_inventory_to_the_dashboard() {
     let methods: Vec<String> = app.drain().into_iter().map(|call| call.method).collect();
 
     assert!(methods.contains(&"interactive.list".to_string()));
-    assert!(methods.contains(&"coding.list".to_string()));
     assert!(methods.contains(&"runtime.status".to_string()));
     assert!(!methods.contains(&"runtime.providers".to_string()));
-    assert!(!methods.contains(&"agents.list".to_string()));
 
     app.apply(key(KeyCode::BackTab));
 

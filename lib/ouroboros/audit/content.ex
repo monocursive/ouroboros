@@ -82,8 +82,7 @@ defmodule Ouroboros.Audit.Content do
     Enum.reduce(
       files,
       %{
-        scope:
-          "managed_checkpoints_native_conversations_compaction_blobs_attachments_desktop_and_output",
+        scope: "managed_checkpoints_native_conversations_compaction_blobs_attachments_and_output",
         encrypted: 0,
         plaintext: [],
         unreadable: []
@@ -130,7 +129,6 @@ defmodule Ouroboros.Audit.Content do
       "native/*/compaction/*.json",
       "native/*/blobs/*",
       "native/*/attachments/*",
-      "native/*/desktop/*",
       "native/*/output/*"
     ]
 

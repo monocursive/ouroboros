@@ -51,7 +51,6 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
                "glob",
                "ls",
                "web_fetch",
-               "code_intel",
                "ask_user",
                "agent",
                "agent_result",
@@ -130,7 +129,6 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
                "glob",
                "ls",
                "web_fetch",
-               "code_intel",
                "ask_user",
                "agent",
                "agent_result",
@@ -184,52 +182,6 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
 
     test "reports an unresolvable path as given rather than dropping it", %{scope: scope} do
       assert %{paths: ["../escape"]} = Tools.classify("read", %{"path" => "../escape"}, scope)
-    end
-
-    test "classifies the desktop tools by mode and puts app identity in context", %{scope: scope} do
-      # desktop_state observes: :read, no workspace paths, action tag "state".
-      assert %{tool: "desktop_state", mode: :read, paths: [], context: state_context} =
-               Tools.classify("desktop_state", %{"app" => "Safari"}, scope)
-
-      assert state_context == %{
-               app: "com.apple.Safari",
-               desktop_action: "state",
-               window_id: nil,
-               title: nil
-             }
-
-      # desktop_act operates: :execute, the claimed action carried through.
-      assert %{tool: "desktop_act", mode: :execute, context: act_context} =
-               Tools.classify(
-                 "desktop_act",
-                 %{"app" => "com.apple.Calculator", "action" => "click"},
-                 scope
-               )
-
-      assert act_context == %{
-               app: "com.apple.Calculator",
-               desktop_action: "click",
-               window_id: nil,
-               title: nil
-             }
-
-      # No claimed app or action is nil, not an invented value.
-      assert %{context: %{app: nil, desktop_action: nil, window_id: nil, title: nil}} =
-               Tools.classify("desktop_act", %{}, scope)
-
-      assert %{
-               context: %{
-                 app: nil,
-                 desktop_action: "state",
-                 window_id: "w_other",
-                 title: "Mail"
-               }
-             } =
-               Tools.classify(
-                 "desktop_state",
-                 %{"window_id" => "w_other", "title" => "Mail"},
-                 scope
-               )
     end
   end
 
@@ -920,35 +872,5 @@ defmodule Ouroboros.Provider.Native.ToolsTest do
       assert result.output =~ "     1\tx"
       assert_raise ArgumentError, fn -> String.to_existing_atom(invented) end
     end
-  end
-end
-
-defmodule Ouroboros.Provider.Native.ToolsComputerUseOffTest do
-  # Not async: this sets the global `:ouroboros, :computer_use` application key, which
-  # `Native.Desktop.config/1` reads at call time from every tool listing and lookup. An
-  # async writer of that key would poison whichever async reader happened to run
-  # alongside it, so the one test that needs Computer Use off lives here, serial, rather
-  # than making the whole tools file serial (F8).
-  use ExUnit.Case, async: false
-
-  alias Ouroboros.Provider.Native.Tools
-
-  test "the desktop tools are unknown and unlisted while Computer Use is off (D9)" do
-    original = Application.get_env(:ouroboros, :computer_use)
-
-    Application.put_env(:ouroboros, :computer_use, helper_path: "/nope/missing")
-
-    on_exit(fn ->
-      if original == nil,
-        do: Application.delete_env(:ouroboros, :computer_use),
-        else: Application.put_env(:ouroboros, :computer_use, original)
-    end)
-
-    assert {:error, :unknown_tool} = Tools.lookup("desktop_state", nil, nil)
-    assert {:error, :unknown_tool} = Tools.lookup("desktop_act", nil, nil)
-
-    names = Enum.map(Tools.specs(nil, nil, workspace: "/tmp"), & &1.name)
-    refute "desktop_state" in names
-    refute "desktop_act" in names
   end
 end

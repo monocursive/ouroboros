@@ -184,24 +184,6 @@
     }
   },
   {
-    "fixture": "event_tool_call_acp_edit",
-    "expected": {
-      "data": {
-        "at": 1767225600000,
-        "call_id": "acp-call-0000000000000001",
-        "input": {
-          "newText": "  def project(events, cursor) do\n    events\n    |> Enum.sort()\n  end\n",
-          "oldText": "  def project(events) do\n    events\n  end\n",
-          "path": "lib/ouroboros/web/transcript.ex"
-        },
-        "kind": "edit",
-        "name": "Edit lib/ouroboros/web/transcript.ex"
-      },
-      "kind": "ToolCall",
-      "version": 1
-    }
-  },
-  {
     "fixture": "event_tool_call_bash",
     "expected": {
       "data": {
@@ -237,34 +219,9 @@
     }
   },
   {
-    "fixture": "event_tool_result_acp_edit",
-    "expected": {
-      "data": {
-        "artifacts": [],
-        "at": 1767225600000,
-        "call_id": "acp-call-0000000000000001",
-        "is_error": false,
-        "kind": null,
-        "name": null,
-        "output": [
-          {
-            "content": {
-              "text": "Applied 1 edit to lib/ouroboros/web/transcript.ex",
-              "type": "text"
-            },
-            "type": "content"
-          }
-        ]
-      },
-      "kind": "ToolResult",
-      "version": 1
-    }
-  },
-  {
     "fixture": "event_tool_result_bash",
     "expected": {
       "data": {
-        "artifacts": [],
         "at": 1767225600000,
         "call_id": "toolu_01Bash000000000000001",
         "is_error": false,
@@ -277,34 +234,9 @@
     }
   },
   {
-    "fixture": "event_tool_result_computer_use",
-    "expected": {
-      "data": {
-        "artifacts": [
-          {
-            "height": 982,
-            "media_type": "image/png",
-            "sha256": "abababababababababababababababababababababababababababababababab",
-            "size": 184320,
-            "width": 1512
-          }
-        ],
-        "at": 1767225600000,
-        "call_id": "toolu_01Desktop00000000001",
-        "is_error": false,
-        "kind": null,
-        "name": "desktop_state",
-        "output": "Captured the frontmost window of Calculator."
-      },
-      "kind": "ToolResult",
-      "version": 1
-    }
-  },
-  {
     "fixture": "event_tool_result_read",
     "expected": {
       "data": {
-        "artifacts": [],
         "at": 1767225600000,
         "call_id": "toolu_01Read000000000000001",
         "is_error": false,

@@ -209,7 +209,7 @@ defmodule Ouroboros.Workspace.Manager do
   defp validate_mode(mode) when mode in [:exclusive, :shared_read], do: :ok
   defp validate_mode(mode), do: {:error, {:invalid_lease_mode, mode}}
 
-  defp validate_owner_kind(kind) when kind in [:generic, :coding, :interactive], do: :ok
+  defp validate_owner_kind(kind) when kind in [:generic, :interactive], do: :ok
   defp validate_owner_kind(kind), do: {:error, {:invalid_workspace_owner_kind, kind}}
 
   defp validate_managed_task_id(:interactive, "interactive:" <> session_id)
@@ -303,8 +303,6 @@ defmodule Ouroboros.Workspace.Manager do
     end
   end
 
-  defp reservation_key(:coding, task_id), do: {:coding, task_id}
-
   defp reservation_key(:interactive, "interactive:" <> session_id),
     do: {:interactive, session_id}
 
@@ -312,18 +310,11 @@ defmodule Ouroboros.Workspace.Manager do
 
   defp reservation_key(:generic, _task_id), do: nil
 
-  defp registered_recovery_owner?(kind, task_id, owner_pid) do
-    {registry, registry_id} =
-      case kind do
-        :coding ->
-          {Ouroboros.Coding.Registry, task_id}
-
-        :interactive ->
-          {Ouroboros.Interactive.Registry, String.replace_prefix(task_id, "interactive:", "")}
-      end
+  defp registered_recovery_owner?(:interactive, task_id, owner_pid) do
+    registry_id = String.replace_prefix(task_id, "interactive:", "")
 
     try do
-      Registry.lookup(registry, registry_id) == [{owner_pid, nil}]
+      Registry.lookup(Ouroboros.Interactive.Registry, registry_id) == [{owner_pid, nil}]
     catch
       :exit, _reason -> false
     end
@@ -331,34 +322,29 @@ defmodule Ouroboros.Workspace.Manager do
 
   defp recovery_reservations(opts, allowed_roots) do
     if Keyword.get(opts, :recover_reservations, false) do
-      with {:ok, coding} <- safe_recovery_states(Ouroboros.Coding.Store),
-           {:ok, interactive} <- safe_recovery_states(Ouroboros.Interactive.Store) do
-        coding_claims =
-          Enum.flat_map(coding, fn
-            %Ouroboros.Coding.TaskState{} = task ->
-              if task.node == node() and not Ouroboros.Coding.TaskState.terminal?(task),
-                do: [{:coding, task.id, task.workspace, task.workspace_mode}],
-                else: []
+      with {:ok, interactive} <- safe_recovery_states(Ouroboros.Interactive.Store) do
+        interactive
+        |> Enum.flat_map(fn
+          # A record whose provider this build no longer serves reserves nothing: it will
+          # never take a lease (its coordinator holds it read-only), so minting a
+          # `recovery-…` reservation for it would hold its workspace root against every new
+          # session for the life of the node, with nothing to release it. `Interactive.Task`
+          # took and released the lease for such a record before C2; now that it does not,
+          # the reservation must not be minted either. See docs/proposals/core.md §3 D2.
+          %Ouroboros.Interactive.State{} = session ->
+            if session.node == node() and
+                 not Ouroboros.Interactive.State.terminal?(session) and
+                 is_nil(Ouroboros.Interactive.State.removed_provider(session)),
+               do: [
+                 {:interactive, "interactive:" <> session.id, session.workspace,
+                  session.workspace_mode}
+               ],
+               else: []
 
-            _other ->
-              []
-          end)
-
-        interactive_claims =
-          Enum.flat_map(interactive, fn
-            %Ouroboros.Interactive.State{} = session ->
-              if session.node == node() and not Ouroboros.Interactive.State.terminal?(session),
-                do: [
-                  {:interactive, "interactive:" <> session.id, session.workspace,
-                   session.workspace_mode}
-                ],
-                else: []
-
-            _other ->
-              []
-          end)
-
-        build_reservations(coding_claims ++ interactive_claims, allowed_roots)
+          _other ->
+            []
+        end)
+        |> build_reservations(allowed_roots)
       end
     else
       {:ok, %{}}
@@ -472,13 +458,6 @@ defmodule Ouroboros.Workspace.Manager do
     else
       add_tombstone(state, entry.lease.id, entry, entry.owner_pid)
     end
-  end
-
-  defp durable_owner_nonterminal_or_unknown?(:coding, lease) do
-    durable_state_nonterminal_or_unknown?(
-      safe_store_get(Ouroboros.Coding.Store, lease.task_id),
-      &Ouroboros.Coding.TaskState.terminal?/1
-    )
   end
 
   defp durable_owner_nonterminal_or_unknown?(:interactive, lease) do

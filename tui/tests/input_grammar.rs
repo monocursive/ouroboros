@@ -92,7 +92,7 @@ fn session(status: &str, capabilities: Value) -> Value {
         "_struct": "Ouroboros.Interactive.State",
         "id": "session-b3",
         "status": status,
-        "provider": "codex",
+        "provider": "native",
         "workspace": "/Users/operator/code/ouroboros",
         "updated_at": "2026-01-01T00:00:00.000000Z",
         "options": {
@@ -114,7 +114,7 @@ fn event(sequence: u64, kind: &str, payload: Value) -> Value {
         "payload": payload,
         "turn_id": "turn-1",
         "request_id": Value::Null,
-        "provider": "codex"
+        "provider": "native"
     })
 }
 
@@ -160,7 +160,6 @@ fn opened_with(hello: Hello, status: &str, capabilities: Value, events: Vec<Valu
         Tag::Sessions(Plane::Interactive),
         json!([session(status, capabilities)]),
     );
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
 
     app.open_session(Plane::Interactive, "session-b3".into());
 
@@ -1240,7 +1239,7 @@ fn the_coding_home_prioritises_composition_and_keeps_help_discoverable() {
         Tag::Account,
         json!({ "account": { "email": "operator@example.com" }, "requiresOpenaiAuth": true }),
     );
-    app.config.defaults.provider = Some("codex".into());
+    app.config.defaults.model = Some("openai_codex:gpt-5.6-sol".into());
 
     let text = screen(&mut app).text();
     assert!(text.contains("Understand this project"), "{text}");

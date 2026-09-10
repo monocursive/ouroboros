@@ -20,8 +20,8 @@ defmodule Ouroboros.Wasm.Store do
   Nothing is ever overwritten, so no writer can be interrupted into publishing a partial
   component, and a reader mid-put sees either the old file or the whole new one.
 
-  The write discipline is `Ouroboros.Release.PackageStager`'s, for the same reason it has
-  one: the digest is validated against the bytes before anything is written, the data is
+  The write discipline is deliberate: the digest is validated against the bytes before
+  anything is written, the data is
   synced before it is published, the publish is a link rather than a rename because a rename
   would silently overwrite, and the directory is synced before success is claimed.
 
@@ -94,7 +94,7 @@ defmodule Ouroboros.Wasm.Store do
   store wants reboot survival; a store under `/tmp` would be one that quietly is not one.
   """
 
-  alias Ouroboros.Upgrade.Rollout
+  alias Ouroboros.Upgrade.Rollout.Registry, as: RolloutRegistry
   alias Ouroboros.Wasm
   alias Ouroboros.Wasm.Artifact
 
@@ -147,7 +147,7 @@ defmodule Ouroboros.Wasm.Store do
 
   `:root` in `opts` names a different directory, which is how tests get one of their own.
   It is honoured only where `Ouroboros.Wasm.allow_store_root_override?/0` is true — the
-  same gate `Capability`, `PolicyEngine`, `Rollout` and `Boot` already applied — so a
+  same gate `Capability`, `PolicyEngine`, `Wasm.Rollout` and `Boot` already applied — so a
   caller that forgets the gate cannot point this store at an arbitrary directory. A
   seeded root on a node that has not said so is `{:error, :store_root_override_denied}`,
   not a silent fall-through to `:data_dir`.
@@ -554,9 +554,9 @@ defmodule Ouroboros.Wasm.Store do
   """
   @spec protected_shas(keyword()) :: {:ok, MapSet.t(String.t())} | {:error, :registry_unavailable}
   def protected_shas(opts \\ []) do
-    registry = Keyword.get(opts, :registry, Rollout.Registry)
+    registry = Keyword.get(opts, :registry, RolloutRegistry)
 
-    entries = Rollout.Registry.list(registry)
+    entries = RolloutRegistry.list(registry)
 
     protected =
       entries

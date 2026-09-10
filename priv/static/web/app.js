@@ -264,7 +264,7 @@
     paintBellButtons();
   }
 
-  // A LiveView navigation between the deck, /new and /machines swaps the body without
+  // A LiveView navigation between the deck and /new swaps the body without
   // reloading this file, so the fresh buttons arrive carrying the server's static
   // `aria-pressed="false"`. This is where they are told what is actually true.
   window.addEventListener("phx:page-loading-stop", paintChrome);

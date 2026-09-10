@@ -27,7 +27,7 @@ defmodule Ouroboros.Web.Live.NewSession do
   ## What a stored default is, and what it is not
 
   `new/1` seeds this struct from `Ouroboros.Web.Prefs`, and the semantics are the
-  **desktop's**, which `docs/DESKTOP.md` states in one sentence: "What the file supplies is
+  **desktop's**, which the removed `docs/DESKTOP.md` states in one sentence: "What the file supplies is
   where the control *starts*; an explicit pick is what gets sent, and an untouched panel
   with no stored default states no posture at all, leaving the plane to decide."
 
@@ -51,11 +51,16 @@ defmodule Ouroboros.Web.Live.NewSession do
   @sandbox_modes ["read_only", "workspace_write", "unrestricted"]
   @efforts ["none", "low", "medium", "high", "xhigh", "max"]
 
+  # The only provider this runtime serves. `interactive.start` no longer takes one, so the
+  # form neither offers a choice nor sends a name; this is the row it reads the model
+  # catalogue and the credential probe out of.
+  @provider "native"
+
   @typedoc "Which model row a choice stands for. Not the row's label — the label is drawn."
   @type model_choice :: :runtime_default | :custom | {:catalog, String.t()}
 
   @typedoc """
-  What the model control can honestly be for the selected provider.
+  What the model control can honestly be.
 
   `:unsupported` is the adapter declaring it normalizes no `model` option at all;
   `{:text, hint}` is every path with no catalogue to filter, which is the field this form
@@ -68,7 +73,6 @@ defmodule Ouroboros.Web.Live.NewSession do
 
   @enforce_keys []
   defstruct id: nil,
-            provider: nil,
             model_choice: :runtime_default,
             model_text: "",
             model_search: "",
@@ -79,7 +83,6 @@ defmodule Ouroboros.Web.Live.NewSession do
 
   @type t :: %__MODULE__{
           id: String.t() | nil,
-          provider: String.t() | nil,
           model_choice: model_choice(),
           model_text: String.t(),
           model_search: String.t(),
@@ -115,7 +118,6 @@ defmodule Ouroboros.Web.Live.NewSession do
   def new(prefs \\ %{}) when is_map(prefs) do
     %__MODULE__{
       id: mint_id(),
-      provider: Map.get(prefs, "provider"),
       model_choice: if(Map.has_key?(prefs, "model"), do: :custom, else: :runtime_default),
       model_text: Map.get(prefs, "model", ""),
       machine: Map.get(prefs, "machine", ""),
@@ -154,30 +156,29 @@ defmodule Ouroboros.Web.Live.NewSession do
   @spec efforts() :: [String.t()]
   def efforts, do: @efforts
 
-  @doc "The levels offered for the selected model, or the provider vocabulary if unknown."
+  @doc "The levels offered for the selected model, or the transport vocabulary if unknown."
   @spec efforts(t(), model_field()) :: [String.t()]
   def efforts(%__MODULE__{} = form, {:rows, rows, _total}) do
     case Enum.find(rows, &(&1.choice == form.model_choice)) do
       %{reasoning_efforts: efforts} when is_list(efforts) -> efforts
-      _unknown -> Ouroboros.ReasoningEffort.names_for_provider(form.provider)
+      _unknown -> Ouroboros.ReasoningEffort.accepted_names()
     end
   end
 
   def efforts(%__MODULE__{}, :unsupported), do: []
 
-  def efforts(%__MODULE__{} = form, _field),
-    do: Ouroboros.ReasoningEffort.names_for_provider(form.provider)
+  def efforts(%__MODULE__{}, _field), do: Ouroboros.ReasoningEffort.accepted_names()
 
   # ------------------------------------------------------------------------------------
   # Provider rows
   # ------------------------------------------------------------------------------------
 
   @doc """
-  One row per provider `runtime.providers` reported, in the order it reported them.
+  One row per provider `runtime.providers` reported — one, and it is `native`.
 
-  A row whose probe found nothing is retained so the page can explain why it is
-  unavailable, but the browser disables it. Starting a provider that this runtime already
-  proved it cannot drive turns a deterministic setup problem into a late refusal.
+  The row survives the provider picker because its `credentials` are what the API-key
+  cards read: a probe that says `ANTHROPIC_API_KEY` is absent lets the form stop an
+  Anthropic request before it becomes a failed turn, without ever reading the key.
   """
   @spec provider_rows(term()) :: [map()]
   def provider_rows(entries) when is_list(entries) do
@@ -258,39 +259,23 @@ defmodule Ouroboros.Web.Live.NewSession do
 
   defp probe_note(_status, _error), do: nil
 
-  @doc """
-  The footnote drawn once under the picker when any row is unavailable, or `nil`.
-  """
-  @spec provider_footnote([map()]) :: String.t() | nil
-  def provider_footnote(rows) when is_list(rows) do
-    if Enum.any?(rows, &(not &1.detected?)) do
-      "Unavailable providers stay listed so you can see what this computer is missing."
-    end
-  end
-
   # ------------------------------------------------------------------------------------
   # The model control
   # ------------------------------------------------------------------------------------
 
   @doc """
-  What the model control becomes for `provider`, given whatever `runtime.models` answered.
+  What the model control becomes, given whatever `runtime.models` answered.
 
   Every path that cannot offer a list falls back to the text input rather than to an empty
   picker, because an empty picker claims this runtime knows of no models and none of these
-  paths know that. Ported from `model_field` in `tui/src/desktop.rs`.
+  paths know that.
   """
-  @spec model_field(term(), String.t() | nil) :: model_field()
-  def model_field(catalogue, provider) do
-    provider = trimmed(provider)
-
-    cond do
-      not is_map(catalogue) -> {:text, nil}
-      provider == nil -> {:text, "choose a provider to see its models"}
-      true -> provider_field(catalogue, provider)
-    end
+  @spec model_field(term()) :: model_field()
+  def model_field(catalogue) do
+    if is_map(catalogue), do: native_field(catalogue, @provider), else: {:text, nil}
   end
 
-  defp provider_field(catalogue, provider) do
+  defp native_field(catalogue, provider) do
     case Enum.find(List.wrap(catalogue[:providers]), &(to_string(&1[:provider]) == provider)) do
       nil ->
         {:text, "this runtime's model list does not mention #{provider}"}
@@ -386,39 +371,31 @@ defmodule Ouroboros.Web.Live.NewSession do
   @doc """
   Catalogue rows grouped by the execution path the form actually selected.
 
-  Native rows are grouped by the company that provides the model and explicitly marked as
-  direct, no-CLI calls. A CLI-backed provider gets one group bearing that CLI's name. The
-  runtime's ranking stays authoritative inside every group. The form-owned Recommended
-  and Custom rows are deliberately absent; they frame the groups separately in the
-  control.
+  Rows are grouped by the company that provides the model and explicitly marked as direct,
+  no-CLI calls. The runtime's ranking stays authoritative inside every group. The
+  form-owned Recommended and Custom rows are deliberately absent; they frame the groups
+  separately in the control.
 
   Transport namespaces that reach the same model provider share one heading — notably
   `openai:` API models and `openai_codex:` ChatGPT-backed models both belong to OpenAI.
   Their exact transport remains visible in each row's detail.
   """
-  @spec model_groups([map()], String.t() | nil) :: [%{label: String.t(), rows: [map()]}]
-  def model_groups(rows, provider \\ nil)
-
-  def model_groups(rows, provider) when is_list(rows) do
+  @spec model_groups([map()]) :: [%{label: String.t(), rows: [map()]}]
+  def model_groups(rows) when is_list(rows) do
     rows
     |> Enum.filter(&catalogue?/1)
     |> Enum.reduce(%{}, fn row, groups ->
-      label = model_group_label(row.model, provider)
+      label = model_group_label(row.model)
       Map.update(groups, label, [row], &[row | &1])
     end)
     |> Enum.map(fn {label, rows} -> %{label: label, rows: Enum.reverse(rows)} end)
     |> Enum.sort_by(&String.downcase(&1.label))
   end
 
-  def model_groups(_rows, _provider), do: []
+  def model_groups(_rows), do: []
 
-  defp model_group_label(model, "native"),
+  defp model_group_label(model),
     do: "#{model_provider_label(model)} · direct via Ouroboros (no CLI)"
-
-  defp model_group_label(_model, provider) when is_binary(provider),
-    do: provider_route(provider).group
-
-  defp model_group_label(model, _provider), do: model_provider_label(model)
 
   defp model_provider_label(model) when is_binary(model) do
     model
@@ -440,8 +417,8 @@ defmodule Ouroboros.Web.Live.NewSession do
 
   defp model_provider_label(_model), do: "Other"
 
-  @doc "Human-readable execution path for one provider choice."
-  @spec provider_route(String.t() | nil) :: %{
+  @doc "Human-readable execution path. One provider, one answer."
+  @spec provider_route() :: %{
           name: String.t(),
           short: String.t(),
           badge: String.t(),
@@ -449,7 +426,7 @@ defmodule Ouroboros.Web.Live.NewSession do
           detail: String.t(),
           group: String.t()
         }
-  def provider_route("native") do
+  def provider_route do
     %{
       name: "Ouroboros AI",
       short: "direct model APIs, no CLI",
@@ -457,72 +434,6 @@ defmodule Ouroboros.Web.Live.NewSession do
       title: "Ouroboros runs this model directly.",
       detail: "Its built-in agent loop calls the model API; no model CLI is launched.",
       group: "Direct via Ouroboros (no CLI)"
-    }
-  end
-
-  def provider_route("claude"),
-    do: cli_route("Claude", "Claude Code CLI", "Claude Code CLI")
-
-  def provider_route("gemini"), do: cli_route("Gemini", "Gemini CLI", "Gemini CLI")
-
-  def provider_route("grok") do
-    cli_route(
-      "Grok",
-      "Grok Build CLI",
-      "Grok Build CLI",
-      "The CLI owns the model session and can use a SpaceXAI subscription or xAI API key."
-    )
-  end
-
-  def provider_route("kimi"), do: cli_route("Kimi", "Kimi Code CLI", "Kimi Code CLI")
-
-  def provider_route("opencode"),
-    do: cli_route("OpenCode", "OpenCode CLI", "OpenCode CLI")
-
-  def provider_route("pi"), do: cli_route("Pi", "Pi CLI", "Pi CLI")
-  def provider_route("amp"), do: cli_route("Amp", "Amp CLI", "Amp CLI")
-
-  def provider_route("zai") do
-    cli_route(
-      "Z.ai",
-      "Claude CLI configured for Z.ai",
-      "Claude CLI for Z.ai",
-      "Claude CLI owns the model session and is configured to use Z.ai's GLM models."
-    )
-  end
-
-  def provider_route(nil) do
-    %{
-      name: "finding provider",
-      short: "execution path unknown",
-      badge: "Not selected",
-      title: "Choose an AI provider.",
-      detail: "Its execution path will be shown here before you select a model.",
-      group: "Provider not selected"
-    }
-  end
-
-  def provider_route(provider) when is_binary(provider) do
-    %{
-      name: provider,
-      short: "external provider adapter",
-      badge: "Provider adapter",
-      title: "Runs through the #{provider} provider adapter.",
-      detail: "This adapter does not declare a more specific execution path to the form.",
-      group: "#{provider} provider adapter"
-    }
-  end
-
-  defp cli_route(name, short, group, detail \\ nil) do
-    %{
-      name: name,
-      short: short,
-      badge: "CLI-backed",
-      title: "Runs through #{short}.",
-      detail:
-        detail ||
-          "The CLI owns the model session and tools; Ouroboros supervises and normalizes it.",
-      group: group
     }
   end
 
@@ -543,8 +454,8 @@ defmodule Ouroboros.Web.Live.NewSession do
   end
 
   # The shared catalogue also contains embedding, image, audio, moderation and realtime
-  # lanes. They cannot run an interactive coding turn, so offering them here creates a
-  # choice whose only outcome is a provider refusal.
+  # lanes. They cannot run an agent turn, so offering them here creates a choice whose
+  # only outcome is a provider refusal.
   defp agent_model?(model, default) do
     id = model |> Map.get(:id) |> to_string()
 
@@ -614,9 +525,9 @@ defmodule Ouroboros.Web.Live.NewSession do
   @doc """
   Whether `choice` is something this field can actually offer.
 
-  Asked whenever the provider changes: a model picked under the previous provider is not
-  necessarily a row under the new one, and a choice with no row would leave the form
-  claiming a model the control cannot show.
+  Asked whenever the model rows change: a choice with no row would leave the form claiming
+  a model the control cannot show. (There is no provider picker to change under it any
+  more; `:native` is the only provider — see docs/proposals/core.md §3 D2.)
   """
   @spec offers?(model_field(), model_choice()) :: boolean()
   def offers?({:rows, rows, _total}, choice), do: Enum.any?(rows, &(&1.choice == choice))
@@ -673,56 +584,28 @@ defmodule Ouroboros.Web.Live.NewSession do
     end
   end
 
-  @doc "Whether the selected managed provider runs through the first-party Grok CLI."
-  @spec requires_grok?(t()) :: boolean()
-  def requires_grok?(%__MODULE__{provider: "grok"}), do: true
-  def requires_grok?(%__MODULE__{}), do: false
-
-  @doc "API-key readiness for a selected direct Anthropic/xAI model or managed Grok."
+  @doc "API-key readiness for a selected direct Anthropic or xAI model."
   @spec api_key_card(t(), model_field(), term()) :: map() | nil
   def api_key_card(%__MODULE__{} = form, field, provider_rows) do
     case effective_model(form, field) do
       "anthropic:" <> _model ->
-        api_key_card(
-          provider_rows,
-          form.provider,
-          "anthropic",
-          "Anthropic",
-          "ANTHROPIC_API_KEY",
-          managed?: false,
+        api_key_card(provider_rows, "anthropic", "Anthropic", "ANTHROPIC_API_KEY",
           workspace_env: "ANTHROPIC_WORKSPACE_ID"
         )
 
       "xai:" <> _model ->
-        api_key_card(
-          provider_rows,
-          form.provider,
-          "xai",
-          "xAI",
-          "XAI_API_KEY",
-          managed?: false
-        )
-
-      _other when form.provider == "grok" ->
-        api_key_card(
-          provider_rows,
-          form.provider,
-          "xai",
-          "xAI",
-          "XAI_API_KEY",
-          managed?: true
-        )
+        api_key_card(provider_rows, "xai", "xAI", "XAI_API_KEY", [])
 
       _other ->
         nil
     end
   end
 
-  defp api_key_card(rows, selected_provider, model_provider, label, env, opts)
+  defp api_key_card(rows, model_provider, label, env, opts)
        when is_list(rows) and is_list(opts) do
     credential =
       rows
-      |> Enum.find(&(trimmed(&1[:name]) == trimmed(selected_provider)))
+      |> Enum.find(&(trimmed(&1[:name]) == @provider))
       |> case do
         %{credentials: credentials} when is_list(credentials) ->
           Enum.find(credentials, &(trimmed(&1[:provider]) == model_provider and &1[:env] == env))
@@ -742,7 +625,6 @@ defmodule Ouroboros.Web.Live.NewSession do
       provider: label,
       key: model_provider,
       env: env,
-      managed?: Keyword.get(opts, :managed?, false),
       workspace_env: (credential && credential[:workspace_env]) || opts[:workspace_env],
       workspace_configured?: credential != nil and credential[:workspace_configured?] == true,
       state: state,
@@ -751,65 +633,17 @@ defmodule Ouroboros.Web.Live.NewSession do
     }
   end
 
-  defp api_key_card(_rows, _selected_provider, model_provider, label, env, opts),
+  defp api_key_card(_rows, model_provider, label, env, opts),
     do: %{
       provider: label,
       key: model_provider,
       env: env,
-      managed?: Keyword.get(opts, :managed?, false),
       workspace_env: opts[:workspace_env],
       workspace_configured?: false,
       state: :checking,
       source: nil,
       usable?: false
     }
-
-  @doc "Non-secret SpaceXAI subscription readiness and pending device login."
-  @spec grok_account_card(term(), term()) :: map()
-  def grok_account_card(read, login) do
-    pending? = grok_pending_login?(read) or is_map(login)
-
-    state =
-      cond do
-        not is_map(read) and not pending? -> :checking
-        grok_usable?(read) -> :connected
-        pending? -> :waiting
-        true -> :required
-      end
-
-    %{
-      state: state,
-      usable?: grok_usable?(read),
-      identity: grok_identity(read),
-      code: login && login[:code],
-      url: login && login[:url],
-      login_id: login && login[:login_id],
-      error: grok_login_error(read)
-    }
-  end
-
-  @doc "Whether the first-party CLI reports a usable subscription credential."
-  @spec grok_usable?(term()) :: boolean()
-  def grok_usable?(%{"account" => %{"type" => "grok_subscription"}}), do: true
-  def grok_usable?(%{"requiresGrokAuth" => false}), do: true
-  def grok_usable?(_read), do: false
-
-  defp grok_pending_login?(%{"login" => %{"status" => status}})
-       when status in ["starting", "pending"],
-       do: true
-
-  defp grok_pending_login?(_read), do: false
-
-  defp grok_login_error(%{"login" => %{"error" => error}})
-       when is_binary(error) and error != "",
-       do: error
-
-  defp grok_login_error(_read), do: nil
-
-  defp grok_identity(%{"account" => account}) when is_map(account),
-    do: trimmed(account["label"]) || "SpaceXAI subscription"
-
-  defp grok_identity(_read), do: nil
 
   defp effective_model(%__MODULE__{} = form, field) do
     model_intent(form, field).send || selected_default_model(field, form.model_choice)
@@ -982,7 +816,6 @@ defmodule Ouroboros.Web.Live.NewSession do
   key is present **only** when the operator stated it:
 
     * `id` — always. Caller-owned idempotency, minted with the form (see `new/0`).
-    * `provider` — always, and the form refuses to start without one.
     * `model` — whatever `model_intent/2` says it is sending, absent when that is nothing.
     * `workspace` — the trimmed path, absent when the field is empty.
     * `sandbox_mode` — the operator's card, absent when no card was chosen.
@@ -991,21 +824,14 @@ defmodule Ouroboros.Web.Live.NewSession do
   There is no `title`: `interactive.start` has no such parameter, and a session's durable
   name is `interactive.rename`'s to write after one exists.
   """
-  @spec start_params(t(), model_field()) :: {:ok, map()} | {:error, String.t()}
+  @spec start_params(t(), model_field()) :: map()
   def start_params(%__MODULE__{} = form, field) do
-    case trimmed(form.provider) do
-      nil ->
-        {:error, "choose a provider before starting a session"}
-
-      provider ->
-        {:ok,
-         %{"id" => form.id || mint_id(), "provider" => provider}
-         |> put_stated("machine", trimmed(form.machine))
-         |> put_stated("model", model_intent(form, field).send)
-         |> put_stated("workspace", trimmed(form.workspace))
-         |> put_stated("sandbox_mode", stated(form.sandbox, @sandbox_modes))
-         |> put_stated("reasoning_effort", stated(form.effort, efforts(form, field)))}
-    end
+    %{"id" => form.id || mint_id()}
+    |> put_stated("machine", trimmed(form.machine))
+    |> put_stated("model", model_intent(form, field).send)
+    |> put_stated("workspace", trimmed(form.workspace))
+    |> put_stated("sandbox_mode", stated(form.sandbox, @sandbox_modes))
+    |> put_stated("reasoning_effort", stated(form.effort, efforts(form, field)))
   end
 
   defp put_stated(params, _key, nil), do: params
@@ -1039,10 +865,10 @@ defmodule Ouroboros.Web.Live.NewSession do
   What a refused call says, in the runtime's own words.
 
   The gateway's sentence first, and then — where the plane typed its refusal — the plane's
-  own `message` out of `data`. `unsupported_safety_options` and
-  `unsupported_approval_mode` both carry one, and it is the only text that names which
-  option was refused and what the provider would accept instead; dropping it would leave
-  an operator reading "the runtime refused the call" with no way to act.
+  own `message` out of `data`. `unsupported_approval_mode` carries one, and it is the only
+  text that names which option was refused and what the provider would accept instead;
+  dropping it would leave an operator reading "the runtime refused the call" with no way
+  to act.
   """
   @spec refusal(term()) :: %{message: String.t(), detail: String.t() | nil} | nil
   def refusal({:error, _code, message}) when is_binary(message),

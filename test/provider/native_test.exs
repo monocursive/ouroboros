@@ -45,12 +45,18 @@ defmodule Ouroboros.Provider.NativeTest do
       assert :native in Enum.map(Ouroboros.providers(), & &1.provider)
     end
 
-    test "the removed Codex key cannot reveal Harness's built-in CLI adapter" do
-      assert {:ok, Ouroboros.Provider.RemovedCodex} = Jido.Harness.Registry.lookup(:codex)
-      refute :codex in Enum.map(Ouroboros.providers(), & &1.provider)
-      assert {:ok, status} = Ouroboros.provider_status(:codex)
-      refute status.installed
-      assert status.details["removed"]
+    # `Jido.Harness.Registry` merges this node's provider map over nine bundled vendor-CLI
+    # adapters rather than replacing them, so a vendor key still *resolves* upstream. What
+    # this runtime does with it is the whole answer: it is not listed, it is not probed,
+    # and `interactive.start` refuses it by name before a workspace lease is taken.
+    test "a vendor key the harness still carries is neither listed nor probed" do
+      assert {:ok, Jido.Harness.Adapters.Claude} = Jido.Harness.Registry.lookup(:claude)
+      assert Enum.map(Ouroboros.providers(), & &1.provider) == [:native]
+
+      assert {:error, {:provider_removed, :claude, message}} =
+               Ouroboros.provider_status(:claude)
+
+      assert message =~ "`:native` is the only provider"
     end
   end
 
@@ -122,9 +128,9 @@ defmodule Ouroboros.Provider.NativeTest do
     end
   end
 
-  describe "session_capabilities/2" do
-    test "reports the native transport, including the steer eight of nine cannot do" do
-      assert Provider.session_capabilities(:native) == %{
+  describe "session_capabilities/0" do
+    test "reports the native transport, including the steer no wrapped CLI could do" do
+      assert Provider.session_capabilities() == %{
                transport: :native,
                process: :persistent,
                multi_turn: :native,
@@ -139,16 +145,16 @@ defmodule Ouroboros.Provider.NativeTest do
                # C4. `:native` because this runtime holds the conversation it folds, which
                # is what lets the report carry real token counts.
                compact: :native,
-               # R3/D10. The one transport that runs its tool loop here, and so the one
-               # with a turn journal to replay from. Every other provider answers `false`
-               # rather than omitting the key.
+               # R3/D10. The transport runs its tool loop here, and so has a turn journal
+               # to replay from. Emitted rather than omitted, because the Rust client reads
+               # an absent capability key as offered.
                replay: true
              }
     end
 
     test "every declared capability is answered by an exported callback" do
       adapter = Ouroboros.Provider.Native.Session
-      capabilities = Provider.session_capabilities(:native)
+      capabilities = Provider.session_capabilities()
 
       assert capabilities.approvals != false
       assert function_exported?(adapter, :respond_approval, 3)
@@ -159,34 +165,24 @@ defmodule Ouroboros.Provider.NativeTest do
     end
   end
 
-  describe "safety_options/3" do
-    test "accepts both plane defaults on both planes" do
+  describe "safety_options/1" do
+    test "accepts both plane defaults" do
       assert {:ok, [approval_mode: :prompt, sandbox_mode: :workspace_write]} =
-               Provider.safety_options(:native, [], :coding)
-
-      assert {:ok, [approval_mode: :prompt, sandbox_mode: :workspace_write]} =
-               Provider.safety_options(:native, [], {:interactive, nil})
+               Provider.safety_options([])
     end
 
-    test "`:prompt` is answerable here, unlike on a managed transport" do
-      # X1's refusal fires only where the transport has no approvals channel. This one
-      # does, so the plane default survives.
-      assert {:ok, options} = Provider.safety_options(:native, [], {:interactive, :native})
-      assert Keyword.get(options, :approval_mode) == :prompt
-    end
+    # A stated value is never rewritten or dropped here. A sandbox mode this provider
+    # cannot enforce travels to the harness untouched, which refuses it by name; silently
+    # downgrading it to the provider's own behavior is the one answer that would turn a
+    # policy the caller asked for into no policy at all.
+    test "passes a sandbox mode it cannot enforce through for the harness to refuse" do
+      assert {:ok, options} = Provider.safety_options(sandbox_mode: :nonsense)
 
-    test "refuses a sandbox mode it cannot enforce, by name" do
-      assert {:error, {:unsupported_safety_options, detail}} =
-               Provider.safety_options(:native, [sandbox_mode: :nonsense], :coding)
-
-      assert detail.provider == :native
-      assert detail.message =~ "cannot enforce sandbox_mode: :nonsense"
-      assert detail.message =~ ":workspace_write"
+      assert Keyword.get(options, :sandbox_mode) == :nonsense
     end
 
     test "accepts read_only" do
-      assert {:ok, options} =
-               Provider.safety_options(:native, [sandbox_mode: :read_only], :coding)
+      assert {:ok, options} = Provider.safety_options(sandbox_mode: :read_only)
 
       assert Keyword.get(options, :sandbox_mode) == :read_only
     end
@@ -205,18 +201,8 @@ defmodule Ouroboros.Provider.NativeTest do
       assert session.workspace_mode == :exclusive
     end
 
-    test "accepts unrestricted on both planes, because it is now a mode this provider has" do
-      assert {:ok, coding} =
-               Provider.safety_options(:native, [sandbox_mode: :unrestricted], :coding)
-
-      assert Keyword.get(coding, :sandbox_mode) == :unrestricted
-
-      assert {:ok, interactive} =
-               Provider.safety_options(
-                 :native,
-                 [sandbox_mode: :unrestricted],
-                 {:interactive, nil}
-               )
+    test "accepts unrestricted, because it is now a mode this provider has" do
+      assert {:ok, interactive} = Provider.safety_options(sandbox_mode: :unrestricted)
 
       assert Keyword.get(interactive, :sandbox_mode) == :unrestricted
     end
@@ -276,7 +262,7 @@ defmodule Ouroboros.Provider.NativeTest do
       assert {:ok, status} = Native.status(%{})
 
       assert status.details["sandbox"] == Ouroboros.Provider.Native.Sandbox.label(detection)
-      assert status.details["sandbox"] in ["sandbox-exec", "ouro-sandbox", "bwrap", "none"]
+      assert status.details["sandbox"] in ["sandbox-exec", "bwrap", "none"]
       assert status.details["sandbox_notes"] == detection.notes
 
       case detection.backend do

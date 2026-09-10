@@ -7,7 +7,7 @@ different things.
 > one — none. The adapter that would produce one is written and its decidable half is
 > tested; the run needs a Linux build, a model key, and docker, and has not happened.
 > When it happens the number goes in [§4](#4-the-number-when-there-is-one) whatever it
-> is. That is the commitment `AGENT_EXPERIENCE.md` §10 makes, and this file is where it
+> is. That is the commitment `research/agent-ux-2026/AGENT_EXPERIENCE.md` §10 makes, and this file is where it
 > is kept.
 
 | | [Terminal-Bench 2.1](#2-terminal-bench-21) | [The local corpus](#3-the-local-corpus) | [The self corpus](#5-the-self-corpus) |
@@ -28,7 +28,7 @@ different things.
 in a container that a task author's own tests then grade. It ranks *harness plus model*,
 which is the only axis on which a harness can be compared at all: the same model scores
 about three points differently depending on the loop around it
-([AGENT_EXPERIENCE.md §2.1](AGENT_EXPERIENCE.md)).
+([research/agent-ux-2026/AGENT_EXPERIENCE.md §2.1](research/agent-ux-2026/AGENT_EXPERIENCE.md)).
 
 **Measured by the local corpus.** Whether an instruction reaches the native loop, the
 tools dispatch, the permission gate answers, the guards refuse what they should, the
@@ -51,9 +51,9 @@ for what that does and does not measure.
   their *effect*, mixed with everything else, and gives you one number for the mixture.
 - **Latency or throughput under load.** Both suites are correctness harnesses. Neither
   runs concurrent sessions, and neither is a profiler.
-- **Anything about the nine vendor providers.** Both are `--provider native`. Ouroboros
-  running `claude` scores whatever `claude` scores; that is the vendor's number, not this
-  project's, and publishing it as ours would be borrowing a result.
+- **Anything about a vendor CLI.** Both suites drive the native loop, which is the only
+  provider; there is no wrapped `claude` or `codex` left to score, and a number for one
+  of those would have been the vendor's rather than this project's.
 - **Cost, by the corpus.** It spends nothing, on purpose. Its token column is scripted
   arithmetic, not billing.
 
@@ -71,7 +71,7 @@ The adapter is [`bench/terminal_bench/`](../bench/terminal_bench/README.md):
 prebuilt Linux `ouro`, starts the packaged daemon, and runs one headless turn.
 
 ```sh
-export OURO_LINUX_DIST=/path/to/ouro-<version>-x86_64-unknown-linux-gnu   # `make dist` on Linux
+export OURO_LINUX_DIST=/path/to/ouro   # `make ouro` on a Linux host
 export ANTHROPIC_API_KEY=...
 
 cd bench/terminal_bench
@@ -91,9 +91,9 @@ bench/terminal_bench/run_tests.sh     # 64 tests: no docker, no key, no harbor i
 
 Three things this repository does not have on the machine where the adapter was written:
 
-1. **A Linux `ouro`.** ERTS does not cross-compile. `make dist` produces a client for the
+1. **A Linux `ouro`.** ERTS does not cross-compile. `make ouro` produces a client for the
    host that built it, so a Linux artifact is built on a Linux host or in CI. This is the
-   hard prerequisite, and it is the same one `AGENT_EXPERIENCE.md` §10 names for releases.
+   hard prerequisite, and it is the same one `research/agent-ux-2026/AGENT_EXPERIENCE.md` §10 names for releases.
 2. **A model key, and a budget.** 89 tasks × 5 attempts is 445 transcripts against a
    frontier model. Published leaderboard rows carry costs in the low hundreds of dollars
    at that shape. Start with one task.
@@ -160,7 +160,7 @@ task                      chk   run         duration  tokens  exercises
 09-bash-timeout           ok    completed    2544 ms     218  bash,bounded output
 10-grep                   ok    completed      50 ms     199  grep
 11-glob-ls                ok    completed      54 ms     261  glob,ls
-12-code-intel-no-server   ok    completed      52 ms     296  code_intel
+12-grep-bad-pattern       ok    completed      52 ms     296  grep
 13-ask-user-declined      ok    completed      36 ms     237  ask_user,approval
 14-ask-user-acknowledged  ok    completed      33 ms     240  ask_user,approval
 15-plan                   ok    completed      32 ms     234  plan
@@ -187,14 +187,11 @@ The corpus pins both behaviours so they cannot regress silently.
   count at 2 and says why; the Terminal-Bench adapter deduplicates before telling Harbor,
   because Harbor only ever sees a count and reporting two files would be reporting a file
   that does not exist.
-- **`code_intel` without a language server is a bounded in-band refusal.**
-  `Ouroboros.CodeIntel.Registry.resolve/2` admits a path under configured
-  `:workspace_allowed_roots` **or** the workspace of an interactive or coding session
-  this node holds. A default install with no roots and no live session still judges
-  every path `{:outside_workspace, …}` before a language is considered. With a
-  session (or configured roots) and no server installed, the answer is
-  `{:server_unavailable, …}` — in band, bounded, non-fatal. `12-code-intel-no-server`
-  asserts that contract, not the message.
+- **A tool that cannot answer is a bounded in-band refusal.** `12-grep-bad-pattern`
+  sends `grep` a pattern that does not compile: the turn survives, the failure is a tool
+  result the model reads, and the agent routes around it with `read`. The task asserts
+  that contract — in band, bounded, non-fatal — and the two strings this runtime writes
+  itself, not the regex engine's words for what it did not like.
 
 ### Where it runs
 

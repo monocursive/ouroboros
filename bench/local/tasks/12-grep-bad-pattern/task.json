@@ -1,0 +1,10 @@
+{
+  "title": "a tool that cannot answer fails in band, and the agent routes around it",
+  "exercises": [
+    "grep"
+  ],
+  "instruction": "Corpus task 12: search notes.txt for an unbalanced pattern.",
+  "approval_mode": "prompt",
+  "approve_all": false,
+  "timeout_secs": 60
+}

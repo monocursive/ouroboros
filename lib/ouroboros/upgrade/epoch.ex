@@ -2,14 +2,14 @@ defmodule Ouroboros.Upgrade.Epoch do
   @moduledoc """
   Allocates the monotonic epoch a new artifact will carry.
 
-  A node executor accepts an artifact only if its epoch is strictly greater than the last
-  epoch that node committed, and it decides that before it inspects the artifact at all.
-  The epoch is therefore the cluster's replay defence: an old artifact re-presented later
-  is refused for its number, whatever its bytes say.
+  A target node admits an artifact only if its epoch is strictly greater than every epoch
+  its rollout register already holds, and it decides that before it stages a byte. The
+  epoch is therefore the cluster's replay defence: an old artifact re-presented later is
+  refused for its number, whatever its bytes say.
 
-  `next/2` reads `last_epoch` from every target node's executor and the lane-W epoch from
-  every target node's rollout registry, takes the maximum, and allocates one above it. Two
-  things make that safe against this process dying:
+  `next/2` reads the epoch every target node's rollout registry has admitted, takes the
+  maximum, and allocates one above it. Two things make that safe against this process
+  dying:
 
     * the allocation is written to durable storage *before* it is returned, and the next
       allocation starts above that watermark even when the nodes report something lower.
@@ -22,14 +22,13 @@ defmodule Ouroboros.Upgrade.Epoch do
   `:global.trans/2` serializes concurrent allocations across a connected cluster. It is
   not partition-safe, and the durable watermark is per-forge-node, so two partitioned
   forges can allocate the same number. The defence that does not depend on coordination
-  is on the target: `NodeExecutor.prepare/2` rejects a stale or repeated epoch outright.
+  is on the target: `Ouroboros.Upgrade.Rollout.Registry.admit_wasm_epoch/2` rejects a
+  stale or repeated epoch outright.
 
   Storage comes from `config :ouroboros, :epoch_storage` — ETS in dev and test, a synced
   `Ouroboros.Storage.DurableFile` in production. With an ETS adapter the watermark dies
   with the VM, which is exactly the property production configuration removes.
   """
-
-  alias Ouroboros.Upgrade.Coordinator
 
   @storage_key {:ouroboros, :forge_epoch, 1}
   @lock_retries 20
@@ -86,31 +85,16 @@ defmodule Ouroboros.Upgrade.Epoch do
   end
 
   defp cluster_epoch(nodes, opts) do
-    status_opts =
-      case Keyword.fetch(opts, :status_timeout) do
-        {:ok, timeout} -> [status_timeout: timeout]
-        :error -> []
-      end
-
-    case Coordinator.status(nodes, status_opts) do
-      {:ok, statuses} ->
-        case wasm_epochs(nodes, opts) do
-          {:ok, wasm_epochs} -> highest_epoch(statuses, wasm_epochs)
-          {:error, epochs} -> {:error, {:epoch_status_unavailable, unreadable_wasm(epochs)}}
-        end
-
-      {:error, statuses} ->
-        {:error, {:epoch_status_unavailable, unreadable(statuses)}}
+    case wasm_epochs(nodes, opts) do
+      {:ok, wasm_epochs} -> highest_epoch(nodes, wasm_epochs)
+      {:error, epochs} -> {:error, {:epoch_status_unavailable, unreadable_wasm(epochs)}}
     end
   end
 
-  defp highest_epoch(statuses, wasm_epochs) do
-    Enum.reduce_while(statuses, {:ok, 0}, fn {target, status}, {:ok, highest} ->
-      with epoch when is_integer(epoch) and epoch >= 0 <- Map.get(status, :last_epoch),
-           wasm_epoch when is_integer(wasm_epoch) and wasm_epoch >= 0 <-
-             Map.get(wasm_epochs, target) do
-        {:cont, {:ok, max(highest, max(epoch, wasm_epoch))}}
-      else
+  defp highest_epoch(nodes, wasm_epochs) do
+    Enum.reduce_while(nodes, {:ok, 0}, fn target, {:ok, highest} ->
+      case Map.get(wasm_epochs, target) do
+        epoch when is_integer(epoch) and epoch >= 0 -> {:cont, {:ok, max(highest, epoch)}}
         other -> {:halt, {:error, {:invalid_node_epoch, target, other}}}
       end
     end)
@@ -151,10 +135,6 @@ defmodule Ouroboros.Upgrade.Epoch do
     end
   catch
     kind, reason -> {:error, {kind, reason}}
-  end
-
-  defp unreadable(statuses) do
-    for {target, value} <- statuses, not is_map(value), into: %{}, do: {target, value}
   end
 
   defp unreadable_wasm(epochs) do

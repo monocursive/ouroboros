@@ -22,7 +22,7 @@ defmodule Ouroboros.InteractivePollCadenceTest do
   alias Ouroboros.Poll.Cadence
   alias Ouroboros.Test.HarnessAdapter
 
-  @provider :ouroboros_test
+  @provider :native
   @fast_ms 25
   @idle_cap_ms 1_000
 

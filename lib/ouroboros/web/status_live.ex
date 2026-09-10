@@ -72,10 +72,6 @@ defmodule Ouroboros.Web.StatusLive do
         <dt>Agent sessions</dt>
         <dd class="ouro-mono">{@status.interactive_sessions}</dd>
       </div>
-      <div class="ouro-fact">
-        <dt>Coding tasks</dt>
-        <dd class="ouro-mono">{@status.coding_tasks}</dd>
-      </div>
     </dl>
     """
   end
@@ -128,8 +124,7 @@ defmodule Ouroboros.Web.StatusLive do
       node: to_string(Map.get(status, :node, node())),
       role: to_string(Map.get(status, :role, :unknown)),
       connected_nodes: describe_nodes(Map.get(status, :connected_nodes, [])),
-      interactive_sessions: count(Map.get(status, :interactive_sessions)),
-      coding_tasks: count(Map.get(status, :coding_tasks))
+      interactive_sessions: count(Map.get(status, :interactive_sessions))
     }
   end
 

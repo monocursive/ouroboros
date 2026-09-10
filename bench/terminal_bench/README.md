@@ -19,13 +19,13 @@ and [docs/BENCHMARKS.md](../../docs/BENCHMARKS.md) for the standing statement.
 On a Linux host or in CI, from a checkout:
 
 ```sh
-make dist          # -> dist/ouro-<version>-x86_64-unknown-linux-gnu
+make ouro          # -> tui/target/release/ouro, for the host that built it
 ```
 
 Then, wherever you run Harbor:
 
 ```sh
-export OURO_LINUX_DIST=/path/to/ouro-<version>-x86_64-unknown-linux-gnu
+export OURO_LINUX_DIST=/path/to/ouro
 ```
 
 A `.tar.gz`/`.tgz`/`.tar` containing the binary works too; the install script tries `tar`
@@ -98,7 +98,7 @@ The exact turn:
 
 ```sh
 OUROBOROS_DATA_DIR=/opt/ouroboros/data /opt/ouroboros/ouro run '<instruction>' \
-  --provider native --approve-all --stream-json --workspace /app --timeout 900
+  --approve-all --stream-json --workspace /app --timeout 900
 ```
 
 Six decisions worth knowing:

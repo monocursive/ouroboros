@@ -7,7 +7,6 @@ defmodule Ouroboros.Wasm.ForgeTest do
   alias Ouroboros.Mesh
   alias Ouroboros.Provider.Native.Sandbox
   alias Ouroboros.Provider.Native.Sandbox.Bwrap
-  alias Ouroboros.Provider.Native.Sandbox.Helper
   alias Ouroboros.Provider.Native.Sandbox.SandboxExec
   alias Ouroboros.Runtime.Capabilities
   alias Ouroboros.Upgrade.Rollout.Registry
@@ -292,49 +291,59 @@ defmodule Ouroboros.Wasm.ForgeTest do
     # Red without `Sandbox.fences_reads?/1` and the arm that consults it. A backend that can
     # bound writes and not reads is half a sandbox, and half of this lane's claim.
     #
-    # Since W17 the third backend can fence reads — but only a helper binary that says so.
-    # The two mutations and what each reddens, corrected after a review found this comment
-    # naming the wrong one: make `fences_reads?/1` answer `true` for `:ouro_sandbox` however
-    # it was probed and *this* test reddens, because a stale helper starts claiming a fence
-    # it has not got. Delete the `%{backend: :ouro_sandbox}` clause instead — so the map
-    # falls through to the bare-atom `false` — and the sibling test below reddens, because a
-    # current helper stops being allowed to forge at all.
-    test "a helper that does not claim the read allow-set is refused rather than used",
-         context do
-      stale = %{
-        backend: :ouro_sandbox,
-        executable: "/nowhere",
-        version: nil,
-        notes: "",
-        read_fence: false
-      }
+    # C11. The question used to have a third answer: a `:ouro_sandbox` helper older than W17
+    # applied every other rule and had no read allow-set, so the fence was asked of the
+    # binary rather than of the backend's name. That backend is gone
+    # (docs/proposals/core.md §4 A2) and both survivors answer by name — so what this pins is
+    # that the *question* is still asked, and that a detection this module does not recognise
+    # fails closed rather than forging unfenced. Make `fences_reads?/1` answer `true` for
+    # anything and this reddens.
+    test "a backend that cannot fence reads is refused rather than used", context do
+      unfenced = %{backend: :none, executable: nil, version: nil, notes: "planted"}
 
-      refute Sandbox.fences_reads?(stale)
-      # And a detection with no such key at all — a cache written by an older node, a map
-      # somebody built by hand — is the same answer. This fails closed.
-      refute Sandbox.fences_reads?(Map.delete(stale, :read_fence))
-      # The bare backend name claims nothing: the capability is the binary's, not the name's.
-      refute Sandbox.fences_reads?(:ouro_sandbox)
+      refute Sandbox.fences_reads?(unfenced)
+      # A backend name this build does not know claims nothing either.
+      refute Sandbox.fences_reads?(:some_future_backend)
+      refute Sandbox.fences_reads?(%{})
 
-      assert {:error, {:sandbox_cannot_fence_reads, :ouro_sandbox, why}} =
-               Forge.sandbox_policy("/nowhere/cargo", context.builds, context.tmp, "/sdk", stale)
+      assert {:error, {:sandbox_unavailable, {:no_backend, _}}} =
+               Forge.sandbox_policy(
+                 "/nowhere/cargo",
+                 context.builds,
+                 context.tmp,
+                 "/sdk",
+                 unfenced
+               )
+
+      # A backend that is present but does not fence reads is the other refusal, and it is
+      # the one that names the fence. There is no such backend in this build, so the
+      # detection is planted.
+      planted = %{backend: :some_future_backend, executable: "/nowhere", version: nil, notes: ""}
+
+      assert {:error, {:sandbox_cannot_fence_reads, :some_future_backend, why}} =
+               Forge.sandbox_policy(
+                 "/nowhere/cargo",
+                 context.builds,
+                 context.tmp,
+                 "/sdk",
+                 planted
+               )
 
       assert why =~ "read allow-set"
 
-      # The other two answer by name, because neither is a binary this repository ships.
+      # Both backends this build has answer yes, by name.
       assert Sandbox.fences_reads?(:sandbox_exec)
       assert Sandbox.fences_reads?(:bwrap)
     end
 
-    # The other half of C11, and the reason W17 is not just a Rust change: a helper that
-    # reports the feature is admitted, with the same builder policy the other two get.
-    test "a helper that reports the read allow-set builds under the builder policy", context do
+    # The other half of C11: a backend that fences reads is admitted, with the builder policy.
+    test "a backend that fences reads builds under the builder policy", context do
       current = %{
-        backend: :ouro_sandbox,
+        backend: :bwrap,
         executable: "/nowhere",
         version: "0.1.0",
         notes: "",
-        read_fence: true
+        unshare_net: true
       }
 
       assert Sandbox.fences_reads?(current)
@@ -369,14 +378,15 @@ defmodule Ouroboros.Wasm.ForgeTest do
                  end))
              )
 
-      # And the request that reaches the helper carries the allow-set — for this mode and
-      # for no other. Red without `Helper.request/2`'s `readable` clause.
-      request = Helper.request(Sandbox.with_scratch(policy, "/scratch"), %{root: context.builds})
-      assert request["mode"] == "builder"
-      # The policy carries every root under both its spellings; the request carries the ones
-      # that are not themselves symlinks (the helper refuses a symlinked root by design).
-      assert Enum.all?(request["readable"], &(&1 in policy.readable))
-      assert request["readable"] != []
+      # And what the backend renders carries the allow-set: bubblewrap binds each readable
+      # root that is on disk read-only and binds `/` nowhere, which is the fence.
+      argv = Bwrap.options(%{root: context.builds}, Sandbox.with_scratch(policy, "/scratch"))
+      refute ["--ro-bind", "/", "/"] |> then(&sublist?(argv, &1))
+
+      for root <- Enum.filter(policy.readable, &File.exists?/1) do
+        assert sublist?(argv, ["--ro-bind", root, root]),
+               "#{root} is not bound read-only into the builder's namespace"
+      end
     end
 
     test "the builder policy denies the network, names its writable roots, and fences reads",
@@ -918,19 +928,20 @@ defmodule Ouroboros.Wasm.ForgeTest do
   # it are (`/bin` on macOS, `/usr` on Linux).
   defp bash!, do: System.find_executable("bash") || "/bin/bash"
 
-  # The three backends refuse a read in three different words, and the difference is
-  # mechanism rather than cosmetics. Seatbelt denies an open on a path that is there
-  # (`EPERM`). bubblewrap never puts the file in the namespace, so the compiler is told it
-  # is not there (`ENOENT`). `ouro-sandbox` stays in the host's own path namespace — a mount
-  # can make a path read-only and cannot make it unreadable — so its read fence is Landlock
-  # alone and arrives as `EACCES`. All three are the fence; only one is a permission error,
-  # and one is not even an error about permission. The assertion beside this one — that the
-  # honest fixture still builds under the same policy — is what makes any of the three mean
-  # the fence rather than a broken toolchain.
+  # A contiguous run of `needle` anywhere in `list`.
+  defp sublist?(list, needle) do
+    list |> Enum.chunk_every(length(needle), 1, :discard) |> Enum.member?(needle)
+  end
+
+  # The two backends refuse a read in two different words, and the difference is mechanism
+  # rather than cosmetics. Seatbelt denies an open on a path that is there (`EPERM`).
+  # bubblewrap never puts the file in the namespace, so the compiler is told it is not there
+  # (`ENOENT`). Both are the fence; only one is a permission error. The assertion beside this
+  # one — that the honest fixture still builds under the same policy — is what makes either
+  # of them mean the fence rather than a broken toolchain.
   defp denial_pattern do
     case Sandbox.detect().backend do
       :sandbox_exec -> ~r/Operation not permitted/
-      :ouro_sandbox -> ~r/Permission denied/
       _bwrap -> ~r/No such file or directory/
     end
   end

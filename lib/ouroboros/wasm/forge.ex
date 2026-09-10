@@ -1,15 +1,13 @@
 defmodule Ouroboros.Wasm.Forge do
   @moduledoc """
-  Turns a Cargo project on the guest SDK into a signed lane-W artifact (docs/WASM.md §7.7).
+  Turns a Cargo project on the guest SDK into a signed artifact (docs/WASM.md §7.7).
 
-  `Ouroboros.Upgrade.Forge` is this module's shape in lane B: validate before you compile,
-  compile somewhere that cannot reach the cluster, hold the product to the rules the
-  loading node will re-check, and only then allocate a number and ask for a signature. What
-  differs is what "somewhere" means. Lane B's build peer is a separate BEAM with no
-  distribution — isolation from the *cluster*, not from the machine — and its own moduledoc
-  says compiling hostile source needs a container around it. A Cargo build is arbitrary code
-  at build time by construction (build scripts, proc macros, `include!`), so this lane does
-  what that sentence asks for: the subprocess runs under `Ouroboros.Provider.Native.Sandbox`,
+  The order is fixed: validate before you compile, compile somewhere that cannot reach the
+  cluster, hold the product to the rules the loading node will re-check, and only then
+  allocate a number and ask for a signature. A Cargo build is arbitrary code
+  at build time by construction (build scripts, proc macros, `include!`), so "somewhere"
+  has to mean an OS boundary and not merely a separate process: the subprocess runs under
+  `Ouroboros.Provider.Native.Sandbox`,
   the same OS sandbox the native agent's shell runs in, with no network, writes confined to a
   scratch directory and the registry cache, and a wall-clock ceiling.
 
@@ -35,8 +33,7 @@ defmodule Ouroboros.Wasm.Forge do
       on writes, so a build reads the toolchain, the SDK, the `wit` world file and its own
       directories and nothing else — `include_str!` of anything else fails at compile time,
       in whichever words the backend refuses a read with (`Operation not permitted` from
-      Seatbelt, `No such file or directory` from a bubblewrap namespace,
-      `Permission denied` from `ouro-sandbox`'s Landlock read set). No network
+      Seatbelt, `No such file or directory` from a bubblewrap namespace). No network
       (`--offline` as well, so a cold cache is a refusal rather than a fetch), writes only
       into the build directory, the node-local cargo home and a private `TMPDIR` — and, on
       Linux, `/dev/null` and nothing else under `/dev` — a five-minute ceiling, bounded
@@ -100,8 +97,7 @@ defmodule Ouroboros.Wasm.Forge do
   @default_timeout_ms 300_000
   @max_timeout_ms 300_000
   # What a forwarded forge waits beyond the build's own budget, so the builder's typed refusal
-  # arrives instead of an opaque `:erpc` timeout. `Upgrade.Forge.BuildPeer`'s number, for the
-  # same reason.
+  # arrives instead of an opaque `:erpc` timeout.
   @remote_slack 10_000
 
   @max_output_bytes 64 * 1024
@@ -241,8 +237,8 @@ defmodule Ouroboros.Wasm.Forge do
   # The entry point a **forwarded** forge lands on, and the only one `forward/3` names.
   #
   # Three things are true here and not in `forge/2`. It never asks the placement question with
-  # a setting that could forward, so a builder cannot re-dispatch to a builder —
-  # `Ouroboros.Upgrade.Forge.BuildPeer` is split for exactly that reason. It refuses an input
+  # a setting that could forward, so a builder cannot re-dispatch to a builder. It refuses
+  # an input
   # that names a **path**, because a path is a fact about the origin's filesystem and walking
   # one here would build whatever this machine happens to keep there (D29). And it runs the
   # whole forge — not only cargo — under the deadline the origin set, in a task it can stop,
@@ -313,7 +309,7 @@ defmodule Ouroboros.Wasm.Forge do
   Everything `forge/2` checks before it signs, and a dry build where the toolchain allows one.
 
   Never signs, never allocates an epoch, never writes a bundle. A preview that built is not
-  a prepared deploy — it is the same statement `Ouroboros.Upgrade.Forge.preview/2` makes.
+  a prepared deploy.
 
   `build?: false` stops after validation, which is what a caller asking only "would this be
   accepted" wants and what a node with no toolchain can answer.
@@ -1427,11 +1423,11 @@ defmodule Ouroboros.Wasm.Forge do
   because "what would this build run under" is a question worth being able to ask without
   running one.
 
-  All three backends can fence reads since W17, and the third is still asked rather than
-  assumed. `Sandbox.fences_reads?/1` answers for `:ouro_sandbox` out of the probed helper's
-  own `doctor` report, so the refusal below is no longer "this backend cannot" but "the
-  binary installed on this node cannot" — an operator's remedy is a newer helper, and until
-  they have one the node forges under bubblewrap or not at all.
+  Both backends fence reads — Seatbelt with `(deny default)`, bubblewrap by never binding
+  `/` into the namespace (docs/WASM.md §12) — so `Sandbox.fences_reads?/1` below refuses only
+  a node that has no backend at all, which the clause above it has already refused. It is
+  asked rather than assumed because the two questions are different ones: this lane's claim
+  rests on the read fence, not on the presence of a sandbox.
   """
   @spec sandbox_policy(String.t(), Path.t(), Path.t(), Path.t(), Sandbox.detection()) ::
           {:ok, Sandbox.policy()} | {:error, term()}
@@ -1447,10 +1443,8 @@ defmodule Ouroboros.Wasm.Forge do
          {:sandbox_cannot_fence_reads, detection.backend,
           "the #{Sandbox.label(detection)} at #{detection.executable || "(no path)"} " <>
             "cannot express a read allow-set, so a build under it could read anything the " <>
-            "node can (docs/WASM.md D18, D26). A binary from before the allow-set reports " <>
-            "no `read_allow_set` feature to `doctor` and is refused by that report rather " <>
-            "than by its name — which is why this names the file: replace that one " <>
-            "(`make sandbox`) or let detection fall through to bubblewrap."}}
+            "node can (docs/WASM.md D18, D26). This node will not forge until it has a " <>
+            "backend that fences reads: sandbox-exec on macOS, bubblewrap on Linux."}}
 
       true ->
         {:ok,
@@ -1994,12 +1988,11 @@ defmodule Ouroboros.Wasm.Forge do
   @doc """
   The wall-clock ceiling one build runs under, which is never more than five minutes.
 
-  Two ceilings, and the smaller one wins. This one is the forge's, and it is the one that
-  fires: `Ouroboros.Provider.Native.Exec` signals the sandboxed process group at it, so the
-  build stops and the `after` that removes the scratch directory runs. The other belongs to
-  whoever called — on the effect path `config :ouroboros, :effect_timeout` bounds the whole
-  effect, and `Ouroboros.Agent.Effects.ForgeWasmCapability` therefore asks for a build budget
-  strictly inside it, because the runner's own deadline is a `brutal_kill` that runs no
+  Two ceilings where a caller has one of its own, and the smaller one wins. This one is the
+  forge's, and it is the one that should fire: `Ouroboros.Provider.Native.Exec` signals the
+  sandboxed process group at it, so the build stops and the `after` that removes the scratch
+  directory runs. A caller that bounds a forge therefore asks for a build budget strictly
+  inside its own deadline, because a caller's deadline is typically a kill that runs no
   cleanup and would leave a cargo tree, and a compiler, behind (docs/WASM.md D19).
   """
   @spec build_timeout(keyword()) :: pos_integer()

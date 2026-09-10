@@ -1,106 +1,14 @@
 defmodule Ouroboros.StoreRetentionTest do
   use ExUnit.Case, async: false
 
-  alias Ouroboros.Coding.Store, as: CodingStore
-  alias Ouroboros.Coding.TaskState
   alias Ouroboros.Interactive.State
   alias Ouroboros.Interactive.Store, as: InteractiveStore
 
-  @provider :ouroboros_test
+  @provider :native
 
   setup do
     on_exit(fn -> Application.delete_env(:ouroboros, :terminal_retention_ms) end)
     :ok
-  end
-
-  describe "coding store" do
-    test "delete refuses a live task and accepts a terminal one" do
-      id = unique_id("coding-delete")
-      assert :ok = CodingStore.create(task(id))
-
-      assert {:error, {:task_not_terminal, :starting}} = CodingStore.delete(id)
-      assert {:ok, %TaskState{}} = CodingStore.get(id)
-
-      assert :ok = CodingStore.put(%{task(id) | status: :completed})
-      assert :ok = CodingStore.delete(id)
-      assert :not_found = CodingStore.get(id)
-      assert :not_found = CodingStore.delete(id)
-    end
-
-    test "prune_terminal removes only terminal entries older than the retention" do
-      old_id = unique_id("coding-old")
-      fresh_id = unique_id("coding-fresh")
-      live_id = unique_id("coding-live")
-
-      assert :ok =
-               CodingStore.create(%{task(old_id) | status: :completed, updated_at: hours_ago(2)})
-
-      assert :ok = CodingStore.create(%{task(fresh_id) | status: :completed})
-      assert :ok = CodingStore.create(%{task(live_id) | updated_at: hours_ago(2)})
-
-      assert {:ok, pruned} = CodingStore.prune_terminal(60_000)
-
-      assert old_id in pruned
-      refute fresh_id in pruned
-      refute live_id in pruned
-
-      assert :not_found = CodingStore.get(old_id)
-      assert {:ok, %TaskState{}} = CodingStore.get(fresh_id)
-      assert {:ok, %TaskState{}} = CodingStore.get(live_id)
-
-      assert {:error, {:invalid_retention, :forever}} = CodingStore.prune_terminal(:forever)
-
-      assert :ok = CodingStore.put(%{task(live_id) | status: :cancelled})
-      assert :ok = CodingStore.delete(live_id)
-      assert :ok = CodingStore.delete(fresh_id)
-    end
-
-    test "get_summary projects completion without the event list" do
-      id = unique_id("coding-summary")
-      events = [Ouroboros.Coding.Event.internal(id, 1, :task_lost, %{reason: "boom"})]
-
-      assert :ok =
-               CodingStore.create(%{
-                 task(id)
-                 | status: :failed,
-                   events: events,
-                   next_sequence: 2,
-                   cursor: 1,
-                   result: %{status: :failed},
-                   error: :boom
-               })
-
-      assert {:ok, summary} = CodingStore.get_summary(id)
-
-      assert summary == %{
-               id: id,
-               node: node(),
-               status: :failed,
-               terminal?: true,
-               result: %{status: :failed},
-               error: :boom,
-               updated_at: summary.updated_at
-             }
-
-      refute Map.has_key?(summary, :events)
-      assert :not_found = CodingStore.get_summary(unique_id("absent"))
-      assert :ok = CodingStore.delete(id)
-    end
-
-    test "list_recoverable projects routing and lifecycle only" do
-      id = unique_id("coding-projection")
-      assert :ok = CodingStore.create(task(id))
-
-      assert entry = Enum.find(CodingStore.list_recoverable(), &(&1.id == id))
-      assert entry.node == node()
-      assert entry.status == :starting
-      refute entry.terminal?
-      assert is_binary(entry.updated_at)
-      assert Map.keys(entry) |> Enum.sort() == [:id, :node, :status, :terminal?, :updated_at]
-
-      assert :ok = CodingStore.put(%{task(id) | status: :completed})
-      assert :ok = CodingStore.delete(id)
-    end
   end
 
   describe "interactive store" do
@@ -164,7 +72,12 @@ defmodule Ouroboros.StoreRetentionTest do
       assert entry.node == node()
       assert entry.status == :starting
       refute entry.terminal?
-      assert Map.keys(entry) |> Enum.sort() == [:id, :node, :status, :terminal?, :updated_at]
+      # A native record is recoverable; `removed_provider?` is the lifecycle fact that
+      # keeps `Session.Recovery` from restarting a record naming a provider this build lost.
+      refute entry.removed_provider?
+
+      assert Map.keys(entry) |> Enum.sort() ==
+               [:id, :node, :removed_provider?, :status, :terminal?, :updated_at]
     end
   end
 
@@ -224,27 +137,6 @@ defmodule Ouroboros.StoreRetentionTest do
   end
 
   describe "recovery retention sweep" do
-    test "prunes expired terminal coding tasks on the recovery tick" do
-      id = unique_id("coding-swept")
-      keep_id = unique_id("coding-kept")
-
-      assert :ok = CodingStore.create(%{task(id) | status: :completed, updated_at: hours_ago(2)})
-      assert :ok = CodingStore.create(task(keep_id))
-
-      Application.put_env(:ouroboros, :terminal_retention_ms, 60_000)
-
-      start_supervised!(
-        {Ouroboros.Coding.Recovery, name: nil, interval: 20, prune_interval: 0},
-        id: :coding_retention_sweeper
-      )
-
-      assert_eventually(fn -> CodingStore.get(id) == :not_found end)
-      assert {:ok, %TaskState{}} = CodingStore.get(keep_id)
-
-      assert :ok = CodingStore.put(%{task(keep_id) | status: :cancelled})
-      assert :ok = CodingStore.delete(keep_id)
-    end
-
     test "prunes expired terminal interactive sessions on the recovery tick" do
       id = unique_id("interactive-swept")
 
@@ -266,27 +158,26 @@ defmodule Ouroboros.StoreRetentionTest do
     end
 
     test "a nil retention disables the sweep" do
-      id = unique_id("coding-retained")
+      id = unique_id("interactive-retained")
 
-      assert :ok = CodingStore.create(%{task(id) | status: :completed, updated_at: hours_ago(2)})
+      assert :ok =
+               Ouroboros.Interactive.Store.create(%{
+                 session(id)
+                 | status: :closed,
+                   updated_at: hours_ago(2)
+               })
+
       Application.put_env(:ouroboros, :terminal_retention_ms, nil)
 
       start_supervised!(
-        {Ouroboros.Coding.Recovery, name: nil, interval: 20, prune_interval: 0},
-        id: :coding_retention_disabled
+        {Ouroboros.Interactive.Recovery, name: nil, interval: 20, prune_interval: 0},
+        id: :interactive_retention_disabled
       )
 
       Process.sleep(150)
-      assert {:ok, %TaskState{status: :completed}} = CodingStore.get(id)
-      assert :ok = CodingStore.delete(id)
+      assert {:ok, %State{status: :closed}} = Ouroboros.Interactive.Store.get(id)
+      assert :ok = Ouroboros.Interactive.Store.delete(id)
     end
-  end
-
-  defp task(id) do
-    {:ok, task} =
-      TaskState.new(id, "retention fixture", provider: @provider, workspace: File.cwd!())
-
-    task
   end
 
   defp session(id) do

@@ -32,7 +32,6 @@ defmodule Ouroboros.Wasm.PolicyTwoNodeTest do
 
   alias Ouroboros.Provider.Native.Permissions, as: NativePermissions
   alias Ouroboros.Upgrade.Epoch
-  alias Ouroboros.Upgrade.Forge.Signer
   alias Ouroboros.Wasm
   alias Ouroboros.Wasm.Artifact
   alias Ouroboros.Wasm.PolicyEngine
@@ -207,7 +206,7 @@ defmodule Ouroboros.Wasm.PolicyTwoNodeTest do
       )
 
     payload = Artifact.signing_payload(artifact, @signer)
-    {:ok, value} = Signer.Local.sign(payload, @signer, private_key: context.secret)
+    value = :crypto.sign(:eddsa, :none, payload, [context.secret, :ed25519])
     {:ok, signed} = Artifact.with_signature(artifact, %{signer: @signer, value: value})
     signed
   end
@@ -234,7 +233,6 @@ defmodule Ouroboros.Wasm.PolicyTwoNodeTest do
 
     put_env!(peer_node, :data_dir, data_dir)
     put_env!(peer_node, :wasm, helper_path: Wasm.helper_path())
-    put_env!(peer_node, :coding_storage, {Jido.Storage.ETS, table: peer_name})
 
     {:ok, _mix} = :erpc.call(peer_node, Application, :ensure_all_started, [:mix])
     :ok = :erpc.call(peer_node, Mix, :env, [:test])

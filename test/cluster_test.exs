@@ -10,11 +10,7 @@ defmodule Ouroboros.ClusterTest do
   alias Ouroboros.Cluster
   alias Ouroboros.Gateway.Methods
   alias Ouroboros.Mesh
-  alias Ouroboros.Team
-  alias Ouroboros.Team.Server
-  alias Ouroboros.Upgrade.Forge.BuildPeer
 
-  @capability Ouroboros.Capability.RemotelyBuilt
   @formation_cookie :ouroboros_formation_test
 
   describe "node role" do
@@ -59,7 +55,7 @@ defmodule Ouroboros.ClusterTest do
     test "fleet compatibility has an explicit manual protocol revision" do
       runtime = Cluster.local_fleet_posture().runtime
 
-      assert runtime.fleet_protocol_revision == 2
+      assert runtime.fleet_protocol_revision == 3
 
       assert Cluster.runtime_compatible?(
                runtime,
@@ -72,6 +68,16 @@ defmodule Ouroboros.ClusterTest do
              )
 
       refute Cluster.runtime_compatible?(runtime, Map.delete(runtime, :fleet_protocol_revision))
+    end
+
+    test "the pre-reduction fleet contract is incompatible in both directions" do
+      runtime = Cluster.local_fleet_posture().runtime
+      # dev at 3bc8887 exposes remote session APIs removed by the core reduction, but
+      # has the same application version and OTP release as an upgraded peer.
+      previous = %{runtime | fleet_protocol_revision: 2}
+
+      refute Cluster.runtime_compatible?(runtime, previous)
+      refute Cluster.runtime_compatible?(previous, runtime)
     end
   end
 
@@ -226,7 +232,7 @@ defmodule Ouroboros.ClusterTest do
       before = Enum.find(Cluster.fleet_status().machines, &(&1.node == peer))
       assert before.compatibility == :compatible
       assert before.last_up_at
-      assert before.runtime.fleet_protocol_revision == 2
+      assert before.runtime.fleet_protocol_revision == 3
       assert before.runtime.otp_release == to_string(:erlang.system_info(:otp_release))
 
       assert %{status: :warning, guidance: roster_guidance} =
@@ -235,8 +241,8 @@ defmodule Ouroboros.ClusterTest do
                  &(&1.id == {:machine_connectivity, peer})
                )
 
-      assert roster_guidance =~ "latest signed roster"
-      assert roster_guidance =~ "rotate the fleet"
+      assert roster_guidance =~ "add it to this machine's roster in fleet/profile.json"
+      assert roster_guidance =~ "treat the credential as exposed"
 
       # This fixture deliberately substitutes directory facts, rather than changing
       # the peer's actual CPU or protocol. Keep background probes from replacing those
@@ -506,7 +512,7 @@ defmodule Ouroboros.ClusterTest do
           refute late_node in Cluster.expected_nodes()
 
           # The roster grows while the runtime is up: no restart, no environment
-          # change — only the saved profile moves, exactly what `ouro fleet add` does.
+          # change — only the saved profile moves, exactly what a roster edit does.
           write_test_fleet_profile!(fleet_dir, fleet_id,
             local: owner,
             members: [owner, late],
@@ -604,13 +610,6 @@ defmodule Ouroboros.ClusterTest do
       configure_formation!(owner, Atom.to_string(owner_name))
       :ok = :peer.call(owner, System, :put_env, [%{"OUROBOROS_FLEET_ID" => fleet_id}])
 
-      :ok =
-        :peer.call(late, Application, :put_env, [
-          :ouroboros,
-          :coding_storage,
-          {Jido.Storage.ETS, table: :ouroboros_late_invite_coding}
-        ])
-
       for peer <- [owner, late] do
         assert {:ok, _applications} =
                  :peer.call(peer, Application, :ensure_all_started, [:ouroboros], 60_000)
@@ -625,7 +624,7 @@ defmodule Ouroboros.ClusterTest do
       Process.sleep(600)
       refute late_name in :peer.call(owner, Node, :list, [])
 
-      # `ouro fleet add` while the owner runtime is up: only the saved profile changes.
+      # A roster grown while the owner runtime is up: only the saved profile changes.
       write_test_fleet_profile!(fleet_dir, fleet_id,
         local: owner_member,
         members: [owner_member, late_member],
@@ -879,7 +878,7 @@ defmodule Ouroboros.ClusterTest do
         sweep_now!(strategy)
         assert dials(table) == 4
 
-        # `ouro fleet invite cancel` while the runtime is up: only the roster moves.
+        # A machine removed from the roster while the runtime is up: only the roster moves.
         System.put_env("OUROBOROS_CLUSTER_HOSTS", "")
         sweep_now!(strategy)
         assert dials(table) == 4
@@ -912,7 +911,13 @@ defmodule Ouroboros.ClusterTest do
       bare = start_bare_peer!()
 
       accepted = unique_id("placed")
-      assert {:ok, pid} = Mesh.start_agent_on(core, accepted, role: "remote reviewer")
+
+      assert {:ok, pid} =
+               Mesh.start_agent_on(core, accepted,
+                 agent: Ouroboros.Capability.DistributionReference,
+                 role: "remote reviewer"
+               )
+
       assert node(pid) == core
       on_exit(fn -> Mesh.stop_agent(accepted) end)
 
@@ -928,33 +933,7 @@ defmodule Ouroboros.ClusterTest do
     end
 
     @tag timeout: 180_000
-    test "a team refuses a worker on a node that cannot run one" do
-      builder = start_app_peer!(node_role: :builder)
-
-      team_id = unique_id("cluster-team")
-
-      team =
-        start_supervised!(
-          {Server, id: team_id, supervisor_id: {__MODULE__, team_id}, cleanup_agents: true}
-        )
-
-      assert Team.add_worker(team, unique_id("builder-worker"), node: builder) ==
-               {:error, {:invalid_worker_node, builder, {:role, :builder, :core}}}
-
-      assert Team.add_worker(team, unique_id("absent-worker"),
-               node: :"ouroboros-absent@127.0.0.1"
-             ) ==
-               {:error,
-                {:invalid_worker_node, :"ouroboros-absent@127.0.0.1", :node_not_connected}}
-
-      # The refusals are placement decisions, not team damage: a local worker still works.
-      local_id = unique_id("local-worker")
-      assert {:ok, %{id: ^local_id, node: local_node}} = Team.add_worker(team, local_id)
-      assert local_node == node()
-    end
-
-    @tag timeout: 180_000
-    test "an incompatible core is refused by placement and both gateway start planes" do
+    test "an incompatible core is refused by placement and by the gateway start verb" do
       core = start_app_peer!()
       incompatible_version = "999.0.0-placement-test"
       replace_peer_version!(core, incompatible_version)
@@ -999,19 +978,12 @@ defmodule Ouroboros.ClusterTest do
                )
 
       interactive_id = unique_id("incompatible-interactive")
-      coding_id = unique_id("incompatible-coding")
 
       starts = [
         {"interactive.start",
          %{
            "id" => interactive_id,
            "node" => Atom.to_string(core)
-         }},
-        {"coding.start",
-         %{
-           "id" => coding_id,
-           "objective" => "must not start on a mismatched runtime",
-           "machine" => Atom.to_string(core)
          }}
       ]
 
@@ -1049,8 +1021,6 @@ defmodule Ouroboros.ClusterTest do
 
       assert :not_found ==
                :erpc.call(core, Ouroboros.Interactive.Store, :get, [interactive_id])
-
-      assert :not_found == :erpc.call(core, Ouroboros.Coding.Store, :get, [coding_id])
     end
 
     @tag timeout: 180_000
@@ -1087,8 +1057,6 @@ defmodule Ouroboros.ClusterTest do
 
       assert {:ok, interactive} = Methods.invoke("interactive.list", %{})
       assert is_list(interactive)
-      assert {:ok, coding} = Methods.invoke("coding.list", %{})
-      assert is_list(coding)
 
       # Keep distribution alive but remove the owner-local stores. This is the exact
       # posture in which silently mapping the remote error to [] used to erase its rows
@@ -1096,17 +1064,14 @@ defmodule Ouroboros.ClusterTest do
       assert :ok = :erpc.call(core, Application, :stop, [:ouroboros])
       assert core in Node.list()
 
-      for method <- ["interactive.list", "coding.list"] do
-        assert {:error, -32_004, message,
-                %{"reason" => "owner_query_incomplete", "node" => owner}} =
-                 Methods.invoke(method, %{})
+      assert {:error, -32_004, message, %{"reason" => "owner_query_incomplete", "node" => owner}} =
+               Methods.invoke("interactive.list", %{})
 
-        assert owner == Atom.to_string(core)
-        assert message =~ "session list is incomplete"
-        assert message =~ "keeping the previous fleet view"
-      end
+      assert owner == Atom.to_string(core)
+      assert message =~ "session list is incomplete"
+      assert message =~ "keeping the previous fleet view"
 
-      # Both complete lists above proved this core empty, so its later outage must not
+      # The complete list above proved this core empty, so its later outage must not
       # freeze an otherwise useful refresh merely because it is a saved invitation seed.
       # Positive start/list evidence, not stale topology alone, is the retention fence.
       true = :rpc.cast(core, System, :stop, [])
@@ -1123,10 +1088,8 @@ defmodule Ouroboros.ClusterTest do
         300
       )
 
-      for method <- ["interactive.list", "coding.list"] do
-        assert {:ok, sessions} = Methods.invoke(method, %{})
-        assert is_list(sessions)
-      end
+      assert {:ok, sessions} = Methods.invoke("interactive.list", %{})
+      assert is_list(sessions)
     end
 
     test "a complete empty reply clears only that connected owner's positive evidence" do
@@ -1237,8 +1200,7 @@ defmodule Ouroboros.ClusterTest do
                  %{
                    version: 1,
                    fleet_id: "aaaabbbbccccddddeeeeffff",
-                   interactive: ["former-core@127.0.0.1"],
-                   coding: []
+                   interactive: ["former-core@127.0.0.1"]
                  },
                  path: Path.join(fleet_dir, "cluster-directory")
                )
@@ -1345,8 +1307,7 @@ defmodule Ouroboros.ClusterTest do
                    %{
                      version: 1,
                      fleet_id: fleet_id,
-                     interactive: "not-an-owner-list",
-                     coding: []
+                     interactive: "not-an-owner-list"
                    },
                    path: checkpoint_dir
                  )
@@ -1375,11 +1336,6 @@ defmodule Ouroboros.ClusterTest do
                  Cluster.record_session_snapshot(:interactive, [])
 
         assert File.read!(checkpoint) == undecodable
-
-        # The journal names both planes, so a recorded interactive observation must never
-        # be able to answer for coding either.
-        assert {:error, {:invalid_session_owners, :interactive}} =
-                 Cluster.session_owners(:coding)
       end)
     end
 
@@ -1436,11 +1392,6 @@ defmodule Ouroboros.ClusterTest do
                    {target, [%{id: "offline-interactive"}]}
                  ])
 
-        assert :ok =
-                 Cluster.record_session_snapshot(:coding, [
-                   {target, [%{id: "offline-coding"}]}
-                 ])
-
         assert {:error, -32_602, confirmation_message} =
                  Methods.invoke("fleet.forget_session_owner", %{"machine" => machine})
 
@@ -1473,19 +1424,15 @@ defmodule Ouroboros.ClusterTest do
         restart_cluster_monitor!()
 
         # Cancellation and signed roster import are not session-state retirement. The
-        # tombstone alone survives a Monitor/BEAM recovery and keeps both planes honest.
-        for plane <- [:interactive, :coding] do
-          assert {:ok, owners} = Cluster.session_owners(plane)
-          assert MapSet.member?(owners, Atom.to_string(target))
-        end
+        # tombstone alone survives a Monitor/BEAM recovery.
+        assert {:ok, owners} = Cluster.session_owners(:interactive)
+        assert MapSet.member?(owners, Atom.to_string(target))
 
-        for method <- ["interactive.list", "coding.list"] do
-          assert {:error, -32_004, _message,
-                  %{"reason" => "owner_query_incomplete", "node" => owner}} =
-                   Methods.invoke(method, %{})
+        assert {:error, -32_004, _message,
+                %{"reason" => "owner_query_incomplete", "node" => owner}} =
+                 Methods.invoke("interactive.list", %{})
 
-          assert owner == Atom.to_string(target)
-        end
+        assert owner == Atom.to_string(target)
 
         assert {:ok,
                 %{
@@ -1501,10 +1448,8 @@ defmodule Ouroboros.ClusterTest do
 
         assert forgotten_node == Atom.to_string(target)
 
-        for plane <- [:interactive, :coding] do
-          assert {:ok, owners} = Cluster.session_owners(plane)
-          refute MapSet.member?(owners, Atom.to_string(target))
-        end
+        assert {:ok, owners} = Cluster.session_owners(:interactive)
+        refute MapSet.member?(owners, Atom.to_string(target))
 
         # Repeating an already-confirmed retirement is safe for automation and still
         # forces a synced checkpoint before success.
@@ -1518,8 +1463,6 @@ defmodule Ouroboros.ClusterTest do
 
         assert {:ok, interactive} = Methods.invoke("interactive.list", %{})
         assert is_list(interactive)
-        assert {:ok, coding} = Methods.invoke("coding.list", %{})
-        assert is_list(coding)
       end)
     end
 
@@ -1576,12 +1519,12 @@ defmodule Ouroboros.ClusterTest do
           providers =
             previous_providers
             |> then(&Map.new(&1 || %{}))
-            |> Map.put(:ouroboros_test, Ouroboros.Test.HarnessAdapter)
+            |> Map.put(:native, Ouroboros.Test.HarnessAdapter)
 
           config =
             previous_config
             |> then(&Map.new(&1 || %{}))
-            |> Map.put(:ouroboros_test, %{test_pid: self()})
+            |> Map.put(:native, %{test_pid: self()})
 
           Application.put_env(:jido_harness, :providers, providers)
           Application.put_env(:jido_harness, :provider_config, config)
@@ -1594,7 +1537,7 @@ defmodule Ouroboros.ClusterTest do
             :erpc.call(core, Application, :put_env, [
               :jido_harness,
               :provider_config,
-              Map.put(config, :ouroboros_test, %{})
+              Map.put(config, :native, %{})
             ])
 
           on_exit(fn ->
@@ -1622,7 +1565,6 @@ defmodule Ouroboros.ClusterTest do
           assert {:ok, %Ouroboros.Interactive.Ref{id: ^id, node: ^core}} =
                    Methods.invoke("interactive.start", %{
                      "id" => id,
-                     "provider" => "ouroboros_test",
                      "workspace" => File.cwd!(),
                      "node" => Atom.to_string(core)
                    })
@@ -1693,7 +1635,6 @@ defmodule Ouroboros.ClusterTest do
             Task.async(fn ->
               Methods.invoke("interactive.start", %{
                 "id" => id,
-                "provider" => "native",
                 "workspace" => File.cwd!(),
                 "node" => Atom.to_string(core)
               })
@@ -1785,8 +1726,6 @@ defmodule Ouroboros.ClusterTest do
           assert Enum.any?(sessions, &(&1.id == id and &1.node == core))
           assert {:ok, interactive_owners} = Cluster.session_owners(:interactive)
           assert MapSet.member?(interactive_owners, Atom.to_string(core))
-          assert {:ok, coding_owners} = Cluster.session_owners(:coding)
-          refute MapSet.member?(coding_owners, Atom.to_string(core))
 
           # The monitor is deliberately at the tail of the supervision tree and can
           # restart independently. Its positive owner evidence must come back from the
@@ -1897,96 +1836,6 @@ defmodule Ouroboros.ClusterTest do
     end
   end
 
-  describe "remote builds" do
-    @tag timeout: 300_000
-    test "a builder node compiles the capability and this node never loads it" do
-      builder = start_app_peer!(node_role: :builder)
-
-      previous = Application.get_env(:ouroboros, :forge_builder_node)
-      Application.put_env(:ouroboros, :forge_builder_node, builder)
-
-      on_exit(fn ->
-        Application.put_env(:ouroboros, :forge_builder_node, previous)
-        unload(@capability)
-      end)
-
-      assert {:ok, build} =
-               BuildPeer.build(@capability, capability_source(), capability_test_source())
-
-      assert build.module == @capability
-      assert is_binary(build.binary)
-      assert build.test_report.failures == 0
-      assert build.test_report.total == 1
-
-      # The compile happened inside a peer of the builder: not distributed, and not this
-      # VM. Mirrors forge_build_peer_test — the module name is still unknown here.
-      assert build.peer_runtime.distributed == false
-      assert build.peer_runtime.node == :nonode@nohost
-      assert :code.which(@capability) == :non_existing
-      assert :code.get_object_code(@capability) == :error
-      refute Code.ensure_loaded?(@capability)
-
-      # Nor did the builder itself load it: it too only held the binary.
-      assert :erpc.call(builder, :code, :which, [@capability]) == :non_existing
-
-      # The artifact's runtime triple is the builder's, which is exactly why a builder
-      # must be a role of the same release: the verifier compares it to every target.
-      assert build.peer_runtime.otp_release == to_string(:erlang.system_info(:otp_release))
-
-      assert build.peer_runtime.system_architecture ==
-               to_string(:erlang.system_info(:system_architecture))
-    end
-
-    @tag timeout: 180_000
-    test "a builder that is mis-rolled or unreachable is a typed refusal, not a build" do
-      core = start_app_peer!()
-
-      previous = Application.get_env(:ouroboros, :forge_builder_node)
-      on_exit(fn -> Application.put_env(:ouroboros, :forge_builder_node, previous) end)
-
-      Application.put_env(:ouroboros, :forge_builder_node, core)
-
-      assert BuildPeer.build(@capability, capability_source(), nil) ==
-               {:error, {:forge_builder_refused, core, {:role, :core, :builder}}}
-
-      absent = :"ouroboros-absent@127.0.0.1"
-      Application.put_env(:ouroboros, :forge_builder_node, absent)
-
-      assert BuildPeer.build(@capability, capability_source(), nil) ==
-               {:error, {:forge_builder_refused, absent, :node_not_connected}}
-
-      Application.put_env(:ouroboros, :forge_builder_node, "not-a-node")
-
-      assert BuildPeer.build(@capability, capability_source(), nil) ==
-               {:error, {:invalid_forge_builder_node, "not-a-node"}}
-
-      # The escape hatch relaxes the role and nothing else: the target must still be a
-      # connected node running this runtime.
-      allow_previous = Application.get_env(:ouroboros, :forge_builder_allow_any_role)
-      Application.put_env(:ouroboros, :forge_builder_allow_any_role, true)
-
-      on_exit(fn ->
-        Application.put_env(:ouroboros, :forge_builder_allow_any_role, allow_previous)
-      end)
-
-      Application.put_env(:ouroboros, :forge_builder_node, absent)
-
-      assert BuildPeer.build(@capability, capability_source(), nil) ==
-               {:error, {:forge_builder_refused, absent, :node_not_connected}}
-    end
-
-    test "an unset builder leaves the local build path untouched" do
-      assert Application.get_env(:ouroboros, :forge_builder_node) == nil
-
-      assert {:ok, observed} =
-               BuildPeer.with_peer(fn peer ->
-                 {:ok, BuildPeer.call(peer, :erlang, :node, [])}
-               end)
-
-      assert observed == :nonode@nohost
-    end
-  end
-
   describe "least-privileged trees" do
     @tag timeout: 180_000
     test "a :builder node starts cluster formation and nothing else" do
@@ -1997,21 +1846,13 @@ defmodule Ouroboros.ClusterTest do
       assert is_pid(:erpc.call(builder, Process, :whereis, [Ouroboros.Cluster]))
 
       # None of the planes a core node owns exist here. A compromised builder has a
-      # compiler on it, not a fleet's teams, sessions, journals, or control plane.
+      # compiler on it, not a fleet's sessions, journals, or effect authority.
       for name <- [
             Ouroboros.Jido,
             Ouroboros.Agent.EffectLedger,
             Ouroboros.Mesh.Directory,
-            Ouroboros.Coding.Store,
             Ouroboros.Interactive.Store,
-            Ouroboros.Team.Store,
-            Ouroboros.Team.Supervisor,
-            Ouroboros.Orchestration.Store,
-            Ouroboros.Orchestration.Scheduler,
-            Ouroboros.Control.Store,
             Ouroboros.Control.Grants,
-            Ouroboros.Release.Runtime,
-            Ouroboros.Upgrade.NodeExecutor,
             Ouroboros.Upgrade.Rollout.Registry
           ] do
         assert :erpc.call(builder, Process, :whereis, [name]) == nil,
@@ -2025,8 +1866,7 @@ defmodule Ouroboros.ClusterTest do
       status = :erpc.call(builder, Ouroboros, :status, [])
       assert status.role == :builder
       assert status.availability.cluster == :available
-      assert status.availability.teams == :unavailable
-      assert status.availability.coding == :unavailable
+      assert status.availability.interactive == :unavailable
       assert status.availability.mesh == :unavailable
     end
   end
@@ -2218,7 +2058,6 @@ defmodule Ouroboros.ClusterTest do
         "OUROBOROS_CLUSTER_HOSTS",
         "OUROBOROS_ALLOW_INSECURE_DIST",
         "OUROBOROS_COOKIE_FILE",
-        "OUROBOROS_FORGE_BUILDER_NODE",
         "OUROBOROS_UPGRADE_TRUSTED_SIGNERS"
       ]
 
@@ -2254,13 +2093,11 @@ defmodule Ouroboros.ClusterTest do
       assert prod_config()[:ouroboros][:node_role] == :core
     end
 
-    test "role and builder are read from the environment and refused when unrecognized" do
+    test "the role is read from the environment and refused when unrecognized" do
       System.put_env("OUROBOROS_NODE_ROLE", "builder")
-      System.put_env("OUROBOROS_FORGE_BUILDER_NODE", "builder-1@10.0.0.20")
 
       config = prod_config()[:ouroboros]
       assert config[:node_role] == :builder
-      assert config[:forge_builder_node] == :"builder-1@10.0.0.20"
 
       System.put_env("OUROBOROS_NODE_ROLE", "root")
       assert_raise RuntimeError, ~r/OUROBOROS_NODE_ROLE/, fn -> prod_config() end
@@ -2486,7 +2323,7 @@ defmodule Ouroboros.ClusterTest do
   defp reset_session_owner_evidence! do
     :sys.replace_state(Ouroboros.Cluster.Monitor, fn state ->
       state
-      |> Map.put(:session_owners, %{interactive: MapSet.new(), coding: MapSet.new()})
+      |> Map.put(:session_owners, %{interactive: MapSet.new()})
       |> Map.put(:session_owner_evidence, :reliable)
     end)
   end
@@ -2494,7 +2331,11 @@ defmodule Ouroboros.ClusterTest do
   defp start_app_peer!(env \\ []) do
     peer_node = start_bare_peer!()
 
-    put_peer_env!(peer_node, :coding_storage, {Jido.Storage.ETS, table: peer_table(peer_node)})
+    put_peer_env!(
+      peer_node,
+      :interactive_storage,
+      {Jido.Storage.ETS, table: peer_table(peer_node)}
+    )
 
     Enum.each(env, fn {key, value} -> put_peer_env!(peer_node, key, value) end)
 
@@ -2575,7 +2416,7 @@ defmodule Ouroboros.ClusterTest do
     # spec. Restore the peer-local test store before the least-privilege tree boots.
     put_peer_env!(
       peer_node,
-      :coding_storage,
+      :interactive_storage,
       {Jido.Storage.ETS, table: peer_table(peer_node)}
     )
 
@@ -2629,8 +2470,8 @@ defmodule Ouroboros.ClusterTest do
     :ok =
       :peer.call(peer, Application, :put_env, [
         :ouroboros,
-        :coding_storage,
-        {Jido.Storage.ETS, table: :ouroboros_formation_coding}
+        :interactive_storage,
+        {Jido.Storage.ETS, table: :ouroboros_formation_interactive}
       ])
   end
 
@@ -2669,34 +2510,6 @@ defmodule Ouroboros.ClusterTest do
     File.mkdir_p!(dir)
     on_exit(fn -> File.rm_rf(dir) end)
     dir
-  end
-
-  defp unload(module) do
-    :code.delete(module)
-    :code.soft_purge(module)
-    :ok
-  end
-
-  defp capability_source do
-    """
-    defmodule #{inspect(@capability)} do
-      @vsn 1
-
-      def double(n) when is_integer(n), do: n * 2
-    end
-    """
-  end
-
-  defp capability_test_source do
-    """
-    defmodule Ouroboros.Capability.RemotelyBuiltTest do
-      use ExUnit.Case, async: false
-
-      test "doubles" do
-        assert #{inspect(@capability)}.double(21) == 42
-      end
-    end
-    """
   end
 
   defp unique_id(prefix), do: "#{prefix}-#{System.unique_integer([:positive])}"

@@ -50,9 +50,6 @@ defmodule Ouroboros.Web.Live.SettingsLive do
       |> assign(:account, nil)
       |> assign(:login, nil)
       |> assign(:polling_account?, false)
-      |> assign(:grok_account, nil)
-      |> assign(:grok_login, nil)
-      |> assign(:polling_grok_account?, false)
       |> assign(:credential_dialog, nil)
       |> assign(:credential_error, nil)
       |> assign(:notice, nil)
@@ -89,28 +86,21 @@ defmodule Ouroboros.Web.Live.SettingsLive do
            detail: "Open the operate-scope Ouroboros web surface to change session defaults."
          )}
 
-      not available_provider?(socket.assigns.providers, form.provider) ->
-        {:noreply, refuse(socket, "Choose an available AI provider before saving defaults.")}
-
       true ->
-        case NewSession.start_params(form, field(socket)) do
-          {:ok, stated} ->
-            case Prefs.write(socket.assigns.data_dir, Map.delete(stated, "id")) do
-              :ok ->
-                {:noreply,
-                 socket
-                 |> assign(:notice, "Session defaults saved for this Ouroboros runtime.")
-                 |> assign(:refusal, nil)}
+        stated = NewSession.start_params(form, field(socket))
 
-              {:error, _reason} ->
-                {:noreply,
-                 refuse(socket, "The defaults could not be stored.",
-                   detail: "The runtime log has the filesystem reason."
-                 )}
-            end
+        case Prefs.write(socket.assigns.data_dir, Map.delete(stated, "id")) do
+          :ok ->
+            {:noreply,
+             socket
+             |> assign(:notice, "Session defaults saved for this Ouroboros runtime.")
+             |> assign(:refusal, nil)}
 
-          {:error, message} ->
-            {:noreply, refuse(socket, message)}
+          {:error, _reason} ->
+            {:noreply,
+             refuse(socket, "The defaults could not be stored.",
+               detail: "The runtime log has the filesystem reason."
+             )}
         end
     end
   end
@@ -137,24 +127,14 @@ defmodule Ouroboros.Web.Live.SettingsLive do
   # ------------------------------------------------------------------------------------
 
   def handle_event("connect-chatgpt", _params, socket) do
-    case Ouroboros.Web.Live.AccountConnection.connect(socket, :chatgpt, &call/3, @account_poll) do
+    case Ouroboros.Web.Live.AccountConnection.connect(socket, &call/3, @account_poll) do
       {:ok, updated} -> {:noreply, clear_feedback(updated)}
       {:error, updated} -> {:noreply, updated}
     end
   end
 
   def handle_event("cancel-chatgpt", _params, socket),
-    do: {:noreply, Ouroboros.Web.Live.AccountConnection.cancel(socket, :chatgpt, &call/3)}
-
-  def handle_event("connect-grok", _params, socket) do
-    case Ouroboros.Web.Live.AccountConnection.connect(socket, :grok, &call/3, @account_poll) do
-      {:ok, updated} -> {:noreply, clear_feedback(updated)}
-      {:error, updated} -> {:noreply, updated}
-    end
-  end
-
-  def handle_event("cancel-grok", _params, socket),
-    do: {:noreply, Ouroboros.Web.Live.AccountConnection.cancel(socket, :grok, &call/3)}
+    do: {:noreply, Ouroboros.Web.Live.AccountConnection.cancel(socket, &call/3)}
 
   def handle_event("open-anthropic-key", _params, socket),
     do: open_credential(socket, :anthropic, "credentials.anthropic.set")
@@ -209,13 +189,7 @@ defmodule Ouroboros.Web.Live.SettingsLive do
 
   @impl true
   def handle_info(:poll_account, socket),
-    do:
-      {:noreply,
-       Ouroboros.Web.Live.AccountConnection.poll(socket, :chatgpt, &call/3, @account_poll)}
-
-  def handle_info(:poll_grok_account, socket),
-    do:
-      {:noreply, Ouroboros.Web.Live.AccountConnection.poll(socket, :grok, &call/3, @account_poll)}
+    do: {:noreply, Ouroboros.Web.Live.AccountConnection.poll(socket, &call/3, @account_poll)}
 
   def handle_info(_message, socket), do: {:noreply, socket}
 
@@ -232,8 +206,6 @@ defmodule Ouroboros.Web.Live.SettingsLive do
     |> assign(:loaded?, true)
     |> read_account()
     |> maybe_poll_account()
-    |> read_grok_account()
-    |> maybe_poll_grok_account()
   end
 
   defp load_providers(socket) do
@@ -243,7 +215,6 @@ defmodule Ouroboros.Web.Live.SettingsLive do
 
         socket
         |> assign(:providers, rows)
-        |> assign(:form, choose_provider(socket.assigns.form, rows))
 
       refused ->
         assign(socket, :providers_error, refusal_message(refused))
@@ -268,16 +239,10 @@ defmodule Ouroboros.Web.Live.SettingsLive do
     do: assign(socket, :form, NewSession.promote(socket.assigns.form, field(socket)))
 
   defp read_account(socket),
-    do: Ouroboros.Web.Live.AccountConnection.read(socket, :chatgpt, &call/3)
-
-  defp read_grok_account(socket),
-    do: Ouroboros.Web.Live.AccountConnection.read(socket, :grok, &call/3)
+    do: Ouroboros.Web.Live.AccountConnection.read(socket, &call/3)
 
   defp maybe_poll_account(socket),
-    do: Ouroboros.Web.Live.AccountConnection.maybe_poll(socket, :chatgpt, @account_poll)
-
-  defp maybe_poll_grok_account(socket),
-    do: Ouroboros.Web.Live.AccountConnection.maybe_poll(socket, :grok, @account_poll)
+    do: Ouroboros.Web.Live.AccountConnection.maybe_poll(socket, @account_poll)
 
   defp browse(socket, path) do
     params = if is_binary(path), do: %{"path" => path}, else: %{}
@@ -355,8 +320,7 @@ defmodule Ouroboros.Web.Live.SettingsLive do
   defp read_form(params, form) do
     %{
       form
-      | provider: Map.get(params, "provider", form.provider),
-        workspace: Map.get(params, "workspace", form.workspace),
+      | workspace: Map.get(params, "workspace", form.workspace),
         model_text: Map.get(params, "model_text", form.model_text),
         model_search: Map.get(params, "model_search", form.model_search),
         model_choice: model_choice(params, form),
@@ -364,22 +328,8 @@ defmodule Ouroboros.Web.Live.SettingsLive do
     }
   end
 
-  defp choose_provider(form, rows) do
-    available = Enum.filter(rows, & &1.detected?)
-
-    provider =
-      cond do
-        Enum.any?(available, &(&1.name == form.provider)) -> form.provider
-        Enum.any?(available, &(&1.name == "native")) -> "native"
-        available != [] -> hd(available).name
-        true -> nil
-      end
-
-    %{form | provider: provider}
-  end
-
   defp reconcile(form, socket) do
-    field = NewSession.model_field(socket.assigns.catalogue, form.provider)
+    field = NewSession.model_field(socket.assigns.catalogue)
 
     form =
       if NewSession.offers?(field, form.model_choice),
@@ -394,13 +344,7 @@ defmodule Ouroboros.Web.Live.SettingsLive do
   defp model_choice(%{"model_choice" => value}, _form), do: NewSession.choice(value)
   defp model_choice(_params, form), do: form.model_choice
 
-  defp field(socket),
-    do: NewSession.model_field(socket.assigns.catalogue, socket.assigns.form.provider)
-
-  defp available_provider?(rows, provider) when is_list(rows),
-    do: Enum.any?(rows, &(&1.name == provider and &1.detected?))
-
-  defp available_provider?(_rows, _provider), do: false
+  defp field(socket), do: NewSession.model_field(socket.assigns.catalogue)
 
   defp credential(rows, provider, env) when is_list(rows) do
     rows
@@ -440,7 +384,7 @@ defmodule Ouroboros.Web.Live.SettingsLive do
       models = Enum.find(model_rows, &(to_string(&1[:provider]) == row.name))
 
       %{
-        name: provider_label(row.name),
+        name: NewSession.provider_route().name,
         key: row.name,
         available?: row.detected?,
         note: row.note,
@@ -455,7 +399,7 @@ defmodule Ouroboros.Web.Live.SettingsLive do
 
   defp clear_feedback(socket), do: socket |> assign(:notice, nil) |> assign(:refusal, nil)
 
-  defp refuse(socket, message, opts \\ []) do
+  defp refuse(socket, message, opts) do
     socket
     |> assign(:notice, nil)
     |> assign(:refusal, %{message: message, detail: opts[:detail]})
@@ -467,7 +411,7 @@ defmodule Ouroboros.Web.Live.SettingsLive do
 
   @impl true
   def render(assigns) do
-    field = NewSession.model_field(assigns.catalogue, assigns.form.provider)
+    field = NewSession.model_field(assigns.catalogue)
 
     assigns =
       assigns
@@ -479,10 +423,6 @@ defmodule Ouroboros.Web.Live.SettingsLive do
       )
       |> assign(:intent, NewSession.model_intent(assigns.form, field))
       |> assign(:account_card, NewSession.account_card(assigns.account, assigns.login))
-      |> assign(
-        :grok_account_card,
-        NewSession.grok_account_card(assigns.grok_account, assigns.grok_login)
-      )
       |> assign(:anthropic, credential(assigns.providers, "anthropic", "ANTHROPIC_API_KEY"))
       |> assign(:openai, credential(assigns.providers, "openai", "OPENAI_API_KEY"))
       |> assign(:xai, credential(assigns.providers, "xai", "XAI_API_KEY"))
@@ -527,13 +467,6 @@ defmodule Ouroboros.Web.Live.SettingsLive do
               phx-change="change-defaults"
               phx-submit="save-defaults"
             >
-              <NewSessionLive.provider_field
-                rows={@providers}
-                error={@providers_error}
-                invalid={false}
-                loaded={@loaded?}
-                chosen={@form.provider}
-              />
               <NewSessionLive.model_field
                 field={@field}
                 visible={@visible}
@@ -581,14 +514,6 @@ defmodule Ouroboros.Web.Live.SettingsLive do
                   connect="connect-chatgpt"
                   cancel="cancel-chatgpt"
                   can_connect={Call.available?(@scope, "account.login.start")}
-                />
-                <.subscription_card
-                  service="SpaceXAI"
-                  detail="Grok Build models"
-                  card={@grok_account_card}
-                  connect="connect-grok"
-                  cancel="cancel-grok"
-                  can_connect={Call.available?(@scope, "grok.account.login.start")}
                 />
               </div>
             </div>
@@ -866,14 +791,6 @@ defmodule Ouroboros.Web.Live.SettingsLive do
 
   defp credential_copy(:missing, _source), do: " is not available to the service. "
   defp credential_copy(:checking, _source), do: " readiness has not been reported yet. "
-
-  defp provider_label("native"), do: "Ouroboros AI"
-  defp provider_label("claude"), do: "Claude Code"
-  defp provider_label("gemini"), do: "Gemini CLI"
-  defp provider_label("grok"), do: "Grok Build"
-  defp provider_label("opencode"), do: "OpenCode"
-  defp provider_label("zai"), do: "Z.ai"
-  defp provider_label(provider), do: provider
 
   defp model_count(nil), do: "Model list unavailable"
   defp model_count(1), do: "1 model"

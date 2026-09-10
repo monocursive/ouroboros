@@ -2,7 +2,7 @@ defmodule Ouroboros.Agent.EffectLedger do
   @moduledoc """
   Durable, content-minimized history for grant-gated agent effects.
 
-  `Ouroboros.Agent.Effects.Runner` records an admitted attempt here before it starts
+  `Ouroboros.Provider.Native.Tools.Forge` records an admitted attempt here before it starts
   the supervised work. The same record is settled after the work finishes. Refusals
   are recorded as terminal entries before they are returned. This ordering makes the
   ledger an authority boundary rather than best-effort telemetry: if the initial
@@ -57,6 +57,40 @@ defmodule Ouroboros.Agent.EffectLedger do
   which is the property this arithmetic exists for. What it costs is a hundred and sixty-odd
   slots of the high-volume kinds' quota on such a node, and that is the right trade for the
   only durable record of what widened this node's permission surface.
+
+  ## A checkpoint this build cannot decode
+
+  Checkpoints are decoded with `[:safe]`, which refuses to *create* an atom, and entries are
+  written as plain terms — `sanitize_identity/1` keeps atoms as atoms and `@result_fields`
+  takes result fields verbatim. An entry written by an older build can therefore name
+  something this build has never interned: a `forge` result's `module` under the BEAM forge
+  lane was a runtime-minted capability module atom, a name that was never in this repo's
+  source and that no build can intern again now that the lane is gone. One such entry stops
+  the whole file decoding.
+
+  Such a file is *quarantined*, not fatal: `Ouroboros.Storage.DurableFile`'s
+  `get_checkpoint_or_quarantine/2` moves it aside as
+  `<name>.quarantined-<unix>.term` under the ledger's `checkpoints/` directory, with every
+  byte intact, logs one error line naming that path, and this store starts empty at sequence
+  1. An operator reads the old history out of those bytes — `:erlang.binary_to_term/1`
+  without `[:safe]`, on any VM, is enough, and that is exactly the read this store may not
+  perform, because creating an atom for whatever a file happens to name is the hazard rather
+  than the remedy.
+
+  What that costs is stated plainly. Sequence numbers restart at 1, so a sequence in the new
+  history names a different entry than the same sequence in the quarantined bytes. `ledger.export`'s
+  hash chain is not affected, because there is no stored chain to cut: the chain is computed
+  over the entries of one answer from a published seed (`Gateway.Methods.Encode.chain/1`), so
+  the export after a quarantine is a complete, self-verifying chain over the history this node
+  actually holds, and it claims nothing about the history it does not. A client comparing two
+  exports across a quarantine sees the count fall and the sequences repeat, which is the
+  visible fact, not a hidden one.
+
+  A checkpoint that is unreadable for any *other* reason still stops this store —
+  `{:effect_ledger_checkpoint_unreadable, reason}` for an I/O or content-integrity failure,
+  `{:unsupported_effect_ledger_checkpoint, version}` for a version this build does not know.
+  Those say the bytes could not be read, or should not be; only `:invalid_term` says this
+  build cannot interpret them.
   """
 
   use GenServer
@@ -105,7 +139,7 @@ defmodule Ouroboros.Agent.EffectLedger do
     # I1. One tool call the native agent was admitted to make, checkpointed before the
     # tool runs. `subject` is what the call is *about* — the paths it names, a digest of
     # the command line, the hosts it would reach, the MCP server and tool behind an
-    # `mcp__*` name, the Computer Use app and window — and never what any of them contain.
+    # `mcp__*` name — and never what any of them contain.
     # `sanitize_subject/1` below is what makes that true here rather than at the call
     # site's discretion.
     tool_call: [
@@ -739,9 +773,6 @@ defmodule Ouroboros.Agent.EffectLedger do
     |> put_if(:hosts, subject_list(Map.get(subject, :hosts), @subject_hosts))
     |> put_if(:mcp_server, subject_name(Map.get(subject, :mcp_server)))
     |> put_if(:mcp_tool, subject_name(Map.get(subject, :mcp_tool)))
-    |> put_if(:app, subject_name(Map.get(subject, :app)))
-    |> put_if(:desktop_action, subject_name(Map.get(subject, :desktop_action)))
-    |> put_if(:window_id, subject_name(Map.get(subject, :window_id)))
     # W13. Lane W's two identities for one tool call: the name the rollout register holds,
     # and the sha256 of the component bytes a signature bound. The digest goes through
     # `subject_digest/1` like a command's, so a value that is not 64 lower-case hex is
@@ -1021,8 +1052,14 @@ defmodule Ouroboros.Agent.EffectLedger do
     end
   end
 
+  # An undecodable checkpoint is quarantined rather than fatal; see the moduledoc. Only the
+  # durable adapter can hold one — an ETS table holds terms, not bytes — so only it is asked
+  # for the quarantining read.
+  defp checkpoint_reader(Ouroboros.Storage.DurableFile), do: :get_checkpoint_or_quarantine
+  defp checkpoint_reader(_adapter), do: :get_checkpoint
+
   defp load(adapter, adapter_opts) do
-    case adapter_call(adapter, :get_checkpoint, [@store_key, adapter_opts]) do
+    case adapter_call(adapter, checkpoint_reader(adapter), [@store_key, adapter_opts]) do
       :not_found ->
         {:ok, %{entries: [], next_sequence: 1}}
 

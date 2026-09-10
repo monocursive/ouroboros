@@ -1,30 +1,30 @@
 # Runtime simplification, September 2026
 
-The audit led to shared mechanisms at existing boundaries. Batch tasks, interactive
-sessions, native subagents, durable teams, and BEAM/WASM upgrades retain their distinct
-lifetimes and APIs.
+The audit led to shared mechanisms at existing boundaries. Interactive sessions, native
+subagents, and the WebAssembly capability lane retain their distinct lifetimes and APIs.
+
+> The coding, team, orchestration and control planes this document also covered were
+> deleted in September 2026; see [the core reduction](proposals/core.md) §3 D3. The
+> merge of the interactive and coding persistence schemas it once proposed is moot.
 
 ## Ownership and restart matrix
 
 The root remains `rest_for_one`. Its durable directory owner, effect ledger, model
 admission, permission authorities, stores, and workspace manager are upstream of their
-consumers. Coding/interactive/team stores remain above the workspace manager because it
-reads their checkpoints to reconstruct reservations before admitting work.
+consumers. The interactive store remains above the workspace manager because it reads
+its checkpoints to reconstruct reservations before admitting work.
 
 | Replaced owner | Must restart | Must survive |
 |---|---|---|
 | Durable directory owner or effect ledger | All execution consumers | No consumer may retain stale authority |
 | Model admission | Jido and downstream execution consumers | Effect ledger |
 | Workspace manager | Session coordinators and downstream surfaces | Durable stores |
-| Coding registry | Coding task supervisor and recovery | Workspace reservations, interactive sessions, scheduler |
-| Interactive registry | Interactive task supervisor and recovery | Coding sessions and workspace reservations |
-| Automation store | Later automation owners | Session planes and permission authorities |
-| CodeIntel supervisor after exhausting its restart budget | Its language-server pool | WASM, Desktop, MCP and session owners |
-| WASM supervisor | Its pool, then boot recovery | Desktop, MCP, CodeIntel and web |
+| Interactive registry | Interactive task supervisor and recovery | Workspace reservations |
+| WASM supervisor | Its pool, then boot recovery | MCP and web |
 | Gateway or web | Its own connections | Durable owners and unrelated helpers |
 
-`ApplicationRecoveryTest` injects authority and registry failures and exhausts the
-CodeIntel restart budget. `McpTest` exhausts the MCP budget and checks surviving peers. The WASM
+`ApplicationRecoveryTest` injects authority and registry failures.
+`McpTest` exhausts the MCP budget and checks surviving peers. The WASM
 boot task remains transient and follows the WASM supervisor in its own `rest_for_one`
 subtree. This is different from the temporary worktree reconciliation task.
 
@@ -37,24 +37,25 @@ boundary. Its linked acceptor waits for the runtime application to finish starti
 before handling requests. An immediate `runtime.shutdown` therefore cannot interrupt
 application startup and bypass removal of the gateway and runtime-owner markers.
 
-`config :ouroboros, automation_enabled: false` omits the orchestration/Control stores,
-scheduler and optional Control server. The default is `true`, preserving existing
-behavior. Permission rules and grants, native subagents, coding, interactive sessions,
-and teams remain available. Status reports orchestration as disabled. Disabling this
-setting does not delete saved plans or runs; re-enabling loads their checkpoints.
-
 ## Checkpoint publication
 
-`Storage.Records` is shared by Coding, Interactive, Team, Orchestration, and Control.
-Owners retain validation, version checks, and domain transitions. Updating an existing
-record writes only that record, including its own retained history.
+`Storage.Records` is the per-record store, and `Interactive.Store` is the only store built
+on it: one `Storage.DurableFile` checkpoint per session plus a versioned index. Every other
+durable store — grants, permissions, the effect ledger, policy promotion, the rollout
+register, the signing journal, the epoch watermark, the cluster's session-owner record —
+keeps one aggregate checkpoint. The owner retains validation, version checks, and domain
+transitions. Updating an existing record writes only that record, including its own
+retained history.
 
 - Creation: sync the record, then publish its id in the versioned index.
 - Deletion: publish the reduced index, then remove orphan files.
 - Migration: retain the legacy aggregate until every record is written and the new
   index is published. Interactive retains its existing `:session` record-key format.
 - Corruption: fail closed on an unreadable index; quarantine an unreadable individual
-  record, keeping its bytes for inspection and loading the remaining records.
+  record, keeping its bytes for inspection and loading the remaining records. The
+  aggregate stores that can hold a name no build can spell — grants and the effect
+  ledger — apply the same doctrine at file granularity; see "Durable checkpoints across
+  builds" below.
 - Ambiguous commit: stop the store for reconciliation; never claim a definite refusal
   or undo a possibly published record.
 
@@ -65,7 +66,10 @@ not change `Storage.DurableFile`'s file/rename/directory-sync guarantees.
 
 ## Runtime event semantics
 
-`EventPresentation` owns provider-alias interpretation outside the web namespace. Gateway
+`EventPresentation` owns the runtime's event projection. It used to own provider-alias
+interpretation as well — the camelCase ACP spellings, the Codex and Claude key variants —
+and lost it in September 2026 with the wrapped vendor providers themselves
+([the core reduction](proposals/core.md) §3 D2): one provider writes one spelling. Gateway
 live events, backlogs, and replay results add `semantic` for supported common concepts:
 text, thinking, calls/results, usage, approvals, and terminal outcomes. A record has
 `version: 1`, a `kind`, and `data`. It is computed from the redacted, transport-bounded
@@ -83,20 +87,19 @@ cell tests separately pin local rendering behavior.
 
 ## Other shared mechanisms
 
-- `ProcessEnvironment` applies credential checks and explicit Port unsets. Exec, WASM,
-  and Desktop retain separate allowlists. Desktop inherits only execution/locale paths;
-  macOS bootstrap-session identity is an OS property, not arbitrary environment data.
+- `ProcessEnvironment` applies credential checks and explicit Port unsets. Exec and WASM
+  retain separate allowlists.
 - `Transport.JsonLines` owns bounded incremental framing; each pipe retains its limits,
-  buffer, noise budget, and protocol-specific encoders. LSP framing remains separate.
+  buffer, noise budget, and protocol-specific encoders.
 - `Session.Recovery`, `Session.Routing`, and `Workspace.Admission` own the common sweep,
   routing budgets, and bounded retry for the same owner's stale lease.
-- `Control.Permissions.Engine` maps missing/failed/malformed engines to asks. Native
-  plan-mode refusal and transport-specific approval delivery remain separate. An engine
-  failure does not supply a persistent-rule suggestion.
+- `Control.Permissions.Engine` maps missing/failed/malformed engines to asks. The native
+  plan-mode refusal remains separate. An engine failure does not supply a persistent-rule
+  suggestion.
 - `ToolAttempt` carries the validated call, classification, effect id, hook context and
-  authority together through live admission and execution. Rewrites and Desktop target
-  confirmation replace the call and subject together. Replay substitutes recorded
-  results before constructing a live attempt.
+  authority together through live admission and execution. A hook rewrite replaces the
+  call and subject together. Replay substitutes recorded results before constructing a
+  live attempt.
 - The repetition guard bounds consecutive equivalent calls, permitting intervening
   edits; the turn iteration budget still bounds alternating calls.
 - `Gateway.Methods.Contract` declares metadata, parameter envelopes, requirements, and
@@ -109,9 +112,26 @@ cell tests separately pin local rendering behavior.
 - The CLI's `RuntimeConnection` and `Ownership` distinguish attached runtimes from owned
   children. Explicit asynchronous error cleanup and exit handling act only on owned
   children; detach relinquishes ownership. Spawn locks and process-birth checks remain
-  in the existing startup path. Fleet service installation and identity checks live in
-  `fleet/service.rs`, behind the existing public facade.
+  in the existing startup path. Fleet service installation was deleted with the rest of
+  the enrollment product (`proposals/core.md` §3).
 
-The separate BEAM and WASM upgrade engines remain supported. Removing an extension
-lane, merging batch and interactive persistence schemas, or replacing the effect ledger
-with a new storage engine would require a separate compatibility and product decision.
+## Durable checkpoints across builds
+
+Every `Storage.DurableFile` checkpoint is decoded with
+`:erlang.binary_to_term(binary, [:safe])`, which refuses to create an atom, so a build
+that deletes the last module spelling an atom has changed the durable format whatever
+else it did. Three mechanisms, one per kind of name, keep a data directory written by an
+older build readable: `Ouroboros.Storage.RetiredAtoms` for a name no module of this build
+spells any more; `DurableFile.get_checkpoint_or_quarantine/2` for a name no build can
+spell — the node that wrote a record, or a capability module minted at runtime; and
+`DurableFile.ensure_build_loaded/0` for a name this build spells in a module that has not
+loaded yet. The cost of a miss depends on the store: a `Storage.Records` store drops one
+record from its index and boots, and a whole-file store would lose the file, which is why
+grants and the effect ledger quarantine the file and start empty rather than stop the
+node. The contract, both blast radii, and what an operator sees afterwards are in
+[ARCHITECTURE.md](ARCHITECTURE.md#durable-checkpoints), and `make boot-gate` is the
+proof: a data directory written by `dev` at `3bc8887` booting on this tree, twenty times.
+
+There is one extension lane, WebAssembly, and one persistence schema for sessions, the
+interactive one. Adding a second lane, or replacing the effect ledger with a different
+storage engine, would require a separate compatibility and product decision.

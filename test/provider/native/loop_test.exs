@@ -200,7 +200,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
 
       names = Enum.map(request.tools, & &1.name)
 
-      assert Enum.take(names, 15) == [
+      assert Enum.take(names, 14) == [
                "read",
                "write",
                "edit",
@@ -210,7 +210,6 @@ defmodule Ouroboros.Provider.Native.LoopTest do
                "glob",
                "ls",
                "web_fetch",
-               "code_intel",
                "ask_user",
                "agent",
                "agent_result",

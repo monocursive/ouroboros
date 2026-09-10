@@ -88,7 +88,9 @@ defmodule Ouroboros.Session.Recovery do
   defp schedule_recovery(interval), do: Process.send_after(self(), :recover, interval)
 
   defp recoverable?(task) do
-    task.node == node() and not task.terminal? and old_enough_to_recover?(task.updated_at)
+    task.node == node() and not task.terminal? and
+      not Map.get(task, :removed_provider?, false) and
+      old_enough_to_recover?(task.updated_at)
   end
 
   defp old_enough_to_recover?(updated_at) do

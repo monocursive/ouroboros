@@ -145,12 +145,6 @@ if config_env() == :prod and is_nil(System.get_env("OUROBOROS_COLLECTOR_CONFIG")
     """
   end
 
-  forge_builder_node =
-    case env_value.("OUROBOROS_FORGE_BUILDER_NODE") do
-      nil -> nil
-      name -> String.to_atom(name)
-    end
-
   # A `:signer` node's whole reason to exist is holding a key this application cannot
   # reach. Checking that here, before any module of this application is guaranteed
   # loadable, means the misconfiguration an operator is most likely to make — deploying
@@ -188,39 +182,10 @@ if config_env() == :prod and is_nil(System.get_env("OUROBOROS_COLLECTOR_CONFIG")
       _other -> raise "OUROBOROS_SIGNING_RATE_LIMIT_PER_MINUTE must be a positive integer"
     end
 
-  # Requiring a signed evaluation spec is the recommended production posture: it makes
-  # "this capability declared, inside the signature, how it would be judged" a
-  # precondition of getting a signature at all. Production defaults to on; an operator
-  # who needs the historical behaviour sets OUROBOROS_SIGNING_REQUIRE_EVAL=false.
-  signing_require_eval =
-    case env_value.("OUROBOROS_SIGNING_REQUIRE_EVAL") do
-      nil ->
-        true
-
-      value when value in ["true", "1"] ->
-        true
-
-      value when value in ["false", "0"] ->
-        false
-
-      other ->
-        raise "OUROBOROS_SIGNING_REQUIRE_EVAL must be true or false, got: #{inspect(other)}"
-    end
-
   signing_node =
     case env_value.("OUROBOROS_SIGNING_NODE") do
       nil -> nil
       name -> String.to_atom(name)
-    end
-
-  # Naming a signer node is the operator action that gives this cluster a signing
-  # capability. Without it the forge keeps the shipped refusal, so a production release
-  # still acquires signing deliberately rather than by default.
-  forge_signer =
-    if is_nil(signing_node) do
-      Ouroboros.Upgrade.Forge.Signer.Deny
-    else
-      {Ouroboros.Upgrade.Forge.Signer.Remote, [node: signing_node, timeout: signing_call_timeout]}
     end
 
   workspace_roots =
@@ -240,62 +205,6 @@ if config_env() == :prod and is_nil(System.get_env("OUROBOROS_COLLECTOR_CONFIG")
       else: workspace_roots ++ [Path.join(data_dir, "worktrees")]
 
   _ = File.mkdir_p(Path.join(data_dir, "worktrees"))
-
-  orchestration_concurrency =
-    case Integer.parse(System.get_env("OUROBOROS_ORCHESTRATION_CONCURRENCY") || "4") do
-      {value, ""} when value > 0 -> value
-      _other -> raise "OUROBOROS_ORCHESTRATION_CONCURRENCY must be a positive integer"
-    end
-
-  # The forge lane of the orchestration plane is off unless a workspace is named.
-  # Nodes default to the local node at execution time rather than here, because
-  # distribution may not have started when this file is evaluated.
-  forge_workspace =
-    case System.get_env("OUROBOROS_ORCHESTRATION_FORGE_WORKSPACE") do
-      nil ->
-        nil
-
-      workspace ->
-        if Path.type(workspace) == :absolute do
-          workspace
-        else
-          raise "OUROBOROS_ORCHESTRATION_FORGE_WORKSPACE must be an absolute path"
-        end
-    end
-
-  forge_nodes =
-    case System.get_env("OUROBOROS_ORCHESTRATION_FORGE_NODES") do
-      nil ->
-        []
-
-      nodes ->
-        nodes |> String.split(",", trim: true) |> Enum.map(&String.to_atom(String.trim(&1)))
-    end
-
-  orchestration_forge_options =
-    cond do
-      is_nil(forge_workspace) ->
-        []
-
-      true ->
-        options =
-          if forge_nodes == [] do
-            [workspace: forge_workspace]
-          else
-            [workspace: forge_workspace, nodes: forge_nodes]
-          end
-
-        case env_value.("OUROBOROS_FORGE_SIGNER_ID") do
-          nil -> options
-          signer_id -> Keyword.put(options, :signer_id, signer_id)
-        end
-    end
-
-  # Letting a planner express a forge step is an explicit operator decision, and
-  # still not authority to deploy: signing and per-node signature verification
-  # are unchanged by it.
-  control_allow_forge_steps =
-    System.get_env("OUROBOROS_CONTROL_ALLOW_FORGE_STEPS") == "true"
 
   signer_format =
     "OUROBOROS_UPGRADE_TRUSTED_SIGNERS must be comma-separated " <>
@@ -337,16 +246,10 @@ if config_env() == :prod and is_nil(System.get_env("OUROBOROS_COLLECTOR_CONFIG")
 
   config :ouroboros,
     node_role: node_role,
-    forge_builder_node: forge_builder_node,
-    # Acknowledged session, team, and plan transitions must survive the crash that
-    # follows them — the same synced write the effect ledger uses.
-    coding_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "coding")},
+    # Acknowledged session transitions must survive the crash that follows them — the
+    # same synced write the effect ledger uses.
     interactive_storage:
       {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "interactive")},
-    team_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "teams")},
-    orchestration_storage:
-      {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "orchestration")},
-    control_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "control")},
     # The effect authority decides what agents may do to the cluster, so it is held to
     # the same synced write the mutation journals use: a grant that was acknowledged
     # must survive the crash that follows it, and a revocation must too.
@@ -372,9 +275,6 @@ if config_env() == :prod and is_nil(System.get_env("OUROBOROS_COLLECTOR_CONFIG")
     # unfinished acknowledged attempt from one that was never requested.
     effect_ledger_storage:
       {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "effect-ledger")},
-    upgrade_storage: {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "upgrades")},
-    release_storage:
-      {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "release-journal")},
     capability_storage:
       {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "capabilities")},
     # The epoch watermark must survive a crash between allocating a number and using it,
@@ -385,18 +285,11 @@ if config_env() == :prod and is_nil(System.get_env("OUROBOROS_COLLECTOR_CONFIG")
     # what this key has ever approved.
     signing_journal_storage:
       {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "signing-journal")},
-    forge_signer: forge_signer,
     signing_node: signing_node,
     signing_call_timeout: signing_call_timeout,
     signer_id: signer_id,
-    signing_require_eval: signing_require_eval,
     signing_rate_limit_per_minute: signing_rate_limit,
     workspace_allowed_roots: workspace_roots,
-    orchestration_max_concurrency: orchestration_concurrency,
-    orchestration_team_id: System.get_env("OUROBOROS_ORCHESTRATION_TEAM_ID"),
-    orchestration_worker_id: System.get_env("OUROBOROS_ORCHESTRATION_WORKER_ID"),
-    orchestration_forge_options: orchestration_forge_options,
-    control_allow_forge_steps: control_allow_forge_steps,
     upgrade_trust_policy: [
       allow_unsigned: false,
       trusted_signers: trusted_signers
@@ -523,56 +416,6 @@ case Ouroboros.Self.Posture.configure(
   :off -> :ok
   {:ok, settings} -> config :ouroboros, settings
   {:error, message} -> raise message
-end
-
-# Language servers are a liability as much as an asset — OpenCode turned theirs off by
-# default over memory and staleness, and Anthropic tells users to disable plugins under
-# pressure (R4 §1). So the two switches an operator reaches for under pressure are
-# environment variables, readable in every environment: turn the pool off entirely, and
-# lower the per-host memory budget. Everything else stays in `config/config.exs`, where a
-# deployment can set it deliberately. A malformed value refuses the boot rather than
-# quietly removing the bound it was meant to set.
-code_intel_enabled =
-  case gateway_value.("OUROBOROS_CODE_INTEL") do
-    nil -> true
-    value when value in ["1", "true"] -> true
-    value when value in ["0", "false"] -> false
-    other -> raise "OUROBOROS_CODE_INTEL must be 1, 0, true, or false, got: #{other}"
-  end
-
-code_intel_memory_budget =
-  case gateway_value.("OUROBOROS_CODE_INTEL_MEMORY_BUDGET_MB") do
-    nil ->
-      nil
-
-    value ->
-      case Integer.parse(value) do
-        {megabytes, ""} when megabytes > 0 -> megabytes * 1024 * 1024
-        _other -> raise "OUROBOROS_CODE_INTEL_MEMORY_BUDGET_MB must be a positive integer"
-      end
-  end
-
-config :ouroboros, :code_intel, enabled: code_intel_enabled
-
-if code_intel_memory_budget do
-  config :ouroboros, :code_intel, memory_budget_bytes: code_intel_memory_budget
-end
-
-# Computer Use is host-privileged. Env 1/0 is the explicit switch; when unset the
-# helper-on-disk predicate in `Desktop.enabled?/0` is the opt-in. Do not force
-# `enabled: false` here — that made a GUI adopt a daemon that could never show the tools.
-case gateway_value.("OUROBOROS_COMPUTER_USE") do
-  nil ->
-    :ok
-
-  value when value in ["1", "true"] ->
-    config :ouroboros, :computer_use, enabled: true
-
-  value when value in ["0", "false"] ->
-    config :ouroboros, :computer_use, enabled: false
-
-  other ->
-    raise "OUROBOROS_COMPUTER_USE must be 1, 0, true, or false, got: #{other}"
 end
 
 if System.get_env("OUROBOROS_GATEWAY") == "1" do

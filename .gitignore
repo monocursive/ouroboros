@@ -35,6 +35,8 @@ ouroboros-*.tar
 
 # Release tarballs (built via "mix release --tar"), which is how a node's artifact ships.
 *.tar.gz
+# The integration fixture is a committed record, not a built artifact (scripts/fixture/boot_gate.sh).
+!/test/support/integration_fixture/fixture-datadir.tar.gz
 
 # The Rust TUI crate's build directory.
 /tui/target/
@@ -54,20 +56,7 @@ ouroboros-*.tar
 /tui/wasm/guest/target/
 /tui/wasm/guest/examples/*/target/
 
-# Where `make dist` names a built client for the platform it can run on. The artifact of
-# record is the one a tagged build uploads, not a copy somebody made locally. The three
-# things under dist/ that are *source* rather than output — the release signing public
-# key `ouro update` compiles in, the Homebrew formula template, and the container
-# definition `make dist-linux` builds the Linux x86-64 client with — are kept.
-/dist/*
-!/dist/release.pub
-!/dist/homebrew/
-!/dist/docker/
-
-
-# Built Computer Use helper; never a source artifact.
-/priv/computer-use/
-/priv/sandbox/
+# Built helpers; never source artifacts.
 /priv/wasm/
 
 # The two JavaScript bundles `mix web.assets` copies out of the dependencies on every

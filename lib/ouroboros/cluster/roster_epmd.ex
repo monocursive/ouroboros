@@ -3,12 +3,12 @@ defmodule Ouroboros.Cluster.RosterEpmd do
   libcluster's Epmd strategy with one difference: the host list is re-resolved on
   every connection sweep instead of frozen into the topology when formation starts.
 
-  `Cluster.Strategy.Epmd` reads `config[:hosts]` once, so a fleet whose roster grew
-  while this runtime was up — `ouro fleet add` on a live owner — was never dialed:
-  the new member appeared in the saved profile immediately, while the dialer kept the
-  list it was born with until the next restart. When the new member cannot dial inward
-  (a NATed owner is the common case), the mesh then never forms and the operator waits
-  forever. The inverse held too: a canceled member was dialed until restart.
+  `Cluster.Strategy.Epmd` reads `config[:hosts]` once, so a roster that grew while this
+  runtime was up was never dialed: the new member appeared in the saved profile
+  immediately, while the dialer kept the list it was born with until the next restart.
+  When the new member cannot dial inward (a NATed peer is the common case), the mesh
+  then never forms and the operator waits forever. The inverse held too: a removed
+  member was dialed until restart.
 
   Each sweep asks `Ouroboros.Cluster.membership_hosts/0` for the current list, which
   reads the saved fleet profile and falls back to the `OUROBOROS_CLUSTER_HOSTS` boot

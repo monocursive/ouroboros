@@ -1,89 +1,14 @@
-defmodule Ouroboros.Test.StubRun do
-  @moduledoc """
-  A deterministic stand-in for one supervised Harness run.
-
-  `Jido.Harness.Run` dispatches through `Jido.Harness.RunRegistry`, so registering
-  under a run id is enough to hold that boundary still: a provider that answers
-  `info` but wedges on `replay` is otherwise unreachable from a test.
-  """
-
-  use GenServer
-
-  alias Jido.Harness.RunInfo
-
-  def start_link(opts) do
-    GenServer.start_link(__MODULE__, opts, name: via(Keyword.fetch!(opts, :run_id)))
-  end
-
-  def via(run_id), do: {:via, Registry, {Jido.Harness.RunRegistry, run_id}}
-
-  @doc "Returns how many replay calls the stub has served since the last change."
-  def replay_calls(server), do: GenServer.call(server, :stub_replay_calls)
-
-  @doc "Replaces the replay reply and resets the call counter."
-  def set_replay(server, reply), do: GenServer.call(server, {:stub_set_replay, reply})
-
-  @impl true
-  def init(opts) do
-    {:ok,
-     %{
-       run_id: Keyword.fetch!(opts, :run_id),
-       provider: Keyword.get(opts, :provider, :ouroboros_test),
-       state: Keyword.get(opts, :state, :running),
-       replay: Keyword.get(opts, :replay, {:ok, []}),
-       delay_ms: Keyword.get(opts, :delay_ms, 0),
-       replay_calls: 0
-     }}
-  end
-
-  @impl true
-  def handle_call(:info, _from, state) do
-    delay(state)
-    {:reply, {:ok, info(state)}, state}
-  end
-
-  def handle_call({:replay, _cursor, _limit}, _from, state) do
-    delay(state)
-    {:reply, state.replay, %{state | replay_calls: state.replay_calls + 1}}
-  end
-
-  def handle_call(:result, _from, state), do: {:reply, {:pending, info(state)}, state}
-
-  def handle_call(:stub_replay_calls, _from, state), do: {:reply, state.replay_calls, state}
-
-  def handle_call({:stub_set_replay, reply}, _from, state) do
-    {:reply, :ok, %{state | replay: reply, replay_calls: 0}}
-  end
-
-  def handle_call(_message, _from, state), do: {:reply, :ok, state}
-
-  defp info(state) do
-    RunInfo.new!(
-      run_id: state.run_id,
-      provider: state.provider,
-      state: state.state,
-      started_at: DateTime.utc_now() |> DateTime.to_iso8601(),
-      output_cursor: Ouroboros.Test.StubHarness.output_cursor(state.replay)
-    )
-  end
-
-  # Blocking here blocks the coordinator that is calling into the harness, which is
-  # what a wedged provider transport looks like from Ouroboros.
-  defp delay(%{delay_ms: 0}), do: :ok
-  defp delay(%{delay_ms: delay_ms}), do: Process.sleep(delay_ms)
-end
-
 defmodule Ouroboros.Test.StubHarness do
   @moduledoc """
-  What the stub run and stub session share: an `info` whose `output_cursor` agrees with
-  the `replay` fixture.
+  What a stub session needs: an `info` whose `output_cursor` agrees with the `replay`
+  fixture.
 
-  The coordinators peek `info.output_cursor` and call `replay` only once it has advanced
-  past their durable checkpoint, so a stub answering the two from independent fixtures
-  would leave its replay reply unreachable. Deriving the cursor from the replay fixture
-  keeps them in lockstep by construction: events advertise the highest sequence they
-  carry, and an error advertises a cursor no checkpoint reaches — a wedged replay only
-  wedges a poll that attempts it.
+  The coordinator peeks `info.output_cursor` and calls `replay` only once it has advanced
+  past its durable checkpoint, so a stub answering the two from independent fixtures would
+  leave its replay reply unreachable. Deriving the cursor from the replay fixture keeps
+  them in lockstep by construction: events advertise the highest sequence they carry, and
+  an error advertises a cursor no checkpoint reaches — a wedged replay only wedges a poll
+  that attempts it.
   """
 
   def output_cursor({:ok, events}), do: Enum.reduce(events, 0, &max(&1.sequence, &2))
@@ -118,7 +43,7 @@ defmodule Ouroboros.Test.StubSession do
     {:ok,
      %{
        session_id: Keyword.fetch!(opts, :session_id),
-       provider: Keyword.get(opts, :provider, :ouroboros_test),
+       provider: Keyword.get(opts, :provider, :native),
        state: Keyword.get(opts, :state, :idle),
        replay: Keyword.get(opts, :replay, {:ok, []}),
        send_message: Keyword.get(opts, :send_message, :ok),

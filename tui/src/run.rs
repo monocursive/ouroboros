@@ -627,10 +627,7 @@ impl<'a> Run<'a> {
         self.require(hello, "interactive.subscribe")?;
         self.require(hello, "interactive.send_message")?;
 
-        sinks.note(
-            self.options.verbose,
-            &format!("starting a {} session", request.provider),
-        );
+        sinks.note(self.options.verbose, "starting a session");
 
         let started = self.start_call(&method, params).await?;
 
@@ -651,7 +648,6 @@ impl<'a> Run<'a> {
         }
 
         self.report.session_id = started.id.clone();
-        self.report.provider = Some(request.provider.clone());
         self.node = started.node.clone();
         self.report.node = started.node.clone();
         self.report.turn_id = format!("ouro-run:{}", started.id);
@@ -1546,18 +1542,7 @@ impl<'a> Run<'a> {
             return;
         }
 
-        let desktop = event
-            .payload
-            .pointer("/tool_call/name")
-            .and_then(Value::as_str)
-            .is_some_and(|name| name == "desktop_state" || name == "desktop_act");
-
-        let (decision, reason) = if desktop {
-            (
-                ApprovalDecision::Deny,
-                Some("headless will not grant Computer Use; add a ComputerUse(app:…) rule"),
-            )
-        } else if self.options.approve_all {
+        let (decision, reason) = if self.options.approve_all {
             (ApprovalDecision::Approve, None)
         } else {
             (ApprovalDecision::Deny, Some(HEADLESS_DENY_REASON))
@@ -2200,20 +2185,17 @@ fn append_bounded(target: &mut String, text: &str, limit: usize) {
 pub fn start_plan(
     flags: &crate::config::StartFlags,
     defaults: &crate::config::Defaults,
-    config_path: &std::path::Path,
     session_id: String,
     workspace: impl FnOnce(&str, Option<&str>) -> Result<String, String>,
     prompt: String,
     plan: bool,
 ) -> Result<Plan, Refusal> {
-    let resolved = crate::config::resolve_start(flags, defaults)
-        .map_err(|missing| Refusal(missing.message(config_path)))?;
+    let resolved = crate::config::resolve_start(flags, defaults);
     let machine = resolved.machine.clone().unwrap_or_default();
 
     let request = StartRequest {
         id: session_id,
         plane: Plane::Interactive,
-        provider: resolved.provider.clone(),
         model: resolved.model.clone(),
         machine: machine.clone(),
         workspace: workspace(&machine, resolved.workspace.as_deref()).map_err(Refusal)?,
@@ -2230,7 +2212,6 @@ pub fn start_plan(
             })?),
         },
         reasoning_effort: None,
-        objective: String::new(),
         // `ouro run` takes no --worktree: a one-shot prompt that provisioned a worktree
         // would leave one behind for a session nobody is going to reopen.
         worktree: false,

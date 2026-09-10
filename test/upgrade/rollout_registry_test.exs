@@ -1,11 +1,29 @@
 defmodule Ouroboros.Upgrade.RolloutRegistryTest do
   use ExUnit.Case, async: false
 
-  alias Ouroboros.Upgrade.Coordinator.{DeploymentReceipt, NodeReceipt}
-  alias Ouroboros.Upgrade.Rollout
   alias Ouroboros.Upgrade.Rollout.Registry
 
   @module Ouroboros.Capability.Recorded
+
+  test "the rollout registry is supervised by the application on a :core node" do
+    # `Wasm.Deploy` and `Upgrade.Epoch` both ask `Process.whereis/1` for this name on the
+    # nodes they are about to deploy to, and a node that does not hold it is reported
+    # `:absent` rather than as an error — deliberately, so a lone signer can say "I have no
+    # register either". That makes "a `:core` node starts one" unobservable from inside
+    # either of them, and it has to be asserted here, against the child list slice C3 edits.
+    assert Ouroboros.Cluster.role() == :core
+
+    pid = Process.whereis(Registry)
+    assert is_pid(pid)
+
+    assert {Registry, ^pid, :worker, _modules} =
+             Ouroboros.Supervisor
+             |> Supervisor.which_children()
+             |> Enum.find(&(elem(&1, 0) == Registry))
+
+    assert Registry.durability() == :ephemeral_checkpoint
+    assert is_list(Registry.list())
+  end
 
   test "records a rollout and refuses transitions that would lose information" do
     registry = start_registry!()
@@ -821,38 +839,6 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
     GenServer.stop(second)
   end
 
-  test "ambiguity is never recorded as a rollback" do
-    proven =
-      deployment(%{
-        a@host: %NodeReceipt{node: :a@host, recovery: :rolled_back},
-        b@host: %NodeReceipt{node: :b@host, recovery: :aborted}
-      })
-
-    assert {:rolled_back, detail} = Rollout.settled_state(proven)
-    assert detail.nodes == %{a@host: :rolled_back, b@host: :aborted}
-
-    # One node that never proved anything outranks every node that did.
-    ambiguous =
-      deployment(%{
-        a@host: %NodeReceipt{node: :a@host, recovery: :rolled_back},
-        b@host: %NodeReceipt{node: :b@host, recovery: :quarantined}
-      })
-
-    assert {:quarantined, _detail} = Rollout.settled_state(%{ambiguous | recovery: :quarantined})
-
-    # Even with every node reporting a proven recovery, a deployment whose own recovery
-    # is not complete is not a proven rollback.
-    assert {:quarantined, _detail} = Rollout.settled_state(%{proven | recovery: :incomplete})
-    assert {:quarantined, _detail} = Rollout.settled_state(%{proven | recovery: :quarantined})
-
-    # A recovery state this build does not recognize is treated as ambiguity, not as
-    # success: an unknown answer is not a proof.
-    unknown =
-      deployment(%{a@host: %NodeReceipt{node: :a@host, recovery: :something_new_and_unclear}})
-
-    assert {:quarantined, _detail} = Rollout.settled_state(unknown)
-  end
-
   test "a rollout whose id spells a word is still that rollout after a restart" do
     directory = temporary_directory!()
     storage = {Ouroboros.Storage.DurableFile, path: directory}
@@ -922,19 +908,6 @@ defmodule Ouroboros.Upgrade.RolloutRegistryTest do
       "eval_report" => nil,
       "created_at" => "x",
       "updated_at" => "x"
-    }
-  end
-
-  defp deployment(node_receipts) do
-    %DeploymentReceipt{
-      id: "deployment-#{System.unique_integer([:positive])}",
-      artifact_id: "artifact-#{System.unique_integer([:positive])}",
-      epoch: 1,
-      nodes: Map.keys(node_receipts),
-      node_receipts: node_receipts,
-      outcome: :health_failed,
-      recovery: :complete,
-      started_at: DateTime.utc_now() |> DateTime.to_iso8601()
     }
   end
 

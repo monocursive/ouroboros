@@ -109,7 +109,7 @@ class Classification(unittest.TestCase):
 class RunCommand(unittest.TestCase):
     def test_it_carries_the_flags_the_adapter_promises(self):
         command = sh.run_command("do the thing", "/app", 900)
-        self.assertIn("--provider native", command)
+        self.assertNotIn("--provider", command)
         self.assertIn("--approve-all", command)
         self.assertIn("--stream-json", command)
         self.assertIn("--timeout 900", command)

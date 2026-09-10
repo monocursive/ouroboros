@@ -34,17 +34,9 @@ defmodule Ouroboros.Web.Live.ApprovalCardTest do
              )
     end
 
-    test "a question, a plan exit and a Computer Use ask cannot" do
+    test "a question and a plan exit cannot" do
       refute ApprovalCard.inline?(request(%{"kind" => "question"}))
       refute ApprovalCard.inline?(request(%{"kind" => "plan_exit"}))
-
-      refute ApprovalCard.inline?(
-               request(%{"kind" => "permission", "tool_call" => %{"name" => "desktop_state"}})
-             )
-
-      refute ApprovalCard.inline?(
-               request(%{"kind" => "permission", "tool_call" => %{"name" => "desktop_act"}})
-             )
     end
   end
 

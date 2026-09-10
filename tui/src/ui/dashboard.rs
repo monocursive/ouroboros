@@ -56,26 +56,6 @@ fn node(frame: &mut Frame, area: Rect, app: &App) {
             lines.push(field("node", &blank(&status.node)));
             lines.push(field("role", &blank(&status.role)));
             lines.push(field("cluster", &status.cluster_summary()));
-            lines.push(field(
-                "upgrade",
-                status.mode("upgrade").unwrap_or("unknown"),
-            ));
-            lines.push(field(
-                "release",
-                status.mode("release").unwrap_or("unknown"),
-            ));
-            lines.push(field(
-                "control",
-                &format!(
-                    "{} ({} runs)",
-                    status
-                        .availability
-                        .get("control")
-                        .map(|availability| availability.as_str())
-                        .unwrap_or("unknown"),
-                    status.control.runs.len()
-                ),
-            ));
             lines.push(field("forge", &status.forge_summary()));
         }
         None => {
@@ -144,11 +124,6 @@ fn nodes(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(theme::muted()),
         ))),
     }
-
-    lines.push(Line::from(Span::styled(
-        "Open /machines for guided setup and recovery",
-        Style::default().fg(theme::accent()),
-    )));
 
     frame.render_widget(
         Paragraph::new(lines)

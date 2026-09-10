@@ -20,10 +20,9 @@ defmodule Ouroboros.Gateway.SessionReplayVerifyTest do
   alias Ouroboros.InteractiveSession
   alias Ouroboros.Provider.Native.Journal
   alias Ouroboros.Provider.Native.Paths
-  alias Ouroboros.Test.HarnessAdapter
   alias Ouroboros.Test.NativeModelScript
 
-  @provider :ouroboros_test
+  @provider :native
 
   setup do
     cleanup_sessions()
@@ -43,12 +42,6 @@ defmodule Ouroboros.Gateway.SessionReplayVerifyTest do
     previous_native_model = Application.get_env(:ouroboros, :native_model_module)
     Application.put_env(:ouroboros, :native_data_dir, data_dir)
     Application.put_env(:ouroboros, :native_model_module, NativeModelScript)
-
-    Application.put_env(
-      :jido_harness,
-      :providers,
-      Map.put(map_or_empty(previous_providers), @provider, HarnessAdapter)
-    )
 
     Application.put_env(
       :jido_harness,
@@ -76,8 +69,8 @@ defmodule Ouroboros.Gateway.SessionReplayVerifyTest do
     test "verification is operate scope, with a ceiling of its own" do
       table = Methods.table()
 
-      # `computer_use.status`/`probe` is the precedent: this starts a process — a real turn
-      # loop per recorded turn — even though it spends nothing and writes nothing.
+      # This starts a process — a real turn loop per recorded turn — even though it
+      # spends nothing and writes nothing.
       assert table["interactive.replay_verify"].scope == :operate
       assert "interactive.replay_verify" in Methods.names()
       assert Methods.permits?(:operate, table["interactive.replay_verify"])
@@ -102,18 +95,6 @@ defmodule Ouroboros.Gateway.SessionReplayVerifyTest do
                Methods.invoke("interactive.replay_verify", %{"id" => "no-such-session"})
 
       assert message =~ "no such record"
-    end
-  end
-
-  describe "a transport that keeps no journal" do
-    test "is refused as wire data naming the verb, not answered as unverified", %{id: id} do
-      start_session(id)
-
-      assert {:error, -32_006, _message, ["unsupported_on_transport", details]} =
-               Methods.invoke("interactive.replay_verify", %{"id" => id})
-
-      assert details["verb"] == "replay_verify"
-      retire_session(id)
     end
   end
 
@@ -262,12 +243,6 @@ defmodule Ouroboros.Gateway.SessionReplayVerifyTest do
       value ->
         value
     end
-  end
-
-  defp start_session(id, opts \\ []) do
-    opts = Keyword.merge([id: id, provider: @provider, workspace: File.cwd!()], opts)
-    assert {:ok, ref} = InteractiveSession.start(opts)
-    ref
   end
 
   defp retire_session(id) do

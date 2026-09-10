@@ -94,32 +94,11 @@ defmodule Ouroboros.EventPresentation.PlanStep do
 
   alias Ouroboros.EventPresentation.PlanStatus
 
-  defstruct [:text, :priority, status: :pending]
+  defstruct [:text, status: :pending]
 
   @type t :: %__MODULE__{
           text: String.t(),
-          status: PlanStatus.t(),
-          priority: String.t() | nil
-        }
-end
-
-defmodule Ouroboros.EventPresentation.ImageArtifact do
-  @moduledoc """
-  One image a tool result staged, described but not carried.
-
-  Metadata only: the sha that names it, the media type, the staged byte count, and the
-  pixel dimensions. The bytes never travel on the event
-  (`tui/src/model/transcript.rs:311-332`).
-  """
-
-  defstruct [:sha256, :media_type, :size, :width, :height]
-
-  @type t :: %__MODULE__{
-          sha256: String.t(),
-          media_type: String.t() | nil,
-          size: non_neg_integer() | nil,
-          width: non_neg_integer() | nil,
-          height: non_neg_integer() | nil
+          status: PlanStatus.t()
         }
 end
 
@@ -282,30 +261,6 @@ defmodule Ouroboros.EventPresentation.Compaction do
   defp archive(parts, _id), do: parts
 end
 
-defmodule Ouroboros.EventPresentation.DelegationEvent do
-  @moduledoc "A `delegation` event's payload, as the parent's transcript carries it (G1)."
-
-  defstruct [
-    :delegation_id,
-    :task_id,
-    :task_node,
-    :team_id,
-    :objective_digest,
-    :status,
-    :result_digest
-  ]
-
-  @type t :: %__MODULE__{
-          delegation_id: String.t() | nil,
-          task_id: String.t() | nil,
-          task_node: String.t() | nil,
-          team_id: String.t() | nil,
-          objective_digest: String.t() | nil,
-          status: String.t() | nil,
-          result_digest: String.t() | nil
-        }
-end
-
 defmodule Ouroboros.EventPresentation.SubagentEvent do
   @moduledoc """
   One `provider_event` whose `kind` is `subagent`: a child agent spawning, reporting, or
@@ -459,11 +414,9 @@ defmodule Ouroboros.EventPresentation.ToolCall do
 end
 
 defmodule Ouroboros.EventPresentation.ToolResult do
-  @moduledoc "One normalized tool result, with any image artifacts it staged."
+  @moduledoc "One normalized tool result."
 
-  alias Ouroboros.EventPresentation.ImageArtifact
-
-  defstruct [:call_id, :name, :kind, :output, :at, is_error: false, artifacts: []]
+  defstruct [:call_id, :name, :kind, :output, :at, is_error: false]
 
   @type t :: %__MODULE__{
           call_id: String.t() | nil,
@@ -471,8 +424,7 @@ defmodule Ouroboros.EventPresentation.ToolResult do
           kind: String.t() | nil,
           output: term(),
           is_error: boolean(),
-          at: integer() | nil,
-          artifacts: [ImageArtifact.t()]
+          at: integer() | nil
         }
 end
 
@@ -652,27 +604,16 @@ defmodule Ouroboros.EventPresentation do
     (`deps/jido_harness/lib/jido_harness/event.ex:138-149`), and the schema declares
     `payload: Zoi.map(Zoi.string(), Zoi.any())` (`event.ex:63`). That is every
     `tool_call`, `tool_result`, `file_change`, `plan_updated`, `usage`,
-    `approval_requested`, `provider_event` and lifecycle event, on both planes.
+    `approval_requested`, `provider_event` and lifecycle event.
   * Every runtime-native interactive emitter builds string keys literally —
-    `%{"kind" => "configured", …}` (`lib/ouroboros/interactive/task.ex:1481`),
-    `%{"kind" => "operator_shell", …}` (`lib/ouroboros/interactive/task/shell.ex:272`),
-    the `delegation` payload (`lib/ouroboros/interactive/task.ex:1868-1877`).
-  * **The exception:** `Ouroboros.Coding.Event.internal/4`
-    (`lib/ouroboros/coding/event.ex:46`) skips that stringification, and all eight of its
-    call sites build **atom**-keyed maps — `%{path: …, reason: …, message: …}`
-    (`lib/ouroboros/coding/task.ex:368-374`), `%{request_id: …, decision: …, scope: …}`
-    (`lib/ouroboros/coding/task.ex:156-162`). `Jido.Harness.Redaction.redact/1` preserves
-    key types (`deps/jido_harness/lib/jido_harness/redaction.ex:23-27`), so they arrive
-    here as atoms.
+    `%{"kind" => "configured", …}` (`lib/ouroboros/interactive/task.ex:1481`) and
+    `%{"kind" => "operator_shell", …}` (`lib/ouroboros/interactive/task/shell.ex:272`).
 
-  The Rust client never sees those atoms: `Ouroboros.Gateway.Wire` stringifies atom keys
-  and atom values on the way out (`lib/ouroboros/gateway/wire.ex:148`, `:292`, `:300-309`),
-  keeping `nil` and booleans as themselves. An in-process reader skips that boundary
-  entirely (`lib/ouroboros/interactive/task.ex:2152`), so `from_event/1` applies exactly
-  that one transform first — see `wire_shape/1`. Doing less would render a coding-plane
-  `worktree_retained` as a bare marker on the web and as a sentence in the TUI; doing more
-  (reading both key types in every field reader) would be a guess in forty places instead
-  of a stated normalization in one.
+  An emitter that builds an atom-keyed payload is still read correctly: `from_event/1`
+  applies exactly one normalization first — see `wire_shape/1` — so a reader here never
+  has to guess a key type. `Ouroboros.Gateway.Wire` performs the same stringification on
+  the way out to the Rust client (`lib/ouroboros/gateway/wire.ex:148`, `:292`,
+  `:300-309`), keeping `nil` and booleans as themselves.
   """
 
   import Bitwise, only: [band: 2]
@@ -683,13 +624,11 @@ defmodule Ouroboros.EventPresentation do
     ApprovalResolved,
     CommandOutput,
     Compaction,
-    DelegationEvent,
     Diff,
     Failure,
     FileChange,
     FileUpdate,
     Hidden,
-    ImageArtifact,
     Interrupted,
     Lifecycle,
     PlanStatus,
@@ -726,8 +665,6 @@ defmodule Ouroboros.EventPresentation do
   @plan_steps 64
   # How many tool names a `run_started` header fact keeps.
   @run_tools 128
-  # How many image artifacts one tool result mints cells for.
-  @max_artifacts 16
   # How long a label from a runtime-native payload may be before it stops being a label.
   @label_bytes 256
 
@@ -768,7 +705,6 @@ defmodule Ouroboros.EventPresentation do
           | Interrupted.t()
           | ShellEvent.t()
           | Compaction.t()
-          | DelegationEvent.t()
           | SubagentEvent.t()
           | ProviderNote.t()
           | Hidden.t()
@@ -826,8 +762,7 @@ defmodule Ouroboros.EventPresentation do
   Reads one durable event into a presentation struct.
 
   Accepts an `%Ouroboros.Interactive.Event{}` or any map carrying `:type`, `:payload`,
-  `:timestamp`, `:turn_id` and `:request_id` — the coding plane's event struct has the
-  same five fields.
+  `:timestamp`, `:turn_id` and `:request_id`.
   """
   @spec from_event(map()) :: t()
   def from_event(event) do
@@ -851,7 +786,7 @@ defmodule Ouroboros.EventPresentation do
         end
 
       :thinking_delta ->
-        case raw_text(payload, ["text", "thinking", "reasoning"]) do
+        case raw_text(payload, ["text"]) do
           nil ->
             %Hidden{reason: :empty_thinking}
 
@@ -861,18 +796,11 @@ defmodule Ouroboros.EventPresentation do
 
       :tool_call ->
         %ToolCall{
-          call_id: text(payload, ["call_id", "tool_call_id", "toolCallId", "id"]),
-          name:
-            text(payload, ["name", "tool_name", "toolName", "tool", "title", "kind"]) || "tool",
-          kind: text(payload, ["kind", "tool_kind", "toolKind"]),
+          call_id: text(payload, ["call_id", "tool_call_id", "id"]),
+          name: text(payload, ["name", "tool_name", "tool"]) || "tool",
+          kind: text(payload, ["kind"]),
           input:
-            case first_value(payload, [
-                   "input",
-                   "arguments",
-                   "parameters",
-                   "rawInput",
-                   "raw_input"
-                 ]) do
+            case first_value(payload, ["input", "arguments"]) do
               {:ok, value} -> bounded_value(value)
               :error -> %{}
             end,
@@ -881,21 +809,20 @@ defmodule Ouroboros.EventPresentation do
 
       :tool_result ->
         %ToolResult{
-          call_id: text(payload, ["call_id", "tool_call_id", "toolCallId", "id"]),
-          name: text(payload, ["name", "tool_name", "toolName", "tool", "title", "kind"]),
-          kind: text(payload, ["kind", "tool_kind", "toolKind"]),
+          call_id: text(payload, ["call_id", "tool_call_id", "id"]),
+          name: text(payload, ["name", "tool_name", "tool"]),
+          kind: text(payload, ["kind"]),
           output:
-            case first_value(payload, ["output", "result", "content", "rawOutput", "raw_output"]) do
+            case first_value(payload, ["output", "result", "content"]) do
               {:ok, value} -> bounded_value(value)
               :error -> nil
             end,
           is_error: error_result?(payload),
-          at: epoch_millis(Map.get(event, :timestamp)),
-          artifacts: image_artifacts(payload)
+          at: epoch_millis(Map.get(event, :timestamp))
         }
 
       :command_output_delta ->
-        case raw_text(payload, ["text", "output"]) do
+        case raw_text(payload, ["text"]) do
           nil -> %Hidden{reason: :empty_command_output}
           text -> %CommandOutput{text: text}
         end
@@ -979,12 +906,6 @@ defmodule Ouroboros.EventPresentation do
       kind when kind in [:run_cancelled, :session_cancelled] ->
         %Interrupted{detail: detail(payload)}
 
-      # G1. `delegation` is its own runtime-native event type, not a wrapped provider one:
-      # `emit_runtime_event(runtime, :delegation, …)` puts it in the same sequence space as
-      # everything else (`lib/ouroboros/interactive/task.ex:1880`).
-      :delegation ->
-        decode_delegation(payload)
-
       # A kind this build does not know. It is still an event the runtime recorded, so it
       # reads as one dim line naming itself rather than as nothing at all.
       other ->
@@ -1008,8 +929,8 @@ defmodule Ouroboros.EventPresentation do
   Atom keys and atom values become their strings; `nil` and the booleans stay themselves;
   a module name loses its `Elixir.` prefix. Mirrors `wire.ex:147-148` and `:298-309`
   exactly, and nothing else the wire does — no byte caps, no `_opaque` minting, no
-  struct tagging. This is what makes a coding-plane internal event
-  (`lib/ouroboros/coding/event.ex:46`) read the same in a browser as it does in the TUI.
+  struct tagging. This is what makes an atom-keyed runtime-native payload read the same in
+  a browser as it does in the TUI.
   """
   @spec wire_shape(term()) :: term()
   def wire_shape(value) when is_map(value) and not is_struct(value) do
@@ -1059,10 +980,7 @@ defmodule Ouroboros.EventPresentation do
     end
   end
 
-  # The provider kind an escape-hatch event is reporting, so it is never invisible.
-  #
-  # ACP wraps every update it does not map in `{"kind": "acp_update", "update": …}`; the
-  # update's own `sessionUpdate` type is the informative half and is lifted out here.
+  # The kind an escape-hatch event is reporting, so it is never invisible.
   defp provider_note(payload) do
     # Three kinds this runtime writes itself and this surface draws in full. Matched
     # before the generic path because they are not "something the provider said that this
@@ -1086,28 +1004,17 @@ defmodule Ouroboros.EventPresentation do
     end
   end
 
+  # Empty when the payload named no kind at all: the cell says "provider event" once, and
+  # inventing a second copy of that phrase to sit in this field would only make it say it
+  # twice.
   defp generic_provider_note(payload) do
-    kind = text(payload, ["kind", "type", "item_type", "event", "name"])
-
-    nested =
-      case Map.fetch(payload, "update") do
-        {:ok, update} -> text(update, ["sessionUpdate", "session_update", "type"])
-        :error -> nil
-      end
-
-    # Empty when the provider named no kind at all: the cell says "provider event" once,
-    # and inventing a second copy of that phrase to sit in this field would only make it
-    # say it twice.
-    kind =
-      case {kind, nested} do
-        {nil, nil} -> ""
-        {kind, nil} -> kind
-        {nil, nested} -> nested
-        {kind, nested} -> "#{kind} · #{nested}"
-      end
-
     %ProviderNote{
-      kind: bounded_copy(kind, @text_bytes, @text_truncation),
+      kind:
+        bounded_copy(
+          text(payload, ["kind", "type", "event"]) || "",
+          @text_bytes,
+          @text_truncation
+        ),
       detail: optional_detail(payload) || ""
     }
   end
@@ -1116,14 +1023,14 @@ defmodule Ouroboros.EventPresentation do
     declared = array(payload, "tools")
 
     %RunStart{
-      model: text(payload, ["model", "model_id", "modelId"]),
-      cwd: text(payload, ["cwd", "workspace", "working_directory"]),
+      model: text(payload, ["model"]),
+      cwd: text(payload, ["cwd"]),
       tools:
         declared
         |> Enum.take(@run_tools)
         |> Enum.map(fn
           tool when is_binary(tool) -> nonempty(tool)
-          other -> text(other, ["name", "tool", "title"])
+          other -> text(other, ["name", "tool"])
         end)
         |> Enum.reject(&is_nil/1),
       tool_count: length(declared)
@@ -1132,18 +1039,12 @@ defmodule Ouroboros.EventPresentation do
 
   defp usage_report(payload) do
     %UsageReport{
-      input_tokens: number(payload, ["input_tokens", "inputTokens", "prompt_tokens"]),
-      output_tokens: number(payload, ["output_tokens", "outputTokens", "completion_tokens"]),
-      cached_tokens:
-        number(payload, [
-          "cache_read_input_tokens",
-          "cached_input_tokens",
-          "cachedInputTokens",
-          "cache_read_tokens"
-        ]),
-      total_tokens: number(payload, ["total_tokens", "totalTokens"]),
+      input_tokens: number(payload, ["input_tokens"]),
+      output_tokens: number(payload, ["output_tokens"]),
+      cached_tokens: number(payload, ["cache_read_tokens"]),
+      total_tokens: number(payload, ["total_tokens"]),
       cost_usd:
-        case first_value(payload, ["cost_usd", "total_cost_usd", "costUsd"]) do
+        case first_value(payload, ["cost_usd"]) do
           {:ok, value} -> as_float(value)
           :error -> nil
         end
@@ -1153,8 +1054,8 @@ defmodule Ouroboros.EventPresentation do
   @doc """
   Both plan shapes this runtime can deliver, read tolerantly.
 
-  Codex sends `{"explanation", "plan": [{"step", "status"}]}`; ACP forwards its `plan`
-  session update verbatim, whose entries are `{"content", "priority", "status"}`.
+  The shape is `{"explanation", "plan": [{"step", "status"}]}` — what the native plan tool
+  normalizes every step into (`Ouroboros.Provider.Native.Tools.Plan`).
 
   Public because a `plan_exit` approval's `payload.plan` is *the same `plan_updated`
   payload*, held back by the native session and attached to the question (B2). The
@@ -1165,13 +1066,13 @@ defmodule Ouroboros.EventPresentation do
   @spec plan_update(term()) :: PlanUpdate.t()
   def plan_update(payload) do
     entries =
-      case first_value(payload, ["plan", "entries", "steps", "todos", "tasks"]) do
+      case first_value(payload, ["plan"]) do
         {:ok, list} when is_list(list) -> list
         _otherwise -> []
       end
 
     %PlanUpdate{
-      explanation: text(payload, ["explanation", "summary", "description"]),
+      explanation: text(payload, ["explanation"]),
       steps:
         entries |> Enum.take(@plan_steps) |> Enum.map(&plan_step/1) |> Enum.reject(&is_nil/1),
       step_count: length(entries)
@@ -1181,27 +1082,19 @@ defmodule Ouroboros.EventPresentation do
   defp plan_step(value) when is_binary(value) do
     case nonempty(value) do
       nil -> nil
-      text -> %PlanStep{text: text, status: :pending, priority: nil}
+      text -> %PlanStep{text: text, status: :pending}
     end
   end
 
   defp plan_step(value) when is_map(value) do
-    body =
-      text(value, ["step", "content", "text", "title", "description", "name"]) ||
-        case Map.fetch(value, "content") do
-          {:ok, content} -> leaf_text(content)
-          :error -> nil
-        end
-
-    case body do
+    case text(value, ["step"]) do
       nil ->
         nil
 
       body ->
         %PlanStep{
           text: body,
-          status: PlanStatus.parse(trimmed_string_value(value, ["status", "state"])),
-          priority: text(value, ["priority"])
+          status: PlanStatus.parse(trimmed_string_value(value, ["status"]))
         }
     end
   end
@@ -1242,7 +1135,7 @@ defmodule Ouroboros.EventPresentation do
   # only the prefix — so it is marked truncated, which is what makes the cell say
   # "in excerpt" beside the numbers instead of asserting a diffstat it cannot know.
   defp diff_field(payload) do
-    case first_value(payload, ["diff", "patch", "delta"]) do
+    case first_value(payload, ["diff"]) do
       :error ->
         nil
 
@@ -1269,8 +1162,8 @@ defmodule Ouroboros.EventPresentation do
   end
 
   defp file_change(value) when is_map(value) do
-    path = text(value, ["path", "file", "name", "file_path"])
-    kind = text(value, ["kind", "action", "change_type", "type", "status"])
+    path = text(value, ["path", "relative_path"])
+    kind = text(value, ["kind", "status"])
     diff = diff_field(value)
 
     if is_nil(path) and is_nil(kind) and is_nil(diff) do
@@ -1378,18 +1271,6 @@ defmodule Ouroboros.EventPresentation do
       before_tokens: strict_count(payload, "before_tokens"),
       after_tokens: strict_count(payload, "after_tokens"),
       summarised: as_bool(Map.get(payload, "summarised"))
-    }
-  end
-
-  defp decode_delegation(payload) do
-    %DelegationEvent{
-      delegation_id: label_at(payload, "delegation_id"),
-      task_id: label_at(payload, "task_id"),
-      task_node: label_at(payload, "task_node"),
-      team_id: label_at(payload, "team_id"),
-      objective_digest: label_at(payload, "objective_digest"),
-      status: label_at(payload, "status"),
-      result_digest: label_at(payload, "result_digest")
     }
   end
 
@@ -1532,62 +1413,7 @@ defmodule Ouroboros.EventPresentation do
   # Payload readers
   # ------------------------------------------------------------------------------------
 
-  defp error_result?(payload) do
-    case Map.get(payload, "is_error") do
-      value when is_boolean(value) ->
-        value
-
-      _otherwise ->
-        text(payload, ["status"]) in ["error", "failed", "declined"]
-    end
-  end
-
-  # The image artifacts a tool result carried (§8.5), read defensively.
-  #
-  # An entry with an unknown `kind` is skipped rather than guessed at, and unknown fields
-  # are ignored rather than rejected. The one hard requirement is a `sha256`: it is the
-  # only key that can fetch the bytes or be checked by containment. A missing `kind` is
-  # taken as an image, because that is the only artifact kind the contract defines.
-  defp image_artifacts(payload) do
-    payload
-    |> array("artifacts")
-    |> Enum.filter(fn entry ->
-      case text(entry, ["kind"]) do
-        nil -> true
-        kind -> kind == "image"
-      end
-    end)
-    |> Enum.map(&image_artifact/1)
-    |> Enum.reject(&is_nil/1)
-    |> Enum.take(@max_artifacts)
-  end
-
-  defp image_artifact(entry) do
-    with sha256 when is_binary(sha256) <- text(entry, ["sha256", "sha", "digest"]),
-         true <- byte_size(sha256) == 64,
-         true <- hex?(sha256) do
-      %ImageArtifact{
-        sha256: String.downcase(sha256, :ascii),
-        media_type: text(entry, ["media_type", "mediaType", "content_type"]),
-        size: number(entry, ["bytes", "size"]),
-        width: clamp_u32(number(entry, ["width"])),
-        height: clamp_u32(number(entry, ["height"]))
-      }
-    else
-      _otherwise -> nil
-    end
-  end
-
-  defp hex?(text) do
-    text
-    |> :binary.bin_to_list()
-    |> Enum.all?(fn byte ->
-      byte in ?0..?9 or byte in ?a..?f or byte in ?A..?F
-    end)
-  end
-
-  defp clamp_u32(nil), do: nil
-  defp clamp_u32(value), do: min(value, 4_294_967_295)
+  defp error_result?(payload), do: Map.get(payload, "is_error") == true
 
   defp detail(payload) do
     text(payload, ["error", "reason", "message", "text"]) || bounded_compact(payload)

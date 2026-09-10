@@ -7,7 +7,7 @@ defmodule Ouroboros.Control.Permissions do
   refuses it with the rule named; anything else becomes the approval prompt that exists
   today. The point is not to prompt less for its own sake — it is that 98.9% of analysed
   Claude Code configurations had zero deny rules because prompting for everything trains
-  people to stop reading ([AGENT_EXPERIENCE §2.5](../../../docs/AGENT_EXPERIENCE.md)).
+  people to stop reading ([AGENT_EXPERIENCE §2.5](../../../docs/research/agent-ux-2026/AGENT_EXPERIENCE.md)).
   A prompt that survives is one that was worth showing.
 
   ## The three calls
@@ -59,9 +59,9 @@ defmodule Ouroboros.Control.Permissions do
   allowlist plus protected paths rather than a denylist (R3 §8d).
 
   This module lives under `Ouroboros.Control.` for the same reason `Control.Grants` does:
-  the prefix is in `Ouroboros.Upgrade.Verifier`'s protected set, so the fast patch lane
-  refuses an artifact that would replace the engine deciding what code may do. A runtime
-  that can author code must not be able to author its own permissions away.
+  a forged component is reached only through the seams this engine gates, so nothing a
+  runtime forges can replace the engine deciding what code may do. A runtime that can
+  author code must not be able to author its own permissions away.
   """
 
   use GenServer
@@ -107,9 +107,9 @@ defmodule Ouroboros.Control.Permissions do
   # `:request` and `:principal` are read by `answered_request/1` below, which is the whole
   # reason a recorded answer can name the call it answered. They were missing here, and a
   # map type lists every key it admits — so every real caller "broke the contract", and
-  # dialyzer stopped analysing the rest of the calling function. `Seam.record_answer/4`
-  # was the loser: its `remember/3` call — the one that persists a session-scope "don't
-  # ask again" — read as dead code for exactly as long as this type was wrong.
+  # dialyzer stopped analysing the rest of the calling function. The ACP seam's own
+  # `record_answer/4` was the loser: its session-scope "don't ask again" read as dead code
+  # for exactly as long as this type was wrong. That seam is gone; the type stays right.
   @type answer :: %{
           required(:decision) => :approve | :deny,
           optional(:scope) => :once | :session | :always,
@@ -346,7 +346,6 @@ defmodule Ouroboros.Control.Permissions do
   """
   @spec suggest(map() | keyword() | Request.t()) :: String.t() | nil
   def suggest(%Request{} = request) do
-    computer_use = computer_use_app(request)
     capability = capability_name(request)
     forge = forge_name(request)
 
@@ -356,9 +355,6 @@ defmodule Ouroboros.Control.Permissions do
 
       is_binary(forge) ->
         "Forge(#{forge})"
-
-      is_binary(computer_use) ->
-        "ComputerUse(app:#{computer_use})"
 
       is_binary(request.command) ->
         suggest_command(request.command)
@@ -827,19 +823,6 @@ defmodule Ouroboros.Control.Permissions do
   defp suggest_glob(path), do: Path.dirname(path) <> "/**"
 
   defp base_name(token), do: token |> String.split("/") |> List.last()
-
-  # A desktop tool whose app the node resolved: the rule an operator would write keys on
-  # the app id, never on the tool name or a path — a bundle id is not a filesystem path,
-  # so it must not be routed through `suggest_glob`. nil for anything that is not one.
-  defp computer_use_app(%Request{tool: tool, context: context})
-       when tool in ["desktop_state", "desktop_act"] and is_map(context) do
-    case Map.get(context, :app) || Map.get(context, "app") do
-      app when is_binary(app) and app != "" -> app
-      _other -> nil
-    end
-  end
-
-  defp computer_use_app(_request), do: nil
 
   # W13. The rule an operator would write for a capability keys on the capability, never on
   # the tool: `Tool(capability)` is "let this session run every component this node has

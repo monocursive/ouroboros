@@ -86,10 +86,10 @@ defmodule Ouroboros.Gateway.Methods.Safe do
      %{"reason" => "cursor_pruned", "floor" => floor}}
   end
 
-  # Several planes bound themselves and answer `:timeout` rather than exiting. The request
-  # may still have been accepted durably — `Ouroboros.Team` says so explicitly — so the
-  # answer is the same "the gateway stopped waiting, the runtime did not" that a ceiling
-  # breach gets, and it carries the same admission of not knowing.
+  # A plane that bounds itself answers `:timeout` rather than exiting. The request may
+  # still have been accepted durably, so the answer is the same "the gateway stopped
+  # waiting, the runtime did not" that a ceiling breach gets, and it carries the same
+  # admission of not knowing.
   def reply({:error, :timeout}) do
     {:error, code(:upstream_timeout), "the runtime did not answer in time",
      %{"outcome" => "unknown"}}
@@ -210,14 +210,6 @@ defmodule Ouroboros.Gateway.Methods.Safe do
 
   def account_reply(result), do: reply(result)
 
-  def grok_account_reply({:error, {:timeout, operation}}),
-    do: {:error, code(:upstream_timeout), "Grok authentication timed out during #{operation}"}
-
-  def grok_account_reply({:error, {:upstream, message}}) when is_binary(message),
-    do: upstream_error({:grok_auth, message})
-
-  def grok_account_reply(result), do: reply(result)
-
   def forget_session_owner_reply({:ok, result}), do: {:ok, result}
 
   def forget_session_owner_reply({:error, {:invalid_session_owner_machine, machine}}) do
@@ -228,7 +220,7 @@ defmodule Ouroboros.Gateway.Methods.Safe do
 
   def forget_session_owner_reply({:error, {:session_owner_not_tombstoned, machine}}) do
     not_found(
-      "fleet profile has no roster tombstone for machine #{inspect(machine)}; cancel it and import the updated roster before accepting state loss"
+      "fleet profile has no roster tombstone for machine #{inspect(machine)}; run `ouro fleet sessions forget --machine NAME --accept-state-loss` on this machine, which records the tombstone before asking for this"
     )
   end
 
@@ -244,13 +236,13 @@ defmodule Ouroboros.Gateway.Methods.Safe do
 
   def forget_session_owner_reply({:error, :fleet_profile_unavailable}) do
     unavailable(
-      "no active fleet profile is available; this command only retires a member already tombstoned by a signed fleet roster"
+      "no active fleet profile is available; this command only retires a member this machine's own roster records as tombstoned"
     )
   end
 
   def forget_session_owner_reply({:error, {:fleet_profile_unavailable, reason}}) do
     {:error, code(:unavailable),
-     "the local fleet profile could not be validated; repair or re-import it before forgetting session state",
+     "the local fleet profile could not be validated; repair it before forgetting session state",
      %{"reason" => "fleet_profile_unavailable", "error" => Wire.to_json(reason)}}
   end
 

@@ -4,7 +4,6 @@ defmodule Ouroboros.Interactive.Task.Turns do
   alias Jido.Harness.{Session, TurnRequest}
   alias Ouroboros.Interactive.State
   alias Ouroboros.Interactive.Task
-  alias Ouroboros.Provider
   alias Ouroboros.ReasoningEffort
   alias Ouroboros.Runtime.Exposure
   alias Ouroboros.Workspace.Path, as: WorkspacePath
@@ -38,7 +37,7 @@ defmodule Ouroboros.Interactive.Task.Turns do
       when mode in [:message, :follow_up] and is_binary(id) and is_list(opts) do
     with :ok <- validate_turn_id(id),
          true <- Keyword.keyword?(opts) || {:error, :invalid_turn_options},
-         {:ok, request} <- build_turn_request(runtime.session.provider, input, opts),
+         {:ok, request} <- build_turn_request(input, opts),
          {:ok, request} <- authorize_turn_attachments(request, runtime.session.workspace),
          :ok <- ensure_serializable(request),
          :ok <- ensure_secret_free_options(request),
@@ -214,7 +213,7 @@ defmodule Ouroboros.Interactive.Task.Turns do
 
   defp ensure_exposable_turn(_session, _request), do: :ok
 
-  defp build_turn_request(provider, input, opts) do
+  defp build_turn_request(input, opts) do
     allowed = [:attachments, :reasoning_effort, :output_schema, :metadata, :provider_options]
 
     case Enum.find(Keyword.keys(opts), &(&1 not in allowed)) do
@@ -234,9 +233,7 @@ defmodule Ouroboros.Interactive.Task.Turns do
               other
           end
 
-        with {:ok, request} <- ReasoningEffort.turn_request(attrs) do
-          {:ok, Provider.apply_runtime_provider_policy(request, provider)}
-        end
+        ReasoningEffort.turn_request(attrs)
 
       key ->
         {:error, {:unknown_turn_option, key}}

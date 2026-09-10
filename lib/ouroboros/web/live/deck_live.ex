@@ -75,7 +75,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   The toggle lives in socket state and is never written down: a preference that survived a
   reload would be a standing grant nobody remembers making. While it is on, every pending
-  request that is **not** a question, a plan exit, or a Computer Use ask is answered
+  request that is **not** a question or a plan exit is answered
   `{approve, once, actor: "automation"}` — the terminal client's exact carve-outs, read
   through the one predicate both surfaces share. Answered request ids are remembered so a
   replay after a repair cannot answer the same request twice.
@@ -119,7 +119,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   @poll_interval 3_000
   @coalesce 80
-  @planes %{"interactive" => :interactive, "coding" => :coding}
+  @planes %{"interactive" => :interactive}
 
   # A turn state nothing has been read from yet, so the composer has something to draw
   # before a session is open.
@@ -467,13 +467,6 @@ defmodule Ouroboros.Web.Live.DeckLive do
     end
   end
 
-  def handle_info({:ouroboros_coding_event, id, event}, socket) do
-    case resync_if_mailbox_lagged(socket) do
-      {:lagged, socket} -> {:noreply, socket}
-      :ok -> {:noreply, live_event(socket, :coding, id, event)}
-    end
-  end
-
   def handle_info(:flush, socket) do
     case resync_if_mailbox_lagged(socket) do
       {:lagged, socket} -> {:noreply, socket}
@@ -519,13 +512,8 @@ defmodule Ouroboros.Web.Live.DeckLive do
     |> assign_page_title()
   end
 
-  # Both planes, each refused independently: a coding list that failed must not empty a
-  # rail the interactive list answered for.
   defp sessions(scope, session) do
-    {interactive, first} = list(scope, "interactive.list", &Rail.from_interactive/1, session)
-    {coding, second} = list(scope, "coding.list", &Rail.from_coding/1, session)
-
-    {interactive ++ coding, first || second}
+    list(scope, "interactive.list", &Rail.from_interactive/1, session)
   end
 
   defp list(scope, method, to_row, session) do
@@ -550,10 +538,11 @@ defmodule Ouroboros.Web.Live.DeckLive do
   defp refresh_info(%{assigns: %{open: nil}} = socket), do: assign(socket, :info, nil)
 
   defp refresh_info(%{assigns: %{open: {plane, id}}} = socket) do
-    method = if plane == :interactive, do: "interactive.info", else: "coding.info"
     params = session_params(socket, plane, id)
 
-    case Call.call(socket.assigns.scope, method, params, session: socket.assigns[:web_session]) do
+    case Call.call(socket.assigns.scope, "interactive.info", params,
+           session: socket.assigns[:web_session]
+         ) do
       {:ok, info} when is_map(info) -> assign(socket, :info, info)
       _refused -> socket
     end
@@ -769,7 +758,6 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
     case plane do
       :interactive -> Ouroboros.Interactive.Ref.new(id, owner)
-      :coding -> Ouroboros.Coding.TaskRef.new(id, owner)
     end
   end
 
@@ -809,7 +797,6 @@ defmodule Ouroboros.Web.Live.DeckLive do
   defp drop_queued_plane_events do
     receive do
       {:ouroboros_interactive_event, _id, _event} -> drop_queued_plane_events()
-      {:ouroboros_coding_event, _id, _event} -> drop_queued_plane_events()
     after
       0 -> :ok
     end
@@ -1068,7 +1055,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
   defp detail_of(nil), do: nil
   defp detail_of(%Approval{} = request), do: Approval.detail(request)
 
-  # Every pending request that is not a question, a plan exit, or a Computer Use ask.
+  # Every pending request that is not a question or a plan exit.
   # `Transcript.question?/1` is the whole carve-out and it is the locked module's, so the
   # rail's inline answers and this cannot disagree about what a permission is.
   defp auto_answer(%{assigns: %{auto_approve?: true, open: {_plane, _id}}} = socket) do
@@ -1194,16 +1181,13 @@ defmodule Ouroboros.Web.Live.DeckLive do
     end
   end
 
-  # Computer Use remember is user-scoped by design (D4): the grant is "this app, from this
-  # operator", which is not a fact about a directory. `Capability(…)` joins it for the same
-  # reason (W13): a capability is deployed to a node by the rollout plane, and a session
-  # that has not chosen a project folder could otherwise never remember an answer about one.
-  # Every other pattern is scoped to the workspace the gate already proved this session
-  # names.
+  # A `Capability(…)` remember is user-scoped by design (W13): a capability is deployed to
+  # a node by the rollout plane, and a session that has not chosen a project folder could
+  # otherwise never remember an answer about one. Every other pattern is scoped to the
+  # workspace the gate already proved this session names.
   defp add_rule(%{assigns: %{open: {plane, id}}} = socket, %Approval.Rule{} = rule) do
     params =
-      if String.starts_with?(rule.pattern, "ComputerUse(") or
-           String.starts_with?(rule.pattern, "Capability(") do
+      if String.starts_with?(rule.pattern, "Capability(") do
         %{"scope" => "user", "pattern" => rule.pattern, "decision" => "allow"}
       else
         %{
@@ -1272,13 +1256,9 @@ defmodule Ouroboros.Web.Live.DeckLive do
 
   defp reasoning_efforts(assigns) do
     open_row = row(assigns.rows, assigns.open)
-
-    provider =
-      (open_row && open_row.provider) || (assigns.info && Map.get(assigns.info, :provider))
-
     model = reported(assigns, :model) || (open_row && open_row.model)
 
-    Ouroboros.Models.reasoning_efforts(provider, model)
+    Ouroboros.Models.reasoning_efforts(model)
   end
 
   # ------------------------------------------------------------------------------------
@@ -1483,7 +1463,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
     <header class="ouro-topbar">
       <span class="ouro-wordmark">Ouroboros</span>
 
-      <a class="ouro-presence" aria-label={@machines_label} href="/machines">
+      <span class="ouro-presence" role="img" aria-label={@machines_label}>
         <span class="ouro-presence-label">Machines</span>
         <span
           :for={machine <- @machines}
@@ -1492,7 +1472,7 @@ defmodule Ouroboros.Web.Live.DeckLive do
         >
           <span class="ouro-visually-hidden">{machine.name}</span>
         </span>
-      </a>
+      </span>
 
       <div class="ouro-topbar-right">
         <span :if={@today.tokens} class="ouro-today ouro-mono" title="sessions updated today, UTC">
@@ -1579,7 +1559,6 @@ defmodule Ouroboros.Web.Live.DeckLive do
           scope={@scope}
         />
       </section>
-      <.link navigate="/machines" class="ouro-rail-machines">Machines</.link>
     </nav>
     """
   end
@@ -1655,7 +1634,6 @@ defmodule Ouroboros.Web.Live.DeckLive do
         class={[
           "ouro-row",
           "ouro-row-#{@entry.group}",
-          @entry.depth == 1 && "ouro-row-nested",
           @selected? && "ouro-row-open",
           (@entry.group == :settled and Rail.failed?(@row)) && "ouro-row-failed"
         ]}
@@ -1718,8 +1696,8 @@ defmodule Ouroboros.Web.Live.DeckLive do
     """
   end
 
-  # Two buttons on a row, for a plain permission and nothing else. A question, a plan exit
-  # and a Computer Use ask carry a decision a one-line row never showed, so those rows stay
+  # Two buttons on a row, for a plain permission and nothing else. A question and a plan
+  # exit carry a decision a one-line row never showed, so those rows stay
   # a link into the session — `Approval.question?/1` draws that line, once, for both
   # surfaces. Outside the link element on purpose: a button inside an anchor is markup no
   # browser agrees about.
@@ -2368,9 +2346,9 @@ defmodule Ouroboros.Web.Live.DeckLive do
     |> Enum.map_join(" · ", &to_string/1)
   end
 
+  # A record written before the reduction still names the provider it ran under, and it is
+  # still listed with its history; the name it carries is drawn as it was stored.
   defp provider_name(:native), do: "Ouroboros AI"
-  defp provider_name(:claude_code), do: "Claude Code"
-  defp provider_name(:openai_codex), do: "Codex"
   defp provider_name(provider), do: provider
 
   # `unrestricted` is the one sandbox posture worth a tag: it is the session that can do

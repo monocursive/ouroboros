@@ -110,13 +110,12 @@ fn opened(pairs: &[(&str, &str)]) -> App {
             "_struct": "Ouroboros.Interactive.State",
             "id": "session-a7",
             "status": "idle",
-            "provider": "codex",
+            "provider": "native",
             "workspace": "/w",
             "updated_at": "2026-01-01T00:00:00.000000Z",
             "options": { "capabilities": { "transport": "app_server", "interrupt": "native" } },
         }]),
     );
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
     app.open_session(Plane::Interactive, "session-a7".into());
 
     if let Some(subscribe) = app
@@ -296,17 +295,21 @@ fn a_key_whose_value_is_not_a_string_is_named_rather_than_refusing_the_file() {
     let dir = std::env::temp_dir().join(format!("ouro-keys-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     let path = dir.join("config.toml");
-    // `claude`, not `codex`: an explicit codex default is migrated to native by
-    // `config::normalise`, and this test's canary must be a value that survives loading.
+    // The canary is a `[defaults]` value this build still reads, so a dropped `[keys]`
+    // line is visibly the only thing the file lost.
     std::fs::write(
         &path,
-        "[defaults]\nprovider = \"claude\"\n[keys]\nverbose = true\nplan_panel = \"ctrl+y\"\n",
+        "[defaults]\nmodel = \"openai_codex:gpt-5.6-sol\"\n\
+         [keys]\nverbose = true\nplan_panel = \"ctrl+y\"\n",
     )
     .expect("a config");
 
     let loaded = ouro::config::load(path);
 
-    assert_eq!(loaded.config.defaults.provider.as_deref(), Some("claude"));
+    assert_eq!(
+        loaded.config.defaults.model.as_deref(),
+        Some("openai_codex:gpt-5.6-sol")
+    );
     assert_eq!(loaded.problems.len(), 1, "{:?}", loaded.problems);
     assert!(
         loaded.problems[0].contains("keys.verbose"),

@@ -2,7 +2,7 @@ defmodule Ouroboros.Wasm.Codec do
   @moduledoc """
   Newline-delimited JSON-RPC 2.0 framing for the `ouro-wasm` helper's stdio transport.
 
-  Framing is shared with MCP and Desktop; the owning pool supplies this pipe's limit
+  Framing is shared with MCP; the owning pool supplies this pipe's limit
   independently of those transports. The helper's own frame cap is 8 MiB.
 
   `decode/2` is incremental. A line longer than `max_frame_bytes` is an error rather than a

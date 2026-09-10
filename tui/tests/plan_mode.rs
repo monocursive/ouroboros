@@ -107,7 +107,6 @@ fn opened_with(hello: ouro::proto::Hello, options: Value) -> App {
         Tag::Sessions(Plane::Interactive),
         session_row(options),
     );
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
 
     app.open_session(Plane::Interactive, SESSION.to_string());
 
@@ -617,7 +616,7 @@ fn plan_refuses_an_argument_it_cannot_read() {
 /// The runtime's `at_start_only` refusal is rendered as what it is: a sentence naming the
 /// thing to do instead.
 #[test]
-fn a_mid_life_plan_change_claude_refuses_is_rendered_as_data() {
+fn a_mid_life_plan_change_the_runtime_refuses_is_rendered_as_data() {
     let mut app = opened();
     compose(&mut app, "/plan on");
 
@@ -629,12 +628,12 @@ fn a_mid_life_plan_change_claude_refuses_is_rendered_as_data() {
             code: ErrorCode::InvalidParams,
             message: "unsupported_configuration".into(),
             data: Some(json!({
-                "provider": "claude",
+                "provider": "native",
                 "field": "plan",
                 "reason": "at_start_only",
-                "message": "claude can only be told to plan when the session starts \
-                            (it carries the posture as provider_options on every launch); \
-                            start a new session with `plan: true` instead."
+                "message": "this session can only be told to plan when it starts \
+                            (it carries the posture on every launch); start a new session \
+                            with `plan: true` instead."
             })),
         })),
     });
@@ -645,7 +644,7 @@ fn a_mid_life_plan_change_claude_refuses_is_rendered_as_data() {
     let text = render(&mut app, 220, 44).text();
 
     assert!(
-        text.contains("can only be told to plan when the session starts"),
+        text.contains("can only be told to plan when it starts"),
         "the runtime's own sentence is shown, not a JSON blob\n{text}"
     );
     assert!(

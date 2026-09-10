@@ -1,12 +1,9 @@
 defmodule Ouroboros.Web.Live.Rail.Row do
   @moduledoc """
-  One session as the rail draws it, from either plane.
+  One session as the rail draws it.
 
-  A normalized row rather than the plane's own struct, because the two planes name the
-  same facts differently — a conversation has a `title` and a task has an `objective`, a
-  conversation lists the `children` it delegated and a task names the `parent` that
-  delegated it — and a rail that branched on which plane it was holding would encode that
-  difference in every row it draws instead of once, here.
+  A normalized row rather than the plane's own struct, so a rail draws a heading from
+  field names it owns rather than from the checkpoint's.
   """
 
   defstruct [
@@ -23,14 +20,11 @@ defmodule Ouroboros.Web.Live.Rail.Row do
     :sandbox_mode,
     :total_tokens,
     :cost_usd,
-    :parent_id,
-    :parent_plane,
     :error,
-    :last_turn,
-    children: []
+    :last_turn
   ]
 
-  @type plane :: :interactive | :coding
+  @type plane :: :interactive
   @type t :: %__MODULE__{
           plane: plane(),
           id: String.t(),
@@ -45,16 +39,13 @@ defmodule Ouroboros.Web.Live.Rail.Row do
           sandbox_mode: atom() | String.t() | nil,
           total_tokens: non_neg_integer() | nil,
           cost_usd: number() | nil,
-          parent_id: String.t() | nil,
-          parent_plane: plane() | nil,
-          error: term(),
-          children: [String.t()]
+          error: term()
         }
 end
 
 defmodule Ouroboros.Web.Live.Rail do
   @moduledoc """
-  Both planes' sessions in one list, grouped by what each one needs.
+  Every session in one list, grouped by what each one needs.
 
   Port of `SessionsTab::triaged` (`tui/src/ui/app/session.rs:380`) and
   `SessionInfo::triage` (`tui/src/model.rs:237`). The grouping **is** the ordering, not a
@@ -84,8 +75,8 @@ defmodule Ouroboros.Web.Live.Rail do
 
   alias Ouroboros.Web.Live.Rail.Row
 
-  @typedoc "A row with the group it landed in and whether it is drawn nested under a parent."
-  @type triaged :: %{group: group(), depth: 0 | 1, row: Row.t()}
+  @typedoc "A row with the group it landed in."
+  @type triaged :: %{group: group(), depth: 0, row: Row.t()}
   @type group :: :needs_you | :at_work | :settled
 
   @groups [:needs_you, :at_work, :settled]
@@ -129,8 +120,8 @@ defmodule Ouroboros.Web.Live.Rail do
   finished reading.
 
   The terminal client's `SessionInfo::triage` (`tui/src/model.rs`) uses the same rule:
-  idle on either plane is `Triage::Done`. Approvals still promote the row. If one
-  surface ever changes this, change the other in the same pass.
+  idle is `Triage::Done`. Approvals still promote the row. If one surface ever changes
+  this, change the other in the same pass.
   """
   @spec triage_of(Row.t(), non_neg_integer()) :: group()
   def triage_of(%Row{} = row, pending \\ 0) when is_integer(pending) do
@@ -138,14 +129,14 @@ defmodule Ouroboros.Web.Live.Rail do
       pending > 0 or row.status == :awaiting_approval -> :needs_you
       terminal?(row.status) -> :settled
       busy?(row.status) -> :at_work
-      # Idle, on either plane: between turns, and waiting on nobody in particular.
+      # Idle: between turns, and waiting on nobody in particular.
       row.status == :idle -> :settled
       true -> :at_work
     end
   end
 
   @doc """
-  Every row, grouped, ordered, deduped and nested.
+  Every row, grouped, ordered and deduped.
 
   `pending` is a map from `{plane, id}` to the count of unanswered approvals this view
   holds for that session — usually one entry, for the session that is open.
@@ -157,7 +148,7 @@ defmodule Ouroboros.Web.Live.Rail do
     |> Enum.map(fn row -> {triage_of(row, Map.get(pending, {row.plane, row.id}, 0)), row} end)
     |> Enum.sort_by(&key/1)
     |> dedupe()
-    |> nest()
+    |> Enum.map(fn {group, row} -> %{group: group, depth: 0, row: row} end)
   end
 
   @doc "How many rows landed in each group."
@@ -170,9 +161,7 @@ defmodule Ouroboros.Web.Live.Rail do
   @doc """
   One row's title, and never an empty string.
 
-  A conversation nobody named and a task are different things with the same problem: the
-  rail needs a word. The task's objective is what it was asked to do, which is the closest
-  thing it has to a name. An unnamed conversation gets a friendly project label;
+  A conversation nobody named still needs a word, so it gets a friendly project label;
   its stable id remains in its route and session details.
   """
   @spec title(Row.t()) :: String.t()
@@ -219,8 +208,6 @@ defmodule Ouroboros.Web.Live.Rail do
   def failed?(%Row{status: status}), do: status in [:failed, :lost]
 
   # ------------------------------------------------------------------------------------
-  # Rows from the two planes
-  # ------------------------------------------------------------------------------------
 
   @doc """
   One `interactive.list` row.
@@ -249,35 +236,7 @@ defmodule Ouroboros.Web.Live.Rail do
       sandbox_mode: Map.get(options, :sandbox_mode),
       total_tokens: Map.get(usage, :total_tokens),
       cost_usd: Map.get(usage, :cost_usd),
-      error: Map.get(session, :error),
-      children: List.wrap(Map.get(session, :children))
-    }
-  end
-
-  @doc "One `coding.list` row. Its objective stands in for the title it does not have."
-  @spec from_coding(map()) :: Row.t()
-  def from_coding(task) when is_map(task) do
-    options = Map.get(task, :options) || %{}
-    parent = Map.get(task, :parent)
-
-    %Row{
-      plane: :coding,
-      id: to_string(Map.get(task, :id, "")),
-      node: Map.get(task, :node),
-      status: Map.get(task, :status, :unknown),
-      updated_at: Map.get(task, :updated_at),
-      created_at: Map.get(task, :created_at),
-      title: Map.get(task, :objective),
-      provider: Map.get(task, :provider),
-      model: Map.get(options, :model),
-      workspace: Map.get(task, :workspace),
-      sandbox_mode: Map.get(options, :sandbox_mode),
-      total_tokens: nil,
-      cost_usd: nil,
-      parent_id: parent && Map.get(parent, :id),
-      parent_plane: parent && Map.get(parent, :plane),
-      error: Map.get(task, :error),
-      children: []
+      error: Map.get(session, :error)
     }
   end
 
@@ -305,8 +264,7 @@ defmodule Ouroboros.Web.Live.Rail do
   defp negate(text), do: for(<<byte <- text>>, into: <<>>, do: <<255 - byte>>)
 
   defp plane_order(:interactive), do: 0
-  defp plane_order(:coding), do: 1
-  defp plane_order(_other), do: 2
+  defp plane_order(_other), do: 1
 
   # One row represents one addressable stream. A duplicate `{plane, id}` — two nodes both
   # claiming a session — is drawn once, at the place the first observation put it.
@@ -322,44 +280,4 @@ defmodule Ouroboros.Web.Live.Rail do
 
     Enum.reverse(kept)
   end
-
-  # Moves each delegated coding task directly under the conversation that started it.
-  #
-  # **Only within a group.** The two orderings this rail carries answer different
-  # questions — "what needs me" and "who started this" — and where they disagree the first
-  # one wins, because a child that needs a human must not be buried under a parent that
-  # does not. A child whose parent sits in another group keeps its own place at depth
-  # zero, which is the honest answer rather than a tree drawn across a heading.
-  defp nest(rows) do
-    {ordered, _taken} =
-      Enum.reduce(rows, {[], MapSet.new()}, fn {group, row}, {ordered, taken} ->
-        if MapSet.member?(taken, {row.plane, row.id}) do
-          {ordered, taken}
-        else
-          ordered = [%{group: group, depth: 0, row: row} | ordered]
-
-          if row.children == [] do
-            {ordered, taken}
-          else
-            Enum.reduce(rows, {ordered, taken}, fn {child_group, child}, {ordered, taken} ->
-              if child_group == group and claims?(row, child) do
-                {[%{group: child_group, depth: 1, row: child} | ordered],
-                 MapSet.put(taken, {child.plane, child.id})}
-              else
-                {ordered, taken}
-              end
-            end)
-          end
-        end
-      end)
-
-    Enum.reverse(ordered)
-  end
-
-  defp claims?(%Row{} = parent, %Row{plane: :coding} = child) do
-    child.id in parent.children or
-      (child.parent_id == parent.id and child.parent_plane == parent.plane)
-  end
-
-  defp claims?(_parent, _child), do: false
 end

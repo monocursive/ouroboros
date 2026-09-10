@@ -7,7 +7,7 @@ is the only kind of verification this repository can honestly claim for the adap
 Two rules shape all of it:
 
   * **Nothing is built in the container.** ERTS does not cross-compile and a task image
-    is not a build host. The artifact is `make dist` run on a Linux machine, handed over
+    is not a build host. The artifact is `make ouro` run on a Linux machine, handed over
     as `OURO_LINUX_DIST`, uploaded by the agent and only unpacked here.
   * **Nothing is fetched.** No curl, no npm, no package index. Terminal-Bench tasks may
     run with the network policy closed, and an agent that needs a download to install
@@ -33,7 +33,7 @@ DATA_DIR = "/opt/ouroboros/data"
 def is_tarball(path: str) -> bool:
     """Whether the dist artifact is an archive rather than the bare binary.
 
-    `make dist` produces a single self-contained executable, but a release pipeline that
+    `make ouro` produces a single self-contained executable, but a pipeline that
     ships it inside a `.tar.gz` is at least as likely, so both are accepted and the
     difference is one branch rather than a documented restriction.
     """
@@ -130,7 +130,6 @@ def run_command(
     return (
         f"OUROBOROS_DATA_DIR={shlex.quote(data_dir)} "
         f"{shlex.quote(ouro)} run {shlex.quote(instruction)}"
-        " --provider native"
         " --approve-all"
         " --stream-json"
         f" --workspace {shlex.quote(workspace)}"

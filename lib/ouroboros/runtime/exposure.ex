@@ -17,8 +17,8 @@ defmodule Ouroboros.Runtime.Exposure do
   alias Ouroboros.Cluster
   alias Ouroboros.Mesh
   alias Ouroboros.Runtime.Manifesto
-  alias Ouroboros.Upgrade.Forge.Signer
   alias Ouroboros.Upgrade.Rollout.Registry
+  alias Ouroboros.Upgrade.Signing.Service, as: SigningService
 
   @open "<ouroboros-runtime"
   @close "</ouroboros-runtime>"
@@ -361,12 +361,17 @@ defmodule Ouroboros.Runtime.Exposure do
 
   defp format_agent(other), do: inspect(other, limit: 8)
 
+  # The same three answers `Ouroboros.Wasm.Deploy.signer/1` picks between, asked without
+  # signing anything: a configured `:signer` node that is not this one is `:remote`, a
+  # signing service running here is `:local`, and neither is `:deny` — this node cannot
+  # sign, so nothing it forges can be admitted.
   defp signer_kind do
-    case Signer.configured() do
-      {Signer.Deny, _opts} -> :deny
-      {Signer.Local, _opts} -> :local
-      {Signer.Remote, _opts} -> :remote
-      {_other, _opts} -> :other
+    configured = Application.get_env(:ouroboros, :signing_node)
+
+    cond do
+      is_atom(configured) and not is_nil(configured) and configured != node() -> :remote
+      is_pid(Process.whereis(SigningService)) -> :local
+      true -> :deny
     end
   end
 

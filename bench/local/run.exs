@@ -538,8 +538,6 @@ defmodule Bench.Runner do
       [
         "run",
         task.instruction,
-        "--provider",
-        "native",
         "--workspace",
         workspace,
         "--approval-mode",

@@ -33,7 +33,7 @@ defmodule Ouroboros.Web.Live.Composer do
   A sandbox picker is offered only where the session **reported** a posture. A picker
   defaulted to `workspace_write` because nothing said otherwise would be this page telling
   an operator what a session is allowed to do on no evidence, which is the one thing a
-  security control must never do (`docs/DESKTOP.md:63-69`, `docs/WEB.md` §4).
+  security control must never do (the removed `docs/DESKTOP.md`, `docs/WEB.md` §4).
 
   The thinking picker is always offered because effort is a preference, not a permission,
   and its **label** carries the same honesty: `Default` where nothing reported one. Its

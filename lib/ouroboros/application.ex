@@ -123,8 +123,7 @@ defmodule Ouroboros.Application do
   # builder with no pool answered every forwarded forge `{:imports_unreadable,
   # {:pool_unavailable, …}}` — found the first time a forward crossed a real node boundary
   # (W22, §13 W-F31). The pool is lazy and owns nothing durable, so the posture is unchanged:
-  # no teams, stores, schedulers, registries, workspaces, recovery loops, or control plane
-  # exist on that host to be reached.
+  # no stores, registries, workspaces or recovery loops exist on that host to be reached.
   defp children(:builder), do: [Ouroboros.Cluster, Ouroboros.Wasm.Supervisor]
 
   # A `:signer` node is the same posture plus the one process its role names. The service
@@ -141,7 +140,7 @@ defmodule Ouroboros.Application do
 
   defp children(:core) do
     children =
-      runtime_boundary_children([Ouroboros.Provider.RuntimeCache]) ++
+      runtime_boundary_children([]) ++
         [
           # The effect ledger leads every process that can originate an effect. If its
           # durable authority restarts, rest_for_one stops Jido's runners and agent
@@ -163,11 +162,8 @@ defmodule Ouroboros.Application do
             type: :worker
           },
           Ouroboros.Mesh.Directory,
-          Ouroboros.Upgrade.NodeExecutor,
           Ouroboros.Upgrade.Rollout.Registry,
-          Ouroboros.Coding.Store,
           Ouroboros.Interactive.Store,
-          Ouroboros.Team.Store,
           Ouroboros.Control.Grants,
           # S2. What a signed policy component has earned the right to resolve, beside the
           # authority that says what an agent may do to the cluster and above every session
@@ -184,9 +180,6 @@ defmodule Ouroboros.Application do
           Ouroboros.Control.Permissions
         ] ++
         self_signing_children() ++
-        [
-          release_runtime()
-        ] ++
         workspace_children() ++
         [
           # D3/D9. The native transport's own name space, keyed by `provider_session_id`.
@@ -195,25 +188,9 @@ defmodule Ouroboros.Application do
           # without reading another supervisor's private state.
           {Ouroboros.Application.RegistryOwner,
            keys: :unique, name: Ouroboros.Provider.Native.Registry},
-          # C4. The same idea for the remaining ACP JSONL transport, keyed by harness
-          # session id. The pinned harness exposes its worker but not the transport handle
-          # underneath it; ACP `session/set_mode` is a dialect verb the worker cannot carry.
-          {Ouroboros.Application.RegistryOwner,
-           keys: :unique, name: Ouroboros.Provider.Session.Registry},
           subtree(
             Ouroboros.Session.Supervisor,
             [
-              subtree(
-                Ouroboros.Coding.Supervisor,
-                [
-                  {Ouroboros.Application.RegistryOwner,
-                   keys: :unique, name: Ouroboros.Coding.Registry},
-                  {DynamicSupervisor,
-                   strategy: :one_for_one, name: Ouroboros.Coding.TaskSupervisor},
-                  Ouroboros.Coding.Recovery
-                ],
-                :rest_for_one
-              ),
               subtree(
                 Ouroboros.Interactive.Supervisor,
                 [
@@ -224,18 +201,8 @@ defmodule Ouroboros.Application do
                   Ouroboros.Interactive.Recovery
                 ],
                 :rest_for_one
-              ),
-              subtree(
-                Ouroboros.Team.RuntimeSupervisor,
-                [
-                  {Ouroboros.Application.RegistryOwner,
-                   keys: :unique, name: Ouroboros.Team.Registry},
-                  {DynamicSupervisor, strategy: :one_for_one, name: Ouroboros.Team.Supervisor},
-                  Ouroboros.Team.Recovery
-                ],
-                :rest_for_one
               )
-            ] ++ automation_children(),
+            ],
             :one_for_one
           )
         ]
@@ -247,17 +214,15 @@ defmodule Ouroboros.Application do
       [
         subtree(
           Ouroboros.Surface.Supervisor,
-          [Ouroboros.Cluster, Ouroboros.Provider.OpenAIAuth, Ouroboros.Provider.GrokAuth] ++
+          [Ouroboros.Cluster, Ouroboros.Provider.OpenAIAuth] ++
             gateway_children() ++
             [
-              Ouroboros.CodeIntel.Supervisor,
               subtree(
                 Ouroboros.Wasm.RuntimeSupervisor,
                 [Ouroboros.Wasm.Supervisor] ++
                   boot_restart_children(),
                 :rest_for_one
               ),
-              Ouroboros.Provider.Native.Desktop.Supervisor,
               Ouroboros.Provider.Native.Mcp.Supervisor
             ] ++ web_children(),
           :one_for_one
@@ -272,26 +237,6 @@ defmodule Ouroboros.Application do
       type: :supervisor,
       shutdown: :infinity
     }
-  end
-
-  # Preserve existing behavior by default. Permission rules and grants remain core when
-  # objective automation is disabled; session and native subagent APIs remain available.
-  defp automation_children do
-    if Application.get_env(:ouroboros, :automation_enabled, true) do
-      [
-        subtree(
-          Ouroboros.Automation.Supervisor,
-          [
-            Ouroboros.Orchestration.Store,
-            Ouroboros.Control.Store,
-            orchestration_scheduler()
-          ] ++ control_children(),
-          :rest_for_one
-        )
-      ]
-    else
-      []
-    end
   end
 
   # The lane-W half of the same idea as `reconcile_worktrees`: a supervised one-shot task,
@@ -333,13 +278,13 @@ defmodule Ouroboros.Application do
     end
   end
 
-  # S4. The one-machine signing posture. A lane-W signature comes from an explicit service, a
+  # S4. The one-machine signing posture. A signature comes from an explicit service, a
   # configured `:signer`-role peer, or **a service registered on this node** — in that order
   # (`Ouroboros.Wasm.Deploy`) — and until now only `children(:signer)` above ever started one.
   # So a single machine could forge and never sign, which is the whole `self` posture's loop.
   #
-  # This is the dev loop `Ouroboros.Upgrade.Forge.Signer`'s moduledoc describes and it is not
-  # custody: the key is a file beside the application, readable by every process this user
+  # This is a dev loop and it is not custody: the key is a file beside the application,
+  # readable by every process this user
   # runs, and anyone holding it signs as this identity. A fleet names `OUROBOROS_SIGNING_NODE`
   # instead — and then this starts nothing, because the peer signs and a second service here
   # would be a second key to look after for no reason.
@@ -352,15 +297,20 @@ defmodule Ouroboros.Application do
   #
   # Public (undocumented) for `wasm_restart_children/0`'s reason: `test/self/boot_test.exs`
   # reads the decision off the spec this tree actually builds rather than restating it.
-  # S4 fix wave. And it starts nothing at all on a node whose sandbox cannot **hide** that
-  # file from a session's own shell. The review of this slice proved the whole of it: the
-  # default `:workspace_write` policy fences writes and not reads, so the model's `bash` read
-  # the seed, derived the keypair with `:crypto`, and signed a manifest — around the eval
-  # spec, the rate limit and the journal that are the only things this service adds. The
-  # fence is `Ouroboros.Provider.Native.Sandbox`'s `hidden_files`, two of the three backends
-  # can render it, and `hides_files?/1` is how the third says it cannot. A key this node
-  # cannot fence is a key it declines to hold, and `OUROBOROS_SELF_UNFENCED_KEY=1` is the
-  # operator saying they accept the consequence in the sentence below.
+  #
+  # S4. The seed this service loads is denied a **read** by every session's own sandbox
+  # policy (`Ouroboros.Provider.Native.Sandbox`'s `hidden_files`), which is what makes
+  # holding it here safe: without that fence the model's `bash` reads the seed, derives the
+  # keypair with `:crypto`, and signs a manifest around the eval spec, the rate limit and the
+  # journal that are the only things this service adds.
+  #
+  # Both backends render the fence — Seatbelt with a `literal` deny, bubblewrap by binding
+  # `/dev/null` read-only over the path, and only where the file is there — so this no longer
+  # asks *which* backend a node has. It still asks whether it has one. `:none` renders no
+  # fence at all, and a node that cannot hide the seed from its own sessions is a node that
+  # declines to hold it: no backend, no service. There used to be one variable that turned
+  # that refusal off (`OUROBOROS_SELF_UNFENCED_KEY`); it went with the third backend, and the
+  # remedy is now a `:signer` peer or a backend (docs/proposals/core.md §4 A2).
   #
   # `Sandbox.detect/0` here rather than a fresh probe: it is cached in `:persistent_term`, so
   # this is the same answer every `bash` call in the VM will get, decided once at boot.
@@ -372,43 +322,30 @@ defmodule Ouroboros.Application do
     if Application.get_env(:ouroboros, :self_posture, false) == true and
          is_nil(Application.get_env(:ouroboros, :signing_node)) and
          is_binary(key_path) and key_path != "" do
-      signing_service_if_fenced(key_path)
+      signing_service_if_a_backend_is_there(key_path)
     else
       []
     end
   end
 
-  defp signing_service_if_fenced(key_path) do
+  defp signing_service_if_a_backend_is_there(key_path) do
     detection = Ouroboros.Provider.Native.Sandbox.detect()
 
-    cond do
-      Ouroboros.Provider.Native.Sandbox.hides_files?(detection) ->
-        [{Ouroboros.Upgrade.Signing.Service, [key_path: key_path]}]
+    if detection.backend == :none do
+      Logger.error(
+        "OUROBOROS_POSTURE=self names a signing key at #{key_path}, and this node has no OS " <>
+          "sandbox at all: with no backend nothing hides a named file from a read, so any " <>
+          "session on this node can read the signing seed and sign in this key's name — " <>
+          "around the signed evaluation spec, the rate limit and the signing journal " <>
+          "(docs/SELF.md §2, S-D49). No local signing service was started, so a forge here " <>
+          "ends at :no_signing_service. Name a `:signer` peer with OUROBOROS_SIGNING_NODE so " <>
+          "the key lives on another host, or install a backend: bubblewrap on Linux, or run " <>
+          "on macOS where `sandbox-exec` is present."
+      )
 
-      System.get_env(Ouroboros.Self.Posture.unfenced_key_env()) == "1" ->
-        Logger.warning(
-          "#{Ouroboros.Self.Posture.unfenced_key_env()}=1: starting the one-machine signing " <>
-            "service with #{key_path} on a #{Ouroboros.Provider.Native.Sandbox.label(detection)} " <>
-            "sandbox, which cannot hide one named file from a read. Any session on this node " <>
-            "can read the signing seed and sign in this key's name — around the signed " <>
-            "evaluation spec, the rate limit and the signing journal (docs/SELF.md S-D49)."
-        )
-
-        [{Ouroboros.Upgrade.Signing.Service, [key_path: key_path]}]
-
-      true ->
-        Logger.error(
-          "OUROBOROS_POSTURE=self names a signing key at #{key_path}, and this node's " <>
-            "#{Ouroboros.Provider.Native.Sandbox.label(detection)} sandbox cannot hide a " <>
-            "named file from a read: any session on this node can read the signing seed and " <>
-            "sign in this key's name. No local signing service was started, so a forge here " <>
-            "ends at :no_signing_service. Name a `:signer` peer with OUROBOROS_SIGNING_NODE " <>
-            "so the key lives on another host, or set " <>
-            "#{Ouroboros.Self.Posture.unfenced_key_env()}=1 to accept that consequence " <>
-            "(docs/SELF.md §2, S-D49)."
-        )
-
-        []
+      []
+    else
+      [{Ouroboros.Upgrade.Signing.Service, [key_path: key_path]}]
     end
   end
 
@@ -534,95 +471,5 @@ defmodule Ouroboros.Application do
       [] ->
         []
     end
-  end
-
-  defp orchestration_scheduler do
-    opts =
-      [
-        max_concurrency: Application.get_env(:ouroboros, :orchestration_max_concurrency, 4),
-        executors: orchestration_executors()
-      ]
-
-    {Ouroboros.Orchestration.Scheduler, opts}
-  end
-
-  # Each step kind gets its own executor. An explicit `:orchestration_executors`
-  # entry wins over the per-kind configuration below, so an operator can name an
-  # adapter this application does not know about. A kind with no executor is one
-  # the scheduler refuses to accept plans for, which is why forge dispatch stays
-  # off until `:orchestration_forge_options` says otherwise.
-  defp orchestration_executors do
-    configured = Application.get_env(:ouroboros, :orchestration_executors, %{})
-
-    %{}
-    |> put_executor(:coding, team_executor())
-    |> put_executor(:forge, forge_executor())
-    |> Map.merge(if(is_map(configured), do: configured, else: %{}))
-  end
-
-  defp put_executor(executors, _kind, nil), do: executors
-  defp put_executor(executors, kind, executor), do: Map.put(executors, kind, executor)
-
-  defp team_executor do
-    case Application.get_env(:ouroboros, :orchestration_team_id) do
-      team_id when is_binary(team_id) and byte_size(team_id) > 0 ->
-        {Ouroboros.Orchestration.TeamExecutor,
-         [
-           team_id: team_id,
-           worker_id: Application.get_env(:ouroboros, :orchestration_worker_id),
-           coding_options: Application.get_env(:ouroboros, :orchestration_coding_options, [])
-         ]}
-
-      _other ->
-        nil
-    end
-  end
-
-  defp forge_executor do
-    case Application.get_env(:ouroboros, :orchestration_forge_options, []) do
-      [_ | _] = options -> {Ouroboros.Orchestration.ForgeExecutor, options}
-      _other -> nil
-    end
-  end
-
-  defp control_children do
-    if Application.get_env(:ouroboros, :control_enabled, false) do
-      [
-        {Ouroboros.Control.Server,
-         [
-           store: Ouroboros.Control.Store,
-           scheduler: Ouroboros.Orchestration.Scheduler,
-           planner: Application.fetch_env!(:ouroboros, :control_planner),
-           evaluator: Application.fetch_env!(:ouroboros, :control_evaluator),
-           poll_interval: Application.get_env(:ouroboros, :control_poll_interval, 1_000)
-         ]}
-      ]
-    else
-      []
-    end
-  end
-
-  defp release_runtime do
-    {Ouroboros.Release.Runtime,
-     [
-       storage:
-         Application.get_env(
-           :ouroboros,
-           :release_storage,
-           {Jido.Storage.ETS, table: :ouroboros_releases}
-         ),
-       adapter:
-         Application.get_env(
-           :ouroboros,
-           :release_handler_adapter,
-           Ouroboros.Release.HandlerAdapter.OTP
-         ),
-       authorizer:
-         Application.get_env(
-           :ouroboros,
-           :release_authorizer,
-           Ouroboros.Release.Authorizer.Deny
-         )
-     ]}
   end
 end

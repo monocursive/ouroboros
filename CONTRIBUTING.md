@@ -9,18 +9,33 @@
 ## Local test gate
 
 `make test` is the local gate — formatting (`mix format`, `cargo fmt`), the
-destructive-lifecycle script tests, the Elixir suite, and the Rust suite with both
-feature sets plus clippy — not the whole of CI:
+destructive-lifecycle script tests, the Elixir suite, the integration boot gate
+(`make boot-gate`: a data directory written before the core reduction, booted twenty
+times against this tree), and the Rust suite with both feature sets plus clippy — not the
+whole of CI:
 
 ```sh
 make test
 ```
 
 CI also runs Dialyzer, the suites with `OUROBOROS_REQUIRE_WASM` (a missing helper fails
-rather than skips), golden fixture drift, protocol-docs drift, browser journeys, the
-packaged three-node fleet, and the Linux container proofs (wasm, forge, sandbox). Run
-`make dialyzer` locally if you touched specs or types. If a Dialyzer failure looks
-garbled locally, use the default formatter — see the note in `.github/workflows/ci.yml`.
+rather than skips), golden fixture drift, protocol-docs drift, browser journeys, and the
+Linux container proof for the wasm suites under bubblewrap. Run `make dialyzer` locally
+if you touched specs or types. Run the browser journeys locally if you touched anything
+the web renders — they are the only test that drives the pages in a browser, and nothing
+in `make test` does:
+
+```sh
+npm ci && npx playwright install chromium   # once
+npm run test:browser                        # about thirty seconds, both viewports
+```
+ If a Dialyzer failure looks garbled locally, use the
+default formatter — see the note in `.github/workflows/ci.yml`.
+
+`dialyzer.ignore-warnings` pins each accepted warning by file *and line*, so adding or
+removing lines above a pinned one silently unpins it and the warning fires again: re-run
+`mix dialyzer` and re-pin whenever you edit a file that has an entry, and never pipe its
+output into `tail`, which hides the exit code.
 
 ## Golden fixtures
 
@@ -36,6 +51,6 @@ make golden
 
 1. Bump `version` in `mix.exs` on `dev`.
 2. Merge `dev` into `main` once CI is green.
-3. Tag `vX.Y.Z` on `main` — the tag must match the Mix version exactly, or the release
-   workflow refuses to build. The workflow publishes signed binaries for four targets;
-   see `docs/DISTRIBUTION.md` for the signing key requirements.
+3. Tag `vX.Y.Z` on `main` — the tag must match the Mix version exactly. There is no
+   binary publication workflow: `make ouro` builds the client with its release embedded,
+   on the machine that will run it (`docs/proposals/core.md` §3).

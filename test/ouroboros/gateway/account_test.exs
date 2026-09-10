@@ -4,7 +4,6 @@ defmodule Ouroboros.Gateway.AccountTest do
   use ExUnit.Case, async: false
 
   alias Ouroboros.Gateway.Methods
-  alias Ouroboros.Test.GrokAccountAdapter
   alias Ouroboros.Test.OpenAIAccountAdapter
 
   test "the account surface is advertised with read and operate scopes" do
@@ -16,10 +15,13 @@ defmodule Ouroboros.Gateway.AccountTest do
     assert table["account.login.cancel"].scope == :operate
     assert table["account.logout"].scope == :operate
     assert table["credentials.anthropic.set"].scope == :operate
-    assert table["grok.account.read"].scope == :read
-    assert table["grok.account.login.start"].scope == :operate
-    assert table["grok.account.login.cancel"].scope == :operate
     assert table["credentials.xai.set"].scope == :operate
+
+    # The Grok CLI's device flow went with the wrapped vendor providers, and the surface
+    # says so: the three verbs are not in the table at all rather than answering an error.
+    for removed <- ~w(grok.account.read grok.account.login.start grok.account.login.cancel) do
+      refute Map.has_key?(table, removed)
+    end
   end
 
   test "stores an xAI key through a one-way, closed parameter boundary" do
@@ -213,35 +215,9 @@ defmodule Ouroboros.Gateway.AccountTest do
     assert message =~ "browser or device_code"
   end
 
-  test "reads and starts the first-party Grok device flow" do
-    on_exit(&GrokAccountAdapter.reset/0)
-    GrokAccountAdapter.disconnected()
-
-    assert {:ok, %{"requiresGrokAuth" => true, "account" => nil}} =
-             Methods.invoke("grok.account.read", %{})
-
-    assert {:ok,
-            %{
-              "loginId" => "grok-device",
-              "verificationUrl" => verification_url,
-              "userCode" => "WXYZ-5678"
-            }} = Methods.invoke("grok.account.login.start", %{})
-
-    assert verification_url =~ "auth.x.ai"
-
-    assert {:ok, %{"cancelled" => "grok-device"}} =
-             Methods.invoke("grok.account.login.cancel", %{"login_id" => "grok-device"})
-
-    assert {:error, -32602, message} =
-             Methods.invoke("grok.account.login.start", %{"flow" => "browser"})
-
-    assert message =~ "unsupported fields"
-  end
-
   describe "a boundary that fails is answered in the terms it failed in" do
     setup do
       on_exit(&OpenAIAccountAdapter.succeed/0)
-      on_exit(&GrokAccountAdapter.reset/0)
       :ok
     end
 
@@ -273,20 +249,6 @@ defmodule Ouroboros.Gateway.AccountTest do
         assert message == "the runtime failed the call"
         assert data == ["openai_auth", "the OAuth server refused the request"]
       end
-    end
-
-    test "Grok account failures keep their provider attribution" do
-      GrokAccountAdapter.fail({:error, {:timeout, "grok/login"}})
-
-      assert {:error, -32005, "Grok authentication timed out during grok/login"} =
-               Methods.invoke("grok.account.login.start", %{})
-
-      GrokAccountAdapter.fail({:error, {:upstream, "the device code was refused"}})
-
-      assert {:error, -32006, "the runtime failed the call", data} =
-               Methods.invoke("grok.account.login.start", %{})
-
-      assert data == ["grok_auth", "the device code was refused"]
     end
   end
 end

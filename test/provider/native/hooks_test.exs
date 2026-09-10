@@ -250,45 +250,13 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       assert trusted.declined == 0
     end
 
-    # S1/HIGH-1. Configuration is necessary and no longer sufficient: `ouroboros.toml` is a
-    # file in a workspace the session can write, so trusting it means trusting whatever it
-    # writes into it next — unless the kernel holds that one path shut. The sandbox backend
-    # is the second condition, and where it cannot express the fence the workspace's shell
-    # hooks are declined exactly as an untrusted workspace's are.
-    test "operator configuration alone does not trust a workspace the sandbox cannot fence",
-         %{workspace: workspace} do
-      project_toml(workspace, """
-      [[hooks]]
-      event = "PreToolUse"
-      command = "true"
-      """)
-
-      trust(workspace)
-
-      # Seatbelt and bubblewrap can write the deny; ouro-sandbox cannot, and says so.
-      for backend <- [:sandbox_exec, :bwrap] do
-        config = Hooks.load(workspace, sandbox_detection: %{backend: backend})
-        assert config.trusted?, "#{backend} declined a workspace it can fence"
-        assert [%{event: :pre_tool_use}] = config.hooks
-        assert config.declined == 0
-      end
-
-      for backend <- [:ouro_sandbox, :none] do
-        {config, log} =
-          with_log(fn -> Hooks.load(workspace, sandbox_detection: %{backend: backend}) end)
-
-        refute config.trusted?, "#{backend} trusted a workspace it cannot fence"
-        assert config.hooks == []
-        assert config.declined == 1
-
-        # One warning, naming the reason and the file.
-        assert log =~ "cannot keep a shell out of"
-        assert log =~ Path.join(workspace, "ouroboros.toml")
-        assert log =~ inspect(backend)
-      end
-    end
-
-    test "a component hook from such a workspace is still admitted, as D8 says", %{
+    # S1. `trusted?/2` used to ask the OS sandbox a second question — whether the backend
+    # this node detected could fence `ouroboros.toml` at all — because one of the three
+    # backends could not. There are two backends now and both can, so operator configuration
+    # is sufficient again (docs/proposals/core.md §4 A2). What has *not* changed is that the
+    # fence must exist: `Sandbox.protected_files/2` names the manifest in every workspace
+    # policy, and `sandbox_test.exs` pins both backends rendering it.
+    test "a component hook from an untrusted workspace is still admitted, as D8 says", %{
       workspace: workspace
     } do
       File.mkdir_p!(Path.join(workspace, "hooks"))
@@ -300,9 +268,8 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       component = "./hooks/vet.wasm"
       """)
 
-      trust(workspace)
-
-      config = Hooks.load(workspace, sandbox_detection: %{backend: :ouro_sandbox})
+      # Deliberately not trusted: no `trust(workspace)`.
+      config = Hooks.load(workspace)
 
       refute config.trusted?
       assert [%{kind: :component, trusted: false}] = config.hooks
@@ -698,81 +665,6 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       refute result["output"] =~ "ran"
     end
 
-    test "a no-op desktop hook sees redaction without replacing the real typed text", context do
-      trust(context.workspace)
-
-      observer =
-        script(context.root, "observe-desktop.sh", """
-        python3 -c 'import json,sys
-        p=json.load(sys.stdin)
-        ti=p.get("tool_input") or {}
-        secret="sk-live-secret"
-        ok=("text" not in ti and ti.get("text_bytes")==len(secret) and secret not in json.dumps(p))
-        if not ok:
-            sys.stderr.write("hook saw the secret or lost text_bytes\\n")
-            sys.exit(2)
-        print("{}")'
-        """)
-
-      project_toml(context.workspace, """
-      [[hooks]]
-      event = "PreToolUse"
-      command = "#{observer}"
-      matcher = "desktop_act"
-      """)
-
-      helper = Path.join(context.root, "ouro-computer-use")
-      File.write!(helper, "#!/bin/sh\nexit 1\n")
-      previous = Application.get_env(:ouroboros, :computer_use)
-      Application.put_env(:ouroboros, :computer_use, enabled: true, helper_path: helper)
-
-      on_exit(fn -> restore(:computer_use, previous) end)
-
-      snapshot = %{
-        state: %{
-          "app" => %{"id" => "com.apple.calculator"},
-          "window" => %{"id" => "w_1"},
-          "nodes" => []
-        },
-        at: System.system_time(:millisecond)
-      }
-
-      pool = Ouroboros.Provider.Native.Desktop.Pool
-      Ouroboros.Provider.Native.Desktop.Pool.remember_state(pool, context.session_dir, snapshot)
-
-      assert Ouroboros.Provider.Native.Desktop.Pool.last_state(pool, context.session_dir) ==
-               snapshot
-
-      script = [
-        [
-          {:tool_call,
-           %{
-             id: "c1",
-             name: "desktop_act",
-             input: %{"action" => "type", "text" => "sk-live-secret"}
-           }}
-        ],
-        [{:text, "done"}, {:finish, :stop}]
-      ]
-
-      {loop, _agent} = start_loop(context, script)
-      pid = run(loop)
-
-      assert_receive {:event, %{type: :approval_requested} = first}, 5_000
-      send(pid, {:native_approval, first.request_id, ApprovalResponse.new!(:approve)})
-
-      assert_receive {:event, %{type: :approval_requested} = sensitive}, 5_000
-      assert sensitive.request_id != first.request_id
-      assert sensitive.payload["reason"] =~ "password field or looks like a secret"
-      refute Map.has_key?(sensitive.payload, "suggested_rule")
-
-      send(pid, {:native_approval, sensitive.request_id, ApprovalResponse.new!(:deny)})
-      [result] = tool_results(collect())
-      assert result["output"] =~ "the operator denied this desktop_act call"
-      refute result["output"] =~ "hook saw the secret"
-      refute result["output"] =~ "sk-live-secret"
-    end
-
     test "`additionalContext` is appended to the tool result", context do
       trust(context.workspace)
 
@@ -1003,82 +895,6 @@ defmodule Ouroboros.Provider.Native.HooksTest do
 
       assert result["output"] =~ "post ran"
       refute result["output"] =~ "post missing"
-    end
-
-    test "desktop_act typed text is redacted on PostToolUseFailure", context do
-      trust(context.workspace)
-
-      recorder =
-        script(context.root, "post-desktop.sh", """
-        python3 -c 'import json,sys
-        p=json.load(sys.stdin)
-        ti=p.get("tool_input") or {}
-        secret="hello from the hook"
-        ok=("text" not in ti and ti.get("text_bytes")==len(secret) and secret not in json.dumps(p))
-        print(json.dumps({"hookSpecificOutput":{"additionalContext": "post desktop" if ok else "post desktop leaked"}}))'
-        """)
-
-      project_toml(context.workspace, """
-      [[hooks]]
-      event = "PostToolUse"
-      matcher = "desktop_act"
-      command = "#{recorder}"
-
-      [[hooks]]
-      event = "PostToolUseFailure"
-      matcher = "desktop_act"
-      command = "#{recorder}"
-      """)
-
-      helper = Path.join(context.root, "ouro-computer-use")
-      File.write!(helper, "#!/bin/sh\nexit 1\n")
-      previous = Application.get_env(:ouroboros, :computer_use)
-      Application.put_env(:ouroboros, :computer_use, enabled: true, helper_path: helper)
-      on_exit(fn -> restore(:computer_use, previous) end)
-
-      snapshot = %{
-        state: %{
-          "app" => %{"id" => "com.apple.calculator"},
-          "window" => %{"id" => "w_1"},
-          "nodes" => []
-        },
-        at: System.system_time(:millisecond)
-      }
-
-      pool = Ouroboros.Provider.Native.Desktop.Pool
-      Ouroboros.Provider.Native.Desktop.Pool.remember_state(pool, context.session_dir, snapshot)
-
-      assert Ouroboros.Provider.Native.Desktop.Pool.last_state(pool, context.session_dir) ==
-               snapshot
-
-      script = [
-        [
-          {:tool_call,
-           %{
-             id: "c1",
-             name: "desktop_act",
-             input: %{"action" => "type", "text" => "hello from the hook"}
-           }}
-        ],
-        [{:text, "done"}, {:finish, :stop}]
-      ]
-
-      {loop, _agent} =
-        start_loop(context, script,
-          approval_mode: :ask,
-          approval_timeout_ms: :infinity,
-          desktop_runner: fn "act", _params, _timeout -> {:error, :broken} end
-        )
-
-      pid = run(loop)
-
-      assert_receive {:event, %{type: :approval_requested} = ask}, 5_000
-      send(pid, {:native_approval, ask.request_id, ApprovalResponse.new!(:approve)})
-
-      [result] = tool_results(collect())
-      assert result["output"] =~ "post desktop"
-      refute result["output"] =~ "post desktop leaked"
-      refute result["output"] =~ "hello from the hook"
     end
 
     test "a failing tool fires PostToolUseFailure instead", context do
@@ -1356,12 +1172,7 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       command = "#{blocker}"
       """)
 
-      # S1: `trusted?/2` now also asks whether the *sandbox* can fence this workspace's
-      # `ouroboros.toml`, and `native_sandbox: :none` above says it cannot — which would
-      # decline the hook one layer earlier than the layer this test is about. The detection
-      # is named explicitly so the load stays trusted and the dispatch is still the thing
-      # under test.
-      config = Hooks.load(context.workspace, sandbox_detection: %{backend: :sandbox_exec})
+      config = Hooks.load(context.workspace)
 
       {result, log} =
         with_log(fn ->
@@ -1386,9 +1197,7 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       marker = Path.join(context.workspace, "ambient-check-ran")
       project_toml(context.workspace, "[checks]\ntypecheck = \"touch #{marker}\"\n")
 
-      # S1: as above — the load is kept trusted on purpose so that "a check that cannot be
-      # sandboxed fails" is what this asserts, not "a check that was never loaded".
-      config = Hooks.load(context.workspace, sandbox_detection: %{backend: :sandbox_exec})
+      config = Hooks.load(context.workspace)
       assert [failure] = Hooks.run_checks(config)
       assert failure =~ "typecheck"
       assert failure =~ "could not run"

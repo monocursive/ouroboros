@@ -192,7 +192,7 @@ defmodule Ouroboros.Gateway.PolicyTest do
 
       # The company `policy.*` keeps. Each of these widens what may run without a person, which
       # is why each of them is an administrator's.
-      for method <- ~w(permissions.add grants.grant wasm.deploy credentials.set upgrade.apply) do
+      for method <- ~w(permissions.add grants.grant wasm.deploy credentials.set release.install) do
         refute Identity.permits?(ana, method, :operate),
                "#{method} unexpectedly admits a bare operator"
       end

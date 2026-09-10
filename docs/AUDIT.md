@@ -92,8 +92,8 @@ Restrict those separately, and use the existing gateway and web transport protec
 The standard/local single-user fallback remains available only when no identities are
 configured. Required environment configuration rejects missing identities or encryption.
 
-Required recording supports the native provider. Vendor agents, MCP, desktop automation,
-code-intelligence subprocesses, WASM capabilities and component hooks do not currently
+Required recording supports the native provider. Vendor agents, MCP,
+WASM capabilities and component hooks do not currently
 meet its full recording/containment contract and cannot execute through that profile.
 Native reads, writes, edits, patches, shell, search, web fetch, questions, plans, skills
 and supported native subagents retain runtime-boundary evidence. Shells require an OS
@@ -109,10 +109,9 @@ execution checks the destination's organization, required policy, capture and cu
 floor before handoff. The initiating identity must exist and be active on that node.
 
 The packaged fleet launcher preserves explicit `OUROBOROS_AUDIT_CONFIG` and
-`OUROBOROS_AUDIT_MODE` settings. The automatic `fleet service install` template does not
-yet persist audit policy: it refuses an audit-configured installation instead of silently
-dropping the policy. Use an operator-managed service with these environment settings and
-the packaged `ouro service-run` command, or an operator-managed release. Verify
+`OUROBOROS_AUDIT_MODE` settings. Use an operator-managed service with these environment
+settings and the packaged `ouro service-run` command, or an operator-managed release.
+Verify
 `ouro audit status` on every node after startup; editing only an interactive shell's
 environment does not reconfigure an already running service.
 

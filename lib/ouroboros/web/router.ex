@@ -41,16 +41,13 @@ defmodule Ouroboros.Web.Router do
       live "/s/:plane/:id", Live.DeckLive, :session
       live "/new", Live.NewSessionLive, :index
       live "/settings", Live.SettingsLive, :index
-      live "/machines", Live.MachinesLive, :index
       live "/status", StatusLive, :index
       live "/audit", AuditLive, :index
       live "/audit/:stream", AuditLive, :show
     end
 
-    # Not a LiveView: it answers bytes, and an `<img>` is a plain GET. It is inside the
-    # authenticated scope like everything else, so the cookie that opened the deck is the
-    # only thing that opens a screenshot.
-    get "/artifact/:plane/:id/:sha", ArtifactController, :show
+    # Not a LiveView: it answers bytes, and it is inside the authenticated scope like
+    # everything else, so the cookie that opened the deck is the only thing that opens it.
     get "/audit-bundle/:id", AuditBundleController, :show
   end
 end

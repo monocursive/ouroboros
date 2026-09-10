@@ -2,10 +2,9 @@ defmodule Ouroboros.Wasm.Pool do
   @moduledoc """
   Owns the one `ouro-wasm` helper process this node runs, and speaks its six methods.
 
-  There is exactly one helper on a node, for the reason `Ouroboros.Provider.Native.Desktop.Pool`
-  has exactly one: the expensive thing — here a wasmtime engine, its epoch ticker, and the
-  compiled-component cache — is per-binary, not per-caller, and a second helper pid would
-  buy nothing but a second copy of all of it. This GenServer is that single owner. It spawns
+  There is exactly one helper on a node: the expensive thing — a wasmtime engine, its epoch
+  ticker, and the compiled-component cache — is per-binary, not per-caller, and a second
+  helper pid would buy nothing but a second copy of all of it. This GenServer is that single owner. It spawns
   the resolved helper with the `serve` subcommand, speaks the newline-delimited JSON-RPC of
   `Ouroboros.Wasm.Codec` over its stdio, keeps at most one request in flight, and hands
   every request a hard deadline.
@@ -26,8 +25,8 @@ defmodule Ouroboros.Wasm.Pool do
   waiting, and the window keeps a helper that fails on every spawn from being respawned on
   every request. A request after the window reconnects.
 
-  A **timeout is broken**, unlike the desktop pool's abandon-and-recover path, and that is a
-  fact about this helper rather than a stricter policy: `ouro-wasm` runs every guest under a
+  A **timeout is broken**, and that is a fact about this helper rather than a stricter
+  policy: `ouro-wasm` runs every guest under a
   fuel budget, an epoch deadline, and a memory ceiling, so a request that outlives its own
   deadline plus the transport's margin is not slow work — it is a helper wedged somewhere no
   deadline reaches, and a wedged helper answers nothing ever again. The child is killed by
@@ -105,8 +104,8 @@ defmodule Ouroboros.Wasm.Pool do
   never forks, never execs and never talks to launchd, so `Sandbox.helper_policy/1` says
   `process: :sealed` and on Seatbelt the child may exec only the binary it was spawned as (by
   its resolved path, as one `-D` parameter), may not fork, has no `mach-lookup`, reads
-  `sysctl` under `hw.` only and can `stat` nothing it may not read. The two Linux backends
-  cannot express that and render the policy as they render a build's; the pool does not
+  `sysctl` under `hw.` only and can `stat` nothing it may not read. bubblewrap cannot
+  express that and renders the policy as it renders a build's; the pool does not
   refuse on it — `:required` still means reads and network fenced — and `status/1`'s
   `sandbox.process` says which posture the child actually got: `:sealed`, `:open`, `:off`.
   The one way to an open process posture on Seatbelt is `scripted_helper: true`, a pool start
@@ -119,8 +118,8 @@ defmodule Ouroboros.Wasm.Pool do
   `loopback: false` and the Seatbelt profile emits `(deny network*)` and nothing after it. A
   review proved why it matters: under the old policy a probe connected to a loopback listener,
   and a loopback socket reaches every service on this machine — this node's own gateway
-  included. The two Linux backends unshare the network namespace, so the host's loopback is
-  not in the child's namespace at all; a `bwrap` that could not unshare one is a refusal to
+  included. bubblewrap unshares the network namespace, so the host's loopback is not in the
+  child's namespace at all; a `bwrap` that could not unshare one is a refusal to
   spawn (`Sandbox.fences_network?/1`) rather than a child on the host's network.
 
   **Nothing degrades quietly.** `config :ouroboros, :wasm, helper_sandbox:` is `:required` by
@@ -307,7 +306,7 @@ defmodule Ouroboros.Wasm.Pool do
   `process` (W21) is the process posture the child **actually** got, answered by the backend
   and not by the policy: `:sealed` — exec only itself, no fork, no `mach-lookup`, `sysctl`
   under `hw.` only — where the policy asked for it and the backend is Seatbelt; `:open` on
-  the two Linux backends, which cannot express it, and for a pool started with
+  bubblewrap, which cannot express it, and for a pool started with
   `scripted_helper: true`; `:off` under `helper_sandbox: :off`; `nil` where the pool refused
   to spawn. A node that cannot seal is **not** refused — `:required` means reads and network
   fenced (D25) — it is a node whose status says `open`.

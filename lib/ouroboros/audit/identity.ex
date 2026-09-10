@@ -113,7 +113,6 @@ defmodule Ouroboros.Audit.Identity do
         "policy.",
         "credentials.",
         "release.",
-        "upgrade.",
         "forge.",
         "wasm.",
         "account."

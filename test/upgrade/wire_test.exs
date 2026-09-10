@@ -11,7 +11,8 @@ defmodule Ouroboros.Upgrade.WireTest do
 
   use ExUnit.Case, async: true
 
-  alias Ouroboros.Upgrade.{Artifact, Wire}
+  alias Ouroboros.Upgrade.Wire
+  alias Ouroboros.Wasm.Artifact
 
   # Each of these spells an atom every VM has interned, so a boundary that resolved bare
   # keys would turn each one into that atom.
@@ -42,7 +43,7 @@ defmodule Ouroboros.Upgrade.WireTest do
       for term <- [
             %{"__atom__" => "ok"},
             %{"__tuple__" => [1, 2]},
-            %{"__struct__" => "Elixir.Ouroboros.Upgrade.Artifact"},
+            %{"__struct__" => "Elixir.Ouroboros.Wasm.Artifact"},
             %{"__map__" => [["a", 1]]},
             %{"__dropped__" => "improper_list"},
             %{"__atom__" => "ok", "other" => 1},
@@ -62,7 +63,7 @@ defmodule Ouroboros.Upgrade.WireTest do
     end
 
     test "nested structures round-trip through every container" do
-      {:ok, artifact} = artifact!(%{forge: %{eval: eval_spec()}})
+      {:ok, artifact} = artifact!(%{author: "wire", eval: eval_spec()})
 
       term = %{
         artifact: artifact,
@@ -76,8 +77,17 @@ defmodule Ouroboros.Upgrade.WireTest do
 
     test "a signed manifest hashes the same on both sides of the boundary" do
       {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
-      {:ok, artifact} = artifact!(%{forge: %{eval: eval_spec()}})
-      signed = Artifact.sign(artifact, "wire-signer", private_key)
+      {:ok, artifact} = artifact!(%{author: "wire", eval: eval_spec()})
+
+      value =
+        :crypto.sign(
+          :eddsa,
+          :none,
+          Artifact.signing_payload(artifact, "wire-signer"),
+          [private_key, :ed25519]
+        )
+
+      signed = %{artifact | signature: %{signer: "wire-signer", value: value}}
 
       restored = Wire.load(Wire.dump(signed))
 
@@ -232,7 +242,9 @@ defmodule Ouroboros.Upgrade.WireTest do
     end
 
     test "needs no atom beyond the three booleans, wherever the term came from" do
-      {:ok, artifact} = artifact!(%{"raw" => %{ok: {:t, [nil]}}, forge: %{eval: eval_spec()}})
+      {:ok, artifact} =
+        artifact!(%{"raw" => %{ok: {:t, [nil]}}, author: "wire", eval: eval_spec()})
+
       dumped = Wire.dump(%{"k" => {:a, %{b: :c}}, artifact: artifact, list: [%{"d" => :e}]})
 
       assert atoms(dumped) == []
@@ -261,7 +273,7 @@ defmodule Ouroboros.Upgrade.WireTest do
     end
 
     test "an already-decoded struct is returned as it is" do
-      {:ok, artifact} = artifact!(%{})
+      {:ok, artifact} = artifact!(%{author: "wire"})
       assert Wire.load(artifact) == artifact
     end
   end
@@ -283,12 +295,12 @@ defmodule Ouroboros.Upgrade.WireTest do
     end
   end
 
-  # An artifact built the way the forge builds one: real module bytes (a test module
-  # has none on disk, so the boundary's own), and a metadata map whose eval spec carries
-  # the string-keyed probe input this boundary used to mangle.
+  # A manifest built the way the forge builds one: a component preamble and some bytes
+  # after it, and a metadata map whose eval spec carries the string-keyed probe input this
+  # boundary used to mangle. Nothing here parses the component.
   defp artifact!(metadata) do
-    {Wire, binary, _filename} = :code.get_object_code(Wire)
-    Artifact.build([{Wire, binary, []}], epoch: 1, metadata: metadata)
+    bytes = <<0, "asm", 0x0D, 0x00, 0x01, 0x00, "wire-test-component">>
+    Artifact.build(bytes, name: "wire-probe", epoch: 1, imports: [], metadata: metadata)
   end
 
   defp eval_spec do

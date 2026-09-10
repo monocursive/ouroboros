@@ -284,28 +284,8 @@ defmodule Ouroboros.Provider.Native.Session do
   def whereis(_provider_session_id), do: nil
 
   @doc false
-  def bridge_tool(handle, request, call, emit),
-    do: GenServer.call(handle, {:bridge_tool, request, call, emit}, 15 * 60_000)
-
-  defp bridge_source(state, nil), do: {:ok, state}
-
-  defp bridge_source(state, request) do
-    with {:ok, scope} <-
-           Paths.scope(request.cwd, request.add_dirs, Loop.sandbox_mode(request.sandbox_mode)),
-         {:ok, model_spec} <- Loop.resolve_model(request.model) do
-      plan? = truthy_option(request.provider_options || %{}, "plan")
-
-      {:ok,
-       %{
-         state
-         | request: request,
-           scope: if(plan?, do: %{scope | sandbox_mode: :read_only}, else: scope),
-           model_spec: model_spec,
-           approval_mode: Loop.approval_mode(request.approval_mode),
-           plan_mode?: plan?
-       }}
-    end
-  end
+  def bridge_tool(handle, call, emit),
+    do: GenServer.call(handle, {:bridge_tool, call, emit}, 15 * 60_000)
 
   # ---------------------------------------------------------------- lifecycle
 
@@ -619,47 +599,47 @@ defmodule Ouroboros.Provider.Native.Session do
     end
   end
 
-  def handle_call({:bridge_tool, _request, _call, _emit}, _from, %{loop: loop} = state)
+  def handle_call({:bridge_tool, _call, _emit}, _from, %{loop: loop} = state)
       when not is_nil(loop), do: {:reply, {:error, :busy}, state}
 
-  def handle_call({:bridge_tool, request, call, emit}, from, state) do
-    with {:ok, source} <- bridge_source(state, request) do
-      owner = self()
+  # The child runs on this session's own live state: its scope, its model, its approval
+  # mode. A wrapped vendor owner used to hand in a synthesized request to run a sidecar
+  # under instead, and that half went with the vendor providers.
+  def handle_call({:bridge_tool, call, emit}, from, state) do
+    source = state
+    owner = self()
 
-      loop = %Loop{
-        emit: emit,
-        model_module: source.model_module,
-        model_spec: source.model_spec,
-        scope: source.scope,
-        session_dir: source.session_dir,
-        journal: source.journal,
-        session_id: source.context.session_id,
-        provider_session_id: source.provider_session_id,
-        turn_id: "bridge_" <> call.id,
-        approval_mode: loop_approval_mode(source),
-        allowed_tools: source.request.allowed_tools,
-        disallowed_tools: source.request.disallowed_tools,
-        session_pid: owner,
-        session_request: source.request,
-        session_context: source.context,
-        subagent_depth: source.subagent_depth,
-        subagent_parent: source.subagent_parent,
-        subagent_task_id: source.subagent_task_id,
-        tool_timeout_ms: source.tool_timeout_ms,
-        approval_timeout_ms: source.request.approval_timeout_ms,
-        hooks: nil
-      }
+    loop = %Loop{
+      emit: emit,
+      model_module: source.model_module,
+      model_spec: source.model_spec,
+      scope: source.scope,
+      session_dir: source.session_dir,
+      journal: source.journal,
+      session_id: source.context.session_id,
+      provider_session_id: source.provider_session_id,
+      turn_id: "bridge_" <> call.id,
+      approval_mode: loop_approval_mode(source),
+      allowed_tools: source.request.allowed_tools,
+      disallowed_tools: source.request.disallowed_tools,
+      session_pid: owner,
+      session_request: source.request,
+      session_context: source.context,
+      subagent_depth: source.subagent_depth,
+      subagent_parent: source.subagent_parent,
+      subagent_task_id: source.subagent_task_id,
+      tool_timeout_ms: source.tool_timeout_ms,
+      approval_timeout_ms: source.request.approval_timeout_ms,
+      hooks: nil
+    }
 
-      task =
-        Task.Supervisor.async_nolink(Jido.Harness.SessionTaskSupervisor, fn ->
-          {:bridge_result, Loop.run_tool(loop, call)}
-        end)
+    task =
+      Task.Supervisor.async_nolink(Jido.Harness.SessionTaskSupervisor, fn ->
+        {:bridge_result, Loop.run_tool(loop, call)}
+      end)
 
-      {:noreply,
-       %{state | loop: %{pid: task.pid, ref: task.ref, turn_id: loop.turn_id, bridge_from: from}}}
-    else
-      {:error, reason} -> {:reply, {:error, reason}, state}
-    end
+    {:noreply,
+     %{state | loop: %{pid: task.pid, ref: task.ref, turn_id: loop.turn_id, bridge_from: from}}}
   end
 
   # ---------------------------------------------------------------- subagents (G3)
@@ -1124,7 +1104,6 @@ defmodule Ouroboros.Provider.Native.Session do
   def terminate(:normal, state) do
     _ = stop_loop(state)
     _ = stop_subagents(state, "session closed")
-    _ = Ouroboros.Provider.Native.Desktop.forget_state(state.session_dir)
     :ok
   rescue
     _error -> :ok
@@ -1134,7 +1113,6 @@ defmodule Ouroboros.Provider.Native.Session do
     _ = stop_loop(state)
     _ = stop_subagents(state, "session ended")
     _ = session_end(state, terminate_reason(reason))
-    _ = Ouroboros.Provider.Native.Desktop.forget_state(state.session_dir)
     :ok
   rescue
     _error -> :ok

@@ -222,7 +222,6 @@ defmodule Ouroboros.Wasm.ForgeTwoNodeTest do
       |> Enum.sort()
 
     assert ids == [Cluster, Wasm.Supervisor]
-    assert call(builder.node, Process, :whereis, [Ouroboros.Upgrade.NodeExecutor]) == nil
     assert call(builder.node, Process, :whereis, [Registry]) == nil
   end
 
@@ -580,7 +579,6 @@ defmodule Ouroboros.Wasm.ForgeTwoNodeTest do
     put_env!(peer_node, :upgrade_trust_policy, context.trust_policy)
     put_env!(peer_node, :data_dir, data_dir)
     put_env!(peer_node, :wasm, helper_path: Wasm.helper_path())
-    put_env!(peer_node, :coding_storage, {Jido.Storage.ETS, table: peer_name})
 
     case role do
       :signer ->

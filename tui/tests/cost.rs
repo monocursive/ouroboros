@@ -59,7 +59,7 @@ fn session(id: &str, usage: Value) -> Value {
         "_struct": "Ouroboros.Interactive.State",
         "id": id,
         "status": "idle",
-        "provider": "codex",
+        "provider": "native",
         "workspace": "/w",
         "updated_at": "2026-01-01T00:00:00.000000Z",
         "options": {
@@ -84,7 +84,7 @@ fn event(sequence: u64, kind: &str, payload: Value) -> Value {
         "timestamp": "2026-01-01T00:00:00.000000Z",
         "payload": payload,
         "turn_id": "turn-1",
-        "provider": "codex"
+        "provider": "native"
     })
 }
 
@@ -99,7 +99,6 @@ fn opened(rows: Vec<Value>, events: Vec<Value>) -> App {
     app.apply(key(KeyCode::Char('2')));
 
     answer(&mut app, Tag::Sessions(Plane::Interactive), json!(rows));
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
     app.open_session(Plane::Interactive, "session-a7".into());
 
     if let Some(subscribe) = app
@@ -497,15 +496,15 @@ fn a_usage_map_with_nothing_in_it_draws_nothing() {
 
 /// The rail's card carries the cell that fits, and drops the half that does not.
 ///
-/// The card is twenty columns of a hundred-and-twenty-column frame, which holds
-/// `IDLE · codex` and the cost and not the token count as well. Asserted against the
+/// The card is a slice of a hundred-and-forty-column frame, which holds
+/// `IDLE · native` and the cost and not the token count as well. Asserted against the
 /// *card's own row*, not the frame: the footer states the same numbers, and a `contains`
 /// over the whole screen would pass without the rail drawing anything.
 #[test]
 fn the_rail_card_carries_the_cell_that_fits_and_drops_the_rest() {
     let mut app = one_session();
-    let drawn = screen(&mut app, 120);
-    let card = drawn.row("IDLE · codex");
+    let drawn = screen(&mut app, 140);
+    let card = drawn.row("IDLE · native");
 
     assert!(card.contains("$0.42"), "the cost fits\n{}", drawn.text());
     assert!(
@@ -519,7 +518,7 @@ fn the_rail_card_carries_the_cell_that_fits_and_drops_the_rest() {
 fn a_rail_card_without_usage_carries_nothing() {
     let mut app = opened(vec![session("session-a7", Value::Null)], Vec::new());
     let drawn = screen(&mut app, 120);
-    let card = drawn.row("IDLE · codex");
+    let card = drawn.row("IDLE · native");
 
     assert!(!card.contains("$"), "{card}");
 }

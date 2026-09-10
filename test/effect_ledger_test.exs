@@ -99,7 +99,7 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
 
   test "a denied stable request cannot become a new effect after authority changes" do
     ledger = start_ledger!()
-    denied = attrs("denied-stable", :start_agent, %{module: Ouroboros.Agent.Worker})
+    denied = attrs("denied-stable", :start_agent, %{module: Ouroboros.Wasm.Capability})
 
     assert {:ok, %Entry{status: :denied}, :created} =
              EffectLedger.record_denied(denied, ledger)
@@ -108,7 +108,7 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
       put_in(denied, [:authority], %{
         decision: :granted,
         reason: :granted,
-        constraints: %{modules: [Ouroboros.Agent.Worker]},
+        constraints: %{modules: [Ouroboros.Wasm.Capability]},
         granted_at: "2026-08-22T00:01:00Z"
       })
 
@@ -150,7 +150,7 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
 
   test "retention never evicts in-flight work and settlement advances the query cursor" do
     ledger = start_ledger!(retention_limit: 2)
-    active = attrs("active", :start_agent, %{module: Ouroboros.Agent.Worker})
+    active = attrs("active", :start_agent, %{module: Ouroboros.Wasm.Capability})
     assert {:ok, _entry, :created} = EffectLedger.record_started(active, ledger)
 
     for number <- 1..3 do
@@ -167,7 +167,7 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
                active.id,
                %{
                  status: :ok,
-                 result: %{agent_id: "started", module: Ouroboros.Agent.Worker, node: node()}
+                 result: %{agent_id: "started", module: Ouroboros.Wasm.Capability, node: node()}
                },
                ledger
              )
@@ -243,7 +243,7 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
 
     assert {:error, {:effect_ledger_checkpoint_failed, :storage_offline}} =
              EffectLedger.record_started(
-               attrs("never-admitted", :start_agent, %{module: Ouroboros.Agent.Worker}),
+               attrs("never-admitted", :start_agent, %{module: Ouroboros.Wasm.Capability}),
                ledger
              )
 
@@ -281,7 +281,7 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
         attempt: %{
           tool: "bash",
           mode: :execute,
-          provider: :codex,
+          provider: :native,
           fingerprint: %{sha256: String.duplicate("a", 64), bytes: 12},
           command: @secret
         },
@@ -304,7 +304,7 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
       assert entry.attempt == %{
                tool: "bash",
                mode: :execute,
-               provider: :codex,
+               provider: :native,
                fingerprint: %{sha256: String.duplicate("a", 64), bytes: 12}
              }
 
@@ -425,37 +425,33 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
       refute inspect(entry) =~ "rm -rf"
     end
 
-    test "a Computer Use subject keeps app, action, and window_id" do
+    test "a capability subject keeps the name and the component digest" do
       ledger = start_ledger!()
+      digest = String.duplicate("d", 64)
 
       assert {:ok, entry, :created} =
                EffectLedger.record_started(
                  %{
-                   id: "tool-cu",
+                   id: "tool-cap",
                    effect: :tool_call,
                    principal: "session:s1",
                    attempt: %{
                      session_id: "s1",
-                     tool: "desktop_act",
+                     tool: "capability",
                      provider: :native,
                      subject: %{
-                       app: "com.apple.calculator",
-                       desktop_action: "click",
-                       window_id: "w_1",
+                       capability: "vet",
+                       component_sha256: digest,
                        input: @secret
                      }
                    },
                    authority: %{decision: :allow},
-                   cause: %{signal_id: "tool-cu"}
+                   cause: %{signal_id: "tool-cap"}
                  },
                  ledger
                )
 
-      assert entry.attempt.subject == %{
-               app: "com.apple.calculator",
-               desktop_action: "click",
-               window_id: "w_1"
-             }
+      assert entry.attempt.subject == %{capability: "vet", component_sha256: digest}
 
       refute inspect(entry) =~ @secret
     end
@@ -498,7 +494,7 @@ defmodule Ouroboros.Agent.EffectLedgerTest do
                      session_id: "s1",
                      request_id: "req-1",
                      tool: "bash",
-                     provider: :codex,
+                     provider: :native,
                      node: node(),
                      subject: %{command_sha256: String.duplicate("b", 64)},
                      reason: @secret

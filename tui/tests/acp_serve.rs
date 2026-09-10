@@ -222,7 +222,6 @@ impl Drop for Harness {
 
 fn options() -> Options {
     Options {
-        provider: "native".into(),
         workspace: None,
         approval_mode: Some("prompt".into()),
         sandbox_mode: None,
@@ -415,7 +414,11 @@ async fn session_new_starts_the_session_on_the_editors_cwd_and_advertises_its_mo
     let frames = harness.line(session_new()).await;
     let start = harness.sent("interactive.start");
 
-    assert_eq!(start["params"]["provider"], "native");
+    assert!(
+        start["params"].get("provider").is_none(),
+        "`provider` is not a start option and sending it would be -32602: {}",
+        start["params"]
+    );
     assert_eq!(start["params"]["workspace"], "/tmp/project");
     assert_eq!(start["params"]["approval_mode"], "prompt");
     assert!(
@@ -1189,7 +1192,7 @@ async fn set_mode_configures_the_session_and_a_mode_never_advertised_is_refused(
         let mut replies = open_replies();
         replies.push((
             "interactive.configure",
-            json!({"options": {"approval_mode": "auto_edit"}, "applies": "next_turn"}),
+            json!({"options": {"approval_mode": "auto_edit"}, "applies": "now"}),
         ));
         replies
     })
@@ -1230,7 +1233,7 @@ async fn set_mode_configures_the_session_and_a_mode_never_advertised_is_refused(
     assert!(refused[0]["error"]["message"]
         .as_str()
         .expect("a message")
-        .contains("provider native"));
+        .contains("session/new advertised"));
 }
 
 #[tokio::test]
@@ -1280,7 +1283,7 @@ async fn a_configured_status_event_becomes_a_current_mode_update() {
                 "status",
                 json!({
                     "kind": "configured",
-                    "applies": "next_turn",
+                    "applies": "now",
                     "changed": {"approval_mode": "auto_approve"}
                 }),
             )
@@ -1675,7 +1678,7 @@ fn a_prompt_is_text_and_workspace_paths_and_nothing_else() {
 #[test]
 fn modes_are_offered_only_where_the_runtime_would_not_refuse_them() {
     let full = json!({"dynamic_configuration": "native", "approvals": "native"});
-    let ids: Vec<String> = modes_for("native", Some(&full), false)
+    let ids: Vec<String> = modes_for(Some(&full))
         .into_iter()
         .map(|mode| mode.id)
         .collect();
@@ -1687,28 +1690,24 @@ fn modes_are_offered_only_where_the_runtime_would_not_refuse_them() {
     // No approvals channel: `prompt` is the mode `interactive.start`/`configure` refuse
     // with `["unsupported_approval_mode", …]`, so it is not offered.
     let no_approvals = json!({"dynamic_configuration": "managed", "approvals": false});
-    let ids: Vec<String> = modes_for("claude", Some(&no_approvals), false)
+    let ids: Vec<String> = modes_for(Some(&no_approvals))
         .into_iter()
         .map(|mode| mode.id)
         .collect();
-    assert_eq!(ids, ["auto_edit", "auto_approve", "default"]);
+    assert_eq!(ids, ["plan", "auto_edit", "auto_approve", "default"]);
 
-    // The ACP transport declares no dynamic configuration at all, so it gets no modes —
-    // and `plan` is not offered for a provider whose plan mode is not settable mid-session.
-    let acp = json!({"transport": "acp", "dynamic_configuration": false, "approvals": "native"});
-    assert!(modes_for("opencode", Some(&acp), false).is_empty());
-
-    // A session that *is* planning may always be offered the way out of it.
-    let ids: Vec<String> = modes_for("opencode", Some(&acp), true)
+    // A session that declares no dynamic configuration at all gets no approval modes. Plan
+    // survives it: plan is its own `interactive.configure` field, not an approval mode,
+    // and this runtime's transport takes it at any time.
+    let fixed = json!({"dynamic_configuration": false, "approvals": "native"});
+    let ids: Vec<String> = modes_for(Some(&fixed))
         .into_iter()
         .map(|mode| mode.id)
         .collect();
     assert_eq!(ids, ["plan"]);
 
-    // No capabilities read at all: nothing but the one mode a provider table proves.
-    assert!(modes_for("native", None, false)
-        .iter()
-        .all(|mode| mode.id == "plan"));
+    // No capabilities read at all: nothing but the one mode that needs no capability.
+    assert!(modes_for(None).iter().all(|mode| mode.id == "plan"));
 }
 
 #[test]

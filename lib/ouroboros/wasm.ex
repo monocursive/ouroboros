@@ -6,11 +6,10 @@ defmodule Ouroboros.Wasm do
   The helper is the containment boundary (docs/WASM.md §7.3). It is an isolated workspace
   member carrying a whole wasmtime, built by `make wasm` into `priv/wasm/` and fanned out to
   `_build/*/lib/ouroboros/priv/wasm/`. Nothing here builds it and nothing here requires it:
-  **presence on disk is the operator opt-in**, exactly as it is for the Computer Use helper
-  (`Ouroboros.Provider.Native.Desktop.helper_path/0`), and absence is an error tuple rather
+  **presence on disk is the operator opt-in**, and absence is an error tuple rather
   than a raise so a node that never built one boots and runs unchanged.
 
-  Resolution order, same shape as the desktop helper's:
+  Resolution order:
 
     1. `OUROBOROS_WASM_HELPER` — an absolute path to an operator build;
     2. a configured absolute `helper_path` under `config :ouroboros, :wasm`;
@@ -27,8 +26,7 @@ defmodule Ouroboros.Wasm do
   with the env override or its own `priv/wasm/`.
 
   Settings are bounds on somebody else's program, so a malformed value falls back to the
-  default rather than widening anything — the `Ouroboros.Provider.Native.Desktop.config/1`
-  posture, for the same reason.
+  default rather than widening anything.
   """
 
   @helper "ouro-wasm"
@@ -68,8 +66,7 @@ defmodule Ouroboros.Wasm do
     # Values above `max_frame_bytes_max/0` (32 MiB, the helper's own ceiling) fall back to
     # this default rather than widening the helper's read bound.
     max_frame_bytes: 8 * 1024 * 1024,
-    # How long a broken helper is left alone before a request may reconnect it. The same
-    # window `Ouroboros.Provider.Native.Desktop.Pool` uses, for the same reason.
+    # How long a broken helper is left alone before a request may reconnect it.
     broken_ms: 15_000,
     # What `Ouroboros.Wasm.Store` will hold before pruning evicts unreferenced bytes.
     # Eight components at the helper's 64 MiB per-component ceiling: far more than a

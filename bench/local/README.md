@@ -28,7 +28,7 @@ for what each of the two measures and what neither does.
    scratch `XDG_CONFIG_HOME`, so nothing in the operator's config or data can change the
    result, and with every known model-provider API key **removed from the environment**.
 4. For each task: copies the fixture workspace to scratch, runs
-   `ouro run "<instruction>" --provider native --workspace … --approval-mode … --stream-json --timeout …`,
+   `ouro run "<instruction>" --workspace … --approval-mode … --stream-json --timeout …`,
    saves the NDJSON trajectory and the result object, then runs the task's `check.sh`.
 5. Prints the table, stops the daemon, removes the scratch directory, and exits non-zero
    on any failure.
@@ -120,7 +120,7 @@ in the same script.
 | 09-bash-timeout | a 45 s sleep inside a 2 s budget, killed and reported |
 | 10-grep | `grep`, asserting matches rather than which engine answered |
 | 11-glob-ls | `glob` and `ls`, two tool calls in one turn |
-| 12-code-intel-no-server | `code_intel` failing in band, agent routing around it |
+| 12-grep-bad-pattern | `grep` failing in band, agent routing around it |
 | 13-ask-user-declined | a question nobody can answer; not an error |
 | 14-ask-user-acknowledged | an approved question with no text; asked even under `auto_approve` |
 | 15-plan | `plan` publishing `plan_updated` |
@@ -136,10 +136,7 @@ slice adds no code under `lib/`.
   payload's absolute `path` *and* the relative path it parses out of the unified diff
   header. `02-write-approved` pins the count at 2; the other write tasks assert
   containment, so only that one task changes if it is ever deduplicated.
-- **`code_intel` is unreachable for an ordinary session.**
-  `Ouroboros.CodeIntel.Registry.resolve/2` takes the workspace root from the node's
-  `:workspace_allowed_roots`, which is empty on a default runtime and is *not* populated
-  by admitting a session's workspace. Every path is therefore judged
-  `{:outside_workspace, …}` before a language is considered, independently of whether any
-  language server is installed. `12-code-intel-no-server` asserts the contract (in-band,
-  bounded, non-fatal) and not the message, so fixing this does not turn the task red.
+- **A tool that cannot answer must not end the turn.** `12-grep-bad-pattern` asserts the
+  contract — in band, bounded, non-fatal — for a `grep` whose pattern does not compile,
+  and pins only the two strings this runtime writes itself rather than the regex engine's
+  own words for what it did not like.

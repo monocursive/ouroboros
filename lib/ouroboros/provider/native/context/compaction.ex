@@ -315,10 +315,8 @@ defmodule Ouroboros.Provider.Native.Context.Compaction do
 
   defp elidable?(_message), do: false
 
-  # §8.3. Eliding a tool result replaces its whole content — text *and* image parts — with
-  # the marker, and the byte count includes the image bytes so a folded screenshot's cost is
-  # visible on the marker. The staged file under `session_dir/desktop/` is untouched; the
-  # image is dropped from the *conversation*, not from disk.
+  # §8.3. Eliding a tool result replaces its whole content with the marker, and the byte
+  # count is what the marker reports so a folded result's cost stays visible.
   defp elide(message) do
     %{message | content: "#{@elision_marker} #{content_bytes(Map.get(message, :content))} bytes]"}
   end

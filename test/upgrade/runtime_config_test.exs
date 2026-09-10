@@ -4,8 +4,6 @@ defmodule Ouroboros.Upgrade.RuntimeConfigTest do
   @data_dir "OUROBOROS_DATA_DIR"
   @xdg_data_home "XDG_DATA_HOME"
   @signers "OUROBOROS_UPGRADE_TRUSTED_SIGNERS"
-  @forge_workspace "OUROBOROS_ORCHESTRATION_FORGE_WORKSPACE"
-  @forge_signer "OUROBOROS_FORGE_SIGNER_ID"
   @runtime_log_file "OUROBOROS_RUNTIME_LOG_FILE"
   @runtime_log_max_bytes "OUROBOROS_RUNTIME_LOG_MAX_BYTES"
   @runtime_log_max_files "OUROBOROS_RUNTIME_LOG_MAX_FILES"
@@ -26,8 +24,6 @@ defmodule Ouroboros.Upgrade.RuntimeConfigTest do
       restore_env(@data_dir, previous)
       restore_env(@xdg_data_home, previous)
       restore_env(@signers, previous)
-      restore_env(@forge_workspace, previous)
-      restore_env(@forge_signer, previous)
       restore_env(@runtime_log_file, previous)
       restore_env(@runtime_log_max_bytes, previous)
       restore_env(@runtime_log_max_files, previous)
@@ -70,27 +66,6 @@ defmodule Ouroboros.Upgrade.RuntimeConfigTest do
     end
   end
 
-  test "a signer id alone does not enable the forge executor" do
-    System.delete_env(@forge_workspace)
-    System.put_env(@forge_signer, "release-key")
-
-    assert forge_options() == []
-  end
-
-  test "a named workspace enables forge options and can carry a signer" do
-    workspace = Path.join(System.tmp_dir!(), "ouroboros-forge-workspace")
-    System.put_env(@forge_workspace, workspace)
-    System.delete_env(@forge_signer)
-
-    assert forge_options() == [workspace: workspace]
-
-    System.put_env(@forge_signer, "release-key")
-    assert Map.new(forge_options()) == %{workspace: workspace, signer_id: "release-key"}
-
-    System.put_env(@forge_signer, "   ")
-    assert forge_options() == [workspace: workspace]
-  end
-
   test "production stores and gateway discovery share the trimmed explicit directory", %{
     data_dir: scratch
   } do
@@ -101,11 +76,11 @@ defmodule Ouroboros.Upgrade.RuntimeConfigTest do
 
     assert get_in(config, [:ouroboros, :data_dir]) == data_dir
 
-    assert {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "coding")} ==
-             get_in(config, [:ouroboros, :coding_storage])
+    assert {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "interactive")} ==
+             get_in(config, [:ouroboros, :interactive_storage])
 
-    assert {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "upgrades")} ==
-             get_in(config, [:ouroboros, :upgrade_storage])
+    assert {Ouroboros.Storage.DurableFile, path: Path.join(data_dir, "capabilities")} ==
+             get_in(config, [:ouroboros, :capability_storage])
   end
 
   test "a blank production override still derives the XDG default", %{data_dir: scratch} do
@@ -265,11 +240,6 @@ defmodule Ouroboros.Upgrade.RuntimeConfigTest do
   defp trust_policy do
     config = runtime_config(:prod)
     get_in(config, [:ouroboros, :upgrade_trust_policy])
-  end
-
-  defp forge_options do
-    config = runtime_config(:prod)
-    get_in(config, [:ouroboros, :orchestration_forge_options])
   end
 
   defp runtime_config(env), do: Config.Reader.read!("config/runtime.exs", env: env, target: :host)

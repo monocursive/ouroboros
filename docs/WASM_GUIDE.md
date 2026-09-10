@@ -676,25 +676,15 @@ through nothing else — it is not a mesh client.
   target's deadline plus the pool's call margin. That is stated in the tool's own description
   so a model can weigh it against a cheaper tool.
 
-### 6. `agents.message`, for a script
+### 6. From a script
 
-The operator's half of the same reach is the gateway verb `agents.message`, scope `:operate`:
-
-```json
-{"method": "agents.message", "params": {"to": "wasm/counter", "body": {"add": 40}}}
-```
-
-```json
-{"result": {"from": "gateway", "to": "wasm/counter",
-            "reply": {"count": 40, "messages": 1},
-            "truncated": false, "untrusted": true}}
-```
-
-It reaches *any* mesh agent, because the mesh already resolves an agent anywhere in the
-cluster and a weaker second answer would not change that. `untrusted: true` is the label in
-structured form; `truncated` says whether the reply was cut at the 64 KiB bound.
-`agents.state` is the `:read` sibling and labels and bounds the same two fields for a `wasm/`
-agent, because it returns them too.
+There is no gateway verb that messages a capability directly. `agents.message` and its
+`:read` sibling `agents.state` reached any mesh agent from a script, and they were deleted
+with the coordination stack ([the core reduction](proposals/core.md) §3 D3). What reaches a
+deployed capability now is the session's `capability` tool above — so a script drives one
+the way it drives anything else here, through a session (`ouro run "<prompt>"`, or
+`interactive.start` and `interactive.send_message` on the gateway) — and `wasm.list` and
+`wasm.status` report what is deployed and live without sending it anything.
 
 ---
 
@@ -1080,7 +1070,7 @@ loopback** — the helper speaks over a pipe, and a loopback socket would reach 
 the machine, this node's gateway included.
 
 `helper_sandbox` is `:required` by default, and under it a node with no sandbox backend, a
-backend with no read allow-set (`ouro-sandbox` before W17), a `bwrap` that cannot unshare a
+backend that cannot fence reads, a `bwrap` that cannot unshare a
 network namespace, or no data directory **refuses to start the helper at all**: every lane-W
 request answers `{:error, :broken}` and `wasm.status` carries
 `sandbox: {posture: "refused", backend, reason, readable}` beside a helper phase of `broken`.
@@ -1104,9 +1094,9 @@ On macOS the helper's **process** is sealed as well (W21): it may exec only its 
 not fork, cannot look up a mach service — no launchd, no pasteboard — reads `sysctl` under
 `hw.` only, and cannot `stat` a path it may not read. So a compromised artifact inside the
 fence cannot run `curl` or `osascript`, and `osascript`'s `do shell script` no longer leaves the
-sandbox. `wasm.status` reports it as `sandbox.process: "sealed"`. On Linux neither backend can
-express that seal: inside bubblewrap's namespace `/usr/bin` is readable and executable, and
-Landlock does not fence `stat`, so a Linux node reports `sandbox.process: "open"` — the read
+sandbox. `wasm.status` reports it as `sandbox.process: "sealed"`. On Linux the backend cannot
+express that seal: inside bubblewrap's namespace `/usr/bin` is readable and executable, so a
+Linux node reports `sandbox.process: "open"` — the read
 and network fences are the same, and the node is not refused for it. `off` is what
 `helper_sandbox: :off` reports. docs/WASM.md D25 names what remains on each platform. There is
 no key that widens the seal; the one opt-out is a test fixture for scripted fake helpers.
@@ -1579,14 +1569,11 @@ sandbox the native agent's shell runs in:
 files at compile time and a `#[path]` module reaches one outside `src/`; all of them are
 denied unless the file is inside your project. A capability that needs data ships it as a
 `src/**.rs` file or receives it in its `init` config — those are the two doors, and both are
-inside the manifest that gets signed. The three backends say it in three different ways, and
-none of them is a bug in your project: macOS enforces it with Seatbelt and says
+inside the manifest that gets signed. The two backends say it in two different ways, and
+neither is a bug in your project: macOS enforces it with Seatbelt and says
 `Operation not permitted`; a Linux node on bubblewrap enforces it with a namespace the file
-was never in, and says `No such file or directory`; a Linux node on `ouro-sandbox` enforces
-it with a Landlock read set and says `Permission denied` (docs/WASM.md D26). The one case
-that is not a fence is a node carrying an `ouro-sandbox` older than that read set: it reports
-no `read_allow_set` feature to `doctor`, and the forge refuses to build there at all rather
-than behind a fence that helper cannot apply. `make sandbox` installs a current one.
+was never in, and says `No such file or directory` (docs/WASM.md D26). A node with no backend
+at all does not build: the forge refuses rather than building behind a fence nobody applied.
 
 ### Warming the cache, once, per builder
 
@@ -1636,10 +1623,10 @@ you say "any component", out loud.
   })
 ```
 
-A forge is bounded twice: five minutes of wall clock in the forge itself, and
-`config :ouroboros, :effect_timeout` around the whole effect. The effect asks for a build
-budget strictly inside the second, so a build that runs long is stopped by the forge — which
-signals the compiler and removes its tree — rather than by the runner, which would not.
+A forge is bounded by five minutes of wall clock in the forge itself. A caller that
+bounds it too asks for a build budget strictly inside its own, so a build that runs long is
+stopped by the forge — which signals the compiler and removes its tree — rather than by the
+caller, which would not.
 
 `eval` is not optional in practice: lane W requires a signed evaluation spec (D12), because
 there is no build peer running your tests here — the spec *is* the test story, and the

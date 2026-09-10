@@ -106,10 +106,6 @@ pub enum PresentationEvent {
     /// numbers in it — what was archived, and where — are the only record a reader has of
     /// history that is no longer in front of them.
     Compaction(Box<crate::model::native::Compaction>),
-    /// G1. A coding task this conversation delegated, starting or ending. Two per child
-    /// and no more; the terminal one carries a digest of the result, never the result,
-    /// because that is the child's own record.
-    Delegation(Box<crate::model::native::DelegationEvent>),
     /// A child agent this session spawned, at one moment of its life: spawned, reporting
     /// progress, or settled. Unlike a delegation there may be many of these per child —
     /// the runtime sends up to sixty-four progress reports — so the cell layer folds them
@@ -307,32 +303,6 @@ pub struct ToolResult {
     pub output: Value,
     pub is_error: bool,
     pub at: Option<i64>,
-    /// Image artifacts this result carried beside its text (§8.5, A11). Empty for every
-    /// tool that is not `desktop_state`, which is every tool today.
-    pub artifacts: Vec<ImageArtifact>,
-}
-
-/// One image a tool result staged, described but not carried (§8.5).
-///
-/// The wire shape is deliberately metadata only — the sha that names it, the media type, the
-/// staged file's byte count, and the pixel dimensions. The bytes never travel on this event:
-/// "no path on the wire. The path is a fact about this node", and the pixels are fetched by
-/// sha through `computer_use.artifact` by the one surface that can draw them. Decoded once,
-/// here, at absorb time, so nothing downstream parses the payload again.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ImageArtifact {
-    /// The digest that both names the artifact and is the only key `computer_use.artifact`
-    /// and [`crate::images::session_desktop`] accept. An artifact with no sha is dropped:
-    /// without it there is nothing to fetch and nothing containment can check.
-    pub sha256: String,
-    /// `image/png`, `image/jpeg`. Absent where the gateway did not state it; a drawer then
-    /// reads the format from the fetched header rather than trusting this.
-    pub media_type: Option<String>,
-    /// The staged file's size in bytes (the wire field `bytes`), so a surface can decide
-    /// whether to fetch before it asks — not the bytes themselves.
-    pub size: Option<u64>,
-    pub width: Option<u32>,
-    pub height: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -432,7 +402,6 @@ impl PresentationEvent {
                 .unwrap_or(Value::Null),
                 is_error: error_result(&event.payload),
                 at: epoch_millis(&event.timestamp),
-                artifacts: image_artifacts(&event.payload),
             }),
             EventType::CommandOutputDelta => raw_text(&event.payload, &["text", "output"])
                 .map(Self::CommandOutput)
@@ -482,12 +451,6 @@ impl PresentationEvent {
                 detail: lifecycle_detail(&event.payload),
             },
             EventType::ProviderEvent => provider_note(&event.payload),
-            // G1. `delegation` is its own runtime-native event type, not a wrapped
-            // provider one: `emit_runtime_event(runtime, :delegation, …)` puts it in the
-            // same sequence space as everything else, so it arrives here as `Other`.
-            EventType::Other(ref kind) if kind == "delegation" => Self::Delegation(Box::new(
-                crate::model::native::DelegationEvent::decode(&event.payload),
-            )),
             // A kind this build does not know. It is still an event the runtime recorded,
             // so it reads as one dim line naming itself rather than as nothing at all.
             EventType::Other(ref kind) => Self::ProviderNote {
@@ -922,50 +885,6 @@ fn error_result(payload: &Value) -> bool {
         })
 }
 
-/// The image artifacts a tool result carried (§8.5), read defensively.
-///
-/// Tolerant of a newer gateway on both axes the threat model cares about: an entry with an
-/// unknown `kind` is skipped rather than guessed at, and unknown *fields* are ignored rather
-/// than rejected. The one hard requirement is a `sha256` — it is the only key that can fetch
-/// the bytes or be checked by containment, so an entry without one is not an artifact this
-/// client can do anything honest with. A missing `kind` is treated as an image, because the
-/// only artifact kind the contract defines is `image` and a stricter reading would silently
-/// drop the very thing this exists to carry.
-///
-/// A bound on the count keeps a malformed or hostile payload from minting an unbounded run
-/// of cells; the observe loop stages at most a couple of snapshots per turn.
-fn image_artifacts(payload: &Value) -> Vec<ImageArtifact> {
-    const MAX_ARTIFACTS: usize = 16;
-
-    let Some(entries) = payload.get("artifacts").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-
-    entries
-        .iter()
-        .filter(|entry| {
-            // An entry that named a kind must name the one kind this client draws. One that
-            // named none is taken as an image; see the doc above.
-            text(entry, &["kind"]).is_none_or(|kind| kind == "image")
-        })
-        .filter_map(|entry| {
-            let sha256 = text(entry, &["sha256", "sha", "digest"])?;
-            if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return None;
-            }
-
-            Some(ImageArtifact {
-                sha256: sha256.to_ascii_lowercase(),
-                media_type: text(entry, &["media_type", "mediaType", "content_type"]),
-                size: number(entry, &["bytes", "size"]),
-                width: number(entry, &["width"]).map(|value| value.min(u32::MAX as u64) as u32),
-                height: number(entry, &["height"]).map(|value| value.min(u32::MAX as u64) as u32),
-            })
-        })
-        .take(MAX_ARTIFACTS)
-        .collect()
-}
-
 fn detail(payload: &Value) -> String {
     text(payload, &["error", "reason", "message", "text"])
         .unwrap_or_else(|| bounded_compact(payload))
@@ -1387,65 +1306,8 @@ mod tests {
                 output: json!({"text": "defmodule Ouroboros"}),
                 is_error: false,
                 at: fixture_at(),
-                artifacts: Vec::new(),
             })
         );
-    }
-
-    #[test]
-    fn decodes_desktop_image_artifacts_and_tolerates_a_newer_gateways_extra_fields() {
-        let sha = "a".repeat(64);
-        let result = event(
-            "tool_result",
-            json!({
-                "call_id": "call-9",
-                "name": "desktop_state",
-                "output": {"text": "Calculator is frontmost"},
-                "is_error": false,
-                "artifacts": [
-                    {
-                        "kind": "image",
-                        "sha256": sha,
-                        "media_type": "image/jpeg",
-                        "bytes": 81234,
-                        "width": 480,
-                        "height": 640,
-                        // A field this client has never heard of must not reject the entry.
-                        "capture_backend": "ScreenCaptureKit"
-                    },
-                    // A non-image artifact is skipped rather than guessed at.
-                    {"kind": "trace", "sha256": "deadbeef"},
-                    // An image with no sha cannot be fetched or contained, so it is dropped.
-                    {"kind": "image", "width": 10, "height": 10}
-                ]
-            }),
-        );
-
-        let PresentationEvent::ToolResult(result) = PresentationEvent::from_event(&result) else {
-            panic!("expected a tool result")
-        };
-
-        assert_eq!(
-            result.artifacts,
-            vec![ImageArtifact {
-                sha256: sha,
-                media_type: Some("image/jpeg".into()),
-                size: Some(81234),
-                width: Some(480),
-                height: Some(640),
-            }],
-            "only the image entry with a sha survives, and its unknown field is ignored"
-        );
-
-        // No `artifacts` key at all is simply an empty list — every tool but desktop_state.
-        let plain = event(
-            "tool_result",
-            json!({"call_id": "c", "output": {"text": "ok"}}),
-        );
-        let PresentationEvent::ToolResult(plain) = PresentationEvent::from_event(&plain) else {
-            panic!("expected a tool result")
-        };
-        assert!(plain.artifacts.is_empty());
     }
 
     #[test]
@@ -1488,7 +1350,6 @@ mod tests {
                 output: json!({"text": "project docs"}),
                 is_error: false,
                 at: fixture_at(),
-                artifacts: Vec::new(),
             })
         );
     }

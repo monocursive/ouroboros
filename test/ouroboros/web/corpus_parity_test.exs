@@ -19,18 +19,15 @@ defmodule Ouroboros.Web.CorpusParityTest do
     UserSteer
   }
 
-  # The event types this corpus carries, as the runtime spells them. `delegation` (G1) and
-  # `status` (D6) are Ouroboros's own and so are not in `canonical_types/0`. Spelled out
-  # rather than derived with `String.to_existing_atom/1` so a fixture carrying a type this
-  # build does not know fails loudly here instead of decoding into something plausible.
-  @types Map.new(
-           Presentation.canonical_types() ++ [:delegation, :status],
-           &{Atom.to_string(&1), &1}
-         )
+  # The event types this corpus carries, as the runtime spells them. `status` (D6) is
+  # Ouroboros's own and so is not in `canonical_types/0`. Spelled out rather than derived
+  # with `String.to_existing_atom/1` so a fixture carrying a type this build does not know
+  # fails loudly here instead of decoding into something plausible.
+  @types Map.new(Presentation.canonical_types() ++ [:status], &{Atom.to_string(&1), &1})
 
   # `Ouroboros.Gateway.Wire` writes the provider as its string; the in-process subscriber
   # holds the atom the runtime minted.
-  @providers %{"claude_code" => :claude_code, "native" => :native}
+  @providers %{"native" => :native}
 
   # ------------------------------------------------------------------------------------
   # One fixture's event, decoded the way the transport hands it to the model.
@@ -38,8 +35,6 @@ defmodule Ouroboros.Web.CorpusParityTest do
 
   # Mirrors `presentation_corpus.rs`'s own `event/1`: the same file, the same
   # `params.event` object, rebuilt into the struct an in-process reader would be holding.
-  # A coding-plane frame names its subject `task_id` rather than `session_id`; nothing in
-  # either module reads that field, and carrying it keeps the struct honest anyway.
   defp event(name) do
     frame = name |> Golden.path() |> File.read!() |> JSON.decode!()
     fields = get_in(frame, ["params", "event"])
@@ -341,51 +336,6 @@ defmodule Ouroboros.Web.CorpusParityTest do
       assert summary(hd(settled.calls)) ==
                {"Read", "lib/ouroboros/gateway/wire.ex:120-159", "→ 3 lines"}
     end
-
-    # Mirrors `an_acp_edit_reads_as_an_edit_with_the_lines_the_call_carried`. The ACP
-    # dialect names a call in prose and says what it *is* only in `kind`. The summariser
-    # reads both: the title is the row's name, the kind is what picks the verb.
-    test "an_acp_edit_reads_as_an_edit_with_the_lines_the_call_carried" do
-      edit = tool(cell("event_tool_call_acp_edit"))
-
-      assert edit.name == "Edit lib/ouroboros/web/transcript.ex"
-      assert edit.kind == "edit"
-
-      assert summary(edit) == {"Edit", "lib/ouroboros/web/transcript.ex (+4 −3)", ""}
-    end
-
-    # Mirrors `an_acp_status_of_completed_settles_the_edit_without_an_is_error_field`.
-    test "an_acp_status_of_completed_settles_the_edit_without_an_is_error_field" do
-      projected = cells(["event_tool_call_acp_edit", "event_tool_result_acp_edit"])
-
-      assert length(projected) == 1, inspect(projected)
-      assert tool(hd(projected)).state == :completed
-
-      assert summary(hd(projected)) == {"Edit", "lib/ouroboros/web/transcript.ex (+4 −3)", ""}
-    end
-
-    # Mirrors `a_computer_use_result_is_a_tool_row_and_then_a_labelled_image`. A Computer
-    # Use result is two cells in a fixed order: the tool row, then the picture it produced.
-    # The image carries the sha and the size the gateway stated and no bytes — the pixels
-    # are fetched by sha through `computer_use.artifact`.
-    test "a_computer_use_result_is_a_tool_row_and_then_a_labelled_image" do
-      projected = cells(["event_tool_result_computer_use"])
-
-      assert length(projected) == 2, inspect(projected)
-      assert tool(hd(projected)).name == "desktop_state"
-      assert tool(hd(projected)).state == :completed
-      assert summary(hd(projected)) == {"desktop state", "", ""}
-
-      assert %Cell.Image{} = image = Enum.at(projected, 1)
-
-      assert image.named == "desktop capture · abababababab"
-      assert image.pixels == {1512, 982}
-      assert image.format == "png"
-      assert image.media_type == "image/png"
-      assert image.sha == String.duplicate("ab", 32)
-      assert image.note == nil
-      assert Cell.Image.label(image) == "[image 1512×982 png · desktop capture · abababababab]"
-    end
   end
 
   # ------------------------------------------------------------------------------------
@@ -536,7 +486,7 @@ defmodule Ouroboros.Web.CorpusParityTest do
 
       # `session_ready` is where the transport facts are; `session_started` names only its
       # working directory, which is not a sentence worth a line.
-      assert chat_note(cell("event_session_ready")) == "session ready · acp · stable"
+      assert chat_note(cell("event_session_ready")) == "session ready · native · stable"
 
       assert chat_note(cell("event_session_idle")) == "session idle"
 
@@ -585,7 +535,6 @@ defmodule Ouroboros.Web.CorpusParityTest do
       request = approval("event_approval_requested_permission")
 
       refute Approval.question?(request), "a command is not a question"
-      refute Approval.computer_use?(request)
 
       assert Approval.subject(request) ==
                "git push --force origin main — no permission rule engine is configured on this " <>
@@ -758,19 +707,10 @@ defmodule Ouroboros.Web.CorpusParityTest do
   end
 
   # ------------------------------------------------------------------------------------
-  # The two envelope fixtures that also carry a renderable payload
+  # The envelope fixture that also carries a renderable payload
   # ------------------------------------------------------------------------------------
 
-  describe "the envelope fixtures that also carry a renderable payload" do
-    # Mirrors `the_coding_notification_is_a_finished_run_and_reads_as_one`. `run_completed`
-    # gets no `event_*` frame of its own because it already has one: the coding
-    # notification that has pinned the second plane's envelope since the corpus existed.
-    # The kind is still a kind a client renders, so its words are asserted here rather than
-    # left to the fixture that happens to carry them.
-    test "the_coding_notification_is_a_finished_run_and_reads_as_one" do
-      assert chat_note(cell("coding_event_notification")) == "run finished · objective satisfied"
-    end
-
+  describe "the envelope fixture that also carries a renderable payload" do
     # Mirrors `an_excerpted_patch_is_drawn_and_says_its_counts_are_only_the_prefix`. The
     # gateway replaces an oversized leaf with `{"_excerpt", "_bytes"}`, and a patch that
     # arrived as one is still worth colouring — but its `+`/`-` counts describe the prefix
@@ -865,16 +805,20 @@ defmodule Ouroboros.Web.CorpusParityTest do
       assert chat_note(cell("event_provider_event_plan_exit")) == "provider event · plan_exit"
     end
 
-    # Mirrors `an_unmodelled_provider_event_is_a_line_that_names_both_halves_of_its_kind`.
-    # The must-render case. ACP wraps every update it does not map in
-    # `{"kind": "acp_update", "update": …}`, and the update's own `sessionUpdate` type is
-    # the informative half — so it is lifted out and both halves are named.
-    test "an_unmodelled_provider_event_is_a_line_that_names_both_halves_of_its_kind" do
+    # Mirrors `an_unmodelled_provider_event_names_its_kind`. The must-render case: a
+    # `provider_event` whose kind this client does not model is a visible note naming the
+    # kind and whatever words the payload carried, never a dropped event. The ACP
+    # `{"kind": "acp_update", "update": …}` envelope this used to unwrap went with the ACP
+    # client.
+    test "an_unmodelled_provider_event_names_its_kind" do
       assert presentation("event_provider_event_unknown") ==
-               %ProviderNote{kind: "acp_update · terminal_output", detail: ""}
+               %ProviderNote{
+                 kind: "terminal_output",
+                 detail: "waiting for the container to come up"
+               }
 
       assert chat_note(cell("event_provider_event_unknown")) ==
-               "provider event · acp_update · terminal_output"
+               "provider event · terminal_output — waiting for the container to come up"
     end
   end
 
@@ -883,23 +827,6 @@ defmodule Ouroboros.Web.CorpusParityTest do
   # ------------------------------------------------------------------------------------
 
   describe "the types this runtime mints itself" do
-    # Mirrors `a_settled_delegation_is_a_block_with_a_digest_and_no_result`. A delegation
-    # is a fact about work this session caused, so the parent's transcript draws it — with
-    # a digest of the result and never the result, which is the child's own record.
-    test "a_settled_delegation_is_a_block_with_a_digest_and_no_result" do
-      block = runtime_block(cell("event_delegation"))
-
-      assert block.label == "Delegation completed"
-
-      assert block.detail ==
-               "task task-0000000000000000000000002 · ouroboros@worker · result digest b7e40aa1"
-
-      assert block.tone == :success
-
-      assert block.key == nil,
-             "nothing local ever drew this, so there is nothing to dedupe against"
-    end
-
     # Mirrors `a_runtime_status_event_reads_as_a_named_note`. `status` is Ouroboros's own
     # type and no client models it, so it takes the same named-note path an unrecognised
     # provider kind does.
@@ -927,7 +854,6 @@ defmodule Ouroboros.Web.CorpusParityTest do
         "event_approval_requested_subagent",
         "event_approval_resolved",
         "event_command_output_delta",
-        "event_delegation",
         "event_file_change",
         "event_input_accepted",
         "event_input_accepted_steer",
@@ -953,12 +879,9 @@ defmodule Ouroboros.Web.CorpusParityTest do
         "event_session_started",
         "event_status_resumed",
         "event_thinking_delta",
-        "event_tool_call_acp_edit",
         "event_tool_call_bash",
         "event_tool_call_read",
-        "event_tool_result_acp_edit",
         "event_tool_result_bash",
-        "event_tool_result_computer_use",
         "event_tool_result_read",
         "event_turn_completed",
         "event_turn_failed",
@@ -991,8 +914,7 @@ defmodule Ouroboros.Web.CorpusParityTest do
     end
 
     # The one transform `from_event/1` applies before reading is `wire_shape/1`
-    # (`presentation.ex:953`), which flattens the atoms an in-process coding-plane payload
-    # can carry. A fixture payload has already been through `Ouroboros.Gateway.Wire`, so
+    # (`presentation.ex:953`), which flattens the atoms an in-process payload can carry. A fixture payload has already been through `Ouroboros.Gateway.Wire`, so
     # applying it again must change nothing — otherwise every literal above would be
     # asserting the words of a payload no reader ever holds.
     test "wire_shape is the identity over a payload the wire already encoded" do

@@ -26,8 +26,9 @@ missing pillar of the mediated-effects kernel (envelope, capability table, polic
 gate, supervision all exist in some shape; determinism/replay does not), it closes the
 oldest open loop (Forge eval tests hand-assemble challengers; fork-at-a-decision-point
 turns every recorded real session into an eval corpus), and it is structurally
-native-only — nobody can deterministically replay `claude --print` — which makes it the
-honest argument for the native provider as flagship.
+native-only — nobody can deterministically replay a CLI driven from outside — which is
+the honest argument for the native provider, and since September 2026 the native provider
+is the only one ([the core reduction](proposals/core.md) §3 D2).
 
 ## 1. What the tree already holds, and why none of it is the substrate
 
@@ -88,7 +89,7 @@ Three additions, one extension, one badge:
    (`methods.ex:328`, `seed_fork/4` at `native/session.ex:1094-1110`); the missing halves
    compose two mechanisms that already exist. (§6)
 5. **A `replay` session capability** — the badge, derived beside `:fork`/`:compact`
-   (`provider.ex:71`), explicit `false` for every vendor provider. (§7)
+   in `Ouroboros.Provider`. (§7)
 
 The sketch's line lands literally: the journal is the source of truth for what a session
 *was*; `conversation.json` is a cache of it for the model's benefit.
@@ -131,7 +132,7 @@ was *already observed* by the live run (recorded, never re-read on replay — D9
 | `prompt` | the user message as appended (text + attachment pointers `{sha256, media_type, size}`) | after `UserPromptSubmit` hook fold (loop.ex:234-236) — i.e. the bytes that actually entered the conversation |
 | `model_call` | `iteration`, `request_sha256`, `system_sha256`, `message_count`, `tools_sha256`, `ledger_effect_id` | before `Model.stream` (loop.ex:340) |
 | `model_result` | `iteration`, `chunks` (the retained chunk list, in order: `text` deltas, `thinking` deltas, `tool_call`s, `reasoning_details`, `provider_metadata`, `usage`, `finish`), `duration_ms` | stream consumed |
-| `tool_result` | `call_id`, `tool`, `ledger_ref`, `content` (the final `%{role: :tool}` message content — post hook-append, post LSP-append, i.e. exactly what entered `state.messages` at loop.ex:940-959), `is_error`, `duration_ms`, `output_bytes` | per tool, in dispatch order |
+| `tool_result` | `call_id`, `tool`, `ledger_ref`, `content` (the final `%{role: :tool}` message content — post hook-append, i.e. exactly what entered `state.messages`), `is_error`, `duration_ms`, `output_bytes` | per tool, in dispatch order |
 | `injected` | `origin` (`rule` \| `steer` \| `stop_hook` \| `checks` \| `session_start`), `content`, `after_call_id?` | any non-prompt user message appended mid-turn or at settle |
 | `approval` | `request_id`, `call_id`, `question_sha256`, `decision`, `scope`, `actor`, `rule_id?`, `permission_entry_id?` | on answer/timeout/interrupt — the decision metadata; the resulting tool message is its own `tool_result`/`injected` record |
 | `configure` | `key`, `value` | each applied `configure_one` (session.ex:996-1060) |
@@ -242,8 +243,8 @@ run's entries — a hazard the exploration named explicitly.)
 `@checkpoint_version` 1→2 with the `rollout/registry.ex:388-414` migration idiom:
 `@upgradable_versions [1]`, struct-widening `struct(Entry, Map.from_struct(entry))`,
 newer-refused. `@store_key` stays `{:ouroboros, :agent_effect_ledger, 1}` — bumping it
-would hide old evidence behind an empty boot (`node_executor.ex:1201-1205` argues the
-general case). Downstream, mechanically: the `ledger.list` effect enum
+would hide old evidence behind an empty boot: a reader that cannot find the key it
+wrote reports nothing rather than reporting what is there. Downstream, mechanically: the `ledger.list` effect enum
 (`methods.ex:2572`), `mix ouroboros.gateway.golden` + `mix ouroboros.protocol.docs`
 regeneration (both drift-locked by tests), and the retention arithmetic note — a fifth
 kind present shifts the max-min quota to 1000/5; acceptable, because the ledger is the
@@ -262,7 +263,7 @@ a simulation — with every nondeterminism source substituted by the record:
   (`model.ex:99`), and the loop takes `state.model_module`.
 - **Tools**: the `Loop` struct gains a `tool_source` field (default `:live`). In replay
   it returns the recorded `tool_result` content for `(call_id)` instead of dispatching —
-  admission, hooks, sandbox, LSP, MCP, desktop are never invoked, because their outputs
+  admission, hooks, sandbox, MCP are never invoked, because their outputs
   are already baked into the recorded content (the inventory's items 2.39–2.46 all land
   inside recorded messages). The ledger gate is bypassed with the same field (replay
   accounts for nothing because it executes nothing).
@@ -333,9 +334,9 @@ are added:
 
 Standing limits, restated rather than solved here: a fork of a live session holding an
 exclusive workspace lease is refused by the lease (`task.ex:1521-1523`); `worktree` is
-not in fork's envelope (D7 of AGENT_EXPERIENCE remains deferred); vendor forks branch at
-the tail only (Claude `--fork-session` semantics — `session.rs:1061-1067`), so `to_turn`
-on a vendor session is refused as `{:unforkable_at_turn, provider}`.
+not in fork's envelope (D7 of AGENT_EXPERIENCE remains deferred). The vendor forks that
+could only branch at the tail — and the `{:unforkable_at_turn, provider}` refusal that
+named them — went with the vendor providers.
 
 Fork + journal compose into the eval loop: fork at the decision point, run the
 challenger model live, and the two journals are directly comparable records — the corpus
@@ -354,9 +355,8 @@ fetch, built by `Plane::method("replay")` — `model.rs:85`):
   `methods.ex:210-212` et al.): it reads one file. Windowing mirrors
   `interactive.replay`'s cursor discipline.
 - **`interactive.replay_verify`** — `:operate`. `{id, node?}` → `{verified, turns,
-  records, head, divergence: null | {…}}`. Operate because it starts a process — the
-  `computer_use.status`/`probe` split is the exact precedent (`methods.ex:285-286`),
-  even though it spends no tokens. Own timeout ceiling (long sessions re-derive many
+  records, head, divergence: null | {…}}`. Operate because it starts a process, even
+  though it spends no tokens. Own timeout ceiling (long sessions re-derive many
   turns).
 
 Both get `@params` entries, `@fixture_owners` placement, golden fixtures, and PROTOCOL
@@ -394,8 +394,9 @@ worth this slice; the parity map records the divergence.
 
 ## 8. Honest limits (v1, stated up front)
 
-1. **Native sessions only.** Vendor sessions run their tool loops in vendor processes;
-   nothing here can record or replay them. The badge says so per session.
+1. **Native sessions only** — which, since the core reduction, is every session. The
+   badge is still emitted per session, because a record written before the reduction can
+   name a provider this build no longer has.
 2. **Verified replay proves derivation, not the world.** It proves the shipped loop
    re-derives the recorded conversation and events from the recorded effects — the
    determinism property. It does not prove the tools *would* return the same results
@@ -502,8 +503,8 @@ byte-stable, clippy/fmt clean.
   which for delta events is coarser than the live instants. Closing it needs a per-event
   `at` in the record — a recording change, deliberately not made in v1.
 - **Capability `replay`** is `true`/`false` only (the three-state `"degraded"` needs a
-  per-session journal scan at list time — deferred); vendors get explicit `false`. The
-  badge draws only on explicit `true`. Multimodal tool results replay with an exact
+  per-session journal scan at list time — deferred). The badge draws only on explicit
+  `true`. Multimodal tool results replay with an exact
   *message* but a diverging `tool_result` *event* (live splits artifacts out) — surfaces
   as a named divergence, reconstruction deferred.
 

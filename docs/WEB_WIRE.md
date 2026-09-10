@@ -25,7 +25,7 @@ to it — line-framed JSON-RPC over loopback TCP (`lib/ouroboros/gateway/listene
 — has the bounded outbound queue and the `stream.lagged` protocol the in-process path
 lacks (`lib/ouroboros/gateway/conn.ex:849-913`), and a browser cannot speak it because the
 gateway has no HTTP or WebSocket transport; that was filed as roadmap item **H4** and is
-still `pending` (`docs/AGENT_EXPERIENCE.md:162`, `:863`). The option-preserving move is to
+still `pending` (`docs/research/agent-ux-2026/AGENT_EXPERIENCE.md:162`, `:863`). The option-preserving move is to
 grow that transport and let the existing LiveView become a client of it, which retires
 `Web.Call` and the pid subscription while keeping Phoenix, `Phoenix.LiveViewTest`, and the
 transcript parity lock — the three things the GPUI deletion was paid for. The alternative
@@ -62,9 +62,9 @@ slice.
   table it reads" (`call.ex:93-95`).
 - **The LiveView subscribes as a process.** `DeckLive` calls
   `Methods.subscribe(plane, ref, cursor)` from its own process (`deck_live.ex:600-604`)
-  because "Both planes register `self()` and monitor it" (`deck_live.ex:10-17`). Events
-  arrive as raw messages, `{:ouroboros_interactive_event, id, %Event{}}` and its coding
-  twin (`deck_live.ex:394-398`).
+  because "the plane registers `self()` and monitors it" (`deck_live.ex:10-17`). Events
+  arrive as raw messages, `{:ouroboros_interactive_event, id, %Event{}}`
+  (`deck_live.ex:394-398`).
 - **The plane sends to subscriber pids unconditionally.** After the durable checkpoint
   succeeds, `persist/3` fans every event out to every registered subscriber with a bare
   `send/2` — no queue check, no counter, no cap (`lib/ouroboros/interactive/task.ex:2268-2273`).
@@ -122,9 +122,9 @@ slice.
   the LiveView makes. The `@replay_limit 500` bound belongs to `*.replay`
   (`lib/ouroboros/gateway/methods.ex:142`, `:635`), not to `subscribe`.
 - **H4 is the roadmap trace.** `| H4 | pending | HTTP/SSE |`
-  (`docs/AGENT_EXPERIENCE.md:162`); scoped as "**H4 HTTP/SSE bridge** — `ouro serve --http`
+  (`docs/research/agent-ux-2026/AGENT_EXPERIENCE.md:162`); scoped as "**H4 HTTP/SSE bridge** — `ouro serve --http`
   for web clients and an OpenCode-style SDK shape", size M, Phase 4, and with its
-  Acceptance column left as `—` (`AGENT_EXPERIENCE.md:863`); scheduled in Phase 4
+  Acceptance column left as `—` (`research/agent-ux-2026/AGENT_EXPERIENCE.md:863`); scheduled in Phase 4
   (`:912`); and §11 Deferred names "a web dashboard and phone surface beyond what ACP
   clients and H4 provide" (`:1010`). So the transport has a roadmap slot, no acceptance
   criteria, and no owner.
@@ -135,11 +135,12 @@ slice.
 
 ### 1.3 The byte-cap asymmetry — the one that decides §6.3
 
-- **The caps live in exactly one place and apply to exactly two structs.**
-  `Gateway.Wire.walk/3` byte-caps the `payload` of `%InteractiveEvent{}` and
-  `%CodingEvent{}` and nothing else, and its own comment says why this is the one place:
-  the cap must cover "a live notification, a `replay` result, or a `subscribe` backlog"
-  alike (`lib/ouroboros/gateway/wire.ex:169-175`, `:237-242`).
+- **The caps live in exactly one place and apply to exactly one struct.**
+  `Gateway.Wire.walk/3` byte-caps the `payload` of `%InteractiveEvent{}` and nothing
+  else — the coding plane's twin went with the plane (`docs/proposals/core.md` §3 D3) —
+  and its own comment says why this is the one place: the cap must cover "a live
+  notification, a `replay` result, or a `subscribe` backlog" alike
+  (`lib/ouroboros/gateway/wire.ex:165-170`).
 - **The numbers.** `event_leaf_bytes` 128 KiB per string leaf, `event_payload_bytes`
   512 KiB per event across all its leaves, `detail_leaf_bytes` 4 MiB for
   `*.event_detail`'s override (`config.ex:56-60`, `:142-144`). The per-event budget is
@@ -259,7 +260,7 @@ LiveView. Phoenix, LiveView, `Phoenix.LiveViewTest`, `Web.Presentation`, `Web.Tr
 |---|---|---|
 | `lib/ouroboros/web/call.ex`, whole module, 180 lines | `call.ex:1-180` | a request over the wire, answered by `Conn`'s existing dispatch (`conn.ex:529-557`) |
 | `Call.available?/2`, the feature gate | `call.ex:98-103` | the `methods` list `hello` already returns (`conn.ex:656`) — the substitution `call.ex:93-95` itself names |
-| the raw-message `handle_info` clauses | `deck_live.ex:394-398` | `interactive.event` / `coding.event` notification frames |
+| the raw-message `handle_info` clauses | `deck_live.ex:394-398` | `interactive.event` notification frames |
 | `Presentation.wire_shape/1` and its call site | `presentation.ex:936-961` | the wire, which does the flattening for real |
 | the coordinator monitor | `deck_live.ex:644-661` | `stream.ended` (`conn.ex:808`) |
 | the in-process/wire divergence as a category | — | one encoder, one shape, one set of caps |
@@ -306,7 +307,7 @@ is born.
 
 **The cost that decides it.** The GPUI desktop was deleted seven days ago, and the first
 reason given was that it had **no headless test story** — "Nothing here has been verified
-by eye" (`WEB.md:26-36`, quoting `docs/DESKTOP.md:189-192`) — while
+by eye" (`WEB.md:26-36`, quoting the removed `docs/DESKTOP.md`) — while
 "`Phoenix.LiveViewTest` is fully headless, which changes the economics of every future
 surface slice" (`WEB.md:35-36`). Option B's honest answer to "what is the headless test
 story now" still requires a Node/Bun test runner for the TS projection against the corpus.
@@ -318,7 +319,7 @@ harness.
 
 There is a genuine case for B — a browser client over a documented protocol is what an
 external SDK consumer would use, and it is the shape H4 gestures at
-(`AGENT_EXPERIENCE.md:863`, "an OpenCode-style SDK shape"). It is not a case that should be
+(`research/agent-ux-2026/AGENT_EXPERIENCE.md:863`, "an OpenCode-style SDK shape"). It is not a case that should be
 made seven days after the opposite decision, on a surface whose acceptance checklist has
 not yet been walked once end to end (`WEB.md:601-608`).
 
@@ -543,7 +544,7 @@ learn a second discovery mechanism. `web.json` carries `birth` the same way
 
 ### What the transport deliberately does not do
 
-No SSE. H4 names "HTTP/SSE" (`AGENT_EXPERIENCE.md:162`, `:863`), and SSE is the wrong
+No SSE. H4 names "HTTP/SSE" (`research/agent-ux-2026/AGENT_EXPERIENCE.md:162`, `:863`), and SSE is the wrong
 shape for this protocol: it is one-directional, so requests would need a second channel,
 and the `Conn` would then own two half-connections whose lifecycles could disagree. If an
 SSE bridge is ever wanted for a consumer that cannot hold a socket, it is a separate
@@ -605,11 +606,9 @@ including doing nothing else.** T4–T6 are the migration and only exist under W
   assertion rewritten — only the fixture that stands up the runtime changes. If a test
   assertion has to change, that is a behaviour change the slice must name and justify.
 
-- **T5 — the other views.** `MachinesLive`, `NewSessionLive`, `StatusLive`, and the
-  artifact controller (which calls `computer_use.artifact` in-process today,
-  `WEB.md:305`). *Acceptance:* per-view LiveViewTest suites unchanged; the artifact
-  controller's sha-addressed caching behaviour asserted unchanged, since the payload now
-  arrives base64 through the wire rather than as a binary.
+- **T5 — the other views.** `MachinesLive`, `NewSessionLive`, `StatusLive`. (This plan
+  also named the artifact controller; it was deleted with the computer-use plane.)
+  *Acceptance:* per-view LiveViewTest suites unchanged.
 
 - **T6 — removals** (§5).
 
@@ -734,7 +733,7 @@ of it written in the language the server is written in. Today the protocol's onl
 client is Rust, which means every claim about "the protocol is enough to build a surface
 on" is a claim about one implementation by one author in one language. T2 plus T4 would
 make the web an existence proof, and the corpus would keep it honest. It delivers H4's
-substance (`AGENT_EXPERIENCE.md:863`) at H4's stated size, with the acceptance criteria
+substance (`research/agent-ux-2026/AGENT_EXPERIENCE.md:863`) at H4's stated size, with the acceptance criteria
 that row has never had. And it turns "should the runtime be a daemon" from an argument
 into a measurement: after T4 the browser's latency, its behaviour under lag, and its
 behaviour under caps are all observable facts rather than predictions.

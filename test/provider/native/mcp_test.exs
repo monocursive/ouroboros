@@ -1,7 +1,6 @@
 defmodule Ouroboros.Provider.Native.McpTest do
   use ExUnit.Case, async: false
 
-  alias Ouroboros.Provider.Native.Desktop
   alias Ouroboros.Provider.Native.Mcp
   alias Ouroboros.Provider.Native.Mcp.Pool
   alias Ouroboros.Provider.Native.Mcp.Result
@@ -42,12 +41,8 @@ defmodule Ouroboros.Provider.Native.McpTest do
         Map.new(
           [
             Ouroboros.Cluster,
-            Ouroboros.Coding.TaskSupervisor,
             Ouroboros.Interactive.TaskSupervisor,
-            Ouroboros.Team.Supervisor,
-            Ouroboros.CodeIntel.Supervisor,
-            Ouroboros.Wasm.Supervisor,
-            Ouroboros.Provider.Native.Desktop.Supervisor
+            Ouroboros.Wasm.Supervisor
           ],
           &{&1, Process.whereis(&1)}
         )
@@ -493,15 +488,7 @@ defmodule Ouroboros.Provider.Native.McpTest do
       :ok
     end
 
-    test "MCP tools follow the static and any node-local desktop tools in the spec list",
-         context do
-      desktop =
-        if Desktop.enabled?() do
-          ["desktop_state"] ++ if(Desktop.act_enabled?(), do: ["desktop_act"], else: [])
-        else
-          []
-        end
-
+    test "MCP tools follow the static tools in the spec list", context do
       # Other suites may start distribution; neither registry assertion depends on
       # whether they happened to run first.
       for distributed <- [false, true] do
@@ -512,7 +499,7 @@ defmodule Ouroboros.Provider.Native.McpTest do
         static =
           Enum.map(Tools.modules(), & &1.name()) -- if(distributed, do: [], else: ["fleet"])
 
-        assert names == static ++ desktop ++ ["mcp__fake__echo", "mcp__fake__add"]
+        assert names == static ++ ["mcp__fake__echo", "mcp__fake__add"]
       end
     end
 

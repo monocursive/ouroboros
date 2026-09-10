@@ -32,8 +32,6 @@ use rand::TryRngCore;
 use serde_json::{json, Value};
 
 use crate::config::{Config, Defaults, ONBOARDING_PROMPTS};
-use crate::fleet::Profile as FleetProfile;
-use crate::fleet_add::{AddKind, AddPlan, Intent as FleetIntent, JoinIntent};
 use crate::keymap::{Action, Keymap};
 use crate::model::{
     self, new_session_id, AccountState, ApprovalDecision, ApprovalMode, ApprovalScope, Attachment,
@@ -52,12 +50,12 @@ use super::transcript_cells;
 use super::tree::{TreeState, TreeView};
 
 mod answers;
+mod cluster;
 mod details;
 mod footer;
 mod home;
 mod keys;
 mod location;
-mod machines;
 pub mod native;
 mod overlays;
 mod session;
@@ -72,13 +70,9 @@ use session::{
     PendingReconciliationKind, SavedComposerDraft, SessionRecovery,
 };
 
+pub use cluster::{MachineChoice, MachineSecurity, MachineSummary};
 pub use footer::{SessionFacts, TranscriptFacts};
 pub use location::Location;
-pub use machines::{
-    AddFailure, AddField, AddMachine, AddMethod, AddProgress, AddStage, AddStep, FleetJob,
-    FormField, FormKind, MachineAction, MachineCandidate, MachineChoice, MachineForm,
-    MachineReport, MachineSecurity, MachineSummary, Machines, MenuItem,
-};
 pub use overlays::{
     approval_at, approval_index, approval_label, sandbox_at, sandbox_index, sandbox_label,
     AccountDialog, AccountFlow, ApprovalRule, Command, CommandPalette, Overlay, PromptKind,
@@ -86,7 +80,7 @@ pub use overlays::{
 };
 pub use session::{Composer, ComposerVerb, QueuedDraft, SessionsTab, QUEUE_LIMIT};
 pub use settings::{Settings, SettingsField};
-pub use start::{provider_choices, NewField, NewSession, ProviderChoice};
+pub use start::{NewField, NewSession, DEFAULT_MODEL};
 
 /// The driver's tick. Pi and OpenCode animate the working spinner at ~80ms; poll
 /// cadences below are counted in these frames so wall-clock meaning stays put.
@@ -98,7 +92,6 @@ pub const TICK_MS: u64 = 80;
 const STATUS_TICKS: u64 = 38; // ~3s
 const LIST_TICKS: u64 = 38; // ~3s
 const UPGRADE_TICKS: u64 = 63; // ~5s
-const DETAIL_TICKS: u64 = 125; // ~10s: `Mesh.state/1` is a whole agent's state tree
 const PROVIDER_TICKS: u64 = 750; // ~60s: each entry probes an executable
 const ACCOUNT_TICKS: u64 = 375; // ~30s; ~1s while a managed login is pending
 const ACCOUNT_LOGIN_TICKS: u64 = 13;
@@ -120,7 +113,7 @@ pub const BACKTRACK_TICKS: u64 = BACKTRACK_WINDOW_MS.div_ceil(TICK_MS);
 const CTRL_C_QUIT_TICKS: u64 = 13;
 static TURN_ID_FALLBACK_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-/// `interactive.start` and `coding.start` declare a 120s gateway ceiling, because provider
+/// `interactive.start` declares a 120s gateway ceiling, because provider
 /// readiness is `:infinity` upstream. This leaves room for the answer rather than racing
 /// it, and it is the one call the transport's 20s default cannot serve.
 pub const START_TIMEOUT: Duration = Duration::from_secs(130);
@@ -137,31 +130,17 @@ const MAX_RESYNC_ROUNDS: u32 = 40;
 pub enum Tab {
     Dashboard,
     Sessions,
-    Agents,
-    Teams,
-    Plans,
     Upgrade,
     Logs,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 7] = [
-        Tab::Dashboard,
-        Tab::Sessions,
-        Tab::Agents,
-        Tab::Teams,
-        Tab::Plans,
-        Tab::Upgrade,
-        Tab::Logs,
-    ];
+    pub const ALL: [Tab; 4] = [Tab::Dashboard, Tab::Sessions, Tab::Upgrade, Tab::Logs];
 
     pub fn title(self) -> &'static str {
         match self {
             Self::Dashboard => "Dashboard",
             Self::Sessions => "Sessions",
-            Self::Agents => "Agents",
-            Self::Teams => "Teams",
-            Self::Plans => "Plans/Control",
             Self::Upgrade => "Upgrade",
             Self::Logs => "Logs",
         }
@@ -198,8 +177,6 @@ pub enum Quit {
     Shutdown,
     /// Attach mode: close the socket and nothing else.
     Disconnect,
-    /// Stop this standalone runtime, create a fleet from the saved intent, then come back.
-    ApplyFleetIntent,
 }
 
 /// One request the driver should make. `Clone` because a confirmation dialog holds the
@@ -248,23 +225,8 @@ pub enum Tag {
     Status,
     Providers,
     Sessions(Plane),
-    Agents,
-    AgentState(String),
-    Teams,
-    TeamState(String),
-    Plans,
-    Plan(String),
-    ControlRuns,
-    ControlRun(String),
-    UpgradeStatus,
-    Rollouts,
-    History(String),
     Signing,
     Grants(String),
-    /// `control.submit`. The answer carries the id of a run that did not exist before.
-    ControlSubmit,
-    /// `control.cancel {id}`.
-    ControlCancel(String),
     /// The single resync path: `subscribe` after a reconnect or a first open, `replay`
     /// after a lag or a pruned cursor.
     ///
@@ -301,7 +263,7 @@ pub enum Tag {
         reconciling: bool,
         submission_sequence: u64,
     },
-    /// `interactive.event_detail` / `coding.event_detail` for one excerpted event, asked
+    /// `interactive.event_detail` for one excerpted event, asked
     /// for by the `/details` ledger. The sequence is on the tag because the answer is a
     /// bare event and two drill-ins can be outstanding at once.
     EventDetail {
@@ -365,7 +327,7 @@ pub enum Tag {
         id: String,
         want: SandboxMode,
     },
-    /// `interactive.start` / `coding.start`. Separate from [`Tag::Action`] because the
+    /// `interactive.start`. Separate from [`Tag::Action`] because the
     /// answer carries the id of a session that did not exist when the request was made.
     Start {
         plane: Plane,
@@ -420,17 +382,6 @@ pub enum Tag {
         plane: Plane,
         id: String,
         command: String,
-    },
-    /// G1. `interactive.delegate`.
-    Delegate {
-        plane: Plane,
-        id: String,
-    },
-    /// G1. `interactive.delegations`, for the overlay or for the `Ctrl+T` panel.
-    Delegations {
-        plane: Plane,
-        id: String,
-        show: bool,
     },
 }
 
@@ -493,23 +444,6 @@ pub enum Msg {
     Scroll(isize),
     /// Text the I/O driver read back from `$VISUAL`/`$EDITOR`.
     ExternalEditor(String),
-    /// Tailscale peers and SSH config hosts, gathered by the driver when Machines opens.
-    MachineCandidates {
-        candidates: Vec<MachineCandidate>,
-        local_machine: Option<String>,
-        local_host: Option<String>,
-    },
-    /// One typed event from the add pipeline, as it happens. Drives the Machines stepper
-    /// and nothing else; the terminal event still arrives separately as
-    /// [`Msg::FleetJobFinished`], which is what settles the step and the recipe.
-    FleetAddEvent(Box<crate::fleet_add::AddEvent>),
-    /// Result of a confirmed `fleet add` / prepare job the driver ran.
-    FleetJobFinished {
-        log: Vec<String>,
-        result: Result<String, String>,
-    },
-    /// The driver declined a second machine discovery scan; one is still running.
-    MachineScanPending,
     /// The terminal reported focus in or out (CSI ?1004h). `true` is focused.
     ///
     /// Assumed focused until told otherwise: a terminal that never sends this is one
@@ -612,81 +546,17 @@ pub enum Pane {
     Detail,
 }
 
-/// One row of a list pane, projected out of whatever the method answered.
-#[derive(Debug, Clone)]
-pub struct Row {
-    pub id: String,
-    pub label: String,
-    pub status: Option<String>,
-    pub raw: Value,
-}
-
-/// A list on the left and a value tree on the right — tabs 3 through 6, which differ only
-/// in which method fills the list and which fills the tree.
-#[derive(Debug)]
-pub struct Explorer {
-    pub rows: Loadable<Vec<Row>>,
-    pub selected: usize,
-    pub detail: Loadable<Value>,
-    pub tree: TreeState,
-    pub focus: Pane,
-    /// The id whose detail `detail` currently holds, so a selection change is detectable.
-    pub detail_of: Option<String>,
-}
-
-impl Default for Explorer {
-    fn default() -> Self {
-        Self {
-            rows: Loadable::default(),
-            selected: 0,
-            detail: Loadable::default(),
-            tree: TreeState::opened(),
-            focus: Pane::List,
-            detail_of: None,
-        }
-    }
-}
-
-impl Explorer {
-    pub fn current(&self) -> Option<&Row> {
-        self.rows.value.as_ref()?.get(self.selected)
-    }
-
-    fn move_by(&mut self, delta: isize) {
-        let len = self.rows.value.as_ref().map(Vec::len).unwrap_or(0);
-
-        if len == 0 {
-            self.selected = 0;
-            return;
-        }
-
-        self.selected = (self.selected as isize + delta).clamp(0, len as isize - 1) as usize;
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpgradeSection {
-    Status,
-    Rollouts,
-    History,
     Signing,
     Grants,
 }
 
 impl UpgradeSection {
-    pub const ALL: [UpgradeSection; 5] = [
-        UpgradeSection::Status,
-        UpgradeSection::Rollouts,
-        UpgradeSection::History,
-        UpgradeSection::Signing,
-        UpgradeSection::Grants,
-    ];
+    pub const ALL: [UpgradeSection; 2] = [UpgradeSection::Signing, UpgradeSection::Grants];
 
     pub fn title(self) -> &'static str {
         match self {
-            Self::Status => "node executor",
-            Self::Rollouts => "rollouts",
-            Self::History => "module history",
             Self::Signing => "signing decisions",
             Self::Grants => "effect grants",
         }
@@ -694,9 +564,6 @@ impl UpgradeSection {
 
     pub fn method(self) -> &'static str {
         match self {
-            Self::Status => "upgrade.status",
-            Self::Rollouts => "upgrade.rollouts",
-            Self::History => "upgrade.history",
             Self::Signing => "signing.decisions",
             Self::Grants => "grants.list",
         }
@@ -706,10 +573,6 @@ impl UpgradeSection {
 #[derive(Debug)]
 pub struct UpgradeTab {
     pub section: usize,
-    pub status: Loadable<Value>,
-    pub rollouts: Loadable<Value>,
-    pub history: Loadable<Value>,
-    pub history_module: Option<String>,
     pub signing: Loadable<Value>,
     pub grants: Loadable<Value>,
     pub grants_principal: Option<String>,
@@ -721,10 +584,6 @@ impl Default for UpgradeTab {
     fn default() -> Self {
         Self {
             section: 0,
-            status: Loadable::default(),
-            rollouts: Loadable::default(),
-            history: Loadable::default(),
-            history_module: None,
             signing: Loadable::default(),
             grants: Loadable::default(),
             grants_principal: None,
@@ -743,9 +602,6 @@ impl UpgradeTab {
 
     pub fn panel(&self, section: UpgradeSection) -> &Loadable<Value> {
         match section {
-            UpgradeSection::Status => &self.status,
-            UpgradeSection::Rollouts => &self.rollouts,
-            UpgradeSection::History => &self.history,
             UpgradeSection::Signing => &self.signing,
             UpgradeSection::Grants => &self.grants,
         }
@@ -753,9 +609,6 @@ impl UpgradeTab {
 
     fn panel_mut(&mut self, section: UpgradeSection) -> &mut Loadable<Value> {
         match section {
-            UpgradeSection::Status => &mut self.status,
-            UpgradeSection::Rollouts => &mut self.rollouts,
-            UpgradeSection::History => &mut self.history,
             UpgradeSection::Signing => &mut self.signing,
             UpgradeSection::Grants => &mut self.grants,
         }
@@ -843,12 +696,6 @@ pub struct App {
     pub status: Loadable<RuntimeStatus>,
     pub providers: Loadable<Vec<ProviderEntry>>,
     pub sessions: SessionsTab,
-    pub agents: Explorer,
-    pub teams: Explorer,
-    pub plans: Explorer,
-    pub control: Explorer,
-    /// Which of the two lists tab 5 is driving.
-    pub plans_on_control: bool,
     pub upgrade: UpgradeTab,
     pub logs: Option<LogRing>,
     pub log_scroll: usize,
@@ -891,33 +738,13 @@ pub struct App {
     /// know where that runtime keeps its files, and a local path printed under a remote
     /// node would be a guess wearing a fact's clothes.
     pub data_dir: Option<String>,
-    /// Non-secret membership metadata loaded by the launcher from this runtime's data
-    /// directory. The App remains a pure state machine: it never reads the profile itself.
-    pub fleet_profile: Option<FleetProfile>,
-    /// Whether this data directory holds the fleet CA key. Loaded by the launcher; the
-    /// App never stats the key file.
-    pub can_invite: bool,
-    /// Ask the driver to list Tailscale/SSH hosts. Set when Machines opens.
-    scan_machines_pending: bool,
     /// Whether the "this is not the palette you asked for" sentence has been said. Once
     /// per run rather than once per operator: the reason it is true is the terminal this
     /// run was started in, and that can differ from the last one.
     theme_hint_shown: bool,
-    /// Restart-as-fleet plan. The driver writes it, then this process shuts down.
-    fleet_intent_pending: Option<FleetIntent>,
-    /// Restart-and-join plan. The driver writes the invitation path, then shuts down.
-    join_intent_pending: Option<JoinIntent>,
-    /// Confirmed add/prepare for a live fleet owner. The driver runs it.
-    fleet_job_pending: Option<FleetJob>,
-    /// The operator confirmed a cancel of the running add. The driver owns the
-    /// `AddHandle` and is the only thing that can act on it.
-    fleet_add_cancel_pending: bool,
-    /// Open Machines after a fleet-intent restart so the operator sees what happened.
-    pub open_machines_on_start: bool,
-    /// Progress from that restart's add, shown on the Add Done step.
-    pub resume_add_log: Vec<String>,
-    /// Enroll recipe from that restart's add, if the destination still needs a command.
-    pub resume_add_recipe: Option<String>,
+    /// Non-secret membership metadata loaded by the launcher from this runtime's data
+    /// directory. The App remains a pure state machine: it never reads the profile itself.
+    pub fleet_profile: Option<crate::fleet::Profile>,
     /// Whether this terminal reports `Shift+Enter` as something other than `Enter`. Set by
     /// the driver once it has asked; see [`super::keyboard_enhanced`]. The composer footers
     /// advertise the binding only where it exists, because in every other terminal that
@@ -973,10 +800,6 @@ pub struct App {
     /// on nothing: a stale reading for a session that is no longer open is simply not
     /// matched, and the footer falls back to stating tokens without a percentage.
     pub(super) context: Option<(Plane, String, Box<crate::model::native::SessionContext>)>,
-    /// G1. What `interactive.delegations` last answered, and for which session.
-    pub(super) delegations: Option<(Plane, String, Vec<crate::model::native::DelegationRow>)>,
-    /// G1. Whether a `/delegate` is in flight, for the composer's chip.
-    pub(super) delegating: bool,
     /// B7. The last refused operator command, kept on the composer so the reason and the
     /// one key that fixes it are on screen together.
     pub(super) shell_refusal: Option<ShellRefusalState>,
@@ -1090,11 +913,6 @@ impl App {
             status: Loadable::default(),
             providers: Loadable::default(),
             sessions: SessionsTab::default(),
-            agents: Explorer::default(),
-            teams: Explorer::default(),
-            plans: Explorer::default(),
-            control: Explorer::default(),
-            plans_on_control: false,
             upgrade: UpgradeTab::default(),
             logs,
             log_scroll: 0,
@@ -1108,17 +926,8 @@ impl App {
             keymap: Keymap::builtin(),
             config_path: None,
             data_dir: None,
-            fleet_profile: None,
-            can_invite: false,
-            scan_machines_pending: false,
             theme_hint_shown: false,
-            fleet_intent_pending: None,
-            join_intent_pending: None,
-            fleet_job_pending: None,
-            fleet_add_cancel_pending: false,
-            open_machines_on_start: false,
-            resume_add_log: Vec::new(),
-            resume_add_recipe: None,
+            fleet_profile: None,
             keyboard_enhanced: false,
             home_draft: Editor::default(),
             home_pending: false,
@@ -1137,8 +946,6 @@ impl App {
             help_scroll: 0,
             backtrack_arm: None,
             context: None,
-            delegations: None,
-            delegating: false,
             shell_refusal: None,
             ctrl_c_until: None,
             details: DetailsView::default(),
@@ -1478,16 +1285,6 @@ impl App {
             hidden.push("/context");
         }
 
-        // G1. Two halves of the same slice, gated separately because a gateway can serve
-        // one and not the other.
-        if !self.delegation_offered() {
-            hidden.push("/delegate");
-        }
-
-        if !(self.sessions.open.is_some() && self.hello.serves("interactive.delegations")) {
-            hidden.push("/delegations");
-        }
-
         self.completion_catalog.hide_commands(hidden);
     }
 
@@ -1510,7 +1307,7 @@ impl App {
 
     /// What a live stream frame is worth interrupting someone for, and which session it
     /// was about. The final `bool` says whether an approval frame is a *question* — a
-    /// plan exit, `ask_user`'s `kind: "question"`, or Computer Use — which auto-approve
+    /// plan exit or `ask_user`'s `kind: "question"` — which auto-approve
     /// leaves for a person and must therefore still ring.
     ///
     /// Live frames only — this is read from [`Msg::Notification`], never from a replay
@@ -1518,7 +1315,6 @@ impl App {
     fn live_signal(notification: &Notification) -> Option<(Plane, String, notify::Signal, bool)> {
         let plane = match notification.method.as_str() {
             "interactive.event" => Plane::Interactive,
-            "coding.event" => Plane::Coding,
             _not_an_event => return None,
         };
 
@@ -1537,19 +1333,13 @@ impl App {
         };
 
         let question = matches!(EventType::parse(kind), EventType::ApprovalRequested)
-            && (matches!(
+            && matches!(
                 notification
                     .params
                     .pointer("/event/payload/kind")
                     .and_then(Value::as_str),
                 Some("plan_exit") | Some("question")
-            ) || matches!(
-                notification
-                    .params
-                    .pointer("/event/payload/tool_call/name")
-                    .and_then(Value::as_str),
-                Some("desktop_state") | Some("desktop_act")
-            ));
+            );
 
         Some((plane, id.to_string(), signal, question))
     }
@@ -1705,44 +1495,6 @@ impl App {
         self.inform(hint, NoticeKind::Info);
     }
 
-    pub fn take_scan_machines(&mut self) -> bool {
-        std::mem::take(&mut self.scan_machines_pending)
-    }
-
-    pub fn take_fleet_intent(&mut self) -> Option<FleetIntent> {
-        self.fleet_intent_pending.take()
-    }
-
-    pub fn take_join_intent(&mut self) -> Option<JoinIntent> {
-        self.join_intent_pending.take()
-    }
-
-    pub fn fleet_plan_write_failed(&mut self, error: impl Into<String>) {
-        self.quit = None;
-        let error = error.into();
-        self.inform(error.clone(), NoticeKind::Error);
-        if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
-            if let Some(add) = machines.add.as_mut() {
-                add.pending = false;
-                add.step = AddStep::Confirm;
-                add.error = Some(error.clone());
-            }
-            if let Some(form) = machines.form.as_mut() {
-                form.pending = false;
-                form.step = AddStep::Confirm;
-                form.error = Some(error);
-            }
-        }
-    }
-
-    pub fn take_fleet_job(&mut self) -> Option<FleetJob> {
-        self.fleet_job_pending.take()
-    }
-
-    pub fn take_fleet_add_cancel(&mut self) -> bool {
-        std::mem::take(&mut self.fleet_add_cancel_pending)
-    }
-
     pub fn leader_pending(&self) -> bool {
         self.leader_until.is_some()
     }
@@ -1764,8 +1516,10 @@ impl App {
             .unwrap_or(false)
     }
 
+    /// Whether the home model is one a ChatGPT subscription pays for, and so one that
+    /// cannot start until that account is connected.
     pub fn home_requires_chatgpt(&self) -> bool {
-        self.home_provider() == "native" && self.home_model().starts_with("openai_codex:")
+        self.home_model().starts_with("openai_codex:")
     }
 
     pub fn home_ready(&self) -> bool {
@@ -1773,16 +1527,12 @@ impl App {
             && (!self.home_requires_chatgpt() || self.codex_usable())
     }
 
-    pub fn home_provider(&self) -> &str {
-        self.config.defaults.provider.as_deref().unwrap_or("native")
-    }
-
     pub fn home_model(&self) -> &str {
         self.config
             .defaults
             .model
             .as_deref()
-            .unwrap_or("openai_codex:gpt-5.6-sol")
+            .unwrap_or(DEFAULT_MODEL)
     }
 
     pub fn home_workspace(&self) -> String {
@@ -1979,7 +1729,6 @@ impl App {
             .collect();
         let previous = match plane {
             Plane::Interactive => self.sessions.interactive.value.as_ref(),
-            Plane::Coding => self.sessions.coding.value.as_ref(),
         };
 
         if let Some(previous) = previous {
@@ -2155,101 +1904,6 @@ impl App {
             }
             Msg::NotificationsDropped(total) => self.client_dropped(total),
             Msg::ExternalEditor(text) => self.apply_external_editor(text),
-            Msg::MachineScanPending => {
-                self.inform("machine discovery is already running", NoticeKind::Info);
-            }
-            Msg::MachineCandidates {
-                candidates,
-                local_machine,
-                local_host,
-            } => {
-                if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
-                    machines.candidates = candidates;
-                    machines.local_machine = local_machine.clone();
-                    machines.local_host = local_host.clone();
-                    if let Some(add) = machines.add.as_mut() {
-                        if add.owner_machine.is_empty() {
-                            if let Some(name) = local_machine {
-                                add.owner_machine = name;
-                            }
-                        }
-                        if add.owner_host.is_empty() {
-                            if let Some(host) = local_host {
-                                add.owner_host = host;
-                            }
-                        }
-                    }
-                }
-            }
-            Msg::FleetAddEvent(event) => {
-                if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
-                    if let Some(progress) =
-                        machines.add.as_mut().and_then(|add| add.progress.as_mut())
-                    {
-                        progress.apply(&event);
-                    }
-                }
-            }
-            Msg::FleetJobFinished { log, result } => {
-                if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
-                    if let Some(add) = machines.add.as_mut() {
-                        add.pending = false;
-                        add.log = log.clone();
-                        match result.clone() {
-                            Ok(recipe) => {
-                                add.step = AddStep::Done;
-                                add.recipe = (!recipe.is_empty()).then_some(recipe);
-                                add.error = None;
-                            }
-                            Err(error) => {
-                                // A streamed add keeps the stepper up so the failure is
-                                // read where it happened, with its residue. Enter or Esc
-                                // there returns to the plan, which is how it is rerun.
-                                let streamed = add
-                                    .progress
-                                    .as_ref()
-                                    .is_some_and(|progress| progress.failure.is_some());
-                                if !streamed {
-                                    add.step = AddStep::Confirm;
-                                }
-                                add.error = Some(error);
-                            }
-                        }
-                    } else if let Some(form) = machines.form.as_mut() {
-                        form.pending = false;
-                        form.log = log.clone();
-                        match result.clone() {
-                            Ok(recipe) => {
-                                form.step = AddStep::Done;
-                                form.recipe = (!recipe.is_empty()).then_some(recipe);
-                                form.error = None;
-                            }
-                            Err(error) => {
-                                form.step = AddStep::Confirm;
-                                form.error = Some(error);
-                            }
-                        }
-                    } else if let Some(report) = machines.report.as_mut() {
-                        report.pending = false;
-                        match result {
-                            Ok(recipe) => {
-                                let mut body = log.join("\n");
-                                if !recipe.is_empty() {
-                                    if !body.is_empty() {
-                                        body.push_str("\n\n");
-                                    }
-                                    body.push_str(&recipe);
-                                }
-                                report.body = body;
-                                report.copy = (!recipe.is_empty()).then_some(recipe);
-                            }
-                            Err(error) => {
-                                report.body = error;
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -2296,36 +1950,8 @@ impl App {
                     json!({}),
                     LIST_TICKS,
                 );
-                self.issue_if_due(
-                    Tag::Sessions(Plane::Coding),
-                    "coding.list",
-                    json!({}),
-                    LIST_TICKS,
-                );
             }
-            Tab::Agents => {
-                self.issue_if_due(Tag::Agents, "agents.list", json!({}), LIST_TICKS);
-                self.poll_detail(Tab::Agents);
-            }
-            Tab::Teams => {
-                self.issue_if_due(Tag::Teams, "teams.list", json!({}), LIST_TICKS);
-                self.poll_detail(Tab::Teams);
-            }
-            Tab::Plans => {
-                self.issue_if_due(Tag::Plans, "plans.list", json!({}), LIST_TICKS);
-                self.issue_if_due(Tag::ControlRuns, "control.list", json!({}), LIST_TICKS);
-                self.poll_detail(Tab::Plans);
-            }
-            Tab::Upgrade => {
-                self.issue_if_due(
-                    Tag::UpgradeStatus,
-                    "upgrade.status",
-                    json!({}),
-                    UPGRADE_TICKS,
-                );
-                self.issue_if_due(Tag::Rollouts, "upgrade.rollouts", json!({}), UPGRADE_TICKS);
-                self.poll_upgrade_section();
-            }
+            Tab::Upgrade => self.poll_upgrade_section(),
             // The ring is local. There is nothing to ask anyone for.
             Tab::Logs => {}
         }
@@ -2334,88 +1960,8 @@ impl App {
         // operator stays on the conversation. Machine status is the cheap, bounded signal
         // that its owner has returned; it avoids hammering a known-offline node with
         // subscribe calls.
-        if !self.sessions.recovering.is_empty()
-            || matches!(self.overlay, Some(Overlay::Machines(_)))
-        {
+        if !self.sessions.recovering.is_empty() {
             self.issue_if_due(Tag::Status, "runtime.status", json!({}), STATUS_TICKS);
-        }
-    }
-
-    fn poll_detail(&mut self, tab: Tab) {
-        let requests: Vec<(Tag, &'static str, String)> = match tab {
-            Tab::Agents => self
-                .agents
-                .current()
-                .map(|row| {
-                    (
-                        Tag::AgentState(row.id.clone()),
-                        "agents.state",
-                        row.id.clone(),
-                    )
-                })
-                .into_iter()
-                .collect(),
-            Tab::Teams => self
-                .teams
-                .current()
-                .map(|row| {
-                    (
-                        Tag::TeamState(row.id.clone()),
-                        "teams.state",
-                        row.id.clone(),
-                    )
-                })
-                .into_iter()
-                .collect(),
-            Tab::Plans => {
-                let mut out = Vec::new();
-
-                if let Some(row) = self.plans.current() {
-                    out.push((Tag::Plan(row.id.clone()), "plans.get", row.id.clone()));
-                }
-
-                if let Some(row) = self.control.current() {
-                    out.push((
-                        Tag::ControlRun(row.id.clone()),
-                        "control.get",
-                        row.id.clone(),
-                    ));
-                }
-
-                out
-            }
-            _ => Vec::new(),
-        };
-
-        let mut due = Vec::new();
-
-        for (tag, method, id) in requests {
-            let ticks = self.ticks;
-
-            let explorer = match &tag {
-                Tag::AgentState(_) => &mut self.agents,
-                Tag::TeamState(_) => &mut self.teams,
-                Tag::Plan(_) => &mut self.plans,
-                Tag::ControlRun(_) => &mut self.control,
-                _ => continue,
-            };
-
-            // A selection that moved is fetched immediately; the same selection is
-            // refreshed on the slow cadence, because a state tree is not a cheap list.
-            if explorer.detail_of.as_deref() != Some(id.as_str()) {
-                explorer.detail.invalidate();
-                explorer.tree.reset();
-                explorer.detail_of = Some(id.clone());
-            }
-
-            if explorer.detail.due(ticks) {
-                explorer.detail.started();
-                due.push(Call::new(tag, method, json!({ "id": id })));
-            }
-        }
-
-        for call in due {
-            self.issue(call);
         }
     }
 
@@ -2423,19 +1969,6 @@ impl App {
         let section = self.upgrade.current();
 
         let (tag, method, params) = match section {
-            // Already polled unconditionally above.
-            UpgradeSection::Status | UpgradeSection::Rollouts => return,
-            UpgradeSection::History => {
-                let Some(module) = self.upgrade.history_module.clone() else {
-                    return;
-                };
-
-                (
-                    Tag::History(module.clone()),
-                    "upgrade.history",
-                    json!({ "module": module }),
-                )
-            }
             UpgradeSection::Signing => (Tag::Signing, "signing.decisions", json!({})),
             UpgradeSection::Grants => {
                 let Some(principal) = self.upgrade.grants_principal.clone() else {
@@ -2464,13 +1997,6 @@ impl App {
             Tag::Status => self.status.due(self.ticks),
             Tag::Providers => self.providers.due(self.ticks),
             Tag::Sessions(Plane::Interactive) => self.sessions.interactive.due(self.ticks),
-            Tag::Sessions(Plane::Coding) => self.sessions.coding.due(self.ticks),
-            Tag::Agents => self.agents.rows.due(self.ticks),
-            Tag::Teams => self.teams.rows.due(self.ticks),
-            Tag::Plans => self.plans.rows.due(self.ticks),
-            Tag::ControlRuns => self.control.rows.due(self.ticks),
-            Tag::UpgradeStatus => self.upgrade.status.due(self.ticks),
-            Tag::Rollouts => self.upgrade.rollouts.due(self.ticks),
             _ => true,
         };
 
@@ -2483,13 +2009,6 @@ impl App {
             Tag::Status => self.status.started(),
             Tag::Providers => self.providers.started(),
             Tag::Sessions(Plane::Interactive) => self.sessions.interactive.started(),
-            Tag::Sessions(Plane::Coding) => self.sessions.coding.started(),
-            Tag::Agents => self.agents.rows.started(),
-            Tag::Teams => self.teams.rows.started(),
-            Tag::Plans => self.plans.rows.started(),
-            Tag::ControlRuns => self.control.rows.started(),
-            Tag::UpgradeStatus => self.upgrade.status.started(),
-            Tag::Rollouts => self.upgrade.rollouts.started(),
             _ => {}
         }
 
@@ -2546,25 +2065,8 @@ impl App {
             }
             Tab::Sessions => {
                 self.sessions.interactive.invalidate();
-                self.sessions.coding.invalidate();
-            }
-            Tab::Agents => {
-                self.agents.rows.invalidate();
-                self.agents.detail.invalidate();
-            }
-            Tab::Teams => {
-                self.teams.rows.invalidate();
-                self.teams.detail.invalidate();
-            }
-            Tab::Plans => {
-                self.plans.rows.invalidate();
-                self.plans.detail.invalidate();
-                self.control.rows.invalidate();
-                self.control.detail.invalidate();
             }
             Tab::Upgrade => {
-                self.upgrade.status.invalidate();
-                self.upgrade.rollouts.invalidate();
                 let section = self.upgrade.current();
                 self.upgrade.panel_mut(section).invalidate();
             }

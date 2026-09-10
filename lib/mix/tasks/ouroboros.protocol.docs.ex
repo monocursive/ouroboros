@@ -32,8 +32,8 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
 
   Regenerating on another machine on another day writes the same bytes: the task reads no
   clock, no node name, and no configured value. The dynamic vocabularies it does read —
-  `Ouroboros.CodeIntel.operations/0`, `Ouroboros.Agent.EffectLedger.effects/0` and
-  `statuses/0`, and the ledger's own query bounds — are static per build, and reading them
+  `Ouroboros.Agent.EffectLedger.effects/0` and `statuses/0`, and the ledger's own query
+  bounds — are static per build, and reading them
   is the point: a document that stated a narrower vocabulary than the runtime accepts
   would be a document a client could be refused for believing.
 
@@ -55,18 +55,16 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
 
   @path "docs/PROTOCOL.md"
 
-  # The five verbs `invoke/2` never sees: the four subscription verbs, because both planes
-  # register the *calling* process as the subscriber, and `runtime.shutdown`, because it
+  # The three verbs `invoke/2` never sees: the two subscription verbs, because the plane
+  # registers the *calling* process as the subscriber, and `runtime.shutdown`, because it
   # needs the listener configuration and the socket the acknowledgement must reach.
-  # `hello` is a sixth for the same reason — it owns the socket a failed handshake closes.
+  # `hello` is a fourth for the same reason — it owns the socket a failed handshake closes.
   # `Ouroboros.Gateway.ProtocolDocsTest` proves this list is exactly the set of table
   # methods with no `invoke/2` clause.
   @connection_answered ~w(
     hello
     interactive.subscribe
     interactive.unsubscribe
-    coding.subscribe
-    coding.unsubscribe
     runtime.shutdown
   )
 
@@ -83,8 +81,6 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
     "hello_result" => {:method, "hello"},
     "runtime_status_result" => {:method, "runtime.status"},
     "interactive_event_detail_result" => {:method, "interactive.event_detail"},
-    "coding_event_detail_result" => {:method, "coding.event_detail"},
-    "code_intel_diagnostics_result" => {:method, "code_intel.diagnostics"},
     "interactive_journal_result" => {:method, "interactive.journal"},
     "interactive_replay_verify_result" => {:method, "interactive.replay_verify"},
     "ledger_list_result" => {:method, "ledger.list"},
@@ -92,20 +88,17 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
     "mcp_list_result" => {:method, "mcp.list"},
     "wasm_status_result" => {:method, "wasm.status"},
     "wasm_list_result" => {:method, "wasm.list"},
-    "agents_message_result" => {:method, "agents.message"},
     "wasm_upload_result" => {:method, "wasm.upload"},
     "wasm_download_result" => {:method, "wasm.download"},
     "wasm_sign_result" => {:method, "wasm.sign"},
     "wasm_deploy_result" => {:method, "wasm.deploy"},
     "wasm_rollback_result" => {:method, "wasm.rollback"},
-    "agents_message_truncated_result" => {:method, "agents.message"},
     "workspace_browse_result" => {:method, "workspace.browse"},
     "policy_status_result" => {:method, "policy.status"},
     "policy_promote_result" => {:method, "policy.promote"},
     "policy_replay_result" => {:method, "policy.replay"},
     "interactive_event_notification" => {:notification, "interactive.event"},
     "interactive_event_excerpt_notification" => {:notification, "interactive.event"},
-    "coding_event_notification" => {:notification, "coding.event"},
     "stream_lagged_notification" => {:notification, "stream.lagged"},
     "stream_ended_notification" => {:notification, "stream.ended"},
     "error_unauthenticated" => {:error, :unauthenticated},
@@ -137,9 +130,8 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
   # A reading order rather than an alphabet. A band this list does not name is appended
   # alphabetically, so a new band appears in the reference the day it appears in the table.
   @band_order ~w(
-    handshake runtime fleet account agents interactive coding teams
-    plans control permissions policy grants code_intel ledger workspace capabilities
-    upgrade signing wasm
+    handshake runtime fleet account interactive permissions policy grants
+    ledger workspace capabilities signing wasm
   )
 
   @impl Mix.Task
@@ -436,7 +428,6 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
   end
 
   defp method_for(:interactive), do: "interactive.event"
-  defp method_for(:coding), do: "coding.event"
 
   # ---------------------------------------------------------------------------
 
@@ -718,7 +709,7 @@ defmodule Mix.Tasks.Ouroboros.Protocol.Docs do
 
     **Not a list of the refusals a plane can name.** The per-method "can answer" line is
     derived from the method's table entry and its envelope. A plane's own typed refusals —
-    `unsupported_on_transport`, `shell_refused`, `delegation_failed`, and the rest — travel
+    `unsupported_on_transport`, `shell_refused`, `rewind_refused`, and the rest — travel
     in the `data` of a `-32006` and are documented where they are decided.
     """
   end

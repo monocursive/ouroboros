@@ -20,7 +20,7 @@ defmodule Ouroboros.InteractiveWorktreeTest do
   alias Ouroboros.Workspace.Manager, as: WorkspaceManager
   alias Ouroboros.Workspace.Worktree
 
-  @provider :ouroboros_test
+  @provider :native
 
   setup do
     if System.find_executable("git") do

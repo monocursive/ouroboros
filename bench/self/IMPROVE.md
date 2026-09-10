@@ -23,7 +23,7 @@ HUP).
 
 | # | Step | What it is |
 |---|---|---|
-| 1 | `worktree` | `.claude/worktrees/improve-<slug>` on `self/improve-<slug>`, branched from `dev`; `deps/` and `_build/` cloned in with `cp -Rc`; `priv/wasm` and `priv/sandbox` copied |
+| 1 | `worktree` | `.claude/worktrees/improve-<slug>` on `self/improve-<slug>`, branched from `dev`; `deps/` and `_build/` cloned in with `cp -Rc`; `priv/wasm` copied |
 | 2 | `daemon` | `ouro --dev daemon` on a scratch `OUROBOROS_DATA_DIR` (mode 0700). `ouro stop` runs from a trap, always |
 | 3 | `implementer` | `ouro run` with `docs/self/briefs/implementer.md` + the task, `--workspace <worktree> --approve-all --stream-json` |
 | 4 | `build-scan` | the diff against the build definitions the gates themselves run. A hit **stops the loop before any gate**, writes the body and exits 2 — unless `--allow-build-changes` |

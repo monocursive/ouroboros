@@ -6,11 +6,11 @@ rust-version = "1.95"
 description = "Ouroboros WebAssembly containment helper: the private JSON-RPC helper the runtime spawns to load, instantiate, and call capability components."
 publish = false
 
-# An isolated workspace member, for the same reason `computer-use` and `sandbox` are ones,
-# and with the strongest case any of the three has had: `wasmtime` is a JIT compiler and a
-# runtime for untrusted bytes, roughly a hundred transitive crates, and none of it belongs in
-# the `ouro` terminal client's build graph. `ouro` never depends on this member. A wasmtime
-# panic — or a wasmtime escape — costs a Port, not the node (docs/WASM.md D3).
+# An isolated workspace member, for the same reason `sandbox` is one, and with the stronger
+# case of the two: `wasmtime` is a JIT compiler and a runtime for untrusted bytes, roughly a
+# hundred transitive crates, and none of it belongs in the `ouro` terminal client's build
+# graph. `ouro` never depends on this member. A wasmtime panic — or a wasmtime escape —
+# costs a Port, not the node (docs/WASM.md D3).
 #
 # `rust-version` is 1.95 here where the rest of the workspace is 1.88: that is wasmtime 48's
 # own MSRV, not a preference. 48 is also wasmtime's current LTS — the project ships a major
@@ -26,13 +26,13 @@ path = "src/main.rs"
 
 [dependencies]
 serde_json = "1"
-# The line loop and stdio, exactly as `computer-use` uses it. The `current_thread` runtime
-# plus `spawn_blocking`: every wasmtime call is blocking work that must not sit on the
-# reactor, and compiling a component can take hundreds of milliseconds.
+# The line loop and stdio, exactly as the now-deleted `ouro-computer-use` used it. The
+# `current_thread` runtime plus `spawn_blocking`: every wasmtime call is blocking work that
+# must not sit on the reactor, and compiling a component can take hundreds of milliseconds.
 tokio = { version = "1", features = ["rt", "macros", "io-util", "io-std"] }
 # Component identity is the sha256 of the bytes, recomputed here from what was actually read
 # rather than trusted from the request (§7.5). Pure Rust, already in this workspace's lock
-# behind `ouro` and `computer-use`; no C, no OpenSSL.
+# behind `ouro`; no C, no OpenSSL.
 sha2 = "0.10"
 # The structural pre-compile pass (`src/shape.rs`). This is not a new crate in the graph:
 # wasmtime 48.0.1 already resolves exactly this version behind `wasmtime-environ`, so naming it

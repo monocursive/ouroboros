@@ -4,7 +4,6 @@ defmodule Ouroboros.Wasm.SigningTest do
   # read at all.
   use ExUnit.Case, async: false
 
-  alias Ouroboros.Upgrade.Forge.Signer
   alias Ouroboros.Upgrade.Signing.Policy
   alias Ouroboros.Upgrade.Signing.Service
   alias Ouroboros.Wasm
@@ -339,9 +338,7 @@ defmodule Ouroboros.Wasm.SigningTest do
       assert {:ok, _findings} = evaluate(artifact!(), Map.put(bare, :component_bytes, @bytes))
     end
 
-    test "the BEAM arm is untouched by any of it" do
-      # A context shaped for lane W does not change what the other arm does with a term it
-      # does not recognize, and the wasm keys are simply not read.
+    test "a term that is not a manifest, and a context that is not one, are refusals" do
       assert {:refused, {:invalid_artifact, _}} = evaluate(%{not: "an artifact"}, context())
       assert {:refused, {:invalid_policy_context, _}} = evaluate(artifact!(), :not_a_context)
     end
@@ -488,21 +485,19 @@ defmodule Ouroboros.Wasm.SigningTest do
       assert {:ok, _signature} = sign(service, with_metadata(&Map.delete(&1, :eval)))
     end
 
-    test "the deny signer still refuses, and a Local dev signer signs through sign/2" do
-      assert {:error, :signing_denied} =
-               Signer.Deny.sign(Artifact.signing_payload(artifact!(), @signer_id), @signer_id)
-
-      # `Signer.Local` implements only `sign/2` — the generic payload path. Lane W needs no
-      # new callback: the payload it hands over is bytes like any other.
+    test "a detached signature over this lane's payload is one the verifier accepts" do
+      # The service is not the only thing that can produce one: what a loading node checks
+      # is a signature over `signing_payload/2`, whoever held the key.
       {public, secret} = :crypto.generate_key(:eddsa, :ed25519)
       artifact = artifact!()
 
-      assert {:ok, signature} =
-               Signer.Local.sign(
-                 Artifact.signing_payload(artifact, @signer_id),
-                 @signer_id,
-                 private_key: secret
-               )
+      signature =
+        :crypto.sign(
+          :eddsa,
+          :none,
+          Artifact.signing_payload(artifact, @signer_id),
+          [secret, :ed25519]
+        )
 
       {:ok, signed} = Artifact.with_signature(artifact, %{signer: @signer_id, value: signature})
       assert :ok = Verifier.verify(signed, @bytes, trusted_signers: %{@signer_id => public})
@@ -517,7 +512,6 @@ defmodule Ouroboros.Wasm.SigningTest do
     %{
       signer_id: @signer_id,
       requester: node(),
-      require_eval: false,
       require_wasm_eval: true,
       component_bytes: @bytes,
       max_artifact_bytes: 16 * 1024 * 1024,

@@ -12,12 +12,11 @@
         "name": "Read",
         "output": "  1→defmodule Ouroboros.Gateway.Wire do\n  2→  @moduledoc \"The encoder the socket is written from.\"\n  3→end\n"
       },
-      "provider": "claude_code",
+      "provider": "native",
       "provider_session_id": "provider-0000000000000001",
       "request_id": null,
       "semantic": {
         "data": {
-          "artifacts": [],
           "at": 1767225600000,
           "call_id": "toolu_01Read000000000000001",
           "is_error": false,

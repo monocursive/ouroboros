@@ -27,7 +27,6 @@ defmodule Ouroboros.Control.GrantsTest do
   alias Ouroboros.Control.Grants
   alias Ouroboros.Control.Grants.Grant
   alias Ouroboros.Control.GrantsTest.FlakyStorage
-  alias Ouroboros.Upgrade.{Artifact, Verifier}
 
   setup do
     on_exit(&FlakyStorage.heal!/0)
@@ -56,8 +55,8 @@ defmodule Ouroboros.Control.GrantsTest do
       grants = start_grants!()
       assert {:ok, _grant} = Grants.grant("agent", :start_agent, [modules: :any], grants)
 
-      assert Grants.granted?("agent", :start_agent, %{module: Ouroboros.Agent.Worker}, grants)
-      refute Grants.granted?("agent", :forge, %{module: Ouroboros.Agent.Worker}, grants)
+      assert Grants.granted?("agent", :start_agent, %{module: Ouroboros.Wasm.Capability}, grants)
+      refute Grants.granted?("agent", :forge, %{module: Ouroboros.Wasm.Capability}, grants)
       refute Grants.granted?("agent", :send_message, %{agent: "other"}, grants)
     end
 
@@ -65,18 +64,28 @@ defmodule Ouroboros.Control.GrantsTest do
       grants = start_grants!()
 
       assert %{granted?: false, grant: nil, reason: :not_granted} =
-               Grants.decision("agent", :start_agent, %{module: Ouroboros.Agent.Worker}, grants)
+               Grants.decision(
+                 "agent",
+                 :start_agent,
+                 %{module: Ouroboros.Wasm.Capability},
+                 grants
+               )
 
       assert {:ok, grant} =
                Grants.grant(
                  "agent",
                  :start_agent,
-                 [modules: [Ouroboros.Agent.Worker]],
+                 [modules: [Ouroboros.Wasm.Capability]],
                  grants
                )
 
       assert %{granted?: true, grant: ^grant, reason: :granted} =
-               Grants.decision("agent", :start_agent, %{module: Ouroboros.Agent.Worker}, grants)
+               Grants.decision(
+                 "agent",
+                 :start_agent,
+                 %{module: Ouroboros.Wasm.Capability},
+                 grants
+               )
 
       assert %{granted?: false, grant: ^grant, reason: :outside_constraints} =
                Grants.decision("agent", :start_agent, %{module: Kernel}, grants)
@@ -84,7 +93,12 @@ defmodule Ouroboros.Control.GrantsTest do
       stop_supervised!(grants)
 
       assert %{granted?: false, grant: nil, reason: :authority_unavailable} =
-               Grants.decision("agent", :start_agent, %{module: Ouroboros.Agent.Worker}, grants)
+               Grants.decision(
+                 "agent",
+                 :start_agent,
+                 %{module: Ouroboros.Wasm.Capability},
+                 grants
+               )
     end
 
     test "a grant belongs to exactly one principal" do
@@ -134,20 +148,20 @@ defmodule Ouroboros.Control.GrantsTest do
                Grants.grant(
                  "agent",
                  :start_agent,
-                 [modules: [Ouroboros.Agent.Worker, Ouroboros.Capability.Echo]],
+                 [modules: [Ouroboros.Wasm.Capability, Ouroboros.Capability.Echo]],
                  grants
                )
 
       assert %Grant{effect: :start_agent, constraints: %{modules: modules}} = grant
-      assert modules == [Ouroboros.Agent.Worker, Ouroboros.Capability.Echo]
+      assert modules == [Ouroboros.Wasm.Capability, Ouroboros.Capability.Echo]
 
-      assert Grants.granted?("agent", :start_agent, %{module: Ouroboros.Agent.Worker}, grants)
+      assert Grants.granted?("agent", :start_agent, %{module: Ouroboros.Wasm.Capability}, grants)
       assert Grants.granted?("agent", :start_agent, %{module: Ouroboros.Capability.Echo}, grants)
 
       refute Grants.granted?(
                "agent",
                :start_agent,
-               %{module: Ouroboros.Agent.Coordinator},
+               %{module: Ouroboros.Capability.Other},
                grants
              )
 
@@ -219,10 +233,10 @@ defmodule Ouroboros.Control.GrantsTest do
       assert Grants.granted?("agent", :start_agent, %{module: Kernel}, grants)
 
       assert {:ok, _grant} =
-               Grants.grant("agent", :start_agent, [modules: [Ouroboros.Agent.Worker]], grants)
+               Grants.grant("agent", :start_agent, [modules: [Ouroboros.Wasm.Capability]], grants)
 
       refute Grants.granted?("agent", :start_agent, %{module: Kernel}, grants)
-      assert Grants.granted?("agent", :start_agent, %{module: Ouroboros.Agent.Worker}, grants)
+      assert Grants.granted?("agent", :start_agent, %{module: Ouroboros.Wasm.Capability}, grants)
       assert [%Grant{effect: :start_agent}] = Grants.list("agent", grants)
     end
   end
@@ -252,7 +266,7 @@ defmodule Ouroboros.Control.GrantsTest do
     grants = start_grants!(storage)
 
     assert {:ok, _grant} =
-             Grants.grant("agent", :start_agent, [modules: [Ouroboros.Agent.Worker]], grants)
+             Grants.grant("agent", :start_agent, [modules: [Ouroboros.Wasm.Capability]], grants)
 
     assert {:ok, _grant} = Grants.grant("agent", :deploy, [nodes: [node()]], grants)
     assert :ok = Grants.revoke("agent", :deploy, grants)
@@ -260,7 +274,7 @@ defmodule Ouroboros.Control.GrantsTest do
     stop_supervised!(grants)
     restarted = start_grants!(storage)
 
-    assert Grants.granted?("agent", :start_agent, %{module: Ouroboros.Agent.Worker}, restarted)
+    assert Grants.granted?("agent", :start_agent, %{module: Ouroboros.Wasm.Capability}, restarted)
     refute Grants.granted?("agent", :start_agent, %{module: Kernel}, restarted)
 
     # The revocation is durable too. A restart that resurrected it would be the same
@@ -313,27 +327,6 @@ defmodule Ouroboros.Control.GrantsTest do
     end
   end
 
-  test "the fast patch lane refuses to replace or introduce the authority itself" do
-    {Grants, binary, _filename} = :code.get_object_code(Grants)
-
-    assert {:ok, artifact} =
-             Artifact.build([{Grants, binary, disposition: :replace}], epoch: unique_epoch())
-
-    assert {:error, {:immutable_control_module, Grants}} =
-             Verifier.verify(artifact, allow_unsigned: true)
-
-    # Neither disposition is a way in. A capability forged by an agent cannot patch, or
-    # take the name of, the authority that decided the agent could forge it.
-    assert {:ok, introduced} =
-             Artifact.build([{Grants, binary, disposition: :introduce}], epoch: unique_epoch())
-
-    assert {:error, {:immutable_control_module, Grants}} =
-             Verifier.verify(introduced, allow_unsigned: true)
-
-    assert :code.which(Grants) != :non_existing
-    assert Process.alive?(Process.whereis(Grants))
-  end
-
   defp start_grants!(storage \\ nil) do
     name = unique_name()
     storage = storage || {Jido.Storage.ETS, table: unique_table()}
@@ -346,6 +339,4 @@ defmodule Ouroboros.Control.GrantsTest do
 
   defp unique_table,
     do: String.to_atom("grants_storage_#{System.unique_integer([:positive, :monotonic])}")
-
-  defp unique_epoch, do: System.unique_integer([:positive, :monotonic])
 end

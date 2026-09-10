@@ -41,7 +41,7 @@ defmodule Ouroboros.Upgrade.Wire do
 
   A name the loading VM has *not* interned is carried, never created: an atom comes
   back as its name (a binary), a struct as a map still tagged with its module name.
-  `Ouroboros.Upgrade.ModuleName` and the journals treat that binary as the fact it is —
+  `module_from_wire/1` and the journals treat that binary as the fact it is —
   a module this node is not holding — rather than as corruption. One corner of the
   fallback: a map holding both `:x` and `"x"` as keys loads on such a VM as one key, the
   way `Map.new/1` resolves a duplicate.
@@ -78,6 +78,7 @@ defmodule Ouroboros.Upgrade.Wire do
   @tuple "__tuple__"
   @map "__map__"
   @dropped "__dropped__"
+  @module_prefix "Elixir."
 
   # An atom key spelling one of these would read back as a tag, so a map holding one is
   # written in the pair form, where keys are encoded and the collision cannot happen.
@@ -105,6 +106,67 @@ defmodule Ouroboros.Upgrade.Wire do
   @spec load(term()) :: term()
   def load(%mod{} = struct) when is_atom(mod), do: struct
   def load(term), do: decode(term)
+
+  @doc """
+  Whether a term has an external form every VM can read back the same way.
+
+  Pids, references, ports, functions and structs are not portable in that sense, and
+  neither is anything containing one. The journals, the rollout register and the
+  evaluation grammar all ask this before they record a caller's term, because a durable
+  record that cannot be read back is not evidence of anything.
+  """
+  @spec portable_term?(term()) :: boolean()
+  def portable_term?(term) when is_atom(term) or is_binary(term) or is_number(term), do: true
+  def portable_term?(term) when is_list(term), do: Enum.all?(term, &portable_term?/1)
+
+  def portable_term?(term) when is_tuple(term),
+    do: term |> Tuple.to_list() |> Enum.all?(&portable_term?/1)
+
+  def portable_term?(term) when is_map(term) do
+    not is_struct(term) and
+      Enum.all?(term, fn {key, value} -> portable_term?(key) and portable_term?(value) end)
+  end
+
+  def portable_term?(_term), do: false
+
+  @doc """
+  The binary form of a module name, for a term about to be persisted.
+
+  A capability's name is created when it is deployed. The atom exists in the VM that
+  loaded it and in no other, and it is gone from the VM that reboots, so a checkpoint
+  holding it could not be read back at all: `binary_to_term/2` in `[:safe]` mode — which
+  `Ouroboros.Storage.DurableFile` uses and keeps using — refuses any term naming an atom
+  this VM has never interned, and the store reports corruption for what is only a name it
+  has not heard of.
+
+  Both directions are idempotent, so a name that never became an atom can be written
+  straight back out.
+  """
+  @spec module_to_wire(term()) :: term()
+  def module_to_wire(name) when is_atom(name) do
+    case Atom.to_string(name) do
+      @module_prefix <> _rest = text -> text
+      _erlang_module_or_plain_atom -> name
+    end
+  end
+
+  def module_to_wire(name), do: name
+
+  @doc """
+  The module a persisted name refers to, when this VM has heard of it.
+
+  A name that does not resolve stays a binary, which is the truth about it here: that
+  module is not loaded on this node. That is a fact for the reader to act on, not a
+  corrupt record to refuse.
+  """
+  @spec module_from_wire(term()) :: term()
+  def module_from_wire(@module_prefix <> _rest = text) do
+    String.to_existing_atom(text)
+  rescue
+    ArgumentError -> text
+  end
+
+  def module_from_wire(name), do: name
 
   defp encode(term) when term in [nil, true, false], do: term
   defp encode(term) when is_binary(term) or is_number(term), do: term

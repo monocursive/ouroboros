@@ -26,7 +26,6 @@ defmodule Ouroboros.Web.Transcript do
     ApprovalResolved,
     CommandOutput,
     Compaction,
-    DelegationEvent,
     Failure,
     FileUpdate,
     Hidden,
@@ -363,10 +362,6 @@ defmodule Ouroboros.Web.Transcript do
     state |> flush_agent(false) |> push!(block)
   end
 
-  defp absorb_entry(%Entry.Note{note: {:image, cell}}, state) do
-    state |> flush_agent(false) |> push!(cell)
-  end
-
   defp absorb_entry(%Entry.Note{note: note}, state) do
     state
     |> flush_agent(false)
@@ -504,10 +499,6 @@ defmodule Ouroboros.Web.Transcript do
 
   defp project_event(state, %Compaction{} = report) do
     state |> flush_agent(false) |> push_deduped(compaction_block(report))
-  end
-
-  defp project_event(state, %DelegationEvent{} = delegation) do
-    state |> flush_agent(false) |> push!(delegation_block(delegation))
   end
 
   defp project_event(state, %SubagentEvent{} = event) do
@@ -894,20 +885,8 @@ defmodule Ouroboros.Web.Transcript do
     end
   end
 
-  # Taken before the result is consumed so the tool cell and its image cells are the same
-  # two-step every surface reads: the tool row, then the picture it produced. The
-  # fs-free contract holds because these artifacts arrive on the event and are minted from
-  # it — nothing here stats a file or reads a clock.
   defp project_tool_result(state, %ToolResult{} = result) do
-    artifacts = result.artifacts
-
-    state
-    |> merge_or_push_tool_result(%{result | artifacts: []})
-    |> then(fn state ->
-      Enum.reduce(artifacts, state, fn artifact, state ->
-        push!(state, Cell.Image.from_artifact(artifact))
-      end)
-    end)
+    merge_or_push_tool_result(state, result)
   end
 
   defp merge_or_push_tool_result(state, %ToolResult{} = result) do
@@ -1334,39 +1313,6 @@ defmodule Ouroboros.Web.Transcript do
       tone: :muted,
       key: report.archive_id
     }
-  end
-
-  @doc "G1. A coding task this conversation delegated, starting or finishing."
-  @spec delegation_block(DelegationEvent.t()) :: Cell.Runtime.t()
-  def delegation_block(%DelegationEvent{} = delegation) do
-    label =
-      case delegation.status do
-        "started" -> "Delegated to a coding task"
-        status when is_binary(status) -> "Delegation #{status}"
-        nil -> "Delegation"
-      end
-
-    facts =
-      []
-      |> then(&if(delegation.task_id, do: &1 ++ ["task #{delegation.task_id}"], else: &1))
-      |> then(&if(delegation.task_node, do: &1 ++ [delegation.task_node], else: &1))
-      # A digest, never the result: the child's own transcript is the record of what it
-      # did, and a parent that quoted it would be presenting a copy as the thing.
-      |> then(
-        &if(delegation.result_digest,
-          do: &1 ++ ["result digest #{delegation.result_digest}"],
-          else: &1
-        )
-      )
-
-    tone =
-      case delegation.status do
-        status when status in ["failed", "cancelled", "lost"] -> :warning
-        "completed" -> :success
-        _running -> :muted
-      end
-
-    %Cell.Runtime{label: label, detail: Enum.join(facts, " · "), tone: tone}
   end
 
   # Folds one child-agent event onto the row that child already owns, or opens one.

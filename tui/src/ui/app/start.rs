@@ -1,65 +1,20 @@
 use super::*;
 
-/// One row of a provider picker that has to be able to show a stored default the runtime
-/// does not report.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProviderChoice {
-    /// No default: every session states its own provider, as it always did.
-    Unset,
-    /// A provider this runtime reports, and whether its probe found an executable.
-    Probed { name: String, ready: bool },
-    /// The config file names it and this runtime's provider list does not.
-    Unserved { name: String },
-}
-
-impl ProviderChoice {
-    /// The name to store, or `None` for the "unset" row.
-    pub fn name(&self) -> Option<&str> {
-        match self {
-            Self::Unset => None,
-            Self::Probed { name, .. } | Self::Unserved { name } => Some(name),
-        }
-    }
-}
-
-/// The rows the settings provider picker offers.
+/// The model a session starts on when nothing has been stored yet.
 ///
-/// "unset" first, then whatever `runtime.providers` reported, then the stored default when
-/// this runtime does not report it. That last row is why this is a function rather than an
-/// index into the probe list: a config written on another machine — or before a provider
-/// was removed — names something the probe will not list, and a picker that silently
-/// dropped it would show an operator a default they no longer have.
-pub fn provider_choices(providers: &[ProviderEntry], stored: Option<&str>) -> Vec<ProviderChoice> {
-    let mut choices = vec![ProviderChoice::Unset];
-
-    choices.extend(providers.iter().map(|entry| ProviderChoice::Probed {
-        name: entry.provider.clone(),
-        ready: entry.ready(),
-    }));
-
-    if let Some(stored) = stored.map(str::trim).filter(|stored| !stored.is_empty()) {
-        if !providers.iter().any(|entry| entry.provider == stored) {
-            choices.push(ProviderChoice::Unserved {
-                name: stored.to_string(),
-            });
-        }
-    }
-
-    choices
-}
+/// The one provider this runtime serves reaches ChatGPT through a subscription, and this
+/// is the model that subscription buys. Stated here rather than left to the plane so the
+/// dialog can open on a row that says what will happen.
+pub const DEFAULT_MODEL: &str = "openai_codex:gpt-5.6-sol";
 
 /// One row of the new-session dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NewField {
-    Plane,
     Machine,
-    Provider,
     Model,
     Workspace,
     ApprovalMode,
     SandboxMode,
-    /// Only reachable on the coding plane, where the objective is required.
-    Objective,
     /// D7. Whether the session runs in its own `git worktree` rather than the workspace
     /// itself. Offered only where the gateway serves the option, because a toggle that a
     /// runtime silently ignores is worse than no toggle.
@@ -70,22 +25,18 @@ pub enum NewField {
 /// The dialog that turns "start a session" into a set of stated choices.
 ///
 /// Every field is on screen at once, and every one of them stays editable. What the config
-/// file supplies is where the *cursor starts*, never what gets sent: a prefilled provider
-/// is one the operator chose once, explicitly, in a file they can read, which is a
-/// different thing from a node's default deciding for them. With no config the dialog is
-/// exactly what it was — provider on row one, nothing preselected but the first entry.
+/// file supplies is where the *cursor starts*, never what gets sent: a prefilled model is
+/// one the operator chose once, explicitly, in a file they can read, which is a different
+/// thing from a node's default deciding for them.
 ///
-/// The provider list comes from `runtime.providers` — the same answer the Dashboard shows
-/// — and an entry whose probe found no executable is drawn dim but is **still
-/// selectable**: "installed" means a file exists, the runtime is the authority on whether
-/// a session can start, and refusing on a heuristic would be this client overruling it.
+/// There is no provider row. This runtime serves one provider, so there is no choice to
+/// offer and a row offering it would be asking a question with one answer. The provider
+/// list is still fetched — the approval and sandbox rows read this runtime's capabilities
+/// out of it, and the Runtime tab shows the probe.
 #[derive(Debug)]
 pub struct NewSession {
     pub field: NewField,
     pub request: StartRequest,
-    /// Index into the provider list, kept rather than the name so the cursor survives a
-    /// providers refresh that reordered nothing.
-    pub provider: usize,
     /// Index into [`App::machine_choices`]. Zero is always this machine.
     pub machine: usize,
     pub approval: usize,
@@ -103,14 +54,6 @@ pub struct NewSession {
     /// The caller's cwd is a useful local hint and an unsafe remote default. Keep it only
     /// so cycling back to this machine can restore it before the operator edits the field.
     inferred_local_workspace: Option<String>,
-    /// The provider the config file names, until the probe list arrives and the cursor can
-    /// be put on it.
-    ///
-    /// A name rather than an index because the list it indexes into is fetched
-    /// asynchronously and may not exist when this dialog opens. Cleared the moment it is
-    /// placed — or the moment the operator moves the cursor themselves, so a providers
-    /// answer that lands late cannot move a choice they already made.
-    wanted_provider: Option<String>,
 }
 
 impl NewSession {
@@ -122,13 +65,19 @@ impl NewSession {
     ) -> Self {
         let inferred_local_workspace = workspace_is_inferred.then(|| workspace.clone());
         Self {
-            field: NewField::Provider,
+            field: NewField::Model,
             request: StartRequest {
                 workspace,
-                model: defaults.model.clone(),
+                // Opening on the row that says what will happen, rather than on a blank
+                // one that means "whatever the plane picks".
+                model: Some(
+                    defaults
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| DEFAULT_MODEL.into()),
+                ),
                 ..StartRequest::new(plane)
             },
-            provider: 0,
             machine: 0,
             approval: approval_index(defaults.approval_mode()),
             sandbox: sandbox_index(defaults.sandbox_mode()),
@@ -137,58 +86,20 @@ impl NewSession {
             pending_request: None,
             reconciling: false,
             inferred_local_workspace,
-            wanted_provider: defaults.provider.clone().or_else(|| Some("native".into())),
         }
     }
 
-    /// Puts the cursor on the provider the config names, once the list is known.
-    ///
-    /// Answers the stored name back when this runtime does not serve it, so the caller can
-    /// say so rather than leaving the cursor somewhere the operator did not choose. Idle
-    /// on every later call — a default is applied once, and the cursor is the operator's
-    /// afterwards.
-    fn place_provider(&mut self, providers: &[ProviderEntry]) -> Option<String> {
-        let wanted = self.wanted_provider.clone()?;
-
-        if providers.is_empty() {
-            return None;
-        }
-
-        self.wanted_provider = None;
-
-        match providers.iter().position(|entry| entry.provider == wanted) {
-            Some(index) => {
-                self.provider = index;
-                if wanted == "native" && self.request.model.is_none() {
-                    self.request.model = Some("openai_codex:gpt-5.6-sol".into());
-                }
-                None
-            }
-            None => Some(wanted),
-        }
-    }
-
-    /// The rows this plane has. `objective` exists only where the gateway accepts it.
+    /// The rows this dialog has, in the order it draws them.
     pub fn fields(&self) -> Vec<NewField> {
-        let mut fields = vec![
-            NewField::Plane,
+        vec![
             NewField::Machine,
-            NewField::Provider,
             NewField::Model,
-        ];
-
-        if self.request.plane == Plane::Coding {
-            fields.push(NewField::Objective);
-        }
-
-        fields.extend([
             NewField::Workspace,
             NewField::ApprovalMode,
             NewField::SandboxMode,
             NewField::Worktree,
             NewField::Start,
-        ]);
-        fields
+        ]
     }
 
     pub fn approval_mode(&self) -> Option<ApprovalMode> {
@@ -208,17 +119,21 @@ impl NewSession {
         sandbox_label(self.sandbox)
     }
 
-    /// The provider entry the cursor is on, once `runtime.providers` has answered.
+    /// The one provider this runtime serves, once `runtime.providers` has answered.
+    ///
+    /// A lookup rather than a constant because the *probe* is a runtime fact: whether the
+    /// entry is ready, and which modes it normalizes, is the node's answer and not this
+    /// client's assumption.
     pub fn provider_entry<'a>(&self, providers: &'a [ProviderEntry]) -> Option<&'a ProviderEntry> {
-        providers.get(self.provider)
+        providers.first()
     }
 
-    /// Why the selected approval mode cannot start a session on the selected provider.
+    /// Why the selected approval mode cannot start a session on this runtime.
     ///
     /// Read out of `runtime.providers` — the `normalized_values` and `session_transports`
-    /// this client already receives and never used (M2 §6). The dialog greys the row
-    /// rather than removing the value: a mode this provider refuses is still a mode, and
-    /// an operator comparing providers needs to see which one is the obstacle.
+    /// this client already receives (M2 §6). The dialog greys the row rather than removing
+    /// the value: a mode the transport refuses is still a mode, and an operator needs to
+    /// see what the obstacle is.
     ///
     /// `None` also where the spec does not resolve. Greying on a guess would be this
     /// client overruling a runtime that has not spoken.
@@ -237,13 +152,8 @@ impl NewSession {
     }
 
     /// The request as the fields currently read.
-    pub fn resolved(&self, providers: &[ProviderEntry]) -> StartRequest {
+    pub fn resolved(&self) -> StartRequest {
         let mut request = self.request.clone();
-
-        request.provider = providers
-            .get(self.provider)
-            .map(|entry| entry.provider.clone())
-            .unwrap_or_default();
 
         request.approval_mode = self.approval_mode();
         request.sandbox_mode = self.sandbox_mode();
@@ -262,28 +172,8 @@ impl NewSession {
         self.field = fields[next];
     }
 
-    fn cycle(&mut self, delta: isize, providers: usize, machines: &[MachineChoice]) {
+    fn cycle(&mut self, delta: isize, machines: &[MachineChoice]) {
         match self.field {
-            NewField::Plane => {
-                self.request.plane = match self.request.plane {
-                    Plane::Interactive => Plane::Coding,
-                    Plane::Coding => Plane::Interactive,
-                };
-
-                // The objective row appears and disappears with the plane; the cursor
-                // must not be left pointing at a row that no longer exists.
-                if !self.fields().contains(&self.field) {
-                    self.field = NewField::Provider;
-                }
-            }
-            NewField::Provider if providers > 0 => {
-                // The operator is choosing now, so a providers answer still in flight must
-                // not move the cursor out from under them afterwards.
-                self.wanted_provider = None;
-                self.provider =
-                    (self.provider as isize + delta).rem_euclid(providers as isize) as usize;
-                self.request.model = None;
-            }
             NewField::Machine if !machines.is_empty() => {
                 self.machine =
                     (self.machine as isize + delta).rem_euclid(machines.len() as isize) as usize;
@@ -321,7 +211,6 @@ impl NewSession {
                 Some(&mut self.request.workspace)
             }
             NewField::Model => Some(self.request.model.get_or_insert_with(String::new)),
-            NewField::Objective => Some(&mut self.request.objective),
             _ => None,
         }
     }
@@ -360,7 +249,8 @@ impl App {
             return;
         }
 
-        // The dialog is about to list providers, and the Sessions tab never polls them.
+        // The approval and sandbox rows read this runtime's capabilities out of the probe,
+        // and the Sessions tab never polls it.
         self.fetch_providers();
 
         let workspace_is_inferred = self.config.defaults.workspace.is_none()
@@ -374,10 +264,6 @@ impl App {
             workspace_is_inferred,
             &self.config.defaults,
         ))));
-
-        // The list may already be here, in which case the cursor can be placed now rather
-        // than on the next answer.
-        self.place_default_provider();
     }
 
     /// The workspace the `n` dialog and the settings overlay start from.
@@ -395,39 +281,6 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// Points whichever picker is open at the provider the config names.
-    ///
-    /// Called both when a dialog opens and when a providers answer lands, because the two
-    /// can happen in either order and the cursor has to end up in the same place either
-    /// way.
-    pub(super) fn place_default_provider(&mut self) {
-        let providers = self.providers.value.clone().unwrap_or_default();
-        let stored = self.config.defaults.provider.clone();
-
-        let unserved = match self.overlay.as_mut() {
-            Some(Overlay::New(dialog)) => dialog.place_provider(&providers),
-            Some(Overlay::Settings(settings)) => {
-                let choices = provider_choices(&providers, stored.as_deref());
-                settings.place_provider(&choices);
-                None
-            }
-            _ => None,
-        };
-
-        if let Some(name) = unserved {
-            // Said rather than silently ignored: a default that does not exist here is the
-            // operator's to know about, and the list on screen is what this runtime does
-            // serve.
-            self.inform(
-                format!(
-                    "the default provider {name:?} is not one this runtime reports; the list \
-                     here is what it does serve"
-                ),
-                NoticeKind::Warn,
-            );
-        }
-    }
-
     /// Asks for the provider list if this connection has not got one yet.
     pub(super) fn fetch_providers(&mut self) {
         if self.providers.value.is_some() || self.providers.pending {
@@ -441,12 +294,6 @@ impl App {
     pub(super) fn new_session_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::KeyCode;
 
-        let providers = self
-            .providers
-            .value
-            .as_ref()
-            .map(Vec::len)
-            .unwrap_or_default();
         let machines = self.machine_choices();
 
         let Some(Overlay::New(dialog)) = self.overlay.as_mut() else {
@@ -486,8 +333,8 @@ impl App {
             KeyCode::Esc => self.overlay = None,
             KeyCode::Tab | KeyCode::Down => dialog.move_field(1),
             KeyCode::BackTab | KeyCode::Up => dialog.move_field(-1),
-            KeyCode::Left => dialog.cycle(-1, providers, &machines),
-            KeyCode::Right => dialog.cycle(1, providers, &machines),
+            KeyCode::Left => dialog.cycle(-1, &machines),
+            KeyCode::Right => dialog.cycle(1, &machines),
             KeyCode::Backspace => {
                 if let Some(text) = dialog.text_mut() {
                     text.pop();
@@ -516,8 +363,6 @@ impl App {
     }
 
     fn submit_new_session(&mut self) {
-        let providers = self.providers.value.clone().unwrap_or_default();
-
         let Some(Overlay::New(dialog)) = self.overlay.as_mut() else {
             return;
         };
@@ -525,7 +370,7 @@ impl App {
         let request = dialog
             .pending_request
             .clone()
-            .unwrap_or_else(|| dialog.resolved(&providers));
+            .unwrap_or_else(|| dialog.resolved());
 
         let params = match request.params() {
             Ok(params) => params,
@@ -539,13 +384,12 @@ impl App {
         dialog.error = None;
         dialog.pending = true;
         dialog.pending_request = Some(request.clone());
-        self.config.defaults.provider = Some(request.provider.clone());
         self.config.defaults.model = request.model.clone();
         self.save_pending = true;
 
         let plane = request.plane;
 
-        // `interactive.start` and `coding.start` declare a 120s gateway ceiling: provider
+        // `interactive.start` declares a 120s gateway ceiling: provider
         // readiness is legitimately unbounded upstream and this is the one call that
         // waits for it.
         self.issue(
@@ -578,7 +422,6 @@ impl App {
         // The lists are polled, and waiting up to three seconds for the row to appear
         // under a session the operator is already looking at reads as a bug.
         self.sessions.interactive.invalidate();
-        self.sessions.coding.invalidate();
 
         self.open_session_on(plane, started.id.clone(), started.node.clone());
 

@@ -21,13 +21,131 @@ defmodule Ouroboros.Storage.DurableFile do
 
   `:durability_hook` is a deterministic fault-observation seam for tests. A hook
   returning `{:error, reason}` aborts before the named operation.
+
+  Checkpoints are read with `:erlang.binary_to_term(binary, [:safe])`, which refuses to
+  create an atom, so a file naming an atom this build does not have fails to decode
+  entirely. `Ouroboros.Storage.RetiredAtoms` holds the names the core reduction removed
+  that a written checkpoint may still carry; `retired_atoms/0` below compiles that list
+  into this module, so loading the adapter interns them and a store written by an older
+  build reads back.
+
+  ## The build, before the first decode
+
+  `[:safe]` asks whether an atom is *interned*, not whether this build spells it. Elixir's
+  default `:interactive` code loading loads a module the first time something calls it, so
+  under `mix run` and `make dev` the atom table at any instant is a function of boot order:
+  the integration fixture measured between 36 and 117 `Ouroboros.*` modules loaded at the
+  effect ledger's first read, run to run, against identical bytes. A checkpoint holding a
+  name whose only speller has not loaded yet then fails to decode — and the store either
+  refuses to boot or, since the fix wave, quarantines the file and starts empty, which is
+  the same data loss without the crash. The shipped release boots in `:embedded` mode with
+  every module already loaded, so this never reached production; every development daemon
+  and every test that boots a data directory has it.
+
+  `ensure_build_loaded/0` closes that: before the first `[:safe]` decode in a VM it loads
+  every module of `:ouroboros` and of the applications it depends on, once, and records
+  that in `:persistent_term`. In embedded mode the modules are already loaded and the call
+  costs a membership check each; in interactive mode it makes a checkpoint's readability a
+  property of the build rather than of the order the boot happened to take.
+
+  The three mechanisms are disjoint and all three are needed. `RetiredAtoms` covers a name
+  **no module of this build spells any more**. The quarantine covers a name **no build can
+  spell**, minted at runtime. This covers a name **this build spells in a module that has
+  not loaded yet**.
+
+  ## Quarantine
+
+  `get_checkpoint/2` decodes with `[:safe]`, which refuses to *create* an atom. A
+  checkpoint written by an older build can therefore hold a name this build has never
+  interned — a module it deleted, or, worse, a name that was minted at runtime and was
+  never in anyone's source — and the whole file stops decoding. A store that answers
+  `{:stop, _}` to that turns one unreadable file into a node that does not boot.
+
+  `get_checkpoint_or_quarantine/2` is the same read for a store that would rather keep
+  running: an *undecodable term* moves aside with every byte intact and reads as
+  `:not_found`. This is `Ouroboros.Storage.Records`' doctrine — "quarantine an unreadable
+  individual record, keeping its bytes for inspection" (docs/SIMPLIFICATION.md,
+  "Checkpoint publication") — applied to a store that keeps one aggregate checkpoint
+  rather than a record per id, so the unit of quarantine is the file. Every other failure
+  (I/O, a content-integrity failure, a missing directory) still fails exactly as before,
+  because those say nothing about whether this build can interpret the bytes.
   """
+
+  require Logger
 
   @behaviour Jido.Storage
 
   # Old enough that no live commit could still be writing it, short enough that an
   # orphan does not outlive the boot that follows the crash which made it.
   @stale_temporary_ms 60_000
+
+  # Read at compile time on purpose: the names land in *this* module's atom table, so they
+  # are interned by the time `get_checkpoint/2` below can run, in a VM that never loaded
+  # `Ouroboros.Storage.RetiredAtoms` itself. See that module for why.
+  @retired_atoms Ouroboros.Storage.RetiredAtoms.all()
+
+  @doc """
+  The atoms `Ouroboros.Storage.RetiredAtoms` keeps alive for `safe_binary_to_term/1`.
+
+  Nothing in the decode path calls this. It exists so the list is a value this module
+  holds rather than a comment claiming it does.
+  """
+  @spec retired_atoms() :: [atom()]
+  def retired_atoms, do: @retired_atoms
+
+  # Per VM, not per process: the atom table every store decodes against is the VM's.
+  @build_loaded {__MODULE__, :build_loaded}
+
+  @doc """
+  Loads this build's modules once per VM, so a `[:safe]` decode sees the whole build.
+
+  Every module of `:ouroboros` and of every application in its transitive `:applications`
+  closure that the application controller has loaded. An application that is not loaded
+  contributes nothing and is skipped: nothing of it can be running, so nothing of it can
+  have written the checkpoint being read. A module that will not load is not an error
+  here — this is about which names exist, and the modules that do load still intern theirs.
+
+  Idempotent, and cheap after the first call. Two stores decoding at once may both do the
+  work; loading a module twice is the code server's own no-op, so the race costs time and
+  never correctness.
+  """
+  @spec ensure_build_loaded() :: :ok
+  def ensure_build_loaded do
+    if :persistent_term.get(@build_loaded, false) do
+      :ok
+    else
+      _ = load_build()
+      :persistent_term.put(@build_loaded, true)
+      :ok
+    end
+  end
+
+  defp load_build do
+    :ouroboros
+    |> application_closure(MapSet.new())
+    |> Enum.flat_map(&(Application.spec(&1, :modules) || []))
+    |> Code.ensure_all_loaded()
+  rescue
+    # A decode must not become the place a code-path problem is reported. The names that
+    # did get interned still count; the ones that did not were not going to help.
+    error ->
+      Logger.warning("could not preload this build before a checkpoint decode: #{inspect(error)}")
+      :ok
+  end
+
+  defp application_closure(app, seen) do
+    # `nil` is the application controller's answer for an application it has not loaded.
+    case {MapSet.member?(seen, app), Application.spec(app, :applications)} do
+      {true, _applications} ->
+        seen
+
+      {false, nil} ->
+        seen
+
+      {false, applications} ->
+        Enum.reduce(applications, MapSet.put(seen, app), &application_closure/2)
+    end
+  end
 
   @impl true
   def get_checkpoint(key, opts) do
@@ -37,6 +155,33 @@ defmodule Ouroboros.Storage.DurableFile do
         {:error, :enoent} -> :not_found
         {:error, reason} -> {:error, reason}
       end
+    end
+  end
+
+  @doc """
+  `get_checkpoint/2`, except that a checkpoint whose bytes do not decode is quarantined.
+
+  The file is renamed aside as `<name>.quarantined-<unix>.term` — every byte kept, nothing
+  rewritten — one error line is logged naming that path and the reason, and the read
+  answers `:not_found`, which is the caller's "no checkpoint yet" branch. The name keeps
+  its `.term` suffix on purpose: `Ouroboros.Audit.Content.inventory/2` globs
+  `*/checkpoints/*.term`, and a quarantined file that dropped out of the operational
+  content inventory would be bytes on disk nobody is accounting for.
+
+  Only `{:error, :invalid_term}` is quarantined. An unreadable file is otherwise returned
+  as the error it is, and a rename that fails returns the original `:invalid_term` rather
+  than reporting an absent checkpoint while the unreadable one is still standing.
+
+  A caller that uses this instead of `get_checkpoint/2` is saying that an uninterpretable
+  checkpoint should narrow it, not stop it. That is only true of a store whose empty state
+  is the safe one; a store whose empty state would fail open must keep failing closed.
+  """
+  @spec get_checkpoint_or_quarantine(term(), keyword()) ::
+          {:ok, term()} | :not_found | {:error, term()}
+  def get_checkpoint_or_quarantine(key, opts) do
+    case get_checkpoint(key, opts) do
+      {:error, :invalid_term} -> quarantine(key, opts)
+      other -> other
     end
   end
 
@@ -209,10 +354,59 @@ defmodule Ouroboros.Storage.DurableFile do
     path <> ".tmp-" <> suffix
   end
 
+  # The one call site, immediately before the one decode, so the invariant is local: no
+  # `[:safe]` decode in this module can run against an atom table this build has not filled.
   defp safe_binary_to_term(binary) do
+    ensure_build_loaded()
     {:ok, :erlang.binary_to_term(binary, [:safe])}
   rescue
     ArgumentError -> {:error, :invalid_term}
+  end
+
+  defp quarantine(key, opts) do
+    with {:ok, path} <- checkpoint_path(key, opts) do
+      destination = quarantine_path(path)
+
+      case File.rename(path, destination) do
+        :ok ->
+          Logger.error(
+            "checkpoint #{inspect(key)} at #{path} could not be decoded (:invalid_term); " <>
+              "quarantining it at #{destination} and starting from no checkpoint"
+          )
+
+          :not_found
+
+        {:error, :enoent} ->
+          # Somebody else moved or removed it between the read and the rename. There is no
+          # checkpoint here either way, and no bytes were lost by this process.
+          :not_found
+
+        {:error, reason} ->
+          Logger.error(
+            "checkpoint #{inspect(key)} at #{path} could not be decoded (:invalid_term) and " <>
+              "could not be quarantined (#{inspect(reason)}); it is still standing"
+          )
+
+          {:error, :invalid_term}
+      end
+    end
+  end
+
+  # `.term` is kept as the extension so the file stays inside the operational content
+  # inventory's glob. A second quarantine of the same key in the same second cannot happen
+  # in a single store's lifetime — the first one leaves nothing to read — but two nodes
+  # sharing a data directory is a mistake that must not eat the evidence, so an occupied
+  # destination gets a random discriminator rather than being overwritten.
+  defp quarantine_path(path) do
+    base = Path.rootname(path, ".term")
+    candidate = "#{base}.quarantined-#{System.os_time(:second)}.term"
+
+    if File.exists?(candidate) do
+      suffix = :crypto.strong_rand_bytes(6) |> Base.url_encode64(padding: false)
+      "#{base}.quarantined-#{System.os_time(:second)}-#{suffix}.term"
+    else
+      candidate
+    end
   end
 
   defp remove_if_present(path) do

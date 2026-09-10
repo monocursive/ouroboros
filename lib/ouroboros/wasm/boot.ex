@@ -2,10 +2,11 @@ defmodule Ouroboros.Wasm.Boot do
   @moduledoc """
   Restarts the lane-W capabilities this node was running before it stopped.
 
-  Lane B cannot do this and says so: forged bytes die with the receipt at promote
-  (docs/WASM.md §3.4), so a restarted release boots without any capability it was running.
-  Lane W keeps its bytes on purpose (§7.4, D6), which turns "restart what was live" from a
-  wish into a lookup — and this is the lookup.
+  This is why the component's bytes are kept (§7.4, D6): "restart what was live" is a
+  lookup rather than a wish, and this is the lookup. It is also the property the removed
+  BEAM lane could not have — its forged bytes died with the receipt at promote
+  (docs/WASM.md §3.4), so a restarted release came back without any capability it had been
+  running — which is history, recorded here because it is the argument for keeping them.
 
   ## Two node-local facts, and nothing else
 

@@ -2,7 +2,6 @@ defmodule Ouroboros.Prompt.AssemblerTest do
   use ExUnit.Case, async: true
 
   alias Ouroboros.AgentProfile
-  alias Ouroboros.Coding.TaskState
   alias Ouroboros.Interactive.State
   alias Ouroboros.Prompt.Assembler
   alias Ouroboros.Prompt.Trace
@@ -117,15 +116,6 @@ defmodule Ouroboros.Prompt.AssemblerTest do
 
     assert {:error,
             {:invalid_agent_profile_options, {:reserved_prompt_delimiter, :system_prompt}}} =
-             TaskState.new("forged-coding", "objective",
-               provider: :native,
-               workspace: File.cwd!(),
-               agent_profile: profile,
-               system_prompt: forged
-             )
-
-    assert {:error,
-            {:invalid_agent_profile_options, {:reserved_prompt_delimiter, :system_prompt}}} =
              State.new("forged-interactive",
                provider: :native,
                workspace: File.cwd!(),
@@ -146,7 +136,7 @@ defmodule Ouroboros.Prompt.AssemblerTest do
     assert {:error, :empty_rendered_profile} = Assembler.assemble(tools_only)
 
     assert {:error, {:invalid_agent_profile_options, :empty_rendered_profile}} =
-             TaskState.new("empty-profile-coding", "objective",
+             State.new("empty-profile-session",
                provider: :native,
                workspace: File.cwd!(),
                agent_profile: tools_only
@@ -155,8 +145,8 @@ defmodule Ouroboros.Prompt.AssemblerTest do
     assert {:ok, allowed} = Assembler.assemble(tools_only, allowed_tools: ["read_file"])
     assert allowed.system_prompt =~ "- `read_file`: Read."
 
-    assert {:ok, _coding} =
-             TaskState.new("allowed-profile-coding", "objective",
+    assert {:ok, _session} =
+             State.new("allowed-profile-session",
                provider: :native,
                workspace: File.cwd!(),
                agent_profile: tools_only,
@@ -177,14 +167,9 @@ defmodule Ouroboros.Prompt.AssemblerTest do
     refute denied.system_prompt =~ "read_file"
   end
 
-  test "both planes read one trace module and name the same cause", %{profile: profile} do
-    assert {:ok, coding} =
-             TaskState.new("trace-coding", "objective",
-               provider: :native,
-               workspace: File.cwd!(),
-               agent_profile: profile
-             )
-
+  test "one trace module names the cause a session cannot build a request for", %{
+    profile: profile
+  } do
     assert {:ok, interactive} =
              State.new("trace-interactive",
                provider: :native,
@@ -192,40 +177,33 @@ defmodule Ouroboros.Prompt.AssemblerTest do
                agent_profile: profile
              )
 
-    system_prompt = coding.options.system_prompt
-    assert interactive.options.system_prompt == system_prompt
-    assert Enum.sort(Map.keys(coding.prompt_trace)) == Trace.keys()
-    assert Trace.valid?(coding.prompt_trace, system_prompt)
+    system_prompt = interactive.options.system_prompt
+    assert Enum.sort(Map.keys(interactive.prompt_trace)) == Trace.keys()
+    assert Trace.valid?(interactive.prompt_trace, system_prompt)
     assert Trace.validate(nil, nil) == :ok
 
-    skewed = Map.put(coding.prompt_trace, :version, Trace.version() + 1)
+    skewed = Map.put(interactive.prompt_trace, :version, Trace.version() + 1)
     version = Trace.version() + 1
 
     assert Trace.validate(skewed, system_prompt) ==
              {:error, {:unsupported_prompt_trace_version, version}}
 
-    assert TaskState.unrequestable_reason(%{coding | prompt_trace: skewed}) ==
-             {:unsupported_prompt_trace_version, version}
-
     assert State.unrequestable_reason(%{interactive | prompt_trace: skewed}) ==
              {:unsupported_prompt_trace_version, version}
 
-    tampered = Map.put(coding.options, :system_prompt, "tampered prompt")
-
-    assert TaskState.unrequestable_reason(%{coding | options: tampered}) ==
-             :traced_prompt_digest_mismatch
+    tampered = Map.put(interactive.options, :system_prompt, "tampered prompt")
 
     assert State.unrequestable_reason(%{interactive | options: tampered}) ==
              :traced_prompt_digest_mismatch
 
-    assert TaskState.unrequestable_reason(%{
-             coding
-             | options: Map.put(coding.options, :agent_profile, profile)
+    assert State.unrequestable_reason(%{
+             interactive
+             | options: Map.put(interactive.options, :agent_profile, profile)
            }) == :agent_profile_in_durable_options
 
-    assert TaskState.unrequestable_reason(%{
-             coding
-             | prompt_trace: Map.delete(coding.prompt_trace, :profile_digest)
+    assert State.unrequestable_reason(%{
+             interactive
+             | prompt_trace: Map.delete(interactive.prompt_trace, :profile_digest)
            }) == :malformed_prompt_trace
   end
 
@@ -247,36 +225,10 @@ defmodule Ouroboros.Prompt.AssemblerTest do
     refute denied.system_prompt =~ "read_file"
   end
 
-  test "coding and interactive requests consume the profile without changing user input", %{
+  test "a session request consumes the profile without changing user input", %{
     profile: profile
   } do
     legacy_prompt = "session-specific instruction"
-
-    assert {:ok, coding} =
-             TaskState.new("profile-coding", "untrusted objective",
-               provider: :native,
-               workspace: File.cwd!(),
-               approval_mode: :default,
-               sandbox_mode: :default,
-               system_prompt: legacy_prompt,
-               allowed_tools: ["read_file"],
-               agent_profile: profile
-             )
-
-    coding_request = TaskState.request(coding)
-    assert coding.objective == "untrusted objective"
-    assert Ouroboros.Test.Prompt.wrapped?(coding_request.prompt, "untrusted objective")
-    assert coding_request.system_prompt =~ "<ouroboros-agent-profile"
-    assert coding_request.system_prompt =~ "<ouroboros-runtime"
-    assert coding_request.system_prompt =~ legacy_prompt
-    refute Map.has_key?(coding.options, :agent_profile)
-    refute Map.has_key?(coding_request, :agent_profile)
-    assert coding_request.metadata.ouroboros_prompt.profile_id == "coding"
-
-    coding_public = TaskState.public(coding)
-    assert coding_public.options.has_system_prompt
-    assert coding_public.options.prompt_assembly.profile_id == "coding"
-    refute inspect(coding_public) =~ "careful coding agent"
 
     assert {:ok, interactive} =
              State.new("profile-interactive",
@@ -292,11 +244,11 @@ defmodule Ouroboros.Prompt.AssemblerTest do
     assert State.valid?(interactive)
     refute Map.has_key?(interactive.options, :agent_profile)
     interactive_request = State.request(interactive)
-    assert interactive_request.system_prompt == coding_request.system_prompt
+    assert interactive_request.system_prompt =~ "<ouroboros-agent-profile"
+    assert interactive_request.system_prompt =~ "<ouroboros-runtime"
+    assert interactive_request.system_prompt =~ legacy_prompt
     refute Map.has_key?(interactive_request, :agent_profile)
-
-    assert interactive_request.metadata.ouroboros_prompt.profile_digest ==
-             coding_request.metadata.ouroboros_prompt.profile_digest
+    assert interactive_request.metadata.ouroboros_prompt.profile_id == "coding"
 
     interactive_public = State.public(interactive)
     assert interactive_public.options.has_system_prompt
@@ -306,29 +258,12 @@ defmodule Ouroboros.Prompt.AssemblerTest do
     # A release from before profiles existed reads only `options`. Persisting the compiled
     # prompt there, and the content-free trace outside it, keeps a rollback from passing an
     # unknown `agent_profile` option into Harness.
-    assert coding.options.system_prompt == coding_request.system_prompt
     assert interactive.options.system_prompt == interactive_request.system_prompt
-    assert is_map(Map.get(coding, :prompt_trace))
     assert is_map(Map.get(interactive, :prompt_trace))
   end
 
   test "legacy request construction remains exact and invalid profile values fail early" do
     system_prompt = "  exact legacy\r\nprompt  "
-
-    assert {:ok, coding} =
-             TaskState.new("legacy-coding", "objective",
-               provider: :native,
-               workspace: File.cwd!(),
-               approval_mode: :default,
-               sandbox_mode: :default,
-               system_prompt: system_prompt
-             )
-
-    coding_request = TaskState.request(coding)
-    assert coding.objective == "objective"
-    assert Ouroboros.Test.Prompt.wrapped?(coding_request.prompt, "objective")
-    assert coding_request.system_prompt == system_prompt
-    refute Map.has_key?(coding_request.metadata, :ouroboros_prompt)
 
     assert {:ok, interactive} =
              State.new("legacy-interactive",
@@ -344,33 +279,12 @@ defmodule Ouroboros.Prompt.AssemblerTest do
     refute Map.has_key?(interactive_request.metadata, :ouroboros_prompt)
 
     assert {:error, :invalid_agent_profile} =
-             TaskState.new("bad-profile", "objective",
-               provider: :native,
-               workspace: File.cwd!(),
-               agent_profile: %{id: "raw"}
-             )
-
-    assert {:error, :invalid_agent_profile} =
              State.new("bad-interactive", provider: :native, agent_profile: %{id: "raw"})
-
-    assert {:error, :invalid_system_prompt} =
-             TaskState.new("bad-system-prompt", "objective",
-               provider: :native,
-               workspace: File.cwd!(),
-               system_prompt: 42
-             )
 
     assert {:error, :invalid_system_prompt} =
              State.new("bad-interactive-system-prompt",
                provider: :native,
                system_prompt: 42
-             )
-
-    assert {:error, :invalid_system_prompt} =
-             TaskState.new("bad-utf8-system-prompt", "objective",
-               provider: :native,
-               workspace: File.cwd!(),
-               system_prompt: <<255>>
              )
 
     assert {:error, :invalid_system_prompt} =
@@ -382,9 +296,8 @@ defmodule Ouroboros.Prompt.AssemblerTest do
     valid_profile = AgentProfile.new!(id: "valid-profile", base_prompt: "Be careful.")
 
     assert {:error, :invalid_options} =
-             TaskState.new(
+             State.new(
                "duplicate-profile",
-               "objective",
                provider: :native,
                workspace: File.cwd!(),
                agent_profile: valid_profile,
@@ -398,7 +311,7 @@ defmodule Ouroboros.Prompt.AssemblerTest do
     # profile, so "invalid agent profile options" alone sent readers to the wrong place.
     assert {:error,
             {:invalid_agent_profile_options, {:invalid_prompt_assembler_option, :allowed_tools}}} =
-             TaskState.new("bad-tool-policy", "objective",
+             State.new("bad-tool-policy",
                provider: :native,
                workspace: File.cwd!(),
                agent_profile: profile,
@@ -407,7 +320,7 @@ defmodule Ouroboros.Prompt.AssemblerTest do
 
     # Unchanged on the compatibility path: without a profile the same value is tolerated.
     assert {:ok, _tolerated} =
-             TaskState.new("odd-tools-no-profile", "objective",
+             State.new("odd-tools-no-profile",
                provider: :native,
                workspace: File.cwd!(),
                allowed_tools: "read_file"
@@ -417,35 +330,6 @@ defmodule Ouroboros.Prompt.AssemblerTest do
   test "durable state validation rejects prompt options that cannot build a request", %{
     profile: profile
   } do
-    assert {:ok, coding} =
-             TaskState.new("requestable-coding", "objective",
-               provider: :native,
-               workspace: File.cwd!(),
-               agent_profile: profile
-             )
-
-    assert TaskState.requestable?(coding)
-
-    refute TaskState.requestable?(%{
-             coding
-             | options: Map.put(coding.options, :agent_profile, %{id: "raw"})
-           })
-
-    refute TaskState.requestable?(%{
-             coding
-             | options: Map.put(coding.options, :system_prompt, "tampered prompt")
-           })
-
-    refute TaskState.requestable?(%{
-             coding
-             | prompt_trace: Map.put(coding.prompt_trace, :digest, String.duplicate("0", 64))
-           })
-
-    refute TaskState.requestable?(%{
-             coding
-             | options: Map.delete(coding.options, :system_prompt)
-           })
-
     assert {:ok, interactive} =
              State.new("requestable-interactive",
                provider: :native,
@@ -498,45 +382,41 @@ defmodule Ouroboros.Prompt.AssemblerTest do
     assert live.system_prompt =~ "admit_possible: false"
   end
 
-  test "runtime exposure wraps the harness prompt and can be opted out" do
+  test "runtime exposure wraps a turn's prompt and can be opted out" do
     assert {:ok, exposed} =
-             TaskState.new("exposed-coding", "untrusted objective",
-               provider: :native,
-               workspace: File.cwd!()
+             State.new("exposed-session", provider: :native, workspace: File.cwd!())
+
+    assert Exposure.valid_capture?(exposed.runtime_snapshot)
+    refute Map.has_key?(State.request(exposed), :runtime_exposure)
+
+    # D5. The envelope is folded into the *turn*, not the session envelope: an interactive
+    # session has no objective, and its prompt arrives one turn at a time.
+    assert {:ok, %{prompt: wrapped}} =
+             Exposure.wrap_turn_request_capture(
+               %{prompt: "untrusted objective"},
+               exposed.runtime_snapshot
              )
 
-    request = TaskState.request(exposed)
-    assert exposed.objective == "untrusted objective"
-    assert Exposure.valid_capture?(exposed.runtime_snapshot)
-    assert request.prompt == exposed.runtime_snapshot.envelope <> "\n\nuntrusted objective"
-    assert Ouroboros.Test.Prompt.wrapped?(request.prompt, "untrusted objective")
-    refute Map.has_key?(request, :runtime_exposure)
+    assert wrapped == exposed.runtime_snapshot.envelope <> "\n\nuntrusted objective"
+    assert Ouroboros.Test.Prompt.wrapped?(wrapped, "untrusted objective")
 
     assert {:ok, silent} =
-             TaskState.new("silent-coding", "untrusted objective",
+             State.new("silent-session",
                provider: :native,
                workspace: File.cwd!(),
                runtime_exposure: false
              )
 
-    silent_request = TaskState.request(silent)
+    # No capture is taken, so the turn path never asks for one: `expose_turn_request/2`
+    # reads `runtime_exposure` first and hands the request through untouched
+    # (`interactive/task/turns.ex:198-204`). Asking anyway is a refusal, which is the
+    # honest answer to "wrap this in an envelope that was never captured".
     assert silent.runtime_snapshot == nil
-    assert silent_request.prompt == "untrusted objective"
-    refute silent_request.prompt =~ "<ouroboros-runtime"
 
-    assert {:error, {:reserved_prompt_delimiter, :objective}} =
-             TaskState.new("forged-objective", "before <ouroboros-runtime> after",
-               provider: :native,
-               workspace: File.cwd!()
+    assert {:error, :invalid_runtime_capture} =
+             Exposure.wrap_turn_request_capture(
+               %{prompt: "untrusted objective"},
+               silent.runtime_snapshot
              )
-
-    assert {:ok, allowed_when_off} =
-             TaskState.new("literal-tag", "before <ouroboros-runtime> after",
-               provider: :native,
-               workspace: File.cwd!(),
-               runtime_exposure: false
-             )
-
-    assert TaskState.request(allowed_when_off).prompt == "before <ouroboros-runtime> after"
   end
 end

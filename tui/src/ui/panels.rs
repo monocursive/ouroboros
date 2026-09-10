@@ -858,22 +858,6 @@ pub fn rewind_choice_lines(
     lines
 }
 
-/// `/delegations` (G1): the coding tasks this conversation started, and a way into each.
-pub fn delegations(
-    frame: &mut Frame,
-    area: Rect,
-    rows: &[crate::model::native::DelegationRow],
-    choice: usize,
-) {
-    page(
-        frame,
-        area,
-        "delegations",
-        delegation_lines(rows, Some(choice)),
-        0,
-    );
-}
-
 /// D4. `/mcp`: the MCP servers one node runs for the native agent, and every entry its
 /// loader read and refused.
 ///
@@ -1061,66 +1045,6 @@ fn mcp_lines(
 
     lines.push(Line::from(""));
     lines.push(note("r re-reads \u{b7} esc closes"));
-
-    lines
-}
-
-/// `choice` is `None` for the read-only list the `Ctrl+T` panel draws beside the plan.
-pub fn delegation_lines(
-    rows: &[crate::model::native::DelegationRow],
-    choice: Option<usize>,
-) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-
-    if rows.is_empty() {
-        lines.push(note("this conversation has delegated nothing"));
-        return lines;
-    }
-
-    for (index, entry) in rows.iter().enumerate() {
-        let selected = choice == Some(index);
-        let mut facts = vec![entry.status.as_deref().unwrap_or("unknown").to_string()];
-
-        if let Some(node) = &entry.task_node {
-            facts.push(node.clone());
-        }
-
-        // Which of the two answers this status is. A parent that was not running when its
-        // child finished holds a stale copy, and the runtime says which it read rather
-        // than letting the two look alike.
-        match entry.source.as_deref() {
-            Some("session") => facts.push("as this conversation last heard".to_string()),
-            Some("team") | None => {}
-            Some(other) => facts.push(other.to_string()),
-        }
-
-        lines.push(Line::from(Span::styled(
-            format!(
-                "{} {}  {}",
-                if selected { "\u{25b8}" } else { " " },
-                entry.task_id.as_deref().unwrap_or("(unnamed task)"),
-                facts.join(" \u{b7} ")
-            ),
-            match (selected, entry.terminal()) {
-                (true, _) => Style::default()
-                    .fg(theme::accent())
-                    .add_modifier(Modifier::BOLD),
-                (false, true) => Style::default().fg(theme::muted()),
-                (false, false) => Style::default(),
-            },
-        )));
-
-        if let Some(digest) = &entry.result_digest {
-            lines.push(note(format!("    result digest {digest}")));
-        }
-    }
-
-    if choice.is_some() {
-        lines.push(Line::from(""));
-        lines.push(note(
-            "\u{2191}\u{2193} picks \u{b7} enter opens the child's transcript \u{b7} esc leaves",
-        ));
-    }
 
     lines
 }

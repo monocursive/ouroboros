@@ -55,7 +55,7 @@ fn event(sequence: u64, kind: &str, turn: Option<&str>, payload: Value) -> Value
         "sequence": sequence,
         "type": kind,
         "timestamp": "2026-01-01T00:00:00.000000Z",
-        "provider": "codex",
+        "provider": "native",
         "payload": payload,
     });
 
@@ -86,14 +86,12 @@ fn start_plan(prompt: &str) -> Plan {
     let request = StartRequest {
         id: SESSION.to_string(),
         plane: Plane::Interactive,
-        provider: "native".into(),
         model: Some("openai_codex:gpt-5.6-sol".into()),
         machine: String::new(),
         workspace: "/w".into(),
         approval_mode: None,
         sandbox_mode: None,
         reasoning_effort: None,
-        objective: String::new(),
         worktree: false,
         plan: false,
     };
@@ -113,14 +111,12 @@ fn planning_start(prompt: &str) -> Plan {
     let request = StartRequest {
         id: SESSION.to_string(),
         plane: Plane::Interactive,
-        provider: "native".into(),
         model: Some("openai_codex:gpt-5.6-sol".into()),
         machine: String::new(),
         workspace: "/w".into(),
         approval_mode: None,
         sandbox_mode: None,
         reasoning_effort: None,
-        objective: String::new(),
         worktree: false,
         plan: true,
     };
@@ -268,16 +264,20 @@ where
 /// The handshake plus the two calls every start does, answered as the gateway answers
 /// them. Leaves the peer ready to notify events.
 async fn accept_start(peer: &mut Peer, backlog: Value) {
-    accept_start_of(peer, backlog, "native", "do the thing").await;
+    accept_start_of(peer, backlog, "do the thing").await;
 }
 
-/// The same, for a start this file makes with a different provider or prompt.
-async fn accept_start_of(peer: &mut Peer, backlog: Value, provider: &str, prompt: &str) {
+/// The same, for a start this file makes with a different prompt.
+async fn accept_start_of(peer: &mut Peer, backlog: Value, prompt: &str) {
     peer.hello(SERVES).await;
 
     let start = peer.request_for("interactive.start").await;
     assert_eq!(start["params"]["id"], SESSION);
-    assert_eq!(start["params"]["provider"], provider);
+    assert!(
+        start["params"].get("provider").is_none(),
+        "`provider` is not a start option and sending it would be -32602: {}",
+        start["params"]
+    );
     peer.result(
         &start["id"],
         json!({ "id": SESSION, "outcome": "created", "ready": true }),
@@ -620,7 +620,7 @@ Do the thing.
         options(Output::Text),
         move |mut peer| {
             tokio::spawn(async move {
-                accept_start_of(&mut peer, json!([]), "native", &expected).await;
+                accept_start_of(&mut peer, json!([]), &expected).await;
 
                 for frame in [
                     text_event(1, "output_text_final", "read it"),
@@ -708,7 +708,6 @@ fn a_planning_start_asks_for_plan_mode_and_nothing_else() {
         params,
         json!({
             "id": SESSION,
-            "provider": "native",
             "model": "openai_codex:gpt-5.6-sol",
             "workspace": "/w",
             "plan": true,
@@ -733,7 +732,7 @@ async fn a_planning_run_answers_keep_planning_and_reports_the_plan() {
         options(Output::Json),
         |mut peer| {
             tokio::spawn(async move {
-                accept_start_of(&mut peer, json!([]), "native", "plan a greeter").await;
+                accept_start_of(&mut peer, json!([]), "plan a greeter").await;
 
                 peer.notify(
                     "interactive.event",
@@ -805,7 +804,7 @@ async fn approve_all_does_not_grant_a_headless_run_auto_edit() {
 
     let ran = run_against(planning_start("plan a greeter"), options, |mut peer| {
         tokio::spawn(async move {
-            accept_start_of(&mut peer, json!([]), "native", "plan a greeter").await;
+            accept_start_of(&mut peer, json!([]), "plan a greeter").await;
 
             peer.notify(
                 "interactive.event",
@@ -847,7 +846,7 @@ async fn a_planning_run_falls_back_where_provider_options_are_refused() {
         options(Output::Json),
         |mut peer| {
             tokio::spawn(async move {
-                accept_start_of(&mut peer, json!([]), "native", "plan a greeter").await;
+                accept_start_of(&mut peer, json!([]), "plan a greeter").await;
 
                 peer.notify(
                     "interactive.event",
@@ -906,7 +905,7 @@ async fn a_plan_from_the_final_message_is_reported_as_a_message() {
         options(Output::Json),
         |mut peer| {
             tokio::spawn(async move {
-                accept_start_of(&mut peer, json!([]), "native", "plan a greeter").await;
+                accept_start_of(&mut peer, json!([]), "plan a greeter").await;
 
                 let mut approval = plan_exit_event(1, "plan_exit_abc");
                 approval["payload"]["plan_source"] = json!("message");
@@ -1641,7 +1640,7 @@ async fn resume_subscribes_from_the_sessions_own_cursor_and_prints_only_the_new_
                     "_struct": "Ouroboros.Interactive.State",
                     "id": SESSION,
                     "status": "idle",
-                    "provider": "codex",
+                    "provider": "native",
                     // The plane's own contiguous high-water mark. Forty events of history
                     // this run has no business reprinting.
                     "cursor": 40,
@@ -1719,7 +1718,7 @@ async fn a_busy_session_is_resumed_with_follow_up_rather_than_a_second_message()
             let info = peer.request_for("interactive.info").await;
             peer.result(
                 &info["id"],
-                json!({ "id": SESSION, "status": "running", "provider": "codex", "cursor": 7 }),
+                json!({ "id": SESSION, "status": "running", "provider": "native", "cursor": 7 }),
             )
             .await;
 
@@ -1782,7 +1781,7 @@ async fn a_refused_start_carries_the_runtimes_own_words() {
         "session_start_failed",
         {
             "__exception__": true,
-            "provider": "codex",
+            "provider": "native",
             "message": "provider does not support normalized session option",
             "details": { "field": "sandbox_mode" }
         }
@@ -1831,10 +1830,10 @@ async fn a_refused_start_carries_the_runtimes_own_words() {
     assert_eq!(run::Exit::USAGE.code(), 64);
 }
 
-/// The actual binary documents the direct default and model selector without starting a
-/// runtime.
+/// The actual binary documents the one provider it serves and the model selector, without
+/// starting a runtime.
 #[test]
-fn the_binary_help_names_the_native_default_and_model_selector() {
+fn the_binary_help_names_the_one_provider_and_the_model_selector() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ouro"))
         .args(["new", "--help"])
         .output()
@@ -1842,8 +1841,12 @@ fn the_binary_help_names_the_native_default_and_model_selector() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
-    assert!(stdout.contains("direct Native provider"), "{stdout}");
+    assert!(stdout.contains("serves one provider, `native`"), "{stdout}");
     assert!(stdout.contains("--model <SPEC>"), "{stdout}");
+    assert!(
+        !stdout.contains("--provider"),
+        "there is no provider to choose: {stdout}"
+    );
 }
 
 /// The headless approval policy is documented where a person types the command.

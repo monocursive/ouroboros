@@ -166,15 +166,14 @@ defmodule Ouroboros.Wasm.ResolutionTest do
   end
 
   @tag :subprocess
-  test "no helper resolver selects a binary planted in a cwd ancestor (F1)" do
-    # The finding, for all three resolvers at once. Each of them walked six ancestors of the
-    # daemon's working directory looking for `priv/<kind>/<binary>`, and two of them also had
-    # a bare `Path.expand("priv/<kind>/…")` candidate. With no bundled helper — the documented
-    # default, since nothing in this repo builds one for you — a *cloned repository* that
-    # happened to contain that path supplied the binary the daemon spawns as its containment
-    # boundary: the wasm helper that contains untrusted guest code, the Computer Use helper
-    # that drives the desktop, and the sandbox helper that applies Landlock and seccomp before
-    # `execve`ing an untrusted command.
+  test "the helper resolver selects no binary planted in a cwd ancestor (F1)" do
+    # The finding. The resolver walked six ancestors of the daemon's working directory
+    # looking for `priv/wasm/ouro-wasm`, and also had a bare `Path.expand("priv/wasm/…")`
+    # candidate. With no bundled helper — the documented default, since nothing in this repo
+    # builds one for you — a *cloned repository* that happened to contain that path supplied
+    # the binary the daemon spawns as its containment boundary for untrusted guest code.
+    # The finding covered a second resolver, `ouro-sandbox`'s, in the same shape; that
+    # backend went with docs/proposals/core.md §4 A2 and this is the half that remains.
     #
     # The subprocess is what makes this provable rather than incidental. `:code.lib_dir/1`
     # resolves an application from the *first* matching directory on the code path, so an
@@ -189,41 +188,25 @@ defmodule Ouroboros.Wasm.ResolutionTest do
     File.mkdir_p!(fake_ebin)
     on_exit(fn -> File.rm_rf(root) end)
 
-    # Planted twice per helper: once in the working directory itself (which is what the bare
-    # `Path.expand("priv/<kind>/…")` candidate read) and once six levels up in an ancestor of
+    # Planted twice: once in the working directory itself (which is what the bare
+    # `Path.expand("priv/wasm/…")` candidate read) and once six levels up in an ancestor of
     # it (which is what the walk read). Both shapes are gone, so neither copy may be chosen.
     planted =
-      Map.new(
-        [
-          {:wasm, "wasm", "ouro-wasm"},
-          {:desktop, "computer-use", "ouro-computer-use"},
-          {:sandbox, "sandbox", "ouro-sandbox"}
-        ],
-        fn {key, kind, name} ->
-          paths =
-            for base <- [root, deep] do
-              path = Path.join([base, "priv", kind, name])
-              File.mkdir_p!(Path.dirname(path))
-              File.write!(path, "#!/bin/sh\nexit 0\n")
-              File.chmod!(path, 0o755)
-              path
-            end
-
-          {key, paths}
-        end
-      )
+      for base <- [root, deep] do
+        path = Path.join([base, "priv", "wasm", "ouro-wasm"])
+        File.mkdir_p!(Path.dirname(path))
+        File.write!(path, "#!/bin/sh\nexit 0\n")
+        File.chmod!(path, 0o755)
+        path
+      end
 
     code = """
-    for name <- ~w(OUROBOROS_WASM_HELPER OUROBOROS_COMPUTER_USE_HELPER OUROBOROS_SANDBOX_HELPER) do
-      System.delete_env(name)
-    end
+    System.delete_env("OUROBOROS_WASM_HELPER")
 
     File.cd!(#{inspect(deep)})
 
     IO.puts("PRIV:" <> inspect(:code.priv_dir(:ouroboros)))
     IO.puts("WASM:" <> Ouroboros.Wasm.helper_path())
-    IO.puts("DESKTOP:" <> Ouroboros.Provider.Native.Desktop.helper_path())
-    IO.puts("SANDBOX:" <> inspect(Ouroboros.Provider.Native.Sandbox.Helper.executable()))
     """
 
     {output, status} = run_elixir(code, ["-pa", fake_ebin])
@@ -241,53 +224,41 @@ defmodule Ouroboros.Wasm.ResolutionTest do
       |> Map.new()
 
     # The fixture is only meaningful if the subprocess really had no bundled helper: its
-    # `priv/` is the empty directory beside the fake ebin, which holds none of the three.
+    # `priv/` is the empty directory beside the fake ebin, which holds neither.
     assert lines["PRIV"] =~ Path.join([root, "codepath", "ouroboros", "priv"]), output
 
-    for {key, resolver} <- %{wasm: "WASM", desktop: "DESKTOP", sandbox: "SANDBOX"} do
-      resolved = Map.fetch!(lines, resolver)
+    resolved = Map.fetch!(lines, "WASM")
 
-      for path <- Map.fetch!(planted, key) do
-        assert File.regular?(path)
+    for path <- planted do
+      assert File.regular?(path)
 
-        refute resolved =~ path,
-               "#{key}: a helper planted under the working directory was selected " <>
-                 "(#{resolved})\n#{output}"
-      end
+      refute resolved =~ path,
+             "a helper planted under the working directory was selected " <>
+               "(#{resolved})\n#{output}"
     end
   end
 
   @tag :subprocess
-  test "relative helper overrides are rejected by all three containment resolvers" do
+  test "a relative helper override is rejected by the containment resolver" do
     root =
       Path.join(System.tmp_dir!(), "ouro-relative-helper-#{System.unique_integer([:positive])}")
 
-    File.mkdir_p!(Path.join(root, "priv/sandbox"))
-    File.write!(Path.join(root, "priv/sandbox/ouro-sandbox"), "#!/bin/sh\nexit 0\n")
+    File.mkdir_p!(Path.join(root, "priv/wasm"))
+    File.write!(Path.join(root, "priv/wasm/ouro-wasm"), "#!/bin/sh\nexit 0\n")
     on_exit(fn -> File.rm_rf(root) end)
 
     code = """
     File.cd!(#{inspect(root)})
     System.put_env("OUROBOROS_WASM_HELPER", "priv/wasm/ouro-wasm")
-    System.put_env("OUROBOROS_COMPUTER_USE_HELPER", "priv/computer-use/ouro-computer-use")
-    System.put_env("OUROBOROS_SANDBOX_HELPER", "priv/sandbox/ouro-sandbox")
     Application.put_env(:ouroboros, :wasm, helper_path: "configured/ouro-wasm")
-    Application.put_env(:ouroboros, :computer_use, helper_path: "configured/ouro-computer-use")
-    Application.put_env(:ouroboros, :native_sandbox_helper, "configured/ouro-sandbox")
 
     IO.puts("WASM:" <> Ouroboros.Wasm.helper_path())
-    IO.puts("DESKTOP:" <> Ouroboros.Provider.Native.Desktop.helper_path())
-    IO.puts("SANDBOX:" <> inspect(Ouroboros.Provider.Native.Sandbox.Helper.executable()))
     """
 
     {output, status} = run_elixir(code)
     assert status == 0, output
     refute output =~ "WASM:priv/", output
     refute output =~ "WASM:configured/", output
-    refute output =~ "DESKTOP:priv/", output
-    refute output =~ "DESKTOP:configured/", output
-    refute output =~ "SANDBOX:\"priv/", output
-    refute output =~ "SANDBOX:\"configured/", output
   end
 
   # Replaces a few keys of the node's `:wasm` config for one test and restores the whole

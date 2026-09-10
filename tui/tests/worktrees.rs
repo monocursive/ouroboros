@@ -84,7 +84,6 @@ fn opened(rows: Value) -> App {
     app.apply(key(KeyCode::Char('2')));
 
     answer(&mut app, Tag::Sessions(Plane::Interactive), rows);
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
 
     app.open_session(Plane::Interactive, "session-w".into());
     let subscribe = app
@@ -112,7 +111,6 @@ fn screen(app: &mut App) -> Screen {
 #[test]
 fn the_start_request_sends_worktree_only_when_it_was_asked_for() {
     let plain = StartRequest {
-        provider: "native".into(),
         workspace: "/w".into(),
         ..StartRequest::new(Plane::Interactive)
     };
@@ -140,7 +138,6 @@ fn the_new_session_dialog_toggles_the_worktree_row() {
     );
     app.apply(key(KeyCode::Char('2')));
     answer(&mut app, Tag::Sessions(Plane::Interactive), json!([]));
-    answer(&mut app, Tag::Sessions(Plane::Coding), json!([]));
 
     // `ctrl+x N` is the dialog with every option on it.
     app.apply(modified(KeyCode::Char('x'), KeyModifiers::CONTROL));

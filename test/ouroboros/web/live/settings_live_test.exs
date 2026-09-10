@@ -1,11 +1,15 @@
 defmodule Ouroboros.Web.Live.SettingsLiveTest do
   @moduledoc """
   The settings page's hierarchy and the two things it may change: session defaults and
-  runtime-owned provider credentials.
+  runtime-owned model credentials.
 
-  The tests deliberately never begin a subscription login or make a provider request.
-  They prove the local UI contract and private persistence boundary, not an external
-  account grant.
+  There is one provider — `native`, in this runtime's own process — so nothing here picks
+  between providers; what it stores are the model, folder and posture a new session starts
+  with, and the API keys that runtime holds for each model vendor.
+
+  The tests deliberately never begin a subscription login or make a model request. They
+  prove the local UI contract and private persistence boundary, not an external account
+  grant.
   """
 
   use ExUnit.Case, async: false
@@ -86,7 +90,6 @@ defmodule Ouroboros.Web.Live.SettingsLiveTest do
     html =
       view
       |> form("#session-defaults", %{
-        "provider" => "native",
         "model_choice" => "runtime_default",
         "model_search" => "",
         "workspace" => dir,
@@ -97,7 +100,6 @@ defmodule Ouroboros.Web.Live.SettingsLiveTest do
     assert html =~ "Session defaults saved for this Ouroboros runtime."
 
     assert Prefs.read(dir) == %{
-             "provider" => "native",
              "sandbox_mode" => "read_only",
              "workspace" => dir
            }

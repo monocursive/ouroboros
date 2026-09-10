@@ -13,7 +13,7 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs computer-use computer-use-debug sandbox sandbox-linux-test forge-linux-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test dialyzer bench-local self-export golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check bench-self improve-selftest
+.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test boot-gate dialyzer bench-local self-export golden protocol-docs release-tarball ouro bench-self improve-selftest
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -26,7 +26,8 @@ help:
 	@echo "make stop             everything down: daemon, and any stray daemons"
 	@echo "make reset            stop everything, then empty the dev data dir (oauth.json kept)"
 	@echo "make logs             follow the dev runtime's log"
-	@echo "make test             formatting, script checks, mix test, cargo test/fmt/clippy"
+	@echo "make test             formatting, script checks, mix test, the boot gate, cargo test/fmt/clippy"
+	@echo "make boot-gate        the pre-reduction data directory booted against this tree, 10x per mode"
 	@echo "make dialyzer         gradual mix dialyzer; PLTs live under _build/plts"
 	@echo "make bench-local      the local eval corpus: no key, no network, no docker"
 	@echo "make self-export      write this node's promoted policy + record into priv/self/"
@@ -36,15 +37,6 @@ help:
 	@echo "make protocol-docs    regenerate docs/PROTOCOL.md and fail on drift"
 	@echo "make release-tarball  MIX_ENV=prod mix release, printing the tarball path"
 	@echo "make ouro             that tarball baked into tui/target/release/ouro"
-	@echo "make fleet-e2e        build ouro, then exercise a hermetic 3-node TLS fleet"
-	@echo "make dist             ouro, copied to dist/ouro-<version>-<target triple>"
-	@echo "make dist-linux       the same, for x86_64-unknown-linux-gnu, built in Docker"
-	@echo "make dist-linux-clean drop the dist-linux image and its cache volumes"
-	@echo "make dist-check       install.sh against a local fixture; release.yml structure"
-	@echo "make computer-use     build ouro-computer-use into priv/computer-use/"
-	@echo "make sandbox          build ouro-sandbox into priv/sandbox/ (Linux sandbox helper)"
-	@echo "make sandbox-linux-test  prove the sandbox helper enforces, in a Linux container"
-	@echo "make forge-linux-test    prove the forge's builder namespace, in a Linux container"
 	@echo "make wasm-linux-test     prove the wasm suites under bubblewrap, in a Linux container"
 	@echo "make wasm             build ouro-wasm into priv/wasm/ (WebAssembly containment helper)"
 	@echo "make wasm-guest       build the lane-W acceptance guest into test/support/wasm/echo.wasm"
@@ -87,54 +79,10 @@ reset:
 logs:
 	@sh scripts/dev.sh logs
 
-computer-use:
-	@echo "==> computer-use: release helper into priv/computer-use/"
-	cd tui && $(CARGO) build --release -p ouro-computer-use
-	mkdir -p priv/computer-use
-	cp tui/target/release/ouro-computer-use priv/computer-use/ouro-computer-use
-	chmod 0755 priv/computer-use/ouro-computer-use
-	@for env in dev test prod; do \
-	  dest="_build/$$env/lib/ouroboros/priv/computer-use"; \
-	  if [ -d "_build/$$env/lib/ouroboros/priv" ]; then \
-	    mkdir -p "$$dest"; \
-	    cp priv/computer-use/ouro-computer-use "$$dest/ouro-computer-use"; \
-	    chmod 0755 "$$dest/ouro-computer-use"; \
-	  fi; \
-	done
-
-# The sandbox helper only enforces on Linux, so building it on a Mac produces a binary
-# whose `doctor` reports `"usable": false` and which `Sandbox.Helper.probe/1` therefore
-# declines to select. That is deliberate: the target stays runnable everywhere so the
-# install path is exercised on the machine the code is written on, and detection falls
-# through to sandbox-exec exactly as it would with no helper at all.
-sandbox:
-	@echo "==> sandbox: release helper into priv/sandbox/"
-	cd tui && $(CARGO) build --release -p ouro-sandbox
-	mkdir -p priv/sandbox
-	cp tui/target/release/ouro-sandbox priv/sandbox/ouro-sandbox
-	chmod 0755 priv/sandbox/ouro-sandbox
-	@for env in dev test prod; do \
-	  dest="_build/$$env/lib/ouroboros/priv/sandbox"; \
-	  if [ -d "_build/$$env/lib/ouroboros/priv" ]; then \
-	    mkdir -p "$$dest"; \
-	    cp priv/sandbox/ouro-sandbox "$$dest/ouro-sandbox"; \
-	    chmod 0755 "$$dest/ouro-sandbox"; \
-	  fi; \
-	done
-	@echo "==> sandbox: what this build can enforce here"
-	@priv/sandbox/ouro-sandbox doctor
-
-# The Linux enforcement proof, reproducible from a Mac. The helper's unit tests run
-# anywhere; `tui/sandbox/tests/linux_enforcement.rs` only means something on a kernel with
-# Landlock, and user namespaces need a privileged container to be creatable at all.
-sandbox-linux-test:
-	@echo "==> sandbox-linux-test: enforcement suite in a privileged Linux container"
-	scripts/sandbox-linux-test.sh
-
-# The WebAssembly containment helper. Unlike the sandbox helper this one enforces the same on
-# every platform — the boundary is wasmtime's linker, not a kernel feature — so there is no
-# per-OS caveat here. `ouro-wasm` carries a wasmtime, which needs a newer Rust than the rest of
-# this workspace; see the rust-version note in tui/wasm/Cargo.toml.
+# The WebAssembly containment helper, and the only helper this repository builds. It
+# enforces the same on every platform — the boundary is wasmtime's linker, not a kernel
+# feature — so there is no per-OS caveat here. `ouro-wasm` carries a wasmtime, which needs a
+# newer Rust than the rest of this workspace; see the rust-version note in tui/wasm/Cargo.toml.
 wasm:
 	@echo "==> wasm: release helper into priv/wasm/"
 	cd tui && $(CARGO) build --release -p ouro-wasm
@@ -229,16 +177,9 @@ wasm-sdk-cache:
 	@echo "==> wasm-sdk-cache: crates now cached"
 	@find "$(FORGE_CARGO_HOME)/registry/cache" -name '*.crate' | wc -l
 
-# The forge's builder namespace, on a real kernel, from a Mac. `--privileged` is what allows
-# the user namespace bubblewrap needs; the script's header says why that is a fact about
-# Docker rather than about the sandbox.
-forge-linux-test:
-	@echo "==> forge-linux-test: the builder namespace on a Linux kernel"
-	scripts/forge-linux-test.sh
-
-# Lane W under bubblewrap: the backend the hosted CI job runs every wasm suite under, and
-# the one no Mac exercises. `ouro-sandbox` is disabled by name inside the container so
-# detection falls through to `bwrap`, which is what found W16's merged-`/usr` namespace hole.
+# Lane W under bubblewrap: the Linux backend, the one the hosted CI job runs every wasm
+# suite under, and the one no Mac exercises. It is what found W16's merged-`/usr`
+# namespace hole.
 wasm-linux-test:
 	@echo "==> wasm-linux-test: the wasm suites under bubblewrap on a Linux kernel"
 	scripts/wasm-linux-test.sh
@@ -252,36 +193,32 @@ wasm-skew-test:
 	@echo "==> wasm-skew-test: a precompiled artifact from another toolchain, refused by name"
 	scripts/wasm-skew-test.sh
 
-computer-use-debug:
-	@echo "==> computer-use-debug: debug helper into priv/computer-use/"
-	cd tui && $(CARGO) build -p ouro-computer-use
-	mkdir -p priv/computer-use
-	cp tui/target/debug/ouro-computer-use priv/computer-use/ouro-computer-use
-	chmod 0755 priv/computer-use/ouro-computer-use
-	@for env in dev test prod; do \
-	  dest="_build/$$env/lib/ouroboros/priv/computer-use"; \
-	  if [ -d "_build/$$env/lib/ouroboros/priv" ]; then \
-	    mkdir -p "$$dest"; \
-	    cp priv/computer-use/ouro-computer-use "$$dest/ouro-computer-use"; \
-	    chmod 0755 "$$dest/ouro-computer-use"; \
-	  fi; \
-	done
-
-
-
 # The Rust suite runs twice on purpose. `embed` is off by default so that iterating on the
 # client never waits on a release, which also means the extractor is not compiled — and an
 # extractor nobody compiled is an extractor nobody tested.
 test:
-	@echo "==> test: formatting and scripts, then mix and Rust with both feature sets"
+	@echo "==> test: formatting and scripts, then mix, the boot gate, and Rust with both feature sets"
 	$(MIX) format --check-formatted
 	sh scripts/test-dev.sh
 	SHELL="$(SHELL)" $(MIX) test
+	$(MAKE) boot-gate
 	cd tui && $(CARGO) test
 	cd tui && $(CARGO) test --features embed
 	cd tui && $(CARGO) fmt --check
 	cd tui && $(CARGO) clippy --all-targets -- -D warnings
 	cd tui && $(CARGO) clippy --all-targets --features embed -- -D warnings
+
+# The integration gate of the core reduction (docs/proposals/core.md, "Status"): the data
+# directory `dev` wrote at 3bc8887, holding every durable shape the reduction retired, booted
+# against this tree ten times under interactive code loading and ten times with every module
+# preloaded, each against a fresh copy, with every count compared against the record in
+# test/support/integration_fixture/README.md. It needs an `ouro` binary for the
+# process-incarnation helper (`make ouro`'s, or a debug build it makes itself) and it boots in
+# the development environment, where that helper is required exactly as it is on a real node.
+boot-gate:
+	@echo "==> boot-gate: the pre-reduction data directory, booted against this tree"
+	MIX_ENV=dev $(MIX) compile
+	sh scripts/fixture/boot_gate.sh
 
 # Deliberately not part of `make test`: the first run builds a PLT and even incremental
 # runs are minutes, not the seconds `mix test` is supposed to stay. CI has its own job.
@@ -326,16 +263,6 @@ improve-selftest:
 	@echo "==> improve-selftest: the outer loop against a shim client (no key, no spend)"
 	./bench/self/improve-selftest.sh
 
-# Deliberately not part of `make test`, for the same reason `fleet-e2e` is not: it needs
-# tools `make test` must not require. The install.sh half needs only `sh` and a sha256
-# tool and would be safe there; the release.yml half needs a YAML parser (python3 with
-# PyYAML, or ruby), and a release whose four native runners fail because one of them lacks
-# PyYAML is a worse outcome than a check somebody has to type. See docs/DISTRIBUTION.md §7.
-dist-check:
-	@echo "==> dist-check: install.sh against a local fixture release, then release.yml"
-	sh scripts/test-install.sh
-	sh scripts/check-release-workflow.sh
-
 # The fixtures are the seam between two toolchains that cannot call each other's tests, so
 # a regeneration that changes bytes is a protocol change and has to be committed as one.
 golden:
@@ -351,42 +278,17 @@ protocol-docs: golden
 	$(MIX) ouroboros.protocol.docs
 	git diff --exit-code docs/PROTOCOL.md
 
-release-tarball: computer-use sandbox wasm
+release-tarball: wasm
 	@echo "==> release-tarball: MIX_ENV=prod mix release"
 	MIX_ENV=prod $(MIX) release --overwrite
 	@ls _build/prod/$(RELEASE)-*.tar.gz
 
 # ERTS is not cross-compiled: this bakes the release built on *this* machine into a client
-# for this machine. A binary for another OS or architecture is built there, which is what
-# the release workflow's matrix is for.
+# for this machine. A binary for another OS or architecture is built there, on that
+# machine, with the same target.
 ouro: release-tarball
 	@echo "==> ouro: baking that tarball into tui/target/release/ouro"
 	tarball="$$PWD/$$(ls _build/prod/$(RELEASE)-*.tar.gz | head -1)"; \
 	cd tui && OUROBOROS_RELEASE_TARBALL="$$tarball" $(CARGO) build --release --features embed
 	@ls -l tui/target/release/ouro
 
-# Deliberately not part of `make test`: this builds a packaged release and repeatedly
-# boots three real BEAM nodes. The script isolates HOME, data, ports, names, and cleanup.
-fleet-e2e: ouro
-	@echo "==> fleet-e2e: packaged three-node TLS formation and recovery"
-	OURO_E2E_BIN="$$PWD/tui/target/release/ouro" bash scripts/fleet-e2e.sh
-
-dist: ouro
-	@echo "==> dist: naming the binary for the platform it can actually run"
-	@mkdir -p dist
-	version=$$(ls _build/prod/$(RELEASE)-*.tar.gz | head -1 | sed -e 's|.*/$(RELEASE)-||' -e 's|\.tar\.gz$$||'); \
-	triple=$$(rustc -vV | sed -n 's/^host: //p'); \
-	cp tui/target/release/ouro "dist/ouro-$$version-$$triple"; \
-	echo "dist/ouro-$$version-$$triple"
-
-# The one place `dist` above cannot reach: a machine that is not the target. ERTS is not
-# cross-compiled, so this does not cross-compile — it runs the identical `make dist` on an
-# emulated x86-64 Linux, in a container pinned to the release runner's OTP, Elixir, and
-# Rust. Slow, and honestly labelled: it is the development path that gives `ouro fleet add`
-# something to copy to a Linux box, not the release path. See docs/DISTRIBUTION.md §8.
-dist-linux:
-	@echo "==> dist-linux: dist/ouro-<version>-x86_64-unknown-linux-gnu, via Docker"
-	@sh scripts/dist-linux.sh
-
-dist-linux-clean:
-	@sh scripts/dist-linux.sh --clean

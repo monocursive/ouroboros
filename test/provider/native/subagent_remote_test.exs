@@ -271,7 +271,6 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
         assert {:ok, %{is_error: false, output: pending_return}} =
                  Session.bridge_tool(
                    handle,
-                   nil,
                    %{
                      id: "stop-return",
                      name: "agent_result",
@@ -933,8 +932,6 @@ defmodule Ouroboros.Provider.Native.SubagentRemoteTest do
       :peer.start(%{name: name, args: code_path_args(), wait_boot: 30_000})
 
     on_exit(fn -> stop_peer(peer) end)
-
-    put_peer_env!(peer_node, :coding_storage, {Jido.Storage.ETS, table: peer_table(peer_node)})
 
     {:ok, _applications} =
       :erpc.call(peer_node, Application, :ensure_all_started, [:ouroboros], 60_000)

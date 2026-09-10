@@ -31,10 +31,6 @@ defmodule Ouroboros.Control.Permissions.Matcher do
   | `mcp__server__tool` | a tool named `mcp:server:tool` or `mcp__server__tool` |
   | `Tool(name)` | a tool with that name |
   | `Tool(name:param=value)` | that tool when `context[param]` equals `value` |
-  | `ComputerUse(observe)` | the `desktop_state` tool |
-  | `ComputerUse(act)` | the `desktop_act` tool |
-  | `ComputerUse(app:<id>)` | either desktop tool when `context.app` equals `<id>` |
-  | `ComputerUse(app:*)` | either desktop tool when `context.app` is a nonempty binary |
   | `Capability(<name>)` | the `capability` tool when `context.capability` is that name |
   | `Capability(*)` | the `capability` tool when `context.capability` is a nonempty binary |
   | `Forge(<name>)` | the `forge` tool when `context.forge` is that name |
@@ -134,27 +130,6 @@ defmodule Ouroboros.Control.Permissions.Matcher do
       context_value(request.context, spec.param) == spec.value
   end
 
-  # ── Computer Use ─────────────────────────────────────────────────────────────────────
-
-  defp do_matches?(%Pattern{kind: :computer_use, spec: %{form: :observe}}, request, _quantifier),
-    do: request.tool == "desktop_state"
-
-  defp do_matches?(%Pattern{kind: :computer_use, spec: %{form: :act}}, request, _quantifier),
-    do: request.tool == "desktop_act"
-
-  # An allow on `*` must not cover "we did not resolve an app": a missing key reads as nil,
-  # never as a nonempty binary. The `:any` clause precedes the exact one so `%{app: :any}`
-  # is the wildcard, not an app literally named ":any".
-  defp do_matches?(%Pattern{kind: :computer_use, spec: %{app: :any}}, request, _quantifier) do
-    case context_value(request.context, "app") do
-      app when is_binary(app) -> app != ""
-      _other -> false
-    end
-  end
-
-  defp do_matches?(%Pattern{kind: :computer_use, spec: %{app: app}}, request, _quantifier),
-    do: context_value(request.context, "app") == app
-
   # ── Capability (W13) ─────────────────────────────────────────────────────────────────
 
   # `context.capability` is set by `Ouroboros.Provider.Native.Tools.classify/3` only for a
@@ -191,6 +166,17 @@ defmodule Ouroboros.Control.Permissions.Matcher do
 
   defp do_matches?(%Pattern{kind: :forge, spec: %{name: name}}, request, _quantifier),
     do: request.tool == "forge" and context_value(request.context, "forge") == name
+
+  # ── A kind this build no longer has ────────────────────────────────────────────────
+
+  # A rule stored by an older build whose kind the core reduction retired — a
+  # `ComputerUse(…)` rule in a permission checkpoint written before slice C5, say. The
+  # file still decodes, because `Ouroboros.Storage.RetiredAtoms` keeps the name interned;
+  # what it must not do is decide anything. Matching nothing is the narrow answer in both
+  # directions: an `allow` it cannot cover permits nothing, and a `deny` it cannot cover
+  # refuses nothing that a live rule would not refuse anyway. Written out rather than left
+  # to `matches?/3`'s `rescue`, so the answer is a decision this module made.
+  defp do_matches?(%Pattern{}, _request, _quantifier), do: false
 
   # ── helpers ────────────────────────────────────────────────────────────────────────
 

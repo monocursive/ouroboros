@@ -58,8 +58,10 @@ each probe and keeps `state: :local | :connected | :offline` with timestamps
 (`cluster.ex:179-194`, `280-345`, `new_machine/2`). `Cluster.resolve_machine/1` accepts
 a node string or the friendly machine name (`cluster.ex:1409-1421`).
 
-**Prompt.** `Prompt.base/1` has sections Tools, Workspace, posture, plan, computer use,
-Rules, Ouroboros sources, Style (`prompt.ex:69-137`) and no fleet section. The prompt is
+**Prompt.** `Prompt.base/1` has sections Tools, Workspace, posture, plan, Rules,
+Ouroboros sources, Style (`prompt.ex:69-135`) and no fleet section. At `ffded0b` it also
+had a computer-use section; that plane was removed with desktop automation
+(`docs/proposals/core.md` §4 A4). The prompt is
 built when the session opens and again on compaction (`session.ex:1492-1520`), so
 whatever it says about the fleet is a snapshot.
 
@@ -85,7 +87,7 @@ deletes an uncommitted change.
 
 **Stated non-claims.** FLEET.md: "No provisioning: nothing clones, fetches, or creates
 worktrees"; tags, logical workspace maps, and workspace provisioning are on the deferred
-list. AGENT_EXPERIENCE.md G3: "Still: one turn per child, no steering into one."
+list. research/agent-ux-2026/AGENT_EXPERIENCE.md G3: "Still: one turn per child, no steering into one."
 
 **Tests that already hold these seams.** `test/provider/native/subagent_test.exs`,
 `test/provider/native/subagent_remote_test.exs` (boots a real peer VM and proves
@@ -373,7 +375,7 @@ throughout.
   session's id, principal, and posture, with the same refusals in the same words. Facts
   come through `fleet.status`, which slice A already extends.
 - `ouro mcp-serve` (`tui/src/mcp_serve.rs`) serves `agent`, `agent_result`, and `fleet`
-  beside `approve` and `code_intel`, so a Claude Code or Codex session under Ouroboros
+  beside `approve`, so a Claude Code or Codex session under Ouroboros
   can place a native child on another machine. Approvals from that child reach the
   vendor session's channel through the `approval_requested` path the bridge already uses.
 
@@ -403,7 +405,7 @@ Every slice follows the protocol the last three waves settled on:
   only the union of slice gates, with one or two integration-fix commits budgeted;
 - a bounded live check on real machines for B, C, and D — the Mac ↔ VPS pair for
   provisioning and return, the dev cluster for the rest;
-- docs in the same PR: the G3 row and the capability table in AGENT_EXPERIENCE.md, the
+- docs in the same PR: the G3 row and the capability table in research/agent-ux-2026/AGENT_EXPERIENCE.md, the
   deferred list and the "What has been proven" paragraph in FLEET.md, PROTOCOL.md
   fixtures, and the TUI.md/WEB.md rows for the new cells. A claim goes into a document
   only after the test or live run that backs it exists.

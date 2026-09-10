@@ -133,24 +133,6 @@ impl Worktree {
     }
 }
 
-/// The other half of a delegation's nesting: which conversation owns this coding task.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Parent {
-    pub plane: Option<String>,
-    pub id: String,
-}
-
-impl Parent {
-    pub fn decode(value: Option<&Value>) -> Option<Self> {
-        let map = value.and_then(Value::as_object)?;
-
-        Some(Self {
-            plane: at(map, "plane"),
-            id: at(map, "id")?,
-        })
-    }
-}
-
 /// One fold of a conversation, as `interactive.compact` and the durable `compaction`
 /// event both report it (D9).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -692,123 +674,6 @@ pub fn refusal_tag(data: Option<&Value>) -> Option<&str> {
     tag.as_str()
 }
 
-/// What `interactive.delegate` answered (G1).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Delegated {
-    pub delegation_id: Option<String>,
-    pub team_id: Option<String>,
-    pub task_id: Option<String>,
-    pub task_node: Option<String>,
-    pub plane: Option<String>,
-    pub status: Option<String>,
-}
-
-impl Delegated {
-    pub fn decode(value: &Value) -> Option<Self> {
-        let map = value.as_object()?;
-
-        Some(Self {
-            delegation_id: at(map, "delegation_id"),
-            team_id: at(map, "team_id"),
-            task_id: at(map, "task_id"),
-            task_node: at(map, "task_node"),
-            plane: at(map, "plane"),
-            status: at(map, "status"),
-        })
-    }
-}
-
-/// One row of `interactive.delegations` (G1).
-///
-/// `source` is what keeps a status honest: `"team"` means the team that owns the child was
-/// read just now, `"session"` means it could not be and this is the conversation's own
-/// copy — which is stale exactly when the parent was not running as the child finished.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DelegationRow {
-    pub delegation_id: Option<String>,
-    pub team_id: Option<String>,
-    pub task_id: Option<String>,
-    pub task_node: Option<String>,
-    pub plane: Option<String>,
-    pub objective_digest: Option<String>,
-    pub status: Option<String>,
-    pub result_digest: Option<String>,
-    pub created_at: Option<String>,
-    pub updated_at: Option<String>,
-    pub source: Option<String>,
-}
-
-impl DelegationRow {
-    pub fn decode(value: &Value) -> Option<Self> {
-        let map = value.as_object()?;
-
-        Some(Self {
-            delegation_id: at(map, "delegation_id"),
-            team_id: at(map, "team_id"),
-            task_id: at(map, "task_id"),
-            task_node: at(map, "task_node"),
-            plane: at(map, "plane"),
-            objective_digest: at(map, "objective_digest"),
-            status: at(map, "status"),
-            result_digest: at(map, "result_digest"),
-            created_at: at(map, "created_at"),
-            updated_at: at(map, "updated_at"),
-            source: at(map, "source"),
-        })
-    }
-
-    pub fn decode_list(value: &Value) -> Vec<Self> {
-        value
-            .as_array()
-            .map(|items| {
-                items
-                    .iter()
-                    .take(MAX_ROWS)
-                    .filter_map(Self::decode)
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// Whether the runtime says this child has finished, whatever the outcome.
-    pub fn terminal(&self) -> bool {
-        matches!(
-            self.status.as_deref(),
-            Some("completed" | "failed" | "cancelled" | "timed_out" | "unreachable")
-        )
-    }
-}
-
-/// A `delegation` event's payload, as the parent's transcript carries it (G1).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DelegationEvent {
-    pub delegation_id: Option<String>,
-    pub task_id: Option<String>,
-    pub task_node: Option<String>,
-    pub team_id: Option<String>,
-    pub objective_digest: Option<String>,
-    pub status: Option<String>,
-    pub result_digest: Option<String>,
-}
-
-impl DelegationEvent {
-    pub fn decode(payload: &Value) -> Self {
-        let Some(map) = payload.as_object() else {
-            return Self::default();
-        };
-
-        Self {
-            delegation_id: at(map, "delegation_id"),
-            task_id: at(map, "task_id"),
-            task_node: at(map, "task_node"),
-            team_id: at(map, "team_id"),
-            objective_digest: at(map, "objective_digest"),
-            status: at(map, "status"),
-            result_digest: at(map, "result_digest"),
-        }
-    }
-}
-
 /// How many of a settled child's changed paths the parent's transcript names.
 ///
 /// The count beside them is the whole number, so a child that touched three hundred files
@@ -1222,15 +1087,6 @@ mod tests {
     }
 
     #[test]
-    fn a_delegation_row_knows_a_terminal_status_from_a_running_one() {
-        let running = DelegationRow::decode(&json!({"status": "running"})).unwrap();
-        assert!(!running.terminal());
-
-        let done = DelegationRow::decode(&json!({"status": "completed"})).unwrap();
-        assert!(done.terminal());
-    }
-
-    #[test]
     fn lists_are_bounded_and_tolerant_of_rows_this_build_cannot_read() {
         let rows: Vec<_> = (0..(MAX_ROWS + 40))
             .map(|index| json!({"turn_id": format!("t{index}"), "files": 1}))
@@ -1241,10 +1097,6 @@ mod tests {
             MAX_ROWS
         );
         assert!(RewindPoint::decode_list(&json!("not a list")).is_empty());
-        assert_eq!(
-            DelegationRow::decode_list(&json!([{"delegation_id": "d1"}, 7])).len(),
-            1
-        );
     }
 
     #[test]

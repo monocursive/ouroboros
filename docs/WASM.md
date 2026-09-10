@@ -7,6 +7,31 @@ the as-built record. Every file:line claim below was verified against the tree a
 the time it was written; if you are reading this much later, re-verify before
 building.
 
+**Lane B is gone.** docs/proposals/core.md §4 A1 removed the BEAM forge lane —
+`upgrade/forge/`, `beam.ex`, `node_executor.ex`, `coordinator.ex`, `artifact.ex`,
+`module_name.ex`, `verifier.ex`, `rollout.ex` and `scripts/forge-linux-test.sh` — for the
+reason §1 below gives: a forged BEAM runs with ambient VM authority, and no name policy
+changes that. Lane W is the forge. Everything below that describes lane B, compares
+against it, or reports a proof run under `scripts/forge-linux-test.sh` is the record of
+how this lane was designed and built, not a description of the tree. What lane W stands
+on — `upgrade/signing/`, `upgrade/rollout/`, `epoch.ex`, `wire.ex` — is unchanged, and
+the routing rule in §6 now has one destination. Every `file:line` citation below into a
+file this tree no longer has resolves at `dev` `3bc8887`, the last commit before the
+reduction; read them there.
+
+**The `ouro-sandbox` backend is gone.** docs/proposals/core.md §4 A2 removed the second
+Linux OS-sandbox backend — `provider/native/sandbox/helper.ex`, the `tui/sandbox/` crate,
+`priv/sandbox/`, `scripts/sandbox-linux-test.sh` and the `sandbox*` make targets — along
+with the `LD_PRELOAD` name filter (`c_src/fs_filter.c`) both Linux backends loaded and the
+one semantic it carried: denying the creation of a `.git` that did not exist when the
+command started. There are two OS sandbox backends, Seatbelt and bubblewrap, and both fence
+reads, protect a named file and hide a named credential — so `Sandbox.protects_files?/1`,
+`Sandbox.hides_files?/1` and the `read_fence` / `features.read_allow_set` detection this
+document describes are gone too. Everything below that names `ouro-sandbox`, Landlock, the
+helper's seccomp belt or its `doctor` report is the record of how this lane was built, not
+a description of the tree. `Sandbox.helper_policy/1` is unaffected: that name has always
+meant the **`ouro-wasm`** helper, and it is rendered by Seatbelt or bubblewrap as before.
+
 ## 1. Purpose
 
 Ouroboros has one place left where admission is hygiene rather than containment: code.
@@ -21,8 +46,8 @@ ARCHITECTURE.md — into a sentence about one lane instead of the whole system.
 
 This is not a portability project and not a rewrite. The BEAM lane stays, for
 everything that must be OTP (supervision, stores, live control-plane evolution). The
-native loop is not ported to wasm (see §9.2 for why). The workspace — `bash`, git, LSP
-— is a different axis entirely; §10 covers the microVM tier for it, deliberately last.
+native loop is not ported to wasm (see §9.2 for why). The workspace — `bash`, git — is a
+different axis entirely; §10 covers the microVM tier for it, deliberately last.
 
 Goals, in the user's words: agents that are **secure** (containment, not name policy),
 **auditable** (an artifact whose maximum authority is statically legible, signed and
@@ -77,8 +102,8 @@ process, the distribution mesh.
 `sh -c` through `Exec.run_shell` (`provider/native/hooks.ex:486`,
 `provider/native/exec.ex:98-109`) with a filtered-but-ambient environment: `HOME`,
 `PATH`, the filesystem, the network. `Sandbox.wrap` has exactly two call sites —
-`tools/bash.ex:142` and the ACP terminal service (`session/service.ex:628`) — and
-hooks are not one of them (`docs/AGENT_EXPERIENCE.md` C5 row records this). The entire
+`tools/bash.ex:142` and, until the core reduction deleted it, the ACP terminal service —
+and hooks are not one of them (`docs/research/agent-ux-2026/AGENT_EXPERIENCE.md` C5 row records this). The entire
 mitigation is `Hooks.trusted?/2` (`hooks.ex:452-479`): operator-configured
 `:trusted_workspaces`, deliberately never an in-repo marker. Consequence: a cloned
 repository's hooks and `[checks]` are declined wholesale. Containment would let them
@@ -147,21 +172,23 @@ since landed; treat §7, §8, §11 and §14 as current.
 - Namespace enforcement points (all six): source regex (`source.ex:51,121-129`),
   verifier introduce-prefix (`verifier.ex:68,247-253`), verifier protected set
   (`verifier.ex:40-67,283-291`), signer policy (`policy.ex:196,260-268`), mesh start
-  allow-list (`mesh.ex:30`: `["Elixir.Ouroboros.Agent.", "Elixir.Ouroboros.Capability."]`),
-  operator entry-point regexes (`runtime/capabilities.ex:258-268`,
-  `orchestration/step.ex:152-158`).
+  allow-list (`mesh.ex:30`: `["Elixir.Ouroboros.Capability."]`), operator entry-point
+  regex (`runtime/capabilities.ex:258-268`).
 - Identity: `Upgrade.ModuleName` exists solely because forged atoms don't survive
   reboot (`upgrade/module_name.ex:1-19`). Content addressing is pervasive (source
   sha256, BEAM sha256/md5, deterministic signing payload
   `artifact.ex:75-77`).
-- Effects lane: `ForgeCapability`/`DeployCapability` under `Control.Grants`
-  deny-by-default; the principal is server-owned `context.agent.id`, never the
-  signal's claim (`agent/effects/runner.ex:126`); a deploy can only ship an artifact
-  the same agent's granted forge returned (`agent/effects.ex:304-313`).
+- Admission: forge and deploy sit under `Control.Grants` deny-by-default; the principal
+  is server-owned — the session or the operator behind the call — and never a name the
+  request supplies; a deploy can only ship an artifact a granted forge returned. The
+  typed-signal effects lane that first held this was deleted in September 2026.
 
 ### 4.2 The helper-on-a-pipe pattern (the Rust template)
 
-Two variants exist; `ouro-wasm` copies the **server-shaped** one.
+Two variants existed when this survey was written; `ouro-wasm` copies the
+**server-shaped** one. `ouro-computer-use` and its Elixir owner were deleted by the core
+reduction ([proposals/core.md](proposals/core.md) §4 A4); the paragraphs below record the
+template `ouro-wasm` was built from, not code that still ships.
 
 - Workspace: `tui/Cargo.toml` members `[".", "computer-use", "sandbox"]`; helpers are
   isolated members, never dependencies of `ouro`, each with hand-rolled argv parsing
@@ -174,6 +201,7 @@ Two variants exist; `ouro-wasm` copies the **server-shaped** one.
   seam spawns children with `{:stdin, :close}` (`tui/sandbox/src/request.rs:14-18`,
   `provider/native/exec.ex:128`); `deny_unknown_fields` on the request; exit 125 +
   `ouro-sandbox: ` stderr prefix distinguishes backend failure from command failure.
+  *(Deleted by docs/proposals/core.md §4 A2; the survey entry stands as written.)*
 - Elixir owner (server-shaped half): `Native.Desktop.Pool` — one helper per node,
   lazy, spawned via `Port.open({:spawn_executable, ...})` with secret-shaped env
   unset (`desktop/pool.ex:47,548-552`), handshake = a `doctor` request, broken is a
@@ -219,10 +247,10 @@ Two variants exist; `ouro-wasm` copies the **server-shaped** one.
   (`provider/native/permissions.ex:67-69`) — **the cleanest existing plug for a wasm
   policy stage**. Note: at the time of this survey the ACP lane called
   `Control.Permissions` directly through `Seam` and was not covered by that seam; W18
-  put it behind the same setting (D27).
+  put it behind the same setting (D27), and the core reduction later deleted the lane.
 - Classifier auto mode (C6): no code, only the reserved
   `actor: :rule | :human | :classifier` in the ledger entry type
-  (`permissions.ex:92`) and AGENT_EXPERIENCE.md rows.
+  (`permissions.ex:92`) and research/agent-ux-2026/AGENT_EXPERIENCE.md rows.
 - MCP is the worked precedent for a dynamic tool lane: one seam in
   `tools.ex:262-269` (`resolve_module` returns `{McpTool, name}`), specs appended
   behind a gate, opaque `{module, name}` dispatch, honest `:execute` classification
@@ -248,7 +276,7 @@ Two variants exist; `ouro-wasm` copies the **server-shaped** one.
   allowlist ("external network is on or off, never 'these hosts'",
   `sandbox.ex:96-98`).
 - Lease rule: any non-`read_only` sandbox mode takes an exclusive workspace lease by
-  default (`coding/task_state.ex:477-478`). Worktrees are provisioned idempotently on
+  default (`interactive/state.ex`, `default_workspace_mode/1`). Worktrees are provisioned idempotently on
   every admission (`workspace/worktree.ex:141-142`); "The provider never learns any of
   this. It receives a `cwd`" (`worktree.ex:137-138`).
 - Fleet facts: `local_fleet_posture/0` = `%{node, role, running, machine, runtime}`
@@ -519,13 +547,20 @@ name-shaped deny-list missed `RELEASE_COOKIE`, `AWS_ACCESS_KEY_ID`, `SSH_AUTH_SO
 → `:code.priv_dir/1` → sibling of `ouro` and **nothing derived from the working
 directory** (a parent walk let a cloned repository supply the containment boundary
 itself; the same walk was removed from the desktop and sandbox helper resolvers),
-`make wasm`, `/priv/wasm/` gitignored, `release-tarball: computer-use sandbox wasm`.
+`make wasm`, `/priv/wasm/` gitignored, `release-tarball: sandbox wasm`.
 Every per-instance limit is range-checked against the helper's own maxima before a frame
 is built, and against the connected helper's `doctor.limits` when they are narrower;
 every interval the pool hands a timer is clamped to a module constant, because
 `limits.deadline_ms` is caller-chosen and reachable over the mesh.
 
 ### 7.3a The helper under the OS sandbox
+
+> The `ouro-sandbox` backend named in this section is deleted (docs/proposals/core.md §4 A2).
+> There are two OS sandbox backends, Seatbelt and bubblewrap; `Sandbox.helper_policy/1` is
+> the **`ouro-wasm`** helper's policy and is unchanged, and every claim here about what that
+> policy fences holds on both. Sentences about Landlock, a `doctor` report's
+> `features.read_allow_set`, `read_fence`, `protects_files?/1` or `hides_files?/1` are the
+> record of how this was built.
 
 The helper is a separate process, which is what keeps a wasmtime crash off the node (D3).
 Since W8 it is also a process that **maps machine code a signer produced** — `deserialize` is
@@ -615,7 +650,8 @@ service on this machine — this node's own gateway among them. The two Linux ba
 network namespace, so there is no host loopback in the child to take away; a `bwrap` that
 *cannot* unshare one (`unshare_net: false`, a host without `CLONE_NEWNET`) is a refusal to
 spawn rather than a child on the host's network, which is the second question
-`Sandbox.fences_network?/1` exists to ask.
+`Sandbox.fences_network?/1` exists to ask. (Written when there were two Linux backends;
+there is one, and the sentence holds for it.)
 
 **The fence is stated twice.** Every `load` in this repository names a file in this node's own
 store, and the one `inspect` names a product the forge just built in this node's own build
@@ -628,7 +664,8 @@ half resolves both. That asymmetry is why there are two walls and not one.
 
 **And it does not degrade quietly.** `config :ouroboros, :wasm, helper_sandbox:` is
 `:required` by default. Under it a node with no backend, a backend that cannot fence reads
-(`Sandbox.fences_reads?/1`, contract C11 — `ouro-sandbox` before W17), a backend that cannot
+(`Sandbox.fences_reads?/1`, contract C11 — both surviving backends answer yes by name; the
+one that did not is deleted), a backend that cannot
 fence the network (`Sandbox.fences_network?/1`), or no data directory to put a scratch in
 **refuses to spawn**: the pool goes broken with `{:helper_sandbox_unavailable, reason}`, every
 request answers at once, and `wasm.status` reports
@@ -711,9 +748,8 @@ The `Signer` behaviour is reused unchanged — `sign_artifact/2` already takes
    sorted list against the helper's own sorted reading, which can never repeat an import.
    `["log", "log"]` was a manifest signed into a permanent quarantine;
 5. provenance: author present; `eval` spec validated when present, **required** by
-   default for lane W (D12) — there is no BuildPeer/ExUnit analogue here, so the
-   signed eval spec *is* the test story; `:signing_require_eval` semantics extend
-   rather than fork;
+   default (D12, `:signing_require_wasm_eval`) — there is no build peer running a test
+   suite here, so the signed eval spec *is* the test story;
 6. **precompiled block** (W8, D22). `precompiled` is absent, or exactly
    `%{wasmtime, target, sha256, size}`: a 64-hex digest that is *not* the component's own,
    a positive size within the same multiple of the artifact ceiling a bundle admits, and two
@@ -1001,16 +1037,17 @@ bounded to the newest eight, and `deploy/3` reads it back and holds it to the ar
 asked for before staging a byte — it is this node's own output, but it is a file, and a file
 is what somebody else can replace.
 
-**The two effects.** `ForgeWasmCapability` and `DeployWasmCapability` go through
-`Runner.dispatch(:forge, …)` and `(:deploy, …)` exactly as the BEAM lane's do: the acting
-principal is `context.agent.id`, the signal's `from` is recorded as `claimed_from` and
-authorizes nothing (`runner.ex:126`), and the author written into the signed manifest is the
-principal. The `:forge` grant is asked about `"wasm/<name>"` — the same string the rollout
-register calls the module and a signed `start` block claims — so `modules: ["wasm/counter"]`
-is a grant to forge that capability and nothing else. A deploy resolves its artifact from the
-agent's own `forged` ring and never from the signal, and one ring now holds both lanes'
-manifests, so each deploy action refuses the other lane's by name rather than by whatever
-would have failed first downstream.
+**Who may forge.** The acting principal is server-side state — the session behind
+`Ouroboros.Provider.Native.Tools.Forge`, or the operator behind the gateway — never a name
+the request supplies, and it is the author written into the signed manifest. The `:forge`
+grant is asked about `"wasm/<name>"` — the same string the rollout register calls the module
+and a signed `start` block claims — so `modules: ["wasm/counter"]` is a grant to forge that
+capability and nothing else. A deploy resolves its artifact from the `forged` ring and never
+from the request, and one ring holds both lanes' manifests, so a deploy refuses the other
+lane's by name rather than by whatever would have failed first downstream. The typed-signal
+effects that used to carry this — `ForgeWasmCapability` and `DeployWasmCapability` through
+`Runner.dispatch/5` — were deleted in September 2026 (proposals/core.md §3 D3); the grant,
+the ring and the authorship rule are what outlived them.
 
 **The operator's half is the same code.** A proposal directory under
 `.ouroboros/capabilities/` that holds a `Cargo.toml` is a lane-W proposal;
@@ -1051,7 +1088,7 @@ matches a call to that capability, `Capability(*)` matches a call to any, and wi
 written the engine's own posture applies: ask, once per capability, and the operator's
 answer is what persists. An *allow* on those patterns is honest because the name they match
 is one this node resolved against its live rollouts before the engine was asked — the same
-distinction `ComputerUse(app:…)` draws against `Tool(<name>:<param>=…)`, whose parameter is
+distinction `Capability(…)` draws against `Tool(<name>:<param>=…)`, whose parameter is
 whatever the provider reported. A name that does not resolve carries no `capability` in the
 request context at all, so `Capability(*)` cannot cover "we could not tell which one".
 
@@ -1285,25 +1322,23 @@ the rule the node would record, and the guest's own log; it exits non-zero on a 
 worlds, and `examples/no-network-shell` is the worked one — it denies a `bash` whose command
 contains `curl`, `wget` or `nc `, with a stated rule, and asks about everything else.
 
-**Every seam reads one setting** (W18, D27). Four readers now: the native loop
+**Every seam reads one setting** (W18, D27). Three readers: the native loop
 (`Provider.Native.Permissions`), the interactive plane's external approvals
-(`Interactive.Task.Approvals`), the interactive shell (`Interactive.Task.Shell`, through
-`Approvals.permissions_engine/2`) and the ACP lane (`Control.Permissions.Seam` — both the
-`session/request_permission` a vendor process sends and the `fs/write_text_file` and
-`terminal/create` an agent asks this runtime to perform). A node given a policy component has
-one on every lane a permission question arrives on rather than on three seams out of four. The
-ACP seam takes `Interactive.Task.Approvals`' tolerance verbatim: an answer in none of the three
-shapes, an exception and an exit are each an ask, with the approval reaching the human exactly
-as it did before an engine was named. **No engine *failure* widens anything there** — and what
-an engine does answer is its own authority, an `{:allow, ref}` included, exactly as on the other
-three seams; the bound on a component's `allow` is `PolicyEngine`'s `:policy_allowable_tools`
-(D20) and there is deliberately no second one at the seam. `remember/4` and `forget_session/1`
-stay on `Control.Permissions` whatever engine is named — rule-store operations, not decisions
-(C13) — and so does the *pattern* a `:session` answer is written as, because that row is durable
-and its width is not something a named engine may widen from underneath. Proved end to end in
-`test/wasm/policy_acp_test.exs` against the real `no-network-shell`, signed and deployed through
-the real rollout, and asked both directly at the seam and through a real `Session.Jsonl` driving
-a vendor process.
+(`Interactive.Task.Approvals`) and the interactive shell (`Interactive.Task.Shell`, through
+`Approvals.permissions_engine/2`). A node given a policy component has one on every lane a
+permission question arrives on. There was a fourth, `Control.Permissions.Seam` — the ACP
+`session/request_permission` a vendor process sent, and the `fs/write_text_file` and
+`terminal/create` an ACP agent asked this runtime to perform — and it went with the wrapped
+vendor providers in September 2026 ([the core reduction](proposals/core.md) §3 D2), taking
+`test/wasm/policy_acp_test.exs` with it.
+
+**No engine *failure* widens anything** on the three that remain — and what an engine does
+answer is its own authority, an `{:allow, ref}` included; the bound on a component's `allow`
+is `PolicyEngine`'s `:policy_allowable_tools` (D20) and there is deliberately no second one at
+a seam. `remember/4` and `forget_session/1` stay on `Control.Permissions` whatever engine is
+named — rule-store operations, not decisions (C13) — and so does the *pattern* a `:session`
+answer is written as, because that row is durable and its width is not something a named
+engine may widen from underneath.
 
 A model-backed classifier (the original C6 sketch) remains possible *behind* the same engine
 interface; the wasm module is the deterministic, offline-testable version, and it is the one
@@ -1358,7 +1393,7 @@ A `world ouroboros:agent` (`step(state, event) -> effects` with host-bound
 brains in any language §1's boundary admits, structurally contained, signed and placed
 with machinery that exists. It is **not** a migration target for the native loop. The
 2026-08-30 rewrite assessment applies with equal force here: the loop's value is its integration surface
-(permissions, hooks, checkpoints, subagents, compaction, computer use), all of which
+(permissions, hooks, checkpoints, subagents, compaction), all of which
 are host-side services either way; and record/replay at the effect seams — shipped in
 REPLAY.md — already delivers replay, divergence detection, and forking without giving
 up the BEAM.
@@ -1373,8 +1408,8 @@ answering novel calls. Useful, cheaper than a full run, and much smaller than
 
 ## 10. The microVM tier (separate axis: the hands, not the brain)
 
-Wasm contains forged logic and policy; it does nothing for `bash`, git, or LSP
-servers. The next tier there is a microVM backend behind the **existing** sandbox
+Wasm contains forged logic and policy; it does nothing for `bash` or git. The next tier
+there is a microVM backend behind the **existing** sandbox
 machinery — it is a backend, not a lane (D9).
 
 - **Slots** (all verified): a probe clause ahead of `probe_linux`'s helper check
@@ -1959,16 +1994,15 @@ machinery — it is a backend, not a lane (D9).
   with `config :ouroboros, :wasm_forge_cargo_home`. A node with no data directory has nowhere
   to keep a cache and says so rather than falling back to somebody's.
 
-  **Two ceilings, and the smaller one has to be the forge's.** The forge's own is five
-  minutes and is enforced by `Ouroboros.Provider.Native.Exec`, which signals the sandboxed
-  process group and lets the `after` that removes the scratch tree run. The effect surface
-  has a second one, `config :ouroboros, :effect_timeout`, and it is not a deadline of the
-  same kind: the runner ends an overrunning effect with `Task.shutdown(task, :brutal_kill)`,
-  and a killed process runs no `after`. A forge cut there left its build tree on disk and a
-  cargo process group still compiling inside it — which is why
-  `Ouroboros.Agent.Effects.ForgeWasmCapability` asks for a build budget strictly inside the
-  effect's, the same idiom `DelegateTask` uses against the same deadline, and why the test
-  for it asserts `pgrep` finds nothing rather than only that the refusal has the right name.
+  **The ceiling has to be the forge's own.** It is five minutes and is enforced by
+  `Ouroboros.Provider.Native.Exec`, which signals the sandboxed process group and lets the
+  `after` that removes the scratch tree run. A caller's deadline is not a deadline of the
+  same kind: a caller that gives up first leaves its build tree on disk and a cargo process
+  group still compiling inside it, so a caller that bounds a forge asks for a build budget
+  strictly inside its own — which is why the test for it asserts `pgrep` finds nothing
+  rather than only that the refusal has the right name. The typed-signal effect runner that
+  used to own the outer deadline, and `config :ouroboros, :effect_timeout` with it, was
+  deleted in September 2026 (proposals/core.md §3 D3).
 
   **`:any` does not cross the lanes.** `Ouroboros.Control.Grants` holds `"wasm/<name>"` in a
   `:forge` allow-list, and it would have been easy to let `modules: :any` cover those too —
@@ -2292,7 +2326,12 @@ machinery — it is a backend, not a lane (D9).
   residual was about, and the machine code still runs.
 
 - **D26 — a read allow-set is a list the daemon widens, and a read denial is Landlock's
-  alone.** D18 fenced a build's reads on two backends and refused the third by name, because
+  alone.** *(The third backend this decision is about is deleted —
+  docs/proposals/core.md §4 A2. Both surviving backends fence a builder's reads by name,
+  `Sandbox.fences_reads?/1` no longer probes a binary for the capability, and the
+  `read_fence` detection key is gone. The rules below about what the daemon puts in the list
+  still hold; the Landlock half is history.)* D18 fenced a build's reads on two backends and
+  refused the third by name, because
   `ouro-sandbox`'s wire format had no way to say what a build may read. It has one now:
   `mode: "builder"` and `readable: [...]`, and the three rules around it are what make the
   field a fence rather than a hint.
@@ -2378,7 +2417,11 @@ machinery — it is a backend, not a lane (D9).
   costs a node its forge; failing open would cost it the fence the forge's claim rests on.
 
 - **D27 — one setting names the permission engine for every seam, and no engine failure
-  widens anything.** `config :ouroboros, :permissions_engine` was read by the native loop, by
+  widens anything.** (As built, September 2026: the core reduction deleted the ACP lane —
+  `Ouroboros.Control.Permissions.Seam` and the whole `provider/session/` client — so this
+  setting now has **three** readers, not four; see docs/proposals/core.md §3 D2. The rest
+  of this decision stands and the paragraph is left as the dated record it is.)
+  `config :ouroboros, :permissions_engine` was read by the native loop, by
   the interactive plane's external approvals and by the interactive shell (which asks
   `Approvals.permissions_engine/2` for it). `Ouroboros.Control.Permissions.Seam` — the ACP lane,
   which is both the `session/request_permission` a vendor process sends and the
@@ -2424,7 +2467,10 @@ machinery — it is a backend, not a lane (D9).
   one is a frame a client draws and the other is a tool result a model reads; what is the same
   is the rule they name.
 
-  **What is still not covered.** Nothing on this lane by dialect:
+  **What is still not covered.** (As built, September 2026: the core reduction deleted the
+  ACP lane this paragraph is about — `Ouroboros.Provider.Session.Dialect`, `Dialect.ACP`
+  and `Session.Service` are gone; see docs/proposals/core.md §3 D2. The gap it names went
+  with the lane. Left as the dated record it is.) Nothing on this lane by dialect:
   `Ouroboros.Provider.Session.Dialect` has exactly one implementation, `Dialect.ACP`, and a
   second would reach the same three functions. Two residuals are older than this slice and are
   restated rather than removed. `fs/read_text_file` is not gated on ACP at all —
@@ -2848,7 +2894,7 @@ Stated once, so nobody reads more into the lane than is there:
   `helper_readable` is a widening knob, though a vetted one: `/`, a non-directory, and any
   ancestor of the data directory are refused, and one bad entry rejects the list.
 
-- **The workspace.** §10 is the axis for `bash`/git/LSP; nothing in lanes W/H/T
+- **The workspace.** §10 is the axis for `bash`/git; nothing in lanes W/H/T
   touches it.
 - **Signer custody, and what W8 added to it.** A signer is still a cluster member reachable by
   `:erpc`; `Control.Grants` is still one process per node. Those are unchanged by this spec and
@@ -3517,12 +3563,13 @@ Each slice is PR-sized, lands green, and is useful alone.
   missing a crate is a refusal naming it in 8 ms, not a fetch.
 
   The node then reads the product's imports with its own helper, which D18 argues is exactly
-  the case D15 does not cover: it built these bytes. Two effects — `ForgeWasmCapability` and
-  `DeployWasmCapability` — reach it through `Runner.dispatch/5` with the server-owned
-  principal as the signed manifest's author, the `:forge` grant asked about
-  `"wasm/<name>"` so one narrow grant admits one capability, and the deploy resolving its
-  artifact from the agent's own `forged` ring; that ring now holds both lanes, so each deploy
-  action refuses the other lane's manifest by name. `Control.Grants` learned to hold a
+  the case D15 does not cover: it built these bytes. What reaches it is a session's tool and
+  the operator's gateway, each with the server-owned principal as the signed manifest's
+  author, the `:forge` grant asked about `"wasm/<name>"` so one narrow grant admits one
+  capability, and the deploy resolving its artifact from the `forged` ring; that ring holds
+  both lanes, so a deploy refuses the other lane's manifest by name. (The two typed-signal
+  effects that first carried this were deleted in September 2026.) `Control.Grants` learned
+  to hold a
   `"wasm/<name>"` in a `:forge` allow-list for that, which is the one widening this slice
   makes explicit: `modules: :any` now reaches both lanes. The operator's half is the same
   code — a proposal directory holding a `Cargo.toml` is lane W, `capabilities.preview` reports
@@ -3854,7 +3901,11 @@ Each slice is PR-sized, lands green, and is useful alone.
   helper refuses it now, so the sentence is true from both ends. A symlinked `readable` root
   was granting its target: canonicalised on the daemon, refused by the helper, both tested.
 
-- **W18 — every permission seam reads one setting.** `Control.Permissions.Seam` — the ACP lane,
+- **W18 — every permission seam reads one setting.** (As built, September 2026: the core
+  reduction deleted `Control.Permissions.Seam` with the ACP lane, so that setting now has
+  **three** readers — the native loop, the interactive plane's external approvals, and the
+  interactive shell — not four; see docs/proposals/core.md §3 D2. Left as the dated record
+  it is.) `Control.Permissions.Seam` — the ACP lane,
   and the last seam that called `Control.Permissions` by name — now evaluates, records and
   suggests through the module `config :ouroboros, :permissions_engine` names, so a node given
   `Wasm.PolicyEngine` has a policy component on all four of that setting's readers rather than
@@ -4244,5 +4295,4 @@ Each slice is PR-sized, lands green, and is useful alone.
   https://component-model.bytecodealliance.org. wasmex (fallback path):
   https://hexdocs.pm/wasmex — `Wasmex.Components`, 0.15.1.
 - In-repo: ARCHITECTURE.md (milestone 3, "Still external"), FLEET.md (§6 tags, F6),
-  REPLAY.md (the record/replay kernel lane A defers to), COMPUTER_USE.md §12/§18 (the
-  helper doctrine this spec's host copies), AGENT_EXPERIENCE.md (C5/C6 rows).
+  REPLAY.md (the record/replay kernel lane A defers to), research/agent-ux-2026/AGENT_EXPERIENCE.md (C5/C6 rows).

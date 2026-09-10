@@ -4,8 +4,8 @@ defmodule Ouroboros.Provider.Native.Tools do
 
   D1 shipped Pi's four — `read`, `write`, `edit`, `bash` — plus `plan`. D2 completes the
   set every leader has (R3 §8a): search (`grep`, `glob`, `ls`), a second edit format
-  (`apply_patch`, V4A), the network (`web_fetch`), a way to ask (`ask_user`), the Agent
-  Skills loader (`skill`), and the language server (`code_intel`). `todo` is an alias of
+  (`apply_patch`, V4A), the network (`web_fetch`), a way to ask (`ask_user`), and the Agent
+  Skills loader (`skill`). `todo` is an alias of
   `plan` rather than a second tool, because two names for one behaviour in the schema
   list costs context in every request and teaches the model that they differ.
 
@@ -38,7 +38,6 @@ defmodule Ouroboros.Provider.Native.Tools do
   """
 
   alias Jido.AI.ToolAdapter
-  alias Ouroboros.Provider.Native.Desktop
   alias Ouroboros.Provider.Native.Mcp
   alias Ouroboros.Provider.Native.Model
   alias Ouroboros.Provider.Native.Paths
@@ -48,9 +47,6 @@ defmodule Ouroboros.Provider.Native.Tools do
   alias Ouroboros.Provider.Native.Tools.AskUser
   alias Ouroboros.Provider.Native.Tools.Bash
   alias Ouroboros.Provider.Native.Tools.Capability
-  alias Ouroboros.Provider.Native.Tools.CodeIntel
-  alias Ouroboros.Provider.Native.Tools.DesktopAct
-  alias Ouroboros.Provider.Native.Tools.DesktopState
   alias Ouroboros.Provider.Native.Tools.Edit
   alias Ouroboros.Provider.Native.Tools.Fleet
   alias Ouroboros.Provider.Native.Tools.Forge
@@ -87,7 +83,6 @@ defmodule Ouroboros.Provider.Native.Tools do
       Glob,
       Ls,
       WebFetch,
-      CodeIntel,
       AskUser,
       AgentTool,
       AgentResult,
@@ -144,7 +139,6 @@ defmodule Ouroboros.Provider.Native.Tools do
       do: static,
       else:
         static ++
-          desktop_specs(allowed, disallowed, opts) ++
           capability_specs(allowed, disallowed, opts) ++
           forge_specs(allowed, disallowed, opts) ++ mcp_specs(allowed, disallowed, opts)
   end
@@ -167,35 +161,12 @@ defmodule Ouroboros.Provider.Native.Tools do
     end
   end
 
-  # Computer Use's two tools sit after the static prefix and before MCP (D1, §5.1), and
-  # only when the feature is genuinely usable on this node *and* a workspace was given —
-  # the same host-local gate MCP uses. When it is off `Native.Desktop.enabled?/0` is false
-  # and the names never appear, so the model is not taught a name it cannot use (D9). The
-  # `allowed`/`disallowed` filters apply by tool name exactly as they do to a static tool.
-  defp desktop_specs(allowed, disallowed, opts) do
-    with root when is_binary(root) and root != "" <- Keyword.get(opts, :workspace),
-         true <- Desktop.enabled?() do
-      desktop_modules()
-      |> Enum.filter(fn module ->
-        name = module.name()
-        name not in disallowed and (allowed == [] or name in allowed)
-      end)
-      |> Enum.map(&spec(&1, opts))
-    else
-      _off_or_no_workspace -> []
-    end
-  end
-
-  defp desktop_modules do
-    [DesktopState] ++ if(Desktop.act_enabled?(), do: [DesktopAct], else: [])
-  end
-
-  # W13. `capability` appears only on a node that has a live lane-W rollout to reach, the
-  # same posture the desktop tools take (D9): a name the model is taught and cannot use is
-  # a name it spends calls discovering is useless, and on a node with no capabilities the
-  # tool's own answer would be "there are none". It is deliberately not gated on a
-  # workspace the way the desktop tools and MCP are — a capability is deployed to a *node*
-  # by the rollout plane, and a session without a workspace root can still call one.
+  # W13. `capability` appears only on a node that has a live lane-W rollout to reach (D9):
+  # a name the model is taught and cannot use is a name it spends calls discovering is
+  # useless, and on a node with no capabilities the tool's own answer would be "there are
+  # none". It is deliberately not gated on a workspace the way MCP is — a capability is
+  # deployed to a *node* by the rollout plane, and a session without a workspace root can
+  # still call one.
   defp capability_specs(allowed, disallowed, opts) do
     name = Capability.name()
 
@@ -206,8 +177,8 @@ defmodule Ouroboros.Provider.Native.Tools do
   end
 
   # S1. `forge` is shown only while `config :ouroboros, :native_forge_tool` is `true` — the
-  # `self` posture sets it and nothing else does. Same posture as the desktop tools and
-  # `capability` (D9): a model taught a name it cannot use spends a call discovering that.
+  # `self` posture sets it and nothing else does. Same posture as `capability` (D9): a
+  # model taught a name it cannot use spends a call discovering that.
   # It is deliberately not gated on a workspace here; the tool refuses a call whose context
   # carries no scope, because a project directory is a fact about a workspace and a session
   # without one has no directory to name.
@@ -303,21 +274,11 @@ defmodule Ouroboros.Provider.Native.Tools do
   defp resolve_module(name) do
     cond do
       module = Enum.find(modules(), &(&1.name() == name)) -> module
-      module = desktop_module(name) -> module
       module = capability_module(name) -> module
       module = forge_module(name) -> module
       Mcp.advertised?(name) -> {McpTool, name}
       true -> nil
     end
-  end
-
-  # The desktop tools are not in `modules/0`: they are conditional on the node feature flag,
-  # so they resolve here only while `Native.Desktop.enabled?/0`. Off, both names are
-  # `:unknown_tool` — the same answer `specs/3` gives by omitting them (D9). `specs/3` also
-  # gates on a workspace, which this name-only lookup cannot see; that gate is what keeps
-  # the model from being taught the name, so it is enough that a disabled node refuses here.
-  defp desktop_module(name) do
-    if Desktop.enabled?(), do: Enum.find(desktop_modules(), &(&1.name() == name))
   end
 
   # Resolved on the same condition `specs/3` lists it on: a node with nothing live answers
@@ -512,12 +473,6 @@ defmodule Ouroboros.Provider.Native.Tools do
   defp mode("bash", _input), do: :execute
   defp mode("mcp__" <> _rest, _input), do: :execute
 
-  # Computer Use (D3): observing the screen is a read, operating it is an execute. Plan mode
-  # allows the first and refuses the second, which is the correct split — a plan may look
-  # and must not click.
-  defp mode("desktop_state", _input), do: :read
-  defp mode("desktop_act", _input), do: :execute
-
   # G3. Spawning a child that will run tools of its own is an effect, and the honest
   # classification of "a program whose actions this call authorises but does not name" is
   # the one that asks. `agent_result` is `:read` by the default clause below, deliberately:
@@ -539,13 +494,9 @@ defmodule Ouroboros.Provider.Native.Tools do
   defp mode("web_fetch", _input), do: :network
   defp mode(name, _input) when name in ["write", "edit", "apply_patch"], do: :write
 
-  defp mode("code_intel", input) do
-    if CodeIntel.writing?(Map.get(input, "operation")), do: :write, else: :read
-  end
-
   defp mode(_name, _input), do: :read
 
-  defp paths(name, input, scope) when name in ["read", "grep", "glob", "ls", "code_intel"] do
+  defp paths(name, input, scope) when name in ["read", "grep", "glob", "ls"] do
     case Map.get(input, "path") do
       path when is_binary(path) and path != "" -> [resolve(path, scope)]
       _absent -> []
@@ -581,7 +532,6 @@ defmodule Ouroboros.Provider.Native.Tools do
   end
 
   defp write_paths("apply_patch", input, scope), do: ApplyPatch.paths(input, scope)
-  defp write_paths("code_intel", input, scope), do: CodeIntel.write_paths(input, scope)
   defp write_paths(_name, _input, _scope), do: []
 
   defp resolve(path, scope) do
@@ -609,35 +559,15 @@ defmodule Ouroboros.Provider.Native.Tools do
 
   defp command(_name, _input), do: nil
 
-  # D4/§6.3: Computer Use puts claimed app identity, window_id, title, and the desktop
-  # action into the permission `context`. The loop may fill a missing app from last state
-  # unless the call retargets by window_id/title; after capture, `desktop_evaluated_app`
-  # is checked against the helper's resolved id. Every other tool carries an empty context.
-  defp context("desktop_state", input),
-    do: %{
-      app: claimed_app(input),
-      desktop_action: "state",
-      window_id: claimed_string(input, "window_id"),
-      title: claimed_string(input, "title")
-    }
-
-  defp context("desktop_act", input),
-    do: %{
-      app: claimed_app(input),
-      desktop_action: claimed_action(input),
-      window_id: claimed_string(input, "window_id"),
-      title: claimed_string(input, "title")
-    }
-
   # W13/§7.7. Two facts about a capability call, and both are *this node's* rather than the
   # model's: `Tools.Capability.resolve/1` answers only for a name that is a `:live` lane-W
   # entry in the rollout register at classification time, and the sha256 beside it is the
   # one the register holds for those bytes. That is what makes `Capability(<name>)` an
-  # honest allow rather than a parameter equality test on a string the model wrote — the
-  # same distinction `ComputerUse(app:…)` draws — and it is what puts the component's
-  # identity, not its name alone, into the ledger entry for the call.
+  # honest allow rather than a parameter equality test on a string the model wrote, and it
+  # is what puts the component's identity, not its name alone, into the ledger entry for
+  # the call.
   defp context("capability", input) do
-    # `Map.get/2` and not `claimed_string/2`: the engine must be asked about the *exact*
+    # `Map.get/2` and nothing trimmed: the engine must be asked about the *exact*
     # string the model wrote, and `Tools.Capability.resolve/1` is the one function that
     # judges it — the same one the tool calls a moment later with the same value (F1).
     case Capability.resolve(Map.get(input, "name") || Map.get(input, :name)) do
@@ -665,33 +595,6 @@ defmodule Ouroboros.Provider.Native.Tools do
   # Untrimmed, because `Tools.Capability` is untrimmed: a value the classifier repaired and
   # the tool did not is a value the permission engine judged and the tool never ran (F1).
   defp operation(input), do: Map.get(input, "operation") || Map.get(input, :operation)
-
-  defp claimed_app(input) do
-    case Map.get(input, "app") || Map.get(input, :app) do
-      app when is_binary(app) and app != "" -> Desktop.app_alias(app)
-      _absent -> nil
-    end
-  end
-
-  defp claimed_action(input) do
-    case Map.get(input, "action") do
-      action when is_binary(action) and action != "" -> action
-      _absent -> nil
-    end
-  end
-
-  defp claimed_string(input, key) when is_binary(key) do
-    case Map.get(input, key) || Map.get(input, String.to_existing_atom(key)) do
-      value when is_binary(value) and value != "" -> value
-      _absent -> nil
-    end
-  rescue
-    ArgumentError ->
-      case Map.get(input, key) do
-        value when is_binary(value) and value != "" -> value
-        _absent -> nil
-      end
-  end
 
   @doc """
   Runs one tool and normalizes whatever it returned into the loop's result shape.
@@ -730,53 +633,18 @@ defmodule Ouroboros.Provider.Native.Tools do
         end
       end)
 
-    if module == DesktopAct do
-      await_interruptible(task, timeout_ms, label(module))
-    else
-      case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
-        {:ok, {:audit_unavailable, reason}} ->
-          raise Ouroboros.Audit.Unavailable, reason: reason
+    case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {:audit_unavailable, reason}} ->
+        raise Ouroboros.Audit.Unavailable, reason: reason
 
-        {:ok, result} ->
-          normalize_result(result)
-
-        nil ->
-          %{output: "#{label(module)} timed out after #{timeout_ms} ms.", is_error: true}
-
-        {:exit, reason} ->
-          %{output: "#{label(module)} crashed: #{inspect(reason)}", is_error: true}
-      end
-    end
-  end
-
-  defp await_interruptible(task, timeout_ms, label) do
-    ref = Process.monitor(task.pid)
-    task_ref = task.ref
-    deadline = System.monotonic_time(:millisecond) + timeout_ms
-    await_interruptible_loop(task, task_ref, ref, deadline, label)
-  end
-
-  defp await_interruptible_loop(task, task_ref, ref, deadline, label) do
-    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
-
-    receive do
-      {^task_ref, result} ->
-        Process.demonitor(ref, [:flush])
+      {:ok, result} ->
         normalize_result(result)
 
-      {:DOWN, ^ref, :process, _pid, reason} ->
-        %{output: "#{label} crashed: #{inspect(reason)}", is_error: true}
+      nil ->
+        %{output: "#{label(module)} timed out after #{timeout_ms} ms.", is_error: true}
 
-      :native_interrupt ->
-        Desktop.cancel(task.pid)
-        send(self(), :native_interrupt)
-        _ = Task.yield(task, 2_000) || Task.shutdown(task, :brutal_kill)
-        %{output: "#{label} was cancelled", is_error: true}
-    after
-      remaining ->
-        Desktop.cancel(task.pid)
-        _ = Task.shutdown(task, :brutal_kill)
-        %{output: "#{label} timed out after the act deadline.", is_error: true}
+      {:exit, reason} ->
+        %{output: "#{label(module)} crashed: #{inspect(reason)}", is_error: true}
     end
   end
 
@@ -847,11 +715,6 @@ defmodule Ouroboros.Provider.Native.Tools do
       changes: Map.get(result, :changes, []),
       reads: Map.get(result, :reads, %{}),
       plan: Map.get(result, :plan),
-      # C-U (§8.1). Tool results may carry staged images: `[%{path, media_type, sha256,
-      # size}]`. Absent or `[]` for every existing tool; only `desktop_state` fills it. This
-      # is the loop's vision seam — `bound/1` caps `output` and never touches an image,
-      # because a screenshot is bytes on disk fetched by sha, not text to truncate.
-      images: images(Map.get(result, :images, [])),
       # C5+. `bash` is the one tool that can come back saying "the OS sandbox stopped
       # this, and it is a denial an operator could lift". It is carried here rather than
       # buried in the output text because the loop has to *act* on it — it owns the only
@@ -872,20 +735,8 @@ defmodule Ouroboros.Provider.Native.Tools do
       changes: [],
       reads: %{},
       plan: nil,
-      escalation: nil,
-      images: []
+      escalation: nil
     }
-
-  # Keep only well-formed image parts (§8.1). A tool that returns junk here gets `[]` rather
-  # than a malformed part the model encoder would then have to defend against.
-  defp images(list) when is_list(list), do: Enum.filter(list, &image_part?/1)
-  defp images(_other), do: []
-
-  defp image_part?(%{path: path, media_type: media_type, sha256: sha256, size: size})
-       when is_binary(path) and is_binary(media_type) and is_binary(sha256) and is_integer(size),
-       do: true
-
-  defp image_part?(_part), do: false
 
   defp describe({:tool_raised, message}), do: "tool raised: #{message}"
   defp describe({:tool_exited, reason}), do: "tool exited: #{reason}"

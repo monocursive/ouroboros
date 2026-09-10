@@ -1,3 +1,26 @@
+defmodule Ouroboros.Capability.CapabilityToolStandIn do
+  @moduledoc false
+
+  # An agent that stands at a lane-W id with a seeded `:last_answer`. See the test module's
+  # doc for why the tool is exercised against this rather than the wasm wrapper.
+
+  use Jido.Agent,
+    name: "ouroboros_capability_tool_stand_in",
+    description: "A mesh agent with a seeded answer, for the capability tool's own contract",
+    schema: [
+      inbox: [type: :list, default: []],
+      last_answer: [type: :any, default: nil],
+      last_message: [type: :any, default: nil],
+      messages_received: [type: :non_neg_integer, default: 0],
+      untrusted: [type: :any, default: nil]
+    ],
+    signal_routes: [
+      {"ouroboros.agent.message", Ouroboros.Mesh.ReceiveMessage}
+    ]
+
+  def actions, do: super() ++ [Ouroboros.Mesh.ReceiveMessage]
+end
+
 defmodule Ouroboros.Provider.Native.CapabilityToolTest do
   @moduledoc """
   W13 — a live capability is a tool, and the seam between two untrusted parties.
@@ -7,11 +30,11 @@ defmodule Ouroboros.Provider.Native.CapabilityToolTest do
   bounded and labelled, and the permission engine is asked with a name *this node*
   resolved rather than one the model wrote.
 
-  The agents these tests message are ordinary `Ouroboros.Agent.Worker`s standing at the
-  lane's ids. That is deliberate and it is not a simulation of the wrapper: the tool's
-  contract with a capability is exactly `Ouroboros.Mesh`'s — a message in, `:last_answer`
-  out — and using the wrapper here would have meant a helper, a store and a component in a
-  test about which *names* are reachable. The wrapper against a real component is
+  The agents these tests message are plain mesh agents standing at the lane's ids. That is
+  deliberate and it is not a simulation of the wrapper: the tool's contract with a
+  capability is exactly `Ouroboros.Mesh`'s — a message in, `:last_answer` out — and using
+  the wrapper here would have meant a helper, a store and a component in a test about which
+  *names* are reachable. The wrapper against a real component is
   `test/wasm/capability_acceptance_test.exs`.
   """
 
@@ -468,7 +491,7 @@ defmodule Ouroboros.Provider.Native.CapabilityToolTest do
       name = deploy_live("vet", @sha)
 
       # M23: the context key is the capability's name, and another tool could carry one —
-      # the desktop tools already put a resolved app there. A pattern that matched on the
+      # the classifier already puts a resolved fact there. A pattern that matched on the
       # context alone would judge a call it was never written about.
       elsewhere = %{
         principal: %{session_id: "w13", provider: :native, node: node()},
@@ -842,12 +865,15 @@ defmodule Ouroboros.Provider.Native.CapabilityToolTest do
   end
 
   # An agent standing at a lane id with a seeded answer. See the module doc for why this is
-  # a `Worker` and not the wrapper.
+  # a plain mesh agent and not the wrapper.
   defp worker(id, answer, extra \\ %{}) do
     initial_state = Map.merge(%{last_answer: answer}, extra)
 
     {:ok, _pid} =
-      Mesh.start_agent(id, agent: Ouroboros.Agent.Worker, initial_state: initial_state)
+      Mesh.start_agent(id,
+        agent: Ouroboros.Capability.CapabilityToolStandIn,
+        initial_state: initial_state
+      )
 
     on_exit(fn -> Mesh.stop_agent(id) end)
 

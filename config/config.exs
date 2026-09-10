@@ -26,26 +26,18 @@ config :ouroboros,
   upgrade_trust_policy: [allow_unsigned: config_env() != :prod],
   # Which supervision tree this node boots. `:core` runs the full runtime; `:builder`
   # and `:signer` run cluster formation and nothing else, so a host that only compiles
-  # candidate code or only holds a signing seam has no teams, sessions, schedulers, or
-  # control plane on it to lose. An unrecognized value refuses the boot rather than
-  # falling back to the privileged tree. See `Ouroboros.Cluster`.
+  # candidate code or only holds a signing seam has no sessions or stores on it to lose.
+  # An unrecognized value refuses the boot rather than falling back to the privileged
+  # tree. See `Ouroboros.Cluster`.
   node_role: :core,
-  # Refuse to place agents and team workers on a node that is not a connected `:core`
-  # node running this runtime. This is misconfiguration detection — work sent where it
-  # cannot run — and explicitly not a boundary against a hostile connected node, which
-  # has full `:erpc` authority regardless.
+  # Refuse to place a mesh agent on a node that is not a connected `:core` node running
+  # this runtime. This is misconfiguration detection — work sent where it cannot run —
+  # and explicitly not a boundary against a hostile connected node, which has full
+  # `:erpc` authority regardless.
   placement_role_check: true,
-  # Where forge builds run. `nil` builds on this node. A named node must be connected,
-  # running this runtime, and in the `:builder` role; it must also run an identical
-  # ERTS/Elixir/architecture, because the verifier checks the artifact's runtime triple
-  # on every loading node.
-  forge_builder_node: nil,
-  # Relaxes only the builder's *role* requirement, for tests that have a real peer but
-  # not a role-shaped fleet. Connectivity and a running runtime are still required.
-  forge_builder_allow_any_role: false,
-  # Lane W's half of the same question, and unlike the two above it is a check rather than
-  # advice (docs/WASM.md D29, contract C14). `:local` — the default — forges where the effect
-  # lands, exactly as lane W always did; `:builder` forwards a forge that landed on a
+  # Where forge builds run, and it is a check rather than advice (docs/WASM.md D29,
+  # contract C14). `:local` — the default — forges where the effect
+  # lands; `:builder` forwards a forge that landed on a
   # non-builder node to a connected `:builder` and refuses by name when there is none, rather
   # than quietly building here. A `:signer` node refuses to forge under **either** setting and
   # is not configurable: a Cargo build is arbitrary code at build time, and it does not run on
@@ -60,11 +52,7 @@ config :ouroboros,
   # the same posture the Computer Use tools take, so a model is never taught a name it
   # cannot use. Read as exactly `true`: a typo leaves it shut rather than widening it.
   native_forge_tool: false,
-  coding_storage: {Jido.Storage.ETS, table: :ouroboros_coding},
   interactive_storage: {Jido.Storage.ETS, table: :ouroboros_interactive},
-  team_storage: {Jido.Storage.ETS, table: :ouroboros_teams},
-  orchestration_storage: {Jido.Storage.ETS, table: :ouroboros_orchestration},
-  control_storage: {Jido.Storage.ETS, table: :ouroboros_control},
   grants_storage: {Jido.Storage.ETS, table: :ouroboros_grants},
   permissions_storage: {Jido.Storage.ETS, table: :ouroboros_permissions},
   # Operator-authored permission rules, the highest scope `Ouroboros.Control.Permissions`
@@ -89,18 +77,11 @@ config :ouroboros,
   # Terminal entries retained per node. In-flight entries are never evicted, and every
   # read has its own smaller bound in `Ouroboros.Agent.EffectLedger`.
   effect_ledger_limit: 1_000,
-  upgrade_storage: {Jido.Storage.ETS, table: :ouroboros_upgrades},
-  release_storage: {Jido.Storage.ETS, table: :ouroboros_releases},
   capability_storage: {Jido.Storage.ETS, table: :ouroboros_capabilities},
   epoch_storage: {Jido.Storage.ETS, table: :ouroboros_forge_epochs},
-  # The forge asks this module to sign what it builds. Refusing by default means a
-  # cluster acquires a signing capability only when an operator configures one, and
-  # never because a default was convenient. Key custody belongs outside this
-  # application; see `Ouroboros.Upgrade.Forge.Signer`.
-  forge_signer: Ouroboros.Upgrade.Forge.Signer.Deny,
-  # The `:signer` node `Forge.Signer.Remote` submits artifacts to, and how long it waits.
+  # The `:signer` node a forge submits manifests to, and how long it waits.
   # `nil` means no remote signer is configured, which is what an unconfigured cluster
-  # should mean: the client refuses rather than guessing at a host.
+  # should mean: the forge refuses rather than guessing at a host.
   signing_node: nil,
   signing_call_timeout: 15_000,
   # Everything below is read on the signer node itself, by
@@ -109,14 +90,9 @@ config :ouroboros,
   # defaulted, and a `:signer` node refuses to boot without it; the key itself is never
   # configuration, it is read at boot from OUROBOROS_SIGNER_KEY_PATH.
   signer_id: nil,
-  # The independent gate applied to a full artifact before any signature exists. See
+  # The independent gate applied to a full manifest before any signature exists. See
   # `Ouroboros.Upgrade.Signing.Policy`.
   signing_policy: Ouroboros.Upgrade.Signing.Policy.Default,
-  # Whether an artifact must carry a valid evaluation spec in `metadata.forge.eval` to be
-  # signed at all. False keeps the behaviour that existed before the signing service;
-  # production should set it true, because it is the one switch that makes "this
-  # capability declared how it would be judged" a precondition of a signature.
-  signing_require_eval: false,
   # Admissions per requester per minute, refused beyond. This bounds accidents and retry
   # storms; the requester is self-reported, so it is not a bound on an adversary.
   signing_rate_limit_per_minute: 30,
@@ -129,40 +105,11 @@ config :ouroboros,
   # its journal entry was acknowledged first, so this adapter's durability is the
   # durability of the audit trail.
   signing_journal_storage: {Jido.Storage.ETS, table: :ouroboros_signing_journal},
-  # Overall deadline for one isolated build peer: boot, compile, and capability tests.
-  forge_build_timeout: 60_000,
   # Deadline for one node's evaluation run during a capability rollout. It bounds an
   # `:erpc` into `Ouroboros.Upgrade.Rollout.Evaluation`, which enforces the artifact's
   # own `budget_ms` internally; this is the outer limit on a node that stops answering,
   # and exceeding it is ambiguity, so it must be comfortably above any spec's budget.
   capability_eval_timeout: 30_000,
-  # How much slower than the version it replaces a challenger capability may run its
-  # probe set and still be promoted under `compare: true`. Wall-clock over a handful of
-  # probes on a shared VM is noisy; a budget near 1.0 rejects honest challengers.
-  capability_eval_regression_budget: 1.2,
-  # Deadline for one agent effect. Effects run off the agent's process, but they still
-  # hold a supervised task and an in-flight audit entry, so every one of them ends.
-  effect_timeout: 120_000,
-  automation_enabled: true,
-  control_enabled: false,
-  # A durable plan is heterogeneous: every step declares a kind and the scheduler
-  # resolves one executor per kind. `:orchestration_executors` names them
-  # explicitly and overrides what the application derives from
-  # `:orchestration_team_id` (the `:coding` executor) and
-  # `:orchestration_forge_options` (the `:forge` executor). A kind with no
-  # executor is a kind the scheduler refuses to accept plans for, so leaving
-  # forge options empty keeps forge steps unschedulable.
-  orchestration_executors: %{},
-  # Trusted runtime policy for `Ouroboros.Orchestration.ForgeExecutor`: which
-  # workspace source is read from, which nodes receive the capability, and which
-  # signer identity is requested. A forge step supplies only a module name and a
-  # workspace-relative path. Empty means no forge executor.
-  orchestration_forge_options: [],
-  # Whether a planner may express a forge step at all. This widens what a model
-  # can *say*, never what it can deploy: the artifact is still signed by
-  # `:forge_signer` (`Signer.Deny` by default) and still verified against each
-  # target node's trusted signers.
-  control_allow_forge_steps: false,
   # Bound for control-plane session calls (info/replay/subscribe/cancel/steer/
   # respond_approval/interrupt). `await` threads the caller's own timeout instead.
   session_call_timeout: 30_000,
@@ -196,8 +143,8 @@ config :ouroboros,
   # `ANTHROPIC_WORKSPACE_ID`. Direct Anthropic and xAI lanes are API-key-only; managed
   # Grok subscription access stays in the first-party CLI.
   native_model: "openai_codex:gpt-5.6-sol",
-  # How long a terminal coding task or interactive session is retained before the
-  # recovery sweep deletes it. `nil` disables the sweep and keeps everything.
+  # How long a terminal interactive session is retained before the recovery sweep
+  # deletes it. `nil` disables the sweep and keeps everything.
   terminal_retention_ms: 7 * 24 * 60 * 60 * 1_000,
   # How long a closed provider session may keep a dispatched turn unresolved before
   # the turn is settled as ambiguous so the session can reach its terminal state.
@@ -207,27 +154,10 @@ config :ouroboros,
       do: Ouroboros.Test.OpenAIAccountAdapter,
       else: Ouroboros.Provider.OpenAIAuth
     ),
-  grok_account_adapter:
-    if(config_env() == :test,
-      do: Ouroboros.Test.GrokAccountAdapter,
-      else: Ouroboros.Provider.GrokAuth
-    ),
-  # Language servers, owned by this node rather than by any session. Everything here is a
-  # bound; `Ouroboros.CodeIntel.Config` documents each one and refuses a value that would
-  # remove it. Nothing is installed by this runtime — a server absent from the user's PATH
-  # and from the project's own bin directories resolves to an error carrying an install
-  # hint, and that is the end of it.
-  code_intel: [
-    enabled: true,
-    # Operator additions and overrides, merged over the built-in registry by language:
-    #   [%{language: :elixir, extensions: [".ex"], root_markers: ["mix.exs"],
-    #      candidates: [%{server_id: "expert", command: "expert", args: []}]}]
-    servers: []
-  ],
-  # MCP servers the native agent may call (D4). Same posture as `:code_intel` above and
-  # for the same reason — somebody else's program on the end of a pipe — so everything
-  # here is a bound and `Ouroboros.Provider.Native.Mcp.Config` refuses a value that would
-  # remove one. Empty by default: nothing is spawned that an operator did not name.
+  # MCP servers the native agent may call (D4). Somebody else's program on the end of a
+  # pipe, so everything here is a bound and `Ouroboros.Provider.Native.Mcp.Config`
+  # refuses a value that would remove one. Empty by default: nothing is spawned that an
+  # operator did not name.
   mcp: [enabled: true],
   # Node-scope server definitions, in the Claude-compatible shape and highest precedence
   # of the three sources (node, then `~/.config/ouroboros/mcp.json`, then a *trusted*
@@ -235,60 +165,15 @@ config :ouroboros,
   #   %{"github" => %{command: "npx", args: ["-y", "@modelcontextprotocol/server-github"],
   #                   env: %{"GITHUB_TOKEN" => System.get_env("GITHUB_TOKEN")}}}
   mcp_servers: %{},
-  # The LiveView operator surface (docs/WEB.md). The opposite default to `:code_intel`
-  # and `:mcp`, and deliberately: those two are bounds on things this runtime already
+  # The LiveView operator surface (docs/WEB.md). The opposite default to `:mcp`, and
+  # deliberately: that one is a bound on something this runtime already
   # does, while this one is a port a stranger can reach, so absent configuration has to
   # mean no endpoint at all rather than a disabled one. `config/runtime.exs` is the only
   # thing that turns it on, and every other value — a bind, a port, a token path — is a
   # decision that belongs to the machine rather than to the build. Their defaults and the
   # refusals that go with them live in `Ouroboros.Web.Config`.
   web: [enabled: false],
-  # Computer Use (docs/COMPUTER_USE.md §4). Tools appear when the helper is on disk
-  # unless `OUROBOROS_COMPUTER_USE=0`. A helper is the operator opt-in (they built it).
-  # Same hardening as `:mcp` / `:code_intel`: a typo never widens a bound.
-  computer_use: [
-    enabled: true,
-    # Phase 2 ships `desktop_act`. Set false for observe-only.
-    act_enabled: true,
-    # `:bundled` resolves priv/, checkout priv/, or a sibling of `ouro`.
-    # `OUROBOROS_COMPUTER_USE_HELPER=/path` overrides it.
-    helper_path: :bundled,
-    handshake_timeout_ms: 5_000,
-    state_timeout_ms: 5_000,
-    act_timeout_ms: 10_000,
-    shutdown_grace_ms: 2_000,
-    max_frame_bytes: 8 * 1024 * 1024,
-    max_image_bytes: 2 * 1024 * 1024,
-    max_image_width: 1920,
-    max_image_height: 1920,
-    max_nodes: 1_000,
-    max_depth: 32,
-    max_snapshots_per_session: 8,
-    jpeg_quality: 80,
-    # Node deny, not remember-able (D12). The bundle ids Computer Use never drives: this
-    # runtime's own surfaces, every terminal it could shell out of, the panes that draw
-    # OS auth and secrets. `Native.Desktop.denied_app_ids/0` unions this with a baked
-    # floor, so an operator may add to it but a typo can never remove ouro or a terminal.
-    denied_app_ids: [
-      "dev.ouroboros.desktop",
-      "com.ouroboros.desktop",
-      "com.apple.Terminal",
-      "com.googlecode.iterm2",
-      "com.mitchellh.ghostty",
-      "net.kovidgoyal.kitty",
-      "com.apple.systempreferences",
-      "com.apple.loginwindow",
-      "dev.warp.Warp-Stable",
-      "org.alacritty",
-      "com.github.wez.wezterm",
-      "co.zeit.hyper",
-      "org.tabby",
-      "com.1password.1password",
-      "com.apple.keychainaccess",
-      "com.apple.SecurityAgent"
-    ]
-  ],
-  # WebAssembly containment (docs/WASM.md §7). Same posture as `:computer_use`: the helper
+  # WebAssembly containment (docs/WASM.md §7). The helper
   # on disk is the operator opt-in — `make wasm` builds it, nothing else does — and
   # everything here is a bound, so a typo falls back to the default rather than widening
   # one. `OUROBOROS_WASM_HELPER=/path` overrides `:bundled`, which resolves the application's
@@ -403,22 +288,9 @@ config :ouroboros, Ouroboros.Web.Endpoint,
   adapter: Bandit.PhoenixAdapter,
   render_errors: [formats: [html: Ouroboros.Web.ErrorHTML], layout: false]
 
-# Keep every upstream Codex execution and validation behavior, but normalize the one
-# command-start event the pinned Harness currently leaves provider-specific before its
-# journal deliberately discards raw provider records. Claude gains the one flag its
-# managed transport needs to have a human in the loop at all — `--permission-prompt-tool`
-# pointed at `ouro mcp-serve` — and is otherwise the pinned adapter.
-#
-# Harness bundles a Codex CLI adapter. Override it with an explicit removed boundary so
-# deleting Ouroboros's old override cannot silently expose `codex exec` again. `native`
-# is the in-process direct provider and the product default.
-config :jido_harness,
-  providers: %{
-    claude: Ouroboros.Provider.ClaudeAdapter,
-    codex: Ouroboros.Provider.RemovedCodex,
-    grok: Ouroboros.Provider.GrokAdapter,
-    kimi: Ouroboros.Provider.KimiAdapter,
-    opencode: Ouroboros.Provider.OpenCodeAdapter,
-    native: Ouroboros.Provider.Native
-  },
-  process_driver: Ouroboros.Provider.ProcessDriver
+# `native` — the in-process tool loop — is the only provider. `Jido.Harness.Registry`
+# still carries nine bundled vendor-CLI adapters and *merges* this map over them, so this
+# key cannot remove them; `Ouroboros.Interactive.State` refuses any provider but `:native`
+# at the boundary instead, with a named error. Registering `native` here is what makes
+# `Jido.Harness.Registry.spec(:native)` answer this runtime's own adapter.
+config :jido_harness, providers: %{native: Ouroboros.Provider.Native}
