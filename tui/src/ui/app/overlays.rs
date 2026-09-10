@@ -115,7 +115,6 @@ pub enum Command {
     PreviewCapability,
     AdmitCapability,
     Logs,
-    Machines,
     Settings,
     Help,
     /// Claude Code's `/diff`: the files this session changed, by turn.
@@ -161,7 +160,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 42] = [
+    pub const ALL: [Self; 41] = [
         Self::NewSession,
         Self::SwitchSession,
         Self::SessionDetails,
@@ -183,7 +182,6 @@ impl Command {
         Self::Nodes,
         Self::Upgrades,
         Self::Logs,
-        Self::Machines,
         Self::Settings,
         Self::Help,
         Self::ListCapabilities,
@@ -268,7 +266,6 @@ impl Command {
             Self::PreviewCapability => "Preview a capability",
             Self::AdmitCapability => "Admit a capability",
             Self::Logs => "Logs",
-            Self::Machines => "Machines",
             Self::Settings => "Settings",
             Self::Help => "Keyboard shortcuts",
             Self::ShowDiff => "Show changed files",
@@ -320,7 +317,6 @@ impl Command {
             Self::PreviewCapability => "/preview",
             Self::AdmitCapability => "/admit",
             Self::Logs => "/logs",
-            Self::Machines => "/machines",
             Self::Settings => "/settings",
             Self::Help => "?",
             Self::ShowDiff => "/diff",
@@ -511,9 +507,6 @@ pub enum Overlay {
     },
     /// This client's own preferences, beside the facts the runtime reports.
     Settings(Box<Settings>),
-    /// A guided fleet setup surface. Add-another-machine can run after an explicit
-    /// confirm; the remaining rows still copy exact commands.
-    Machines(Box<Machines>),
     Quit {
         options: Vec<(String, Quit)>,
         choice: usize,
@@ -767,11 +760,6 @@ impl App {
 
         if matches!(self.overlay, Some(Overlay::Settings(_))) {
             self.settings_key(key);
-            return;
-        }
-
-        if matches!(self.overlay, Some(Overlay::Machines(_))) {
-            self.machines_key(key);
             return;
         }
 
@@ -1055,8 +1043,7 @@ impl App {
             | Overlay::Account(_)
             | Overlay::SessionPicker { .. }
             | Overlay::New(_)
-            | Overlay::Settings(_)
-            | Overlay::Machines(_) => {}
+            | Overlay::Settings(_) => {}
         }
     }
 
@@ -1217,10 +1204,6 @@ impl App {
             Command::Logs => {
                 self.overlay = None;
                 self.select_tab(Tab::Logs);
-            }
-            Command::Machines => {
-                self.overlay = None;
-                self.open_machines();
             }
             Command::Settings => {
                 self.overlay = None;

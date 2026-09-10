@@ -22,31 +22,15 @@ impl App {
             json!({}),
             LIST_TICKS,
         );
-        if self.open_machines_on_start {
-            self.open_machines_on_start = false;
-            self.open_machines();
-            if !self.resume_add_log.is_empty() || self.resume_add_recipe.is_some() {
-                if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
-                    let mut add = AddMachine::new();
-                    add.step = AddStep::Done;
-                    add.log = std::mem::take(&mut self.resume_add_log);
-                    add.recipe = self.resume_add_recipe.take();
-                    machines.add = Some(add);
-                }
-            }
-        }
     }
 
     /// One line for the coding home: this is one machine, or how many are connected.
     pub fn machine_hint(&self) -> String {
         let summary = self.machine_summary();
         if summary.mode == "Standalone" {
-            "This is one machine. /machines adds your laptop and servers.".into()
+            "This is one machine.".into()
         } else {
-            format!(
-                "Fleet: {} connected. /machines adds or repairs others.",
-                summary.connected
-            )
+            format!("Cluster: {} connected.", summary.connected)
         }
     }
 

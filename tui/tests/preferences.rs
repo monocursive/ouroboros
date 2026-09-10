@@ -187,15 +187,8 @@ fn settings_open_from_anywhere_and_keep_the_two_kinds_of_fact_apart() {
     assert!(screen.contains("ouroboros@golden"), "{}", screen.text());
     assert!(screen.contains("127.0.0.1:4560"), "{}", screen.text());
     assert!(
-        screen.contains(
-            "machines opens a guided setup; the other rows are this client's session defaults"
-        ),
+        screen.contains("the rows below are this client's session defaults"),
         "{}",
-        screen.text()
-    );
-    assert!(
-        screen.contains("standalone · open to create or join a fleet"),
-        "the new first row says what Machines is for: {}",
         screen.text()
     );
     assert!(
@@ -230,8 +223,7 @@ fn settings_start_unset_and_a_save_writes_exactly_what_the_rows_read() {
         screen.text()
     );
 
-    // Machines is the first row. Move to provider: unset -> claude_code.
-    app.apply(key(KeyCode::Down));
+    // Provider is the first row: unset -> claude_code.
     app.apply(key(KeyCode::Right));
 
     // workspace: clear the prefilled launch dir and type one
@@ -304,7 +296,6 @@ fn esc_closes_settings_without_writing_anything() {
     app.config_path = Some(path.clone());
 
     app.apply(key(KeyCode::Char(',')));
-    app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Right));
     app.apply(key(KeyCode::Esc));
 
@@ -328,7 +319,6 @@ fn a_save_with_nowhere_to_write_says_so_instead_of_claiming_success() {
     app.config_path = None;
 
     app.apply(key(KeyCode::Char(',')));
-    app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Right));
     app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Down));
@@ -354,7 +344,6 @@ fn enter_on_a_field_row_moves_rather_than_saving() {
     let mut app = with_providers(Defaults::default());
 
     app.apply(key(KeyCode::Char(',')));
-    app.apply(key(KeyCode::Down));
     app.apply(key(KeyCode::Enter));
 
     let Some(Overlay::Settings(settings)) = &app.overlay else {
@@ -411,7 +400,7 @@ fn a_stored_provider_this_runtime_does_not_serve_is_shown_rather_than_dropped() 
 
     // Still savable as itself: the runtime is the authority on whether a start works, and
     // this client does not overrule a file the operator wrote.
-    for _ in 0..5 {
+    for _ in 0..4 {
         app.apply(key(KeyCode::Down));
     }
     app.apply(key(KeyCode::Enter));

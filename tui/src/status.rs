@@ -86,7 +86,6 @@ pub fn render_status(status: &Value) -> String {
         let _ = writeln!(page, "  {label:<12} {}", count(status, key));
     }
 
-    let _ = writeln!(page, "  release      {}", mode(status, "release"));
     let _ = writeln!(page, "  forge        {}", forge(status));
 
     page
@@ -112,14 +111,6 @@ fn count(status: &Value, key: &str) -> String {
         Some(items) => items.len().to_string(),
         None => "-".into(),
     }
-}
-
-fn mode(status: &Value, key: &str) -> String {
-    status
-        .get(key)
-        .and_then(|value| value.get("mode"))
-        .map(render_value)
-        .unwrap_or_else(|| "-".into())
 }
 
 fn forge(status: &Value) -> String {

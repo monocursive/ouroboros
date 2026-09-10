@@ -97,12 +97,11 @@ Facts the design stands on, each checked in the tree:
   `approval_requested`, `plan_updated`, `usage`, or any `provider_event` payload. The
   Rust side names every fixture on purpose (`tui/src/model.rs:3424`,
   "a fixture added upstream must be decoded here on purpose").
-- **Machine-add is client-side Rust over SSH.** The whole pipeline — probe, binary copy,
-  invitation, `ouro fleet enroll`, Tailscale guided setup — lives in
-  `tui/src/fleet_add.rs` behind the typed `AddEvent` stream (`fleet_add.rs:1116-1148`);
-  the gateway's only fleet verbs are `fleet.status`, `fleet.doctor`,
-  `fleet.forget_session_owner` (`methods.ex:212-213,292`). There is no Elixir enrolment
-  path.
+- **There is no machine-add anywhere.** Enrolment was deleted with the rest of the fleet
+  product (`docs/proposals/core.md` §3). The gateway's fleet verbs are `fleet.status`,
+  `fleet.doctor`, `fleet.tags` and `fleet.forget_session_owner`, all of which read or
+  label an existing cluster; `docs/FLEET.md` is what an operator follows to add a second
+  machine by hand.
 - **Two corrections to prior internal notes**: `fleet.sessions` does not exist
   (the fleet-wide list is `interactive.list` fanning out over `:erpc`,
   `lib/ouroboros/gateway/methods/present.ex:55-113`), and `OUROBOROS_DIST_TAILNET` is
@@ -316,18 +315,11 @@ what was read out of them.
 | New-session form: provider/model pickers with search, workspace + Browse…, sandbox, effort | `runtime.providers` / `runtime.models` (fetched on form open, never on cadence — `mod.rs:107`); a `<select>`/combobox has none of the gpui-component filtered-cache pathology, so the authoritative-choice workaround dies with gpui; **Browse… becomes `workspace.browse`** (§7) — the native picker browsed the *client's* filesystem, which was only ever correct when client and daemon shared a machine |
 | ChatGPT / Grok account and API-key cards | ChatGPT uses `account.read` / `account.login.*`. Managed Grok uses `grok.account.*` and the first-party CLI's device flow; direct xAI calls use `credentials.xai.set`. Authorization URLs are plain HTTPS links, API keys cross one operate-scope write and are never returned, and subscription tokens stay in their owning auth module/CLI. |
 | Settings | `/settings` groups the five editable new-session defaults first, subscription and direct API connections second, the detected provider/model catalogue third, and read-only boot/runtime facts last. Secret values never enter LiveView state; environment-owned configuration is shown as read-only rather than rendered as a control that cannot take effect. |
-| Machines panel: fleet name, member presence chips, add-machine form with two-step Tailscale consent, stepper, AuthUrl card | **read-only in v1**: `fleet.status` + `fleet.doctor` + presence derived from `runtime.status.connected_nodes` under the desktop's exact rules (unknown-not-offline before first status, self-is-connected — `tui/src/desktop/machines.rs:107`); the fleet profile is read server-side from the same `<data_dir>/fleet/profile.json` the daemon already validates (`cluster.ex:716-748`). **Add-machine is deferred** (D10 below) with an honest empty state naming `ouro fleet add` — the desktop's own no-fleet posture |
 | Window title, connection pill, notices | page title, a connection indicator driven by LiveView socket state, one notice slot with the same "Info is deliberately dropped" rule |
 | Keyboard: Enter/Shift-Enter, ⌘., ⌘N | same bindings via LiveView key events (browser-permitting; ⌘N may need to become a different chord — browsers own it) |
 
 **D10 — deferred, stated plainly:**
 
-- **Add-machine from the browser.** The pipeline is Rust driving `ssh`/`scp` from the
-  operator's machine (`fleet_add.rs:1`). Moving it server-side changes its trust shape:
-  the daemon would hold the SSH authority and the Tailscale auth URL relay. That is a real
-  design (a `fleet.add` verb streaming typed events — the `AddEvent` contract is already
-  renderer-agnostic), but it is its own spec, not a port. v1 web renders membership and
-  points at `ouro fleet add` / the TUI stepper.
 - **`runtime.shutdown`, the ledger and upgrade tabs, `workspace.exec`, /raw
   and /export, statusline.** TUI-only today or TUI-appropriate; none existed on the
   desktop. `[statusline]` in particular must never be ported naively — it runs a shell
@@ -550,8 +542,9 @@ PR-sized, each green before the next; W1–W2 are deliberately before any transc
   subscription cards, and private Anthropic/xAI API-key entry. The same contracts now
   have a dedicated `/settings` index: everyday defaults first, model connections second,
   catalogue visibility third, and restart-owned runtime/security facts last.
-- **W7 — machines (read-only)** ✅ **Landed**, + fleet status/doctor rendering +
-  deferred-add empty state.
+- **W7 — machines (read-only)** ✅ **Landed**, then **deleted** with the rest of the
+  fleet product (`docs/proposals/core.md` §3). What survives is the deck's presence
+  strip and `/new`'s machine picker, both from `fleet.status`.
 
   **As built:** `fleet.status` named no fleet. The saved profile has always carried a
   `name` — `ouro fleet` writes it as a required field — but `Cluster`'s roster decoder kept

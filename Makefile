@@ -13,7 +13,7 @@ CARGO ?= cargo
 RELEASE ?= ouroboros
 
 
-.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs sandbox sandbox-linux-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test dialyzer bench-local self-export golden protocol-docs release-tarball ouro fleet-e2e dist dist-linux dist-linux-clean dist-check bench-self improve-selftest
+.PHONY: help dev tui daemon daemon-stop daemon-restart web status stop reset logs sandbox sandbox-linux-test wasm wasm-guest wasm-examples wasm-sdk-check wasm-sdk-cache wasm-linux-test wasm-skew-test test dialyzer bench-local self-export golden protocol-docs release-tarball ouro bench-self improve-selftest
 
 help:
 	@echo "make dev              start a runtime from this checkout and attach (ouro --dev)"
@@ -36,11 +36,6 @@ help:
 	@echo "make protocol-docs    regenerate docs/PROTOCOL.md and fail on drift"
 	@echo "make release-tarball  MIX_ENV=prod mix release, printing the tarball path"
 	@echo "make ouro             that tarball baked into tui/target/release/ouro"
-	@echo "make fleet-e2e        build ouro, then exercise a hermetic 3-node TLS fleet"
-	@echo "make dist             ouro, copied to dist/ouro-<version>-<target triple>"
-	@echo "make dist-linux       the same, for x86_64-unknown-linux-gnu, built in Docker"
-	@echo "make dist-linux-clean drop the dist-linux image and its cache volumes"
-	@echo "make dist-check       install.sh against a local fixture; release.yml structure"
 	@echo "make sandbox          build ouro-sandbox into priv/sandbox/ (Linux sandbox helper)"
 	@echo "make sandbox-linux-test  prove the sandbox helper enforces, in a Linux container"
 	@echo "make wasm-linux-test     prove the wasm suites under bubblewrap, in a Linux container"
@@ -285,16 +280,6 @@ improve-selftest:
 	@echo "==> improve-selftest: the outer loop against a shim client (no key, no spend)"
 	./bench/self/improve-selftest.sh
 
-# Deliberately not part of `make test`, for the same reason `fleet-e2e` is not: it needs
-# tools `make test` must not require. The install.sh half needs only `sh` and a sha256
-# tool and would be safe there; the release.yml half needs a YAML parser (python3 with
-# PyYAML, or ruby), and a release whose four native runners fail because one of them lacks
-# PyYAML is a worse outcome than a check somebody has to type. See docs/DISTRIBUTION.md §7.
-dist-check:
-	@echo "==> dist-check: install.sh against a local fixture release, then release.yml"
-	sh scripts/test-install.sh
-	sh scripts/check-release-workflow.sh
-
 # The fixtures are the seam between two toolchains that cannot call each other's tests, so
 # a regeneration that changes bytes is a protocol change and has to be committed as one.
 golden:
@@ -316,36 +301,11 @@ release-tarball: sandbox wasm
 	@ls _build/prod/$(RELEASE)-*.tar.gz
 
 # ERTS is not cross-compiled: this bakes the release built on *this* machine into a client
-# for this machine. A binary for another OS or architecture is built there, which is what
-# the release workflow's matrix is for.
+# for this machine. A binary for another OS or architecture is built there, on that
+# machine, with the same target.
 ouro: release-tarball
 	@echo "==> ouro: baking that tarball into tui/target/release/ouro"
 	tarball="$$PWD/$$(ls _build/prod/$(RELEASE)-*.tar.gz | head -1)"; \
 	cd tui && OUROBOROS_RELEASE_TARBALL="$$tarball" $(CARGO) build --release --features embed
 	@ls -l tui/target/release/ouro
 
-# Deliberately not part of `make test`: this builds a packaged release and repeatedly
-# boots three real BEAM nodes. The script isolates HOME, data, ports, names, and cleanup.
-fleet-e2e: ouro
-	@echo "==> fleet-e2e: packaged three-node TLS formation and recovery"
-	OURO_E2E_BIN="$$PWD/tui/target/release/ouro" bash scripts/fleet-e2e.sh
-
-dist: ouro
-	@echo "==> dist: naming the binary for the platform it can actually run"
-	@mkdir -p dist
-	version=$$(ls _build/prod/$(RELEASE)-*.tar.gz | head -1 | sed -e 's|.*/$(RELEASE)-||' -e 's|\.tar\.gz$$||'); \
-	triple=$$(rustc -vV | sed -n 's/^host: //p'); \
-	cp tui/target/release/ouro "dist/ouro-$$version-$$triple"; \
-	echo "dist/ouro-$$version-$$triple"
-
-# The one place `dist` above cannot reach: a machine that is not the target. ERTS is not
-# cross-compiled, so this does not cross-compile — it runs the identical `make dist` on an
-# emulated x86-64 Linux, in a container pinned to the release runner's OTP, Elixir, and
-# Rust. Slow, and honestly labelled: it is the development path that gives `ouro fleet add`
-# something to copy to a Linux box, not the release path. See docs/DISTRIBUTION.md §8.
-dist-linux:
-	@echo "==> dist-linux: dist/ouro-<version>-x86_64-unknown-linux-gnu, via Docker"
-	@sh scripts/dist-linux.sh
-
-dist-linux-clean:
-	@sh scripts/dist-linux.sh --clean

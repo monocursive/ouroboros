@@ -304,7 +304,6 @@ observable after the fact via `interactive.info`, so the client reconciles by re
 | `policy.status` `{}` | `Control.PolicyPromotion.status/0` beside `Control.PolicyEvidence.count/0` (docs/SELF.md §S2) — this node's earned-widening record: `policy` (`{name, component_sha256}` or `null`), one `tools` row per promoted **`(tool, shape)`** with `allowed` beside it and the actor and the re-run's numbers each was promoted on, the newest twenty `demotions` (each naming the shape it withdrew and, for one an operator made, the actor who made it), `allowable` (`%{tool => [shape]}`) and its summary `allowable_tools`, the record's `durability`, the promotion `thresholds` and `shadow_every`, and `evidence`. A promoted row's digest is `report_sha256_as_submitted` under the name of what it is: a keyless sha256 over the submitted report's own contents, which says the file was not edited and nothing about who produced the numbers beside it. **`evidence` is the whole of what this protocol says about the corpus**: `records`, `without_document`, `unreadable`, the busiest **32** tools in `by_tool`, and `other_tools`/`other_records` for the rest — counts and never a row, bounded because the corpus's own ceiling is rows and bytes rather than distinct tool names. The corpus holds the exact document a policy component would have been shown for every request a human answered, command lines and paths included, and there is no verb that serves one. `administrator` under required audit, like every `policy.*` verb that widens (this one is `:read` and an operator keeps it). No `node` parameter: the record is a checkpoint on this machine and the corpus is a file on it, so this asks a machine rather than routing to one |
 | `fleet.status` | `Cluster.fleet_status/0` — expected/connected/offline machines, compatibility, TLS posture, optional OS/arch/tags/toolchains |
 | `fleet.tags` | Operator-scoped add/remove/list of advisory tags on a connected machine; target-owned atomic profile writer |
-| `fleet.revoke` `{artifact}` | Operate scope. Verify and durably import a CA-signed revocation, close connections authenticated by that credential, and return surviving machines' acknowledgements plus offline/pending holders. The CLI exposes this through `fleet revoke` and `fleet import-revocation`. |
 | `fleet.doctor` | `Cluster.fleet_doctor/0` — live fleet checks merged with host-local certificate/interface/port/log/service facts |
 | `ledger.list` `{principal?, effect?, status?, since_sequence?, order?, limit?, node?, fleet?}` | `Agent.EffectLedger.list/2` with its own bounds (limit 1..500, default 100). Answers `{entries, nodes}`: `nodes` names every machine that was asked and whether it answered, so an unreachable one is a row saying `unavailable` rather than a shorter list that looks complete. `fleet: true` fans out to every connected core node with the same bounded `:erpc` the `fleet.*` verbs use. Sequences are minted per node, so there is no cross-node total order; entries are ordered by `{node, sequence}` and every row carries `origin_node`. **`effect` is the kind filter** and is matched against the terms this build actually records rather than converted, so an unknown one is `-32602` naming the whole list. I1 added two: `tool_call` — one tool the native agent was admitted to run, written *before* it ran, with `attempt.subject` (the paths, a `command_sha256`, the hosts, the `mcp_server`/`mcp_tool`) and `result.status` one of `completed`/`failed`/`refused`/`timed_out` beside `duration_ms` and `output_bytes` — and `approval` — one answer a *person* gave on any provider, with `result` `{decision, scope, actor, rule_id?, origin}`. Neither ever carries a command line, a tool's arguments, or a file's contents |
 | `ledger.get` `{id, node?}` | `Agent.EffectLedger.get/2`. Unknown id → `-32007`. These are exactly the two parameters a `ledger_ref` on an event carries (§2.5), so resolving a row a client drew needs no translation |
@@ -323,7 +322,7 @@ observable after the fact via `interactive.info`, so the client reconciles by re
 
 | method | maps to |
 |---|---|
-| `fleet.forget_session_owner` `{machine, accept_state_loss: true}` | Explicit local retirement of both durable session-owner evidence planes. Requires the exact machine in the validated local profile's roster tombstones (the profile is rebuilt only from a signature-verified roster import; this node trusts it, it does not re-verify it), refuses a connected node, and syncs the checkpoint before success. Ordinary invite cancellation/import never invokes it; this removes local discoverability evidence, not remote files or credentials. |
+| `fleet.forget_session_owner` `{machine, accept_state_loss: true}` | Explicit local retirement of both durable session-owner evidence planes. Requires the exact machine in the validated local profile's roster *tombstones*, which `ouro fleet sessions forget --accept-state-loss` writes on this machine immediately before calling — the operator's statement that the machine is gone, never inferred from a disconnect. Refuses a connected node (the client then puts the member back), and syncs the checkpoint before success. A client that dies between the two leaves the tombstone standing; `ouro fleet status` and `ouro fleet doctor` name it and `ouro fleet sessions restore NAME` undoes it. This removes local discoverability evidence, not remote files or credentials. |
 | `interactive.start` `{opts}` | `InteractiveSession.start/1` — opts allowlisted (`id`, `provider`, `workspace`, `model`, `system_prompt`, `max_turns`, `event_limit`, `approval_mode`, `sandbox_mode`, `reasoning_effort`, `runtime_exposure`, `worktree`, `plan`, plus fleet `machine`/`node`). `worktree` (D7) is a boolean on **both** planes: both already carried `worktree_requested` durably and provision a `git worktree` under the data directory *before* the lease is taken, so the lease and every containment check apply to the worktree rather than the repository — only the wire could not ask for one, which is what `ouro new --worktree` needed. It is deliberately not in `interactive.configure`'s set: a workspace that has been admitted and leased cannot be moved underneath a running session. The caller-generated `id` is the durable reconciliation key; a matching retry adopts the same immutable intent and a conflicting reuse is refused. Upstream readiness wait is `:infinity` by design ([interactive_session.ex:37](../lib/ouroboros/interactive_session.ex)); this method's gateway ceiling is **120s**, answers timeout with `outcome: unknown`, and runs in its own task so it never blocks the connection. A remote owner additionally requires an explicit absolute destination `workspace`. |
 | `interactive.send_message` / `follow_up` `{id, input, turn_id?}` | idempotent via caller-supplied `turn_id`; `input` remains a legacy nonempty string or a closed `{prompt, attachments?, reasoning_effort?}` object (at most 32 nonempty attachment paths; reasoning `low`/`medium`/`high`). The session canonicalizes every attachment and accepts only an existing regular file contained by its leased workspace; traversal, absolute escape, and symlink escape are refused before Harness dispatch. Two containment limits are inherent to this layer and stated rather than implied away: a hard link inside the workspace to an outside file passes (only symlinks are resolved), and the check races the provider's eventual read (authorize-then-dispatch, no lock) |
 | `interactive.retry_turn` `{id, source_turn_id, node?}` | Retries the latest failed turn from its private checkpoint, preserving attachments and reasoning effort. Operate scope only; a stable retry id per source deduplicates repeated calls. Refuses a new retry while busy or after newer work; the original request is never reconstructed from redacted transcript text. Bounded `last_turn` outcomes in session rows keep failures visible between turns. |
@@ -1020,34 +1019,39 @@ ouro fork SESSION [--node NAME] [--at TURN] [--model SPEC]
                       branch a recorded session into a new one. The child id
                       is minted here so a lost reply can only adopt the same
                       child. --at / --model make it an experiment, not a copy
-ouro fleet create     create private CA/cookie/profile for the first machine
-ouro fleet list       Tailscale peers and SSH config hosts this Mac already knows
-ouro fleet add TARGET --machine NAME --host HOST [--via ssh|tailscale] [--binary FILE]
-                      probe over SSH, copy a matching binary when honest, copy one
-                      private invitation as a file, enroll remotely
-ouro fleet add --print-script --machine NAME --host HOST
-                      write the invitation here and print the enroll recipe
-ouro fleet enroll FILE [--delete] [--service]
-                      join from a copied invitation and start the daemon
-ouro fleet invite --machine NAME --host HOST --out FILE
-                      create one private 0600 owner-attested invitation
-ouro fleet invite cancel --machine NAME --out ROSTER
-                      stop expecting an abandoned invite and sign the new roster
-ouro fleet join FILE  import that machine's invitation
-ouro fleet sync export --out ROSTER
-ouro fleet sync import ROSTER
-                      distribute/import a newer signed membership roster
+ouro fleet create     give this machine a cluster identity: node name, private
+                      cookie, TLS materials, and a private EPMD port
+ouro fleet create --from DIR [--machine NAME] [--host HOST]
+                      make this machine the second (or third) of an existing
+                      cluster, from a privately copied `<data dir>/fleet/`: its
+                      leaf is signed by the CA in the copy and it inherits that
+                      fleet id, cookie and roster. Nothing is sent anywhere and
+                      no CA key is written here
+ouro fleet create --regenerate
+                      rewrite only this machine's generated ssl_dist.conf and
+                      vm.args from the profile it already has. The repair for a
+                      profile written by an older Ouroboros, where leave+create
+                      would mint a new fleet id, CA and cookie instead
+ouro fleet members add NAME --host HOST [--node NODE]
+ouro fleet members remove NAME
+                      edit this machine's roster, under the same lock and
+                      validation as `tag`. Not replicated: run it on each
+                      machine. A live runtime picks it up within a second
 ouro fleet sessions forget --machine NAME --accept-state-loss
-                      after signed removal + restart, irreversibly retire this
-                      gateway/data-dir's offline session-owner evidence
+                      irreversibly retire this gateway/data-dir's offline
+                      session-owner evidence for a machine that is gone
+ouro fleet sessions restore NAME
+                      put a machine this roster declares gone back into it. The
+                      retired evidence does not come back; the member does
 ouro fleet tag add|remove TAG [--machine NAME]
 ouro fleet tag list [--machine NAME]
                       edit local or connected target tags; visible next probe
-ouro fleet status     expected/connected/offline machines, OS/arch, tags and TLS posture
-ouro fleet doctor     actionable profile/network/runtime/service checks
-ouro fleet service install|status|remove
-                      generate and inspect launchd/systemd user recovery
-ouro fleet leave      remove a stopped non-owner/empty-fleet profile safely
+ouro fleet status     expected/connected/offline machines, OS/arch, tags and TLS
+                      posture, and the machines this roster declares gone
+ouro fleet doctor     actionable profile/network/runtime checks, including any
+                      fleet-directory entry `leave` would refuse to remove
+ouro fleet leave      remove this stopped machine's cluster credentials safely,
+                      including a directory whose profile.json never landed
 ouro wasm doctor [--json] [--addr HOST:PORT] [--token-file PATH]
                       WebAssembly containment readiness on a node: helper presence
                       and phase, the world and bounds, the hook-component budget,
@@ -1169,12 +1173,6 @@ ouro acp [--provider NAME] [--workspace PATH] [--approval-mode MODE]
 ouro mcp-serve        hidden. An MCP server on stdio, spawned by a vendor CLI, not
                       by a person: the permission prompt for a transport that has
                       none of its own, plus the native child and fleet tools
-ouro update [--check] [--from URL] [--allow-downgrade]
-                      replace this binary with a signed release, or refuse and
-                      say why. Needs the release public key compiled in; a build
-                      without it refuses rather than installing something it cannot
-                      check. --check prints versions and exits 10 if an update
-                      exists; --from names a mirror
 ouro version          client version, embedded release version+sha, protocol
 ouro --dev            spawn `mix run --no-halt` in cwd with gateway env (no embed);
                       defaults to an isolated ouroboros-dev data directory
@@ -2981,64 +2979,13 @@ rediscovered:
   dialog uses, workspace, approval mode, and sandbox mode — with an explicit
   `[ save ]` row (the `[ start ]` idiom) and "changed, and not written yet" stated
   until it is.
-- **Machines is a runnable fleet menu.** `/machines` (also `,` → machines) lists known
-  Tailscale/SSH hosts and the rest of the fleet actions. Enter runs the selected row
-  after any form/confirm it needs: add (SSH or an enroll recipe), create, join/enroll,
-  invite, service install, status, doctor, and roster export. A first create or add on a
-  standalone Mac restarts once. Invitation bytes never appear on screen, in argv, or in
-  the recipe. A Mac binary is never copied onto Linux. Provider sign-in stays on the
-  destination. `y` still copies the equivalent CLI.
-- **An SSH add is watched, not waited on.** It runs through
-  [`fleet_add::spawn_add`](../tui/src/fleet_add.rs), whose typed `AddEvent`s reach the App
-  as `Msg::FleetAddEvent` while the pipeline runs, instead of one log dump at the end. The
-  pane shows a stage rail — `probe → network → binary → copy → enroll → done` — over a log
-  pane carrying the pipeline's own progress lines. Exactly one terminal event ends every
-  run, and it still arrives as the `Msg::FleetJobFinished` this flow has always settled the
-  step and the recipe on, so nothing about how an add *ends* changed.
-- **The rail is moved only by typed events, never by reading the log.** `Probed`,
-  `Network`, `Install`, `Copying`, `Enrolling` and the terminal event are the only things
-  that light a stage; `Line` feeds the log pane and nothing else. This matters because the
-  pipeline currently emits `Line` plus one terminal event and the typed variants are being
-  wired to that seam separately. Under a `Line`-only stream the rail stays dark and says
-  so — "No stage reported yet — this pipeline is sending progress lines only" — and the
-  log pane is the whole surface. A rail that guessed a stage from the words in a line
-  would be reporting this client's parser, not the pipeline. Events that arrive out of
-  order never walk it backwards. `Install(DistArtifact)` names the artifact that was
-  picked, and `Network(GuidedSetup)` is called out as the guided path.
-- **Guided Tailscale enrollment is a switch plus a consent step, in that order.** The SSH
-  add form has a `tailscale setup` toggle, default off. Confirming a plan with it on does
-  not launch anything: it opens a consent step that quotes, verbatim, what will run as
-  root on the destination — the vendor's installer one-liner and `sudo -n tailscale up` —
-  says it needs passwordless sudo there, and waits. Enter agrees and starts the add with
-  `AddOptions.setup_tailscale`; Esc goes back having run nothing, and flipping the switch
-  withdraws a yes already given, because consent was to a specific plan. The first add on
-  a standalone Mac *refuses* the switch rather than dropping it: that add restarts this Mac
-  and replays a saved plan which has nowhere to record consent.
-- **The sign-in link gets its own block, and only that block.** `AuthUrl` renders under an
-  instruction line, on a line of its own so a terminal's own selection can take it — this
-  client emits no OSC 8 — with the `WaitingForAddress` countdown under it. The link is
-  time-critical and credential-bearing, so it is held for the screen and kept out of the
-  log: the pipeline also prints it as a progress line, and that copy is dropped, as is any
-  later line repeating it. It disappears when the run ends, along with the countdown.
-- **Esc on a running add asks, and then says what a cancel can actually do.** The
-  confirmation and the state after it both say the same true thing: the add stops at the
-  next pipeline boundary, and a remote call already in flight finishes first. Only the
-  driver holds the `AddHandle`; the App raises a flag and the driver calls `cancel()`. The
-  add keeps running until the pipeline itself ends, because a cancel is a request, not a
-  kill.
-- **A failed add is read where it failed.** `Failed { error, residue }` keeps the stepper
-  up with the rail stopped where it stopped, the error, each residue line under "What it
-  left behind", and the guidance that rerunning the same add converges the state — it
-  reuses whatever is already in place. Enter or Esc returns to the plan, which is how it is
-  rerun. The older paths that report only at the end (the enroll-recipe add, the
-  restart-as-a-fleet add) keep their end-only behaviour and have no rail: they have no
-  stages to show here.
-- **Machines keeps membership removal and state retirement separate.** Its guidance says
-  cancel/import preserves offline session-owner rows. Only after inspecting/exporting the
-  removed owner's state, importing the signed roster, and restarting does it show the
-  exact local `ouro fleet sessions forget --machine NAME --accept-state-loss` command.
-  Operators must repeat it for every gateway/data directory that may have observed the
-  owner; it is irreversible local evidence removal, not credential revocation.
+- **There is no Machines overlay.** The cluster is not a product this client sets up:
+  `ouro fleet create` gives one machine its identity, `ouro fleet status` and
+  `ouro fleet doctor` read it, and two machines are joined by hand with the environment
+  in `docs/FLEET.md`. The client keeps the readout — the Dashboard's cluster line, the
+  Settings facts, and the `n` dialog's machine picker — which is
+  [`ui/app/cluster.rs`](../tui/src/ui/app/cluster.rs) over `runtime.status` plus the local
+  profile. `docs/proposals/core.md` §3 records the decision.
 - **On a tty, `ouro new` shows the session id rather than printing it.** A `println!`
   would land in the alternate buffer and be overdrawn; the id is on the boot screen,
   the notice line, and the Sessions tab. `--print` and any non-tty stdout print it
@@ -3238,7 +3185,7 @@ dependency this repository already has and a second build tool is a worse tax
 than a plainer syntax. Same verbs: `dev` (deps if absent + `cargo run -- --dev`),
 `test` (mix test; cargo test/fmt/clippy, *twice* — `embed` is off by default, so
 one pass never compiles the extractor at all), `golden` (regen + `git diff
---exit-code`), `release-tarball`, `ouro`, `dist`. Recipes compute the version and
+--exit-code`), `release-tarball`, `ouro`. Recipes compute the version and
 target triple in the shell, so the file needs no GNU extensions and the version of
 record stays the name `mix release` gave the tarball.
 
@@ -3270,23 +3217,16 @@ so the GC's "newest two" means most recently *started*, not most recently
 unpacked — otherwise the release a daemon is running out of ages out from under
 it after two upgrades.
 
-- **CI matrix** builds per target — the release must be built on the exact OS/arch
-  because ERTS is not cross-compiled: `macos-15` (aarch64-apple-darwin),
-  `macos-15-intel` (x86_64-apple-darwin), `ubuntu-24.04` (x86_64-unknown-linux-gnu),
-  `ubuntu-24.04-arm` (aarch64-unknown-linux-gnu). Artifact:
-  `dist/ouro-<version>-<triple>`, e.g. `ouro-0.1.0-aarch64-apple-darwin`, produced
-  by `make dist` so CI and a laptop cannot drift. This is the same ERTS/arch
-  identity constraint the forge verifier already enforces for artifacts
-  ([mix.exs](../mix.exs) release comment).
-  The release workflow downloads the complete matrix, verifies every target,
-  writes `SHA256SUMS`, and creates or updates the tag's GitHub Release. **Status:
-  written, never executed.** The configured repository remote is not a public GitHub
-  release channel, and no tag has reached this workflow. Local builds are evidence about
-  the commands, not evidence that downloadable assets already exist. `.gitignore`
-  covers `*.tar.gz`, `/tui/target/`, and `/dist/`.
-- The supported deployment artifact is `ouro`, including generated fleet services. A
-  plain release tarball or raw-release container remains unsupported until it ships the
-  trusted native process-incarnation and recovery-lock helper too.
+- **No publishing lane.** `ouro` must be built on the exact OS/arch it runs on,
+  because ERTS is not cross-compiled; that constraint is the same one the forge
+  verifier enforces for artifacts ([mix.exs](../mix.exs) release comment). The signed
+  cross-target release pipeline, the `dist*` make targets and the `ouro update`
+  self-updater that consumed them were deleted by
+  [proposals/core.md](proposals/core.md) §3 D4: `make ouro` is the whole build, and an
+  operator copies the binary it produces to each machine.
+- The supported deployment artifact is `ouro`. A plain release tarball or raw-release
+  container remains unsupported until it ships the trusted native process-incarnation
+  and recovery-lock helper too.
 - Version skew: `hello.protocol` is the only compatibility contract. Mismatch
   → the TUI prints both versions and the one-line fix. The runtime's own
   modules may change hourly under the upgrade lanes — the protocol integer is
@@ -3361,9 +3301,7 @@ same gateway; multi-cluster attach
 profiles in `ouro`; Windows; log streaming to attach-mode clients; per-token
 scopes (today scope is per-listener, set at boot); daemon reconfiguration
 from arbitrary settings fields (a private fleet profile is the one implemented
-runtime configuration path; Machines deliberately guides secret-bearing create,
-invite, and join commands instead of executing them on an accidental keypress);
-unknown-key preservation
+runtime configuration path); unknown-key preservation
 through config saves; automated pty-level tests for the boot screen and coding home;
 graying out approval/sandbox choices a provider cannot take in the `n` dialog
 (`runtime.providers` already

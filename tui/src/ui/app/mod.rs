@@ -32,8 +32,6 @@ use rand::TryRngCore;
 use serde_json::{json, Value};
 
 use crate::config::{Config, Defaults, ONBOARDING_PROMPTS};
-use crate::fleet::Profile as FleetProfile;
-use crate::fleet_add::{AddKind, AddPlan, Intent as FleetIntent, JoinIntent};
 use crate::keymap::{Action, Keymap};
 use crate::model::{
     self, new_session_id, AccountState, ApprovalDecision, ApprovalMode, ApprovalScope, Attachment,
@@ -52,12 +50,12 @@ use super::transcript_cells;
 use super::tree::{TreeState, TreeView};
 
 mod answers;
+mod cluster;
 mod details;
 mod footer;
 mod home;
 mod keys;
 mod location;
-mod machines;
 pub mod native;
 mod overlays;
 mod session;
@@ -72,13 +70,9 @@ use session::{
     PendingReconciliationKind, SavedComposerDraft, SessionRecovery,
 };
 
+pub use cluster::{MachineChoice, MachineSecurity, MachineSummary};
 pub use footer::{SessionFacts, TranscriptFacts};
 pub use location::Location;
-pub use machines::{
-    AddFailure, AddField, AddMachine, AddMethod, AddProgress, AddStage, AddStep, FleetJob,
-    FormField, FormKind, MachineAction, MachineCandidate, MachineChoice, MachineForm,
-    MachineReport, MachineSecurity, MachineSummary, Machines, MenuItem,
-};
 pub use overlays::{
     approval_at, approval_index, approval_label, sandbox_at, sandbox_index, sandbox_label,
     AccountDialog, AccountFlow, ApprovalRule, Command, CommandPalette, Overlay, PromptKind,
@@ -183,8 +177,6 @@ pub enum Quit {
     Shutdown,
     /// Attach mode: close the socket and nothing else.
     Disconnect,
-    /// Stop this standalone runtime, create a fleet from the saved intent, then come back.
-    ApplyFleetIntent,
 }
 
 /// One request the driver should make. `Clone` because a confirmation dialog holds the
@@ -452,23 +444,6 @@ pub enum Msg {
     Scroll(isize),
     /// Text the I/O driver read back from `$VISUAL`/`$EDITOR`.
     ExternalEditor(String),
-    /// Tailscale peers and SSH config hosts, gathered by the driver when Machines opens.
-    MachineCandidates {
-        candidates: Vec<MachineCandidate>,
-        local_machine: Option<String>,
-        local_host: Option<String>,
-    },
-    /// One typed event from the add pipeline, as it happens. Drives the Machines stepper
-    /// and nothing else; the terminal event still arrives separately as
-    /// [`Msg::FleetJobFinished`], which is what settles the step and the recipe.
-    FleetAddEvent(Box<crate::fleet_add::AddEvent>),
-    /// Result of a confirmed `fleet add` / prepare job the driver ran.
-    FleetJobFinished {
-        log: Vec<String>,
-        result: Result<String, String>,
-    },
-    /// The driver declined a second machine discovery scan; one is still running.
-    MachineScanPending,
     /// The terminal reported focus in or out (CSI ?1004h). `true` is focused.
     ///
     /// Assumed focused until told otherwise: a terminal that never sends this is one
@@ -763,33 +738,13 @@ pub struct App {
     /// know where that runtime keeps its files, and a local path printed under a remote
     /// node would be a guess wearing a fact's clothes.
     pub data_dir: Option<String>,
-    /// Non-secret membership metadata loaded by the launcher from this runtime's data
-    /// directory. The App remains a pure state machine: it never reads the profile itself.
-    pub fleet_profile: Option<FleetProfile>,
-    /// Whether this data directory holds the fleet CA key. Loaded by the launcher; the
-    /// App never stats the key file.
-    pub can_invite: bool,
-    /// Ask the driver to list Tailscale/SSH hosts. Set when Machines opens.
-    scan_machines_pending: bool,
     /// Whether the "this is not the palette you asked for" sentence has been said. Once
     /// per run rather than once per operator: the reason it is true is the terminal this
     /// run was started in, and that can differ from the last one.
     theme_hint_shown: bool,
-    /// Restart-as-fleet plan. The driver writes it, then this process shuts down.
-    fleet_intent_pending: Option<FleetIntent>,
-    /// Restart-and-join plan. The driver writes the invitation path, then shuts down.
-    join_intent_pending: Option<JoinIntent>,
-    /// Confirmed add/prepare for a live fleet owner. The driver runs it.
-    fleet_job_pending: Option<FleetJob>,
-    /// The operator confirmed a cancel of the running add. The driver owns the
-    /// `AddHandle` and is the only thing that can act on it.
-    fleet_add_cancel_pending: bool,
-    /// Open Machines after a fleet-intent restart so the operator sees what happened.
-    pub open_machines_on_start: bool,
-    /// Progress from that restart's add, shown on the Add Done step.
-    pub resume_add_log: Vec<String>,
-    /// Enroll recipe from that restart's add, if the destination still needs a command.
-    pub resume_add_recipe: Option<String>,
+    /// Non-secret membership metadata loaded by the launcher from this runtime's data
+    /// directory. The App remains a pure state machine: it never reads the profile itself.
+    pub fleet_profile: Option<crate::fleet::Profile>,
     /// Whether this terminal reports `Shift+Enter` as something other than `Enter`. Set by
     /// the driver once it has asked; see [`super::keyboard_enhanced`]. The composer footers
     /// advertise the binding only where it exists, because in every other terminal that
@@ -971,17 +926,8 @@ impl App {
             keymap: Keymap::builtin(),
             config_path: None,
             data_dir: None,
-            fleet_profile: None,
-            can_invite: false,
-            scan_machines_pending: false,
             theme_hint_shown: false,
-            fleet_intent_pending: None,
-            join_intent_pending: None,
-            fleet_job_pending: None,
-            fleet_add_cancel_pending: false,
-            open_machines_on_start: false,
-            resume_add_log: Vec::new(),
-            resume_add_recipe: None,
+            fleet_profile: None,
             keyboard_enhanced: false,
             home_draft: Editor::default(),
             home_pending: false,
@@ -1549,44 +1495,6 @@ impl App {
         self.inform(hint, NoticeKind::Info);
     }
 
-    pub fn take_scan_machines(&mut self) -> bool {
-        std::mem::take(&mut self.scan_machines_pending)
-    }
-
-    pub fn take_fleet_intent(&mut self) -> Option<FleetIntent> {
-        self.fleet_intent_pending.take()
-    }
-
-    pub fn take_join_intent(&mut self) -> Option<JoinIntent> {
-        self.join_intent_pending.take()
-    }
-
-    pub fn fleet_plan_write_failed(&mut self, error: impl Into<String>) {
-        self.quit = None;
-        let error = error.into();
-        self.inform(error.clone(), NoticeKind::Error);
-        if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
-            if let Some(add) = machines.add.as_mut() {
-                add.pending = false;
-                add.step = AddStep::Confirm;
-                add.error = Some(error.clone());
-            }
-            if let Some(form) = machines.form.as_mut() {
-                form.pending = false;
-                form.step = AddStep::Confirm;
-                form.error = Some(error);
-            }
-        }
-    }
-
-    pub fn take_fleet_job(&mut self) -> Option<FleetJob> {
-        self.fleet_job_pending.take()
-    }
-
-    pub fn take_fleet_add_cancel(&mut self) -> bool {
-        std::mem::take(&mut self.fleet_add_cancel_pending)
-    }
-
     pub fn leader_pending(&self) -> bool {
         self.leader_until.is_some()
     }
@@ -1998,101 +1906,6 @@ impl App {
             }
             Msg::NotificationsDropped(total) => self.client_dropped(total),
             Msg::ExternalEditor(text) => self.apply_external_editor(text),
-            Msg::MachineScanPending => {
-                self.inform("machine discovery is already running", NoticeKind::Info);
-            }
-            Msg::MachineCandidates {
-                candidates,
-                local_machine,
-                local_host,
-            } => {
-                if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
-                    machines.candidates = candidates;
-                    machines.local_machine = local_machine.clone();
-                    machines.local_host = local_host.clone();
-                    if let Some(add) = machines.add.as_mut() {
-                        if add.owner_machine.is_empty() {
-                            if let Some(name) = local_machine {
-                                add.owner_machine = name;
-                            }
-                        }
-                        if add.owner_host.is_empty() {
-                            if let Some(host) = local_host {
-                                add.owner_host = host;
-                            }
-                        }
-                    }
-                }
-            }
-            Msg::FleetAddEvent(event) => {
-                if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
-                    if let Some(progress) =
-                        machines.add.as_mut().and_then(|add| add.progress.as_mut())
-                    {
-                        progress.apply(&event);
-                    }
-                }
-            }
-            Msg::FleetJobFinished { log, result } => {
-                if let Some(Overlay::Machines(machines)) = self.overlay.as_mut() {
-                    if let Some(add) = machines.add.as_mut() {
-                        add.pending = false;
-                        add.log = log.clone();
-                        match result.clone() {
-                            Ok(recipe) => {
-                                add.step = AddStep::Done;
-                                add.recipe = (!recipe.is_empty()).then_some(recipe);
-                                add.error = None;
-                            }
-                            Err(error) => {
-                                // A streamed add keeps the stepper up so the failure is
-                                // read where it happened, with its residue. Enter or Esc
-                                // there returns to the plan, which is how it is rerun.
-                                let streamed = add
-                                    .progress
-                                    .as_ref()
-                                    .is_some_and(|progress| progress.failure.is_some());
-                                if !streamed {
-                                    add.step = AddStep::Confirm;
-                                }
-                                add.error = Some(error);
-                            }
-                        }
-                    } else if let Some(form) = machines.form.as_mut() {
-                        form.pending = false;
-                        form.log = log.clone();
-                        match result.clone() {
-                            Ok(recipe) => {
-                                form.step = AddStep::Done;
-                                form.recipe = (!recipe.is_empty()).then_some(recipe);
-                                form.error = None;
-                            }
-                            Err(error) => {
-                                form.step = AddStep::Confirm;
-                                form.error = Some(error);
-                            }
-                        }
-                    } else if let Some(report) = machines.report.as_mut() {
-                        report.pending = false;
-                        match result {
-                            Ok(recipe) => {
-                                let mut body = log.join("\n");
-                                if !recipe.is_empty() {
-                                    if !body.is_empty() {
-                                        body.push_str("\n\n");
-                                    }
-                                    body.push_str(&recipe);
-                                }
-                                report.body = body;
-                                report.copy = (!recipe.is_empty()).then_some(recipe);
-                            }
-                            Err(error) => {
-                                report.body = error;
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -2149,9 +1962,7 @@ impl App {
         // operator stays on the conversation. Machine status is the cheap, bounded signal
         // that its owner has returned; it avoids hammering a known-offline node with
         // subscribe calls.
-        if !self.sessions.recovering.is_empty()
-            || matches!(self.overlay, Some(Overlay::Machines(_)))
-        {
+        if !self.sessions.recovering.is_empty() {
             self.issue_if_due(Tag::Status, "runtime.status", json!({}), STATUS_TICKS);
         }
     }

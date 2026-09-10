@@ -21,7 +21,7 @@ const HISTORY_LIMIT: usize = 100;
 const COMPLETED_PATH_LIMIT: usize = 36;
 pub const WORKSPACE_FILE_LIMIT: usize = 4_000;
 
-pub(crate) const COMMANDS: [(&str, &str); 46] = [
+pub(crate) const COMMANDS: [(&str, &str); 44] = [
     ("/new", "start a new coding session"),
     ("/write", "start a session that can edit files"),
     ("/switch", "switch sessions"),
@@ -78,8 +78,6 @@ pub(crate) const COMMANDS: [(&str, &str); 46] = [
         "/options",
         "new session with provider and workspace options",
     ),
-    ("/machines", "open the fleet machines menu"),
-    ("/fleet", "open the fleet machines menu"),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1085,10 +1083,10 @@ mod tests {
         }
 
         editor.clear_text();
-        editor.paste("/mach", &catalog);
+        editor.paste("/opt", &catalog);
         assert_eq!(
             editor.completion().unwrap().selected().unwrap().value,
-            "/machines"
+            "/options"
         );
     }
 

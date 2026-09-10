@@ -1,23 +1,13 @@
-//! A small, local control plane for joining Ouroboros machines.
+//! This machine's cluster identity, and the EPMD it owns while its runtime runs.
 //!
-//! The profile deliberately contains only non-secret facts. The BEAM cookie, node key,
-//! and fleet CA key live in separate mode-0600 files and are passed to the release by
-//! path. An invitation is the one exception: it is a portable, mode-0600 envelope that
-//! contains the new machine's credential and the shared cookie. It never implements
-//! `Debug`, and no command prints its contents.
-
-mod service;
-pub(crate) use service::validated_runtime_authority_env;
-#[cfg(test)]
-use service::*;
-pub use service::{
-    recovery_ready, render_service_status, service_activate, service_install, service_remove,
-    shell_quote_path, validate_ready_status, ServiceInstall, ServiceKind,
-};
-use service::{
-    service_activation, service_deactivation, service_manager_state, service_path,
-    service_recovery_check, validate_service_unit_identity, ServiceFact, ServiceManagerState,
-};
+//! `create` mints the identity — node name, private cookie, a self-signed CA and node
+//! certificate for TLS distribution, a private EPMD port — and `runtime_env` turns it
+//! into the environment the packaged release boots with. The profile deliberately
+//! contains only non-secret facts: the BEAM cookie, the node key and the CA key live in
+//! separate mode-0600 files and are passed to the release by path.
+//!
+//! Nothing here enrolls another machine. Two machines join a cluster because an operator
+//! gave them the same cookie and named each other, which is `docs/FLEET.md`.
 
 use std::collections::BTreeSet;
 use std::ffi::CStr;
@@ -35,7 +25,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, bail, Context, Result};
 use rand::{rngs::OsRng, TryRngCore};
 use rcgen::{
-    date_time_ymd, BasicConstraints, CertificateParams, CustomExtension, DistinguishedName, DnType,
+    date_time_ymd, BasicConstraints, CertificateParams, DistinguishedName, DnType,
     ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
 };
 use serde::{Deserialize, Serialize};
@@ -45,13 +35,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::runtime;
 
-pub mod revocation;
-
 pub const FLEET_DIR: &str = "fleet";
 pub const PROFILE_FILE: &str = "profile.json";
-pub const PENDING_DIR: &str = "pending";
-pub const ADD_INTENT_FILE: &str = "add-intent.json";
-pub const JOIN_INTENT_FILE: &str = "join-intent.json";
 pub const COOKIE_FILE: &str = "cookie";
 pub const CA_CERT_FILE: &str = "ca-cert.pem";
 pub const CA_KEY_FILE: &str = "ca-key.pem";
@@ -80,14 +65,8 @@ pub const DEFAULT_GATEWAY_SPAN: u16 = 1_000;
 pub const DEFAULT_EPMD_BASE: u16 = 14_000;
 pub const DEFAULT_EPMD_SPAN: u16 = 1_000;
 const PROFILE_SCHEMA: u8 = 1;
-const INVITATION_SCHEMA: u8 = 1;
-const INVITATION_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
-const INVITATION_FUTURE_SKEW_SECS: u64 = 5 * 60;
 const MAX_CA_VALIDITY_DAYS: i64 = 12 * 366;
 const MAX_NODE_VALIDITY_DAYS: i64 = 7 * 366;
-const ATTESTATION_OID: &[u64] = &[1, 3, 6, 1, 4, 1, 59_555, 1, 1];
-const ATTESTATION_OID_TEXT: &str = "1.3.6.1.4.1.59555.1.1";
-const ROSTER_SCHEMA: u8 = 1;
 const STAGING_PREFIX: &str = ".fleet.setup.";
 const EPMD_OWNER_SCHEMA: u8 = 1;
 const EPMD_START_DEADLINE: Duration = Duration::from_secs(5);
@@ -332,10 +311,16 @@ pub struct Profile {
     pub node: String,
     pub role: String,
     pub members: Vec<Member>,
-    #[serde(default = "initial_roster_revision")]
-    pub roster_revision: u64,
+    /// Machines this operator has declared permanently gone, by
+    /// `ouro fleet sessions forget --accept-state-loss`. A tombstone is the operator's
+    /// explicit statement, and it is what `fleet.forget_session_owner` requires before it
+    /// will release a dead machine's durable session-owner evidence: a partitioned but
+    /// live owner is never robbed of its sessions by an automatic rule. Defaulted so a
+    /// profile written before this field reads as "nothing declared gone".
     #[serde(default)]
     pub tombstones: Vec<Member>,
+    #[serde(default = "initial_roster_revision")]
+    pub roster_revision: u64,
     pub gateway_port: u16,
     #[serde(default = "legacy_epmd_port")]
     pub epmd_port: u16,
@@ -349,10 +334,6 @@ impl Profile {
             .iter()
             .filter(|member| member.node != self.node)
             .count()
-    }
-
-    pub fn can_invite(&self, data_dir: &Path) -> bool {
-        fleet_dir(data_dir).join(CA_KEY_FILE).is_file()
     }
 }
 
@@ -430,90 +411,6 @@ pub(crate) fn ephemeral_ports() -> Ports {
     }
 }
 
-#[derive(Deserialize, Serialize)]
-struct Invitation {
-    schema: u8,
-    created_unix: u64,
-    fleet_id: String,
-    name: String,
-    member: Member,
-    members: Vec<Member>,
-    roster_revision: u64,
-    tombstones: Vec<Member>,
-    gateway_port: u16,
-    epmd_port: u16,
-    dist_port_min: u16,
-    dist_port_max: u16,
-    ca_cert_pem: String,
-    node_cert_pem: String,
-    node_key_pem: String,
-    cookie: String,
-    attestation_pem: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    revocations: Vec<String>,
-}
-
-impl Drop for Invitation {
-    fn drop(&mut self) {
-        self.node_key_pem.zeroize();
-        self.cookie.zeroize();
-    }
-}
-
-#[derive(Deserialize, Serialize)]
-struct RosterArtifact {
-    schema: u8,
-    created_unix: u64,
-    fleet_id: String,
-    name: String,
-    revision: u64,
-    members: Vec<Member>,
-    tombstones: Vec<Member>,
-    attestation_pem: String,
-}
-
-#[derive(Serialize)]
-struct InvitationAttestedPayload<'a> {
-    schema: u8,
-    created_unix: u64,
-    fleet_id: &'a str,
-    name: &'a str,
-    member: &'a Member,
-    members: &'a [Member],
-    roster_revision: u64,
-    tombstones: &'a [Member],
-    gateway_port: u16,
-    epmd_port: u16,
-    dist_port_min: u16,
-    dist_port_max: u16,
-    ca_cert_pem: &'a str,
-    node_cert_pem: &'a str,
-    node_key_pem: &'a str,
-    cookie: &'a str,
-    #[serde(skip_serializing_if = "<[String]>::is_empty")]
-    revocations: &'a [String],
-}
-
-#[derive(Serialize)]
-struct RosterAttestedPayload<'a> {
-    schema: u8,
-    created_unix: u64,
-    fleet_id: &'a str,
-    name: &'a str,
-    revision: u64,
-    members: &'a [Member],
-    tombstones: &'a [Member],
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RosterImport {
-    pub previous_revision: u64,
-    pub revision: u64,
-    pub members: usize,
-    pub removed: Vec<Member>,
-    pub changed: bool,
-}
-
 struct Materials {
     ca_cert_pem: String,
     ca_key_pem: Option<String>,
@@ -538,44 +435,6 @@ pub fn fleet_dir(data_dir: &Path) -> PathBuf {
 
 pub fn profile_path(data_dir: &Path) -> PathBuf {
     fleet_dir(data_dir).join(PROFILE_FILE)
-}
-
-pub fn pending_dir(data_dir: &Path) -> PathBuf {
-    fleet_dir(data_dir).join(PENDING_DIR)
-}
-
-/// Where a first-run add-from-this-instance restart stores its non-secret plan.
-pub fn add_intent_path(data_dir: &Path) -> PathBuf {
-    data_dir.join(ADD_INTENT_FILE)
-}
-
-/// Where a first-run join-from-this-instance restart stores the invitation path.
-pub fn join_intent_path(data_dir: &Path) -> PathBuf {
-    data_dir.join(JOIN_INTENT_FILE)
-}
-
-/// Invitation path for one pending machine. The machine name is validated so it cannot
-/// escape the pending directory.
-pub fn pending_invite_path(data_dir: &Path, machine: &str) -> Result<PathBuf> {
-    validate_machine(machine)?;
-    Ok(pending_dir(data_dir).join(format!("{machine}.ouro")))
-}
-
-pub fn ensure_pending_dir(data_dir: &Path) -> Result<PathBuf> {
-    let dir = pending_dir(data_dir);
-    if dir
-        .try_exists()
-        .with_context(|| format!("inspecting {}", dir.display()))?
-    {
-        ensure_private_dir(&dir)?;
-    } else {
-        DirBuilder::new()
-            .mode(0o700)
-            .create(&dir)
-            .with_context(|| format!("creating private pending directory {}", dir.display()))?;
-        ensure_private_dir(&dir)?;
-    }
-    Ok(dir)
 }
 
 fn epmd_owner_path(data_dir: &Path) -> PathBuf {
@@ -650,7 +509,7 @@ pub fn load(data_dir: &Path) -> Result<Option<Profile>> {
             )
         })? {
             bail!(
-                "{} exists without {}. If you know this stopped machine's former name, clear only the recognized private files with `ouro fleet leave --discard-incomplete --machine NAME`; Ouroboros will first prove its recovery unit is inactive. Otherwise restore profile.json from backup before retrying",
+                "{} exists without {}. Restore profile.json from a backup to keep this machine's cluster identity, or run `ouro fleet leave` on this stopped machine to clear the recognized private files and start over with `ouro fleet create`",
                 fleet_dir(data_dir).display(),
                 path.display()
             );
@@ -707,6 +566,201 @@ pub fn tags(
         write_profile(data_dir, &profile)?;
     }
     validated_tags(&profile.tags)
+}
+
+/// Record, on this machine's roster only, that another machine is permanently gone.
+///
+/// This is the only writer of [`Profile::tombstones`], and the tombstone is the whole
+/// reason `fleet.forget_session_owner` has something to check. Nothing infers a tombstone
+/// from a disconnect: an unreachable peer is a peer this machine keeps retrying, so a
+/// partitioned owner is never robbed of its sessions. The operator saying
+/// `--accept-state-loss` is the statement, and this is where it is written down.
+///
+/// The member moves out of `members` into `tombstones` and the roster revision advances,
+/// so `ouro fleet status` stops expecting it. The roster is not replicated: every
+/// remaining machine needs the same command run locally.
+///
+/// Idempotent — a machine already declared gone is returned unchanged, so a retry after a
+/// failed gateway call asks the runtime again rather than refusing.
+pub fn forget_machine(data_dir: &Path, machine: &str) -> Result<Member> {
+    let _lock = lock_live_fleet_update(data_dir, "ouro fleet sessions forget")?;
+    let mut profile = load(data_dir)?.context(
+        "this machine is standalone; there is no cluster roster to declare a machine gone in",
+    )?;
+    if machine == profile.machine || machine == profile.node {
+        bail!(
+            "{machine} is this machine; `ouro fleet leave` retires this machine's own identity, and `ouro fleet sessions forget` is for a machine that is gone for good"
+        );
+    }
+    if let Some(gone) = profile
+        .tombstones
+        .iter()
+        .find(|entry| entry.machine == machine || entry.node == machine)
+    {
+        return Ok(gone.clone());
+    }
+    let Some(index) = profile
+        .members
+        .iter()
+        .position(|entry| entry.machine == machine || entry.node == machine)
+    else {
+        bail!(
+            "this machine's roster has no member named {machine}; `ouro fleet status` prints the names it knows"
+        );
+    };
+    let removed = profile.members.remove(index);
+    profile.roster_revision = profile
+        .roster_revision
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("this machine's roster revision is exhausted"))?;
+    profile.tombstones.push(removed.clone());
+    profile
+        .tombstones
+        .sort_by(|left, right| left.node.cmp(&right.node));
+    write_profile(data_dir, &profile).context(
+        "recording the machine as permanently gone before retiring its session evidence",
+    )?;
+    Ok(removed)
+}
+
+/// Undo [`forget_machine`] when the runtime refused to retire the evidence.
+///
+/// The refusal that matters is a machine that turned out to be connected: the roster must
+/// not quietly lose a member whose sessions this cluster is still answering for.
+pub fn restore_machine(data_dir: &Path, restored: &Member) -> Result<()> {
+    let _lock = lock_live_fleet_update(data_dir, "ouro fleet sessions forget")?;
+    let mut profile = load(data_dir)?
+        .context("this machine is standalone; there is no cluster roster to restore a member to")?;
+    profile
+        .tombstones
+        .retain(|entry| entry.node != restored.node);
+    if !profile
+        .members
+        .iter()
+        .any(|entry| entry.node == restored.node)
+    {
+        profile.members.push(restored.clone());
+        profile
+            .members
+            .sort_by(|left, right| left.node.cmp(&right.node));
+    }
+    profile.roster_revision = profile
+        .roster_revision
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("this machine's roster revision is exhausted"))?;
+    write_profile(data_dir, &profile).context("restoring the member the runtime refused to forget")
+}
+
+/// Add another machine to *this* machine's roster.
+///
+/// The roster is not replicated and never was: this writes `<data dir>/fleet/profile.json`
+/// here and nowhere else, so an operator runs it once per remaining machine. It exists so
+/// they never hand-edit that file — `validate_profile` refuses several shapes a careful
+/// person still gets wrong, starting with `node` not being `ouro-<machine>@<host>`.
+///
+/// It takes the same live lock `ouro fleet tag` takes rather than requiring a stopped
+/// runtime, because the running node re-reads the profile on its next reconnect sweep
+/// (about a second later) and starts dialing the new member without a restart.
+pub fn add_member(
+    data_dir: &Path,
+    machine: &str,
+    host: &str,
+    node: Option<&str>,
+) -> Result<Member> {
+    validate_machine(machine)?;
+    validate_host(host)?;
+    let added = member(machine, host);
+    if let Some(node) = node {
+        if node != added.node {
+            bail!(
+                "machine `{machine}` at `{host}` is node {}, not {node}; a node name is always `ouro-<machine>@<host>`",
+                added.node
+            );
+        }
+    }
+    let _lock = lock_live_fleet_update(data_dir, "ouro fleet members add")?;
+    let mut profile = load(data_dir)?.context(
+        "this machine is standalone; `ouro fleet create` gives it a cluster identity before it can have a roster",
+    )?;
+    if let Some(gone) = profile
+        .tombstones
+        .iter()
+        .find(|entry| entry.machine == machine || entry.node == added.node)
+    {
+        bail!(
+            "this machine's roster records {} as gone for good; `ouro fleet sessions restore {}` puts it back before it can be added again",
+            gone.node,
+            gone.machine
+        );
+    }
+    if let Some(existing) = profile
+        .members
+        .iter()
+        .find(|entry| entry.machine == machine || entry.node == added.node)
+    {
+        if existing == &added {
+            return Ok(added);
+        }
+        bail!(
+            "this machine's roster already names {} as {}; `ouro fleet members remove {}` first if its address changed",
+            existing.machine,
+            existing.node,
+            existing.machine
+        );
+    }
+    profile.members.push(added.clone());
+    profile
+        .members
+        .sort_by(|left, right| left.node.cmp(&right.node));
+    profile.roster_revision = profile
+        .roster_revision
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("this machine's roster revision is exhausted"))?;
+    write_profile(data_dir, &profile).context("adding the machine to this machine's roster")?;
+    Ok(added)
+}
+
+/// Take a machine out of *this* machine's roster.
+///
+/// This is the counterpart of `ouro fleet leave` run on that machine: it stops this one
+/// dialing it and stops `ouro fleet status` expecting it. It writes no tombstone — a
+/// tombstone is the operator saying durable session-owner evidence may be released, which
+/// is `ouro fleet sessions forget`.
+pub fn remove_member(data_dir: &Path, machine: &str) -> Result<Member> {
+    let _lock = lock_live_fleet_update(data_dir, "ouro fleet members remove")?;
+    let mut profile = load(data_dir)?
+        .context("this machine is standalone; there is no cluster roster to edit")?;
+    if machine == profile.machine || machine == profile.node {
+        bail!(
+            "{machine} is this machine; `ouro fleet leave` retires its own identity, and `ouro fleet members remove` edits this machine's view of the others"
+        );
+    }
+    let Some(index) = profile
+        .members
+        .iter()
+        .position(|entry| entry.machine == machine || entry.node == machine)
+    else {
+        if let Some(gone) = profile
+            .tombstones
+            .iter()
+            .find(|entry| entry.machine == machine || entry.node == machine)
+        {
+            bail!(
+                "this machine's roster already records {} as gone for good; nothing was changed",
+                gone.node
+            );
+        }
+        bail!(
+            "this machine's roster has no member named {machine}; `ouro fleet status` prints the names it knows"
+        );
+    };
+    let removed = profile.members.remove(index);
+    profile.roster_revision = profile
+        .roster_revision
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("this machine's roster revision is exhausted"))?;
+    write_profile(data_dir, &profile).context("taking the machine out of this machine's roster")?;
+    Ok(removed)
 }
 
 fn empty_tags() -> Value {
@@ -843,8 +897,8 @@ pub fn create(
         node: member.node.clone(),
         role: "core".to_string(),
         members: vec![member.clone()],
-        roster_revision: initial_roster_revision(),
         tombstones: Vec::new(),
+        roster_revision: initial_roster_revision(),
         gateway_port: ports
             .gateway
             .unwrap_or_else(|| default_gateway_port(&fleet_id, machine)),
@@ -855,459 +909,216 @@ pub fn create(
     ensure_runtime_ports_available(&profile)?;
 
     let materials = new_fleet_materials(&profile, &member)?;
-    install_new_profile(data_dir, &profile, &materials, &[])?;
+    install_new_profile(data_dir, &profile, &materials)?;
     Ok(profile)
 }
 
-pub fn invite(
-    data_dir: &Path,
-    machine: &str,
-    host: &str,
-    output: &Path,
-    ports: Ports,
-) -> Result<Member> {
-    invite_with_replace(data_dir, machine, host, output, ports, false)
+/// The non-secret and secret facts `create --from` reads out of a privately copied
+/// `<data dir>/fleet/` directory.
+struct SourceFleet {
+    fleet_id: String,
+    name: String,
+    members: Vec<Member>,
+    tombstones: Vec<Member>,
+    roster_revision: u64,
+    epmd_port: u16,
+    dist_port_min: u16,
+    dist_port_max: u16,
+    ca_cert_pem: String,
+    ca_key_pem: Zeroizing<String>,
+    cookie: Zeroizing<String>,
 }
 
-pub fn invite_with_replace(
+/// Read a copy of another machine's fleet directory, and refuse anything less than a
+/// complete one.
+///
+/// "Complete" is the whole point: the CA certificate alone cannot sign, a CA key alone
+/// cannot be bound to a certificate, and a cookie without the profile names no fleet. The
+/// source machine's own leaf is validated against the CA and key here, which is what
+/// proves the three files belong together before this machine trusts them.
+fn read_source_fleet(dir: &Path) -> Result<SourceFleet> {
+    ensure_private_dir(dir).with_context(|| {
+        format!(
+            "{} must be a private copy of another machine's fleet directory",
+            dir.display()
+        )
+    })?;
+    for (name, description) in [
+        (PROFILE_FILE, "copied fleet profile"),
+        (COOKIE_FILE, "copied fleet cookie"),
+        (CA_CERT_FILE, "copied fleet CA certificate"),
+        (CA_KEY_FILE, "copied fleet CA key"),
+        (NODE_CERT_FILE, "copied node certificate"),
+        (NODE_KEY_FILE, "copied node key"),
+    ] {
+        ensure_private_file(&dir.join(name), description).with_context(|| {
+            format!(
+                "{} is not a complete copy of a machine's fleet directory; copy the whole of `<data dir>/fleet/` from the first machine, privately",
+                dir.display()
+            )
+        })?;
+    }
+    let text = read_private(&dir.join(PROFILE_FILE), "copied fleet profile")?;
+    let profile: Profile = serde_json::from_str(&text).with_context(|| {
+        format!(
+            "{} is not a valid fleet profile",
+            dir.join(PROFILE_FILE).display()
+        )
+    })?;
+    validate_profile(&profile)?;
+    let cookie = Zeroizing::new(read_private(&dir.join(COOKIE_FILE), "copied fleet cookie")?);
+    validate_cookie(&cookie, &dir.join(COOKIE_FILE).display().to_string())?;
+    let ca_cert_pem = read_private(&dir.join(CA_CERT_FILE), "copied fleet CA certificate")?;
+    let ca_key_pem = Zeroizing::new(read_private(&dir.join(CA_KEY_FILE), "copied fleet CA key")?);
+    let node_cert_pem = read_private(&dir.join(NODE_CERT_FILE), "copied node certificate")?;
+    let node_key_pem = Zeroizing::new(read_private(&dir.join(NODE_KEY_FILE), "copied node key")?);
+    validate_tls_identity(
+        &member(&profile.machine, &profile.host),
+        &ca_cert_pem,
+        &node_cert_pem,
+        &node_key_pem,
+        Some(&ca_key_pem),
+        "copied fleet directory",
+    )?;
+    Ok(SourceFleet {
+        fleet_id: profile.fleet_id,
+        name: profile.name,
+        members: profile.members,
+        tombstones: profile.tombstones,
+        roster_revision: profile.roster_revision,
+        epmd_port: profile.epmd_port,
+        dist_port_min: profile.dist_port_min,
+        dist_port_max: profile.dist_port_max,
+        ca_cert_pem,
+        ca_key_pem,
+        cookie,
+    })
+}
+
+/// Give this machine an identity inside a cluster that already exists, from a private
+/// copy of the first machine's `<data dir>/fleet/`.
+///
+/// This is the file-based floor of `docs/proposals/core.md` §3 D4. The operator moves the
+/// directory the way they move any other private file; this reads the CA, the key and the
+/// cookie out of it and signs exactly one leaf — this machine's. Nothing is sent
+/// anywhere, nothing is installed, no machine is contacted, and no CA key is written
+/// here: the authority to sign a further machine stays where `ca-key.pem` already is.
+/// The first machine learns about this one when an operator runs `ouro fleet members add`
+/// on it.
+pub fn create_from(
     data_dir: &Path,
+    source_dir: &Path,
     machine: &str,
     host: &str,
-    output: &Path,
     ports: Ports,
-    replace: bool,
-) -> Result<Member> {
+) -> Result<Profile> {
     validate_machine(machine)?;
     validate_host(host)?;
     ensure_usable_ipv4_resolution(host)?;
     validate_ports(ports)?;
     ensure_data_dir(data_dir)?;
-    // Invitations may be created while the runtime is live, but their profile update
-    // must not race another invite, leave, or a stop/start transition. A concurrent
-    // command gets the spawn lock's bounded, actionable retry instead of silently
-    // overwriting an invited member.
-    let _lock = lock_live_fleet_update(data_dir, "ouro fleet invite")?;
-    let mut profile = load(data_dir)?.ok_or_else(|| {
-        anyhow!("this machine is standalone; create a fleet first with `ouro fleet create` (or add --machine/--host to override safe detection)")
-    })?;
-    validate_materials(data_dir, true)
-        .context("this machine's fleet credentials are not safe to use for an invitation")?;
+    let _lock = lock_stopped_fleet_mutation(data_dir, "ouro fleet create --from")?;
+    ensure_local_bind_address(host)?;
 
-    let ca_key_path = fleet_dir(data_dir).join(CA_KEY_FILE);
-    if !ca_key_path.try_exists()? {
-        bail!(
-            "this machine joined the fleet and does not hold its signing key; create invitations on the original machine (fleet {})",
-            profile.fleet_id
-        );
-    }
-
-    let invited = member(machine, host);
-    if revocation::entries(data_dir, &profile)?
-        .iter()
-        .any(|(node, _)| node == &invited.node)
-    {
-        bail!("this machine identity is permanently revoked; enroll the replacement under a new machine name");
-    }
-    let existing = profile
-        .members
-        .iter()
-        .find(|existing| existing.machine == invited.machine || existing.node == invited.node);
-    let replacing = match existing {
-        Some(existing) if existing == &invited && replace => true,
-        Some(existing) if existing == &invited => bail!(
-            "machine `{machine}` is already recorded in fleet {}. If that same machine lost its local fleet data, reissue it with `ouro fleet invite --machine {machine} --host {host} --out FILE --replace`. This repairs availability but does not revoke an old copied credential",
-            profile.fleet_id
-        ),
-        Some(_) if replace => bail!(
-            "--replace may only reissue the exact recorded machine name and host; `{machine}` does not match its saved identity. Rebuild the fleet to change or revoke an identity"
-        ),
-        Some(_) => bail!(
-            "machine `{machine}` conflicts with an identity already recorded in fleet {}; choose a unique machine name. Multiple local test nodes may share one host when their machine names and ports differ",
-            profile.fleet_id
-        ),
-        None if replace => bail!(
-            "--replace is only for an exact machine already recorded in this fleet; omit it to invite new machine `{machine}`"
-        ),
-        None => false,
-    };
-
-    let ca_cert_pem = read_private(
-        &fleet_dir(data_dir).join(CA_CERT_FILE),
-        "fleet CA certificate",
-    )?;
-    let mut ca_key_pem = read_private(&ca_key_path, "fleet CA key")?;
-    let mut cookie = read_private(&fleet_dir(data_dir).join(COOKIE_FILE), "fleet cookie")?;
-    validate_cookie(&cookie, "fleet cookie")?;
-    let (node_cert_pem, mut node_key_pem) = signed_node(&invited, &ca_cert_pem, &ca_key_pem)?;
-    let original_profile = profile.clone();
-    let mut members = profile.members.clone();
-    if !replacing {
-        members.push(invited.clone());
-        profile.roster_revision = profile
-            .roster_revision
-            .checked_add(1)
-            .ok_or_else(|| anyhow!("fleet roster revision is exhausted"))?;
-        profile
-            .tombstones
-            .retain(|removed| removed.machine != invited.machine && removed.node != invited.node);
-    }
-    members.sort_by(|left, right| left.node.cmp(&right.node));
-    let (dist_port_min, dist_port_max) = dist_ports(ports.dist);
-    let mut invitation = Invitation {
-        schema: INVITATION_SCHEMA,
-        created_unix: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
-        fleet_id: profile.fleet_id.clone(),
-        name: profile.name.clone(),
-        member: invited.clone(),
-        members: members.clone(),
-        roster_revision: profile.roster_revision,
-        tombstones: profile.tombstones.clone(),
-        gateway_port: ports
-            .gateway
-            .unwrap_or_else(|| default_gateway_port(&profile.fleet_id, machine)),
-        epmd_port: profile.epmd_port,
-        dist_port_min,
-        dist_port_max,
-        ca_cert_pem,
-        node_cert_pem,
-        node_key_pem: node_key_pem.clone(),
-        cookie: cookie.clone(),
-        attestation_pem: String::new(),
-        revocations: revocation::entries(data_dir, &profile)?
-            .into_iter()
-            .map(|(_, artifact)| artifact)
-            .collect(),
-    };
-    let attested = invitation_attested_payload(&invitation)?;
-    invitation.attestation_pem = signed_attestation(
-        &attested,
-        &invitation.ca_cert_pem,
-        &ca_key_pem,
-        "invitation",
-    )?;
-    validate_invitation(&invitation)
-        .context("the newly generated invitation failed its own security preflight")?;
-
-    refuse_existing_output(output, "invitation")?;
-    let mut bytes =
-        serde_json::to_vec_pretty(&invitation).context("encoding the private invitation")?;
-    // Commit expected membership before publishing the bearer credential. A crash can
-    // then leave only a visible, harmless ghost member that `invite cancel` can remove;
-    // it can never leave an untracked credential capable of connecting inward.
-    profile.members = members;
-    let publish = commit_invitation_profile_first(
-        data_dir,
-        &profile,
-        &original_profile,
-        output,
-        &bytes,
-        |path, bytes| write_private_new(path, bytes, "invitation"),
-    );
-    if let Err(error) = publish {
-        bytes.zeroize();
-        return Err(error);
-    }
-    bytes.zeroize();
-
-    ca_key_pem.zeroize();
-    cookie.zeroize();
-    node_key_pem.zeroize();
-    Ok(invited)
-}
-
-fn commit_invitation_profile_first<F>(
-    data_dir: &Path,
-    profile: &Profile,
-    original_profile: &Profile,
-    output: &Path,
-    bytes: &[u8],
-    write_output: F,
-) -> Result<()>
-where
-    F: FnOnce(&Path, &[u8]) -> Result<()>,
-{
-    write_profile(data_dir, profile)
-        .context("recording the invited machine before publishing its credential")?;
-    let Err(write_error) = write_output(output, bytes) else {
-        return Ok(());
-    };
-    let output_cleanup = cleanup_failed_private_output(output);
-    let rollback = write_profile(data_dir, original_profile);
-    match (output_cleanup, rollback) {
-        (Ok(()), Ok(())) => Err(write_error).context(
-            "publishing the invitation failed; expected membership was rolled back and no credential remains",
-        ),
-        (cleanup, rollback) => bail!(
-            "publishing the invitation failed ({write_error:#}); cleanup result: {}; profile rollback result: {}. The owner fails closed: inspect {}, run `ouro fleet status`, and do not distribute any file before retrying",
-            cleanup
-                .err()
-                .map(|error| format!("FAILED: {error:#}"))
-                .unwrap_or_else(|| "complete".into()),
-            rollback
-                .err()
-                .map(|error| format!("FAILED: {error:#}"))
-                .unwrap_or_else(|| "complete".into()),
-            output.display()
-        ),
-    }
-}
-
-/// Remove an abandoned invitation from the owner's expected topology and publish a
-/// CA-attested roster that every existing member can import. This is deliberately not
-/// named revoke: copied credentials remain trusted until the whole fleet is rotated.
-pub fn cancel_invite(
-    data_dir: &Path,
-    machine_name: &str,
-    roster_output: &Path,
-) -> Result<(Member, u64)> {
-    validate_machine(machine_name)?;
-    ensure_data_dir(data_dir)?;
-    refuse_existing_output(roster_output, "roster sync")?;
-    // Like invite, cancel changes only the saved membership file. A running runtime
-    // re-reads it on every reconnect sweep and stops dialing the canceled machine
-    // within seconds. It is serialized with lifecycle commands but remains safe while
-    // this runtime serves agents.
-    let _lock = lock_live_fleet_update(data_dir, "ouro fleet invite cancel")?;
-    let mut profile = load(data_dir)?.ok_or_else(|| {
-        anyhow!("this machine is standalone; there is no saved invitation to cancel")
-    })?;
-    validate_materials(data_dir, true).context(
-        "only the fleet owner with its valid CA signing key may cancel expected membership",
-    )?;
-    let index = profile
-        .members
-        .iter()
-        .position(|member| member.machine == machine_name)
-        .ok_or_else(|| {
-            anyhow!(
-                "machine `{machine_name}` is not recorded in {}; run `ouro fleet status` and use an exact saved machine name",
-                profile.name
-            )
-        })?;
-    if profile.members[index].node == profile.node {
-        bail!(
-            "cannot cancel this owner machine's own identity; `invite cancel` is only for an expected joined machine"
-        );
-    }
-    let original = profile.clone();
-    let removed = profile.members.remove(index);
-    profile.roster_revision = profile
-        .roster_revision
-        .checked_add(1)
-        .ok_or_else(|| anyhow!("fleet roster revision is exhausted"))?;
-    profile
-        .tombstones
-        .retain(|entry| entry.node != removed.node);
-    profile.tombstones.push(removed.clone());
-    profile
-        .tombstones
-        .sort_by(|left, right| left.node.cmp(&right.node));
-    let roster = signed_roster(data_dir, &profile)?;
-    validate_roster(
-        &roster,
-        &read_private(
-            &fleet_dir(data_dir).join(CA_CERT_FILE),
-            "fleet CA certificate",
-        )?,
-    )?;
-    let bytes = serde_json::to_vec_pretty(&roster).context("encoding the private roster sync")?;
-
-    write_profile(data_dir, &profile)
-        .context("recording the canceled invitation before publishing roster sync")?;
-    if let Err(write_error) = write_private_new(roster_output, &bytes, "roster sync") {
-        let output_cleanup = cleanup_failed_private_output(roster_output);
-        let rollback = write_profile(data_dir, &original);
-        return match (output_cleanup, rollback) {
-            (Ok(()), Ok(())) => Err(write_error).context(
-                "publishing roster sync failed; the canceled member was rolled back",
-            ),
-            (cleanup, rollback) => bail!(
-                "publishing roster sync failed ({write_error:#}); cleanup result: {}; profile rollback result: {}. Inspect {} and run `ouro fleet status` before retrying",
-                cleanup
-                    .err()
-                    .map(|error| format!("FAILED: {error:#}"))
-                    .unwrap_or_else(|| "complete".into()),
-                rollback
-                    .err()
-                    .map(|error| format!("FAILED: {error:#}"))
-                    .unwrap_or_else(|| "complete".into()),
-                roster_output.display()
-            ),
-        };
-    }
-    Ok((removed, profile.roster_revision))
-}
-
-pub fn export_roster(data_dir: &Path, output: &Path) -> Result<u64> {
-    ensure_data_dir(data_dir)?;
-    refuse_existing_output(output, "roster sync")?;
-    let _lock = lock_live_fleet_update(data_dir, "ouro fleet sync export")?;
-    let profile = load(data_dir)?
-        .ok_or_else(|| anyhow!("this machine is standalone; there is no fleet roster"))?;
-    validate_materials(data_dir, true)
-        .context("only the fleet owner with its valid CA key can sign roster sync files")?;
-    let roster = signed_roster(data_dir, &profile)?;
-    let ca_cert = read_private(
-        &fleet_dir(data_dir).join(CA_CERT_FILE),
-        "fleet CA certificate",
-    )?;
-    validate_roster(&roster, &ca_cert)?;
-    let bytes = serde_json::to_vec_pretty(&roster).context("encoding the private roster sync")?;
-    write_private_new(output, &bytes, "roster sync")?;
-    Ok(profile.roster_revision)
-}
-
-pub fn import_roster(data_dir: &Path, input: &Path) -> Result<RosterImport> {
-    ensure_data_dir(data_dir)?;
-    let _lock = lock_stopped_fleet_mutation(data_dir, "ouro fleet sync import")?;
-    let mut profile = load(data_dir)?.ok_or_else(|| {
-        anyhow!("this machine is standalone; join the fleet before importing its roster")
-    })?;
-    validate_materials(data_dir, false)?;
-    let encoded = read_private(input, "fleet roster sync")?;
-    let roster: RosterArtifact = serde_json::from_str(&encoded)
-        .with_context(|| format!("{} is not an Ouroboros roster sync", input.display()))?;
-    let ca_cert = read_private(
-        &fleet_dir(data_dir).join(CA_CERT_FILE),
-        "fleet CA certificate",
-    )?;
-    validate_roster(&roster, &ca_cert)?;
-    if roster.fleet_id != profile.fleet_id || roster.name != profile.name {
-        bail!("roster sync belongs to a different fleet; no local profile field was changed");
-    }
-    if roster.revision < profile.roster_revision {
-        bail!(
-            "roster sync revision {} is older than this machine's revision {}; refusing a signed rollback. Ask the owner for a fresh `ouro fleet sync export`",
-            roster.revision,
-            profile.roster_revision
-        );
-    }
-    if roster.revision == profile.roster_revision {
-        if roster.members != profile.members || roster.tombstones != profile.tombstones {
-            bail!(
-                "roster sync revision {} conflicts with different saved membership; rebuild/rejoin rather than guessing which signed state wins",
-                roster.revision
-            );
-        }
-        return Ok(RosterImport {
-            previous_revision: profile.roster_revision,
-            revision: profile.roster_revision,
-            members: profile.members.len(),
-            removed: Vec::new(),
-            changed: false,
-        });
-    }
-    if !roster
-        .members
-        .iter()
-        .any(|member| member.node == profile.node)
-    {
-        bail!(
-            "roster revision {} removes this machine itself. Stop and leave this machine, then ask the owner for a fresh invitation; Ouroboros will not silently rewrite its identity",
-            roster.revision
-        );
-    }
-    for member in &roster.members {
-        ensure_usable_ipv4_resolution(&member.host).with_context(|| {
-            format!(
-                "roster machine {} has an unusable private address",
-                member.machine
-            )
-        })?;
-    }
-    let removed = profile
-        .members
-        .iter()
-        .filter(|old| !roster.members.iter().any(|new| new.node == old.node))
-        .cloned()
-        .collect::<Vec<_>>();
-    let previous_revision = profile.roster_revision;
-    profile.members = roster.members;
-    profile.tombstones = roster.tombstones;
-    profile.roster_revision = roster.revision;
-    write_profile(data_dir, &profile).context("installing the newer signed fleet roster")?;
-    Ok(RosterImport {
-        previous_revision,
-        revision: profile.roster_revision,
-        members: profile.members.len(),
-        removed,
-        changed: true,
-    })
-}
-
-pub fn join(data_dir: &Path, invitation_path: &Path, ports: Ports) -> Result<Profile> {
-    validate_ports(ports)?;
-    ensure_data_dir(data_dir)?;
-    let _lock = lock_stopped_fleet_mutation(data_dir, "ouro fleet join")?;
     let final_dir = fleet_dir(data_dir);
     if final_dir
         .try_exists()
         .with_context(|| format!("inspecting {}", final_dir.display()))?
     {
         bail!(
-            "this machine already has fleet state in {}; run `ouro fleet status`, or stop it and run `ouro fleet leave` before joining",
+            "this machine already has fleet state in {}; run `ouro fleet status` instead, or stop the runtime and run `ouro fleet leave` before joining a different cluster",
             final_dir.display()
         );
     }
 
-    let mut encoded = read_private(invitation_path, "fleet invitation")?;
-    let invitation: Invitation = serde_json::from_str(&encoded).with_context(|| {
-        format!(
-            "{} is not a valid Ouroboros fleet invitation",
-            invitation_path.display()
-        )
-    })?;
-    encoded.zeroize();
-    validate_invitation(&invitation)?;
-    for member in &invitation.members {
-        ensure_usable_ipv4_resolution(&member.host).with_context(|| {
-            format!(
-                "invitation machine {} cannot use its recorded address",
-                member.machine
-            )
-        })?;
+    let source = read_source_fleet(source_dir)?;
+    let local = member(machine, host);
+    if let Some(existing) = source
+        .members
+        .iter()
+        .chain(source.tombstones.iter())
+        .find(|entry| entry.machine == machine || entry.node == local.node)
+    {
+        bail!(
+            "the copied roster already names machine `{}` as {}; `ouro fleet create --from` mints a machine that is not in it yet and will not reissue an existing one. Give this machine another `--machine` name, or move that machine's own fleet directory back to it",
+            existing.machine,
+            existing.node
+        );
     }
-    ensure_local_bind_address(&invitation.member.host).with_context(|| {
-        format!(
-            "the invitation's address for this machine ({}) is not a local private interface",
-            invitation.member.machine
-        )
-    })?;
-    ensure_epmd_port_available(&invitation.member.host, invitation.epmd_port)?;
-    let (default_min, default_max) = (invitation.dist_port_min, invitation.dist_port_max);
+
+    let mut members = source.members.clone();
+    members.push(local.clone());
+    members.sort_by(|left, right| left.node.cmp(&right.node));
+    // One cluster is one EPMD port and one distribution range: `runtime_env` publishes
+    // `ERL_EPMD_PORT` per machine and every peer dials it, so the copy's numbers are the
+    // right default. An explicit port stays available for several test nodes on one host.
+    let epmd_port = ports.epmd.unwrap_or(source.epmd_port);
+    ensure_epmd_port_available(host, epmd_port)?;
     let (dist_port_min, dist_port_max) = match ports.dist {
-        Some(port) => (port, port),
-        None => (default_min, default_max),
+        Some(_) => dist_ports(ports.dist),
+        None => (source.dist_port_min, source.dist_port_max),
     };
     let profile = Profile {
         tags: empty_tags(),
         schema: PROFILE_SCHEMA,
-        fleet_id: invitation.fleet_id.clone(),
-        name: invitation.name.clone(),
-        machine: invitation.member.machine.clone(),
-        host: invitation.member.host.clone(),
-        node: invitation.member.node.clone(),
+        fleet_id: source.fleet_id.clone(),
+        name: source.name.clone(),
+        machine: machine.to_string(),
+        host: host.to_string(),
+        node: local.node.clone(),
         role: "core".to_string(),
-        members: invitation.members.clone(),
-        roster_revision: invitation.roster_revision,
-        tombstones: invitation.tombstones.clone(),
-        gateway_port: ports.gateway.unwrap_or(invitation.gateway_port),
-        epmd_port: invitation.epmd_port,
+        members,
+        // The operator's statements about machines that are gone travel with the roster;
+        // a machine already declared gone must not come back as a member on a machine
+        // that joins later.
+        tombstones: source.tombstones.clone(),
+        roster_revision: source.roster_revision.saturating_add(1),
+        gateway_port: ports
+            .gateway
+            .unwrap_or_else(|| default_gateway_port(&source.fleet_id, machine)),
+        epmd_port,
         dist_port_min,
         dist_port_max,
     };
+    validate_profile(&profile)?;
     ensure_runtime_ports_available(&profile)?;
-    let materials = Materials {
-        ca_cert_pem: invitation.ca_cert_pem.clone(),
-        ca_key_pem: None,
-        node_cert_pem: invitation.node_cert_pem.clone(),
-        node_key_pem: invitation.node_key_pem.clone(),
-        cookie: invitation.cookie.clone(),
-    };
-    install_new_profile(data_dir, &profile, &materials, &invitation.revocations)?;
+
+    let materials = joined_fleet_materials(&local, &source)?;
+    // The leaf has to satisfy the same check `runtime_env` runs before every boot, and it
+    // has to satisfy it against the copied CA bytes, not against a re-encoding of them.
+    validate_tls_identity(
+        &local,
+        &materials.ca_cert_pem,
+        &materials.node_cert_pem,
+        &materials.node_key_pem,
+        None,
+        "newly signed node credentials",
+    )?;
+    install_new_profile(data_dir, &profile, &materials)?;
+    Ok(profile)
+}
+
+/// Rewrite only the generated files from this machine's existing profile.
+///
+/// `ssl_dist.conf` and `vm.args` are the two files `validate_materials` compares
+/// byte-for-byte, and a profile written by an older Ouroboros carries a policy string
+/// this build no longer generates. The repair for that is not `leave` plus `create`:
+/// those mint a new fleet id, a new CA and a new cookie, so every other machine stops
+/// trusting this one and, with no enrollment, nothing can re-establish it. Identity, CA,
+/// cookie, members and tombstones are untouched here.
+pub fn regenerate(data_dir: &Path) -> Result<Profile> {
+    ensure_data_dir(data_dir)?;
+    let _lock = lock_stopped_fleet_mutation(data_dir, "ouro fleet create --regenerate")?;
+    let profile = load(data_dir)?.context(
+        "this machine has no cluster identity to regenerate; `ouro fleet create` mints one, and `ouro fleet create --from` mints one inside an existing cluster",
+    )?;
+    let root = fleet_dir(data_dir);
+    let (tls, vm_args) = generated_runtime_files(data_dir, &profile)?;
+    write_private_atomic(&root.join(TLS_OPTFILE), tls.as_bytes())?;
+    write_private_atomic(&root.join(VM_ARGS_FILE), vm_args.as_bytes())?;
+    validate_materials(data_dir, false).context(
+        "the regenerated policy files still do not describe a startable machine; the remaining problem is in the credentials, not in the generated files",
+    )?;
     Ok(profile)
 }
 
@@ -1317,7 +1128,7 @@ pub fn runtime_env(data_dir: &Path) -> Result<Option<Vec<(String, String)>>> {
     let staging = inspect_orphan_staging(data_dir)?;
     if !staging.is_empty() {
         bail!(
-            "{} interrupted private fleet setup director{} remain in {}. Refusing to start standalone or distributed runtime until `ouro fleet doctor` is clean; retry the intended create/join command to recover under the lifecycle lock",
+            "{} interrupted private fleet setup director{} remain in {}. Refusing to start standalone or distributed runtime until `ouro fleet doctor` is clean; retry `ouro fleet create` to recover under the lifecycle lock",
             staging.len(),
             if staging.len() == 1 { "y" } else { "ies" },
             data_dir.display()
@@ -1326,12 +1137,6 @@ pub fn runtime_env(data_dir: &Path) -> Result<Option<Vec<(String, String)>>> {
     let Some(profile) = load(data_dir)? else {
         return Ok(None);
     };
-    if revocation::entries(data_dir, &profile)?
-        .iter()
-        .any(|(node, _)| node == &profile.node)
-    {
-        bail!("this machine's fleet credential has been revoked; leave and request a new machine identity");
-    }
     validate_materials(data_dir, false)?;
     let root = fleet_dir(data_dir);
     let bind_address = resolve_fleet_ipv4(&profile.host).with_context(|| {
@@ -1391,7 +1196,7 @@ pub fn runtime_env(data_dir: &Path) -> Result<Option<Vec<(String, String)>>> {
 pub fn render_status(data_dir: &Path) -> Result<String> {
     let Some(profile) = load(data_dir)? else {
         return Ok(format!(
-            "Standalone machine\n  No fleet is configured in {}.\n\nNext: `ouro fleet create` on the first machine (safe name/address detection), or `ouro fleet join INVITE` on another.\n",
+            "Standalone machine\n  No cluster identity is configured in {}.\n\nNext: `ouro fleet create` gives this machine a node name, a private cookie and TLS materials; see docs/FLEET.md to form a cluster with a second machine.\n",
             data_dir.display()
         ));
     };
@@ -1441,11 +1246,17 @@ pub fn render_status(data_dir: &Path) -> Result<String> {
             .join(", "),
     );
     text.push('\n');
-    if profile.can_invite(data_dir) {
-        text.push_str(&format!(
-            "  authority    sole invitation/roster signer; back up {} securely (service recovery does not protect disk loss)\n",
-            fleet_dir(data_dir).display()
-        ));
+    if !profile.tombstones.is_empty() {
+        text.push_str("  gone         ");
+        text.push_str(
+            &profile
+                .tombstones
+                .iter()
+                .map(|member| member.machine.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        text.push_str(" (declared gone for good; `ouro fleet sessions restore NAME` undoes it)\n");
     }
     if !runtime_live {
         text.push_str("\nNext: `ouro daemon`. It will keep retrying machines that start later.\n");
@@ -1459,20 +1270,7 @@ pub fn render_status(data_dir: &Path) -> Result<String> {
 /// tolerant projection so an older/newer runtime can add fields without breaking this
 /// client; malformed essentials return `None` and the caller falls back to local state.
 pub fn render_live_status(data_dir: &Path, value: &Value) -> Option<String> {
-    let mut profile = load(data_dir).ok().flatten()?;
-    let revoked = value
-        .get("revoked_nodes")
-        .and_then(Value::as_array)
-        .map(|nodes| {
-            nodes
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_default();
-    profile
-        .members
-        .retain(|member| !revoked.contains(member.node.as_str()));
+    let profile = load(data_dir).ok().flatten()?;
     let summary = value.get("summary")?;
     let reported_expected = summary.get("expected")?.as_u64()?;
     let connected = summary.get("connected")?.as_u64()?;
@@ -1565,9 +1363,7 @@ pub fn render_live_status(data_dir: &Path, value: &Value) -> Option<String> {
             "  {marker} {name:<18} {state:<10} {role:<8} {node}\n"
         ));
         text.push_str(&format!("      {}\n", render_machine_facts(machine)));
-        if machine.get("revoked?").and_then(Value::as_bool) == Some(true) {
-            text.push_str("      credential permanently revoked; TLS access refused\n");
-        } else if state == "offline" {
+        if state == "offline" {
             let retry = if machine.get("expected?").and_then(Value::as_bool) == Some(false) {
                 "not in the active roster"
             } else {
@@ -1592,12 +1388,22 @@ pub fn render_live_status(data_dir: &Path, value: &Value) -> Option<String> {
             "      not joined yet; it can connect inward now, and this machine loads it as an outbound seed on its next restart\n",
         );
     }
-    if profile.can_invite(data_dir) {
+    // A declared-gone machine is out of `members`, so neither the local roster nor the
+    // live directory mentions it. Printing it is the only way an operator can see that a
+    // `sessions forget` — or a client that died halfway through one — happened at all.
+    for gone in &profile.tombstones {
         text.push_str(&format!(
-            "\nAuthority: this is the sole invitation/roster signer. Back up {} securely; service recovery does not protect disk loss.\n",
-            fleet_dir(data_dir).display()
+            "  ✕ {:<18} {:<10} {:<8} {}\n",
+            gone.machine, "gone", "declared", gone.node
         ));
+        text.push_str(
+            "      declared gone for good on this machine; `ouro fleet sessions restore NAME` undoes it\n",
+        );
     }
+    text.push_str(&format!(
+        "\nAuthority: this machine's credentials cannot be reissued from anywhere else. Back up {} securely.\n",
+        fleet_dir(data_dir).display()
+    ));
     text.push_str("\nUse `ouro new --machine NAME --provider PROVIDER --workspace /absolute/path/on/NAME/project` to place an agent; the workspace is the destination path on that machine. Run `ouro fleet doctor` for firewall, certificate, and version guidance.\n");
     Some(text)
 }
@@ -1608,29 +1414,42 @@ pub struct DoctorReport {
     data_dir: PathBuf,
     checks: Vec<Check>,
     scope: String,
-    recovery: RecoveryReadiness,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RecoveryReadiness {
-    Active,
-    Inactive,
-    NotInstalled,
-    Unknown,
 }
 
 pub fn doctor(data_dir: &Path) -> DoctorReport {
     let mut checks = Vec::new();
-    let mut recovery = RecoveryReadiness::NotInstalled;
     match inspect_orphan_staging(data_dir) {
         Ok(staging) if staging.is_empty() => {}
         Ok(staging) => checks.push(problem(format!(
-            "{} interrupted private fleet setup {} outside the active profile. Retry the intended `ouro fleet create`/`ouro fleet join` command to clean it safely under the lifecycle lock, then rerun doctor",
+            "{} interrupted private fleet setup {} outside the active profile. Retry `ouro fleet create` to clean it safely under the lifecycle lock, then rerun doctor",
             staging.len(),
             if staging.len() == 1 { "remains" } else { "directories remain" }
         ))),
         Err(error) => checks.push(problem(format!(
             "interrupted fleet setup cannot be recovered safely: {error:#}"
+        ))),
+    }
+    // `ouro fleet leave` is the only command that removes this directory and it refuses
+    // one holding an entry it does not recognize. Naming them here is what keeps that
+    // refusal from being a silent dead end.
+    let root = fleet_dir(data_dir);
+    match root.try_exists() {
+        Ok(true) => match unrecognized_fleet_entries(&root) {
+            Ok(unknown) if unknown.is_empty() => {}
+            Ok(unknown) => checks.push(problem(format!(
+                "{} holds {} entr{} no Ouroboros command recognizes ({}). `ouro fleet leave` refuses to remove a directory containing them; move or inspect them first",
+                root.display(),
+                unknown.len(),
+                if unknown.len() == 1 { "y" } else { "ies" },
+                unknown.join(", ")
+            ))),
+            Err(error) => checks.push(problem(format!(
+                "the fleet directory cannot be listed: {error:#}"
+            ))),
+        },
+        Ok(false) => {}
+        Err(error) => checks.push(problem(format!(
+            "the fleet directory cannot be inspected: {error:#}"
         ))),
     }
     let profile = match load(data_dir) {
@@ -1817,151 +1636,34 @@ pub fn doctor(data_dir: &Path) -> DoctorReport {
             ))),
         }
 
-        if profile.can_invite(data_dir) {
+        if !profile.tombstones.is_empty() {
             checks.push(warn(format!(
-                "this is the sole invitation/roster authority. Back up {} securely; automatic service recovery cannot recover its CA key after disk loss",
-                fleet_dir(data_dir).display()
+                "this machine's roster declares {} gone for good: {}. They are out of `members`, so nothing dials them and `ouro fleet status` does not expect them; `ouro fleet sessions restore NAME` undoes one",
+                profile.tombstones.len(),
+                profile
+                    .tombstones
+                    .iter()
+                    .map(|member| member.machine.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )));
-        } else {
-            checks.push(ok(
-                "this is a joined machine; create new invitations on the owner machine",
-            ));
         }
-
-        match service_path(profile) {
-            Ok((kind, path)) if path.exists() => {
-                match ensure_private_file(&path, "recovery unit") {
-                    Ok(()) => {
-                        let identity = read_private(&path, kind.label()).and_then(|contents| {
-                            validate_service_unit_identity(kind, profile, data_dir, &contents)
-                        });
-                        match identity {
-                            Err(error) => {
-                                recovery = RecoveryReadiness::Unknown;
-                                checks.push(problem(format!(
-                                    "recovery unit drift: {error:#}. Inspect and deactivate it with `{}`, then run `ouro fleet service remove`, `ouro fleet service install`, and the newly printed activation command. Recovery is not ready until the exact current executable/data directory is restored",
-                                    service_deactivation(kind, profile, &path)
-                                )));
-                            }
-                            Ok(identity) => {
-                                checks.push(ok(format!(
-                                    "recovery unit identity matches the current ouro executable, foreground service-run, and data directory; provider CLI PATH is {}; admitted workspaces: {}; gateway bounds: {} bytes/frame and {} queued frames",
-                                    identity.provider_path,
-                                    if identity.workspace_roots.is_empty() {
-                                        "none"
-                                    } else {
-                                        &identity.workspace_roots
-                                    },
-                                    identity.gateway_max_frame,
-                                    identity.gateway_queue_limit
-                                )));
-                                checks.push(ok(
-                                    "recovery leaves HOME to the user manager and copies only PATH, AMP_CLI_PATH/GEMINI_CLI_PATH, admitted workspace roots, and gateway resource bounds; API keys and arbitrary shell variables are not copied",
-                                ));
-                                checks.push(ok(format!(
-                                    "runtime log {} is live-rotated solely by OTP after {} MiB with {} private archives (.0 newest); rotation happens after a complete event",
-                                    data_dir.join(runtime::RUNTIME_LOG_FILE).display(),
-                                    runtime::RUNTIME_LOG_MAX_BYTES / (1024 * 1024),
-                                    runtime::RUNTIME_LOG_BACKUPS
-                                )));
-                                checks.push(ok(format!(
-                                    "bootstrap/VM/crash log {} is rotated before a managed start after {} MiB with {} private backups; raw output in one uninterrupted run may exceed that threshold",
-                                    data_dir.join(runtime::DAEMON_LOG_FILE).display(),
-                                    runtime::DAEMON_LOG_MAX_BYTES / (1024 * 1024),
-                                    runtime::DAEMON_LOG_BACKUPS
-                                )));
-                                let manager = service_manager_state(kind, profile);
-                                let (active_recovery, active_check) = service_recovery_check(
-                                    kind,
-                                    profile,
-                                    &path,
-                                    data_dir,
-                                    &manager,
-                                    runtime_running,
-                                );
-                                recovery = active_recovery;
-                                checks.push(active_check);
-                                if kind == ServiceKind::SystemdUser {
-                                    match manager.enabled {
-                                        ServiceFact::Yes => checks.push(ok(
-                                            "systemd user recovery is enabled for future user sessions",
-                                        )),
-                                        ServiceFact::No => {
-                                            recovery = RecoveryReadiness::Inactive;
-                                            checks.push(warn(format!(
-                                                "systemd user recovery is not enabled; run `{}`",
-                                                service_activation(kind, profile, &path)
-                                            )))
-                                        }
-                                        ServiceFact::Unknown => {
-                                            recovery = RecoveryReadiness::Unknown;
-                                            checks.push(warn(
-                                                "systemd could not prove whether recovery is enabled; run `ouro fleet service status` and inspect the user manager",
-                                            ))
-                                        }
-                                    }
-                                    match manager.linger.unwrap_or(ServiceFact::Unknown) {
-                                        ServiceFact::Yes => checks.push(ok(
-                                            "user lingering is enabled, so systemd may start Ouroboros before login",
-                                        )),
-                                        ServiceFact::No => checks.push(warn(
-                                            "systemd recovery starts after this user logs in; optionally run `loginctl enable-linger \"$USER\"` for pre-login boot",
-                                        )),
-                                        ServiceFact::Unknown => checks.push(warn(
-                                            "pre-login systemd recovery is unknown; inspect `loginctl show-user \"$USER\" -p Linger`",
-                                        )),
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(error) => checks.push(problem(format!("recovery unit: {error:#}"))),
-                }
-            }
-            Ok((kind, path)) => {
-                let manager = service_manager_state(kind, profile);
-                if manager.active == ServiceFact::Yes {
-                    recovery = RecoveryReadiness::Unknown;
-                    checks.push(problem(format!(
-                        "the {} still has {} active even though its unit file is missing; deactivate it with `{}` before reinstalling",
-                        kind.label(),
-                        profile.machine,
-                        service_deactivation(kind, profile, &path)
-                    )));
-                } else {
-                    recovery = RecoveryReadiness::NotInstalled;
-                    checks.push(warn(
-                        "automatic login/crash recovery is not installed; use `ouro fleet service install` when this machine should run unattended",
-                    ));
-                }
-            }
-            Err(error) => checks.push(warn(format!(
-                "automatic service setup is unavailable on this platform: {error}"
-            ))),
-        }
+        checks.push(warn(format!(
+            "this machine's cluster credentials cannot be reissued from anywhere else. Back up {} securely; there is no recovery from disk loss",
+            fleet_dir(data_dir).display()
+        )));
     }
 
-    build_doctor_report(
-        data_dir,
-        checks,
-        "local profile, host, runtime, and service checks",
-        recovery,
-    )
+    build_doctor_report(data_dir, checks, "local profile, host, and runtime checks")
 }
 
-fn build_doctor_report(
-    data_dir: &Path,
-    checks: Vec<Check>,
-    scope: &str,
-    recovery: RecoveryReadiness,
-) -> DoctorReport {
+fn build_doctor_report(data_dir: &Path, checks: Vec<Check>, scope: &str) -> DoctorReport {
     let mut report = DoctorReport {
         text: String::new(),
         healthy: false,
         data_dir: data_dir.to_path_buf(),
         checks,
         scope: scope.to_string(),
-        recovery,
     };
     refresh_doctor_report(&mut report);
     report
@@ -1986,19 +1688,7 @@ fn refresh_doctor_report(report: &mut DoctorReport) {
         } else {
             "Fleet networking is locally ready; live remote compatibility and connectivity were not checked."
         };
-        let recovery = match report.recovery {
-            RecoveryReadiness::Active => "Automatic process recovery is active.",
-            RecoveryReadiness::Inactive => {
-                "Automatic process/login recovery is NOT active; activate the installed unit before relying on it."
-            }
-            RecoveryReadiness::NotInstalled => {
-                "Automatic process/login recovery is NOT installed; manual `ouro daemon` operation remains supported."
-            }
-            RecoveryReadiness::Unknown => {
-                "Automatic process/login recovery could not be verified; inspect `ouro fleet service status`."
-            }
-        };
-        text.push_str(&format!("\n{networking} {recovery}\n"));
+        text.push_str(&format!("\n{networking}\n"));
     } else {
         text.push_str(
             "\nNot ready. Fix the items marked [fix], then run `ouro fleet doctor` again. No secret values were printed.\n",
@@ -2105,32 +1795,34 @@ fn live_doctor_text(value: Option<&Value>, field: &str) -> Result<String> {
 
 /// Removes only the known fleet files, and only while no runtime owns this data dir.
 /// Unknown entries are refused before anything is deleted.
-pub fn leave(data_dir: &Path) -> Result<bool> {
-    leave_with_manager_query_and_epmd(data_dir, service_manager_state, None)
+/// What `leave` removed, so the caller can say it out loud.
+///
+/// `machine` is `None` for a directory whose `profile.json` is missing or unreadable —
+/// the state a crash between `install_new_profile`'s staging rename and its fsync leaves.
+/// `leave` is the only command that removes a fleet directory, so it has to work on that
+/// directory too; the recognized private files are removed either way and named in
+/// `removed`.
+#[derive(Debug)]
+pub struct Removal {
+    pub machine: Option<String>,
+    pub profile_readable: bool,
+    pub removed: Vec<String>,
+}
+
+pub fn leave(data_dir: &Path) -> Result<Option<Removal>> {
+    leave_with_epmd_program(data_dir, None)
 }
 
 /// Packaged CLI path: the current embedded release supplies its own EPMD control binary
 /// so cleanup never resolves a security-sensitive command through PATH.
-pub fn leave_with_epmd(data_dir: &Path, epmd_program: &Path) -> Result<bool> {
-    leave_with_manager_query_and_epmd(data_dir, service_manager_state, Some(epmd_program))
+pub fn leave_with_epmd(data_dir: &Path, epmd_program: &Path) -> Result<Option<Removal>> {
+    leave_with_epmd_program(data_dir, Some(epmd_program))
 }
 
-#[cfg(test)]
-fn leave_with_manager_query<F>(data_dir: &Path, mut manager_query: F) -> Result<bool>
-where
-    F: FnMut(ServiceKind, &Profile) -> ServiceManagerState,
-{
-    leave_with_manager_query_and_epmd(data_dir, &mut manager_query, None)
-}
-
-fn leave_with_manager_query_and_epmd<F>(
+fn leave_with_epmd_program(
     data_dir: &Path,
-    mut manager_query: F,
     epmd_program: Option<&Path>,
-) -> Result<bool>
-where
-    F: FnMut(ServiceKind, &Profile) -> ServiceManagerState,
-{
+) -> Result<Option<Removal>> {
     ensure_data_dir(data_dir)?;
     let _lock = lock_stopped_fleet_mutation(data_dir, "ouro fleet leave")?;
 
@@ -2139,133 +1831,20 @@ where
         .try_exists()
         .with_context(|| format!("inspecting {}", dir.display()))?
     {
-        return Ok(false);
+        return Ok(None);
     }
-    let profile = load(data_dir)?.ok_or_else(|| {
-        anyhow!(
-            "{} exists without a readable profile; nothing was removed",
-            dir.display()
-        )
-    })?;
-    if profile.members.len() > 1 && profile.can_invite(data_dir) {
-        bail!(
-            "{} is the only machine that can create invitations for {}. It still records {} machines, so leaving would destroy the fleet's sole signing authority. Keep this owner, or remove/rebuild the other machines and create a new fleet; authority transfer is not available yet",
-            profile.machine,
-            profile.name,
-            profile.members.len()
-        );
-    }
-    if let Ok((kind, service_path)) = service_path(&profile) {
-        let manager = manager_query(kind, &profile);
-        let installed = service_path.try_exists().with_context(|| {
-            format!(
-                "inspecting recovery unit {} before leaving",
-                service_path.display()
-            )
-        })?;
-        ensure_service_removed_before_leave(
-            kind,
-            installed,
-            &manager,
-            &service_deactivation(kind, &profile, &service_path),
-        )?;
-    }
-    retire_epmd_before_profile_removal(data_dir, Some(&profile), epmd_program)?;
-    remove_recognized_fleet_dir(&dir)?;
-    Ok(true)
-}
-
-/// Explicit recovery for a partial setup whose profile cannot be loaded. The former
-/// machine name is required so the external service unit can be found and queried before
-/// any credential disappears.
-pub fn discard_incomplete(data_dir: &Path, machine: &str) -> Result<bool> {
-    discard_incomplete_with_manager_query_and_epmd(data_dir, machine, service_manager_state, None)
-}
-
-pub fn discard_incomplete_with_epmd(
-    data_dir: &Path,
-    machine: &str,
-    epmd_program: &Path,
-) -> Result<bool> {
-    discard_incomplete_with_manager_query_and_epmd(
-        data_dir,
-        machine,
-        service_manager_state,
-        Some(epmd_program),
-    )
-}
-
-#[cfg(test)]
-fn discard_incomplete_with_manager_query<F>(
-    data_dir: &Path,
-    machine_name: &str,
-    mut manager_query: F,
-) -> Result<bool>
-where
-    F: FnMut(ServiceKind, &Profile) -> ServiceManagerState,
-{
-    discard_incomplete_with_manager_query_and_epmd(data_dir, machine_name, &mut manager_query, None)
-}
-
-fn discard_incomplete_with_manager_query_and_epmd<F>(
-    data_dir: &Path,
-    machine_name: &str,
-    mut manager_query: F,
-    epmd_program: Option<&Path>,
-) -> Result<bool>
-where
-    F: FnMut(ServiceKind, &Profile) -> ServiceManagerState,
-{
-    validate_machine(machine_name)?;
-    ensure_data_dir(data_dir)?;
-    let _lock = lock_stopped_fleet_mutation(data_dir, "ouro fleet leave --discard-incomplete")?;
-    let dir = fleet_dir(data_dir);
-    if !dir.try_exists()? {
-        return Ok(false);
-    }
-    if matches!(load(data_dir), Ok(Some(_))) {
-        bail!(
-            "this fleet profile is readable; omit --discard-incomplete and run `ouro fleet leave` so membership and signing-authority safety checks remain active"
-        );
-    }
-
-    // Only the machine name participates in OS service identity. The remaining fields
-    // are inert placeholders and are never persisted or shown.
-    let service_profile = Profile {
-        tags: empty_tags(),
-        schema: PROFILE_SCHEMA,
-        fleet_id: "000000000000000000000000".into(),
-        name: "incomplete fleet recovery".into(),
-        machine: machine_name.into(),
-        host: "127.0.0.1".into(),
-        node: format!("ouro-{machine_name}@127.0.0.1"),
-        role: "core".into(),
-        members: vec![member(machine_name, "127.0.0.1")],
-        roster_revision: initial_roster_revision(),
-        tombstones: Vec::new(),
-        gateway_port: DEFAULT_GATEWAY_BASE,
-        epmd_port: DEFAULT_EPMD_BASE,
-        dist_port_min: DEFAULT_DIST_PORT_MIN,
-        dist_port_max: DEFAULT_DIST_PORT_MAX,
-    };
-    let (kind, service_path) = service_path(&service_profile)?;
-    let manager = manager_query(kind, &service_profile);
-    let installed = service_path.try_exists().with_context(|| {
-        format!(
-            "inspecting former recovery unit {} before clearing the incomplete profile",
-            service_path.display()
-        )
-    })?;
-    ensure_service_removed_before_leave(
-        kind,
-        installed,
-        &manager,
-        &service_deactivation(kind, &service_profile, &service_path),
-    )?;
-
-    retire_epmd_before_profile_removal(data_dir, None, epmd_program)?;
-    remove_recognized_fleet_dir(&dir)?;
-    Ok(true)
+    // An unreadable profile must not lock the operator out of the one command that
+    // cleans up: every other surface refuses such a directory, so refusing here too
+    // leaves `rm -rf` as the only repair. The EPMD retirement below already accepts
+    // `None` and then trusts only the ownership marker and its lock.
+    let profile = load(data_dir).unwrap_or_default();
+    retire_epmd_before_profile_removal(data_dir, profile.as_ref(), epmd_program)?;
+    let removed = remove_recognized_fleet_dir(&dir)?;
+    Ok(Some(Removal {
+        machine: profile.as_ref().map(|profile| profile.machine.clone()),
+        profile_readable: profile.is_some(),
+        removed,
+    }))
 }
 
 fn retire_epmd_before_profile_removal(
@@ -2465,25 +2044,25 @@ fn epmd_registered_names(address: Ipv4Addr, port: u16) -> Result<Vec<String>> {
         .collect())
 }
 
-fn remove_recognized_fleet_dir(dir: &Path) -> Result<()> {
+fn remove_recognized_fleet_dir(dir: &Path) -> Result<Vec<String>> {
     ensure_private_dir(dir)?;
     let known = known_fleet_files();
     let mut present = Vec::new();
+    let mut names = Vec::new();
     let mut cluster_directory = None;
-    let mut unknown = Vec::new();
+    let unknown = unrecognized_fleet_entries(dir)?;
     for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let entry = entry?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
-            unknown.push(name.to_string_lossy().into_owned());
             continue;
         };
         if name == CLUSTER_DIRECTORY_DIR {
             cluster_directory = Some(entry.path());
-        } else if known.contains(name) || revocation::recognized_filename(name) {
+            names.push(name.to_string());
+        } else if known.contains(name) || retired_revocation_file(name) {
             present.push(entry.path());
-        } else {
-            unknown.push(name.to_string());
+            names.push(name.to_string());
         }
     }
     if !unknown.is_empty() {
@@ -2493,6 +2072,7 @@ fn remove_recognized_fleet_dir(dir: &Path) -> Result<()> {
             unknown.join(", ")
         );
     }
+    names.sort();
     // Validate the complete recognized shape before unlinking the first credential.
     // A late symlink or foreign file must leave every known secret intact.
     for path in &present {
@@ -2513,7 +2093,44 @@ fn remove_recognized_fleet_dir(dir: &Path) -> Result<()> {
     }
     fs::remove_dir(dir).with_context(|| format!("removing empty {}", dir.display()))?;
     sync_parent(dir)?;
-    Ok(())
+    Ok(names)
+}
+
+/// Entries in `<data dir>/fleet/` that no lifecycle command recognizes.
+///
+/// `leave` refuses to remove such a directory, so anything listed here is a dead end
+/// until the operator moves it: `doctor` therefore names them instead of calling the
+/// machine healthy.
+fn unrecognized_fleet_entries(dir: &Path) -> Result<Vec<String>> {
+    let known = known_fleet_files();
+    let mut unknown = Vec::new();
+    for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            unknown.push(name.to_string_lossy().into_owned());
+            continue;
+        };
+        if name == CLUSTER_DIRECTORY_DIR || known.contains(name) || retired_revocation_file(name) {
+            continue;
+        }
+        unknown.push(name.to_string());
+    }
+    unknown.sort();
+    Ok(unknown)
+}
+
+/// `revoke-<64 hex>.json`: the CA-attested revocation artifact this reduction deleted the
+/// producer of.
+///
+/// The files themselves are durable state on any machine whose lab ever revoked one —
+/// written by the previous `ouro fleet join` and by `Ouroboros.Cluster.Revocations` — and
+/// nothing else in the tree reads them any more. Recognizing the shape is what keeps
+/// `ouro fleet leave` able to retire such a machine's identity at all.
+fn retired_revocation_file(name: &str) -> bool {
+    name.strip_prefix("revoke-")
+        .and_then(|rest| rest.strip_suffix(".json"))
+        .is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 fn validate_cluster_directory(path: &Path) -> Result<Vec<PathBuf>> {
@@ -2626,31 +2243,7 @@ fn known_fleet_files() -> BTreeSet<&'static str> {
     .collect()
 }
 
-fn ensure_service_removed_before_leave(
-    kind: ServiceKind,
-    installed: bool,
-    manager: &ServiceManagerState,
-    deactivation: &str,
-) -> Result<()> {
-    let manager_not_inactive = manager.active != ServiceFact::No
-        || (kind == ServiceKind::SystemdUser && manager.enabled != ServiceFact::No);
-    if installed || manager_not_inactive {
-        bail!(
-            "fleet recovery may still start this machine (unit installed: {}; active: {}; enabled: {}). First deactivate it with `{deactivation}`, then run `ouro fleet service remove`, then retry `ouro fleet leave`. No credential was removed",
-            if installed { "yes" } else { "no" },
-            manager.active.label(),
-            manager.enabled.label()
-        );
-    }
-    Ok(())
-}
-
-fn install_new_profile(
-    data_dir: &Path,
-    profile: &Profile,
-    materials: &Materials,
-    revocations: &[String],
-) -> Result<()> {
+fn install_new_profile(data_dir: &Path, profile: &Profile, materials: &Materials) -> Result<()> {
     let final_dir = fleet_dir(data_dir);
     let staging = data_dir.join(format!(
         ".fleet.setup.{}.{}",
@@ -2679,19 +2272,6 @@ fn install_new_profile(
             &staging.join(NODE_KEY_FILE),
             materials.node_key_pem.as_bytes(),
         )?;
-        if revocations.len() > 4096 {
-            bail!("invitation has too many revocations");
-        }
-        for artifact in revocations {
-            let node = revocation::validate(artifact, &profile.fleet_id, &materials.ca_cert_pem)?;
-            if node == profile.node {
-                bail!("invitation carries a revoked local identity");
-            }
-            write_private_atomic(
-                &staging.join(revocation::filename(&node)),
-                artifact.as_bytes(),
-            )?;
-        }
         let (tls, vm_args) = generated_runtime_files(data_dir, profile)?;
         write_private_atomic(&staging.join(TLS_OPTFILE), tls.as_bytes())?;
         write_private_atomic(&staging.join(VM_ARGS_FILE), vm_args.as_bytes())?;
@@ -2897,7 +2477,6 @@ fn generated_runtime_files(data_dir: &Path, profile: &Profile) -> Result<(String
     let cert = erl_string(&root.join(NODE_CERT_FILE))?;
     let key = erl_string(&root.join(NODE_KEY_FILE))?;
     let ca = erl_string(&root.join(CA_CERT_FILE))?;
-    let policy = erl_string(&root)?;
     let optfile = erl_string(&root.join(TLS_OPTFILE))?;
     let bind_address = resolve_fleet_ipv4(&profile.host).with_context(|| {
         format!(
@@ -2907,13 +2486,30 @@ fn generated_runtime_files(data_dir: &Path, profile: &Profile) -> Result<(String
     })?;
     let [a, b, c, d] = bind_address.octets();
     let tls = format!(
-        "[\n  {{server, [{{certfile, \"{cert}\"}}, {{keyfile, \"{key}\"}}, {{cacertfile, \"{ca}\"}}, {{verify, verify_peer}}, {{fail_if_no_peer_cert, true}}, {{secure_renegotiate, true}}, {{reuse_sessions, false}}, {{session_tickets, disabled}}, {{verify_fun, {{fun 'Elixir.Ouroboros.Cluster.Revocations':verify/3, \"{policy}\"}}}}]}},\n  {{client, [{{certfile, \"{cert}\"}}, {{keyfile, \"{key}\"}}, {{cacertfile, \"{ca}\"}}, {{verify, verify_peer}}, {{secure_renegotiate, true}}, {{reuse_sessions, false}}, {{session_tickets, disabled}}, {{verify_fun, {{fun 'Elixir.Ouroboros.Cluster.Revocations':verify/3, \"{policy}\"}}}}]}}\n].\n"
+        "[\n  {{server, [{{certfile, \"{cert}\"}}, {{keyfile, \"{key}\"}}, {{cacertfile, \"{ca}\"}}, {{verify, verify_peer}}, {{fail_if_no_peer_cert, true}}, {{secure_renegotiate, true}}, {{reuse_sessions, false}}, {{session_tickets, disabled}}]}},\n  {{client, [{{certfile, \"{cert}\"}}, {{keyfile, \"{key}\"}}, {{cacertfile, \"{ca}\"}}, {{verify, verify_peer}}, {{secure_renegotiate, true}}, {{reuse_sessions, false}}, {{session_tickets, disabled}}]}}\n].\n"
     );
     let vm_args = format!(
         "## Generated by `ouro fleet`; safe to inspect (contains paths, never secrets).\n-proto_dist inet_tls\n-ssl_dist_optfile \"{optfile}\"\n-kernel inet_dist_use_interface {{{a},{b},{c},{d}}}\n-kernel inet_dist_listen_min {} inet_dist_listen_max {}\n",
         profile.dist_port_min, profile.dist_port_max
     );
     Ok((tls, vm_args))
+}
+
+/// The mutual-TLS policy the Ouroboros before this reduction generated.
+///
+/// Nothing emits this string; it exists so a profile written by that build gets a refusal
+/// that names the repair instead of one that sends its operator round a loop. It is the
+/// current policy plus a `verify_fun` in `Ouroboros.Cluster.Revocations`, the module that
+/// went with the revocation authority.
+fn previous_generated_tls(data_dir: &Path) -> Result<String> {
+    let root = fleet_dir(data_dir);
+    let cert = erl_string(&root.join(NODE_CERT_FILE))?;
+    let key = erl_string(&root.join(NODE_KEY_FILE))?;
+    let ca = erl_string(&root.join(CA_CERT_FILE))?;
+    let policy = erl_string(&root)?;
+    Ok(format!(
+        "[\n  {{server, [{{certfile, \"{cert}\"}}, {{keyfile, \"{key}\"}}, {{cacertfile, \"{ca}\"}}, {{verify, verify_peer}}, {{fail_if_no_peer_cert, true}}, {{secure_renegotiate, true}}, {{reuse_sessions, false}}, {{session_tickets, disabled}}, {{verify_fun, {{fun 'Elixir.Ouroboros.Cluster.Revocations':verify/3, \"{policy}\"}}}}]}},\n  {{client, [{{certfile, \"{cert}\"}}, {{keyfile, \"{key}\"}}, {{cacertfile, \"{ca}\"}}, {{verify, verify_peer}}, {{secure_renegotiate, true}}, {{reuse_sessions, false}}, {{session_tickets, disabled}}, {{verify_fun, {{fun 'Elixir.Ouroboros.Cluster.Revocations':verify/3, \"{policy}\"}}}}]}}\n].\n"
+    ))
 }
 
 fn new_fleet_materials(profile: &Profile, local: &Member) -> Result<Materials> {
@@ -2948,118 +2544,31 @@ fn new_fleet_materials(profile: &Profile, local: &Member) -> Result<Materials> {
     })
 }
 
-fn signed_node(member: &Member, ca_cert_pem: &str, ca_key_pem: &str) -> Result<(String, String)> {
-    let ca_key = KeyPair::from_pem(ca_key_pem).context("reading the fleet CA key")?;
-    let ca_params = CertificateParams::from_ca_cert_pem(ca_cert_pem)
-        .context("reading the fleet CA certificate")?;
+/// Mint this machine's leaf under a CA that already exists.
+///
+/// This is the same signing step `new_fleet_materials` performs for the first machine's
+/// own leaf, against a CA read out of a copied fleet directory instead of one just
+/// generated. `from_ca_cert_pem` recovers only what signing needs — the CA's subject name
+/// and its subject key identifier — so the issued leaf carries the copied CA's issuer name
+/// and authority key id and verifies against the copied CA bytes, which are what gets
+/// installed. `ca_key_pem` is deliberately `None`: this machine gets the CA certificate,
+/// never the CA key.
+fn joined_fleet_materials(local: &Member, source: &SourceFleet) -> Result<Materials> {
+    let ca_params = CertificateParams::from_ca_cert_pem(&source.ca_cert_pem)
+        .context("reading the copied fleet CA certificate")?;
+    let ca_key =
+        KeyPair::from_pem(&source.ca_key_pem).context("reading the copied fleet CA key")?;
     let ca_cert = ca_params
         .self_signed(&ca_key)
-        .context("reconstructing the fleet CA signer")?;
-    signed_node_with(member, &ca_cert, &ca_key)
-}
-
-/// Sign a canonical artifact digest with a short-purpose certificate issued by the fleet
-/// CA. rcgen intentionally does not expose raw private-key signing; a CA-issued
-/// attestation certificate gives the same cryptographic binding while keeping signing
-/// key use inside the certificate API. The attestation's fresh private key is discarded.
-fn signed_attestation(
-    payload: &[u8],
-    ca_cert_pem: &str,
-    ca_key_pem: &str,
-    label: &str,
-) -> Result<String> {
-    let ca_key = KeyPair::from_pem(ca_key_pem).context("reading the fleet CA key")?;
-    let ca_params = CertificateParams::from_ca_cert_pem(ca_cert_pem)
-        .context("reading the fleet CA certificate")?;
-    let ca_cert = ca_params
-        .self_signed(&ca_key)
-        .context("reconstructing the fleet CA signer")?;
-    let year = current_utc_year()?;
-    let mut params = CertificateParams::default();
-    params.not_before = date_time_ymd(year - 1, 1, 1);
-    params.not_after = date_time_ymd(year + 2, 1, 1);
-    params.distinguished_name = DistinguishedName::new();
-    params.distinguished_name.push(
-        DnType::CommonName,
-        format!("Ouroboros fleet {label} attestation"),
-    );
-    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-    params
-        .custom_extensions
-        .push(CustomExtension::from_oid_content(
-            ATTESTATION_OID,
-            attestation_digest_der(payload),
-        ));
-    let key = KeyPair::generate().context("generating an artifact attestation key")?;
-    params
-        .signed_by(&key, &ca_cert, &ca_key)
-        .context("signing the fleet artifact attestation")
-        .map(|certificate| certificate.pem())
-}
-
-fn attestation_digest_der(payload: &[u8]) -> Vec<u8> {
-    let digest = ring::digest::digest(&ring::digest::SHA256, payload);
-    let mut der = Vec::with_capacity(34);
-    der.extend_from_slice(&[0x04, 0x20]); // DER OCTET STRING, 32 bytes
-    der.extend_from_slice(digest.as_ref());
-    der
-}
-
-fn verify_attestation(
-    payload: &[u8],
-    attestation_pem: &str,
-    ca_cert_pem: &str,
-    description: &str,
-) -> Result<()> {
-    verify_attestation_with_expiry(payload, attestation_pem, ca_cert_pem, description, true)
-}
-
-fn verify_attestation_with_expiry(
-    payload: &[u8],
-    attestation_pem: &str,
-    ca_cert_pem: &str,
-    description: &str,
-    require_current: bool,
-) -> Result<()> {
-    let (ca_remaining, ca_pem) = parse_x509_pem(ca_cert_pem.as_bytes())
-        .map_err(|_| anyhow!("{description} CA certificate is not valid PEM"))?;
-    if ca_pem.label != "CERTIFICATE" || !ca_remaining.iter().all(u8::is_ascii_whitespace) {
-        bail!("{description} CA certificate must contain exactly one certificate PEM block");
-    }
-    let ca = ca_pem
-        .parse_x509()
-        .map_err(|_| anyhow!("{description} CA certificate is not valid X.509"))?;
-    let (remaining, pem) = parse_x509_pem(attestation_pem.as_bytes())
-        .map_err(|_| anyhow!("{description} attestation is not valid PEM"))?;
-    if pem.label != "CERTIFICATE" || !remaining.iter().all(u8::is_ascii_whitespace) {
-        bail!("{description} attestation must contain exactly one certificate PEM block");
-    }
-    let certificate = pem
-        .parse_x509()
-        .map_err(|_| anyhow!("{description} attestation is not valid X.509"))?;
-    if require_current && !certificate.validity().is_valid() {
-        bail!("{description} attestation certificate is not currently valid");
-    }
-    if certificate.is_ca() {
-        bail!("{description} attestation certificate is incorrectly marked as a CA");
-    }
-    certificate
-        .verify_signature(Some(&ca.tbs_certificate.subject_pki))
-        .map_err(|_| anyhow!("{description} fields are not attested by the fleet CA"))?;
-    let mut matching = certificate
-        .extensions()
-        .iter()
-        .filter(|extension| extension.oid.to_id_string() == ATTESTATION_OID_TEXT);
-    let extension = matching
-        .next()
-        .ok_or_else(|| anyhow!("{description} attestation is missing its payload digest"))?;
-    if matching.next().is_some() {
-        bail!("{description} attestation repeats its payload digest");
-    }
-    if extension.value != attestation_digest_der(payload) {
-        bail!("{description} fields were changed after the fleet owner signed them");
-    }
-    Ok(())
+        .context("binding the copied fleet CA certificate to its key for signing")?;
+    let (node_cert_pem, node_key_pem) = signed_node_with(local, &ca_cert, &ca_key)?;
+    Ok(Materials {
+        ca_cert_pem: source.ca_cert_pem.clone(),
+        ca_key_pem: None,
+        node_cert_pem,
+        node_key_pem,
+        cookie: source.cookie.to_string(),
+    })
 }
 
 fn signed_node_with(
@@ -3114,7 +2623,6 @@ fn validate_profile(profile: &Profile) -> Result<()> {
     if profile.members.is_empty() || !profile.members.iter().any(|m| m.node == profile.node) {
         bail!("fleet profile must include this machine in its member list");
     }
-    validate_roster_sets(&profile.members, &profile.tombstones)?;
     if profile.roster_revision == 0 {
         bail!("fleet profile roster revision must be positive");
     }
@@ -3145,6 +2653,9 @@ fn validate_profile(profile: &Profile) -> Result<()> {
                 "fleet tombstone {} has a node that does not match its name and host",
                 removed.machine
             );
+        }
+        if removed.node == profile.node {
+            bail!("fleet profile cannot tombstone the machine it belongs to");
         }
         if nodes.contains(&removed.node) || machines.contains(&removed.machine) {
             bail!(
@@ -3180,231 +2691,7 @@ fn validate_profile(profile: &Profile) -> Result<()> {
     Ok(())
 }
 
-fn invitation_attested_payload(invitation: &Invitation) -> Result<Vec<u8>> {
-    serde_json::to_vec(&InvitationAttestedPayload {
-        schema: invitation.schema,
-        created_unix: invitation.created_unix,
-        fleet_id: &invitation.fleet_id,
-        name: &invitation.name,
-        member: &invitation.member,
-        members: &invitation.members,
-        roster_revision: invitation.roster_revision,
-        tombstones: &invitation.tombstones,
-        gateway_port: invitation.gateway_port,
-        epmd_port: invitation.epmd_port,
-        dist_port_min: invitation.dist_port_min,
-        dist_port_max: invitation.dist_port_max,
-        ca_cert_pem: &invitation.ca_cert_pem,
-        node_cert_pem: &invitation.node_cert_pem,
-        node_key_pem: &invitation.node_key_pem,
-        cookie: &invitation.cookie,
-        revocations: &invitation.revocations,
-    })
-    .context("encoding the canonical invitation payload")
-}
-
-fn roster_attested_payload(roster: &RosterArtifact) -> Result<Vec<u8>> {
-    serde_json::to_vec(&RosterAttestedPayload {
-        schema: roster.schema,
-        created_unix: roster.created_unix,
-        fleet_id: &roster.fleet_id,
-        name: &roster.name,
-        revision: roster.revision,
-        members: &roster.members,
-        tombstones: &roster.tombstones,
-    })
-    .context("encoding the canonical fleet roster payload")
-}
-
-fn signed_roster(data_dir: &Path, profile: &Profile) -> Result<RosterArtifact> {
-    let ca_cert = read_private(
-        &fleet_dir(data_dir).join(CA_CERT_FILE),
-        "fleet CA certificate",
-    )?;
-    let mut ca_key = read_private(&fleet_dir(data_dir).join(CA_KEY_FILE), "fleet CA key")?;
-    let mut roster = RosterArtifact {
-        schema: ROSTER_SCHEMA,
-        created_unix: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .context("the system clock is before the Unix epoch")?
-            .as_secs(),
-        fleet_id: profile.fleet_id.clone(),
-        name: profile.name.clone(),
-        revision: profile.roster_revision,
-        members: profile.members.clone(),
-        tombstones: profile.tombstones.clone(),
-        attestation_pem: String::new(),
-    };
-    let payload = roster_attested_payload(&roster)?;
-    roster.attestation_pem = signed_attestation(&payload, &ca_cert, &ca_key, "roster")?;
-    ca_key.zeroize();
-    Ok(roster)
-}
-
-fn validate_roster(roster: &RosterArtifact, ca_cert_pem: &str) -> Result<()> {
-    let payload = roster_attested_payload(roster)?;
-    verify_attestation(
-        &payload,
-        &roster.attestation_pem,
-        ca_cert_pem,
-        "roster sync",
-    )?;
-    if roster.schema != ROSTER_SCHEMA {
-        bail!(
-            "roster schema {} is unsupported (this Ouroboros supports {})",
-            roster.schema,
-            ROSTER_SCHEMA
-        );
-    }
-    if roster.revision == 0 {
-        bail!("roster revision must be positive");
-    }
-    if roster.fleet_id.len() != 24
-        || !roster
-            .fleet_id
-            .chars()
-            .all(|character| character.is_ascii_hexdigit())
-    {
-        bail!("roster sync has an invalid fleet id");
-    }
-    validate_fleet_name(&roster.name)?;
-    validate_roster_sets(&roster.members, &roster.tombstones)?;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("the system clock is before the Unix epoch")?
-        .as_secs();
-    if roster.created_unix > now.saturating_add(INVITATION_FUTURE_SKEW_SECS) {
-        bail!("roster sync creation time is in the future; correct the clock and export it again");
-    }
-    if now.saturating_sub(roster.created_unix) > INVITATION_MAX_AGE_SECS {
-        bail!(
-            "roster sync is older than 7 days; ask the owner for a fresh `ouro fleet sync export`"
-        );
-    }
-    Ok(())
-}
-
-fn validate_roster_sets(members: &[Member], tombstones: &[Member]) -> Result<()> {
-    if members.is_empty() {
-        bail!("fleet roster cannot be empty");
-    }
-    let mut nodes = BTreeSet::new();
-    let mut machines = BTreeSet::new();
-    for member in members {
-        validate_machine(&member.machine)?;
-        validate_host(&member.host)?;
-        if member.node != self::member(&member.machine, &member.host).node {
-            bail!(
-                "roster node {} does not match its machine and host",
-                member.node
-            );
-        }
-        if !nodes.insert(&member.node) || !machines.insert(&member.machine) {
-            bail!("fleet roster repeats machine or node {}", member.machine);
-        }
-    }
-    let mut removed_nodes = BTreeSet::new();
-    for removed in tombstones {
-        validate_machine(&removed.machine)?;
-        validate_host(&removed.host)?;
-        if removed.node != self::member(&removed.machine, &removed.host).node {
-            bail!(
-                "roster tombstone {} does not match its machine and host",
-                removed.node
-            );
-        }
-        if nodes.contains(&removed.node) || machines.contains(&removed.machine) {
-            bail!(
-                "roster marks machine {} both active and removed",
-                removed.machine
-            );
-        }
-        if !removed_nodes.insert(&removed.node) {
-            bail!("roster repeats removed node {}", removed.node);
-        }
-    }
-    Ok(())
-}
-
-fn validate_invitation(invitation: &Invitation) -> Result<()> {
-    let payload = invitation_attested_payload(invitation)?;
-    verify_attestation(
-        &payload,
-        &invitation.attestation_pem,
-        &invitation.ca_cert_pem,
-        "invitation",
-    )?;
-    if invitation.schema != INVITATION_SCHEMA {
-        bail!(
-            "invitation schema {} is not supported by this ouro (supports {})",
-            invitation.schema,
-            INVITATION_SCHEMA
-        );
-    }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("the system clock is before the Unix epoch")?
-        .as_secs();
-    if invitation.created_unix > now.saturating_add(INVITATION_FUTURE_SKEW_SECS) {
-        bail!(
-            "invitation creation time is in the future; correct this machine's clock and ask the fleet owner for a fresh invitation"
-        );
-    }
-    if now.saturating_sub(invitation.created_unix) > INVITATION_MAX_AGE_SECS {
-        bail!(
-            "invitation is older than 7 days. Ask the fleet owner for a fresh `ouro fleet invite`; no fleet credential was installed"
-        );
-    }
-    let profile = Profile {
-        tags: empty_tags(),
-        schema: PROFILE_SCHEMA,
-        fleet_id: invitation.fleet_id.clone(),
-        name: invitation.name.clone(),
-        machine: invitation.member.machine.clone(),
-        host: invitation.member.host.clone(),
-        node: invitation.member.node.clone(),
-        role: "core".into(),
-        members: invitation.members.clone(),
-        roster_revision: invitation.roster_revision,
-        tombstones: invitation.tombstones.clone(),
-        gateway_port: invitation.gateway_port,
-        epmd_port: invitation.epmd_port,
-        dist_port_min: invitation.dist_port_min,
-        dist_port_max: invitation.dist_port_max,
-    };
-    validate_profile(&profile)?;
-    validate_cookie(&invitation.cookie, "invitation cookie")?;
-    validate_tls_identity(
-        &invitation.member,
-        &invitation.ca_cert_pem,
-        &invitation.node_cert_pem,
-        &invitation.node_key_pem,
-        None,
-        "invitation",
-    )?;
-    Ok(())
-}
-
 fn validate_materials(data_dir: &Path, require_ca_key: bool) -> Result<()> {
-    validate_materials_policy(data_dir, require_ca_key, false)
-}
-
-/// Migrate only the previously generated TLS policy, with the runtime stopped.
-/// All identities, permissions, VM arguments and nonstandard policies still fail closed.
-pub fn upgrade_transport(data_dir: &Path) -> Result<()> {
-    let _lock = lock_stopped_fleet_mutation(data_dir, "ouro fleet upgrade-transport")?;
-    validate_materials_policy(data_dir, false, true)?;
-    let profile = load(data_dir)?.ok_or_else(|| anyhow!("create or join a fleet first"))?;
-    let (tls, _) = generated_runtime_files(data_dir, &profile)?;
-    write_private_atomic(&fleet_dir(data_dir).join(TLS_OPTFILE), tls.as_bytes())?;
-    validate_materials(data_dir, false)
-}
-
-fn validate_materials_policy(
-    data_dir: &Path,
-    require_ca_key: bool,
-    allow_legacy: bool,
-) -> Result<()> {
     let root = fleet_dir(data_dir);
     for (name, description) in [
         (PROFILE_FILE, "fleet profile"),
@@ -3447,17 +2734,24 @@ fn validate_materials_policy(
     let actual_tls = read_private(&root.join(TLS_OPTFILE), "TLS option file")?;
     let actual_vm_args = read_private(&root.join(VM_ARGS_FILE), "VM arguments")?;
     let (expected_tls, expected_vm_args) = generated_runtime_files(data_dir, &profile)?;
-    let policy = erl_string(&root)?;
-    let legacy_tls = expected_tls.replace(&format!(", {{reuse_sessions, false}}, {{session_tickets, disabled}}, {{verify_fun, {{fun 'Elixir.Ouroboros.Cluster.Revocations':verify/3, \"{policy}\"}}}}"), "");
-    if actual_tls != expected_tls && !(allow_legacy && actual_tls == legacy_tls) {
+    if actual_tls != expected_tls {
+        // A file that is exactly the policy the previous build generated is not a
+        // weakened policy, and "restore from a trusted backup" is a loop for it: the
+        // trusted backup is that same file.
+        if actual_tls == previous_generated_tls(data_dir)? {
+            bail!(
+                "{} is the strict generated mutual-TLS policy of an older Ouroboros: it routes verification through `Ouroboros.Cluster.Revocations`, a module this build does not have. Rewrite it from this profile with `ouro fleet create --regenerate` on this stopped machine, which keeps this fleet id, CA, cookie and roster",
+                root.join(TLS_OPTFILE).display()
+            );
+        }
         bail!(
-            "{} does not match the strict generated mutual-TLS policy for this profile; startup is refused. For an older generated policy, stop the runtime and run `ouro fleet upgrade-transport`; otherwise restore a trusted backup or rebuild/rejoin this profile",
+            "{} does not match the strict generated mutual-TLS policy for this profile; startup is refused. Rewrite it from this profile with `ouro fleet create --regenerate`, or restore this file from a trusted backup",
             root.join(TLS_OPTFILE).display()
         );
     }
     if actual_vm_args.as_bytes() != expected_vm_args.as_bytes() {
         bail!(
-            "{} does not match the generated TLS/port policy for this profile; startup is refused. Restore this file from a trusted backup or rebuild/rejoin this fleet profile",
+            "{} does not match the generated TLS/port policy for this profile; startup is refused. Rewrite it from this profile with `ouro fleet create --regenerate`, or restore this file from a trusted backup",
             root.join(VM_ARGS_FILE).display()
         );
     }
@@ -4972,40 +4266,6 @@ fn read_private(path: &Path, description: &str) -> Result<String> {
     Ok(text)
 }
 
-fn refuse_existing_output(path: &Path, description: &str) -> Result<()> {
-    match fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).context(format!("inspecting {description} output {}", path.display())),
-        Ok(_) => bail!(
-            "{} already exists; choose a new --out path rather than overwriting a private {description}",
-            path.display()
-        ),
-    }
-}
-
-fn cleanup_failed_private_output(path: &Path) -> Result<()> {
-    let metadata = match fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(error).context(format!("inspecting failed output {}", path.display()))
-        }
-        Ok(metadata) => metadata,
-    };
-    let uid = unsafe { libc::geteuid() };
-    if !metadata.file_type().is_file() || metadata.uid() != uid || metadata.mode() & 0o777 != 0o600
-    {
-        bail!(
-            "failed output {} was replaced or is unsafe (regular={}, uid={}, mode={:o}); it was not removed automatically",
-            path.display(),
-            metadata.file_type().is_file(),
-            metadata.uid(),
-            metadata.mode() & 0o777
-        );
-    }
-    fs::remove_file(path).with_context(|| format!("removing failed output {}", path.display()))?;
-    sync_parent(path)
-}
-
 fn write_private_new(path: &Path, bytes: &[u8], description: &str) -> Result<()> {
     let parent = path
         .parent()
@@ -5133,6 +4393,113 @@ fn problem(message: impl Into<String>) -> Check {
     }
 }
 
+const DEFAULT_GATEWAY_MAX_FRAME: u64 = 1_048_576;
+const DEFAULT_GATEWAY_QUEUE_LIMIT: u64 = 1_000;
+
+/// The only operator authority settings a packaged fleet runtime may inherit. The
+/// launcher removes every ambient `OUROBOROS_*` variable first, then reapplies these
+/// normalized values beside the profile-owned environment.
+pub(crate) fn validated_runtime_authority_env(
+    caller: &[(String, String)],
+) -> Result<Vec<(String, String)>> {
+    let value = |name: &str| {
+        caller
+            .iter()
+            .rev()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    };
+    let workspace_roots = value("OUROBOROS_WORKSPACE_ROOTS")
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    validate_inherited_workspace_roots(&workspace_roots)
+        .context("validating inherited OUROBOROS_WORKSPACE_ROOTS")?;
+    let gateway_max_frame = parse_runtime_limit(
+        "OUROBOROS_GATEWAY_MAX_FRAME",
+        value("OUROBOROS_GATEWAY_MAX_FRAME"),
+        DEFAULT_GATEWAY_MAX_FRAME,
+        1_024,
+    )?;
+    let gateway_queue_limit = parse_runtime_limit(
+        "OUROBOROS_GATEWAY_QUEUE_LIMIT",
+        value("OUROBOROS_GATEWAY_QUEUE_LIMIT"),
+        DEFAULT_GATEWAY_QUEUE_LIMIT,
+        1,
+    )?;
+    let mut environment = vec![
+        ("OUROBOROS_WORKSPACE_ROOTS".into(), workspace_roots),
+        (
+            "OUROBOROS_GATEWAY_MAX_FRAME".into(),
+            gateway_max_frame.to_string(),
+        ),
+        (
+            "OUROBOROS_GATEWAY_QUEUE_LIMIT".into(),
+            gateway_queue_limit.to_string(),
+        ),
+    ];
+    if value("OUROBOROS_COLLECTOR_CONFIG").is_some() {
+        bail!("the custody collector must run separately with release eval, not the fleet agent launcher");
+    }
+    if let Some(policy) = value("OUROBOROS_AUDIT_CONFIG") {
+        let path = Path::new(policy);
+        if !path.is_absolute() {
+            bail!("OUROBOROS_AUDIT_CONFIG must be an absolute policy path");
+        }
+        uncontrolled_path_text(path).context("validating the inherited audit policy path")?;
+        // The release validates privacy, content and keys before boot.
+        // Preserve the operator's policy through the fleet environment scrubber.
+        environment.push(("OUROBOROS_AUDIT_CONFIG".into(), policy.into()));
+    }
+    if let Some(mode) = value("OUROBOROS_AUDIT_MODE") {
+        if !matches!(mode, "standard" | "local" | "required") {
+            bail!("OUROBOROS_AUDIT_MODE must be standard, local or required");
+        }
+        environment.push(("OUROBOROS_AUDIT_MODE".into(), mode.into()));
+    }
+    Ok(environment)
+}
+
+fn parse_runtime_limit(name: &str, raw: Option<&str>, default: u64, minimum: u64) -> Result<u64> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(default);
+    };
+    let value = raw
+        .parse::<u64>()
+        .with_context(|| format!("{name} must be a base-10 integer of at least {minimum}"))?;
+    if value < minimum {
+        bail!("{name} must be an integer of at least {minimum}, got {value}");
+    }
+    Ok(value)
+}
+
+fn validate_inherited_workspace_roots(value: &str) -> Result<()> {
+    if value.chars().any(char::is_control) {
+        bail!("inherited OUROBOROS_WORKSPACE_ROOTS contains a control character");
+    }
+    if value.is_empty() {
+        return Ok(());
+    }
+    let entries = std::env::split_paths(value).collect::<Vec<_>>();
+    if entries.is_empty() || entries.iter().any(|entry| !entry.is_absolute()) {
+        bail!("inherited OUROBOROS_WORKSPACE_ROOTS must contain only absolute directories");
+    }
+    for entry in entries {
+        uncontrolled_path_text(&entry).context("validating an inherited workspace root")?;
+    }
+    Ok(())
+}
+
+fn uncontrolled_path_text(path: &Path) -> Result<&str> {
+    let text = path
+        .to_str()
+        .ok_or_else(|| anyhow!("path is not valid UTF-8: {}", path.display()))?;
+    if text.chars().any(|character| character.is_control()) {
+        bail!("path contains a control character: {}", path.display());
+    }
+    Ok(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5158,44 +4525,6 @@ mod tests {
         builder.mode(0o700);
         builder.create(&path).unwrap();
         path
-    }
-
-    #[test]
-    fn transport_upgrade_accepts_only_the_exact_legacy_policy() {
-        let data = scratch("transport-upgrade");
-        let profile = create(&data, None, "core", "localhost", ephemeral_ports()).unwrap();
-        let root = fleet_dir(&data);
-        let (current, _) = generated_runtime_files(&data, &profile).unwrap();
-        let policy = erl_string(&root).unwrap();
-        let legacy = current.replace(&format!(", {{reuse_sessions, false}}, {{session_tickets, disabled}}, {{verify_fun, {{fun 'Elixir.Ouroboros.Cluster.Revocations':verify/3, \"{policy}\"}}}}"), "");
-        assert_ne!(current, legacy);
-        write_private_atomic(&root.join(TLS_OPTFILE), legacy.as_bytes()).unwrap();
-        assert!(runtime_env(&data).is_err());
-        upgrade_transport(&data).unwrap();
-        assert!(runtime_env(&data).is_ok());
-        let unsafe_policy = current.replace("verify_peer", "verify_none");
-        write_private_atomic(&root.join(TLS_OPTFILE), unsafe_policy.as_bytes()).unwrap();
-        assert!(upgrade_transport(&data).is_err());
-        assert_eq!(
-            fs::read_to_string(root.join(TLS_OPTFILE)).unwrap(),
-            unsafe_policy
-        );
-        fs::remove_dir_all(data).unwrap();
-    }
-
-    #[test]
-    fn managed_readiness_requires_tls_and_a_connected_compatible_peer() {
-        let mut status = serde_json::json!({"security": {"distributed": true, "tls": true},
-            "machines": [{"node":"ouro-core@localhost", "state":"local", "compatibility":"local"},
-                         {"node":"ouro-peer@localhost", "state":"connected", "compatibility":"compatible"}]});
-        assert!(validate_ready_status(&status, Some("ouro-peer@localhost")).is_ok());
-        status["machines"][1]["compatibility"] = "incompatible".into();
-        assert!(validate_ready_status(&status, Some("ouro-peer@localhost")).is_err());
-        status["machines"][1]["state"] = "offline".into();
-        assert!(validate_ready_status(&status, Some("ouro-peer@localhost")).is_err());
-        assert!(validate_ready_status(&status, None).is_ok());
-        status["security"]["tls"] = false.into();
-        assert!(validate_ready_status(&status, None).is_err());
     }
 
     #[test]
@@ -5249,6 +4578,110 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// The tombstone is the operator's statement that a machine is gone, and the only
+    /// thing `fleet.forget_session_owner` will act on. It is written here, by hand, never
+    /// inferred from a machine being unreachable.
+    #[test]
+    fn declaring_a_machine_gone_moves_it_out_of_the_roster_and_can_be_undone() {
+        let dir = scratch("forget-machine");
+        fs::create_dir(dir.join("fleet")).unwrap();
+        let mut profile = sample_profile("studio");
+        let vps = member("vps", "vps.tailnet.ts.net");
+        profile.members.push(vps.clone());
+        write_profile(&dir, &profile).unwrap();
+        assert!(
+            load(&dir).unwrap().unwrap().tombstones.is_empty(),
+            "an unreachable peer is not a peer anyone declared gone"
+        );
+
+        assert_eq!(forget_machine(&dir, "vps").unwrap(), vps);
+        let after = load(&dir).unwrap().unwrap();
+        assert_eq!(
+            after.members,
+            vec![member("studio", "studio.tailnet.ts.net")]
+        );
+        assert_eq!(after.tombstones, vec![vps.clone()]);
+        assert_eq!(after.roster_revision, profile.roster_revision + 1);
+        assert_eq!(after.expected_peers(), 0);
+
+        // A gateway call that failed is retried against the same statement, so the second
+        // run must reach the gateway rather than refuse, and must not move the roster on.
+        assert_eq!(forget_machine(&dir, &vps.node).unwrap(), vps);
+        assert_eq!(
+            load(&dir).unwrap().unwrap().roster_revision,
+            profile.roster_revision + 1
+        );
+
+        // The runtime refusing — the machine turned out to be connected — puts it back.
+        restore_machine(&dir, &vps).unwrap();
+        let restored = load(&dir).unwrap().unwrap();
+        assert!(restored.tombstones.is_empty());
+        assert!(restored.members.contains(&vps));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn declaring_a_machine_gone_refuses_this_machine_and_a_name_the_roster_never_had() {
+        let dir = scratch("forget-machine-refusals");
+        fs::create_dir(dir.join("fleet")).unwrap();
+        let profile = sample_profile("studio");
+        write_profile(&dir, &profile).unwrap();
+
+        for own in ["studio", "ouro-studio@studio.tailnet.ts.net"] {
+            let refusal = forget_machine(&dir, own).unwrap_err().to_string();
+            assert!(refusal.contains("ouro fleet leave"), "{refusal}");
+        }
+        let unknown = forget_machine(&dir, "ghost").unwrap_err().to_string();
+        assert!(unknown.contains("no member named ghost"), "{unknown}");
+        assert!(load(&dir).unwrap().unwrap().tombstones.is_empty());
+
+        // A profile written before this field reads as "nothing declared gone" rather
+        // than as a profile this machine refuses to start from.
+        let mut encoded: Value =
+            serde_json::from_str(&fs::read_to_string(profile_path(&dir)).unwrap()).unwrap();
+        assert!(encoded
+            .as_object_mut()
+            .unwrap()
+            .remove("tombstones")
+            .is_some());
+        write_private_atomic(
+            &profile_path(&dir),
+            &serde_json::to_vec_pretty(&encoded).unwrap(),
+        )
+        .unwrap();
+        assert!(load(&dir).unwrap().unwrap().tombstones.is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_hand_edited_roster_cannot_call_a_machine_both_active_and_gone() {
+        let mut both = sample_profile("studio");
+        let vps = member("vps", "vps.tailnet.ts.net");
+        both.members.push(vps.clone());
+        both.tombstones.push(vps);
+        let refusal = validate_profile(&both).unwrap_err().to_string();
+        assert!(refusal.contains("both active and removed"), "{refusal}");
+
+        let mut itself = sample_profile("studio");
+        itself
+            .tombstones
+            .push(member("studio", "studio.tailnet.ts.net"));
+        let refusal = validate_profile(&itself).unwrap_err().to_string();
+        assert!(
+            refusal.contains("cannot tombstone the machine it belongs to"),
+            "{refusal}"
+        );
+
+        let mut mismatched = sample_profile("studio");
+        mismatched.tombstones.push(Member {
+            machine: "vps".into(),
+            host: "vps.tailnet.ts.net".into(),
+            node: "ouro-elsewhere@vps.tailnet.ts.net".into(),
+        });
+        let refusal = validate_profile(&mismatched).unwrap_err().to_string();
+        assert!(refusal.contains("fleet tombstone vps"), "{refusal}");
+    }
+
     #[test]
     fn facts_render_with_tags_and_older_peers_stay_unknown() {
         assert_eq!(
@@ -5263,6 +4696,359 @@ mod tests {
         );
     }
 
+    /// What an operator does when they move `<data dir>/fleet/` to the second machine.
+    fn copy_fleet_dir(from: &Path, to: &Path) {
+        fs::DirBuilder::new().mode(0o700).create(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            fs::copy(entry.path(), &target).unwrap();
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
+    fn env_value<'a>(environment: &'a [(String, String)], key: &str) -> &'a str {
+        environment
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.as_str())
+            .unwrap_or_else(|| panic!("{key} is not in the computed runtime environment"))
+    }
+
+    /// Plan §3 D4 keeps the cluster and drops enrollment: "an operator copies the binary
+    /// to each machine and sets the cluster environment by hand". Copying files by hand
+    /// therefore has to be enough to form the two-machine mutual-TLS cluster FLEET.md
+    /// describes — one CA, one cookie, two leaves, two rosters. Nothing below opens a
+    /// socket to another machine or installs anything.
+    #[test]
+    fn a_second_machine_is_created_from_a_private_copy_of_the_first_machines_fleet_directory() {
+        let one = scratch("create-from-one");
+        let two = scratch("create-from-two");
+        let carried = scratch("create-from-carried");
+
+        let first = create(
+            &one,
+            Some("Workshop"),
+            "studio",
+            "127.0.0.1",
+            ephemeral_ports(),
+        )
+        .expect("the first machine mints its own CA");
+        let copy = carried.join("fleet");
+        copy_fleet_dir(&fleet_dir(&one), &copy);
+
+        // An incomplete copy is refused before anything is written.
+        let partial = carried.join("partial");
+        copy_fleet_dir(&fleet_dir(&one), &partial);
+        fs::remove_file(partial.join(CA_KEY_FILE)).unwrap();
+        let error = create_from(&two, &partial, "vps", "127.0.0.1", ephemeral_ports())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not a complete copy"), "{error}");
+        assert!(!fleet_dir(&two).exists(), "a refusal wrote fleet state");
+
+        // A name the copied roster already holds is refused: `--from` mints a machine
+        // that is not in the cluster yet, it does not reissue one that is.
+        let error = create_from(&two, &copy, "studio", "127.0.0.1", ephemeral_ports())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already names machine `studio`"), "{error}");
+        assert!(!fleet_dir(&two).exists(), "a refusal wrote fleet state");
+
+        let second = create_from(&two, &copy, "vps", "127.0.0.1", ephemeral_ports())
+            .expect("the second machine signs its leaf with the copied CA");
+
+        // One cluster: one id, one name, one cookie.
+        assert_eq!(second.fleet_id, first.fleet_id);
+        assert_eq!(second.name, first.name);
+        assert_eq!(
+            read_private(&fleet_dir(&two).join(COOKIE_FILE), "cookie").unwrap(),
+            read_private(&fleet_dir(&one).join(COOKIE_FILE), "cookie").unwrap()
+        );
+        // The signing authority stays on the machine that already holds it.
+        assert!(
+            !fleet_dir(&two).join(CA_KEY_FILE).exists(),
+            "the second machine was given the CA key"
+        );
+
+        // Both leaves chain to the one CA, checked against the first machine's own CA
+        // bytes rather than against a re-encoding of them.
+        let ca = read_private(&fleet_dir(&one).join(CA_CERT_FILE), "CA").unwrap();
+        assert_eq!(
+            ca,
+            read_private(&fleet_dir(&two).join(CA_CERT_FILE), "CA").unwrap()
+        );
+        for (data, machine) in [(&one, "studio"), (&two, "vps")] {
+            validate_tls_identity(
+                &member(machine, "127.0.0.1"),
+                &ca,
+                &read_private(&fleet_dir(data).join(NODE_CERT_FILE), "leaf").unwrap(),
+                &read_private(&fleet_dir(data).join(NODE_KEY_FILE), "leaf key").unwrap(),
+                None,
+                "test",
+            )
+            .unwrap_or_else(|error| {
+                panic!("{machine}'s leaf does not chain to the one CA: {error:#}")
+            });
+        }
+
+        // The second machine already expects both; the first has to be told, locally.
+        assert_eq!(
+            second
+                .members
+                .iter()
+                .map(|member| member.machine.as_str())
+                .collect::<Vec<_>>(),
+            vec!["studio", "vps"]
+        );
+        assert_eq!(first.members.len(), 1);
+        let added = add_member(&one, "vps", "127.0.0.1", Some("ouro-vps@127.0.0.1")).unwrap();
+        assert_eq!(added, member("vps", "127.0.0.1"));
+        let after = load(&one).unwrap().unwrap();
+        assert_eq!(after.members.len(), 2);
+        assert_eq!(after.roster_revision, first.roster_revision + 1);
+        // Idempotent, so a repeated command is not an error and does not move the revision.
+        assert_eq!(add_member(&one, "vps", "127.0.0.1", None).unwrap(), added);
+        assert_eq!(
+            load(&one).unwrap().unwrap().roster_revision,
+            after.roster_revision
+        );
+        let error = add_member(&one, "vps", "127.0.0.2", None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already names vps"), "{error}");
+        let error = add_member(&one, "vps", "127.0.0.1", Some("vps"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("ouro-vps@127.0.0.1"), "{error}");
+
+        // Both machines validate, and both boot with the same two-node seed list.
+        for data in [&one, &two] {
+            let environment = runtime_env(data)
+                .unwrap_or_else(|error| panic!("{} refuses to start: {error:#}", data.display()))
+                .expect("a profile is installed");
+            let hosts = env_value(&environment, "OUROBOROS_CLUSTER_HOSTS");
+            assert!(hosts.contains("ouro-studio@127.0.0.1"), "{hosts}");
+            assert!(hosts.contains("ouro-vps@127.0.0.1"), "{hosts}");
+            assert_eq!(
+                env_value(&environment, "OUROBOROS_FLEET_ID"),
+                first.fleet_id
+            );
+        }
+        assert!(doctor(&one).text.contains("vps"));
+
+        // `members remove` is the counterpart of `leave` on the other machine, and it is
+        // not a tombstone: nothing durable is retired by it.
+        let error = remove_member(&one, "studio").unwrap_err().to_string();
+        assert!(error.contains("`ouro fleet leave`"), "{error}");
+        assert_eq!(remove_member(&one, "vps").unwrap(), added);
+        let after = load(&one).unwrap().unwrap();
+        assert_eq!(after.members, vec![member("studio", "127.0.0.1")]);
+        assert!(after.tombstones.is_empty());
+
+        fs::remove_dir_all(one).ok();
+        fs::remove_dir_all(two).ok();
+        fs::remove_dir_all(carried).ok();
+    }
+
+    /// F1: `revoke-<64 hex>.json` is durable state on any machine whose lab ever revoked
+    /// one, and `leave` is the only command that removes a fleet directory. Recognizing
+    /// the shape is what keeps such a machine retirable; naming everything else is what
+    /// keeps the refusal from being silent.
+    #[test]
+    fn leave_retires_a_directory_holding_a_retired_revocation_and_doctor_names_what_it_cannot() {
+        let data = scratch("leave-revocation");
+        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
+        let artifact = fleet_dir(&data).join(format!("revoke-{}.json", "ab".repeat(32)));
+        write_private_atomic(&artifact, b"{\"schema\":1}").unwrap();
+
+        // The artifact is inert but recognized, so it is not something doctor asks the
+        // operator to move, and it does not make the machine unhealthy.
+        let report = doctor(&data);
+        assert!(report.healthy, "{}", report.text);
+        assert!(!report.text.contains("no Ouroboros command recognizes"));
+
+        // An entry nothing recognizes is still a refusal, and doctor now says which.
+        write_private_atomic(&fleet_dir(&data).join("operator-note"), b"keep me").unwrap();
+        let report = doctor(&data);
+        assert!(!report.healthy);
+        assert!(
+            report.text.contains("[fix]") && report.text.contains("operator-note"),
+            "{}",
+            report.text
+        );
+        let error = leave(&data).unwrap_err().to_string();
+        assert!(error.contains("operator-note"), "{error}");
+        assert!(artifact.exists(), "a refusal removed a file");
+
+        fs::remove_file(fleet_dir(&data).join("operator-note")).unwrap();
+        let removal = leave(&data)
+            .unwrap()
+            .expect("a fleet directory was present");
+        assert!(removal
+            .removed
+            .iter()
+            .any(|name| name.starts_with("revoke-")));
+        assert!(!fleet_dir(&data).exists());
+        fs::remove_dir_all(data).ok();
+    }
+
+    /// F2: a crash between `install_new_profile`'s staging rename and its fsync leaves a
+    /// fleet directory with no `profile.json`. Every surface refuses such a directory, so
+    /// `leave` refusing it too is a total lockout repairable only by hand.
+    #[test]
+    fn leave_clears_a_fleet_directory_whose_profile_never_landed() {
+        let data = scratch("leave-incomplete");
+        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
+        fs::remove_file(profile_path(&data)).unwrap();
+
+        for message in [
+            load(&data).unwrap_err().to_string(),
+            runtime_env(&data).unwrap_err().to_string(),
+            doctor(&data).text,
+        ] {
+            assert!(
+                !message.contains("--discard-incomplete"),
+                "a surface still names a flag that does not parse: {message}"
+            );
+            assert!(message.contains("ouro fleet leave"), "{message}");
+        }
+
+        let removal = leave(&data)
+            .unwrap()
+            .expect("a fleet directory was present");
+        assert!(!removal.profile_readable);
+        assert_eq!(removal.machine, None);
+        assert!(removal.removed.iter().any(|name| name == COOKIE_FILE));
+        assert!(removal.removed.iter().any(|name| name == CA_KEY_FILE));
+        assert!(!fleet_dir(&data).exists());
+        assert!(load(&data).unwrap().is_none());
+        fs::remove_dir_all(data).ok();
+    }
+
+    /// F4: the previous Ouroboros generated a policy that routed verification through a
+    /// module this build deleted. "Restore from a trusted backup" is a loop for that file
+    /// — the backup is the file — and `leave` + `create` mints a new fleet id, CA and
+    /// cookie, which is a rebuild of the trust domain, not a repair.
+    #[test]
+    fn regenerating_repairs_a_generated_policy_written_by_an_older_ouroboros() {
+        let data = scratch("regenerate");
+        let created = create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
+        let root = fleet_dir(&data);
+        let current = fs::read_to_string(root.join(TLS_OPTFILE)).unwrap();
+        let previous = previous_generated_tls(&data).unwrap();
+        assert_ne!(previous, current);
+        write_private_atomic(&root.join(TLS_OPTFILE), previous.as_bytes()).unwrap();
+
+        let error = runtime_env(&data).unwrap_err().to_string();
+        assert!(error.contains("Cluster.Revocations"), "{error}");
+        assert!(error.contains("--regenerate"), "{error}");
+        assert!(
+            !error.contains("trusted backup"),
+            "the loop remedy is still offered for the one file it loops on: {error}"
+        );
+
+        let regenerated = regenerate(&data).unwrap();
+        assert_eq!(regenerated.fleet_id, created.fleet_id);
+        assert_eq!(regenerated.members, created.members);
+        assert_eq!(
+            fs::read_to_string(root.join(TLS_OPTFILE)).unwrap(),
+            current,
+            "regenerate did not restore the current generated policy"
+        );
+        assert!(runtime_env(&data).unwrap().is_some());
+        assert!(doctor(&data).healthy);
+
+        // A policy nobody generated is still a refusal, and it still names the repair.
+        let weakened = current.replace("verify_peer", "verify_none");
+        write_private_atomic(&root.join(TLS_OPTFILE), weakened.as_bytes()).unwrap();
+        let error = runtime_env(&data).unwrap_err().to_string();
+        assert!(error.contains("--regenerate"), "{error}");
+        assert!(error.contains("trusted backup"), "{error}");
+        fs::remove_dir_all(data).ok();
+    }
+
+    /// The other half of `test/cluster_dist_tls_test.exs`. That test drives `:ssl` with a
+    /// committed copy of this policy and proves what it refuses; this one fails if the
+    /// generator stops emitting exactly that copy. Without the pair, an edit that drops
+    /// `verify_peer` from one half only changes the string the drift test compares to
+    /// itself, and nothing in either language notices.
+    #[test]
+    fn the_generated_policy_is_the_one_the_handshake_test_drives_ssl_with() {
+        let data = scratch("generated-policy-template");
+        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
+        let root = fleet_dir(&data);
+        let generated = fs::read_to_string(root.join(TLS_OPTFILE)).unwrap();
+        let template = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../test/support/fleet_tls/ssl_dist.conf.template"),
+        )
+        .expect("the committed template the Elixir handshake test consults");
+        assert_eq!(
+            generated,
+            template.replace("@FLEET_DIR@", root.to_str().unwrap()),
+            "`generated_runtime_files` no longer emits the policy test/cluster_dist_tls_test.exs proves the behaviour of; regenerate test/support/fleet_tls/ as its README says"
+        );
+        fs::remove_dir_all(data).ok();
+    }
+
+    /// F5: a client that dies between the tombstone write and the gateway reply leaves a
+    /// silently shrunk roster. It is safe, but it has to be visible and it has to have an
+    /// undo.
+    #[test]
+    fn a_machine_declared_gone_is_named_by_status_and_doctor_and_can_be_restored() {
+        let dir = scratch("tombstone-visible");
+        fs::create_dir(dir.join("fleet")).unwrap();
+        let mut profile = sample_profile("studio");
+        let vps = member("vps", "vps.tailnet.ts.net");
+        profile.members.push(vps.clone());
+        write_profile(&dir, &profile).unwrap();
+
+        forget_machine(&dir, "vps").unwrap();
+        let status = render_status(&dir).unwrap();
+        assert!(status.contains("gone"), "{status}");
+        assert!(status.contains("vps"), "{status}");
+        assert!(status.contains("sessions restore"), "{status}");
+        let report = doctor(&dir);
+        assert!(
+            report.text.contains("gone for good") && report.text.contains("vps"),
+            "{}",
+            report.text
+        );
+
+        // The live projection comes from a runtime that never heard of the machine
+        // either, so without this the tombstone is invisible on the surface an operator
+        // with a running daemon actually sees.
+        let live = serde_json::json!({
+            "summary": {"expected": 1, "connected": 1, "offline": 0, "incompatible": 0},
+            "machines": [{
+                "machine": "studio",
+                "node": "ouro-studio@studio.tailnet.ts.net",
+                "state": "local",
+                "role": "core"
+            }]
+        });
+        let rendered = render_live_status(&dir, &live).expect("a live projection");
+        assert!(
+            rendered.contains("ouro-vps@vps.tailnet.ts.net"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("sessions restore"), "{rendered}");
+
+        // `members add` refuses to quietly undo the operator's statement.
+        let error = add_member(&dir, "vps", "vps.tailnet.ts.net", None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("sessions restore vps"), "{error}");
+
+        restore_machine(&dir, &vps).unwrap();
+        let after = load(&dir).unwrap().unwrap();
+        assert!(after.tombstones.is_empty());
+        assert!(after.members.contains(&vps));
+        assert!(!render_status(&dir).unwrap().contains("gone for good"));
+        fs::remove_dir_all(dir).ok();
+    }
+
     fn sample_profile(machine: &str) -> Profile {
         Profile {
             tags: empty_tags(),
@@ -5274,31 +5060,13 @@ mod tests {
             node: format!("ouro-{machine}@studio.tailnet.ts.net"),
             role: "core".into(),
             members: vec![member(machine, "studio.tailnet.ts.net")],
-            roster_revision: initial_roster_revision(),
             tombstones: Vec::new(),
+            roster_revision: initial_roster_revision(),
             gateway_port: 48_111,
             epmd_port: 14_111,
             dist_port_min: 44_111,
             dist_port_max: 44_111,
         }
-    }
-
-    fn manager_output(code: i32, stdout: &str, stderr: &str) -> ManagerCommandOutput {
-        ManagerCommandOutput {
-            code: Some(code),
-            stdout: stdout.into(),
-            stderr: stderr.into(),
-            timed_out: false,
-        }
-    }
-
-    fn leave_with_inactive_manager(data_dir: &Path) -> Result<bool> {
-        leave_with_manager_query(data_dir, |kind, _profile| ServiceManagerState {
-            active: ServiceFact::No,
-            enabled: ServiceFact::No,
-            linger: (kind == ServiceKind::SystemdUser).then_some(ServiceFact::No),
-            note: None,
-        })
     }
 
     fn fake_epmd(port: u16, stop: Arc<AtomicBool>) -> thread::JoinHandle<()> {
@@ -5340,25 +5108,6 @@ mod tests {
                 return profile;
             }
         }
-    }
-
-    fn inactive_manager(kind: ServiceKind, _profile: &Profile) -> ServiceManagerState {
-        ServiceManagerState {
-            active: ServiceFact::No,
-            enabled: ServiceFact::No,
-            linger: (kind == ServiceKind::SystemdUser).then_some(ServiceFact::No),
-            note: None,
-        }
-    }
-
-    fn resign_invitation_value(owner: &Path, value: &mut Value) {
-        let mut invitation: Invitation = serde_json::from_value(value.clone()).unwrap();
-        invitation.attestation_pem.clear();
-        let payload = invitation_attested_payload(&invitation).unwrap();
-        let ca_key = fs::read_to_string(fleet_dir(owner).join(CA_KEY_FILE)).unwrap();
-        invitation.attestation_pem =
-            signed_attestation(&payload, &invitation.ca_cert_pem, &ca_key, "invitation").unwrap();
-        *value = serde_json::to_value(&invitation).unwrap();
     }
 
     #[test]
@@ -5450,59 +5199,7 @@ mod tests {
     }
 
     #[test]
-    fn invite_and_join_share_trust_but_not_the_ca_signing_key() {
-        let owner = scratch("owner");
-        let joined = scratch("joined");
-        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let invitation = owner.join("worker.ouro-fleet");
-        invite(
-            &owner,
-            "worker",
-            "127.0.0.1",
-            &invitation,
-            Ports {
-                gateway: Some(48_102),
-                dist: Some(44_102),
-                epmd: None,
-            },
-        )
-        .unwrap();
-        assert_eq!(fs::metadata(&invitation).unwrap().mode() & 0o777, 0o600);
-
-        let profile = join(
-            &joined,
-            &invitation,
-            Ports {
-                gateway: Some(48_103),
-                dist: Some(44_103),
-                epmd: None,
-            },
-        )
-        .unwrap();
-        assert_eq!(profile.machine, "worker");
-        assert_eq!(profile.gateway_port, 48_103);
-        assert_eq!(profile.dist_port_min, 44_103);
-        assert_eq!(profile.members.len(), 2);
-        assert!(!fleet_dir(&joined).join(CA_KEY_FILE).exists());
-        assert!(invite(
-            &joined,
-            "third",
-            "127.0.0.3",
-            &joined.join("nope"),
-            ephemeral_ports()
-        )
-        .is_err());
-        assert_eq!(
-            fs::read_to_string(fleet_dir(&owner).join(COOKIE_FILE)).unwrap(),
-            fs::read_to_string(fleet_dir(&joined).join(COOKIE_FILE)).unwrap()
-        );
-
-        fs::remove_dir_all(owner).ok();
-        fs::remove_dir_all(joined).ok();
-    }
-
-    #[test]
-    fn create_and_join_refuse_occupied_gateway_and_distribution_ports_before_install() {
+    fn create_refuses_occupied_gateway_and_distribution_ports_before_install() {
         let created = scratch("occupied-create-ports");
         let gateway = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let gateway_port = gateway.local_addr().unwrap().port();
@@ -5530,30 +5227,21 @@ mod tests {
         assert!(!fleet_dir(&created).exists());
         drop(gateway);
 
-        let owner = scratch("occupied-join-owner");
-        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let invitation = owner.join("worker.ouro");
-        invite(
-            &owner,
-            "worker",
-            "127.0.0.1",
-            &invitation,
-            ephemeral_ports(),
-        )
-        .unwrap();
-        let joined = scratch("occupied-join-ports");
         let distribution = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let distribution_port = distribution.local_addr().unwrap().port();
         let free_gateway = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let free_gateway_port = free_gateway.local_addr().unwrap().port();
         drop(free_gateway);
-        let error = join(
-            &joined,
-            &invitation,
+        let occupied_dist = scratch("occupied-dist-ports");
+        let error = create(
+            &occupied_dist,
+            None,
+            "owner",
+            "127.0.0.1",
             Ports {
                 gateway: Some(free_gateway_port),
                 dist: Some(distribution_port),
-                epmd: None,
+                ..ephemeral_ports()
             },
         )
         .unwrap_err()
@@ -5563,11 +5251,10 @@ mod tests {
             error.contains("no fleet credential was installed"),
             "{error}"
         );
-        assert!(!fleet_dir(&joined).exists());
+        assert!(!fleet_dir(&occupied_dist).exists());
 
         fs::remove_dir_all(created).ok();
-        fs::remove_dir_all(owner).ok();
-        fs::remove_dir_all(joined).ok();
+        fs::remove_dir_all(occupied_dist).ok();
     }
 
     #[test]
@@ -5598,301 +5285,6 @@ mod tests {
     }
 
     #[test]
-    fn invitation_profile_commit_precedes_publication_and_rolls_back_on_write_failure() {
-        use std::cell::Cell;
-
-        let owner = scratch("invite-publish-order");
-        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let original = load(&owner).unwrap().unwrap();
-        let mut proposed = original.clone();
-        proposed.members.push(member("worker", "127.0.0.1"));
-        proposed.roster_revision += 1;
-        let output = owner.join("worker.ouro");
-        let observed_committed = Cell::new(false);
-        let error = commit_invitation_profile_first(
-            &owner,
-            &proposed,
-            &original,
-            &output,
-            b"private credential fixture",
-            |_, _| {
-                observed_committed.set(load(&owner).unwrap().unwrap() == proposed);
-                Err(anyhow!("injected invitation publication failure"))
-            },
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(observed_committed.get());
-        assert!(error.contains("rolled back"), "{error}");
-        assert_eq!(load(&owner).unwrap().unwrap(), original);
-        assert!(!output.exists());
-
-        let mut invalid = original.clone();
-        invalid.schema = 99;
-        let bearer_called = Cell::new(false);
-        assert!(commit_invitation_profile_first(
-            &owner,
-            &invalid,
-            &original,
-            &output,
-            b"never published",
-            |_, _| {
-                bearer_called.set(true);
-                Ok(())
-            },
-        )
-        .is_err());
-        assert!(!bearer_called.get());
-        assert!(!output.exists());
-
-        fs::remove_dir_all(owner).ok();
-    }
-
-    #[test]
-    fn an_exact_lost_machine_can_be_reissued_without_duplicating_membership() {
-        let owner = scratch("replace-owner");
-        let joined = scratch("replace-joined");
-        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let first = owner.join("worker-first.ouro");
-        invite(&owner, "worker", "127.0.0.1", &first, ephemeral_ports()).unwrap();
-
-        let duplicate = owner.join("worker-duplicate.ouro");
-        let error = invite(&owner, "worker", "127.0.0.1", &duplicate, ephemeral_ports())
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("--replace"), "{error}");
-        assert!(error.contains("does not revoke"), "{error}");
-        assert!(!duplicate.exists());
-
-        let replacement = owner.join("worker-replacement.ouro");
-        invite_with_replace(
-            &owner,
-            "worker",
-            "127.0.0.1",
-            &replacement,
-            ephemeral_ports(),
-            true,
-        )
-        .unwrap();
-        assert_eq!(load(&owner).unwrap().unwrap().members.len(), 2);
-        join(&joined, &replacement, ephemeral_ports()).unwrap();
-
-        let moved = owner.join("worker-moved.ouro");
-        let error = invite_with_replace(
-            &owner,
-            "worker",
-            "127.0.0.3",
-            &moved,
-            ephemeral_ports(),
-            true,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("exact recorded"), "{error}");
-        assert!(error.contains("Rebuild the fleet"), "{error}");
-        assert!(!moved.exists());
-
-        fs::remove_dir_all(owner).ok();
-        fs::remove_dir_all(joined).ok();
-    }
-
-    #[test]
-    fn owner_cancellation_is_live_safe_and_signed_roster_removes_the_peer_everywhere() {
-        let owner = scratch("cancel-invite-owner");
-        let charlie = scratch("cancel-invite-charlie");
-        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let first = owner.join("alpha.ouro");
-        invite(&owner, "alpha", "127.0.0.1", &first, ephemeral_ports()).unwrap();
-        let charlie_invitation = owner.join("charlie.ouro");
-        invite(
-            &owner,
-            "charlie",
-            "127.0.0.1",
-            &charlie_invitation,
-            ephemeral_ports(),
-        )
-        .unwrap();
-        join(&charlie, &charlie_invitation, ephemeral_ports()).unwrap();
-        assert!(load(&charlie)
-            .unwrap()
-            .unwrap()
-            .members
-            .iter()
-            .any(|member| member.machine == "alpha"));
-
-        write_private_atomic(
-            &owner.join(runtime::PUBLICATION_FILE),
-            format!(
-                r#"{{"port":47003,"protocol":1,"node":"ouro-owner@127.0.0.1","pid":{},"scope":"operate"}}"#,
-                std::process::id()
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-        let roster = owner.join("without-alpha.ouro-roster");
-        let (removed, revision) = cancel_invite(&owner, "alpha", &roster).unwrap();
-        assert_eq!(removed.machine, "alpha");
-        assert_eq!(fs::metadata(&roster).unwrap().mode() & 0o777, 0o600);
-        let owner_profile = load(&owner).unwrap().unwrap();
-        assert_eq!(owner_profile.members.len(), 2);
-        assert_eq!(owner_profile.roster_revision, revision);
-        assert!(owner_profile
-            .tombstones
-            .iter()
-            .any(|member| member.machine == "alpha"));
-
-        let imported = import_roster(&charlie, &roster).unwrap();
-        assert!(imported.changed);
-        assert_eq!(imported.removed, vec![removed.clone()]);
-        let charlie_profile = load(&charlie).unwrap().unwrap();
-        assert_eq!(charlie_profile.roster_revision, revision);
-        assert!(!charlie_profile
-            .members
-            .iter()
-            .any(|member| member.machine == "alpha"));
-
-        let self_error = cancel_invite(&owner, "owner", &owner.join("self.ouro-roster"))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            self_error.contains("owner machine's own identity"),
-            "{self_error}"
-        );
-
-        let replacement = owner.join("alpha-after-cancel.ouro");
-        invite(
-            &owner,
-            "alpha",
-            "127.0.0.1",
-            &replacement,
-            ephemeral_ports(),
-        )
-        .unwrap();
-        let profile = load(&owner).unwrap().unwrap();
-        assert_eq!(profile.members.len(), 3);
-        assert!(!profile
-            .tombstones
-            .iter()
-            .any(|member| member.machine == "alpha"));
-
-        fs::remove_dir_all(owner).ok();
-        fs::remove_dir_all(charlie).ok();
-    }
-
-    #[test]
-    fn stale_and_future_invitations_are_refused_before_install() {
-        let owner = scratch("invitation-age-owner");
-        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let invitation = owner.join("alpha.ouro");
-        invite(&owner, "alpha", "127.0.0.2", &invitation, ephemeral_ports()).unwrap();
-        let original: Value = serde_json::from_slice(&fs::read(&invitation).unwrap()).unwrap();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        for (index, (created, expected)) in [
-            (
-                now.saturating_sub(INVITATION_MAX_AGE_SECS + 60),
-                "older than 7 days",
-            ),
-            (
-                now.saturating_add(INVITATION_FUTURE_SKEW_SECS + 60),
-                "creation time is in the future",
-            ),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let mut value = original.clone();
-            value["created_unix"] = Value::from(created);
-            write_private_atomic(&invitation, &serde_json::to_vec_pretty(&value).unwrap()).unwrap();
-            let unsigned_join = scratch(&format!("invitation-age-tamper-{index}"));
-            let tamper = join(&unsigned_join, &invitation, ephemeral_ports())
-                .unwrap_err()
-                .to_string();
-            assert!(tamper.contains("changed after"), "{tamper}");
-            assert!(!fleet_dir(&unsigned_join).exists());
-            fs::remove_dir_all(unsigned_join).ok();
-
-            resign_invitation_value(&owner, &mut value);
-            write_private_atomic(&invitation, &serde_json::to_vec_pretty(&value).unwrap()).unwrap();
-            let joined = scratch(&format!("invitation-age-join-{index}"));
-            let error = join(&joined, &invitation, ephemeral_ports())
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains(expected), "{error}");
-            assert!(!fleet_dir(&joined).exists());
-            fs::remove_dir_all(joined).ok();
-        }
-
-        fs::remove_dir_all(owner).ok();
-    }
-
-    #[test]
-    fn invitation_attestation_binds_member_and_port_fields_before_they_are_trusted() {
-        let owner = scratch("invitation-attestation-owner");
-        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let invitation = owner.join("worker.ouro");
-        invite(
-            &owner,
-            "worker",
-            "127.0.0.1",
-            &invitation,
-            ephemeral_ports(),
-        )
-        .unwrap();
-        let original: Value = serde_json::from_slice(&fs::read(&invitation).unwrap()).unwrap();
-        for (label, value) in [
-            {
-                let mut value = original.clone();
-                value["member"]["machine"] = Value::from("changed-worker");
-                ("member", value)
-            },
-            {
-                let mut value = original.clone();
-                let port = value["gateway_port"].as_u64().unwrap();
-                value["gateway_port"] = Value::from(port + 1);
-                ("gateway port", value)
-            },
-            {
-                let mut value = original.clone();
-                let port = value["dist_port_min"].as_u64().unwrap();
-                value["dist_port_min"] = Value::from(port + 1);
-                ("distribution port", value)
-            },
-        ] {
-            write_private_atomic(&invitation, &serde_json::to_vec_pretty(&value).unwrap()).unwrap();
-            let joined = scratch(&format!("invitation-attestation-{label}"));
-            let error = join(&joined, &invitation, ephemeral_ports())
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains("changed after"), "{label}: {error}");
-            assert!(!fleet_dir(&joined).exists());
-            fs::remove_dir_all(joined).ok();
-        }
-        fs::remove_dir_all(owner).ok();
-    }
-
-    #[test]
-    fn invitation_is_create_new_and_requires_private_permissions() {
-        let owner = scratch("invite-private");
-        let joined = scratch("invite-public-refused");
-        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let path = owner.join("invite");
-        invite(&owner, "worker", "127.0.0.2", &path, ephemeral_ports()).unwrap();
-        assert!(invite(&owner, "other", "127.0.0.3", &path, ephemeral_ports()).is_err());
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-        let error = join(&joined, &path, ephemeral_ports())
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("mode 0600"), "{error}");
-
-        fs::remove_dir_all(owner).ok();
-        fs::remove_dir_all(joined).ok();
-    }
-
-    #[test]
     fn stopped_mutations_share_the_runtime_lock_and_refuse_every_live_owner_shape() {
         let live = scratch("live-mutation");
         write_private_atomic(
@@ -5907,7 +5299,6 @@ mod tests {
 
         for error in [
             create(&live, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap_err(),
-            join(&live, &live.join("missing.ouro"), ephemeral_ports()).unwrap_err(),
             leave(&live).unwrap_err(),
         ] {
             let error = error.to_string();
@@ -5943,75 +5334,6 @@ mod tests {
 
         fs::remove_dir_all(live).ok();
         fs::remove_dir_all(unpublished).ok();
-    }
-
-    #[test]
-    fn invitations_are_serialized_but_remain_allowed_while_the_runtime_is_live() {
-        let owner = scratch("invite-lock");
-        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let blocked_path = owner.join("blocked.ouro");
-        let held = runtime::acquire_spawn_lock(&owner).unwrap();
-        let error = invite(
-            &owner,
-            "alpha",
-            "127.0.0.1",
-            &blocked_path,
-            ephemeral_ports(),
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("another ouro"), "{error}");
-        assert!(!blocked_path.exists());
-        assert_eq!(load(&owner).unwrap().unwrap().members.len(), 1);
-        drop(held);
-
-        write_private_atomic(
-            &owner.join(runtime::PUBLICATION_FILE),
-            format!(
-                r#"{{"port":47002,"protocol":1,"node":"ouro-owner@127.0.0.1","pid":{},"scope":"operate"}}"#,
-                std::process::id()
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-        let invitation = owner.join("alpha.ouro");
-        invite(&owner, "alpha", "127.0.0.1", &invitation, ephemeral_ports()).unwrap();
-        assert!(invitation.exists());
-        assert_eq!(load(&owner).unwrap().unwrap().members.len(), 2);
-
-        fs::remove_dir_all(owner).ok();
-    }
-
-    #[test]
-    fn the_only_invitation_authority_cannot_leave_a_multi_machine_fleet() {
-        let owner = scratch("owner-leave");
-        let joined = scratch("joined-leave");
-        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let invitation = owner.join("worker.ouro");
-        invite(
-            &owner,
-            "worker",
-            "127.0.0.1",
-            &invitation,
-            ephemeral_ports(),
-        )
-        .unwrap();
-        join(&joined, &invitation, ephemeral_ports()).unwrap();
-
-        let error = leave_with_inactive_manager(&owner).unwrap_err().to_string();
-        assert!(error.contains("sole signing authority"), "{error}");
-        assert!(
-            error.contains("authority transfer is not available"),
-            "{error}"
-        );
-        assert!(fleet_dir(&owner).join(CA_KEY_FILE).exists());
-        assert!(
-            leave_with_inactive_manager(&joined).unwrap(),
-            "a non-authority joiner may leave"
-        );
-
-        fs::remove_dir_all(owner).ok();
-        fs::remove_dir_all(joined).ok();
     }
 
     #[test]
@@ -6051,15 +5373,26 @@ mod tests {
         assert!(error.contains("resolving fleet host"), "{error}");
         assert!(!fleet_dir(&data).exists());
 
-        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        for host in ["2001:db8::1", "host:epmd"] {
-            let invitation = data.join(format!("{}.ouro", host.replace(':', "-")));
-            let error = invite(&data, "worker", host, &invitation, ephemeral_ports())
+        // `create` refuses both of these in `validate_host`, before any resolution is
+        // attempted, so neither reaches the "resolving to IPv4" branch the deleted
+        // `invite` arm used to exercise here; that branch is covered by
+        // `fleet_dns_requires_one_canonical_private_ipv4`. Pin each host to the refusal it
+        // actually gets rather than accepting either of two.
+        for (host, refusal) in [
+            (
+                "2001:db8::1",
+                "IPv6 fleet distribution is not yet supported",
+            ),
+            ("host:epmd", "contains `:`"),
+        ] {
+            let error = create(&data, None, "owner", host, ephemeral_ports())
                 .unwrap_err()
                 .to_string();
-            assert!(error.contains("resolving to IPv4"), "{error}");
-            assert!(!invitation.exists());
+            assert!(error.contains(refusal), "{error}");
+            assert!(!fleet_dir(&data).exists());
         }
+
+        create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         assert_eq!(load(&data).unwrap().unwrap().members.len(), 1);
         fs::remove_dir_all(data).ok();
     }
@@ -6340,8 +5673,8 @@ mod tests {
             node: "ouro-vps@127.0.0.1".into(),
             role: "core".into(),
             members: vec![member("vps", "127.0.0.1")],
-            roster_revision: initial_roster_revision(),
             tombstones: Vec::new(),
+            roster_revision: initial_roster_revision(),
             // The exact exposure a real enrollment died on: gateway and distribution
             // pinned inside Linux's default ephemeral range, EPMD safely below it.
             gateway_port: 47_704,
@@ -6404,7 +5737,7 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let server = fake_epmd(profile.epmd_port, stop.clone());
 
-        let error = leave_with_inactive_manager(&data).unwrap_err().to_string();
+        let error = leave(&data).unwrap_err().to_string();
         assert!(
             error.contains("no positive Ouroboros ownership lease"),
             "{error}"
@@ -6415,7 +5748,7 @@ mod tests {
 
         stop.store(true, Ordering::Relaxed);
         server.join().unwrap();
-        assert!(leave_with_inactive_manager(&data).unwrap());
+        assert!(leave(&data).unwrap().is_some());
         assert!(!fleet_dir(&data).exists());
         fs::remove_dir_all(data).ok();
     }
@@ -6455,7 +5788,7 @@ mod tests {
             runtime::pid_alive(owner.pid),
             "the fixture PID must be live"
         );
-        assert!(leave_with_inactive_manager(&data).unwrap());
+        assert!(leave(&data).unwrap().is_some());
         assert!(
             runtime::pid_alive(owner.pid),
             "leave targeted an unrelated PID"
@@ -6536,7 +5869,7 @@ mod tests {
             OwnedEpmdListenerState::LoopbackOnly
         );
 
-        let fallback = leave_with_inactive_manager(&data).unwrap_err().to_string();
+        let fallback = leave(&data).unwrap_err().to_string();
         assert!(
             fallback.contains("recorded by the ownership marker is unavailable"),
             "{fallback}"
@@ -6544,10 +5877,7 @@ mod tests {
         assert!(profile_path(&data).exists());
         assert!(runtime::pid_alive(pid));
 
-        assert!(
-            leave_with_manager_query_and_epmd(&data, inactive_manager, Some(&current_program),)
-                .unwrap()
-        );
+        assert!(leave_with_epmd(&data, &current_program).unwrap().is_some());
         assert!(!fleet_dir(&data).exists());
         assert!(!runtime::pid_alive(pid));
         waiter.join().unwrap();
@@ -6669,7 +5999,7 @@ mod tests {
     }
 
     #[test]
-    fn create_and_join_refuse_an_advertised_private_address_not_assigned_locally() {
+    fn create_refuses_an_advertised_private_address_not_assigned_locally() {
         let unavailable = (1_u8..=254)
             .map(|last| Ipv4Addr::new(10, 255, 254, last))
             .find(|address| TcpListener::bind((*address, 0)).is_err())
@@ -6691,74 +6021,28 @@ mod tests {
         );
         assert!(!fleet_dir(&created).exists());
 
-        let owner = scratch("nonlocal-join-owner");
-        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let invitation = owner.join("remote.ouro");
-        invite(
-            &owner,
-            "remote",
-            &unavailable.to_string(),
-            &invitation,
-            ephemeral_ports(),
-        )
-        .unwrap();
-        let joined = scratch("nonlocal-join");
-        let error = format!(
-            "{:#}",
-            join(&joined, &invitation, ephemeral_ports()).unwrap_err()
-        );
-        assert!(error.contains("not a local private interface"), "{error}");
-        assert!(
-            error.contains("not assigned to a local interface"),
-            "{error}"
-        );
-        assert!(!fleet_dir(&joined).exists());
-
         fs::remove_dir_all(created).ok();
-        fs::remove_dir_all(owner).ok();
-        fs::remove_dir_all(joined).ok();
     }
 
     #[test]
-    fn invitation_and_installed_cookie_validation_matches_the_beam_exactly() {
-        let owner = scratch("cookie-owner");
-        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let invitation = owner.join("worker.ouro");
-        invite(
-            &owner,
-            "worker",
-            "127.0.0.1",
-            &invitation,
-            ephemeral_ports(),
-        )
-        .unwrap();
-        let original: Value = serde_json::from_slice(&fs::read(&invitation).unwrap())
-            .expect("private invitation JSON");
-
-        for (index, malformed) in [
+    fn installed_cookie_validation_matches_the_beam_exactly() {
+        for malformed in [
             "a".repeat(63),
             "A".repeat(64),
             format!("{}\n", "a".repeat(64)),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let mut value = original.clone();
-            value["cookie"] = Value::String(malformed);
-            resign_invitation_value(&owner, &mut value);
-            write_private_atomic(&invitation, &serde_json::to_vec_pretty(&value).unwrap()).unwrap();
-            let joined = scratch(&format!("cookie-join-{index}"));
-            let error = join(&joined, &invitation, ephemeral_ports())
+        ] {
+            let error = validate_cookie(&malformed, "installed cookie")
                 .unwrap_err()
                 .to_string();
             assert!(
                 error.contains("exactly 64 lowercase hexadecimal"),
                 "{error}"
             );
-            assert!(!fleet_dir(&joined).exists());
-            fs::remove_dir_all(joined).ok();
         }
+        validate_cookie(&"a".repeat(64), "installed cookie").unwrap();
 
+        let owner = scratch("cookie-owner");
+        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         write_private_atomic(&fleet_dir(&owner).join(COOKIE_FILE), &[b'A'; 64]).unwrap();
         let report = doctor(&owner);
         assert!(!report.healthy);
@@ -6772,81 +6056,7 @@ mod tests {
     }
 
     #[test]
-    fn join_rejects_tampered_certificate_chain_key_and_machine_identity_before_install() {
-        let owner = scratch("tls-owner");
-        let other_owner = scratch("tls-other-owner");
-        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        create(
-            &other_owner,
-            None,
-            "other-owner",
-            "127.0.0.1",
-            ephemeral_ports(),
-        )
-        .unwrap();
-        let invitation = owner.join("worker.ouro");
-        invite(
-            &owner,
-            "worker",
-            "127.0.0.1",
-            &invitation,
-            ephemeral_ports(),
-        )
-        .unwrap();
-        let original: Value = serde_json::from_slice(&fs::read(&invitation).unwrap()).unwrap();
-
-        let unrelated_key = KeyPair::generate().unwrap().serialize_pem();
-        let mut wrong_key = original.clone();
-        wrong_key["node_key_pem"] = Value::String(unrelated_key);
-
-        let mut wrong_ca = original.clone();
-        wrong_ca["ca_cert_pem"] =
-            Value::String(fs::read_to_string(fleet_dir(&other_owner).join(CA_CERT_FILE)).unwrap());
-
-        let mut wrong_identity = original.clone();
-        wrong_identity["member"]["host"] = Value::String("127.0.0.2".into());
-        wrong_identity["member"]["node"] = Value::String("ouro-worker@127.0.0.2".into());
-        for recorded in wrong_identity["members"].as_array_mut().unwrap() {
-            if recorded["machine"] == "worker" {
-                recorded["host"] = Value::String("127.0.0.2".into());
-                recorded["node"] = Value::String("ouro-worker@127.0.0.2".into());
-            }
-        }
-
-        let mut corrupt_cert = original.clone();
-        corrupt_cert["node_cert_pem"] = Value::String(
-            "-----BEGIN CERTIFICATE-----\nnot-base64\n-----END CERTIFICATE-----\n".into(),
-        );
-
-        for (index, (mut tampered, expected, resign)) in [
-            (wrong_key, "node private key does not match", true),
-            (wrong_ca, "not attested by the fleet CA", false),
-            (wrong_identity, "identity does not match machine", true),
-            (corrupt_cert, "node certificate is not valid PEM", true),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if resign {
-                resign_invitation_value(&owner, &mut tampered);
-            }
-            write_private_atomic(&invitation, &serde_json::to_vec_pretty(&tampered).unwrap())
-                .unwrap();
-            let joined = scratch(&format!("tls-tamper-{index}"));
-            let error = join(&joined, &invitation, ephemeral_ports())
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains(expected), "expected {expected:?}: {error}");
-            assert!(!fleet_dir(&joined).exists());
-            fs::remove_dir_all(joined).ok();
-        }
-
-        fs::remove_dir_all(owner).ok();
-        fs::remove_dir_all(other_owner).ok();
-    }
-
-    #[test]
-    fn doctor_and_invite_reject_installed_key_mismatches_before_beam_uses_them() {
+    fn doctor_rejects_installed_key_mismatches_before_beam_uses_them() {
         let owner = scratch("tls-installed-owner");
         let other_owner = scratch("tls-installed-other");
         create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
@@ -6873,34 +6083,29 @@ mod tests {
             report.text
         );
 
-        // Restore the node key from a fresh local certificate pair, then prove an
-        // unrelated authority cannot be used to mint an invitation.
-        let profile = load(&owner).unwrap().unwrap();
-        let ca_cert = fs::read_to_string(fleet_dir(&owner).join(CA_CERT_FILE)).unwrap();
-        let ca_key = fs::read_to_string(fleet_dir(&owner).join(CA_KEY_FILE)).unwrap();
-        let (node_cert, node_key) =
-            signed_node(&member("owner", "127.0.0.1"), &ca_cert, &ca_key).unwrap();
+        // An unrelated authority's node certificate is not this machine's identity, even
+        // though both are well-formed: doctor compares the installed pair, not its shape.
+        let other_node_cert =
+            fs::read_to_string(fleet_dir(&other_owner).join(NODE_CERT_FILE)).unwrap();
+        let other_node_key =
+            fs::read_to_string(fleet_dir(&other_owner).join(NODE_KEY_FILE)).unwrap();
         write_private_atomic(
             &fleet_dir(&owner).join(NODE_CERT_FILE),
-            node_cert.as_bytes(),
+            other_node_cert.as_bytes(),
         )
         .unwrap();
-        write_private_atomic(&fleet_dir(&owner).join(NODE_KEY_FILE), node_key.as_bytes()).unwrap();
-        assert_eq!(profile.machine, "owner");
-
-        let wrong_ca_key = fs::read_to_string(fleet_dir(&other_owner).join(CA_KEY_FILE)).unwrap();
         write_private_atomic(
-            &fleet_dir(&owner).join(CA_KEY_FILE),
-            wrong_ca_key.as_bytes(),
+            &fleet_dir(&owner).join(NODE_KEY_FILE),
+            other_node_key.as_bytes(),
         )
         .unwrap();
-        let output = owner.join("must-not-exist.ouro");
-        let error = format!(
-            "{:#}",
-            invite(&owner, "worker", "127.0.0.1", &output, ephemeral_ports()).unwrap_err()
+        let report = doctor(&owner);
+        assert!(!report.healthy);
+        assert!(
+            report.text.contains("node certificate") || report.text.contains("CA"),
+            "{}",
+            report.text
         );
-        assert!(error.contains("CA private key does not match"), "{error}");
-        assert!(!output.exists());
 
         fs::remove_dir_all(owner).ok();
         fs::remove_dir_all(other_owner).ok();
@@ -6952,14 +6157,14 @@ mod tests {
         let data = scratch("leave-unknown");
         create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
         write_private_atomic(&fleet_dir(&data).join("operator-note"), b"keep me").unwrap();
-        let error = leave_with_inactive_manager(&data).unwrap_err().to_string();
+        let error = leave(&data).unwrap_err().to_string();
         assert!(error.contains("unknown entries"), "{error}");
         assert!(fleet_dir(&data).join(COOKIE_FILE).exists());
 
         fs::remove_file(fleet_dir(&data).join("operator-note")).unwrap();
-        assert!(leave_with_inactive_manager(&data).unwrap());
+        assert!(leave(&data).unwrap().is_some());
         assert!(!fleet_dir(&data).exists());
-        assert!(!leave_with_inactive_manager(&data).unwrap());
+        assert!(leave(&data).unwrap().is_none());
         fs::remove_dir_all(data).ok();
     }
 
@@ -6987,7 +6192,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(leave_with_inactive_manager(&data).unwrap());
+        assert!(leave(&data).unwrap().is_some());
         assert!(!fleet_dir(&data).exists());
 
         let unsafe_data = scratch("leave-cluster-directory-symlink");
@@ -7002,55 +6207,13 @@ mod tests {
         let target = unsafe_data.join("checkpoint-target");
         write_private_new(&target, b"must remain", "checkpoint target").unwrap();
         std::os::unix::fs::symlink(&target, checkpoints.join(CLUSTER_CHECKPOINT_FILE)).unwrap();
-        let error = leave_with_inactive_manager(&unsafe_data)
-            .unwrap_err()
-            .to_string();
+        let error = leave(&unsafe_data).unwrap_err().to_string();
         assert!(error.contains("private regular"), "{error}");
         assert!(fleet_dir(&unsafe_data).join(COOKIE_FILE).exists());
         assert_eq!(fs::read(&target).unwrap(), b"must remain");
 
         fs::remove_dir_all(data).ok();
         fs::remove_dir_all(unsafe_data).ok();
-    }
-
-    #[test]
-    fn incomplete_profile_cleanup_is_explicit_locked_and_checks_the_former_service_identity() {
-        let data = scratch("discard-incomplete");
-        create(
-            &data,
-            None,
-            "incomplete-test-machine",
-            "127.0.0.1",
-            ephemeral_ports(),
-        )
-        .unwrap();
-        fs::remove_file(profile_path(&data)).unwrap();
-
-        let error = leave_with_inactive_manager(&data).unwrap_err().to_string();
-        assert!(
-            error.contains("--discard-incomplete --machine NAME"),
-            "{error}"
-        );
-        assert!(fleet_dir(&data).join(COOKIE_FILE).exists());
-
-        let removed = discard_incomplete_with_manager_query(
-            &data,
-            "incomplete-test-machine",
-            |kind, profile| {
-                assert_eq!(profile.machine, "incomplete-test-machine");
-                ServiceManagerState {
-                    active: ServiceFact::No,
-                    enabled: ServiceFact::No,
-                    linger: (kind == ServiceKind::SystemdUser).then_some(ServiceFact::No),
-                    note: None,
-                }
-            },
-        )
-        .unwrap();
-        assert!(removed);
-        assert!(!fleet_dir(&data).exists());
-
-        fs::remove_dir_all(data).ok();
     }
 
     #[test]
@@ -7102,43 +6265,6 @@ mod tests {
     }
 
     #[test]
-    fn live_status_keeps_a_just_invited_machine_visible_before_runtime_reload() {
-        let owner = scratch("live-status-invite-union");
-        create(&owner, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
-        let invitation = owner.join("alpha.ouro");
-        invite(&owner, "alpha", "127.0.0.2", &invitation, ephemeral_ports()).unwrap();
-
-        let rendered = render_live_status(
-            &owner,
-            &serde_json::json!({
-                "summary": {"expected": 1, "connected": 1, "offline": 0},
-                "formation": {"reconnect_ms": 1000},
-                "security": {"tls": true},
-                "machines": [{
-                    "machine": "owner",
-                    "node": "ouro-owner@127.0.0.1",
-                    "state": "local",
-                    "role": "core"
-                }]
-            }),
-        )
-        .expect("a tolerant live fleet projection");
-
-        assert!(
-            rendered.contains("known 2 · connected 1 · offline 1"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("alpha"), "{rendered}");
-        assert!(rendered.contains("invited"), "{rendered}");
-        assert!(
-            rendered.contains("outbound seed on its next restart"),
-            "{rendered}"
-        );
-
-        fs::remove_dir_all(owner).ok();
-    }
-
-    #[test]
     fn stale_publication_status_recommends_restart_not_attach() {
         let data = scratch("stale-status-guidance");
         create(&data, None, "owner", "127.0.0.1", ephemeral_ports()).unwrap();
@@ -7168,147 +6294,7 @@ mod tests {
     }
 
     #[test]
-    fn manager_queries_are_absolute_typed_and_include_systemd_lingering() {
-        let profile = sample_profile("studio-mini");
-        let mut launchd_calls = Vec::new();
-        let launchd =
-            query_service_manager_with(ServiceKind::Launchd, &profile, |program, args| {
-                launchd_calls.push((program.to_string(), args.to_vec()));
-                if args.first().map(String::as_str) == Some("print") {
-                    Ok(manager_output(
-                        113,
-                        "",
-                        "Could not find service \"dev.ouroboros.studio-mini\" in domain",
-                    ))
-                } else {
-                    Ok(manager_output(0, "disabled services = {\n}\n", ""))
-                }
-            });
-        assert_eq!(launchd.active, ServiceFact::No);
-        assert_eq!(launchd.enabled, ServiceFact::Yes);
-        assert_eq!(launchd.linger, None);
-        assert!(launchd_calls
-            .iter()
-            .all(|(program, _)| program == "/bin/launchctl"));
-        for (state, expected) in [
-            ("state = waiting\n", ServiceFact::No),
-            ("state = running\n", ServiceFact::Yes),
-        ] {
-            let launchd =
-                query_service_manager_with(ServiceKind::Launchd, &profile, |_program, args| {
-                    if args.first().map(String::as_str) == Some("print") {
-                        Ok(manager_output(0, state, ""))
-                    } else {
-                        Ok(manager_output(0, "disabled services = {\n}\n", ""))
-                    }
-                });
-            assert_eq!(launchd.active, expected, "{state}");
-        }
-
-        let mut systemd_calls = Vec::new();
-        let systemd =
-            query_service_manager_with(ServiceKind::SystemdUser, &profile, |program, args| {
-                systemd_calls.push((program.to_string(), args.to_vec()));
-                match (program, args.get(1).map(String::as_str)) {
-                    ("/usr/bin/systemctl", Some("is-active")) => {
-                        Ok(manager_output(0, "active\n", ""))
-                    }
-                    ("/usr/bin/systemctl", Some("is-enabled")) => {
-                        Ok(manager_output(0, "enabled\n", ""))
-                    }
-                    ("/usr/bin/loginctl", _) => Ok(manager_output(0, "no\n", "")),
-                    other => panic!("unexpected manager query: {other:?}"),
-                }
-            });
-        assert_eq!(systemd.active, ServiceFact::Yes);
-        assert_eq!(systemd.enabled, ServiceFact::Yes);
-        assert_eq!(systemd.linger, Some(ServiceFact::No));
-        assert_eq!(systemd_calls.len(), 3);
-        assert!(systemd_calls.iter().any(|(program, args)| {
-            program == "/usr/bin/loginctl"
-                && args
-                    == &[
-                        "show-user",
-                        &unsafe { libc::geteuid() }.to_string(),
-                        "-p",
-                        "Linger",
-                        "--value",
-                    ]
-        }));
-    }
-
-    #[test]
-    fn service_removal_fails_closed_until_the_manager_is_proven_inactive() {
-        let deactivation = "systemctl --user disable --now ouroboros-studio.service";
-        for manager in [
-            ServiceManagerState {
-                active: ServiceFact::Yes,
-                enabled: ServiceFact::Yes,
-                linger: Some(ServiceFact::Yes),
-                note: None,
-            },
-            ServiceManagerState {
-                active: ServiceFact::Unknown,
-                enabled: ServiceFact::No,
-                linger: Some(ServiceFact::No),
-                note: Some("trusted manager query timed out".into()),
-            },
-            ServiceManagerState {
-                active: ServiceFact::No,
-                enabled: ServiceFact::Yes,
-                linger: Some(ServiceFact::No),
-                note: None,
-            },
-        ] {
-            let error =
-                ensure_service_manager_inactive(ServiceKind::SystemdUser, &manager, deactivation)
-                    .unwrap_err()
-                    .to_string();
-            assert!(
-                error.contains("not removed") || error.contains("fails closed"),
-                "{error}"
-            );
-        }
-        ensure_service_manager_inactive(
-            ServiceKind::SystemdUser,
-            &ServiceManagerState {
-                active: ServiceFact::No,
-                enabled: ServiceFact::No,
-                linger: Some(ServiceFact::No),
-                note: None,
-            },
-            deactivation,
-        )
-        .unwrap();
-
-        let inactive = ServiceManagerState {
-            active: ServiceFact::No,
-            enabled: ServiceFact::No,
-            linger: Some(ServiceFact::No),
-            note: None,
-        };
-        let error = ensure_service_removed_before_leave(
-            ServiceKind::SystemdUser,
-            true,
-            &inactive,
-            deactivation,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains(deactivation), "{error}");
-        assert!(error.contains("`ouro fleet service remove`"), "{error}");
-        assert!(error.contains("retry `ouro fleet leave`"), "{error}");
-        ensure_service_removed_before_leave(
-            ServiceKind::SystemdUser,
-            false,
-            &inactive,
-            deactivation,
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn doctor_merges_live_errors_and_never_claims_inactive_recovery_is_ready() {
+    fn doctor_merges_live_errors_into_the_local_report() {
         let local = build_doctor_report(
             Path::new("/tmp/fleet-doctor-fixture"),
             vec![
@@ -7316,12 +6302,8 @@ mod tests {
                 warn("service inactive"),
             ],
             "local checks only",
-            RecoveryReadiness::Inactive,
         );
         assert!(local.healthy);
-        assert!(local
-            .text
-            .contains("Automatic process/login recovery is NOT active"));
 
         let live = merge_live_doctor(
             local,
@@ -7348,7 +6330,6 @@ mod tests {
                 Path::new("/tmp/fleet-doctor-fixture"),
                 vec![ok("local")],
                 "local",
-                RecoveryReadiness::NotInstalled,
             ),
             &serde_json::json!({
                 "healthy?": true,
@@ -7371,7 +6352,6 @@ mod tests {
                 Path::new("/tmp/fleet-doctor-fixture"),
                 vec![ok("local")],
                 "local",
-                RecoveryReadiness::NotInstalled,
             ),
             &serde_json::json!({"healthy?": true, "checks": [{"status": "future"}]}),
         );
@@ -7382,218 +6362,10 @@ mod tests {
             Path::new("/tmp/fleet-doctor-fixture"),
             vec![ok("local")],
             "local",
-            RecoveryReadiness::NotInstalled,
         ));
         assert!(stopped.text.contains("local checks only (runtime stopped)"));
         assert!(stopped
             .text
             .contains("live remote compatibility and connectivity were not checked"));
-    }
-
-    #[test]
-    fn doctor_never_calls_a_crash_looping_manager_recovery_active() {
-        let profile = sample_profile("studio-mini");
-        let unit = Path::new("/tmp/ouroboros-studio-mini.service");
-        let data = Path::new("/tmp/ouro-recovery-fixture");
-        let manager = ServiceManagerState {
-            active: ServiceFact::Yes,
-            enabled: ServiceFact::Yes,
-            linger: Some(ServiceFact::Yes),
-            note: None,
-        };
-
-        let (readiness, check) = service_recovery_check(
-            ServiceKind::SystemdUser,
-            &profile,
-            unit,
-            data,
-            &manager,
-            false,
-        );
-        assert_eq!(readiness, RecoveryReadiness::Unknown);
-        assert_eq!(check.level, CheckLevel::Problem);
-        assert!(check.message.contains("no live Ouroboros runtime"));
-        assert!(check.message.contains("runtime.log"));
-        assert!(check.message.contains("daemon.log"));
-
-        let (readiness, check) = service_recovery_check(
-            ServiceKind::SystemdUser,
-            &profile,
-            unit,
-            data,
-            &manager,
-            true,
-        );
-        assert_eq!(readiness, RecoveryReadiness::Active);
-        assert_eq!(check.level, CheckLevel::Ok);
-        assert!(check.message.contains("owns a live Ouroboros runtime"));
-    }
-
-    #[test]
-    fn recovery_unit_identity_requires_current_paths_and_restart_policy() {
-        let profile = sample_profile("studio-mini");
-        let data = scratch("service-unit-identity");
-        let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
-        let environment = ServiceEnvironment {
-            path: "/usr/local/bin:/usr/bin:/bin".into(),
-            provider_paths: Vec::new(),
-            workspace_roots: "/srv/ouro-work:/opt/project".into(),
-            gateway_max_frame: 65_536,
-            gateway_queue_limit: 64,
-        };
-        for kind in [ServiceKind::Launchd, ServiceKind::SystemdUser] {
-            let rendered =
-                render_service_unit(kind, &profile, &data, &executable, &environment).unwrap();
-            let identity = validate_service_unit_identity_with_executable(
-                kind,
-                &profile,
-                &data,
-                &executable,
-                &rendered,
-            )
-            .unwrap();
-            assert_eq!(identity.provider_path, environment.path);
-            assert_eq!(identity.workspace_roots, environment.workspace_roots);
-            assert_eq!(identity.gateway_max_frame, 65_536);
-            assert_eq!(identity.gateway_queue_limit, 64);
-
-            let drifted_data = rendered.replace(path_text(&data).unwrap(), "/tmp/wrong-data");
-            let error = validate_service_unit_identity_with_executable(
-                kind,
-                &profile,
-                &data,
-                &executable,
-                &drifted_data,
-            )
-            .unwrap_err()
-            .to_string();
-            assert!(error.contains("OUROBOROS_DATA_DIR"), "{error}");
-
-            let drifted_policy = match kind {
-                ServiceKind::Launchd => rendered.replace(
-                    "<key>KeepAlive</key><true/>",
-                    "<key>KeepAlive</key><false/>",
-                ),
-                ServiceKind::SystemdUser => rendered.replace("Restart=always", "Restart=no"),
-            };
-            let error = validate_service_unit_identity_with_executable(
-                kind,
-                &profile,
-                &data,
-                &executable,
-                &drifted_policy,
-            )
-            .unwrap_err()
-            .to_string();
-            assert!(error.contains("policy"), "{error}");
-
-            let widened_gateway = match kind {
-                ServiceKind::Launchd => rendered.replace(
-                    "<key>OUROBOROS_GATEWAY_QUEUE_LIMIT</key><string>64</string>",
-                    "<key>OUROBOROS_GATEWAY_QUEUE_LIMIT</key><string>1000</string>",
-                ),
-                ServiceKind::SystemdUser => rendered.replace(
-                    "Environment=\"OUROBOROS_GATEWAY_QUEUE_LIMIT=64\"",
-                    "Environment=\"OUROBOROS_GATEWAY_QUEUE_LIMIT=1000\"",
-                ),
-            };
-            let error = validate_service_unit_identity_with_executable(
-                kind,
-                &profile,
-                &data,
-                &executable,
-                &widened_gateway,
-            )
-            .unwrap_err()
-            .to_string();
-            assert!(error.contains("authority policy digest"), "{error}");
-        }
-        fs::remove_dir_all(data).ok();
-    }
-
-    #[test]
-    fn service_templates_stay_attached_and_quote_paths_without_secrets() {
-        let profile = sample_profile("studio-mini");
-        let data = Path::new("/tmp/Ouro & fleet/data");
-        let executable = Path::new("/Applications/Michael's Ouro & Tools/ouro");
-        let environment = ServiceEnvironment {
-            path: "/opt/provider sentinel/bin:/usr/local/bin:/usr/bin:/bin".into(),
-            provider_paths: vec![("AMP_CLI_PATH".into(), "/opt/provider sentinel/amp".into())],
-            workspace_roots: "/srv/provider workspace:/opt/project".into(),
-            gateway_max_frame: 65_536,
-            gateway_queue_limit: 64,
-        };
-        let launchd = render_service_unit(
-            ServiceKind::Launchd,
-            &profile,
-            data,
-            executable,
-            &environment,
-        )
-        .unwrap();
-        assert!(launchd.contains("<string>service-run</string>"));
-        assert!(launchd.contains("Michael&apos;s Ouro &amp; Tools"));
-        assert!(launchd.contains("<key>KeepAlive</key><true/>"));
-        assert!(launchd.contains("<key>PATH</key><string>/opt/provider sentinel/bin:"));
-        assert!(launchd.contains("<key>AMP_CLI_PATH</key><string>/opt/provider sentinel/amp"));
-        assert!(launchd.contains(
-            "<key>OUROBOROS_WORKSPACE_ROOTS</key><string>/srv/provider workspace:/opt/project</string>"
-        ));
-        assert!(launchd.contains("<key>OUROBOROS_GATEWAY_MAX_FRAME</key><string>65536</string>"));
-        assert!(launchd.contains("<key>OUROBOROS_GATEWAY_QUEUE_LIMIT</key><string>64</string>"));
-        assert!(!launchd.contains("cookie"));
-
-        let systemd = render_service_unit(
-            ServiceKind::SystemdUser,
-            &profile,
-            data,
-            executable,
-            &environment,
-        )
-        .unwrap();
-        assert!(
-            systemd.contains("ExecStart=\"/Applications/Michael's Ouro & Tools/ouro\" service-run")
-        );
-        assert!(systemd.contains("Restart=always"));
-        assert!(systemd.contains("Environment=\"OUROBOROS_DATA_DIR=/tmp/Ouro & fleet/data\""));
-        assert!(systemd.contains("Environment=\"PATH=/opt/provider sentinel/bin:"));
-        assert!(systemd.contains("Environment=\"AMP_CLI_PATH=/opt/provider sentinel/amp\""));
-        assert!(systemd.contains(
-            "Environment=\"OUROBOROS_WORKSPACE_ROOTS=/srv/provider workspace:/opt/project\""
-        ));
-        assert!(systemd.contains("Environment=\"OUROBOROS_GATEWAY_MAX_FRAME=65536\""));
-        assert!(systemd.contains("Environment=\"OUROBOROS_GATEWAY_QUEUE_LIMIT=64\""));
-        assert!(!systemd.contains("cookie"));
-        assert!(!systemd.contains("API_KEY"));
-
-        assert_eq!(
-            shell_quote("/Users/Michael's Ouro/ouro"),
-            "'/Users/Michael'\"'\"'s Ouro/ouro'"
-        );
-        assert_eq!(
-            shell_quote_path(Path::new("/tmp/Michael's invite $(safe).ouro")).unwrap(),
-            "'/tmp/Michael'\"'\"'s invite $(safe).ouro'"
-        );
-        assert!(shell_quote_path(Path::new("/tmp/bad\ninvite")).is_err());
-        assert!(render_service_unit(
-            ServiceKind::Launchd,
-            &profile,
-            Path::new("/tmp/bad\npath"),
-            executable,
-            &environment,
-        )
-        .is_err());
-        for unsafe_path in ["/tmp/percent%path", "/tmp/dollar$path"] {
-            let error = render_service_unit(
-                ServiceKind::SystemdUser,
-                &profile,
-                Path::new(unsafe_path),
-                executable,
-                &environment,
-            )
-            .unwrap_err()
-            .to_string();
-            assert!(error.contains("systemd may expand"), "{error}");
-        }
     }
 }

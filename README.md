@@ -122,7 +122,6 @@ runs them. [WASM.md](docs/WASM.md) is the design behind it.
 - [Fleet setup](docs/FLEET.md)
 - [WebAssembly components](docs/WASM_GUIDE.md)
 - [Protocol reference](docs/PROTOCOL.md)
-- [Distribution](docs/DISTRIBUTION.md)
 
 ## Contributing
 

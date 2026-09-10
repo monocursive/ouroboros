@@ -1,286 +1,189 @@
-# Ouroboros Fleet
+# The cluster
 
-An implemented secure core plus the evolution design for a fleet of Ouroboros runtimes
-— a Mac, a Linux laptop, a VPS — joined as one BEAM cluster.
+Ouroboros runs as one BEAM cluster: several machines, one trust domain, sessions and
+native subagents placed across it. This document is the whole of it — what a node is,
+what it reads from its environment, how nodes find each other, and what an operator
+types to bring a second machine up.
 
-## Current implemented core (2026-09-07)
+There is no enrollment product. Nothing here copies a binary to another machine, opens
+an SSH connection, mints an invitation, or installs a service. An operator builds `ouro`
+on each machine (`make ouro`), copies the binary the way they copy any other binary, and
+then either copies one cluster-identity directory between the machines or sets the
+environment below by hand. `docs/proposals/core.md` §3 records that decision.
 
-The beginner path no longer requires the environment/OpenSSL runbook described later in
-this document. From the first Mac you launch, `/machines` is a menu that can add, create,
-join, invite, check, and diagnose. Known Tailscale/SSH hosts are rows you can run. A first
-create or add restarts that standalone runtime once to become the fleet owner. SSH/Tailscale
-SSH copies a private invitation as a file and enrolls when the destination can run this
-binary; a Mac build is never copied onto Linux. What *is* copied onto Linux is a release
-artifact already built for that OS/CPU at this exact version (see below). When SSH is
-unavailable, "I'll set it up myself" / `ouro fleet add --print-script` writes the
-invitation here and prints `ouro fleet enroll`.
+## Roles
+
+Every node boots as exactly one of three roles, from `config :ouroboros, :node_role`
+(`OUROBOROS_NODE_ROLE`, default `core`). The role shapes the supervision tree in
+`Ouroboros.Application`:
+
+| Role | What it runs |
+|---|---|
+| `core` | the full runtime: sessions, storage, the mesh, the gateway, the web surface |
+| `builder` | `Ouroboros.Cluster` plus `Ouroboros.Wasm.Supervisor`, and nothing that holds durable work — a forwarded lane-W forge reads imports through this node's helper pool |
+| `signer` | `Ouroboros.Cluster`, `Upgrade.Signing.Service`, and the durable-directory owner when configured |
+
+An unrecognized role refuses the boot rather than defaulting to the most privileged one.
+`OUROBOROS_SIGNING_NODE` on a `core` node names the `signer` peer that lane-W signing is
+routed to; `OUROBOROS_FORGE_BUILDER_NODE` names the builder.
+
+Role is a *placement* concept, not a security boundary — see "Trust" below.
+`Ouroboros.Cluster.ensure_role/2` and `ensure_placeable/1` refuse work sent to a node
+that cannot run it; `config :ouroboros, :placement_role_check` (default `true`) turns
+that check off for setups that place onto unlabelled nodes deliberately.
+
+## Environment
+
+Read by `rel/env.sh.eex`, `config/runtime.exs` and `Ouroboros.Cluster`, except the two
+`ERL_EPMD_*` variables, which no Ouroboros code reads: ERTS consumes them, and
+`fleet::runtime_env` is what sets them.
+
+| Variable | Meaning |
+|---|---|
+| `OUROBOROS_NODE` | this node's fully qualified name, `name@host`. Setting it selects distribution with long names. |
+| `OUROBOROS_DIST` | `none` forces a single-machine daemon; anything else selects distribution. Unset with no node name and no strategy is also single-machine. |
+| `OUROBOROS_COOKIE_FILE` | absolute path to a mode-0600, same-user, non-symlink file holding exactly 64 lowercase hex characters. `config/runtime.exs` reads it and replaces the release launcher's disposable boot cookie before libcluster starts, so the real cookie never appears in `argv` or the environment. |
+| `OUROBOROS_NODE_ROLE` | `core`, `builder` or `signer`. |
+| `OUROBOROS_CLUSTER_STRATEGY` | `none` (default), `epmd`, `gossip` or `dns`. |
+| `OUROBOROS_CLUSTER_HOSTS` | comma-separated node names, for the `epmd` strategy. |
+| `OUROBOROS_CLUSTER_RECONNECT_MS` | dial retry interval (default 5000). |
+| `OUROBOROS_CLUSTER_GOSSIP_PORT`, `OUROBOROS_CLUSTER_GOSSIP_SECRET` | for the `gossip` strategy. |
+| `OUROBOROS_CLUSTER_DNS_QUERY`, `OUROBOROS_CLUSTER_DNS_BASENAME` | for the `dns` strategy. |
+| `OUROBOROS_DIST_TLS`, `OUROBOROS_DIST_TLS_OPTFILE` | `rel/vm.args.eex` turns these into `-proto_dist inet_tls` and an ssl options file. |
+| `OUROBOROS_DIST_PORT_MIN`, `OUROBOROS_DIST_PORT_MAX` | pin the distribution listener to a firewall-friendly range. Set together. |
+| `ERL_EPMD_ADDRESS`, `ERL_EPMD_PORT` | keep EPMD on one private address and a non-default port. |
+| `OUROBOROS_MACHINE_NAME` | the friendly label this node reports in `fleet.status`. |
+| `OUROBOROS_FLEET_ID` | with `OUROBOROS_DATA_DIR`, selects the durable cluster directory under `<data dir>/fleet/`. Without it, session-owner evidence is in-memory only. |
+| `OUROBOROS_ALLOW_INSECURE_DIST` | `1` accepts cleartext distribution. See below. |
+
+**Forming a cluster over cleartext distribution refuses the boot.** A cluster puts the
+shared cookie, and every message after it, on the wire; any node that completes the
+handshake holds full `:erpc` authority over this one. `config/runtime.exs` reads the
+transport the VM is actually running (`-proto_dist`) rather than the one someone
+intended, and raises unless it is `inet_tls`/`inet6_tls`. `OUROBOROS_ALLOW_INSECURE_DIST=1`
+is the deliberate override for a trusted network, and has to be typed on the host that
+wants it.
+
+## Formation
+
+`Ouroboros.Cluster` owns formation and identity and is the only place that knows either.
+`OUROBOROS_CLUSTER_STRATEGY` selects one of:
+
+- **`none`** (default) — no discovery. Nodes are connected by something else, or not
+  at all.
+- **`epmd`** — a list of node names, retried on `OUROBOROS_CLUSTER_RECONNECT_MS` so boot
+  order does not matter. `OUROBOROS_CLUSTER_HOSTS` seeds the list.
+- **`gossip`** — libcluster's multicast gossip, optionally keyed by
+  `OUROBOROS_CLUSTER_GOSSIP_SECRET`.
+- **`dns`** — poll the A records of `OUROBOROS_CLUSTER_DNS_QUERY` and connect
+  `basename@ip`.
+
+A strategy that is named but misconfigured refuses the boot; it does not quietly fall
+back to an unformed cluster.
+
+`Ouroboros.Cluster.Monitor` keeps the observed roster: who joined, who left, each peer's
+role and runtime posture, and which nodes own interactive sessions. Runtime
+compatibility is a manual fence — `@fleet_protocol_revision` in `cluster.ex`, plus the
+Ouroboros version and OTP release — so a mixed-revision cluster is named rather than
+silently trusted.
+
+## Two machines, by hand
+
+Nothing below contacts a machine. An operator copies one directory, types four commands,
+and the two runtimes find each other.
+
+`ouro fleet create` gives the first machine a cluster identity in `<data dir>/fleet/`: a
+fleet id, a node name, a private 64-hex cookie at mode 0600, a self-signed CA, a node
+certificate signed by it, a private EPMD port, and generated `ssl_dist.conf` and `vm.args`.
+The packaged launcher owns that EPMD for the life of the runtime and retires it on
+`ouro fleet leave`.
+
+**The profile is what the launcher trusts, not your environment.** When `<data dir>/fleet/`
+holds a profile, `ouro daemon` computes the whole cluster environment from it and *removes*
+the caller's — `apply_spawn_environment` (`tui/src/runtime.rs:1828-1866`) strips every
+`OUROBOROS_*` variable the operator exported, plus `ERL_AFLAGS`, `ERL_FLAGS`, `ERL_INETRC`,
+`ERL_LIBS`, `ERL_ZFLAGS`, `ELIXIR_ERL_OPTIONS` and every `RELEASE_*`, then applies the
+profile's. Exporting `OUROBOROS_CLUSTER_HOSTS` beside a profile therefore does nothing at
+all, silently. Edit the roster instead, with the commands below.
 
 ```sh
-# First machine (already running ouro): /machines → Add, or:
-ouro fleet list
-ouro fleet add user@vps --machine vps --host vps.example-tailnet.ts.net
-ouro fleet add --print-script --machine laptop --host laptop.example-tailnet.ts.net
+# 1. On the first machine.
+ouro fleet create --machine studio --host studio.example-tailnet.ts.net
 
-# Mac → Linux, with an artifact built and signed as described in DISTRIBUTION.md
-make dist-linux
-ouro fleet add user@vps --machine vps --host vps.example-tailnet.ts.net
+# 2. Copy the whole directory to the second machine, privately: it holds the cluster's
+#    CA key and its cookie. Any private transport will do; scp is one.
+scp -rp ~/.ouroboros/fleet me@vps.example-tailnet.ts.net:/home/me/carried-fleet
 
-# A destination with no tailnet yet. This runs commands as root over there.
-ouro fleet add user@vps --setup-tailscale
+# 3. On the second machine. This signs *its* certificate with the copied CA, and takes
+#    the fleet id, the cookie and the roster from the copy. Then delete the copy.
+ouro fleet create --from /home/me/carried-fleet \
+  --machine vps --host vps.example-tailnet.ts.net
+rm -rf /home/me/carried-fleet
 
-# First add while this Mac is still standalone
-ouro stop
-ouro fleet add --init --owner-host studio.example-tailnet.ts.net \
-  --print-script --machine laptop --host laptop.example-tailnet.ts.net
+# 4. Back on the first machine: tell it about the second.
+ouro fleet members add vps --host vps.example-tailnet.ts.net
 
-# Explicit file path, same membership material
-ouro fleet create
-ouro fleet invite --machine laptop --host laptop.example-tailnet.ts.net --out laptop.ouro
-
-# Invited machine, after privately copying the mode-0600 file
-ouro fleet enroll laptop.ouro --delete --activate
-# or: ouro fleet join laptop.ouro && ouro daemon
-
-# On both machines, activate managed recovery. Linux also requires user lingering.
-ouro fleet service install
-ouro fleet service start
-
-# Either machine
-ouro fleet status
-ouro fleet doctor
-ouro new --machine laptop --provider native --workspace /absolute/path/on/laptop/project
-
-# If an expected invitation is abandoned, publish the signed membership change
-ouro fleet invite cancel --machine laptop --out fleet.ouro-roster
-# On every existing member, inspect service ownership before stopping anything
-ouro fleet service status
-# Deactivate an installed recovery unit with the exact command above; otherwise: ouro stop
-ouro fleet sync import fleet.ouro-roster
-# Reactivate that unit with its printed command; otherwise: ouro daemon
-ouro fleet doctor
-
-# Only for a permanently lost machine that owned sessions, after inspecting/exporting
-# any recoverable owner-local state. Run locally on every gateway that may have seen it.
-ouro fleet sessions forget --machine laptop --accept-state-loss
+# 5. Start both.
+ouro daemon
 ```
 
-`fleet status` is fleet-wide. `fleet doctor` merges live fleet facts with host-local
-certificate, interface, port, log, and recovery-service checks, so run doctor locally on
-each machine during setup.
-
-SSH enrollment runs `fleet enroll --delete --activate` and waits for an authenticated
-local readiness check: TLS distribution and a persistently enabled, active recovery
-service. When the owner's runtime is running, the remote must also report a compatible
-BEAM connection to it. During first-run setup, when the owner is still stopped, the
-result explicitly leaves peer connectivity pending. After the owner starts, inspect
-`fleet status` or run `fleet ready --peer ouro-OWNER@HOST` on the destination. A failure
-after joining preserves that fact; repair the service and run `fleet service start`
-instead of issuing a second credential.
-
-### Revoking a machine identity
-
-Upgrade every existing member to management protocol 2 before relying on revocation.
-Deactivate its recovery unit, stop the runtime, run `ouro fleet upgrade-transport`,
-and restart recovery. Migration accepts only the exact previous generated TLS policy;
-custom or weakened policy still fails closed.
+Then, from either machine:
 
 ```sh
-# Invitation authority, preferably running so it can collect acknowledgements:
-ouro fleet revoke --machine laptop --out laptop.revocation.json
-# Any surviving machine that was offline; copy the artifact privately first:
-ouro fleet import-revocation laptop.revocation.json
+ouro fleet status     # this machine's identity, plus the live roster when a runtime answers
+ouro fleet doctor     # local security and, when running, live connectivity and compatibility
+ouro new --machine vps --provider native --workspace /absolute/path/on/vps/project
 ```
 
-Revocation is permanent and CA-signed. It rejects that certificate identity during TLS
-handshakes, closes existing sockets authenticated with it, persists across restarts,
-and accompanies new invitations. Resumed TLS sessions are disabled so reconnects must
-pass the verifier. Old rosters and reissued invitations cannot restore this identity;
-a replacement needs a new machine name. Revocation leaves session history and positive
-owner evidence intact.
+`create --from` refuses a directory that is not a complete copy of a fleet directory, and
+refuses a `--machine` name the copied roster already holds. It writes no `ca-key.pem` on the
+second machine: the authority to sign a third machine stays where the key already is, so a
+third machine is another copy of the *first* machine's directory. Both machines end up with
+one CA, one cookie, one fleet id, and a certificate whose common name is
+`ouro-<machine>@<host>` with the host in a subject alternative name —
+`ouro fleet doctor` refuses a mismatch rather than falling back to cleartext.
 
-A successful local save is not fleet-wide completion. The signed artifact identifies
-the invitation authority; only that authority can confirm completion using its full
-issuance roster. Imports ask it to reconcile the change and report it as pending when
-it is offline. The command names every pending holder, including canceled invitations that could still hold credentials. Keep pending
-machines isolated from the revoked holder until they import and acknowledge the policy.
-A stopped issuer reports that distribution remains outstanding. Connected peers also
-exchange signed records when joining.
+The roster is not replicated and there is no membership consensus. `ouro fleet members add`
+and `ouro fleet members remove` edit *this* machine's `fleet/profile.json`, under the same
+lock and validation `ouro fleet tag` uses, so nobody hand-edits that file; run them once per
+machine. A running node re-reads the profile on every reconnect sweep
+(`OUROBOROS_CLUSTER_RECONNECT_MS`, 1000 ms from a profile), so a roster edit reaches the
+live dialer within about a second, with no restart.
 
-All distributed BEAM nodes remain one trust domain: a hostile machine that already
-joined could execute code on peers or copy other credentials. Revocation prevents reuse
-of one identity; recovering from an actual compromise requires clean hosts and whole
-fleet credential rotation. Roles are placement controls, not isolation boundaries.
+A machine leaves the same way it arrived, by hand: `ouro fleet leave` on the machine itself
+retires its own identity and owned EPMD, and `ouro fleet members remove NAME` on every
+remaining machine takes it out of their rosters. There is no revocation authority and no
+signed roster to distribute; a machine whose credentials leaked is answered by re-creating
+the cluster, or by the network ACLs under "Trust".
 
-Each machine's `OUROBOROS_DATA_DIR` leaf must be a real same-user directory at mode
-`0700`. The packaged launcher creates a missing leaf privately and can restrict its own
-derived XDG default when upgrading same-user legacy state. Explicit fleet paths still
-refuse symlinks, foreign ownership, non-directories, and broader existing modes without
-changing them. If an imported path is refused, inspect its ownership and contents before
-applying `chmod 700` (only when it is truly yours), or select a fresh absolute path; do
-this before installing or retrying the generated fleet service.
+A profile written by an older Ouroboros can carry a generated `ssl_dist.conf` this build no
+longer emits, and startup refuses it by name. `ouro fleet create --regenerate` rewrites only
+`ssl_dist.conf` and `vm.args` from the profile, in place, keeping the fleet id, CA, cookie,
+roster and tombstones — which `ouro fleet leave` plus `ouro fleet create` would all destroy.
 
-Cancel/import changes membership bookkeeping; it does not revoke credentials and does not
-erase positive session-owner evidence. An offline former owner therefore continues to
-make session lists fail closed after restart. If the machine is permanently lost, first
-inspect or export any recoverable owner-local state, then run `ouro fleet sessions forget
---machine NAME --accept-state-loss` locally on every gateway/data directory that may have
-observed it. The authenticated operate call requires the matching roster tombstone in the
-validated local profile (rebuilt only from a signature-verified roster import),
-refuses while that node is connected, and syncs both evidence planes before success. It is
-an irreversible local discoverability boundary only: it neither deletes files on the lost
-machine nor revokes its credential.
+**The alternative: manage the certificates yourself.** With *no* profile in
+`<data dir>/fleet/`, none of the above applies and the variables in the table are read
+exactly as set, so an operator with their own CA can set `OUROBOROS_NODE`,
+`OUROBOROS_COOKIE_FILE`, `OUROBOROS_CLUSTER_STRATEGY=epmd`, `OUROBOROS_CLUSTER_HOSTS`,
+`OUROBOROS_DIST_TLS=1` and `OUROBOROS_DIST_TLS_OPTFILE` by hand and cluster without
+`ouro fleet` at all. What it costs is stated plainly: there is no `OUROBOROS_FLEET_ID`, so
+there is no durable session-owner directory under `<data dir>/fleet/cluster-directory/`
+(`Cluster.Monitor.fleet_profile_storage/0`, `lib/ouroboros/cluster.ex:819-836`), session ownership is in-memory only, and
+`ouro fleet sessions forget` has nothing to retire. `ouro fleet status` and
+`ouro fleet doctor` also have no profile to read. Nothing checks that the optfile you
+supply is a mutual-TLS policy either; that check belongs to the profile the launcher
+computes from.
 
-Implemented now:
+Ports: allow the EPMD port and the distribution range between the private addresses only.
+The gateway port stays loopback-only.
 
-- a private per-machine profile, generated fleet CA, per-node TLS certificate/key, 0600
-  cookie file, dynamic `vm.args`, stable identity/ports, owner-attested invitations and
-  membership rosters, and create/invite/join/sync/leave validation in the packaged
-  `ouro` binary;
-- no real fleet cookie in argv or the environment; a disposable boot cookie is replaced
-  from the validated private file before supervised formation starts;
-- private-interface TLS distribution with a fleet-specific EPMD port, supervised static
-  reconnect, a last-known expected/connected/offline machine directory, compatibility
-  and transport diagnostics, plus `fleet.status` and `fleet.doctor` gateway methods;
-- one local gateway routing remote starts, session lists, calls, replay, subscriptions,
-  and follow-ups over BEAM distribution using owner-qualified references;
-- durable positive session-owner evidence that survives gateway/runtime recovery, plus an
-  explicit tombstoned-offline state-loss command instead of implicit deletion on cancel;
-- Settings → Machines: a runnable menu. Known Tailscale/SSH hosts are first-class add
-  targets. Enter runs add, create, join/enroll, invite, service install, status, doctor,
-  and roster export after confirm. A first create or add on a standalone Mac restarts
-  once. Invitation bytes never appear on screen;
-- cross-platform artifact resolution in `ouro fleet add`. When the destination is a
-  different OS/CPU, has no `ouro`, and no `--binary` was given, the add looks for
-  `ouro-<this version>-<destination triple>` — the exact name `make dist` writes — in
-  `$OUROBOROS_DIST_DIR`, then in every `dist` directory above this executable's real path,
-  then in `./dist`. Every supplied/discovered artifact must have a matching signed
-  `SHA256SUMS` and `SHA256SUMS.minisig` beside it, trusted by the release key compiled
-  into the owner. A private verified snapshot is copied. If no local artifact matches,
-  a provisioned build downloads and verifies its exact release. Verification happens
-  before invitation creation. An existing destination `ouro` must report the exact
-  version and management protocol 2 before receiving an invitation;
-- `ouro fleet add --setup-tailscale`: consent-gated guided enrollment for a destination
-  that cannot yet prove a private address. It runs the vendor's own installer
-  (`curl -fsSL https://tailscale.com/install.sh | sudo -n sh`) and `sudo tailscale up`
-  **as root on that machine**, printing each command before it runs; it needs passwordless
-  sudo there and refuses by name when `sudo -n true` fails. `tailscale up` blocks, so it is
-  started detached and its output polled for the sign-in link, which is printed to this
-  terminal and deliberately kept out of the add log, the invitation, and the howto file.
-  The add then waits up to five minutes for a tailnet address and re-probes. All of this
-  happens before any invitation exists, so a refusal or a timeout leaves no private
-  material anywhere; resuming is running the same command again, which reuses an already
-  installed and already up Tailscale. Without the flag a destination with no private
-  address is refused exactly as before, with the flag now named in the message. This is
-  CLI only: the `/machines` menu does not drive `--setup-tailscale` yet;
-- a connected-machine New Session picker, and retained cursor recovery when a remote
-  owner temporarily disappears;
-- remote Team worker reconciliation after the worker's machine restarts;
-- generated launchd/systemd-user recovery units, activated by SSH enrollment; Linux requires persistent user lingering and macOS recovery runs in the user login session;
-- separate private service logs: OTP live-rotates `runtime.log` after 2 MiB with three
-  archives while restart-rotated `daemon.log` retains bootstrap/VM/crash diagnostics,
-  with no shared rotated inode between their writers; and
-- downloadable per-platform release assets plus checksums in the tag workflow (the
-  workflow remains honestly unproven until the first tag runs).
+## Facts, tags and placement
 
-`ouro fleet add` runs as a typed event stream, and that stream is the client seam every
-surface renders. The pipeline emits `Probed`, the `Network` plan it chose, the Tailscale
-`AuthUrl`, a `WaitingForAddress` per poll round, the `Install` decision, each `Copying`
-step, `Enrolling`, and exactly one terminal `Done` or `Failed`; a failure carries
-structured residue naming what it left behind — the pending invitation and the
-treat-as-issued rule, and after a refused enroll the possibility of an already joined
-or running destination. `spawn_add` runs it on its own thread for a UI, `add_with_events` runs it on
-the caller's; the CLI takes the second and renders the same stream back into the lines it
-has always printed, so terminal output is unchanged. Cancellation is checked both between steps and during running SSH/copy operations.
-SSH has a three-minute command deadline, copy has fifteen minutes, and both have
-connection/liveness timeouts and bounded output. Cancellation closes the local process
-group; it cannot undo changes already made remotely.
-
-The checked-in packaged exercise builds a three-node TLS mesh with reverse/cold boot,
-late join, hub loss/rejoin, automatic service-run crash restart, and final cleanup. CI
-runs that exercise on Linux before a release artifact may publish. This remains an
-isolated same-host proof, not a claim that a release has already been installed on three
-physical networks.
-
-On 2026-09-07 the Mac and Ubuntu 26.04 VPS also formed the TLS fleet directly over
-Tailscale, with readiness passing after a VPS service restart. A native child received
-the Mac's dirty and untracked files in a VPS-owned worktree, read and edited them through
-native tools under `workspace_write`, and returned changes plus a delivered report. The
-first bundle was 180885 bytes; the second was 540 bytes and reused the same mirror.
-The Mac's HEAD, index bytes and working status were unchanged. Both returned commits
-passed a real single-commit cherry-pick tree comparison, acknowledgments were repeatable,
-and returned worktrees and source snapshot pins were removed after acknowledgment.
-
-That round trip used scripted model responses to exercise placement, tools and transfer
-without a model-provider dependency. A paused child also received a committed edit and
-delivery fixture through a bounded peer RPC; its dirty write used the real native tool.
-The packaged daemons loaded the branch's updated runtime modules for this check. It is
-physical transport and workspace evidence, not a release installation or AI-provider claim.
-
-The final acceptance on the same day used packaged source `8706591` on both machines:
-real Claude Code on the Mac delegated through MCP to a real OpenAI-powered native child
-on the VPS, collected its returned commit and inspected it with `git show`. Dirty and
-untracked inputs reached the child, exclusions stayed absent, and the parent's HEAD,
-index and working files stayed unchanged. This check used no scripted models or hotloaded
-modules. See the [complete implementation acceptance record](proposals/fleet-aware-subagents-validation.md)
-for build, test and isolated fleet posture details.
-
-What has been proven across two real machines (2026-08-28): a `make dist-linux`
-artifact was deployed from a macOS checkout to a fresh Ubuntu 26.04 VPS by
-`ouro fleet add` (probe, artifact resolution, binary + invitation copy, remote join),
-the two packaged runtimes formed this TLS mesh over a WAN link, `fleet doctor` passed
-on both ends, and `ouro run --machine` executed a real model turn on the remote
-machine. Two honest limits of that run: the VPS was enrolled at loopback and reached
-through an SSH port-forward plus a held EPMD registration — a lab topology, not yet a
-tailnet-address formation — and the remote runtime had to be started by hand once,
-because enroll's start validation raced its own runtime boot on the pinned gateway
-port on that cold 4-core machine (both boots died `eaddrinuse`; a manual `ouro daemon`
-on the same profile came up clean). That race has since been diagnosed and fixed. The
-mechanism was not a double boot — enroll spawns exactly one runtime, and release
-extraction completes before the readiness deadline is armed. The first-generation
-default gateway ports (47000-47999) sat inside Linux's default ephemeral range
-(32768-60999), so the kernel could number any of the fleet's own loopback client
-sockets — the launcher's 4-per-second EPMD NAMES probes, the BEAM's own EPMD
-registration, sshd's forwarded connections in that lab topology — with the machine's
-pinned gateway port at the moment the gateway tried to bind it. That is why
-`ss -tlnp` showed nothing moments later: the holder was never a listener. Three
-defenses now stand: the gateway retries a pinned bind for up to 15s when it loses
-`eaddrinuse` (the holder is ephemeral by nature), new fleets derive gateway
-(17000-17999) and TLS distribution (13700-13729) defaults below the ephemeral floor,
-and `fleet doctor` warns when an existing profile's pinned ports overlap the live
-range read from the kernel. A failed start validation now also stops the packaged
-EPMD it launched and removes its ownership marker, instead of leaving an orphan to
-kill by hand. A second lesson from
-the same topology: when one side's address silently drops the other's SYNs (the VPS
-dialing the Mac's CGNAT tailnet address), that side sits in `connecting` for minutes at
-a time and Erlang's simultaneous-connect tiebreak can repeatedly sacrifice the good
-incoming link for the doomed outgoing one — formation then only wins races. Making the
-unroutable dial fail fast (an ICMP-reject rule on the dialer) dissolved the livelock in
-seconds. A tailnet formation has no such asymmetry. The same run caught
-and fixed a real portability stop: Ubuntu 25.10+ ships coreutils as a multi-call
-binary, so `/usr/bin/id` is a symlink and the data-directory validator refused to
-boot every release there until it learned to follow it.
-
-For a real network, run `tailscale status`, `tailscale ip -4`, and `tailscale ping PEER`
-before `fleet create`. Create prints the exact fleet-specific EPMD port and TLS
-distribution range to allow only between the private fleet addresses. The full
-copy/paste setup, signed roster flow, recovery-service steps, and honest limits live in
-the README's **Running a cluster** section.
-
-Fleet placement has one explicit, manually maintained protocol fence:
-`fleet_protocol_revision: 1`. A machine is compatible only when that revision, the
-Ouroboros version, and the OTP release match. CPU architecture and Elixir version remain
-inventory rather than placement fences. Bump the integer whenever fleet posture, remote
-session routing, or distributed ownership semantics become unsafe across revisions; do
-not replace it with a build-path or source hash.
-
-### Agent awareness and advisory tags
-
-Native distributed sessions have a read-only `fleet` tool and a labelled fleet snapshot
-in the opening prompt. Call `fleet` before placing work: it lists at most 64 machines,
-including disconnected machines with their last disconnect time. OS, CPU, hostname,
-operator tags, toolchain presence and provisionability travel as optional posture facts;
-older peers remain valid with unknown facts. Detection never executes a toolchain.
-`ouro fleet status` and `/machines` show platform and tags.
+`Ouroboros.Cluster.Facts` carries each node's posture: OS, CPU, hostname, operator tags,
+toolchain presence. Native distributed sessions have a read-only `fleet` tool and a
+labelled snapshot in the opening prompt, and a native child can name
+`machine: "tag:xcode"` — exactly one connected match is required, and only its concrete
+node is retained. `docs/proposals/fleet-aware-subagents.md` is the design.
 
 ```sh
 ouro fleet tag add xcode --machine studio
@@ -288,863 +191,87 @@ ouro fleet tag list --machine studio
 ouro fleet tag remove xcode --machine studio
 ```
 
-Omit `--machine` to edit the local profile even while its daemon is stopped. Remote
-changes use the authenticated operator gateway and the target's installed client, which
-shares the profile writer and lifecycle lock used by local management. Connected peers refresh every five seconds in a bounded background batch, so edits
-appear without a reconnect. Tags allow 1–64 lowercase letters/digits plus `. _ : -`, starting with a
-letter or digit, at most 32 per machine. Invalid profile tags are shown with a reason and never block daemon startup.
-`ouro fleet tag remove BAD` can repair a malformed string tag; malformed tag arrays
-can be repaired directly in the profile without changing its identity fields. A native child can use `machine: "tag:xcode"`; exactly one
-connected match is required, and only its concrete node is retained. Multiple matches
-name the machines so the agent can choose deliberately. Tags and facts grant no authority.
+Omit `--machine` to edit the local profile even while its daemon is stopped; naming one
+goes through the authenticated operator gateway. Tags allow 1–64 lowercase
+letters/digits plus `. _ : -`, starting with a letter or digit, at most 32 per machine.
+Connected peers refresh every five seconds in a bounded background batch. **Tags and
+facts grant no authority.** Grants stay node-local and deny-by-default: placing an agent
+by tag onto another machine produces an agent with no grants there until someone grants
+on that node.
 
-Local automated evidence: `fleet_test.exs`, `cluster_test.exs`, and the real-VM
-`subagent_remote_test.exs` cover optional facts, profile validation, tag matching and a
-child reading on the tagged peer, including its hostname. Rust fleet tests cover profile
-tag persistence, diagnostics and optional-fact rendering. This is separate from the
-physical-machine deployment evidence above.
+## Session owners
 
-Still intentionally deferred: automatic Tailscale LocalAPI discovery and auto-join
-(Add lists `tailscale status --json` peers and `~/.ssh/config` hosts as optional
-targets; it does not join them without a confirm),
-logical workspace maps, heterogeneous forge orchestration, replicated journals, live
-provider migration, quorum/fencing, and multi-cluster federation. One Erlang cluster is
-one trust domain. A network partition can produce independent views; no section below
-should be read as a claim of partition-safe consensus.
-
-## Long-running child agents
-
-Use a background child for builds or other work that should outlive the current turn:
-
-```text
-agent(machine: "builder", sync: true, background: true,
-      deadline_ms: 900000, prompt: "Build the project and report the result")
-```
-
-`sync: true` provisions the current Git workspace on the worker. Use `workspace:`
-instead when deliberately selecting a checkout that already exists on that worker.
-
-The node's `provider_options.subagent_deadline_ms` defaults to 300000 ms;
-`subagent_max_deadline_ms` defaults to 900000 ms and caps a requested per-call deadline.
-`bash_max_timeout_ms` defaults to 600000 ms. Both ceilings can be raised to four hours.
-A child's bash call must also request its needed `timeout_ms`. Hooks, checks and other
-Exec callers retain their ten-minute maximum. Foreground agents remain bounded by the
-loop's `tool_timeout_ms`; use `background: true` for long jobs.
-
-The folded row reports elapsed time and the last command's first line or file path.
-Updates arrive every five seconds, with an immediate update when bash starts and a final
-update when the child finishes, under a hard ceiling of 2000 updates per child. Activity is limited to 160 bytes and never includes file
-contents or tool output. `agent_result(task_id: "…", wait_ms: 0)` returns the current
-elapsed time, deadline and activity without waiting or removing a running child.
-
-Interactive children can ask for approval even after their parent's turn has finished.
-The approval names the child and its machine; the target's decision to ask always reaches
-the human, without being re-evaluated against the parent's rules. Closing the session
-stops its children and cancels their pending questions. One-shot runs refuse background
-children because they have no interactive session to hold them.
-
-A real Ubuntu 26.04 run on 2026-09-07 completed `sleep 700 && echo ok` in 700.085 seconds
-inside the normal Linux sandbox. The parent became idle after 20 ms and stayed idle
-through all 140 progress observations; collection returned `completed` and `ok`. Model
-responses were scripted for this timing gate; the shell, sandbox, elapsed time, progress
-and session lifecycle were real. This is local/live implementation evidence, not a
-published release claim.
-
-## Returned child work and deliveries
-
-A child started with `sync: true` receives a snapshot of the parent's committed,
-staged, unstaged, and eligible untracked files. When its turn ends, the target closes
-the child session and captures its committed and dirty work. The return travels in
-bounded, verified chunks and is imported into the original repository as
-`refs/ouroboros/subagents/<task_id>`. The parent's HEAD, index, and working files stay
-as they were. Inspect the child’s changes with `git show <returned_ref>` and
-apply them deliberately with `git cherry-pick <returned_commit>`. The returned commit
-combines the child's committed and dirty changes relative to the provisioned snapshot;
-intermediate child commits are not preserved as separate commits in that return.
-
-Capture clears optimization flags in its private index and rehashes materialized
-tracked files, including files marked `assume-unchanged` or `skip-worktree`. Absent
-sparse-checkout entries retain their indexed content. Repository clean, smudge, and
-process filters are disabled for capture without changing the source configuration;
-external transformations such as Git LFS filtering do not run during a snapshot.
-
-Ignored files do not travel. Add workspace-specific exclusions in `ouroboros.toml`:
-
-```toml
-[provision]
-exclude = [".env", "secrets/"]
-```
-
-Put reports and other artifacts in `.ouroboros/deliver/`. This directory is prepared
-before launch and excluded from the Git snapshot. Only regular files are accepted;
-symlinks, traversal paths, special files, more than 128 files, and archives larger
-than 32 MiB are refused. The target may lower the capture limit with its
-`:deliver_max_bytes` application setting. The parent verifies the uncompressed archive and every
-file's size and digest while extracting into
-`<data_dir>/deliveries/<task_id>/`. The model result and both transcript clients name
-the returned ref and each delivered path and size.
-
-Settlement stays observable while returning work: `summary` reports `returning`,
-`agent_result` keeps the task collectable, and stopping the child does not discard a
-return in flight. When a foreground wait reaches the loop timeout or is interrupted,
-the session takes ownership of the unfinished return. The task stays tracked and
-collectable with `agent_result`; its settled event arrives only after return finishes.
-Return transport is bounded to ten minutes, with an independent
-worker ceiling. Only an acknowledged return, followed by a fresh comparison of the
-child's HEAD, tree, and delivery contents, authorizes deletion of its worktree. A
-failed, ambiguous, or concurrently changed return retains the target worktree and
-snapshot pin and names the error and location. A received Git ref remains available
-even when a later delivery or cleanup step fails.
-
-Concurrent returns to the same repository retry import contention within the same
-ten-minute deadline. An acknowledgment retried after a partial failure verifies any
-already-installed deliveries against their complete size/digest manifest; changed
-files or unsafe paths are refused, never overwritten to make the retry succeed.
-
-Parent repository paths stay in a parent-local capability registry; remote return
-requests carry an opaque capability, repository identity, commit, and task ID. A
-lost parent process or distribution link cannot authorize target cleanup. Returned
-refs are retained for inspection and may be removed explicitly with
-`git update-ref -d refs/ouroboros/subagents/<task_id>` after the work is accepted.
-
-## Vendor sessions and native children
-
-Interactive Claude Code sessions receive `agent`, `agent_result`, and `fleet` through
-`ouro mcp-serve` in every approval posture. Their children use the same native dispatch,
-permission rules, hooks, effect ledger and approval channel as native sessions. The
-owner's current configuration is read for each call. The gateway accepts the session ID
-and tool input; it does not accept a caller-supplied principal or permission posture.
-Closing the owner closes its sidecar and children. A stable request ID prevents an
-ambiguous spawn response from becoming a duplicate child on retry.
-
-Configure a native model on the owner with `OUROBOROS_NATIVE_MODEL` or the runtime's
-`:native_model` setting, using an existing native credential source. Vendor model aliases
-are not native model specifications. The selected worker also needs credentials for
-the child's native model. After a child is created, result and stop remain
-available even if the native default is removed. The previously removed Codex CLI
-transport remains removed; this bridge does not reintroduce it.
-
-## Historical design record (pre-implementation snapshot)
-
-Everything below this heading is the original adversarial evolution survey that led to
-the implemented core above. It is retained as design history, **not** as current setup or
-feature documentation. In particular, its “does not exist” statements and file:line
-citations describe the pre-fleet tree and are now intentionally stale. Use the current
-core section above or the README for operation; use the remainder only to understand
-decisions and deferred ideas such as broader tag routing, Tailscale discovery, logical workspaces, and
-HA.
-
-The longer-term design targets discovery without a hand-maintained host list and routing
-by **tags**: free-form, node-advertised capability labels (`gpu`, `docker`,
-`provider:claude`, `workspace:ouroboros`, `arch:aarch64-apple-darwin`) layered beside the
-existing closed role enum.
-
-This historical record was produced by a four-way adversarial code survey (cluster/distribution,
-gateway/TUI, mesh/team/orchestration/workspace, upgrade/forge/rollout) on branch
-`review-fixes`. Its citations were verified against that earlier snapshot, not the
-current working tree. Sections: what existed (§1), decisions (§2), defects identified
-(§3), the design (§4–§12), security posture and honest limits (§13), implementation
-slices (§14), deferred (§15).
-
----
-
-## 1. Historical baseline at survey time
-
-What the fleet vision can already stand on:
-
-- **Distribution-aware identity exists below the gateway.** Session refs carry their
-  owner node (`lib/ouroboros/interactive/ref.ex:4-12`,
-  `lib/ouroboros/coding/task_ref.ex:4-13`) and `call/2` routes to the owner over
-  `:erpc` with typed `{:owner_unavailable, node}` refusals
-  (`lib/ouroboros/interactive_session.ex:254-266`,
-  `lib/ouroboros/coding_session.ex:171-183`). `start_on/2,3` exists on both planes.
-  The mesh (`:pg` scope) is already cluster-wide, and `agents.list/state/stop` through
-  the gateway already sees the whole cluster (`lib/ouroboros/mesh.ex:109-127,198-216`).
-- **The per-node fact channel exists.** `Cluster.local_posture/0` returns
-  `%{node, role, running}` (`lib/ouroboros/cluster.ex:229-231`), is probed via bounded
-  `:erpc` (`cluster.ex:504-517`) and multicalled fleet-wide (`cluster.ex:488-502`).
-  Its consumers pattern-match with open maps — verified — so **adding keys is a safe
-  rolling change**.
-- **Placement is a single funnel.** `Cluster.ensure_placeable/1`
-  (`cluster.ex:264-271`) has exactly two callers: `mesh.ex:67` and
-  `team/server.ex:363`. `ensure_role/2` already special-cases `:any`
-  (`cluster.ex:243`) — the shape a tag predicate extends.
-- **Formation is pluggable.** libcluster 3.5 with `none|epmd|gossip|dns`
-  (`cluster.ex:105,341-388`); a new strategy is one atom, one `build_topologies/1`
-  clause, one module.
-- **A working precedent for a cross-node gateway method** with typed transport
-  failures and an inner timeout below the method ceiling: `signing.decisions`
-  (`lib/ouroboros/gateway/methods.ex:756-792`).
-
-What did not exist in that pre-implementation snapshot (not current claims):
-
-- No Tailscale/tailnet/MagicDNS awareness of any kind.
-- No tag, label, or capability-advertisement concept; `nodes_by_role/1` is the only
-  "give me candidate nodes" primitive (`cluster.ex:191-196`).
-- No selector anywhere — every "where" is a concrete `node()` atom a caller names.
-- No cross-node listing of sessions, teams, plans, rollouts, or provider
-  availability; `interactive.list`/`coding.list` filter `&(&1.node == node())`
-  (`interactive_session.ex:70`, `coding_session.ex:52`).
-- No `node` parameter on `interactive.start`/`coding.start`
-  (`gateway/methods.ex:235-247`); no `agents.start` gateway verb at all.
-- No host field in `gateway.json`; every client dials `127.0.0.1`
-  (`tui/src/main.rs:962-964`).
-- No fleet registry in `ouro`; one transport, one cursor table, one `(Plane, id)`
-  keyspace (`tui/src/ui/app/:419-439,1298-1333`).
-- No workspace advertisement or logical naming; no grant replication; no per-arch
-  builder selection; no reconciliation between the N per-node rollout registries.
-
-At that survey point, the environment for a sleeping-laptop fleet was hostile: epoch allocation
-refuses fleet-wide if any *named* target is unreachable (`upgrade/epoch.ex:94-96`),
-recovery adopts only node-local work (`coding/recovery.ex:89`,
-`interactive/recovery.ex:64`), `Cluster.Monitor` logs nodeup/nodedown and does
-nothing else (`cluster.ex:19-38`), and the gateway cannot even *name* a
-currently-disconnected member (`gateway/methods.ex:943-955`).
-
----
-
-## 2. Decisions
-
-**D1 — One Erlang cluster over the tailnet, not gateway federation.** The BEAM
-advantage this project is built on — pids, monitors, `:pg`, `:erpc` routing — only
-exists inside a cluster. Gateway-to-gateway federation would re-implement stream
-multiplexing and hold N tokens server-side for strictly less capability. The cost is
-stated plainly in §13: one cluster is one trust domain.
-
-**D2 — The tailnet is the network boundary; the runtime still refuses cleartext by
-name.** Tailscale gives WireGuard encryption, device identity, and ACLs that can
-restrict who reaches EPMD and the distribution ports. That addresses the link-layer
-harm the cleartext refusal (`config/runtime.exs:76-87`) names. The posture is made
-explicit rather than smuggled through `OUROBOROS_ALLOW_INSECURE_DIST=1`: a new
-`OUROBOROS_DIST_TAILNET=1` acknowledgment that requires the distribution listener to
-actually sit on a tailnet address (§4). TLS distribution remains recommended
-defense-in-depth; the cookie is still the only *authentication* between tailnet
-members either way.
-
-**D3 — Roles stay closed; tags are a new, advisory axis.** Role decides which
-supervision tree boots and is security-adjacent; it stays the 3-enum
-(`cluster.ex:104`). Tags are routing hints a node advertises about itself. A hostile
-node advertises whatever it likes — tags inherit the role doctrine verbatim
-(`cluster.ex:92-99`): placement checks are misconfiguration detection, never an
-authority boundary.
-
-**D4 — Self-discovery is a custom libcluster strategy over the Tailscale LocalAPI.**
-Both community packages are dead ends (one archived 2023, one polling the cloud API
-with an API key on every node, neither filters by ACL tag). Gossip is structurally
-dead over a tailnet (multicast; and `cluster.ex:362-371` exposes no interface
-binding). DNSPoll bypasses the OS resolver (`:inet_res`) so MagicDNS is invisible on
-macOS, and it names nodes `basename@<ip>`. The LocalAPI (`tailscale status --json`)
-is local, keyless, live, and carries the peer facts we want: DNS name, tailnet IPs,
-ACL tags, online state. §5.
-
-**D5 — Tags resolve to a concrete node at admission; the concrete node is what
-persists.** Selection happens once, at the placement seam, against the currently
-visible fleet; everything durable (worker snapshots, task states, delegations) keeps
-storing a `node()` exactly as today. No dynamic re-binding, no migration. This keeps
-every existing recovery and ownership invariant untouched.
-
-**D6 — Workspaces get logical names; absolute paths never cross nodes.** A fleet
-node advertises `workspace:<name>` tags from a configured name→root map; a
-delegation carries the logical name and the *owner* resolves it. Leases stay
-node-local admission, and two nodes sharing a network filesystem remain out of
-scope, stated (§9, §13).
-
-**D7 — Fleet view = server-side listing + attach switching; not N live streams.**
-Any gateway can answer `fleet.status`/`fleet.sessions` by bounded multicall
-(precedent: `signing.decisions`). Opening a session that lives elsewhere switches
-`ouro`'s connection to the owner's gateway (the fleet registry knows its address and
-token). Holding N concurrent gateway connections with live streams — and the
-cross-node subscription rework it implies (`gateway/conn.ex:680-697` resolves
-coordinators via a node-local Registry) — is deferred, not designed away (§15).
-
-**D8 — Heterogeneous forge means per-triple builds; the verifier stays strict.** An
-artifact is refused on any node whose `{otp_release, elixir_version,
-system_architecture}` differs (`upgrade/verifier.ex:115-124`), and the triple is
-inside the signed manifest (`upgrade/artifact.ex:90-94`). We do not relax the
-comparison; we group targets by triple and forge one artifact per group with a
-matching builder (§11). Same source, N artifacts, N signatures, N epochs — honest and
-mechanical.
-
-**D9 — Sleep is normal.** Placement and fleet views select from the currently
-visible fleet and say who was unreachable. Operations that *name* an unreachable
-target keep refusing loudly (epoch, rollout) — but they must refuse *cleanly*, which
-today they do not (F5, §3). Sessions owned by a sleeping node are listed with an
-unreachable owner and are not adopted; that is a statement, not a TODO (§12).
-
----
-
-## 3. Fix first — defects that predate the fleet
-
-The survey found real defects that the fleet would trip constantly. Each is
-independent of any new feature and should land first (Slice 1).
-
-**F1 — `validate_coding_node/1` checks `is_atom/1` and nothing else**
-(`team/server.ex:1845-1846`). The one placement decision that starts *paid provider
-work* has no connectivity, runtime, or role check — asymmetric with `add_worker`
-thirty lines above (`team/server.ex:362-367`). A typo'd node keeps the delegation
-`:starting` for `:delegation_start_retry_ms` (default 300s) because
-`ambiguous_start?/1` treats `owner_unavailable` as retryable ambiguity
-(`team/server.ex:1417-1420`). Fix: route through `Cluster.ensure_placeable/1`;
-refusal `{:invalid_coding_node, node, reason}`.
-
-**F2 — The delegating node canonicalizes the target node's workspace**
-(`team/server.ex:1657-1660`, `canonical_workspace/1` at `:1711-1718` calls
-`WorkspacePath.canonicalize/1`, which stats the **local** filesystem;
-`TaskState.new/4` then re-checks `File.dir?` locally). Cross-node delegation to a
-node that has the repo is refused on the node that does not; divergent symlink
-resolution between nodes produces a permanent `{:coding_task_owner_conflict, id}` on
-every poll (`team/server.ex:2106-2145`). Fix: build the request fingerprint on the
-coding node (the pattern `CodingSession.start_on/3` already uses — the whole start
-routes through `:erpc` and validation runs on the owner), or carry the workspace
-unresolved and let the owner canonicalize before the durable checkpoint. §9 layers
-logical names on top; this fix is prior and independent.
-
-**F3 — Default team ids are VM-unique while coordinator ids join a cluster-wide
-namespace.** `team_id` defaults to `"team-#{System.unique_integer([:positive])}"`
-(`team/server.ex:82`) and `coordinator_id` defaults to `team_id <> ":coordinator"`
-(`team/server.ex:1855-1863`), which lands in the `:pg` mesh namespace. Two nodes
-minting `"team-1"` silently share one coordinator — the exact bug class this codebase
-already diagnosed and fixed twice, with the rule written down: *any id joining a
-cluster-visible namespace must carry `node()`*
-(`upgrade/rollout/evaluation.ex:575-588`, `upgrade/rollout/probe.ex:155-166`). Fix:
-embed the node in the default team id (existing snapshots load unchanged — explicit
-ids are untouched).
-
-**F4 — `gateway.json` publishes no host.** The publication carries
-`port/protocol/node/pid/scope[/token_file]` (`gateway/listener.ex:185-203`) and every
-reader dials `127.0.0.1:port` (`tui/src/main.rs:962-964`). A gateway bound to any
-non-loopback address publishes an actively misleading file today. Fix: add a
-`"host"` field (the bound address), clients prefer it, absent means loopback —
-backward compatible in both directions.
-
-**F5 — A zero-effect deployment records permanent quarantine.** *Moot: the code this
-names went with the BEAM forge lane (docs/proposals/core.md §4 A1), and the surviving
-lane already does what the fix asks — `Ouroboros.Wasm.Rollout` validates the target set
-before it checkpoints `:deploying` (`wasm/rollout.ex:8-10,234`).* `Rollout.deploy/4`
-checkpoints `:deploying` (`rollout.ex:191-205`) *before*
-`Coordinator.validate_nodes/1` refuses a disconnected target
-(`coordinator.ex:685-694`). The validation-failed receipt carries deployment
-recovery `:unchanged`, not `:complete` (`coordinator.ex:666-668`), so `proven?` is
-false (`rollout.ex:397-407`) and the registry records `:quarantined` — an operator
-debt with no automatic exit (`registry.ex:63`) that later blocks `ForgeExecutor` for
-the same module (`forge_executor.ex:248-249`), for a deployment that provably touched
-nothing. Fix: validate the target set (connectivity, shape) *before* the
-`:deploying` checkpoint, so a sleeping named target is a clean typed refusal with no
-registry entry. (Also honest: treat all-`:unchanged` validation receipts as proven
-compensation; but refusing before the checkpoint is the correct primary fix.)
-
-**F6 — The builder-must-match-targets invariant is documented, not enforced.** *Moot:
-a WebAssembly component carries no OTP/Elixir/architecture triple, and the lane that did
-was removed by docs/proposals/core.md §4 A1.*
-`build_peer.ex:36-37` claims the artifact's triple is "whatever the peer observed";
-in fact `Artifact.build/2` stamps the **forging node's** triple
-(`upgrade/artifact.ex:54-56`, called from `forge.ex:150-158` locally), and the
-builder's actual triple lands in `metadata.forge.peer_runtime`
-(`forge.ex:98,172`) which — verified — is never compared to anything anywhere.
-`check_builder/1` checks role only (`build_peer.ex:138-145`). A mismatched remote
-builder produces beams whose artifact *claims* the forging node's triple and fails
-only at target-side verification, or worse, passes it while carrying beams compiled
-under a different ERTS. Fix: at assembly, refuse when
-`peer_runtime != local triple` — `{:builder_runtime_mismatch, expected, actual}` —
-and correct the `build_peer.ex` doc claim. §11 extends this to per-triple builder
-selection; the assertion is prior and independent.
-
-**F7 — Workspace admission is silently absent when roots are unconfigured.**
-*Addressed.* Coding and interactive admission skip the lease only when
-`:workspace_allowed_roots` is empty (the default unconstrained install). When roots
-are configured and `Workspace.Manager` is not running, start fails closed as
-`{:workspace_admission_failed, :workspace_manager_unavailable}` rather than running
-unconstrained. The fleet posture carries a rolling-safe extra key
-`workspace: %{admission: :disabled | :required, manager: boolean}` — same seam as
-`wasm`: `valid_fleet_posture?/2` does not require it. Placement that needs the fact
-reads with `Map.get/2`. A required tag (`workspace-admission`) remains a policy
-choice on top of the advertised fact.
-
----
-
-## 4. Substrate: the tailnet posture
-
-The fleet is one Erlang cluster whose members reach each other only over the
-tailnet. This section is configuration and policy; the only new code is one
-acknowledgment flag.
-
-**Node identity.** Each machine sets its own name to its MagicDNS FQDN:
+Each node records which machine owns each interactive session, and persists
+that evidence under `<data dir>/fleet/cluster-directory/` when `OUROBOROS_FLEET_ID` is
+set. An offline owner therefore makes session lists fail closed rather than silently
+hide sessions. If a machine is permanently lost, inspect or export any recoverable
+owner-local state, then run this locally on every remaining machine:
 
 ```sh
-OUROBOROS_NODE=ouroboros@mac.<tailnet>.ts.net
-OUROBOROS_COOKIE=<one shared secret, generated once, distributed by the operator>
+ouro fleet sessions forget --machine NAME --accept-state-loss
 ```
 
-Long names are already mandatory (`rel/env.sh.eex:65-71`); MagicDNS resolves through
-the OS resolver, which `Node.connect/1` uses. Nothing about `rel/env.sh.eex`'s
-refusal ladder changes.
+`--accept-state-loss` is the operator saying the machine is gone for good, and that
+statement is the only thing that can retire the evidence. The command writes it into this
+machine's profile first — the member moves out of `members` into `tombstones` and the
+roster revision advances — and only then asks the runtime, which refuses without that
+tombstone. Nothing infers one from a disconnect, so a partitioned owner that comes back is
+still a member and still owns its sessions.
 
-**Ports, pinned.** Build with `OUROBOROS_DIST_PORT_MIN/MAX` (`rel/vm.args.eex:61-65`)
-so the distribution listener range is fixed, e.g. 9100–9105. EPMD (4369) is
-unavoidable for the epmd strategy and remains reachable tailnet-only.
+**The roster edit reaches the live dialer before the gateway is asked.**
+`Cluster.membership_hosts/0` (`lib/ouroboros/cluster.ex:1392`) re-reads the profile on
+every reconnect sweep, so this machine stops dialing the named
+machine within about a second of the write — while the gateway call is still in flight, and
+whatever the gateway answers. That is safe (removal from the seed list stops dialing; it
+disconnects nothing that is already connected) but it is the opposite order from the way the
+command reads.
 
-**Tailnet ACLs are the perimeter.** Fleet machines carry a tailnet tag (e.g.
-`tag:ouroboros`); the ACL grants 4369 + 9100–9105 + the gateway port only between
-`tag:ouroboros` devices. This is the boundary loopback used to be. It is enforced by
-Tailscale, not by this runtime, and the runtime does not check it — stated in §13.
-
-**Transport acknowledgment.** A cleartext-dist cluster still refuses to boot
-(`config/runtime.exs:76-87`). The fleet posture adds one explicit escape beside the
-generic one:
-
-- `OUROBOROS_DIST_TAILNET=1` — asserts "distribution traffic crosses only the
-  tailnet". Accepted **only if** the distribution listener's resolved address is in
-  `100.64.0.0/10` or `fd7a:115c:a1e0::/48`; otherwise the boot refuses, naming the
-  address it found. This is deliberately narrower than
-  `OUROBOROS_ALLOW_INSECURE_DIST=1`, which remains the blunt operator override.
-- TLS distribution (`OUROBOROS_DIST_TLS=1` at build) remains recommended on top; the
-  two compose.
-
-**Roles across the three machines.** The reference layout: both laptops and the VPS
-are `:core`. The signer stays on the most-trusted, least-exposed host — a laptop,
-not the VPS (§13). A dedicated `:builder` is optional until Slice 6; forge builds
-default local.
-
-**Runbook (Slice 0 — zero code).** The fleet works *today*, manually, with the epmd
-strategy and a static host list:
+The runtime also refuses while that node is connected, and the roster edit is rolled back
+if it does. On success it syncs the checkpoint before reporting, and the *evidence* loss is
+irreversible per machine. The roster half is not: a client that dies between the write and
+the reply leaves a tombstone with nothing retired, so
 
 ```sh
-OUROBOROS_CLUSTER_STRATEGY=epmd
-OUROBOROS_CLUSTER_HOSTS=ouroboros@mac.X.ts.net,ouroboros@linux.X.ts.net,ouroboros@vps.X.ts.net
+ouro fleet status                       # names every machine this roster calls gone
+ouro fleet sessions restore NAME        # puts one back into `members`
 ```
 
-plus the identity block above on each machine, TLS-built releases (or the insecure
-acknowledgment), and the ACL. Its limits are exactly the fleet gaps this spec
-closes: hand-maintained host list, no tags, single-node gateway view, cross-node
-delegation blocked by F2.
-
----
-
-## 5. Formation: `Cluster.Strategy.Tailscale`
-
-A new libcluster strategy module plus one atom in `@strategies` (`cluster.ex:105`),
-one `build_topologies/1` clause, and the mirrored validation in
-`config/runtime.exs:59-62`. `formation_children/0` (`cluster.ex:327-339`) is
-untouched.
-
-**Mechanism.** On each `:timeout` tick (reuse `OUROBOROS_CLUSTER_RECONNECT_MS`,
-default 5000):
-
-1. Run `tailscale status --json` (subprocess; the portable path across macOS's GUI
-   variant and Linux's `tailscaled` socket — the socket path differs per platform,
-   the CLI abstracts it).
-2. Parse `Peer` entries; keep those matching the configured filter **and**
-   currently `Online`.
-3. Derive candidate node names `<basename>@<DNSName-without-trailing-dot>`.
-4. `Cluster.Strategy.connect_nodes/4`, exactly as the epmd strategy does
-   (`deps/libcluster/lib/strategy/epmd.ex:59-64`).
-
-Offline peers are left alone — distribution's own tick notices a dropped link; the
-strategy only ever adds. (DNSPoll's active-disconnect behavior was considered and
-rejected: a laptop mid-sleep-transition should not be forcibly disconnected by a
-poll race.)
-
-**Configuration.**
-
-```sh
-OUROBOROS_CLUSTER_STRATEGY=tailscale
-OUROBOROS_TAILNET_TAG=tag:ouroboros        # peer filter: ACL tag, or
-OUROBOROS_TAILNET_HOSTS=mac,linux,vps      # peer filter: hostname allowlist
-OUROBOROS_CLUSTER_BASENAME=ouroboros       # default "ouroboros"
-```
-
-At least one filter is required; naming neither is
-`{:missing_cluster_configuration, "OUROBOROS_TAILNET_TAG or OUROBOROS_TAILNET_HOSTS"}`,
-refusing the boot through the existing `formation_children/0` raise. The tag filter
-suits tagged (server-style) devices like the VPS; the hostname filter suits personal
-laptops, whose devices are typically untagged. Both may be set; a peer passing
-either is a candidate.
-
-**Refusals, named.** CLI absent → `{:tailscale_unavailable, :cli_not_found}`;
-daemon unreachable ("failed to connect to local Tailscale service") →
-`{:tailscale_unavailable, :daemon_not_running}`; unparseable JSON →
-`{:tailscale_unavailable, {:bad_status, reason}}`. First occurrence at boot refuses
-(consistent with misconfiguration policy); a *later* poll failure logs and retries —
-a tailscaled restart must not take the formation supervisor down with it.
-
-**Verify at implementation time** (external interface, not this repo): exact field
-names in `tailscale status --json` (`Peer` map; `DNSName` carries a trailing dot;
-`Tags` present only on tagged devices; `Online` boolean), and CLI behavior when
-logged out vs. stopped.
-
-**Tests.** The strategy takes the peer-list source as an injectable function
-(default: the CLI), so `test/cluster_test.exs`'s existing patterns cover it: fixture
-JSON → derived node set, filter semantics, refusal shapes, trailing-dot handling —
-no tailscaled in CI.
-
----
-
-## 6. Identity: tags
-
-**Boot.** `boot_role!/0` (`cluster.ex:130-141`) grows into `boot_identity!/0`:
-resolves role exactly as today, plus a validated tag set into `:persistent_term`.
-Malformed tags raise, like an unknown role does.
-
-Tag sources, merged at boot:
-
-- **Static:** `OUROBOROS_NODE_TAGS=gpu,docker` → `config :ouroboros, :node_tags`.
-  Parsed in `config/runtime.exs` standing on `System` alone (the `DataDir`
-  pattern, `data_dir.ex:1-28`). Comma-separated, trimmed, each matching
-  `^[a-z0-9][a-z0-9_.:-]*$`; anything else refuses the boot by name.
-- **Derived, free:** `os:darwin` / `os:linux` (from `:os.type/0`),
-  `arch:<system_architecture>`, `otp:<release>`, `elixir:<version>` — the verifier
-  triple, advertised (§11 consumes it).
-- **Derived, configured:** `workspace:<name>` for each entry of the logical
-  workspace map (§9); `workspace-admission` when roots are configured (F7).
-- **Derived, probed and cached:** `provider:<name>` for each provider whose local
-  `provider_status/1` reports a usable installation. Probing shells out, so this is
-  resolved once at boot and refreshable on demand (`Cluster.refresh_tags/0`), never
-  in the posture hot path.
-
-**Publication.** `local_posture/0` gains two keys —
-`tags :: MapSet.t(String.t())` and `runtime :: %{otp, elixir, arch}` — and nothing
-else changes: probe and multicall consumers already tolerate extra keys (verified),
-so old and new nodes interoperate during a rolling upgrade in both directions.
-
-**Selection.** Beside `nodes_by_role/1`:
-
-```elixir
-@spec nodes_by_tags([String.t()], keyword()) :: %{
-        matching: [node()],
-        unreachable: [node()]
-      }
-# opts: role: :core (default), match: :all | :any
-@spec ensure_placeable(node(), [String.t()]) :: :ok | {:error, term()}
-```
-
-`ensure_placeable/2` composes onto `ensure_role/2`'s existing preconditions with one
-new refusal, `{:missing_tags, target, missing}`. `ensure_placeable/1` remains and
-means "no required tags". The `:placement_role_check` escape keeps its current
-meaning (skip everything).
-
-**Wire surfaces that move in lockstep** (all golden-pinned; regenerate via
-`mix ouroboros.gateway.golden`): `hello` gains `"tags"` (`gateway/conn.ex:624`),
-`runtime.status` gains per-node tags in `cluster` (`lib/ouroboros.ex:19-21`), the
-model-facing envelope names this node's tags (`runtime/exposure.ex:51,131`).
-
-**Doctrine, restated.** A tag is the node's claim about itself, read over the same
-`:erpc` that a hostile connected node could answer arbitrarily. Tags route; they
-never authorize. Grants, signing, and the verifier are unchanged by any tag.
-
----
-
-## 7. The fleet directory
-
-`Cluster.Monitor` (`cluster.ex:19-38`) stops being log-only. It becomes the cache of
-last-known peer postures:
-
-- On `nodeup`: probe the arrival (bounded, async), cache
-  `{posture, observed_at, :reachable}`.
-- On `nodedown`: mark the cached entry `:unreachable` with the down reason —
-  **keep it**. The cache is what lets a fleet view say "the linux laptop was here,
-  carried these tags, and is asleep" instead of forgetting it existed — the exact
-  thing `nodes_by_role/1` cannot say today (`cluster.ex:481-484` buckets slow nodes
-  as unreachable and drops their facts).
-- Periodic refresh of `:reachable` entries at the reconnect interval; entries older
-  than a TTL are re-probed on read.
-
-`Cluster.fleet/0` returns the cache: per node — role, tags, runtime triple,
-running, reachability, observed_at. `nodes_by_tags/2` reads it (never probing
-inline) and returns unreachable-but-matching nodes separately, so callers can name
-what they skipped.
-
-This stays a cache of observations, not a membership authority: it never blocks
-placement on its own staleness, and it is per-node state — each node's directory is
-its own view, which is all an eventually-consistent fleet can honestly offer.
-
----
-
-## 8. Placement by tags
-
-Selection resolves tags → concrete node **once, at admission** (D5). The persisted
-artifact of every placement remains a `node()`.
-
-| Seam | Change | Refusal |
-| --- | --- | --- |
-| `Mesh.start_agent_on/3` (`mesh.ex:64-84`) | accepts `tags:`; passes to `ensure_placeable/2` | existing `{:placement_refused, node, reason}` wraps `{:missing_tags, ...}` |
-| `Mesh.start_agent_where/2` (new) | `nodes_by_tags` → deterministic pick (sorted, first) → `start_agent_on/3` | `{:no_node_matching_tags, tags, %{unreachable: [...]}}` |
-| `Team.add_worker/3` (`team/server.ex:330-360`) | `tags:` joins `[:role, :node]` in `@worker_options` (`:78`); resolves to a node *before* `finish_add_worker`; the **resolved node** persists in the worker snapshot so recovery re-places deterministically (`team/server.ex:827-845`) | `{:invalid_worker_node, ...}` unchanged; `{:no_node_matching_tags, ...}` for an unsatisfiable selector |
-| `Team.delegate/4` | `coding_tags:` beside `coding_node:`; resolved before the fingerprint; requires F1+F2 landed | as above |
-| `Orchestration` steps | `step.metadata[:placement][:tags]` — metadata already reaches executors (`scheduler.ex:635-647`, precedent `team_executor.ex:84-93`); `TeamExecutor` resolves at claim time | step failure `{:placement_unsatisfiable, step_id, tags}` |
-| Gateway | `"tags"` validator (list of strings matching the tag grammar, no atom minting — beside the `:node` validator at `methods.ex:942-955`) on `teams.add_worker`, `teams.delegate`; `interactive.start`/`coding.start` gain **both** `"node"` and `"tags"` (§10) | `invalid_params` naming the grammar; `-32007`-style refusal carrying the unsatisfiable selector |
-
-Not tag-gated, deliberately: rollout target validation (deploy targets are
-code-custody, named explicitly), the signing service (custody is a role), and builder
-selection (`:wasm_forge_placement` — a role, §11).
-
-The planner schema stays closed: model-authored steps still cannot name nodes — and
-now also cannot name tags — without the operator widening the schema; placement
-selectors enter through trusted step metadata only, the same trust line
-`forge_executor.ex:5-11` draws. (F-list aside: `:coding_node` currently escapes
-`TeamExecutor`'s reserved-option list, `team_executor.ex:113` — close that while
-adding the placement metadata path.)
-
----
-
-## 9. Workspaces across the fleet
-
-**Logical names.** New config, per node:
-
-```elixir
-config :ouroboros, workspaces: %{"ouroboros" => "/Users/m/code/ouroboros"}
-# env: OUROBOROS_WORKSPACES="ouroboros=/Users/m/code/ouroboros:blog=/srv/blog"
-```
-
-Each entry is canonicalized at boot against the local filesystem (the manager
-already owns that logic, `workspace/manager.ex:186-198`) and advertised as a
-`workspace:<name>` tag. Roots named here are implicitly allowed roots.
-
-**Resolution at the owner.** A cross-node start or delegation may say
-`workspace: {:name, "ouroboros"}`. The **owner node** resolves the name against its
-own map — after F2, all workspace validation already runs owner-side — and the
-durable task state stores the owner's absolute path exactly as today. A name the
-owner does not carry refuses `{:unknown_workspace, name}` before anything durable is
-written. Absolute paths remain accepted for local starts; what is forbidden is an
-absolute path crossing a node boundary (refused `{:nonportable_workspace, path}` when
-paired with a remote target), because the delegating node's path is a fact about the
-wrong filesystem.
-
-**What this is not.** No provisioning: nothing clones, fetches, or creates
-worktrees (`workspace.ex:9-13` stays true). No shared-filesystem coordination:
-leases are node-local admission (`workspace.ex:14-17`); a `workspace:` tag matching
-two nodes over one NFS mount is a data-corruption path, not a scheduling
-opportunity, and the docs must say so wherever tags are documented.
-
----
-
-## 10. Gateway and `ouro` across the fleet
-
-### 10.1 Gateway on the tailnet
-
-The refusal machinery already exists (`config.ex:207-219`,
-`config/runtime.exs:401-411`); it gains a narrower acknowledgment, mirroring §4:
-
-- `OUROBOROS_GATEWAY_ALLOW_TAILNET=1` accepts a bind address **only** inside
-  `100.64.0.0/10` / `fd7a:115c:a1e0::/48`. `OUROBOROS_GATEWAY_ALLOW_REMOTE=1`
-  remains the blunt form and still permits anything.
-- `gateway.json` gains `"host"` (F4).
-- The fleet convention pins `OUROBOROS_GATEWAY_PORT` (one number fleet-wide, e.g.
-  4560) so a peer's gateway address is `<magicdns>:4560` — discoverable from the
-  tailnet peer list alone, no remote file read.
-- Token custody is unchanged: one token per node, path-not-value, 0600. The operator
-  copies each fleet member's token once (`scp`/`tailscale file cp`) into the client
-  registry (§10.3). A shared fleet token was considered and rejected: one leak would
-  open every node at `operate` scope.
-- Scope stays per-listener: the VPS can run `read` while laptops run `operate`, and
-  `runtime.shutdown` stays gated by `ALLOW_SHUTDOWN` per node.
-
-### 10.2 Fleet methods
-
-Two new read-scope methods, both following the `signing.decisions` shape — inner
-per-node timeout below the method ceiling, typed per-node failures, partial results:
-
-- **`fleet.status`** → this node's directory (§7): per node — role, tags, runtime
-  triple, running, reachability, observed_at, plus gateway advertisement
-  (host/port/scope) when the peer publishes one in its posture.
-- **`fleet.sessions`** → fan-out of `interactive.list` + `coding.list` over
-  reachable `:core` nodes (`:erpc.multicall`, the `postures/0` shape,
-  `cluster.ex:488-502`), merged with each entry's existing `node` field, plus
-  `unreachable: [...]` naming who did not answer. No streaming, no subscriptions —
-  listing only.
-
-`interactive.start` and `coding.start` gain optional `"node"` and `"tags"`
-(mutually exclusive; both absent means local, exactly today's behavior). The
-server resolves tags via `nodes_by_tags/2`, then calls the existing `start_on`
-(`interactive_session.ex:55-60`, `coding_session.ex:38-42`). The `:node` validator
-already exists (`methods.ex:942-955`); it must also accept nodes known to the fleet
-directory but currently unreachable — refusing those with
-`{:node_unreachable, node}` rather than pretending they do not exist.
-
-Session verbs (`info`, `replay`, `subscribe`, …) gain an optional `"node"` param
-that builds the existing `Ref`/`TaskRef` structs — the seam is one function,
-`session_identity/1` (`interactive_session.ex:320-322`), whose struct clause already
-routes correctly. **Cross-node `subscribe` is explicitly out of scope for this
-slice**: `Conn`'s coordinator lookup is a node-local Registry read
-(`gateway/conn.ex:680-697` via `methods.ex:379-381`) and would silently end every
-remote stream at open. Until that rework (§15), `subscribe` with a foreign `"node"`
-refuses `{:subscription_not_local, node}` — a named limit instead of a silent
-`stream.ended`.
-
-Protocol stays `1`: every change is additive (new optional params, new methods, new
-result keys). Goldens updated; the TUI's serde models already carry
-`SessionInfo.node` (`tui/src/model.rs:452,470,503`).
-
-### 10.3 `ouro` fleet client
-
-**Registry.** `config.toml` grows:
-
-```toml
-[[fleet.node]]
-name = "mac"
-addr = "mac.tailXXXX.ts.net:4560"
-token_file = "~/.config/ouroboros/tokens/mac.token"
-```
-
-`ouro fleet` lists registry entries merged with live `fleet.status` from whichever
-node answers first. An `ouro fleet add <magicdns>` helper fills an entry from the
-tailnet peer list + port convention; the token file the operator still copies
-deliberately by hand.
-
-**Attach switching, not N streams (D7).** The TUI keeps exactly one live gateway
-connection. A new fleet panel (fed by `fleet.status`/`fleet.sessions` through the
-current connection) shows every node and every session fleet-wide; opening a session
-owned elsewhere reconnects to that owner's gateway via the registry, restoring
-today's single-connection invariants against a different address. Sessions on
-unreachable nodes render dimmed with the owner named. The Rust cost is bounded: the
-connection-scoped state (`Cursors`, `watches`, `open`, `in_flight`) is already
-keyed per session and is torn down and rebuilt on switch — the multi-connection
-keyspace refactor (`(node, plane, id)` everywhere) is deferred with §15's
-multi-stream work. `Mode::Spawned` supervision remains local-only: `ouro` never
-spawns a remote runtime.
-
----
-
-## 11. Forge and rollout across a heterogeneous fleet
-
-**Moot as designed.** This section was written for the BEAM forge lane, where an
-artifact carried an OTP/Elixir/architecture triple and a builder therefore had to be
-runtime-identical to its targets. That lane was removed by docs/proposals/core.md §4 A1.
-A WebAssembly component is one artifact for every node, forever, so there is nothing to
-group by and no per-triple builder to select: `:wasm_forge_placement` names *where* a
-forge runs (here, or a connected `:builder`), and a `:signer` node refuses to forge under
-either setting.
-
-Registries remain per-driving-node journals (`registry.ex:5-7,90-93`);
-reconciliation across them is deferred (§15) and `fleet.status` at least makes the
-divergence *visible* by naming which node's registry answered.
-
----
-
-## 12. Sleep and partition semantics
-
-Rules, stated once and applied everywhere:
-
-1. **Selection sees the visible fleet.** `nodes_by_tags/2` resolves against
-   reachable nodes and names the unreachable-but-matching ones in its answer; a
-   selector satisfiable only by a sleeping node refuses
-   `{:no_node_matching_tags, tags, %{unreachable: [...]}}` rather than waiting.
-2. **Named targets keep refusing loudly — and cleanly.** Epoch allocation
-   (`epoch.ex:94-96`) and rollout deploys still refuse when an explicitly named
-   target is unreachable; after F5 the refusal leaves no registry debt. "Deploy to
-   whatever is awake" is expressed by selecting first (rule 1), then naming the
-   result — never by the deploy tolerating absence.
-3. **Sessions do not migrate.** Work owned by a sleeping node stays owned by it:
-   recovery remains node-local by design (`coding/recovery.ex:89`,
-   `interactive/recovery.ex:64`) because the provider process, the workspace lease,
-   and the filesystem are physical facts of that host. Fleet views list such
-   sessions with `owner: unreachable`; `ouro` renders them dimmed. On wake, the
-   owner's own recovery adopts them exactly as today.
-4. **Wake reconciliation is observation, not repair.** On `nodeup` the directory
-   re-probes (§7); `:pg` re-syncs mesh membership itself. Duplicate mesh replicas
-   after a partition remain visible-by-design (`mesh.ex:109-127` reports
-   `replicas:`), and F3 removes the one path that made duplicates *silent*.
-5. **`:global` stays best-effort.** Epoch and mesh-start serialization
-   (`epoch.ex:81`, `mesh.ex:50`) are unchanged and their non-partition-safety stays
-   documented; the defenses that do not need coordination (target-side epoch
-   monotonicity, deterministic-owner visibility) carry the weight, as they already
-   do.
-
----
-
-## 13. Security posture and honest limits
+`ouro fleet status` and `ouro fleet doctor` both print declared-gone machines — they are out
+of `members`, so nothing else would mention them at all — and `restore` is the undo.
+`ouro fleet members add` refuses a name this roster records as gone, and names `restore`.
+Nothing here deletes a file on the lost machine.
+
+## Gateway methods
+
+| Method | Scope | What it answers |
+|---|---|---|
+| `fleet.status` | read | the merged roster: machines, roles, connectivity, formation, transport security, posture facts |
+| `fleet.doctor` | read | per-node checks with guidance, and the non-answers named |
+| `fleet.tags` | operate | add / remove / list advisory tags on a connected machine |
+| `fleet.forget_session_owner` | operate | the irreversible local retirement above |
+
+Fleet views are *observations*: bounded per-node answers merged at read time, with
+unreachable nodes named. Nothing here is membership consensus, quorum, or a partition
+policy.
+
+## Trust
 
 - **One cluster is one trust domain.** Any node that completes the distribution
-  handshake holds full `:erpc` authority over every other
-  (`cluster.ex:92-99`, `docs/ARCHITECTURE.md` "Safety boundaries"). Joining the VPS
-  to the laptops means a compromised VPS owns the laptops. The mitigations are
-  perimeter and placement, not containment: tailnet ACLs restrict which devices
-  reach EPMD/dist/gateway ports at the network layer; TLS distribution narrows
-  on-path exposure; the signer lives on the most-trusted host and its key never
-  crosses the wire. An operator who cannot accept this for the VPS should run the
-  VPS un-clustered with only its gateway on the tailnet — the fleet view degrades to
-  what the gateway offers, and that trade is theirs to make.
-- **Tailscale is trusted infrastructure and this runtime does not verify it.** The
-  tailnet posture flags check address ranges, not WireGuard; ACLs are enforced by
-  Tailscale; MagicDNS answers are taken at face value. A tailnet admin mistake (a
-  mistagged device, an over-broad ACL) is invisible here. The cookie remains the
-  only in-band authentication and crosses no wire in the clear only because the
-  tailnet encrypts it.
-- **Tags are claims.** Self-advertised over `:erpc`, cached in per-node directories,
-  never authorization. Grants remain node-local and deny-by-default — placing an
-  agent by tag onto the VPS produces an agent with no grants there until someone
-  grants on that node; that friction is a feature.
-- **Fleet views are observations.** `fleet.status`/`fleet.sessions` merge bounded
-  per-node answers and name non-answers; they are eventually consistent and each
-  node's directory may disagree. Nothing here is membership consensus, quorum, or a
-  partition policy (`docs/ARCHITECTURE.md`, still true).
-- **The gateway's authority model is unchanged.** A token still opens one node at
-  one scope; attach switching means the client holds N tokens, and a stolen client
-  config is N tokens — the registry file deserves the same 0600 discipline as the
-  tokens it names.
-- **Leases, grants, registries, stores stay node-local.** Nothing in this spec
-  replicates state. Every "fleet-wide" surface is a read-time merge with the
-  unreachable named.
-
----
-
-## 14. Slices
-
-Each lands independently, keeps the full suite green, and extends the named test
-files.
-
-**Slice 0 — Runbook (docs only).** §4's manual epmd+MagicDNS cluster documented in
-README's "Running a cluster", with the ACL sketch, port pinning, and current limits
-named (F2 blocks cross-node delegation; single-node gateway view). Acceptance:
-performed once by the operator on real hardware.
-
-**Slice 1 — Fixes F1–F7.** Tests: cross-node delegation to a peer-only workspace
-(F2, `:peer` test), duplicate default-team-id collision across two nodes (F3),
-rollout refusal-before-checkpoint leaves no registry entry (F5,
-`test/upgrade/rollout_test.exs`), builder mismatch refusal via injected
-`peer_runtime` (F6), `gateway.json` host round-trip (F4, both sides).
-
-**Slice 2 — Tags.** `boot_identity!/0`, posture keys, `nodes_by_tags/2`,
-`ensure_placeable/2`, seam table of §8, gateway validators, exposure/goldens.
-Tests extend `test/cluster_test.exs` (posture shape old↔new interop, selector
-semantics, boot refusal on malformed tags) and the golden suite.
-
-**Slice 3 — `Cluster.Strategy.Tailscale`.** Injectable peer source; fixture-driven
-tests per §5. Acceptance: three real machines form the cluster with no
-`OUROBOROS_CLUSTER_HOSTS` anywhere.
-
-**Slice 4 — Fleet directory + gateway.** `Cluster.Monitor` cache, `Cluster.fleet/0`,
-`fleet.status`, `fleet.sessions`, `node`/`tags` on both starts, `Ref`-building
-session verbs with the `{:subscription_not_local, node}` limit, tailnet bind
-acknowledgments. Tests: two-node `:peer` gateway tests (the golden/streaming
-harness already runs multi-VM), directory staleness transitions, partial-result
-shapes with a ghost node.
-
-**Slice 5 — `ouro` fleet.** Registry parsing (total, like `[defaults]`), fleet
-panel, attach switching with cursor-state teardown/rebuild, dimmed unreachable
-owners. Tests extend `tui/tests/` with the existing fake-gateway harness, plus a
-two-gateway switch test.
-
-**Slice 6 — Heterogeneous forge.** Builder map, triple grouping, registry v3
-`platform`, `capabilities.admit` nodes/tags. Tests: same-triple `:peer` groups with
-injected foreign-triple postures (real cross-arch peers are impossible in CI —
-stated in the tests), registry v2→v3 widen-on-read.
-
----
-
-## 15. Deferred, not designed away
-
-- **Cross-node streaming through one gateway** — requires the `Conn` coordinator
-  lookup (`conn.ex:680-697`) and subscription keys to become node-aware, and node
-  fields on every stream notification; until then, attach switching covers it.
-- **True multi-connection `ouro`** — N live gateways, `(node, plane, id)` keyspaces
-  throughout (`tui/src/ui/app/:419-439,1298-1333`).
-- **Grant replication / fleet-visible grants**, and any per-principal budget that
-  spans nodes.
-- **Rollout-registry reconciliation** across driving nodes; operator exit from
-  `:quarantined` beyond `reconcile_quarantine/1`.
-- **Shared-filesystem lease coordination** across nodes. Snapshot provisioning uses
-  a target-local mirror and detached worktree; it does not coordinate a shared checkout.
-- **Session migration/adoption** across nodes; consensus placement, quorum,
-  partition policy — the standing architecture non-claims remain non-claims.
-- **Per-token scopes** on the gateway; a signer outside the distribution trust
-  domain — both already on the project's deferral lists and unchanged here.
+  handshake — cookie, and TLS if configured — holds full `:erpc` authority over every
+  other one (`cluster.ex`, `docs/ARCHITECTURE.md` "Safety boundaries"). Joining a VPS to
+  your laptops means a compromised VPS owns the laptops. The mitigations are perimeter
+  and placement, not containment: network ACLs restrict which devices reach the
+  EPMD/distribution/gateway ports, TLS distribution narrows on-path exposure, and the
+  signer lives on the most-trusted host with a key that never crosses the wire. An
+  operator who cannot accept that for one machine should run it un-clustered with only
+  its gateway reachable, and take the reduced view.
+- **Role checks stop misconfiguration, not attackers.** A hostile connected node ignores
+  every check in `Ouroboros.Cluster` by calling whatever it likes directly. What holds
+  against a hostile *artifact* is the verifier's namespace policy and signature
+  verification, not this module.
+- **A private network is trusted infrastructure this runtime does not verify.** Address
+  ranges are checked; WireGuard, ACLs and DNS answers are taken at face value.
+- **Leases, grants, registries and stores stay node-local.** Nothing here replicates
+  state. Every "fleet-wide" surface is a read-time merge.
+- **Recovering from a compromise means clean hosts and rotated credentials.** Nothing in
+  the cluster undoes code execution or secrets already copied.

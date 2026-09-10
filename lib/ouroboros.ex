@@ -39,7 +39,6 @@ defmodule Ouroboros do
             next_sequence: nil
           }
         ),
-      release: safe_value(&Ouroboros.Release.Runtime.status/0, %{mode: :unavailable}),
       forge:
         safe_value(
           &Ouroboros.Runtime.Exposure.forge_status/0,
@@ -85,8 +84,7 @@ defmodule Ouroboros do
         if(Application.get_env(:ouroboros, :workspace_allowed_roots, []) == [],
           do: :disabled,
           else: process_group_state([Ouroboros.Workspace.Manager])
-        ),
-      release: process_group_state([Ouroboros.Release.Runtime])
+        )
     }
   end
 

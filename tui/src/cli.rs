@@ -311,24 +311,6 @@ pub enum Command {
         path: PathBuf,
     },
 
-    /// Replace this binary with a signed release, or refuse and say why.
-    ///
-    /// Every path through this command needs the release public key compiled in from
-    /// `dist/release.pub`: the Ed25519 signature over `SHA256SUMS` is the only thing that
-    /// makes a download trustworthy, and a checksum fetched from the same place as the
-    /// binary proves nothing on its own. A build without that key refuses rather than
-    /// installing something it cannot check.
-    ///
-    /// Exit codes: 0 up to date or updated; 10 (`--check`) an update exists; 11 no
-    /// release key in this build; 12 verification failed; 13 refused as a downgrade;
-    /// 14 the installed binary is not this command's to replace; 15 nothing could be
-    /// fetched; 16 no asset for this platform.
-    ///
-    /// There is no `--channel`: this project publishes one tag stream and no
-    /// stable/nightly split exists to follow. `docs/DISTRIBUTION.md` says what would have
-    /// to change first.
-    Update(UpdateArgs),
-
     /// Print the client version, the embedded release if there is one, and the protocol.
     Version,
 }
@@ -1180,28 +1162,6 @@ pub struct WasmCheckArgs {
     pub helper: WasmHelperArgs,
 }
 
-/// `ouro update`'s flags.
-#[derive(Debug, Args)]
-pub struct UpdateArgs {
-    /// Print the running and published versions and exit 0 or 10. Downloads the signed
-    /// manifest and verifies it — an unverifiable version number is not an answer — but
-    /// fetches no asset and replaces nothing.
-    #[arg(long)]
-    pub check: bool,
-
-    /// A mirror: the URL or directory holding `ouro-<version>-<triple>`, `SHA256SUMS`,
-    /// and `SHA256SUMS.minisig`. `https://`, `http://`, `file:///`, or a path. The
-    /// signature is checked exactly the same way wherever the bytes came from, which is
-    /// what makes a mirror safe to use at all.
-    #[arg(long, value_name = "URL")]
-    pub from: Option<String>,
-
-    /// Install a release older than the running binary. Refused without this, because a
-    /// rollback is a thing to mean rather than a thing to be handed.
-    #[arg(long)]
-    pub allow_downgrade: bool,
-}
-
 /// `ouro run`'s flags, in one struct so the dispatch stays one line.
 ///
 /// The start options are `ouro new`'s, resolved by the same
@@ -1449,33 +1409,33 @@ pub enum FleetCommand {
     },
     /// Print the machine-management protocol revision, without starting a runtime.
     Protocol,
-    /// Install the current TLS revocation policy on a stopped, previously created fleet.
-    UpgradeTransport,
-    /// Permanently revoke a machine identity and distribute its signed revocation.
-    Revoke {
-        #[arg(long)]
-        machine: String,
-        #[arg(long, value_name = "FILE")]
-        out: PathBuf,
-    },
-    /// Import and distribute a signed revocation (also works on a stopped machine).
-    ImportRevocation { artifact: PathBuf },
-    /// Wait for an authenticated compatible peer and an active recovery service.
-    Ready {
-        #[arg(long)]
-        peer: Option<String>,
-    },
-    /// Create a new secure fleet on this first machine.
+    /// Give this machine its cluster identity: node name, private cookie, TLS materials
+    /// and a private EPMD port.
     Create {
         /// A friendly label shown in Settings. Defaults to "MACHINE's fleet".
         #[arg(long, value_name = "FLEET")]
         name: Option<String>,
 
+        /// Join the cluster of a privately copied `<data dir>/fleet/` directory instead of
+        /// starting a new one: this machine's certificate is signed by the CA in the copy
+        /// and it inherits that cluster's id, cookie and roster. Nothing is sent anywhere.
+        #[arg(long, value_name = "DIR", conflicts_with = "name")]
+        from: Option<PathBuf>,
+
+        /// Rewrite only this machine's generated `ssl_dist.conf` and `vm.args` from the
+        /// profile it already has, keeping its identity, CA, cookie, roster and
+        /// tombstones. This is the repair for a profile written by an older Ouroboros.
+        #[arg(
+            long,
+            conflicts_with_all = ["name", "from", "machine", "host", "gateway_port", "dist_port"]
+        )]
+        regenerate: bool,
+
         /// A short label people will recognize, such as studio-mini.
         #[arg(long, value_name = "NAME")]
         machine: Option<String>,
 
-        /// An IP address or DNS name every fleet machine can reach. A Tailscale
+        /// An IP address or DNS name every cluster machine can reach. A Tailscale
         /// MagicDNS name is usually the easiest choice.
         #[arg(long, value_name = "HOST")]
         host: Option<String>,
@@ -1491,213 +1451,62 @@ pub enum FleetCommand {
         dist_port: Option<u16>,
     },
 
-    /// Make a private, one-machine invitation on the fleet's creator.
-    Invite {
-        /// Manage an invitation already recorded by the owner. With no action, creates
-        /// an invitation using the flags below.
-        #[command(subcommand)]
-        command: Option<InviteCommand>,
-
-        /// The new machine's friendly, unique label.
-        #[arg(long, value_name = "NAME")]
-        machine: Option<String>,
-
-        /// The new machine's reachable IP address or DNS name.
-        #[arg(long, value_name = "HOST")]
-        host: Option<String>,
-
-        /// Where to write the mode-0600 invitation. Existing files are never replaced.
-        #[arg(long, value_name = "FILE")]
-        out: Option<PathBuf>,
-
-        /// Override the invited machine's stable local gateway port.
-        #[arg(long, value_name = "PORT")]
-        gateway_port: Option<u16>,
-
-        /// Pin the invited machine's TLS distribution listener to one port.
-        #[arg(long, value_name = "PORT")]
-        dist_port: Option<u16>,
-
-        /// Reissue credentials for the same machine and host after its local data was
-        /// lost. This does not revoke a copied/compromised old credential.
-        #[arg(long)]
-        replace: bool,
-    },
-
-    /// Show known Tailscale peers and SSH config hosts this Mac can add.
-    List,
-
-    /// Create a private invitation, and either install the other machine over SSH or
-    /// print the enroll recipe to run there.
-    Add {
-        /// `user@host` or a Tailscale MagicDNS name. Omit with --print-script.
-        #[arg(value_name = "TARGET")]
-        target: Option<String>,
-
-        /// Friendly unique label for the new machine.
-        #[arg(long, value_name = "NAME")]
-        machine: Option<String>,
-
-        /// How the fleet reaches the new machine. A Tailscale MagicDNS name or private
-        /// IPv4 address. Omit to use what the SSH probe reports.
-        #[arg(long, value_name = "HOST")]
-        host: Option<String>,
-
-        /// `ssh` (default) or `tailscale` for Tailscale SSH.
-        #[arg(long, value_name = "VIA", default_value = "ssh")]
-        via: String,
-
-        /// A prebuilt ouro binary for the destination OS/CPU, when this Mac cannot copy
-        /// its own (the usual Mac → Linux case).
-        #[arg(long, value_name = "FILE")]
-        binary: Option<PathBuf>,
-
-        /// When the destination has no private address yet, install Tailscale there and
-        /// sign it in. Runs the vendor's installer and `tailscale up` as root on that
-        /// machine (passwordless sudo required) and prints the sign-in link here.
-        #[arg(long)]
-        setup_tailscale: bool,
-
-        /// Do not SSH. Write the invitation and print the command to run on the other
-        /// machine.
-        #[arg(long)]
-        print_script: bool,
-
-        /// If this Mac is still standalone, create the fleet first. Requires a stopped
-        /// runtime and --owner-host.
-        #[arg(long)]
-        init: bool,
-
-        /// This Mac's fleet hostname when --init creates the owner profile.
-        #[arg(long, value_name = "HOST")]
-        owner_host: Option<String>,
-
-        /// This Mac's friendly name when --init creates the owner profile.
-        #[arg(long, value_name = "NAME")]
-        owner_machine: Option<String>,
-    },
-
-    /// Join from a copied invitation, start the daemon, and delete the invitation.
-    Enroll {
-        /// The mode-0600 invitation file. Its contents are never printed.
-        #[arg(value_name = "INVITE")]
-        invitation: PathBuf,
-
-        /// Delete the invitation after a successful join.
-        #[arg(long)]
-        delete: bool,
-
-        /// Also write the recovery unit (does not activate it).
-        #[arg(long)]
-        service: bool,
-
-        /// Install and activate recovery, then require fleet readiness before success.
-        #[arg(long)]
-        activate: bool,
-
-        /// The expected owner node to verify after managed enrollment.
-        #[arg(long, requires = "activate")]
-        peer: Option<String>,
-
-        /// Override this machine's stable local gateway port.
-        #[arg(long, value_name = "PORT")]
-        gateway_port: Option<u16>,
-
-        /// Pin this machine's TLS distribution listener to one port.
-        #[arg(long, value_name = "PORT")]
-        dist_port: Option<u16>,
-    },
-
-    /// Join using the private invitation copied from the fleet creator.
-    Join {
-        /// The mode-0600 invitation file. Its contents are never printed.
-        #[arg(value_name = "INVITE")]
-        invitation: PathBuf,
-
-        /// Override this machine's stable local gateway port.
-        #[arg(long, value_name = "PORT")]
-        gateway_port: Option<u16>,
-
-        /// Pin this machine's TLS distribution listener to one port.
-        #[arg(long, value_name = "PORT")]
-        dist_port: Option<u16>,
-    },
-
-    /// Show this machine's non-secret fleet identity and next action.
+    /// Show this machine's non-secret cluster identity and next action.
     Status,
 
-    /// Check local security plus live fleet connectivity and compatibility when running.
+    /// Check local security plus live cluster connectivity and compatibility when running.
     Doctor,
 
-    /// Export or import a CA-attested membership roster after invitations change.
-    Sync {
+    /// Edit this machine's view of which other machines are in the cluster.
+    Members {
         #[command(subcommand)]
-        command: SyncCommand,
+        command: FleetMembersCommand,
     },
 
-    /// Manage durable knowledge about sessions owned by removed fleet machines.
+    /// Manage durable knowledge about sessions owned by machines that left the cluster.
     Sessions {
         #[command(subcommand)]
         command: SessionsCommand,
     },
 
-    /// Remove this machine's fleet credentials after its runtime is stopped.
-    Leave {
-        /// Explicitly clear a partial setup whose profile.json is missing. Also requires
-        /// --machine so Ouroboros can prove the matching recovery unit is inactive.
-        #[arg(long, requires = "machine")]
-        discard_incomplete: bool,
-
-        /// The former machine name, required with --discard-incomplete to locate its
-        /// launchd/systemd unit safely.
-        #[arg(long, value_name = "NAME", requires = "discard_incomplete")]
-        machine: Option<String>,
-    },
-
-    /// Install or inspect restart-on-failure integration for this fleet machine.
-    Service {
-        #[command(subcommand)]
-        command: ServiceCommand,
-    },
+    /// Remove this machine's cluster credentials after its runtime is stopped.
+    Leave,
 }
 
 #[derive(Debug, Subcommand)]
-pub enum InviteCommand {
-    /// Stop expecting an invitation that was abandoned or mistyped. This changes only
-    /// saved membership and does not revoke a copied credential.
-    Cancel {
-        /// The recorded machine name to stop expecting.
-        #[arg(long, value_name = "NAME")]
+pub enum FleetMembersCommand {
+    /// Add a machine to this machine's roster, so it dials it and expects it. The roster
+    /// is not replicated: run this on every machine that should know about the new one.
+    Add {
+        /// The new machine's short name, as it was given to `ouro fleet create`.
         machine: String,
 
-        /// Write the signed roster that existing fleet machines must import.
-        #[arg(long, value_name = "FILE")]
-        out: PathBuf,
-    },
-}
+        /// The address that machine advertises — the `--host` it was created with.
+        #[arg(long, value_name = "HOST")]
+        host: String,
 
-#[derive(Debug, Subcommand)]
-pub enum SyncCommand {
-    /// Export the owner's current signed membership roster for existing machines.
-    Export {
-        /// A fresh mode-0600 output path; existing files are never overwritten.
-        #[arg(long, value_name = "FILE")]
-        out: PathBuf,
+        /// Optional cross-check on the pair above: a node name is always
+        /// `ouro-<machine>@<host>`, and a mismatch is refused.
+        #[arg(long, value_name = "NODE")]
+        node: Option<String>,
     },
-    /// Import a newer signed roster while this machine's runtime is stopped.
-    Import {
-        /// The mode-0600 roster file received privately from the fleet owner.
-        #[arg(value_name = "ROSTER")]
-        roster: PathBuf,
+
+    /// Take a machine out of this machine's roster, after `ouro fleet leave` was run on
+    /// it. This records no tombstone; `ouro fleet sessions forget` does that.
+    Remove {
+        /// The machine to stop dialing and stop expecting.
+        machine: String,
     },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum SessionsCommand {
-    /// Irreversibly forget this machine's saved routing evidence for a tombstoned,
-    /// offline owner. Run this separately on every remaining fleet machine.
+    /// Declare a machine gone for good and irreversibly forget this machine's saved
+    /// routing evidence for it. Takes it out of this machine's roster and records it as
+    /// a tombstone, which is what the runtime requires before it will retire the
+    /// evidence. Run this separately on every remaining cluster machine.
     Forget {
-        /// The tombstoned machine whose offline session-owner evidence will be lost.
+        /// The machine whose offline session-owner evidence will be lost.
         #[arg(long, value_name = "NAME")]
         machine: String,
 
@@ -1706,18 +1515,14 @@ pub enum SessionsCommand {
         #[arg(long, required = true)]
         accept_state_loss: bool,
     },
-}
 
-#[derive(Debug, Subcommand)]
-pub enum ServiceCommand {
-    /// Write a launchd (macOS) or systemd user unit and show the exact activation command.
-    Install,
-    /// Activate the generated recovery unit, including Linux pre-login recovery.
-    Start,
-    /// Show the generated unit, activation guidance, and local runtime state.
-    Status,
-    /// Remove an inactive generated unit. Running services are refused.
-    Remove,
+    /// Undo `forget`: put a machine declared gone back into this machine's roster. The
+    /// durable evidence the runtime already retired does not come back — this restores
+    /// the roster entry, so the machine is dialed and expected again.
+    Restore {
+        /// The machine this roster records as gone for good.
+        machine: String,
+    },
 }
 
 #[cfg(test)]
@@ -2554,6 +2359,8 @@ mod tests {
             command:
                 FleetCommand::Create {
                     name,
+                    from,
+                    regenerate,
                     machine,
                     host,
                     gateway_port,
@@ -2574,95 +2381,86 @@ mod tests {
         assert_eq!(machine.as_deref(), Some("studio-mini"));
         assert_eq!(host.as_deref(), Some("studio.tailnet.ts.net"));
         assert_eq!(name, None);
+        assert_eq!(from, None);
+        assert!(!regenerate);
         assert_eq!(gateway_port, None);
         assert_eq!(dist_port, None);
 
+        // The second machine of a two-machine cluster: one option, one local directory.
         let Some(Command::Fleet {
-            command:
-                FleetCommand::Join {
-                    invitation,
-                    gateway_port,
-                    dist_port,
-                },
+            command: FleetCommand::Create { from, machine, .. },
         }) = parse(&[
             "fleet",
-            "join",
-            "worker.ouro",
-            "--gateway-port",
-            "48101",
-            "--dist-port",
-            "44101",
-        ])
-        .command
-        else {
-            panic!("fleet join must parse");
-        };
-        assert_eq!(invitation, PathBuf::from("worker.ouro"));
-        assert_eq!(gateway_port, Some(48_101));
-        assert_eq!(dist_port, Some(44_101));
-
-        let Some(Command::Fleet {
-            command:
-                FleetCommand::Invite {
-                    replace,
-                    machine,
-                    host,
-                    ..
-                },
-        }) = parse(&[
-            "fleet",
-            "invite",
+            "create",
+            "--from",
+            "/tmp/carried/fleet",
             "--machine",
-            "worker",
-            "--host",
-            "worker.tailnet.ts.net",
-            "--out",
-            "worker.ouro",
-            "--replace",
+            "vps",
         ])
         .command
         else {
-            panic!("fleet invite --replace must parse");
+            panic!("fleet create --from must parse");
         };
-        assert!(replace);
-        assert_eq!(machine.as_deref(), Some("worker"));
-        assert_eq!(host.as_deref(), Some("worker.tailnet.ts.net"));
+        assert_eq!(from, Some(PathBuf::from("/tmp/carried/fleet")));
+        assert_eq!(machine.as_deref(), Some("vps"));
+
         assert!(matches!(
-            parse(&[
-                "fleet",
-                "invite",
-                "cancel",
-                "--machine",
-                "worker",
-                "--out",
-                "roster.ouro-roster"
-            ])
-            .command,
+            parse(&["fleet", "create", "--regenerate"]).command,
             Some(Command::Fleet {
-                command: FleetCommand::Invite {
-                    command: Some(InviteCommand::Cancel { machine, out }),
+                command: FleetCommand::Create {
+                    regenerate: true,
                     ..
                 }
-            }) if machine == "worker" && out == std::path::Path::new("roster.ouro-roster")
+            })
+        ));
+        for conflicting in [
+            vec!["fleet", "create", "--regenerate", "--machine", "studio"],
+            vec!["fleet", "create", "--regenerate", "--from", "/tmp/carried"],
+            vec![
+                "fleet",
+                "create",
+                "--from",
+                "/tmp/carried",
+                "--name",
+                "Other",
+            ],
+        ] {
+            assert!(
+                Cli::try_parse_from(std::iter::once("ouro").chain(conflicting.iter().copied()))
+                    .is_err(),
+                "{conflicting:?} names two different jobs and must not parse"
+            );
+        }
+
+        assert!(matches!(
+            parse(&["fleet", "members", "add", "vps", "--host", "vps.tailnet.ts.net"]).command,
+            Some(Command::Fleet {
+                command: FleetCommand::Members {
+                    command: FleetMembersCommand::Add { machine, host, node: None }
+                }
+            }) if machine == "vps" && host == "vps.tailnet.ts.net"
         ));
         assert!(
-            Cli::try_parse_from(["ouro", "fleet", "invite", "cancel", "--machine", "worker"])
-                .is_err()
+            Cli::try_parse_from(["ouro", "fleet", "members", "add", "vps"]).is_err(),
+            "a roster entry without an address cannot be built"
         );
         assert!(matches!(
-            parse(&[
-                "fleet",
-                "sync",
-                "import",
-                "roster.ouro-roster"
-            ])
-            .command,
+            parse(&["fleet", "members", "remove", "vps"]).command,
             Some(Command::Fleet {
-                command: FleetCommand::Sync {
-                    command: SyncCommand::Import { roster }
+                command: FleetCommand::Members {
+                    command: FleetMembersCommand::Remove { machine }
                 }
-            }) if roster == std::path::Path::new("roster.ouro-roster")
+            }) if machine == "vps"
         ));
+        assert!(matches!(
+            parse(&["fleet", "sessions", "restore", "retired-vps"]).command,
+            Some(Command::Fleet {
+                command: FleetCommand::Sessions {
+                    command: SessionsCommand::Restore { machine }
+                }
+            }) if machine == "retired-vps"
+        ));
+
         assert!(matches!(
             parse(&[
                 "fleet",
@@ -2695,111 +2493,10 @@ mod tests {
             "irreversible local evidence loss must require an explicit acknowledgement"
         );
 
-        let Some(Command::Fleet {
-            command:
-                FleetCommand::Leave {
-                    discard_incomplete,
-                    machine,
-                },
-        }) = parse(&[
-            "fleet",
-            "leave",
-            "--discard-incomplete",
-            "--machine",
-            "worker",
-        ])
-        .command
-        else {
-            panic!("explicit incomplete cleanup must parse");
-        };
-        assert!(discard_incomplete);
-        assert_eq!(machine.as_deref(), Some("worker"));
-        assert!(Cli::try_parse_from(["ouro", "fleet", "leave", "--machine", "worker"]).is_err());
-
         assert!(matches!(
-            parse(&["fleet", "service", "install"]).command,
+            parse(&["fleet", "leave"]).command,
             Some(Command::Fleet {
-                command: FleetCommand::Service {
-                    command: ServiceCommand::Install
-                }
-            })
-        ));
-        assert!(matches!(
-            parse(&["service-run"]).command,
-            Some(Command::ServiceRun)
-        ));
-
-        let Some(Command::Fleet {
-            command:
-                FleetCommand::Add {
-                    target,
-                    machine,
-                    host,
-                    via,
-                    print_script,
-                    init,
-                    ..
-                },
-        }) = parse(&[
-            "fleet",
-            "add",
-            "op@vps",
-            "--machine",
-            "vps",
-            "--host",
-            "vps.tailnet.ts.net",
-            "--via",
-            "tailscale",
-            "--init",
-        ])
-        .command
-        else {
-            panic!("fleet add must parse");
-        };
-        assert_eq!(target.as_deref(), Some("op@vps"));
-        assert_eq!(machine.as_deref(), Some("vps"));
-        assert_eq!(host.as_deref(), Some("vps.tailnet.ts.net"));
-        assert_eq!(via, "tailscale");
-        assert!(init);
-        assert!(!print_script);
-
-        // Guided Tailscale enrollment is opt-in and off unless the operator names it.
-        let Some(Command::Fleet {
-            command: FleetCommand::Add {
-                setup_tailscale, ..
-            },
-        }) = parse(&["fleet", "add", "op@vps"]).command
-        else {
-            panic!("fleet add must parse without options");
-        };
-        assert!(!setup_tailscale);
-        let Some(Command::Fleet {
-            command:
-                FleetCommand::Add {
-                    setup_tailscale,
-                    host,
-                    ..
-                },
-        }) = parse(&["fleet", "add", "op@vps", "--setup-tailscale"]).command
-        else {
-            panic!("fleet add --setup-tailscale must parse");
-        };
-        assert!(setup_tailscale);
-        assert!(host.is_none());
-        assert!(matches!(
-            parse(&["fleet", "list"]).command,
-            Some(Command::Fleet {
-                command: FleetCommand::List
-            })
-        ));
-        assert!(matches!(
-            parse(&["fleet", "enroll", "vps.ouro", "--delete", "--service"]).command,
-            Some(Command::Fleet {
-                command: FleetCommand::Enroll {
-                    delete: true,
-                    service: true,
-                    ..
-                }
+                command: FleetCommand::Leave
             })
         ));
     }

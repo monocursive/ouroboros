@@ -476,13 +476,12 @@ defmodule Ouroboros.Cluster.Monitor do
         machine
         |> Map.delete(:probe_error)
         |> Map.put(:compatibility, compatibility)
-        |> Map.put(:revoked?, Ouroboros.Cluster.Revocations.revoked?(machine.node))
       end)
       |> Enum.sort_by(fn machine ->
         {state_order(machine.state), Atom.to_string(machine.node)}
       end)
 
-    # An early joiner may only have its invitation seeds in static configuration and
+    # An early peer may only have its boot seeds in static configuration and
     # learn later machines through BEAM transitive connectivity. "expected 2 / connected
     # 3" reads like corrupt state to an operator, so the summary is the union of configured
     # peers and the last-known directory. Per-machine `expected?` still identifies the
@@ -505,7 +504,6 @@ defmodule Ouroboros.Cluster.Monitor do
         incompatible: incompatible
       },
       machines: machines,
-      revoked_nodes: Ouroboros.Cluster.Revocations.nodes(),
       formation: Ouroboros.Cluster.formation(),
       security: Ouroboros.Cluster.dist_security()
     }
@@ -839,17 +837,7 @@ defmodule Ouroboros.Cluster.Monitor do
          {:ok, encoded} <- read_bounded_fleet_profile(profile),
          {:ok, decoded} <- Jason.decode(encoded),
          {:ok, roster} <- decode_fleet_roster(decoded, fleet_id) do
-      revoked = Ouroboros.Cluster.Revocations.revoked_nodes(Path.dirname(profile))
-
-      {removed, active} =
-        Enum.split_with(roster.members, fn {_machine, node} -> MapSet.member?(revoked, node) end)
-
-      {:ok,
-       %{
-         roster
-         | members: Map.new(active),
-           tombstones: Map.merge(roster.tombstones, Map.new(removed))
-       }}
+      {:ok, roster}
     else
       {:error, :enoent} ->
         {:error, :enoent}
@@ -1068,8 +1056,8 @@ defmodule Ouroboros.Cluster do
     * `epmd` — a list of node names, retried on an interval so boot order does not
       matter. `OUROBOROS_CLUSTER_HOSTS` (comma-separated) seeds the list at boot; when
       this node runs from a saved fleet profile, every retry re-resolves membership
-      from that profile (`membership_hosts/0`), so `ouro fleet add` and `ouro fleet
-      invite cancel` reach a running node's dialer without a restart.
+      from that profile (`membership_hosts/0`), so a roster edited while the runtime is
+      up reaches its dialer without a restart.
     * `gossip` — libcluster's multicast gossip, optionally keyed by
       `OUROBOROS_CLUSTER_GOSSIP_SECRET`.
     * `dns` — poll the A records of `OUROBOROS_CLUSTER_DNS_QUERY` and connect
@@ -1121,7 +1109,7 @@ defmodule Ouroboros.Cluster do
   @impl true
   def init(_opts) do
     Supervisor.init(
-      [Ouroboros.Cluster.Revocations] ++ formation_children() ++ [__MODULE__.Monitor],
+      formation_children() ++ [__MODULE__.Monitor],
       strategy: :one_for_one
     )
   end
@@ -1348,10 +1336,10 @@ defmodule Ouroboros.Cluster do
   Returns the node names formation should currently dial.
 
   When this node runs from a saved fleet profile, membership is re-read from that
-  profile on every call, so a roster change made while the runtime is up — `ouro fleet
-  add`, `ouro fleet invite cancel` — reaches both the dialer and the expected-machine
-  directory without a restart. `OUROBOROS_CLUSTER_HOSTS` remains the boot seed, and the
-  whole answer for a topology configured by environment alone.
+  profile on every call, so a roster change made while the runtime is up reaches both
+  the dialer and the expected-machine directory without a restart.
+  `OUROBOROS_CLUSTER_HOSTS` remains the boot seed, and the whole answer for a topology
+  configured by environment alone.
 
   A profile that turns unreadable keeps the last membership this node successfully
   read, with one warning per distinct failure, rather than silently shrinking back to
@@ -1928,7 +1916,6 @@ defmodule Ouroboros.Cluster do
               true -> :offline
             end,
           expected?: MapSet.member?(expected, target),
-          revoked?: Ouroboros.Cluster.Revocations.revoked?(target),
           runtime_running?: if(posture, do: posture.running, else: nil),
           first_seen_at: if(MapSet.member?(connected, target), do: now, else: nil),
           last_seen_at: if(MapSet.member?(connected, target), do: now, else: nil),
@@ -1972,7 +1959,6 @@ defmodule Ouroboros.Cluster do
         incompatible: Enum.count(machines, &(&1.compatibility == :incompatible))
       },
       machines: machines,
-      revoked_nodes: Ouroboros.Cluster.Revocations.nodes(),
       formation: formation(),
       security: dist_security()
     }
@@ -2043,8 +2029,6 @@ defmodule Ouroboros.Cluster do
           doctor_check(
             {:machine_connectivity, machine.node},
             cond do
-              machine.revoked? and machine.state == :offline -> :ok
-              machine.revoked? -> :error
               machine.state == :local -> :ok
               machine.state == :connected and machine.expected? -> :ok
               machine.state == :connected -> :warning
@@ -2052,9 +2036,6 @@ defmodule Ouroboros.Cluster do
               true -> :warning
             end,
             cond do
-              machine.revoked? ->
-                "#{machine.machine} has a permanently revoked credential; TLS access is refused"
-
               machine.state == :local ->
                 "#{machine.machine} is this machine"
 
@@ -2071,11 +2052,8 @@ defmodule Ouroboros.Cluster do
                 "#{machine.machine} is offline; it was learned from another machine"
             end,
             cond do
-              machine.revoked? ->
-                "For a replacement machine, issue a new identity under a new machine name"
-
               machine.state == :connected and not machine.expected? ->
-                "If this is a newly invited member, import the owner's latest signed roster and restart this machine; if it is unexpected, treat the credential as exposed and rotate the fleet"
+                "If this machine belongs here, add it to this machine's roster in fleet/profile.json and restart; if it is unexpected, treat the credential as exposed and rebuild the cluster identity on every machine"
 
               machine.state != :offline ->
                 nil

@@ -7,14 +7,12 @@ vulnerability reporting instead: the **Security** tab of this repository → **R
 vulnerability**. You will get a response there, and the report stays private until a
 fix is released.
 
-## Verifying releases
+## Releases
 
-Release binaries are published with a `SHA256SUMS` file signed by minisign. The public
-key of record is `dist/release.pub` in this repository — the same bytes compiled into
-the `ouro` binary — not anything downloaded from the release itself. Verify with:
+There is no published release channel, no signed download and no self-update: the signing
+key, the release workflow and `ouro update` were deleted by
+[proposals/core.md](docs/proposals/core.md) §3 D4. `make ouro` builds the client on the
+machine that will run it, and an operator copies that binary where it is needed. If a
+release channel comes back, this section says how to verify it.
 
-```sh
-minisign -V -p dist/release.pub -x SHA256SUMS.minisig -m SHA256SUMS
-```
-
-Only the latest release is supported with fixes.
+Only the latest revision is supported with fixes.

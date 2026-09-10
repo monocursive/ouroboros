@@ -20,8 +20,8 @@ defmodule Ouroboros.Wasm.Store do
   Nothing is ever overwritten, so no writer can be interrupted into publishing a partial
   component, and a reader mid-put sees either the old file or the whole new one.
 
-  The write discipline is `Ouroboros.Release.PackageStager`'s, for the same reason it has
-  one: the digest is validated against the bytes before anything is written, the data is
+  The write discipline is deliberate: the digest is validated against the bytes before
+  anything is written, the data is
   synced before it is published, the publish is a link rather than a rename because a rename
   would silently overwrite, and the directory is synced before success is claimed.
 

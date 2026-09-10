@@ -1033,8 +1033,6 @@ pub struct RuntimeStatus {
     pub agents: Vec<Value>,
     #[serde(default)]
     pub interactive_sessions: Vec<Value>,
-    #[serde(default)]
-    pub release: Value,
     /// Signer posture and live capability count. Absent on older gateways.
     #[serde(default)]
     pub forge: Value,
@@ -1043,16 +1041,6 @@ pub struct RuntimeStatus {
 impl RuntimeStatus {
     pub fn decode(value: &Value) -> Result<Self, serde_json::Error> {
         serde_json::from_value(value.clone())
-    }
-
-    /// What `mode` a sub-map reports, for the one that has one.
-    pub fn mode(&self, section: &str) -> Option<&str> {
-        let value = match section {
-            "release" => &self.release,
-            _ => return None,
-        };
-
-        value.get("mode").and_then(Value::as_str)
     }
 
     /// The cluster line, assembled from whichever of the two shapes arrived.
@@ -4176,7 +4164,6 @@ mod tests {
             Some(&Availability::Available)
         );
 
-        assert_eq!(status.mode("release"), Some("ready"));
         assert_eq!(status.cluster_summary(), "strategy=none  distributed=false");
         assert_eq!(status.forge_summary(), "signer=deny live=0 admit=no");
     }

@@ -231,8 +231,8 @@ defmodule Ouroboros.ClusterTest do
                  &(&1.id == {:machine_connectivity, peer})
                )
 
-      assert roster_guidance =~ "latest signed roster"
-      assert roster_guidance =~ "rotate the fleet"
+      assert roster_guidance =~ "add it to this machine's roster in fleet/profile.json"
+      assert roster_guidance =~ "treat the credential as exposed"
 
       # This fixture deliberately substitutes directory facts, rather than changing
       # the peer's actual CPU or protocol. Keep background probes from replacing those
@@ -502,7 +502,7 @@ defmodule Ouroboros.ClusterTest do
           refute late_node in Cluster.expected_nodes()
 
           # The roster grows while the runtime is up: no restart, no environment
-          # change — only the saved profile moves, exactly what `ouro fleet add` does.
+          # change — only the saved profile moves, exactly what a roster edit does.
           write_test_fleet_profile!(fleet_dir, fleet_id,
             local: owner,
             members: [owner, late],
@@ -614,7 +614,7 @@ defmodule Ouroboros.ClusterTest do
       Process.sleep(600)
       refute late_name in :peer.call(owner, Node, :list, [])
 
-      # `ouro fleet add` while the owner runtime is up: only the saved profile changes.
+      # A roster grown while the owner runtime is up: only the saved profile changes.
       write_test_fleet_profile!(fleet_dir, fleet_id,
         local: owner_member,
         members: [owner_member, late_member],
@@ -868,7 +868,7 @@ defmodule Ouroboros.ClusterTest do
         sweep_now!(strategy)
         assert dials(table) == 4
 
-        # `ouro fleet invite cancel` while the runtime is up: only the roster moves.
+        # A machine removed from the roster while the runtime is up: only the roster moves.
         System.put_env("OUROBOROS_CLUSTER_HOSTS", "")
         sweep_now!(strategy)
         assert dials(table) == 4
@@ -1845,7 +1845,6 @@ defmodule Ouroboros.ClusterTest do
             Ouroboros.Mesh.Directory,
             Ouroboros.Interactive.Store,
             Ouroboros.Control.Grants,
-            Ouroboros.Release.Runtime,
             Ouroboros.Upgrade.Rollout.Registry
           ] do
         assert :erpc.call(builder, Process, :whereis, [name]) == nil,

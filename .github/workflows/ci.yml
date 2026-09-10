@@ -5,8 +5,7 @@
 name: CI
 
 # Long-lived branches and release tags only. PR branches already run every job through
-# the pull_request event, so an unfiltered `push` ran each PR commit twice. Tags stay
-# because release.yml's publication gate assumes the ordinary CI workflow also sees them.
+# the pull_request event, so an unfiltered `push` ran each PR commit twice.
 #
 # The other half of the same rule: a PR whose head *is* a long-lived branch (`dev` into
 # `main`, the release cut) is already covered by the push that landed it, so every job
@@ -370,49 +369,6 @@ jobs:
         run: |
           mix ouroboros.protocol.docs
           git diff --exit-code docs/PROTOCOL.md
-
-  # install.sh against a local fixture, then the structural checks on release.yml.
-  # Deliberately not a mix release: the install half needs only sh and a sha256 tool;
-  # the workflow half needs a YAML parser. PyYAML is what makes the 54 structural checks
-  # run rather than falling back to ruby's parse-only path. See docs/DISTRIBUTION.md §7.
-  dist-check:
-    name: Dist check
-    runs-on: ubuntu-24.04
-    # See the `on:` note: a push to a long-lived branch already ran this.
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork || (github.head_ref != 'main' && github.head_ref != 'dev') }}
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - run: pip install pyyaml
-
-      - run: make dist-check
-
-  # One representative packaged Linux build is required because unit suites cannot prove
-  # three released BEAM nodes negotiate TLS, learn late peers, and recover their mesh.
-  fleet-e2e:
-    name: Packaged three-node fleet
-    runs-on: ubuntu-24.04
-    # See the `on:` note: a push to a long-lived branch already ran this.
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork || (github.head_ref != 'main' && github.head_ref != 'dev') }}
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: erlef/setup-beam@v1
-        with:
-          elixir-version: ${{ env.ELIXIR_VERSION }}
-          otp-version: ${{ env.OTP_VERSION }}
-
-      - run: rustup toolchain install stable --profile minimal
-
-      - run: mix deps.get
-
-      - run: make fleet-e2e
 
   # The container proofs a Mac cannot run: `wasm-linux-test` is the wasm suites under
   # bubblewrap with `ouro-sandbox` disabled by name (the backend the Elixir job already

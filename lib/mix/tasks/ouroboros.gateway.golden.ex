@@ -726,8 +726,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         mesh: :available,
         interactive: :available,
         effect_ledger: :available,
-        workspace: :disabled,
-        release: :available
+        workspace: :disabled
       },
       agents: [
         %{
@@ -755,7 +754,6 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         retention_limit: 1_000,
         next_sequence: 5
       },
-      release: %{mode: :ready, handler_releases: [], ephemeral_capability_count: 0},
       forge: %{signer: :deny, admit_possible?: false, live_count: 0, live: []}
     })
   end

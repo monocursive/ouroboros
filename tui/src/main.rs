@@ -22,7 +22,6 @@
 mod runtime_connection;
 use runtime_connection::{Ownership, RuntimeConnection};
 
-use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -35,11 +34,10 @@ use rand::TryRngCore;
 use serde_json::{json, Value};
 
 use ouro::cli::{
-    AcpArgs, Cli, Command, FleetCommand, FleetTagCommand, ForkArgs, InviteCommand, LedgerArgs,
-    McpCommand, ReplayArgs, RunArgs, ServiceCommand, SessionsCommand, SyncCommand, WasmCommand,
+    AcpArgs, Cli, Command, FleetCommand, FleetMembersCommand, FleetTagCommand, ForkArgs,
+    LedgerArgs, McpCommand, ReplayArgs, RunArgs, SessionsCommand, WasmCommand,
 };
 use ouro::config::{self, Loaded, StartFlags};
-use ouro::fleet_add;
 use ouro::mcp_cli;
 use ouro::model::{ApprovalMode, Plane, SandboxMode, StartError, StartRequest, StartedRef};
 use ouro::proto::Hello;
@@ -66,16 +64,10 @@ async fn main() -> ExitCode {
         // stream it chose, so nothing is printed here.
         Err(error) => match error.downcast_ref::<ouro::run::Exit>() {
             Some(exit) => ExitCode::from(exit.code()),
-            // `ouro update` documents its own codes for the same reason `ouro run` does:
-            // a script that branches on "an update is available" needs a number, not a
-            // sentence. It has already printed whichever of the two it had to.
-            None => match error.downcast_ref::<ouro::update::Exit>() {
-                Some(exit) => ExitCode::from(exit.code()),
-                None => {
-                    eprintln!("ouro: {error:#}");
-                    ExitCode::FAILURE
-                }
-            },
+            None => {
+                eprintln!("ouro: {error:#}");
+                ExitCode::FAILURE
+            }
         },
     }
 }
@@ -222,11 +214,6 @@ async fn run(cli: Cli) -> Result<()> {
         Some(Command::HoldRuntimeRecoveryLock { path }) => {
             runtime::hold_runtime_recovery_lock(&path)
         }
-        Some(Command::Update(args)) => ouro::update::main(&ouro::update::Options {
-            check: args.check,
-            from: args.from,
-            allow_downgrade: args.allow_downgrade,
-        }),
         Some(Command::Version) => {
             print!("{}", version());
             Ok(())
@@ -245,13 +232,6 @@ struct Local {
     /// in attach mode, because then it did not choose.
     data_dir: Option<String>,
     config: Loaded,
-    /// After a standalone→fleet restart, land on Machines so the operator sees the add.
-    open_machines: bool,
-    /// Progress lines from the add that triggered that restart. Empty on a normal start.
-    add_log: Vec<String>,
-    /// Enroll recipe from that add, if the destination still needs a command. Never
-    /// contains invitation bytes.
-    add_recipe: Option<String>,
 }
 
 fn version() -> String {
@@ -289,7 +269,7 @@ async fn attach_local(
     config: Loaded,
     continue_from: Option<ContinueRequest>,
 ) -> Result<()> {
-    attach_local_with(paths, dev, config, false, None, continue_from).await
+    attach_local_with(paths, dev, config, continue_from).await
 }
 
 /// F2. What `ouro --continue` asked for, carried to the one place a connection exists.
@@ -307,8 +287,6 @@ async fn attach_local_with(
     paths: &Paths,
     dev: bool,
     config: Loaded,
-    open_machines: bool,
-    add_outcome: Option<fleet_add::Outcome>,
     continue_from: Option<ContinueRequest>,
 ) -> Result<()> {
     paths.ensure_private_data_dir()?;
@@ -328,12 +306,6 @@ async fn attach_local_with(
     let local = Local {
         data_dir: Some(paths.data_dir.display().to_string()),
         config,
-        open_machines,
-        add_log: add_outcome
-            .as_ref()
-            .map(|outcome| outcome.log.clone())
-            .unwrap_or_default(),
-        add_recipe: add_outcome.and_then(|outcome| outcome.recipe.map(|recipe| recipe.text())),
     };
 
     draw(
@@ -750,9 +722,6 @@ async fn new_session(
         Local {
             data_dir: Some(paths.data_dir.display().to_string()),
             config,
-            open_machines: false,
-            add_log: Vec::new(),
-            add_recipe: None,
         },
         created_start_failure,
         first_message_reconciliation,
@@ -1180,162 +1149,6 @@ fn report_boot(boot: &Arc<std::sync::Mutex<BootProgress>>, verbose: bool) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn fleet_add_command(
-    paths: &Paths,
-    target: Option<String>,
-    machine: Option<String>,
-    host: Option<String>,
-    via: String,
-    binary: Option<PathBuf>,
-    setup_tailscale: bool,
-    print_script: bool,
-    init: bool,
-    owner_host: Option<String>,
-    owner_machine: Option<String>,
-) -> Result<()> {
-    // Argument shape is settled before any state changes: a named target means SSH and
-    // --print-script means no SSH, so together they are refused rather than silently
-    // narrowed.
-    match target.as_deref() {
-        Some(target) if print_script => bail!(
-            "--print-script does not use TARGET; drop --print-script to run `{target}` over SSH, or omit the target to only write the invitation"
-        ),
-        None if !print_script => bail!(
-            "name the destination as `ouro fleet add user@host`, or pass `--print-script --machine NAME --host HOST` to enroll it yourself. `ouro fleet list` shows Tailscale and SSH hosts this Mac already knows"
-        ),
-        _ => {}
-    }
-    // Guided enrollment is a thing done to a destination over SSH; there is no
-    // destination to do it to when nothing is being reached.
-    if setup_tailscale && (print_script || target.is_none()) {
-        bail!(
-            "--setup-tailscale needs a destination to reach over SSH; it cannot be combined with --print-script"
-        );
-    }
-
-    if init && fleet::load(&paths.data_dir)?.is_none() {
-        let owner_host = owner_host.as_deref().ok_or_else(|| {
-            anyhow!(
-                "`ouro fleet add --init` needs --owner-host with this Mac's Tailscale MagicDNS name or private IPv4 address"
-            )
-        })?;
-        let identity = fleet::resolve_identity(owner_machine.as_deref(), Some(owner_host))?;
-        fleet::create(
-            &paths.data_dir,
-            None,
-            &identity.machine,
-            &identity.host,
-            fleet::Ports::DEFAULT,
-        )?;
-        println!(
-            "Created this Mac as fleet owner `{machine}` at {host}.",
-            machine = identity.machine,
-            host = identity.host
-        );
-    }
-
-    let owner_host = fleet::load(&paths.data_dir)?
-        .map(|profile| profile.host)
-        .or(owner_host);
-
-    if print_script || target.is_none() {
-        let machine = machine.ok_or_else(|| {
-            anyhow!("`--machine NAME` is required when printing an enroll script")
-        })?;
-        let host = host
-            .ok_or_else(|| anyhow!("`--host HOST` is required when printing an enroll script"))?;
-        let outcome = fleet_add::prepare(&paths.data_dir, &machine, &host, owner_host.as_deref())?;
-        print!("{}", fleet_add::render_outcome(&outcome));
-        return Ok(());
-    }
-
-    let target = target.expect("target is present when not printing a script");
-    let via = fleet_add::Via::parse(&via)?;
-    let options = fleet_add::AddOptions {
-        setup_tailscale,
-        ..fleet_add::AddOptions::default()
-    };
-    // The add runs as a typed event stream — the same one the TUI stepper and the desktop
-    // pane render. This terminal renders it through `NotifyEvents`, the adapter that turns
-    // events back into the lines `StderrNotify` has always printed, so the CLI cannot
-    // drift from the stream it now consumes. It runs on this thread and keeps the `?`:
-    // the terminal `Failed` event is for surfaces that render a failure, while a shell
-    // wants the error on stderr and a non-zero exit, which is what returning `Err` does.
-    let params = fleet_add::AddParams {
-        data_dir: paths.data_dir.clone(),
-        target: target.clone(),
-        machine,
-        host,
-        via,
-        binary,
-        owner_host,
-        options,
-    };
-    let mut notify = fleet_add::StderrNotify;
-    let mut sink = fleet_add::NotifyEvents::new(&mut notify);
-    let cancel = fleet_add::Cancel::default();
-    let on_interrupt = cancel.clone();
-    let interrupt = tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            on_interrupt.cancel();
-        }
-    });
-    let result =
-        fleet_add::add_with_events(&params, &fleet_add::SshRemote { via }, &cancel, &mut sink);
-    interrupt.abort();
-    let outcome = result?;
-    print!("{}", fleet_add::render_outcome(&outcome));
-    Ok(())
-}
-
-async fn fleet_enroll_command(
-    paths: &Paths,
-    invitation: PathBuf,
-    delete: bool,
-    service: bool,
-    activate: bool,
-    peer: Option<String>,
-    ports: fleet::Ports,
-) -> Result<()> {
-    fleet_add::enroll_preflight(&invitation)?;
-    let profile = fleet::join(&paths.data_dir, &invitation, ports)?;
-    println!(
-        "Joined fleet {} as {} at {}.",
-        profile.name, profile.machine, profile.host
-    );
-    if delete {
-        fs::remove_file(&invitation).with_context(|| {
-            format!(
-                "joined, but could not delete invitation {}",
-                invitation.display()
-            )
-        })?;
-    }
-    if activate {
-        fleet::service_install(&paths.data_dir)?;
-        fleet::service_activate(&paths.data_dir)?;
-        return fleet_ready(paths, peer.as_deref()).await;
-    }
-    if service {
-        match fleet::service_install(&paths.data_dir) {
-            Ok(installed) => {
-                println!(
-                    "Recovery unit written at {}.\nActivate with:\n  {}\n",
-                    installed.path.display(),
-                    installed.activation
-                );
-            }
-            Err(error) => {
-                println!(
-                    "joined, but recovery was not installed: {error:#}\nRun `ouro fleet service install` after this daemon is healthy."
-                );
-            }
-        }
-    }
-    daemon(paths, false).await
-}
-
 async fn fleet_rpc(paths: &Paths, method: &str, params: Value) -> Result<Value> {
     let publication = runtime::read_live_publication(&paths.data_dir)?
         .ok_or_else(|| anyhow!("fleet runtime is not running"))?;
@@ -1348,42 +1161,6 @@ async fn fleet_rpc(paths: &Paths, method: &str, params: Value) -> Result<Value> 
         .await;
     attached.client.stop().await;
     result.map_err(Into::into)
-}
-
-async fn fleet_distribute_revocation(paths: &Paths, artifact: &str, file: &Path) -> Result<()> {
-    if runtime::read_live_publication(&paths.data_dir)?.is_none() {
-        println!("Signed revocation saved locally at {}. This stopped machine will enforce it on startup. Import it on every other surviving machine before treating fleet-wide revocation as complete.", file.display());
-        return Ok(());
-    }
-    let result = fleet_rpc(paths, "fleet.revoke", json!({"artifact": artifact})).await?;
-    println!("{}", serde_json::to_string_pretty(&result)?);
-    if result.get("complete").and_then(Value::as_bool) != Some(true) {
-        bail!("revocation is committed, but some machines have not acknowledged it. Import {} on each pending machine; keep that machine isolated from the revoked credential until it acknowledges", file.display());
-    }
-    Ok(())
-}
-
-async fn fleet_ready(paths: &Paths, peer: Option<&str>) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
-    loop {
-        let ready = async {
-            fleet::recovery_ready(&paths.data_dir)?;
-            let status = fleet_rpc(paths, "fleet.status", json!({})).await?;
-            fleet::validate_ready_status(&status, peer)?;
-            Ok::<_, anyhow::Error>(())
-        }
-        .await;
-        match ready {
-            Ok(()) => {
-                println!("OURO_FLEET_READY");
-                return Ok(());
-            }
-            Err(error) if tokio::time::Instant::now() >= deadline => {
-                bail!("machine enrolled but fleet readiness was not verified: {error:#}. Inspect fleet doctor and fleet service status; retry fleet ready after repair");
-            }
-            Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
-        }
-    }
 }
 
 async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Result<()> {
@@ -1434,23 +1211,10 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
             println!("2");
             Ok(())
         }
-        FleetCommand::UpgradeTransport => {
-            fleet::upgrade_transport(&paths.data_dir)?;
-            println!("TLS revocation enforcement installed. Upgrade every fleet member to this build, then restart its recovery service.");
-            Ok(())
-        }
-        FleetCommand::Revoke { machine, out } => {
-            let artifact = fleet::revocation::issue(&paths.data_dir, &machine, &out)?;
-            fleet_distribute_revocation(paths, &artifact, &out).await
-        }
-        FleetCommand::ImportRevocation { artifact: input } => {
-            let artifact = fleet::revocation::import(&paths.data_dir, &input)?;
-            fleet_distribute_revocation(paths, &artifact, &input).await
-        }
-        FleetCommand::Ready { peer } => fleet_ready(paths, peer.as_deref()).await,
-
         FleetCommand::Create {
             name,
+            from,
+            regenerate,
             machine,
             host,
             gateway_port,
@@ -1461,25 +1225,68 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                     "`ouro --dev fleet create` is not supported: secure fleet startup requires the packaged release boot path. Run `ouro fleet create` with the packaged binary; development runtimes should use a separate standalone data directory"
                 );
             }
+            if regenerate {
+                let profile = fleet::regenerate(&paths.data_dir)?;
+                println!(
+                    "Generated policy files rewritten from this machine's profile.\n  fleet        {}\n  machine      {}\n  rewrote      {}, {}\n\nIdentity, CA, cookie, roster and tombstones are unchanged, so every other machine still trusts this one. Next: `ouro fleet doctor`, then `ouro daemon`.",
+                    profile.name,
+                    profile.machine,
+                    fleet::TLS_OPTFILE,
+                    fleet::VM_ARGS_FILE
+                );
+                return Ok(());
+            }
             let identity = fleet::resolve_identity(machine.as_deref(), host.as_deref())?;
-            let profile = fleet::create(
-                &paths.data_dir,
-                name.as_deref(),
-                &identity.machine,
-                &identity.host,
-                fleet::Ports {
-                    gateway: gateway_port,
-                    dist: dist_port,
-                    epmd: None,
-                },
-            )?;
+            let profile = match from.as_deref() {
+                Some(source) => {
+                    let profile = fleet::create_from(
+                        &paths.data_dir,
+                        source,
+                        &identity.machine,
+                        &identity.host,
+                        fleet::Ports {
+                            gateway: gateway_port,
+                            dist: dist_port,
+                            epmd: None,
+                        },
+                    )?;
+                    println!(
+                        "Cluster identity created from {}.\n  fleet        {}\n  machine      {}\n  address      {}\n  members      {}\n\nThis machine's certificate is signed by the copied CA and it shares that cluster's cookie. No CA key was written here, so this machine cannot sign a third one — copy the first machine's `fleet/` directory again for that.\n\nNext:\n  1. Delete your private copy at {}; it holds the cluster's CA key and cookie.\n  2. On every machine already in the cluster, run `ouro fleet members add {} --host {}`.\n  3. Start this machine: `ouro daemon`, then `ouro fleet doctor`.",
+                        source.display(),
+                        profile.name,
+                        profile.machine,
+                        profile.host,
+                        profile
+                            .members
+                            .iter()
+                            .map(|member| member.machine.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        source.display(),
+                        profile.machine,
+                        profile.host
+                    );
+                    return Ok(());
+                }
+                None => fleet::create(
+                    &paths.data_dir,
+                    name.as_deref(),
+                    &identity.machine,
+                    &identity.host,
+                    fleet::Ports {
+                        gateway: gateway_port,
+                        dist: dist_port,
+                        epmd: None,
+                    },
+                )?,
+            };
             let address_note = if fleet::host_is_local_only(&profile.host) {
                 "\n  note         loopback is local-only; use a Tailscale/private IPv4 name on separate machines"
             } else {
                 ""
             };
             println!(
-                "Fleet created securely.\n  fleet        {}\n  machine      {}\n  address      {}{}\n  transport    TLS\n  profile      {}\n\nNext:\n  1. Verify the local interface and credentials: `ouro fleet doctor`\n  2. Start this machine: `ouro daemon`\n  3. Verify the live runtime: `ouro fleet doctor`\n  4. Add another from this machine: `ouro fleet add user@host --machine NAME --host HOST`\n  5. If SSH is unavailable, `ouro fleet add --print-script --machine NAME --host HOST` then run the printed enroll command there\n\nAllow TCP {} (this fleet's EPMD port) and {}..{} only between private fleet addresses; do not open the gateway port, which remains loopback-only. Ouroboros requests the advertised private IPv4 interface for EPMD, pins TLS distribution to it, and doctor checks an incumbent EPMD is not listening on another local IPv4 interface.\n\nThis machine is the fleet's sole invitation/roster authority. Back up {} securely; automatic service recovery does not protect against disk loss. For optional login/crash recovery, run `ouro fleet service install` and follow its activation step.",
+                "Cluster identity created.\n  fleet        {}\n  machine      {}\n  address      {}{}\n  transport    TLS\n  profile      {}\n\nNext:\n  1. Verify the local interface and credentials: `ouro fleet doctor`\n  2. Start this machine: `ouro daemon`\n  3. Verify the live runtime: `ouro fleet doctor`\n\nAllow TCP {} (this machine\'s EPMD port) and {}..{} only between private cluster addresses; do not open the gateway port, which remains loopback-only. Ouroboros requests the advertised private IPv4 interface for EPMD, pins TLS distribution to it, and doctor checks an incumbent EPMD is not listening on another local IPv4 interface.\n\nThese credentials cannot be reissued from anywhere else. Back up {} securely; nothing protects against disk loss. To add a second machine: copy this directory to it privately, run `ouro fleet create --from <copy>` there, then `ouro fleet members add` here. docs/FLEET.md has the whole recipe.",
                 profile.name,
                 profile.machine,
                 profile.host,
@@ -1489,198 +1296,6 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                 profile.dist_port_min,
                 profile.dist_port_max,
                 fleet::fleet_dir(&paths.data_dir).display()
-            );
-            Ok(())
-        }
-        FleetCommand::List => {
-            print!(
-                "{}",
-                fleet_add::render_list(&fleet_add::discover_candidates())
-            );
-            Ok(())
-        }
-        FleetCommand::Add {
-            target,
-            machine,
-            host,
-            via,
-            binary,
-            setup_tailscale,
-            print_script,
-            init,
-            owner_host,
-            owner_machine,
-        } => {
-            if dev {
-                bail!("fleet add belongs to the packaged runtime data directory; omit --dev");
-            }
-            fleet_add_command(
-                paths,
-                target,
-                machine,
-                host,
-                via,
-                binary,
-                setup_tailscale,
-                print_script,
-                init,
-                owner_host,
-                owner_machine,
-            )
-            .await
-        }
-        FleetCommand::Enroll {
-            invitation,
-            delete,
-            service,
-            activate,
-            peer,
-            gateway_port,
-            dist_port,
-        } => {
-            if dev {
-                bail!("fleet enroll belongs to the packaged runtime; omit --dev");
-            }
-            fleet_enroll_command(
-                paths,
-                invitation,
-                delete,
-                service,
-                activate,
-                peer,
-                fleet::Ports {
-                    gateway: gateway_port,
-                    dist: dist_port,
-                    epmd: None,
-                },
-            )
-            .await
-        }
-        FleetCommand::Invite {
-            command,
-            machine,
-            host,
-            out,
-            gateway_port,
-            dist_port,
-            replace,
-        } => {
-            if dev {
-                bail!(
-                    "fleet invitations belong to the packaged runtime data directory; omit --dev"
-                );
-            }
-            if let Some(InviteCommand::Cancel {
-                machine: cancel_machine,
-                out: roster_output,
-            }) = command
-            {
-                if machine.is_some()
-                    || host.is_some()
-                    || out.is_some()
-                    || gateway_port.is_some()
-                    || dist_port.is_some()
-                    || replace
-                {
-                    bail!(
-                        "`ouro fleet invite cancel` accepts only --machine NAME and --out ROSTER; invitation creation flags cannot be mixed with cancellation"
-                    );
-                }
-                let (removed, revision) =
-                    fleet::cancel_invite(&paths.data_dir, &cancel_machine, &roster_output)?;
-                let roster_arg = fleet::shell_quote_path(&roster_output)?;
-                println!(
-                    "Stopped expecting invitation for {} ({}).\n  roster       revision {} in {} (mode 0600)\n\nExisting fleet machines still have their older saved seed list. Copy this roster privately to each one. On every recipient:\n  1. `chmod 600 {}`\n  2. Run `ouro fleet service status`. If a recovery unit is installed, run the exact deactivation command it prints; otherwise run `ouro stop`.\n  3. `ouro fleet sync import {}`\n  4. If it had a recovery unit, run the exact activation command from service status; otherwise run `ouro daemon`.\n  5. `ouro fleet doctor`\n\nThis owner already saved the new roster, and a running owner runtime stops expecting and dialing the canceled machine within a few seconds; no owner restart or import is needed. This update does NOT revoke copied credentials. To permanently revoke this machine identity, run `ouro fleet revoke --machine NAME --out revoked.json` and reconcile every pending acknowledgement. If a hostile machine already joined the BEAM trust domain, rotate the whole fleet from trusted machines; credential revocation cannot undo code execution or secrets already copied.",
-                    removed.machine,
-                    removed.node,
-                    revision,
-                    roster_output.display(),
-                    roster_arg,
-                    roster_arg
-                );
-                println!(
-                    "\nOffline session-owner evidence for {} is deliberately preserved on every machine. Only after the signed roster is installed and each runtime restarted, if you knowingly accept that its offline sessions may become undiscoverable, run this locally on every remaining machine:\n  ouro fleet sessions forget --machine {} --accept-state-loss\nThis is irreversible per machine and does not revoke credentials or delete the removed machine's journals.",
-                    removed.machine, removed.machine
-                );
-                return Ok(());
-            }
-            let machine = machine.ok_or_else(|| {
-                anyhow!("`ouro fleet invite` requires --machine NAME (or use `ouro fleet invite cancel --machine NAME`)")
-            })?;
-            let host = host.ok_or_else(|| {
-                anyhow!("`ouro fleet invite` requires --host HOST for the new machine")
-            })?;
-            let out = out.ok_or_else(|| {
-                anyhow!("`ouro fleet invite` requires --out FILE for the private invitation")
-            })?;
-            let member = fleet::invite_with_replace(
-                &paths.data_dir,
-                &machine,
-                &host,
-                &out,
-                fleet::Ports {
-                    gateway: gateway_port,
-                    dist: dist_port,
-                    epmd: None,
-                },
-                replace,
-            )?;
-            let invitation_arg = fleet::shell_quote_path(&out)?;
-            let address_note = if fleet::host_is_local_only(&member.host) {
-                "\n  note         loopback is local-only; this invitation is for a same-host lab"
-            } else {
-                ""
-            };
-            let replacement_note = if replace {
-                "\n  replacement  reissued for the same identity; this does NOT revoke an old copied credential"
-            } else {
-                ""
-            };
-            println!(
-                "Private invitation created.\n  machine      {}\n  address      {}{}{}\n  invitation   {} (mode 0600)\n\nCopy it through a private channel. Copy tools may widen permissions; on the receiving machine run:\n  chmod 600 {}\n  ouro fleet join {}\n\nA running owner runtime starts expecting and dialing the new machine within a few seconds; no owner restart is needed for it to connect. After it joins, delete the copied invitation from both machines. Its contents are secret and were not printed. The seven-day wrapper-age check prevents stale setup mistakes, but an already copied credential remains usable material; a leak requires whole-fleet credential rotation.",
-                member.machine,
-                member.host,
-                address_note,
-                replacement_note,
-                out.display(),
-                invitation_arg,
-                invitation_arg
-            );
-            Ok(())
-        }
-        FleetCommand::Join {
-            invitation,
-            gateway_port,
-            dist_port,
-        } => {
-            if dev {
-                bail!(
-                    "`ouro --dev fleet join` is not supported: secure fleet startup requires the packaged release. Run `ouro fleet join INVITE` without --dev"
-                );
-            }
-            let profile = fleet::join(
-                &paths.data_dir,
-                &invitation,
-                fleet::Ports {
-                    gateway: gateway_port,
-                    dist: dist_port,
-                    epmd: None,
-                },
-            )?;
-            let address_note = if fleet::host_is_local_only(&profile.host) {
-                " Loopback makes this a same-host lab; use a reachable private IPv4 name for separate machines."
-            } else {
-                ""
-            };
-            println!(
-                "Joined {} securely.\n  machine      {}\n  address      {}\n  expects      {} other machine{}\n  transport    TLS\n\nNext: run `ouro fleet doctor` to verify the local private interface, then `ouro daemon`, then `ouro fleet doctor` again for live connectivity. Ouroboros will keep retrying any machine that is offline.{} For optional login/crash recovery, run `ouro fleet service install` and follow its activation step. Delete {} after confirming this profile; the invitation contains secrets.",
-                profile.name,
-                profile.machine,
-                profile.host,
-                profile.expected_peers(),
-                if profile.expected_peers() == 1 { "" } else { "s" },
-                address_note,
-                invitation.display()
             );
             Ok(())
         }
@@ -1750,69 +1365,57 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                 bail!("fleet doctor found setup problems")
             }
         }
-        FleetCommand::Sync { command } => match command {
-            SyncCommand::Export { out } => {
-                let revision = fleet::export_roster(&paths.data_dir, &out)?;
-                let roster_arg = fleet::shell_quote_path(&out)?;
+        FleetCommand::Members { command } => match command {
+            FleetMembersCommand::Add {
+                machine,
+                host,
+                node,
+            } => {
+                let added = fleet::add_member(&paths.data_dir, &machine, &host, node.as_deref())?;
                 println!(
-                    "Signed fleet roster exported.\n  revision     {}\n  roster       {} (mode 0600)\n\nCopy it privately to existing fleet machines. On each recipient:\n  1. `chmod 600 {}`\n  2. Run `ouro fleet service status`. If a recovery unit is installed, run the exact deactivation command it prints; otherwise run `ouro stop`.\n  3. `ouro fleet sync import {}`\n  4. If it had a recovery unit, run the exact activation command from service status; otherwise run `ouro daemon`.\n  5. `ouro fleet doctor`\n\nThe roster contains no cookie or private key, but machine topology remains private and its CA attestation must not be replaced.",
-                    revision,
-                    out.display(),
-                    roster_arg,
-                    roster_arg
+                    "Roster updated on this machine only.\n  machine      {}\n  node         {}\n\nThis machine dials it on its next reconnect sweep, within about a second; no restart is needed. Run the same command on every other machine in the cluster — the roster is not replicated.",
+                    added.machine, added.node
                 );
                 Ok(())
             }
-            SyncCommand::Import { roster } => {
-                let imported = fleet::import_roster(&paths.data_dir, &roster)?;
-                if imported.changed {
-                    let forget_commands = imported
-                        .removed
-                        .iter()
-                        .map(|member| {
-                            format!(
-                                "  ouro fleet sessions forget --machine {} --accept-state-loss",
-                                member.machine
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    let removed = imported
-                        .removed
-                        .iter()
-                        .map(|member| member.machine.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    println!(
-                        "Signed fleet roster installed.\n  revision     {} → {}\n  expected     {} machine{}\n  removed      {}\n\nNext: if you deactivated a recovery unit, run its exact activation command from `ouro fleet service status`; otherwise run `ouro daemon`. Then run `ouro fleet doctor`. Delete the copied roster after every intended machine imports it.",
-                        imported.previous_revision,
-                        imported.revision,
-                        imported.members,
-                        if imported.members == 1 { "" } else { "s" },
-                        if removed.is_empty() { "none" } else { &removed }
-                    );
-                    if !forget_commands.is_empty() {
-                        println!(
-                            "\nOffline session-owner evidence for removed machines is still preserved locally. After this runtime restarts, only if you explicitly accept losing that offline discovery evidence, run the matching command below on every remaining fleet machine:\n{forget_commands}\nThis is irreversible per machine; skip it while you may need to recover or find sessions from a removed owner."
-                        );
-                    }
-                } else {
-                    println!(
-                        "Roster revision {} is already installed; no profile field changed.",
-                        imported.revision
-                    );
-                }
+            FleetMembersCommand::Remove { machine } => {
+                let removed = fleet::remove_member(&paths.data_dir, &machine)?;
+                println!(
+                    "Roster updated on this machine only.\n  removed      {}\n  node         {}\n\nThis machine stops dialing it within about a second. No tombstone was written and no session-owner evidence was retired; `ouro fleet sessions forget --machine {} --accept-state-loss` does that. Run the same command on every other machine in the cluster.",
+                    removed.machine, removed.node, removed.machine
+                );
                 Ok(())
             }
         },
         FleetCommand::Sessions { command } => match command {
+            SessionsCommand::Restore { machine } => {
+                let profile = fleet::load(&paths.data_dir)?.ok_or_else(|| {
+                    anyhow!("this machine is standalone; there is no cluster roster to restore a member to")
+                })?;
+                let gone = profile
+                    .tombstones
+                    .iter()
+                    .find(|entry| entry.machine == machine || entry.node == machine)
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "this machine's roster does not record {machine} as gone; `ouro fleet status` prints the machines it declares gone"
+                        )
+                    })?;
+                fleet::restore_machine(&paths.data_dir, &gone)?;
+                println!(
+                    "Roster updated on this machine only.\n  machine      {}\n  node         {}\n\n{} is a member again and is dialed on the next reconnect sweep. The durable session-owner evidence a completed `sessions forget` already retired is gone for good; this restores the roster entry, not that evidence.",
+                    gone.machine, gone.node, gone.machine
+                );
+                Ok(())
+            }
             SessionsCommand::Forget {
                 machine,
                 accept_state_loss,
             } => {
                 if dev {
                     bail!(
-                        "fleet session-owner evidence belongs to the packaged runtime; omit --dev and run this command on each remaining fleet machine"
+                        "session-owner evidence belongs to the packaged runtime; omit --dev and run this command on each remaining cluster machine"
                     );
                 }
                 if !accept_state_loss {
@@ -1823,7 +1426,7 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                 let publication = runtime::read_live_publication(&paths.data_dir)?
                     .ok_or_else(|| {
                         anyhow!(
-                            "this machine's fleet runtime is not running. Start its recovery service or run `ouro daemon`, wait for `ouro fleet doctor`, then retry; no session-owner evidence was changed"
+                            "this machine's runtime is not running. Run `ouro daemon`, wait for `ouro fleet doctor`, then retry; no session-owner evidence was changed"
                         )
                     })?;
                 let token = runtime::read_token(&paths.token_file())?;
@@ -1832,6 +1435,17 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                     attach_with(local_address(publication.port), token, false, None, hook)
                         .await
                         .context("connecting to this machine's local runtime")?;
+                // The operator's `--accept-state-loss` is what makes this machine gone
+                // for good, and the tombstone is where that statement is written down.
+                // The runtime refuses to retire durable evidence without it, so it is
+                // recorded first — and rolled back below if the runtime refuses anyway.
+                let removed = match fleet::forget_machine(&paths.data_dir, &machine) {
+                    Ok(removed) => removed,
+                    Err(error) => {
+                        attached.client.stop().await;
+                        return Err(error);
+                    }
+                };
                 let result = attached
                     .client
                     .call_with_timeout(
@@ -1842,19 +1456,40 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
                     .await
                     .context("calling fleet.forget_session_owner");
                 attached.client.stop().await;
-                let result = result?;
-                let (result_machine, node, roster_revision) =
-                    parse_forget_session_owner_result(&machine, &result)?;
+                let confirmed = result.and_then(|value| {
+                    parse_forget_session_owner_result(&machine, &value).map(
+                        |(result_machine, node, roster_revision)| {
+                            (
+                                result_machine.to_string(),
+                                node.to_string(),
+                                roster_revision,
+                            )
+                        },
+                    )
+                });
+                let (result_machine, node, roster_revision) = match confirmed {
+                    Ok(confirmed) => confirmed,
+                    Err(error) => {
+                        return Err(match fleet::restore_machine(&paths.data_dir, &removed) {
+                            Ok(()) => error.context(format!(
+                                "{} is back in this machine's roster; nothing was forgotten",
+                                removed.machine
+                            )),
+                            Err(restore_error) => error.context(format!(
+                                "{} was taken out of this machine's roster and could not be put back ({restore_error:#}); repair {} before retrying",
+                                removed.machine,
+                                fleet::profile_path(&paths.data_dir).display()
+                            )),
+                        });
+                    }
+                };
                 println!(
-                    "Session-owner evidence permanently forgotten on this machine.\n  machine      {result_machine}\n  node         {node}\n  roster       revision {roster_revision}\n\nState loss was explicitly accepted: sessions discoverable only through this machine's saved evidence for {result_machine} may now be unavailable while that former owner is offline. This changed only the local evidence checkpoint; it did not delete journals on the removed machine and did not revoke fleet credentials. Repeat this exact command on every remaining fleet machine after each has imported the signed roster and restarted."
+                    "Session-owner evidence permanently forgotten on this machine.\n  machine      {result_machine}\n  node         {node}\n  roster       revision {roster_revision}\n\nState loss was explicitly accepted: sessions discoverable only through this machine's saved evidence for {result_machine} may now be unavailable while that former owner is offline. {result_machine} is out of this machine's roster and recorded as gone; this changed no files on the removed machine. Repeat this exact command on every remaining cluster machine."
                 );
                 Ok(())
             }
         },
-        FleetCommand::Leave {
-            discard_incomplete,
-            machine,
-        } => {
+        FleetCommand::Leave => {
             let fleet_exists = fleet::fleet_dir(&paths.data_dir)
                 .try_exists()
                 .context("inspecting the fleet directory before leave")?;
@@ -1871,84 +1506,29 @@ async fn fleet_command(paths: &Paths, dev: bool, command: FleetCommand) -> Resul
             } else {
                 None
             };
-            let removed = if discard_incomplete {
-                let machine = machine.as_deref().ok_or_else(|| {
-                    anyhow!("--discard-incomplete requires --machine NAME so the recovery unit can be checked")
-                })?;
-                match epmd_program.as_deref() {
-                    Some(epmd) => {
-                        fleet::discard_incomplete_with_epmd(&paths.data_dir, machine, epmd)?
-                    }
-                    None => fleet::discard_incomplete(&paths.data_dir, machine)?,
-                }
-            } else {
-                match epmd_program.as_deref() {
-                    Some(epmd) => fleet::leave_with_epmd(&paths.data_dir, epmd)?,
-                    None => fleet::leave(&paths.data_dir)?,
-                }
+            let removed = match epmd_program.as_deref() {
+                Some(epmd) => fleet::leave_with_epmd(&paths.data_dir, epmd)?,
+                None => fleet::leave(&paths.data_dir)?,
             };
-            if removed {
-                println!(
-                    "Fleet credentials removed from this stopped machine. The rest of the fleet was not changed.\n\nThis machine is standalone again. To rejoin it, create a fresh invitation on the fleet owner."
-                );
-            } else {
-                println!(
-                    "This machine is already standalone; there was no fleet profile to remove."
-                );
+            match removed {
+                Some(removal) if removal.profile_readable => {
+                    println!(
+                        "Cluster credentials removed from this stopped machine. No other machine was changed.\n  removed      {}\n\nThis machine is standalone again. To give it a cluster identity, run `ouro fleet create`; to make it a second machine of an existing cluster, see docs/FLEET.md.",
+                        removal.removed.join(", ")
+                    );
+                }
+                Some(removal) => {
+                    println!(
+                        "This machine's fleet directory had no readable profile.json, so it could name no machine; the recognized private files were removed anyway.\n  removed      {}\n\nThis machine is standalone again. Run `ouro fleet create` to give it a cluster identity.",
+                        removal.removed.join(", ")
+                    );
+                }
+                None => println!(
+                    "This machine is already standalone; there was no fleet directory to remove."
+                ),
             }
             Ok(())
         }
-        FleetCommand::Service { command } => match command {
-            ServiceCommand::Start => {
-                fleet::service_activate(&paths.data_dir)?;
-                fleet_ready(paths, None).await
-            }
-            ServiceCommand::Install => {
-                if dev {
-                    bail!("recovery services require the packaged ouro; omit --dev");
-                }
-                let service = fleet::service_install(&paths.data_dir)?;
-                let recovery = match service.kind {
-                    fleet::ServiceKind::Launchd => {
-                        "Once activated, launchd starts Ouroboros in this user's login session and restarts it after a crash."
-                    }
-                    fleet::ServiceKind::SystemdUser => {
-                        "Once activated, systemd restarts Ouroboros after a crash and starts it after this user logs in. For optional pre-login boot, run `loginctl enable-linger \"$USER\"`; `ouro fleet service status` reports the boundary."
-                    }
-                };
-                println!(
-                    "{}\n  manager      {}\n  unit         {}\n\nThe unit was not started behind your back. It preserves this shell's absolute PATH, whitelisted provider CLI paths, admitted workspace roots, Codex network policy, and validated gateway frame/queue bounds, but copies no API keys or arbitrary environment variables; HOME remains owned by the user service manager. Activate it with:\n  {}\n\nThen verify it with:\n  `ouro fleet service status`\n\nTo deactivate it later:\n  {}\n\n{} If `ouro daemon` is already running, the service waits and takes over only after that process stops—never a duplicate. No fleet secret is stored in the unit.",
-                    if service.installed {
-                        "Fleet recovery service installed."
-                    } else {
-                        "Fleet recovery service is already installed with the expected contents."
-                    },
-                    service.kind.label(),
-                    service.path.display(),
-                    service.activation,
-                    service.deactivation,
-                    recovery
-                );
-                Ok(())
-            }
-            ServiceCommand::Status => {
-                print!("{}", fleet::render_service_status(&paths.data_dir)?);
-                Ok(())
-            }
-            ServiceCommand::Remove => match fleet::service_remove(&paths.data_dir)? {
-                Some(path) => {
-                    println!(
-                        "Removed the inactive fleet recovery unit {}. Fleet credentials and runtime data were not changed.",
-                        path.display()
-                    );
-                    Ok(())
-                }
-                None => {
-                    println!("No generated recovery unit was installed for this machine.");
-                    Ok(())
-                }
-            },
-        },
     }
 }
 
@@ -1993,7 +1573,7 @@ async fn service_run(paths: &Paths, dev: bool) -> Result<()> {
     }
     paths.ensure_private_data_dir()?;
     if fleet::load(&paths.data_dir)?.is_none() {
-        bail!("service-run requires a fleet profile; run `ouro fleet create` or `ouro fleet join` first");
+        bail!("service-run requires a cluster identity; run `ouro fleet create` first");
     }
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("installing the service termination handler")?;
@@ -2678,9 +2258,6 @@ async fn attach_remote(
             // anything.
             data_dir: None,
             config,
-            open_machines: false,
-            add_log: Vec::new(),
-            add_recipe: None,
         },
         // `--continue` belongs to the bare command, which never reaches `ouro attach`.
         None,
@@ -3238,14 +2815,6 @@ async fn run_ui(
         .data_dir
         .as_deref()
         .and_then(|data_dir| fleet::load(Path::new(data_dir)).ok().flatten());
-    app.can_invite = app
-        .data_dir
-        .as_deref()
-        .zip(app.fleet_profile.as_ref())
-        .is_some_and(|(data_dir, profile)| profile.can_invite(Path::new(data_dir)));
-    app.open_machines_on_start = local.open_machines;
-    app.resume_add_log = local.add_log;
-    app.resume_add_recipe = local.add_recipe;
     app.config_path = Some(local.config.path.clone());
     app.config = local.config.config;
 
@@ -3353,31 +2922,6 @@ async fn run_ui(
                 .await);
         }
     };
-
-    if quit == Quit::ApplyFleetIntent {
-        daemon.finish(Quit::Shutdown, &client, &hello).await?;
-        let data_dir = local.data_dir.ok_or_else(|| {
-            anyhow!(
-                "cannot create a fleet from an attached client that has no local data directory"
-            )
-        })?;
-        let outcome = fleet_add::apply_pending(Path::new(&data_dir))?;
-        print!("{}", fleet_add::render_outcome(&outcome));
-        let paths = runtime::Paths::discover(false)?;
-        // Reattach with this session's own configuration source rather than defaults:
-        // the restart is an implementation detail of one add, not a new invocation.
-        return Box::pin(attach_local_with(
-            &paths,
-            false,
-            config::load(local.config.path),
-            true,
-            Some(outcome),
-            // The restart belongs to one `fleet add`, not to the invocation that asked to
-            // continue a session; that request was already answered before this dialog.
-            None,
-        ))
-        .await;
-    }
 
     daemon.finish(quit, &client, &hello).await
 }
@@ -3530,7 +3074,7 @@ enum StartRequirement {
 fn ensure_start_requirement(paths: &Paths, requirement: StartRequirement) -> Result<()> {
     if requirement == StartRequirement::Fleet && fleet::load(&paths.data_dir)?.is_none() {
         bail!(
-            "service-run lost its fleet profile before acquiring runtime ownership. The runtime was not started; deactivate/remove the stale recovery unit or recreate/join the fleet first"
+            "service-run lost its fleet profile before acquiring runtime ownership. The runtime was not started; stop the supervising unit or run `ouro fleet create` again first"
         );
     }
     Ok(())
@@ -4569,9 +4113,6 @@ mod tests {
                     path: data_dir.join("config.toml"),
                     problems: vec![],
                 },
-                open_machines: false,
-                add_log: Vec::new(),
-                add_recipe: None,
             },
             None,
         )

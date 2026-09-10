@@ -57,7 +57,6 @@ defmodule OuroborosTest do
     assert status.availability.mesh == :available
     assert status.availability.interactive == :available
     assert status.availability.effect_ledger == :available
-    assert status.availability.release == :available
     assert is_list(status.interactive_sessions)
     assert status.effect_ledger.durability == :ephemeral_checkpoint
     assert is_integer(status.effect_ledger.retained)

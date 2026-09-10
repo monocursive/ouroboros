@@ -460,7 +460,6 @@ defmodule Ouroboros.Upgrade.SigningServiceTest do
             Ouroboros.Interactive.Store,
             Ouroboros.Control.Grants,
             Ouroboros.Control.Permissions,
-            Ouroboros.Release.Runtime,
             Ouroboros.Upgrade.Rollout.Registry
           ] do
         assert :erpc.call(signer, Process, :whereis, [name]) == nil,

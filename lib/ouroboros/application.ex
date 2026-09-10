@@ -180,9 +180,6 @@ defmodule Ouroboros.Application do
           Ouroboros.Control.Permissions
         ] ++
         self_signing_children() ++
-        [
-          release_runtime()
-        ] ++
         workspace_children() ++
         [
           # D3/D9. The native transport's own name space, keyed by `provider_session_id`.
@@ -487,29 +484,5 @@ defmodule Ouroboros.Application do
       [] ->
         []
     end
-  end
-
-  defp release_runtime do
-    {Ouroboros.Release.Runtime,
-     [
-       storage:
-         Application.get_env(
-           :ouroboros,
-           :release_storage,
-           {Jido.Storage.ETS, table: :ouroboros_releases}
-         ),
-       adapter:
-         Application.get_env(
-           :ouroboros,
-           :release_handler_adapter,
-           Ouroboros.Release.HandlerAdapter.OTP
-         ),
-       authorizer:
-         Application.get_env(
-           :ouroboros,
-           :release_authorizer,
-           Ouroboros.Release.Authorizer.Deny
-         )
-     ]}
   end
 end

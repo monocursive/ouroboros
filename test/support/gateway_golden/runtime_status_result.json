@@ -17,7 +17,6 @@
       "effect_ledger": "available",
       "interactive": "available",
       "mesh": "available",
-      "release": "available",
       "workspace": "disabled"
     },
     "cluster": {
@@ -69,11 +68,6 @@
       }
     ],
     "node": "ouroboros@golden",
-    "release": {
-      "ephemeral_capability_count": 0,
-      "handler_releases": [],
-      "mode": "ready"
-    },
     "role": "core"
   }
 }

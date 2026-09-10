@@ -36,6 +36,6 @@ make golden
 
 1. Bump `version` in `mix.exs` on `dev`.
 2. Merge `dev` into `main` once CI is green.
-3. Tag `vX.Y.Z` on `main` — the tag must match the Mix version exactly, or the release
-   workflow refuses to build. The workflow publishes signed binaries for four targets;
-   see `docs/DISTRIBUTION.md` for the signing key requirements.
+3. Tag `vX.Y.Z` on `main` — the tag must match the Mix version exactly. There is no
+   binary publication workflow: `make ouro` builds the client with its release embedded,
+   on the machine that will run it (`docs/proposals/core.md` §3).

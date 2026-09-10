@@ -77,7 +77,6 @@ config :ouroboros,
   # Terminal entries retained per node. In-flight entries are never evicted, and every
   # read has its own smaller bound in `Ouroboros.Agent.EffectLedger`.
   effect_ledger_limit: 1_000,
-  release_storage: {Jido.Storage.ETS, table: :ouroboros_releases},
   capability_storage: {Jido.Storage.ETS, table: :ouroboros_capabilities},
   epoch_storage: {Jido.Storage.ETS, table: :ouroboros_forge_epochs},
   # The `:signer` node a forge submits manifests to, and how long it waits.

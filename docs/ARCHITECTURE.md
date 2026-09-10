@@ -356,18 +356,10 @@ decided inside the same serialized message that writes the entry, because a call
 reading the watermark and then checkpointing would be a read-then-write across two
 messages.
 
-The durable lane is separate. `Release.Metadata` builds and validates `.rel`, `.appup`,
-and `relup` terms; `RelupBuilder` invokes `:systools.make_relup` without writing;
-`Release.Artifact` validates a completed archive offline. `Release.Runtime` then gates
-`unpack_release`, `check_install_release`, `install_release`, and `make_permanent`
-behind ephemeral external authorization and a durable write-ahead journal. The default
-authorizer denies mutation. Unpack publishes the exact verified bytes under a synced,
-content-addressed name and gives OTP a same-inode alias matching the archive's validated
-top-level `.rel`; operating-system ownership of that directory is part of the trust
-boundary. The release journal syncs both checkpoint file and parent directory
-before acknowledging success. Tests use real tar archives and a deterministic adapter;
-they do not execute a live embedded-release upgrade or reboot. Only that externally
-rehearsed lane can prove restart persistence or an ERTS change.
+> The OTP release-installation lane that used to sit beside this one — `Release.Metadata`,
+> `RelupBuilder`, `Release.Artifact` and the `Release.Runtime` journal — was deleted in
+> September 2026. See [the core reduction](proposals/core.md) §3 D4: it existed to install
+> release archives onto other machines, and nothing installs onto other machines any more.
 
 ### Signing plane
 
@@ -792,7 +784,7 @@ fault-contained sessions: live process topology, typed event provenance, supervi
 node placement, resumable sessions, and controlled behavior evolution. Compared with a
 conventional single-process coding CLI, Ouroboros can keep several sessions and their
 subagents alive, route them across connected nodes, recover each from its own durable
-checkpoint, and evolve behavior through separately gated component and release lanes.
+checkpoint, and evolve behavior through a separately gated component lane.
 The product surface should expose those properties
 directly through a terminal UI and API rather than hiding them behind one opaque chat
 transcript.
