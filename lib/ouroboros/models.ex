@@ -1,50 +1,30 @@
 defmodule Ouroboros.Models do
   @moduledoc """
-  The model catalogue this node can vouch for, per configured provider.
+  The model catalogue this node can vouch for.
 
   A context meter needs two numbers a session cannot produce on its own: the window the
   model was given and what it costs. `usage` events carry the tokens spent; everything
   else comes from `llm_db`, a packaged snapshot of provider metadata that loads lazily
   and needs no network (`deps/llm_db`). This module is the seam between the two — it
-  answers what `llm_db` knows about the models each *configured* provider draws from,
-  and nothing about models nobody here can reach. Native is the deliberate exception to
-  the one-catalogue-per-provider shape: its in-process transport can reach both the
-  ChatGPT-backed OpenAI lane plus Anthropic and xAI API-key lanes, so its row combines those
-  catalogues and prefixes every id with the transport ReqLLM must use.
+  answers what `llm_db` knows about the models this node's one provider draws from, and
+  nothing about models nobody here can reach.
+
+  `:native` is the only provider, and it is the multi-catalogue shape: its in-process
+  transport reaches the ChatGPT-backed OpenAI lane plus the Anthropic and xAI API-key
+  lanes, so its row combines those catalogues and prefixes every id with the transport
+  ReqLLM must use. There is no per-provider catalogue table any more, and no
+  `config :ouroboros, model_catalogs` override: a lane is a model prefix, not a CLI.
 
   ## What this is not
 
-  Not a claim that a listed model will work. Ouroboros drives a vendor CLI or, for Native,
-  a direct API; whether that account accepts a given model id is known only when it is
-  called. A provider whose adapter does not normalize `:model` at all says so
-  (`model_option: false`) rather than offering a list nothing can select from.
+  Not a claim that a listed model will work. Whether the account behind a lane accepts a
+  given model id is known only when it is called.
 
   Not pricing this runtime charges or verifies. The rates are `llm_db`'s snapshot of the
   vendor's public list price, stated with the epoch they came from so a stale figure can
   be recognised as one. Cache and tool pricing beyond the four token rates is deliberately
   dropped: a footer shows a cost estimate, not an invoice.
-
-  ## Which catalogue a provider draws from
-
-  There is no declaration for this anywhere — an adapter spec names a CLI, not the vendor
-  whose models it runs — so `@catalogs` is Ouroboros's own reading, listed provider by
-  provider and overridable per node with
-
-      config :ouroboros, model_catalogs: %{amp: :anthropic}
-
-  A provider whose atom is itself an `llm_db` provider id needs no entry. A provider that
-  resolves to nothing answers with an empty list and a `nil` catalogue rather than a guess:
-  Amp normalizes no model at all, and Pi routes to whatever its `model_provider` names.
   """
-
-  # Ouroboros provider => the `llm_db` provider whose catalogue that CLI draws from.
-  # Each is a statement about which vendor's models the CLI runs, not about the CLI.
-  @catalogs %{
-    claude: :anthropic,
-    gemini: :google,
-    grok: :xai,
-    kimi: :moonshotai
-  }
 
   # These are model transports inside `:native`, not Harness providers. The configured
   # native model is inserted first below and wins when it draws from the same catalogue
@@ -82,64 +62,33 @@ defmodule Ouroboros.Models do
   def list do
     # The snapshot loads on first query, so the epoch is read *after* the catalogue has
     # been asked for anything; reading it first reports the zero of an unloaded store.
-    providers = Enum.map(providers(), &provider_models/1)
+    providers = Enum.map(Ouroboros.providers(), &provider_models(&1.provider))
 
     %{source: "llm_db", epoch: epoch(), limit: @max_models, providers: providers}
   end
 
-  @doc "Returns the `llm_db` provider a given Ouroboros provider draws its models from."
+  @doc "Returns the `llm_db` provider the configured native model lane draws from."
   @spec catalog(atom()) :: atom() | nil
   def catalog(:native), do: native_catalog(native_model_provider())
 
-  def catalog(provider) when is_atom(provider) do
-    case Map.fetch(configured_catalogs(), provider) do
-      {:ok, catalog} -> catalog
-      :error -> if known_catalog?(provider), do: provider
-    end
-  end
-
   @doc """
-  Returns the model this node configures for `provider`, or `nil`.
+  Returns the model this node configures, or `nil`.
 
-  Read from the Harness provider configuration a node actually starts sessions with —
-  `session_defaults` first, because that is what an interactive session inherits, then
-  `request_defaults` for a node that configured no direct model. Not a preference
-  this module holds: a default nobody configured is `nil`, not a model picked here.
+  Not a preference this module holds: a default nobody configured is `nil`, not a model
+  picked here.
   """
   @spec default_model(atom()) :: String.t() | nil
   def default_model(:native), do: Ouroboros.Provider.Native.Model.configured_model()
 
-  def default_model(provider) when is_atom(provider) do
-    config = provider_config(provider)
-
-    default_from(config, :session_defaults) || default_from(config, :request_defaults)
-  end
-
-  @doc "Reasoning levels advertised by one selected model and accepted by its transport."
-  @spec reasoning_efforts(atom() | String.t() | nil, String.t() | nil) :: [String.t()]
-  def reasoning_efforts(provider, model_id) do
-    accepted = Ouroboros.ReasoningEffort.names_for_provider(provider)
-
-    with provider when is_atom(provider) <- provider_atom(provider),
-         model_id when is_binary(model_id) and model_id != "" <- model_id,
-         model when not is_nil(model) <- find_model(provider, model_id) do
-      model_reasoning_efforts(model, provider)
+  @doc "Reasoning levels advertised by one selected model and accepted by the transport."
+  @spec reasoning_efforts(String.t() | nil) :: [String.t()]
+  def reasoning_efforts(model_id) do
+    with model_id when is_binary(model_id) and model_id != "" <- model_id,
+         model when not is_nil(model) <- find_model(:native, model_id) do
+      model_reasoning_efforts(model)
     else
-      _unknown -> accepted
+      _unknown -> Ouroboros.ReasoningEffort.accepted_names()
     end
-  end
-
-  defp provider_atom(provider) when is_atom(provider), do: provider
-
-  defp provider_atom(provider) when is_binary(provider) do
-    providers()
-    |> Enum.find(&(Atom.to_string(&1) == provider))
-  end
-
-  defp providers do
-    Enum.map(Ouroboros.providers(), & &1.provider)
-  rescue
-    _unavailable -> []
   end
 
   defp provider_models(:native) do
@@ -170,25 +119,8 @@ defmodule Ouroboros.Models do
         models
         |> Enum.take(@max_models)
         |> Enum.map(fn {prefix, _catalog, model} ->
-          model(model, Atom.to_string(prefix), :native)
+          model(model, Atom.to_string(prefix))
         end)
-    }
-  end
-
-  defp provider_models(provider) do
-    catalog = catalog(provider)
-    models = catalog_models(catalog)
-    prefix = model_prefix(provider)
-
-    %{
-      provider: provider,
-      catalog: catalog,
-      default: default_model(provider),
-      # Whether a model can be selected at all is the adapter's declaration, exactly as
-      # every other capability is. A client that greys the picker reads this.
-      model_option: model_option?(provider),
-      total: length(models),
-      models: models |> Enum.take(@max_models) |> Enum.map(&model(&1, prefix, provider))
     }
   end
 
@@ -210,7 +142,7 @@ defmodule Ouroboros.Models do
       Map.get(model, :catalog_only) == true
   end
 
-  defp model(model, prefix, provider) do
+  defp model(model, prefix) do
     limits = Map.get(model, :limits) || %{}
 
     %{
@@ -220,13 +152,13 @@ defmodule Ouroboros.Models do
       context_window: number(Map.get(limits, :context)),
       max_output_tokens: number(Map.get(limits, :output)),
       release_date: Map.get(model, :release_date),
-      reasoning_efforts: model_reasoning_efforts(model, provider),
+      reasoning_efforts: model_reasoning_efforts(model),
       pricing: pricing(Map.get(model, :pricing))
     }
   end
 
-  defp model_reasoning_efforts(model, provider) do
-    accepted = Ouroboros.ReasoningEffort.names_for_provider(provider)
+  defp model_reasoning_efforts(model) do
+    accepted = Ouroboros.ReasoningEffort.accepted_names()
 
     model
     |> declared_reasoning_efforts()
@@ -316,15 +248,6 @@ defmodule Ouroboros.Models do
     end)
   end
 
-  defp find_model(provider, model_id) do
-    catalog = catalog(provider)
-    prefix = model_prefix(provider)
-
-    if catalog do
-      Enum.find(catalog_models(catalog), &(model_id(prefix, &1.id) == model_id))
-    end
-  end
-
   defp native_catalogs do
     configured =
       case native_model_provider() do
@@ -349,9 +272,9 @@ defmodule Ouroboros.Models do
 
   defp native_catalog(_unknown), do: nil
 
-  defp model_prefix(_provider), do: nil
-  defp model_id(nil, id), do: id
-  defp model_id(prefix, id), do: prefix <> ":" <> id
+  # Every id a native lane offers carries the transport prefix ReqLLM must be given, so a
+  # client that echoes an id back is echoing a complete model spec.
+  defp model_id(prefix, id) when is_binary(prefix), do: prefix <> ":" <> id
 
   defp native_model_provider do
     case Ouroboros.Provider.Native.Model.configured_model() do
@@ -370,53 +293,6 @@ defmodule Ouroboros.Models do
     String.to_existing_atom(provider)
   rescue
     ArgumentError -> nil
-  end
-
-  defp configured_catalogs do
-    case Application.get_env(:ouroboros, :model_catalogs) do
-      overrides when is_map(overrides) or is_list(overrides) ->
-        Map.merge(@catalogs, Map.new(overrides))
-
-      _unset ->
-        @catalogs
-    end
-  end
-
-  defp provider_config(provider) do
-    case Application.get_env(:jido_harness, :provider_config, %{}) do
-      config when is_map(config) or is_list(config) ->
-        config |> Map.new() |> Map.get(provider, %{}) |> normalize_map()
-
-      _invalid ->
-        %{}
-    end
-  end
-
-  defp default_from(config, key) do
-    case config |> Map.get(key, %{}) |> normalize_map() |> Map.get(:model) do
-      model when is_binary(model) and model != "" -> model
-      _absent -> nil
-    end
-  end
-
-  defp normalize_map(value) when is_map(value) or is_list(value) do
-    value
-    |> Map.new()
-    |> Map.new(fn
-      {key, nested} when is_binary(key) -> {safe_atom(key), nested}
-      pair -> pair
-    end)
-  end
-
-  defp normalize_map(_value), do: %{}
-
-  # Configuration keys arrive from a node's own config file, so a string spelling of a
-  # key this module knows is honoured and anything else is left as the string it was
-  # rather than minting an atom that is never collected.
-  defp safe_atom(key) do
-    String.to_existing_atom(key)
-  rescue
-    ArgumentError -> key
   end
 
   defp epoch do

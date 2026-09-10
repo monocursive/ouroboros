@@ -20,7 +20,7 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
   alias Ouroboros.InteractiveSession
   alias Ouroboros.Test.HarnessAdapter
 
-  @provider :ouroboros_test
+  @provider :native
 
   setup do
     cleanup_sessions()
@@ -81,7 +81,7 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
                  "sandbox_mode" => "read_only"
                })
 
-      assert result.applies == :next_turn
+      assert result.applies == :now
       assert result.changed == [:approval_mode, :sandbox_mode]
       assert result.options.approval_mode == :auto_approve
       assert result.options.sandbox_mode == :read_only
@@ -130,24 +130,6 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
                })
 
       assert message =~ "no such record"
-    end
-
-    test "the X1 refusal travels as data a client can render", %{id: id} do
-      start_session(id, transport: :managed_no_approvals, approval_mode: :auto_edit)
-
-      assert {:error, -32_006, message, data} =
-               Methods.invoke("interactive.configure", %{
-                 "id" => id,
-                 "approval_mode" => "prompt"
-               })
-
-      assert message =~ "refused the call"
-      assert ["unsupported_approval_mode", details] = data
-      assert details["reason"] == "no_approval_channel"
-      assert details["requested"] == "prompt"
-      assert details["supported"] == ["default", "auto_edit", "auto_approve"]
-
-      retire_session(id)
     end
   end
 
@@ -287,47 +269,24 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
       end
     end
 
-    # A vendor session refuses the branch point by name at the wire, which is what lets a
-    # client tell "this provider cannot do that" from "that turn is gone".
-    test "a to_turn on a session that branches only at its tail is refused by name",
-         %{id: id} do
-      ref = start_session(id, sandbox_mode: :read_only)
-      adapter = name_provider_session(ref)
-
-      assert {:error, -32_006, message, data} =
-               Methods.invoke("interactive.fork", %{
-                 "id" => id,
-                 "fork_id" => unique_id("gateway-branch"),
-                 "to_turn" => "t2"
-               })
-
-      assert message =~ "refused the call"
-      assert ["unforkable_at_turn", details] = data
-      assert details["reason"] == "vendor_forks_at_tail"
-      assert details["to_turn"] == "t2"
-
-      if Process.alive?(adapter), do: HarnessAdapter.finish(adapter)
-      retire_session(id)
-    end
-
     # R3/D10. The capability a client greys the replay verb from, on the two surfaces a
-    # client actually reads. Present and `false` rather than absent: the Rust client reads
-    # an absent key as offered.
+    # client actually reads. Present rather than absent: the Rust client reads an absent
+    # key as offered.
     test "interactive.info and interactive.list both carry the replay capability",
          %{id: id} do
       start_session(id, sandbox_mode: :read_only)
 
       assert {:ok, info} = Methods.invoke("interactive.info", %{"id" => id})
       assert Map.has_key?(info.options.capabilities, :replay)
-      assert info.options.capabilities.replay == false
+      assert info.options.capabilities.replay == true
 
       assert {:ok, listed} = Methods.invoke("interactive.list", %{})
       row = Enum.find(listed, &(&1.id == id))
       assert row
-      assert row.options.capabilities.replay == false
+      assert row.options.capabilities.replay == true
 
       # And it survives the wire encoder as a JSON boolean, not a stringified atom.
-      assert %{"replay" => false} = Wire.to_json(info.options.capabilities)
+      assert %{"replay" => true} = Wire.to_json(info.options.capabilities)
 
       retire_session(id)
     end
@@ -343,14 +302,16 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
       assert catalogue.source == "llm_db"
       assert is_list(catalogue.providers)
 
-      claude = Enum.find(catalogue.providers, &(&1.provider == :claude))
-      assert claude.catalog == :anthropic
-      assert length(claude.models) <= catalogue.limit
-      assert length(claude.models) > 0
+      # One row, because there is one provider — with one catalogue per model lane under
+      # it. The fixture adapter registered as `:native` answers here, so the row is the
+      # runtime's own shape rather than a vendor's.
+      assert [row] = catalogue.providers
+      assert row.provider == :native
+      assert length(row.models) <= catalogue.limit
+      assert length(row.models) > 0
 
-      model = hd(claude.models)
+      model = hd(row.models)
       assert is_integer(model.context_window)
-      assert is_integer(model.max_output_tokens)
     end
 
     test "a session's own model is on interactive.info, so a client can divide by the window",
@@ -363,12 +324,12 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
       assert Map.has_key?(session.options, :model)
       assert Map.has_key?(session, :usage)
 
-      # This provider normalizes no model, so it honestly reports none rather than a
-      # default it did not select — and `runtime.models` says the picker is unavailable.
+      # No model was stated at the start, so the session honestly reports none rather than
+      # a default it did not select.
       assert session.options.model == nil
 
       assert {:ok, catalogue} = Methods.invoke("runtime.models", %{})
-      assert %{model_option: false} = Enum.find(catalogue.providers, &(&1.provider == :amp))
+      assert %{model_option: true} = Enum.find(catalogue.providers, &(&1.provider == :native))
 
       assert {:ok, %State{}} = InteractiveSession.info(ref)
       retire_session(id)

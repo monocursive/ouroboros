@@ -1,12 +1,11 @@
 defmodule Ouroboros.Provider.XAIKey do
   @moduledoc """
-  The node-owned xAI API key used by direct Native requests and the managed Grok CLI.
+  The node-owned xAI API key the native `xai:` model lane calls with.
 
   `XAI_API_KEY` remains the operator-controlled first choice. When it is absent, the web
-  surface may store one private key at `<data_dir>/xai.key`; Native reads it only while
-  preparing an xAI request, and `Ouroboros.Provider.GrokAdapter` passes it transiently to
-  the first-party CLI. The key never enters a session option, checkpoint, event,
-  provider-status reply, or page assign.
+  surface may store one private key at `<data_dir>/xai.key`, which the native model client
+  reads only while preparing an xAI request. The key never enters a session option,
+  checkpoint, event, provider-status reply, or page assign.
 
   The stored file is an exclusive temporary inode whose mode becomes `0600` before key
   bytes are written. It is synced, atomically renamed, and followed by a directory sync.

@@ -391,8 +391,7 @@ async fn the_ui_draws_a_live_dev_runtime_and_stops_it() {
                 entry.provider
             );
 
-            let mut request = StartRequest::new(Plane::Interactive);
-            request.provider = entry.provider.clone();
+            let request = StartRequest::new(Plane::Interactive);
 
             let started = client
                 .call_with_timeout(
@@ -423,48 +422,28 @@ async fn the_ui_draws_a_live_dev_runtime_and_stops_it() {
                 .call("interactive.kill", json!({ "id": started.id }))
                 .await;
         }
-        // The real case today. A provider name this node does not serve is refused in
-        // `option_value(_, :provider, _)` — parameter validation, before
-        // `InteractiveSession.start` exists — so no coding CLI is reachable from here.
+        // The real case today. The deterministic adapter is not compiled into dev, and the
+        // one provider this runtime does serve reaches a real model — which is not
+        // something a smoke test may invoke. So nothing is started, and what is asserted
+        // instead is that the runtime answered with exactly the one provider it serves.
         None => {
-            let mut request = StartRequest::new(Plane::Interactive);
-            request.provider = "not-a-provider-this-node-serves".into();
-
-            let params = request
-                .params()
-                .expect("this client does not second-guess a provider name");
-
-            let refusal = client
-                .call_with_timeout(&request.method(), params, ouro::ui::app::START_TIMEOUT)
-                .await
-                .expect_err("the runtime is the authority on provider names");
-
-            eprintln!("start refusal: {refusal}");
-
             assert_eq!(
-                refusal.code(),
-                Some(ouro::proto::ErrorCode::InvalidParams),
-                "unexpected refusal: {refusal}"
+                names,
+                vec!["native".to_string()],
+                "this runtime serves one provider and reports it once"
             );
 
-            let message = refusal.to_string();
+            // A start is refused by the *runtime*, not second-guessed here: the client
+            // sends no provider at all, and there is no name left for it to invent.
+            let request = StartRequest::new(Plane::Interactive);
+            let params = request.params().expect("a start this client can build");
 
             assert!(
-                message.contains("params.provider"),
-                "the refusal has to name the parameter: {message}"
+                params.get("provider").is_none(),
+                "`provider` is not a start option any more: {params}"
             );
 
-            for name in &names {
-                assert!(
-                    message.contains(name.as_str()),
-                    "and list what it would have accepted ({name} missing): {message}"
-                );
-            }
-
-            assert!(
-                app.sessions.merged().is_empty(),
-                "a refused start creates nothing"
-            );
+            assert!(app.sessions.merged().is_empty(), "nothing was started");
         }
     }
 

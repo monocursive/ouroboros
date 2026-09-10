@@ -1,13 +1,13 @@
 defmodule Ouroboros.InteractiveUsageTest do
   @moduledoc """
-  What a session spent, folded from the `:usage` events providers actually emit.
+  What a session spent, folded from the `:usage` events the native loop emits.
 
-  The payloads here are the shapes the bundled mappers produce — Claude's result
-  `usage` block (`claude_stream.ex:122-128`), the Codex exec mapper's
-  (`cli_mapper/codex.ex:145-149`), the Codex app-server `thread/tokenUsage/updated`
-  notification (`dialect/codex.ex:164-178`), and ACP's `usage_update`
-  (`dialect/acp.ex:197`) — plus the `input`/`totalTokens` spelling Harness's own adapter
-  fixtures carry, because a counter that only reads one spelling silently reports zero.
+  There is one producer of a usage payload now — `Ouroboros.Provider.Native.Cost.payload/2`
+  — and it emits a fixed set of snake_case keys (`input_tokens`, `output_tokens`,
+  `cache_read_tokens`, `cache_creation_tokens`, `total_tokens`, `cost_usd`). The vendor
+  spellings the nine wrapped CLIs used (`inputTokens`, `cache_read_input_tokens`,
+  `totalTokens`, …) went with them in the core reduction (docs/proposals/core.md §3 D2), so
+  the payloads here are the native shapes only.
   """
 
   use ExUnit.Case, async: true
@@ -20,14 +20,14 @@ defmodule Ouroboros.InteractiveUsageTest do
       assert State.fold_usage(session(), []).usage == nil
     end
 
-    test "Claude's result usage block, cache keys and all" do
+    test "the native usage payload, cache keys and all" do
       usage =
         fold([
           usage_event("turn-1", %{
             "input_tokens" => 12,
             "output_tokens" => 34,
-            "cache_read_input_tokens" => 100,
-            "cache_creation_input_tokens" => 7,
+            "cache_read_tokens" => 100,
+            "cache_creation_tokens" => 7,
             "total_tokens" => 46
           })
         ])
@@ -41,15 +41,19 @@ defmodule Ouroboros.InteractiveUsageTest do
       assert usage.cost_usd == nil
     end
 
-    test "the camelCase and bare spellings other transports send" do
+    test "a payload that names no total has the parts stand in for it" do
       usage =
         fold([
-          usage_event("turn-1", %{"input" => 10, "output" => 2, "totalTokens" => 12}),
+          usage_event("turn-1", %{
+            "input_tokens" => 10,
+            "output_tokens" => 2,
+            "total_tokens" => 12
+          }),
           usage_event("turn-2", %{
-            "inputTokens" => 1,
-            "outputTokens" => 2,
-            "cacheReadInputTokens" => 3,
-            "cacheCreationTokens" => 4
+            "input_tokens" => 1,
+            "output_tokens" => 2,
+            "cache_read_tokens" => 3,
+            "cache_creation_tokens" => 4
           })
         ])
 
@@ -77,8 +81,8 @@ defmodule Ouroboros.InteractiveUsageTest do
     end
 
     test "a turn that reports repeatedly is a running total, not three turns" do
-      # `thread/tokenUsage/updated` is a value being updated. Adding each notification
-      # would multiply a Codex session's tokens by however often it reported.
+      # A turn's repeated reports are running totals, not deltas. Adding each one would
+      # multiply the turn's tokens by however often it reported.
       usage =
         fold([
           usage_event("turn-1", %{"input_tokens" => 10, "total_tokens" => 10}),
@@ -117,7 +121,7 @@ defmodule Ouroboros.InteractiveUsageTest do
     end
 
     test "cost arrives on the run terminator and is nil until a provider prices the work" do
-      # Claude puts `cost_usd` on `run_completed`, never on the `usage` event.
+      # `Cost.payload/2` puts `cost_usd` on `run_completed`, never on the `usage` event.
       assert fold([usage_event("turn-1", %{"input_tokens" => 3})]).cost_usd == nil
 
       usage =

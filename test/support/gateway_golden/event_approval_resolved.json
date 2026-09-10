@@ -17,7 +17,7 @@
         "scope": "once",
         "source": "human"
       },
-      "provider": "claude_code",
+      "provider": "native",
       "provider_session_id": "provider-0000000000000001",
       "request_id": "req-permission-000000000001",
       "semantic": {

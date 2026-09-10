@@ -111,7 +111,6 @@ fn screen(app: &mut App) -> Screen {
 #[test]
 fn the_start_request_sends_worktree_only_when_it_was_asked_for() {
     let plain = StartRequest {
-        provider: "native".into(),
         workspace: "/w".into(),
         ..StartRequest::new(Plane::Interactive)
     };

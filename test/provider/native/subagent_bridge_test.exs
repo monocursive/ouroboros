@@ -17,14 +17,17 @@ defmodule Ouroboros.Provider.Native.SubagentBridgeTest do
         {:reply,
          {:ok,
           %{
-            request: state.request,
-            provider: state.request[:provider] || :claude,
-            provider_session_id: state.request[:provider_session_id] || "vendor-session",
+            provider_session_id: state.request.provider_session_id,
             principal_id: state.id
           }}, state}
 
     def handle_call({:configure, changes}, _, state),
       do: {:reply, :ok, %{state | request: Map.merge(state.request, changes)}}
+
+    def handle_call({:session, session}, _, state),
+      do: {:reply, :ok, Map.put(state, :session, session)}
+
+    def handle_call(:session, _, state), do: {:reply, state[:session], state}
 
     def handle_call({:request_approval, _, request}, from, state) do
       send(state.test, {:approval, request, from})
@@ -73,25 +76,49 @@ defmodule Ouroboros.Provider.Native.SubagentBridgeTest do
     %{root: root, script: script}
   end
 
+  # The owner holds a real `Provider.Native.Session`, because that is the only thing a
+  # child can run on: there is one provider, its session lives in this VM, and the bridge
+  # reuses it rather than opening anything of its own. The scripted model is what keeps the
+  # session deterministic; everything else about it is the real transport.
   defp owner(context, opts \\ %{}) do
     id = "bridge-owner-#{System.unique_integer([:positive])}"
 
-    request =
+    attrs =
       Map.merge(
         %{
+          provider: :native,
+          model: Application.get_env(:ouroboros, :native_model),
           cwd: context.root,
-          model: "sonnet",
           approval_mode: :auto_approve,
           sandbox_mode: :read_only,
+          env: %{},
+          env_mode: :overlay,
           metadata: %{ouroboros_session_id: id}
         },
         opts
       )
 
+    {:ok, request} = Jido.Harness.SessionRequest.new(attrs)
     {:ok, pid} = Owner.start_link({id, self(), request})
+
+    {:ok, session} =
+      Ouroboros.Provider.Native.Session.open(request, %{
+        session_id: id,
+        provider: :native,
+        owner: pid,
+        adapter: Ouroboros.Provider.Native.Session,
+        config: %{},
+        process_manager: Jido.Harness.ProcessManager,
+        telemetry_context: %{}
+      })
+
+    provider_session_id = :sys.get_state(session).provider_session_id
+    :ok = GenServer.call(pid, {:configure, %{provider_session_id: provider_session_id}})
+    :ok = GenServer.call(pid, {:session, session})
 
     on_exit(fn ->
       SubagentBridge.close(pid)
+      if Process.alive?(session), do: Ouroboros.Provider.Native.Session.close(session)
       if Process.alive?(pid), do: GenServer.stop(pid)
     end)
 
@@ -151,23 +178,24 @@ defmodule Ouroboros.Provider.Native.SubagentBridgeTest do
     assert Enum.any?(entries, &(&1.attempt.tool == "agent"))
   end
 
-  test "live parent tool restrictions and planning posture replace the sidecar's opening posture",
-       context do
-    {id, owner} = owner(context)
+  # The child inherits the parent session's live posture, because it runs on the parent's
+  # own transport. A tool the parent was not allowed is not one a bridged spawn can reach,
+  # and a planning parent cannot spawn at all.
+  test "the child inherits the live parent's tool restrictions", context do
+    {id, _owner} = owner(context, %{allowed_tools: ["read"]})
 
     assert {:ok, %{is_error: true}} =
              SubagentBridge.call(id, "first", "agent_result", %{"task_id" => "missing"})
-
-    :ok = GenServer.call(owner, {:configure, %{allowed_tools: ["Read"]}})
 
     assert {:ok, %{is_error: true, output: refused}} =
              SubagentBridge.call(id, "second", "agent", %{"prompt" => "read"})
 
     assert refused =~ "not a tool"
     assert NativeModelScript.call_count(context.script) == 0
+  end
 
-    :ok =
-      GenServer.call(owner, {:configure, %{allowed_tools: nil, provider_options: %{plan: true}}})
+  test "a planning parent cannot spawn a child", context do
+    {id, _owner} = owner(context, %{provider_options: %{plan: true}})
 
     assert {:ok, %{is_error: true, output: planning}} =
              SubagentBridge.call(id, "third", "agent", %{"prompt" => "plan", "background" => true})
@@ -281,76 +309,9 @@ defmodule Ouroboros.Provider.Native.SubagentBridgeTest do
     end
   end
 
-  test "unknown vendor allowlist entries never become unrestricted native defaults", context do
-    assert {:ok, request} =
-             SubagentBridge.native_request(%{
-               provider: :claude,
-               request: %{
-                 cwd: context.root,
-                 allowed_tools: ["Bash(git status)"],
-                 disallowed_tools: ["Bash(rm *)"]
-               }
-             })
-
-    assert request.allowed_tools == ["unavailable_vendor_tool:Bash(git status)"]
-    assert request.disallowed_tools == ["bash"]
-
-    assert {:error, :unsupported_bridge_tool} =
-             Ouroboros.Provider.Native.Loop.run_tool(%Ouroboros.Provider.Native.Loop{}, %{
-               name: "bash"
-             })
-  end
-
-  test "gateway rejects caller posture and stop cannot address a different session's child",
-       context do
-    {id, _} = owner(context)
-
-    assert {:error, -32602, _} =
-             Ouroboros.Gateway.Methods.invoke("subagent.spawn", %{
-               "id" => id,
-               "request_id" => "bad",
-               "input" => %{"prompt" => "x"},
-               "approval_mode" => "auto_approve"
-             })
-
-    assert {:ok, reply} =
-             Ouroboros.Gateway.Methods.invoke("subagent.stop", %{
-               "id" => id,
-               "request_id" => "stop",
-               "task_id" => "another-session-child"
-             })
-
-    assert reply["is_error"] == true or reply[:is_error] == true
-    assert NativeModelScript.call_count(context.script) == 0
-  end
-
-  test "native caller reuses the live parent transport and its child registry", context do
-    provider_id = "native-bridge-reuse-#{System.unique_integer([:positive])}"
-    {id, owner} = owner(context, %{provider: :native, provider_session_id: provider_id})
-    model = Application.fetch_env!(:ouroboros, :native_model)
-
-    request =
-      Jido.Harness.SessionRequest.new!(%{
-        provider: :native,
-        cwd: context.root,
-        model: model,
-        provider_session_id: provider_id,
-        approval_mode: :auto_approve
-      })
-
-    {:ok, session} =
-      Ouroboros.Provider.Native.Session.open(
-        request,
-        %{
-          session_id: id,
-          provider: :native,
-          owner: owner,
-          adapter: Ouroboros.Provider.Native,
-          config: %{},
-          process_manager: Jido.Harness.ProcessManager,
-          telemetry_context: %{}
-        }
-      )
+  test "the child runs on the live parent transport and its child registry", context do
+    {id, owner} = owner(context)
+    session = GenServer.call(owner, :session)
 
     assert {:ok, %{is_error: false}} =
              SubagentBridge.call(id, "spawn", "agent", %{
@@ -359,21 +320,21 @@ defmodule Ouroboros.Provider.Native.SubagentBridgeTest do
              })
 
     [{bridge, _}] = Registry.lookup(Ouroboros.Interactive.Registry, {SubagentBridge, owner})
-    assert %{session: ^session, owned?: false} = :sys.get_state(bridge)
-    assert GenServer.call(session, :subagent_counts).tracked == 1
+
+    # The bridge opens nothing of its own: there is one provider, its session is in this
+    # VM, and the child is registered under it.
+    assert %{session: ^session} = :sys.get_state(bridge)
 
     assert_receive {:bridge_event, %{payload: %{"phase" => "spawned", "task_id" => task_id}}},
                    5_000
 
-    assert {:ok, _} = GenServer.call(session, {:subagent_lookup, task_id})
-
-    assert {:ok, %{is_error: false}} =
-             SubagentBridge.call(id, "stop", "agent_result", %{
+    assert {:ok, %{is_error: false, output: result}} =
+             SubagentBridge.call(id, "collect", "agent_result", %{
                "task_id" => task_id,
-               "stop" => true
+               "wait_ms" => 5_000
              })
 
-    assert GenServer.call(session, :subagent_counts).tracked == 0
+    assert result =~ "child answer"
   end
 
   test "real interactive coordinator supplies live posture and refuses new work immediately after close",
@@ -471,7 +432,9 @@ defmodule Ouroboros.Provider.Native.SubagentBridgeTest do
 
     assert result =~ "child answer"
 
-    assert {:error, {:no_model, _}} =
-             SubagentBridge.call(id, "new-spawn", "agent", %{"prompt" => "needs a model"})
+    # And a new child still starts, because it runs on the parent's live transport rather
+    # than on whatever the node's default happens to be at that moment.
+    assert {:ok, %{is_error: false}} =
+             SubagentBridge.call(id, "new-spawn", "agent", %{"prompt" => "another child"})
   end
 end

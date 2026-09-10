@@ -28,7 +28,7 @@ defmodule Ouroboros.Gateway.LedgerTest do
           id: id,
           effect: :permission,
           principal: principal,
-          attempt: %{tool: "Bash", mode: :prompt, provider: :claude_code},
+          attempt: %{tool: "Bash", mode: :prompt, provider: :native},
           authority: %{decision: :allow},
           cause: %{signal_id: id},
           result: %{decision: :allow, scope: :once, actor: :human}

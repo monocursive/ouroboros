@@ -46,11 +46,10 @@ impl App {
                             self.account.ok(account, ticks, cadence);
 
                             if connected {
-                                if self.config.defaults.provider.is_none() {
-                                    self.config.defaults.provider = Some("native".to_string());
-                                    self.config.defaults.model.get_or_insert_with(|| {
-                                        "openai_codex:gpt-5.6-sol".to_string()
-                                    });
+                                // Connecting the account is choosing the model it pays for,
+                                // where nothing else has been chosen.
+                                if self.config.defaults.model.is_none() {
+                                    self.config.defaults.model = Some(DEFAULT_MODEL.to_string());
                                     self.save_pending = true;
                                 }
 
@@ -125,9 +124,6 @@ impl App {
                 Ok(value) => {
                     let providers = ProviderEntry::decode_list(&value);
                     self.providers.ok(providers, ticks, PROVIDER_TICKS);
-                    // A dialog opened before the list arrived has a default it could not
-                    // point at yet. This is the moment it can.
-                    self.place_default_provider();
                 }
                 Err(error) => self
                     .providers

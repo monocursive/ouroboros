@@ -13,6 +13,7 @@ defmodule Ouroboros.Interactive.Store do
           node: node(),
           status: State.status(),
           terminal?: boolean(),
+          removed_provider?: boolean(),
           updated_at: String.t()
         }
 
@@ -34,7 +35,8 @@ defmodule Ouroboros.Interactive.Store do
   @doc """
   Returns the projection recovery needs, computed inside the store process.
 
-  Each entry is `%{id:, node:, status:, terminal?:, updated_at:}`. Recovery runs on a
+  Each entry is `%{id:, node:, status:, terminal?:, removed_provider?:, updated_at:}`.
+  Recovery runs on a
   one-second tick, and deep-copying every retained event list and turn map on every
   tick is the cost this exists to avoid.
   """
@@ -191,6 +193,11 @@ defmodule Ouroboros.Interactive.Store do
       node: session.node,
       status: session.status,
       terminal?: State.terminal?(session),
+      # A record whose provider this build no longer serves is not recovered: there is
+      # nothing to resume, and starting a coordinator for it every restart would leave one
+      # read-only holder per removed-provider record on every node. It gets a coordinator
+      # only when a verb is served against it. See docs/proposals/core.md §3 D2.
+      removed_provider?: State.removed_provider(session) != nil,
       updated_at: session.updated_at
     }
   end

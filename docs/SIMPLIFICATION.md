@@ -59,7 +59,10 @@ not change `Storage.DurableFile`'s file/rename/directory-sync guarantees.
 
 ## Runtime event semantics
 
-`EventPresentation` owns provider-alias interpretation outside the web namespace. Gateway
+`EventPresentation` owns the runtime's event projection. It used to own provider-alias
+interpretation as well — the camelCase ACP spellings, the Codex and Claude key variants —
+and lost it in September 2026 with the wrapped vendor providers themselves
+([the core reduction](proposals/core.md) §3 D2): one provider writes one spelling. Gateway
 live events, backlogs, and replay results add `semantic` for supported common concepts:
 text, thinking, calls/results, usage, approvals, and terminal outcomes. A record has
 `version: 1`, a `kind`, and `data`. It is computed from the redacted, transport-bounded

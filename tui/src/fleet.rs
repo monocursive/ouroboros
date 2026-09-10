@@ -1404,7 +1404,7 @@ pub fn render_live_status(data_dir: &Path, value: &Value) -> Option<String> {
         "\nAuthority: this machine's credentials cannot be reissued from anywhere else. Back up {} securely.\n",
         fleet_dir(data_dir).display()
     ));
-    text.push_str("\nUse `ouro new --machine NAME --provider PROVIDER --workspace /absolute/path/on/NAME/project` to place an agent; the workspace is the destination path on that machine. Run `ouro fleet doctor` for firewall, certificate, and version guidance.\n");
+    text.push_str("\nUse `ouro new --machine NAME --workspace /absolute/path/on/NAME/project` to place an agent; the workspace is the destination path on that machine. Run `ouro fleet doctor` for firewall, certificate, and version guidance.\n");
     Some(text)
 }
 

@@ -125,23 +125,21 @@ defmodule Ouroboros.Wasm.PolicyEngine do
 
   ## Scope
 
-  Four readers, one setting (W18, D27): the native loop
+  Three readers, one setting (W18, D27): the native loop
   (`Ouroboros.Provider.Native.Permissions`), the interactive plane's external approvals
-  (`Ouroboros.Interactive.Task.Approvals`), the interactive shell
-  (`Ouroboros.Interactive.Task.Shell`, through `Approvals.permissions_engine/2`), and the ACP
-  lane through `Ouroboros.Control.Permissions.Seam` — which is both the
-  `session/request_permission` a vendor process sends and the `fs/write_text_file` and
-  `terminal/create` an ACP agent asks this runtime to perform. A node that names this module has
-  a policy on every lane a permission question arrives on, and `test/wasm/policy_acp_test.exs` is
-  the ACP half of that end to end, through a real `Session.Jsonl` and a vendor process.
+  (`Ouroboros.Interactive.Task.Approvals`), and the interactive shell
+  (`Ouroboros.Interactive.Task.Shell`, through `Approvals.permissions_engine/2`). A node
+  that names this module has a policy on every lane a permission question arrives on. The
+  ACP seam was a fourth until the core reduction removed the wrapped vendor providers it
+  existed for; see `docs/proposals/core.md` §3 D2.
 
-  The seam carries this module's answer and turns every failure of its own into an ask, so
-  nothing there widens a verdict — and nothing there narrows one either. **The bound on an
-  `allow` is this module's**, `allowable_tools/1`, and it is the only one: a seam that added a
-  second gate would be a refusal an operator could not find in either place.
+  **The bound on an `allow` is this module's**, `allowable_tools/1`, and it is the only one:
+  a reader that added a second gate would be a refusal an operator could not find in either
+  place.
 
-  The same four readers are also the four places a human answer becomes evidence, because all of
-  them record it through `Control.Permissions.record/2` and that is where the corpus is written.
+  The same three readers are also the three places a human answer becomes evidence, because all
+  of them record it through `Control.Permissions.record/2` and that is where the corpus is
+  written.
   """
 
   require Logger

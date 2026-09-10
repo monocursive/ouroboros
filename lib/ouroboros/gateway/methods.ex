@@ -46,11 +46,12 @@ defmodule Ouroboros.Gateway.Methods do
   literal atoms in this module, chosen by matching the client's string against an
   allowlist. Option *values* that are enums come from a literal map of the exact terms the
   upstream schema declares (`Jido.Harness.RunRequest`'s approval and sandbox modes,
-  `ApprovalResponse`'s decisions). A provider name is matched against the providers this
-  node actually serves, and a node name against `[node() | Node.list()]` — by string
-  comparison against atoms that already exist, never by conversion. An option this module
-  does not list is `-32602` naming it rather than silently dropped, the same posture the
-  planes take toward their own callers.
+  `ApprovalResponse`'s decisions). A node name is matched against `[node() | Node.list()]`
+  — by string comparison against atoms that already exist, never by conversion. (Provider
+  is no longer an option: `:native` is the only provider, so `interactive.start` has no
+  such parameter; see docs/proposals/core.md §3 D2.) An option this module does not list is
+  `-32602` naming it rather than silently dropped, the same posture the planes take toward
+  their own callers.
 
   ## Subscriptions are not invoked here
 
@@ -86,7 +87,6 @@ defmodule Ouroboros.Gateway.Methods do
   alias Ouroboros.Interactive.Task, as: InteractiveTask
   alias Ouroboros.InteractiveSession
   alias Ouroboros.Provider.AnthropicKey
-  alias Ouroboros.Provider.GrokAuth
   alias Ouroboros.Provider.OpenAIAuth
   alias Ouroboros.Provider.XAIKey
   alias Ouroboros.Provider.Native.Mcp
@@ -110,7 +110,6 @@ defmodule Ouroboros.Gateway.Methods do
       unavailable: 1,
       upstream_error: 1,
       account_reply: 1,
-      grok_account_reply: 1,
       forget_session_owner_reply: 1,
       fork_reply: 1,
       exit_result: 1
@@ -168,10 +167,6 @@ defmodule Ouroboros.Gateway.Methods do
   # provider that has to be installed, authenticated, or woken up legitimately takes
   # minutes on a first run. The gateway still refuses to hold a request open forever, so
   # this is the one ceiling measured in provider time rather than in control-plane time.
-
-  # `interactive.request_approval` waits for a person. Fifteen minutes is the stated
-  # ceiling: long enough that stepping away from the terminal is not a denial, short
-  # enough that a forgotten prompt does not hold a gateway task open for a shift.
 
   # B7. One operator command, and the same number `Ouroboros.Workspace.Exec` stops it at.
   # A ceiling below the runner's would kill the gateway task while the command kept
@@ -261,12 +256,8 @@ defmodule Ouroboros.Gateway.Methods do
   # the session its id promised. Whether any one of these four is actually changeable is
   # the transport's answer, asked per session rather than encoded here.
   #
-  # C4. `mode` is the sixth, and it is not a member of any vocabulary this gateway knows:
-  # it carries the *agent's own* mode id, which an ACP agent published in `session/new`
-  # and which `Ouroboros.Provider.Session.Dialect.ACP` validates against that list before
-  # sending `session/set_mode`. A `:string` here rather than an enum is the honest type —
-  # the allowed values belong to the agent, not to this table — and every transport whose
-  # dialect declares no modes refuses it by name.
+  # C4's `mode` was a sixth, carrying an ACP agent's own mode id for `session/set_mode`. It
+  # went with the ACP client; the one transport has no modes of its own to be told.
   @configuration_options Contract.configuration_options()
 
   # ---------------------------------------------------------------------------------
@@ -735,25 +726,6 @@ defmodule Ouroboros.Gateway.Methods do
   @doc false
   def handle_account_logout(_params) do
     safe(fn -> account_reply(account_adapter().logout()) end)
-  end
-
-  @doc false
-  def handle_grok_account_read(_params) do
-    safe(fn -> grok_account_reply(grok_account_adapter().read()) end)
-  end
-
-  @doc false
-  def handle_grok_account_login_start(_params) do
-    safe(fn -> grok_account_reply(grok_account_adapter().login()) end)
-  end
-
-  @doc false
-  def handle_grok_account_login_cancel(params) do
-    with {:ok, login_id} <- fetch_string(params, "login_id") do
-      safe(fn -> grok_account_reply(grok_account_adapter().cancel(login_id)) end)
-    else
-      {:invalid, message} -> invalid_params(message)
-    end
   end
 
   @doc false
@@ -1685,25 +1657,6 @@ defmodule Ouroboros.Gateway.Methods do
     end)
   end
 
-  # C2. The bridge's own verb. `ouro mcp-serve` calls it once per tool Claude Code would
-  # otherwise have prompted about, and the answer it gets is the decision to relay back as
-  # the permission-prompt tool's `allow`/`deny` object. Owner-routed like every other
-  # session verb; the coordinator, not this module, decides.
-  @doc false
-  def handle_interactive_request_approval(params) do
-    safe(fn ->
-      with {:ok, session} <- session_target(:interactive, params),
-           {:ok, request} <- approval_request(params) do
-        case InteractiveSession.request_approval(session, request) do
-          {:ok, answer} -> {:ok, Encode.approval_answer(answer)}
-          other -> reply(other)
-        end
-      else
-        {:invalid, message} -> invalid_params(message)
-      end
-    end)
-  end
-
   # B1. What a session may still be changed to is the transport's answer, not this
   # table's: everything here does is turn four JSON fields into the four atoms the
   # runtime validates against the provider's own declarations, and hand back what came
@@ -2059,7 +2012,6 @@ defmodule Ouroboros.Gateway.Methods do
   # a key here never reaches `Keyword`, and nothing in this module converts one.
   @option_keys %{
     "id" => :id,
-    "provider" => :provider,
     "workspace" => :workspace,
     "model" => :model,
     "system_prompt" => :system_prompt,
@@ -2071,7 +2023,6 @@ defmodule Ouroboros.Gateway.Methods do
     "runtime_exposure" => :runtime_exposure,
     "worktree" => :worktree,
     "plan" => :plan,
-    "mode" => :mode,
     "machine" => :node,
     "node" => :node
   }
@@ -2156,25 +2107,10 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  # Matched against the providers this build actually serves, by string, so an unknown
-  # name is a parameter error rather than a new atom or a session that fails at start.
-  defp option_value(key, :provider, value) do
-    names = Enum.map(Ouroboros.providers(), & &1.provider)
-
-    case Enum.find(names, &(is_binary(value) and Atom.to_string(&1) == value)) do
-      nil ->
-        {:invalid,
-         "params.#{key} must name a provider this node serves: " <>
-           (names |> Enum.map(&Atom.to_string/1) |> Enum.sort() |> Enum.join(", "))}
-
-      provider ->
-        {:ok, provider}
-    end
-  end
-
-  # Node names are compared as strings against atoms that already exist. A node this one
-  # is not connected to could not be placed on anyway, so refusing here is the same answer
-  # the placement check would give, arrived at without minting an atom.
+  # Node names are compared as strings against atoms that already exist, so an unknown name
+  # is a parameter error rather than a new atom or a session that fails at start. A node
+  # this one is not connected to could not be placed on anyway, so refusing here is the
+  # same answer the placement check would give, arrived at without minting an atom.
   defp option_value(key, :node, value) do
     case Cluster.resolve_machine(value) do
       {:error, _reason} ->
@@ -2274,69 +2210,6 @@ defmodule Ouroboros.Gateway.Methods do
   end
 
   defp plan_exit_options(_other), do: :refused
-
-  # What a permission-prompt tool actually carries. `tool_name` is the only required
-  # field: Claude Code's call names the tool, hands over its arguments object, and
-  # correlates with a `tool_use_id`. `cwd` is the bridge's own addition — the directory
-  # the tool would run in, which is the fact a person needs and the payload the Codex
-  # dialect already carries. Nothing else is accepted, because an approval request is a
-  # question, not a place to hand the runtime extra instructions.
-  defp approval_request(params) do
-    case Map.get(params, "request") do
-      request when is_map(request) ->
-        with [] <- Map.keys(request) -- ["tool_name", "input", "tool_use_id", "cwd"],
-             {:ok, tool_name} <- fetch_request_string(request, "tool_name"),
-             {:ok, tool_use_id} <- fetch_optional_request_string(request, "tool_use_id"),
-             {:ok, cwd} <- fetch_optional_request_string(request, "cwd"),
-             {:ok, input} <- fetch_optional_object(request, "input") do
-          {:ok,
-           %{
-             tool_name: tool_name,
-             input: input,
-             tool_use_id: tool_use_id,
-             cwd: cwd
-           }}
-        else
-          {:invalid, message} -> {:invalid, message}
-          _refused -> {:invalid, approval_request_message()}
-        end
-
-      _absent ->
-        {:invalid, approval_request_message()}
-    end
-  end
-
-  defp fetch_request_string(request, key) do
-    case Map.get(request, key) do
-      value when is_binary(value) ->
-        if String.trim(value) == "",
-          do: {:invalid, "params.request.#{key} must be a nonempty string"},
-          else: {:ok, value}
-
-      _absent_or_wrong ->
-        {:invalid, "params.request.#{key} must be a nonempty string"}
-    end
-  end
-
-  defp fetch_optional_request_string(request, key) do
-    case Map.get(request, key) do
-      nil -> {:ok, nil}
-      _present -> fetch_request_string(request, key)
-    end
-  end
-
-  defp fetch_optional_object(params, key) do
-    case Map.get(params, key) do
-      nil -> {:ok, nil}
-      value when is_map(value) -> {:ok, value}
-      _other -> {:invalid, "params.request.#{key} must be an object"}
-    end
-  end
-
-  defp approval_request_message do
-    ~s(params.request must be an object {"tool_name": "...", "input": {...}, ) <>
-      ~s("tool_use_id": "...", "cwd": "..."} with a non-empty tool_name)
-  end
 
   defp approval_message do
     ~s(params.response must be "approve", "deny", or an object ) <>
@@ -3283,10 +3156,6 @@ defmodule Ouroboros.Gateway.Methods do
 
   defp account_adapter do
     Application.get_env(:ouroboros, :account_adapter, OpenAIAuth)
-  end
-
-  defp grok_account_adapter do
-    Application.get_env(:ouroboros, :grok_account_adapter, GrokAuth)
   end
 
   defp anthropic_key_adapter do

@@ -174,9 +174,9 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
   variant, and the two runtime-native types — one frame each, built from the field
   vocabulary the emitting module actually uses. Field names are copied from the emitters
   (`Ouroboros.Provider.Native.Loop`, `.Session`, `.Tools.AskUser`, `.Subagent`,
-  `Ouroboros.Provider.Session.Dialect.ACP`, `Ouroboros.Interactive.Task` and its `Shell`
-  and `Approvals` submodules, and `Jido.Harness`'s own session and run workers); nothing
-  here is a shape invented for a test.
+  `Ouroboros.Interactive.Task` and its `Shell` and `Approvals` submodules, and
+  `Jido.Harness`'s own session and run workers); nothing here is a shape invented for a
+  test.
 
   The same static discipline as everything else in this file: literal ids, two literal
   timestamps, literal sequences.
@@ -224,9 +224,8 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
        :command_output_delta, %{"text" => "Compiling ouroboros v0.1.0\n"}, []},
 
       # -- tools, both dialects ------------------------------------------------
-      {"event_tool_call_bash",
-       "a Claude-dialect command call: `name`/`call_id`/`input`, no ACP `kind`", :interactive,
-       107, :tool_call,
+      {"event_tool_call_bash", "a command call: `name`/`call_id`/`input`, and no `kind`",
+       :interactive, 107, :tool_call,
        %{
          "name" => "Bash",
          "call_id" => "toolu_01Bash000000000000001",
@@ -265,41 +264,6 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
              "  3→end\n",
          "is_error" => false
        }, []},
-      {"event_tool_call_acp_edit",
-       "an ACP tool call: the agent's raw camelCase update, where `kind` is the only enum",
-       :interactive, 111, :tool_call,
-       %{
-         "sessionUpdate" => "tool_call",
-         "toolCallId" => "acp-call-0000000000000001",
-         "title" => "Edit lib/ouroboros/web/transcript.ex",
-         "kind" => "edit",
-         "status" => "pending",
-         "rawInput" => %{
-           "path" => "lib/ouroboros/web/transcript.ex",
-           "oldText" => "  def project(events) do\n    events\n  end\n",
-           "newText" =>
-             "  def project(events, cursor) do\n    events\n    |> Enum.sort()\n  end\n"
-         },
-         "locations" => [%{"path" => "lib/ouroboros/web/transcript.ex"}]
-       }, []},
-      {"event_tool_result_acp_edit",
-       "the ACP `tool_call_update` that settles it, carrying `status` rather than `is_error`",
-       :interactive, 112, :tool_result,
-       %{
-         "sessionUpdate" => "tool_call_update",
-         "toolCallId" => "acp-call-0000000000000001",
-         "status" => "completed",
-         "content" => [
-           %{
-             "type" => "content",
-             "content" => %{
-               "type" => "text",
-               "text" => "Applied 1 edit to lib/ouroboros/web/transcript.ex"
-             }
-           }
-         ]
-       }, []},
-
       # -- what changed on disk ------------------------------------------------
       {"event_file_change",
        "one edit with a real unified diff, whose ± counts a client reads from the hunk " <>
@@ -381,7 +345,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       {"event_session_ready",
        "the transport facts, which are on `session_ready` and not on `session_started`",
        :interactive, 124, :session_ready,
-       %{"transport" => "acp", "maturity" => "stable", "process" => "persistent"}, []},
+       %{"transport" => "native", "maturity" => "stable", "process" => "persistent"}, []},
       {"event_session_idle", "a conversation waiting for its next prompt", :interactive, 125,
        :session_idle, %{}, []},
       {"event_session_closed", "the end of the reading path", :interactive, 126, :session_closed,
@@ -564,15 +528,12 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
          "follow_up" => false
        }, request_id: "req-plan-exit-000000000001"},
       {"event_provider_event_unknown",
-       "an ACP update this client does not model, whose nested `sessionUpdate` is the " <>
-         "informative half: the must-render-as-a-note case", :interactive, 142, :provider_event,
+       "a `provider_event` kind this client does not model: the must-render-as-a-note case",
+       :interactive, 142, :provider_event,
        %{
-         "kind" => "acp_update",
-         "update" => %{
-           "sessionUpdate" => "terminal_output",
-           "terminalId" => "term-0000000000000001",
-           "output" => "waiting for the container to come up"
-         }
+         "kind" => "terminal_output",
+         "terminal_id" => "term-0000000000000001",
+         "message" => "waiting for the container to come up"
        }, []},
 
       # -- the runtime's own types ---------------------------------------------
@@ -604,7 +565,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         timestamp: Keyword.get(fields, :timestamp, @timestamp),
         payload: payload,
         harness_session_id: @harness_session_id,
-        provider: :claude_code,
+        provider: :native,
         provider_session_id: @provider_session_id,
         turn_id: @turn_id,
         request_id: Keyword.get(fields, :request_id)
@@ -740,7 +701,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         %{
           id: @session_id,
           node: :ouroboros@golden,
-          provider: :claude_code,
+          provider: :native,
           status: :idle,
           created_at: @timestamp,
           updated_at: @timestamp
@@ -773,7 +734,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         timestamp: @timestamp,
         payload: %{"text" => "the workspace is clean", "token" => "[REDACTED]"},
         harness_session_id: "harness-0000000000000000001",
-        provider: :claude_code,
+        provider: :native,
         provider_session_id: "provider-0000000000000001",
         turn_id: "turn-0000000000000000000001",
         request_id: nil
@@ -830,7 +791,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
         "tail" => String.duplicate("z", 700)
       },
       harness_session_id: "harness-0000000000000000001",
-      provider: :claude_code,
+      provider: :native,
       provider_session_id: "provider-0000000000000001",
       turn_id: "turn-0000000000000000000001",
       request_id: nil
@@ -1705,7 +1666,7 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
       attempt: %{
         tool: "Bash",
         mode: :prompt,
-        provider: :claude_code,
+        provider: :native,
         fingerprint: %{sha256: String.duplicate("a", 64), bytes: 42}
       },
       authority: %{decision: :allow, reason: :rule},

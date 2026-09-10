@@ -77,7 +77,7 @@ nobody wrote by hand.
       fetched for, then `mix compile` in `dev` and `test` — `test` alone under `--oracle`,
       where no agent will run a command. This is **setup**, timed and reported separately:
       a benchmark that charged the agent for a cold build would be measuring this machine;
-   3. `ouro run "<instruction>" --provider native --workspace <worktree> --approval-mode
+   3. `ouro run "<instruction>" --workspace <worktree> --approval-mode
       prompt --approve-all --stream-json --timeout <secs> --model <spec>`. `--approve-all`
       answers every ask `approve`/`once` and the ask is still **counted**, which is what
       makes "approvals per task" a number this corpus can report;

@@ -4,7 +4,7 @@ defmodule Ouroboros.StoreRetentionTest do
   alias Ouroboros.Interactive.State
   alias Ouroboros.Interactive.Store, as: InteractiveStore
 
-  @provider :ouroboros_test
+  @provider :native
 
   setup do
     on_exit(fn -> Application.delete_env(:ouroboros, :terminal_retention_ms) end)
@@ -72,7 +72,12 @@ defmodule Ouroboros.StoreRetentionTest do
       assert entry.node == node()
       assert entry.status == :starting
       refute entry.terminal?
-      assert Map.keys(entry) |> Enum.sort() == [:id, :node, :status, :terminal?, :updated_at]
+      # A native record is recoverable; `removed_provider?` is the lifecycle fact that
+      # keeps `Session.Recovery` from restarting a record naming a provider this build lost.
+      refute entry.removed_provider?
+
+      assert Map.keys(entry) |> Enum.sort() ==
+               [:id, :node, :removed_provider?, :status, :terminal?, :updated_at]
     end
   end
 

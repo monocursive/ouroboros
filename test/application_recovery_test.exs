@@ -10,7 +10,7 @@ defmodule Ouroboros.ApplicationRecoveryTest do
   alias Ouroboros.Workspace
   alias Ouroboros.Workspace.Manager, as: WorkspaceManager
 
-  @provider :ouroboros_test
+  @provider :native
 
   test "the model admission boundary owns every session that consumes its leases" do
     admission = Process.whereis(Ouroboros.Provider.Native.Model.Admission)
@@ -143,10 +143,9 @@ defmodule Ouroboros.ApplicationRecoveryTest do
     assert Application.get_env(:ouroboros, :data_dir) in [nil, ""]
 
     # The runtime boundary drops the owner of a directory this node does not have, and
-    # nothing else: the provider cache behind it holds no durable state. Model admission
-    # starts after the ledger, still without needing a data directory.
+    # nothing else. Model admission starts after the ledger, still without needing a data
+    # directory.
     assert Process.whereis(Ouroboros.RuntimeOwner) == nil
-    assert is_pid(Process.whereis(Ouroboros.Provider.RuntimeCache))
     assert is_pid(Process.whereis(Ouroboros.Provider.Native.Model.Admission))
   end
 

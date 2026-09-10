@@ -94,30 +94,20 @@ defmodule Ouroboros.EventPresentationTest do
              } = Presentation.from_event(result)
     end
 
-    test "tolerates_acp_camel_case_tool_updates_without_leaking_protocol_into_the_renderer" do
-      call =
-        event(:tool_call, %{
-          "toolCallId" => "acp-1",
-          "title" => "Reading lib/app.ex",
-          "kind" => "read",
-          "rawInput" => %{"path" => "lib/app.ex"}
-        })
-
-      assert %ToolCall{call_id: "acp-1", name: "Reading lib/app.ex", kind: "read"} =
-               Presentation.from_event(call)
-    end
-
     test "a tool call with no recognisable name is still a call" do
       assert %ToolCall{name: "tool", input: %{}, call_id: nil} =
                Presentation.from_event(event(:tool_call, %{}))
     end
 
-    test "an is_error absent but a failed status still reads as an error" do
+    # `is_error` is the one field that says a call failed. A `status` string was the ACP
+    # dialect's way of saying it; with the dialect gone, a payload without `is_error` is
+    # not an error, and reading one out of a status enum nothing writes would be a guess.
+    test "only is_error says a tool result failed" do
       assert %ToolResult{is_error: true} =
-               Presentation.from_event(event(:tool_result, %{"status" => "failed"}))
+               Presentation.from_event(event(:tool_result, %{"is_error" => true}))
 
       assert %ToolResult{is_error: false} =
-               Presentation.from_event(event(:tool_result, %{"status" => "ok"}))
+               Presentation.from_event(event(:tool_result, %{"status" => "failed"}))
     end
 
     test "a tool result output that is JSON null stays null rather than becoming absent" do
@@ -256,7 +246,7 @@ defmodule Ouroboros.EventPresentationTest do
       for {type, module} <- expected do
         # A payload carrying enough for each arm to be its named shape rather than Hidden.
         projected =
-          Presentation.from_event(event(type, %{"text" => "words", "kind" => "acp_update"}))
+          Presentation.from_event(event(type, %{"text" => "words", "kind" => "some_kind"}))
 
         assert projected.__struct__ == module,
                "#{type} projected to #{inspect(projected.__struct__)}, expected #{inspect(module)}"
@@ -289,11 +279,14 @@ defmodule Ouroboros.EventPresentationTest do
                Presentation.from_event(event(:output_text_delta, %{"text" => "part"}))
     end
 
-    test "thinking reads whichever of the three keys the provider used" do
-      for key <- ["text", "thinking", "reasoning"] do
-        assert %Thinking{text: "pondering"} =
-                 Presentation.from_event(event(:thinking_delta, %{key => "pondering"}))
-      end
+    # One spelling. `thinking` and `reasoning` were the Claude and Codex dialects'; the
+    # native loop emits `text` (`Ouroboros.Provider.Native.Loop`, `:thinking_delta`).
+    test "thinking reads the one key the loop writes" do
+      assert %Thinking{text: "pondering"} =
+               Presentation.from_event(event(:thinking_delta, %{"text" => "pondering"}))
+
+      assert %Hidden{reason: :empty_thinking} =
+               Presentation.from_event(event(:thinking_delta, %{"reasoning" => "pondering"}))
     end
 
     test "a lifecycle marker with only bookkeeping behind it reads as a marker" do
@@ -324,13 +317,8 @@ defmodule Ouroboros.EventPresentationTest do
     end
 
     test "a_provider_event_names_its_own_kind" do
-      assert %ProviderNote{kind: "acp_update · agent_thought_chunk"} =
-               Presentation.from_event(
-                 event(:provider_event, %{
-                   "kind" => "acp_update",
-                   "update" => %{"sessionUpdate" => "agent_thought_chunk"}
-                 })
-               )
+      assert %ProviderNote{kind: "terminal_output"} =
+               Presentation.from_event(event(:provider_event, %{"kind" => "terminal_output"}))
 
       assert %ProviderNote{kind: ""} =
                Presentation.from_event(event(:provider_event, %{}))
@@ -529,41 +517,31 @@ defmodule Ouroboros.EventPresentationTest do
   end
 
   describe "plans" do
-    test "both_plan_dialects_project_to_the_same_steps" do
-      codex =
-        Presentation.from_event(
-          event(:plan_updated, %{
-            "explanation" => "the shape of it",
-            "plan" => [
-              %{"step" => "read the module", "status" => "completed"},
-              %{"step" => "write the port", "status" => "in_progress"}
-            ]
-          })
-        )
-
-      acp =
-        Presentation.from_event(
-          event(:plan_updated, %{
-            "explanation" => "the shape of it",
-            "entries" => [
-              %{"content" => "read the module", "status" => "done", "priority" => "high"},
-              %{"content" => "write the port", "status" => "running", "priority" => "high"}
-            ]
-          })
-        )
-
-      assert %PlanUpdate{explanation: "the shape of it", step_count: 2, steps: codex_steps} =
-               codex
-
-      assert %PlanUpdate{step_count: 2, steps: acp_steps} = acp
-
-      assert Enum.map(codex_steps, &{&1.text, &1.status}) ==
-               Enum.map(acp_steps, &{&1.text, &1.status})
+    # One shape: `{"explanation", "plan": [{"step", "status"}]}`, which is what
+    # `Ouroboros.Provider.Native.Tools.Plan` normalizes every step into. The ACP
+    # `{"entries": [{"content", "priority"}]}` reading went with the dialect, and a step
+    # spelled that way now reads as no step rather than as a step nothing wrote.
+    test "a_plan_is_the_one_shape_the_plan_tool_writes" do
+      assert %PlanUpdate{explanation: "the shape of it", step_count: 2, steps: steps} =
+               Presentation.from_event(
+                 event(:plan_updated, %{
+                   "explanation" => "the shape of it",
+                   "plan" => [
+                     %{"step" => "read the module", "status" => "completed"},
+                     %{"step" => "write the port", "status" => "in_progress"}
+                   ]
+                 })
+               )
 
       assert [
                %PlanStep{text: "read the module", status: :done},
                %PlanStep{text: "write the port", status: :in_progress}
-             ] = codex_steps
+             ] = steps
+
+      assert %PlanUpdate{step_count: 0, steps: []} =
+               Presentation.from_event(
+                 event(:plan_updated, %{"entries" => [%{"content" => "read the module"}]})
+               )
     end
 
     test "an_unknown_plan_status_is_kept_verbatim_rather_than_guessed" do

@@ -21,7 +21,7 @@ defmodule Ouroboros.Gateway.WireTest do
       type: :file_change,
       timestamp: @timestamp,
       payload: payload,
-      provider: :codex
+      provider: :native
     }
   end
 
@@ -182,7 +182,7 @@ defmodule Ouroboros.Gateway.WireTest do
       assert encoded["type"] == "file_change"
       assert encoded["session_id"] == "session-1"
       assert encoded["timestamp"] == "2026-01-01T00:00:00.000000Z"
-      assert encoded["provider"] == "codex"
+      assert encoded["provider"] == "native"
       assert encoded["_struct"] == "Ouroboros.Interactive.Event"
     end
 

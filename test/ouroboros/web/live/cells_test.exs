@@ -31,7 +31,7 @@ defmodule Ouroboros.Web.Live.CellsTest do
 
   @types Map.new(Presentation.canonical_types() ++ [:status], &{Atom.to_string(&1), &1})
 
-  @providers %{"claude_code" => :claude_code, "native" => :native}
+  @providers %{"native" => :native}
 
   # ------------------------------------------------------------------------------------
   # Fixtures in, HTML out — the same decode `corpus_parity_test.exs` uses

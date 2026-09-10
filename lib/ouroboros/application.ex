@@ -140,7 +140,7 @@ defmodule Ouroboros.Application do
 
   defp children(:core) do
     children =
-      runtime_boundary_children([Ouroboros.Provider.RuntimeCache]) ++
+      runtime_boundary_children([]) ++
         [
           # The effect ledger leads every process that can originate an effect. If its
           # durable authority restarts, rest_for_one stops Jido's runners and agent
@@ -188,11 +188,6 @@ defmodule Ouroboros.Application do
           # without reading another supervisor's private state.
           {Ouroboros.Application.RegistryOwner,
            keys: :unique, name: Ouroboros.Provider.Native.Registry},
-          # C4. The same idea for the remaining ACP JSONL transport, keyed by harness
-          # session id. The pinned harness exposes its worker but not the transport handle
-          # underneath it; ACP `session/set_mode` is a dialect verb the worker cannot carry.
-          {Ouroboros.Application.RegistryOwner,
-           keys: :unique, name: Ouroboros.Provider.Session.Registry},
           subtree(
             Ouroboros.Session.Supervisor,
             [
@@ -219,7 +214,7 @@ defmodule Ouroboros.Application do
       [
         subtree(
           Ouroboros.Surface.Supervisor,
-          [Ouroboros.Cluster, Ouroboros.Provider.OpenAIAuth, Ouroboros.Provider.GrokAuth] ++
+          [Ouroboros.Cluster, Ouroboros.Provider.OpenAIAuth] ++
             gateway_children() ++
             [
               subtree(

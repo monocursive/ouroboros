@@ -142,8 +142,8 @@ defmodule Ouroboros.Provider.Native.Permissions do
   So it is asked for rather than built: `suggest/1` is the engine's, the grammar is the
   engine's, and this module — the loop's one door to the engine — carries the answer
   across unchanged. That is what every other emitter in the tree already does
-  (`Control.Permissions.Seam.suggested/2`, `Interactive.Task.Approvals`,
-  `Interactive.Task.Shell`), each guarding `is_binary` exactly as this now does.
+  (`Interactive.Task.Approvals`, `Interactive.Task.Shell`), each guarding `is_binary`
+  exactly as this now does.
 
   `nil` where no engine is loaded, where it exports no `suggest/1`, or where it had
   nothing honest to say. The caller omits the key rather than inventing one: this surface

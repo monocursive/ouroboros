@@ -513,11 +513,11 @@ defmodule Ouroboros.InteractiveSession do
   end
 
   @doc """
-  Asks this session's owner for a human decision on a tool call the provider cannot ask
-  about itself.
+  Asks this session's owner for a human decision on a tool call that did not arrive
+  through this session's own transport.
 
-  The one caller today is `ouro mcp-serve`, the stdio MCP server Claude Code is given as
-  its `--permission-prompt-tool`. The coordinator mints the request id, records the
+  The caller is `relay_approval/2` below: a native subagent's question, carried to the
+  parent session that owns the modal. The coordinator mints the request id, records the
   question durably, consults the permission engine, and blocks until
   `respond_approval/3` names that id or its own deadline passes.
 

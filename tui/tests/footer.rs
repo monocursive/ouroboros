@@ -89,7 +89,7 @@ fn session(status: &str, options: Value, usage: Value) -> Value {
         "_struct": "Ouroboros.Interactive.State",
         "id": "session-a7",
         "status": status,
-        "provider": "codex",
+        "provider": "native",
         "workspace": "/Users/operator/code/ouroboros",
         "updated_at": "2026-01-01T00:00:00.000000Z",
         "options": options,
@@ -163,7 +163,7 @@ fn event(sequence: u64, kind: &str, payload: Value, timestamp: &str) -> Value {
         "payload": payload,
         "turn_id": "turn-1",
         "request_id": request_id,
-        "provider": "codex"
+        "provider": "native"
     })
 }
 
@@ -600,7 +600,7 @@ fn the_statusline_payload_carries_the_documented_shape() {
     let payload = app.statusline_payload();
 
     assert_eq!(payload["session"]["id"], "session-a7");
-    assert_eq!(payload["session"]["provider"], "codex");
+    assert_eq!(payload["session"]["provider"], "native");
     assert_eq!(payload["session"]["model"], "gpt-5-codex");
     assert_eq!(
         payload["session"]["workspace"],
@@ -1142,29 +1142,28 @@ fn an_undeclared_capability_is_unknown_and_changes_nothing() {
     );
 }
 
+/// The dialog greys a mode this runtime's own spec says the session could not take, and
+/// says whose limit it is. It stays selectable: the runtime is the authority on whether a
+/// start succeeds, and refusing here on spec data would be this client overruling it.
 #[test]
-fn the_new_session_dialog_greys_a_mode_the_provider_cannot_take() {
+fn the_new_session_dialog_greys_a_mode_the_transport_cannot_take() {
     let mut app = resolved();
     app.apply(key(KeyCode::Char('2')));
-    answer(&mut app, Tag::Providers, providers());
+    answer(&mut app, Tag::Providers, providers_without_approvals());
 
     // Printable shortcuts belong to the operator dashboard; home is a task composer.
     app.tab = ouro::ui::app::Tab::Dashboard;
     app.apply(key(KeyCode::Char('n')));
 
-    // `claude`. Its spec normalizes `approval_mode`, so the schema would accept `prompt` —
-    // and X1 is that its managed transport has no channel to ask through, so the runtime
-    // refuses it. Its sandbox is argv and takes every value.
     let Some(Overlay::New(dialog)) = app.overlay.as_mut() else {
         panic!("the new-session dialog opens");
     };
-    dialog.provider = 0;
     dialog.approval = 2; // prompt
     dialog.sandbox = 3; // workspace_write
 
     let screen = render(&mut app, 160, 30);
     assert!(
-        screen.row("approval").contains("not offered by claude"),
+        screen.row("approval").contains("not offered by native"),
         "{}",
         screen.text()
     );
@@ -1175,15 +1174,12 @@ fn the_new_session_dialog_greys_a_mode_the_provider_cannot_take() {
     );
     assert!(
         !screen.row("files").contains("not offered"),
-        "claude's sandbox is argv and takes every value:\n{}",
+        "a sandbox is argv rather than a channel, so nothing refuses it here:\n{}",
         screen.text()
     );
 
-    // `codex` app-server takes both.
-    let Some(Overlay::New(dialog)) = app.overlay.as_mut() else {
-        panic!("the dialog is still open");
-    };
-    dialog.provider = 1;
+    // The answer this runtime actually gives today takes both.
+    answer(&mut app, Tag::Providers, providers());
 
     let screen = render(&mut app, 160, 30);
     assert!(
@@ -1197,11 +1193,12 @@ fn the_new_session_dialog_greys_a_mode_the_provider_cannot_take() {
         screen.text()
     );
 
-    // `pi` constrains the values themselves: no `prompt`, no `workspace_write`.
-    let Some(Overlay::New(dialog)) = app.overlay.as_mut() else {
-        panic!("the dialog is still open");
-    };
-    dialog.provider = 2;
+    // A spec that constrains the values themselves names the ones it does take.
+    answer(
+        &mut app,
+        Tag::Providers,
+        providers_with_constrained_values(),
+    );
 
     let screen = render(&mut app, 160, 30);
     assert!(
@@ -1243,155 +1240,141 @@ fn the_new_session_dialog_greys_a_mode_the_provider_cannot_take() {
 /// `runtime.providers` as the gateway Wire-encodes it: the whole `AdapterSpec` beside the
 /// probe, including `normalized_options`, `normalized_values`, and `session_transports`.
 ///
-/// The three entries are the three shapes that exist in the bundle today, copied from the
-/// adapters themselves — `claude` (managed, normalizes both modes, constrains neither, no
-/// approvals channel), `codex` (app-server, everything), and `pi` (RPC, the only steer,
-/// and the only spec that constrains the mode *values*).
-fn providers() -> Value {
-    json!([
-        {
-            "provider": "claude",
-            "status": { "installed": true, "compatible": true, "authenticated": true },
-            "spec": {
-                "provider": "claude",
-                "name": "Claude Code",
-                "normalized_options": [
-                    "model", "provider_session_id", "max_turns", "system_prompt",
-                    "allowed_tools", "disallowed_tools", "add_dirs", "mcp_config",
-                    "approval_mode", "sandbox_mode", "reasoning_effort"
-                ],
-                "normalized_values": {},
-                "default_session_transport": "stream_json_resume",
-                "session_transports": [{
-                    "name": "stream_json_resume",
-                    "adapter": "Jido.Harness.SessionAdapters.Managed",
-                    "session_options": "adapter",
-                    "configuration_options": ["model", "reasoning_effort", "approval_mode", "sandbox_mode"],
-                    "capabilities": {
-                        "transport": "stream_json_resume",
-                        "process": "per_turn",
-                        "multi_turn": "managed",
-                        "follow_up": "managed",
-                        "interrupt": "process",
-                        "approvals": false,
-                        "steer": false,
-                        "multimodal": false,
-                        "dynamic_model": "managed",
-                        "dynamic_configuration": "managed"
-                    }
-                }]
-            }
-        },
-        {
-            "provider": "codex",
-            "status": { "installed": true, "compatible": true, "authenticated": true },
-            "spec": {
-                "provider": "codex",
-                "name": "Codex",
-                "normalized_options": ["model", "approval_mode", "sandbox_mode", "reasoning_effort"],
-                "normalized_values": {},
-                "default_session_transport": "app_server",
-                "session_transports": [{
-                    "name": "app_server",
-                    "adapter": "Ouroboros.Provider.Session.Dialect.Codex",
-                    "session_options": "adapter",
-                    "capabilities": {
-                        "transport": "app_server",
-                        "process": "persistent",
-                        "multi_turn": "native",
-                        "follow_up": "native",
-                        "interrupt": "native",
-                        "approvals": "native",
-                        "steer": false,
-                        "multimodal": "native",
-                        "dynamic_model": "native",
-                        "dynamic_configuration": "native"
-                    }
-                }]
-            }
-        },
-        {
-            "provider": "pi",
-            "status": { "installed": true, "compatible": true, "authenticated": true },
-            "spec": {
-                "provider": "pi",
-                "name": "Pi",
-                "normalized_options": [
-                    "model", "provider_session_id", "system_prompt", "allowed_tools",
-                    "disallowed_tools", "approval_mode", "sandbox_mode", "attachments",
-                    "reasoning_effort"
-                ],
-                "normalized_values": {
-                    "approval_mode": ["default", "auto_approve"],
-                    "sandbox_mode": ["default", "read_only", "unrestricted"]
-                },
-                "default_session_transport": "rpc",
-                "session_transports": [{
-                    "name": "rpc",
-                    "adapter": "Jido.Harness.SessionAdapters.PiRPC",
-                    "session_options": [
-                        "model", "provider_session_id", "system_prompt", "allowed_tools",
-                        "disallowed_tools", "approval_mode", "sandbox_mode",
-                        "reasoning_effort", "env"
-                    ],
-                    "capabilities": {
-                        "transport": "rpc",
-                        "process": "persistent",
-                        "multi_turn": "native",
-                        "follow_up": "managed",
-                        "interrupt": "native",
-                        "approvals": false,
-                        "steer": "native",
-                        "multimodal": false,
-                        "dynamic_model": "native",
-                        "dynamic_configuration": "native"
-                    }
-                }]
-            }
+/// This runtime serves one provider, so a list here is one entry long. What varies is the
+/// *transport* that entry declares, and the three shapes below are the three answers the
+/// greying logic has to tell apart — not three vendors.
+fn native_provider(transport: &str, capabilities: Value, normalized_values: Value) -> Value {
+    json!([{
+        "provider": "native",
+        "status": { "installed": true, "compatible": true, "authenticated": true },
+        "spec": {
+            "provider": "native",
+            "name": "Ouroboros",
+            "normalized_options": [
+                "model", "provider_session_id", "system_prompt", "allowed_tools",
+                "disallowed_tools", "approval_mode", "sandbox_mode", "reasoning_effort"
+            ],
+            "normalized_values": normalized_values,
+            "default_session_transport": transport,
+            "session_transports": [{
+                "name": transport,
+                "adapter": "Ouroboros.Provider.Session.Native",
+                "session_options": "adapter",
+                "capabilities": capabilities
+            }]
         }
-    ])
+    }])
+}
+
+fn transport_capabilities(approvals: Value, steer: Value) -> Value {
+    json!({
+        "transport": "native",
+        "process": "persistent",
+        "multi_turn": "native",
+        "follow_up": "native",
+        "interrupt": "native",
+        "approvals": approvals,
+        "steer": steer,
+        "multimodal": "native",
+        "dynamic_model": "native",
+        "dynamic_configuration": "native"
+    })
+}
+
+/// The answer this runtime gives today: a native transport that takes every mode.
+fn providers() -> Value {
+    native_provider(
+        "native",
+        transport_capabilities(json!("native"), json!("native")),
+        json!({}),
+    )
+}
+
+/// A transport with no channel to carry a question to a person. X1: `prompt` promises one
+/// is asked, so the runtime refuses it.
+fn providers_without_approvals() -> Value {
+    native_provider(
+        "managed",
+        transport_capabilities(json!(false), json!(false)),
+        json!({}),
+    )
+}
+
+/// A spec that constrains the mode *values* themselves rather than the channel.
+fn providers_with_constrained_values() -> Value {
+    native_provider(
+        "native",
+        transport_capabilities(json!("native"), json!("native")),
+        json!({
+            "approval_mode": ["default", "auto_approve"],
+            "sandbox_mode": ["default", "read_only", "unrestricted"]
+        }),
+    )
 }
 
 #[test]
 fn the_provider_spec_answers_which_modes_a_session_could_take() {
-    let entries = ProviderEntry::decode_list(&providers());
-    let (claude, codex, pi) = (&entries[0], &entries[1], &entries[2]);
+    let takes_everything = &ProviderEntry::decode_list(&providers())[0];
+    let no_approvals = &ProviderEntry::decode_list(&providers_without_approvals())[0];
+    let constrained = &ProviderEntry::decode_list(&providers_with_constrained_values())[0];
 
-    // X1: `prompt` promises a human is asked, and a managed transport has no channel.
-    assert!(claude
+    // Today's answer: nothing is refused.
+    for mode in ApprovalMode::ALL {
+        assert_eq!(
+            takes_everything.approval_mode_refusal(mode),
+            None,
+            "{mode:?}"
+        );
+    }
+    for mode in SandboxMode::ALL {
+        assert_eq!(
+            takes_everything.sandbox_mode_refusal(mode),
+            None,
+            "{mode:?}"
+        );
+    }
+
+    // X1: `prompt` promises a human is asked, and a transport with no approvals channel
+    // has no way to. Everything else about it is unconstrained, and a sandbox is argv
+    // rather than a channel, so no sandbox value is refused for this reason.
+    assert!(no_approvals
         .approval_mode_refusal(ApprovalMode::Prompt)
         .is_some_and(|reason| reason.contains("no approvals channel")));
-    // Everything else about claude is unconstrained.
-    assert_eq!(claude.approval_mode_refusal(ApprovalMode::AutoEdit), None);
-    assert_eq!(claude.approval_mode_refusal(ApprovalMode::Default), None);
+    assert_eq!(
+        no_approvals.approval_mode_refusal(ApprovalMode::AutoEdit),
+        None
+    );
+    assert_eq!(
+        no_approvals.approval_mode_refusal(ApprovalMode::Default),
+        None
+    );
     for mode in SandboxMode::ALL {
-        assert_eq!(claude.sandbox_mode_refusal(mode), None, "{mode:?}");
+        assert_eq!(no_approvals.sandbox_mode_refusal(mode), None, "{mode:?}");
     }
 
-    for mode in ApprovalMode::ALL {
-        assert_eq!(codex.approval_mode_refusal(mode), None, "{mode:?}");
-    }
-    for mode in SandboxMode::ALL {
-        assert_eq!(codex.sandbox_mode_refusal(mode), None, "{mode:?}");
-    }
-
-    // Pi's spec constrains the values.
-    assert!(pi
+    // A spec that names the values it takes refuses the ones it does not, and says which.
+    assert!(constrained
         .approval_mode_refusal(ApprovalMode::Prompt)
         .is_some_and(|reason| reason.contains("takes only default, auto_approve")));
-    assert_eq!(pi.approval_mode_refusal(ApprovalMode::AutoApprove), None);
-    assert!(pi
+    assert_eq!(
+        constrained.approval_mode_refusal(ApprovalMode::AutoApprove),
+        None
+    );
+    assert!(constrained
         .sandbox_mode_refusal(SandboxMode::WorkspaceWrite)
         .is_some());
-    assert_eq!(pi.sandbox_mode_refusal(SandboxMode::ReadOnly), None);
+    assert_eq!(
+        constrained.sandbox_mode_refusal(SandboxMode::ReadOnly),
+        None
+    );
 
     assert_eq!(
-        codex.session_capabilities().approvals,
+        takes_everything.session_capabilities().approvals,
         Capability::Yes("native".into())
     );
-    assert_eq!(claude.session_capabilities().steer, Capability::No);
+    assert_eq!(no_approvals.session_capabilities().steer, Capability::No);
     assert_eq!(
-        pi.session_capabilities().steer,
+        takes_everything.session_capabilities().steer,
         Capability::Yes("native".into())
     );
 

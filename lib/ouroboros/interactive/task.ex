@@ -12,7 +12,6 @@ defmodule Ouroboros.Interactive.Task do
   alias Ouroboros.Provider
   alias Ouroboros.Provider.Native.Paths
   alias Ouroboros.Provider.Native.Session, as: NativeSession
-  alias Ouroboros.Provider.Session, as: ProviderSession
   alias Ouroboros.ReasoningEffort
   alias Ouroboros.Workspace
   alias Ouroboros.Workspace.Manager, as: WorkspaceManager
@@ -27,10 +26,6 @@ defmodule Ouroboros.Interactive.Task do
   @idle_poll_interval_max 1_000
 
   @replay_limit 100
-  # C4. How long this coordinator waits on a provider-side fold. Under the gateway's own
-  # 120s ceiling for `interactive.compact`, so a transport that never answers is this
-  # call's failure rather than a connection's.
-  @compaction_wait 110_000
   @terminal_retire_ms 100
   @workspace_reacquire_attempts 25
   @workspace_reacquire_delay_ms 4
@@ -73,18 +68,24 @@ defmodule Ouroboros.Interactive.Task do
         if State.terminal?(session) do
           {:ok, runtime(session), {:continue, :attach}}
         else
-          case admit_workspace(session) do
-            # A checkpoint this build cannot turn into a Harness request — a trace from a
-            # newer prompt format, a prompt that is no longer a binary — fails as itself,
-            # before any provider session, and releases what it holds.
-            {:ok, runtime} ->
-              case State.unrequestable_reason(runtime.session) do
-                nil -> {:ok, runtime, {:continue, :attach}}
-                reason -> {:ok, runtime, {:continue, {:unrequestable, reason}}}
+          case State.removed_provider(session) do
+            nil ->
+              case admit_workspace(session) do
+                # A checkpoint this build cannot turn into a Harness request — a trace from
+                # a newer prompt format, a prompt that is no longer a binary — fails as
+                # itself, before any provider session, and releases what it holds.
+                {:ok, runtime} ->
+                  case State.unrequestable_reason(runtime.session) do
+                    nil -> {:ok, runtime, {:continue, :attach}}
+                    reason -> {:ok, runtime, {:continue, {:unrequestable, reason}}}
+                  end
+
+                {:error, reason} ->
+                  {:stop, reason}
               end
 
-            {:error, reason} ->
-              {:stop, reason}
+            provider ->
+              {:ok, runtime(session), {:continue, {:provider_removed, provider}}}
           end
         end
 
@@ -114,6 +115,30 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
+  # A record whose `provider` this build no longer has. It loads, it lists, and its history
+  # is intact: this coordinator is a read-only holder of it (info, replay, journal,
+  # rewind points), exactly as the store handed it over. It takes no workspace lease, opens
+  # no transport and schedules no poll, and every verb that would put it in front of a
+  # provider is refused by name. Failing it instead would rewrite an operator's record to
+  # say something about this build rather than about the session, and would take the
+  # workspace lease to do it.
+  #
+  # No retire timer is armed. Retirement is for a session that has ended; this one has not,
+  # and `handle_info(:retire, …)` does nothing for a non-terminal record anyway (it fired
+  # once at @terminal_retire_ms and leaked the process — the C2 review's F3). The holder
+  # lives until `close`/`kill` transitions it to `:closed`, and `Interactive.Recovery`
+  # does not start one on its own because `Session.Recovery.recoverable?/1` skips a record
+  # this provider names. So a coordinator exists only while a verb is being served.
+  def handle_continue({:provider_removed, provider}, runtime) do
+    Logger.warning(
+      "interactive session #{runtime.session.id} names provider #{inspect(provider)}, " <>
+        "which this build no longer serves; it stays listable and its history stays " <>
+        "intact, and every verb that would run it is refused"
+    )
+
+    {:noreply, refuse_ready_waiters(runtime, State.provider_removed_error(provider))}
+  end
+
   def handle_continue({:unrequestable, reason}, runtime) do
     Logger.error(
       "interactive session #{runtime.session.id} cannot build a request: " <>
@@ -130,11 +155,12 @@ defmodule Ouroboros.Interactive.Task do
     if State.terminal?(session) or runtime.subagent_bridge_closed do
       {:reply, {:error, :session_terminal}, runtime}
     else
+      # `provider_session_id` is the whole snapshot the bridge acts on: it names the live
+      # native transport the child runs on. `principal_id` is what the effect ledger and
+      # the permission engine see.
       {:reply,
        {:ok,
         %{
-          request: State.request(session),
-          provider: session.provider,
           provider_session_id: session.provider_session_id,
           principal_id: session.harness_session_id || session.id
         }}, runtime}
@@ -191,12 +217,20 @@ defmodule Ouroboros.Interactive.Task do
     {:reply, :ok, drop_subscriber(runtime, subscriber)}
   end
 
+  def handle_call({:send_turn, _mode, _id, _input, _opts}, _from, runtime)
+      when runtime.session.provider != :native,
+      do: {:reply, {:error, State.provider_removed_error(runtime.session.provider)}, runtime}
+
   def handle_call({:send_turn, mode, id, input, opts}, _from, runtime) do
     case Turns.dispatch_turn(runtime, mode, id, input, opts) do
       {:ok, turn, runtime} -> {:reply, {:ok, State.public_turn(turn)}, runtime}
       {:error, reason, runtime} -> {:reply, {:error, reason}, runtime}
     end
   end
+
+  def handle_call({:retry_turn, _source_id}, _from, runtime)
+      when runtime.session.provider != :native,
+      do: {:reply, {:error, State.provider_removed_error(runtime.session.provider)}, runtime}
 
   def handle_call({:retry_turn, source_id}, _from, runtime) do
     case Turns.retry_turn(runtime, source_id) do
@@ -218,6 +252,10 @@ defmodule Ouroboros.Interactive.Task do
 
   def handle_call({:await_turn, _request_ref, _turn_id}, _from, runtime),
     do: {:reply, {:error, :not_found}, runtime}
+
+  def handle_call({:steer, _input, _opts}, _from, runtime)
+      when runtime.session.provider != :native,
+      do: {:reply, {:error, State.provider_removed_error(runtime.session.provider)}, runtime}
 
   def handle_call({:steer, input, opts}, _from, runtime) do
     case authorize_steer_attachments(input, opts, runtime) do
@@ -244,11 +282,11 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
-  # C2. An approval this runtime was asked for by something that is not the Harness — the
-  # `ouro mcp-serve` bridge answering Claude's `--permission-prompt-tool`, today the only
-  # caller. The coordinator mints the request id, so the same `respond_approval` verb, the
-  # same modal, and the same durable `approval_requested`/`approval_resolved` pair serve a
-  # managed transport that has no approvals channel of its own.
+  # An approval this runtime was asked for by something that is not this session's own
+  # transport — a native subagent's question relayed to the parent that owns the modal.
+  # The coordinator mints the request id, so the same `respond_approval` verb, the same
+  # modal, and the same durable `approval_requested`/`approval_resolved` pair serve a
+  # question raised inside a child session.
   #
   # Every path here ends in an answer, and none of them allows by omission: a full table,
   # a terminal session, a refused checkpoint, and a deadline all deny, and each says why.
@@ -289,6 +327,10 @@ defmodule Ouroboros.Interactive.Task do
     {reply, runtime} = Approvals.respond_provider(runtime, request_id, response)
     {:reply, reply, runtime}
   end
+
+  def handle_call({:configure, _changes}, _from, runtime)
+      when runtime.session.provider != :native,
+      do: {:reply, {:error, State.provider_removed_error(runtime.session.provider)}, runtime}
 
   def handle_call({:configure, changes}, _from, runtime) do
     case configure_session(runtime, changes) do
@@ -372,6 +414,10 @@ defmodule Ouroboros.Interactive.Task do
   # C4. Two transports can fold a conversation now, and they fold different things.
   # `Provider.compact_capability/1` is the declaration both branches read, so a transport
   # gains compaction by declaring it rather than by being named here.
+  def handle_call({:compact, _focus}, _from, runtime)
+      when runtime.session.provider != :native,
+      do: {:reply, {:error, State.provider_removed_error(runtime.session.provider)}, runtime}
+
   def handle_call({:compact, focus}, _from, runtime) do
     {:reply, compact(runtime, focus), runtime}
   end
@@ -404,6 +450,10 @@ defmodule Ouroboros.Interactive.Task do
   # packet and names the child, and `Ouroboros.InteractiveSession.handoff/3` starts the
   # child outside this process so a parent is never blocked behind provider readiness it
   # does not own.
+  def handle_call({:handoff_plan, _prompt, _id}, _from, runtime)
+      when runtime.session.provider != :native,
+      do: {:reply, {:error, State.provider_removed_error(runtime.session.provider)}, runtime}
+
   def handle_call({:handoff_plan, prompt, id}, _from, runtime) do
     {:reply, handoff_plan(runtime, prompt, id), runtime}
   end
@@ -414,6 +464,10 @@ defmodule Ouroboros.Interactive.Task do
   # until a child it does not own had finished starting or hit the readiness deadline. So
   # this answers with the child's start intent and nothing else, and
   # `Ouroboros.InteractiveSession.fork/2` starts the child outside this process.
+  def handle_call({:fork_plan, _id}, _from, runtime)
+      when runtime.session.provider != :native,
+      do: {:reply, {:error, State.provider_removed_error(runtime.session.provider)}, runtime}
+
   def handle_call({:fork_plan, id}, _from, runtime) do
     {:reply, fork_plan(runtime.session, id, %{}), runtime}
   end
@@ -422,6 +476,10 @@ defmodule Ouroboros.Interactive.Task do
   # clauses stay: a fork is planned by calling into the *parent's* coordinator, which on a
   # fleet may be an older build on another node, and a call it cannot match would kill the
   # parent rather than refuse the child.
+  def handle_call({:fork_plan, _id, _overrides}, _from, runtime)
+      when runtime.session.provider != :native,
+      do: {:reply, {:error, State.provider_removed_error(runtime.session.provider)}, runtime}
+
   def handle_call({:fork_plan, id, overrides}, _from, runtime) do
     {:reply, fork_plan(runtime.session, id, overrides), runtime}
   end
@@ -449,6 +507,10 @@ defmodule Ouroboros.Interactive.Task do
   # A rename touches nothing but the durable record: no provider knows this session by a
   # name, and a terminal session is still worth finding in a picker, so unlike `configure`
   # this is allowed after the conversation has ended.
+  def handle_call({:rename, _title}, _from, runtime)
+      when runtime.session.provider != :native,
+      do: {:reply, {:error, State.provider_removed_error(runtime.session.provider)}, runtime}
+
   def handle_call({:rename, title}, _from, runtime) do
     with {:ok, title} <- State.validate_title(title),
          renamed = runtime.session |> State.put_title(title, :human) |> State.touch(),
@@ -462,6 +524,10 @@ defmodule Ouroboros.Interactive.Task do
         {:reply, {:error, {:rename_checkpoint_failed, :storage_error}}, runtime}
     end
   end
+
+  def handle_call({:interrupt, _turn_id}, _from, runtime)
+      when runtime.session.provider != :native,
+      do: {:reply, {:error, State.provider_removed_error(runtime.session.provider)}, runtime}
 
   def handle_call({:interrupt, turn_id}, _from, runtime) do
     reply =
@@ -479,6 +545,18 @@ defmodule Ouroboros.Interactive.Task do
   def handle_call(:close, _from, %{session: session} = runtime)
       when session.status in [:closed, :cancelled] do
     {:reply, :ok, runtime}
+  end
+
+  # A removed-provider record has no transport to close and no poll to run: ending it is a
+  # durable state change and nothing more. It transitions to `:closed` — the terminal
+  # closed state, not `:failed`, because the operator asked to end it and this build never
+  # ran it — so `delete` then works by the operator's explicit choice, and the coordinator
+  # retires. `close` and `kill` do the same thing here; there is no live process for
+  # `kill` to be more forceful about.
+  def handle_call(action, _from, %{session: session} = runtime)
+      when action in [:close, :kill] and session.provider != :native and
+             session.status not in [:closed, :cancelled] do
+    {:reply, :ok, close_removed_provider(runtime)}
   end
 
   # A session the caller asked to end is not a session the runtime lost, so the Harness
@@ -743,7 +821,7 @@ defmodule Ouroboros.Interactive.Task do
     case State.unrequestable_reason(session) do
       nil ->
         case safe_session_call(fn ->
-               ReasoningEffort.start_session(session.provider, State.request(session))
+               ReasoningEffort.start_session(State.request(session))
              end) do
           {:ok, id} -> Resume.adopt(runtime, id)
           {:error, reason} -> fail_start(runtime, reason)
@@ -756,6 +834,15 @@ defmodule Ouroboros.Interactive.Task do
 
   defp poll(%{session: session} = runtime)
        when session.status in [:closed, :failed, :cancelled, :lost],
+       do: runtime
+
+  # A record whose provider this build lost never enters the poll path. Left to
+  # `attach_or_start/1` below it, `start_harness_session/1` would answer
+  # `{:legacy_transport_unavailable, provider}` and `fail_start/2` would checkpoint it
+  # `:failed`. The mutating verbs are already refused before they can schedule a poll; this
+  # is the brace on the other side, so no stray zero-delay poll can fail the record.
+  defp poll(%{session: %State{provider: provider}} = runtime)
+       when is_atom(provider) and not is_nil(provider) and provider != :native,
        do: runtime
 
   defp poll(%{session: %State{harness_session_id: nil}} = runtime), do: attach_or_start(runtime)
@@ -1223,8 +1310,6 @@ defmodule Ouroboros.Interactive.Task do
         turn = Map.fetch!(runtime.session.turns, turn_id)
 
         with {:ok, request} <- ReasoningEffort.turn_request(turn.request),
-             request =
-               Provider.apply_runtime_provider_policy(request, runtime.session.provider),
              {:ok, request} <-
                Turns.authorize_turn_attachments(request, runtime.session.workspace) do
           case checkpoint_recovered_turn_request(runtime, turn, request) do
@@ -1470,6 +1555,25 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
+  # `close`/`kill` on a removed-provider record. It never held a lease or a transport, so
+  # there is nothing to release or ask; the only work is to write the terminal transition.
+  # `:closed` is storable because it is terminal (`State.storable?/1`), so `persist/3`
+  # accepts it and never reaches `abandon/2` — the refused-checkpoint path that would have
+  # failed it. `error` is cleared: the record's ending is the operator's `close`, not a
+  # fault.
+  defp close_removed_provider(runtime) do
+    closed =
+      runtime.session
+      |> Map.put(:status, :closed)
+      |> Map.put(:error, nil)
+      |> State.touch()
+
+    case persist(runtime, closed, []) do
+      {:ok, runtime} -> runtime |> reply_ready_waiters() |> schedule_retire()
+      {:error, runtime} -> runtime |> reply_ready_waiters() |> schedule_retire()
+    end
+  end
+
   # Mid-session configuration, in the order that keeps the two records honest.
   #
   # The provider is told first. `Jido.Harness.Session.configure/2` is a synchronous call
@@ -1486,31 +1590,28 @@ defmodule Ouroboros.Interactive.Task do
     if State.terminal?(session) do
       {:error, {:session_not_configurable, session.status}, runtime}
     else
-      # B2/C4. `plan` and `mode` are not Harness configuration fields: each mutates a
-      # different live surface. One call may target exactly one surface, because no
-      # transaction spans the native session, an agent's own mode, and Harness
-      # configuration. Refusing a mixed request before the first mutation is the only
-      # outcome in which an error can still mean "nothing changed".
+      # B2. `plan` is not a Harness configuration field: it mutates a different live
+      # surface. One call may target exactly one surface, because no transaction spans the
+      # native session's plan posture and Harness configuration. Refusing a mixed request
+      # before the first mutation is the only outcome in which an error can still mean
+      # "nothing changed".
       {plan, rest} = Map.pop(changes, :plan)
-      {mode, rest} = Map.pop(rest, :mode)
 
-      with :ok <- one_configuration_surface(plan, mode, rest),
-           {:ok, rest, applies} <- configuration_changes(session, rest, plan, mode),
+      with :ok <- one_configuration_surface(plan, rest),
+           {:ok, rest, applies} <- configuration_changes(rest, plan),
            :ok <- apply_plan(runtime, plan),
-           :ok <- apply_mode(runtime, mode),
            :ok <- apply_rest(runtime, rest) do
-        record_configuration(runtime, plan_changes(rest, plan, mode), applies)
+        record_configuration(runtime, plan_changes(rest, plan), applies)
       else
         {:error, reason} -> {:error, reason, runtime}
       end
     end
   end
 
-  defp one_configuration_surface(plan, mode, rest) do
+  defp one_configuration_surface(plan, rest) do
     surfaces =
       []
       |> then(fn surfaces -> if is_nil(plan), do: surfaces, else: [:plan | surfaces] end)
-      |> then(fn surfaces -> if is_nil(mode), do: surfaces, else: [:mode | surfaces] end)
       |> then(fn surfaces -> if rest == %{}, do: surfaces, else: [:session | surfaces] end)
 
     if length(surfaces) <= 1 do
@@ -1522,82 +1623,39 @@ defmodule Ouroboros.Interactive.Task do
           reason: :mixed_surfaces,
           surfaces: Enum.sort(surfaces),
           message:
-            "plan, agent mode, and session options change different live surfaces; " <>
-              "configure one surface per call so a refusal cannot leave a partial change"
+            "plan and session options change different live surfaces; configure one " <>
+              "surface per call so a refusal cannot leave a partial change"
         }}}
     end
   end
 
-  # A change that is only `plan` or only `mode` has nothing for the provider to validate;
-  # a change that is nothing at all is still refused there, as it always was.
-  defp configuration_changes(_session, rest, planning?, mode)
-       when rest == %{} and (is_boolean(planning?) or is_binary(mode)),
-       do: {:ok, %{}, :now}
+  # A change that is only `plan` has nothing for the provider to validate; a change that is
+  # nothing at all is still refused there, as it always was.
+  defp configuration_changes(rest, planning?) when rest == %{} and is_boolean(planning?),
+    do: {:ok, %{}, :now}
 
-  defp configuration_changes(session, rest, _planning?, _mode),
-    do:
-      Provider.session_configuration(session.provider, rest, Map.get(session.options, :transport))
+  defp configuration_changes(rest, _planning?), do: Provider.session_configuration(rest)
 
   defp apply_rest(_runtime, rest) when rest == %{}, do: :ok
   defp apply_rest(runtime, rest), do: apply_configuration(runtime, rest)
 
-  defp plan_changes(rest, plan, mode) do
-    rest
-    |> then(fn changes -> if is_nil(plan), do: changes, else: Map.put(changes, :plan, plan) end)
-    |> then(fn changes -> if is_nil(mode), do: changes, else: Map.put(changes, :mode, mode) end)
-  end
-
-  # C4. The agent's own mode id, forwarded as `session/set_mode` and validated by the
-  # dialect against what the agent announced. Not written into the session's durable
-  # options: a mode belongs to the live agent process, and a resumed session starts a new
-  # one in that agent's own default. The `configured` event still records the change, so
-  # the transcript says what was asked for even though nothing claims it survives.
-  defp apply_mode(_runtime, nil), do: :ok
-
-  defp apply_mode(%{session: session} = runtime, mode) when is_binary(mode) do
-    case Provider.session_mode(session.provider, Map.get(session.options, :transport)) do
-      {:ok, _support} ->
-        with_harness_session(runtime, fn harness_session_id ->
-          case ProviderSession.ask(harness_session_id, :set_mode, %{mode: mode}) do
-            {:ok, _answer} -> :ok
-            {:error, reason} -> {:error, {:configure_refused, durable(reason)}}
-          end
-        end)
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+  defp plan_changes(rest, plan) do
+    if is_nil(plan), do: rest, else: Map.put(rest, :plan, plan)
   end
 
   defp apply_plan(_runtime, nil), do: :ok
 
+  # B2. The native session reaches its plan posture through a live process call, so a
+  # change takes hold now and survives a resume. A start may also ask with
+  # `provider_options: %{plan: true}`.
   defp apply_plan(%{session: session}, planning?) when is_boolean(planning?) do
-    case Provider.plan_mode(session.provider, Map.get(session.options, :transport)) do
-      {:ok, %{settable: :any_time}} ->
-        with {:ok, pid} <- native_transport(session, :plan) do
-          case safe_session_call(fn -> NativeSession.plan_mode(pid, planning?) end) do
-            :ok -> :ok
-            {:ok, _state} -> :ok
-            {:error, reason} -> {:error, {:configure_refused, durable(reason)}}
-            other -> {:error, {:configure_refused, durable(other)}}
-          end
-        end
-
-      {:ok, %{settable: :at_start, via: via}} ->
-        {:error,
-         {:unsupported_configuration,
-          %{
-            provider: session.provider,
-            field: :plan,
-            reason: :at_start_only,
-            message:
-              "#{session.provider} can only be told to plan when the session starts " <>
-                "(it carries the posture as #{via} on every launch); start a new session " <>
-                "with `plan: true` instead."
-          }}}
-
-      {:error, reason} ->
-        {:error, reason}
+    with {:ok, pid} <- native_transport(session, :plan) do
+      case safe_session_call(fn -> NativeSession.plan_mode(pid, planning?) end) do
+        :ok -> :ok
+        {:ok, _state} -> :ok
+        {:error, reason} -> {:error, {:configure_refused, durable(reason)}}
+        other -> {:error, {:configure_refused, durable(other)}}
+      end
     end
   end
 
@@ -1660,8 +1718,8 @@ defmodule Ouroboros.Interactive.Task do
 
   # Branching a session is starting a new one, and the only thing that makes it a fork is
   # what its start request carries: the parent's `provider_session_id` plus the option the
-  # transport spells "branch this" (`--fork-session` for Claude, `thread/fork` for the
-  # Codex app server). Everything else about the child is the parent's own start intent.
+  # native transport spells "branch this". Everything else about the child is the parent's
+  # own start intent.
   #
   # The parent is untouched. No turn is sent, nothing is interrupted, and the only thing
   # ever written to it is a count of the branches it has started.
@@ -1678,95 +1736,38 @@ defmodule Ouroboros.Interactive.Task do
     with {:ok, id} <- validate_fork_id(id),
          {:ok, parent_session_id} <- forkable_provider_session(session),
          {:ok, fork_options} <-
-           Provider.session_fork_options(
-             session.provider,
-             Map.get(session.options, :transport),
-             Map.get(overrides, :to_turn)
-           ) do
+           Provider.session_fork_options(Map.get(overrides, :to_turn)) do
       {:ok, fork_start_options(session, id, parent_session_id, fork_options, overrides)}
     end
   end
 
   # ---------------------------------------------------------------- context (D9)
 
-  # The transport a session actually reaches its provider over, asked of the provider spec
-  # rather than read off the stored option: a session that named none still runs on the
-  # provider's default, and refusing it by a `nil` transport would name the wrong thing.
-  defp session_transport(%State{} = session) do
-    case Provider.session_capabilities(session.provider, Map.get(session.options, :transport)) do
-      %{transport: transport} -> transport
-      _unresolvable -> Map.get(session.options, :transport)
-    end
-  end
-
-  # Two refusals, and they say different things. `unsupported_on_transport` is a
-  # capability answer — this verb does not exist on this wire, and no amount of waiting
-  # changes that. `native_transport_unavailable` is a liveness answer — the verb exists,
-  # the session has not opened its transport yet or it has gone away, and retrying is
-  # sensible.
+  # There is one transport, and it is a process this runtime supervises, so the only thing
+  # left to answer is liveness: `native_transport_unavailable` means the verb exists, the
+  # session has not opened its transport yet or it has gone away, and retrying is sensible.
   defp native_transport(%State{} = session, verb) do
-    case session_transport(session) do
-      :native ->
-        case NativeSession.whereis(session.provider_session_id || "") do
-          pid when is_pid(pid) ->
-            {:ok, pid}
+    case NativeSession.whereis(session.provider_session_id || "") do
+      pid when is_pid(pid) ->
+        {:ok, pid}
 
-          nil ->
-            {:error,
-             {:native_transport_unavailable,
-              %{
-                verb: verb,
-                reason:
-                  if(session.provider_session_id, do: :no_live_transport, else: :not_started),
-                message:
-                  "this session has no live native transport to ask; send a turn first, " <>
-                    "or reopen the session."
-              }}}
-        end
-
-      transport ->
+      nil ->
         {:error,
-         {:unsupported_on_transport,
+         {:native_transport_unavailable,
           %{
-            transport: transport,
             verb: verb,
-            provider: session.provider,
+            reason: if(session.provider_session_id, do: :no_live_transport, else: :not_started),
             message:
-              "#{inspect(session.provider)} reaches this session over the " <>
-                "#{inspect(transport)} transport, which does not hand its conversation to " <>
-                "this runtime. Only a `native` session can #{verb}."
+              "this session has no live native transport to ask; send a turn first, " <>
+                "or reopen the session."
           }}}
     end
   end
 
   defp replay_plan(%State{} = session) do
-    with :ok <- native_record(session),
-         {:ok, provider_session_id} <- recorded_session(session),
+    with {:ok, provider_session_id} <- recorded_session(session),
          {:ok, session_dir, _durable?} <- Paths.session_dir(provider_session_id) do
       {:ok, {session_dir, replay_options(session, provider_session_id)}}
-    end
-  end
-
-  # The same capability answer `native_transport/2` gives, minus the liveness half: a vendor
-  # session has no journal to verify and never will, and saying so is a different fact from
-  # "this native session is not running right now".
-  defp native_record(%State{} = session) do
-    case session_transport(session) do
-      :native ->
-        :ok
-
-      transport ->
-        {:error,
-         {:unsupported_on_transport,
-          %{
-            transport: transport,
-            verb: :replay_verify,
-            provider: session.provider,
-            message:
-              "#{inspect(session.provider)} reaches this session over the " <>
-                "#{inspect(transport)} transport, which keeps no turn journal on this " <>
-                "runtime. Only a `native` session can be replay-verified."
-          }}}
     end
   end
 
@@ -1797,17 +1798,10 @@ defmodule Ouroboros.Interactive.Task do
     ]
   end
 
-  defp compact(%{session: session} = runtime, focus) do
-    case Provider.session_compact(session.provider, Map.get(session.options, :transport)) do
-      :native ->
-        with {:ok, pid} <- native_transport(session, :compact), do: compact_native(pid, focus)
-
-      :provider ->
-        compact_provider(runtime, focus)
-
-      false ->
-        {:error, uncompactable(session)}
-    end
+  # This runtime holds the conversation it folds, which is what lets the report carry real
+  # token counts rather than a summary invented for a transcript it never had.
+  defp compact(%{session: session}, focus) do
+    with {:ok, pid} <- native_transport(session, :compact), do: compact_native(pid, focus)
   end
 
   defp compact_native(pid, focus) do
@@ -1818,47 +1812,16 @@ defmodule Ouroboros.Interactive.Task do
     end
   end
 
-  # The provider folds its own thread. A `focus` is refused by the dialect rather than
-  # dropped, and that refusal travels out untouched: `unsupported_on_transport` with
-  # `reason: focus_not_supported` is a capability answer a client can render, where
-  # `compaction_refused` would look like something worth retrying.
-  defp compact_provider(runtime, focus) do
-    with_harness_session(runtime, fn harness_session_id ->
-      case ProviderSession.ask(harness_session_id, :compact, %{focus: focus}, @compaction_wait) do
-        {:ok, report} when is_map(report) -> {:ok, durable(report)}
-        {:error, {:unsupported_on_transport, _details} = reason} -> {:error, durable(reason)}
-        {:error, reason} -> {:error, {:compaction_refused, durable(reason)}}
-        other -> {:error, {:compaction_refused, durable(other)}}
-      end
-    end)
-  end
-
-  defp uncompactable(%State{} = session) do
-    transport = session_transport(session)
-
-    {:unsupported_on_transport,
-     %{
-       transport: transport,
-       verb: :compact,
-       provider: session.provider,
-       message:
-         "#{inspect(session.provider)} reaches this session over the " <>
-           "#{inspect(transport)} transport, which neither hands its conversation to this " <>
-           "runtime nor offers a fold of its own. Only a `native` session or a Codex " <>
-           "app-server thread can compact."
-     }}
-  end
-
-  # Never a guess. A native session answers with the facts it holds; every other transport
-  # answers with the two numbers its `usage` events carried and says so in `source`, so a
-  # footer can tell "this provider never reported a window" from "the window is zero".
+  # Never a guess. A native session answers with the facts it holds; a session with no
+  # live transport answers with the two numbers its `usage` events carried and says so in
+  # `source`, so a footer can tell "nothing reported a window" from "the window is zero".
   defp session_context(%State{} = session) do
     usage = Map.get(session, :usage) || %{}
 
     base = %{
       session_id: session.id,
       provider: session.provider,
-      transport: session_transport(session),
+      transport: :native,
       model: Map.get(session.options, :model),
       provider_session_id: session.provider_session_id,
       context_window: Map.get(usage, :context_window),
@@ -2411,6 +2374,22 @@ defmodule Ouroboros.Interactive.Task do
 
   def reply_all_terminal_turn_waiters(runtime) do
     Enum.reduce(Map.keys(runtime.session.turns), runtime, &reply_turn_waiters(&2, &1))
+  end
+
+  # The same waiters `reply_ready_waiters/1` answers, told exactly why rather than handed
+  # `{:session_start_failed, nil}` for a session that was never going to start.
+  def refuse_ready_waiters(%{ready_timer: timer} = runtime, reason) when is_reference(timer) do
+    Process.cancel_timer(timer)
+    refuse_ready_waiters(%{runtime | ready_timer: nil}, reason)
+  end
+
+  def refuse_ready_waiters(runtime, reason) do
+    Enum.each(runtime.ready_waiters, fn {from, monitor} ->
+      Process.demonitor(monitor, [:flush])
+      GenServer.reply(from, {:error, reason})
+    end)
+
+    %{runtime | ready_waiters: []}
   end
 
   def reply_ready_waiters(%{ready_timer: timer} = runtime) when is_reference(timer) do

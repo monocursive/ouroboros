@@ -2167,10 +2167,6 @@ pub enum StartError {
     /// without one makes a timeout indistinguishable from permission to bill a second
     /// provider session.
     NoId,
-    /// The gateway would accept a start with no provider and let the node's default
-    /// decide. This client will not: a terminal that silently picked a provider would be
-    /// choosing which vendor runs the operator's code.
-    NoProvider,
     /// A remote runtime must never inherit the packaged release's working directory.
     NoRemoteWorkspace,
     /// Relative paths are relative to the destination runtime, not this terminal.
@@ -2185,9 +2181,6 @@ impl StartError {
             Self::NoId => {
                 "the client did not assign this start a retry-safe session id".to_string()
             }
-            Self::NoProvider => "choose a provider: this client will not let the node pick \
-                                 which vendor runs your code"
-                .to_string(),
             Self::NoRemoteWorkspace => "choose an absolute workspace path on the destination \
                                         machine; remote sessions never guess from this terminal"
                 .to_string(),
@@ -2232,7 +2225,6 @@ impl StartError {
 pub struct StartRequest {
     pub id: String,
     pub plane: Plane,
-    pub provider: String,
     pub model: Option<String>,
     /// A friendly fleet machine name. Blank means this machine, which is the safe and
     /// backwards-compatible default.
@@ -2263,7 +2255,6 @@ impl StartRequest {
         Self {
             id: new_session_id(),
             plane,
-            provider: String::new(),
             model: None,
             machine: String::new(),
             workspace: String::new(),
@@ -2287,15 +2278,8 @@ impl StartRequest {
             return Err(StartError::NoId);
         }
 
-        let provider = self.provider.trim();
-
-        if provider.is_empty() {
-            return Err(StartError::NoProvider);
-        }
-
         let mut params = serde_json::Map::new();
         params.insert("id".into(), Value::String(id.to_string()));
-        params.insert("provider".into(), Value::String(provider.to_string()));
 
         if let Some(model) = self
             .model
@@ -4191,7 +4175,7 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "session-0000000000000000000001");
         assert_eq!(sessions[0].status, SessionStatus::Idle);
-        assert_eq!(sessions[0].provider.as_deref(), Some("claude_code"));
+        assert_eq!(sessions[0].provider.as_deref(), Some("native"));
         assert_eq!(
             sessions[0].triage(0),
             Triage::Done,
@@ -4585,10 +4569,8 @@ mod tests {
                 "event_session_started",
                 "event_status_resumed",
                 "event_thinking_delta",
-                "event_tool_call_acp_edit",
                 "event_tool_call_bash",
                 "event_tool_call_read",
-                "event_tool_result_acp_edit",
                 "event_tool_result_bash",
                 "event_tool_result_read",
                 "event_turn_completed",
@@ -5764,15 +5746,15 @@ mod tests {
     fn provider_entries_separate_a_failed_probe_from_a_missing_provider() {
         let providers = ProviderEntry::decode_list(&serde_json::json!([
             {
-                "provider": "claude_code",
-                "spec": { "provider": "claude_code" },
+                "provider": "native",
+                "spec": { "provider": "native" },
                 "status": {
                     "installed": true, "compatible": true, "authenticated": "unknown",
-                    "smoke_ready": false, "version": "1.2.3", "executable": "/usr/bin/claude"
+                    "smoke_ready": false, "version": "1.2.3", "executable": "/usr/bin/ouro"
                 },
                 "error": null
             },
-            { "provider": "codex", "spec": {}, "status": null, "error": "probe_timeout" }
+            { "provider": "native", "spec": {}, "status": null, "error": "probe_timeout" }
         ]));
 
         assert_eq!(providers.len(), 2);
@@ -5948,7 +5930,6 @@ mod tests {
     #[test]
     fn a_start_sends_only_options_the_gateway_allowlists() {
         let mut request = StartRequest::new(Plane::Interactive);
-        request.provider = "claude_code".into();
         request.workspace = "/work".into();
         request.approval_mode = Some(ApprovalMode::Prompt);
 
@@ -5956,12 +5937,15 @@ mod tests {
         let fields = params.as_object().expect("an object");
 
         assert_eq!(fields["id"], request.id);
-        assert_eq!(fields["provider"], "claude_code");
         assert_eq!(fields["workspace"], "/work");
         assert_eq!(fields["approval_mode"], "prompt");
+        assert!(
+            !fields.contains_key("provider"),
+            "`provider` is no longer a start option and sending it is -32602: {fields:?}"
+        );
         assert_eq!(
             fields.len(),
-            4,
+            3,
             "an option outside @start_options is -32602 naming it, so none is invented: \
              {fields:?}"
         );
@@ -5976,13 +5960,12 @@ mod tests {
             .clone();
         assert_eq!(fields["sandbox_mode"], "read_only");
         assert_eq!(fields["reasoning_effort"], "high");
-        assert_eq!(fields.len(), 6);
+        assert_eq!(fields.len(), 5);
     }
 
     #[test]
     fn an_unanswered_field_is_omitted_rather_than_sent_empty() {
         let mut request = StartRequest::new(Plane::Interactive);
-        request.provider = "codex".into();
 
         let params = request.params().expect("a valid start");
         let fields = params.as_object().expect("an object");
@@ -5994,7 +5977,7 @@ mod tests {
         assert!(!fields.contains_key("sandbox_mode"));
         assert!(!fields.contains_key("reasoning_effort"));
         assert_eq!(fields["id"], request.id);
-        assert_eq!(fields.len(), 2);
+        assert_eq!(fields.len(), 1);
 
         // Whitespace is not an answer either.
         request.workspace = "   ".into();
@@ -6007,14 +5990,6 @@ mod tests {
     }
 
     #[test]
-    fn a_start_without_a_provider_is_refused_here_rather_than_guessed() {
-        let request = StartRequest::new(Plane::Interactive);
-
-        assert_eq!(request.params(), Err(StartError::NoProvider));
-        assert!(StartError::NoProvider.message().contains("which vendor"));
-    }
-
-    #[test]
     fn every_start_has_a_client_owned_retry_identity() {
         let request = StartRequest::new(Plane::Interactive);
 
@@ -6022,14 +5997,12 @@ mod tests {
 
         let mut invalid = request;
         invalid.id.clear();
-        invalid.provider = "codex".into();
         assert_eq!(invalid.params(), Err(StartError::NoId));
     }
 
     #[test]
     fn a_remote_start_requires_an_absolute_destination_workspace() {
         let mut request = StartRequest::new(Plane::Interactive);
-        request.provider = "codex".into();
         request.machine = "mini".into();
 
         assert_eq!(request.params(), Err(StartError::NoRemoteWorkspace));

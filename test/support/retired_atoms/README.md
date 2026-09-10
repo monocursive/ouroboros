@@ -10,6 +10,26 @@ and would then pass on a build where `Ouroboros.Storage.RetiredAtoms` had been e
 | `permissions/checkpoints/omYQ2mvz3V8r8vpf1v7f2IaCRF8lg1aZfFm1nbOQw5c.term` | `Ouroboros.Control.Permissions.checkpoint_key/0` | `ComputerUse(app:com.apple.Calculator)`, `ComputerUse(observe)`, `ComputerUse(act)` and one live `Bash(ls *)`, all user scope |
 | `effect-ledger/checkpoints/XnLGrSCV_IRERSfkSZWB7eyECHaDTDOgoorZOsi65Ug.term` | `Ouroboros.Agent.EffectLedger.checkpoint_key/0` | one settled `:tool_call` entry for `desktop_act`, subject `app` / `desktop_action` / `window_id` |
 
+Two more hold atoms slice C2 (native is the only provider) deleted, an
+`Ouroboros.Storage.Records` store and a single-file ledger checkpoint:
+
+| File | Store | Holds |
+|---|---|---|
+| `interactive/checkpoints/*.term` (index + one record) | `Ouroboros.Interactive.Store` | one session record `fixture-retired-claude` with `provider: :claude`, `options.transport: :acp`, `provider_options` keys `cli_path` / `betas` / `no_ide`, and `error: :provider_transport_unavailable` |
+| `effect-ledger-provider/checkpoints/XnLGrSCV_IRERSfkSZWB7eyECHaDTDOgoorZOsi65Ug.term` | `Ouroboros.Agent.EffectLedger.checkpoint_key/0` | one settled `:tool_call` entry whose `attempt.provider` is `:claude` |
+
+The C2 bytes were written by `scratchpad/rev/mkfixture_c2.exs` in a separate VM: the record
+is a valid `provider: :native` `Interactive.State.new/2` struct, then mutated to name the
+removed provider, transport, `provider_options` keys and ACP failure atom — **each created
+by `String.to_atom/1`** — and written through the real `Storage.Records` and `EffectLedger`
+paths. `interactive/` is a Records store, so it has an index file (`{:ouroboros,
+:interactive_sessions, 1}`, holding only `:version`/`:ids`) beside the one record; the
+`is exercised` test preloads the build (as the store does) before its raw `[:safe]` read so
+those structural keys are interned. Nine of the ten provider names, and every one of these
+atoms, is also spelled by `jido_harness` on a real boot, so **the fixture cannot fail a real
+node on them**; the bare-VM probe (removing `:claude` from `RetiredAtoms` and decoding in an
+`elixir -pa` VM) is the proof that the list, not luck, is what interns them.
+
 ## Provenance
 
 The terms are `765bd88`'s — the commit slice C5 was cut from, the last one whose code

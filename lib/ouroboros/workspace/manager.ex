@@ -325,13 +325,21 @@ defmodule Ouroboros.Workspace.Manager do
       with {:ok, interactive} <- safe_recovery_states(Ouroboros.Interactive.Store) do
         interactive
         |> Enum.flat_map(fn
+          # A record whose provider this build no longer serves reserves nothing: it will
+          # never take a lease (its coordinator holds it read-only), so minting a
+          # `recovery-…` reservation for it would hold its workspace root against every new
+          # session for the life of the node, with nothing to release it. `Interactive.Task`
+          # took and released the lease for such a record before C2; now that it does not,
+          # the reservation must not be minted either. See docs/proposals/core.md §3 D2.
           %Ouroboros.Interactive.State{} = session ->
-            if session.node == node() and not Ouroboros.Interactive.State.terminal?(session),
-              do: [
-                {:interactive, "interactive:" <> session.id, session.workspace,
-                 session.workspace_mode}
-              ],
-              else: []
+            if session.node == node() and
+                 not Ouroboros.Interactive.State.terminal?(session) and
+                 is_nil(Ouroboros.Interactive.State.removed_provider(session)),
+               do: [
+                 {:interactive, "interactive:" <> session.id, session.workspace,
+                  session.workspace_mode}
+               ],
+               else: []
 
           _other ->
             []

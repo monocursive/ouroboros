@@ -80,7 +80,7 @@ pub use overlays::{
 };
 pub use session::{Composer, ComposerVerb, QueuedDraft, SessionsTab, QUEUE_LIMIT};
 pub use settings::{Settings, SettingsField};
-pub use start::{provider_choices, NewField, NewSession, ProviderChoice};
+pub use start::{NewField, NewSession, DEFAULT_MODEL};
 
 /// The driver's tick. Pi and OpenCode animate the working spinner at ~80ms; poll
 /// cadences below are counted in these frames so wall-clock meaning stays put.
@@ -1516,8 +1516,10 @@ impl App {
             .unwrap_or(false)
     }
 
+    /// Whether the home model is one a ChatGPT subscription pays for, and so one that
+    /// cannot start until that account is connected.
     pub fn home_requires_chatgpt(&self) -> bool {
-        self.home_provider() == "native" && self.home_model().starts_with("openai_codex:")
+        self.home_model().starts_with("openai_codex:")
     }
 
     pub fn home_ready(&self) -> bool {
@@ -1525,16 +1527,12 @@ impl App {
             && (!self.home_requires_chatgpt() || self.codex_usable())
     }
 
-    pub fn home_provider(&self) -> &str {
-        self.config.defaults.provider.as_deref().unwrap_or("native")
-    }
-
     pub fn home_model(&self) -> &str {
         self.config
             .defaults
             .model
             .as_deref()
-            .unwrap_or("openai_codex:gpt-5.6-sol")
+            .unwrap_or(DEFAULT_MODEL)
     }
 
     pub fn home_workspace(&self) -> String {

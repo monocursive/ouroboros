@@ -502,7 +502,6 @@ defmodule Ouroboros.Web.Live.Cells do
         <li :for={step <- @cell.plan.steps} class={"ouro-step-#{step.status}"}>
           <span class="ouro-step-glyph" aria-hidden="true">{step_glyph(step.status)}</span>
           <span class="ouro-step-text">{step.text}</span>
-          <span :if={step.priority} class="ouro-quiet">{step.priority}</span>
         </li>
       </ol>
       <p :if={@cell.plan.step_count > length(@cell.plan.steps)} class="ouro-quiet">

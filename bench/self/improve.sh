@@ -1491,7 +1491,7 @@ if [ "$dry_run" != 1 ]; then
     printf 'those in your report rather than making it.\n'
   } >> "$impl_prompt"
 fi
-set -- --provider native --workspace "$wt"
+set -- --workspace "$wt"
 [ -n "$model" ] && set -- "$@" --model "$model"
 ouro_session implementer "$implementer_timeout" "$impl_prompt" "$@"
 impl_session=$session_id
@@ -1543,7 +1543,7 @@ if [ "$dry_run" != 1 ]; then
     fi
   } >> "$review_prompt"
 fi
-set -- --provider native --workspace "$wt"
+set -- --workspace "$wt"
 [ -n "$model" ] && set -- "$@" --model "$model"
 ouro_session reviewer "$reviewer_timeout" "$review_prompt" "$@"
 review_session=$session_id

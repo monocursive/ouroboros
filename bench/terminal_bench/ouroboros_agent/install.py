@@ -130,7 +130,6 @@ def run_command(
     return (
         f"OUROBOROS_DATA_DIR={shlex.quote(data_dir)} "
         f"{shlex.quote(ouro)} run {shlex.quote(instruction)}"
-        " --provider native"
         " --approve-all"
         " --stream-json"
         f" --workspace {shlex.quote(workspace)}"

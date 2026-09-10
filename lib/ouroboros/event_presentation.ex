@@ -94,12 +94,11 @@ defmodule Ouroboros.EventPresentation.PlanStep do
 
   alias Ouroboros.EventPresentation.PlanStatus
 
-  defstruct [:text, :priority, status: :pending]
+  defstruct [:text, status: :pending]
 
   @type t :: %__MODULE__{
           text: String.t(),
-          status: PlanStatus.t(),
-          priority: String.t() | nil
+          status: PlanStatus.t()
         }
 end
 
@@ -787,7 +786,7 @@ defmodule Ouroboros.EventPresentation do
         end
 
       :thinking_delta ->
-        case raw_text(payload, ["text", "thinking", "reasoning"]) do
+        case raw_text(payload, ["text"]) do
           nil ->
             %Hidden{reason: :empty_thinking}
 
@@ -797,18 +796,11 @@ defmodule Ouroboros.EventPresentation do
 
       :tool_call ->
         %ToolCall{
-          call_id: text(payload, ["call_id", "tool_call_id", "toolCallId", "id"]),
-          name:
-            text(payload, ["name", "tool_name", "toolName", "tool", "title", "kind"]) || "tool",
-          kind: text(payload, ["kind", "tool_kind", "toolKind"]),
+          call_id: text(payload, ["call_id", "tool_call_id", "id"]),
+          name: text(payload, ["name", "tool_name", "tool"]) || "tool",
+          kind: text(payload, ["kind"]),
           input:
-            case first_value(payload, [
-                   "input",
-                   "arguments",
-                   "parameters",
-                   "rawInput",
-                   "raw_input"
-                 ]) do
+            case first_value(payload, ["input", "arguments"]) do
               {:ok, value} -> bounded_value(value)
               :error -> %{}
             end,
@@ -817,11 +809,11 @@ defmodule Ouroboros.EventPresentation do
 
       :tool_result ->
         %ToolResult{
-          call_id: text(payload, ["call_id", "tool_call_id", "toolCallId", "id"]),
-          name: text(payload, ["name", "tool_name", "toolName", "tool", "title", "kind"]),
-          kind: text(payload, ["kind", "tool_kind", "toolKind"]),
+          call_id: text(payload, ["call_id", "tool_call_id", "id"]),
+          name: text(payload, ["name", "tool_name", "tool"]),
+          kind: text(payload, ["kind"]),
           output:
-            case first_value(payload, ["output", "result", "content", "rawOutput", "raw_output"]) do
+            case first_value(payload, ["output", "result", "content"]) do
               {:ok, value} -> bounded_value(value)
               :error -> nil
             end,
@@ -830,7 +822,7 @@ defmodule Ouroboros.EventPresentation do
         }
 
       :command_output_delta ->
-        case raw_text(payload, ["text", "output"]) do
+        case raw_text(payload, ["text"]) do
           nil -> %Hidden{reason: :empty_command_output}
           text -> %CommandOutput{text: text}
         end
@@ -988,10 +980,7 @@ defmodule Ouroboros.EventPresentation do
     end
   end
 
-  # The provider kind an escape-hatch event is reporting, so it is never invisible.
-  #
-  # ACP wraps every update it does not map in `{"kind": "acp_update", "update": …}`; the
-  # update's own `sessionUpdate` type is the informative half and is lifted out here.
+  # The kind an escape-hatch event is reporting, so it is never invisible.
   defp provider_note(payload) do
     # Three kinds this runtime writes itself and this surface draws in full. Matched
     # before the generic path because they are not "something the provider said that this
@@ -1015,28 +1004,17 @@ defmodule Ouroboros.EventPresentation do
     end
   end
 
+  # Empty when the payload named no kind at all: the cell says "provider event" once, and
+  # inventing a second copy of that phrase to sit in this field would only make it say it
+  # twice.
   defp generic_provider_note(payload) do
-    kind = text(payload, ["kind", "type", "item_type", "event", "name"])
-
-    nested =
-      case Map.fetch(payload, "update") do
-        {:ok, update} -> text(update, ["sessionUpdate", "session_update", "type"])
-        :error -> nil
-      end
-
-    # Empty when the provider named no kind at all: the cell says "provider event" once,
-    # and inventing a second copy of that phrase to sit in this field would only make it
-    # say it twice.
-    kind =
-      case {kind, nested} do
-        {nil, nil} -> ""
-        {kind, nil} -> kind
-        {nil, nested} -> nested
-        {kind, nested} -> "#{kind} · #{nested}"
-      end
-
     %ProviderNote{
-      kind: bounded_copy(kind, @text_bytes, @text_truncation),
+      kind:
+        bounded_copy(
+          text(payload, ["kind", "type", "event"]) || "",
+          @text_bytes,
+          @text_truncation
+        ),
       detail: optional_detail(payload) || ""
     }
   end
@@ -1045,14 +1023,14 @@ defmodule Ouroboros.EventPresentation do
     declared = array(payload, "tools")
 
     %RunStart{
-      model: text(payload, ["model", "model_id", "modelId"]),
-      cwd: text(payload, ["cwd", "workspace", "working_directory"]),
+      model: text(payload, ["model"]),
+      cwd: text(payload, ["cwd"]),
       tools:
         declared
         |> Enum.take(@run_tools)
         |> Enum.map(fn
           tool when is_binary(tool) -> nonempty(tool)
-          other -> text(other, ["name", "tool", "title"])
+          other -> text(other, ["name", "tool"])
         end)
         |> Enum.reject(&is_nil/1),
       tool_count: length(declared)
@@ -1061,18 +1039,12 @@ defmodule Ouroboros.EventPresentation do
 
   defp usage_report(payload) do
     %UsageReport{
-      input_tokens: number(payload, ["input_tokens", "inputTokens", "prompt_tokens"]),
-      output_tokens: number(payload, ["output_tokens", "outputTokens", "completion_tokens"]),
-      cached_tokens:
-        number(payload, [
-          "cache_read_input_tokens",
-          "cached_input_tokens",
-          "cachedInputTokens",
-          "cache_read_tokens"
-        ]),
-      total_tokens: number(payload, ["total_tokens", "totalTokens"]),
+      input_tokens: number(payload, ["input_tokens"]),
+      output_tokens: number(payload, ["output_tokens"]),
+      cached_tokens: number(payload, ["cache_read_tokens"]),
+      total_tokens: number(payload, ["total_tokens"]),
       cost_usd:
-        case first_value(payload, ["cost_usd", "total_cost_usd", "costUsd"]) do
+        case first_value(payload, ["cost_usd"]) do
           {:ok, value} -> as_float(value)
           :error -> nil
         end
@@ -1082,8 +1054,8 @@ defmodule Ouroboros.EventPresentation do
   @doc """
   Both plan shapes this runtime can deliver, read tolerantly.
 
-  Codex sends `{"explanation", "plan": [{"step", "status"}]}`; ACP forwards its `plan`
-  session update verbatim, whose entries are `{"content", "priority", "status"}`.
+  The shape is `{"explanation", "plan": [{"step", "status"}]}` — what the native plan tool
+  normalizes every step into (`Ouroboros.Provider.Native.Tools.Plan`).
 
   Public because a `plan_exit` approval's `payload.plan` is *the same `plan_updated`
   payload*, held back by the native session and attached to the question (B2). The
@@ -1094,13 +1066,13 @@ defmodule Ouroboros.EventPresentation do
   @spec plan_update(term()) :: PlanUpdate.t()
   def plan_update(payload) do
     entries =
-      case first_value(payload, ["plan", "entries", "steps", "todos", "tasks"]) do
+      case first_value(payload, ["plan"]) do
         {:ok, list} when is_list(list) -> list
         _otherwise -> []
       end
 
     %PlanUpdate{
-      explanation: text(payload, ["explanation", "summary", "description"]),
+      explanation: text(payload, ["explanation"]),
       steps:
         entries |> Enum.take(@plan_steps) |> Enum.map(&plan_step/1) |> Enum.reject(&is_nil/1),
       step_count: length(entries)
@@ -1110,27 +1082,19 @@ defmodule Ouroboros.EventPresentation do
   defp plan_step(value) when is_binary(value) do
     case nonempty(value) do
       nil -> nil
-      text -> %PlanStep{text: text, status: :pending, priority: nil}
+      text -> %PlanStep{text: text, status: :pending}
     end
   end
 
   defp plan_step(value) when is_map(value) do
-    body =
-      text(value, ["step", "content", "text", "title", "description", "name"]) ||
-        case Map.fetch(value, "content") do
-          {:ok, content} -> leaf_text(content)
-          :error -> nil
-        end
-
-    case body do
+    case text(value, ["step"]) do
       nil ->
         nil
 
       body ->
         %PlanStep{
           text: body,
-          status: PlanStatus.parse(trimmed_string_value(value, ["status", "state"])),
-          priority: text(value, ["priority"])
+          status: PlanStatus.parse(trimmed_string_value(value, ["status"]))
         }
     end
   end
@@ -1171,7 +1135,7 @@ defmodule Ouroboros.EventPresentation do
   # only the prefix — so it is marked truncated, which is what makes the cell say
   # "in excerpt" beside the numbers instead of asserting a diffstat it cannot know.
   defp diff_field(payload) do
-    case first_value(payload, ["diff", "patch", "delta"]) do
+    case first_value(payload, ["diff"]) do
       :error ->
         nil
 
@@ -1198,8 +1162,8 @@ defmodule Ouroboros.EventPresentation do
   end
 
   defp file_change(value) when is_map(value) do
-    path = text(value, ["path", "file", "name", "file_path"])
-    kind = text(value, ["kind", "action", "change_type", "type", "status"])
+    path = text(value, ["path", "relative_path"])
+    kind = text(value, ["kind", "status"])
     diff = diff_field(value)
 
     if is_nil(path) and is_nil(kind) and is_nil(diff) do
@@ -1449,15 +1413,7 @@ defmodule Ouroboros.EventPresentation do
   # Payload readers
   # ------------------------------------------------------------------------------------
 
-  defp error_result?(payload) do
-    case Map.get(payload, "is_error") do
-      value when is_boolean(value) ->
-        value
-
-      _otherwise ->
-        text(payload, ["status"]) in ["error", "failed", "declined"]
-    end
-  end
+  defp error_result?(payload), do: Map.get(payload, "is_error") == true
 
   defp detail(payload) do
     text(payload, ["error", "reason", "message", "text"]) || bounded_compact(payload)

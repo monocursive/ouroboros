@@ -59,7 +59,7 @@ fn interactive_rows() -> Value {
             "_struct": "Ouroboros.Interactive.State",
             "id": "session-working",
             "status": "running",
-            "provider": "codex",
+            "provider": "native",
             "node": "ouroboros@alpha",
             "workspace": "/w/one",
             "title": "Porting the auth module",
@@ -69,7 +69,7 @@ fn interactive_rows() -> Value {
             "_struct": "Ouroboros.Interactive.State",
             "id": "session-done",
             "status": "completed",
-            "provider": "codex",
+            "provider": "native",
             "node": "ouroboros@alpha",
             "workspace": "/w/one",
             "title": "Yesterday's fix",
@@ -79,7 +79,7 @@ fn interactive_rows() -> Value {
             "_struct": "Ouroboros.Interactive.State",
             "id": "session-offline",
             "status": "running",
-            "provider": "codex",
+            "provider": "native",
             "node": "ouroboros@gamma",
             "workspace": "/w/three",
             "title": "On a machine nobody can reach",
@@ -160,7 +160,7 @@ fn an_approval_this_client_is_holding_moves_its_row_into_needs_input() {
             "timestamp": "2026-01-01T00:00:00.000000Z",
             "payload": {"tool": "write", "command": "write lib/a.ex"},
             "request_id": "req-1",
-            "provider": "codex"
+            "provider": "native"
         }]),
     );
     app.apply(Msg::Tick);
@@ -261,7 +261,7 @@ fn the_rail_draws_the_groups_in_order_with_their_counts() {
 
     // The node each row is on, because the rail lists every machine's sessions — and
     // dropped whole rather than clipped where a card is too narrow to hold it.
-    assert!(text.contains("RUNNING · codex · alpha"), "{text}");
+    assert!(text.contains("RUNNING · native · alpha"), "{text}");
 }
 
 #[test]
@@ -300,7 +300,7 @@ fn space_peeks_the_last_agent_message_and_r_replies_on_that_session() {
             "timestamp": "2026-01-01T00:00:00.000000Z",
             "payload": {"text": "I have finished the first half and need a decision."},
             "turn_id": "turn-1",
-            "provider": "codex"
+            "provider": "native"
         }]),
     );
     app.apply(Msg::Tick);

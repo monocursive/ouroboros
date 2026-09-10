@@ -138,7 +138,7 @@ defmodule Ouroboros.Control.PermissionsTest do
       assert {:allow, %{scope: :session, pattern: "Bash(ls *)", id: rule_id}} =
                Permissions.evaluate(
                  %{
-                   principal: %{session_id: session, provider: :codex, node: node()},
+                   principal: %{session_id: session, provider: :native, node: node()},
                    tool: "bash",
                    command: "ls -la",
                    mode: :execute
@@ -151,7 +151,7 @@ defmodule Ouroboros.Control.PermissionsTest do
       assert entry.status == :ok
       assert entry.result == %{decision: :approve, scope: :once, actor: :rule, rule_id: rule_id}
       assert entry.attempt.tool == "bash"
-      assert entry.attempt.provider == :codex
+      assert entry.attempt.provider == :native
     end
 
     test "a deny rule refuses and names itself, and lands in the ledger too" do
@@ -319,7 +319,7 @@ defmodule Ouroboros.Control.PermissionsTest do
                  actor: :human,
                  rule_ref: nil,
                  reason: "looked fine",
-                 principal: %{session_id: session, provider: :opencode}
+                 principal: %{session_id: session, provider: :native}
                })
 
       assert {:ok, entry} = EffectLedger.get("decision-#{session}")

@@ -27,7 +27,7 @@ defmodule Ouroboros.Web.CorpusParityTest do
 
   # `Ouroboros.Gateway.Wire` writes the provider as its string; the in-process subscriber
   # holds the atom the runtime minted.
-  @providers %{"claude_code" => :claude_code, "native" => :native}
+  @providers %{"native" => :native}
 
   # ------------------------------------------------------------------------------------
   # One fixture's event, decoded the way the transport hands it to the model.
@@ -336,28 +336,6 @@ defmodule Ouroboros.Web.CorpusParityTest do
       assert summary(hd(settled.calls)) ==
                {"Read", "lib/ouroboros/gateway/wire.ex:120-159", "→ 3 lines"}
     end
-
-    # Mirrors `an_acp_edit_reads_as_an_edit_with_the_lines_the_call_carried`. The ACP
-    # dialect names a call in prose and says what it *is* only in `kind`. The summariser
-    # reads both: the title is the row's name, the kind is what picks the verb.
-    test "an_acp_edit_reads_as_an_edit_with_the_lines_the_call_carried" do
-      edit = tool(cell("event_tool_call_acp_edit"))
-
-      assert edit.name == "Edit lib/ouroboros/web/transcript.ex"
-      assert edit.kind == "edit"
-
-      assert summary(edit) == {"Edit", "lib/ouroboros/web/transcript.ex (+4 −3)", ""}
-    end
-
-    # Mirrors `an_acp_status_of_completed_settles_the_edit_without_an_is_error_field`.
-    test "an_acp_status_of_completed_settles_the_edit_without_an_is_error_field" do
-      projected = cells(["event_tool_call_acp_edit", "event_tool_result_acp_edit"])
-
-      assert length(projected) == 1, inspect(projected)
-      assert tool(hd(projected)).state == :completed
-
-      assert summary(hd(projected)) == {"Edit", "lib/ouroboros/web/transcript.ex (+4 −3)", ""}
-    end
   end
 
   # ------------------------------------------------------------------------------------
@@ -508,7 +486,7 @@ defmodule Ouroboros.Web.CorpusParityTest do
 
       # `session_ready` is where the transport facts are; `session_started` names only its
       # working directory, which is not a sentence worth a line.
-      assert chat_note(cell("event_session_ready")) == "session ready · acp · stable"
+      assert chat_note(cell("event_session_ready")) == "session ready · native · stable"
 
       assert chat_note(cell("event_session_idle")) == "session idle"
 
@@ -827,16 +805,20 @@ defmodule Ouroboros.Web.CorpusParityTest do
       assert chat_note(cell("event_provider_event_plan_exit")) == "provider event · plan_exit"
     end
 
-    # Mirrors `an_unmodelled_provider_event_is_a_line_that_names_both_halves_of_its_kind`.
-    # The must-render case. ACP wraps every update it does not map in
-    # `{"kind": "acp_update", "update": …}`, and the update's own `sessionUpdate` type is
-    # the informative half — so it is lifted out and both halves are named.
-    test "an_unmodelled_provider_event_is_a_line_that_names_both_halves_of_its_kind" do
+    # Mirrors `an_unmodelled_provider_event_names_its_kind`. The must-render case: a
+    # `provider_event` whose kind this client does not model is a visible note naming the
+    # kind and whatever words the payload carried, never a dropped event. The ACP
+    # `{"kind": "acp_update", "update": …}` envelope this used to unwrap went with the ACP
+    # client.
+    test "an_unmodelled_provider_event_names_its_kind" do
       assert presentation("event_provider_event_unknown") ==
-               %ProviderNote{kind: "acp_update · terminal_output", detail: ""}
+               %ProviderNote{
+                 kind: "terminal_output",
+                 detail: "waiting for the container to come up"
+               }
 
       assert chat_note(cell("event_provider_event_unknown")) ==
-               "provider event · acp_update · terminal_output"
+               "provider event · terminal_output — waiting for the container to come up"
     end
   end
 
@@ -897,10 +879,8 @@ defmodule Ouroboros.Web.CorpusParityTest do
         "event_session_started",
         "event_status_resumed",
         "event_thinking_delta",
-        "event_tool_call_acp_edit",
         "event_tool_call_bash",
         "event_tool_call_read",
-        "event_tool_result_acp_edit",
         "event_tool_result_bash",
         "event_tool_result_read",
         "event_turn_completed",

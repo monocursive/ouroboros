@@ -64,7 +64,8 @@ defmodule Ouroboros.InteractiveStateTest do
                  base ++ [provider_options: %{arbitrary_argv: ["--dangerous"]}]
                )
 
-      # Durable in general, but not something this adapter accepts.
+      # A key that was durable while a vendor adapter accepted it, and is now in
+      # `Ouroboros.Storage.RetiredAtoms` because an older session record still has it.
       assert {:error, {:unsafe_provider_options, :native}} =
                State.new(
                  "interactive-state-betas",
@@ -120,11 +121,23 @@ defmodule Ouroboros.InteractiveStateTest do
                State.new("interactive-state-exposure-off", base ++ [runtime_exposure: false])
     end
 
-    test "a removed provider is refused with the migration in the reason", %{base: base} do
-      assert {:error, {:provider_removed, :codex, message}} =
-               State.new("interactive-state-codex", Keyword.put(base, :provider, :codex))
+    # The boundary. `Jido.Harness.Registry` merges this node's provider map over nine
+    # bundled vendor-CLI adapters rather than replacing them, so `:claude` still *resolves*
+    # — which is exactly why the refusal has to be here and by name, before a workspace
+    # lease is taken.
+    test "a provider this build no longer has is refused by name, before anything is held" do
+      for provider <- [:codex, :claude, :grok, :kimi, :opencode, :amp, :pi, :gemini, :zai] do
+        assert {:error, {:provider_removed, ^provider, message}} =
+                 State.new("interactive-state-#{provider}",
+                   provider: provider,
+                   workspace: File.cwd!()
+                 )
 
-      assert message =~ "provider :native"
+        assert message =~ "`:native` is the only provider"
+      end
+
+      assert {:error, :invalid_provider} =
+               State.new("interactive-state-nil", provider: nil, workspace: File.cwd!())
     end
   end
 

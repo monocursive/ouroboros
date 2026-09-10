@@ -16,7 +16,7 @@
         "output_excerpt": "Compiling 1 file (.ex)\nGenerated ouroboros app\n",
         "timed_out": false
       },
-      "provider": "claude_code",
+      "provider": "native",
       "provider_session_id": "provider-0000000000000001",
       "request_id": null,
       "sequence": 138,

@@ -10,10 +10,7 @@ defmodule Ouroboros.Audit.API do
        storage: Store.status(),
        index: Index.status(),
        exports: Ouroboros.Audit.Worker.status(),
-       coverage: %{
-         native: Ouroboros.Audit.coverage(:native),
-         vendor_process: Ouroboros.Audit.coverage(:vendor)
-       }
+       coverage: %{native: Ouroboros.Audit.coverage()}
      }}
   end
 

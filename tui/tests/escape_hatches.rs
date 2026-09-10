@@ -102,7 +102,7 @@ fn conversing() -> App {
             "_struct": "Ouroboros.Interactive.State",
             "id": SESSION,
             "node": "ouroboros@golden",
-            "provider": "claude_code",
+            "provider": "native",
             "workspace": "/tmp/w",
             "status": "running",
             "options": { "approval_mode": "auto_edit", "sandbox_mode": null },

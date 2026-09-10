@@ -11,7 +11,6 @@ defmodule Ouroboros.Gateway.Methods.Contract do
   @replay_limit 500
   @default_replay_limit 100
   @start_timeout 120_000
-  @approval_prompt_timeout 15 * 60 * 1000
   @shell_timeout 10 * 60 * 1000
   @compaction_timeout 120_000
   @forge_timeout 120_000
@@ -96,7 +95,6 @@ defmodule Ouroboros.Gateway.Methods.Contract do
   @permission_decisions %{"allow" => :allow, "deny" => :deny, "ask" => :ask}
   @start_options %{
     "id" => :string,
-    "provider" => :provider,
     "workspace" => :string,
     "model" => :string,
     "system_prompt" => :string,
@@ -116,8 +114,7 @@ defmodule Ouroboros.Gateway.Methods.Contract do
     "sandbox_mode" => {:enum, @sandbox_modes},
     "model" => :string,
     "reasoning_effort" => {:enum, @reasoning_efforts},
-    "plan" => :boolean,
-    "mode" => :string
+    "plan" => :boolean
   }
   @start_option_notes %{
     "id" =>
@@ -131,9 +128,7 @@ defmodule Ouroboros.Gateway.Methods.Contract do
                    {name, :optional, kind, Map.get(@start_option_notes, name)}
                  end)
   @configuration_option_notes %{
-    "mode" =>
-      "the *agent's* own mode id, validated against the `availableModes` it published; refused by name on a transport whose dialect declares none",
-    "plan" => "not a Harness configuration key — it takes its own per-transport path (B2)"
+    "plan" => "not a Harness configuration key — it takes its own live surface (B2)"
   }
   @configuration_params (for {name, kind} <- Enum.sort(@configuration_options) do
                            {name, :optional, kind, Map.get(@configuration_option_notes, name)}
@@ -449,28 +444,6 @@ defmodule Ouroboros.Gateway.Methods.Contract do
          [{"principal", :required, :string, "per-principal by design; there is no list-all"}]},
       handler: :handle_grants_list
     },
-    "grok.account.login.cancel" => %{
-      scope: :operate,
-      timeout: @default_timeout,
-      params:
-        {:closed,
-         [{"login_id", :required, :string, "the loginId returned by grok.account.login.start"}]},
-      handler: :handle_grok_account_login_cancel
-    },
-    "grok.account.login.start" => %{
-      scope: :operate,
-      timeout: @default_timeout,
-      params:
-        {:closed, [],
-         "starts `grok login --device-auth`; the first-party CLI owns and refreshes every subscription token"},
-      handler: :handle_grok_account_login_start
-    },
-    "grok.account.read" => %{
-      scope: :read,
-      timeout: @default_timeout,
-      params: {:closed, []},
-      handler: :handle_grok_account_read
-    },
     "hello" => %{
       scope: :read,
       timeout: @hello_deadline,
@@ -639,25 +612,6 @@ defmodule Ouroboros.Gateway.Methods.Contract do
            "the field that stopped agreeing, or a `boundary` object naming why verification " <>
            "stops there — `turns` counts what verified either way"},
       handler: :handle_interactive_replay_verify
-    },
-    "interactive.request_approval" => %{
-      scope: :operate,
-      timeout: @approval_prompt_timeout,
-      params:
-        {:closed,
-         [
-           @session_id,
-           {"request", :required,
-            {:object,
-             [
-               {"tool_name", :required, :string, nil},
-               {"input", :optional, :object, "the tool's own arguments"},
-               {"tool_use_id", :optional, :string, nil},
-               {"cwd", :optional, :string, "the directory the tool would run in"}
-             ]}, "a closed object; nothing else is accepted"},
-           @session_node
-         ]},
-      handler: :handle_interactive_request_approval
     },
     "interactive.respond_approval" => %{
       scope: :operate,
@@ -1090,7 +1044,6 @@ defmodule Ouroboros.Gateway.Methods.Contract do
   # accepting a machine here must never turn into an arbitrary remote RPC facility.
   @machine_scoped ~w(audit.status audit.doctor audit.search audit.show audit.artifact audit.export audit.download audit.reindex audit.flush audit.retention audit.hold audit.purge runtime.providers runtime.models workspace.browse account.read
     account.login.start account.login.complete account.login.cancel account.logout
-    grok.account.read grok.account.login.start grok.account.login.cancel
     credentials.anthropic.set credentials.xai.set)
   @methods Map.new(@methods, fn {name, entry} ->
              if name in @machine_scoped do

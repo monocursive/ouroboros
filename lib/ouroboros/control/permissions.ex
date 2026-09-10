@@ -107,9 +107,9 @@ defmodule Ouroboros.Control.Permissions do
   # `:request` and `:principal` are read by `answered_request/1` below, which is the whole
   # reason a recorded answer can name the call it answered. They were missing here, and a
   # map type lists every key it admits — so every real caller "broke the contract", and
-  # dialyzer stopped analysing the rest of the calling function. `Seam.record_answer/4`
-  # was the loser: its `remember/3` call — the one that persists a session-scope "don't
-  # ask again" — read as dead code for exactly as long as this type was wrong.
+  # dialyzer stopped analysing the rest of the calling function. The ACP seam's own
+  # `record_answer/4` was the loser: its session-scope "don't ask again" read as dead code
+  # for exactly as long as this type was wrong. That seam is gone; the type stays right.
   @type answer :: %{
           required(:decision) => :approve | :deny,
           optional(:scope) => :once | :session | :always,

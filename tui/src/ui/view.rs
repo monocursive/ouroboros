@@ -13,9 +13,8 @@ use ratatui::Frame;
 
 use super::access;
 use super::app::{
-    provider_choices, AccountDialog, AccountFlow, App, ApprovalRule, CommandPalette, Connection,
-    Mode, NewField, NewSession, NoticeKind, Overlay, ProviderChoice, SessionFacts, Settings,
-    SettingsField, Tab, APPROVAL_CHOICES,
+    AccountDialog, AccountFlow, App, ApprovalRule, CommandPalette, Connection, Mode, NewField,
+    NewSession, NoticeKind, Overlay, SessionFacts, Settings, SettingsField, Tab, APPROVAL_CHOICES,
 };
 use super::editor::COMMANDS;
 use super::theme;
@@ -23,7 +22,7 @@ use super::transcript::ApprovalDetail;
 use super::transcript_cells::wrap_limited;
 use crate::keymap::{Action, Scope};
 use crate::model::transcript::PlanStatus;
-use crate::model::{Plane, ProviderEntry, SandboxMode};
+use crate::model::{Plane, SandboxMode};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     // The scriptable status line gets its own row above the footer, and only when a
@@ -127,14 +126,6 @@ fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled("OUROBOROS", Style::default().add_modifier(Modifier::BOLD)),
     ]);
 
-    let visible_provider = if app.sessions.open.is_some() {
-        app.sessions
-            .open_info()
-            .and_then(|session| session.provider.as_deref())
-    } else {
-        Some(app.home_provider())
-    };
-
     let visible_model = if app.sessions.open.is_some() {
         app.sessions
             .open_info()
@@ -143,17 +134,19 @@ fn shell_header(frame: &mut Frame, area: Rect, app: &App) {
         Some(app.home_model())
     };
 
-    let account_backed = visible_provider == Some("native")
-        && visible_model.is_some_and(|model| model.starts_with("openai_codex:"));
+    // The chip says what pays for this session. A ChatGPT-backed model is the one case
+    // where that is an account rather than a key, and it is the account this header can
+    // report the state of; anything else names the model and leaves it there.
+    let account_backed = visible_model.is_some_and(|model| model.starts_with("openai_codex:"));
 
     let account = if !account_backed {
-        match visible_provider {
-            Some(provider) => Line::from(vec![
-                Span::styled("Provider ", Style::default().fg(theme::muted())),
-                Span::styled(provider, Style::default().fg(theme::accent())),
+        match visible_model {
+            Some(model) => Line::from(vec![
+                Span::styled("Model ", Style::default().fg(theme::muted())),
+                Span::styled(model.to_string(), Style::default().fg(theme::accent())),
             ]),
             None => Line::from(Span::styled(
-                "Provider unknown",
+                "Model unknown",
                 Style::default().fg(theme::muted()),
             )),
         }
@@ -1689,21 +1682,12 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
 
     frame.render_widget(Paragraph::new(facts).wrap(Wrap { trim: false }), chunks[0]);
 
-    let choices = provider_choices(
-        app.providers.value.as_deref().unwrap_or_default(),
-        app.config.defaults.provider.as_deref(),
-    );
-
     let mut rows = Vec::new();
 
     for row in SettingsField::ALL {
         let focused = row == settings.field;
 
         let (label, value, style) = match row {
-            SettingsField::Provider => {
-                let (value, style) = settings_provider_cell(&choices, settings.provider, app);
-                ("provider", value, style)
-            }
             SettingsField::Workspace => (
                 "workspace",
                 text_or_hint(&settings.workspace, "unset — stated per session"),
@@ -1762,41 +1746,6 @@ fn self_settings(frame: &mut Frame, area: Rect, app: &App, settings: &Settings) 
         .wrap(Wrap { trim: false }),
         chunks[2],
     );
-}
-
-fn settings_provider_cell(choices: &[ProviderChoice], index: usize, app: &App) -> (String, Style) {
-    let Some(choice) = choices.get(index) else {
-        return (
-            if app.providers.pending {
-                "asking the runtime which providers it serves".to_string()
-            } else {
-                "unset — stated per session".to_string()
-            },
-            Style::default().fg(theme::muted()),
-        );
-    };
-
-    let position = format!("({}/{})", index + 1, choices.len());
-
-    match choice {
-        ProviderChoice::Unset => (
-            format!("unset — stated per session {position}"),
-            Style::default().fg(theme::muted()),
-        ),
-        ProviderChoice::Probed { name, ready: true } => (
-            format!("{name} {position}"),
-            Style::default().fg(theme::good()),
-        ),
-        ProviderChoice::Probed { name, ready: false } => (
-            format!("{name} — no executable found {position}"),
-            Style::default().fg(theme::muted()),
-        ),
-        // The config names it and the runtime does not. Said, rather than dropped.
-        ProviderChoice::Unserved { name } => (
-            format!("{name} — from the config file; this runtime does not report it {position}"),
-            Style::default().fg(theme::warn()),
-        ),
-    }
 }
 
 /// The new-session form: every choice on screen at once, none of them made for you.
@@ -1939,11 +1888,6 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
                     )
                 }
             }
-            NewField::Provider => provider_cell(
-                providers,
-                dialog.provider,
-                !dialog.request.machine.trim().is_empty(),
-            ),
             NewField::Model => {
                 let model = dialog.request.model.as_deref().unwrap_or_default();
                 (
@@ -1964,11 +1908,11 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
                 ),
                 hint_style(&dialog.request.workspace),
             ),
-            // A value the selected provider cannot take is drawn dim and says whose
+            // A value this runtime's transport cannot take is drawn dim and says whose
             // limit it is. It stays selectable: the runtime is the authority on whether a
             // start succeeds, and refusing here on spec data would be this client
-            // overruling it — the same rule the provider list already follows for an
-            // uninstalled executable.
+            // overruling it — the same rule the probe already follows for an uninstalled
+            // executable.
             NewField::ApprovalMode => match dialog.approval_refusal(providers) {
                 Some(reason) => (
                     "approval",
@@ -2075,10 +2019,7 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
             Style::default().fg(theme::warn()),
         )));
     } else if dialog.request.machine.trim().is_empty()
-        && !providers
-            .get(dialog.provider)
-            .map(|entry| entry.ready())
-            .unwrap_or(true)
+        && !providers.first().map(|entry| entry.ready()).unwrap_or(true)
     {
         // Selectable anyway: "installed" means a probe found an executable, and the
         // runtime is the authority on whether a session can start.
@@ -2100,47 +2041,6 @@ fn new_session(frame: &mut Frame, area: Rect, app: &App, dialog: &NewSession) {
     }
 
     frame.render_widget(Paragraph::new(footer).wrap(Wrap { trim: false }), chunks[2]);
-}
-
-fn provider_cell(
-    providers: &[ProviderEntry],
-    index: usize,
-    remote: bool,
-) -> (&'static str, String, Style) {
-    let Some(entry) = providers.get(index) else {
-        return (
-            "provider",
-            "none available".to_string(),
-            Style::default().fg(theme::warn()),
-        );
-    };
-
-    let position = format!("({}/{})", index + 1, providers.len());
-
-    if remote {
-        return (
-            "provider",
-            format!(
-                "{} — readiness unknown on destination {position}",
-                entry.provider
-            ),
-            Style::default().fg(theme::warn()),
-        );
-    }
-
-    if entry.ready() {
-        return (
-            "provider",
-            format!("{} {position}", entry.provider),
-            Style::default().fg(theme::good()),
-        );
-    }
-
-    (
-        "provider",
-        format!("{} — not installed {position}", entry.provider),
-        Style::default().fg(theme::muted()),
-    )
 }
 
 /// A refusal, split where [`crate::model::refusal`] put its line break.

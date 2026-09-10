@@ -24,6 +24,13 @@ defmodule Ouroboros.Storage.RetiredAtoms do
   note, a retired ledger subject key is a key nothing reads — and never as a reason to
   crash.
 
+  Two kinds of name are deliberately **not** here. A message tag, a registry key, a
+  process-dictionary key or a config key cannot reach a checkpoint at all — C1's F1 dropped
+  eleven of those and C2 drops `:session_jsonl`, `:ouroboros_transport`,
+  `:ouroboros_service_wait`, `:ouroboros_service_lifetime`, `:grok_auth`,
+  `:provider_audit_coverage_insufficient`, `:provider_execution_defaults`,
+  `:grok_account_adapter`, `:grok_auth_file` and `:model_catalogs` for the same reason.
+
   Journals that route through `Ouroboros.Upgrade.Wire` (the signing journal, the rollout
   registry, the WASM store) need no entry here: that boundary writes every atom as a tagged
   binary and reads an unknown one back as its name.
@@ -242,7 +249,114 @@ defmodule Ouroboros.Storage.RetiredAtoms do
     :worker_restore_failed,
     :worker_setup_failed,
     :worker_tag_claimed,
-    :worker_tag_inconsistent
+    :worker_tag_inconsistent,
+
+    # ── C2 (plan §3 D2, native is the only provider) ──
+    #
+    # The provider name itself. It is the `provider` field of every `Interactive.State`
+    # checkpoint (`Ouroboros.Interactive.Store`, one file per session), the `provider`
+    # field of every `Interactive.Event` inside one, and — the expensive one — the
+    # `attempt.provider` of every `:permission` and `:tool_call` entry in
+    # `Ouroboros.Agent.EffectLedger`, which is a single file whose loss stops the boot.
+    #
+    # Nine of these ten are *still* spelled, by `Jido.Harness.Registry`'s `@builtins` in a
+    # dependency this build no longer registers those adapters with. That is an accident of
+    # a pinned dependency and the guarantee must not rest on one — the same reason C5 listed
+    # `:observe` above. `:claude_code` is the tenth and is genuinely gone: it was never a
+    # registry key, only the name an event carried.
+    :amp,
+    :claude,
+    :claude_code,
+    :codex,
+    :gemini,
+    :grok,
+    :kimi,
+    :opencode,
+    :pi,
+    :zai,
+
+    # The session transport a record's `options.transport` named, same store. `:native`
+    # survives; these four were the vendor transports, and `:managed` was the synthetic one
+    # the harness substituted for an adapter that declared none.
+    :acp,
+    :app_server,
+    :managed,
+    :rpc,
+    :stream_json_resume,
+
+    # Keys of `options.provider_options` in the same record. `Interactive.State`'s
+    # `@durable_provider_options` was 47 names and is now the eight the native adapter
+    # declares; these 26 are the ones no line of this build spells any more. The thirteen
+    # not listed — `agent`, `attach`, `base_url`, `continue`, `debug`, `extensions`,
+    # `fork`, `no_session`, `offline`, `session_dir`, `skills`, `thinking`, `title` — are
+    # spelled by kept code for their own reasons and need no entry.
+    :allowed_mcp_server_names,
+    :api_timeout_ms,
+    :betas,
+    :cli_path,
+    :dangerously_allow_all,
+    :fallback_model,
+    :log_file,
+    :log_level,
+    :max_budget_usd,
+    :model_provider,
+    :model_reasoning_summary,
+    :network_access_enabled,
+    :no_color,
+    :no_context_files,
+    :no_extensions,
+    :no_ide,
+    :no_jetbrains,
+    :no_notifications,
+    :no_skills,
+    :project_trust,
+    :resume_last,
+    :session_name,
+    :skills_dirs,
+    :skip_git_repo_check,
+    :visibility,
+    :web_search_enabled,
+
+    # The ACP client's own failure vocabulary. `Ouroboros.Interactive.Task` stores a start
+    # or dispatch refusal as `durable(reason)` in the session's `error` field and in a
+    # turn's, and `State.durable_term/1` keeps an atom as itself — so a session that failed
+    # to open a `Ouroboros.Provider.Session.ACP` transport has one of these on disk, inside
+    # a `Storage.Records` record.
+    :invalid_dialect,
+    :invalid_dialect_ask_result,
+    :invalid_dialect_configure_result,
+    :invalid_handshake_step,
+    :no_bound_port,
+    :no_modes_announced,
+    :no_token_file,
+    :not_an_executable_regular_file,
+    :port_unavailable,
+    :provider_transport_unavailable,
+    :provider_workspace_wrapper_unavailable,
+    :session_not_open,
+    :transport_call_exit,
+    :unknown_mode,
+    :unknown_session,
+    :unmergeable_mcp_config,
+    :unsupported_method_message,
+
+    # The per-provider capability matrix's refusal vocabulary. These eleven are the
+    # deliberate over-inclusion C1's F1 describes: every path this build had for them ended
+    # in a gateway reply rather than in a checkpoint, and none of them is in the fixture —
+    # but they are `{:error, reason}` heads and inner `reason:` values in a term the
+    # coordinator would have made durable had one ever reached `fail_start/2`, and a word
+    # of atom table is cheaper than being wrong about that.
+    :at_start_only,
+    :native_session,
+    :no_approval_channel,
+    :no_dynamic_configuration,
+    :no_dynamic_model,
+    :transport_cannot_fork,
+    :transport_cannot_plan,
+    :transport_has_no_modes,
+    :unforkable_at_turn,
+    :unsupported_approval_mode,
+    :vendor_forks_at_tail
   ]
 
   @doc """

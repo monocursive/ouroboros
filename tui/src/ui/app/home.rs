@@ -116,34 +116,28 @@ impl App {
         ]
     }
 
+    /// The model, without the `vendor:` prefix the wire spec carries.
     pub fn home_model_label(&self) -> String {
-        if self.home_provider() == "native" {
-            self.home_model()
-                .split_once(':')
-                .map(|(_, model)| model)
-                .unwrap_or(self.home_model())
-                .to_string()
-        } else {
-            self.home_provider().to_string()
-        }
+        self.home_model()
+            .split_once(':')
+            .map(|(_, model)| model)
+            .unwrap_or(self.home_model())
+            .to_string()
     }
 
-    /// Requested policy, in plain language. An omitted value is the provider's decision,
+    /// Requested policy, in plain language. An omitted value is the plane's decision,
     /// never a promise that this client can make on its behalf.
     pub fn home_permission_label(&self) -> &'static str {
         match self.config.defaults.approval_mode() {
             Some(ApprovalMode::Prompt) => "Ask before actions",
             Some(ApprovalMode::AutoEdit) => "Ask except for file edits",
             Some(ApprovalMode::AutoApprove) => "Approvals off",
-            Some(ApprovalMode::Default) | None if self.home_provider() == "native" => {
-                "Ask before actions"
-            }
-            Some(ApprovalMode::Default) | None => "Default approvals",
+            // The one transport this runtime serves prompts unless told otherwise.
+            Some(ApprovalMode::Default) | None => "Ask before actions",
         }
     }
 
     fn submit_home(&mut self) {
-        let provider = self.home_provider().to_string();
         let prompt = self.home_draft.submission();
 
         // Navigation and account commands remain usable before direct OAuth completes. The
@@ -163,7 +157,7 @@ impl App {
         }
 
         if self.home_requires_chatgpt() && !self.codex_usable() {
-            let captured = prompt.map(|input| (self.quick_start_request(&provider, &input), input));
+            let captured = prompt.map(|input| (self.quick_start_request(&input), input));
             self.open_account();
             if matches!(self.overlay, Some(Overlay::Account(_))) {
                 self.home_login_start = captured;
@@ -175,7 +169,7 @@ impl App {
             self.home_error = Some("Describe a task, or choose an example below.".to_string());
             return;
         };
-        if let Err(refusal) = self.issue_quick_start(provider, prompt) {
+        if let Err(refusal) = self.issue_quick_start(prompt) {
             self.home_error = Some(refusal);
         }
     }
@@ -281,19 +275,14 @@ impl App {
     /// refusal it can produce is the request's own — a `StartRequest` that does not
     /// describe a session — returned rather than displayed.
     ///
-    /// The stored provider default and the welcome marker are written here: the provider
-    /// written down is exactly the one this start used, and reaching a first session is the
-    /// event the marker records.
-    pub(super) fn issue_quick_start(
-        &mut self,
-        provider: String,
-        prompt: String,
-    ) -> Result<(), String> {
-        let request = self.quick_start_request(&provider, &prompt);
+    /// The welcome marker is written here: reaching a first session is the event it
+    /// records.
+    pub(super) fn issue_quick_start(&mut self, prompt: String) -> Result<(), String> {
+        let request = self.quick_start_request(&prompt);
         self.issue_quick_start_request(request, prompt)
     }
 
-    fn quick_start_request(&self, provider: &str, prompt: &str) -> StartRequest {
+    fn quick_start_request(&self, prompt: &str) -> StartRequest {
         self.first_message
             .as_ref()
             .filter(|pending| pending.start_outcome_unknown && pending.input == prompt)
@@ -301,7 +290,6 @@ impl App {
             .unwrap_or_else(|| StartRequest {
                 id: new_session_id(),
                 plane: Plane::Interactive,
-                provider: provider.to_string(),
                 model: Some(self.home_model().to_string()),
                 machine: self.config.location.machine.clone(),
                 workspace: self.home_workspace(),
@@ -341,7 +329,6 @@ impl App {
                 });
             }
         }
-        self.config.defaults.provider = Some(request.provider.clone());
         self.mark_welcomed();
         self.save_pending = true;
 
@@ -436,21 +423,6 @@ impl App {
             return;
         }
 
-        let provider = self
-            .sessions
-            .open_info()
-            .and_then(|session| session.provider.clone())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| self.home_provider().to_string());
-
-        if provider.is_empty() {
-            self.inform(
-                "choose a provider before starting a writable session",
-                NoticeKind::Warn,
-            );
-            return;
-        }
-
         let workspace = self
             .sessions
             .open_info()
@@ -467,7 +439,6 @@ impl App {
         let request = StartRequest {
             id: new_session_id(),
             plane: Plane::Interactive,
-            provider,
             model: Some(self.home_model().to_string()),
             machine,
             workspace,

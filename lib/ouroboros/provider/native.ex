@@ -128,7 +128,7 @@ defmodule Ouroboros.Provider.Native do
       # `Jido.Harness.SessionRequest` has no field for it and its `approval_mode` enum has
       # no fifth member; `provider_options` is the one channel a start can carry it on.
       # Mid-session it moves through `Native.Session.plan_mode/2`, which is a live process
-      # call rather than a request field. `Ouroboros.Provider.plan_mode/2` declares both.
+      # call rather than a request field.
       #
       # G3's two are here for the same reason and are deliberately the *only* two a caller
       # may set: `subagent_model` points children at a cheaper model than the parent's, and

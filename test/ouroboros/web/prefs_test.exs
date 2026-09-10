@@ -38,7 +38,7 @@ defmodule Ouroboros.Web.PrefsTest do
     test "keeps exactly the five keys the form states", %{dir: dir} do
       assert :ok =
                Prefs.write(dir, %{
-                 "provider" => "claude_code",
+                 "machine" => "laptop",
                  "model" => "openai_codex:gpt-5.6-sol",
                  "workspace" => "/srv/ouroboros",
                  "sandbox_mode" => "workspace_write",
@@ -46,7 +46,7 @@ defmodule Ouroboros.Web.PrefsTest do
                })
 
       assert Prefs.read(dir) == %{
-               "provider" => "claude_code",
+               "machine" => "laptop",
                "model" => "openai_codex:gpt-5.6-sol",
                "workspace" => "/srv/ouroboros",
                "sandbox_mode" => "workspace_write",
@@ -54,18 +54,27 @@ defmodule Ouroboros.Web.PrefsTest do
              }
     end
 
+    # `provider` was a sixth key until the core reduction; a file an older build wrote
+    # still has it, and `read/1` drops it rather than seeding a form field that no longer
+    # exists.
+    test "a stored provider from an older build is dropped", %{dir: dir} do
+      write_raw!(dir, ~s({"provider":"claude_code","model":"openai:gpt-5"}))
+
+      assert Prefs.read(dir) == %{"model" => "openai:gpt-5"}
+    end
+
     test "writes only the keys that were actually stated", %{dir: dir} do
       # The whole point: a control the operator never touched must not become a default by
       # having been drawn.
-      assert :ok = Prefs.write(dir, %{"provider" => "native"})
+      assert :ok = Prefs.write(dir, %{"model" => "openai:gpt-5"})
 
-      assert Prefs.read(dir) == %{"provider" => "native"}
+      assert Prefs.read(dir) == %{"model" => "openai:gpt-5"}
     end
 
     test "retains the extended native reasoning levels", %{dir: dir} do
       assert :ok =
                Prefs.write(dir, %{
-                 "provider" => "native",
+                 "model" => "openai:gpt-5",
                  "reasoning_effort" => "max"
                })
 
@@ -76,14 +85,14 @@ defmodule Ouroboros.Web.PrefsTest do
       assert :ok =
                Prefs.write(dir, %{
                  "id" => "sess-abcdef",
-                 "provider" => "native",
+                 "model" => "openai:gpt-5",
                  "title" => "not a start parameter",
                  "turn_id" => "t-1"
                })
 
       stored = dir |> Prefs.path() |> File.read!() |> JSON.decode!()
 
-      assert stored == %{"provider" => "native"}
+      assert stored == %{"model" => "openai:gpt-5"}
       refute Map.has_key?(stored, "id")
     end
 
@@ -99,47 +108,47 @@ defmodule Ouroboros.Web.PrefsTest do
       # The token file's discipline. Nothing secret lives here, but it sits in a directory
       # beside two files that are, and one write discipline per directory is easier to keep
       # right than two.
-      assert :ok = Prefs.write(dir, %{"provider" => "native"})
+      assert :ok = Prefs.write(dir, %{"model" => "openai:gpt-5"})
 
       assert {:ok, %File.Stat{mode: mode, type: :regular}} = File.lstat(Prefs.path(dir))
       assert Bitwise.band(mode, 0o777) == 0o600
     end
 
     test "leaves no temporary file behind", %{dir: dir} do
-      assert :ok = Prefs.write(dir, %{"provider" => "native", "workspace" => "/srv"})
+      assert :ok = Prefs.write(dir, %{"model" => "openai:gpt-5", "workspace" => "/srv"})
 
       assert File.ls!(dir) == ["web.prefs.json"]
     end
 
     test "a second write replaces the first entirely", %{dir: dir} do
-      assert :ok = Prefs.write(dir, %{"provider" => "native", "reasoning_effort" => "high"})
-      assert :ok = Prefs.write(dir, %{"provider" => "claude_code"})
+      assert :ok = Prefs.write(dir, %{"model" => "openai:gpt-5", "reasoning_effort" => "high"})
+      assert :ok = Prefs.write(dir, %{"model" => "anthropic:claude-opus-5"})
 
       # Not a merge. The map handed in is the whole of what the operator stated this time,
       # and a key they deliberately left alone must not be resurrected from last time.
-      assert Prefs.read(dir) == %{"provider" => "claude_code"}
+      assert Prefs.read(dir) == %{"model" => "anthropic:claude-opus-5"}
     end
 
     test "refuses a value outside a closed vocabulary rather than storing it", %{dir: dir} do
       assert :ok =
                Prefs.write(dir, %{
-                 "provider" => "native",
+                 "model" => "openai:gpt-5",
                  "sandbox_mode" => "danger_zone",
                  "reasoning_effort" => "maximum"
                })
 
-      assert Prefs.read(dir) == %{"provider" => "native"}
+      assert Prefs.read(dir) == %{"model" => "openai:gpt-5"}
     end
 
     test "trims, and treats blank as unstated", %{dir: dir} do
-      assert :ok = Prefs.write(dir, %{"provider" => "  native  ", "workspace" => "   "})
+      assert :ok = Prefs.write(dir, %{"model" => "  openai:gpt-5  ", "workspace" => "   "})
 
-      assert Prefs.read(dir) == %{"provider" => "native"}
+      assert Prefs.read(dir) == %{"model" => "openai:gpt-5"}
     end
 
     test "a data directory that is not one is not a crash", %{dir: dir} do
-      assert Prefs.write(nil, %{"provider" => "native"}) == :ok
-      assert Prefs.write("", %{"provider" => "native"}) == :ok
+      assert Prefs.write(nil, %{"model" => "openai:gpt-5"}) == :ok
+      assert Prefs.write("", %{"model" => "openai:gpt-5"}) == :ok
       refute File.exists?(Prefs.path(dir))
     end
   end
@@ -172,23 +181,23 @@ defmodule Ouroboros.Web.PrefsTest do
     end
 
     test "an object holding the wrong types drops those keys and keeps the rest", %{dir: dir} do
-      write_raw!(dir, JSON.encode!(%{"provider" => "native", "workspace" => 42, "model" => nil}))
+      write_raw!(dir, JSON.encode!(%{"machine" => "laptop", "workspace" => 42, "model" => nil}))
 
-      assert Prefs.read(dir) == %{"provider" => "native"}
+      assert Prefs.read(dir) == %{"machine" => "laptop"}
     end
 
     test "a stale vocabulary value is dropped rather than seeded", %{dir: dir} do
       # A `sandbox_mode` no adapter has heard of would seed a control that cannot draw it
       # and then travel to a plane that answers -32602 naming the parameter.
-      write_raw!(dir, JSON.encode!(%{"provider" => "native", "sandbox_mode" => "read_write"}))
+      write_raw!(dir, JSON.encode!(%{"model" => "openai:gpt-5", "sandbox_mode" => "read_write"}))
 
-      assert Prefs.read(dir) == %{"provider" => "native"}
+      assert Prefs.read(dir) == %{"model" => "openai:gpt-5"}
     end
 
     test "a file larger than the ceiling is refused without being parsed", %{dir: dir} do
       write_raw!(
         dir,
-        JSON.encode!(%{"provider" => "native", "pad" => String.duplicate("x", 70_000)})
+        JSON.encode!(%{"model" => "openai:gpt-5", "pad" => String.duplicate("x", 70_000)})
       )
 
       log = capture_log(fn -> assert Prefs.read(dir) == %{} end)
@@ -204,7 +213,7 @@ defmodule Ouroboros.Web.PrefsTest do
 
     test "a symlink is not followed", %{dir: dir} do
       elsewhere = Path.join(dir, "elsewhere.json")
-      File.write!(elsewhere, JSON.encode!(%{"provider" => "native"}))
+      File.write!(elsewhere, JSON.encode!(%{"model" => "openai:gpt-5"}))
       File.ln_s!(elsewhere, Prefs.path(dir))
 
       # `lstat` sees the link itself, so this never reaches the target — the same posture
@@ -228,7 +237,6 @@ defmodule Ouroboros.Web.PrefsTest do
     test "the remembered project includes its destination computer" do
       assert Prefs.keys() == [
                "machine",
-               "provider",
                "model",
                "workspace",
                "sandbox_mode",

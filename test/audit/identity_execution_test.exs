@@ -60,7 +60,6 @@ defmodule Ouroboros.Audit.IdentityExecutionTest do
 
         params = %{
           "id" => id,
-          "provider" => "native",
           "workspace" => ctx.workspace,
           "model" => model,
           "worktree" => false,
@@ -88,14 +87,12 @@ defmodule Ouroboros.Audit.IdentityExecutionTest do
 
       assert {:error, -32602, _} =
                Methods.invoke_as(subject, "interactive.start", %{
-                 "provider" => "native",
                  "workspace" => ctx.workspace,
                  "audit_actor_id" => "mallory"
                })
 
       assert {:error, -32602, _} =
                Methods.invoke_as(subject, "interactive.start", %{
-                 "provider" => "native",
                  "workspace" => ctx.workspace,
                  "provider_options" => %{"audit_actor_id" => "mallory"}
                })

@@ -1079,8 +1079,6 @@ defmodule Bench.Self.Runner do
       [
         "run",
         task["instruction"],
-        "--provider",
-        "native",
         "--workspace",
         dir,
         "--approval-mode",

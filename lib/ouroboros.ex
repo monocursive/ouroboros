@@ -47,13 +47,23 @@ defmodule Ouroboros do
     }
   end
 
-  @doc "Returns the normalized provider capabilities this runtime serves."
-  @spec providers() :: [Jido.Harness.AdapterSpec.t()]
-  def providers, do: Enum.reject(Jido.Harness.providers(), &(&1.provider == :codex))
+  @doc """
+  Returns the normalized provider capabilities this runtime serves.
 
-  @doc "Probes one provider's installation and compatibility."
+  One, and it is `:native`. `Jido.Harness.Registry` still carries nine bundled vendor-CLI
+  adapters and merges `config :jido_harness, :providers` over them rather than replacing
+  them, so this is a filter rather than a pass-through: listing an adapter this runtime
+  refuses to start would advertise a provider `interactive.start` denies by name.
+  """
+  @spec providers() :: [Jido.Harness.AdapterSpec.t()]
+  def providers, do: Enum.filter(Jido.Harness.providers(), &(&1.provider == :native))
+
+  @doc "Probes the native provider's readiness. Any other name is refused, not probed."
   @spec provider_status(atom()) :: {:ok, Jido.Harness.ProviderStatus.t()} | {:error, term()}
-  def provider_status(provider), do: Jido.Harness.status(provider)
+  def provider_status(:native), do: Jido.Harness.status(:native)
+
+  def provider_status(provider),
+    do: {:error, Ouroboros.Interactive.State.provider_removed_error(provider)}
 
   @doc "Returns bounded, content-minimized agent-effect history from this node."
   @spec effects(keyword() | map()) ::

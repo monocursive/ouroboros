@@ -21,7 +21,7 @@ defmodule Ouroboros.Gateway.WorkspaceExecTest do
   alias Ouroboros.Runtime.Exposure
   alias Ouroboros.Test.HarnessAdapter
 
-  @provider :ouroboros_test
+  @provider :native
 
   setup do
     cleanup_sessions()

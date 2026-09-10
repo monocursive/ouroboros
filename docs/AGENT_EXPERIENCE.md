@@ -13,6 +13,15 @@ and every claim about this codebase was re-read in the source. Companion to
 > the dated record they are. A session hands work to a child through the native `agent`
 > tool now, and the child's progress arrives as `subagent` events in its parent's
 > transcript.
+>
+> **And in whole, for every row about a wrapped vendor CLI.** The nine bundled providers,
+> the ACP client, the per-provider capability matrix, the C2 Claude approval bridge
+> (`--permission-prompt-tool` → `mcp__ouroboros__approve` → `interactive.request_approval`)
+> and the E3 `mcp-serve` code-intelligence tools are all deleted; `:native` is the only
+> provider. See [the core reduction](proposals/core.md) §3 D2. Every scorecard row that
+> compares this runtime to Claude Code, Codex, Gemini, OpenCode, Amp, Grok, Kimi, Pi or
+> Z.ai is a dated reading of *those products*, and stays; every row that describes
+> Ouroboros *driving* one of them describes a plane that is gone.
 
 ## 0. Summary
 

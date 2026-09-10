@@ -26,8 +26,9 @@ missing pillar of the mediated-effects kernel (envelope, capability table, polic
 gate, supervision all exist in some shape; determinism/replay does not), it closes the
 oldest open loop (Forge eval tests hand-assemble challengers; fork-at-a-decision-point
 turns every recorded real session into an eval corpus), and it is structurally
-native-only — nobody can deterministically replay `claude --print` — which makes it the
-honest argument for the native provider as flagship.
+native-only — nobody can deterministically replay a CLI driven from outside — which is
+the honest argument for the native provider, and since September 2026 the native provider
+is the only one ([the core reduction](proposals/core.md) §3 D2).
 
 ## 1. What the tree already holds, and why none of it is the substrate
 
@@ -88,7 +89,7 @@ Three additions, one extension, one badge:
    (`methods.ex:328`, `seed_fork/4` at `native/session.ex:1094-1110`); the missing halves
    compose two mechanisms that already exist. (§6)
 5. **A `replay` session capability** — the badge, derived beside `:fork`/`:compact`
-   (`provider.ex:71`), explicit `false` for every vendor provider. (§7)
+   in `Ouroboros.Provider`. (§7)
 
 The sketch's line lands literally: the journal is the source of truth for what a session
 *was*; `conversation.json` is a cache of it for the model's benefit.
@@ -333,9 +334,9 @@ are added:
 
 Standing limits, restated rather than solved here: a fork of a live session holding an
 exclusive workspace lease is refused by the lease (`task.ex:1521-1523`); `worktree` is
-not in fork's envelope (D7 of AGENT_EXPERIENCE remains deferred); vendor forks branch at
-the tail only (Claude `--fork-session` semantics — `session.rs:1061-1067`), so `to_turn`
-on a vendor session is refused as `{:unforkable_at_turn, provider}`.
+not in fork's envelope (D7 of AGENT_EXPERIENCE remains deferred). The vendor forks that
+could only branch at the tail — and the `{:unforkable_at_turn, provider}` refusal that
+named them — went with the vendor providers.
 
 Fork + journal compose into the eval loop: fork at the decision point, run the
 challenger model live, and the two journals are directly comparable records — the corpus
@@ -393,8 +394,9 @@ worth this slice; the parity map records the divergence.
 
 ## 8. Honest limits (v1, stated up front)
 
-1. **Native sessions only.** Vendor sessions run their tool loops in vendor processes;
-   nothing here can record or replay them. The badge says so per session.
+1. **Native sessions only** — which, since the core reduction, is every session. The
+   badge is still emitted per session, because a record written before the reduction can
+   name a provider this build no longer has.
 2. **Verified replay proves derivation, not the world.** It proves the shipped loop
    re-derives the recorded conversation and events from the recorded effects — the
    determinism property. It does not prove the tools *would* return the same results
@@ -501,8 +503,8 @@ byte-stable, clippy/fmt clean.
   which for delta events is coarser than the live instants. Closing it needs a per-event
   `at` in the record — a recording change, deliberately not made in v1.
 - **Capability `replay`** is `true`/`false` only (the three-state `"degraded"` needs a
-  per-session journal scan at list time — deferred); vendors get explicit `false`. The
-  badge draws only on explicit `true`. Multimodal tool results replay with an exact
+  per-session journal scan at list time — deferred). The badge draws only on explicit
+  `true`. Multimodal tool results replay with an exact
   *message* but a diverging `tool_result` *event* (live splits artifacts out) — surfaces
   as a named divergence, reconstruction deferred.
 

@@ -212,10 +212,12 @@ fn an_existing_chatgpt_subscription_goes_straight_to_the_workspace_composer() {
     assert!(screen.contains("Files: can edit"), "{}", screen.text());
 }
 
+/// The ChatGPT gate is about the *model*, not about a vendor: a model that a
+/// subscription does not pay for starts without one being connected.
 #[test]
-fn a_configured_non_codex_provider_is_not_blocked_by_chatgpt_auth() {
+fn a_configured_non_chatgpt_model_is_not_blocked_by_chatgpt_auth() {
     let mut app = harness(false);
-    app.config.defaults.provider = Some("claude".into());
+    app.config.defaults.model = Some("anthropic:claude-sonnet-5".into());
     app.config.defaults.workspace = Some("/srv/agent-work".into());
 
     let screen = render(&mut app, 120, 34);
@@ -224,8 +226,16 @@ fn a_configured_non_codex_provider_is_not_blocked_by_chatgpt_auth() {
         "{}",
         screen.text()
     );
-    assert!(screen.contains("Using claude"), "{}", screen.text());
-    assert!(screen.contains("Provider claude"), "{}", screen.text());
+    assert!(
+        screen.contains("Using claude-sonnet-5"),
+        "{}",
+        screen.text()
+    );
+    assert!(
+        screen.contains("Model anthropic:claude-sonnet-5"),
+        "{}",
+        screen.text()
+    );
     assert!(
         !screen.contains("ChatGPT not connected") && !screen.contains("ChatGPT unavailable"),
         "{}",
@@ -236,7 +246,6 @@ fn a_configured_non_codex_provider_is_not_blocked_by_chatgpt_auth() {
         "{}",
         screen.text()
     );
-    assert!(screen.contains("Folder: /srv/agent-work"));
 
     type_text(&mut app, "review the current diff");
     app.apply(key(KeyCode::Enter));
@@ -245,8 +254,8 @@ fn a_configured_non_codex_provider_is_not_blocked_by_chatgpt_auth() {
     let start = calls
         .iter()
         .find(|call| call.method == "interactive.start")
-        .expect("the configured provider starts directly");
-    assert_eq!(start.params["provider"], "claude");
+        .expect("the configured model starts directly");
+    assert_eq!(start.params["model"], "anthropic:claude-sonnet-5");
     assert_eq!(start.params["workspace"], "/srv/agent-work");
     assert!(calls
         .iter()
@@ -591,7 +600,11 @@ fn typing_and_enter_start_native_in_the_current_folder_then_send_the_first_messa
         .find(|call| call.method == "interactive.start")
         .expect("a session start");
 
-    assert_eq!(start.params["provider"], "native");
+    assert!(
+        start.params.get("provider").is_none(),
+        "`provider` is not a start option and sending it would be -32602: {}",
+        start.params
+    );
     assert_eq!(start.params["model"], "openai_codex:gpt-5.6-sol");
     assert_eq!(start.params["workspace"], "/work/ouroboros");
     let start_id = start.params["id"]
@@ -1094,7 +1107,7 @@ fn switch_session_stays_inside_the_palette_flow() {
         json!([{
             "_struct": "Ouroboros.Interactive.State",
             "id": "recent-session",
-            "provider": "codex",
+            "provider": "native",
             "status": "idle",
             "updated_at": "2026-08-14T10:00:00Z"
         }]),
@@ -1135,7 +1148,6 @@ fn account_completion_closes_the_gate_without_restarting_the_client() {
 
     assert!(app.chatgpt_connected());
     assert!(app.overlay.is_none());
-    assert_eq!(app.config.defaults.provider.as_deref(), Some("native"));
     assert_eq!(
         app.config.defaults.model.as_deref(),
         Some("openai_codex:gpt-5.6-sol")

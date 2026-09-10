@@ -28,7 +28,7 @@ defmodule Ouroboros.Web.Live.RailTest do
         node: :core@one,
         status: :idle,
         updated_at: "2026-08-29T12:00:00Z",
-        provider: :claude_code,
+        provider: :native,
         workspace: "/w",
         title: nil,
         options: %{},
@@ -290,7 +290,7 @@ defmodule Ouroboros.Web.Live.RailTest do
     test "an at-work row says provider and machine when nothing is watching it" do
       html = render_rail([interactive("w", status: :running)])
 
-      assert html =~ "claude_code · core@one"
+      assert html =~ "native · core@one"
       assert html =~ "ouro-glyph-work"
     end
 
@@ -306,7 +306,7 @@ defmodule Ouroboros.Web.Live.RailTest do
         )
 
       assert html =~ "Read lib/thing.ex"
-      refute html =~ "claude_code · core@one"
+      refute html =~ "native · core@one"
     end
 
     test "an idle session is drawn in the third group, reading 'idle · <age>'" do

@@ -1509,12 +1509,12 @@ defmodule Ouroboros.ClusterTest do
           providers =
             previous_providers
             |> then(&Map.new(&1 || %{}))
-            |> Map.put(:ouroboros_test, Ouroboros.Test.HarnessAdapter)
+            |> Map.put(:native, Ouroboros.Test.HarnessAdapter)
 
           config =
             previous_config
             |> then(&Map.new(&1 || %{}))
-            |> Map.put(:ouroboros_test, %{test_pid: self()})
+            |> Map.put(:native, %{test_pid: self()})
 
           Application.put_env(:jido_harness, :providers, providers)
           Application.put_env(:jido_harness, :provider_config, config)
@@ -1527,7 +1527,7 @@ defmodule Ouroboros.ClusterTest do
             :erpc.call(core, Application, :put_env, [
               :jido_harness,
               :provider_config,
-              Map.put(config, :ouroboros_test, %{})
+              Map.put(config, :native, %{})
             ])
 
           on_exit(fn ->
@@ -1555,7 +1555,6 @@ defmodule Ouroboros.ClusterTest do
           assert {:ok, %Ouroboros.Interactive.Ref{id: ^id, node: ^core}} =
                    Methods.invoke("interactive.start", %{
                      "id" => id,
-                     "provider" => "ouroboros_test",
                      "workspace" => File.cwd!(),
                      "node" => Atom.to_string(core)
                    })
@@ -1626,7 +1625,6 @@ defmodule Ouroboros.ClusterTest do
             Task.async(fn ->
               Methods.invoke("interactive.start", %{
                 "id" => id,
-                "provider" => "native",
                 "workspace" => File.cwd!(),
                 "node" => Atom.to_string(core)
               })

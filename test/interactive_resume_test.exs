@@ -17,7 +17,7 @@ defmodule Ouroboros.InteractiveResumeTest do
   alias Ouroboros.InteractiveSession
   alias Ouroboros.Test.HarnessAdapter
 
-  @provider :ouroboros_test
+  @provider :native
   @provider_session_id "ouroboros-test-session"
 
   setup do

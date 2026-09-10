@@ -4,19 +4,19 @@
 //! ## What belongs here, and what deliberately does not
 //!
 //! Nothing in this file is a runtime fact. The data directory, the node name, the scope,
-//! the provider probes — those come from the daemon and from [`crate::runtime`], and a
+//! the provider probe — those come from the daemon and from [`crate::runtime`], and a
 //! screen that shows one of them says so. What is kept here is the small set of answers a
-//! person would otherwise retype into every `ouro new`: which provider, which workspace,
+//! person would otherwise retype into every `ouro new`: which model, which workspace,
 //! which approval mode, which sandbox. They are *defaults for a form*, not decisions: every one of them
 //! is prefilled into the coding home and the `n` dialog and stays editable, and `ouro new`
 //! still accepts a flag that overrides the file.
 //!
 //! This is what keeps the "not a choice this client makes for you" rule intact while
-//! removing the retyping. The client still refuses to *invent* a provider. It will use one
-//! the operator chose, once, explicitly, in a file they can read — which is a different
-//! statement from a node's default silently deciding which vendor runs their code. The
-//! coding home writes `defaults.provider` for exactly that reason: pressing Enter with a
-//! displayed provider is choosing it, so the next run does not ask again.
+//! removing the retyping. There is no stored provider: this runtime serves `native` and
+//! nothing else, so there is no vendor for a file to pick. What the client still refuses
+//! to invent is a *model*; the coding home writes `defaults.model` when one is chosen,
+//! because pressing Enter with a displayed model is choosing it and the next run should
+//! not ask again.
 //!
 //! `[onboarding]` retains the schema-1 welcome marker. Its former quick-start toggle is
 //! gone: unknown keys are ignored on read, so a file that still names it loads unchanged
@@ -53,7 +53,7 @@
 //!
 //! A development daemon gets its own data directory, because a `gateway.json` shared with
 //! a real one would make each discoverable as the other. It does **not** get its own
-//! preferences: which provider a person prefers is a fact about the person, not about
+//! preferences: which model a person prefers is a fact about the person, not about
 //! which runtime they happened to start.
 
 use std::collections::BTreeMap;
@@ -409,10 +409,6 @@ impl NotificationsConfig {
 /// turns the unreadable ones back into "unset" and says so.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Defaults {
-    /// A provider name. Not validated against a runtime here — which providers exist is a
-    /// fact only a running node can report, and this file is read before there is one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
     /// A full direct model spec such as `openai_codex:gpt-5.6-sol`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -443,8 +439,7 @@ impl Defaults {
     /// Whether anything at all has been stated. A settings screen shows a different
     /// sentence for "nothing is set" than for "these are your answers".
     pub fn is_empty(&self) -> bool {
-        self.provider.is_none()
-            && self.model.is_none()
+        self.model.is_none()
             && self.workspace.is_none()
             && self.approval_mode.is_none()
             && self.sandbox_mode.is_none()
@@ -617,7 +612,6 @@ pub fn load(path: PathBuf) -> Loaded {
 /// that carried it silently would fail a start with an error about a parameter the
 /// operator never typed.
 fn normalise(config: &mut Config, path: &Path, problems: &mut Vec<String>) {
-    blank_to_none(&mut config.defaults.provider);
     blank_to_none(&mut config.defaults.model);
     blank_to_none(&mut config.defaults.workspace);
     blank_to_none(&mut config.defaults.approval_mode);
@@ -627,19 +621,6 @@ fn normalise(config: &mut Config, path: &Path, problems: &mut Vec<String>) {
     blank_to_none(&mut config.notifications.when);
     blank_to_none(&mut config.keys.backtrack);
     blank_to_none(&mut config.theme.name);
-
-    // `codex` used to name Harness's Codex CLI transport. The direct-runtime cutover
-    // removed that provider and made the equivalent ChatGPT-backed path a Native model.
-    // An explicit value in an older config otherwise wins over the new Native fallback
-    // forever and every home submission is rejected by the current gateway. This is an
-    // unambiguous compatibility migration, so preserve an explicitly selected model and
-    // supply the direct ChatGPT default only where the old file could not have named one.
-    if config.defaults.provider.as_deref() == Some("codex") {
-        config.defaults.provider = Some("native".to_string());
-        if config.defaults.model.is_none() {
-            config.defaults.model = Some("openai_codex:gpt-5.6-sol".to_string());
-        }
-    }
 
     if let Some(name) = config.theme.name.clone() {
         if ThemeName::parse(&name).is_none() {
@@ -847,7 +828,6 @@ impl Config {
 /// absent, which is what makes the config file reachable.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StartFlags {
-    pub provider: Option<String>,
     pub model: Option<String>,
     pub workspace: Option<String>,
     pub approval_mode: Option<String>,
@@ -861,7 +841,6 @@ pub struct StartFlags {
 /// The parameters a start will be built from, and where each of them came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedStart {
-    pub provider: String,
     pub model: Option<String>,
     pub workspace: Option<String>,
     pub approval_mode: Option<String>,
@@ -869,30 +848,19 @@ pub struct ResolvedStart {
     pub machine: Option<String>,
 }
 
-/// Retained for API compatibility; direct Native is now always a provider fallback.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Missing {
-    Provider,
-}
-
-impl Missing {
-    pub fn message(&self, _config_path: &Path) -> String {
-        "the direct Native provider could not be selected".to_string()
-    }
-}
-
-/// Flag, then the config file, then the direct Native default.
-pub fn resolve_start(flags: &StartFlags, defaults: &Defaults) -> Result<ResolvedStart, Missing> {
-    let provider = first(&flags.provider, &defaults.provider).unwrap_or_else(|| "native".into());
-
-    Ok(ResolvedStart {
-        provider,
+/// The flag, then the config file, then nothing — field by field.
+///
+/// This cannot fail. It used to be able to: a start had to name a provider, and neither
+/// place naming one was a refusal. This runtime serves one provider, so there is no
+/// question left for an operator to have failed to answer.
+pub fn resolve_start(flags: &StartFlags, defaults: &Defaults) -> ResolvedStart {
+    ResolvedStart {
         model: first(&flags.model, &defaults.model),
         workspace: first(&flags.workspace, &defaults.workspace),
         approval_mode: first(&flags.approval_mode, &defaults.approval_mode),
         sandbox_mode: first(&flags.sandbox_mode, &defaults.sandbox_mode),
         machine: first(&flags.machine, &None),
-    })
+    }
 }
 
 /// The flag if it says something, the stored default if it does, otherwise nothing.
@@ -936,7 +904,6 @@ mod tests {
 
         let config = Config {
             defaults: Defaults {
-                provider: Some("claude".into()),
                 model: Some("anthropic:claude-sonnet-5".into()),
                 workspace: Some("/home/me/project".into()),
                 approval_mode: Some("auto_edit".into()),
@@ -988,9 +955,13 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// Every config written before this runtime narrowed to one provider names one, and a
+    /// stored name is now an answer to a question nobody asks. It is read past rather than
+    /// refused, and the model beside it — the answer that still means something — survives
+    /// the read intact.
     #[test]
-    fn a_removed_codex_default_migrates_to_the_direct_native_model() {
-        let dir = scratch("codex-to-native");
+    fn a_stored_provider_is_read_past_without_disturbing_the_model() {
+        let dir = scratch("stored-provider");
         let path = dir.join(CONFIG_FILE);
 
         fs::write(&path, "[defaults]\nprovider = \"codex\"\n")
@@ -998,11 +969,7 @@ mod tests {
 
         let loaded = load(path.clone());
 
-        assert_eq!(loaded.config.defaults.provider.as_deref(), Some("native"));
-        assert_eq!(
-            loaded.config.defaults.model.as_deref(),
-            Some("openai_codex:gpt-5.6-sol")
-        );
+        assert_eq!(loaded.config.defaults.model, None);
         assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
 
         fs::write(
@@ -1013,11 +980,15 @@ mod tests {
 
         let loaded = load(path.clone());
 
-        assert_eq!(loaded.config.defaults.provider.as_deref(), Some("native"));
         assert_eq!(
             loaded.config.defaults.model.as_deref(),
             Some("openai_codex:gpt-5.5")
         );
+
+        // And the name is not written back out: a save states only what this build reads.
+        loaded.config.save(&path).expect("a rewrite");
+        let text = fs::read_to_string(&path).expect("the rewritten config");
+        assert!(!text.contains("provider"), "{text}");
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -1031,7 +1002,7 @@ mod tests {
             &path,
             "schema = 2\n\
              [defaults]\n\
-             provider = \"codex\"\n\
+             model = \"openai_codex:gpt-5.6-sol\"\n\
              telepathy = true\n\
              [onboarding]\n\
              welcomed = true\n\
@@ -1043,7 +1014,10 @@ mod tests {
 
         let loaded = load(path);
 
-        assert_eq!(loaded.config.defaults.provider.as_deref(), Some("native"));
+        assert_eq!(
+            loaded.config.defaults.model.as_deref(),
+            Some("openai_codex:gpt-5.6-sol")
+        );
         assert!(loaded.config.onboarding.welcomed);
         assert!(
             loaded.problems.is_empty(),
@@ -1064,14 +1038,17 @@ mod tests {
 
         fs::write(
             &path,
-            "[defaults]\nprovider = \"codex\"\n\
+            "[defaults]\nmodel = \"openai_codex:gpt-5.6-sol\"\n\
              [onboarding]\nwelcomed = true\nquick_start = false\n",
         )
         .expect("a config from a build that had the screen");
 
         let loaded = load(path.clone());
 
-        assert_eq!(loaded.config.defaults.provider.as_deref(), Some("native"));
+        assert_eq!(
+            loaded.config.defaults.model.as_deref(),
+            Some("openai_codex:gpt-5.6-sol")
+        );
         assert!(loaded.config.onboarding.welcomed);
         assert!(
             loaded.problems.is_empty(),
@@ -1097,7 +1074,8 @@ mod tests {
 
         // A file with no `[terminal]` table is a file from before this key existed.
         let path = dir.join(CONFIG_FILE);
-        fs::write(&path, "[defaults]\nprovider = \"codex\"\n").expect("an older config");
+        fs::write(&path, "[defaults]\nmodel = \"openai_codex:gpt-5.6-sol\"\n")
+            .expect("an older config");
         let loaded = load(path.clone());
         assert!(loaded.config.terminal.mouse);
         assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
@@ -1120,7 +1098,7 @@ mod tests {
         let dir = scratch("corrupt");
         let path = dir.join(CONFIG_FILE);
 
-        fs::write(&path, "[defaults\nprovider = ").expect("a broken config");
+        fs::write(&path, "[defaults\nmodel = ").expect("a broken config");
 
         let loaded = load(path.clone());
 
@@ -1147,14 +1125,17 @@ mod tests {
 
         fs::write(
             &path,
-            "[defaults]\nprovider = \"codex\"\napproval_mode = \"yolo\"\n",
+            "[defaults]\nmodel = \"openai_codex:gpt-5.6-sol\"\napproval_mode = \"yolo\"\n",
         )
         .expect("a config with a typo");
 
         let loaded = load(path);
 
         // The rest of the file still counts: one bad value is not a bad file.
-        assert_eq!(loaded.config.defaults.provider.as_deref(), Some("native"));
+        assert_eq!(
+            loaded.config.defaults.model.as_deref(),
+            Some("openai_codex:gpt-5.6-sol")
+        );
         assert_eq!(loaded.config.defaults.approval_mode, None);
         assert_eq!(loaded.config.defaults.approval_mode(), None);
         assert_eq!(loaded.problems.len(), 1);
@@ -1174,13 +1155,16 @@ mod tests {
 
         fs::write(
             &path,
-            "[defaults]\nprovider = \"codex\"\nsandbox_mode = \"yolo\"\n",
+            "[defaults]\nmodel = \"openai_codex:gpt-5.6-sol\"\nsandbox_mode = \"yolo\"\n",
         )
         .expect("a config with a typo");
 
         let loaded = load(path);
 
-        assert_eq!(loaded.config.defaults.provider.as_deref(), Some("native"));
+        assert_eq!(
+            loaded.config.defaults.model.as_deref(),
+            Some("openai_codex:gpt-5.6-sol")
+        );
         assert_eq!(loaded.config.defaults.sandbox_mode, None);
         assert_eq!(loaded.config.defaults.sandbox_mode(), None);
         assert_eq!(loaded.problems.len(), 1);
@@ -1200,7 +1184,7 @@ mod tests {
 
         fs::write(
             &path,
-            "[defaults]\nprovider = \"\"\nworkspace = \"   \"\napproval_mode = \"\"\nsandbox_mode = \"\"\n",
+            "[defaults]\nmodel = \"\"\nworkspace = \"   \"\napproval_mode = \"\"\nsandbox_mode = \"\"\n",
         )
         .expect("a blank config");
 
@@ -1219,7 +1203,7 @@ mod tests {
 
         let first = Config {
             defaults: Defaults {
-                provider: Some("claude".into()),
+                model: Some("anthropic:claude-sonnet-5".into()),
                 ..Defaults::default()
             },
             onboarding: Onboarding::default(),
@@ -1325,7 +1309,6 @@ mod tests {
     #[test]
     fn a_flag_beats_the_file_and_the_file_beats_nothing() {
         let defaults = Defaults {
-            provider: Some("claude".into()),
             model: Some("anthropic:claude-sonnet-5".into()),
             workspace: Some("/home/me/project".into()),
             approval_mode: Some("auto_edit".into()),
@@ -1333,9 +1316,8 @@ mod tests {
         };
 
         // Nothing stated: every answer comes from the file.
-        let resolved = resolve_start(&StartFlags::default(), &defaults).expect("a resolution");
+        let resolved = resolve_start(&StartFlags::default(), &defaults);
 
-        assert_eq!(resolved.provider, "claude");
         assert_eq!(resolved.model.as_deref(), Some("anthropic:claude-sonnet-5"));
         assert_eq!(resolved.workspace.as_deref(), Some("/home/me/project"));
         assert_eq!(resolved.approval_mode.as_deref(), Some("auto_edit"));
@@ -1344,16 +1326,16 @@ mod tests {
 
         // Stated: the flag wins, field by field.
         let flags = StartFlags {
-            provider: Some("codex".into()),
+            model: Some("openai_codex:gpt-5.6-sol".into()),
             approval_mode: Some("prompt".into()),
             sandbox_mode: Some("workspace_write".into()),
             machine: Some("builder-one".into()),
             ..StartFlags::default()
         };
 
-        let resolved = resolve_start(&flags, &defaults).expect("a resolution");
+        let resolved = resolve_start(&flags, &defaults);
 
-        assert_eq!(resolved.provider, "codex");
+        assert_eq!(resolved.model.as_deref(), Some("openai_codex:gpt-5.6-sol"));
         assert_eq!(
             resolved.workspace.as_deref(),
             Some("/home/me/project"),
@@ -1364,27 +1346,16 @@ mod tests {
         assert_eq!(resolved.machine.as_deref(), Some("builder-one"));
     }
 
+    /// With nothing stated anywhere there is still a resolution: the one provider needs no
+    /// naming, and every other answer is allowed to stay unstated for the plane to decide.
     #[test]
-    fn nothing_stated_uses_the_direct_native_default() {
-        let resolved =
-            resolve_start(&StartFlags::default(), &Defaults::default()).expect("a resolution");
+    fn nothing_stated_still_resolves_and_states_nothing() {
+        let resolved = resolve_start(&StartFlags::default(), &Defaults::default());
 
-        assert_eq!(resolved.provider, "native");
         assert_eq!(resolved.model, None);
-    }
-
-    #[test]
-    fn a_workspace_and_an_approval_mode_are_allowed_to_be_unstated() {
-        let flags = StartFlags {
-            provider: Some("native".into()),
-            ..StartFlags::default()
-        };
-
-        let resolved = resolve_start(&flags, &Defaults::default()).expect("a resolution");
-
-        assert_eq!(resolved.provider, "native");
         assert_eq!(resolved.workspace, None);
         assert_eq!(resolved.approval_mode, None);
         assert_eq!(resolved.sandbox_mode, None);
+        assert_eq!(resolved.machine, None);
     }
 }

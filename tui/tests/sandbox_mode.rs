@@ -275,12 +275,12 @@ fn a_transport_that_cannot_be_reconfigured_is_rendered_as_data() {
             code: ErrorCode::InvalidParams,
             message: "unsupported_configuration".into(),
             data: Some(json!({
-                "provider": "claude",
+                "provider": "native",
                 "transport": "stream_json_resume",
                 "field": "sandbox_mode",
                 "reason": "option_not_configurable",
-                "message": "claude over the stream_json_resume transport cannot change \
-                            sandbox_mode on an open session; start a new session instead."
+                "message": "this session's transport cannot change sandbox_mode on an \
+                            open session; start a new session instead."
             })),
         })),
     });
@@ -297,9 +297,9 @@ fn a_transport_that_cannot_be_reconfigured_is_rendered_as_data() {
 }
 
 /// `value_not_accepted` carries an allowlist instead of a sentence, and the allowlist is
-/// the whole answer: it says which postures this provider *would* take.
+/// the whole answer: it says which postures the session *would* take.
 #[test]
-fn a_provider_that_does_not_take_the_mode_names_the_ones_it_does() {
+fn a_session_that_does_not_take_the_mode_names_the_ones_it_does() {
     let mut app = opened_with(full_hello(), json!({"sandbox_mode": "read_only"}));
     compose(&mut app, "/sandbox workspace");
 
@@ -311,7 +311,7 @@ fn a_provider_that_does_not_take_the_mode_names_the_ones_it_does() {
             code: ErrorCode::InvalidParams,
             message: "unconfigurable_session".into(),
             data: Some(json!({
-                "provider": "pi",
+                "provider": "native",
                 "transport": "rpc",
                 "field": "sandbox_mode",
                 "reason": "value_not_accepted",
@@ -324,7 +324,7 @@ fn a_provider_that_does_not_take_the_mode_names_the_ones_it_does() {
     let text = render(&mut app, 220, 44).text();
     assert!(
         text.contains("takes only default, read_only, unrestricted"),
-        "the provider's own allowlist is quoted\n{text}"
+        "the runtime's own allowlist is quoted\n{text}"
     );
 }
 
@@ -546,7 +546,6 @@ fn the_start_request_carries_unrestricted_to_the_wire() {
     );
 
     let mut request = StartRequest::new(Plane::Interactive);
-    request.provider = "native".into();
     request.workspace = "/tmp/w".into();
     request.sandbox_mode = Some(SandboxMode::Unrestricted);
 

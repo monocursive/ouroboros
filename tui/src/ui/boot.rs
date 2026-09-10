@@ -86,7 +86,7 @@ pub enum BootEvent {
     Connected { node: String },
     /// `interactive.start`, which is allowed to take two minutes because provider
     /// readiness is unbounded upstream.
-    StartingSession { provider: String },
+    StartingSession,
     /// A session exists.
     SessionStarted { id: String },
     /// Worth saying, but not a phase. Rendered beside the steps rather than as one.
@@ -115,7 +115,7 @@ impl BootEvent {
             | Self::Published { .. }
             | Self::Connecting { .. }
             | Self::Connected { .. }
-            | Self::StartingSession { .. }
+            | Self::StartingSession
             | Self::SessionStarted { .. } => None,
         }
     }
@@ -137,7 +137,7 @@ impl BootEvent {
             Self::Published { port } => Some(format!("gateway published on port {port}")),
             Self::Connecting { address } => Some(format!("connecting to {address}")),
             Self::Connected { node } => Some(format!("connected to {node}")),
-            Self::StartingSession { provider } => Some(format!("starting a {provider} session")),
+            Self::StartingSession => Some("starting the session".into()),
             Self::SessionStarted { id } => Some(format!("session {id}")),
             Self::Warning(_) => None,
         }
@@ -798,9 +798,7 @@ mod tests {
                 address: "a".into(),
             },
             BootEvent::Connected { node: "n".into() },
-            BootEvent::StartingSession {
-                provider: "p".into(),
-            },
+            BootEvent::StartingSession,
             BootEvent::SessionStarted { id: "s".into() },
         ] {
             assert_eq!(event.plain(), None, "{event:?}");
@@ -808,22 +806,20 @@ mod tests {
     }
 
     #[test]
-    fn the_new_session_phases_name_the_provider_and_the_session() {
+    fn the_new_session_phases_name_the_start_and_the_session() {
         let mut progress = BootProgress::new();
 
         progress.apply(BootEvent::Connected {
             node: "ouroboros@golden".into(),
         });
-        progress.apply(BootEvent::StartingSession {
-            provider: "claude_code".into(),
-        });
+        progress.apply(BootEvent::StartingSession);
         progress.apply(BootEvent::SessionStarted {
             id: "session-1".into(),
         });
 
         let steps = labels(&progress);
 
-        assert!(steps[1].0.contains("claude_code"), "{steps:?}");
+        assert!(steps[1].0.contains("starting the session"), "{steps:?}");
         assert!(steps[2].0.contains("session-1"), "{steps:?}");
     }
 

@@ -33,26 +33,28 @@ end
 
 defmodule Ouroboros.InteractiveExternalApprovalTest do
   @moduledoc """
-  C2's runtime half: a tool call a managed transport cannot ask about, asked anyway.
+  A tool call that did not arrive on this session's own transport, asked anyway.
 
-  `interactive.request_approval` is how `ouro mcp-serve` — the stdio MCP server Claude
-  Code is handed as its `--permission-prompt-tool` — reaches the session coordinator. The
-  invariants these tests pin are the ones a permission prompt is worth nothing without:
-  the question is durable before the caller waits on it, the answer is a human's or the
-  engine's, and *every* other outcome is a denial that says which one it was.
+  `Ouroboros.InteractiveSession.request_approval/2` is how a native subagent's question
+  reaches the parent session that owns the modal (`relay_approval/2`). The
+  `interactive.request_approval` gateway verb — the Claude `--permission-prompt-tool`
+  bridge's own door into this — went with the wrapped vendor providers; the machinery
+  under it did not. The invariants these tests pin are the ones a permission prompt is
+  worth nothing without: the question is durable before the caller waits on it, the answer
+  is a human's or the engine's, and *every* other outcome is a denial that says which one
+  it was.
   """
 
   use ExUnit.Case, async: false
 
   alias Jido.Harness.{Session, SessionInfo}
   alias Ouroboros.Control.Permissions
-  alias Ouroboros.Gateway.Methods
   alias Ouroboros.Interactive.{State, Store, Task}
   alias Ouroboros.InteractiveSession
   alias Ouroboros.Test.AllowEverythingPermissions
   alias Ouroboros.Test.HarnessAdapter
 
-  @provider :ouroboros_test
+  @provider :native
   @receive_timeout 5_000
 
   setup do
@@ -446,82 +448,6 @@ defmodule Ouroboros.InteractiveExternalApprovalTest do
     assert entry.principal =~ id
 
     retire_session(id)
-  end
-
-  describe "the gateway verb" do
-    test "carries the round trip end to end", %{id: id} do
-      ref = start_session(id)
-      test_pid = self()
-
-      spawn(fn ->
-        send(
-          test_pid,
-          {:invoked,
-           Methods.invoke("interactive.request_approval", %{
-             "id" => id,
-             "request" => %{
-               "tool_name" => "Edit",
-               "input" => %{"file_path" => "lib/a.ex"},
-               "tool_use_id" => "toolu_gateway",
-               "cwd" => File.cwd!()
-             }
-           })}
-        )
-      end)
-
-      requested = await_event(ref, :approval_requested)
-      assert requested.payload["tool_use_id"] == "toolu_gateway"
-      assert requested.payload["tool_call"]["cwd"] == File.cwd!()
-
-      assert {:ok, _acknowledged} =
-               Methods.invoke("interactive.respond_approval", %{
-                 "id" => id,
-                 "request_id" => requested.request_id,
-                 "response" => "approve"
-               })
-
-      assert_receive {:invoked, {:ok, answer}}, @receive_timeout
-
-      assert answer == %{
-               "decision" => "allow",
-               "request_id" => requested.request_id,
-               "source" => "human",
-               "reason" => nil
-             }
-
-      retire_session(id)
-    end
-
-    test "refuses a request that is not one", %{id: id} do
-      ref = start_session(id)
-
-      assert {:error, -32_602, message} =
-               Methods.invoke("interactive.request_approval", %{"id" => id, "request" => %{}})
-
-      assert message =~ "params.request"
-
-      assert {:error, -32_602, _unknown_field} =
-               Methods.invoke("interactive.request_approval", %{
-                 "id" => id,
-                 "request" => %{"tool_name" => "Read", "provider_options" => %{"x" => 1}}
-               })
-
-      assert {:error, -32_602, _bad_input} =
-               Methods.invoke("interactive.request_approval", %{
-                 "id" => id,
-                 "request" => %{"tool_name" => "Read", "input" => "not an object"}
-               })
-
-      _unused = ref
-      retire_session(id)
-    end
-
-    test "is an operate verb with a fifteen-minute ceiling" do
-      assert %{scope: :operate, timeout: 900_000} =
-               Map.fetch!(Methods.table(), "interactive.request_approval")
-
-      assert "interactive.request_approval" in Methods.names()
-    end
   end
 
   defp start_session(id, opts \\ []) do
