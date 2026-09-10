@@ -116,11 +116,19 @@ defmodule Ouroboros.Interactive.Task do
   end
 
   # A record whose `provider` this build no longer has. It loads, it lists, and its history
-  # is intact: this coordinator holds it exactly as the store handed it over, takes no
-  # workspace lease, opens no transport and schedules no poll, and every verb that would
-  # put it in front of a provider is refused by name. Failing it instead would rewrite an
-  # operator's record to say something about this build rather than about the session, and
-  # would take the workspace lease to do it.
+  # is intact: this coordinator is a read-only holder of it (info, replay, journal,
+  # rewind points), exactly as the store handed it over. It takes no workspace lease, opens
+  # no transport and schedules no poll, and every verb that would put it in front of a
+  # provider is refused by name. Failing it instead would rewrite an operator's record to
+  # say something about this build rather than about the session, and would take the
+  # workspace lease to do it.
+  #
+  # No retire timer is armed. Retirement is for a session that has ended; this one has not,
+  # and `handle_info(:retire, …)` does nothing for a non-terminal record anyway (it fired
+  # once at @terminal_retire_ms and leaked the process — the C2 review's F3). The holder
+  # lives until `close`/`kill` transitions it to `:closed`, and `Interactive.Recovery`
+  # does not start one on its own because `Session.Recovery.recoverable?/1` skips a record
+  # this provider names. So a coordinator exists only while a verb is being served.
   def handle_continue({:provider_removed, provider}, runtime) do
     Logger.warning(
       "interactive session #{runtime.session.id} names provider #{inspect(provider)}, " <>
@@ -128,10 +136,7 @@ defmodule Ouroboros.Interactive.Task do
         "intact, and every verb that would run it is refused"
     )
 
-    {:noreply,
-     runtime
-     |> refuse_ready_waiters(State.provider_removed_error(provider))
-     |> schedule_retire()}
+    {:noreply, refuse_ready_waiters(runtime, State.provider_removed_error(provider))}
   end
 
   def handle_continue({:unrequestable, reason}, runtime) do
@@ -248,6 +253,10 @@ defmodule Ouroboros.Interactive.Task do
   def handle_call({:await_turn, _request_ref, _turn_id}, _from, runtime),
     do: {:reply, {:error, :not_found}, runtime}
 
+  def handle_call({:steer, _input, _opts}, _from, runtime)
+      when runtime.session.provider != :native,
+      do: {:reply, {:error, State.provider_removed_error(runtime.session.provider)}, runtime}
+
   def handle_call({:steer, input, opts}, _from, runtime) do
     case authorize_steer_attachments(input, opts, runtime) do
       {:ok, input, opts} ->
@@ -318,6 +327,10 @@ defmodule Ouroboros.Interactive.Task do
     {reply, runtime} = Approvals.respond_provider(runtime, request_id, response)
     {:reply, reply, runtime}
   end
+
+  def handle_call({:configure, _changes}, _from, runtime)
+      when runtime.session.provider != :native,
+      do: {:reply, {:error, State.provider_removed_error(runtime.session.provider)}, runtime}
 
   def handle_call({:configure, changes}, _from, runtime) do
     case configure_session(runtime, changes) do
@@ -401,6 +414,10 @@ defmodule Ouroboros.Interactive.Task do
   # C4. Two transports can fold a conversation now, and they fold different things.
   # `Provider.compact_capability/1` is the declaration both branches read, so a transport
   # gains compaction by declaring it rather than by being named here.
+  def handle_call({:compact, _focus}, _from, runtime)
+      when runtime.session.provider != :native,
+      do: {:reply, {:error, State.provider_removed_error(runtime.session.provider)}, runtime}
+
   def handle_call({:compact, focus}, _from, runtime) do
     {:reply, compact(runtime, focus), runtime}
   end
@@ -433,6 +450,10 @@ defmodule Ouroboros.Interactive.Task do
   # packet and names the child, and `Ouroboros.InteractiveSession.handoff/3` starts the
   # child outside this process so a parent is never blocked behind provider readiness it
   # does not own.
+  def handle_call({:handoff_plan, _prompt, _id}, _from, runtime)
+      when runtime.session.provider != :native,
+      do: {:reply, {:error, State.provider_removed_error(runtime.session.provider)}, runtime}
+
   def handle_call({:handoff_plan, prompt, id}, _from, runtime) do
     {:reply, handoff_plan(runtime, prompt, id), runtime}
   end
@@ -443,6 +464,10 @@ defmodule Ouroboros.Interactive.Task do
   # until a child it does not own had finished starting or hit the readiness deadline. So
   # this answers with the child's start intent and nothing else, and
   # `Ouroboros.InteractiveSession.fork/2` starts the child outside this process.
+  def handle_call({:fork_plan, _id}, _from, runtime)
+      when runtime.session.provider != :native,
+      do: {:reply, {:error, State.provider_removed_error(runtime.session.provider)}, runtime}
+
   def handle_call({:fork_plan, id}, _from, runtime) do
     {:reply, fork_plan(runtime.session, id, %{}), runtime}
   end
@@ -451,6 +476,10 @@ defmodule Ouroboros.Interactive.Task do
   # clauses stay: a fork is planned by calling into the *parent's* coordinator, which on a
   # fleet may be an older build on another node, and a call it cannot match would kill the
   # parent rather than refuse the child.
+  def handle_call({:fork_plan, _id, _overrides}, _from, runtime)
+      when runtime.session.provider != :native,
+      do: {:reply, {:error, State.provider_removed_error(runtime.session.provider)}, runtime}
+
   def handle_call({:fork_plan, id, overrides}, _from, runtime) do
     {:reply, fork_plan(runtime.session, id, overrides), runtime}
   end
@@ -478,6 +507,10 @@ defmodule Ouroboros.Interactive.Task do
   # A rename touches nothing but the durable record: no provider knows this session by a
   # name, and a terminal session is still worth finding in a picker, so unlike `configure`
   # this is allowed after the conversation has ended.
+  def handle_call({:rename, _title}, _from, runtime)
+      when runtime.session.provider != :native,
+      do: {:reply, {:error, State.provider_removed_error(runtime.session.provider)}, runtime}
+
   def handle_call({:rename, title}, _from, runtime) do
     with {:ok, title} <- State.validate_title(title),
          renamed = runtime.session |> State.put_title(title, :human) |> State.touch(),
@@ -491,6 +524,10 @@ defmodule Ouroboros.Interactive.Task do
         {:reply, {:error, {:rename_checkpoint_failed, :storage_error}}, runtime}
     end
   end
+
+  def handle_call({:interrupt, _turn_id}, _from, runtime)
+      when runtime.session.provider != :native,
+      do: {:reply, {:error, State.provider_removed_error(runtime.session.provider)}, runtime}
 
   def handle_call({:interrupt, turn_id}, _from, runtime) do
     reply =
@@ -508,6 +545,18 @@ defmodule Ouroboros.Interactive.Task do
   def handle_call(:close, _from, %{session: session} = runtime)
       when session.status in [:closed, :cancelled] do
     {:reply, :ok, runtime}
+  end
+
+  # A removed-provider record has no transport to close and no poll to run: ending it is a
+  # durable state change and nothing more. It transitions to `:closed` — the terminal
+  # closed state, not `:failed`, because the operator asked to end it and this build never
+  # ran it — so `delete` then works by the operator's explicit choice, and the coordinator
+  # retires. `close` and `kill` do the same thing here; there is no live process for
+  # `kill` to be more forceful about.
+  def handle_call(action, _from, %{session: session} = runtime)
+      when action in [:close, :kill] and session.provider != :native and
+             session.status not in [:closed, :cancelled] do
+    {:reply, :ok, close_removed_provider(runtime)}
   end
 
   # A session the caller asked to end is not a session the runtime lost, so the Harness
@@ -785,6 +834,15 @@ defmodule Ouroboros.Interactive.Task do
 
   defp poll(%{session: session} = runtime)
        when session.status in [:closed, :failed, :cancelled, :lost],
+       do: runtime
+
+  # A record whose provider this build lost never enters the poll path. Left to
+  # `attach_or_start/1` below it, `start_harness_session/1` would answer
+  # `{:legacy_transport_unavailable, provider}` and `fail_start/2` would checkpoint it
+  # `:failed`. The mutating verbs are already refused before they can schedule a poll; this
+  # is the brace on the other side, so no stray zero-delay poll can fail the record.
+  defp poll(%{session: %State{provider: provider}} = runtime)
+       when is_atom(provider) and not is_nil(provider) and provider != :native,
        do: runtime
 
   defp poll(%{session: %State{harness_session_id: nil}} = runtime), do: attach_or_start(runtime)
@@ -1494,6 +1552,25 @@ defmodule Ouroboros.Interactive.Task do
 
       {:error, runtime} ->
         schedule_poll(runtime, @poll_interval)
+    end
+  end
+
+  # `close`/`kill` on a removed-provider record. It never held a lease or a transport, so
+  # there is nothing to release or ask; the only work is to write the terminal transition.
+  # `:closed` is storable because it is terminal (`State.storable?/1`), so `persist/3`
+  # accepts it and never reaches `abandon/2` — the refused-checkpoint path that would have
+  # failed it. `error` is cleared: the record's ending is the operator's `close`, not a
+  # fault.
+  defp close_removed_provider(runtime) do
+    closed =
+      runtime.session
+      |> Map.put(:status, :closed)
+      |> Map.put(:error, nil)
+      |> State.touch()
+
+    case persist(runtime, closed, []) do
+      {:ok, runtime} -> runtime |> reply_ready_waiters() |> schedule_retire()
+      {:error, runtime} -> runtime |> reply_ready_waiters() |> schedule_retire()
     end
   end
 
