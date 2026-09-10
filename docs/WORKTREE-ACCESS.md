@@ -25,13 +25,17 @@ retain their existing policy shape. Seatbelt reopens these paths after its paren
 denials, then denies nested protected names. bubblewrap reopens exact bind mounts
 and retains nested protected binds.
 
-A protected *name* that does not exist when the command starts is not denied on
-Linux. It used to be, by an `LD_PRELOAD` filter that resolved cwd and `*at`
-directory descriptors and survived `execve`, `execvp` and an `env -i` child — and
-that a static binary or a direct syscall walked past anyway. The filter and the
-`ouro-sandbox` backend that also loaded it were deleted by
-docs/proposals/core.md §4 A2. Existing protected paths are protected by mounts,
-which is the whole of the Linux fence; Seatbelt still denies both cases by regex.
+A protected *name* created after the command starts, **below the top level of a
+writable root**, is not denied on Linux. It used to be, by an `LD_PRELOAD` filter
+that resolved cwd and `*at` directory descriptors and survived `execve`, `execvp`
+and an `env -i` child — and that a static binary or a direct syscall walked past
+anyway. The filter and the `ouro-sandbox` backend that also loaded it were deleted
+by docs/proposals/core.md §4 A2. A writable root's *own* `.git` or `.ouroboros` is
+still covered whether or not it is there: bound read-only over itself when it
+exists, and covered by a read-only bind of the command's empty scratch directory
+when it does not. Protection on Linux is mounts, and a mount can only name a
+destination known before the namespace is built; Seatbelt still denies every case
+by regex.
 
 Provisioned shell commands start with `GIT_CONFIG_NOSYSTEM=1`,
 `GIT_CONFIG_GLOBAL=/dev/null`, and `GIT_CONFIG_COUNT=0`. Operator-global hooks,
@@ -65,8 +69,9 @@ normal Git denial, symlink/registry rejection, and mirror/sibling write denials.
 
 The Linux evidence is the bubblewrap run: on the Ubuntu fleet validation host
 (kernel 7.0.0-28) as `ubuntu`, delivery logging, ordinary Git denial, approved
-commit and seven neighboring fences all passed. The nested-name, case and `env -i`
-denials in that run came from the `LD_PRELOAD` filter and are no longer claimed —
-see above. A Landlock-helper run of 31 kernel tests on the same host is the record
+commit and seven neighboring fences all passed. The half of the nested-name, case
+and `env -i` denials in that run that covered a name *created* by the command came
+from the `LD_PRELOAD` filter and is no longer claimed — see above; a nested `.git`
+that was there when the command started is still bound read-only and still denied. A Landlock-helper run of 31 kernel tests on the same host is the record
 of a backend this tree no longer has. These are local-source and disposable-host
 validation, not evidence of a published release.

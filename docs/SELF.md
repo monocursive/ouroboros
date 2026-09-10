@@ -71,10 +71,16 @@ eval-spec requirement is only as strong as that fence**. The same list carries t
 and the sandbox deliberately keeps loopback open for build tools.
 
 Both backends render that fence — Seatbelt with `(deny file-read* (literal …))`, bubblewrap by
-binding `/dev/null` read-only over the path — so the application starts the local signing
-service wherever the posture is on and a key is named. There used to be a third backend that
-could not, a `hides_files?/1` question in front of this decision, and an
-`OUROBOROS_SELF_UNFENCED_KEY=1` escape from it; all three went with docs/proposals/core.md §4 A2.
+binding `/dev/null` read-only over the path, and only where the file is there (an absent one is
+left out, because binding `/dev/null` onto a path under a read-only bind aborts the command;
+`Bwrap.hidden_file_binds/1` has the measurement). So the application no longer asks *which*
+backend a node has before it starts the local signing service. It still asks whether the node
+has one: **no backend, no service.** A `:none` node renders no fence at all, so it logs one
+error naming `OUROBOROS_SIGNING_NODE` — or installing a backend — and starts nothing, and a
+forge there ends at `:no_signing_service`. There used to be a third backend that could not
+render the fence, a `hides_files?/1` question in front of this decision, and an
+`OUROBOROS_SELF_UNFENCED_KEY=1` escape from it; all three went with docs/proposals/core.md §4
+A2, and nothing replaced the escape.
 
 **On a fleet, name a `:signer` node.** `OUROBOROS_SIGNING_NODE` puts the key on another host,
 this node starts no service, and none of the above applies: the seed is not on the machine the
@@ -709,9 +715,11 @@ checkout — is an empty report and no log line.
   `Self.Boot.run_after_wasm/0`, with the lane-W half proved to run first.
 - `boot_test.exs`, the posture's key — the posture with a key beside the application starts one
   service carrying that key path; a `signing_node` posture starts none, with or without a real
-  key file on this host; no posture and no key each start none. (The `hides_files?/1` refusal and
-  `OUROBOROS_SELF_UNFENCED_KEY` this bullet used to describe went with the third backend,
-  docs/proposals/core.md §4 A2.)
+  key file on this host; no posture and no key each start none; and a node with **no sandbox
+  backend** starts none and logs one error naming a `:signer` peer or a backend as the remedy.
+  (The `hides_files?/1` question that stood in front of this decision, and the
+  `OUROBOROS_SELF_UNFENCED_KEY` escape from it, went with the third backend,
+  docs/proposals/core.md §4 A2. The refusal on a backend-less node did not.)
 - `sandbox_test.exs` — `hidden_files/0` names the seed, both tokens and the cookie secret, in
   the spelling they are configured with and in the one the kernel resolves, and agrees with
   `Ouroboros.Web.Config`'s own defaults; every session policy carries them in all three modes
@@ -1536,9 +1544,12 @@ sandboxed children, not on this user.
 *Superseded in part by docs/proposals/core.md §4 A2.* This decision also carried a refusal for a
 backend that could not render the deny: `ouro-sandbox` reported `Sandbox.hides_files?/1` as
 `false`, `Ouroboros.Application.self_signing_children/0` then started no local signing service,
-and `OUROBOROS_SELF_UNFENCED_KEY=1` was the operator accepting the consequence. That backend and
-all three of those are deleted; both remaining backends render the deny. A fleet posture is
-unaffected either way — `OUROBOROS_SIGNING_NODE` puts the key on another host.
+and `OUROBOROS_SELF_UNFENCED_KEY=1` was the operator accepting the consequence. That backend,
+that question and that variable are deleted; both remaining backends render the deny, so there
+is no backend left to ask about. **The refusal itself is not deleted**: a node with *no*
+backend renders no fence, and `self_signing_children/0` still starts nothing there and logs why.
+No backend, no service — and no variable that lifts it. A fleet posture is unaffected either
+way: `OUROBOROS_SIGNING_NODE` puts the key on another host.
 
 **S-D50. An export replaces `priv/self`'s files and removes every bundle it did not write.**
 `Ouroboros.Self.Boot` globs `priv/self/*.ouro-wasm`, so a policy renamed between two exports
