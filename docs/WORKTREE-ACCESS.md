@@ -19,20 +19,19 @@ cannot supply these grants. Older records without the captured `git_dir` do not
 receive an exception. Symlinked delivery roots and mismatched records fail closed.
 The runtime creates `.ouroboros/deliver` before admitting the child.
 
-The sandbox policy and helper JSON carry an optional `write_exceptions` list;
-ordinary workspaces retain their existing policy shape. The helper accepts at
-most three existing canonical directories in workspace modes. An older helper
-rejects the unknown field instead of silently dropping enforcement. Seatbelt
-reopens these paths after its parent denials, then denies nested protected names.
-Linux backends reopen exact bind mounts and retain nested protected binds; the
-helper's Landlock grants cover the same paths. The preload filter handles new
-protected names, resolves cwd and `*at` directory descriptors, and preserves its
-policy through `execve`, `execvp`, and an `env -i` child.
+The sandbox policy carries an optional `write_exceptions` list of at most three
+existing canonical directories, and only in workspace modes; ordinary workspaces
+retain their existing policy shape. Seatbelt reopens these paths after its parent
+denials, then denies nested protected names. bubblewrap reopens exact bind mounts
+and retains nested protected binds.
 
-Linux's existing preload limitation still applies: static binaries and direct
-syscalls do not pass through its new-name checks. Existing protected paths are
-also protected by mounts; the helper additionally applies Landlock and seccomp.
-This change does not claim a new kernel-level name filter.
+A protected *name* that does not exist when the command starts is not denied on
+Linux. It used to be, by an `LD_PRELOAD` filter that resolved cwd and `*at`
+directory descriptors and survived `execve`, `execvp` and an `env -i` child — and
+that a static binary or a direct syscall walked past anyway. The filter and the
+`ouro-sandbox` backend that also loaded it were deleted by
+docs/proposals/core.md §4 A2. Existing protected paths are protected by mounts,
+which is the whole of the Linux fence; Seatbelt still denies both cases by regex.
 
 Provisioned shell commands start with `GIT_CONFIG_NOSYSTEM=1`,
 `GIT_CONFIG_GLOBAL=/dev/null`, and `GIT_CONFIG_COUNT=0`. Operator-global hooks,
@@ -44,28 +43,19 @@ command may supply its own identity with `git -c user.name=… -c user.email=…
 
 Ubuntu systems enforcing AppArmor's unprivileged user namespace restriction may
 allow `unshare` but refuse the subsequent identity mapping or mount operation.
-`ouro-sandbox doctor` tests those operations as well, reports `usable: false`,
-and mentions AppArmor when setup fails. Run doctor as the actual daemon user:
-root success does not prove that the daemon can use the helper.
+`Bwrap.probe/1` runs a representative read-only mount and a second command that
+unshares the network namespace before the backend is selected at all, so such a
+host reports no usable backend rather than wrapping nothing. Run the runtime as
+the actual daemon user when checking: root success does not prove that the daemon
+can enter a namespace.
 
-For a reviewed installed helper, an administrator can grant user namespace
-admission to its **exact executable path**. Adapt this profile to that path:
-
-```text
-abi <abi/5.0>,
-include <tunables/global>
-profile ouroboros-sandbox /absolute/install/priv/sandbox/ouro-sandbox flags=(unconfined) {
-  userns,
-}
-```
-
-Install it as a root-owned file in `/etc/apparmor.d/`, then load that file with
-`sudo apparmor_parser -r /etc/apparmor.d/ouroboros-sandbox`. The profile grants
-namespace admission; Ouroboros still applies its mount, Landlock, seccomp and
-capability restrictions before executing the command. Use a reviewed installation
-path, and update the profile when that path changes. Do not disable the machine's
-user namespace restriction globally. Verify `doctor` and a real sandboxed write
-and denial as the daemon user after installation.
+The host-wide switch is `kernel.apparmor_restrict_unprivileged_userns`; CI's
+ubuntu-24.04 job sets it to 0 for the runner, and `scripts/wasm-linux-test.sh`
+writes it inside its container when it can. An administrator who does not want to
+lift it machine-wide can grant namespace admission to `bwrap`'s exact executable
+path with an AppArmor profile carrying `userns,`. Ouroboros still applies its
+mounts and its network namespace before executing the command. Verify a real
+sandboxed write and denial as the daemon user after any such change.
 
 ## Validation evidence
 
@@ -73,11 +63,10 @@ The focused Mac suite covers native write permission and SafeWrite, real shell
 logging to delivery, actual detached Git staging/commit after escalation, a
 normal Git denial, symlink/registry rejection, and mirror/sibling write denials.
 
-The Linux enforcement suite builds and loads this change's preload library and
-runs the same delivery/commit/neighbor cases against the actual helper. On the
-Ubuntu fleet validation host (kernel 7.0.0-28, Landlock ABI 8), all 31 kernel tests
-passed as `ubuntu` after exact-path AppArmor admission; the global restriction
-remained enabled. A separate bubblewrap run as `ubuntu` passed delivery logging,
-ordinary Git denial, approved commit, seven neighboring fences, and nested-name,
-case, and `env -i` denials. These are local-source and disposable-host validation,
-not evidence of a published release.
+The Linux evidence is the bubblewrap run: on the Ubuntu fleet validation host
+(kernel 7.0.0-28) as `ubuntu`, delivery logging, ordinary Git denial, approved
+commit and seven neighboring fences all passed. The nested-name, case and `env -i`
+denials in that run came from the `LD_PRELOAD` filter and are no longer claimed —
+see above. A Landlock-helper run of 31 kernel tests on the same host is the record
+of a backend this tree no longer has. These are local-source and disposable-host
+validation, not evidence of a published release.

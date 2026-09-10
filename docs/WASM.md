@@ -17,6 +17,19 @@ how this lane was designed and built, not a description of the tree. What lane W
 on — `upgrade/signing/`, `upgrade/rollout/`, `epoch.ex`, `wire.ex` — is unchanged, and
 the routing rule in §6 now has one destination.
 
+**The `ouro-sandbox` backend is gone.** docs/proposals/core.md §4 A2 removed the second
+Linux OS-sandbox backend — `provider/native/sandbox/helper.ex`, the `tui/sandbox/` crate,
+`priv/sandbox/`, `scripts/sandbox-linux-test.sh` and the `sandbox*` make targets — along
+with the `LD_PRELOAD` name filter (`c_src/fs_filter.c`) both Linux backends loaded and the
+one semantic it carried: denying the creation of a `.git` that did not exist when the
+command started. There are two OS sandbox backends, Seatbelt and bubblewrap, and both fence
+reads, protect a named file and hide a named credential — so `Sandbox.protects_files?/1`,
+`Sandbox.hides_files?/1` and the `read_fence` / `features.read_allow_set` detection this
+document describes are gone too. Everything below that names `ouro-sandbox`, Landlock, the
+helper's seccomp belt or its `doctor` report is the record of how this lane was built, not
+a description of the tree. `Sandbox.helper_policy/1` is unaffected: that name has always
+meant the **`ouro-wasm`** helper, and it is rendered by Seatbelt or bubblewrap as before.
+
 ## 1. Purpose
 
 Ouroboros has one place left where admission is hygiene rather than containment: code.
@@ -186,6 +199,7 @@ template `ouro-wasm` was built from, not code that still ships.
   seam spawns children with `{:stdin, :close}` (`tui/sandbox/src/request.rs:14-18`,
   `provider/native/exec.ex:128`); `deny_unknown_fields` on the request; exit 125 +
   `ouro-sandbox: ` stderr prefix distinguishes backend failure from command failure.
+  *(Deleted by docs/proposals/core.md §4 A2; the survey entry stands as written.)*
 - Elixir owner (server-shaped half): `Native.Desktop.Pool` — one helper per node,
   lazy, spawned via `Port.open({:spawn_executable, ...})` with secret-shaped env
   unset (`desktop/pool.ex:47,548-552`), handshake = a `doctor` request, broken is a
@@ -539,6 +553,13 @@ every interval the pool hands a timer is clamped to a module constant, because
 
 ### 7.3a The helper under the OS sandbox
 
+> The `ouro-sandbox` backend named in this section is deleted (docs/proposals/core.md §4 A2).
+> There are two OS sandbox backends, Seatbelt and bubblewrap; `Sandbox.helper_policy/1` is
+> the **`ouro-wasm`** helper's policy and is unchanged, and every claim here about what that
+> policy fences holds on both. Sentences about Landlock, a `doctor` report's
+> `features.read_allow_set`, `read_fence`, `protects_files?/1` or `hides_files?/1` are the
+> record of how this was built.
+
 The helper is a separate process, which is what keeps a wasmtime crash off the node (D3).
 Since W8 it is also a process that **maps machine code a signer produced** — `deserialize` is
 `unsafe` because wasmtime does not validate a serialized artifact against a malicious producer
@@ -627,7 +648,8 @@ service on this machine — this node's own gateway among them. The two Linux ba
 network namespace, so there is no host loopback in the child to take away; a `bwrap` that
 *cannot* unshare one (`unshare_net: false`, a host without `CLONE_NEWNET`) is a refusal to
 spawn rather than a child on the host's network, which is the second question
-`Sandbox.fences_network?/1` exists to ask.
+`Sandbox.fences_network?/1` exists to ask. (Written when there were two Linux backends;
+there is one, and the sentence holds for it.)
 
 **The fence is stated twice.** Every `load` in this repository names a file in this node's own
 store, and the one `inspect` names a product the forge just built in this node's own build
@@ -640,7 +662,8 @@ half resolves both. That asymmetry is why there are two walls and not one.
 
 **And it does not degrade quietly.** `config :ouroboros, :wasm, helper_sandbox:` is
 `:required` by default. Under it a node with no backend, a backend that cannot fence reads
-(`Sandbox.fences_reads?/1`, contract C11 — `ouro-sandbox` before W17), a backend that cannot
+(`Sandbox.fences_reads?/1`, contract C11 — both surviving backends answer yes by name; the
+one that did not is deleted), a backend that cannot
 fence the network (`Sandbox.fences_network?/1`), or no data directory to put a scratch in
 **refuses to spawn**: the pool goes broken with `{:helper_sandbox_unavailable, reason}`, every
 request answers at once, and `wasm.status` reports
@@ -2303,7 +2326,12 @@ machinery — it is a backend, not a lane (D9).
   residual was about, and the machine code still runs.
 
 - **D26 — a read allow-set is a list the daemon widens, and a read denial is Landlock's
-  alone.** D18 fenced a build's reads on two backends and refused the third by name, because
+  alone.** *(The third backend this decision is about is deleted —
+  docs/proposals/core.md §4 A2. Both surviving backends fence a builder's reads by name,
+  `Sandbox.fences_reads?/1` no longer probes a binary for the capability, and the
+  `read_fence` detection key is gone. The rules below about what the daemon puts in the list
+  still hold; the Landlock half is history.)* D18 fenced a build's reads on two backends and
+  refused the third by name, because
   `ouro-sandbox`'s wire format had no way to say what a build may read. It has one now:
   `mode: "builder"` and `readable: [...]`, and the three rules around it are what make the
   field a fence rather than a hint.
