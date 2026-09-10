@@ -54,7 +54,7 @@ defmodule Ouroboros.InteractiveRemovedProviderTest do
       {:ok, id: id, ref: Ref.new(id)}
     end
 
-    test "steer / interrupt / rename / configure / compact / handoff / fork / turns", %{
+    test "steer / interrupt / rename / configure / compact / handoff / fork / turns / exec", %{
       id: id,
       ref: ref
     } do
@@ -70,7 +70,8 @@ defmodule Ouroboros.InteractiveRemovedProviderTest do
         InteractiveSession.fork(ref),
         InteractiveSession.send_message(ref, "hello"),
         InteractiveSession.follow_up(ref, "and then"),
-        InteractiveSession.retry_turn(ref, "some-turn")
+        InteractiveSession.retry_turn(ref, "some-turn"),
+        InteractiveSession.exec(ref, "true")
       ]
 
       for reply <- refusals do
@@ -117,6 +118,29 @@ defmodule Ouroboros.InteractiveRemovedProviderTest do
   end
 
   describe "it reserves no workspace (F2)" do
+    test "workspace.exec cannot use saved approval to write through another owner's lease" do
+      root = tmp_root("exec")
+      workspace = Path.join(root, "workspace")
+      id = seed_removed_provider(workspace: workspace, options: %{approval_mode: :auto_approve})
+      before = fetch!(id)
+
+      start_supervised!({Workspace, allowed_roots: [root]})
+      assert {:ok, _lease, _capability} = Workspace.acquire(workspace, "another-session")
+      claims = Workspace.list()
+      assert {:ok, effects} = Ouroboros.Agent.EffectLedger.list(effect: :operator_shell)
+
+      assert {:error, -32_006, _message, ["provider_removed", "claude", _detail]} =
+               Methods.invoke("workspace.exec", %{
+                 "id" => id,
+                 "command" => "printf regression > review-marker"
+               })
+
+      refute File.exists?(Path.join(workspace, "review-marker"))
+      assert fetch!(id) == before
+      assert Workspace.list() == claims
+      assert Ouroboros.Agent.EffectLedger.list(effect: :operator_shell) == {:ok, effects}
+    end
+
     test "the recovery manager mints no reservation for it, and its root stays acquirable" do
       root = tmp_root("reservation")
       workspace = Path.join(root, "claude")
@@ -204,6 +228,7 @@ defmodule Ouroboros.InteractiveRemovedProviderTest do
     id = "removed-provider-#{System.unique_integer([:positive, :monotonic])}"
     workspace = Keyword.get_lazy(opts, :workspace, fn -> Path.join(tmp_root("ws"), "claude") end)
     record = removed_provider_record(id, workspace)
+    record = %{record | options: Keyword.get(opts, :options, record.options)}
 
     if Keyword.get(opts, :isolate, false) do
       # The reservation manager reads the whole store at init and fails closed on a claim

@@ -435,6 +435,10 @@ defmodule Ouroboros.Interactive.Task do
   # `interrupt`, not its own turns — for that long. This call decides, records, and hands
   # back a plan; `Ouroboros.InteractiveSession.exec/2` runs the command in the caller's
   # own process, under the caller's own ceiling.
+  def handle_call({:exec_plan, _command}, _from, runtime)
+      when runtime.session.provider != :native,
+      do: {:reply, {:error, State.provider_removed_error(runtime.session.provider)}, runtime}
+
   def handle_call({:exec_plan, command}, {caller, _tag}, runtime) do
     case Shell.plan(runtime, command, caller) do
       {:ok, plan, runtime} -> {:reply, {:ok, plan}, runtime}

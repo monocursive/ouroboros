@@ -89,6 +89,10 @@ compatibility is a manual fence — `@fleet_protocol_revision` in `cluster.ex`, 
 Ouroboros version and OTP release — so a mixed-revision cluster is named rather than
 silently trusted.
 
+The core reduction uses protocol revision **3**. Pre-reduction runtimes advertise
+revision **2** and expose remote APIs this build removed; upgrade peers to the same
+revision before placing work between them.
+
 ## Two machines, by hand
 
 Nothing below contacts a machine. An operator copies one directory, types four commands,

@@ -55,7 +55,7 @@ defmodule Ouroboros.ClusterTest do
     test "fleet compatibility has an explicit manual protocol revision" do
       runtime = Cluster.local_fleet_posture().runtime
 
-      assert runtime.fleet_protocol_revision == 2
+      assert runtime.fleet_protocol_revision == 3
 
       assert Cluster.runtime_compatible?(
                runtime,
@@ -68,6 +68,16 @@ defmodule Ouroboros.ClusterTest do
              )
 
       refute Cluster.runtime_compatible?(runtime, Map.delete(runtime, :fleet_protocol_revision))
+    end
+
+    test "the pre-reduction fleet contract is incompatible in both directions" do
+      runtime = Cluster.local_fleet_posture().runtime
+      # dev at 3bc8887 exposes remote session APIs removed by the core reduction, but
+      # has the same application version and OTP release as an upgraded peer.
+      previous = %{runtime | fleet_protocol_revision: 2}
+
+      refute Cluster.runtime_compatible?(runtime, previous)
+      refute Cluster.runtime_compatible?(previous, runtime)
     end
   end
 
@@ -222,7 +232,7 @@ defmodule Ouroboros.ClusterTest do
       before = Enum.find(Cluster.fleet_status().machines, &(&1.node == peer))
       assert before.compatibility == :compatible
       assert before.last_up_at
-      assert before.runtime.fleet_protocol_revision == 2
+      assert before.runtime.fleet_protocol_revision == 3
       assert before.runtime.otp_release == to_string(:erlang.system_info(:otp_release))
 
       assert %{status: :warning, guidance: roster_guidance} =

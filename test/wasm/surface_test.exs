@@ -653,32 +653,32 @@ defmodule Ouroboros.Wasm.SurfaceTest do
   end
 
   defp counting_pool(report) do
-    {:ok, pid} =
-      CountingPool.start_link(%{
-        phase: :ready,
-        helper_path: "/fake/ouro-wasm",
-        os_pid: 4242,
-        doctor: report,
-        instances: 2,
-        owned: 1,
-        pending_drops: 0,
-        hook_components: 3,
-        # W16, D25. A pool answers what its child's posture is; the fixture's is the ordinary
-        # one, because that is what a working node reports. `readable` is absolute on the node
-        # and **basenames** on the wire, for `helper.path`'s reason.
-        sandbox: %{
-          posture: :sandboxed,
-          # W21: what Seatbelt applies to the real helper by default.
-          process: :sealed,
-          backend: "sandbox-exec",
-          reason: nil,
-          readable: ["/opt/ouroboros/data/wasm/components"]
-        },
-        broken_reason: nil
-      })
-
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
-    pid
+    start_supervised!(
+      {CountingPool,
+       %{
+         phase: :ready,
+         helper_path: "/fake/ouro-wasm",
+         os_pid: 4242,
+         doctor: report,
+         instances: 2,
+         owned: 1,
+         pending_drops: 0,
+         hook_components: 3,
+         # W16, D25. A pool answers what its child's posture is; the fixture's is the ordinary
+         # one, because that is what a working node reports. `readable` is absolute on the node
+         # and **basenames** on the wire, for `helper.path`'s reason.
+         sandbox: %{
+           posture: :sandboxed,
+           # W21: what Seatbelt applies to the real helper by default.
+           process: :sealed,
+           backend: "sandbox-exec",
+           reason: nil,
+           readable: ["/opt/ouroboros/data/wasm/components"]
+         },
+         broken_reason: nil
+       }},
+      id: make_ref()
+    )
   end
 
   defp pool_opts(context, overrides),
@@ -686,11 +686,7 @@ defmodule Ouroboros.Wasm.SurfaceTest do
 
   defp with_report(context, overrides), do: Surface.status(pool_opts(context, overrides))
 
-  defp fake_registry(entries) do
-    {:ok, pid} = FakeRegistry.start_link(entries)
-    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
-    pid
-  end
+  defp fake_registry(entries), do: start_supervised!({FakeRegistry, entries}, id: make_ref())
 
   defp entry(id, opts \\ []) do
     struct!(Registry.Entry,
