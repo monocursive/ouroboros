@@ -35,6 +35,8 @@ ouroboros-*.tar
 
 # Release tarballs (built via "mix release --tar"), which is how a node's artifact ships.
 *.tar.gz
+# The integration fixture is a committed record, not a built artifact (scripts/fixture/boot_gate.sh).
+!/test/support/integration_fixture/fixture-datadir.tar.gz
 
 # The Rust TUI crate's build directory.
 /tui/target/
