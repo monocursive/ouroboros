@@ -744,6 +744,32 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       assert Sandbox.label(:bwrap) == "bwrap"
       assert Sandbox.label(:none) == "none"
     end
+
+    # `label/1`'s catch-all is justified in its own `@doc` by the sentence "those three answer
+    # for any term", and it has to be true of all three rather than of the one that happens to
+    # be asked first: a refusal naming an unknown backend reaches `label/1` *after* one of them
+    # answered `false` (`Wasm.Pool.sandbox_status/1`, `Wasm.Forge.sandbox_policy/5`), and a
+    # question that raises instead of answering turns that refusal into a crash inside the code
+    # already refusing. Pinned in both shapes, the bare atom and the detection map.
+    test "and the three questions a refusal asks first answer for a name it does not know" do
+      assert Sandbox.label(:some_future_backend) == "some_future_backend"
+
+      refute Sandbox.fences_reads?(:some_future_backend)
+      refute Sandbox.fences_network?(:some_future_backend)
+      refute Sandbox.seals_process?(:some_future_backend)
+
+      refute Sandbox.fences_reads?(%{backend: :some_future_backend})
+      refute Sandbox.fences_network?(%{backend: :some_future_backend})
+      refute Sandbox.seals_process?(%{backend: :some_future_backend})
+
+      # And the posture derived from the third is `:open` rather than a crash.
+      assert Sandbox.process_posture(%{process: :sealed}, :some_future_backend) == :open
+
+      assert Sandbox.process_posture(
+               %{process: :sealed},
+               %{backend: :some_future_backend}
+             ) == :open
+    end
   end
 
   describe "the tool call marker" do
@@ -1953,7 +1979,50 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
       refute File.exists?(Path.join(nested, "HEAD"))
     end
 
-    test "denies creating a .git that did not exist when the command started", %{
+    # The create-time half of the segment fence, in the two cases that now differ. Read
+    # `Bwrap`'s moduledoc section "Protected segments, and the one this backend cannot fence"
+    # beside these: a bind can only name a destination that is known before the namespace is
+    # built, so what survives is exactly what a bind could name.
+    #
+    # This one is a destination bubblewrap *can* name: a writable root's own top-level
+    # segment, absent or not, is `--ro-bind <scratch> <dest>` — the command's own empty
+    # scratch directory, read-only, at that path. So the create is still denied, and pinning
+    # it is what keeps the narrowing below from being read as the whole fence going away.
+    # The fixture's workspace already has a `.git` — that is the "denies a write into .git"
+    # case two tests above — so the absent top-level segments to try here are the workspace's
+    # own `.ouroboros` and the second writable root's `.git`. `mkdir -p` on the placeholder is
+    # a no-op success, because the mount point is already a directory; the write through it
+    # is not.
+    test "denies creating a protected segment at the top level of a writable root", %{
+      context: context,
+      root: root,
+      workspace: workspace
+    } do
+      cases = [
+        {"mkdir -p .ouroboros && echo x > .ouroboros/HEAD",
+         Path.join(workspace, ".ouroboros/HEAD")},
+        {"mkdir -p ../extra/.git && echo x > ../extra/.git/HEAD",
+         Path.join(root, "extra/.git/HEAD")}
+      ]
+
+      for {command, created} <- cases do
+        result = run(Bash, %{"command" => command}, context)
+
+        assert result.is_error, "#{command} was allowed: #{result.output}"
+        assert result.output =~ "Read-only file system"
+        refute File.exists?(created), "#{command} wrote #{created}"
+      end
+    end
+
+    # And the destination bubblewrap cannot name, asserted as the success it is rather than
+    # left to be inferred from prose. `deps/bar/.git` does not exist when the namespace is
+    # built, so nothing binds it and it sits inside the read-write `--bind` of the workspace.
+    # This used to be denied, by an `LD_PRELOAD` name filter this repository built and loaded
+    # into every sandboxed command; docs/proposals/core.md §4 A2 deleted the filter and the
+    # semantic together, on the grounds that Claude Code and Codex do not claim it either.
+    # An existing nested `.git` is still bound read-only — that is the test above this one —
+    # and Seatbelt still denies both cases by regex, which is why this is a Linux-only test.
+    test "and does not deny one created below the top level: the Linux narrowing, stated", %{
       context: context,
       workspace: workspace
     } do
@@ -1964,10 +2033,9 @@ defmodule Ouroboros.Provider.Native.SandboxTest do
           context
         )
 
-      assert result.is_error
-      assert result.output =~ "Read-only file system"
-      refute File.dir?(Path.join(workspace, "deps/bar/.git"))
-      refute File.exists?(Path.join(workspace, "deps/bar/.git/HEAD"))
+      refute result.is_error, "the create was denied: #{result.output}"
+      assert File.dir?(Path.join(workspace, "deps/bar/.git"))
+      assert File.read!(Path.join(workspace, "deps/bar/.git/HEAD")) == "x\n"
     end
   end
 end

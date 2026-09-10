@@ -928,17 +928,17 @@ defmodule Ouroboros.Wasm.ForgeTest do
   # it are (`/bin` on macOS, `/usr` on Linux).
   defp bash!, do: System.find_executable("bash") || "/bin/bash"
 
+  # A contiguous run of `needle` anywhere in `list`.
+  defp sublist?(list, needle) do
+    list |> Enum.chunk_every(length(needle), 1, :discard) |> Enum.member?(needle)
+  end
+
   # The two backends refuse a read in two different words, and the difference is mechanism
   # rather than cosmetics. Seatbelt denies an open on a path that is there (`EPERM`).
   # bubblewrap never puts the file in the namespace, so the compiler is told it is not there
   # (`ENOENT`). Both are the fence; only one is a permission error. The assertion beside this
   # one — that the honest fixture still builds under the same policy — is what makes either
   # of them mean the fence rather than a broken toolchain.
-  # A contiguous run of `needle` anywhere in `list`.
-  defp sublist?(list, needle) do
-    list |> Enum.chunk_every(length(needle), 1, :discard) |> Enum.member?(needle)
-  end
-
   defp denial_pattern do
     case Sandbox.detect().backend do
       :sandbox_exec -> ~r/Operation not permitted/

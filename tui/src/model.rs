@@ -5023,17 +5023,24 @@ mod tests {
     /// fence off. `refused` is the one that means there is no helper on that node.
     #[test]
     fn a_refused_and_a_disabled_wasm_sandbox_decode_as_themselves() {
+        // The backend name is one no runtime ships: both backends this tree has fence reads,
+        // so `{:cannot_fence_reads, _}` can only ever name a backend the runtime does not
+        // recognise. The Elixir side plants the same `:some_future_backend` for the same
+        // reason (`test/wasm/pool_test.exs`, `test/wasm/forge_test.exs`).
         let refused = WasmStatus::decode(&serde_json::json!({
             "sandbox": {
                 "posture": "refused",
-                "backend": "bwrap",
-                "reason": "{:cannot_fence_reads, :bwrap}"
+                "backend": "some-future-backend",
+                "reason": "{:cannot_fence_reads, :some_future_backend}"
             }
         }));
 
         assert!(refused.sandbox.refused());
         assert!(!refused.sandbox.sandboxed());
-        assert_eq!(refused.sandbox.backend.as_deref(), Some("bwrap"));
+        assert_eq!(
+            refused.sandbox.backend.as_deref(),
+            Some("some-future-backend")
+        );
         assert!(refused.sandbox.reason.is_some(), "a refusal says why");
         assert!(
             refused.sandbox.readable.is_empty(),
