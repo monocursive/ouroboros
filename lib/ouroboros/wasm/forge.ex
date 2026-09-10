@@ -33,8 +33,7 @@ defmodule Ouroboros.Wasm.Forge do
       on writes, so a build reads the toolchain, the SDK, the `wit` world file and its own
       directories and nothing else — `include_str!` of anything else fails at compile time,
       in whichever words the backend refuses a read with (`Operation not permitted` from
-      Seatbelt, `No such file or directory` from a bubblewrap namespace,
-      `Permission denied` from `ouro-sandbox`'s Landlock read set). No network
+      Seatbelt, `No such file or directory` from a bubblewrap namespace). No network
       (`--offline` as well, so a cold cache is a refusal rather than a fetch), writes only
       into the build directory, the node-local cargo home and a private `TMPDIR` — and, on
       Linux, `/dev/null` and nothing else under `/dev` — a five-minute ceiling, bounded
@@ -1424,11 +1423,11 @@ defmodule Ouroboros.Wasm.Forge do
   because "what would this build run under" is a question worth being able to ask without
   running one.
 
-  All three backends can fence reads since W17, and the third is still asked rather than
-  assumed. `Sandbox.fences_reads?/1` answers for `:ouro_sandbox` out of the probed helper's
-  own `doctor` report, so the refusal below is no longer "this backend cannot" but "the
-  binary installed on this node cannot" — an operator's remedy is a newer helper, and until
-  they have one the node forges under bubblewrap or not at all.
+  Both backends fence reads — Seatbelt with `(deny default)`, bubblewrap by never binding
+  `/` into the namespace (docs/WASM.md §12) — so `Sandbox.fences_reads?/1` below refuses only
+  a node that has no backend at all, which the clause above it has already refused. It is
+  asked rather than assumed because the two questions are different ones: this lane's claim
+  rests on the read fence, not on the presence of a sandbox.
   """
   @spec sandbox_policy(String.t(), Path.t(), Path.t(), Path.t(), Sandbox.detection()) ::
           {:ok, Sandbox.policy()} | {:error, term()}
@@ -1444,10 +1443,8 @@ defmodule Ouroboros.Wasm.Forge do
          {:sandbox_cannot_fence_reads, detection.backend,
           "the #{Sandbox.label(detection)} at #{detection.executable || "(no path)"} " <>
             "cannot express a read allow-set, so a build under it could read anything the " <>
-            "node can (docs/WASM.md D18, D26). A binary from before the allow-set reports " <>
-            "no `read_allow_set` feature to `doctor` and is refused by that report rather " <>
-            "than by its name — which is why this names the file: replace that one " <>
-            "(`make sandbox`) or let detection fall through to bubblewrap."}}
+            "node can (docs/WASM.md D18, D26). This node will not forge until it has a " <>
+            "backend that fences reads: sandbox-exec on macOS, bubblewrap on Linux."}}
 
       true ->
         {:ok,

@@ -302,15 +302,20 @@ defmodule Ouroboros.Application do
   #
   # Public (undocumented) for `wasm_restart_children/0`'s reason: `test/self/boot_test.exs`
   # reads the decision off the spec this tree actually builds rather than restating it.
-  # S4 fix wave. And it starts nothing at all on a node whose sandbox cannot **hide** that
-  # file from a session's own shell. The review of this slice proved the whole of it: the
-  # default `:workspace_write` policy fences writes and not reads, so the model's `bash` read
-  # the seed, derived the keypair with `:crypto`, and signed a manifest — around the eval
-  # spec, the rate limit and the journal that are the only things this service adds. The
-  # fence is `Ouroboros.Provider.Native.Sandbox`'s `hidden_files`, two of the three backends
-  # can render it, and `hides_files?/1` is how the third says it cannot. A key this node
-  # cannot fence is a key it declines to hold, and `OUROBOROS_SELF_UNFENCED_KEY=1` is the
-  # operator saying they accept the consequence in the sentence below.
+  #
+  # S4. The seed this service loads is denied a **read** by every session's own sandbox
+  # policy (`Ouroboros.Provider.Native.Sandbox`'s `hidden_files`), which is what makes
+  # holding it here safe: without that fence the model's `bash` reads the seed, derives the
+  # keypair with `:crypto`, and signs a manifest around the eval spec, the rate limit and the
+  # journal that are the only things this service adds.
+  #
+  # Both backends render the fence — Seatbelt with a `literal` deny, bubblewrap by binding
+  # `/dev/null` read-only over the path, and only where the file is there — so this no longer
+  # asks *which* backend a node has. It still asks whether it has one. `:none` renders no
+  # fence at all, and a node that cannot hide the seed from its own sessions is a node that
+  # declines to hold it: no backend, no service. There used to be one variable that turned
+  # that refusal off (`OUROBOROS_SELF_UNFENCED_KEY`); it went with the third backend, and the
+  # remedy is now a `:signer` peer or a backend (docs/proposals/core.md §4 A2).
   #
   # `Sandbox.detect/0` here rather than a fresh probe: it is cached in `:persistent_term`, so
   # this is the same answer every `bash` call in the VM will get, decided once at boot.
@@ -322,43 +327,30 @@ defmodule Ouroboros.Application do
     if Application.get_env(:ouroboros, :self_posture, false) == true and
          is_nil(Application.get_env(:ouroboros, :signing_node)) and
          is_binary(key_path) and key_path != "" do
-      signing_service_if_fenced(key_path)
+      signing_service_if_a_backend_is_there(key_path)
     else
       []
     end
   end
 
-  defp signing_service_if_fenced(key_path) do
+  defp signing_service_if_a_backend_is_there(key_path) do
     detection = Ouroboros.Provider.Native.Sandbox.detect()
 
-    cond do
-      Ouroboros.Provider.Native.Sandbox.hides_files?(detection) ->
-        [{Ouroboros.Upgrade.Signing.Service, [key_path: key_path]}]
+    if detection.backend == :none do
+      Logger.error(
+        "OUROBOROS_POSTURE=self names a signing key at #{key_path}, and this node has no OS " <>
+          "sandbox at all: with no backend nothing hides a named file from a read, so any " <>
+          "session on this node can read the signing seed and sign in this key's name — " <>
+          "around the signed evaluation spec, the rate limit and the signing journal " <>
+          "(docs/SELF.md §2, S-D49). No local signing service was started, so a forge here " <>
+          "ends at :no_signing_service. Name a `:signer` peer with OUROBOROS_SIGNING_NODE so " <>
+          "the key lives on another host, or install a backend: bubblewrap on Linux, or run " <>
+          "on macOS where `sandbox-exec` is present."
+      )
 
-      System.get_env(Ouroboros.Self.Posture.unfenced_key_env()) == "1" ->
-        Logger.warning(
-          "#{Ouroboros.Self.Posture.unfenced_key_env()}=1: starting the one-machine signing " <>
-            "service with #{key_path} on a #{Ouroboros.Provider.Native.Sandbox.label(detection)} " <>
-            "sandbox, which cannot hide one named file from a read. Any session on this node " <>
-            "can read the signing seed and sign in this key's name — around the signed " <>
-            "evaluation spec, the rate limit and the signing journal (docs/SELF.md S-D49)."
-        )
-
-        [{Ouroboros.Upgrade.Signing.Service, [key_path: key_path]}]
-
-      true ->
-        Logger.error(
-          "OUROBOROS_POSTURE=self names a signing key at #{key_path}, and this node's " <>
-            "#{Ouroboros.Provider.Native.Sandbox.label(detection)} sandbox cannot hide a " <>
-            "named file from a read: any session on this node can read the signing seed and " <>
-            "sign in this key's name. No local signing service was started, so a forge here " <>
-            "ends at :no_signing_service. Name a `:signer` peer with OUROBOROS_SIGNING_NODE " <>
-            "so the key lives on another host, or set " <>
-            "#{Ouroboros.Self.Posture.unfenced_key_env()}=1 to accept that consequence " <>
-            "(docs/SELF.md §2, S-D49)."
-        )
-
-        []
+      []
+    else
+      [{Ouroboros.Upgrade.Signing.Service, [key_path: key_path]}]
     end
   end
 

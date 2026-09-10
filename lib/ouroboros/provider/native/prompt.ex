@@ -269,7 +269,7 @@ defmodule Ouroboros.Provider.Native.Prompt do
     This node has **no OS sandbox available**. File tools remain bounded by the workspace
     path checks above, but `bash` is refused rather than run unsandboxed — a workspace-write
     label a shell can step out of would be a lie about the label. Ask the human to install
-    `ouro-sandbox`, `bwrap`, or `sandbox-exec`, or to set
+    `bwrap` (Linux) or run on macOS where `sandbox-exec` is present, or to set
     `OUROBOROS_ALLOW_UNSANDBOXED_BASH=1` if they accept an unsandboxed shell on this
     node.#{approvals(approval_mode)}
     """

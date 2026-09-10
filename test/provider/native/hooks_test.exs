@@ -250,45 +250,13 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       assert trusted.declined == 0
     end
 
-    # S1/HIGH-1. Configuration is necessary and no longer sufficient: `ouroboros.toml` is a
-    # file in a workspace the session can write, so trusting it means trusting whatever it
-    # writes into it next — unless the kernel holds that one path shut. The sandbox backend
-    # is the second condition, and where it cannot express the fence the workspace's shell
-    # hooks are declined exactly as an untrusted workspace's are.
-    test "operator configuration alone does not trust a workspace the sandbox cannot fence",
-         %{workspace: workspace} do
-      project_toml(workspace, """
-      [[hooks]]
-      event = "PreToolUse"
-      command = "true"
-      """)
-
-      trust(workspace)
-
-      # Seatbelt and bubblewrap can write the deny; ouro-sandbox cannot, and says so.
-      for backend <- [:sandbox_exec, :bwrap] do
-        config = Hooks.load(workspace, sandbox_detection: %{backend: backend})
-        assert config.trusted?, "#{backend} declined a workspace it can fence"
-        assert [%{event: :pre_tool_use}] = config.hooks
-        assert config.declined == 0
-      end
-
-      for backend <- [:ouro_sandbox, :none] do
-        {config, log} =
-          with_log(fn -> Hooks.load(workspace, sandbox_detection: %{backend: backend}) end)
-
-        refute config.trusted?, "#{backend} trusted a workspace it cannot fence"
-        assert config.hooks == []
-        assert config.declined == 1
-
-        # One warning, naming the reason and the file.
-        assert log =~ "cannot keep a shell out of"
-        assert log =~ Path.join(workspace, "ouroboros.toml")
-        assert log =~ inspect(backend)
-      end
-    end
-
-    test "a component hook from such a workspace is still admitted, as D8 says", %{
+    # S1. `trusted?/2` used to ask the OS sandbox a second question — whether the backend
+    # this node detected could fence `ouroboros.toml` at all — because one of the three
+    # backends could not. There are two backends now and both can, so operator configuration
+    # is sufficient again (docs/proposals/core.md §4 A2). What has *not* changed is that the
+    # fence must exist: `Sandbox.protected_files/2` names the manifest in every workspace
+    # policy, and `sandbox_test.exs` pins both backends rendering it.
+    test "a component hook from an untrusted workspace is still admitted, as D8 says", %{
       workspace: workspace
     } do
       File.mkdir_p!(Path.join(workspace, "hooks"))
@@ -300,9 +268,8 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       component = "./hooks/vet.wasm"
       """)
 
-      trust(workspace)
-
-      config = Hooks.load(workspace, sandbox_detection: %{backend: :ouro_sandbox})
+      # Deliberately not trusted: no `trust(workspace)`.
+      config = Hooks.load(workspace)
 
       refute config.trusted?
       assert [%{kind: :component, trusted: false}] = config.hooks
@@ -1205,12 +1172,7 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       command = "#{blocker}"
       """)
 
-      # S1: `trusted?/2` now also asks whether the *sandbox* can fence this workspace's
-      # `ouroboros.toml`, and `native_sandbox: :none` above says it cannot — which would
-      # decline the hook one layer earlier than the layer this test is about. The detection
-      # is named explicitly so the load stays trusted and the dispatch is still the thing
-      # under test.
-      config = Hooks.load(context.workspace, sandbox_detection: %{backend: :sandbox_exec})
+      config = Hooks.load(context.workspace)
 
       {result, log} =
         with_log(fn ->
@@ -1235,9 +1197,7 @@ defmodule Ouroboros.Provider.Native.HooksTest do
       marker = Path.join(context.workspace, "ambient-check-ran")
       project_toml(context.workspace, "[checks]\ntypecheck = \"touch #{marker}\"\n")
 
-      # S1: as above — the load is kept trusted on purpose so that "a check that cannot be
-      # sandboxed fails" is what this asserts, not "a check that was never loaded".
-      config = Hooks.load(context.workspace, sandbox_detection: %{backend: :sandbox_exec})
+      config = Hooks.load(context.workspace)
       assert [failure] = Hooks.run_checks(config)
       assert failure =~ "typecheck"
       assert failure =~ "could not run"

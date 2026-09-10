@@ -70,8 +70,8 @@ nobody wrote by hand.
       what the asked-for ref reaches, so the commit that is the answer — and every commit
       after it — is not in the workspace at all; that this is so is asserted per task
       rather than assumed, and it costs 0.50 s and 4.3 MiB. The history *up to* the base is
-      all there. `deps/`, `_build/`,
-      `priv/wasm/` and `priv/sandbox/` are cloned in from the checkout (`cp -Rc` on macOS,
+      all there. `deps/`, `_build/` and
+      `priv/wasm/` are cloned in from the checkout (`cp -Rc` on macOS,
       so APFS shares the blocks and a 300 MB `_build` costs metadata);
    2. `mix deps.get` when the commit's `mix.lock` is not the one those `deps/` were
       fetched for, then `mix compile` in `dev` and `test` — `test` alone under `--oracle`,
