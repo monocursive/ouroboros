@@ -169,13 +169,13 @@ defmodule Mix.Tasks.Ouroboros.Gateway.Golden do
   being fine the moment a second implementation has to produce the same sentences from
   the same bytes, because there is nothing in this directory for it to be held to.
 
-  So this list is the payload half of the same seam: every `Jido.Harness.Event` type,
+  So this list is the payload half of the same seam: every preserved execution event type,
   every `provider_event.kind` this runtime writes itself, every `approval_requested`
   variant, and the two runtime-native types — one frame each, built from the field
   vocabulary the emitting module actually uses. Field names are copied from the emitters
   (`Ouroboros.Provider.Native.Loop`, `.Session`, `.Tools.AskUser`, `.Subagent`,
   `Ouroboros.Interactive.Task` and its `Shell` and `Approvals` submodules, and
-  `Jido.Harness`'s own session and run workers); nothing here is a shape invented for a
+  the legacy worker lifecycle for historical replay); nothing here is a shape invented for a
   test.
 
   The same static discipline as everything else in this file: literal ids, two literal

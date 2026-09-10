@@ -286,7 +286,7 @@ defmodule Ouroboros.Runtime.Exposure do
     case Map.get(command, key) || Map.get(command, Atom.to_string(key)) do
       value when is_binary(value) ->
         value
-        |> Jido.Harness.Redaction.redact()
+        |> Ouroboros.Redaction.redact()
         |> String.replace(~r/\p{Cc}/u, " ")
         |> truncate(limit)
         |> String.trim()

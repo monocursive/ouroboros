@@ -259,11 +259,9 @@ defmodule Ouroboros.Storage.RetiredAtoms do
     # `attempt.provider` of every `:permission` and `:tool_call` entry in
     # `Ouroboros.Agent.EffectLedger`, which is a single file whose loss stops the boot.
     #
-    # Nine of these ten are *still* spelled, by `Jido.Harness.Registry`'s `@builtins` in a
-    # dependency this build no longer registers those adapters with. That is an accident of
-    # a pinned dependency and the guarantee must not rest on one — the same reason C5 listed
-    # `:observe` above. `:claude_code` is the tenth and is genuinely gone: it was never a
-    # registry key, only the name an event carried.
+    # Nine of these ten formerly came from the removed vendor registry's builtins.
+    # Keep the historical vocabulary explicit now that no dependency interns it.
+    # `:claude_code` was never a registry key, only the name an event carried.
     :amp,
     :claude,
     :claude_code,
@@ -356,7 +354,61 @@ defmodule Ouroboros.Storage.RetiredAtoms do
     :transport_has_no_modes,
     :unforkable_at_turn,
     :unsupported_approval_mode,
-    :vendor_forks_at_tail
+    :vendor_forks_at_tail,
+
+    # ── J2: owned session contract, Interactive.Store and EffectLedger ──
+    # Historical nested requests, events, results and errors remain ordinary data.
+    # These are tags only: SessionMigration never loads or constructs these modules.
+    :"Elixir.Jido.Harness.SessionRequest",
+    :"Elixir.Jido.Harness.TurnRequest",
+    :"Elixir.Jido.Harness.ApprovalResponse",
+    :"Elixir.Jido.Harness.Event",
+    :"Elixir.Jido.Harness.Error",
+    :"Elixir.Jido.Harness.SessionInfo",
+    :"Elixir.Jido.Harness.TurnResult",
+    :"Elixir.Jido.Harness.RunRequest",
+    :"Elixir.Jido.Harness.RunResult",
+    :"Elixir.Jido.Harness.RunInfo",
+    :"Elixir.Jido.Harness.ProcessInfo",
+    # Renamed durable identity fields and generation-local cursor offsets.
+    :harness_session_id,
+    :harness_turn_id,
+    :provider_session_id,
+    :sequence_offset,
+    # Fields and enum values of the retired structs above. Most still have a live
+    # speller; the explicit list keeps valid old data independent of that accident.
+    :retention,
+    :memory_bytes,
+    :journal_dir,
+    :journal_path,
+    :journal_bytes,
+    :max_events,
+    :max_bytes,
+    :output_cursor,
+    :queued_turns,
+    :active_turn_id,
+    :pending_approvals,
+    :text_truncated?,
+    :env_mode,
+    :overlay,
+    :replace,
+    :category,
+    :configuration,
+    :execution,
+    :internal,
+    :run_id,
+    :raw,
+    :__exception__,
+    :validation,
+    :transport,
+    :legacy_refusal,
+    # Session lifecycle failures can be nested in a durable session error or ledger
+    # classification even though the old worker which produced them is now gone.
+    :turn_timeout_interrupt_failed,
+    :transport_exit,
+    :model_provider_required,
+    :missing_version,
+    :unparseable_version
   ]
 
   @doc """

@@ -58,7 +58,7 @@ defmodule Ouroboros.Provider.Native.LoopLedgerTest do
 
   @moduletag :capture_log
 
-  alias Jido.Harness.ApprovalResponse
+  alias Ouroboros.Session.ApprovalResponse
   alias Ouroboros.Agent.EffectLedger
   alias Ouroboros.Control.Permissions.Request
   alias Ouroboros.Control.PolicyEvidence

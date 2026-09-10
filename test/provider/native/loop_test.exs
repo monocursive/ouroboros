@@ -5,7 +5,7 @@ defmodule Ouroboros.Provider.Native.LoopTest do
   # inside the test rather than on the runner's guillotine.
   @moduletag timeout: 120_000
 
-  alias Jido.Harness.ApprovalResponse
+  alias Ouroboros.Session.ApprovalResponse
   alias Ouroboros.Provider.Native.Loop
   alias Ouroboros.Provider.Native.Paths
   alias Ouroboros.Test.NativeModelScript

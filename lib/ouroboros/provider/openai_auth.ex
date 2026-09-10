@@ -294,7 +294,7 @@ defmodule Ouroboros.Provider.OpenAIAuth do
       parent = self()
 
       {:ok, pid} =
-        Task.Supervisor.start_child(Jido.Harness.SessionTaskSupervisor, fn ->
+        Task.Supervisor.start_child(Ouroboros.SessionTaskSupervisor, fn ->
           result = poll_device(state, device_id, user_code, interval_ms)
           send(parent, {:oauth_device_complete, login_id, result})
         end)
@@ -460,7 +460,7 @@ defmodule Ouroboros.Provider.OpenAIAuth do
     with {:ok, socket} <- :gen_tcp.listen(port, options),
          {:ok, {_address, actual_port}} <- :inet.sockname(socket),
          {:ok, pid} <-
-           Task.Supervisor.start_child(Jido.Harness.SessionTaskSupervisor, fn ->
+           Task.Supervisor.start_child(Ouroboros.SessionTaskSupervisor, fn ->
              accept_callback(parent, login_id, socket)
            end) do
       {:ok,

@@ -3,7 +3,9 @@ defmodule Ouroboros.Provider.NativeTest do
 
   @moduletag :capture_log
 
-  alias Jido.Harness.RunRequest
+  alias Ouroboros.Session.Request
+  alias Ouroboros.Session.TurnRequest
+  alias Ouroboros.Test.NativeSessionFixture, as: Session
   alias Ouroboros.Provider
   alias Ouroboros.Provider.Native
   alias Ouroboros.Test.NativeModelScript
@@ -35,9 +37,8 @@ defmodule Ouroboros.Provider.NativeTest do
   defp restore(key, value), do: Application.put_env(:ouroboros, key, value)
 
   describe "registration" do
-    test "is a registered provider like the three this runtime already overrides" do
-      assert Map.get(Jido.Harness.Registry.providers(), :native) == Native
-      assert {:ok, spec} = Jido.Harness.Registry.spec(:native)
+    test "declares the one native execution provider" do
+      assert {:ok, spec} = Provider.spec(:native)
       assert spec.provider == :native
     end
 
@@ -45,12 +46,7 @@ defmodule Ouroboros.Provider.NativeTest do
       assert :native in Enum.map(Ouroboros.providers(), & &1.provider)
     end
 
-    # `Jido.Harness.Registry` merges this node's provider map over nine bundled vendor-CLI
-    # adapters rather than replacing them, so a vendor key still *resolves* upstream. What
-    # this runtime does with it is the whole answer: it is not listed, it is not probed,
-    # and `interactive.start` refuses it by name before a workspace lease is taken.
-    test "a vendor key the harness still carries is neither listed nor probed" do
-      assert {:ok, Jido.Harness.Adapters.Claude} = Jido.Harness.Registry.lookup(:claude)
+    test "a removed vendor key is neither listed nor probed" do
       assert Enum.map(Ouroboros.providers(), & &1.provider) == [:native]
 
       assert {:error, {:provider_removed, :claude, message}} =
@@ -67,6 +63,7 @@ defmodule Ouroboros.Provider.NativeTest do
       assert Enum.sort(spec.normalized_options) ==
                Enum.sort([
                  :model,
+                 :plan,
                  :system_prompt,
                  :max_turns,
                  :approval_mode,
@@ -120,10 +117,6 @@ defmodule Ouroboros.Provider.NativeTest do
     test "the only transport is selectable by default, so choosing the provider is enough" do
       [transport] = Native.spec().session_transports
 
-      # `Jido.Harness.Session.Manager` refuses to default to an `:experimental`
-      # transport (`session/manager.ex:128`). Since this is the provider's only one,
-      # marking it experimental would make `provider: :native` refuse to start unless
-      # every caller also passed `transport: :native`.
       assert transport.capabilities.maturity == :stable
     end
   end
@@ -172,10 +165,10 @@ defmodule Ouroboros.Provider.NativeTest do
     end
 
     # A stated value is never rewritten or dropped here. A sandbox mode this provider
-    # cannot enforce travels to the harness untouched, which refuses it by name; silently
+    # cannot enforce travels to the request contract untouched, which refuses it by name; silently
     # downgrading it to the provider's own behavior is the one answer that would turn a
     # policy the caller asked for into no policy at all.
-    test "passes a sandbox mode it cannot enforce through for the harness to refuse" do
+    test "passes a sandbox mode it cannot enforce through for the request contract to refuse" do
       assert {:ok, options} = Provider.safety_options(sandbox_mode: :nonsense)
 
       assert Keyword.get(options, :sandbox_mode) == :nonsense
@@ -278,7 +271,62 @@ defmodule Ouroboros.Provider.NativeTest do
     end
   end
 
-  describe "run/2 on the coding plane" do
+  describe "native session execution" do
+    test "turn options preserve the accepted names without changing execution policy", context do
+      {model, script} =
+        NativeModelScript.start([
+          [
+            {:tool_call,
+             %{
+               id: "write-in-read-only-session",
+               name: "write",
+               input: %{"path" => "blocked.txt", "content" => "must not appear"}
+             }}
+          ],
+          [{:text, "session remains read-only"}, {:finish, :stop}]
+        ])
+
+      request =
+        Request.new!(%{
+          cwd: context.workspace,
+          model: model,
+          approval_mode: :auto_approve,
+          sandbox_mode: :read_only
+        })
+
+      assert {:ok, handle} =
+               Session.open(request, %{session_id: "turn-option-parity", owner: self()})
+
+      on_exit(fn -> Session.close(handle) end)
+
+      for key <- ["unknown_setting", "plan", "approval_mode", "sandbox_mode"] do
+        assert {:error, %Ouroboros.Session.Error{message: "unknown turn provider option"}} =
+                 Session.send(
+                   handle,
+                   TurnRequest.new!(%{prompt: "change policy", provider_options: %{key => true}}),
+                   "refused-#{key}"
+                 )
+      end
+
+      assert NativeModelScript.call_count(script) == 0
+
+      # These names were accepted but were never per-turn configuration overrides.
+      assert :ok =
+               Session.send(
+                 handle,
+                 TurnRequest.new!(%{
+                   prompt: "continue working",
+                   provider_options: %{"max_iterations" => 1, :tool_timeout_ms => 1}
+                 }),
+                 "accepted-options"
+               )
+
+      assert {:ok, %{status: :completed}} = Session.await(handle, "accepted-options", 2_000)
+      assert NativeModelScript.call_count(script) == 2
+      refute File.exists?(Path.join(context.workspace, "blocked.txt"))
+      assert %{request: %{plan: false, sandbox_mode: :read_only}} = :sys.get_state(handle)
+    end
+
     test "runs one finite turn to completion and returns its event stream", context do
       {model_spec, _agent} =
         NativeModelScript.start([
@@ -290,7 +338,7 @@ defmodule Ouroboros.Provider.NativeTest do
         ])
 
       request =
-        RunRequest.new!(%{
+        Map.new(%{
           prompt: "look at lib/a.ex",
           provider: :native,
           cwd: context.workspace,
@@ -303,10 +351,10 @@ defmodule Ouroboros.Provider.NativeTest do
         provider: :native,
         config: %{},
         telemetry_context: %{},
-        process_manager: Jido.Harness.ProcessDriver.Erlexec
+        process_manager: Ouroboros.Provider.Native.ProcessSignal
       }
 
-      assert {:ok, stream} = Native.run(request, run_context)
+      assert {:ok, stream} = run_turn(request, run_context)
       events = Enum.to_list(stream)
 
       assert Enum.map(events, & &1.type) == [
@@ -334,17 +382,17 @@ defmodule Ouroboros.Provider.NativeTest do
       on_exit(fn -> restore(:native_model, previous_default) end)
 
       request =
-        RunRequest.new!(%{prompt: "hello", provider: :native, cwd: context.workspace})
+        Map.new(%{prompt: "hello", provider: :native, cwd: context.workspace})
 
       run_context = %{
         run_id: "run-2",
         provider: :native,
         config: %{},
         telemetry_context: %{},
-        process_manager: Jido.Harness.ProcessDriver.Erlexec
+        process_manager: Ouroboros.Provider.Native.ProcessSignal
       }
 
-      assert {:error, {:no_model, message}} = Native.run(request, run_context)
+      assert {:error, {:no_model, message}} = run_turn(request, run_context)
       assert message =~ "OUROBOROS_NATIVE_MODEL"
     end
   end
@@ -367,7 +415,7 @@ defmodule Ouroboros.Provider.NativeTest do
         )
 
         request =
-          RunRequest.new!(%{
+          Map.new(%{
             prompt:
               "Read lib/a.ex, then edit it so `x` returns 2 instead of 1. " <>
                 "Do not run any commands.",
@@ -383,10 +431,10 @@ defmodule Ouroboros.Provider.NativeTest do
           provider: :native,
           config: %{},
           telemetry_context: %{},
-          process_manager: Jido.Harness.ProcessDriver.Erlexec
+          process_manager: Ouroboros.Provider.Native.ProcessSignal
         }
 
-        assert {:ok, stream} = Native.run(request, run_context)
+        assert {:ok, stream} = run_turn(request, run_context)
         events = Enum.to_list(stream)
         types = Enum.map(events, & &1.type)
 
@@ -395,6 +443,50 @@ defmodule Ouroboros.Provider.NativeTest do
         assert List.last(types) == :turn_completed
         assert File.read!(Path.join(context.workspace, "lib/a.ex")) =~ "def x, do: 2"
       end
+    end
+  end
+
+  # The former finite-run assertions now exercise one turn through the actual owned
+  # session contract. The test consumer only handles attachment delivery.
+  defp run_turn(attrs, context) do
+    {prompt, session_attrs} = Map.pop(attrs, :prompt)
+    session_context = Map.put(context, :session_id, context.run_id)
+
+    with {:ok, request} <- Request.new(session_attrs),
+         {:ok, handle} <- Session.open(request, Map.put(session_context, :owner, self())),
+         :ok <- Session.send(handle, TurnRequest.new!(prompt), "turn-" <> context.run_id) do
+      stream =
+        Stream.resource(fn -> handle end, &next_turn_event/1, fn _ -> Session.close(handle) end)
+
+      {:ok, stream}
+    end
+  end
+
+  defp next_turn_event(:done), do: {:halt, :done}
+
+  defp next_turn_event(handle) do
+    receive do
+      {:native_test_event, %{type: type} = event}
+      when type in [:turn_completed, :turn_failed, :turn_interrupted] ->
+        {[event], :done}
+
+      {:native_test_event, %{type: type}}
+      when type in [
+             :session_started,
+             :session_ready,
+             :session_idle,
+             :input_accepted,
+             :queue_changed
+           ] ->
+        next_turn_event(handle)
+
+      {:native_test_event, %{type: :provider_event, payload: %{"kind" => "native_ready"}}} ->
+        next_turn_event(handle)
+
+      {:native_test_event, event} ->
+        {[event], handle}
+    after
+      30_000 -> flunk("native turn emitted no event within 30 seconds")
     end
   end
 end

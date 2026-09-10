@@ -55,7 +55,7 @@ defmodule Ouroboros.ClusterTest do
     test "fleet compatibility has an explicit manual protocol revision" do
       runtime = Cluster.local_fleet_posture().runtime
 
-      assert runtime.fleet_protocol_revision == 3
+      assert runtime.fleet_protocol_revision == 4
 
       assert Cluster.runtime_compatible?(
                runtime,
@@ -75,6 +75,14 @@ defmodule Ouroboros.ClusterTest do
       # dev at 3bc8887 exposes remote session APIs removed by the core reduction, but
       # has the same application version and OTP release as an upgraded peer.
       previous = %{runtime | fleet_protocol_revision: 2}
+
+      refute Cluster.runtime_compatible?(runtime, previous)
+      refute Cluster.runtime_compatible?(previous, runtime)
+    end
+
+    test "the pre-J2 session contract is incompatible in both directions" do
+      runtime = Cluster.local_fleet_posture().runtime
+      previous = %{runtime | fleet_protocol_revision: 3}
 
       refute Cluster.runtime_compatible?(runtime, previous)
       refute Cluster.runtime_compatible?(previous, runtime)
@@ -232,7 +240,7 @@ defmodule Ouroboros.ClusterTest do
       before = Enum.find(Cluster.fleet_status().machines, &(&1.node == peer))
       assert before.compatibility == :compatible
       assert before.last_up_at
-      assert before.runtime.fleet_protocol_revision == 3
+      assert before.runtime.fleet_protocol_revision == 4
       assert before.runtime.otp_release == to_string(:erlang.system_info(:otp_release))
 
       assert %{status: :warning, guidance: roster_guidance} =
@@ -968,6 +976,24 @@ defmodule Ouroboros.ClusterTest do
                ^expected}} =
                Cluster.ensure_placeable(core)
 
+      # Session routing includes every remote public start/control/approval/await
+      # path. Even a harmless send proves that dispatch never reaches an old peer.
+      assert {:error, {:runtime_incompatible, ^actual, ^expected}} =
+               Ouroboros.Session.Routing.route(core, Kernel, :send, [
+                 self(),
+                 :incompatible_session_dispatch
+               ])
+
+      refute_receive :incompatible_session_dispatch
+
+      assert {:error, {:runtime_incompatible, ^actual, ^expected}} =
+               Ouroboros.InteractiveSession.start_on(core, id: "j2-incompatible-start")
+
+      assert {:error, {:runtime_incompatible, ^actual, ^expected}} =
+               Ouroboros.InteractiveSession.start_for_gateway_on(core,
+                 id: "j2-incompatible-gateway-start"
+               )
+
       assert actual.otp_release == expected.otp_release
       assert actual.fleet_protocol_revision == expected.fleet_protocol_revision
 
@@ -1513,41 +1539,16 @@ defmodule Ouroboros.ClusterTest do
           core = start_app_peer!()
           on_exit(fn -> clear_session_owner_evidence(:interactive, core) end)
 
-          previous_providers = Application.get_env(:jido_harness, :providers)
-          previous_config = Application.get_env(:jido_harness, :provider_config)
-
-          providers =
-            previous_providers
-            |> then(&Map.new(&1 || %{}))
-            |> Map.put(:native, Ouroboros.Test.HarnessAdapter)
-
-          config =
-            previous_config
-            |> then(&Map.new(&1 || %{}))
-            |> Map.put(:native, %{test_pid: self()})
-
-          Application.put_env(:jido_harness, :providers, providers)
-          Application.put_env(:jido_harness, :provider_config, config)
+          previous_config = Ouroboros.Test.NativeConfig.snapshot()
+          config = %{native: %{test_pid: self()}}
+          Ouroboros.Test.NativeConfig.configure(config)
 
           # No turn is sent, so this creates a durable ready session without leaving a
           # provider stream running — exactly the start-before-first-list boundary.
-          :ok = :erpc.call(core, Application, :put_env, [:jido_harness, :providers, providers])
-
-          :ok =
-            :erpc.call(core, Application, :put_env, [
-              :jido_harness,
-              :provider_config,
-              Map.put(config, :native, %{})
-            ])
+          :ok = :erpc.call(core, Ouroboros.Test.NativeConfig, :configure, [config])
 
           on_exit(fn ->
-            if previous_providers,
-              do: Application.put_env(:jido_harness, :providers, previous_providers),
-              else: Application.delete_env(:jido_harness, :providers)
-
-            if previous_config,
-              do: Application.put_env(:jido_harness, :provider_config, previous_config),
-              else: Application.delete_env(:jido_harness, :provider_config)
+            Ouroboros.Test.NativeConfig.configure(previous_config)
           end)
 
           assert_eventually(

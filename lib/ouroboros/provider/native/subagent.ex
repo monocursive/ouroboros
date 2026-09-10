@@ -7,7 +7,7 @@ defmodule Ouroboros.Provider.Native.Subagent do
   the parent's interactive session, under the parent's posture, reporting back as
   events of the parent. Nothing above the native provider learns that a child exists
   except through `provider_event` payloads of kind `subagent`, and nothing below it is
-  special: the child is opened by the same `Ouroboros.Provider.Native.Session.open/2`
+  special: the child is opened by the same `Ouroboros.Session.open_child/3`
   any session is, and runs the same loop with the same permission engine, the same
   hooks, the same ledger.
 
@@ -44,7 +44,7 @@ defmodule Ouroboros.Provider.Native.Subagent do
   ## Lifecycle, precisely
 
     * **Spawn.** `spawn/1` starts this process under
-      `Jido.Harness.SessionTransportSupervisor` — the same supervisor the child session
+      `Ouroboros.SessionTransportSupervisor` — the same supervisor the child session
       itself is started under, `:temporary` for the same reason — and opens the child
       session synchronously, bounded by `@open_timeout`. A failure to open is returned to
       the caller; nothing is left behind.
@@ -72,7 +72,7 @@ defmodule Ouroboros.Provider.Native.Subagent do
   inside one VM. That is why this process, and not the loop, is what moves.
 
   **The launch runs on the child's node, and that is the whole design.**
-  `Jido.Harness.SessionRequest.new/1` validates `File.dir?(cwd)`, and a git worktree is a
+  `Ouroboros.Session.Request.new/1` validates `File.dir?(cwd)`, and a git worktree is a
   directory on a disk: building either on the parent's node would answer a question about
   the target's filesystem by looking at the wrong one — the defect `docs/FLEET.md` records
   as F2. So the spec carries `request_attrs` (a plain map) and `worktree` (a boolean
@@ -99,7 +99,7 @@ defmodule Ouroboros.Provider.Native.Subagent do
 
   The spec crosses the wire, so it must hold nothing that means only what this VM says it
   means. `Ouroboros.Provider.Native.Tools.Agent` scrubs funs, ports and references out of
-  the harness context and the provider options before a remote spawn; pids are kept, since
+  the execution context and the provider options before a remote spawn; pids are kept, since
   the subscriber is one and reaching back to it is the point.
 
   ## Bounds
@@ -115,10 +115,10 @@ defmodule Ouroboros.Provider.Native.Subagent do
 
   use GenServer, restart: :temporary
 
-  alias Jido.Harness.ApprovalResponse
-  alias Jido.Harness.TurnRequest
+  alias Ouroboros.Session.ApprovalResponse
+  alias Ouroboros.Session.TurnRequest
+  alias Ouroboros.Session
   alias Ouroboros.Provider.Native.Paths
-  alias Ouroboros.Provider.Native.Session
   alias Ouroboros.Workspace.Worktree
 
   @open_timeout 30_000
@@ -228,7 +228,7 @@ defmodule Ouroboros.Provider.Native.Subagent do
   @spec start_and_launch(spec()) :: {:ok, map()} | {:error, term()}
   def start_and_launch(spec) do
     case DynamicSupervisor.start_child(
-           Jido.Harness.SessionTransportSupervisor,
+           Ouroboros.SessionTransportSupervisor,
            {__MODULE__, spec}
          ) do
       {:ok, pid} ->
@@ -273,14 +273,18 @@ defmodule Ouroboros.Provider.Native.Subagent do
   end
 
   defp remote_start_call(target, spec) do
-    {:returned,
-     :erpc.call(
-       target,
-       __MODULE__,
-       :start_and_launch,
-       [spec],
-       max(@remote_spawn_timeout, launch_timeout(spec) + 15_000)
-     )}
+    with :ok <- Ouroboros.Cluster.ensure_placeable(target) do
+      {:returned,
+       :erpc.call(
+         target,
+         __MODULE__,
+         :start_and_launch,
+         [spec],
+         max(@remote_spawn_timeout, launch_timeout(spec) + 15_000)
+       )}
+    else
+      {:error, reason} -> {:returned, {:error, reason}}
+    end
   catch
     :error, {:erpc, reason} -> {:ambiguous, reason}
     kind, reason -> {:ambiguous, {kind, reason}}
@@ -322,9 +326,11 @@ defmodule Ouroboros.Provider.Native.Subagent do
     do: safe_call(pid, {:await, timeout_ms}, timeout_ms + 5_000)
 
   @doc "Answers one approval this child raised, by the child's own request id."
-  @spec respond(pid(), String.t(), ApprovalResponse.t()) :: :ok
+  @spec respond(pid(), String.t(), ApprovalResponse.t()) :: :ok | {:error, term()}
   def respond(pid, child_request_id, %ApprovalResponse{} = response) do
-    GenServer.cast(pid, {:respond, child_request_id, response})
+    with :ok <- ensure_owner_compatible(pid) do
+      GenServer.cast(pid, {:respond, child_request_id, response})
+    end
   catch
     :exit, _reason -> :ok
   end
@@ -425,6 +431,7 @@ defmodule Ouroboros.Provider.Native.Subagent do
 
   @impl GenServer
   def init(spec) do
+    {:ok, _} = Registry.register(Ouroboros.SessionRegistry, {:subagent, spec.task_id}, nil)
     subscriber = spec.subscriber
     monitor = Process.monitor(subscriber)
     request_attrs = Map.get(spec, :request_attrs) || %{}
@@ -460,6 +467,10 @@ defmodule Ouroboros.Provider.Native.Subagent do
        subscriber: subscriber,
        subscriber_monitor: monitor,
        handle: nil,
+       runtime_id: nil,
+       runtime_monitor: nil,
+       attachment: nil,
+       output_cursor: 0,
        provider_session_id: nil,
        session_dir: nil,
        turn_id: nil,
@@ -537,6 +548,15 @@ defmodule Ouroboros.Provider.Native.Subagent do
     {:reply, {:ok, summary_of(state)}, state}
   end
 
+  def handle_call(
+        {:acknowledge_child_close, runtime_id},
+        _from,
+        %{runtime_id: runtime_id} = state
+      ) do
+    acknowledge_closed_child(state.attachment, state.output_cursor)
+    {:reply, :ok, state}
+  end
+
   # The old loop may exit immediately after the reply. Replace its monitor before
   # returning, so neither that DOWN nor a fast return completion can lose the result.
   defp handoff_return(%{status: :returning} = state, owner) when is_pid(owner) do
@@ -556,7 +576,7 @@ defmodule Ouroboros.Provider.Native.Subagent do
   @impl GenServer
   def handle_cast({:respond, child_request_id, response}, state) do
     if state.handle && MapSet.member?(state.open_approvals, child_request_id) do
-      _ = Session.respond_approval(state.handle, child_request_id, response)
+      _ = Session.respond_approval(state.runtime_id, child_request_id, response)
       {:noreply, %{state | open_approvals: MapSet.delete(state.open_approvals, child_request_id)}}
     else
       {:noreply, state}
@@ -573,12 +593,30 @@ defmodule Ouroboros.Provider.Native.Subagent do
     do: return_completed(state, {:error, {:return_worker_failed, reason}})
 
   def handle_info(:return_deadline, %{return_task: task} = state) when not is_nil(task) do
-    Task.Supervisor.terminate_child(Jido.Harness.SessionTaskSupervisor, task.pid)
+    Task.Supervisor.terminate_child(Ouroboros.SessionTaskSupervisor, task.pid)
     Process.demonitor(task.ref, [:flush])
     return_completed(state, {:error, :return_deadline_expired})
   end
 
-  def handle_info({:session_adapter_event, event}, state), do: {:noreply, absorb(state, event)}
+  def handle_info(
+        {:session_output, runtime_id, generation, _high_water},
+        %{runtime_id: runtime_id, attachment: %{generation: generation}} = state
+      ),
+      do: {:noreply, drain_child(state)}
+
+  def handle_info(:drain_child, state), do: {:noreply, drain_child(state)}
+
+  def handle_info(
+        {:DOWN, monitor, :process, _pid, reason},
+        %{runtime_monitor: monitor, status: :running} = state
+      ),
+      do:
+        {:noreply,
+         settle(
+           state,
+           :failed,
+           "the child runtime stopped before its outcome was collected: #{inspect(reason)}"
+         )}
 
   def handle_info(:progress_tick, %{status: :running} = state) do
     state = progress(%{state | progress_timer: nil})
@@ -619,8 +657,7 @@ defmodule Ouroboros.Provider.Native.Subagent do
   @impl GenServer
   def terminate(_reason, state) do
     if state.return_task,
-      do:
-        Task.Supervisor.terminate_child(Jido.Harness.SessionTaskSupervisor, state.return_task.pid)
+      do: Task.Supervisor.terminate_child(Ouroboros.SessionTaskSupervisor, state.return_task.pid)
 
     _ = close_child(state)
     _ = retire_worktree(state)
@@ -710,33 +747,60 @@ defmodule Ouroboros.Provider.Native.Subagent do
 
   # The child's `owner` is **this** process and never the subscriber. A subscriber gets a
   # digest; the raw stream belongs here, where it is counted, bounded, and turned into one.
-  # Pointing a child at the loop directly would also rename the parent's provider session,
-  # because the harness worker adopts the `provider_session_id` of any adapter event it
-  # receives.
+  # The attachment identifies this registered child aggregator, so the parent conversation
+  # identity can never be replaced by a child runtime notification.
   defp open_child(state) do
-    case Session.open(state.request, Map.put(state.context, :owner, self())) do
-      {:ok, handle} ->
-        provider_session_id = state.request.provider_session_id
-        turn_id = "sub_turn_" <> random(9)
+    with {:ok, runtime_id} <- Session.open_child(state.task_id, state.request, state.context),
+         {:ok, info} <- Session.info(runtime_id),
+         {:ok, attachment, _info} <- Session.attach(runtime_id, self(), 0) do
+      provider_session_id = info.provider_session_id
+      turn_id = "sub_turn_" <> state.task_id
 
-        state = %{
-          state
-          | handle: handle,
-            provider_session_id: provider_session_id,
-            session_dir: session_dir(provider_session_id),
-            turn_id: turn_id,
-            status: :running,
-            deadline_timer:
-              Process.send_after(self(), {:subagent_deadline, state.task_id}, state.deadline_ms)
-        }
+      state = %{
+        state
+        | handle: info.pid,
+          runtime_id: runtime_id,
+          runtime_monitor: Process.monitor(info.pid),
+          attachment: attachment,
+          provider_session_id: provider_session_id,
+          session_dir: session_dir(provider_session_id),
+          turn_id: turn_id,
+          status: :running,
+          deadline_timer:
+            Process.send_after(self(), {:subagent_deadline, state.task_id}, state.deadline_ms)
+      }
 
-        case Session.send(state.handle, TurnRequest.new!(state.prompt), turn_id) do
-          :ok -> {:ok, schedule_progress(state)}
-          other -> {:error, {:subagent_turn_refused, other}}
-        end
+      case Session.submit(runtime_id, turn_id, :message, TurnRequest.new!(state.prompt)) do
+        {:ok, ^turn_id} ->
+          Kernel.send(self(), :drain_child)
+          {:ok, schedule_progress(state)}
 
+        other ->
+          {:error, {:subagent_turn_refused, other}}
+      end
+    else
       {:error, reason} ->
         {:error, {:subagent_session_unopenable, reason}}
+    end
+  end
+
+  defp drain_child(%{attachment: nil} = state), do: state
+
+  defp drain_child(state) do
+    case Session.drain(state.attachment, state.output_cursor, 128) do
+      {:ok, [], _info} ->
+        state
+
+      {:ok, events, _info} ->
+        # Native journal entries and conversation checkpoints precede the terminal
+        # event. The digest is the child's bounded presentation of that durable record.
+        next = Enum.reduce(events, state, &absorb(&2, &1))
+        cursor = List.last(events).sequence
+        _ = Session.ack(state.attachment, cursor)
+        %{next | output_cursor: cursor}
+
+      {:error, reason} ->
+        settle(state, :failed, "the child's retained output is unavailable: #{inspect(reason)}")
     end
   end
 
@@ -929,9 +993,13 @@ defmodule Ouroboros.Provider.Native.Subagent do
     if is_map(state.provision) and is_map(state.worktree) do
       # Closing the child and transporting its result can take minutes. Keep the owner
       # responsive; await/2 only releases its collectors once the return has finalized.
+      owner = self()
+
       task =
-        Task.Supervisor.async_nolink(Jido.Harness.SessionTaskSupervisor, fn ->
-          close_child(state)
+        Task.Supervisor.async_nolink(Ouroboros.SessionTaskSupervisor, fn ->
+          Session.close(state.runtime_id)
+          # Only the registered attachment owner can acknowledge native output.
+          GenServer.call(owner, {:acknowledge_child_close, state.runtime_id}, :infinity)
           Ouroboros.Workspace.Return.finish(state.worktree, state.provision)
         end)
 
@@ -989,10 +1057,38 @@ defmodule Ouroboros.Provider.Native.Subagent do
 
   defp close_child(%{handle: nil}), do: :ok
 
-  defp close_child(%{handle: handle}) do
-    if Process.alive?(handle), do: Session.close(handle), else: :ok
+  defp close_child(%{handle: handle, runtime_id: runtime_id} = state) do
+    if Process.alive?(handle) do
+      with :ok <- Session.close(runtime_id) do
+        acknowledge_closed_child(state.attachment, state.output_cursor)
+      end
+    else
+      :ok
+    end
   catch
     :exit, _reason -> :ok
+  end
+
+  # The aggregator can exit immediately after settlement. Consume the close marker
+  # here while its registered attachment still exists, releasing the terminal runtime.
+  defp acknowledge_closed_child(nil, _cursor), do: :ok
+
+  defp acknowledge_closed_child(attachment, cursor) do
+    case Session.drain(attachment, cursor, 128) do
+      {:ok, [], _info} ->
+        :ok
+
+      {:ok, events, info} ->
+        cursor = List.last(events).sequence
+
+        case Session.ack(attachment, cursor) do
+          :ok when cursor < info.output_high_water -> acknowledge_closed_child(attachment, cursor)
+          _settled -> :ok
+        end
+
+      _unavailable ->
+        :ok
+    end
   end
 
   # A worktree that holds uncommitted work is kept and said so. This module never
@@ -1171,12 +1267,14 @@ defmodule Ouroboros.Provider.Native.Subagent do
   defp clip(_text, _limit), do: ""
 
   defp safe_call(pid, message, timeout) do
-    GenServer.call(pid, message, timeout)
+    with :ok <- ensure_owner_compatible(pid) do
+      GenServer.call(pid, message, timeout)
+    end
   catch
     :exit, reason -> {:error, {:subagent_unreachable, reason}}
   end
 
-  # `Jido.Harness.SessionTransportSupervisor` is a locally registered name, so terminating a
+  # `Ouroboros.SessionTransportSupervisor` is a locally registered name, so terminating a
   # remote child has to happen **on its own node** — asking this node's supervisor about a
   # pid that was never its child answers `{:error, :not_found}` and leaves the child running
   # against a workspace nobody is watching, which is the one outcome this module exists to
@@ -1184,18 +1282,23 @@ defmodule Ouroboros.Provider.Native.Subagent do
   defp stop_process(pid) do
     case node(pid) do
       target when target == node() ->
-        DynamicSupervisor.terminate_child(Jido.Harness.SessionTransportSupervisor, pid)
+        DynamicSupervisor.terminate_child(Ouroboros.SessionTransportSupervisor, pid)
 
       target ->
-        :erpc.call(
-          target,
-          DynamicSupervisor,
-          :terminate_child,
-          [Jido.Harness.SessionTransportSupervisor, pid],
-          @remote_stop_timeout
-        )
+        with :ok <- Ouroboros.Cluster.ensure_placeable(target) do
+          :erpc.call(
+            target,
+            DynamicSupervisor,
+            :terminate_child,
+            [Ouroboros.SessionTransportSupervisor, pid],
+            @remote_stop_timeout
+          )
+        end
     end
   catch
     _kind, _reason -> :ok
   end
+
+  defp ensure_owner_compatible(pid) when node(pid) == node(), do: :ok
+  defp ensure_owner_compatible(pid), do: Ouroboros.Cluster.ensure_placeable(node(pid))
 end

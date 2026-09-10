@@ -1,7 +1,7 @@
 defmodule Ouroboros.InteractiveDeadlineTest do
   use ExUnit.Case, async: false
 
-  alias Jido.Harness.TurnRequest
+  alias Ouroboros.Session.TurnRequest
   alias Ouroboros.Interactive.{Ref, State, Store, Task}
   alias Ouroboros.InteractiveSession
   alias Ouroboros.Test.StubSession
@@ -96,14 +96,14 @@ defmodule Ouroboros.InteractiveDeadlineTest do
     turn =
       turn_id
       |> State.new_turn(:message, request)
-      |> Map.put(:harness_turn_id, harness_turn_id)
+      |> Map.put(:runtime_turn_id, harness_turn_id)
       |> Map.put(:status, :running)
 
     assert :ok =
              Store.create(%{
                session
                | status: :idle,
-                 harness_session_id: harness_session_id,
+                 runtime_id: harness_session_id,
                  turns: %{turn_id => turn}
              })
 

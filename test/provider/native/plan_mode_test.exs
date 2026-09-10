@@ -15,10 +15,10 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
 
   @moduletag :capture_log
 
-  alias Jido.Harness.ApprovalResponse
-  alias Jido.Harness.SessionRequest
-  alias Jido.Harness.TurnRequest
-  alias Ouroboros.Provider.Native.Session
+  alias Ouroboros.Session.ApprovalResponse
+  alias Ouroboros.Session.Request, as: SessionRequest
+  alias Ouroboros.Session.TurnRequest
+  alias Ouroboros.Test.NativeSessionFixture, as: Session
   alias Ouroboros.Test.NativeModelScript
 
   setup do
@@ -66,7 +66,7 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
             # own deadline on a loaded machine; the unanswered path is tested with an
             # explicit short deadline.
             approval_timeout_ms: :infinity,
-            provider_options: %{plan: true}
+            plan: true
           },
           overrides
         )
@@ -78,7 +78,7 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
       owner: self(),
       adapter: Ouroboros.Provider.Native,
       config: %{},
-      process_manager: Jido.Harness.ProcessDriver.Erlexec,
+      process_manager: Ouroboros.Provider.Native.ProcessSignal,
       telemetry_context: %{}
     }
 
@@ -107,8 +107,8 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
 
   defp await_event(type, timeout \\ 15_000) do
     receive do
-      {:session_adapter_event, %{type: ^type} = event} -> event
-      {:session_adapter_event, _other} -> await_event(type, timeout)
+      {:native_test_event, %{type: ^type} = event} -> event
+      {:native_test_event, _other} -> await_event(type, timeout)
     after
       timeout -> flunk("no #{type} within #{timeout}ms")
     end
@@ -116,8 +116,8 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
 
   defp collect_until(type, acc \\ []) do
     receive do
-      {:session_adapter_event, %{type: ^type} = event} -> Enum.reverse([event | acc])
-      {:session_adapter_event, event} -> collect_until(type, [event | acc])
+      {:native_test_event, %{type: ^type} = event} -> Enum.reverse([event | acc])
+      {:native_test_event, event} -> collect_until(type, [event | acc])
     after
       15_000 -> flunk("no #{type} within 15s; got #{inspect(Enum.map(acc, & &1.type))}")
     end
@@ -125,7 +125,7 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
 
   defp drain do
     receive do
-      {:session_adapter_event, _event} -> drain()
+      {:native_test_event, _event} -> drain()
     after
       0 -> :ok
     end
@@ -134,7 +134,7 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
   # The worker journals; a harness-driven test reads the journal rather than a mailbox.
   defp await_replay(session_id, predicate, deadline \\ nil) do
     deadline = deadline || System.monotonic_time(:millisecond) + 15_000
-    {:ok, events} = Jido.Harness.Session.replay(session_id, cursor: 0, limit: 500)
+    {:ok, events} = Ouroboros.Test.NativeSessionFixture.replay(session_id, cursor: 0, limit: 500)
 
     cond do
       predicate.(events) ->
@@ -322,7 +322,7 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
       # is no longer its active one, so a question raised after `turn_completed` would be
       # auto-denied as stale.
       assert request.turn_id == "turn-1"
-      refute_received {:session_adapter_event, %{type: :turn_completed}}
+      refute_received {:native_test_event, %{type: :turn_completed}}
     end
 
     test "the question falls back to the final message when the model ignored the plan tool",
@@ -527,15 +527,17 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
       exit_event = await_event(:provider_event)
       assert exit_event.payload["follow_up"] == true
 
-      # The same turn continues rather than a second one starting: the harness worker's
-      # active turn is still `turn-1`, so its approvals still route and its terminal event
-      # still finishes the turn it dispatched.
-      started = await_event(:turn_started)
-      assert started.turn_id == "turn-1"
-
+      # Continuation has the original turn identity and no second lifecycle start.
       completed = await_event(:turn_completed)
       assert completed.turn_id == "turn-1"
       assert File.read!(Path.join(context.workspace, "lib/b.ex")) == "built\n"
+      assert {:ok, events} = Session.replay(handle)
+      assert Enum.count(events, &(&1.type == :turn_started)) == 1
+
+      assert Enum.all?(
+               Enum.filter(events, &(&1.type in [:tool_call, :tool_result])),
+               &(&1.turn_id == "turn-1")
+             )
     end
 
     test "nobody answering leaves the session planning and completes the turn", context do
@@ -586,14 +588,14 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
           owner: self(),
           adapter: Ouroboros.Provider.Native,
           config: %{},
-          process_manager: Jido.Harness.ProcessDriver.Erlexec,
+          process_manager: Ouroboros.Provider.Native.ProcessSignal,
           telemetry_context: %{}
         })
 
       on_exit(fn -> if Process.alive?(resumed), do: Session.close(resumed) end)
 
       # Nothing in the resumed request says "plan": the posture came off disk.
-      refute Map.has_key?(resumed_request.provider_options, :plan)
+      assert resumed_request.plan == false
       assert {:ok, %{plan: true, sandbox_mode: :read_only}} = Session.plan_state(resumed)
     end
 
@@ -636,7 +638,7 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
             owner: self(),
             adapter: Ouroboros.Provider.Native,
             config: %{},
-            process_manager: Jido.Harness.ProcessDriver.Erlexec,
+            process_manager: Ouroboros.Provider.Native.ProcessSignal,
             telemetry_context: %{}
           }
         )
@@ -653,7 +655,7 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
       script = [[plan_call("c1")], [{:text, "planned"}, {:finish, :stop}]]
 
       %{handle: handle, request: request} =
-        open(context, script, %{approval_mode: :prompt, provider_options: %{plan: true}})
+        open(context, script, %{approval_mode: :prompt, plan: true})
 
       ready = await_event(:provider_event)
       provider_session_id = ready.provider_session_id
@@ -695,7 +697,7 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
             owner: self(),
             adapter: Ouroboros.Provider.Native,
             config: %{},
-            process_manager: Jido.Harness.ProcessDriver.Erlexec,
+            process_manager: Ouroboros.Provider.Native.ProcessSignal,
             telemetry_context: %{}
           }
         )
@@ -708,7 +710,7 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
       script = [[plan_call("c1")], [{:text, "planned"}, {:finish, :stop}]]
 
       %{handle: handle, request: request} =
-        open(context, script, %{approval_mode: :prompt, provider_options: %{plan: true}})
+        open(context, script, %{approval_mode: :prompt, plan: true})
 
       ready = await_event(:provider_event)
       provider_session_id = ready.provider_session_id
@@ -748,7 +750,7 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
             owner: self(),
             adapter: Ouroboros.Provider.Native,
             config: %{},
-            process_manager: Jido.Harness.ProcessDriver.Erlexec,
+            process_manager: Ouroboros.Provider.Native.ProcessSignal,
             telemetry_context: %{}
           }
         )
@@ -769,7 +771,7 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
       script = [[{:text, "hello"}, {:finish, :stop}]]
 
       %{handle: handle} =
-        open(context, script, %{provider_options: %{}, sandbox_mode: :workspace_write})
+        open(context, script, %{plan: false, sandbox_mode: :workspace_write})
 
       await_event(:provider_event)
 
@@ -791,7 +793,7 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
       script = [[{:text, "hello"}, {:finish, :stop}]]
 
       %{handle: handle} =
-        open(context, script, %{provider_options: %{}, sandbox_mode: :unrestricted})
+        open(context, script, %{plan: false, sandbox_mode: :unrestricted})
 
       await_event(:provider_event)
 
@@ -811,7 +813,7 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
 
       %{handle: handle} =
         open(context, script, %{
-          provider_options: %{plan: true},
+          plan: true,
           sandbox_mode: :unrestricted
         })
 
@@ -822,12 +824,10 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
       assert {:ok, %{plan: false, sandbox_mode: :unrestricted}} = Session.plan_state(handle)
     end
 
-    test "plan mode is reachable and durable through the harness worker", context do
-      # The end-to-end check the unit tests above cannot make: driven through
-      # `Jido.Harness.Session` rather than by calling the transport's callbacks, because
-      # the worker is the thing that would deny a plan-exit approval as *stale* if the
-      # terminal event had gone out first. Plan → question → auto_edit → a write that
-      # succeeds, with the worker's own bookkeeping intact throughout.
+    test "plan mode is reachable and durable through the owned session contract", context do
+      # Plan-exit approval remains live until its answer is consumed, before the
+      # terminal event. Plan → question → auto_edit → a write that succeeds keeps
+      # one runtime turn and its approval identity throughout.
       script = [
         [plan_call("c1")],
         [{:text, "that is the plan"}, {:finish, :stop}],
@@ -838,17 +838,19 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
       {model_spec, _agent} = NativeModelScript.start(script)
 
       {:ok, session_id} =
-        Jido.Harness.Session.start(:native, %{
+        Ouroboros.Test.NativeSessionFixture.start(:native, %{
           cwd: context.workspace,
           model: model_spec,
           approval_mode: :prompt,
           approval_timeout_ms: :infinity,
-          provider_options: %{plan: true}
+          plan: true
         })
 
-      on_exit(fn -> Jido.Harness.Session.close(session_id) end)
+      on_exit(fn -> Ouroboros.Test.NativeSessionFixture.close(session_id) end)
 
-      {:ok, turn_id} = Jido.Harness.Session.send_message(session_id, "plan the change")
+      {:ok, turn_id} =
+        Ouroboros.Test.NativeSessionFixture.send_message(session_id, "plan the change")
+
       events = await_replay(session_id, &Enum.any?(&1, fn e -> e.type == :approval_requested end))
       ask = Enum.find(events, &(&1.type == :approval_requested))
 
@@ -862,10 +864,11 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
                  event.payload["kind"] == "stale_approval_denied"
              end)
 
-      assert {:ok, %{state: :awaiting_approval}} = Jido.Harness.Session.info(session_id)
+      assert {:ok, %{state: :awaiting_approval}} =
+               Ouroboros.Test.NativeSessionFixture.info(session_id)
 
       assert :ok =
-               Jido.Harness.Session.respond_approval(session_id, ask.request_id, %{
+               Ouroboros.Test.NativeSessionFixture.respond_approval(session_id, ask.request_id, %{
                  decision: :approve,
                  scope: :session
                })
@@ -876,13 +879,18 @@ defmodule Ouroboros.Provider.Native.PlanModeTest do
         Enum.find(events, &(&1.type == :provider_event and &1.payload["kind"] == "plan_exit"))
 
       assert exit_event.payload["choice"] == "auto_edit"
-      assert {:ok, result} = Jido.Harness.Session.await(session_id, turn_id, 15_000)
+
+      assert {:ok, result} =
+               Ouroboros.Test.NativeSessionFixture.await(session_id, turn_id, 15_000)
+
       assert result.status == :completed
 
       # And the posture really changed: the write that plan mode refused now applies with
       # no approval at all, because `auto_edit` is what the operator chose.
-      {:ok, second} = Jido.Harness.Session.send_message(session_id, "now build it")
-      assert {:ok, %{status: :completed}} = Jido.Harness.Session.await(session_id, second, 15_000)
+      {:ok, second} = Ouroboros.Test.NativeSessionFixture.send_message(session_id, "now build it")
+
+      assert {:ok, %{status: :completed}} =
+               Ouroboros.Test.NativeSessionFixture.await(session_id, second, 15_000)
 
       assert File.read!(Path.join(context.workspace, "lib/built.ex")) ==
                "defmodule Built do\nend\n"

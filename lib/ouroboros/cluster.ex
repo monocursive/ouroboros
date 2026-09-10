@@ -1096,7 +1096,7 @@ defmodule Ouroboros.Cluster do
   # unsafe even if the application version was accidentally left unchanged. Never derive
   # it from a build path, source hash, or host: operators need one stable, reviewable
   # protocol revision shared by every artifact in a compatible fleet.
-  @fleet_protocol_revision 3
+  @fleet_protocol_revision 4
   @runtime_contract_keys [:fleet_protocol_revision, :ouroboros_version, :otp_release]
 
   @type role :: :core | :builder | :signer

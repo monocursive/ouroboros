@@ -47,12 +47,12 @@ defmodule Ouroboros.InteractiveExternalApprovalTest do
 
   use ExUnit.Case, async: false
 
-  alias Jido.Harness.{Session, SessionInfo}
+  alias Ouroboros.Session
+  alias Ouroboros.Session.RuntimeInfo, as: SessionInfo
   alias Ouroboros.Control.Permissions
   alias Ouroboros.Interactive.{State, Store, Task}
   alias Ouroboros.InteractiveSession
   alias Ouroboros.Test.AllowEverythingPermissions
-  alias Ouroboros.Test.HarnessAdapter
 
   @provider :native
   @receive_timeout 5_000
@@ -60,25 +60,11 @@ defmodule Ouroboros.InteractiveExternalApprovalTest do
   setup do
     cleanup_sessions()
 
-    previous_providers = Application.get_env(:jido_harness, :providers)
-    previous_provider_config = Application.get_env(:jido_harness, :provider_config)
+    previous_provider_config = Ouroboros.Test.NativeConfig.snapshot()
     previous_engine = Application.get_env(:ouroboros, :permissions_engine)
     journal_dir = unique_journal_dir()
 
-    Application.put_env(
-      :jido_harness,
-      :providers,
-      Map.put(map_or_empty(previous_providers), @provider, HarnessAdapter)
-    )
-
-    Application.put_env(
-      :jido_harness,
-      :provider_config,
-      Map.put(map_or_empty(previous_provider_config), @provider, %{
-        test_pid: self(),
-        retention: %{journal_dir: journal_dir}
-      })
-    )
+    Ouroboros.Test.NativeConfig.configure(%{native: %{test_pid: self()}})
 
     # Absent unless a test says otherwise: with no engine on the node every request is
     # `:ask`, which is the posture this runtime ships in until C1 lands.
@@ -86,8 +72,7 @@ defmodule Ouroboros.InteractiveExternalApprovalTest do
 
     on_exit(fn ->
       cleanup_sessions()
-      restore_harness_env(:providers, previous_providers)
-      restore_harness_env(:provider_config, previous_provider_config)
+      Ouroboros.Test.NativeConfig.configure(previous_provider_config)
 
       case previous_engine do
         nil -> Application.delete_env(:ouroboros, :permissions_engine)
@@ -132,7 +117,7 @@ defmodule Ouroboros.InteractiveExternalApprovalTest do
              })
 
     assert_receive {:relayed_answer,
-                    %Jido.Harness.ApprovalResponse{
+                    %Ouroboros.Session.ApprovalResponse{
                       decision: :approve,
                       scope: :session,
                       provider_options: %{"option_id" => "allow"}
@@ -539,7 +524,9 @@ defmodule Ouroboros.InteractiveExternalApprovalTest do
     Session.list()
     |> Enum.each(fn info ->
       unless SessionInfo.terminal?(info), do: Session.kill(info.session_id)
-      _ = Session.prune(info.session_id)
+
+      if is_pid(info.pid) and Process.alive?(info.pid),
+        do: DynamicSupervisor.terminate_child(Ouroboros.SessionTransportSupervisor, info.pid)
     end)
   rescue
     _error -> :ok
@@ -555,10 +542,4 @@ defmodule Ouroboros.InteractiveExternalApprovalTest do
   end
 
   defp unique_id(prefix), do: "#{prefix}-#{System.unique_integer([:positive, :monotonic])}"
-
-  defp map_or_empty(nil), do: %{}
-  defp map_or_empty(value), do: Map.new(value)
-
-  defp restore_harness_env(key, nil), do: Application.delete_env(:jido_harness, key)
-  defp restore_harness_env(key, value), do: Application.put_env(:jido_harness, key, value)
 end

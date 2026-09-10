@@ -20,7 +20,7 @@ defmodule Ouroboros.Provider.Native.SubagentBridge do
   use GenServer, restart: :temporary
   alias Ouroboros.Interactive.Task, as: Owner
   alias Ouroboros.Provider.Native.Session
-  alias Jido.Harness.ApprovalResponse
+  alias Ouroboros.Session.ApprovalResponse
 
   @limit 128
   @timeout 15 * 60_000
@@ -112,7 +112,7 @@ defmodule Ouroboros.Provider.Native.SubagentBridge do
         parent = self()
 
         task =
-          Task.Supervisor.async_nolink(Jido.Harness.SessionTaskSupervisor, fn ->
+          Task.Supervisor.async_nolink(Ouroboros.SessionTaskSupervisor, fn ->
             run(parent, state, request_id, name, input)
           end)
 
@@ -136,7 +136,7 @@ defmodule Ouroboros.Provider.Native.SubagentBridge do
       {:reply, :ok, state}
     else
       task =
-        Task.Supervisor.async_nolink(Jido.Harness.SessionTaskSupervisor, fn ->
+        Task.Supervisor.async_nolink(Ouroboros.SessionTaskSupervisor, fn ->
           response = Ouroboros.InteractiveSession.relay_approval(state.id, event.payload)
           send(loop, {:native_approval, event.request_id, response})
           :ok
@@ -195,13 +195,6 @@ defmodule Ouroboros.Provider.Native.SubagentBridge do
         deny_relay(relay.loop, relay.request_id)
         {:noreply, %{state | relays: relays}}
     end
-  end
-
-  def handle_info({:session_adapter_event, %{type: :provider_event} = event}, state) do
-    if event.payload["kind"] == "subagent",
-      do: GenServer.cast(state.owner, {:subagent_bridge_event, event})
-
-    {:noreply, state}
   end
 
   def handle_info(_message, state), do: {:noreply, state}

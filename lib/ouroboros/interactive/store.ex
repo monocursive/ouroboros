@@ -181,11 +181,7 @@ defmodule Ouroboros.Interactive.Store do
     })
   end
 
-  defp decode_session(id, %State{id: id} = session) when is_binary(id) do
-    if State.loadable?(session), do: {:ok, session}, else: :error
-  end
-
-  defp decode_session(_id, _session), do: :error
+  defp decode_session(id, session), do: Ouroboros.Storage.SessionMigration.decode(id, session)
 
   defp recoverable(%State{} = session) do
     %{

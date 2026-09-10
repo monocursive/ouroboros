@@ -1,23 +1,8 @@
 defmodule Ouroboros.ReasoningEffort do
-  @moduledoc """
-  The reasoning-effort vocabulary Ouroboros accepts and the compatibility seam to the
-  pinned Harness request schemas.
+  @moduledoc "The closed reasoning-effort vocabulary accepted by native session requests."
 
-  OpenAI reasoning models can declare `none`, `low`, `medium`, `high`, `xhigh`, and
-  `max`. The gateway, web preferences, model catalogue, TUI, and native provider all use
-  this ordering. The native provider carries the complete vocabulary because it owns the
-  model request and can validate the request before entering Harness.
-
-  Harness currently validates only `low | medium | high` in its provider-neutral request
-  structs. For native requests, the constructors below let Harness validate every other
-  field with the reasoning value temporarily absent, restore a value from this closed
-  vocabulary, and then enter the already-validated manager path. This is not a general
-  schema bypass: it is native-only, one field wide, and the adapter's own
-  `normalized_values` allowlist is still enforced by the managers.
-  """
-
-  alias Jido.Harness.{Registry, RequestResolver, RunManager, SessionManager}
-  alias Jido.Harness.{RunRequest, SessionRequest, TurnRequest}
+  alias Ouroboros.Session.Request, as: SessionRequest
+  alias Ouroboros.Session.TurnRequest
 
   @atoms [:none, :low, :medium, :high, :xhigh, :max]
   @names Enum.map(@atoms, &Atom.to_string/1)
@@ -39,35 +24,13 @@ defmodule Ouroboros.ReasoningEffort do
   @spec valid?(term()) :: boolean()
   def valid?(value), do: value in @atoms or value in @names
 
-  @doc "Starts a Harness session, preserving the native provider's wider vocabulary."
-  @spec start_session(map() | keyword()) :: {:ok, String.t()} | {:error, term()}
-  def start_session(attrs) when is_map(attrs) or is_list(attrs) do
-    with {:ok, attrs} <- attributes(attrs),
-         defaults =
-           Registry.provider_config(:native) |> Map.get(:session_defaults, %{}) |> Map.new(),
-         merged = defaults |> Map.merge(attrs) |> Map.put(:provider, :native),
-         {:ok, request} <- session_request(merged) do
-      SessionManager.start(:native, request)
-    end
-  end
-
-  @doc "Starts a detached Harness run, preserving the native provider's wider vocabulary."
-  @spec start_run(map() | keyword()) :: {:ok, String.t()} | {:error, term()}
-  def start_run(attrs) when is_map(attrs) or is_list(attrs) do
-    with {:ok, attrs} <- attributes(attrs),
-         {:ok, request} <- native_run_request(attrs),
-         {:ok, request} <- RequestResolver.resolve(:native, request) do
-      RunManager.start(:native, request)
-    end
-  end
-
   @doc "Builds a session request while retaining a canonical reasoning effort."
   @spec session_request(map() | keyword()) :: {:ok, SessionRequest.t()} | {:error, term()}
   def session_request(attrs) when is_map(attrs) or is_list(attrs) do
     with {:ok, attrs} <- attributes(attrs),
          {:ok, effort} <- effort(attrs),
-         {:ok, request} <- SessionRequest.new(without_effort(attrs)) do
-      {:ok, %{request | reasoning_effort: effort}}
+         {:ok, request} <- SessionRequest.new(with_effort(attrs, effort)) do
+      {:ok, request}
     end
   end
 
@@ -83,14 +46,14 @@ defmodule Ouroboros.ReasoningEffort do
   def turn_request(attrs) when is_map(attrs) or is_list(attrs) do
     with {:ok, attrs} <- attributes(attrs),
          {:ok, effort} <- effort(attrs),
-         {:ok, request} <- TurnRequest.new(without_effort(attrs)) do
-      {:ok, %{request | reasoning_effort: effort}}
+         {:ok, request} <- TurnRequest.new(with_effort(attrs, effort)) do
+      {:ok, request}
     end
   end
 
   def turn_request(attrs), do: TurnRequest.new(attrs)
 
-  @doc "Builds a turn request after applying the same option precedence as Harness."
+  @doc "Builds a turn request after applying the established option precedence."
   @spec turn_request(term(), keyword()) :: {:ok, TurnRequest.t()} | {:error, term()}
   def turn_request(input, options) when is_list(options) do
     if Keyword.keyword?(options) do
@@ -122,28 +85,12 @@ defmodule Ouroboros.ReasoningEffort do
 
   def turn_request(_input, _options), do: {:error, :invalid_turn_options}
 
-  @doc "The bang form used by native run and subagent internals."
+  @doc "The bang form used by native session and subagent internals."
   @spec turn_request!(map() | keyword() | String.t() | TurnRequest.t()) :: TurnRequest.t()
   def turn_request!(attrs) do
     case turn_request(attrs) do
       {:ok, request} -> request
       {:error, reason} -> raise ArgumentError, "invalid turn request: #{inspect(reason)}"
-    end
-  end
-
-  defp native_run_request(attrs) do
-    with {:ok, spec} <- Registry.spec(:native),
-         config_defaults =
-           Registry.provider_config(:native) |> Map.get(:request_defaults, %{}) |> Map.new(),
-         explicit = attrs |> Map.delete(:provider) |> Map.delete("provider"),
-         merged =
-           spec.request_defaults
-           |> Map.merge(config_defaults)
-           |> Map.merge(explicit)
-           |> Map.put(:provider, :native),
-         {:ok, effort} <- effort(merged),
-         {:ok, request} <- RunRequest.new(without_effort(merged)) do
-      {:ok, %{request | reasoning_effort: effort}}
     end
   end
 
@@ -171,10 +118,10 @@ defmodule Ouroboros.ReasoningEffort do
     end
   end
 
-  defp without_effort(attrs) do
+  defp with_effort(attrs, effort) do
     attrs
     |> Map.delete("reasoning_effort")
-    |> Map.put(:reasoning_effort, nil)
+    |> Map.put(:reasoning_effort, effort)
   end
 
   defp valid_atom_or_nil?(nil), do: true

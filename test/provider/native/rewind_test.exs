@@ -11,9 +11,10 @@ defmodule Ouroboros.Provider.Native.RewindTest do
 
   @moduletag :capture_log
 
-  alias Jido.Harness.SessionRequest
-  alias Jido.Harness.TurnRequest
-  alias Ouroboros.Provider.Native.{Paths, Session}
+  alias Ouroboros.Session.Request, as: SessionRequest
+  alias Ouroboros.Session.TurnRequest
+  alias Ouroboros.Provider.Native.Paths
+  alias Ouroboros.Test.NativeSessionFixture, as: Session
   alias Ouroboros.Test.NativeModelScript
 
   setup do
@@ -75,7 +76,7 @@ defmodule Ouroboros.Provider.Native.RewindTest do
       owner: self(),
       adapter: Ouroboros.Provider.Native,
       config: %{},
-      process_manager: Jido.Harness.ProcessDriver.Erlexec,
+      process_manager: Ouroboros.Provider.Native.ProcessSignal,
       telemetry_context: %{}
     }
   end
@@ -87,11 +88,11 @@ defmodule Ouroboros.Provider.Native.RewindTest do
 
   defp await_terminal(acc \\ []) do
     receive do
-      {:session_adapter_event, %{type: type} = event}
+      {:native_test_event, %{type: type} = event}
       when type in [:turn_completed, :turn_failed, :turn_interrupted] ->
         Enum.reverse([event | acc])
 
-      {:session_adapter_event, event} ->
+      {:native_test_event, event} ->
         await_terminal([event | acc])
     after
       20_000 -> flunk("no terminal turn event within 20s")
@@ -100,7 +101,7 @@ defmodule Ouroboros.Provider.Native.RewindTest do
 
   defp drain do
     receive do
-      {:session_adapter_event, _event} -> drain()
+      {:native_test_event, _event} -> drain()
     after
       50 -> :ok
     end
@@ -550,8 +551,8 @@ defmodule Ouroboros.Provider.Native.RewindTest do
 
   defp await_event(type) do
     receive do
-      {:session_adapter_event, %{type: ^type} = event} -> event
-      {:session_adapter_event, _other} -> await_event(type)
+      {:native_test_event, %{type: ^type} = event} -> event
+      {:native_test_event, _other} -> await_event(type)
     after
       15_000 -> flunk("no #{type} within 15s")
     end

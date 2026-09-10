@@ -13,41 +13,27 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
 
   @moduletag :capture_log
 
-  alias Jido.Harness.{Session, SessionInfo}
+  alias Ouroboros.Session
+  alias Ouroboros.Session.RuntimeInfo, as: SessionInfo
   alias Ouroboros.Gateway.Methods
   alias Ouroboros.Gateway.Wire
   alias Ouroboros.Interactive.{State, Store, Task}
   alias Ouroboros.InteractiveSession
-  alias Ouroboros.Test.HarnessAdapter
+  alias Ouroboros.Test.ControlledModel
 
   @provider :native
 
   setup do
     cleanup_sessions()
 
-    previous_providers = Application.get_env(:jido_harness, :providers)
-    previous_provider_config = Application.get_env(:jido_harness, :provider_config)
+    previous_provider_config = Ouroboros.Test.NativeConfig.snapshot()
     journal_dir = unique_journal_dir()
 
-    Application.put_env(
-      :jido_harness,
-      :providers,
-      Map.put(map_or_empty(previous_providers), @provider, HarnessAdapter)
-    )
-
-    Application.put_env(
-      :jido_harness,
-      :provider_config,
-      Map.put(map_or_empty(previous_provider_config), @provider, %{
-        test_pid: self(),
-        retention: %{journal_dir: journal_dir}
-      })
-    )
+    Ouroboros.Test.NativeConfig.configure(%{native: %{test_pid: self()}})
 
     on_exit(fn ->
       cleanup_sessions()
-      restore_env(:providers, previous_providers)
-      restore_env(:provider_config, previous_provider_config)
+      Ouroboros.Test.NativeConfig.configure(previous_provider_config)
       File.rm_rf(journal_dir)
     end)
 
@@ -210,13 +196,17 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
       assert {:ok, parent} = Methods.invoke("interactive.info", %{"id" => id})
       assert parent.forks == 1
 
-      if Process.alive?(adapter), do: HarnessAdapter.finish(adapter)
+      if Process.alive?(adapter), do: ControlledModel.finish(adapter)
       retire_session(fork_id)
       retire_session(id)
     end
 
-    test "a fork before the provider named a session is refused with a reason", %{id: id} do
+    test "a fork of an unnamed historical session is refused with a reason", %{id: id} do
       start_session(id, sandbox_mode: :read_only)
+
+      :sys.replace_state(Task.whereis(id), fn runtime ->
+        %{runtime | session: %{runtime.session | provider_session_id: nil}}
+      end)
 
       assert {:error, -32_006, message, data} = Methods.invoke("interactive.fork", %{"id" => id})
 
@@ -340,8 +330,8 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
     assert {:ok, _turn} =
              InteractiveSession.send_message(ref, "name the session", id: unique_id("turn"))
 
-    assert_receive {:ouroboros_test_adapter_started, _run, _request, adapter}, 2_000
-    assert :ok = HarnessAdapter.emit(adapter, :output_text_delta, %{"text" => "working"})
+    assert_receive {:ouroboros_test_model_started, _run, _request, adapter}, 2_000
+    assert :ok = ControlledModel.emit(adapter, :output_text_delta, %{"text" => "working"})
 
     assert_eventually(fn ->
       match?(
@@ -399,7 +389,9 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
     Session.list()
     |> Enum.each(fn info ->
       unless SessionInfo.terminal?(info), do: Session.kill(info.session_id)
-      _ = Session.prune(info.session_id)
+
+      if is_pid(info.pid) and Process.alive?(info.pid),
+        do: DynamicSupervisor.terminate_child(Ouroboros.SessionTransportSupervisor, info.pid)
     end)
   rescue
     _error -> :ok
@@ -415,10 +407,4 @@ defmodule Ouroboros.Gateway.SessionControlsTest do
   end
 
   defp unique_id(prefix), do: "#{prefix}-#{System.unique_integer([:positive, :monotonic])}"
-
-  defp map_or_empty(nil), do: %{}
-  defp map_or_empty(value), do: Map.new(value)
-
-  defp restore_env(key, nil), do: Application.delete_env(:jido_harness, key)
-  defp restore_env(key, value), do: Application.put_env(:jido_harness, key, value)
 end

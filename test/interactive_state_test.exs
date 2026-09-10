@@ -9,7 +9,7 @@ defmodule Ouroboros.InteractiveStateTest do
   Every one of them is a durable-checkpoint rule rather than a style preference. `env`,
   `env_mode` and `mcp_config` are credentials-adjacent and are refused by name so that a
   caller is told which rule it broke; `provider_options` is an adapter allow-list *and* a
-  `Jido.Harness.Redaction` fixed-point check, so a value that redaction would change never
+  `Ouroboros.Redaction` fixed-point check, so a value that redaction would change never
   reaches a checkpoint; the id is what every store write is keyed by.
   """
 

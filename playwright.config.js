@@ -26,14 +26,14 @@ module.exports = defineConfig({
     }
   ],
   webServer: {
-    command: "mix run --no-halt",
+    command: "mix run --no-halt test/support/browser_runtime.exs",
     url: `http://127.0.0.1:${port}/auth`,
     reuseExistingServer: false,
     timeout: 120_000,
     env: {
       ...process.env,
       MIX_ENV: "test",
-      OUROBOROS_DATA_DIR: path.join(__dirname, "_build", "playwright-data"),
+      OUROBOROS_DATA_DIR: path.join(__dirname, "_build", "playwright-j2-data"),
       OUROBOROS_WEB: "1",
       OUROBOROS_WEB_BIND: "127.0.0.1",
       OUROBOROS_WEB_PORT: String(port),

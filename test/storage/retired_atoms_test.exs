@@ -45,10 +45,18 @@ defmodule Ouroboros.Storage.RetiredAtomsTest do
   @c2_fixture_names @c2_provider_names ++
                       @c2_transport_names ++ @c2_provider_option_names ++ @c2_error_names
 
+  # J2 explicitly retains these old fields too. They were already present in the
+  # unchanged C2 corpus; retiring their spellings widens its vocabulary intersection.
+  @j2_prior_fixture_names ~w(harness_session_id provider_session_id raw sequence_offset transport)
+
   # Every name a committed `DurableFile` fixture holds. The session record below is base64
   # rather than a store, so it is guarded separately.
   @fixture_names @permissions_names ++
-                   @desktop_ledger_names ++ @ledger_names ++ @grants_names ++ @c2_fixture_names
+                   @desktop_ledger_names ++
+                   @ledger_names ++
+                   @grants_names ++
+                   @c2_fixture_names ++
+                   @j2_prior_fixture_names
 
   # An interactive session's own `delegations` field, captured as base64 rather than as a
   # `DurableFile` directory because what matters about it is the nine names, not the store.

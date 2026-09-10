@@ -11,42 +11,29 @@ defmodule Ouroboros.InteractiveControlsTest do
 
   use ExUnit.Case, async: false
 
-  alias Jido.Harness.{RunRequest, Session, SessionInfo}
+  alias Ouroboros.Test.ModelRequest, as: RunRequest
+  alias Ouroboros.Session
+  alias Ouroboros.Session.RuntimeInfo, as: SessionInfo
   alias Ouroboros.Interactive.{Ref, State, Store, Task}
   alias Ouroboros.InteractiveSession
-  alias Ouroboros.Test.HarnessAdapter
+  alias Ouroboros.Test.ControlledModel, as: HarnessAdapter
 
   @provider :native
 
   setup do
     cleanup_sessions()
 
-    previous_providers = Application.get_env(:jido_harness, :providers)
-    previous_provider_config = Application.get_env(:jido_harness, :provider_config)
+    previous_provider_config = Ouroboros.Test.NativeConfig.snapshot()
     journal_dir = unique_journal_dir()
 
-    Application.put_env(
-      :jido_harness,
-      :providers,
-      Map.put(map_or_empty(previous_providers), @provider, HarnessAdapter)
-    )
-
-    Application.put_env(
-      :jido_harness,
-      :provider_config,
-      Map.put(map_or_empty(previous_provider_config), @provider, %{
-        test_pid: self(),
-        retention: %{journal_dir: journal_dir}
-      })
-    )
-
-    HarnessAdapter.reset_resume()
+    previous_native_dir = Application.get_env(:ouroboros, :native_data_dir)
+    Ouroboros.Test.NativeConfig.configure(%{native: %{test_pid: self()}})
+    Application.put_env(:ouroboros, :native_data_dir, journal_dir)
 
     on_exit(fn ->
-      HarnessAdapter.reset_resume()
       cleanup_sessions()
-      restore_env(:providers, previous_providers)
-      restore_env(:provider_config, previous_provider_config)
+      Ouroboros.Test.NativeConfig.configure(previous_provider_config)
+      restore_native_dir(previous_native_dir)
       File.rm_rf(journal_dir)
     end)
 
@@ -89,7 +76,7 @@ defmodule Ouroboros.InteractiveControlsTest do
       # The managed transport rebuilds its run request per turn from the session request
       # the worker holds. If `configure` had only written Ouroboros's checkpoint, this
       # turn would still carry the options the session was started with.
-      assert_receive {:ouroboros_test_adapter_started, _run,
+      assert_receive {:ouroboros_test_model_started, _run,
                       %RunRequest{approval_mode: :auto_approve, sandbox_mode: :read_only},
                       adapter},
                      2_000
@@ -156,7 +143,7 @@ defmodule Ouroboros.InteractiveControlsTest do
       assert {:ok, _turn} =
                InteractiveSession.send_message(ref, "keep going", id: unique_id("turn"))
 
-      assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{}, adapter}, 2_000
+      assert_receive {:ouroboros_test_model_started, _run, %RunRequest{}, adapter}, 2_000
       assert :ok = HarnessAdapter.emit(adapter, :output_text_delta, %{"text" => "still here"})
 
       later =
@@ -177,14 +164,13 @@ defmodule Ouroboros.InteractiveControlsTest do
     test "a field the transport cannot change is refused by name", %{id: id} do
       ref = start_session(id)
 
-      # This adapter normalizes no `:reasoning_effort`, so the field is outside the list a
-      # start is held to and a configure is refused by name rather than sent.
-      assert {:error, {:unconfigurable_session, details}} =
-               InteractiveSession.configure(ref, %{reasoning_effort: :high})
+      assert {:error, {:invalid_configuration, details}} =
+               InteractiveSession.configure(ref, %{system_prompt: "replace instructions"})
 
-      assert details.reason == :option_not_configurable
-      assert details.field == :reasoning_effort
-      assert details.message =~ "cannot change :reasoning_effort on an open session"
+      assert details.reason == :unknown_field
+      assert details.field == :system_prompt
+      assert {:ok, session} = Store.get(id)
+      assert Map.get(session.options, :system_prompt) == nil
 
       retire_session(id)
     end
@@ -196,12 +182,12 @@ defmodule Ouroboros.InteractiveControlsTest do
       # into a value the provider cannot enforce would be the sandbox equivalent of the
       # X1 hole — a policy that reads as applied and is not.
       assert {:error, {:unconfigurable_session, details}} =
-               InteractiveSession.configure(ref, %{sandbox_mode: :unrestricted})
+               InteractiveSession.configure(ref, %{sandbox_mode: :not_a_sandbox})
 
       assert details.reason == :value_not_accepted
       assert details.field == :sandbox_mode
-      assert details.value == :unrestricted
-      assert details.accepted_values == [:default, :read_only, :workspace_write]
+      assert details.value == :not_a_sandbox
+      assert details.accepted_values == [:default, :read_only, :workspace_write, :unrestricted]
 
       assert {:ok, session} = InteractiveSession.info(ref)
       assert State.public(session).options.sandbox_mode == :workspace_write
@@ -305,7 +291,7 @@ defmodule Ouroboros.InteractiveControlsTest do
                  id: unique_id("turn")
                )
 
-      assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{}, adapter}, 2_000
+      assert_receive {:ouroboros_test_model_started, _run, %RunRequest{}, adapter}, 2_000
 
       titled =
         assert_eventually(fn ->
@@ -329,7 +315,7 @@ defmodule Ouroboros.InteractiveControlsTest do
                  id: unique_id("turn")
                )
 
-      assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{}, second}, 2_000
+      assert_receive {:ouroboros_test_model_started, _run, %RunRequest{}, second}, 2_000
 
       assert_eventually(fn -> accepted_inputs(ref) >= 2 end)
       assert {:ok, session} = InteractiveSession.info(ref)
@@ -348,7 +334,7 @@ defmodule Ouroboros.InteractiveControlsTest do
                  id: unique_id("turn")
                )
 
-      assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{}, adapter}, 2_000
+      assert_receive {:ouroboros_test_model_started, _run, %RunRequest{}, adapter}, 2_000
 
       assert_eventually(fn ->
         match?({:ok, [_ | _]}, InteractiveSession.replay(ref, cursor: 0, limit: 100))
@@ -369,7 +355,7 @@ defmodule Ouroboros.InteractiveControlsTest do
       assert {:ok, _turn} =
                InteractiveSession.send_message(ref, "the runtime's guess", id: unique_id("turn"))
 
-      assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{}, adapter}, 2_000
+      assert_receive {:ouroboros_test_model_started, _run, %RunRequest{}, adapter}, 2_000
 
       assert_eventually(fn ->
         case InteractiveSession.info(ref) do
@@ -387,7 +373,7 @@ defmodule Ouroboros.InteractiveControlsTest do
       assert {:ok, _turn} =
                InteractiveSession.send_message(ref, "another prompt", id: unique_id("turn"))
 
-      assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{}, second}, 2_000
+      assert_receive {:ouroboros_test_model_started, _run, %RunRequest{}, second}, 2_000
       assert_eventually(fn -> accepted_inputs(ref) >= 2 end)
 
       assert {:ok, session} = InteractiveSession.info(ref)
@@ -460,8 +446,10 @@ defmodule Ouroboros.InteractiveControlsTest do
       # restart rebuilds and the projection deliberately hides provider options.
       assert {:ok, %State{} = durable} = Store.get(child.id)
       request = State.request(durable)
-      assert request.provider_session_id == "ouroboros-test-session"
-      assert request.provider_options.fork_session == true
+      assert durable.options.provider_session_id == provider_session_id(ref)
+      assert durable.options.provider_options.fork_session == true
+      assert request.provider_session_id == forked.provider_session_id
+      refute request.provider_session_id == provider_session_id(ref)
 
       # And it is the request the provider is actually handed, not just the checkpoint.
       assert {:ok, _turn} =
@@ -469,12 +457,14 @@ defmodule Ouroboros.InteractiveControlsTest do
                  id: unique_id("turn")
                )
 
-      assert_receive {:ouroboros_test_adapter_started, _run,
+      assert_receive {:ouroboros_test_model_started, _run,
                       %RunRequest{
-                        provider_session_id: "ouroboros-test-session",
+                        provider_session_id: fork_source_id,
                         provider_options: %{fork_session: true}
                       }, child_adapter},
                      2_000
+
+      assert fork_source_id == provider_session_id(ref)
 
       # And the parent is untouched but for the count of branches it has started.
       assert {:ok, %State{} = parent} = InteractiveSession.info(ref)
@@ -502,7 +492,7 @@ defmodule Ouroboros.InteractiveControlsTest do
                  id: unique_id("turn")
                )
 
-      assert_receive {:ouroboros_test_adapter_started, _run,
+      assert_receive {:ouroboros_test_model_started, _run,
                       %RunRequest{approval_mode: :auto_approve, sandbox_mode: :read_only},
                       child_adapter},
                      2_000
@@ -513,8 +503,12 @@ defmodule Ouroboros.InteractiveControlsTest do
       retire_session(id)
     end
 
-    test "a session the provider has not named yet has nothing to branch", %{id: id} do
+    test "an unnamed historical session has nothing to branch", %{id: id} do
       ref = start_session(id, sandbox_mode: :read_only)
+
+      :sys.replace_state(Task.whereis(id), fn runtime ->
+        %{runtime | session: %{runtime.session | provider_session_id: nil}}
+      end)
 
       assert {:error, {:unforkable_session, details}} = InteractiveSession.fork(ref)
       assert details.reason == :no_provider_session_id
@@ -555,7 +549,7 @@ defmodule Ouroboros.InteractiveControlsTest do
       # start intent, which is what keeps a model substitution from being a second start.
       assert substituted[:forked_from] == id
       assert substituted[:provider] == @provider
-      assert substituted[:provider_session_id] == "ouroboros-test-session"
+      assert substituted[:provider_session_id] == provider_session_id(ref)
       assert substituted[:provider_options][:fork_session] == true
       assert substituted[:sandbox_mode] == :read_only
 
@@ -631,7 +625,7 @@ defmodule Ouroboros.InteractiveControlsTest do
       assert opts[:forked_from] == id
       assert opts[:provider] == @provider
       assert opts[:workspace] == File.cwd!()
-      assert opts[:provider_session_id] == "ouroboros-test-session"
+      assert opts[:provider_session_id] == provider_session_id(ref)
       assert opts[:provider_options][:fork_session] == true
 
       # A plan is intent, not a session: nothing was created and nothing was started.
@@ -681,7 +675,7 @@ defmodule Ouroboros.InteractiveControlsTest do
       assert {:ok, _turn} =
                InteractiveSession.send_message(ref, "spend something", id: unique_id("turn"))
 
-      assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{}, adapter}, 2_000
+      assert_receive {:ouroboros_test_model_started, _run, %RunRequest{}, adapter}, 2_000
 
       assert :ok =
                HarnessAdapter.emit(adapter, :usage, %{
@@ -689,6 +683,8 @@ defmodule Ouroboros.InteractiveControlsTest do
                  "output_tokens" => 30,
                  "total_tokens" => 150
                })
+
+      assert :ok = HarnessAdapter.finish(adapter)
 
       row =
         assert_eventually(fn ->
@@ -793,8 +789,10 @@ defmodule Ouroboros.InteractiveControlsTest do
     assert {:ok, _turn} =
              InteractiveSession.send_message(ref, "name the session", id: unique_id("turn"))
 
-    assert_receive {:ouroboros_test_adapter_started, _run, %RunRequest{}, adapter}, 2_000
+    assert_receive {:ouroboros_test_model_started, _run, %RunRequest{}, adapter}, 2_000
     assert :ok = HarnessAdapter.emit(adapter, :output_text_delta, %{"text" => "working"})
+    assert :ok = HarnessAdapter.finish(adapter)
+    assert_eventually(fn -> ready_for_next_turn?(ref) end)
 
     assert_eventually(fn ->
       match?(
@@ -807,16 +805,15 @@ defmodule Ouroboros.InteractiveControlsTest do
   end
 
   defp ready_for_next_turn?(ref) do
-    # The coordinator's status is cached, and this fixture's managed transport emits
-    # completion before consuming its task result. Wait for both to finish before
-    # sending another prompt; observing :idle alone can still race a :busy refusal.
     with {:ok, %State{status: :idle, harness_session_id: id}} <- InteractiveSession.info(ref),
-         [{worker, _}] <- Registry.lookup(Jido.Harness.SessionRegistry, id),
-         %{status: :idle, active: nil, handle: transport} <- :sys.get_state(worker) do
-      match?(%{active: nil, task: nil}, :sys.get_state(transport))
-    else
-      _not_ready -> false
-    end
+         {:ok, %{state: :idle, active_turn_id: nil}} <- Session.info(id),
+         do: true,
+         else: (_ -> false)
+  end
+
+  defp provider_session_id(ref) do
+    {:ok, session} = InteractiveSession.info(ref)
+    session.provider_session_id
   end
 
   defp accepted_inputs(ref) do
@@ -826,14 +823,14 @@ defmodule Ouroboros.InteractiveControlsTest do
     end
   end
 
-  # A stubbed provider session never answers `close`, so these coordinators are retired
-  # directly rather than left retrying for the rest of the suite.
   defp retire_session(id) do
+    _ = InteractiveSession.kill(id)
+
     case Task.whereis(id) do
       pid when is_pid(pid) ->
         DynamicSupervisor.terminate_child(Ouroboros.Interactive.TaskSupervisor, pid)
 
-      _absent ->
+      _ ->
         :ok
     end
 
@@ -842,7 +839,7 @@ defmodule Ouroboros.InteractiveControlsTest do
         _ = Store.put(%{session | status: :cancelled})
         _ = Store.delete(id)
 
-      _absent ->
+      _ ->
         :ok
     end
 
@@ -853,7 +850,9 @@ defmodule Ouroboros.InteractiveControlsTest do
     Session.list()
     |> Enum.each(fn info ->
       unless SessionInfo.terminal?(info), do: Session.kill(info.session_id)
-      _ = Session.prune(info.session_id)
+
+      if is_pid(info.pid) and Process.alive?(info.pid),
+        do: DynamicSupervisor.terminate_child(Ouroboros.SessionTransportSupervisor, info.pid)
     end)
   rescue
     _error -> :ok
@@ -884,9 +883,6 @@ defmodule Ouroboros.InteractiveControlsTest do
 
   defp unique_id(prefix), do: "#{prefix}-#{System.unique_integer([:positive, :monotonic])}"
 
-  defp map_or_empty(nil), do: %{}
-  defp map_or_empty(value), do: Map.new(value)
-
-  defp restore_env(key, nil), do: Application.delete_env(:jido_harness, key)
-  defp restore_env(key, value), do: Application.put_env(:jido_harness, key, value)
+  defp restore_native_dir(nil), do: Application.delete_env(:ouroboros, :native_data_dir)
+  defp restore_native_dir(value), do: Application.put_env(:ouroboros, :native_data_dir, value)
 end

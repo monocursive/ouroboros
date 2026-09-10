@@ -178,10 +178,11 @@ defmodule Ouroboros.MixProject do
       # with `escape: true` and never with raw HTML passed through — see
       # `Ouroboros.Web.Live.Markdown`.
       {:earmark, "~> 1.4"},
-      # Jido.Harness 2.0 is not on Hex yet. Pin the reviewed upstream commit so
-      # provider protocol changes cannot enter the runtime implicitly.
-      {:jido_harness,
-       github: "agentjido/jido_harness", ref: "8bf0d52f4fed0d8a9d2594000d8b3a775da16f8b"},
+      # Session validation and runtime serialization are owned dependencies.
+      {:zoi, "~> 0.18"},
+      {:jason, "~> 1.4"},
+      {:telemetry, "~> 1.3"},
+      {:jsv, "~> 0.12"},
       # The macOS process-group race workaround verifies this exact upstream source.
       # Remove/review patches/erlexec-2.3.4-macos-setpgid.patch when upgrading.
       {:erlexec, "== 2.3.4", override: true},

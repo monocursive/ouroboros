@@ -100,7 +100,7 @@ defmodule Ouroboros.Audit.IdentityExecutionTest do
   end
 
   test "native children inherit request attribution and cannot supply it in tool input", ctx do
-    alias Jido.Harness.SessionRequest, as: Request
+    alias Ouroboros.Session.Request
     alias Ouroboros.Provider.Native.Tools.Agent, as: AgentTool
 
     config =

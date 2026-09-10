@@ -50,6 +50,9 @@ defmodule Ouroboros.Interactive.State do
               [
                 :workspace_lease_id,
                 :harness_session_id,
+                :runtime_id,
+                :runtime_generation,
+                :close_intent,
                 :provider_session_id,
                 :title,
                 # Derived in public/1; a bounded outcome survives event-window pruning.
@@ -59,6 +62,8 @@ defmodule Ouroboros.Interactive.State do
                 # because they are different claims: a fork carries the parent's
                 # conversation, a handoff carries a curated packet *about* it.
                 :handed_off_from,
+                runtime_cursor: 0,
+                format_version: 2,
                 title_source: nil,
                 forks: 0,
                 # D7. The request, then the record: `worktree_requested` is the start
@@ -117,7 +122,7 @@ defmodule Ouroboros.Interactive.State do
           required(:status) => turn_status(),
           required(:created_at) => String.t(),
           required(:updated_at) => String.t(),
-          optional(:harness_turn_id) => String.t() | nil,
+          optional(:runtime_turn_id) => String.t() | nil,
           optional(:result) => map() | nil,
           optional(:error) => term()
         }
@@ -366,11 +371,8 @@ defmodule Ouroboros.Interactive.State do
   defp put_system_prompt(options, system_prompt),
     do: Map.put(options, :system_prompt, system_prompt)
 
-  # The boundary. `Jido.Harness.Registry` merges `config :jido_harness, :providers` over
-  # nine bundled vendor-CLI adapters, so a name this build no longer serves still resolves
-  # to an upstream adapter and would start a wrapped CLI. Refusing here, by name, is what
-  # makes `native` the only provider rather than the only *configured* one — and it is
-  # refused before a workspace lease is taken, so nothing is half-started.
+  # Removed provider names remain readable history, but cannot cross the owned
+  # native execution boundary. Refuse before acquiring a workspace lease.
   defp provider_removed_message(provider) do
     "provider #{inspect(provider)} was removed; `:native` is the only provider. " <>
       "A vendor model is reachable as a native model — `anthropic:`, `openai:`, " <>
@@ -393,18 +395,14 @@ defmodule Ouroboros.Interactive.State do
   defp valid_provider_options?(options) when options in [nil, %{}], do: true
 
   defp valid_provider_options?(options) when is_map(options) do
-    allowed_by_adapter =
-      case Jido.Harness.Registry.spec(:native) do
-        {:ok, spec} -> spec.provider_options
-        {:error, _reason} -> []
-      end
+    allowed_by_adapter = Ouroboros.Provider.Native.spec().provider_options
 
     Enum.all?(options, fn {key, value} ->
       atom_key = normalize_provider_option_key(key, allowed_by_adapter)
 
       atom_key in @durable_provider_options and
         atom_key in allowed_by_adapter and
-        Jido.Harness.Redaction.redact(value) == value
+        Ouroboros.Redaction.redact(value) == value
     end)
   end
 
@@ -469,29 +467,24 @@ defmodule Ouroboros.Interactive.State do
     |> rename(:runtime_timeout_ms, :turn_runtime_timeout_ms)
     |> rename(:idle_timeout_ms, :turn_idle_timeout_ms)
     |> Map.drop([:attachments, :max_turns])
-    |> fold_plan_option()
     |> Map.merge(%{
       cwd: state.workspace,
       metadata: metadata
     })
+    |> clear_applied_fork(state.provider_session_id)
     |> put_provider_session_id(state.provider_session_id)
     |> reject_nil_values()
   end
 
-  # B2. `plan` is a session option on the wire and a provider option underneath: the
-  # native session reads `provider_options.plan`, and the pinned Harness request has no
-  # field of its own for it (a fifth `approval_mode` is refused by the dependency). A
-  # session started planning therefore carries it where the native session looks; one that
-  # is not carries nothing, so the request stays byte-identical to before.
-  defp fold_plan_option(%{plan: true} = request) do
-    provider_options = Map.get(request, :provider_options) || %{}
-
-    request
-    |> Map.delete(:plan)
-    |> Map.put(:provider_options, Map.put(provider_options, :plan, true))
+  # Fork flags describe a one-time start. Once the child has its own conversation
+  # identity, reopening it is a resume of that child, not another fork operation.
+  defp clear_applied_fork(request, id) when is_binary(id) and id != "" do
+    Map.update(request, :provider_options, %{}, fn options ->
+      Map.drop(options || %{}, [:fork_session, :fork_to_turn, "fork_session", "fork_to_turn"])
+    end)
   end
 
-  defp fold_plan_option(request), do: Map.delete(request, :plan)
+  defp clear_applied_fork(request, _id), do: request
 
   # The provider session id a session learned from its own events is the one that can
   # resume it, and it lives on the struct rather than in the start options. A request
@@ -536,7 +529,7 @@ defmodule Ouroboros.Interactive.State do
     do: {:error, :no_provider_session_id}
 
   def resume_support(%__MODULE__{} = state) do
-    with {:ok, spec} <- Jido.Harness.Registry.spec(state.provider),
+    with {:ok, spec} <- Ouroboros.Provider.spec(state.provider),
          true <- spec.capabilities.resume? || {:error, :provider_does_not_resume},
          {:ok, options} <- session_options(spec, Map.get(state.options, :transport)) do
       if :provider_session_id in options,
@@ -714,8 +707,8 @@ defmodule Ouroboros.Interactive.State do
   @spec count_fork(t()) :: t()
   def count_fork(%__MODULE__{} = state), do: %{state | forks: forks(state) + 1}
 
-  @spec new_turn(String.t(), :message | :follow_up, Jido.Harness.TurnRequest.t()) :: turn()
-  def new_turn(id, mode, %Jido.Harness.TurnRequest{} = request) do
+  @spec new_turn(String.t(), :message | :follow_up, Ouroboros.Session.TurnRequest.t()) :: turn()
+  def new_turn(id, mode, %Ouroboros.Session.TurnRequest{} = request) do
     request = request |> Map.from_struct() |> reject_nil_values()
     now = timestamp()
 
@@ -724,7 +717,7 @@ defmodule Ouroboros.Interactive.State do
       mode: mode,
       fingerprint: fingerprint(mode, request),
       request: request,
-      harness_turn_id: nil,
+      runtime_turn_id: nil,
       status: :dispatching,
       result: nil,
       error: nil,
@@ -795,6 +788,17 @@ defmodule Ouroboros.Interactive.State do
     turns = Map.new(state.turns, fn {id, turn} -> {id, public_turn(turn)} end)
 
     state
+    |> Map.put(
+      :harness_session_id,
+      Map.get(state, :runtime_id) || Map.get(state, :harness_session_id)
+    )
+    |> Map.drop([
+      :runtime_id,
+      :runtime_generation,
+      :runtime_cursor,
+      :format_version,
+      :close_intent
+    ])
     |> Map.put(:runtime_snapshot, nil)
     |> Map.put(:options, options)
     |> Map.put(:turns, turns)
@@ -850,15 +854,23 @@ defmodule Ouroboros.Interactive.State do
 
   @spec public_turn(turn()) :: map()
   def public_turn(turn) do
+    turn =
+      turn
+      |> Map.put(
+        :harness_turn_id,
+        Map.get(turn, :runtime_turn_id) || Map.get(turn, :harness_turn_id)
+      )
+      |> Map.delete(:runtime_turn_id)
+
     case Map.fetch(turn, :request) do
       {:ok, request} ->
         turn
         |> Map.drop([:fingerprint, :request])
         |> Map.put(:prompt, Map.get(request, :prompt))
-        |> Jido.Harness.Redaction.redact()
+        |> Ouroboros.Redaction.redact()
 
       :error ->
-        Jido.Harness.Redaction.redact(turn)
+        Ouroboros.Redaction.redact(turn)
     end
   end
 
@@ -1030,7 +1042,11 @@ defmodule Ouroboros.Interactive.State do
       state.status in (@terminal_statuses ++
                          [:starting, :idle, :running, :awaiting_approval, :closing]) and
       is_binary(state.created_at) and is_binary(state.updated_at) and
-      optional_id?(state.workspace_lease_id) and optional_id?(state.harness_session_id) and
+      optional_id?(state.workspace_lease_id) and optional_id?(state.runtime_id) and
+      optional_id?(state.runtime_generation) and state.format_version == 2 and
+      state.close_intent in [nil, :close, :kill] and
+      is_integer(state.runtime_cursor) and state.runtime_cursor >= 0 and
+      state.runtime_cursor <= state.cursor and
       optional_id?(state.provider_session_id) and valid_title?(state) and
       optional_id?(forked_from(state)) and optional_id?(handed_off_from(state)) and
       is_integer(forks(state)) and forks(state) >= 0 and
@@ -1138,9 +1154,9 @@ defmodule Ouroboros.Interactive.State do
       when is_pid(term) or is_port(term) or is_reference(term) or is_function(term),
       do: inspect(term)
 
-  def durable_term(%module{} = term) do
-    term |> Map.from_struct() |> Map.new(&durable_pair/1) |> then(&struct(module, &1))
-  end
+  # Preserve reviewed struct tags as data; never invoke a module named by stored input.
+  def durable_term(%{__struct__: _module} = term),
+    do: term |> Map.to_list() |> Map.new(&durable_pair/1)
 
   def durable_term(term) when is_map(term), do: Map.new(term, &durable_pair/1)
   def durable_term(term) when is_list(term), do: Enum.map(term, &durable_term/1)
@@ -1226,7 +1242,7 @@ defmodule Ouroboros.Interactive.State do
                :interrupted,
                :ambiguous
              ] and is_binary(created_at) and is_binary(updated_at) ->
-        optional_id?(Map.get(turn, :harness_turn_id)) and serializable?(request) and
+        optional_id?(Map.get(turn, :runtime_turn_id)) and serializable?(request) and
           serializable?(Map.get(turn, :result)) and serializable?(Map.get(turn, :error))
 
       _turn ->

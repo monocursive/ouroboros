@@ -7,7 +7,7 @@ defmodule Ouroboros.InteractiveSession do
   reattachment, and node-aware routing.
   """
 
-  alias Jido.Harness.ApprovalResponse
+  alias Ouroboros.Session.ApprovalResponse
   alias Ouroboros.Interactive.{Ref, State, Store, Task}
   alias Ouroboros.Provider.Native.Replay
   alias Ouroboros.Workspace.Exec
@@ -560,17 +560,17 @@ defmodule Ouroboros.InteractiveSession do
 
     case request_approval(session, request) do
       {:ok, %{response: response}} ->
-        Jido.Harness.ApprovalResponse.new!(response)
+        Ouroboros.Session.ApprovalResponse.new!(response)
 
       {:ok, answer} ->
-        Jido.Harness.ApprovalResponse.new!(%{
+        Ouroboros.Session.ApprovalResponse.new!(%{
           decision: if(answer.decision in [:allow, "allow"], do: :approve, else: :deny),
           scope: :once,
           reason: Map.get(answer, :reason)
         })
 
       {:error, reason} ->
-        Jido.Harness.ApprovalResponse.new!(%{
+        Ouroboros.Session.ApprovalResponse.new!(%{
           decision: :deny,
           scope: :once,
           reason: "approval channel unavailable: #{inspect(reason)}"

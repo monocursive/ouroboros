@@ -16,11 +16,11 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
 
   @moduletag :capture_log
 
-  alias Jido.Harness.ApprovalResponse
-  alias Jido.Harness.SessionRequest
-  alias Jido.Harness.TurnRequest
+  alias Ouroboros.Session.ApprovalResponse
+  alias Ouroboros.Session.Request, as: SessionRequest
+  alias Ouroboros.Session.TurnRequest
   alias Ouroboros.Agent.EffectLedger
-  alias Ouroboros.Provider.Native.Session
+  alias Ouroboros.Test.NativeSessionFixture, as: Session
   alias Ouroboros.Provider.Native.Subagent
   alias Ouroboros.Provider.Native.Tools
   alias Ouroboros.Provider.Native.Tools.Agent, as: AgentTool
@@ -84,7 +84,7 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
 
   # ---------------------------------------------------------------- harness
 
-  defp open(context, parent_script, child_script, overrides \\ %{}) do
+  defp open(context, parent_script, child_script, overrides \\ %{}, kind \\ :parent) do
     {parent_spec, parent_agent} = NativeModelScript.start(parent_script)
     {child_spec, child_agent} = NativeModelScript.start(child_script)
 
@@ -118,16 +118,22 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       owner: self(),
       adapter: Ouroboros.Provider.Native,
       config: %{},
-      process_manager: Jido.Harness.ProcessDriver.Erlexec,
+      process_manager: Ouroboros.Provider.Native.ProcessSignal,
       telemetry_context: %{}
     }
 
-    {:ok, handle} = Session.open(request, session_context)
+    {:ok, handle} =
+      case kind do
+        :parent -> Session.open(request, session_context)
+        :child -> Session.open_child(request, session_context)
+      end
+
+    {:ok, runtime} = Ouroboros.Session.info(handle)
     on_exit(fn -> if Process.alive?(handle), do: Session.close(handle) end)
 
     %{
       handle: handle,
-      session_id: session_id,
+      session_id: runtime.runtime_id,
       parent_agent: parent_agent,
       child_agent: child_agent,
       child_spec: child_spec
@@ -139,8 +145,8 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
 
   defp collect_until(type, acc \\ [], timeout \\ 30_000) do
     receive do
-      {:session_adapter_event, %{type: ^type} = event} -> Enum.reverse([event | acc])
-      {:session_adapter_event, event} -> collect_until(type, [event | acc], timeout)
+      {:native_test_event, %{type: ^type} = event} -> Enum.reverse([event | acc])
+      {:native_test_event, event} -> collect_until(type, [event | acc], timeout)
     after
       timeout -> flunk("no #{type}; saw #{inspect(Enum.map(acc, & &1.type))}")
     end
@@ -148,11 +154,11 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
 
   defp await_subagent(phase, timeout \\ 30_000) do
     receive do
-      {:session_adapter_event,
+      {:native_test_event,
        %{type: :provider_event, payload: %{"kind" => "subagent", "phase" => ^phase}} = event} ->
         event
 
-      {:session_adapter_event, _other} ->
+      {:native_test_event, _other} ->
         await_subagent(phase, timeout)
     after
       timeout -> flunk("no subagent #{phase} event within #{timeout}ms")
@@ -408,7 +414,8 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
           context,
           [[agent_call(%{"prompt" => "spawn deeper"})], finish()],
           [[{:text, "unused"}, {:finish, :stop}]],
-          %{provider_options: %{"subagent_depth" => AgentTool.max_depth()}}
+          %{provider_options: %{"subagent_depth" => AgentTool.max_depth()}},
+          :child
         )
 
       send_turn(handle)
@@ -477,7 +484,7 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
 
       send(handle, {:subagent, "settled-child", {:settled, summary}})
 
-      assert_receive {:session_adapter_event,
+      assert_receive {:native_test_event,
                       %{type: :provider_event, payload: %{"phase" => "settled"}}},
                      5_000
 
@@ -540,7 +547,7 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       # A planning parent hands its child the plan posture, not a way out of it.
       assert spec.request_attrs.sandbox_mode == :read_only
       assert spec.request_attrs.approval_mode == :prompt
-      assert spec.request_attrs.provider_options["plan"] == true
+      assert spec.request_attrs.plan == true
       assert spec.request_attrs.disallowed_tools == ["bash"]
       assert spec.request_attrs.provider_options["subagent_depth"] == 1
       assert spec.request_attrs.provider_options["subagent_parent"] == "native-parent"
@@ -576,7 +583,7 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
       assert {:ok, prompting_spec} = AgentTool.plan(%{"prompt" => "explore"}, prompting)
       assert prompting_spec.request_attrs.approval_mode == :prompt
       assert prompting_spec.request_attrs.sandbox_mode == :workspace_write
-      refute Map.has_key?(prompting_spec.request_attrs.provider_options, "plan")
+      refute prompting_spec.request_attrs.plan
     end
 
     test "max_turns is capped and reaches the child as its own iteration bound" do
@@ -804,7 +811,7 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
     test "the spec a remote child would travel as survives the wire", %{parent: parent} do
       # Distribution serialises the spec, so every field has to mean on the target what it
       # means here. A closure, a port or a reference does not, and the harness context is
-      # where one would arrive: it is built by `Jido.Harness.Session.Worker` out of a
+      # where one would arrive: it is built by the coordinator out of a
       # provider config an operator wrote.
       dirty = %{
         parent
@@ -813,7 +820,7 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
             provider: :native,
             owner: self(),
             adapter: Ouroboros.Provider.Native,
-            process_manager: Jido.Harness.ProcessDriver.Erlexec,
+            process_manager: Ouroboros.Provider.Native.ProcessSignal,
             telemetry_context: %{session_id: "sess-remote"},
             config: %{
               test_pid: self(),
@@ -927,7 +934,7 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
           owner: self(),
           adapter: Ouroboros.Provider.Native,
           config: %{},
-          process_manager: Jido.Harness.ProcessDriver.Erlexec,
+          process_manager: Ouroboros.Provider.Native.ProcessSignal,
           telemetry_context: %{}
         },
         worktree: false,
@@ -947,6 +954,17 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
 
       assert {:error, {:subagent_unstartable, {:subagent_task_id_collision, ^task_id}}} =
                Subagent.start_and_launch(collision)
+
+      assert {:ok, %{status: :completed}} = Subagent.await(first.pid, 5_000)
+      runtime_id = :sys.get_state(first.pid).runtime_id
+      assert is_binary(runtime_id)
+
+      wait_until(fn ->
+        Registry.lookup(Ouroboros.SessionRegistry, {:runtime, runtime_id}) == []
+      end)
+
+      assert {:error, :not_found} = Ouroboros.Session.info(runtime_id)
+      assert Ouroboros.Provider.Native.Session.whereis(provider_session_id) == nil
 
       assert {:ok, _summary} = Subagent.stop(first.pid)
     end
@@ -1404,8 +1422,8 @@ defmodule Ouroboros.Provider.Native.SubagentTest do
 
   defp await_approval(timeout \\ 30_000) do
     receive do
-      {:session_adapter_event, %{type: :approval_requested} = event} -> event
-      {:session_adapter_event, _other} -> await_approval(timeout)
+      {:native_test_event, %{type: :approval_requested} = event} -> event
+      {:native_test_event, _other} -> await_approval(timeout)
     after
       timeout -> flunk("no approval_requested within #{timeout}ms")
     end

@@ -1,15 +1,15 @@
-defmodule Ouroboros.HarnessEventProjectionTest do
+defmodule Ouroboros.RuntimeEventProjectionTest do
   use ExUnit.Case, async: true
 
-  alias Jido.Harness.Event, as: HarnessEvent
+  alias Ouroboros.Session.RuntimeEvent
   alias Ouroboros.Interactive.Event, as: InteractiveEvent
 
   test "normalized direct events retain canonical type and payload" do
-    harness_event =
-      HarnessEvent.new!(
+    runtime_event =
+      RuntimeEvent.new!(
         provider: :native,
         type: :tool_call,
-        session_id: "harness-session",
+        session_id: "runtime-session",
         sequence: 7,
         payload: %{
           "call_id" => "item-42",
@@ -18,16 +18,16 @@ defmodule Ouroboros.HarnessEventProjectionTest do
         }
       )
 
-    interactive = InteractiveEvent.from_harness("interactive-session", harness_event)
+    interactive = InteractiveEvent.from_execution("interactive-session", runtime_event)
 
     assert interactive.type == :tool_call
-    assert interactive.payload == harness_event.payload
+    assert interactive.payload == runtime_event.payload
     assert interactive.sequence == 7
   end
 
   test "raw provider records are never persisted" do
-    harness_event =
-      HarnessEvent.new!(
+    runtime_event =
+      RuntimeEvent.new!(
         provider: :native,
         type: :provider_event,
         sequence: 3,
@@ -35,7 +35,7 @@ defmodule Ouroboros.HarnessEventProjectionTest do
         raw: %{"authorization" => "Bearer must-not-persist"}
       )
 
-    interactive = InteractiveEvent.from_harness("interactive-session", harness_event)
+    interactive = InteractiveEvent.from_execution("interactive-session", runtime_event)
 
     refute Map.has_key?(Map.from_struct(interactive), :raw)
     refute inspect(interactive) =~ "must-not-persist"

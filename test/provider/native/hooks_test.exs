@@ -14,7 +14,7 @@ defmodule Ouroboros.Provider.Native.HooksTest do
 
   import ExUnit.CaptureLog
 
-  alias Jido.Harness.ApprovalResponse
+  alias Ouroboros.Session.ApprovalResponse
   alias Ouroboros.Provider.Native.Hooks
   alias Ouroboros.Provider.Native.Loop
   alias Ouroboros.Provider.Native.Paths

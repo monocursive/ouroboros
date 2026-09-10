@@ -1,10 +1,10 @@
 defmodule Ouroboros.Provider.Native.McpSessionTest do
   use ExUnit.Case, async: false
 
-  alias Jido.Harness.SessionRequest
-  alias Jido.Harness.TurnRequest
+  alias Ouroboros.Session.Request, as: SessionRequest
+  alias Ouroboros.Session.TurnRequest
   alias Ouroboros.Provider.Native.Mcp.Pool
-  alias Ouroboros.Provider.Native.Session
+  alias Ouroboros.Test.NativeSessionFixture, as: Session
   alias Ouroboros.Test.NativeModelScript
 
   @moduletag :capture_log
@@ -216,7 +216,7 @@ defmodule Ouroboros.Provider.Native.McpSessionTest do
       owner: self(),
       adapter: Ouroboros.Provider.Native,
       config: %{},
-      process_manager: Jido.Harness.ProcessDriver.Erlexec,
+      process_manager: Ouroboros.Provider.Native.ProcessSignal,
       telemetry_context: %{}
     }
 
@@ -228,8 +228,8 @@ defmodule Ouroboros.Provider.Native.McpSessionTest do
 
   defp collect_until(type, acc \\ []) do
     receive do
-      {:session_adapter_event, %{type: ^type} = event} -> Enum.reverse([event | acc])
-      {:session_adapter_event, event} -> collect_until(type, [event | acc])
+      {:native_test_event, %{type: ^type} = event} -> Enum.reverse([event | acc])
+      {:native_test_event, event} -> collect_until(type, [event | acc])
     after
       30_000 -> flunk("no #{type} within 30s; got #{inspect(Enum.map(acc, & &1.type))}")
     end
@@ -237,8 +237,8 @@ defmodule Ouroboros.Provider.Native.McpSessionTest do
 
   defp await_event(type) do
     receive do
-      {:session_adapter_event, %{type: ^type} = event} -> event
-      {:session_adapter_event, _other} -> await_event(type)
+      {:native_test_event, %{type: ^type} = event} -> event
+      {:native_test_event, _other} -> await_event(type)
     after
       30_000 -> flunk("no #{type} within 30s")
     end

@@ -17,10 +17,10 @@ defmodule Ouroboros.Provider.Native.SessionHooksTest do
 
   @moduletag :capture_log
 
-  alias Jido.Harness.SessionRequest
-  alias Jido.Harness.TurnRequest
+  alias Ouroboros.Session.Request, as: SessionRequest
+  alias Ouroboros.Session.TurnRequest
   alias Ouroboros.Provider.Native.Paths
-  alias Ouroboros.Provider.Native.Session
+  alias Ouroboros.Test.NativeSessionFixture, as: Session
   alias Ouroboros.Test.NativeModelScript
 
   setup do
@@ -101,7 +101,7 @@ defmodule Ouroboros.Provider.Native.SessionHooksTest do
         owner: self(),
         adapter: Ouroboros.Provider.Native,
         config: %{},
-        process_manager: Jido.Harness.ProcessDriver.Erlexec,
+        process_manager: Ouroboros.Provider.Native.ProcessSignal,
         telemetry_context: %{}
       })
 
@@ -111,8 +111,8 @@ defmodule Ouroboros.Provider.Native.SessionHooksTest do
 
   defp await_event(type, timeout \\ 15_000) do
     receive do
-      {:session_adapter_event, %{type: ^type} = event} -> event
-      {:session_adapter_event, _other} -> await_event(type, timeout)
+      {:native_test_event, %{type: ^type} = event} -> event
+      {:native_test_event, _other} -> await_event(type, timeout)
     after
       timeout -> flunk("no #{type} within #{timeout}ms")
     end
@@ -120,10 +120,10 @@ defmodule Ouroboros.Provider.Native.SessionHooksTest do
 
   defp await_provider_event(status, timeout \\ 15_000) do
     receive do
-      {:session_adapter_event, %{type: :provider_event, payload: %{"status" => ^status}} = event} ->
+      {:native_test_event, %{type: :provider_event, payload: %{"status" => ^status}} = event} ->
         event
 
-      {:session_adapter_event, _other} ->
+      {:native_test_event, _other} ->
         await_provider_event(status, timeout)
     after
       timeout -> flunk("no #{status} provider_event within #{timeout}ms")
@@ -132,7 +132,7 @@ defmodule Ouroboros.Provider.Native.SessionHooksTest do
 
   defp drain do
     receive do
-      {:session_adapter_event, _event} -> drain()
+      {:native_test_event, _event} -> drain()
     after
       0 -> :ok
     end
@@ -243,7 +243,7 @@ defmodule Ouroboros.Provider.Native.SessionHooksTest do
             owner: self(),
             adapter: Ouroboros.Provider.Native,
             config: %{},
-            process_manager: Jido.Harness.ProcessDriver.Erlexec,
+            process_manager: Ouroboros.Provider.Native.ProcessSignal,
             telemetry_context: %{}
           }
         )

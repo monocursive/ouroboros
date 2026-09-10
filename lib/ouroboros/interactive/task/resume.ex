@@ -3,11 +3,11 @@ defmodule Ouroboros.Interactive.Task.Resume do
 
   require Logger
 
-  alias Jido.Harness.Session
+  alias Ouroboros.Session
   alias Ouroboros.Interactive.{Event, State}
   alias Ouroboros.Interactive.Task
 
-  @poll_interval 25
+  @checkpoint_retry_ms 100
 
   def find_adoptable_session(ouroboros_id) do
     sessions = Task.safe_session_call(&Session.list/0)
@@ -17,8 +17,10 @@ defmodule Ouroboros.Interactive.Task.Resume do
         Enum.filter(sessions, fn info ->
           metadata = info.metadata || %{}
 
-          Map.get(metadata, :ouroboros_session_id) == ouroboros_id or
-            Map.get(metadata, "ouroboros_session_id") == ouroboros_id
+          info.logical_id == ouroboros_id or
+            (is_nil(info.logical_id) and
+               (Map.get(metadata, :ouroboros_session_id) == ouroboros_id or
+                  Map.get(metadata, "ouroboros_session_id") == ouroboros_id))
         end)
       else
         []
@@ -39,15 +41,19 @@ defmodule Ouroboros.Interactive.Task.Resume do
     end
   end
 
-  def adopt(runtime, harness_session_id) do
+  def adopt(%{session: %{runtime_id: previous}} = runtime, runtime_id)
+      when is_binary(previous) and previous != runtime_id,
+      do: adopt_resumed(runtime, runtime_id, previous)
+
+  def adopt(runtime, runtime_id) do
     session =
       runtime.session
-      |> Map.put(:harness_session_id, harness_session_id)
+      |> Map.put(:runtime_id, runtime_id)
       |> State.touch()
 
     case Task.persist(runtime, session, []) do
       {:ok, runtime} ->
-        Task.schedule_poll(runtime, 0)
+        Task.attach_runtime(runtime)
 
       {:error, runtime} ->
         Task.retry(runtime, :session_adoption_checkpoint_failed, :storage_error)
@@ -58,10 +64,10 @@ defmodule Ouroboros.Interactive.Task.Resume do
   # attempted one, already explained why it could not, or was told to end the session.
   def settle_resume(runtime), do: %{runtime | resume_settled: true}
 
-  # A Harness session Harness no longer knows is not the same thing as a provider
+  # A runtime the registry no longer knows is not the same thing as a provider
   # session that is gone. `provider_session_id` is durable, and every transport that
   # declares it can be handed it again — `claude --resume`, Codex `thread/resume`, ACP
-  # `session/load`. So the answer to "Harness does not know this session" is to open a
+  # `session/load`. So the answer to "the registry does not know this runtime" is to open a
   # new one against the same provider session and keep going; `:lost` is what is left
   # when there is nothing to resume with, or when the provider refuses.
   #
@@ -69,7 +75,22 @@ defmodule Ouroboros.Interactive.Task.Resume do
   # explained once. A provider that loses the session again ends the session honestly
   # instead of spinning up a start loop, and a genuinely transient outage still gets a
   # fresh decision the next time recovery restarts the coordinator.
-  def resume_or_lose(%{resume_settled: true} = runtime, reason), do: lose(runtime, reason)
+  def resume_or_lose(%{session: %{close_intent: action}} = runtime, reason)
+      when action in [:close, :kill] do
+    case existing_replacement(runtime) do
+      {:ok, id} -> adopt_resumed(runtime, id, runtime.session.runtime_id)
+      :not_found -> finish_missing_shutdown(runtime, action, reason)
+      {:error, error} -> Task.retry(runtime, :shutdown_discovery_failed, error)
+    end
+  end
+
+  def resume_or_lose(%{resume_settled: true} = runtime, reason) do
+    case existing_replacement(runtime) do
+      {:ok, id} -> adopt_resumed(runtime, id, runtime.session.runtime_id)
+      :not_found -> lose(runtime, reason)
+      {:error, error} -> Task.retry(runtime, :resume_discovery_failed, error)
+    end
+  end
 
   def resume_or_lose(runtime, reason) do
     runtime = settle_resume(runtime)
@@ -88,16 +109,46 @@ defmodule Ouroboros.Interactive.Task.Resume do
     end
   end
 
+  defp existing_replacement(runtime) do
+    case find_adoptable_session(runtime.session.id) do
+      {:ok, id} when id != runtime.session.runtime_id -> {:ok, id}
+      {:ok, _same} -> :not_found
+      other -> other
+    end
+  end
+
+  defp finish_missing_shutdown(runtime, action, reason) do
+    session =
+      runtime.session
+      |> Task.finalize_unresolved_turns({:intentional_shutdown, action, reason})
+      |> Map.put(:status, if(action == :kill, do: :cancelled, else: :closed))
+      |> State.touch()
+
+    case Task.persist(runtime, session, []) do
+      {:ok, runtime} ->
+        runtime
+        |> Task.release_workspace()
+        |> Task.reply_ready_waiters()
+        |> Task.reply_all_terminal_turn_waiters()
+        |> Task.schedule_retire()
+
+      {:error, runtime} ->
+        Task.retry(runtime, :shutdown_checkpoint_failed, :storage_error)
+    end
+  end
+
   defp attempt_resume(runtime) do
     session = runtime.session
 
     case State.unrequestable_reason(session) do
       nil ->
         case Task.safe_session_call(fn ->
-               Ouroboros.ReasoningEffort.start_session(State.request(session))
+               with {:ok, request} <-
+                      Ouroboros.ReasoningEffort.session_request(State.request(session)),
+                    do: Session.open(session.id, request)
              end) do
-          {:ok, harness_session_id} ->
-            adopt_resumed(runtime, harness_session_id, session.harness_session_id)
+          {:ok, runtime_id} ->
+            adopt_resumed(runtime, runtime_id, session.runtime_id)
 
           {:error, reason} ->
             lose(runtime, {:resume_failed, reason})
@@ -115,7 +166,7 @@ defmodule Ouroboros.Interactive.Task.Resume do
   # retried — the provider may well have completed it, and nothing here can tell.
   # The workspace lease is untouched: this coordinator has held it since admission and
   # goes on holding it, exactly as it does across a restart.
-  defp adopt_resumed(runtime, harness_session_id, previous_harness_session_id) do
+  defp adopt_resumed(runtime, runtime_id, previous_runtime_id) do
     session = runtime.session
     sequence = session.cursor + 1
 
@@ -127,9 +178,9 @@ defmodule Ouroboros.Interactive.Task.Resume do
         %{
           "kind" => "resumed",
           "provider_session_id" => session.provider_session_id,
-          "previous_harness_session_id" => previous_harness_session_id
+          "previous_harness_session_id" => previous_runtime_id
         },
-        harness_session_id: harness_session_id,
+        harness_session_id: runtime_id,
         provider: session.provider,
         provider_session_id: session.provider_session_id
       )
@@ -137,7 +188,9 @@ defmodule Ouroboros.Interactive.Task.Resume do
     resumed =
       session
       |> Task.finalize_unresolved_turns({:session_resumed, :outcome_unknown})
-      |> Map.put(:harness_session_id, harness_session_id)
+      |> Map.put(:runtime_id, runtime_id)
+      |> Map.put(:runtime_cursor, 0)
+      |> Map.put(:runtime_generation, nil)
       |> Map.put(:sequence_offset, sequence)
       |> Map.put(:cursor, sequence)
       |> Map.put(:resumes, State.resumes(session) + 1)
@@ -147,17 +200,27 @@ defmodule Ouroboros.Interactive.Task.Resume do
 
     case Task.persist(runtime, resumed, [event]) do
       {:ok, runtime} ->
+        if runtime.session.close_intent in [:close, :kill],
+          do:
+            Task.safe_session_call(fn ->
+              apply(Session, runtime.session.close_intent, [runtime_id])
+            end)
+
         runtime
         |> Task.clear_retry()
         |> Task.reply_all_terminal_turn_waiters()
-        |> Task.schedule_poll(0)
+        |> Task.attach_runtime()
 
-      # A resume whose checkpoint was refused did not happen. Close the new Harness
-      # session rather than leave it running unreferenced; the attempt stays spent, so
-      # the next poll finds the old session still missing and loses honestly.
+      # The replacement remains idle and discoverable by logical identity. Retry its
+      # adoption before admitting any input, preserving this one resume attempt and
+      # its sequence offset even if the coordinator also restarts before the retry.
       {:error, runtime} ->
-        _ = Task.safe_session_call(fn -> Session.close(harness_session_id) end)
-        Task.retry(runtime, :session_resume_checkpoint_failed, :storage_error)
+        if runtime.runtime_monitor, do: Process.demonitor(runtime.runtime_monitor, [:flush])
+
+        runtime
+        |> Map.put(:attachment, nil)
+        |> Map.put(:runtime_monitor, nil)
+        |> Task.retry(:session_resume_checkpoint_failed, :storage_error)
     end
   end
 
@@ -178,7 +241,7 @@ defmodule Ouroboros.Interactive.Task.Resume do
         |> Task.schedule_retire()
 
       {:error, runtime} ->
-        Task.schedule_poll(runtime, @poll_interval)
+        Task.schedule_reconcile(runtime, @checkpoint_retry_ms)
     end
   end
 end

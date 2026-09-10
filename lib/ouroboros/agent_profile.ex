@@ -6,7 +6,7 @@ defmodule Ouroboros.AgentProfile do
   prompt manifest, grant no authority, and start no tool loop. The prompt
   assembler advertises one only when the request's explicit `allowed_tools`
   contains its name, with `disallowed_tools` taking precedence. Provider
-  execution remains owned by `Jido.Harness`.
+  execution remains owned by `Ouroboros.Session`.
 
   Lists preserve caller-declared order because instruction precedence is part of
   the profile. Maps are normalized into a fixed shape, text uses LF line endings,

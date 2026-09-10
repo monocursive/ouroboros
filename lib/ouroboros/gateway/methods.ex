@@ -45,7 +45,7 @@ defmodule Ouroboros.Gateway.Methods do
   frequently, an atom value. None of them are built from client bytes. Option *keys* are
   literal atoms in this module, chosen by matching the client's string against an
   allowlist. Option *values* that are enums come from a literal map of the exact terms the
-  upstream schema declares (`Jido.Harness.RunRequest`'s approval and sandbox modes,
+  owned schema declares (`Ouroboros.Session.Request`'s approval and sandbox modes,
   `ApprovalResponse`'s decisions). A node name is matched against `[node() | Node.list()]`
   — by string comparison against atoms that already exist, never by conversion. (Provider
   is no longer an option: `:native` is the only provider, so `interactive.start` has no
@@ -207,9 +207,9 @@ defmodule Ouroboros.Gateway.Methods do
     not_found: -32007
   }
 
-  # The exact terms the upstream schemas declare, spelled out here so that a client string
-  # is matched against them rather than converted into one. `Jido.Harness.RunRequest`
-  # names the first three; `Jido.Harness.ApprovalResponse` names the last two.
+  # The exact terms the owned schemas declare, spelled out here so that a client string
+  # is matched against them rather than converted into one. `Ouroboros.Session.Request`
+  # names the first three; `Ouroboros.Session.ApprovalResponse` names the last two.
 
   @reasoning_efforts Contract.reasoning_efforts()
 
@@ -2128,7 +2128,7 @@ defmodule Ouroboros.Gateway.Methods do
     end
   end
 
-  # The upstream schema accepts a bare decision or a map. Both are reconstructed here from
+  # The owned schema accepts a bare decision or a map. Both are reconstructed here from
   # literal terms: the plane never sees a value this module did not already contain.
   # `provider_options` is deliberately not accepted — an approval is a yes or a no, and a
   # place to smuggle provider flags through is not what a confirmation dialog should be.
@@ -2180,7 +2180,7 @@ defmodule Ouroboros.Gateway.Methods do
 
   # A non-human actor travels twice: as `:actor`, which the interactive plane's ledger entry
   # and its permission entry read, and inside `provider_options`, which is the only slot
-  # `Jido.Harness.ApprovalResponse` has that survives the trip to a native run's loop (S2's fix
+  # `Ouroboros.Session.ApprovalResponse` has that survives the trip to a native run's loop (S2's fix
   # wave — the loop labelled every answer `:human` because the fact never reached it). A client
   # cannot write this key itself: `plan_exit_options/1` above admits `choice` and `follow_up`
   # and nothing else, and this runs after it.

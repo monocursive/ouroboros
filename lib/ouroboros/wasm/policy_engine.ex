@@ -79,7 +79,7 @@ defmodule Ouroboros.Wasm.PolicyEngine do
 
   The JSON form of the request `Control.Permissions` already normalised — the tool, the mode,
   the command and paths and domains under `input`, the principal, the workspace root, and the
-  context keys — with every credential-shaped value redacted by `Jido.Harness.Redaction`, the
+  context keys — with every credential-shaped value redacted by `Ouroboros.Redaction`, the
   same redaction the durable session projection uses.
 
   **It is never truncated.** A document that would exceed #{64 * 1024} bytes is not sent at all
@@ -144,7 +144,7 @@ defmodule Ouroboros.Wasm.PolicyEngine do
 
   require Logger
 
-  alias Jido.Harness.Redaction
+  alias Ouroboros.Redaction
   alias Ouroboros.Control.{Permissions, PolicyEvidence, PolicyPromotion}
   alias Ouroboros.Control.Permissions.{Matcher, Pattern, Request, Shell}
   alias Ouroboros.Provider.Native.Journal
@@ -167,11 +167,11 @@ defmodule Ouroboros.Wasm.PolicyEngine do
   # The label every string a component authored wears wherever a model or a person reads it.
   @untrusted "[untrusted policy component]"
 
-  # What a redacted value is replaced with. `Jido.Harness.Redaction`'s word, so one grep finds
+  # What a redacted value is replaced with. `Ouroboros.Redaction`'s word, so one grep finds
   # every redaction this runtime performs.
   @redacted "[REDACTED]"
 
-  # A key whose value is a credential whatever the value looks like. `Jido.Harness.Redaction`'s
+  # A key whose value is a credential whatever the value looks like. `Ouroboros.Redaction`'s
   # pattern, applied to a key with every run of non-alphanumerics folded to `_`.
   @credential_key ~r/(^|_)(authorization|credential|password|secret|token|api_?key)($|_)/i
 
@@ -1809,7 +1809,7 @@ defmodule Ouroboros.Wasm.PolicyEngine do
 
     1. **Credential-shaped keys.** A map key matching `#{inspect(@credential_key)}` — after
        every run of non-alphanumerics is folded to `_`, so `X-Api-Key` and `apiKey` both
-       match — has its whole value replaced. This is `Jido.Harness.Redaction`'s rule.
+       match — has its whole value replaced. This is `Ouroboros.Redaction`'s rule.
     2. **Well-known token shapes, in every string.** `Bearer <run>`, AWS access key ids,
        `sk-…`, GitHub `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`/`github_pat_`, Slack `xox…`, PEM
        private-key blocks, and `NAME=value` or `NAME: value` where NAME is credential-shaped.

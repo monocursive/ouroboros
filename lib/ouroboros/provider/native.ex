@@ -1,98 +1,43 @@
 defmodule Ouroboros.Provider.Native do
   @moduledoc """
-  The tenth provider: a tool loop Ouroboros owns, in this VM.
+  Native execution declarations and configuration owned by Ouroboros.
 
-  Every other provider drives a vendor CLI. Ouroboros hands it a request, polls its
-  events, and is never in the loop where a tool actually runs — so it cannot ask before
-  a command executes, fold a conversation it does not hold, or veto anything
-  (`docs/research/agent-ux-2026/AGENT_EXPERIENCE.md` §3.3 F1/F2/F5). This adapter is the one place that is not
-  true: the model call, the tool dispatch, and the file writes all happen here, which is
-  why it is the only honest home for permission rules, MCP, hooks, compaction and
-  checkpoints (§4.3, D1).
+  The model call, permission decisions, tool dispatch, compaction, and conversation
+  checkpoints run in this VM. Session scheduling and delivery are owned by
+  `Ouroboros.Provider.Native.Session`; this module describes its public capabilities.
 
-  It registers like the three adapters this runtime already overrides — through
-  `config :jido_harness, :providers` — and emits the same normalized event kinds into
-  the same journals, gateway stream, and TUI cells. Nothing about a vendor session
-  changes because this exists.
-
-  ## What is enforced, and what is not
-
-    * **Path containment is enforced.** Every tool path is canonicalized with
-      `Ouroboros.Workspace.Path` and refused outside the session workspace or its
-      declared `add_dirs`.
-    * **`sandbox_mode: :read_only` is enforced** by refusing `write` and `edit`, and —
-      since C5 — by running `bash` inside the node's OS sandbox. Where the node has no
-      sandbox backend `bash` is still refused outright, because a shell that cannot be
-      made read-only under a read-only label is a lie about the label.
-    * **`:unrestricted` is offered, deliberately.** `normalized_values.sandbox_mode`
-      lists `:default`, `:read_only`, `:workspace_write`, and `:unrestricted`, valid at
-      start and through `interactive.configure`. C5 said the answer to "let it out" was
-      a human rather than a flag; the human has since decided, so the flag exists and
-      says what it does. What it means is narrow and worth stating exactly:
-
-        * It is about **the shell**. `bash` runs with no OS sandbox — the
-          `{:unsandboxed, :unrestricted}` branch of `Ouroboros.Provider.Native.Sandbox`,
-          which logs a warning naming the session every time a command takes it. The
-          `sandbox` marker on the `bash` tool call reads `none`, so a client footer says
-          "no OS sandbox" from a fact rather than a guess.
-        * It is **not** about the structured file tools. `write`, `edit`, `apply_patch`
-          and every path-taking tool keep their `Ouroboros.Workspace.Path` containment
-          inside the workspace and its declared `add_dirs`. Widening those is a separate
-          decision nobody has made, and quietly folding it into this one would mean the
-          mode did two things under one name.
-        * It is **not** about who is asked. `approval_mode`, the C1 permission engine,
-          the hooks and the effect ledger are untouched: full access answers "what can
-          be written", never "who is asked".
-        * Plan mode still outranks it. Entering plan mode forces `:read_only` and
-          remembers what it displaced, `:unrestricted` included, and leaving restores it.
-    * **The OS sandbox is what the node has.** `Ouroboros.Provider.Native.Sandbox`
-      detects macOS `sandbox-exec` or Linux `bwrap`; `ProviderStatus.details["sandbox"]`
-      names which, or `none`. On `none`, `read_only` and `workspace_write` both refuse
-      `bash` rather than running it unsandboxed — a label this node cannot keep is a lie
-      about the label, not a convenience. `OUROBOROS_ALLOW_UNSANDBOXED_BASH=1` (or
-      `config :ouroboros, allow_unsandboxed_bash: true`) restores the old
-      `workspace_write` posture: the tools' own path checks, a shell that can reach the
-      network and write outside the workspace, and approvals, rules and the ledger as
-      the containment. `:unrestricted` is that weaker posture asked for by name, and is
-      not what a missing backend quietly becomes. There is no seccomp filter and no
-      domain allowlist on any backend.
-    * **MCP, hooks, compaction, and checkpoints live in this adapter.** They are
-      the reason this provider exists in-process rather than as another CLI: the loop
-      can ask before a tool runs, fold a conversation it actually holds, and refuse a
-      compaction whose archive cannot be written. Vendor transports still own whatever
-      of those they implement themselves; this module does not invent a second copy for
-      a transcript it never had.
+  `:unrestricted` disables the shell OS sandbox only. Structured file tools retain
+  workspace path containment, and approvals, rules, plan posture, and the effect ledger
+  remain authoritative. Without an OS sandbox backend, read-only and workspace-write
+  shell commands refuse unless the existing explicit unsandboxed policy permits them.
   """
 
-  @behaviour Jido.Harness.Adapter
-
-  alias Jido.Harness.AdapterSpec
-  alias Jido.Harness.Capabilities
-  alias Jido.Harness.InteractionCapabilities
-  alias Jido.Harness.ProviderStatus
-  alias Jido.Harness.RunRequest
-  alias Jido.Harness.SessionTransportSpec
-  alias Ouroboros.Provider.Native.Run
   alias Ouroboros.Provider.Native.Model
   alias Ouroboros.Provider.Native.Sandbox
   alias Ouroboros.Provider.Native.Session
 
   @provider :native
 
-  @doc "The registry key this adapter is registered under."
+  @doc "Reads native runtime settings directly from the Ouroboros application."
+  @spec config() :: map()
+  def config, do: :ouroboros |> Application.get_env(:native_provider, %{}) |> Map.new()
+
+  @doc "The one provider supported by this runtime."
   @spec provider() :: atom()
   def provider, do: @provider
 
-  @impl true
   def spec do
-    AdapterSpec.new!(
+    Map.new(
       provider: @provider,
+      install: nil,
+      docs_url: nil,
+      request_defaults: %{},
       name: "Ouroboros native agent",
       # Not a program on PATH. `ProviderStatus.executable` is a free-form string that
       # every consumer renders; naming the truth beats naming a binary that never exists.
       executable: "in-process",
       capabilities:
-        Capabilities.new!(
+        Map.new(
           streaming?: true,
           tool_calls?: true,
           tool_results?: true,
@@ -106,6 +51,7 @@ defmodule Ouroboros.Provider.Native do
       session_transports: [native_transport()],
       normalized_options: [
         :model,
+        :plan,
         :system_prompt,
         :max_turns,
         :approval_mode,
@@ -124,26 +70,12 @@ defmodule Ouroboros.Provider.Native do
         # moduledoc for what it does not relax.
         sandbox_mode: [:default, :read_only, :workspace_write, :unrestricted]
       },
-      # `plan` (B2) is here rather than in `normalized_options` because
-      # `Jido.Harness.SessionRequest` has no field for it and its `approval_mode` enum has
-      # no fifth member; `provider_options` is the one channel a start can carry it on.
-      # Mid-session it moves through `Native.Session.plan_mode/2`, which is a live process
-      # call rather than a request field.
-      #
-      # G3's two are here for the same reason and are deliberately the *only* two a caller
-      # may set: `subagent_model` points children at a cheaper model than the parent's, and
-      # `subagent_deadline_ms` bounds how long one may run. The rest of a child's shape —
-      # its depth, its parent, its task id — is set by this runtime when it opens the child
-      # and would be a way to forge a lineage if a request could name it.
-      # R3's `fork_to_turn` rides beside `fork_session` for the same reason: a fork's
-      # branch point is start intent that only exists at open, and this is the one channel
-      # a start carries it on. It is meaningless without `fork_session`, and the session
-      # ignores it when that is absent — a resume is not a branch.
+      # These are runtime-specific bounds and fork/child settings. Plan posture is an
+      # explicit Request field, independent of the provider options map.
       provider_options: [
         :max_iterations,
         :tool_timeout_ms,
         :event_limit,
-        :plan,
         :subagent_model,
         :fork_session,
         :fork_to_turn,
@@ -159,21 +91,13 @@ defmodule Ouroboros.Provider.Native do
   # capability eight of the nine vendor providers cannot declare: the loop is here, so a
   # steered message can be injected between two tool calls of a running turn.
   defp native_transport do
-    SessionTransportSpec.new!(
+    Map.new(
       name: :native,
+      minimum_version: nil,
       adapter: Session,
       capabilities:
-        InteractionCapabilities.new!(
+        Map.new(
           transport: :native,
-          # Not a quality claim. `Jido.Harness.Session.Manager` refuses to *default* to
-          # an `:experimental` transport
-          # (`deps/jido_harness/lib/jido_harness/session/manager.ex:128`), and this is
-          # the provider's only transport — so `:experimental` would mean every caller
-          # had to pass `transport: :native` by hand or watch the session refuse to
-          # start, including `ouro new --provider native`. Choosing this provider *is*
-          # the explicit selection the flag exists to require. How new the loop is, and
-          # what it does not yet enforce, is stated in the README and the moduledoc,
-          # where it can be read rather than inferred from an enum.
           maturity: :stable,
           process: :persistent,
           multi_turn: :native,
@@ -183,6 +107,7 @@ defmodule Ouroboros.Provider.Native do
           steer: :native,
           # Authorized images are copied into the session's private attachment store and
           # sent as ReqLLM image content parts; other files are named for the read tool.
+          structured_output: false,
           multimodal: :native,
           dynamic_model: :native,
           dynamic_configuration: :native
@@ -202,7 +127,6 @@ defmodule Ouroboros.Provider.Native do
   whether the configured model's provider has a usable key or OAuth credential. Detail
   rows expose names and booleans only.
   """
-  @impl true
   def status(_config) do
     credentials = Model.credential_report()
     model = Model.configured_model()
@@ -211,8 +135,9 @@ defmodule Ouroboros.Provider.Native do
     sandbox = Sandbox.detect()
 
     {:ok,
-     ProviderStatus.new!(
+     Map.new(
        provider: @provider,
+       error: nil,
        installed: available?,
        compatible: available?,
        authenticated: authenticated?,
@@ -233,21 +158,6 @@ defmodule Ouroboros.Provider.Native do
          "enforced" => enforced(sandbox)
        }
      )}
-  end
-
-  @doc """
-  Runs one finite turn to completion and returns its event stream.
-
-  Required by the `Jido.Harness` adapter behaviour. The run worker owns
-  `run_started`/`run_completed`/`run_failed`; everything between them is the
-  session-backed bridge's stream, so a finite run and a session turn restore and
-  checkpoint the same conversation instead of maintaining two implementations.
-  """
-  @impl true
-  def run(%RunRequest{} = request, context) do
-    with {:ok, pid, _provider_session_id} <- Run.start(request, context) do
-      {:ok, Run.stream(pid)}
-    end
   end
 
   defp enforced(%{backend: :none}),
